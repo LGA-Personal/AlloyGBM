@@ -1,0 +1,42 @@
+generated_at: "2026-02-22T23:11:06Z"
+active_target: "docs/architecture/v1.0/v0.1/v0.0.3"
+suggested_next_layer: "docs/architecture/v1.0/v0.1/v0.0.3"
+layers:
+  - path: "docs/architecture/v1.0"
+    status: "planned-only"
+    has_plan: true
+    has_implementation_notes: false
+    has_verification_report: false
+    missing_artifacts:
+      - "implementation_notes.md"
+      - "verification_report.md"
+    parent: null
+    previous_siblings: []
+  - path: "docs/architecture/v1.0/v0.1"
+    status: "planned-only"
+    has_plan: true
+    has_implementation_notes: false
+    has_verification_report: false
+    missing_artifacts:
+      - "implementation_notes.md"
+      - "verification_report.md"
+    parent: "docs/architecture/v1.0"
+    previous_siblings: []
+  - path: "docs/architecture/v1.0/v0.1/v0.0.1"
+    status: "implemented-with-notes"
+    has_plan: true
+    has_implementation_notes: true
+    has_verification_report: false
+    missing_artifacts:
+      - "verification_report.md"
+    parent: "docs/architecture/v1.0/v0.1"
+    previous_siblings: []
+  - path: "docs/architecture/v1.0/v0.1/v0.0.2"
+    status: "verified"
+    has_plan: true
+    has_implementation_notes: true
+    has_verification_report: true
+    missing_artifacts: []
+    parent: "docs/architecture/v1.0/v0.1"
+    previous_siblings:
+      - "docs/architecture/v1.0/v0.1/v0.0.1"
