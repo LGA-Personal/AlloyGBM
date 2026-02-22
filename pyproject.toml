@@ -1,0 +1,15 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "alloygbm"
+version = "0.0.1"
+description = "Rust-first GBDT scaffolding with Python bindings"
+readme = "README.md"
+requires-python = ">=3.10"
+
+[tool.maturin]
+manifest-path = "bindings/python/Cargo.toml"
+python-source = "bindings/python"
+module-name = "alloygbm._alloygbm"

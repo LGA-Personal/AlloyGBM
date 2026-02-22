@@ -1,0 +1,20 @@
+[package]
+name = "alloygbm-python"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "_alloygbm"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23.5", features = ["extension-module", "abi3-py310"] }
+
+[package.metadata.maturin]
+python-source = "."
+module-name = "alloygbm._alloygbm"
+
+[lints]
+workspace = true
