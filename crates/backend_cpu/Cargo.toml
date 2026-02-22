@@ -1,0 +1,13 @@
+[package]
+name = "alloygbm-backend-cpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+alloygbm-core = { path = "../core" }
+alloygbm-engine = { path = "../engine" }
+
+[lints]
+workspace = true

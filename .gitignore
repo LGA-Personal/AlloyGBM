@@ -1,0 +1,40 @@
+# macOS
+.DS_Store
+
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.dylib
+*.egg-info/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+pip-wheel-metadata/
+*.whl
+
+# Build artifacts
+/dist/
+/build/
+/wheels/
+/site/
+
+# AI Agents
+.claude/
+.agent/
+.gemini/
+.codex/
+
+# Editors
+.idea/
+.vscode/
