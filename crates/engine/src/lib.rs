@@ -192,10 +192,18 @@ pub struct IterationControls {
     pub rounds: usize,
     pub min_split_gain: f32,
     pub min_rows_per_leaf: usize,
+    pub min_abs_leaf_value: f32,
+    pub max_abs_leaf_value: f32,
 }
 
 impl IterationControls {
-    pub fn new(rounds: usize, min_split_gain: f32, min_rows_per_leaf: usize) -> EngineResult<Self> {
+    pub fn new(
+        rounds: usize,
+        min_split_gain: f32,
+        min_rows_per_leaf: usize,
+        min_abs_leaf_value: f32,
+        max_abs_leaf_value: f32,
+    ) -> EngineResult<Self> {
         if rounds == 0 {
             return Err(EngineError::InvalidConfig(
                 "rounds must be greater than 0".to_string(),
@@ -211,11 +219,28 @@ impl IterationControls {
                 "min_rows_per_leaf must be greater than 0".to_string(),
             ));
         }
+        if !min_abs_leaf_value.is_finite() || min_abs_leaf_value < 0.0 {
+            return Err(EngineError::InvalidConfig(
+                "min_abs_leaf_value must be finite and >= 0".to_string(),
+            ));
+        }
+        if !max_abs_leaf_value.is_finite() || max_abs_leaf_value <= 0.0 {
+            return Err(EngineError::InvalidConfig(
+                "max_abs_leaf_value must be finite and > 0".to_string(),
+            ));
+        }
+        if min_abs_leaf_value > max_abs_leaf_value {
+            return Err(EngineError::InvalidConfig(
+                "min_abs_leaf_value cannot exceed max_abs_leaf_value".to_string(),
+            ));
+        }
 
         Ok(Self {
             rounds,
             min_split_gain,
             min_rows_per_leaf,
+            min_abs_leaf_value,
+            max_abs_leaf_value,
         })
     }
 }
@@ -279,12 +304,10 @@ impl TrainedModel {
         let parsed = deserialize_model_artifact_v1(bytes).map_err(EngineError::from)?;
 
         let trees_section = required_single_section(&parsed.sections, ModelSectionKind::Trees)?;
-        let predictor_layout_section =
-            required_single_section(&parsed.sections, ModelSectionKind::PredictorLayout)?;
-
         let metadata_feature_count = parsed.contract.metadata.feature_names.len();
+        let predictor_layout = resolve_predictor_layout(&parsed.sections, metadata_feature_count)?;
+
         let mut model = decode_trained_model_payload(&trees_section.payload)?;
-        let predictor_layout = decode_predictor_layout_payload(&predictor_layout_section.payload)?;
 
         if predictor_layout.feature_count != metadata_feature_count {
             return Err(EngineError::ContractViolation(format!(
@@ -402,7 +425,7 @@ impl Trainer {
         objective: &O,
         rounds: usize,
     ) -> EngineResult<TrainedModel> {
-        let controls = IterationControls::new(rounds, 0.0, 1)?;
+        let controls = IterationControls::new(rounds, 0.0, 1, 0.0, 1_000_000.0)?;
         self.fit_iterations_with_controls(dataset, binned_matrix, backend, objective, controls)
     }
 
@@ -459,10 +482,20 @@ impl Trainer {
                 ));
             }
 
-            let left_leaf_value = -self.params.learning_rate * left_stats.grad_sum
+            let raw_left_leaf_value = -self.params.learning_rate * left_stats.grad_sum
                 / (left_stats.hess_sum + LEAF_EPSILON);
-            let right_leaf_value = -self.params.learning_rate * right_stats.grad_sum
+            let raw_right_leaf_value = -self.params.learning_rate * right_stats.grad_sum
                 / (right_stats.hess_sum + LEAF_EPSILON);
+
+            let left_leaf_value = raw_left_leaf_value
+                .clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value);
+            let right_leaf_value = raw_right_leaf_value
+                .clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value);
+            if left_leaf_value.abs() < controls.min_abs_leaf_value
+                && right_leaf_value.abs() < controls.min_abs_leaf_value
+            {
+                break;
+            }
 
             for &row_index in &partition.left_row_indices {
                 predictions[row_index as usize] += left_leaf_value;
@@ -568,6 +601,21 @@ fn validate_iteration_controls(controls: IterationControls) -> EngineResult<()> 
             "min_rows_per_leaf must be greater than 0".to_string(),
         ));
     }
+    if !controls.min_abs_leaf_value.is_finite() || controls.min_abs_leaf_value < 0.0 {
+        return Err(EngineError::InvalidConfig(
+            "min_abs_leaf_value must be finite and >= 0".to_string(),
+        ));
+    }
+    if !controls.max_abs_leaf_value.is_finite() || controls.max_abs_leaf_value <= 0.0 {
+        return Err(EngineError::InvalidConfig(
+            "max_abs_leaf_value must be finite and > 0".to_string(),
+        ));
+    }
+    if controls.min_abs_leaf_value > controls.max_abs_leaf_value {
+        return Err(EngineError::InvalidConfig(
+            "min_abs_leaf_value cannot exceed max_abs_leaf_value".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -575,7 +623,19 @@ fn required_single_section(
     sections: &[ModelArtifactSection],
     kind: ModelSectionKind,
 ) -> EngineResult<&ModelArtifactSection> {
-    let mut found: Option<&ModelArtifactSection> = None;
+    optional_single_section(sections, kind)?.ok_or_else(|| {
+        EngineError::ContractViolation(format!(
+            "model artifact missing required {:?} section",
+            kind
+        ))
+    })
+}
+
+fn optional_single_section(
+    sections: &[ModelArtifactSection],
+    kind: ModelSectionKind,
+) -> EngineResult<Option<&ModelArtifactSection>> {
+    let mut found = None;
     for section in sections {
         if section.descriptor.kind != kind {
             continue;
@@ -588,13 +648,27 @@ fn required_single_section(
         }
         found = Some(section);
     }
+    Ok(found)
+}
 
-    found.ok_or_else(|| {
-        EngineError::ContractViolation(format!(
-            "model artifact missing required {:?} section",
-            kind
-        ))
-    })
+fn resolve_predictor_layout(
+    sections: &[ModelArtifactSection],
+    metadata_feature_count: usize,
+) -> EngineResult<PredictorLayoutPayload> {
+    if let Some(section) = optional_single_section(sections, ModelSectionKind::PredictorLayout)? {
+        return decode_predictor_layout_payload(&section.payload);
+    }
+
+    // Compatibility path for v0.0.4 legacy payloads that only carried Trees.
+    if sections.len() == 1 && sections[0].descriptor.kind == ModelSectionKind::Trees {
+        return Ok(PredictorLayoutPayload {
+            feature_count: metadata_feature_count,
+        });
+    }
+
+    Err(EngineError::ContractViolation(
+        "model artifact missing required PredictorLayout section".to_string(),
+    ))
 }
 
 fn encode_predictor_layout_payload(model: &TrainedModel) -> EngineResult<Vec<u8>> {
@@ -1024,7 +1098,8 @@ mod tests {
     #[test]
     fn fit_iterations_controls_enforce_min_split_gain() {
         let trainer = Trainer::new(TrainParams::default()).expect("valid params");
-        let controls = IterationControls::new(3, 10.0, 1).expect("controls are valid");
+        let controls =
+            IterationControls::new(3, 10.0, 1, 0.0, 1_000_000.0).expect("controls are valid");
         let model = trainer
             .fit_iterations_with_controls(
                 &sample_dataset(),
@@ -1041,7 +1116,8 @@ mod tests {
     #[test]
     fn fit_iterations_controls_enforce_min_rows_per_leaf() {
         let trainer = Trainer::new(TrainParams::default()).expect("valid params");
-        let controls = IterationControls::new(3, 0.0, 3).expect("controls are valid");
+        let controls =
+            IterationControls::new(3, 0.0, 3, 0.0, 1_000_000.0).expect("controls are valid");
         let model = trainer
             .fit_iterations_with_controls(
                 &sample_dataset(),
@@ -1058,17 +1134,67 @@ mod tests {
     #[test]
     fn iteration_controls_reject_invalid_values() {
         assert!(matches!(
-            IterationControls::new(0, 0.0, 1),
+            IterationControls::new(0, 0.0, 1, 0.0, 1_000_000.0),
             Err(EngineError::InvalidConfig(_))
         ));
         assert!(matches!(
-            IterationControls::new(1, -0.1, 1),
+            IterationControls::new(1, -0.1, 1, 0.0, 1_000_000.0),
             Err(EngineError::InvalidConfig(_))
         ));
         assert!(matches!(
-            IterationControls::new(1, 0.0, 0),
+            IterationControls::new(1, 0.0, 0, 0.0, 1_000_000.0),
             Err(EngineError::InvalidConfig(_))
         ));
+        assert!(matches!(
+            IterationControls::new(1, 0.0, 1, -0.1, 1_000_000.0),
+            Err(EngineError::InvalidConfig(_))
+        ));
+        assert!(matches!(
+            IterationControls::new(1, 0.0, 1, 0.0, 0.0),
+            Err(EngineError::InvalidConfig(_))
+        ));
+        assert!(matches!(
+            IterationControls::new(1, 0.0, 1, 2.0, 1.0),
+            Err(EngineError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn fit_iterations_controls_enforce_min_abs_leaf_value() {
+        let trainer = Trainer::new(TrainParams::default()).expect("valid params");
+        let controls =
+            IterationControls::new(3, 0.0, 1, 10.0, 1_000_000.0).expect("controls are valid");
+        let model = trainer
+            .fit_iterations_with_controls(
+                &sample_dataset(),
+                &sample_binned_matrix(),
+                &MockBackend,
+                &SquaredErrorObjective,
+                controls,
+            )
+            .expect("iterative training succeeds");
+
+        assert!(model.stumps.is_empty());
+    }
+
+    #[test]
+    fn fit_iterations_controls_clamp_leaf_values() {
+        let trainer = Trainer::new(TrainParams::default()).expect("valid params");
+        let controls = IterationControls::new(1, 0.0, 1, 0.0, 0.1).expect("controls are valid");
+        let model = trainer
+            .fit_iterations_with_controls(
+                &sample_dataset(),
+                &sample_binned_matrix(),
+                &MockBackend,
+                &SquaredErrorObjective,
+                controls,
+            )
+            .expect("iterative training succeeds");
+
+        assert_eq!(model.stumps.len(), 1);
+        let stump = &model.stumps[0];
+        assert!(stump.left_leaf_value.abs() <= 0.1);
+        assert!(stump.right_leaf_value.abs() <= 0.1);
     }
 
     #[test]
@@ -1094,6 +1220,30 @@ mod tests {
     }
 
     #[test]
+    fn trained_model_artifact_accepts_legacy_trees_only_payload() {
+        let model = sample_trained_model();
+        let metadata = ModelMetadata {
+            format_version: MODEL_FORMAT_V1,
+            feature_names: (0..model.feature_count)
+                .map(|index| format!("f{index}"))
+                .collect(),
+            trained_device: Device::Cpu,
+        };
+        let trees_payload = encode_trained_model_payload(&model).expect("trees encode");
+
+        let legacy_trees_only =
+            serialize_model_artifact_v1(&metadata, &[(ModelSectionKind::Trees, trees_payload)])
+                .expect("artifact serializes");
+        let restored =
+            TrainedModel::from_artifact_bytes(&legacy_trees_only).expect("legacy artifact parses");
+
+        let rows = vec![vec![0.0, 0.0], vec![3.0, 1.0]];
+        let original_preds = model.predict_batch(&rows).expect("predicts");
+        let restored_preds = restored.predict_batch(&rows).expect("predicts");
+        assert_eq!(original_preds, restored_preds);
+    }
+
+    #[test]
     fn trained_model_artifact_rejects_missing_required_sections() {
         let model = sample_trained_model();
         let metadata = ModelMetadata {
@@ -1107,9 +1257,12 @@ mod tests {
         let layout_payload =
             encode_predictor_layout_payload(&model).expect("predictor layout encodes");
 
-        let missing_predictor = serialize_model_artifact_v1(
+        let non_legacy_missing_predictor = serialize_model_artifact_v1(
             &metadata,
-            &[(ModelSectionKind::Trees, trees_payload.clone())],
+            &[
+                (ModelSectionKind::Trees, trees_payload.clone()),
+                (ModelSectionKind::ShapAux, vec![9_u8]),
+            ],
         )
         .expect("artifact serializes");
         let missing_trees = serialize_model_artifact_v1(
@@ -1119,7 +1272,7 @@ mod tests {
         .expect("artifact serializes");
 
         assert!(matches!(
-            TrainedModel::from_artifact_bytes(&missing_predictor),
+            TrainedModel::from_artifact_bytes(&non_legacy_missing_predictor),
             Err(EngineError::ContractViolation(_))
         ));
         assert!(matches!(
