@@ -1,4 +1,4 @@
-"""Public Python API for alloygbm v0.0.2."""
+"""Public Python API for alloygbm v0.0.3."""
 
 from ._alloygbm import native_runtime_info
 from .regressor import GBMRegressor
