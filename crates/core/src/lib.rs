@@ -373,6 +373,19 @@ pub struct ModelIoContractV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelArtifactSection {
+    pub descriptor: ModelSectionDescriptor,
+    pub payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedModelArtifactV1 {
+    pub contract: ModelIoContractV1,
+    pub metadata_json: String,
+    pub sections: Vec<ModelArtifactSection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoreError {
     InvalidConfig(String),
     Validation(String),
@@ -620,6 +633,164 @@ pub fn deserialize_metadata_json(input: &str) -> CoreResult<ModelMetadata> {
         format_version,
         feature_names,
         trained_device: Device::parse_metadata_label(&trained_device_raw)?,
+    })
+}
+
+pub fn serialize_model_artifact_v1(
+    metadata: &ModelMetadata,
+    sections: &[(ModelSectionKind, Vec<u8>)],
+) -> CoreResult<Vec<u8>> {
+    if sections.is_empty() {
+        return Err(CoreError::Serialization(
+            "model artifact requires at least one section".to_string(),
+        ));
+    }
+
+    let metadata_json = serialize_metadata_json(metadata);
+    let metadata_json_bytes = metadata_json.as_bytes();
+    let metadata_json_len = u32::try_from(metadata_json_bytes.len()).map_err(|_| {
+        CoreError::Serialization("metadata json length exceeds u32::MAX".to_string())
+    })?;
+
+    let section_count = u32::try_from(sections.len())
+        .map_err(|_| CoreError::Serialization("section count exceeds u32::MAX".to_string()))?;
+    let descriptor_table_len = sections
+        .len()
+        .checked_mul(MODEL_SECTION_DESCRIPTOR_LEN)
+        .ok_or_else(|| CoreError::Serialization("section table length overflow".to_string()))?;
+    let data_start = MODEL_BINARY_HEADER_LEN
+        .checked_add(descriptor_table_len)
+        .and_then(|value| value.checked_add(metadata_json_bytes.len()))
+        .ok_or_else(|| CoreError::Serialization("artifact header length overflow".to_string()))?;
+
+    let mut descriptors = Vec::with_capacity(sections.len());
+    let mut offset = data_start as u64;
+    for (kind, payload) in sections {
+        if payload.is_empty() {
+            return Err(CoreError::Serialization(
+                "section payload cannot be empty".to_string(),
+            ));
+        }
+        let length = u64::try_from(payload.len())
+            .map_err(|_| CoreError::Serialization("section length overflow".to_string()))?;
+        descriptors.push(ModelSectionDescriptor {
+            kind: *kind,
+            offset,
+            length,
+        });
+        offset = offset
+            .checked_add(length)
+            .ok_or_else(|| CoreError::Serialization("section offset overflow".to_string()))?;
+    }
+
+    let contract = ModelIoContractV1 {
+        header: ModelBinaryHeader::new(section_count, metadata_json_len),
+        sections: descriptors.clone(),
+        metadata: metadata.clone(),
+    };
+    validate_model_contract_v1(&contract)?;
+
+    let final_len = usize::try_from(offset)
+        .map_err(|_| CoreError::Serialization("artifact length exceeds usize".to_string()))?;
+    let mut bytes = Vec::with_capacity(final_len);
+    bytes.extend_from_slice(&contract.header.encode());
+    for descriptor in &descriptors {
+        bytes.extend_from_slice(&descriptor.encode());
+    }
+    bytes.extend_from_slice(metadata_json_bytes);
+    for (_, payload) in sections {
+        bytes.extend_from_slice(payload);
+    }
+
+    Ok(bytes)
+}
+
+pub fn deserialize_model_artifact_v1(bytes: &[u8]) -> CoreResult<ParsedModelArtifactV1> {
+    if bytes.len() < MODEL_BINARY_HEADER_LEN {
+        return Err(CoreError::Serialization(
+            "artifact too small to contain model header".to_string(),
+        ));
+    }
+
+    let header = ModelBinaryHeader::decode(&bytes[0..MODEL_BINARY_HEADER_LEN])?;
+    if header.format_version != MODEL_FORMAT_V1 {
+        return Err(CoreError::Serialization(format!(
+            "unsupported format_version {}, expected {MODEL_FORMAT_V1}",
+            header.format_version
+        )));
+    }
+
+    let section_count = header.section_count as usize;
+    let descriptor_table_len = section_count
+        .checked_mul(MODEL_SECTION_DESCRIPTOR_LEN)
+        .ok_or_else(|| CoreError::Serialization("section table length overflow".to_string()))?;
+    let descriptor_start = MODEL_BINARY_HEADER_LEN;
+    let descriptor_end = descriptor_start
+        .checked_add(descriptor_table_len)
+        .ok_or_else(|| CoreError::Serialization("descriptor range overflow".to_string()))?;
+    if bytes.len() < descriptor_end {
+        return Err(CoreError::Serialization(
+            "artifact truncated in section descriptor table".to_string(),
+        ));
+    }
+
+    let mut descriptors = Vec::with_capacity(section_count);
+    for section_index in 0..section_count {
+        let start = descriptor_start + section_index * MODEL_SECTION_DESCRIPTOR_LEN;
+        let end = start + MODEL_SECTION_DESCRIPTOR_LEN;
+        descriptors.push(ModelSectionDescriptor::decode(&bytes[start..end])?);
+    }
+
+    let metadata_json_len = header.metadata_json_len as usize;
+    let metadata_start = descriptor_end;
+    let metadata_end = metadata_start
+        .checked_add(metadata_json_len)
+        .ok_or_else(|| CoreError::Serialization("metadata range overflow".to_string()))?;
+    if bytes.len() < metadata_end {
+        return Err(CoreError::Serialization(
+            "artifact truncated in metadata payload".to_string(),
+        ));
+    }
+    let metadata_json = std::str::from_utf8(&bytes[metadata_start..metadata_end])
+        .map_err(|err| {
+            CoreError::Serialization(format!("metadata json is not valid UTF-8: {err}"))
+        })?
+        .to_string();
+    let metadata = deserialize_metadata_json(&metadata_json)?;
+
+    let contract = ModelIoContractV1 {
+        header,
+        sections: descriptors.clone(),
+        metadata,
+    };
+    validate_model_contract_v1(&contract)?;
+
+    let mut parsed_sections = Vec::with_capacity(descriptors.len());
+    for descriptor in &descriptors {
+        let start = usize::try_from(descriptor.offset)
+            .map_err(|_| CoreError::Serialization("section offset exceeds usize".to_string()))?;
+        let length = usize::try_from(descriptor.length)
+            .map_err(|_| CoreError::Serialization("section length exceeds usize".to_string()))?;
+        let end = start
+            .checked_add(length)
+            .ok_or_else(|| CoreError::Serialization("section range overflow".to_string()))?;
+
+        if end > bytes.len() {
+            return Err(CoreError::Serialization(
+                "artifact truncated in section payload".to_string(),
+            ));
+        }
+
+        parsed_sections.push(ModelArtifactSection {
+            descriptor: *descriptor,
+            payload: bytes[start..end].to_vec(),
+        });
+    }
+
+    Ok(ParsedModelArtifactV1 {
+        contract,
+        metadata_json,
+        sections: parsed_sections,
     })
 }
 
@@ -917,6 +1088,40 @@ mod tests {
         };
         assert!(matches!(
             validate_model_contract_v1(&contract),
+            Err(CoreError::Serialization(_))
+        ));
+    }
+
+    #[test]
+    fn model_artifact_roundtrip() {
+        let metadata = sample_metadata();
+        let sections = vec![
+            (ModelSectionKind::Trees, vec![1_u8, 2, 3, 4]),
+            (ModelSectionKind::PredictorLayout, vec![9_u8, 8, 7]),
+        ];
+
+        let bytes = serialize_model_artifact_v1(&metadata, &sections).expect("artifact encodes");
+        let parsed = deserialize_model_artifact_v1(&bytes).expect("artifact decodes");
+
+        assert_eq!(parsed.contract.metadata, metadata);
+        assert_eq!(parsed.sections.len(), 2);
+        assert_eq!(parsed.sections[0].descriptor.kind, ModelSectionKind::Trees);
+        assert_eq!(parsed.sections[0].payload, vec![1_u8, 2, 3, 4]);
+        assert_eq!(
+            parsed.sections[1].descriptor.kind,
+            ModelSectionKind::PredictorLayout
+        );
+        assert_eq!(parsed.sections[1].payload, vec![9_u8, 8, 7]);
+    }
+
+    #[test]
+    fn model_artifact_deserialize_rejects_truncated_payload() {
+        let metadata = sample_metadata();
+        let sections = vec![(ModelSectionKind::Trees, vec![1_u8, 2, 3, 4])];
+        let bytes = serialize_model_artifact_v1(&metadata, &sections).expect("artifact encodes");
+        let truncated = &bytes[..bytes.len() - 1];
+        assert!(matches!(
+            deserialize_model_artifact_v1(truncated),
             Err(CoreError::Serialization(_))
         ));
     }
