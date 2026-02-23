@@ -1,4 +1,4 @@
-"""Public Python API for alloygbm v0.0.3."""
+"""Public Python API for the AlloyGBM baseline regressor scaffold."""
 
 from ._alloygbm import native_runtime_info
 from .regressor import GBMRegressor

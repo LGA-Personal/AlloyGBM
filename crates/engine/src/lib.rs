@@ -1,8 +1,9 @@
 use alloygbm_core::{
     BinnedMatrix, CoreError, Device, FeatureTile, GradientPair, HistogramBundle, MODEL_FORMAT_V1,
-    ModelMetadata, ModelSectionKind, NodeSlice, NodeStats, PartitionResult, SplitCandidate,
-    TrainParams, TrainingDataset, deserialize_model_artifact_v1, serialize_model_artifact_v1,
-    validate_binned_matrix, validate_train_params, validate_training_dataset,
+    ModelArtifactSection, ModelMetadata, ModelSectionKind, NodeSlice, NodeStats, PartitionResult,
+    SplitCandidate, TrainParams, TrainingDataset, deserialize_model_artifact_v1,
+    serialize_model_artifact_v1, validate_binned_matrix, validate_train_params,
+    validate_training_dataset,
 };
 use std::error::Error;
 use std::fmt::{Display, Formatter};
@@ -186,6 +187,39 @@ pub struct TrainedModel {
     pub stumps: Vec<TrainedStump>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IterationControls {
+    pub rounds: usize,
+    pub min_split_gain: f32,
+    pub min_rows_per_leaf: usize,
+}
+
+impl IterationControls {
+    pub fn new(rounds: usize, min_split_gain: f32, min_rows_per_leaf: usize) -> EngineResult<Self> {
+        if rounds == 0 {
+            return Err(EngineError::InvalidConfig(
+                "rounds must be greater than 0".to_string(),
+            ));
+        }
+        if !min_split_gain.is_finite() || min_split_gain < 0.0 {
+            return Err(EngineError::InvalidConfig(
+                "min_split_gain must be finite and >= 0".to_string(),
+            ));
+        }
+        if min_rows_per_leaf == 0 {
+            return Err(EngineError::InvalidConfig(
+                "min_rows_per_leaf must be greater than 0".to_string(),
+            ));
+        }
+
+        Ok(Self {
+            rounds,
+            min_split_gain,
+            min_rows_per_leaf,
+        })
+    }
+}
+
 impl TrainedModel {
     pub fn predict_row(&self, features: &[f32]) -> EngineResult<f32> {
         if features.len() != self.feature_count {
@@ -221,7 +255,8 @@ impl TrainedModel {
     }
 
     pub fn to_artifact_bytes(&self) -> EngineResult<Vec<u8>> {
-        let payload = encode_trained_model_payload(self)?;
+        let trees_payload = encode_trained_model_payload(self)?;
+        let predictor_layout_payload = encode_predictor_layout_payload(self)?;
         let metadata = ModelMetadata {
             format_version: MODEL_FORMAT_V1,
             feature_names: (0..self.feature_count)
@@ -230,33 +265,47 @@ impl TrainedModel {
             trained_device: Device::Cpu,
         };
 
-        serialize_model_artifact_v1(&metadata, &[(ModelSectionKind::Trees, payload)])
-            .map_err(EngineError::from)
+        serialize_model_artifact_v1(
+            &metadata,
+            &[
+                (ModelSectionKind::Trees, trees_payload),
+                (ModelSectionKind::PredictorLayout, predictor_layout_payload),
+            ],
+        )
+        .map_err(EngineError::from)
     }
 
     pub fn from_artifact_bytes(bytes: &[u8]) -> EngineResult<Self> {
         let parsed = deserialize_model_artifact_v1(bytes).map_err(EngineError::from)?;
 
-        let tree_section = parsed
-            .sections
-            .iter()
-            .find(|section| section.descriptor.kind == ModelSectionKind::Trees)
-            .ok_or_else(|| {
-                EngineError::ContractViolation(
-                    "model artifact missing required Trees section".to_string(),
-                )
-            })?;
+        let trees_section = required_single_section(&parsed.sections, ModelSectionKind::Trees)?;
+        let predictor_layout_section =
+            required_single_section(&parsed.sections, ModelSectionKind::PredictorLayout)?;
 
-        let mut model = decode_trained_model_payload(&tree_section.payload)?;
-        if model.feature_count != parsed.contract.metadata.feature_names.len() {
+        let metadata_feature_count = parsed.contract.metadata.feature_names.len();
+        let mut model = decode_trained_model_payload(&trees_section.payload)?;
+        let predictor_layout = decode_predictor_layout_payload(&predictor_layout_section.payload)?;
+
+        if predictor_layout.feature_count != metadata_feature_count {
             return Err(EngineError::ContractViolation(format!(
-                "decoded feature_count {} does not match metadata feature count {}",
-                model.feature_count,
-                parsed.contract.metadata.feature_names.len()
+                "predictor layout feature_count {} does not match metadata feature count {}",
+                predictor_layout.feature_count, metadata_feature_count
+            )));
+        }
+        if model.feature_count != predictor_layout.feature_count {
+            return Err(EngineError::ContractViolation(format!(
+                "decoded trees feature_count {} does not match predictor layout feature_count {}",
+                model.feature_count, predictor_layout.feature_count
+            )));
+        }
+        if model.feature_count != metadata_feature_count {
+            return Err(EngineError::ContractViolation(format!(
+                "decoded trees feature_count {} does not match metadata feature count {}",
+                model.feature_count, metadata_feature_count
             )));
         }
 
-        model.feature_count = parsed.contract.metadata.feature_names.len();
+        model.feature_count = metadata_feature_count;
         Ok(model)
     }
 }
@@ -353,12 +402,19 @@ impl Trainer {
         objective: &O,
         rounds: usize,
     ) -> EngineResult<TrainedModel> {
-        if rounds == 0 {
-            return Err(EngineError::InvalidConfig(
-                "rounds must be greater than 0".to_string(),
-            ));
-        }
+        let controls = IterationControls::new(rounds, 0.0, 1)?;
+        self.fit_iterations_with_controls(dataset, binned_matrix, backend, objective, controls)
+    }
 
+    pub fn fit_iterations_with_controls<B: BackendOps, O: ObjectiveOps>(
+        &self,
+        dataset: &TrainingDataset,
+        binned_matrix: &BinnedMatrix,
+        backend: &B,
+        objective: &O,
+        controls: IterationControls,
+    ) -> EngineResult<TrainedModel> {
+        validate_iteration_controls(controls)?;
         validate_training_alignment(dataset, binned_matrix)?;
         let fit_contract = self.validate_fit_contract(dataset, objective)?;
 
@@ -370,7 +426,7 @@ impl Trainer {
 
         const LEAF_EPSILON: f32 = 1e-6;
 
-        for _round in 0..rounds {
+        for _round in 0..controls.rounds {
             let gradients = objective.compute_gradients(
                 &predictions,
                 &dataset.targets,
@@ -383,12 +439,17 @@ impl Trainer {
             let Some(mut split) = backend.best_split(&histograms)? else {
                 break;
             };
-            if !split.gain.is_finite() || split.gain <= 0.0 {
+            if !split.gain.is_finite() || split.gain <= controls.min_split_gain {
                 break;
             }
 
             let partition = backend.apply_split(binned_matrix, &root_node, &split)?;
             validate_partition_cover(dataset.row_count(), &partition)?;
+            if partition.left_row_indices.len() < controls.min_rows_per_leaf
+                || partition.right_row_indices.len() < controls.min_rows_per_leaf
+            {
+                break;
+            }
 
             let left_stats = backend.reduce_sums(&gradients, &partition.left_row_indices)?;
             let right_stats = backend.reduce_sums(&gradients, &partition.right_row_indices)?;
@@ -489,6 +550,97 @@ fn validate_partition_cover(row_count: usize, partition: &PartitionResult) -> En
         ));
     }
     Ok(())
+}
+
+fn validate_iteration_controls(controls: IterationControls) -> EngineResult<()> {
+    if controls.rounds == 0 {
+        return Err(EngineError::InvalidConfig(
+            "rounds must be greater than 0".to_string(),
+        ));
+    }
+    if !controls.min_split_gain.is_finite() || controls.min_split_gain < 0.0 {
+        return Err(EngineError::InvalidConfig(
+            "min_split_gain must be finite and >= 0".to_string(),
+        ));
+    }
+    if controls.min_rows_per_leaf == 0 {
+        return Err(EngineError::InvalidConfig(
+            "min_rows_per_leaf must be greater than 0".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn required_single_section(
+    sections: &[ModelArtifactSection],
+    kind: ModelSectionKind,
+) -> EngineResult<&ModelArtifactSection> {
+    let mut found: Option<&ModelArtifactSection> = None;
+    for section in sections {
+        if section.descriptor.kind != kind {
+            continue;
+        }
+        if found.is_some() {
+            return Err(EngineError::ContractViolation(format!(
+                "model artifact contains duplicate required {:?} sections",
+                kind
+            )));
+        }
+        found = Some(section);
+    }
+
+    found.ok_or_else(|| {
+        EngineError::ContractViolation(format!(
+            "model artifact missing required {:?} section",
+            kind
+        ))
+    })
+}
+
+fn encode_predictor_layout_payload(model: &TrainedModel) -> EngineResult<Vec<u8>> {
+    let feature_count = u32::try_from(model.feature_count).map_err(|_| {
+        EngineError::ContractViolation("feature_count exceeds u32::MAX".to_string())
+    })?;
+    const THRESHOLD_MODE_BIN_INDEX: u32 = 1;
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&MODEL_FORMAT_V1.to_le_bytes());
+    bytes.extend_from_slice(&feature_count.to_le_bytes());
+    bytes.extend_from_slice(&THRESHOLD_MODE_BIN_INDEX.to_le_bytes());
+    Ok(bytes)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PredictorLayoutPayload {
+    feature_count: usize,
+}
+
+fn decode_predictor_layout_payload(bytes: &[u8]) -> EngineResult<PredictorLayoutPayload> {
+    const LAYOUT_LEN: usize = 12;
+    const THRESHOLD_MODE_BIN_INDEX: u32 = 1;
+    if bytes.len() != LAYOUT_LEN {
+        return Err(EngineError::ContractViolation(format!(
+            "predictor layout payload length {} does not match expected {LAYOUT_LEN}",
+            bytes.len()
+        )));
+    }
+
+    let format_version = read_u32_le(bytes, 0)?;
+    if format_version != MODEL_FORMAT_V1 {
+        return Err(EngineError::ContractViolation(format!(
+            "unsupported predictor layout format version {format_version}"
+        )));
+    }
+
+    let feature_count = read_u32_le(bytes, 4)? as usize;
+    let threshold_mode = read_u32_le(bytes, 8)?;
+    if threshold_mode != THRESHOLD_MODE_BIN_INDEX {
+        return Err(EngineError::ContractViolation(format!(
+            "unsupported predictor layout threshold mode {threshold_mode}"
+        )));
+    }
+
+    Ok(PredictorLayoutPayload { feature_count })
 }
 
 fn encode_trained_model_payload(model: &TrainedModel) -> EngineResult<Vec<u8>> {
@@ -674,6 +826,19 @@ mod tests {
         .expect("binned matrix is valid")
     }
 
+    fn sample_trained_model() -> TrainedModel {
+        let trainer = Trainer::new(TrainParams::default()).expect("valid params");
+        trainer
+            .fit_iterations(
+                &sample_dataset(),
+                &sample_binned_matrix(),
+                &MockBackend,
+                &SquaredErrorObjective,
+                2,
+            )
+            .expect("iterative training succeeds")
+    }
+
     impl BackendOps for MockBackend {
         fn build_histograms(
             &self,
@@ -857,26 +1022,139 @@ mod tests {
     }
 
     #[test]
-    fn trained_model_artifact_roundtrip_preserves_predictions() {
+    fn fit_iterations_controls_enforce_min_split_gain() {
         let trainer = Trainer::new(TrainParams::default()).expect("valid params");
+        let controls = IterationControls::new(3, 10.0, 1).expect("controls are valid");
         let model = trainer
-            .fit_iterations(
+            .fit_iterations_with_controls(
                 &sample_dataset(),
                 &sample_binned_matrix(),
                 &MockBackend,
                 &SquaredErrorObjective,
-                2,
+                controls,
             )
             .expect("iterative training succeeds");
+
+        assert!(model.stumps.is_empty());
+    }
+
+    #[test]
+    fn fit_iterations_controls_enforce_min_rows_per_leaf() {
+        let trainer = Trainer::new(TrainParams::default()).expect("valid params");
+        let controls = IterationControls::new(3, 0.0, 3).expect("controls are valid");
+        let model = trainer
+            .fit_iterations_with_controls(
+                &sample_dataset(),
+                &sample_binned_matrix(),
+                &MockBackend,
+                &SquaredErrorObjective,
+                controls,
+            )
+            .expect("iterative training succeeds");
+
+        assert!(model.stumps.is_empty());
+    }
+
+    #[test]
+    fn iteration_controls_reject_invalid_values() {
+        assert!(matches!(
+            IterationControls::new(0, 0.0, 1),
+            Err(EngineError::InvalidConfig(_))
+        ));
+        assert!(matches!(
+            IterationControls::new(1, -0.1, 1),
+            Err(EngineError::InvalidConfig(_))
+        ));
+        assert!(matches!(
+            IterationControls::new(1, 0.0, 0),
+            Err(EngineError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn trained_model_artifact_roundtrip_preserves_predictions() {
+        let model = sample_trained_model();
         let bytes = model.to_artifact_bytes().expect("artifact serializes");
         let restored = TrainedModel::from_artifact_bytes(&bytes).expect("artifact parses");
+        let parsed = deserialize_model_artifact_v1(&bytes).expect("artifact decodes");
 
         assert_eq!(model.feature_count, restored.feature_count);
         assert_eq!(model.stumps.len(), restored.stumps.len());
+        assert_eq!(parsed.sections.len(), 2);
+        assert_eq!(parsed.sections[0].descriptor.kind, ModelSectionKind::Trees);
+        assert_eq!(
+            parsed.sections[1].descriptor.kind,
+            ModelSectionKind::PredictorLayout
+        );
 
         let rows = vec![vec![0.0, 0.0], vec![3.0, 1.0]];
         let original_preds = model.predict_batch(&rows).expect("predicts");
         let restored_preds = restored.predict_batch(&rows).expect("predicts");
         assert_eq!(original_preds, restored_preds);
+    }
+
+    #[test]
+    fn trained_model_artifact_rejects_missing_required_sections() {
+        let model = sample_trained_model();
+        let metadata = ModelMetadata {
+            format_version: MODEL_FORMAT_V1,
+            feature_names: (0..model.feature_count)
+                .map(|index| format!("f{index}"))
+                .collect(),
+            trained_device: Device::Cpu,
+        };
+        let trees_payload = encode_trained_model_payload(&model).expect("trees encode");
+        let layout_payload =
+            encode_predictor_layout_payload(&model).expect("predictor layout encodes");
+
+        let missing_predictor = serialize_model_artifact_v1(
+            &metadata,
+            &[(ModelSectionKind::Trees, trees_payload.clone())],
+        )
+        .expect("artifact serializes");
+        let missing_trees = serialize_model_artifact_v1(
+            &metadata,
+            &[(ModelSectionKind::PredictorLayout, layout_payload.clone())],
+        )
+        .expect("artifact serializes");
+
+        assert!(matches!(
+            TrainedModel::from_artifact_bytes(&missing_predictor),
+            Err(EngineError::ContractViolation(_))
+        ));
+        assert!(matches!(
+            TrainedModel::from_artifact_bytes(&missing_trees),
+            Err(EngineError::ContractViolation(_))
+        ));
+    }
+
+    #[test]
+    fn trained_model_artifact_rejects_duplicate_required_sections() {
+        let model = sample_trained_model();
+        let metadata = ModelMetadata {
+            format_version: MODEL_FORMAT_V1,
+            feature_names: (0..model.feature_count)
+                .map(|index| format!("f{index}"))
+                .collect(),
+            trained_device: Device::Cpu,
+        };
+        let trees_payload = encode_trained_model_payload(&model).expect("trees encode");
+        let layout_payload =
+            encode_predictor_layout_payload(&model).expect("predictor layout encodes");
+
+        let duplicate_predictor = serialize_model_artifact_v1(
+            &metadata,
+            &[
+                (ModelSectionKind::Trees, trees_payload),
+                (ModelSectionKind::PredictorLayout, layout_payload.clone()),
+                (ModelSectionKind::PredictorLayout, layout_payload),
+            ],
+        )
+        .expect("artifact serializes");
+
+        assert!(matches!(
+            TrainedModel::from_artifact_bytes(&duplicate_predictor),
+            Err(EngineError::ContractViolation(_))
+        ));
     }
 }

@@ -1,4 +1,4 @@
-"""Python-facing estimator baseline for v0.0.3."""
+"""Python-facing estimator baseline scaffold for AlloyGBM."""
 
 from __future__ import annotations
 

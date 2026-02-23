@@ -1,4 +1,4 @@
-"""Focused contract tests for the v0.0.3 Python regressor baseline."""
+"""Focused contract tests for the AlloyGBM Python regressor baseline."""
 
 from __future__ import annotations
 
