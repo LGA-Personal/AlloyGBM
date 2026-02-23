@@ -1,7 +1,8 @@
-"""Python-facing estimator stubs for v0.0.2."""
+"""Python-facing estimator baseline for v0.0.3."""
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 
 class GBMRegressor:
     """Sklearn-style contract stub for the future native estimator."""
@@ -24,6 +25,8 @@ class GBMRegressor:
         self.seed = int(seed)
         self.deterministic = bool(deterministic)
         self._is_fitted = False
+        self._baseline_prediction = 0.0
+        self._n_features_in = 0
 
     def __repr__(self) -> str:
         return (
@@ -73,13 +76,56 @@ class GBMRegressor:
         return self
 
     def fit(self, X: object, y: object) -> "GBMRegressor":
-        """Validate fit contract shape, then fail explicitly until v0.0.3+."""
-        del X, y
-        raise NotImplementedError("fit is not implemented in v0.0.2")
+        """Fit a deterministic constant baseline predictor."""
+        rows = self._validate_rows(X)
+        targets = self._validate_targets(y)
+        if len(rows) != len(targets):
+            raise ValueError("X and y must contain the same number of rows")
+
+        self._n_features_in = len(rows[0])
+        self._baseline_prediction = sum(targets) / len(targets)
+        self._is_fitted = True
+        return self
 
     def predict(self, X: object) -> list[float]:
-        """Require fitted-state before prediction; kernel remains unimplemented."""
-        del X
+        """Predict constant baseline values for each input row."""
         if not self._is_fitted:
             raise RuntimeError("GBMRegressor must be fit before predict")
-        raise NotImplementedError("predict is not implemented in v0.0.2")
+        rows = self._validate_rows(X)
+        if len(rows[0]) != self._n_features_in:
+            raise ValueError(
+                f"X feature count {len(rows[0])} does not match fitted feature count "
+                f"{self._n_features_in}"
+            )
+        return [self._baseline_prediction] * len(rows)
+
+    @staticmethod
+    def _validate_rows(X: object) -> list[list[float]]:
+        if not isinstance(X, Sequence) or isinstance(X, (str, bytes)):
+            raise TypeError("X must be a sequence of feature rows")
+        if len(X) == 0:
+            raise ValueError("X must contain at least one row")
+
+        normalized: list[list[float]] = []
+        expected_width: int | None = None
+        for row in X:
+            if not isinstance(row, Sequence) or isinstance(row, (str, bytes)):
+                raise TypeError("each X row must be a sequence of numeric values")
+            if len(row) == 0:
+                raise ValueError("each X row must contain at least one feature value")
+            row_values = [float(value) for value in row]
+            if expected_width is None:
+                expected_width = len(row_values)
+            elif len(row_values) != expected_width:
+                raise ValueError("all X rows must have the same feature count")
+            normalized.append(row_values)
+
+        return normalized
+
+    @staticmethod
+    def _validate_targets(y: object) -> list[float]:
+        if not isinstance(y, Sequence) or isinstance(y, (str, bytes)):
+            raise TypeError("y must be a sequence of numeric values")
+        if len(y) == 0:
+            raise ValueError("y must contain at least one value")
+        return [float(value) for value in y]
