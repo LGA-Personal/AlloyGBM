@@ -199,6 +199,7 @@ pub struct IterationControls {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IterationStopReason {
     CompletedRequestedRounds,
+    DepthBudgetReached,
     NoSplitCandidate,
     GainBelowThreshold,
     LeafRowsBelowThreshold,
@@ -209,6 +210,7 @@ pub enum IterationStopReason {
 pub struct IterationRunSummary {
     pub model: TrainedModel,
     pub rounds_requested: usize,
+    pub effective_round_cap: usize,
     pub rounds_completed: usize,
     pub stop_reason: IterationStopReason,
     pub final_loss: f32,
@@ -218,6 +220,16 @@ pub struct IterationRunSummary {
 pub enum ArtifactCompatibilityMode {
     Strict,
     AllowLegacyTreesOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArtifactCompatibilityReport {
+    pub trees_section_count: usize,
+    pub predictor_layout_section_count: usize,
+    pub strict_compatible: bool,
+    pub legacy_trees_only_compatible: bool,
+    pub legacy_compatible: bool,
+    pub recommended_mode: Option<ArtifactCompatibilityMode>,
 }
 
 impl IterationControls {
@@ -328,11 +340,55 @@ impl TrainedModel {
         Self::from_artifact_bytes_with_mode(bytes, ArtifactCompatibilityMode::AllowLegacyTreesOnly)
     }
 
+    pub fn artifact_compatibility_report(
+        bytes: &[u8],
+    ) -> EngineResult<ArtifactCompatibilityReport> {
+        let parsed = deserialize_model_artifact_v1(bytes).map_err(EngineError::from)?;
+        Ok(artifact_compatibility_report_from_sections(
+            &parsed.sections,
+        ))
+    }
+
+    pub fn from_artifact_bytes_auto(
+        bytes: &[u8],
+    ) -> EngineResult<(Self, ArtifactCompatibilityMode)> {
+        let report = Self::artifact_compatibility_report(bytes)?;
+        let mode = report.recommended_mode.ok_or_else(|| {
+            EngineError::ContractViolation(format!(
+                "unable to determine artifact compatibility mode (Trees sections: {}, PredictorLayout sections: {})",
+                report.trees_section_count, report.predictor_layout_section_count
+            ))
+        })?;
+        let model = Self::from_artifact_bytes_with_mode(bytes, mode)?;
+        Ok((model, mode))
+    }
+
     pub fn from_artifact_bytes_with_mode(
         bytes: &[u8],
         compatibility_mode: ArtifactCompatibilityMode,
     ) -> EngineResult<Self> {
         let parsed = deserialize_model_artifact_v1(bytes).map_err(EngineError::from)?;
+        let compatibility_report = artifact_compatibility_report_from_sections(&parsed.sections);
+
+        match compatibility_mode {
+            ArtifactCompatibilityMode::Strict if !compatibility_report.strict_compatible => {
+                return Err(EngineError::ContractViolation(format!(
+                    "strict compatibility mode requires exactly one Trees and one PredictorLayout section (found Trees={}, PredictorLayout={})",
+                    compatibility_report.trees_section_count,
+                    compatibility_report.predictor_layout_section_count
+                )));
+            }
+            ArtifactCompatibilityMode::AllowLegacyTreesOnly
+                if !compatibility_report.legacy_compatible =>
+            {
+                return Err(EngineError::ContractViolation(format!(
+                    "legacy-compatible mode only supports strict dual-section artifacts or legacy Trees-only artifacts (found Trees={}, PredictorLayout={})",
+                    compatibility_report.trees_section_count,
+                    compatibility_report.predictor_layout_section_count
+                )));
+            }
+            _ => {}
+        }
 
         let trees_section = required_single_section(&parsed.sections, ModelSectionKind::Trees)?;
         let metadata_feature_count = parsed.contract.metadata.feature_names.len();
@@ -492,11 +548,16 @@ impl Trainer {
         let feature_tiles = vec![FeatureTile::new(0, binned_matrix.feature_count as u32)?];
         let mut stumps = Vec::new();
         let mut rounds_completed = 0_usize;
-        let mut stop_reason = IterationStopReason::CompletedRequestedRounds;
+        let effective_round_cap = controls.rounds.min(self.params.max_depth as usize);
+        let mut stop_reason = if controls.rounds > effective_round_cap {
+            IterationStopReason::DepthBudgetReached
+        } else {
+            IterationStopReason::CompletedRequestedRounds
+        };
 
         const LEAF_EPSILON: f32 = 1e-6;
 
-        for _round in 0..controls.rounds {
+        for _round in 0..effective_round_cap {
             let gradients = objective.compute_gradients(
                 &predictions,
                 &dataset.targets,
@@ -580,6 +641,7 @@ impl Trainer {
         Ok(IterationRunSummary {
             model,
             rounds_requested: controls.rounds,
+            effective_round_cap,
             rounds_completed,
             stop_reason,
             final_loss,
@@ -751,6 +813,42 @@ fn optional_single_section(
         found = Some(section);
     }
     Ok(found)
+}
+
+fn artifact_compatibility_report_from_sections(
+    sections: &[ModelArtifactSection],
+) -> ArtifactCompatibilityReport {
+    let trees_section_count = sections
+        .iter()
+        .filter(|section| section.descriptor.kind == ModelSectionKind::Trees)
+        .count();
+    let predictor_layout_section_count = sections
+        .iter()
+        .filter(|section| section.descriptor.kind == ModelSectionKind::PredictorLayout)
+        .count();
+
+    let strict_compatible = trees_section_count == 1 && predictor_layout_section_count == 1;
+    let legacy_trees_only_compatible = trees_section_count == 1
+        && predictor_layout_section_count == 0
+        && sections.len() == 1
+        && sections[0].descriptor.kind == ModelSectionKind::Trees;
+    let legacy_compatible = strict_compatible || legacy_trees_only_compatible;
+    let recommended_mode = if strict_compatible {
+        Some(ArtifactCompatibilityMode::Strict)
+    } else if legacy_trees_only_compatible {
+        Some(ArtifactCompatibilityMode::AllowLegacyTreesOnly)
+    } else {
+        None
+    };
+
+    ArtifactCompatibilityReport {
+        trees_section_count,
+        predictor_layout_section_count,
+        strict_compatible,
+        legacy_trees_only_compatible,
+        legacy_compatible,
+        recommended_mode,
+    }
 }
 
 fn resolve_predictor_layout(
@@ -1235,6 +1333,7 @@ mod tests {
             .expect("iterative training succeeds");
 
         assert_eq!(summary.rounds_requested, 3);
+        assert_eq!(summary.effective_round_cap, 3);
         assert_eq!(summary.rounds_completed, 0);
         assert_eq!(summary.stop_reason, IterationStopReason::GainBelowThreshold);
         assert!(summary.model.stumps.is_empty());
@@ -1256,12 +1355,39 @@ mod tests {
             .expect("iterative training succeeds");
 
         assert_eq!(summary.rounds_requested, 1);
+        assert_eq!(summary.effective_round_cap, 1);
         assert_eq!(summary.rounds_completed, 1);
         assert_eq!(
             summary.stop_reason,
             IterationStopReason::CompletedRequestedRounds
         );
         assert!(!summary.model.stumps.is_empty());
+    }
+
+    #[test]
+    fn fit_iterations_summary_reports_depth_budget_stop_reason() {
+        let params = TrainParams {
+            max_depth: 1,
+            ..TrainParams::default()
+        };
+        let trainer = Trainer::new(params).expect("valid params");
+        let controls =
+            IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0).expect("controls are valid");
+        let summary = trainer
+            .fit_iterations_with_summary(
+                &sample_dataset(),
+                &sample_binned_matrix(),
+                &MockBackend,
+                &SquaredErrorObjective,
+                controls,
+            )
+            .expect("iterative training succeeds");
+
+        assert_eq!(summary.rounds_requested, 3);
+        assert_eq!(summary.effective_round_cap, 1);
+        assert_eq!(summary.rounds_completed, 1);
+        assert_eq!(summary.stop_reason, IterationStopReason::DepthBudgetReached);
+        assert_eq!(summary.model.stumps.len(), 1);
     }
 
     #[test]
@@ -1430,6 +1556,156 @@ mod tests {
         let original_preds = model.predict_batch(&rows).expect("predicts");
         let restored_preds = restored.predict_batch(&rows).expect("predicts");
         assert_eq!(original_preds, restored_preds);
+    }
+
+    #[test]
+    fn artifact_compatibility_report_classifies_dual_section_payload() {
+        let model = sample_trained_model();
+        let bytes = model.to_artifact_bytes().expect("artifact serializes");
+        let report =
+            TrainedModel::artifact_compatibility_report(&bytes).expect("report should parse");
+
+        assert_eq!(report.trees_section_count, 1);
+        assert_eq!(report.predictor_layout_section_count, 1);
+        assert!(report.strict_compatible);
+        assert!(!report.legacy_trees_only_compatible);
+        assert!(report.legacy_compatible);
+        assert_eq!(
+            report.recommended_mode,
+            Some(ArtifactCompatibilityMode::Strict)
+        );
+    }
+
+    #[test]
+    fn artifact_compatibility_report_classifies_legacy_trees_only_payload() {
+        let model = sample_trained_model();
+        let metadata = ModelMetadata {
+            format_version: MODEL_FORMAT_V1,
+            feature_names: (0..model.feature_count)
+                .map(|index| format!("f{index}"))
+                .collect(),
+            trained_device: Device::Cpu,
+        };
+        let trees_payload = encode_trained_model_payload(&model).expect("trees encode");
+        let legacy_trees_only =
+            serialize_model_artifact_v1(&metadata, &[(ModelSectionKind::Trees, trees_payload)])
+                .expect("artifact serializes");
+
+        let report = TrainedModel::artifact_compatibility_report(&legacy_trees_only)
+            .expect("report should parse");
+        assert_eq!(report.trees_section_count, 1);
+        assert_eq!(report.predictor_layout_section_count, 0);
+        assert!(!report.strict_compatible);
+        assert!(report.legacy_trees_only_compatible);
+        assert!(report.legacy_compatible);
+        assert_eq!(
+            report.recommended_mode,
+            Some(ArtifactCompatibilityMode::AllowLegacyTreesOnly)
+        );
+    }
+
+    #[test]
+    fn artifact_compatibility_report_marks_malformed_required_sections_incompatible() {
+        let model = sample_trained_model();
+        let metadata = ModelMetadata {
+            format_version: MODEL_FORMAT_V1,
+            feature_names: (0..model.feature_count)
+                .map(|index| format!("f{index}"))
+                .collect(),
+            trained_device: Device::Cpu,
+        };
+        let trees_payload = encode_trained_model_payload(&model).expect("trees encode");
+        let layout_payload =
+            encode_predictor_layout_payload(&model).expect("predictor layout encodes");
+        let duplicate_predictor = serialize_model_artifact_v1(
+            &metadata,
+            &[
+                (ModelSectionKind::Trees, trees_payload),
+                (ModelSectionKind::PredictorLayout, layout_payload.clone()),
+                (ModelSectionKind::PredictorLayout, layout_payload),
+            ],
+        )
+        .expect("artifact serializes");
+
+        let report = TrainedModel::artifact_compatibility_report(&duplicate_predictor)
+            .expect("report should parse");
+        assert_eq!(report.trees_section_count, 1);
+        assert_eq!(report.predictor_layout_section_count, 2);
+        assert!(!report.strict_compatible);
+        assert!(!report.legacy_trees_only_compatible);
+        assert!(!report.legacy_compatible);
+        assert_eq!(report.recommended_mode, None);
+    }
+
+    #[test]
+    fn from_artifact_bytes_auto_selects_strict_for_dual_section_payload() {
+        let model = sample_trained_model();
+        let bytes = model.to_artifact_bytes().expect("artifact serializes");
+        let (restored, selected_mode) =
+            TrainedModel::from_artifact_bytes_auto(&bytes).expect("auto import succeeds");
+
+        assert_eq!(selected_mode, ArtifactCompatibilityMode::Strict);
+        let rows = vec![vec![0.0, 0.0], vec![3.0, 1.0]];
+        let original_preds = model.predict_batch(&rows).expect("predicts");
+        let restored_preds = restored.predict_batch(&rows).expect("predicts");
+        assert_eq!(original_preds, restored_preds);
+    }
+
+    #[test]
+    fn from_artifact_bytes_auto_selects_legacy_for_trees_only_payload() {
+        let model = sample_trained_model();
+        let metadata = ModelMetadata {
+            format_version: MODEL_FORMAT_V1,
+            feature_names: (0..model.feature_count)
+                .map(|index| format!("f{index}"))
+                .collect(),
+            trained_device: Device::Cpu,
+        };
+        let trees_payload = encode_trained_model_payload(&model).expect("trees encode");
+        let legacy_trees_only =
+            serialize_model_artifact_v1(&metadata, &[(ModelSectionKind::Trees, trees_payload)])
+                .expect("artifact serializes");
+
+        let (restored, selected_mode) = TrainedModel::from_artifact_bytes_auto(&legacy_trees_only)
+            .expect("auto import succeeds");
+        assert_eq!(
+            selected_mode,
+            ArtifactCompatibilityMode::AllowLegacyTreesOnly
+        );
+
+        let rows = vec![vec![0.0, 0.0], vec![3.0, 1.0]];
+        let original_preds = model.predict_batch(&rows).expect("predicts");
+        let restored_preds = restored.predict_batch(&rows).expect("predicts");
+        assert_eq!(original_preds, restored_preds);
+    }
+
+    #[test]
+    fn from_artifact_bytes_auto_rejects_malformed_required_section_layouts() {
+        let model = sample_trained_model();
+        let metadata = ModelMetadata {
+            format_version: MODEL_FORMAT_V1,
+            feature_names: (0..model.feature_count)
+                .map(|index| format!("f{index}"))
+                .collect(),
+            trained_device: Device::Cpu,
+        };
+        let trees_payload = encode_trained_model_payload(&model).expect("trees encode");
+        let layout_payload =
+            encode_predictor_layout_payload(&model).expect("predictor layout encodes");
+        let duplicate_predictor = serialize_model_artifact_v1(
+            &metadata,
+            &[
+                (ModelSectionKind::Trees, trees_payload),
+                (ModelSectionKind::PredictorLayout, layout_payload.clone()),
+                (ModelSectionKind::PredictorLayout, layout_payload),
+            ],
+        )
+        .expect("artifact serializes");
+
+        assert!(matches!(
+            TrainedModel::from_artifact_bytes_auto(&duplicate_predictor),
+            Err(EngineError::ContractViolation(_))
+        ));
     }
 
     #[test]
