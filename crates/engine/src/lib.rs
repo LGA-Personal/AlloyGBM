@@ -196,6 +196,30 @@ pub struct IterationControls {
     pub max_abs_leaf_value: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IterationStopReason {
+    CompletedRequestedRounds,
+    NoSplitCandidate,
+    GainBelowThreshold,
+    LeafRowsBelowThreshold,
+    LeafMagnitudeBelowThreshold,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IterationRunSummary {
+    pub model: TrainedModel,
+    pub rounds_requested: usize,
+    pub rounds_completed: usize,
+    pub stop_reason: IterationStopReason,
+    pub final_loss: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactCompatibilityMode {
+    Strict,
+    AllowLegacyTreesOnly,
+}
+
 impl IterationControls {
     pub fn new(
         rounds: usize,
@@ -301,11 +325,19 @@ impl TrainedModel {
     }
 
     pub fn from_artifact_bytes(bytes: &[u8]) -> EngineResult<Self> {
+        Self::from_artifact_bytes_with_mode(bytes, ArtifactCompatibilityMode::AllowLegacyTreesOnly)
+    }
+
+    pub fn from_artifact_bytes_with_mode(
+        bytes: &[u8],
+        compatibility_mode: ArtifactCompatibilityMode,
+    ) -> EngineResult<Self> {
         let parsed = deserialize_model_artifact_v1(bytes).map_err(EngineError::from)?;
 
         let trees_section = required_single_section(&parsed.sections, ModelSectionKind::Trees)?;
         let metadata_feature_count = parsed.contract.metadata.feature_names.len();
-        let predictor_layout = resolve_predictor_layout(&parsed.sections, metadata_feature_count)?;
+        let predictor_layout =
+            resolve_predictor_layout(&parsed.sections, metadata_feature_count, compatibility_mode)?;
 
         let mut model = decode_trained_model_payload(&trees_section.payload)?;
 
@@ -437,6 +469,19 @@ impl Trainer {
         objective: &O,
         controls: IterationControls,
     ) -> EngineResult<TrainedModel> {
+        let summary =
+            self.fit_iterations_with_summary(dataset, binned_matrix, backend, objective, controls)?;
+        Ok(summary.model)
+    }
+
+    pub fn fit_iterations_with_summary<B: BackendOps, O: ObjectiveOps>(
+        &self,
+        dataset: &TrainingDataset,
+        binned_matrix: &BinnedMatrix,
+        backend: &B,
+        objective: &O,
+        controls: IterationControls,
+    ) -> EngineResult<IterationRunSummary> {
         validate_iteration_controls(controls)?;
         validate_training_alignment(dataset, binned_matrix)?;
         let fit_contract = self.validate_fit_contract(dataset, objective)?;
@@ -446,6 +491,8 @@ impl Trainer {
         let root_node = NodeSlice::new(0, root_row_indices)?;
         let feature_tiles = vec![FeatureTile::new(0, binned_matrix.feature_count as u32)?];
         let mut stumps = Vec::new();
+        let mut rounds_completed = 0_usize;
+        let mut stop_reason = IterationStopReason::CompletedRequestedRounds;
 
         const LEAF_EPSILON: f32 = 1e-6;
 
@@ -460,9 +507,11 @@ impl Trainer {
             let histograms =
                 backend.build_histograms(binned_matrix, &gradients, &root_node, &feature_tiles)?;
             let Some(mut split) = backend.best_split(&histograms)? else {
+                stop_reason = IterationStopReason::NoSplitCandidate;
                 break;
             };
             if !split.gain.is_finite() || split.gain <= controls.min_split_gain {
+                stop_reason = IterationStopReason::GainBelowThreshold;
                 break;
             }
 
@@ -471,6 +520,7 @@ impl Trainer {
             if partition.left_row_indices.len() < controls.min_rows_per_leaf
                 || partition.right_row_indices.len() < controls.min_rows_per_leaf
             {
+                stop_reason = IterationStopReason::LeafRowsBelowThreshold;
                 break;
             }
 
@@ -494,6 +544,7 @@ impl Trainer {
             if left_leaf_value.abs() < controls.min_abs_leaf_value
                 && right_leaf_value.abs() < controls.min_abs_leaf_value
             {
+                stop_reason = IterationStopReason::LeafMagnitudeBelowThreshold;
                 break;
             }
 
@@ -512,12 +563,26 @@ impl Trainer {
                 left_leaf_value,
                 right_leaf_value,
             });
+            rounds_completed += 1;
         }
 
-        Ok(TrainedModel {
+        let model = TrainedModel {
             baseline_prediction: fit_contract.baseline_prediction,
             feature_count: dataset.matrix.feature_count,
             stumps,
+        };
+        let final_loss = squared_error_loss(
+            &predictions,
+            &dataset.targets,
+            dataset.sample_weights.as_deref(),
+        )?;
+
+        Ok(IterationRunSummary {
+            model,
+            rounds_requested: controls.rounds,
+            rounds_completed,
+            stop_reason,
+            final_loss,
         })
     }
 
@@ -619,6 +684,43 @@ fn validate_iteration_controls(controls: IterationControls) -> EngineResult<()> 
     Ok(())
 }
 
+fn squared_error_loss(
+    predictions: &[f32],
+    targets: &[f32],
+    sample_weights: Option<&[f32]>,
+) -> EngineResult<f32> {
+    if predictions.len() != targets.len() {
+        return Err(EngineError::ContractViolation(format!(
+            "predictions length {} does not match targets length {}",
+            predictions.len(),
+            targets.len()
+        )));
+    }
+    if let Some(weights) = sample_weights
+        && weights.len() != targets.len()
+    {
+        return Err(EngineError::ContractViolation(format!(
+            "weights length {} does not match targets length {}",
+            weights.len(),
+            targets.len()
+        )));
+    }
+
+    let mut total = 0.0_f32;
+    for index in 0..predictions.len() {
+        let weight = sample_weights.map_or(1.0, |weights| weights[index]);
+        if !weight.is_finite() || weight <= 0.0 {
+            return Err(EngineError::ContractViolation(
+                "sample weights must be finite and > 0".to_string(),
+            ));
+        }
+        let residual = predictions[index] - targets[index];
+        total += residual * residual * weight;
+    }
+
+    Ok(total)
+}
+
 fn required_single_section(
     sections: &[ModelArtifactSection],
     kind: ModelSectionKind,
@@ -654,13 +756,17 @@ fn optional_single_section(
 fn resolve_predictor_layout(
     sections: &[ModelArtifactSection],
     metadata_feature_count: usize,
+    compatibility_mode: ArtifactCompatibilityMode,
 ) -> EngineResult<PredictorLayoutPayload> {
     if let Some(section) = optional_single_section(sections, ModelSectionKind::PredictorLayout)? {
         return decode_predictor_layout_payload(&section.payload);
     }
 
-    // Compatibility path for v0.0.4 legacy payloads that only carried Trees.
-    if sections.len() == 1 && sections[0].descriptor.kind == ModelSectionKind::Trees {
+    if compatibility_mode == ArtifactCompatibilityMode::AllowLegacyTreesOnly
+        && sections.len() == 1
+        && sections[0].descriptor.kind == ModelSectionKind::Trees
+    {
+        // Compatibility path for v0.0.4 legacy payloads that only carried Trees.
         return Ok(PredictorLayoutPayload {
             feature_count: metadata_feature_count,
         });
@@ -1114,6 +1220,51 @@ mod tests {
     }
 
     #[test]
+    fn fit_iterations_summary_reports_gain_threshold_stop_reason() {
+        let trainer = Trainer::new(TrainParams::default()).expect("valid params");
+        let controls =
+            IterationControls::new(3, 10.0, 1, 0.0, 1_000_000.0).expect("controls are valid");
+        let summary = trainer
+            .fit_iterations_with_summary(
+                &sample_dataset(),
+                &sample_binned_matrix(),
+                &MockBackend,
+                &SquaredErrorObjective,
+                controls,
+            )
+            .expect("iterative training succeeds");
+
+        assert_eq!(summary.rounds_requested, 3);
+        assert_eq!(summary.rounds_completed, 0);
+        assert_eq!(summary.stop_reason, IterationStopReason::GainBelowThreshold);
+        assert!(summary.model.stumps.is_empty());
+    }
+
+    #[test]
+    fn fit_iterations_summary_reports_completed_requested_rounds() {
+        let trainer = Trainer::new(TrainParams::default()).expect("valid params");
+        let controls =
+            IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0).expect("controls are valid");
+        let summary = trainer
+            .fit_iterations_with_summary(
+                &sample_dataset(),
+                &sample_binned_matrix(),
+                &MockBackend,
+                &SquaredErrorObjective,
+                controls,
+            )
+            .expect("iterative training succeeds");
+
+        assert_eq!(summary.rounds_requested, 1);
+        assert_eq!(summary.rounds_completed, 1);
+        assert_eq!(
+            summary.stop_reason,
+            IterationStopReason::CompletedRequestedRounds
+        );
+        assert!(!summary.model.stumps.is_empty());
+    }
+
+    #[test]
     fn fit_iterations_controls_enforce_min_rows_per_leaf() {
         let trainer = Trainer::new(TrainParams::default()).expect("valid params");
         let controls =
@@ -1236,6 +1387,44 @@ mod tests {
                 .expect("artifact serializes");
         let restored =
             TrainedModel::from_artifact_bytes(&legacy_trees_only).expect("legacy artifact parses");
+
+        let rows = vec![vec![0.0, 0.0], vec![3.0, 1.0]];
+        let original_preds = model.predict_batch(&rows).expect("predicts");
+        let restored_preds = restored.predict_batch(&rows).expect("predicts");
+        assert_eq!(original_preds, restored_preds);
+    }
+
+    #[test]
+    fn strict_mode_rejects_legacy_trees_only_payload() {
+        let model = sample_trained_model();
+        let metadata = ModelMetadata {
+            format_version: MODEL_FORMAT_V1,
+            feature_names: (0..model.feature_count)
+                .map(|index| format!("f{index}"))
+                .collect(),
+            trained_device: Device::Cpu,
+        };
+        let trees_payload = encode_trained_model_payload(&model).expect("trees encode");
+        let legacy_trees_only =
+            serialize_model_artifact_v1(&metadata, &[(ModelSectionKind::Trees, trees_payload)])
+                .expect("artifact serializes");
+
+        assert!(matches!(
+            TrainedModel::from_artifact_bytes_with_mode(
+                &legacy_trees_only,
+                ArtifactCompatibilityMode::Strict
+            ),
+            Err(EngineError::ContractViolation(_))
+        ));
+    }
+
+    #[test]
+    fn strict_mode_accepts_dual_section_payload() {
+        let model = sample_trained_model();
+        let bytes = model.to_artifact_bytes().expect("artifact serializes");
+        let restored =
+            TrainedModel::from_artifact_bytes_with_mode(&bytes, ArtifactCompatibilityMode::Strict)
+                .expect("strict artifact parse succeeds");
 
         let rows = vec![vec![0.0, 0.0], vec![3.0, 1.0]];
         let original_preds = model.predict_batch(&rows).expect("predicts");
