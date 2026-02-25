@@ -26,6 +26,9 @@ jobs:
       - name: Cargo check
         run: cargo check --workspace
 
+      - name: Cargo doc
+        run: cargo doc --workspace --no-deps
+
       - name: Cargo fmt
         run: cargo fmt -- --check
 
@@ -67,3 +70,30 @@ jobs:
 
       - name: Import smoke
         run: python -c "import alloygbm; print(alloygbm.native_runtime_info())"
+
+      - name: Python regressor contract smoke
+        run: |
+          python - <<'PY'
+          from alloygbm import GBMRegressor
+
+          model = GBMRegressor(
+              learning_rate=0.2,
+              max_depth=4,
+              seed=1,
+              deterministic=True,
+          )
+          params = model.get_params()
+          assert params["learning_rate"] == 0.2
+          assert params["max_depth"] == 4
+
+          try:
+              model.set_params(learning_rate=0.0)
+          except ValueError:
+              pass
+          else:
+              raise AssertionError(
+                  "expected ValueError for invalid learning_rate"
+              )
+
+          print("GBMRegressor contract smoke ok")
+          PY
