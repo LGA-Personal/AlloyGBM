@@ -12,6 +12,10 @@ class GBMRegressor:
         *,
         learning_rate: float = 0.1,
         max_depth: int = 6,
+        row_subsample: float = 1.0,
+        col_subsample: float = 1.0,
+        early_stopping_rounds: int | None = None,
+        min_validation_improvement: float = 0.0,
         seed: int = 0,
         deterministic: bool = True,
     ) -> None:
@@ -19,9 +23,25 @@ class GBMRegressor:
             raise ValueError("learning_rate must be in (0.0, 1.0]")
         if max_depth <= 0:
             raise ValueError("max_depth must be greater than 0")
+        if not (0.0 < row_subsample <= 1.0):
+            raise ValueError("row_subsample must be in (0.0, 1.0]")
+        if not (0.0 < col_subsample <= 1.0):
+            raise ValueError("col_subsample must be in (0.0, 1.0]")
+        if early_stopping_rounds is not None and int(early_stopping_rounds) <= 0:
+            raise ValueError("early_stopping_rounds must be greater than 0 when set")
+        if min_validation_improvement < 0.0:
+            raise ValueError("min_validation_improvement must be >= 0")
 
         self.learning_rate = float(learning_rate)
         self.max_depth = int(max_depth)
+        self.row_subsample = float(row_subsample)
+        self.col_subsample = float(col_subsample)
+        self.early_stopping_rounds = (
+            int(early_stopping_rounds)
+            if early_stopping_rounds is not None
+            else None
+        )
+        self.min_validation_improvement = float(min_validation_improvement)
         self.seed = int(seed)
         self.deterministic = bool(deterministic)
         self._is_fitted = False
@@ -33,24 +53,41 @@ class GBMRegressor:
             "GBMRegressor("
             f"learning_rate={self.learning_rate}, "
             f"max_depth={self.max_depth}, "
+            f"row_subsample={self.row_subsample}, "
+            f"col_subsample={self.col_subsample}, "
+            f"early_stopping_rounds={self.early_stopping_rounds}, "
+            f"min_validation_improvement={self.min_validation_improvement}, "
             f"seed={self.seed}, "
             f"deterministic={self.deterministic}"
             ")"
         )
 
-    def get_params(self, deep: bool = True) -> dict[str, float | int | bool]:
+    def get_params(self, deep: bool = True) -> dict[str, float | int | bool | None]:
         """Return estimator parameters in sklearn-compatible shape."""
         del deep  # Not used until nested estimators exist.
         return {
             "learning_rate": self.learning_rate,
             "max_depth": self.max_depth,
+            "row_subsample": self.row_subsample,
+            "col_subsample": self.col_subsample,
+            "early_stopping_rounds": self.early_stopping_rounds,
+            "min_validation_improvement": self.min_validation_improvement,
             "seed": self.seed,
             "deterministic": self.deterministic,
         }
 
-    def set_params(self, **params: float | int | bool) -> "GBMRegressor":
+    def set_params(self, **params: float | int | bool | None) -> "GBMRegressor":
         """Set estimator parameters with constructor-equivalent validation."""
-        allowed = {"learning_rate", "max_depth", "seed", "deterministic"}
+        allowed = {
+            "learning_rate",
+            "max_depth",
+            "row_subsample",
+            "col_subsample",
+            "early_stopping_rounds",
+            "min_validation_improvement",
+            "seed",
+            "deterministic",
+        }
         unknown = sorted(set(params) - allowed)
         if unknown:
             raise ValueError(f"Unknown parameter(s): {', '.join(unknown)}")
@@ -66,6 +103,35 @@ class GBMRegressor:
             if max_depth <= 0:
                 raise ValueError("max_depth must be greater than 0")
             self.max_depth = max_depth
+
+        if "row_subsample" in params:
+            row_subsample = float(params["row_subsample"])
+            if not (0.0 < row_subsample <= 1.0):
+                raise ValueError("row_subsample must be in (0.0, 1.0]")
+            self.row_subsample = row_subsample
+
+        if "col_subsample" in params:
+            col_subsample = float(params["col_subsample"])
+            if not (0.0 < col_subsample <= 1.0):
+                raise ValueError("col_subsample must be in (0.0, 1.0]")
+            self.col_subsample = col_subsample
+
+        if "early_stopping_rounds" in params:
+            if params["early_stopping_rounds"] is None:
+                self.early_stopping_rounds = None
+            else:
+                early_stopping_rounds = int(params["early_stopping_rounds"])
+                if early_stopping_rounds <= 0:
+                    raise ValueError(
+                        "early_stopping_rounds must be greater than 0 when set"
+                    )
+                self.early_stopping_rounds = early_stopping_rounds
+
+        if "min_validation_improvement" in params:
+            min_validation_improvement = float(params["min_validation_improvement"])
+            if min_validation_improvement < 0.0:
+                raise ValueError("min_validation_improvement must be >= 0")
+            self.min_validation_improvement = min_validation_improvement
 
         if "seed" in params:
             self.seed = int(params["seed"])

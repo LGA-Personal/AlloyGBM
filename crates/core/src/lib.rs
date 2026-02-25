@@ -34,6 +34,10 @@ pub struct TrainParams {
     pub deterministic: bool,
     pub learning_rate: f32,
     pub max_depth: u16,
+    pub row_subsample: f32,
+    pub col_subsample: f32,
+    pub early_stopping_rounds: Option<u16>,
+    pub min_validation_improvement: f32,
 }
 
 impl Default for TrainParams {
@@ -43,6 +47,10 @@ impl Default for TrainParams {
             deterministic: true,
             learning_rate: 0.1,
             max_depth: 6,
+            row_subsample: 1.0,
+            col_subsample: 1.0,
+            early_stopping_rounds: None,
+            min_validation_improvement: 0.0,
         }
     }
 }
@@ -420,6 +428,32 @@ pub fn validate_train_params(params: &TrainParams) -> CoreResult<()> {
     if params.max_depth == 0 {
         return Err(CoreError::InvalidConfig(
             "max_depth must be greater than 0".to_string(),
+        ));
+    }
+
+    if !(0.0..=1.0).contains(&params.row_subsample) || params.row_subsample == 0.0 {
+        return Err(CoreError::InvalidConfig(
+            "row_subsample must be in (0.0, 1.0]".to_string(),
+        ));
+    }
+
+    if !(0.0..=1.0).contains(&params.col_subsample) || params.col_subsample == 0.0 {
+        return Err(CoreError::InvalidConfig(
+            "col_subsample must be in (0.0, 1.0]".to_string(),
+        ));
+    }
+
+    if let Some(rounds) = params.early_stopping_rounds
+        && rounds == 0
+    {
+        return Err(CoreError::InvalidConfig(
+            "early_stopping_rounds must be greater than 0 when set".to_string(),
+        ));
+    }
+
+    if !params.min_validation_improvement.is_finite() || params.min_validation_improvement < 0.0 {
+        return Err(CoreError::InvalidConfig(
+            "min_validation_improvement must be finite and >= 0".to_string(),
         ));
     }
 
@@ -971,6 +1005,54 @@ mod tests {
     fn rejects_invalid_learning_rate() {
         let params = TrainParams {
             learning_rate: 0.0,
+            ..TrainParams::default()
+        };
+        assert!(matches!(
+            validate_train_params(&params),
+            Err(CoreError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_row_subsample() {
+        let params = TrainParams {
+            row_subsample: 0.0,
+            ..TrainParams::default()
+        };
+        assert!(matches!(
+            validate_train_params(&params),
+            Err(CoreError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_col_subsample() {
+        let params = TrainParams {
+            col_subsample: 1.5,
+            ..TrainParams::default()
+        };
+        assert!(matches!(
+            validate_train_params(&params),
+            Err(CoreError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_early_stopping_rounds() {
+        let params = TrainParams {
+            early_stopping_rounds: Some(0),
+            ..TrainParams::default()
+        };
+        assert!(matches!(
+            validate_train_params(&params),
+            Err(CoreError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_negative_min_validation_improvement() {
+        let params = TrainParams {
+            min_validation_improvement: -0.1,
             ..TrainParams::default()
         };
         assert!(matches!(
