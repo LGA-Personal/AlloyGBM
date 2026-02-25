@@ -173,6 +173,12 @@ pub struct TrainRoundSummary {
     pub partition: Option<PartitionResult>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ValidationDatasetRef<'a> {
+    pub dataset: &'a TrainingDataset,
+    pub binned_matrix: &'a BinnedMatrix,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrainedStump {
     pub split: SplitCandidate,
@@ -196,6 +202,10 @@ pub struct IterationControls {
     pub max_abs_leaf_value: f32,
     pub min_loss_improvement: f32,
     pub max_consecutive_weak_improvements: usize,
+    pub row_subsample: f32,
+    pub col_subsample: f32,
+    pub early_stopping_rounds: Option<usize>,
+    pub min_validation_improvement: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -207,6 +217,7 @@ pub enum IterationStopReason {
     LeafRowsBelowThreshold,
     LeafMagnitudeBelowThreshold,
     LossImprovementBelowThreshold,
+    ValidationLossPlateau,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -217,9 +228,14 @@ pub struct IterationRunSummary {
     pub rounds_completed: usize,
     pub stop_reason: IterationStopReason,
     pub initial_loss: f32,
+    pub initial_validation_loss: Option<f32>,
     pub loss_per_completed_round: Vec<f32>,
+    pub validation_loss_per_completed_round: Vec<f32>,
+    pub best_validation_loss: Option<f32>,
+    pub best_validation_round: Option<usize>,
     pub weak_improvement_rounds_committed: usize,
     pub final_loss: f32,
+    pub final_validation_loss: Option<f32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -292,7 +308,51 @@ impl IterationControls {
             max_abs_leaf_value,
             min_loss_improvement,
             max_consecutive_weak_improvements,
+            row_subsample: 1.0,
+            col_subsample: 1.0,
+            early_stopping_rounds: None,
+            min_validation_improvement: 0.0,
         })
+    }
+
+    pub fn with_subsample_rates(
+        mut self,
+        row_subsample: f32,
+        col_subsample: f32,
+    ) -> EngineResult<Self> {
+        if !(0.0..=1.0).contains(&row_subsample) || row_subsample == 0.0 {
+            return Err(EngineError::InvalidConfig(
+                "row_subsample must be in (0.0, 1.0]".to_string(),
+            ));
+        }
+        if !(0.0..=1.0).contains(&col_subsample) || col_subsample == 0.0 {
+            return Err(EngineError::InvalidConfig(
+                "col_subsample must be in (0.0, 1.0]".to_string(),
+            ));
+        }
+        self.row_subsample = row_subsample;
+        self.col_subsample = col_subsample;
+        Ok(self)
+    }
+
+    pub fn with_validation_early_stopping(
+        mut self,
+        early_stopping_rounds: usize,
+        min_validation_improvement: f32,
+    ) -> EngineResult<Self> {
+        if early_stopping_rounds == 0 {
+            return Err(EngineError::InvalidConfig(
+                "early_stopping_rounds must be greater than 0".to_string(),
+            ));
+        }
+        if !min_validation_improvement.is_finite() || min_validation_improvement < 0.0 {
+            return Err(EngineError::InvalidConfig(
+                "min_validation_improvement must be finite and >= 0".to_string(),
+            ));
+        }
+        self.early_stopping_rounds = Some(early_stopping_rounds);
+        self.min_validation_improvement = min_validation_improvement;
+        Ok(self)
     }
 }
 
@@ -528,7 +588,7 @@ impl Trainer {
         objective: &O,
         rounds: usize,
     ) -> EngineResult<TrainedModel> {
-        let controls = IterationControls::new(rounds, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)?;
+        let controls = self.default_iteration_controls(rounds)?;
         self.fit_iterations_with_controls(dataset, binned_matrix, backend, objective, controls)
     }
 
@@ -553,14 +613,78 @@ impl Trainer {
         objective: &O,
         controls: IterationControls,
     ) -> EngineResult<IterationRunSummary> {
+        self.fit_iterations_with_optional_validation_summary(
+            dataset,
+            binned_matrix,
+            backend,
+            objective,
+            controls,
+            None,
+        )
+    }
+
+    pub fn fit_iterations_with_validation_summary<B: BackendOps, O: ObjectiveOps>(
+        &self,
+        dataset: &TrainingDataset,
+        binned_matrix: &BinnedMatrix,
+        validation: ValidationDatasetRef<'_>,
+        backend: &B,
+        objective: &O,
+        controls: IterationControls,
+    ) -> EngineResult<IterationRunSummary> {
+        self.fit_iterations_with_optional_validation_summary(
+            dataset,
+            binned_matrix,
+            backend,
+            objective,
+            controls,
+            Some(validation),
+        )
+    }
+
+    fn default_iteration_controls(&self, rounds: usize) -> EngineResult<IterationControls> {
+        let mut controls = IterationControls::new(rounds, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)?
+            .with_subsample_rates(self.params.row_subsample, self.params.col_subsample)?;
+        if let Some(early_stopping_rounds) = self.params.early_stopping_rounds {
+            controls = controls.with_validation_early_stopping(
+                early_stopping_rounds as usize,
+                self.params.min_validation_improvement,
+            )?;
+        }
+        Ok(controls)
+    }
+
+    fn fit_iterations_with_optional_validation_summary<B: BackendOps, O: ObjectiveOps>(
+        &self,
+        dataset: &TrainingDataset,
+        binned_matrix: &BinnedMatrix,
+        backend: &B,
+        objective: &O,
+        controls: IterationControls,
+        validation: Option<ValidationDatasetRef<'_>>,
+    ) -> EngineResult<IterationRunSummary> {
         validate_iteration_controls(controls)?;
+        if controls.early_stopping_rounds.is_some() && validation.is_none() {
+            return Err(EngineError::InvalidConfig(
+                "validation early stopping requires a validation dataset".to_string(),
+            ));
+        }
         validate_training_alignment(dataset, binned_matrix)?;
+        if let Some(validation_ref) = validation {
+            validate_training_alignment(validation_ref.dataset, validation_ref.binned_matrix)?;
+            if validation_ref.dataset.matrix.feature_count != dataset.matrix.feature_count {
+                return Err(EngineError::ContractViolation(format!(
+                    "validation feature_count {} does not match training feature_count {}",
+                    validation_ref.dataset.matrix.feature_count, dataset.matrix.feature_count
+                )));
+            }
+        }
         let fit_contract = self.validate_fit_contract(dataset, objective)?;
 
         let mut predictions = vec![fit_contract.baseline_prediction; dataset.row_count()];
-        let root_row_indices = (0..dataset.row_count() as u32).collect::<Vec<_>>();
-        let root_node = NodeSlice::new(0, root_row_indices)?;
-        let feature_tiles = vec![FeatureTile::new(0, binned_matrix.feature_count as u32)?];
+        let mut validation_predictions = validation.map(|validation_ref| {
+            vec![fit_contract.baseline_prediction; validation_ref.dataset.row_count()]
+        });
         let mut stumps = Vec::new();
         let mut rounds_completed = 0_usize;
         let effective_round_cap = controls.rounds.min(self.params.max_depth as usize);
@@ -574,14 +698,37 @@ impl Trainer {
             &dataset.targets,
             dataset.sample_weights.as_deref(),
         )?;
+        let initial_validation_loss = if let Some(validation_ref) = validation {
+            let validation_predictions_ref = validation_predictions.as_ref().ok_or_else(|| {
+                EngineError::ContractViolation(
+                    "validation predictions were not initialized".to_string(),
+                )
+            })?;
+            Some(squared_error_loss(
+                validation_predictions_ref,
+                &validation_ref.dataset.targets,
+                validation_ref.dataset.sample_weights.as_deref(),
+            )?)
+        } else {
+            None
+        };
         let mut current_loss = initial_loss;
+        let mut current_validation_loss = initial_validation_loss;
         let mut loss_per_completed_round = Vec::new();
+        let mut validation_loss_per_completed_round = Vec::new();
+        let mut best_validation_loss = initial_validation_loss;
+        let mut best_validation_round = initial_validation_loss.map(|_| 0_usize);
+        let mut validation_no_improvement_rounds = 0_usize;
         let mut weak_improvement_streak = 0_usize;
         let mut weak_improvement_rounds_committed = 0_usize;
 
         const LEAF_EPSILON: f32 = 1e-6;
 
         for _round in 0..effective_round_cap {
+            let root_row_indices = sampled_row_indices(dataset.row_count(), controls.row_subsample);
+            let root_node = NodeSlice::new(0, root_row_indices)?;
+            let feature_tiles =
+                sampled_feature_tiles(binned_matrix.feature_count, controls.col_subsample)?;
             let gradients = objective.compute_gradients(
                 &predictions,
                 &dataset.targets,
@@ -601,7 +748,7 @@ impl Trainer {
             }
 
             let partition = backend.apply_split(binned_matrix, &root_node, &split)?;
-            validate_partition_cover(dataset.row_count(), &partition)?;
+            validate_partition_cover(root_node.row_indices.len(), &partition)?;
             if partition.left_row_indices.len() < controls.min_rows_per_leaf
                 || partition.right_row_indices.len() < controls.min_rows_per_leaf
             {
@@ -634,12 +781,13 @@ impl Trainer {
             }
 
             let mut candidate_predictions = predictions.clone();
-            for &row_index in &partition.left_row_indices {
-                candidate_predictions[row_index as usize] += left_leaf_value;
-            }
-            for &row_index in &partition.right_row_indices {
-                candidate_predictions[row_index as usize] += right_leaf_value;
-            }
+            apply_stump_to_binned_predictions(
+                &mut candidate_predictions,
+                binned_matrix,
+                &split,
+                left_leaf_value,
+                right_leaf_value,
+            )?;
             let candidate_loss = squared_error_loss(
                 &candidate_predictions,
                 &dataset.targets,
@@ -660,9 +808,60 @@ impl Trainer {
             } else {
                 weak_improvement_streak = 0;
             }
+
+            let mut candidate_validation_predictions = None;
+            let mut candidate_validation_loss = None;
+            let mut stop_for_validation_plateau = false;
+            if let Some(validation_ref) = validation {
+                let mut next_validation_predictions =
+                    validation_predictions.clone().ok_or_else(|| {
+                        EngineError::ContractViolation(
+                            "validation predictions were not initialized".to_string(),
+                        )
+                    })?;
+                apply_stump_to_binned_predictions(
+                    &mut next_validation_predictions,
+                    validation_ref.binned_matrix,
+                    &split,
+                    left_leaf_value,
+                    right_leaf_value,
+                )?;
+                let next_validation_loss = squared_error_loss(
+                    &next_validation_predictions,
+                    &validation_ref.dataset.targets,
+                    validation_ref.dataset.sample_weights.as_deref(),
+                )?;
+
+                let improved = best_validation_loss
+                    .map(|best| best - next_validation_loss > controls.min_validation_improvement)
+                    .unwrap_or(true);
+                if improved {
+                    best_validation_loss = Some(next_validation_loss);
+                    best_validation_round = Some(rounds_completed + 1);
+                    validation_no_improvement_rounds = 0;
+                } else if controls.early_stopping_rounds.is_some() {
+                    validation_no_improvement_rounds += 1;
+                }
+                if let Some(patience) = controls.early_stopping_rounds
+                    && validation_no_improvement_rounds >= patience
+                {
+                    stop_for_validation_plateau = true;
+                }
+
+                candidate_validation_predictions = Some(next_validation_predictions);
+                candidate_validation_loss = Some(next_validation_loss);
+            }
+
             predictions = candidate_predictions;
             current_loss = candidate_loss;
             loss_per_completed_round.push(candidate_loss);
+            if let Some(next_validation_predictions) = candidate_validation_predictions {
+                validation_predictions = Some(next_validation_predictions);
+            }
+            if let Some(next_validation_loss) = candidate_validation_loss {
+                current_validation_loss = Some(next_validation_loss);
+                validation_loss_per_completed_round.push(next_validation_loss);
+            }
 
             split.left_stats = left_stats;
             split.right_stats = right_stats;
@@ -673,6 +872,11 @@ impl Trainer {
                 right_leaf_value,
             });
             rounds_completed += 1;
+
+            if stop_for_validation_plateau {
+                stop_reason = IterationStopReason::ValidationLossPlateau;
+                break;
+            }
         }
 
         let model = TrainedModel {
@@ -689,9 +893,14 @@ impl Trainer {
             rounds_completed,
             stop_reason,
             initial_loss,
+            initial_validation_loss,
             loss_per_completed_round,
+            validation_loss_per_completed_round,
+            best_validation_loss,
+            best_validation_round,
             weak_improvement_rounds_committed,
             final_loss,
+            final_validation_loss: current_validation_loss,
         })
     }
 
@@ -794,6 +1003,82 @@ fn validate_iteration_controls(controls: IterationControls) -> EngineResult<()> 
         return Err(EngineError::InvalidConfig(
             "min_loss_improvement must be finite and >= 0".to_string(),
         ));
+    }
+    if !(0.0..=1.0).contains(&controls.row_subsample) || controls.row_subsample == 0.0 {
+        return Err(EngineError::InvalidConfig(
+            "row_subsample must be in (0.0, 1.0]".to_string(),
+        ));
+    }
+    if !(0.0..=1.0).contains(&controls.col_subsample) || controls.col_subsample == 0.0 {
+        return Err(EngineError::InvalidConfig(
+            "col_subsample must be in (0.0, 1.0]".to_string(),
+        ));
+    }
+    if let Some(early_stopping_rounds) = controls.early_stopping_rounds
+        && early_stopping_rounds == 0
+    {
+        return Err(EngineError::InvalidConfig(
+            "early_stopping_rounds must be greater than 0".to_string(),
+        ));
+    }
+    if !controls.min_validation_improvement.is_finite() || controls.min_validation_improvement < 0.0
+    {
+        return Err(EngineError::InvalidConfig(
+            "min_validation_improvement must be finite and >= 0".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn sampled_row_indices(row_count: usize, row_subsample: f32) -> Vec<u32> {
+    let sampled = ((row_count as f32) * row_subsample)
+        .ceil()
+        .max(1.0)
+        .min(row_count as f32) as usize;
+    (0..sampled as u32).collect()
+}
+
+fn sampled_feature_tiles(
+    feature_count: usize,
+    col_subsample: f32,
+) -> EngineResult<Vec<FeatureTile>> {
+    let sampled = ((feature_count as f32) * col_subsample)
+        .ceil()
+        .max(1.0)
+        .min(feature_count as f32) as u32;
+    Ok(vec![FeatureTile::new(0, sampled)?])
+}
+
+fn apply_stump_to_binned_predictions(
+    predictions: &mut [f32],
+    binned_matrix: &BinnedMatrix,
+    split: &SplitCandidate,
+    left_leaf_value: f32,
+    right_leaf_value: f32,
+) -> EngineResult<()> {
+    if predictions.len() != binned_matrix.row_count {
+        return Err(EngineError::ContractViolation(format!(
+            "predictions length {} does not match binned row_count {}",
+            predictions.len(),
+            binned_matrix.row_count
+        )));
+    }
+    let feature_index = split.feature_index as usize;
+    if feature_index >= binned_matrix.feature_count {
+        return Err(EngineError::ContractViolation(format!(
+            "split feature_index {} exceeds feature_count {}",
+            split.feature_index, binned_matrix.feature_count
+        )));
+    }
+
+    for (row_index, prediction) in predictions.iter_mut().enumerate() {
+        let cell_index = row_index * binned_matrix.feature_count + feature_index;
+        let bin = binned_matrix.bins[cell_index];
+        *prediction += if bin <= split.threshold_bin {
+            left_leaf_value
+        } else {
+            right_leaf_value
+        };
     }
     Ok(())
 }
@@ -1204,13 +1489,28 @@ mod tests {
 
         fn apply_split(
             &self,
-            _binned_matrix: &BinnedMatrix,
-            _node: &NodeSlice,
-            _split: &SplitCandidate,
+            binned_matrix: &BinnedMatrix,
+            node: &NodeSlice,
+            split: &SplitCandidate,
         ) -> EngineResult<PartitionResult> {
+            node.validate_bounds(binned_matrix.row_count)?;
+
+            let mut left_row_indices = Vec::new();
+            let mut right_row_indices = Vec::new();
+            for &row_index in &node.row_indices {
+                let row_index = row_index as usize;
+                let cell_index =
+                    row_index * binned_matrix.feature_count + split.feature_index as usize;
+                let bin = binned_matrix.bins[cell_index];
+                if bin <= split.threshold_bin {
+                    left_row_indices.push(row_index as u32);
+                } else {
+                    right_row_indices.push(row_index as u32);
+                }
+            }
             Ok(PartitionResult {
-                left_row_indices: vec![0, 1],
-                right_row_indices: vec![2, 3],
+                left_row_indices,
+                right_row_indices,
             })
         }
 
@@ -1349,6 +1649,18 @@ mod tests {
             0,
         );
         assert!(matches!(result, Err(EngineError::InvalidConfig(_))));
+    }
+
+    #[test]
+    fn trainer_rejects_invalid_subsample_params() {
+        let params = TrainParams {
+            row_subsample: 0.0,
+            ..TrainParams::default()
+        };
+        assert!(matches!(
+            Trainer::new(params),
+            Err(EngineError::Core(CoreError::InvalidConfig(_)))
+        ));
     }
 
     #[test]
@@ -1501,6 +1813,16 @@ mod tests {
             IterationControls::new(1, 0.0, 1, 0.0, 1.0, -0.1, 0),
             Err(EngineError::InvalidConfig(_))
         ));
+        assert!(matches!(
+            IterationControls::new(1, 0.0, 1, 0.0, 1.0, 0.0, 0)
+                .and_then(|controls| controls.with_subsample_rates(0.0, 1.0)),
+            Err(EngineError::InvalidConfig(_))
+        ));
+        assert!(matches!(
+            IterationControls::new(1, 0.0, 1, 0.0, 1.0, 0.0, 0)
+                .and_then(|controls| controls.with_validation_early_stopping(0, 0.0)),
+            Err(EngineError::InvalidConfig(_))
+        ));
     }
 
     #[test]
@@ -1616,6 +1938,58 @@ mod tests {
         assert_eq!(summary.weak_improvement_rounds_committed, 1);
         assert_eq!(summary.loss_per_completed_round.len(), 1);
         assert_eq!(summary.model.stumps.len(), 1);
+    }
+
+    #[test]
+    fn validation_early_stopping_requires_validation_dataset() {
+        let trainer = Trainer::new(TrainParams::default()).expect("valid params");
+        let controls = IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
+            .expect("controls are valid")
+            .with_validation_early_stopping(1, 0.0)
+            .expect("validation controls are valid");
+        let result = trainer.fit_iterations_with_summary(
+            &sample_dataset(),
+            &sample_binned_matrix(),
+            &MockBackend,
+            &SquaredErrorObjective,
+            controls,
+        );
+        assert!(matches!(result, Err(EngineError::InvalidConfig(_))));
+    }
+
+    #[test]
+    fn fit_iterations_with_validation_summary_reports_validation_plateau_stop_reason() {
+        let trainer = Trainer::new(TrainParams::default()).expect("valid params");
+        let controls = IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
+            .expect("controls are valid")
+            .with_validation_early_stopping(1, 100.0)
+            .expect("validation controls are valid");
+        let validation = ValidationDatasetRef {
+            dataset: &sample_dataset(),
+            binned_matrix: &sample_binned_matrix(),
+        };
+        let summary = trainer
+            .fit_iterations_with_validation_summary(
+                &sample_dataset(),
+                &sample_binned_matrix(),
+                validation,
+                &MockBackend,
+                &SquaredErrorObjective,
+                controls,
+            )
+            .expect("iterative training with validation succeeds");
+
+        assert_eq!(
+            summary.stop_reason,
+            IterationStopReason::ValidationLossPlateau
+        );
+        assert_eq!(summary.rounds_completed, 1);
+        assert_eq!(summary.model.stumps.len(), 1);
+        assert!(summary.initial_validation_loss.is_some());
+        assert_eq!(summary.validation_loss_per_completed_round.len(), 1);
+        assert!(summary.best_validation_loss.is_some());
+        assert!(summary.best_validation_round.is_some());
+        assert!(summary.final_validation_loss.is_some());
     }
 
     #[test]

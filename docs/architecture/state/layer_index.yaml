@@ -1,6 +1,6 @@
-generated_at: "2026-02-25T04:09:19Z"
-active_target: "docs/architecture/v1.0/v0.1/v0.0.12"
-suggested_next_layer: "docs/architecture/v1.0/v0.1/v0.0.12"
+generated_at: "2026-02-25T05:52:06Z"
+active_target: "docs/architecture/v1.0/v0.2/v0.1.2"
+suggested_next_layer: "docs/architecture/v1.0/v0.2/v0.1.2"
 layers:
   - path: "docs/architecture/v1.0"
     status: "planned-only"
@@ -13,6 +13,14 @@ layers:
     parent: null
     previous_siblings: []
   - path: "docs/architecture/v1.0/v0.1"
+    status: "verified"
+    has_plan: true
+    has_implementation_notes: true
+    has_verification_report: true
+    missing_artifacts: []
+    parent: "docs/architecture/v1.0"
+    previous_siblings: []
+  - path: "docs/architecture/v1.0/v0.2"
     status: "planned-only"
     has_plan: true
     has_implementation_notes: false
@@ -21,14 +29,22 @@ layers:
       - "implementation_notes.md"
       - "verification_report.md"
     parent: "docs/architecture/v1.0"
-    previous_siblings: []
-  - path: "docs/architecture/v1.0/v0.1/v0.0.1"
-    status: "implemented-with-notes"
+    previous_siblings:
+      - "docs/architecture/v1.0/v0.1"
+  - path: "docs/architecture/v1.0/v0.2/v0.1.1"
+    status: "verified"
     has_plan: true
     has_implementation_notes: true
-    has_verification_report: false
-    missing_artifacts:
-      - "verification_report.md"
+    has_verification_report: true
+    missing_artifacts: []
+    parent: "docs/architecture/v1.0/v0.2"
+    previous_siblings: []
+  - path: "docs/architecture/v1.0/v0.1/v0.0.1"
+    status: "verified"
+    has_plan: true
+    has_implementation_notes: true
+    has_verification_report: true
+    missing_artifacts: []
     parent: "docs/architecture/v1.0/v0.1"
     previous_siblings: []
   - path: "docs/architecture/v1.0/v0.1/v0.0.2"
@@ -166,3 +182,22 @@ layers:
       - "docs/architecture/v1.0/v0.1/v0.0.8"
       - "docs/architecture/v1.0/v0.1/v0.0.9"
       - "docs/architecture/v1.0/v0.1/v0.0.10"
+  - path: "docs/architecture/v1.0/v0.1/v0.0.12"
+    status: "verified"
+    has_plan: true
+    has_implementation_notes: true
+    has_verification_report: true
+    missing_artifacts: []
+    parent: "docs/architecture/v1.0/v0.1"
+    previous_siblings:
+      - "docs/architecture/v1.0/v0.1/v0.0.1"
+      - "docs/architecture/v1.0/v0.1/v0.0.2"
+      - "docs/architecture/v1.0/v0.1/v0.0.3"
+      - "docs/architecture/v1.0/v0.1/v0.0.4"
+      - "docs/architecture/v1.0/v0.1/v0.0.5"
+      - "docs/architecture/v1.0/v0.1/v0.0.6"
+      - "docs/architecture/v1.0/v0.1/v0.0.7"
+      - "docs/architecture/v1.0/v0.1/v0.0.8"
+      - "docs/architecture/v1.0/v0.1/v0.0.9"
+      - "docs/architecture/v1.0/v0.1/v0.0.10"
+      - "docs/architecture/v1.0/v0.1/v0.0.11"

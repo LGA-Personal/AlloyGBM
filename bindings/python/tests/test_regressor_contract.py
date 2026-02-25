@@ -31,21 +31,44 @@ class GBMRegressorContractTests(unittest.TestCase):
             GBMRegressor(learning_rate=0.0)
         with self.assertRaisesRegex(ValueError, "max_depth"):
             GBMRegressor(max_depth=0)
+        with self.assertRaisesRegex(ValueError, "row_subsample"):
+            GBMRegressor(row_subsample=0.0)
+        with self.assertRaisesRegex(ValueError, "col_subsample"):
+            GBMRegressor(col_subsample=1.5)
+        with self.assertRaisesRegex(ValueError, "early_stopping_rounds"):
+            GBMRegressor(early_stopping_rounds=0)
+        with self.assertRaisesRegex(ValueError, "min_validation_improvement"):
+            GBMRegressor(min_validation_improvement=-0.1)
 
     def test_get_params_and_set_params_roundtrip(self) -> None:
         model = GBMRegressor()
         params = model.get_params()
         self.assertEqual(params["learning_rate"], 0.1)
         self.assertEqual(params["max_depth"], 6)
+        self.assertEqual(params["row_subsample"], 1.0)
+        self.assertEqual(params["col_subsample"], 1.0)
+        self.assertIsNone(params["early_stopping_rounds"])
+        self.assertEqual(params["min_validation_improvement"], 0.0)
         self.assertEqual(params["seed"], 0)
         self.assertTrue(params["deterministic"])
 
         updated = model.set_params(
-            learning_rate=0.2, max_depth=4, seed=7, deterministic=False
+            learning_rate=0.2,
+            max_depth=4,
+            row_subsample=0.75,
+            col_subsample=0.5,
+            early_stopping_rounds=4,
+            min_validation_improvement=0.01,
+            seed=7,
+            deterministic=False,
         )
         self.assertIs(updated, model)
         self.assertEqual(model.get_params()["learning_rate"], 0.2)
         self.assertEqual(model.get_params()["max_depth"], 4)
+        self.assertEqual(model.get_params()["row_subsample"], 0.75)
+        self.assertEqual(model.get_params()["col_subsample"], 0.5)
+        self.assertEqual(model.get_params()["early_stopping_rounds"], 4)
+        self.assertEqual(model.get_params()["min_validation_improvement"], 0.01)
         self.assertEqual(model.get_params()["seed"], 7)
         self.assertFalse(model.get_params()["deterministic"])
 
