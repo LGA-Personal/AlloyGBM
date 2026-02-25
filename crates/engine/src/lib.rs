@@ -7,6 +7,7 @@ use alloygbm_core::{
 };
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineError {
@@ -231,6 +232,8 @@ pub struct IterationRunSummary {
     pub initial_validation_loss: Option<f32>,
     pub loss_per_completed_round: Vec<f32>,
     pub validation_loss_per_completed_round: Vec<f32>,
+    pub sampled_rows_per_completed_round: Vec<usize>,
+    pub sampled_features_per_completed_round: Vec<usize>,
     pub best_validation_loss: Option<f32>,
     pub best_validation_round: Option<usize>,
     pub weak_improvement_rounds_committed: usize,
@@ -680,6 +683,7 @@ impl Trainer {
             }
         }
         let fit_contract = self.validate_fit_contract(dataset, objective)?;
+        let sampling_seed_base = sampling_seed_base(self.params.seed, self.params.deterministic);
 
         let mut predictions = vec![fit_contract.baseline_prediction; dataset.row_count()];
         let mut validation_predictions = validation.map(|validation_ref| {
@@ -716,6 +720,8 @@ impl Trainer {
         let mut current_validation_loss = initial_validation_loss;
         let mut loss_per_completed_round = Vec::new();
         let mut validation_loss_per_completed_round = Vec::new();
+        let mut sampled_rows_per_completed_round = Vec::new();
+        let mut sampled_features_per_completed_round = Vec::new();
         let mut best_validation_loss = initial_validation_loss;
         let mut best_validation_round = initial_validation_loss.map(|_| 0_usize);
         let mut validation_no_improvement_rounds = 0_usize;
@@ -724,11 +730,21 @@ impl Trainer {
 
         const LEAF_EPSILON: f32 = 1e-6;
 
-        for _round in 0..effective_round_cap {
-            let root_row_indices = sampled_row_indices(dataset.row_count(), controls.row_subsample);
+        for round_index in 0..effective_round_cap {
+            let root_row_indices = sampled_row_indices(
+                dataset.row_count(),
+                controls.row_subsample,
+                sampling_seed_base,
+                round_index as u64,
+            );
             let root_node = NodeSlice::new(0, root_row_indices)?;
-            let feature_tiles =
-                sampled_feature_tiles(binned_matrix.feature_count, controls.col_subsample)?;
+            let (feature_tiles, sampled_feature_count) = sampled_feature_tiles(
+                binned_matrix.feature_count,
+                controls.col_subsample,
+                sampling_seed_base,
+                round_index as u64,
+            )?;
+            let sampled_row_count = root_node.row_indices.len();
             let gradients = objective.compute_gradients(
                 &predictions,
                 &dataset.targets,
@@ -855,6 +871,8 @@ impl Trainer {
             predictions = candidate_predictions;
             current_loss = candidate_loss;
             loss_per_completed_round.push(candidate_loss);
+            sampled_rows_per_completed_round.push(sampled_row_count);
+            sampled_features_per_completed_round.push(sampled_feature_count);
             if let Some(next_validation_predictions) = candidate_validation_predictions {
                 validation_predictions = Some(next_validation_predictions);
             }
@@ -896,6 +914,8 @@ impl Trainer {
             initial_validation_loss,
             loss_per_completed_round,
             validation_loss_per_completed_round,
+            sampled_rows_per_completed_round,
+            sampled_features_per_completed_round,
             best_validation_loss,
             best_validation_round,
             weak_improvement_rounds_committed,
@@ -1030,23 +1050,109 @@ fn validate_iteration_controls(controls: IterationControls) -> EngineResult<()> 
     Ok(())
 }
 
-fn sampled_row_indices(row_count: usize, row_subsample: f32) -> Vec<u32> {
-    let sampled = ((row_count as f32) * row_subsample)
+fn sampling_seed_base(seed: u64, deterministic: bool) -> u64 {
+    if deterministic {
+        return seed;
+    }
+    let now_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0);
+    seed ^ now_nanos
+}
+
+fn mixed_hash(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^ (value >> 31)
+}
+
+fn sampled_count(total_count: usize, subsample: f32) -> usize {
+    ((total_count as f32) * subsample)
         .ceil()
         .max(1.0)
-        .min(row_count as f32) as usize;
-    (0..sampled as u32).collect()
+        .min(total_count as f32) as usize
+}
+
+fn sampled_indices(
+    total_count: usize,
+    subsample: f32,
+    seed_base: u64,
+    round_index: u64,
+) -> Vec<usize> {
+    if total_count == 0 {
+        return Vec::new();
+    }
+    let keep_count = sampled_count(total_count, subsample);
+    if keep_count >= total_count {
+        return (0..total_count).collect();
+    }
+
+    let round_seed = mixed_hash(seed_base ^ round_index.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    let mut scored = (0..total_count)
+        .map(|index| {
+            let index_seed = (index as u64).wrapping_mul(0xD6E8_FD50_89A4_7A4D);
+            let hash = mixed_hash(round_seed ^ index_seed);
+            (index, hash)
+        })
+        .collect::<Vec<_>>();
+    scored.sort_unstable_by(|lhs, rhs| lhs.1.cmp(&rhs.1).then_with(|| lhs.0.cmp(&rhs.0)));
+
+    let mut selected = scored
+        .into_iter()
+        .take(keep_count)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    selected.sort_unstable();
+    selected
+}
+
+fn sampled_row_indices(
+    row_count: usize,
+    row_subsample: f32,
+    seed_base: u64,
+    round_index: u64,
+) -> Vec<u32> {
+    sampled_indices(row_count, row_subsample, seed_base, round_index)
+        .into_iter()
+        .map(|row_index| row_index as u32)
+        .collect()
+}
+
+fn feature_tiles_from_sorted_indices(indices: &[usize]) -> EngineResult<Vec<FeatureTile>> {
+    if indices.is_empty() {
+        return Err(EngineError::ContractViolation(
+            "feature subsampling produced no feature indices".to_string(),
+        ));
+    }
+
+    let mut tiles = Vec::new();
+    let mut start = indices[0];
+    let mut previous = indices[0];
+    for &current in indices.iter().skip(1) {
+        if current == previous + 1 {
+            previous = current;
+            continue;
+        }
+        tiles.push(FeatureTile::new(start as u32, (previous + 1) as u32)?);
+        start = current;
+        previous = current;
+    }
+    tiles.push(FeatureTile::new(start as u32, (previous + 1) as u32)?);
+    Ok(tiles)
 }
 
 fn sampled_feature_tiles(
     feature_count: usize,
     col_subsample: f32,
-) -> EngineResult<Vec<FeatureTile>> {
-    let sampled = ((feature_count as f32) * col_subsample)
-        .ceil()
-        .max(1.0)
-        .min(feature_count as f32) as u32;
-    Ok(vec![FeatureTile::new(0, sampled)?])
+    seed_base: u64,
+    round_index: u64,
+) -> EngineResult<(Vec<FeatureTile>, usize)> {
+    let selected = sampled_indices(feature_count, col_subsample, seed_base, round_index);
+    let coverage_count = selected.len();
+    let tiles = feature_tiles_from_sorted_indices(&selected)?;
+    Ok((tiles, coverage_count))
 }
 
 fn apply_stump_to_binned_predictions(
@@ -1826,6 +1932,27 @@ mod tests {
     }
 
     #[test]
+    fn sampled_row_indices_are_seeded_and_non_prefix() {
+        let selected = sampled_row_indices(8, 0.5, 17, 0);
+        let selected_repeat = sampled_row_indices(8, 0.5, 17, 0);
+        assert_eq!(selected, selected_repeat);
+        assert_eq!(selected.len(), 4);
+        assert_ne!(selected, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn sampled_feature_tiles_cover_expected_feature_count() {
+        let (tiles, coverage_count) =
+            sampled_feature_tiles(10, 0.3, 23, 0).expect("feature tiles should sample");
+        assert_eq!(coverage_count, 3);
+        let tile_coverage = tiles
+            .iter()
+            .map(|tile| (tile.end_feature - tile.start_feature) as usize)
+            .sum::<usize>();
+        assert_eq!(tile_coverage, coverage_count);
+    }
+
+    #[test]
     fn fit_iterations_controls_enforce_min_abs_leaf_value() {
         let trainer = Trainer::new(TrainParams::default()).expect("valid params");
         let controls = IterationControls::new(3, 0.0, 1, 10.0, 1_000_000.0, 0.0, 0)
@@ -1990,6 +2117,8 @@ mod tests {
         assert!(summary.best_validation_loss.is_some());
         assert!(summary.best_validation_round.is_some());
         assert!(summary.final_validation_loss.is_some());
+        assert_eq!(summary.sampled_rows_per_completed_round, vec![4]);
+        assert_eq!(summary.sampled_features_per_completed_round, vec![2]);
     }
 
     #[test]
