@@ -194,6 +194,7 @@ pub struct IterationControls {
     pub min_rows_per_leaf: usize,
     pub min_abs_leaf_value: f32,
     pub max_abs_leaf_value: f32,
+    pub min_loss_improvement: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,6 +205,7 @@ pub enum IterationStopReason {
     GainBelowThreshold,
     LeafRowsBelowThreshold,
     LeafMagnitudeBelowThreshold,
+    LossImprovementBelowThreshold,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -213,6 +215,8 @@ pub struct IterationRunSummary {
     pub effective_round_cap: usize,
     pub rounds_completed: usize,
     pub stop_reason: IterationStopReason,
+    pub initial_loss: f32,
+    pub loss_per_completed_round: Vec<f32>,
     pub final_loss: f32,
 }
 
@@ -239,6 +243,7 @@ impl IterationControls {
         min_rows_per_leaf: usize,
         min_abs_leaf_value: f32,
         max_abs_leaf_value: f32,
+        min_loss_improvement: f32,
     ) -> EngineResult<Self> {
         if rounds == 0 {
             return Err(EngineError::InvalidConfig(
@@ -270,6 +275,11 @@ impl IterationControls {
                 "min_abs_leaf_value cannot exceed max_abs_leaf_value".to_string(),
             ));
         }
+        if !min_loss_improvement.is_finite() || min_loss_improvement < 0.0 {
+            return Err(EngineError::InvalidConfig(
+                "min_loss_improvement must be finite and >= 0".to_string(),
+            ));
+        }
 
         Ok(Self {
             rounds,
@@ -277,6 +287,7 @@ impl IterationControls {
             min_rows_per_leaf,
             min_abs_leaf_value,
             max_abs_leaf_value,
+            min_loss_improvement,
         })
     }
 }
@@ -513,7 +524,7 @@ impl Trainer {
         objective: &O,
         rounds: usize,
     ) -> EngineResult<TrainedModel> {
-        let controls = IterationControls::new(rounds, 0.0, 1, 0.0, 1_000_000.0)?;
+        let controls = IterationControls::new(rounds, 0.0, 1, 0.0, 1_000_000.0, 0.0)?;
         self.fit_iterations_with_controls(dataset, binned_matrix, backend, objective, controls)
     }
 
@@ -554,6 +565,13 @@ impl Trainer {
         } else {
             IterationStopReason::CompletedRequestedRounds
         };
+        let initial_loss = squared_error_loss(
+            &predictions,
+            &dataset.targets,
+            dataset.sample_weights.as_deref(),
+        )?;
+        let mut current_loss = initial_loss;
+        let mut loss_per_completed_round = Vec::new();
 
         const LEAF_EPSILON: f32 = 1e-6;
 
@@ -609,12 +627,26 @@ impl Trainer {
                 break;
             }
 
+            let mut candidate_predictions = predictions.clone();
             for &row_index in &partition.left_row_indices {
-                predictions[row_index as usize] += left_leaf_value;
+                candidate_predictions[row_index as usize] += left_leaf_value;
             }
             for &row_index in &partition.right_row_indices {
-                predictions[row_index as usize] += right_leaf_value;
+                candidate_predictions[row_index as usize] += right_leaf_value;
             }
+            let candidate_loss = squared_error_loss(
+                &candidate_predictions,
+                &dataset.targets,
+                dataset.sample_weights.as_deref(),
+            )?;
+            let loss_improvement = current_loss - candidate_loss;
+            if loss_improvement < controls.min_loss_improvement {
+                stop_reason = IterationStopReason::LossImprovementBelowThreshold;
+                break;
+            }
+            predictions = candidate_predictions;
+            current_loss = candidate_loss;
+            loss_per_completed_round.push(candidate_loss);
 
             split.left_stats = left_stats;
             split.right_stats = right_stats;
@@ -632,11 +664,7 @@ impl Trainer {
             feature_count: dataset.matrix.feature_count,
             stumps,
         };
-        let final_loss = squared_error_loss(
-            &predictions,
-            &dataset.targets,
-            dataset.sample_weights.as_deref(),
-        )?;
+        let final_loss = current_loss;
 
         Ok(IterationRunSummary {
             model,
@@ -644,6 +672,8 @@ impl Trainer {
             effective_round_cap,
             rounds_completed,
             stop_reason,
+            initial_loss,
+            loss_per_completed_round,
             final_loss,
         })
     }
@@ -741,6 +771,11 @@ fn validate_iteration_controls(controls: IterationControls) -> EngineResult<()> 
     if controls.min_abs_leaf_value > controls.max_abs_leaf_value {
         return Err(EngineError::InvalidConfig(
             "min_abs_leaf_value cannot exceed max_abs_leaf_value".to_string(),
+        ));
+    }
+    if !controls.min_loss_improvement.is_finite() || controls.min_loss_improvement < 0.0 {
+        return Err(EngineError::InvalidConfig(
+            "min_loss_improvement must be finite and >= 0".to_string(),
         ));
     }
     Ok(())
@@ -1303,7 +1338,7 @@ mod tests {
     fn fit_iterations_controls_enforce_min_split_gain() {
         let trainer = Trainer::new(TrainParams::default()).expect("valid params");
         let controls =
-            IterationControls::new(3, 10.0, 1, 0.0, 1_000_000.0).expect("controls are valid");
+            IterationControls::new(3, 10.0, 1, 0.0, 1_000_000.0, 0.0).expect("controls are valid");
         let model = trainer
             .fit_iterations_with_controls(
                 &sample_dataset(),
@@ -1321,7 +1356,7 @@ mod tests {
     fn fit_iterations_summary_reports_gain_threshold_stop_reason() {
         let trainer = Trainer::new(TrainParams::default()).expect("valid params");
         let controls =
-            IterationControls::new(3, 10.0, 1, 0.0, 1_000_000.0).expect("controls are valid");
+            IterationControls::new(3, 10.0, 1, 0.0, 1_000_000.0, 0.0).expect("controls are valid");
         let summary = trainer
             .fit_iterations_with_summary(
                 &sample_dataset(),
@@ -1337,13 +1372,15 @@ mod tests {
         assert_eq!(summary.rounds_completed, 0);
         assert_eq!(summary.stop_reason, IterationStopReason::GainBelowThreshold);
         assert!(summary.model.stumps.is_empty());
+        assert!(summary.loss_per_completed_round.is_empty());
+        assert_eq!(summary.initial_loss, summary.final_loss);
     }
 
     #[test]
     fn fit_iterations_summary_reports_completed_requested_rounds() {
         let trainer = Trainer::new(TrainParams::default()).expect("valid params");
         let controls =
-            IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0).expect("controls are valid");
+            IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0).expect("controls are valid");
         let summary = trainer
             .fit_iterations_with_summary(
                 &sample_dataset(),
@@ -1362,6 +1399,11 @@ mod tests {
             IterationStopReason::CompletedRequestedRounds
         );
         assert!(!summary.model.stumps.is_empty());
+        assert_eq!(summary.loss_per_completed_round.len(), 1);
+        assert_eq!(
+            summary.final_loss,
+            summary.loss_per_completed_round[summary.loss_per_completed_round.len() - 1]
+        );
     }
 
     #[test]
@@ -1372,7 +1414,7 @@ mod tests {
         };
         let trainer = Trainer::new(params).expect("valid params");
         let controls =
-            IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0).expect("controls are valid");
+            IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0, 0.0).expect("controls are valid");
         let summary = trainer
             .fit_iterations_with_summary(
                 &sample_dataset(),
@@ -1388,13 +1430,14 @@ mod tests {
         assert_eq!(summary.rounds_completed, 1);
         assert_eq!(summary.stop_reason, IterationStopReason::DepthBudgetReached);
         assert_eq!(summary.model.stumps.len(), 1);
+        assert_eq!(summary.loss_per_completed_round.len(), 1);
     }
 
     #[test]
     fn fit_iterations_controls_enforce_min_rows_per_leaf() {
         let trainer = Trainer::new(TrainParams::default()).expect("valid params");
         let controls =
-            IterationControls::new(3, 0.0, 3, 0.0, 1_000_000.0).expect("controls are valid");
+            IterationControls::new(3, 0.0, 3, 0.0, 1_000_000.0, 0.0).expect("controls are valid");
         let model = trainer
             .fit_iterations_with_controls(
                 &sample_dataset(),
@@ -1411,27 +1454,31 @@ mod tests {
     #[test]
     fn iteration_controls_reject_invalid_values() {
         assert!(matches!(
-            IterationControls::new(0, 0.0, 1, 0.0, 1_000_000.0),
+            IterationControls::new(0, 0.0, 1, 0.0, 1_000_000.0, 0.0),
             Err(EngineError::InvalidConfig(_))
         ));
         assert!(matches!(
-            IterationControls::new(1, -0.1, 1, 0.0, 1_000_000.0),
+            IterationControls::new(1, -0.1, 1, 0.0, 1_000_000.0, 0.0),
             Err(EngineError::InvalidConfig(_))
         ));
         assert!(matches!(
-            IterationControls::new(1, 0.0, 0, 0.0, 1_000_000.0),
+            IterationControls::new(1, 0.0, 0, 0.0, 1_000_000.0, 0.0),
             Err(EngineError::InvalidConfig(_))
         ));
         assert!(matches!(
-            IterationControls::new(1, 0.0, 1, -0.1, 1_000_000.0),
+            IterationControls::new(1, 0.0, 1, -0.1, 1_000_000.0, 0.0),
             Err(EngineError::InvalidConfig(_))
         ));
         assert!(matches!(
-            IterationControls::new(1, 0.0, 1, 0.0, 0.0),
+            IterationControls::new(1, 0.0, 1, 0.0, 0.0, 0.0),
             Err(EngineError::InvalidConfig(_))
         ));
         assert!(matches!(
-            IterationControls::new(1, 0.0, 1, 2.0, 1.0),
+            IterationControls::new(1, 0.0, 1, 2.0, 1.0, 0.0),
+            Err(EngineError::InvalidConfig(_))
+        ));
+        assert!(matches!(
+            IterationControls::new(1, 0.0, 1, 0.0, 1.0, -0.1),
             Err(EngineError::InvalidConfig(_))
         ));
     }
@@ -1440,7 +1487,7 @@ mod tests {
     fn fit_iterations_controls_enforce_min_abs_leaf_value() {
         let trainer = Trainer::new(TrainParams::default()).expect("valid params");
         let controls =
-            IterationControls::new(3, 0.0, 1, 10.0, 1_000_000.0).expect("controls are valid");
+            IterationControls::new(3, 0.0, 1, 10.0, 1_000_000.0, 0.0).expect("controls are valid");
         let model = trainer
             .fit_iterations_with_controls(
                 &sample_dataset(),
@@ -1457,7 +1504,8 @@ mod tests {
     #[test]
     fn fit_iterations_controls_clamp_leaf_values() {
         let trainer = Trainer::new(TrainParams::default()).expect("valid params");
-        let controls = IterationControls::new(1, 0.0, 1, 0.0, 0.1).expect("controls are valid");
+        let controls =
+            IterationControls::new(1, 0.0, 1, 0.0, 0.1, 0.0).expect("controls are valid");
         let model = trainer
             .fit_iterations_with_controls(
                 &sample_dataset(),
@@ -1472,6 +1520,54 @@ mod tests {
         let stump = &model.stumps[0];
         assert!(stump.left_leaf_value.abs() <= 0.1);
         assert!(stump.right_leaf_value.abs() <= 0.1);
+    }
+
+    #[test]
+    fn fit_iterations_summary_reports_loss_improvement_threshold_stop_reason() {
+        let trainer = Trainer::new(TrainParams::default()).expect("valid params");
+        let controls =
+            IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0, 100.0).expect("controls are valid");
+        let summary = trainer
+            .fit_iterations_with_summary(
+                &sample_dataset(),
+                &sample_binned_matrix(),
+                &MockBackend,
+                &SquaredErrorObjective,
+                controls,
+            )
+            .expect("iterative training succeeds");
+
+        assert_eq!(summary.rounds_requested, 3);
+        assert_eq!(summary.rounds_completed, 0);
+        assert_eq!(
+            summary.stop_reason,
+            IterationStopReason::LossImprovementBelowThreshold
+        );
+        assert!(summary.model.stumps.is_empty());
+        assert!(summary.loss_per_completed_round.is_empty());
+        assert_eq!(summary.initial_loss, summary.final_loss);
+    }
+
+    #[test]
+    fn fit_iterations_summary_tracks_loss_trace_for_completed_rounds() {
+        let trainer = Trainer::new(TrainParams::default()).expect("valid params");
+        let controls =
+            IterationControls::new(2, 0.0, 1, 0.0, 1_000_000.0, 0.0).expect("controls are valid");
+        let summary = trainer
+            .fit_iterations_with_summary(
+                &sample_dataset(),
+                &sample_binned_matrix(),
+                &MockBackend,
+                &SquaredErrorObjective,
+                controls,
+            )
+            .expect("iterative training succeeds");
+
+        assert_eq!(summary.rounds_completed, 2);
+        assert_eq!(summary.loss_per_completed_round.len(), 2);
+        assert!(summary.loss_per_completed_round[0] < summary.initial_loss);
+        assert!(summary.loss_per_completed_round[1] <= summary.loss_per_completed_round[0]);
+        assert_eq!(summary.final_loss, summary.loss_per_completed_round[1]);
     }
 
     #[test]
