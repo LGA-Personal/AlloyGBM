@@ -897,6 +897,30 @@ impl Trainer {
             }
         }
 
+        if stop_reason == IterationStopReason::ValidationLossPlateau
+            && let Some(best_round) = best_validation_round
+            && best_round < rounds_completed
+        {
+            stumps.truncate(best_round);
+            loss_per_completed_round.truncate(best_round);
+            validation_loss_per_completed_round.truncate(best_round);
+            sampled_rows_per_completed_round.truncate(best_round);
+            sampled_features_per_completed_round.truncate(best_round);
+            rounds_completed = best_round;
+            weak_improvement_rounds_committed =
+                weak_improvement_rounds_committed.min(rounds_completed);
+            current_loss = if rounds_completed == 0 {
+                initial_loss
+            } else {
+                loss_per_completed_round[rounds_completed - 1]
+            };
+            current_validation_loss = if rounds_completed == 0 {
+                initial_validation_loss
+            } else {
+                Some(validation_loss_per_completed_round[rounds_completed - 1])
+            };
+        }
+
         let model = TrainedModel {
             baseline_prediction: fit_contract.baseline_prediction,
             feature_count: dataset.matrix.feature_count,
@@ -1953,6 +1977,48 @@ mod tests {
     }
 
     #[test]
+    fn sampled_feature_tiles_are_seeded_and_non_prefix() {
+        let expand = |tiles: &[FeatureTile]| {
+            tiles
+                .iter()
+                .flat_map(|tile| tile.start_feature..tile.end_feature)
+                .map(|index| index as usize)
+                .collect::<Vec<_>>()
+        };
+
+        let (tiles, coverage_count) =
+            sampled_feature_tiles(12, 0.4, 17, 0).expect("feature tiles should sample");
+        let (tiles_repeat, coverage_count_repeat) =
+            sampled_feature_tiles(12, 0.4, 17, 0).expect("feature tiles should sample");
+        assert_eq!(coverage_count, 5);
+        assert_eq!(coverage_count, coverage_count_repeat);
+        let selected = expand(&tiles);
+        let selected_repeat = expand(&tiles_repeat);
+        assert_eq!(selected, selected_repeat);
+        assert_ne!(selected, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn sampled_indices_respect_ceil_minimum_and_upper_bound_rules() {
+        let one_row = sampled_row_indices(5, 0.01, 5, 0);
+        assert_eq!(one_row.len(), 1);
+
+        let half_rows = sampled_row_indices(5, 0.5, 5, 0);
+        assert_eq!(half_rows.len(), 3);
+
+        let all_rows = sampled_row_indices(5, 1.0, 5, 0);
+        assert_eq!(all_rows.len(), 5);
+
+        let (_, one_feature) =
+            sampled_feature_tiles(7, 0.01, 5, 0).expect("feature tiles should sample");
+        assert_eq!(one_feature, 1);
+
+        let (_, all_features) =
+            sampled_feature_tiles(7, 1.0, 5, 0).expect("feature tiles should sample");
+        assert_eq!(all_features, 7);
+    }
+
+    #[test]
     fn fit_iterations_controls_enforce_min_abs_leaf_value() {
         let trainer = Trainer::new(TrainParams::default()).expect("valid params");
         let controls = IterationControls::new(3, 0.0, 1, 10.0, 1_000_000.0, 0.0, 0)
@@ -2110,15 +2176,23 @@ mod tests {
             summary.stop_reason,
             IterationStopReason::ValidationLossPlateau
         );
-        assert_eq!(summary.rounds_completed, 1);
-        assert_eq!(summary.model.stumps.len(), 1);
+        assert_eq!(summary.rounds_completed, 0);
+        assert!(summary.model.stumps.is_empty());
         assert!(summary.initial_validation_loss.is_some());
-        assert_eq!(summary.validation_loss_per_completed_round.len(), 1);
-        assert!(summary.best_validation_loss.is_some());
-        assert!(summary.best_validation_round.is_some());
+        assert!(summary.validation_loss_per_completed_round.is_empty());
+        assert_eq!(
+            summary.best_validation_loss,
+            summary.initial_validation_loss
+        );
+        assert_eq!(summary.best_validation_round, Some(0));
         assert!(summary.final_validation_loss.is_some());
-        assert_eq!(summary.sampled_rows_per_completed_round, vec![4]);
-        assert_eq!(summary.sampled_features_per_completed_round, vec![2]);
+        assert_eq!(
+            summary.final_validation_loss,
+            summary.initial_validation_loss
+        );
+        assert!(summary.sampled_rows_per_completed_round.is_empty());
+        assert!(summary.sampled_features_per_completed_round.is_empty());
+        assert_eq!(summary.final_loss, summary.initial_loss);
     }
 
     #[test]
