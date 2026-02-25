@@ -217,7 +217,8 @@ impl BackendOps for CpuBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloygbm_core::FeatureTile;
+    use alloygbm_core::{DatasetMatrix, FeatureTile, TrainParams, TrainingDataset};
+    use alloygbm_engine::{SquaredErrorObjective, Trainer};
 
     fn sample_binned_matrix() -> BinnedMatrix {
         BinnedMatrix::new(
@@ -232,6 +233,83 @@ mod tests {
             ],
         )
         .expect("binned matrix is valid")
+    }
+
+    fn quality_fixture_dataset() -> TrainingDataset {
+        TrainingDataset {
+            matrix: DatasetMatrix::new(
+                8,
+                2,
+                vec![
+                    0.0, 0.0, //
+                    1.0, 0.0, //
+                    2.0, 0.0, //
+                    3.0, 0.0, //
+                    4.0, 0.0, //
+                    5.0, 0.0, //
+                    6.0, 0.0, //
+                    7.0, 0.0, //
+                ],
+            )
+            .expect("matrix is valid"),
+            targets: vec![-3.0, -2.0, -1.0, 0.0, 0.0, 1.0, 2.0, 3.0],
+            sample_weights: None,
+            time_index: None,
+            group_id: None,
+        }
+    }
+
+    fn quality_fixture_binned_matrix() -> BinnedMatrix {
+        BinnedMatrix::new(
+            8,
+            2,
+            7,
+            vec![
+                0, 0, //
+                1, 0, //
+                2, 0, //
+                3, 0, //
+                4, 0, //
+                5, 0, //
+                6, 0, //
+                7, 0, //
+            ],
+        )
+        .expect("binned matrix is valid")
+    }
+
+    fn fixture_rows(dataset: &TrainingDataset) -> Vec<Vec<f32>> {
+        dataset
+            .matrix
+            .values
+            .chunks(dataset.matrix.feature_count)
+            .map(|row| row.to_vec())
+            .collect()
+    }
+
+    fn mean_squared_error(predictions: &[f32], targets: &[f32]) -> f32 {
+        let error_sum = predictions
+            .iter()
+            .zip(targets)
+            .map(|(prediction, target)| {
+                let error = prediction - target;
+                error * error
+            })
+            .sum::<f32>();
+        error_sum / predictions.len() as f32
+    }
+
+    fn fixture_params() -> TrainParams {
+        TrainParams {
+            seed: 7,
+            deterministic: true,
+            learning_rate: 0.3,
+            max_depth: 6,
+            row_subsample: 1.0,
+            col_subsample: 1.0,
+            early_stopping_rounds: None,
+            min_validation_improvement: 0.0,
+        }
     }
 
     fn sample_gradients() -> Vec<GradientPair> {
@@ -347,5 +425,46 @@ mod tests {
     #[test]
     fn backend_reports_cpu_device() {
         assert_eq!(CpuBackend.device(), Device::Cpu);
+    }
+
+    #[test]
+    fn cpu_backend_training_beats_naive_baseline_mse() {
+        let dataset = quality_fixture_dataset();
+        let binned = quality_fixture_binned_matrix();
+        let trainer = Trainer::new(fixture_params()).expect("params are valid");
+        let backend = CpuBackend;
+        let model = trainer
+            .fit_iterations(&dataset, &binned, &backend, &SquaredErrorObjective, 6)
+            .expect("training succeeds");
+
+        assert!(!model.stumps.is_empty());
+
+        let rows = fixture_rows(&dataset);
+        let model_predictions = model.predict_batch(&rows).expect("predictions succeed");
+        let baseline_prediction =
+            dataset.targets.iter().sum::<f32>() / dataset.targets.len() as f32;
+        let baseline_predictions = vec![baseline_prediction; dataset.targets.len()];
+
+        let model_mse = mean_squared_error(&model_predictions, &dataset.targets);
+        let baseline_mse = mean_squared_error(&baseline_predictions, &dataset.targets);
+        assert!(model_mse < baseline_mse);
+    }
+
+    #[test]
+    fn cpu_backend_deterministic_training_has_stable_artifact_bytes() {
+        let dataset = quality_fixture_dataset();
+        let binned = quality_fixture_binned_matrix();
+        let trainer = Trainer::new(fixture_params()).expect("params are valid");
+        let backend = CpuBackend;
+        let model_a = trainer
+            .fit_iterations(&dataset, &binned, &backend, &SquaredErrorObjective, 6)
+            .expect("first training succeeds");
+        let model_b = trainer
+            .fit_iterations(&dataset, &binned, &backend, &SquaredErrorObjective, 6)
+            .expect("second training succeeds");
+
+        let bytes_a = model_a.to_artifact_bytes().expect("artifact serializes");
+        let bytes_b = model_b.to_artifact_bytes().expect("artifact serializes");
+        assert_eq!(bytes_a, bytes_b);
     }
 }
