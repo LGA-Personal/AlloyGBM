@@ -5,6 +5,7 @@ use alloygbm_core::{
     serialize_model_artifact_v1, validate_binned_matrix, validate_train_params,
     validate_training_dataset,
 };
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -369,8 +370,16 @@ impl TrainedModel {
             )));
         }
 
+        let stumps_by_node = self
+            .stumps
+            .iter()
+            .map(|stump| (stump.split.node_id, stump))
+            .collect::<HashMap<_, _>>();
         let mut prediction = self.baseline_prediction;
         for stump in &self.stumps {
+            if !row_satisfies_stump_path_features(features, stump, &stumps_by_node)? {
+                continue;
+            }
             let feature_index = stump.split.feature_index as usize;
             let feature_value = features[feature_index];
             let threshold = stump.split.threshold_bin as f32;
@@ -690,13 +699,10 @@ impl Trainer {
             vec![fit_contract.baseline_prediction; validation_ref.dataset.row_count()]
         });
         let mut stumps = Vec::new();
+        let mut stumps_per_completed_round = Vec::new();
         let mut rounds_completed = 0_usize;
-        let effective_round_cap = controls.rounds.min(self.params.max_depth as usize);
-        let mut stop_reason = if controls.rounds > effective_round_cap {
-            IterationStopReason::DepthBudgetReached
-        } else {
-            IterationStopReason::CompletedRequestedRounds
-        };
+        let effective_round_cap = controls.rounds;
+        let mut stop_reason = IterationStopReason::CompletedRequestedRounds;
         let initial_loss = squared_error_loss(
             &predictions,
             &dataset.targets,
@@ -737,14 +743,13 @@ impl Trainer {
                 sampling_seed_base,
                 round_index as u64,
             );
-            let root_node = NodeSlice::new(0, root_row_indices)?;
             let (feature_tiles, sampled_feature_count) = sampled_feature_tiles(
                 binned_matrix.feature_count,
                 controls.col_subsample,
                 sampling_seed_base,
                 round_index as u64,
             )?;
-            let sampled_row_count = root_node.row_indices.len();
+            let sampled_row_count = root_row_indices.len();
             let gradients = objective.compute_gradients(
                 &predictions,
                 &dataset.targets,
@@ -752,58 +757,108 @@ impl Trainer {
             )?;
             validate_gradient_pairs(&gradients, dataset.row_count())?;
 
-            let histograms =
-                backend.build_histograms(binned_matrix, &gradients, &root_node, &feature_tiles)?;
-            let Some(mut split) = backend.best_split(&histograms)? else {
-                stop_reason = IterationStopReason::NoSplitCandidate;
-                break;
-            };
-            if !split.gain.is_finite() || split.gain <= controls.min_split_gain {
-                stop_reason = IterationStopReason::GainBelowThreshold;
-                break;
-            }
-
-            let partition = backend.apply_split(binned_matrix, &root_node, &split)?;
-            validate_partition_cover(root_node.row_indices.len(), &partition)?;
-            if partition.left_row_indices.len() < controls.min_rows_per_leaf
-                || partition.right_row_indices.len() < controls.min_rows_per_leaf
-            {
-                stop_reason = IterationStopReason::LeafRowsBelowThreshold;
-                break;
-            }
-
-            let left_stats = backend.reduce_sums(&gradients, &partition.left_row_indices)?;
-            let right_stats = backend.reduce_sums(&gradients, &partition.right_row_indices)?;
-            if left_stats.hess_sum <= 0.0 || right_stats.hess_sum <= 0.0 {
-                return Err(EngineError::ContractViolation(
-                    "backend produced non-positive hessian sums".to_string(),
-                ));
-            }
-
-            let raw_left_leaf_value = -self.params.learning_rate * left_stats.grad_sum
-                / (left_stats.hess_sum + LEAF_EPSILON);
-            let raw_right_leaf_value = -self.params.learning_rate * right_stats.grad_sum
-                / (right_stats.hess_sum + LEAF_EPSILON);
-
-            let left_leaf_value = raw_left_leaf_value
-                .clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value);
-            let right_leaf_value = raw_right_leaf_value
-                .clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value);
-            if left_leaf_value.abs() < controls.min_abs_leaf_value
-                && right_leaf_value.abs() < controls.min_abs_leaf_value
-            {
-                stop_reason = IterationStopReason::LeafMagnitudeBelowThreshold;
-                break;
-            }
-
             let mut candidate_predictions = predictions.clone();
-            apply_stump_to_binned_predictions(
-                &mut candidate_predictions,
-                binned_matrix,
-                &split,
-                left_leaf_value,
-                right_leaf_value,
-            )?;
+            let mut candidate_round_stumps = Vec::new();
+            let mut round_rejection_reason = IterationStopReason::NoSplitCandidate;
+            let mut active_nodes = vec![(0_u32, root_row_indices)];
+
+            for depth in 0..(self.params.max_depth as usize) {
+                if active_nodes.is_empty() {
+                    break;
+                }
+
+                let mut next_nodes = Vec::new();
+                for (local_node_id, node_rows) in active_nodes {
+                    let node_id = encode_tree_node_id(round_index, local_node_id)?;
+                    let node = NodeSlice::new(node_id, node_rows)?;
+                    let histograms = backend.build_histograms(
+                        binned_matrix,
+                        &gradients,
+                        &node,
+                        &feature_tiles,
+                    )?;
+                    let Some(mut split) = backend.best_split(&histograms)? else {
+                        continue;
+                    };
+                    if !split.gain.is_finite() || split.gain <= controls.min_split_gain {
+                        round_rejection_reason = IterationStopReason::GainBelowThreshold;
+                        continue;
+                    }
+
+                    let partition = backend.apply_split(binned_matrix, &node, &split)?;
+                    if partition.left_row_indices.len() + partition.right_row_indices.len()
+                        != node.row_indices.len()
+                    {
+                        return Err(EngineError::ContractViolation(
+                            "split partition does not cover all node rows".to_string(),
+                        ));
+                    }
+                    if partition.left_row_indices.is_empty()
+                        || partition.right_row_indices.is_empty()
+                        || partition.left_row_indices.len() < controls.min_rows_per_leaf
+                        || partition.right_row_indices.len() < controls.min_rows_per_leaf
+                    {
+                        round_rejection_reason = IterationStopReason::LeafRowsBelowThreshold;
+                        continue;
+                    }
+
+                    let left_stats =
+                        backend.reduce_sums(&gradients, &partition.left_row_indices)?;
+                    let right_stats =
+                        backend.reduce_sums(&gradients, &partition.right_row_indices)?;
+                    if left_stats.hess_sum <= 0.0 || right_stats.hess_sum <= 0.0 {
+                        return Err(EngineError::ContractViolation(
+                            "backend produced non-positive hessian sums".to_string(),
+                        ));
+                    }
+
+                    let raw_left_leaf_value = -self.params.learning_rate * left_stats.grad_sum
+                        / (left_stats.hess_sum + LEAF_EPSILON);
+                    let raw_right_leaf_value = -self.params.learning_rate * right_stats.grad_sum
+                        / (right_stats.hess_sum + LEAF_EPSILON);
+
+                    let left_leaf_value = raw_left_leaf_value
+                        .clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value);
+                    let right_leaf_value = raw_right_leaf_value
+                        .clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value);
+                    if left_leaf_value.abs() < controls.min_abs_leaf_value
+                        && right_leaf_value.abs() < controls.min_abs_leaf_value
+                    {
+                        round_rejection_reason = IterationStopReason::LeafMagnitudeBelowThreshold;
+                        continue;
+                    }
+
+                    apply_partition_leaf_updates(
+                        &mut candidate_predictions,
+                        &partition,
+                        left_leaf_value,
+                        right_leaf_value,
+                    )?;
+
+                    split.left_stats = left_stats;
+                    split.right_stats = right_stats;
+
+                    if depth + 1 < self.params.max_depth as usize {
+                        let left_local_node_id = left_child_node_id(local_node_id)?;
+                        let right_local_node_id = right_child_node_id(local_node_id)?;
+                        next_nodes.push((left_local_node_id, partition.left_row_indices.clone()));
+                        next_nodes.push((right_local_node_id, partition.right_row_indices.clone()));
+                    }
+
+                    candidate_round_stumps.push(TrainedStump {
+                        split,
+                        left_leaf_value,
+                        right_leaf_value,
+                    });
+                }
+                active_nodes = next_nodes;
+            }
+
+            if candidate_round_stumps.is_empty() {
+                stop_reason = round_rejection_reason;
+                break;
+            }
+
             let candidate_loss = squared_error_loss(
                 &candidate_predictions,
                 &dataset.targets,
@@ -835,13 +890,18 @@ impl Trainer {
                             "validation predictions were not initialized".to_string(),
                         )
                     })?;
-                apply_stump_to_binned_predictions(
-                    &mut next_validation_predictions,
-                    validation_ref.binned_matrix,
-                    &split,
-                    left_leaf_value,
-                    right_leaf_value,
-                )?;
+                let mut round_stumps_by_node = HashMap::new();
+                for stump in &candidate_round_stumps {
+                    apply_stump_to_binned_predictions_with_path(
+                        &mut next_validation_predictions,
+                        validation_ref.binned_matrix,
+                        stump,
+                        stump.left_leaf_value,
+                        stump.right_leaf_value,
+                        &round_stumps_by_node,
+                    )?;
+                    round_stumps_by_node.insert(stump.split.node_id, stump);
+                }
                 let next_validation_loss = squared_error_loss(
                     &next_validation_predictions,
                     &validation_ref.dataset.targets,
@@ -881,14 +941,8 @@ impl Trainer {
                 validation_loss_per_completed_round.push(next_validation_loss);
             }
 
-            split.left_stats = left_stats;
-            split.right_stats = right_stats;
-
-            stumps.push(TrainedStump {
-                split,
-                left_leaf_value,
-                right_leaf_value,
-            });
+            stumps_per_completed_round.push(candidate_round_stumps.len());
+            stumps.extend(candidate_round_stumps);
             rounds_completed += 1;
 
             if stop_for_validation_plateau {
@@ -901,7 +955,12 @@ impl Trainer {
             && let Some(best_round) = best_validation_round
             && best_round < rounds_completed
         {
-            stumps.truncate(best_round);
+            let kept_stumps = stumps_per_completed_round
+                .iter()
+                .take(best_round)
+                .sum::<usize>();
+            stumps.truncate(kept_stumps);
+            stumps_per_completed_round.truncate(best_round);
             loss_per_completed_round.truncate(best_round);
             validation_loss_per_completed_round.truncate(best_round);
             sampled_rows_per_completed_round.truncate(best_round);
@@ -1074,6 +1133,120 @@ fn validate_iteration_controls(controls: IterationControls) -> EngineResult<()> 
     Ok(())
 }
 
+const TREE_NODE_STRIDE: u32 = 1 << 20;
+
+fn encode_tree_node_id(tree_index: usize, local_node_id: u32) -> EngineResult<u32> {
+    if local_node_id >= TREE_NODE_STRIDE {
+        return Err(EngineError::ContractViolation(format!(
+            "local node_id {local_node_id} exceeds supported tree-node stride {TREE_NODE_STRIDE}"
+        )));
+    }
+    let tree_index_u32 = u32::try_from(tree_index).map_err(|_| {
+        EngineError::ContractViolation(format!("tree index {tree_index} exceeds u32::MAX"))
+    })?;
+    tree_index_u32
+        .checked_mul(TREE_NODE_STRIDE)
+        .and_then(|base| base.checked_add(local_node_id))
+        .ok_or_else(|| {
+            EngineError::ContractViolation("encoded tree node id overflowed u32 range".to_string())
+        })
+}
+
+fn decode_tree_node_id(node_id: u32) -> (u32, u32) {
+    (node_id / TREE_NODE_STRIDE, node_id % TREE_NODE_STRIDE)
+}
+
+fn left_child_node_id(local_node_id: u32) -> EngineResult<u32> {
+    local_node_id
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| {
+            EngineError::ContractViolation(format!(
+                "left child id overflow for local node {local_node_id}"
+            ))
+        })
+}
+
+fn right_child_node_id(local_node_id: u32) -> EngineResult<u32> {
+    local_node_id
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(2))
+        .ok_or_else(|| {
+            EngineError::ContractViolation(format!(
+                "right child id overflow for local node {local_node_id}"
+            ))
+        })
+}
+
+fn row_satisfies_stump_path_features(
+    features: &[f32],
+    stump: &TrainedStump,
+    stumps_by_node: &HashMap<u32, &TrainedStump>,
+) -> EngineResult<bool> {
+    let (tree_id, mut local_node_id) = decode_tree_node_id(stump.split.node_id);
+    while local_node_id > 0 {
+        let parent_local = (local_node_id - 1) / 2;
+        let parent_node_id = encode_tree_node_id(tree_id as usize, parent_local)?;
+        let Some(parent_stump) = stumps_by_node.get(&parent_node_id) else {
+            return Ok(false);
+        };
+        let feature_index = parent_stump.split.feature_index as usize;
+        if feature_index >= features.len() {
+            return Err(EngineError::ContractViolation(format!(
+                "split feature_index {} exceeds feature length {}",
+                parent_stump.split.feature_index,
+                features.len()
+            )));
+        }
+        let went_left = features[feature_index] <= parent_stump.split.threshold_bin as f32;
+        let expected_left = local_node_id == parent_local * 2 + 1;
+        if went_left != expected_left {
+            return Ok(false);
+        }
+        local_node_id = parent_local;
+    }
+    Ok(true)
+}
+
+fn row_satisfies_stump_path_bins(
+    row_index: usize,
+    binned_matrix: &BinnedMatrix,
+    stump: &TrainedStump,
+    stumps_by_node: &HashMap<u32, &TrainedStump>,
+) -> EngineResult<bool> {
+    let (tree_id, mut local_node_id) = decode_tree_node_id(stump.split.node_id);
+    while local_node_id > 0 {
+        let parent_local = (local_node_id - 1) / 2;
+        let parent_node_id = encode_tree_node_id(tree_id as usize, parent_local)?;
+        let Some(parent_stump) = stumps_by_node.get(&parent_node_id) else {
+            return Ok(false);
+        };
+        let feature_index = parent_stump.split.feature_index as usize;
+        if feature_index >= binned_matrix.feature_count {
+            return Err(EngineError::ContractViolation(format!(
+                "split feature_index {} exceeds feature_count {}",
+                parent_stump.split.feature_index, binned_matrix.feature_count
+            )));
+        }
+        let cell_index = row_index
+            .checked_mul(binned_matrix.feature_count)
+            .and_then(|base| base.checked_add(feature_index))
+            .ok_or_else(|| {
+                EngineError::ContractViolation(
+                    "row/feature index overflow while applying stump path".to_string(),
+                )
+            })?;
+        let bin = binned_matrix.bins[cell_index];
+        let went_left = bin <= parent_stump.split.threshold_bin;
+        let expected_left = local_node_id == parent_local * 2 + 1;
+        if went_left != expected_left {
+            return Ok(false);
+        }
+        local_node_id = parent_local;
+    }
+    Ok(true)
+}
+
 fn sampling_seed_base(seed: u64, deterministic: bool) -> u64 {
     if deterministic {
         return seed;
@@ -1179,12 +1352,41 @@ fn sampled_feature_tiles(
     Ok((tiles, coverage_count))
 }
 
-fn apply_stump_to_binned_predictions(
+fn apply_partition_leaf_updates(
     predictions: &mut [f32],
-    binned_matrix: &BinnedMatrix,
-    split: &SplitCandidate,
+    partition: &PartitionResult,
     left_leaf_value: f32,
     right_leaf_value: f32,
+) -> EngineResult<()> {
+    let prediction_len = predictions.len();
+    for &row_index in &partition.left_row_indices {
+        let row_index = row_index as usize;
+        if row_index >= prediction_len {
+            return Err(EngineError::ContractViolation(format!(
+                "left partition row index {row_index} is out of bounds for predictions length {prediction_len}"
+            )));
+        }
+        predictions[row_index] += left_leaf_value;
+    }
+    for &row_index in &partition.right_row_indices {
+        let row_index = row_index as usize;
+        if row_index >= prediction_len {
+            return Err(EngineError::ContractViolation(format!(
+                "right partition row index {row_index} is out of bounds for predictions length {prediction_len}"
+            )));
+        }
+        predictions[row_index] += right_leaf_value;
+    }
+    Ok(())
+}
+
+fn apply_stump_to_binned_predictions_with_path(
+    predictions: &mut [f32],
+    binned_matrix: &BinnedMatrix,
+    stump: &TrainedStump,
+    left_leaf_value: f32,
+    right_leaf_value: f32,
+    stumps_by_node: &HashMap<u32, &TrainedStump>,
 ) -> EngineResult<()> {
     if predictions.len() != binned_matrix.row_count {
         return Err(EngineError::ContractViolation(format!(
@@ -1193,18 +1395,21 @@ fn apply_stump_to_binned_predictions(
             binned_matrix.row_count
         )));
     }
-    let feature_index = split.feature_index as usize;
+    let feature_index = stump.split.feature_index as usize;
     if feature_index >= binned_matrix.feature_count {
         return Err(EngineError::ContractViolation(format!(
             "split feature_index {} exceeds feature_count {}",
-            split.feature_index, binned_matrix.feature_count
+            stump.split.feature_index, binned_matrix.feature_count
         )));
     }
 
     for (row_index, prediction) in predictions.iter_mut().enumerate() {
+        if !row_satisfies_stump_path_bins(row_index, binned_matrix, stump, stumps_by_node)? {
+            continue;
+        }
         let cell_index = row_index * binned_matrix.feature_count + feature_index;
         let bin = binned_matrix.bins[cell_index];
-        *prediction += if bin <= split.threshold_bin {
+        *prediction += if bin <= stump.split.threshold_bin {
             left_leaf_value
         } else {
             right_leaf_value
@@ -1599,10 +1804,17 @@ mod tests {
         }
 
         fn best_split(&self, histograms: &HistogramBundle) -> EngineResult<Option<SplitCandidate>> {
+            let (_, local_node_id) = decode_tree_node_id(histograms.node_id);
+            let threshold_bin = match local_node_id {
+                0 => 1,
+                1 => 0,
+                2 => 2,
+                _ => 1,
+            };
             Ok(Some(SplitCandidate {
                 node_id: histograms.node_id,
                 feature_index: 0,
-                threshold_bin: 1,
+                threshold_bin,
                 gain: 3.0,
                 left_stats: NodeStats {
                     grad_sum: 0.0,
@@ -1868,7 +2080,7 @@ mod tests {
     }
 
     #[test]
-    fn fit_iterations_summary_reports_depth_budget_stop_reason() {
+    fn fit_iterations_summary_uses_round_count_as_round_cap() {
         let params = TrainParams {
             max_depth: 1,
             ..TrainParams::default()
@@ -1887,12 +2099,47 @@ mod tests {
             .expect("iterative training succeeds");
 
         assert_eq!(summary.rounds_requested, 3);
-        assert_eq!(summary.effective_round_cap, 1);
-        assert_eq!(summary.rounds_completed, 1);
-        assert_eq!(summary.stop_reason, IterationStopReason::DepthBudgetReached);
-        assert_eq!(summary.model.stumps.len(), 1);
-        assert_eq!(summary.loss_per_completed_round.len(), 1);
+        assert_eq!(summary.effective_round_cap, 3);
+        assert_eq!(summary.rounds_completed, 3);
+        assert_eq!(
+            summary.stop_reason,
+            IterationStopReason::CompletedRequestedRounds
+        );
+        assert_eq!(summary.model.stumps.len(), 3);
+        assert_eq!(summary.loss_per_completed_round.len(), 3);
         assert_eq!(summary.weak_improvement_rounds_committed, 0);
+    }
+
+    #[test]
+    fn fit_iterations_grows_multiple_nodes_per_round_when_depth_allows() {
+        let params = TrainParams {
+            max_depth: 2,
+            ..TrainParams::default()
+        };
+        let trainer = Trainer::new(params).expect("valid params");
+        let controls = IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
+            .expect("controls are valid");
+        let summary = trainer
+            .fit_iterations_with_summary(
+                &sample_dataset(),
+                &sample_binned_matrix(),
+                &MockBackend,
+                &SquaredErrorObjective,
+                controls,
+            )
+            .expect("iterative training succeeds");
+
+        assert_eq!(summary.rounds_completed, 1);
+        assert_eq!(summary.model.stumps.len(), 3);
+        let node_ids = summary
+            .model
+            .stumps
+            .iter()
+            .map(|stump| stump.split.node_id)
+            .collect::<Vec<_>>();
+        assert!(node_ids.contains(&0));
+        assert!(node_ids.contains(&1));
+        assert!(node_ids.contains(&2));
     }
 
     #[test]
@@ -2051,10 +2298,11 @@ mod tests {
             )
             .expect("iterative training succeeds");
 
-        assert_eq!(model.stumps.len(), 1);
-        let stump = &model.stumps[0];
-        assert!(stump.left_leaf_value.abs() <= 0.1);
-        assert!(stump.right_leaf_value.abs() <= 0.1);
+        assert!(!model.stumps.is_empty());
+        for stump in &model.stumps {
+            assert!(stump.left_leaf_value.abs() <= 0.1);
+            assert!(stump.right_leaf_value.abs() <= 0.1);
+        }
     }
 
     #[test]
@@ -2130,7 +2378,65 @@ mod tests {
         );
         assert_eq!(summary.weak_improvement_rounds_committed, 1);
         assert_eq!(summary.loss_per_completed_round.len(), 1);
-        assert_eq!(summary.model.stumps.len(), 1);
+        assert!(!summary.model.stumps.is_empty());
+    }
+
+    #[test]
+    fn predict_row_applies_non_root_nodes_only_when_path_matches() {
+        let model = TrainedModel {
+            baseline_prediction: 0.0,
+            feature_count: 1,
+            stumps: vec![
+                TrainedStump {
+                    split: SplitCandidate {
+                        node_id: 0,
+                        feature_index: 0,
+                        threshold_bin: 0,
+                        gain: 1.0,
+                        left_stats: NodeStats {
+                            grad_sum: 0.0,
+                            hess_sum: 1.0,
+                            row_count: 1,
+                        },
+                        right_stats: NodeStats {
+                            grad_sum: 0.0,
+                            hess_sum: 1.0,
+                            row_count: 1,
+                        },
+                    },
+                    left_leaf_value: 0.0,
+                    right_leaf_value: 1.0,
+                },
+                TrainedStump {
+                    split: SplitCandidate {
+                        node_id: 2,
+                        feature_index: 0,
+                        threshold_bin: 0,
+                        gain: 1.0,
+                        left_stats: NodeStats {
+                            grad_sum: 0.0,
+                            hess_sum: 1.0,
+                            row_count: 1,
+                        },
+                        right_stats: NodeStats {
+                            grad_sum: 0.0,
+                            hess_sum: 1.0,
+                            row_count: 1,
+                        },
+                    },
+                    left_leaf_value: 10.0,
+                    right_leaf_value: 20.0,
+                },
+            ],
+        };
+
+        let left = model.predict_row(&[0.0]).expect("left prediction succeeds");
+        let right = model
+            .predict_row(&[1.0])
+            .expect("right prediction succeeds");
+
+        assert_eq!(left, 0.0);
+        assert_eq!(right, 21.0);
     }
 
     #[test]
