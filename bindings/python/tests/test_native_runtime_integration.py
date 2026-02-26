@@ -10,6 +10,22 @@ import tempfile
 import unittest
 from pathlib import Path
 
+FIXTURE_ARTIFACT_HEX = (
+    "4147424d010000000200000047000000010000007f00000000000000d000000000000000"
+    "020000004f010000000000000c000000000000007b22666f726d61745f76657273696f6e"
+    "223a312c22666561747572655f6e616d6573223a5b226630222c226631225d2c22747261"
+    "696e65645f646576696365223a22637075227d0100000002000000060000000000000000"
+    "000000000000000200000097999941979919bfea51b83e03000000050000000100000000"
+    "00000001000000e8ffbf3ffaff3fbf909999be0200000001000000020000000000000005"
+    "0000003a44b440c9cccc3dfaff3f3f03000000020000000000100000000000040000009e"
+    "1dbc401afb4bbee6fba93e0500000003000000010010000000000000000000188d9b3f9a"
+    "70fdbe8c4100be010000000400000002001000000000000600000040a06b3fe1a55b3ee3"
+    "26113f0200000001000000010000000200000001000000"
+)
+FIXTURE_ARTIFACT_BYTES = bytes.fromhex(FIXTURE_ARTIFACT_HEX)
+FIXTURE_ROWS = [[1.0, 0.0], [6.0, 0.0], [3.5, 0.0]]
+FIXTURE_PREDICTIONS = [-1.674449, 1.656500, 0.135550]
+
 
 class NativeRuntimeIntegrationTests(unittest.TestCase):
     @classmethod
@@ -104,6 +120,29 @@ class NativeRuntimeIntegrationTests(unittest.TestCase):
             self.alloygbm.GBMRegressor.predict_from_artifact(
                 b"invalid-artifact", [[1.0, 0.0]]
             )
+
+    def test_runtime_native_predictor_entrypoint_returns_expected_values(self) -> None:
+        predictions = list(
+            self.alloygbm._alloygbm.predictor_predict_batch(
+                FIXTURE_ARTIFACT_BYTES, FIXTURE_ROWS
+            )
+        )
+        self.assertEqual(len(predictions), len(FIXTURE_PREDICTIONS))
+        for actual, expected in zip(predictions, FIXTURE_PREDICTIONS):
+            self.assertAlmostEqual(actual, expected, places=5)
+
+    def test_public_regressor_bridge_matches_native_success_path(self) -> None:
+        native_predictions = list(
+            self.alloygbm._alloygbm.predictor_predict_batch(
+                FIXTURE_ARTIFACT_BYTES, FIXTURE_ROWS
+            )
+        )
+        bridge_predictions = self.alloygbm.GBMRegressor.predict_from_artifact(
+            FIXTURE_ARTIFACT_BYTES, FIXTURE_ROWS
+        )
+        self.assertEqual(len(bridge_predictions), len(native_predictions))
+        for bridge_value, native_value in zip(bridge_predictions, native_predictions):
+            self.assertAlmostEqual(bridge_value, native_value, places=6)
 
 
 if __name__ == "__main__":
