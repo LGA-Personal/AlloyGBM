@@ -10,8 +10,8 @@
 - Status: PASS
 
 - Criterion 2: binding function predictions match engine predictions from the same serialized model bytes on deterministic fixture rows.
-- Evidence: `predictor_predict_batch` is a thin delegation to `alloygbm_predictor::Predictor::from_artifact_bytes(...).predict_batch(...)`; predictor parity test `predictor_from_artifact_matches_engine_predictions` remains passing in `cargo test --workspace`.
-- Status: PASS (inferred via delegation + existing parity coverage)
+- Evidence: binding-crate unit test `binding_bridge_predictions_match_engine_predictions` (in `bindings/python/src/lib.rs`) trains deterministic engine fixture data, serializes artifact bytes, invokes binding bridge implementation (`predictor_predict_batch_impl`), and asserts exact parity with engine `predict_batch` outputs.
+- Status: PASS
 
 - Criterion 3: binding function rejects invalid inputs (for example feature-count mismatch or empty rows) with clear Python errors.
 - Evidence:
@@ -54,10 +54,10 @@
 - `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'` -> PASS
 
 ## Residual Uncovered Criteria
-- Direct runtime execution of the PyO3 extension function from Python test process is not yet automated in repository test harness.
+- None for `v0.1.7` acceptance criteria.
 
 ## Residual Risks
-- Binding-level parity relies on delegation to predictor rather than a dedicated Python runtime parity fixture in this layer.
+- Python-runtime import execution of the extension function is still not exercised in `bindings/python/tests`; current evidence validates bridge behavior at Rust binding-layer plus Python wrapper contract level.
 - Parent rollup verification artifacts for `v0.2` and `v1.0` remain pending.
 
 ## Final Readiness

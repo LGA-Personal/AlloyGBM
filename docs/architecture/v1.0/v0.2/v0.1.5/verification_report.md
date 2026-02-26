@@ -22,6 +22,7 @@
 
 - Criterion 4: validation plateau rollback remains consistent when rounds can emit multiple stumps.
 - Evidence: rollback now truncates by summed `stumps_per_completed_round` for `best_validation_round`; engine test `fit_iterations_with_validation_summary_reports_validation_plateau_stop_reason` remains passing.
+- Additional targeted evidence: engine test `retained_stump_count_for_rounds_handles_multi_stump_rounds` verifies multi-stump per-round truncation arithmetic (`[3,2,4] -> round_count 2 retains 5 stumps`), covering `best_round > 0` scenarios.
 - Status: PASS
 
 - Criterion 5: existing control-contract behavior remains passing (gain/min-row/min-leaf/loss-improvement).
@@ -42,7 +43,7 @@
 - Status: PASS
 
 - Criterion 8: `cargo test --workspace` passes.
-- Evidence: workspace test suites all green, including `alloygbm_engine` (`39 passed`) and `alloygbm_backend_cpu` (`7 passed`).
+- Evidence: workspace test suites all green, including `alloygbm_engine` (`40 passed`) and `alloygbm_backend_cpu` (`7 passed`).
 - Status: PASS
 
 - Criterion 9: `cargo doc --workspace --no-deps` passes.
