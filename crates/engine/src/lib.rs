@@ -955,10 +955,8 @@ impl Trainer {
             && let Some(best_round) = best_validation_round
             && best_round < rounds_completed
         {
-            let kept_stumps = stumps_per_completed_round
-                .iter()
-                .take(best_round)
-                .sum::<usize>();
+            let kept_stumps =
+                retained_stump_count_for_rounds(&stumps_per_completed_round, best_round);
             stumps.truncate(kept_stumps);
             stumps_per_completed_round.truncate(best_round);
             loss_per_completed_round.truncate(best_round);
@@ -1176,6 +1174,16 @@ fn right_child_node_id(local_node_id: u32) -> EngineResult<u32> {
                 "right child id overflow for local node {local_node_id}"
             ))
         })
+}
+
+fn retained_stump_count_for_rounds(
+    stumps_per_completed_round: &[usize],
+    round_count: usize,
+) -> usize {
+    stumps_per_completed_round
+        .iter()
+        .take(round_count)
+        .sum::<usize>()
 }
 
 fn row_satisfies_stump_path_features(
@@ -2437,6 +2445,16 @@ mod tests {
 
         assert_eq!(left, 0.0);
         assert_eq!(right, 21.0);
+    }
+
+    #[test]
+    fn retained_stump_count_for_rounds_handles_multi_stump_rounds() {
+        let stumps_per_round = vec![3, 2, 4];
+        assert_eq!(retained_stump_count_for_rounds(&stumps_per_round, 0), 0);
+        assert_eq!(retained_stump_count_for_rounds(&stumps_per_round, 1), 3);
+        assert_eq!(retained_stump_count_for_rounds(&stumps_per_round, 2), 5);
+        assert_eq!(retained_stump_count_for_rounds(&stumps_per_round, 3), 9);
+        assert_eq!(retained_stump_count_for_rounds(&stumps_per_round, 10), 9);
     }
 
     #[test]

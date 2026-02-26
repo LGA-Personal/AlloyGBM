@@ -485,6 +485,21 @@ mod tests {
     }
 
     #[test]
+    fn predictor_row_matches_engine_prediction() {
+        let (engine_model, dataset) = train_engine_model();
+        let artifact = engine_model
+            .to_artifact_bytes()
+            .expect("artifact serializes");
+        let predictor = Predictor::from_artifact_bytes(&artifact).expect("artifact parses");
+        let rows = fixture_rows(&dataset);
+        let row = &rows[0];
+
+        let engine_prediction = engine_model.predict_row(row).expect("engine predicts");
+        let predictor_prediction = predictor.predict_row(row).expect("predictor predicts");
+        assert_eq!(engine_prediction, predictor_prediction);
+    }
+
+    #[test]
     fn predictor_accepts_legacy_trees_only_artifact() {
         let (engine_model, dataset) = train_engine_model();
         let strict_artifact = engine_model
