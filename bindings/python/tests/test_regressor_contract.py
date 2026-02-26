@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 
-def load_regressor_class() -> type:
+def load_regressor_module():
     regressor_path = (
         Path(__file__).resolve().parents[1] / "alloygbm" / "regressor.py"
     )
@@ -19,10 +19,11 @@ def load_regressor_class() -> type:
 
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.GBMRegressor
+    return module
 
 
-GBMRegressor = load_regressor_class()
+regressor_module = load_regressor_module()
+GBMRegressor = regressor_module.GBMRegressor
 
 
 class GBMRegressorContractTests(unittest.TestCase):
@@ -100,6 +101,45 @@ class GBMRegressorContractTests(unittest.TestCase):
         model = GBMRegressor().fit([[1.0, 2.0], [3.0, 4.0]], [1.0, 2.0])
         with self.assertRaisesRegex(ValueError, "feature count"):
             model.predict([[1.0]])
+
+    def test_predict_from_artifact_rejects_non_bytes_payload(self) -> None:
+        with self.assertRaisesRegex(TypeError, "artifact_bytes"):
+            GBMRegressor.predict_from_artifact("artifact", [[1.0]])  # type: ignore[arg-type]
+
+    def test_predict_from_artifact_uses_native_bridge(self) -> None:
+        calls: list[tuple[bytes, list[list[float]]]] = []
+
+        def fake_predictor(
+            artifact_bytes: bytes, rows: list[list[float]]
+        ) -> list[float]:
+            calls.append((artifact_bytes, rows))
+            return [1.5] * len(rows)
+
+        original_loader = regressor_module._load_native_predictor_predict_batch
+        regressor_module._load_native_predictor_predict_batch = lambda: fake_predictor
+        try:
+            predictions = GBMRegressor.predict_from_artifact(
+                b"artifact", [[1.0, 0.0], [2.0, 0.0]]
+            )
+        finally:
+            regressor_module._load_native_predictor_predict_batch = original_loader
+
+        self.assertEqual(predictions, [1.5, 1.5])
+        self.assertEqual(
+            calls,
+            [(b"artifact", [[1.0, 0.0], [2.0, 0.0]])],
+        )
+
+    def test_predict_from_artifact_propagates_native_bridge_error(self) -> None:
+        original_loader = regressor_module._load_native_predictor_predict_batch
+        regressor_module._load_native_predictor_predict_batch = lambda: (_ for _ in ()).throw(
+            RuntimeError("native bridge unavailable")
+        )
+        try:
+            with self.assertRaisesRegex(RuntimeError, "native bridge unavailable"):
+                GBMRegressor.predict_from_artifact(b"artifact", [[1.0, 0.0]])
+        finally:
+            regressor_module._load_native_predictor_predict_batch = original_loader
 
 
 if __name__ == "__main__":

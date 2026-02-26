@@ -11,6 +11,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { version = "0.23.5", features = ["extension-module", "abi3-py310"] }
+alloygbm-predictor = { path = "../../crates/predictor" }
 
 [package.metadata.maturin]
 python-source = "."
