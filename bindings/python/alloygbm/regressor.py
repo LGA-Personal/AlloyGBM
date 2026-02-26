@@ -4,6 +4,17 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+
+def _load_native_predictor_predict_batch():
+    try:
+        from alloygbm._alloygbm import predictor_predict_batch
+    except Exception as exc:  # pragma: no cover - exercised via contract tests.
+        raise RuntimeError(
+            "native predictor binding is unavailable; build/install the alloygbm extension module"
+        ) from exc
+    return predictor_predict_batch
+
+
 class GBMRegressor:
     """Sklearn-style contract stub for the future native estimator."""
 
@@ -164,6 +175,17 @@ class GBMRegressor:
                 f"{self._n_features_in}"
             )
         return [self._baseline_prediction] * len(rows)
+
+    @staticmethod
+    def predict_from_artifact(
+        artifact_bytes: bytes | bytearray | memoryview, X: object
+    ) -> list[float]:
+        """Run predictor-backed inference from serialized model artifact bytes."""
+        if not isinstance(artifact_bytes, (bytes, bytearray, memoryview)):
+            raise TypeError("artifact_bytes must be bytes-like")
+        rows = GBMRegressor._validate_rows(X)
+        predictor_predict_batch = _load_native_predictor_predict_batch()
+        return list(predictor_predict_batch(bytes(artifact_bytes), rows))
 
     @staticmethod
     def _validate_rows(X: object) -> list[list[float]]:
