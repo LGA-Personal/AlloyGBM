@@ -15,6 +15,16 @@ def _load_native_predictor_predict_batch():
     return predictor_predict_batch
 
 
+def _load_native_train_regression_artifact():
+    try:
+        from alloygbm._alloygbm import train_regression_artifact
+    except Exception as exc:  # pragma: no cover - exercised via contract tests.
+        raise RuntimeError(
+            "native training binding is unavailable; build/install the alloygbm extension module"
+        ) from exc
+    return train_regression_artifact
+
+
 class GBMRegressor:
     """Sklearn-style contract stub for the future native estimator."""
 
@@ -56,7 +66,7 @@ class GBMRegressor:
         self.seed = int(seed)
         self.deterministic = bool(deterministic)
         self._is_fitted = False
-        self._baseline_prediction = 0.0
+        self._artifact_bytes: bytes | None = None
         self._n_features_in = 0
 
     def __repr__(self) -> str:
@@ -153,28 +163,45 @@ class GBMRegressor:
         return self
 
     def fit(self, X: object, y: object) -> "GBMRegressor":
-        """Fit a deterministic constant baseline predictor."""
+        """Fit native-backed regression model artifact state."""
         rows = self._validate_rows(X)
         targets = self._validate_targets(y)
         if len(rows) != len(targets):
             raise ValueError("X and y must contain the same number of rows")
 
+        train_regression_artifact = _load_native_train_regression_artifact()
+        artifact_bytes = train_regression_artifact(
+            rows=rows,
+            targets=targets,
+            learning_rate=self.learning_rate,
+            max_depth=self.max_depth,
+            row_subsample=self.row_subsample,
+            col_subsample=self.col_subsample,
+            min_validation_improvement=self.min_validation_improvement,
+            seed=self.seed,
+            deterministic=self.deterministic,
+            early_stopping_rounds=self.early_stopping_rounds,
+        )
+
         self._n_features_in = len(rows[0])
-        self._baseline_prediction = sum(targets) / len(targets)
+        self._artifact_bytes = bytes(artifact_bytes)
         self._is_fitted = True
         return self
 
     def predict(self, X: object) -> list[float]:
-        """Predict constant baseline values for each input row."""
+        """Predict using the fitted native artifact."""
         if not self._is_fitted:
             raise RuntimeError("GBMRegressor must be fit before predict")
+        if self._artifact_bytes is None:
+            raise RuntimeError("GBMRegressor native artifact is not available")
         rows = self._validate_rows(X)
         if len(rows[0]) != self._n_features_in:
             raise ValueError(
                 f"X feature count {len(rows[0])} does not match fitted feature count "
                 f"{self._n_features_in}"
             )
-        return [self._baseline_prediction] * len(rows)
+        predictor_predict_batch = _load_native_predictor_predict_batch()
+        return list(predictor_predict_batch(self._artifact_bytes, rows))
 
     @staticmethod
     def predict_from_artifact(

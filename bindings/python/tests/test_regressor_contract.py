@@ -83,14 +83,92 @@ class GBMRegressorContractTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "must be fit"):
             model.predict([])
 
-    def test_fit_and_predict_constant_baseline(self) -> None:
-        model = GBMRegressor()
-        fitted = model.fit([[1.0, 0.0], [2.0, 0.0], [3.0, 0.0]], [2.0, 4.0, 6.0])
+    def test_fit_and_predict_use_native_bridges(self) -> None:
+        train_calls: list[tuple[object, ...]] = []
+        predict_calls: list[tuple[bytes, list[list[float]]]] = []
+
+        def fake_train(
+            rows: list[list[float]],
+            targets: list[float],
+            learning_rate: float,
+            max_depth: int,
+            row_subsample: float,
+            col_subsample: float,
+            early_stopping_rounds: int | None,
+            min_validation_improvement: float,
+            seed: int,
+            deterministic: bool,
+        ) -> bytes:
+            train_calls.append(
+                (
+                    rows,
+                    targets,
+                    learning_rate,
+                    max_depth,
+                    row_subsample,
+                    col_subsample,
+                    early_stopping_rounds,
+                    min_validation_improvement,
+                    seed,
+                    deterministic,
+                )
+            )
+            return b"trained-artifact"
+
+        def fake_predictor(
+            artifact_bytes: bytes, rows: list[list[float]]
+        ) -> list[float]:
+            predict_calls.append((artifact_bytes, rows))
+            return [0.5 + row[0] for row in rows]
+
+        original_train_loader = regressor_module._load_native_train_regression_artifact
+        original_predict_loader = regressor_module._load_native_predictor_predict_batch
+        regressor_module._load_native_train_regression_artifact = lambda: fake_train
+        regressor_module._load_native_predictor_predict_batch = lambda: fake_predictor
+        try:
+            model = GBMRegressor(
+                learning_rate=0.2,
+                max_depth=4,
+                row_subsample=0.75,
+                col_subsample=0.5,
+                early_stopping_rounds=4,
+                min_validation_improvement=0.01,
+                seed=7,
+                deterministic=False,
+            )
+            fitted = model.fit([[1.0, 0.0], [2.0, 0.0], [3.0, 0.0]], [2.0, 4.0, 6.0])
+            predictions = model.predict([[1.0, 0.0], [2.0, 0.0]])
+        finally:
+            regressor_module._load_native_train_regression_artifact = (
+                original_train_loader
+            )
+            regressor_module._load_native_predictor_predict_batch = (
+                original_predict_loader
+            )
+
         self.assertIs(fitted, model)
-        predictions = model.predict([[10.0, 0.0], [20.0, 0.0]])
-        self.assertEqual(len(predictions), 2)
-        self.assertAlmostEqual(predictions[0], 4.0)
-        self.assertAlmostEqual(predictions[1], 4.0)
+        self.assertEqual(predictions, [1.5, 2.5])
+        self.assertEqual(
+            train_calls,
+            [
+                (
+                    [[1.0, 0.0], [2.0, 0.0], [3.0, 0.0]],
+                    [2.0, 4.0, 6.0],
+                    0.2,
+                    4,
+                    0.75,
+                    0.5,
+                    4,
+                    0.01,
+                    7,
+                    False,
+                )
+            ],
+        )
+        self.assertEqual(
+            predict_calls,
+            [(b"trained-artifact", [[1.0, 0.0], [2.0, 0.0]])],
+        )
 
     def test_fit_rejects_mismatched_lengths(self) -> None:
         model = GBMRegressor()
@@ -98,9 +176,18 @@ class GBMRegressorContractTests(unittest.TestCase):
             model.fit([[1.0], [2.0]], [1.0])
 
     def test_predict_rejects_feature_count_mismatch(self) -> None:
-        model = GBMRegressor().fit([[1.0, 2.0], [3.0, 4.0]], [1.0, 2.0])
-        with self.assertRaisesRegex(ValueError, "feature count"):
-            model.predict([[1.0]])
+        original_train_loader = regressor_module._load_native_train_regression_artifact
+        regressor_module._load_native_train_regression_artifact = lambda: (
+            lambda *_args, **_kwargs: b"artifact"
+        )
+        try:
+            model = GBMRegressor().fit([[1.0, 2.0], [3.0, 4.0]], [1.0, 2.0])
+            with self.assertRaisesRegex(ValueError, "feature count"):
+                model.predict([[1.0]])
+        finally:
+            regressor_module._load_native_train_regression_artifact = (
+                original_train_loader
+            )
 
     def test_predict_from_artifact_rejects_non_bytes_payload(self) -> None:
         with self.assertRaisesRegex(TypeError, "artifact_bytes"):

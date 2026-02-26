@@ -25,6 +25,17 @@ FIXTURE_ARTIFACT_HEX = (
 FIXTURE_ARTIFACT_BYTES = bytes.fromhex(FIXTURE_ARTIFACT_HEX)
 FIXTURE_ROWS = [[1.0, 0.0], [6.0, 0.0], [3.5, 0.0]]
 FIXTURE_PREDICTIONS = [-1.674449, 1.656500, 0.135550]
+FIT_ROWS = [
+    [0.0, 0.0],
+    [1.0, 0.0],
+    [2.0, 0.0],
+    [3.0, 0.0],
+    [4.0, 0.0],
+    [5.0, 0.0],
+    [6.0, 0.0],
+    [7.0, 0.0],
+]
+FIT_TARGETS = [-3.0, -2.0, -1.0, 0.0, 0.0, 1.0, 2.0, 3.0]
 
 
 class NativeRuntimeIntegrationTests(unittest.TestCase):
@@ -143,6 +154,40 @@ class NativeRuntimeIntegrationTests(unittest.TestCase):
         self.assertEqual(len(bridge_predictions), len(native_predictions))
         for bridge_value, native_value in zip(bridge_predictions, native_predictions):
             self.assertAlmostEqual(bridge_value, native_value, places=6)
+
+    def test_public_regressor_fit_predict_is_native_backed_and_deterministic(self) -> None:
+        model_a = self.alloygbm.GBMRegressor(
+            learning_rate=0.3,
+            max_depth=2,
+            row_subsample=1.0,
+            col_subsample=1.0,
+            early_stopping_rounds=None,
+            min_validation_improvement=0.0,
+            seed=7,
+            deterministic=True,
+        )
+        fitted = model_a.fit(FIT_ROWS, FIT_TARGETS)
+        self.assertIs(fitted, model_a)
+        predictions_a = model_a.predict([[1.0, 0.0], [6.0, 0.0], [3.0, 0.0]])
+
+        model_b = self.alloygbm.GBMRegressor(
+            learning_rate=0.3,
+            max_depth=2,
+            row_subsample=1.0,
+            col_subsample=1.0,
+            early_stopping_rounds=None,
+            min_validation_improvement=0.0,
+            seed=7,
+            deterministic=True,
+        )
+        predictions_b = model_b.fit(FIT_ROWS, FIT_TARGETS).predict(
+            [[1.0, 0.0], [6.0, 0.0], [3.0, 0.0]]
+        )
+
+        self.assertEqual(len(predictions_a), 3)
+        self.assertGreater(len({round(value, 6) for value in predictions_a}), 1)
+        for value_a, value_b in zip(predictions_a, predictions_b):
+            self.assertAlmostEqual(value_a, value_b, places=6)
 
 
 if __name__ == "__main__":
