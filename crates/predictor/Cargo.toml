@@ -8,5 +8,9 @@ rust-version.workspace = true
 [dependencies]
 alloygbm-core = { path = "../core" }
 
+[dev-dependencies]
+alloygbm-backend-cpu = { path = "../backend_cpu" }
+alloygbm-engine = { path = "../engine" }
+
 [lints]
 workspace = true
