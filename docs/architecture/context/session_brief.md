@@ -1,11 +1,11 @@
 # Session Brief (2026-02-26)
 
 ## Current Target
-- Layer: `docs/architecture/v1.0/v0.3/v0.2.2`
+- Layer: `docs/architecture/v1.0/v0.3/v0.2.3`
 - Reason this is next:
-  - `docs/architecture/state/layer_index.yaml` (`generated_at: 2026-02-26T18:04:54Z`) sets both `active_target` and `suggested_next_layer` to `docs/architecture/v1.0/v0.3/v0.2.2`.
-  - `docs/architecture/v1.0/v0.3/v0.2.1` is now `verified` with plan, implementation notes, and verification report.
-  - `docs/architecture/v1.0/v0.3/v0.2.2/` does not yet exist, making it the next incomplete child slice.
+  - `docs/architecture/state/layer_index.yaml` (`generated_at: 2026-02-26T18:13:40Z`) sets both `active_target` and `suggested_next_layer` to `docs/architecture/v1.0/v0.3/v0.2.3`.
+  - `docs/architecture/v1.0/v0.3/v0.2.2` is now `verified` with plan, implementation notes, and verification report.
+  - `docs/architecture/v1.0/v0.3/v0.2.3/` does not yet exist, making it the next incomplete child slice.
 
 ## Parent Constraints
 - `docs/architecture/README.md`: work from highest-level roadmap to deepest active layer, and do not skip decomposition levels.
@@ -15,22 +15,22 @@
 
 ## Progress Snapshot
 - Artifact counts under `docs/architecture`:
-  - `plan.md`: 27
-  - `implementation_notes.md`: 25
-  - `verification_report.md`: 25
+  - `plan.md`: 28
+  - `implementation_notes.md`: 26
+  - `verification_report.md`: 26
 - Most recent completed layers:
+  - `docs/architecture/v1.0/v0.3/v0.2.2` (`verified`)
+  - `docs/architecture/v1.0/v0.3/v0.2.1` (`verified`)
   - `docs/architecture/v1.0/v0.2/v0.1.10` (`verified`)
-  - `docs/architecture/v1.0/v0.2/v0.1.9` (`verified`)
-  - `docs/architecture/v1.0/v0.2/v0.1.8` (`verified`)
 - Most recent completed parent layers:
   - `docs/architecture/v1.0/v0.2` (`verified`)
   - `docs/architecture/v1.0/v0.1` (`verified`)
 - In-progress layer:
-  - none (`v0.2.2` is selected and currently unstarted).
+  - none (`v0.2.3` is selected and currently unstarted).
 - Missing artifacts (active target + open ancestor rollups):
-  - `docs/architecture/v1.0/v0.3/v0.2.2/plan.md`
-  - `docs/architecture/v1.0/v0.3/v0.2.2/implementation_notes.md`
-  - `docs/architecture/v1.0/v0.3/v0.2.2/verification_report.md`
+  - `docs/architecture/v1.0/v0.3/v0.2.3/plan.md`
+  - `docs/architecture/v1.0/v0.3/v0.2.3/implementation_notes.md`
+  - `docs/architecture/v1.0/v0.3/v0.2.3/verification_report.md`
   - `docs/architecture/v1.0/v0.3/implementation_notes.md`
   - `docs/architecture/v1.0/v0.3/verification_report.md`
   - `docs/architecture/v1.0/implementation_notes.md`
@@ -46,9 +46,9 @@
 - Latest known verification from `docs/architecture/v1.0/v0.2/verification_report.md` (2026-02-26): `cargo fmt`, `cargo clippy`, `cargo test`, `cargo doc`, and Python unittests all PASS.
 
 ## Blockers
-- Blocker: `v0.2.2` has no plan artifact yet.
+- Blocker: `v0.2.3` has no plan artifact yet.
 - Impact: next child-layer implementation cannot begin with explicit boundaries.
-- Suggested unblock: create `docs/architecture/v1.0/v0.3/v0.2.2/plan.md` from remaining `v0.3` acceptance gaps.
+- Suggested unblock: create `docs/architecture/v1.0/v0.3/v0.2.3/plan.md` from remaining `v0.3` acceptance gaps.
 
 - Blocker: top-level `v1.0` rollup artifacts are still absent.
 - Impact: program-level phase closure cannot be declared when `v1.0` implementation completes.
@@ -59,15 +59,16 @@
 - Suggested unblock: add benchmark harness/report artifact in a dedicated performance layer.
 
 ## Immediate Next Actions
-1. Create `docs/architecture/v1.0/v0.3/v0.2.2/plan.md` with focused scope for the next wrapper gap closure.
-2. Implement and verify `v0.2.2` against that plan.
+1. Create `docs/architecture/v1.0/v0.3/v0.2.3/plan.md` with focused scope for the next wrapper gap closure.
+2. Implement and verify `v0.2.3` against that plan.
 3. Keep `docs/architecture/state/layer_index.yaml` synchronized after each `v0.3` child-layer completion.
 
 ## High-Priority Files
 - path: `docs/architecture/state/layer_index.yaml`
 - path: `docs/architecture/v1.0/plan.md`
 - path: `docs/architecture/v1.0/v0.3/plan.md`
-- path: `docs/architecture/v1.0/v0.3/v0.2.1/plan.md`
+- path: `docs/architecture/v1.0/v0.3/v0.2.2/plan.md`
+- path: `docs/architecture/v1.0/v0.3/v0.2.2/verification_report.md`
 - path: `docs/architecture/gpu_financial_gbm_roadmap.md`
 - path: `docs/architecture/README.md`
 - path: `docs/architecture/v1.0/v0.2/verification_report.md`

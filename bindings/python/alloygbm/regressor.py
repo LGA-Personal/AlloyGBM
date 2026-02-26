@@ -216,14 +216,15 @@ class GBMRegressor:
 
     @staticmethod
     def _validate_rows(X: object) -> list[list[float]]:
-        if not isinstance(X, Sequence) or isinstance(X, (str, bytes)):
+        rows_like = GBMRegressor._coerce_sequence_like(X, "X")
+        if not isinstance(rows_like, Sequence) or isinstance(rows_like, (str, bytes)):
             raise TypeError("X must be a sequence of feature rows")
-        if len(X) == 0:
+        if len(rows_like) == 0:
             raise ValueError("X must contain at least one row")
 
         normalized: list[list[float]] = []
         expected_width: int | None = None
-        for row in X:
+        for row in rows_like:
             if not isinstance(row, Sequence) or isinstance(row, (str, bytes)):
                 raise TypeError("each X row must be a sequence of numeric values")
             if len(row) == 0:
@@ -239,8 +240,32 @@ class GBMRegressor:
 
     @staticmethod
     def _validate_targets(y: object) -> list[float]:
-        if not isinstance(y, Sequence) or isinstance(y, (str, bytes)):
+        targets_like = GBMRegressor._coerce_sequence_like(y, "y")
+        if not isinstance(targets_like, Sequence) or isinstance(targets_like, (str, bytes)):
             raise TypeError("y must be a sequence of numeric values")
-        if len(y) == 0:
+        if len(targets_like) == 0:
             raise ValueError("y must contain at least one value")
-        return [float(value) for value in y]
+        return [float(value) for value in targets_like]
+
+    @staticmethod
+    def _coerce_sequence_like(value: object, argument_name: str) -> object:
+        current = value
+        for _ in range(4):
+            if isinstance(current, Sequence) and not isinstance(current, (str, bytes)):
+                return current
+
+            next_value: object | None = None
+            if hasattr(current, "to_numpy"):
+                next_value = current.to_numpy()  # type: ignore[call-arg]
+            elif hasattr(current, "to_list"):
+                next_value = current.to_list()  # type: ignore[call-arg]
+            elif hasattr(current, "tolist"):
+                next_value = current.tolist()  # type: ignore[call-arg]
+
+            if next_value is None or next_value is current:
+                break
+            current = next_value
+
+        raise TypeError(
+            f"{argument_name} must be a sequence or provide to_numpy/to_list/tolist conversion"
+        )

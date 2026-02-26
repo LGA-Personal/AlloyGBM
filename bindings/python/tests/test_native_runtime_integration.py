@@ -38,6 +38,30 @@ FIT_ROWS = [
 FIT_TARGETS = [-3.0, -2.0, -1.0, 0.0, 0.0, 1.0, 2.0, 3.0]
 
 
+class _RuntimeNumpyLike:
+    def __init__(self, values: object) -> None:
+        self._values = values
+
+    def tolist(self) -> object:
+        return self._values
+
+
+class _RuntimePandasLikeFrame:
+    def __init__(self, rows: list[list[float]]) -> None:
+        self._rows = rows
+
+    def to_numpy(self) -> _RuntimeNumpyLike:
+        return _RuntimeNumpyLike(self._rows)
+
+
+class _RuntimePolarsLikeSeries:
+    def __init__(self, values: list[float]) -> None:
+        self._values = values
+
+    def to_list(self) -> list[float]:
+        return self._values
+
+
 class NativeRuntimeIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -188,6 +212,34 @@ class NativeRuntimeIntegrationTests(unittest.TestCase):
         self.assertGreater(len({round(value, 6) for value in predictions_a}), 1)
         for value_a, value_b in zip(predictions_a, predictions_b):
             self.assertAlmostEqual(value_a, value_b, places=6)
+
+    def test_public_regressor_accepts_dataframe_like_adapters(self) -> None:
+        model = self.alloygbm.GBMRegressor(
+            learning_rate=0.3,
+            max_depth=2,
+            row_subsample=1.0,
+            col_subsample=1.0,
+            early_stopping_rounds=None,
+            min_validation_improvement=0.0,
+            seed=7,
+            deterministic=True,
+        )
+        model.fit(_RuntimePandasLikeFrame(FIT_ROWS), _RuntimePolarsLikeSeries(FIT_TARGETS))
+        predictions = model.predict(_RuntimePandasLikeFrame([[1.0, 0.0], [6.0, 0.0]]))
+        self.assertEqual(len(predictions), 2)
+        self.assertNotAlmostEqual(predictions[0], predictions[1], places=6)
+
+        native_predictions = list(
+            self.alloygbm._alloygbm.predictor_predict_batch(
+                FIXTURE_ARTIFACT_BYTES, FIXTURE_ROWS
+            )
+        )
+        adapter_predictions = self.alloygbm.GBMRegressor.predict_from_artifact(
+            FIXTURE_ARTIFACT_BYTES, _RuntimePandasLikeFrame(FIXTURE_ROWS)
+        )
+        self.assertEqual(len(adapter_predictions), len(native_predictions))
+        for adapter_value, native_value in zip(adapter_predictions, native_predictions):
+            self.assertAlmostEqual(adapter_value, native_value, places=6)
 
 
 if __name__ == "__main__":
