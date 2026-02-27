@@ -149,6 +149,9 @@ class NativeRuntimeIntegrationTests(unittest.TestCase):
         self.assertTrue(callable(self.alloygbm.mae))
         self.assertTrue(callable(self.alloygbm.r2_score))
         self.assertTrue(callable(self.alloygbm.pearson_correlation))
+        self.assertTrue(callable(self.alloygbm.rank_ic))
+        self.assertTrue(callable(self.alloygbm.hit_rate))
+        self.assertTrue(callable(self.alloygbm.icir))
 
         y_true = [1.0, 2.0, 3.0]
         y_pred = [1.0, 2.0, 3.0]
@@ -156,6 +159,11 @@ class NativeRuntimeIntegrationTests(unittest.TestCase):
         self.assertEqual(self.alloygbm.mae(y_true, y_pred), 0.0)
         self.assertEqual(self.alloygbm.r2_score(y_true, y_pred), 1.0)
         self.assertEqual(self.alloygbm.pearson_correlation(y_true, y_pred), 1.0)
+        self.assertEqual(self.alloygbm.rank_ic(y_true, y_pred), 1.0)
+        self.assertEqual(self.alloygbm.hit_rate(y_true, y_pred), 1.0)
+        self.assertAlmostEqual(
+            self.alloygbm.icir([0.1, 0.2, 0.0, -0.1]), 0.44721359549995787, places=12
+        )
 
     def test_runtime_native_predictor_entrypoint_executes(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "serialization|artifact|header"):

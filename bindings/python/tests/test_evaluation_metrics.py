@@ -22,9 +22,12 @@ def load_evaluation_module():
 
 
 evaluation_module = load_evaluation_module()
+hit_rate = evaluation_module.hit_rate
+icir = evaluation_module.icir
 mae = evaluation_module.mae
 pearson_correlation = evaluation_module.pearson_correlation
 r2_score = evaluation_module.r2_score
+rank_ic = evaluation_module.rank_ic
 rmse = evaluation_module.rmse
 
 
@@ -138,6 +141,52 @@ class EvaluationMetricTests(unittest.TestCase):
     def test_pearson_returns_zero_for_zero_variance_series(self) -> None:
         self.assertEqual(pearson_correlation([1.0, 1.0, 1.0], [1.0, 2.0, 3.0]), 0.0)
         self.assertEqual(pearson_correlation([1.0, 2.0, 3.0], [4.0, 4.0, 4.0]), 0.0)
+
+    def test_rank_ic_perfect_and_inverse_order(self) -> None:
+        y_true = [1.0, 2.0, 3.0, 4.0]
+        self.assertEqual(rank_ic(y_true, [1.0, 2.0, 3.0, 4.0]), 1.0)
+        self.assertEqual(rank_ic(y_true, [4.0, 3.0, 2.0, 1.0]), -1.0)
+
+    def test_rank_ic_uses_average_rank_for_ties(self) -> None:
+        y_true = [10.0, 20.0, 20.0, 40.0]
+        y_pred = [1.0, 2.0, 3.0, 4.0]
+        self.assertAlmostEqual(rank_ic(y_true, y_pred), 0.9486832980505138, places=12)
+
+    def test_hit_rate_default_threshold(self) -> None:
+        y_true = [1.0, -2.0, 0.0, 4.0, -5.0]
+        y_pred = [0.5, -3.0, 0.0, -1.0, -7.0]
+        self.assertAlmostEqual(hit_rate(y_true, y_pred), 0.8, places=12)
+
+    def test_hit_rate_with_non_zero_threshold(self) -> None:
+        y_true = [0.4, 0.8, -0.4, -0.9, 0.0]
+        y_pred = [0.3, 1.2, -0.8, 0.9, 0.0]
+        self.assertAlmostEqual(hit_rate(y_true, y_pred, threshold=0.5), 0.8, places=12)
+
+    def test_hit_rate_rejects_non_finite_threshold(self) -> None:
+        with self.assertRaisesRegex(ValueError, "threshold"):
+            hit_rate([1.0], [1.0], threshold=float("nan"))
+        with self.assertRaisesRegex(ValueError, "threshold"):
+            hit_rate([1.0], [1.0], threshold=float("inf"))
+
+    def test_icir_computes_mean_over_population_std(self) -> None:
+        self.assertAlmostEqual(
+            icir([0.1, 0.2, 0.0, -0.1]), 0.44721359549995787, places=12
+        )
+
+    def test_icir_zero_variance_fallback(self) -> None:
+        self.assertEqual(icir([0.1, 0.1, 0.1]), 0.0)
+
+    def test_icir_rejects_empty_or_non_finite_values(self) -> None:
+        with self.assertRaisesRegex(ValueError, "at least one value"):
+            icir([])
+        with self.assertRaisesRegex(ValueError, "finite numeric values"):
+            icir([0.1, float("nan")])
+
+    def test_finance_pair_metrics_reject_mismatched_lengths(self) -> None:
+        with self.assertRaisesRegex(ValueError, "same number of values"):
+            rank_ic([1.0, 2.0], [1.0])
+        with self.assertRaisesRegex(ValueError, "same number of values"):
+            hit_rate([1.0, 2.0], [1.0])
 
 
 if __name__ == "__main__":
