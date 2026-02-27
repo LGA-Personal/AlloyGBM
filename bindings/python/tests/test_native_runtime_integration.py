@@ -144,6 +144,19 @@ class NativeRuntimeIntegrationTests(unittest.TestCase):
         self.assertEqual(info.name, "alloygbm")
         self.assertRegex(info.version, re.compile(r"^\d+\.\d+\.\d+"))
 
+    def test_runtime_import_exposes_metric_helpers(self) -> None:
+        self.assertTrue(callable(self.alloygbm.rmse))
+        self.assertTrue(callable(self.alloygbm.mae))
+        self.assertTrue(callable(self.alloygbm.r2_score))
+        self.assertTrue(callable(self.alloygbm.pearson_correlation))
+
+        y_true = [1.0, 2.0, 3.0]
+        y_pred = [1.0, 2.0, 3.0]
+        self.assertEqual(self.alloygbm.rmse(y_true, y_pred), 0.0)
+        self.assertEqual(self.alloygbm.mae(y_true, y_pred), 0.0)
+        self.assertEqual(self.alloygbm.r2_score(y_true, y_pred), 1.0)
+        self.assertEqual(self.alloygbm.pearson_correlation(y_true, y_pred), 1.0)
+
     def test_runtime_native_predictor_entrypoint_executes(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "serialization|artifact|header"):
             self.alloygbm._alloygbm.predictor_predict_batch(
