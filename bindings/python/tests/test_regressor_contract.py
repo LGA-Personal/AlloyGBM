@@ -68,6 +68,8 @@ class GBMRegressorContractTests(unittest.TestCase):
             GBMRegressor(learning_rate=0.0)
         with self.assertRaisesRegex(ValueError, "max_depth"):
             GBMRegressor(max_depth=0)
+        with self.assertRaisesRegex(ValueError, "n_estimators"):
+            GBMRegressor(n_estimators=0)
         with self.assertRaisesRegex(ValueError, "row_subsample"):
             GBMRegressor(row_subsample=0.0)
         with self.assertRaisesRegex(ValueError, "col_subsample"):
@@ -82,6 +84,7 @@ class GBMRegressorContractTests(unittest.TestCase):
         params = model.get_params()
         self.assertEqual(params["learning_rate"], 0.1)
         self.assertEqual(params["max_depth"], 6)
+        self.assertEqual(params["n_estimators"], 6)
         self.assertEqual(params["row_subsample"], 1.0)
         self.assertEqual(params["col_subsample"], 1.0)
         self.assertIsNone(params["early_stopping_rounds"])
@@ -92,6 +95,7 @@ class GBMRegressorContractTests(unittest.TestCase):
         updated = model.set_params(
             learning_rate=0.2,
             max_depth=4,
+            n_estimators=9,
             row_subsample=0.75,
             col_subsample=0.5,
             early_stopping_rounds=4,
@@ -102,6 +106,7 @@ class GBMRegressorContractTests(unittest.TestCase):
         self.assertIs(updated, model)
         self.assertEqual(model.get_params()["learning_rate"], 0.2)
         self.assertEqual(model.get_params()["max_depth"], 4)
+        self.assertEqual(model.get_params()["n_estimators"], 9)
         self.assertEqual(model.get_params()["row_subsample"], 0.75)
         self.assertEqual(model.get_params()["col_subsample"], 0.5)
         self.assertEqual(model.get_params()["early_stopping_rounds"], 4)
@@ -113,6 +118,11 @@ class GBMRegressorContractTests(unittest.TestCase):
         model = GBMRegressor()
         with self.assertRaisesRegex(ValueError, "Unknown parameter"):
             model.set_params(unknown=1)  # type: ignore[arg-type]
+
+    def test_set_params_rejects_invalid_n_estimators(self) -> None:
+        model = GBMRegressor()
+        with self.assertRaisesRegex(ValueError, "n_estimators"):
+            model.set_params(n_estimators=0)
 
     def test_predict_requires_fit(self) -> None:
         model = GBMRegressor()
@@ -130,6 +140,7 @@ class GBMRegressorContractTests(unittest.TestCase):
             max_depth: int,
             row_subsample: float,
             col_subsample: float,
+            rounds: int,
             early_stopping_rounds: int | None,
             min_validation_improvement: float,
             seed: int,
@@ -143,6 +154,7 @@ class GBMRegressorContractTests(unittest.TestCase):
                     max_depth,
                     row_subsample,
                     col_subsample,
+                    rounds,
                     early_stopping_rounds,
                     min_validation_improvement,
                     seed,
@@ -165,6 +177,7 @@ class GBMRegressorContractTests(unittest.TestCase):
             model = GBMRegressor(
                 learning_rate=0.2,
                 max_depth=4,
+                n_estimators=9,
                 row_subsample=0.75,
                 col_subsample=0.5,
                 early_stopping_rounds=4,
@@ -194,6 +207,7 @@ class GBMRegressorContractTests(unittest.TestCase):
                     4,
                     0.75,
                     0.5,
+                    9,
                     4,
                     0.01,
                     7,

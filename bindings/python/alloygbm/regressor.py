@@ -33,6 +33,7 @@ class GBMRegressor:
         *,
         learning_rate: float = 0.1,
         max_depth: int = 6,
+        n_estimators: int = 6,
         row_subsample: float = 1.0,
         col_subsample: float = 1.0,
         early_stopping_rounds: int | None = None,
@@ -44,6 +45,8 @@ class GBMRegressor:
             raise ValueError("learning_rate must be in (0.0, 1.0]")
         if max_depth <= 0:
             raise ValueError("max_depth must be greater than 0")
+        if n_estimators <= 0:
+            raise ValueError("n_estimators must be greater than 0")
         if not (0.0 < row_subsample <= 1.0):
             raise ValueError("row_subsample must be in (0.0, 1.0]")
         if not (0.0 < col_subsample <= 1.0):
@@ -55,6 +58,7 @@ class GBMRegressor:
 
         self.learning_rate = float(learning_rate)
         self.max_depth = int(max_depth)
+        self.n_estimators = int(n_estimators)
         self.row_subsample = float(row_subsample)
         self.col_subsample = float(col_subsample)
         self.early_stopping_rounds = (
@@ -74,6 +78,7 @@ class GBMRegressor:
             "GBMRegressor("
             f"learning_rate={self.learning_rate}, "
             f"max_depth={self.max_depth}, "
+            f"n_estimators={self.n_estimators}, "
             f"row_subsample={self.row_subsample}, "
             f"col_subsample={self.col_subsample}, "
             f"early_stopping_rounds={self.early_stopping_rounds}, "
@@ -89,6 +94,7 @@ class GBMRegressor:
         return {
             "learning_rate": self.learning_rate,
             "max_depth": self.max_depth,
+            "n_estimators": self.n_estimators,
             "row_subsample": self.row_subsample,
             "col_subsample": self.col_subsample,
             "early_stopping_rounds": self.early_stopping_rounds,
@@ -102,6 +108,7 @@ class GBMRegressor:
         allowed = {
             "learning_rate",
             "max_depth",
+            "n_estimators",
             "row_subsample",
             "col_subsample",
             "early_stopping_rounds",
@@ -124,6 +131,12 @@ class GBMRegressor:
             if max_depth <= 0:
                 raise ValueError("max_depth must be greater than 0")
             self.max_depth = max_depth
+
+        if "n_estimators" in params:
+            n_estimators = int(params["n_estimators"])
+            if n_estimators <= 0:
+                raise ValueError("n_estimators must be greater than 0")
+            self.n_estimators = n_estimators
 
         if "row_subsample" in params:
             row_subsample = float(params["row_subsample"])
@@ -180,6 +193,7 @@ class GBMRegressor:
             min_validation_improvement=self.min_validation_improvement,
             seed=self.seed,
             deterministic=self.deterministic,
+            rounds=self.n_estimators,
             early_stopping_rounds=self.early_stopping_rounds,
         )
 
