@@ -64,6 +64,40 @@ def pearson_correlation(y_true: object, y_pred: object) -> float:
     return covariance / math.sqrt(true_variance * pred_variance)
 
 
+def rank_ic(y_true: object, y_pred: object) -> float:
+    """Compute rank information coefficient (Spearman-style rank correlation)."""
+    true_values, pred_values = _validated_pair(y_true, y_pred)
+    true_ranks = _average_ranks(true_values)
+    pred_ranks = _average_ranks(pred_values)
+    return pearson_correlation(true_ranks, pred_ranks)
+
+
+def hit_rate(y_true: object, y_pred: object, *, threshold: float = 0.0) -> float:
+    """Compute directional hit rate using three-way sign around a threshold."""
+    threshold_value = float(threshold)
+    if not math.isfinite(threshold_value):
+        raise ValueError("threshold must be a finite numeric value")
+
+    true_values, pred_values = _validated_pair(y_true, y_pred)
+    hits = 0
+    for true_value, pred_value in zip(true_values, pred_values):
+        if _direction(true_value, threshold_value) == _direction(
+            pred_value, threshold_value
+        ):
+            hits += 1
+    return hits / len(true_values)
+
+
+def icir(ic_values: object) -> float:
+    """Compute information coefficient information ratio from IC observations."""
+    ic_series = _coerce_numeric_sequence(ic_values, "ic_values")
+    ic_mean = sum(ic_series) / len(ic_series)
+    ic_variance = sum((value - ic_mean) ** 2 for value in ic_series) / len(ic_series)
+    if math.isclose(ic_variance, 0.0, rel_tol=0.0, abs_tol=1e-15):
+        return 0.0
+    return ic_mean / math.sqrt(ic_variance)
+
+
 def _validated_pair(y_true: object, y_pred: object) -> tuple[list[float], list[float]]:
     true_values = _coerce_numeric_sequence(y_true, "y_true")
     pred_values = _coerce_numeric_sequence(y_pred, "y_pred")
@@ -118,4 +152,39 @@ def _coerce_sequence_like(value: object, argument_name: str) -> Sequence[object]
     )
 
 
-__all__ = ["mae", "pearson_correlation", "r2_score", "rmse"]
+def _average_ranks(values: Sequence[float]) -> list[float]:
+    ranks = [0.0] * len(values)
+    sorted_items = sorted(enumerate(values), key=lambda item: item[1])
+    index = 0
+    while index < len(sorted_items):
+        tie_end = index
+        while (
+            tie_end + 1 < len(sorted_items)
+            and sorted_items[tie_end + 1][1] == sorted_items[index][1]
+        ):
+            tie_end += 1
+        average_rank = ((index + tie_end) / 2.0) + 1.0
+        for tie_index in range(index, tie_end + 1):
+            original_index = sorted_items[tie_index][0]
+            ranks[original_index] = average_rank
+        index = tie_end + 1
+    return ranks
+
+
+def _direction(value: float, threshold: float) -> int:
+    if value > threshold:
+        return 1
+    if value < threshold:
+        return -1
+    return 0
+
+
+__all__ = [
+    "hit_rate",
+    "icir",
+    "mae",
+    "pearson_correlation",
+    "r2_score",
+    "rank_ic",
+    "rmse",
+]
