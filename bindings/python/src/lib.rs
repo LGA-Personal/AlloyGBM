@@ -165,6 +165,7 @@ fn predictor_predict_batch(artifact_bytes: &[u8], rows: Vec<Vec<f32>>) -> PyResu
     min_validation_improvement,
     seed,
     deterministic,
+    rounds=DEFAULT_TRAIN_ROUNDS,
     early_stopping_rounds=None
 ))]
 #[allow(clippy::too_many_arguments)]
@@ -178,8 +179,13 @@ fn train_regression_artifact(
     min_validation_improvement: f32,
     seed: u64,
     deterministic: bool,
+    rounds: usize,
     early_stopping_rounds: Option<u16>,
 ) -> PyResult<Vec<u8>> {
+    if rounds == 0 {
+        return Err(PyValueError::new_err("rounds must be greater than 0"));
+    }
+
     let params = TrainParams {
         seed,
         deterministic,
@@ -191,8 +197,7 @@ fn train_regression_artifact(
         min_validation_improvement,
     };
 
-    train_regression_artifact_impl(&rows, &targets, params, DEFAULT_TRAIN_ROUNDS)
-        .map_err(engine_error_to_pyerr)
+    train_regression_artifact_impl(&rows, &targets, params, rounds).map_err(engine_error_to_pyerr)
 }
 
 #[pymodule]

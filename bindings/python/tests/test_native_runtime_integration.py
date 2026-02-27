@@ -150,6 +150,22 @@ class NativeRuntimeIntegrationTests(unittest.TestCase):
                 b"invalid-artifact", [[1.0, 0.0]]
             )
 
+    def test_runtime_train_bridge_rejects_zero_rounds(self) -> None:
+        with self.assertRaisesRegex(ValueError, "rounds"):
+            self.alloygbm._alloygbm.train_regression_artifact(
+                rows=FIT_ROWS,
+                targets=FIT_TARGETS,
+                learning_rate=0.3,
+                max_depth=2,
+                row_subsample=1.0,
+                col_subsample=1.0,
+                min_validation_improvement=0.0,
+                seed=7,
+                deterministic=True,
+                rounds=0,
+                early_stopping_rounds=None,
+            )
+
     def test_public_regressor_bridge_uses_native_extension_runtime(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "serialization|artifact|header"):
             self.alloygbm.GBMRegressor.predict_from_artifact(
@@ -183,6 +199,7 @@ class NativeRuntimeIntegrationTests(unittest.TestCase):
         model_a = self.alloygbm.GBMRegressor(
             learning_rate=0.3,
             max_depth=2,
+            n_estimators=6,
             row_subsample=1.0,
             col_subsample=1.0,
             early_stopping_rounds=None,
@@ -197,6 +214,7 @@ class NativeRuntimeIntegrationTests(unittest.TestCase):
         model_b = self.alloygbm.GBMRegressor(
             learning_rate=0.3,
             max_depth=2,
+            n_estimators=6,
             row_subsample=1.0,
             col_subsample=1.0,
             early_stopping_rounds=None,
@@ -213,10 +231,50 @@ class NativeRuntimeIntegrationTests(unittest.TestCase):
         for value_a, value_b in zip(predictions_a, predictions_b):
             self.assertAlmostEqual(value_a, value_b, places=6)
 
+    def test_public_regressor_n_estimators_controls_training_rounds(self) -> None:
+        model_short = self.alloygbm.GBMRegressor(
+            learning_rate=0.3,
+            max_depth=2,
+            n_estimators=1,
+            row_subsample=1.0,
+            col_subsample=1.0,
+            early_stopping_rounds=None,
+            min_validation_improvement=0.0,
+            seed=7,
+            deterministic=True,
+        )
+        model_long = self.alloygbm.GBMRegressor(
+            learning_rate=0.3,
+            max_depth=2,
+            n_estimators=8,
+            row_subsample=1.0,
+            col_subsample=1.0,
+            early_stopping_rounds=None,
+            min_validation_improvement=0.0,
+            seed=7,
+            deterministic=True,
+        )
+
+        predictions_short = model_short.fit(FIT_ROWS, FIT_TARGETS).predict(
+            [[1.0, 0.0], [6.0, 0.0], [3.0, 0.0]]
+        )
+        predictions_long = model_long.fit(FIT_ROWS, FIT_TARGETS).predict(
+            [[1.0, 0.0], [6.0, 0.0], [3.0, 0.0]]
+        )
+
+        self.assertNotEqual(model_short._artifact_bytes, model_long._artifact_bytes)
+        self.assertTrue(
+            any(
+                abs(short_value - long_value) > 1e-6
+                for short_value, long_value in zip(predictions_short, predictions_long)
+            )
+        )
+
     def test_public_regressor_accepts_dataframe_like_adapters(self) -> None:
         model = self.alloygbm.GBMRegressor(
             learning_rate=0.3,
             max_depth=2,
+            n_estimators=6,
             row_subsample=1.0,
             col_subsample=1.0,
             early_stopping_rounds=None,
