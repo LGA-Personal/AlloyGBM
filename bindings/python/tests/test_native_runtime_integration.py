@@ -152,6 +152,8 @@ class NativeRuntimeIntegrationTests(unittest.TestCase):
         self.assertTrue(callable(self.alloygbm.rank_ic))
         self.assertTrue(callable(self.alloygbm.hit_rate))
         self.assertTrue(callable(self.alloygbm.icir))
+        self.assertTrue(callable(self.alloygbm.purged_time_series_splits))
+        self.assertTrue(callable(self.alloygbm.purged_panel_splits))
 
         y_true = [1.0, 2.0, 3.0]
         y_pred = [1.0, 2.0, 3.0]
@@ -163,6 +165,26 @@ class NativeRuntimeIntegrationTests(unittest.TestCase):
         self.assertEqual(self.alloygbm.hit_rate(y_true, y_pred), 1.0)
         self.assertAlmostEqual(
             self.alloygbm.icir([0.1, 0.2, 0.0, -0.1]), 0.44721359549995787, places=12
+        )
+        self.assertEqual(
+            len(
+                self.alloygbm.purged_time_series_splits(
+                    [0, 0, 1, 1, 2, 2], n_splits=2, purge_gap=0, embargo=0
+                )
+            ),
+            2,
+        )
+        self.assertEqual(
+            len(
+                self.alloygbm.purged_panel_splits(
+                    [0, 0, 1, 1, 2, 2],
+                    ["A", "B", "A", "B", "A", "B"],
+                    n_splits=2,
+                    purge_gap=0,
+                    embargo=0,
+                )
+            ),
+            2,
         )
 
     def test_runtime_native_predictor_entrypoint_executes(self) -> None:

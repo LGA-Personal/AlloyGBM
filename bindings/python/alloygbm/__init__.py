@@ -11,6 +11,7 @@ from .evaluation import (
     rmse,
 )
 from .regressor import GBMRegressor
+from .validation import purged_panel_splits, purged_time_series_splits
 
 __all__ = [
     "GBMRegressor",
@@ -19,6 +20,8 @@ __all__ = [
     "mae",
     "native_runtime_info",
     "pearson_correlation",
+    "purged_panel_splits",
+    "purged_time_series_splits",
     "r2_score",
     "rank_ic",
     "rmse",
