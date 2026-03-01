@@ -1,4 +1,4 @@
-generated_at: "2026-03-01T04:12:33Z"
+generated_at: "2026-03-01T15:31:56Z"
 active_target: "docs/architecture/v1.0/v0.5"
 suggested_next_layer: "docs/architecture/v1.0/v0.5"
 layers:
@@ -72,6 +72,15 @@ layers:
     missing_artifacts: []
     parent: "docs/architecture/v1.0/v0.5"
     previous_siblings: []
+  - path: "docs/architecture/v1.0/v0.5/v0.4.2"
+    status: "verified"
+    has_plan: true
+    has_implementation_notes: true
+    has_verification_report: true
+    missing_artifacts: []
+    parent: "docs/architecture/v1.0/v0.5"
+    previous_siblings:
+      - "docs/architecture/v1.0/v0.5/v0.4.1"
   - path: "docs/architecture/v1.0/v0.4/v0.3.1"
     status: "verified"
     has_plan: true
