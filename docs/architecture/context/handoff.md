@@ -1,76 +1,66 @@
 # Handoff
 
 ## Session Scope
-- Layer: `docs/architecture/v1.0/v0.2/v0.1.8` (active target from `docs/architecture/state/layer_index.yaml`)
-- Goal: complete and verify `v0.1.7` Python predictor bridge work, close remaining test-evidence gap, and leave next-step handoff for `v0.1.8`.
+- Layer: `docs/architecture/v1.0/v0.5/v0.4.1`.
+- Goal: finalize `v0.4` closeout continuity, open `v0.5`, and leave a decision-complete `v0.4.1` implementation start point.
 
-## Current Layer and Status
-- Active target from state index: `docs/architecture/v1.0/v0.2/v0.1.8`
-- `v0.1.8` status: not started (`plan.md`, `implementation_notes.md`, `verification_report.md` missing).
-- Most recently completed layer: `docs/architecture/v1.0/v0.2/v0.1.7` (`verified` in state index and artifacts).
-- Latest commit:
-  - `3ac5d25 feat(v0.1.7): add Python predictor artifact inference bridge`
-
-## Completed This Session
-- Orchestrated and delivered `v0.1.7` layer artifacts:
-  - `docs/architecture/v1.0/v0.2/v0.1.7/plan.md`
-  - `docs/architecture/v1.0/v0.2/v0.1.7/implementation_notes.md`
-  - `docs/architecture/v1.0/v0.2/v0.1.7/verification_report.md`
-- Implemented Python predictor bridge:
-  - added native binding function `predictor_predict_batch` in `bindings/python/src/lib.rs`.
-  - added Python API bridge `GBMRegressor.predict_from_artifact(...)` in `bindings/python/alloygbm/regressor.py`.
-  - added Python wrapper contract tests in `bindings/python/tests/test_regressor_contract.py`.
-- Updated state index to advance active/suggested target to `v0.1.8`.
-- Closed test gap for criterion 2 with explicit binding-layer parity test:
-  - added `binding_bridge_predictions_match_engine_predictions` in `bindings/python/src/lib.rs` (currently uncommitted).
-  - updated `docs/architecture/v1.0/v0.2/v0.1.7/verification_report.md` to remove inferred evidence (currently uncommitted).
+## Completed
+- Closed parent `v0.4` artifacts and committed them:
+  - `docs/architecture/v1.0/v0.4/implementation_notes.md`
+  - `docs/architecture/v1.0/v0.4/verification_report.md`
+  - commit: `44f5405 chore(v0.4): close parent layer verification artifacts`
+- Created next-layer planning structure:
+  - `docs/architecture/v1.0/v0.5/plan.md`
+  - `docs/architecture/v1.0/v0.5/v0.4.1/plan.md`
+- Hardened both plans for decision completeness:
+  - explicit acceptance criteria,
+  - benchmark command/evidence defaults,
+  - tighter scope boundaries and criterion-to-command mapping.
+- Updated `docs/architecture/state/layer_index.yaml`:
+  - added `docs/architecture/v1.0/v0.5` and `docs/architecture/v1.0/v0.5/v0.4.1` as `planned-only`,
+  - set `active_target` and `suggested_next_layer` to `docs/architecture/v1.0/v0.5/v0.4.1`.
 
 ## Validation Evidence
-- Command: `cargo fmt -- --check`
-- Result: PASS
-- Command: `cargo clippy --workspace --all-targets -- -D warnings`
-- Result: PASS
-- Command: `cargo test --workspace`
-- Result: PASS (includes `_alloygbm` test `binding_bridge_predictions_match_engine_predictions`)
-- Command: `cargo doc --workspace --no-deps`
-- Result: PASS
-- Command: `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'`
-- Result: PASS (`Ran 10 tests`, `OK`)
+- Parent `v0.4` verification commands were executed and recorded as PASS in `docs/architecture/v1.0/v0.4/verification_report.md`:
+  - `cargo fmt -- --check`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo test --workspace`
+  - `cargo doc --workspace --no-deps`
+  - `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'` (`Ran 52 tests`, `OK`)
+- Planning hardening pass (`v0.5` / `v0.4.1`) changed docs only; no new build/test commands were run in that pass.
 
-## Exact Unfinished Tasks
-1. Commit the post-`3ac5d25` test-gap-closer changes:
-   - `bindings/python/Cargo.toml`
-   - `bindings/python/src/lib.rs`
-   - `docs/architecture/v1.0/v0.2/v0.1.7/verification_report.md`
-2. Keep unrelated dirty files out of that commit:
-   - `crates/engine/src/lib.rs`
-   - `docs/architecture/context/session_brief.md`
-   - `docs/architecture/v1.0/v0.2/v0.1.2/verification_report.md`
-   - `docs/architecture/v1.0/v0.2/v0.1.5/verification_report.md`
-3. Start `v0.1.8` orchestration (plan -> implementation -> verification) after the above commit is cleanly landed.
+## Open Work
+1. Implement `docs/architecture/v1.0/v0.5/v0.4.1/plan.md`.
+2. Add backend benchmark harness:
+   - create `crates/backend_cpu/benches/histogram_kernels.rs`,
+   - ensure `cargo bench -p alloygbm-backend-cpu --bench histogram_kernels` runs.
+3. Apply first low-risk optimization in `CpuBackend::build_histograms(...)`.
+4. Add/extend backend parity tests for histogram aggregates and split behavior.
+5. Run verification gates plus benchmark baseline/post-change comparison.
+6. Write:
+   - `docs/architecture/v1.0/v0.5/v0.4.1/implementation_notes.md`
+   - `docs/architecture/v1.0/v0.5/v0.4.1/verification_report.md`
+7. Refresh `docs/architecture/state/layer_index.yaml` after `v0.4.1` verification.
 
 ## Blockers
-- No hard runtime blocker.
-- Process-level pending parent rollups remain:
-  - `docs/architecture/v1.0/v0.2/implementation_notes.md`
-  - `docs/architecture/v1.0/v0.2/verification_report.md`
-  - `docs/architecture/v1.0/implementation_notes.md`
-  - `docs/architecture/v1.0/verification_report.md`
+- No hard blocker for starting `v0.4.1`.
+- Constraint: preserve deterministic correctness parity while introducing performance-focused backend changes.
 
 ## Next Command
-`cd /Users/lashby/Projects/AlloyGBM && git add bindings/python/Cargo.toml bindings/python/src/lib.rs docs/architecture/v1.0/v0.2/v0.1.7/verification_report.md && git commit -m "test(v0.1.7): add binding bridge parity evidence"`
+`cd /Users/lashby/Projects/AlloyGBM && rg -n "fn build_histograms|fn best_split|fn apply_split" crates/backend_cpu/src/lib.rs`
 
 Expected outcome:
-- creates one scoped commit containing only the `v0.1.7` test-gap closure files, preserving unrelated in-progress modifications.
+- prints exact hot-path function locations to start `v0.4.1` benchmark + optimization edits in the scoped backend surface.
 
 ## First Files to Open Next
+- `docs/architecture/v1.0/v0.5/v0.4.1/plan.md`
+- `docs/architecture/v1.0/v0.5/plan.md`
+- `crates/backend_cpu/src/lib.rs`
+- `crates/backend_cpu/Cargo.toml`
 - `docs/architecture/state/layer_index.yaml`
-- `docs/architecture/v1.0/v0.2/v0.1.7/verification_report.md`
-- `docs/architecture/v1.0/v0.2/plan.md`
-- `bindings/python/src/lib.rs`
-- `docs/architecture/v1.0/v0.2/v0.1.7/implementation_notes.md`
 
 ## Known Risks and Gotchas
-- `v0.1.7` implementation notes currently mention no in-crate binding tests, but `binding_bridge_predictions_match_engine_predictions` now exists; reconcile this in a follow-up docs sync if strict artifact consistency is required.
-- Do not accidentally stage pre-existing unrelated dirty files when making the test-gap commit.
-- `v0.2` remains parent-level `planned-only` until parent rollup artifacts are created.
+- Keep `v0.4.1` scalar-only; SIMD dispatch is deferred to later `v0.4.x` slices.
+- Do not alter Python/regressor public API in `v0.4.1`.
+- Benchmark evidence must include baseline and post-change results from the same runner/environment.
+- Working tree is intentionally dirty with planning/context/state edits pending commit.
