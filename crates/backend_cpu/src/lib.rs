@@ -11,6 +11,90 @@ impl CpuBackend {
     pub fn device(&self) -> Device {
         Device::Cpu
     }
+
+    fn build_tile_histograms_per_feature(
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: &NodeSlice,
+        start_feature: usize,
+        end_feature: usize,
+        bin_count: usize,
+        feature_histograms: &mut Vec<FeatureHistogram>,
+    ) {
+        for feature_index in start_feature..end_feature {
+            let mut bins = vec![
+                HistogramBin {
+                    grad_sum: 0.0,
+                    hess_sum: 0.0,
+                    count: 0,
+                };
+                bin_count
+            ];
+
+            for &row_index in &node.row_indices {
+                let row_index = row_index as usize;
+                let cell_index = row_index * binned_matrix.feature_count + feature_index;
+                let bin_index = binned_matrix.bins[cell_index] as usize;
+                let gradient = gradients[row_index];
+                let target_bin = &mut bins[bin_index];
+                target_bin.grad_sum += gradient.grad;
+                target_bin.hess_sum += gradient.hess;
+                target_bin.count += 1;
+            }
+
+            feature_histograms.push(FeatureHistogram {
+                feature_index: feature_index as u32,
+                bins,
+            });
+        }
+    }
+
+    fn build_tile_histograms_row_first(
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: &NodeSlice,
+        start_feature: usize,
+        end_feature: usize,
+        bin_count: usize,
+        feature_histograms: &mut Vec<FeatureHistogram>,
+    ) {
+        let tile_feature_count = end_feature - start_feature;
+        let flat_len = tile_feature_count * bin_count;
+        let mut grad_sums = vec![0.0_f32; flat_len];
+        let mut hess_sums = vec![0.0_f32; flat_len];
+        let mut counts = vec![0_u32; flat_len];
+
+        for &row_index in &node.row_indices {
+            let row_index = row_index as usize;
+            let row_base = row_index * binned_matrix.feature_count + start_feature;
+            let gradient = gradients[row_index];
+            for local_feature_index in 0..tile_feature_count {
+                let bin_index = binned_matrix.bins[row_base + local_feature_index] as usize;
+                let flat_index = local_feature_index * bin_count + bin_index;
+                grad_sums[flat_index] += gradient.grad;
+                hess_sums[flat_index] += gradient.hess;
+                counts[flat_index] += 1;
+            }
+        }
+
+        for local_feature_index in 0..tile_feature_count {
+            let base = local_feature_index * bin_count;
+            let mut bins = Vec::with_capacity(bin_count);
+            for bin_index in 0..bin_count {
+                let flat_index = base + bin_index;
+                bins.push(HistogramBin {
+                    grad_sum: grad_sums[flat_index],
+                    hess_sum: hess_sums[flat_index],
+                    count: counts[flat_index],
+                });
+            }
+
+            feature_histograms.push(FeatureHistogram {
+                feature_index: (start_feature + local_feature_index) as u32,
+                bins,
+            });
+        }
+    }
 }
 
 impl BackendOps for CpuBackend {
@@ -42,6 +126,7 @@ impl BackendOps for CpuBackend {
             .map(|tile| (tile.end_feature - tile.start_feature) as usize)
             .sum();
         let mut feature_histograms = Vec::with_capacity(selected_feature_count);
+        const SMALL_TILE_WORKLOAD_THRESHOLD: usize = 16_384;
 
         for tile in feature_tiles {
             if tile.end_feature as usize > feature_count {
@@ -54,40 +139,28 @@ impl BackendOps for CpuBackend {
             let start_feature = tile.start_feature as usize;
             let end_feature = tile.end_feature as usize;
             let tile_feature_count = end_feature - start_feature;
-            let flat_len = tile_feature_count * bin_count;
-            let mut grad_sums = vec![0.0_f32; flat_len];
-            let mut hess_sums = vec![0.0_f32; flat_len];
-            let mut counts = vec![0_u32; flat_len];
+            let tile_workload = node.row_indices.len().saturating_mul(tile_feature_count);
 
-            for &row_index in &node.row_indices {
-                let row_index = row_index as usize;
-                let row_base = row_index * feature_count + start_feature;
-                let gradient = gradients[row_index];
-                for local_feature_index in 0..tile_feature_count {
-                    let bin_index = binned_matrix.bins[row_base + local_feature_index] as usize;
-                    let flat_index = local_feature_index * bin_count + bin_index;
-                    grad_sums[flat_index] += gradient.grad;
-                    hess_sums[flat_index] += gradient.hess;
-                    counts[flat_index] += 1;
-                }
-            }
-
-            for local_feature_index in 0..tile_feature_count {
-                let base = local_feature_index * bin_count;
-                let mut bins = Vec::with_capacity(bin_count);
-                for bin_index in 0..bin_count {
-                    let flat_index = base + bin_index;
-                    bins.push(HistogramBin {
-                        grad_sum: grad_sums[flat_index],
-                        hess_sum: hess_sums[flat_index],
-                        count: counts[flat_index],
-                    });
-                }
-
-                feature_histograms.push(FeatureHistogram {
-                    feature_index: (start_feature + local_feature_index) as u32,
-                    bins,
-                });
+            if tile_workload <= SMALL_TILE_WORKLOAD_THRESHOLD {
+                Self::build_tile_histograms_per_feature(
+                    binned_matrix,
+                    gradients,
+                    node,
+                    start_feature,
+                    end_feature,
+                    bin_count,
+                    &mut feature_histograms,
+                );
+            } else {
+                Self::build_tile_histograms_row_first(
+                    binned_matrix,
+                    gradients,
+                    node,
+                    start_feature,
+                    end_feature,
+                    bin_count,
+                    &mut feature_histograms,
+                );
             }
         }
 
@@ -415,6 +488,38 @@ mod tests {
                 .best_split(&split_tiles)
                 .expect("split-tile split should succeed")
         );
+    }
+
+    #[test]
+    fn histogram_tile_strategies_are_equivalent() {
+        let matrix = sample_binned_matrix();
+        let gradients = sample_gradients();
+        let node = sample_node();
+        let bin_count = matrix.max_bin as usize + 1;
+
+        let mut per_feature = Vec::new();
+        CpuBackend::build_tile_histograms_per_feature(
+            &matrix,
+            &gradients,
+            &node,
+            0,
+            2,
+            bin_count,
+            &mut per_feature,
+        );
+
+        let mut row_first = Vec::new();
+        CpuBackend::build_tile_histograms_row_first(
+            &matrix,
+            &gradients,
+            &node,
+            0,
+            2,
+            bin_count,
+            &mut row_first,
+        );
+
+        assert_eq!(per_feature, row_first);
     }
 
     #[test]
