@@ -35,39 +35,57 @@ impl BackendOps for CpuBackend {
         }
         node.validate_bounds(binned_matrix.row_count)?;
 
-        let mut feature_histograms = Vec::new();
+        let feature_count = binned_matrix.feature_count;
+        let bin_count = binned_matrix.max_bin as usize + 1;
+        let selected_feature_count = feature_tiles
+            .iter()
+            .map(|tile| (tile.end_feature - tile.start_feature) as usize)
+            .sum();
+        let mut feature_histograms = Vec::with_capacity(selected_feature_count);
+
         for tile in feature_tiles {
-            if tile.end_feature as usize > binned_matrix.feature_count {
+            if tile.end_feature as usize > feature_count {
                 return Err(EngineError::ContractViolation(format!(
                     "feature tile end {} exceeds feature_count {}",
-                    tile.end_feature, binned_matrix.feature_count
+                    tile.end_feature, feature_count
                 )));
             }
 
-            for feature_index in tile.start_feature..tile.end_feature {
-                let mut bins = vec![
-                    HistogramBin {
-                        grad_sum: 0.0,
-                        hess_sum: 0.0,
-                        count: 0,
-                    };
-                    binned_matrix.max_bin as usize + 1
-                ];
+            let start_feature = tile.start_feature as usize;
+            let end_feature = tile.end_feature as usize;
+            let tile_feature_count = end_feature - start_feature;
+            let flat_len = tile_feature_count * bin_count;
+            let mut grad_sums = vec![0.0_f32; flat_len];
+            let mut hess_sums = vec![0.0_f32; flat_len];
+            let mut counts = vec![0_u32; flat_len];
 
-                for &row_index in &node.row_indices {
-                    let row_index = row_index as usize;
-                    let cell_index =
-                        row_index * binned_matrix.feature_count + feature_index as usize;
-                    let bin_index = binned_matrix.bins[cell_index] as usize;
-                    let gradient = gradients[row_index];
-                    let target_bin = &mut bins[bin_index];
-                    target_bin.grad_sum += gradient.grad;
-                    target_bin.hess_sum += gradient.hess;
-                    target_bin.count += 1;
+            for &row_index in &node.row_indices {
+                let row_index = row_index as usize;
+                let row_base = row_index * feature_count + start_feature;
+                let gradient = gradients[row_index];
+                for local_feature_index in 0..tile_feature_count {
+                    let bin_index = binned_matrix.bins[row_base + local_feature_index] as usize;
+                    let flat_index = local_feature_index * bin_count + bin_index;
+                    grad_sums[flat_index] += gradient.grad;
+                    hess_sums[flat_index] += gradient.hess;
+                    counts[flat_index] += 1;
+                }
+            }
+
+            for local_feature_index in 0..tile_feature_count {
+                let base = local_feature_index * bin_count;
+                let mut bins = Vec::with_capacity(bin_count);
+                for bin_index in 0..bin_count {
+                    let flat_index = base + bin_index;
+                    bins.push(HistogramBin {
+                        grad_sum: grad_sums[flat_index],
+                        hess_sum: hess_sums[flat_index],
+                        count: counts[flat_index],
+                    });
                 }
 
                 feature_histograms.push(FeatureHistogram {
-                    feature_index,
+                    feature_index: (start_feature + local_feature_index) as u32,
                     bins,
                 });
             }
@@ -359,6 +377,44 @@ mod tests {
         assert_eq!(feature0.bins[3].count, 1);
         assert!((feature0.bins[0].grad_sum - 2.0).abs() < 1e-6);
         assert!((feature0.bins[3].grad_sum + 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn build_histograms_is_tile_partition_invariant() {
+        let backend = CpuBackend;
+        let matrix = sample_binned_matrix();
+        let gradients = sample_gradients();
+        let node = sample_node();
+
+        let single_tile = backend
+            .build_histograms(
+                &matrix,
+                &gradients,
+                &node,
+                &[FeatureTile::new(0, 2).expect("feature tile is valid")],
+            )
+            .expect("single-tile histograms should build");
+        let split_tiles = backend
+            .build_histograms(
+                &matrix,
+                &gradients,
+                &node,
+                &[
+                    FeatureTile::new(0, 1).expect("feature tile is valid"),
+                    FeatureTile::new(1, 2).expect("feature tile is valid"),
+                ],
+            )
+            .expect("split-tile histograms should build");
+
+        assert_eq!(single_tile, split_tiles);
+        assert_eq!(
+            backend
+                .best_split(&single_tile)
+                .expect("single-tile split should succeed"),
+            backend
+                .best_split(&split_tiles)
+                .expect("split-tile split should succeed")
+        );
     }
 
     #[test]
