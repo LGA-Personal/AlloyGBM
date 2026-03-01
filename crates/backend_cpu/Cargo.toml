@@ -9,5 +9,9 @@ rust-version.workspace = true
 alloygbm-core = { path = "../core" }
 alloygbm-engine = { path = "../engine" }
 
+[[bench]]
+name = "histogram_kernels"
+harness = false
+
 [lints]
 workspace = true
