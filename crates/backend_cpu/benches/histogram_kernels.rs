@@ -140,6 +140,28 @@ fn build_histograms_baseline_reference(
 fn main() {
     let backend = CpuBackend;
 
+    let tiny_fixture = build_fixture(256, 8, 31, 4);
+    run_case("histogram_build_tiny_baseline_ref", 10, 220, || {
+        let histograms = build_histograms_baseline_reference(
+            &tiny_fixture.binned_matrix,
+            &tiny_fixture.gradients,
+            &tiny_fixture.node,
+            &tiny_fixture.feature_tiles,
+        );
+        black_box(histograms);
+    });
+    run_case("histogram_build_tiny_backend", 10, 220, || {
+        let histograms = backend
+            .build_histograms(
+                &tiny_fixture.binned_matrix,
+                &tiny_fixture.gradients,
+                &tiny_fixture.node,
+                &tiny_fixture.feature_tiles,
+            )
+            .expect("histogram benchmark should succeed");
+        black_box(histograms);
+    });
+
     let small_fixture = build_fixture(1_024, 16, 63, 4);
     run_case("histogram_build_small_baseline_ref", 8, 140, || {
         let histograms = build_histograms_baseline_reference(
@@ -184,17 +206,31 @@ fn main() {
         black_box(histograms);
     });
 
-    let split_histograms = backend
+    let split_histograms_small = backend
+        .build_histograms(
+            &small_fixture.binned_matrix,
+            &small_fixture.gradients,
+            &small_fixture.node,
+            &small_fixture.feature_tiles,
+        )
+        .expect("small split benchmark histogram precompute should succeed");
+    let split_histograms_medium = backend
         .build_histograms(
             &medium_fixture.binned_matrix,
             &medium_fixture.gradients,
             &medium_fixture.node,
             &medium_fixture.feature_tiles,
         )
-        .expect("split benchmark histogram precompute should succeed");
+        .expect("medium split benchmark histogram precompute should succeed");
+    run_case("best_split_small", 12, 500, || {
+        let split = backend
+            .best_split(&split_histograms_small)
+            .expect("best split benchmark should succeed");
+        black_box(split);
+    });
     run_case("best_split_medium", 12, 500, || {
         let split = backend
-            .best_split(&split_histograms)
+            .best_split(&split_histograms_medium)
             .expect("best split benchmark should succeed");
         black_box(split);
     });
