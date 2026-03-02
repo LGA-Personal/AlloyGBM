@@ -10,6 +10,7 @@ use std::fmt::{Display, Formatter};
 
 const TREE_NODE_STRIDE: u32 = 1 << 20;
 const ADDITIVITY_TOLERANCE: f32 = 1e-5;
+const MAX_EXACT_SPLIT_FEATURES: usize = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShapError {
@@ -40,6 +41,14 @@ pub struct ShapExplanationBatch {
 struct ArtifactShapContext {
     feature_names: Vec<String>,
     model: TrainedModel,
+}
+
+#[derive(Debug)]
+struct ModelStructure<'a> {
+    tree_root_ids: Vec<u32>,
+    nodes_by_tree_local_id: HashMap<u64, &'a TrainedStump>,
+    split_features: Vec<usize>,
+    split_feature_bit_positions: Vec<Option<u8>>,
 }
 
 pub fn explain_rows_from_artifact_bytes(
@@ -186,53 +195,284 @@ fn explain_rows_from_model(
 ) -> ShapResult<ShapExplanationBatch> {
     validate_rows(rows, model.feature_count)?;
 
-    let stumps_by_node = model
-        .stumps
-        .iter()
-        .map(|stump| (stump.split.node_id, stump))
-        .collect::<HashMap<_, _>>();
+    let model_structure = build_model_structure(model)?;
+    let expected_value =
+        expected_prediction_for_subset(model, rows[0].as_slice(), 0, &model_structure)?;
 
     let mut row_contributions = Vec::with_capacity(rows.len());
     for (row_index, row) in rows.iter().enumerate() {
-        let mut contributions = vec![0.0_f32; model.feature_count];
-        for stump in &model.stumps {
-            if !row_satisfies_stump_path_features(row, stump, &stumps_by_node)? {
-                continue;
-            }
+        let values_by_subset = compute_subset_expectations(model, row, &model_structure)?;
+        let row_expected_value = values_by_subset[0];
 
-            let feature_index = stump.split.feature_index as usize;
-            if feature_index >= model.feature_count {
-                return Err(ShapError::ContractViolation(format!(
-                    "stump feature_index {} exceeds model feature_count {}",
-                    stump.split.feature_index, model.feature_count
-                )));
-            }
-            let threshold = stump.split.threshold_bin as f32;
-            let contribution = if row[feature_index] <= threshold {
-                stump.left_leaf_value
-            } else {
-                stump.right_leaf_value
-            };
-            contributions[feature_index] += contribution;
-        }
-
-        let predicted = model
-            .predict_row(row)
-            .map_err(|error| ShapError::ContractViolation(error.to_string()))?;
-        let reconstructed = model.baseline_prediction + contributions.iter().sum::<f32>();
-        if (predicted - reconstructed).abs() > ADDITIVITY_TOLERANCE {
+        if (row_expected_value - expected_value).abs() > ADDITIVITY_TOLERANCE {
             return Err(ShapError::ContractViolation(format!(
-                "row {row_index} additivity check failed: predicted={predicted}, reconstructed={reconstructed}, tolerance={ADDITIVITY_TOLERANCE}"
+                "row {row_index} expected value drift: {row_expected_value} vs baseline {expected_value}"
             )));
         }
 
+        let contributions = shapley_values_for_row(
+            model,
+            row,
+            &values_by_subset,
+            &model_structure,
+            row_index,
+            expected_value,
+        )?;
         row_contributions.push(contributions);
     }
 
     Ok(ShapExplanationBatch {
-        expected_value: model.baseline_prediction,
+        expected_value,
         values: row_contributions,
     })
+}
+
+fn build_model_structure(model: &TrainedModel) -> ShapResult<ModelStructure<'_>> {
+    let mut nodes_by_tree_local_id = HashMap::new();
+    let mut tree_root_ids = Vec::new();
+    let mut split_features = Vec::new();
+
+    for stump in &model.stumps {
+        let (tree_id, local_node_id) = decode_tree_node_id(stump.split.node_id);
+        let node_key = tree_local_key(tree_id, local_node_id);
+        nodes_by_tree_local_id.insert(node_key, stump);
+        if local_node_id == 0 {
+            tree_root_ids.push(tree_id);
+        }
+
+        let feature_index = stump.split.feature_index as usize;
+        if feature_index >= model.feature_count {
+            return Err(ShapError::ContractViolation(format!(
+                "stump feature_index {} exceeds model feature_count {}",
+                stump.split.feature_index, model.feature_count
+            )));
+        }
+        split_features.push(feature_index);
+    }
+
+    tree_root_ids.sort_unstable();
+    tree_root_ids.dedup();
+    split_features.sort_unstable();
+    split_features.dedup();
+
+    if split_features.len() > MAX_EXACT_SPLIT_FEATURES {
+        return Err(ShapError::ContractViolation(format!(
+            "exact SHAP supports at most {MAX_EXACT_SPLIT_FEATURES} distinct split features per model (found {})",
+            split_features.len()
+        )));
+    }
+
+    let mut split_feature_bit_positions = vec![None; model.feature_count];
+    for (bit_position, feature_index) in split_features.iter().enumerate() {
+        split_feature_bit_positions[*feature_index] = Some(bit_position as u8);
+    }
+
+    Ok(ModelStructure {
+        tree_root_ids,
+        nodes_by_tree_local_id,
+        split_features,
+        split_feature_bit_positions,
+    })
+}
+
+fn compute_subset_expectations(
+    model: &TrainedModel,
+    row: &[f32],
+    model_structure: &ModelStructure<'_>,
+) -> ShapResult<Vec<f32>> {
+    let split_feature_count = model_structure.split_features.len();
+    let subset_count = 1_usize
+        .checked_shl(split_feature_count as u32)
+        .ok_or_else(|| ShapError::ContractViolation("subset count overflow".to_string()))?;
+
+    let mut values_by_subset = Vec::with_capacity(subset_count);
+    for subset_mask in 0..subset_count {
+        let value =
+            expected_prediction_for_subset(model, row, subset_mask as u64, model_structure)?;
+        values_by_subset.push(value);
+    }
+    Ok(values_by_subset)
+}
+
+fn expected_prediction_for_subset(
+    model: &TrainedModel,
+    row: &[f32],
+    subset_mask: u64,
+    model_structure: &ModelStructure<'_>,
+) -> ShapResult<f32> {
+    let mut prediction = model.baseline_prediction;
+    for tree_id in &model_structure.tree_root_ids {
+        prediction += expected_subtree(*tree_id, 0, row, subset_mask, model_structure)?;
+    }
+    Ok(prediction)
+}
+
+fn expected_subtree(
+    tree_id: u32,
+    local_node_id: u32,
+    row: &[f32],
+    subset_mask: u64,
+    model_structure: &ModelStructure<'_>,
+) -> ShapResult<f32> {
+    let node_key = tree_local_key(tree_id, local_node_id);
+    let Some(stump) = model_structure.nodes_by_tree_local_id.get(&node_key) else {
+        return Ok(0.0);
+    };
+
+    let split_feature_index = stump.split.feature_index as usize;
+    if split_feature_index >= row.len() {
+        return Err(ShapError::ContractViolation(format!(
+            "split feature_index {} exceeds row feature length {}",
+            stump.split.feature_index,
+            row.len()
+        )));
+    }
+
+    let threshold = stump.split.threshold_bin as f32;
+    let left_child_local = left_child_local_id(local_node_id)?;
+    let right_child_local = right_child_local_id(local_node_id)?;
+
+    if let Some(bit_position) = model_structure.split_feature_bit_positions[split_feature_index] {
+        let is_known = (subset_mask & (1_u64 << bit_position)) != 0;
+        if is_known {
+            let goes_left = row[split_feature_index] <= threshold;
+            if goes_left {
+                return Ok(stump.left_leaf_value
+                    + expected_subtree(
+                        tree_id,
+                        left_child_local,
+                        row,
+                        subset_mask,
+                        model_structure,
+                    )?);
+            }
+            return Ok(stump.right_leaf_value
+                + expected_subtree(
+                    tree_id,
+                    right_child_local,
+                    row,
+                    subset_mask,
+                    model_structure,
+                )?);
+        }
+    }
+
+    let left_count = stump.split.left_stats.row_count as f32;
+    let right_count = stump.split.right_stats.row_count as f32;
+    let total_count = left_count + right_count;
+    let left_probability = if total_count > 0.0 {
+        left_count / total_count
+    } else {
+        0.5
+    };
+    let right_probability = 1.0 - left_probability;
+
+    let left_expected = stump.left_leaf_value
+        + expected_subtree(tree_id, left_child_local, row, subset_mask, model_structure)?;
+    let right_expected = stump.right_leaf_value
+        + expected_subtree(
+            tree_id,
+            right_child_local,
+            row,
+            subset_mask,
+            model_structure,
+        )?;
+
+    Ok(left_probability * left_expected + right_probability * right_expected)
+}
+
+fn shapley_values_for_row(
+    model: &TrainedModel,
+    row: &[f32],
+    values_by_subset: &[f32],
+    model_structure: &ModelStructure<'_>,
+    row_index: usize,
+    expected_value: f32,
+) -> ShapResult<Vec<f32>> {
+    let split_feature_count = model_structure.split_features.len();
+    let subset_count = values_by_subset.len();
+
+    let mut contributions = vec![0.0_f32; model.feature_count];
+    if split_feature_count == 0 {
+        verify_additivity(model, row, &contributions, row_index, expected_value)?;
+        return Ok(contributions);
+    }
+
+    let factorials = factorial_table(split_feature_count);
+    let total_factorial = factorials[split_feature_count];
+
+    for (feature_bit_position, &feature_index) in model_structure.split_features.iter().enumerate()
+    {
+        let feature_bit = 1_u64 << feature_bit_position;
+        let mut phi = 0.0_f64;
+
+        for subset_mask in 0..subset_count {
+            let subset_mask_u64 = subset_mask as u64;
+            if (subset_mask_u64 & feature_bit) != 0 {
+                continue;
+            }
+
+            let with_feature_mask = subset_mask_u64 | feature_bit;
+            let subset_size = subset_mask_u64.count_ones() as usize;
+            let weight = factorials[subset_size]
+                * factorials[split_feature_count - subset_size - 1]
+                / total_factorial;
+
+            let marginal =
+                values_by_subset[with_feature_mask as usize] - values_by_subset[subset_mask];
+            phi += weight * marginal as f64;
+        }
+
+        contributions[feature_index] = phi as f32;
+    }
+
+    verify_additivity(model, row, &contributions, row_index, expected_value)?;
+    Ok(contributions)
+}
+
+fn verify_additivity(
+    model: &TrainedModel,
+    row: &[f32],
+    contributions: &[f32],
+    row_index: usize,
+    expected_value: f32,
+) -> ShapResult<()> {
+    let predicted = model
+        .predict_row(row)
+        .map_err(|error| ShapError::ContractViolation(error.to_string()))?;
+    let reconstructed = expected_value + contributions.iter().sum::<f32>();
+    if (predicted - reconstructed).abs() > ADDITIVITY_TOLERANCE {
+        return Err(ShapError::ContractViolation(format!(
+            "row {row_index} additivity check failed: predicted={predicted}, reconstructed={reconstructed}, tolerance={ADDITIVITY_TOLERANCE}"
+        )));
+    }
+    Ok(())
+}
+
+fn factorial_table(max_value: usize) -> Vec<f64> {
+    let mut factorials = vec![1.0_f64; max_value + 1];
+    for value in 1..=max_value {
+        factorials[value] = factorials[value - 1] * value as f64;
+    }
+    factorials
+}
+
+fn tree_local_key(tree_id: u32, local_node_id: u32) -> u64 {
+    ((tree_id as u64) << 32) | local_node_id as u64
+}
+
+fn left_child_local_id(local_node_id: u32) -> ShapResult<u32> {
+    local_node_id
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| ShapError::ContractViolation("left child node id overflow".to_string()))
+}
+
+fn right_child_local_id(local_node_id: u32) -> ShapResult<u32> {
+    local_node_id
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(2))
+        .ok_or_else(|| ShapError::ContractViolation("right child node id overflow".to_string()))
 }
 
 fn validate_rows(rows: &[Vec<f32>], feature_count: usize) -> ShapResult<()> {
@@ -264,57 +504,8 @@ fn validate_rows(rows: &[Vec<f32>], feature_count: usize) -> ShapResult<()> {
     Ok(())
 }
 
-fn encode_tree_node_id(tree_index: u32, local_node_id: u32) -> ShapResult<u32> {
-    if local_node_id >= TREE_NODE_STRIDE {
-        return Err(ShapError::ContractViolation(format!(
-            "local node_id {local_node_id} exceeds supported tree-node stride {TREE_NODE_STRIDE}"
-        )));
-    }
-
-    tree_index
-        .checked_mul(TREE_NODE_STRIDE)
-        .and_then(|base| base.checked_add(local_node_id))
-        .ok_or_else(|| {
-            ShapError::ContractViolation("encoded tree node id overflowed u32 range".to_string())
-        })
-}
-
 fn decode_tree_node_id(node_id: u32) -> (u32, u32) {
     (node_id / TREE_NODE_STRIDE, node_id % TREE_NODE_STRIDE)
-}
-
-fn row_satisfies_stump_path_features(
-    features: &[f32],
-    stump: &TrainedStump,
-    stumps_by_node: &HashMap<u32, &TrainedStump>,
-) -> ShapResult<bool> {
-    let (tree_id, mut local_node_id) = decode_tree_node_id(stump.split.node_id);
-    while local_node_id > 0 {
-        let parent_local = (local_node_id - 1) / 2;
-        let parent_node_id = encode_tree_node_id(tree_id, parent_local)?;
-        let Some(parent_stump) = stumps_by_node.get(&parent_node_id) else {
-            return Ok(false);
-        };
-
-        let feature_index = parent_stump.split.feature_index as usize;
-        if feature_index >= features.len() {
-            return Err(ShapError::ContractViolation(format!(
-                "split feature_index {} exceeds feature length {}",
-                parent_stump.split.feature_index,
-                features.len()
-            )));
-        }
-
-        let went_left = features[feature_index] <= parent_stump.split.threshold_bin as f32;
-        let expected_left = local_node_id == parent_local * 2 + 1;
-        if went_left != expected_left {
-            return Ok(false);
-        }
-
-        local_node_id = parent_local;
-    }
-
-    Ok(true)
 }
 
 #[cfg(test)]
@@ -326,10 +517,13 @@ mod tests {
     };
     use alloygbm_engine::TrainedModel;
 
-    fn sample_metadata() -> ModelMetadata {
+    fn sample_metadata(feature_names: &[&str]) -> ModelMetadata {
         ModelMetadata {
             format_version: 1,
-            feature_names: vec!["f0".to_string(), "f1".to_string()],
+            feature_names: feature_names
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect(),
             trained_device: Device::Cpu,
         }
     }
@@ -378,6 +572,15 @@ mod tests {
         }
     }
 
+    fn fixture_model_with_unused_feature() -> TrainedModel {
+        TrainedModel {
+            baseline_prediction: 0.5,
+            feature_count: 3,
+            stumps: fixture_model().stumps,
+            categorical_state: None,
+        }
+    }
+
     fn fixture_rows() -> Vec<Vec<f32>> {
         vec![
             vec![0.0, 0.0],
@@ -385,6 +588,13 @@ mod tests {
             vec![3.0, 0.0],
             vec![3.0, 2.0],
         ]
+    }
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() <= ADDITIVITY_TOLERANCE,
+            "expected {expected}, got {actual}"
+        );
     }
 
     #[test]
@@ -427,7 +637,7 @@ mod tests {
             .expect("predictor layout payload exists");
 
         let incompatible_artifact = serialize_model_artifact_v1(
-            &sample_metadata(),
+            &sample_metadata(&["f0", "f1"]),
             &[(ModelSectionKind::PredictorLayout, layout_payload)],
         )
         .expect("artifact serializes");
@@ -437,47 +647,66 @@ mod tests {
     }
 
     #[test]
-    fn explain_rows_from_artifact_has_deterministic_shape_and_additivity() {
+    fn explain_rows_from_artifact_computes_exact_expected_value_and_contributions() {
         let model = fixture_model();
         let artifact = model.to_artifact_bytes().expect("artifact serializes");
         let rows = fixture_rows();
 
         let explanation = explain_rows_from_artifact_bytes(&artifact, &rows).expect("explains");
-        assert_eq!(explanation.expected_value, model.baseline_prediction);
+        assert_close(explanation.expected_value, 2.25);
         assert_eq!(explanation.values.len(), rows.len());
         for row_values in &explanation.values {
             assert_eq!(row_values.len(), model.feature_count);
         }
 
-        let expected_contributions = vec![
-            vec![1.0, 0.1],
-            vec![1.0, 0.2],
-            vec![2.0, 0.3],
-            vec![2.0, 0.4],
+        let expected_values = [
+            vec![-0.6, -0.05],
+            vec![-0.6, 0.05],
+            vec![0.6, -0.05],
+            vec![0.6, 0.05],
         ];
-        assert_eq!(explanation.values, expected_contributions);
+
+        for (actual_row, expected_row) in explanation.values.iter().zip(expected_values.iter()) {
+            for (actual, expected) in actual_row.iter().zip(expected_row.iter()) {
+                assert_close(*actual, *expected);
+            }
+        }
 
         for (row, values) in rows.iter().zip(explanation.values.iter()) {
             let predicted = model.predict_row(row).expect("predicts");
             let reconstructed = explanation.expected_value + values.iter().sum::<f32>();
-            assert!((predicted - reconstructed).abs() <= ADDITIVITY_TOLERANCE);
+            assert_close(reconstructed, predicted);
         }
+    }
+
+    #[test]
+    fn explain_rows_from_artifact_assigns_zero_to_unused_features() {
+        let model = fixture_model_with_unused_feature();
+        let artifact = model.to_artifact_bytes().expect("artifact serializes");
+        let rows = vec![vec![0.0, 0.0, 5.0], vec![3.0, 2.0, 9.0]];
+
+        let explanation = explain_rows_from_artifact_bytes(&artifact, &rows).expect("explains");
+        assert_eq!(explanation.values[0].len(), 3);
+        assert_close(explanation.values[0][2], 0.0);
+        assert_close(explanation.values[1][2], 0.0);
     }
 
     #[test]
     fn global_importance_aggregates_mean_absolute_contribution() {
         let feature_names = vec!["f0".to_string(), "f1".to_string()];
         let shap_values = vec![
-            vec![1.0, 0.1],
-            vec![1.0, 0.2],
-            vec![2.0, 0.3],
-            vec![2.0, 0.4],
+            vec![-0.6, -0.05],
+            vec![-0.6, 0.05],
+            vec![0.6, -0.05],
+            vec![0.6, 0.05],
         ];
 
         let global = global_importance_from_shap_values(&feature_names, &shap_values)
             .expect("global importance computes");
-        assert_eq!(global[0], ("f0".to_string(), 1.5));
-        assert_eq!(global[1], ("f1".to_string(), 0.25));
+        assert_close(global[0].1, 0.6);
+        assert_close(global[1].1, 0.05);
+        assert_eq!(global[0].0, "f0");
+        assert_eq!(global[1].0, "f1");
     }
 
     #[test]
@@ -495,7 +724,7 @@ mod tests {
 
     #[test]
     fn legacy_stub_helpers_return_deterministic_outputs() {
-        let metadata = sample_metadata();
+        let metadata = sample_metadata(&["f0", "f1"]);
         let rows = fixture_rows();
         let shap_values = shap_values_stub(&metadata, &rows).expect("stub values compute");
         assert_eq!(shap_values.len(), rows.len());
