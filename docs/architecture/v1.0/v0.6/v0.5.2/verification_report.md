@@ -71,6 +71,15 @@
   - Command executed in this verification pass -> PASS (`Ran 54 tests`, `OK`).
 - Status: PASS
 
+## Test Gap Mapping
+- Mapping summary:
+  - Criteria (1) to (5) are covered by targeted Rust/Python tests tied to canonical-vs-compatibility routing and strict-vs-legacy behavior.
+  - Criteria (8) to (12) are covered by required verification command runs.
+- Gap result:
+  - No missing-test gaps identified.
+  - No missing-run gaps identified.
+  - No missing-artifact gaps identified.
+
 ## Tests Added or Updated
 - File: [bindings/python/src/lib.rs](/Users/lashby/Projects/AlloyGBM/bindings/python/src/lib.rs)
 - Purpose: verify canonical strict bridge accepts strict artifacts and rejects legacy trees-only artifacts.
@@ -92,6 +101,9 @@
 - Result: PASS
 - Command: `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'`
 - Result: PASS (`Ran 54 tests`, `OK`)
+
+## Residual Uncovered Criteria
+- None.
 
 ## Residual Risks
 - Canonical gating is currently enforced at Python bridge level; future direct predictor-bridge usage outside wrapper could bypass canonical path unless similarly constrained.
