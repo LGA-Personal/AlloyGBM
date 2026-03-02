@@ -2,8 +2,9 @@ use alloygbm_core::{
     BinnedMatrix, CoreError, Device, FeatureTile, GradientPair, HistogramBundle, MODEL_FORMAT_V1,
     ModelArtifactSection, ModelMetadata, ModelSectionKind, NodeSlice, NodeStats, PartitionResult,
     SplitCandidate, TrainParams, TrainingDataset, deserialize_model_artifact_v1,
-    serialize_model_artifact_v1, validate_binned_matrix, validate_train_params,
-    validate_training_dataset,
+    format_required_section_auto_mode_error, format_required_section_mode_error,
+    required_section_compatibility_report, serialize_model_artifact_v1, validate_binned_matrix,
+    validate_train_params, validate_training_dataset,
 };
 use std::collections::HashMap;
 use std::error::Error;
@@ -258,6 +259,18 @@ pub struct ArtifactCompatibilityReport {
     pub recommended_mode: Option<ArtifactCompatibilityMode>,
 }
 
+impl ArtifactCompatibilityReport {
+    fn required_section_report(self) -> alloygbm_core::RequiredSectionCompatibilityReport {
+        alloygbm_core::RequiredSectionCompatibilityReport {
+            trees_section_count: self.trees_section_count,
+            predictor_layout_section_count: self.predictor_layout_section_count,
+            strict_compatible: self.strict_compatible,
+            legacy_trees_only_compatible: self.legacy_trees_only_compatible,
+            legacy_compatible: self.legacy_compatible,
+        }
+    }
+}
+
 impl IterationControls {
     pub fn new(
         rounds: usize,
@@ -441,9 +454,8 @@ impl TrainedModel {
     ) -> EngineResult<(Self, ArtifactCompatibilityMode)> {
         let report = Self::artifact_compatibility_report(bytes)?;
         let mode = report.recommended_mode.ok_or_else(|| {
-            EngineError::ContractViolation(format!(
-                "unable to determine artifact compatibility mode (Trees sections: {}, PredictorLayout sections: {})",
-                report.trees_section_count, report.predictor_layout_section_count
+            EngineError::ContractViolation(format_required_section_auto_mode_error(
+                report.required_section_report(),
             ))
         })?;
         let model = Self::from_artifact_bytes_with_mode(bytes, mode)?;
@@ -459,20 +471,22 @@ impl TrainedModel {
 
         match compatibility_mode {
             ArtifactCompatibilityMode::Strict if !compatibility_report.strict_compatible => {
-                return Err(EngineError::ContractViolation(format!(
-                    "strict compatibility mode requires exactly one Trees and one PredictorLayout section (found Trees={}, PredictorLayout={})",
-                    compatibility_report.trees_section_count,
-                    compatibility_report.predictor_layout_section_count
-                )));
+                return Err(EngineError::ContractViolation(
+                    format_required_section_mode_error(
+                        compatibility_report.required_section_report(),
+                        false,
+                    ),
+                ));
             }
             ArtifactCompatibilityMode::AllowLegacyTreesOnly
                 if !compatibility_report.legacy_compatible =>
             {
-                return Err(EngineError::ContractViolation(format!(
-                    "legacy-compatible mode only supports strict dual-section artifacts or legacy Trees-only artifacts (found Trees={}, PredictorLayout={})",
-                    compatibility_report.trees_section_count,
-                    compatibility_report.predictor_layout_section_count
-                )));
+                return Err(EngineError::ContractViolation(
+                    format_required_section_mode_error(
+                        compatibility_report.required_section_report(),
+                        true,
+                    ),
+                ));
             }
             _ => {}
         }
@@ -1498,35 +1512,21 @@ fn optional_single_section(
 fn artifact_compatibility_report_from_sections(
     sections: &[ModelArtifactSection],
 ) -> ArtifactCompatibilityReport {
-    let trees_section_count = sections
-        .iter()
-        .filter(|section| section.descriptor.kind == ModelSectionKind::Trees)
-        .count();
-    let predictor_layout_section_count = sections
-        .iter()
-        .filter(|section| section.descriptor.kind == ModelSectionKind::PredictorLayout)
-        .count();
-
-    let strict_compatible = trees_section_count == 1 && predictor_layout_section_count == 1;
-    let legacy_trees_only_compatible = trees_section_count == 1
-        && predictor_layout_section_count == 0
-        && sections.len() == 1
-        && sections[0].descriptor.kind == ModelSectionKind::Trees;
-    let legacy_compatible = strict_compatible || legacy_trees_only_compatible;
-    let recommended_mode = if strict_compatible {
+    let report = required_section_compatibility_report(sections);
+    let recommended_mode = if report.strict_compatible {
         Some(ArtifactCompatibilityMode::Strict)
-    } else if legacy_trees_only_compatible {
+    } else if report.legacy_trees_only_compatible {
         Some(ArtifactCompatibilityMode::AllowLegacyTreesOnly)
     } else {
         None
     };
 
     ArtifactCompatibilityReport {
-        trees_section_count,
-        predictor_layout_section_count,
-        strict_compatible,
-        legacy_trees_only_compatible,
-        legacy_compatible,
+        trees_section_count: report.trees_section_count,
+        predictor_layout_section_count: report.predictor_layout_section_count,
+        strict_compatible: report.strict_compatible,
+        legacy_trees_only_compatible: report.legacy_trees_only_compatible,
+        legacy_compatible: report.legacy_compatible,
         recommended_mode,
     }
 }
@@ -2747,10 +2747,20 @@ mod tests {
         )
         .expect("artifact serializes");
 
-        assert!(matches!(
-            TrainedModel::from_artifact_bytes_auto(&duplicate_predictor),
-            Err(EngineError::ContractViolation(_))
-        ));
+        let result = TrainedModel::from_artifact_bytes_auto(&duplicate_predictor);
+        match result {
+            Err(EngineError::ContractViolation(message)) => {
+                let report = TrainedModel::artifact_compatibility_report(&duplicate_predictor)
+                    .expect("report should parse");
+                assert_eq!(
+                    message,
+                    alloygbm_core::format_required_section_auto_mode_error(
+                        report.required_section_report()
+                    )
+                );
+            }
+            other => panic!("expected contract violation, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2815,9 +2825,20 @@ mod tests {
         )
         .expect("artifact serializes");
 
-        assert!(matches!(
-            TrainedModel::from_artifact_bytes(&duplicate_predictor),
-            Err(EngineError::ContractViolation(_))
-        ));
+        let result = TrainedModel::from_artifact_bytes(&duplicate_predictor);
+        match result {
+            Err(EngineError::ContractViolation(message)) => {
+                let report = TrainedModel::artifact_compatibility_report(&duplicate_predictor)
+                    .expect("report should parse");
+                assert_eq!(
+                    message,
+                    alloygbm_core::format_required_section_mode_error(
+                        report.required_section_report(),
+                        true
+                    )
+                );
+            }
+            other => panic!("expected contract violation, got {other:?}"),
+        }
     }
 }
