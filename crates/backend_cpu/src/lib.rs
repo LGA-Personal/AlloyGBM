@@ -3,11 +3,13 @@ use alloygbm_core::{
     HistogramBundle, NodeSlice, NodeStats, PartitionResult, SplitCandidate,
 };
 use alloygbm_engine::{BackendOps, EngineError, EngineResult};
+use std::sync::OnceLock;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CpuBackend;
 
 const SMALL_TILE_WORKLOAD_THRESHOLD: usize = 16_384;
+const DISABLE_AVX2_ENV_VAR: &str = "ALLOYGBM_DISABLE_AVX2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HistogramKernelPath {
@@ -21,15 +23,36 @@ impl CpuBackend {
         Device::Cpu
     }
 
+    fn avx2_disabled_by_env() -> bool {
+        static AVX2_DISABLED: OnceLock<bool> = OnceLock::new();
+        *AVX2_DISABLED.get_or_init(|| match std::env::var(DISABLE_AVX2_ENV_VAR) {
+            Ok(value) => {
+                let normalized = value.trim().to_ascii_lowercase();
+                !(normalized.is_empty()
+                    || normalized == "0"
+                    || normalized == "false"
+                    || normalized == "off")
+            }
+            Err(_) => false,
+        })
+    }
+
     fn runtime_avx2_available() -> bool {
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        {
-            std::arch::is_x86_feature_detected!("avx2")
-        }
-        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-        {
-            false
-        }
+        static AVX2_AVAILABLE: OnceLock<bool> = OnceLock::new();
+        *AVX2_AVAILABLE.get_or_init(|| {
+            if Self::avx2_disabled_by_env() {
+                return false;
+            }
+
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            {
+                std::arch::is_x86_feature_detected!("avx2")
+            }
+            #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+            {
+                false
+            }
+        })
     }
 
     fn select_histogram_kernel_path(
@@ -149,8 +172,7 @@ impl CpuBackend {
     }
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    #[target_feature(enable = "avx2")]
-    unsafe fn build_tile_histograms_row_first_avx2(
+    fn build_tile_histograms_row_first_x86(
         binned_matrix: &BinnedMatrix,
         gradients: &[GradientPair],
         node: &NodeSlice,
@@ -335,18 +357,15 @@ impl BackendOps for CpuBackend {
                 }
                 HistogramKernelPath::RowFirstAvx2 => {
                     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-                    unsafe {
-                        // SAFETY: this branch is only selected when runtime AVX2 support is detected.
-                        Self::build_tile_histograms_row_first_avx2(
-                            binned_matrix,
-                            gradients,
-                            node,
-                            start_feature,
-                            end_feature,
-                            bin_count,
-                            &mut feature_histograms,
-                        );
-                    }
+                    Self::build_tile_histograms_row_first_x86(
+                        binned_matrix,
+                        gradients,
+                        node,
+                        start_feature,
+                        end_feature,
+                        bin_count,
+                        &mut feature_histograms,
+                    );
                     #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
                     Self::build_tile_histograms_row_first(
                         binned_matrix,
@@ -741,7 +760,7 @@ mod tests {
 
     #[test]
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    fn avx2_row_first_histograms_match_scalar_when_supported() {
+    fn x86_row_first_histograms_match_scalar_when_avx2_supported() {
         if !CpuBackend::runtime_avx2_available() {
             return;
         }
@@ -769,18 +788,15 @@ mod tests {
         );
 
         let mut avx2 = Vec::new();
-        unsafe {
-            // SAFETY: runtime AVX2 support is checked at the start of the test.
-            CpuBackend::build_tile_histograms_row_first_avx2(
-                &matrix,
-                &gradients,
-                &node,
-                0,
-                matrix.feature_count,
-                bin_count,
-                &mut avx2,
-            );
-        }
+        CpuBackend::build_tile_histograms_row_first_x86(
+            &matrix,
+            &gradients,
+            &node,
+            0,
+            matrix.feature_count,
+            bin_count,
+            &mut avx2,
+        );
 
         assert_eq!(scalar, avx2);
     }
