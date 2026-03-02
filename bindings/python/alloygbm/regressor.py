@@ -15,6 +15,16 @@ def _load_native_predictor_predict_batch():
     return predictor_predict_batch
 
 
+def _load_native_predictor_predict_batch_canonical():
+    try:
+        from alloygbm._alloygbm import predictor_predict_batch_canonical
+    except Exception as exc:  # pragma: no cover - exercised via contract tests.
+        raise RuntimeError(
+            "native canonical predictor binding is unavailable; build/install the alloygbm extension module"
+        ) from exc
+    return predictor_predict_batch_canonical
+
+
 def _load_native_train_regression_artifact():
     try:
         from alloygbm._alloygbm import train_regression_artifact
@@ -214,8 +224,10 @@ class GBMRegressor:
                 f"X feature count {len(rows[0])} does not match fitted feature count "
                 f"{self._n_features_in}"
             )
-        predictor_predict_batch = _load_native_predictor_predict_batch()
-        return list(predictor_predict_batch(self._artifact_bytes, rows))
+        predictor_predict_batch_canonical = (
+            _load_native_predictor_predict_batch_canonical()
+        )
+        return list(predictor_predict_batch_canonical(self._artifact_bytes, rows))
 
     @staticmethod
     def predict_from_artifact(
