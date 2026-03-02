@@ -470,6 +470,28 @@ mod tests {
         (model, dataset)
     }
 
+    fn strict_artifact_payloads() -> (ModelMetadata, Vec<u8>, Vec<u8>) {
+        let (engine_model, _) = train_engine_model();
+        let strict_artifact = engine_model
+            .to_artifact_bytes()
+            .expect("artifact serializes");
+        let parsed = alloygbm_core::deserialize_model_artifact_v1(&strict_artifact)
+            .expect("strict artifact parses");
+        let trees_payload = parsed
+            .sections
+            .iter()
+            .find(|section| section.descriptor.kind == ModelSectionKind::Trees)
+            .map(|section| section.payload.clone())
+            .expect("trees payload exists");
+        let layout_payload = parsed
+            .sections
+            .iter()
+            .find(|section| section.descriptor.kind == ModelSectionKind::PredictorLayout)
+            .map(|section| section.payload.clone())
+            .expect("predictor layout payload exists");
+        (parsed.contract.metadata, trees_payload, layout_payload)
+    }
+
     #[test]
     fn predictor_from_artifact_matches_engine_predictions() {
         let (engine_model, dataset) = train_engine_model();
@@ -524,6 +546,58 @@ mod tests {
         let engine_predictions = engine_model.predict_batch(&rows).expect("engine predicts");
         let predictor_predictions = predictor.predict_batch(&rows).expect("predictor predicts");
         assert_eq!(engine_predictions, predictor_predictions);
+    }
+
+    #[test]
+    fn predictor_rejects_duplicate_required_sections() {
+        let (metadata, trees_payload, layout_payload) = strict_artifact_payloads();
+        let duplicate_layout_artifact = serialize_model_artifact_v1(
+            &metadata,
+            &[
+                (ModelSectionKind::Trees, trees_payload),
+                (ModelSectionKind::PredictorLayout, layout_payload.clone()),
+                (ModelSectionKind::PredictorLayout, layout_payload),
+            ],
+        )
+        .expect("duplicate artifact serializes");
+
+        assert!(matches!(
+            Predictor::from_artifact_bytes(&duplicate_layout_artifact),
+            Err(PredictorError::ContractViolation(_))
+        ));
+    }
+
+    #[test]
+    fn predictor_rejects_non_legacy_missing_predictor_layout_section() {
+        let (metadata, trees_payload, _) = strict_artifact_payloads();
+        let non_legacy_missing_layout = serialize_model_artifact_v1(
+            &metadata,
+            &[
+                (ModelSectionKind::Trees, trees_payload),
+                (ModelSectionKind::ShapAux, vec![9_u8]),
+            ],
+        )
+        .expect("artifact serializes");
+
+        assert!(matches!(
+            Predictor::from_artifact_bytes(&non_legacy_missing_layout),
+            Err(PredictorError::ContractViolation(_))
+        ));
+    }
+
+    #[test]
+    fn predictor_rejects_missing_trees_section() {
+        let (metadata, _, layout_payload) = strict_artifact_payloads();
+        let missing_trees = serialize_model_artifact_v1(
+            &metadata,
+            &[(ModelSectionKind::PredictorLayout, layout_payload)],
+        )
+        .expect("artifact serializes");
+
+        assert!(matches!(
+            Predictor::from_artifact_bytes(&missing_trees),
+            Err(PredictorError::ContractViolation(_))
+        ));
     }
 
     #[test]
