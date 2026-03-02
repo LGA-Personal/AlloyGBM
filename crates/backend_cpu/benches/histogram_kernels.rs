@@ -7,6 +7,8 @@ use alloygbm_engine::BackendOps;
 use std::hint::black_box;
 use std::time::Instant;
 
+const DISABLE_AVX2_ENV_VAR: &str = "ALLOYGBM_DISABLE_AVX2";
+
 struct BenchmarkFixture {
     binned_matrix: BinnedMatrix,
     gradients: Vec<GradientPair>,
@@ -139,6 +141,12 @@ fn build_histograms_baseline_reference(
 
 fn main() {
     let backend = CpuBackend;
+    println!("runtime_target_arch: {}", std::env::consts::ARCH);
+    println!("runtime_avx2_enabled: {}", runtime_avx2_enabled());
+    println!(
+        "runtime_avx2_override: {}",
+        std::env::var(DISABLE_AVX2_ENV_VAR).unwrap_or_else(|_| "unset".to_string())
+    );
 
     let tiny_fixture = build_fixture(256, 8, 31, 4);
     run_case("histogram_build_tiny_baseline_ref", 10, 220, || {
@@ -234,4 +242,32 @@ fn main() {
             .expect("best split benchmark should succeed");
         black_box(split);
     });
+}
+
+fn avx2_disabled_by_env() -> bool {
+    match std::env::var(DISABLE_AVX2_ENV_VAR) {
+        Ok(value) => {
+            let normalized = value.trim().to_ascii_lowercase();
+            !(normalized.is_empty()
+                || normalized == "0"
+                || normalized == "false"
+                || normalized == "off")
+        }
+        Err(_) => false,
+    }
+}
+
+fn runtime_avx2_enabled() -> bool {
+    if avx2_disabled_by_env() {
+        return false;
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        std::arch::is_x86_feature_detected!("avx2")
+    }
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    {
+        false
+    }
 }

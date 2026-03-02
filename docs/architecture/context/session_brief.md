@@ -1,66 +1,58 @@
-# Session Brief (2026-02-27)
+# Session Brief (2026-03-01)
 
 ## Current Target
-- Layer: `docs/architecture/v1.0/v0.5/v0.4.1`
+- Layer: `docs/architecture/v1.0/v0.5` (`planned-only`, `active_target` in `docs/architecture/state/layer_index.yaml` generated `2026-03-01T15:31:56Z`)
 - Reason this is next:
-  - `docs/architecture/state/layer_index.yaml` (`generated_at: 2026-02-27T05:04:30Z`) marks this path as both `active_target` and `suggested_next_layer`.
-  - The target is `planned-only` with missing execution artifacts, making it the latest incomplete child layer.
+  - `v0.5` is the most recent incomplete layer with missing closeout artifacts.
+  - Most recent child slice `v0.4.2` is verified, so next concrete execution is opening `v0.4.3` under `v0.5`.
 
-## Parent Constraints
-- `docs/architecture/README.md`: maintain strict parent-to-child decomposition and do not skip planning levels.
-- `docs/architecture/gpu_financial_gbm_roadmap.md`: keep this phase CPU-first and correctness-first.
-- `docs/architecture/v1.0/plan.md`: `0.5.0` scope is CPU kernel optimization with deterministic behavior preserved.
-- `docs/architecture/v1.0/v0.5/plan.md`: in scope is backend hot-path optimization + benchmark evidence; out of scope is ranking/SHAP/categorical/model-format work.
-- `docs/architecture/v1.0/v0.5/v0.4.1/plan.md`: first slice must establish baseline benchmark harness and one low-risk `build_histograms` optimization pass.
+## Ancestor Chain and Constraints
+- Ancestor chain: `docs/architecture/v1.0` -> `docs/architecture/v1.0/v0.5`
+- `docs/architecture/README.md`: preserve strict parent-to-child decomposition; do not skip levels.
+- `docs/architecture/gpu_financial_gbm_roadmap.md`: remain CPU-first and correctness-first in this phase.
+- `docs/architecture/v1.0/plan.md`: `0.5.0` is CPU-kernel optimization + SIMD readiness with deterministic parity.
+- `docs/architecture/v1.0/v0.5/plan.md`: in scope is backend hot-path optimization, AVX2 runtime dispatch with scalar fallback, and benchmark evidence; out of scope is ranking/SHAP/categorical/model-format work.
 
 ## Progress Snapshot
 - Most recent completed layer(s):
-  - `docs/architecture/v1.0/v0.4` (`verified`)
-  - `docs/architecture/v1.0/v0.4/v0.3.3` (`verified`, latest completed child in the previous parent)
+  - `docs/architecture/v1.0/v0.5/v0.4.2` (`verified`, verification report dated 2026-03-01)
+  - `docs/architecture/v1.0/v0.5/v0.4.1` (`verified`, verification report dated 2026-02-28)
+  - `docs/architecture/v1.0/v0.4` (`verified`, parent prior to current `v0.5` track)
 - In-progress layer:
-  - none recorded; current target remains `planned-only`
+  - none recorded (no `v0.4.3` plan exists yet)
 - Missing artifacts:
   - `docs/architecture/v1.0/v0.5/implementation_notes.md`
   - `docs/architecture/v1.0/v0.5/verification_report.md`
-  - `docs/architecture/v1.0/v0.5/v0.4.1/implementation_notes.md`
-  - `docs/architecture/v1.0/v0.5/v0.4.1/verification_report.md`
 
 ## Repo Execution Context
-- Git branch state: `main...origin/main [ahead 8]`
+- Git branch state: `main...origin/main [ahead 11]`
 - Current changed paths:
   - `docs/architecture/context/handoff.md`
-  - `docs/architecture/context/session_brief.md`
-  - `docs/architecture/state/layer_index.yaml`
-  - `docs/architecture/v1.0/v0.5/` (new layer directory)
 - Key manifests/config:
-  - `Cargo.toml`: workspace includes `core`, `engine`, `backend_cpu`, `predictor`, `shap`, `categorical`, and Python bindings.
-  - `rust-toolchain.toml`: Rust `1.92.0` with `rustfmt` and `clippy`.
-  - `pyproject.toml`: package `alloygbm` built via `maturin`.
-- Latest known gate evidence (`docs/architecture/v1.0/v0.4/verification_report.md`):
-  - `cargo fmt -- --check` PASS
-  - `cargo clippy --workspace --all-targets -- -D warnings` PASS
-  - `cargo test --workspace` PASS
-  - `cargo doc --workspace --no-deps` PASS
-  - `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'` PASS (`Ran 52 tests`, `OK`)
+  - `Cargo.toml`: workspace crates `core`, `engine`, `backend_cpu`, `predictor`, `shap`, `categorical`, `bindings/python`.
+  - `rust-toolchain.toml`: Rust `1.92.0`, components `rustfmt`, `clippy`.
+  - `pyproject.toml`: Python package `alloygbm` via `maturin`.
+- Latest verification evidence:
+  - `docs/architecture/v1.0/v0.5/v0.4.2/verification_report.md` shows PASS for benchmark + fmt + clippy + tests + docs + Python tests.
 
 ## Blockers
-- No hard blocker is recorded for starting `v0.4.1`.
-- Constraint blocker: optimization work must keep deterministic correctness parity.
-- Scope blocker: SIMD rollout is deferred to later `v0.4.x` slices, so `v0.4.1` must remain scalar-first.
+- No hard blocker recorded.
+- Constraint blocker: SIMD work in next slice must preserve deterministic parity and explicit scalar fallback behavior.
+- Process blocker: `v0.5` cannot close until parent rollup artifacts are written after remaining child slices.
 
 ## Immediate Next Actions
-1. Open the active plan and locate backend hot-path functions:
-   - `rg -n "fn build_histograms|fn best_split|fn apply_split" crates/backend_cpu/src/lib.rs`
-2. Add deterministic benchmark harness in `crates/backend_cpu/benches/histogram_kernels.rs` and wire bench target config.
-3. Capture baseline benchmark results (`cargo bench -p alloygbm-backend-cpu --bench histogram_kernels`).
-4. Implement the first low-risk `CpuBackend::build_histograms(...)` optimization and add parity tests.
-5. Re-run full gate commands and benchmark comparison, then write `implementation_notes.md` and `verification_report.md` for `v0.4.1`.
-6. Update `docs/architecture/state/layer_index.yaml` after verification.
+1. Create `docs/architecture/v1.0/v0.5/v0.4.3/plan.md` aligned to AVX2 runtime dispatch + scalar fallback validation.
+2. Implement `v0.4.3` in `crates/backend_cpu/src/lib.rs` with runtime feature detection and parity tests.
+3. Extend/validate benchmarks in `crates/backend_cpu/benches/histogram_kernels.rs` for SIMD vs scalar evidence.
+4. Run verification gates (`cargo fmt`, `cargo clippy`, `cargo test`, `cargo doc`, Python tests, targeted bench) and publish `v0.4.3` artifacts.
+5. Update `docs/architecture/state/layer_index.yaml` after `v0.4.3`, then prepare `v0.5` rollup artifacts when remaining child work is complete.
 
 ## High-Priority Files (Read First)
-- `docs/architecture/v1.0/v0.5/v0.4.1/plan.md`
-- `docs/architecture/v1.0/v0.5/plan.md`
 - `docs/architecture/state/layer_index.yaml`
+- `docs/architecture/v1.0/v0.5/plan.md`
+- `docs/architecture/v1.0/v0.5/v0.4.2/plan.md`
+- `docs/architecture/v1.0/v0.5/v0.4.2/implementation_notes.md`
+- `docs/architecture/v1.0/v0.5/v0.4.2/verification_report.md`
 - `docs/architecture/context/handoff.md`
 - `crates/backend_cpu/src/lib.rs`
-- `crates/backend_cpu/Cargo.toml`
+- `crates/backend_cpu/benches/histogram_kernels.rs`
