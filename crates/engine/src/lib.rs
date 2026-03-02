@@ -1,9 +1,12 @@
+use alloygbm_categorical::{TargetEncoderConfig, fit_transform_target_encoder};
 use alloygbm_core::{
-    BinnedMatrix, CoreError, Device, FeatureTile, GradientPair, HistogramBundle, MODEL_FORMAT_V1,
-    ModelArtifactSection, ModelMetadata, ModelSectionKind, NodeSlice, NodeStats, PartitionResult,
-    SplitCandidate, TrainParams, TrainingDataset, deserialize_model_artifact_v1,
-    format_required_section_auto_mode_error, format_required_section_mode_error,
-    required_section_compatibility_report, serialize_model_artifact_v1, validate_binned_matrix,
+    BinnedMatrix, CategoricalStatePayloadV1, CoreError, DatasetMatrix, Device, FeatureTile,
+    GradientPair, HistogramBundle, MODEL_FORMAT_V1, ModelArtifactSection, ModelMetadata,
+    ModelSectionKind, NodeSlice, NodeStats, PartitionResult, SplitCandidate, TrainParams,
+    TrainingDataset, decode_optional_categorical_state_section_v1, deserialize_model_artifact_v1,
+    encode_categorical_state_payload_v1, format_required_section_auto_mode_error,
+    format_required_section_mode_error, required_section_compatibility_report,
+    serialize_model_artifact_v1, validate_binned_matrix, validate_categorical_state_payload_v1,
     validate_train_params, validate_training_dataset,
 };
 use std::collections::HashMap;
@@ -194,6 +197,14 @@ pub struct TrainedModel {
     pub baseline_prediction: f32,
     pub feature_count: usize,
     pub stumps: Vec<TrainedStump>,
+    pub categorical_state: Option<CategoricalStatePayloadV1>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CategoricalTargetEncodingSpec {
+    pub feature_index: usize,
+    pub values: Vec<String>,
+    pub config: TargetEncoderConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -374,6 +385,17 @@ impl IterationControls {
 }
 
 impl TrainedModel {
+    pub fn with_categorical_state(
+        mut self,
+        categorical_state: Option<CategoricalStatePayloadV1>,
+    ) -> EngineResult<Self> {
+        if let Some(state) = categorical_state.as_ref() {
+            validate_categorical_state_payload_v1(state, Some(self.feature_count))?;
+        }
+        self.categorical_state = categorical_state;
+        Ok(self)
+    }
+
     pub fn predict_row(&self, features: &[f32]) -> EngineResult<f32> {
         if features.len() != self.feature_count {
             return Err(EngineError::ContractViolation(format!(
@@ -426,14 +448,16 @@ impl TrainedModel {
             trained_device: Device::Cpu,
         };
 
-        serialize_model_artifact_v1(
-            &metadata,
-            &[
-                (ModelSectionKind::Trees, trees_payload),
-                (ModelSectionKind::PredictorLayout, predictor_layout_payload),
-            ],
-        )
-        .map_err(EngineError::from)
+        let mut sections = vec![
+            (ModelSectionKind::Trees, trees_payload),
+            (ModelSectionKind::PredictorLayout, predictor_layout_payload),
+        ];
+        if let Some(categorical_state) = self.categorical_state.as_ref() {
+            let categorical_payload = encode_categorical_state_payload_v1(categorical_state)?;
+            sections.push((ModelSectionKind::CategoricalState, categorical_payload));
+        }
+
+        serialize_model_artifact_v1(&metadata, &sections).map_err(EngineError::from)
     }
 
     pub fn from_artifact_bytes(bytes: &[u8]) -> EngineResult<Self> {
@@ -517,6 +541,8 @@ impl TrainedModel {
             )));
         }
 
+        model.categorical_state =
+            decode_optional_categorical_state_section_v1(&parsed.sections, metadata_feature_count)?;
         model.feature_count = metadata_feature_count;
         Ok(model)
     }
@@ -616,6 +642,32 @@ impl Trainer {
     ) -> EngineResult<TrainedModel> {
         let controls = self.default_iteration_controls(rounds)?;
         self.fit_iterations_with_controls(dataset, binned_matrix, backend, objective, controls)
+    }
+
+    pub fn fit_iterations_with_single_target_encoded_feature<B: BackendOps, O: ObjectiveOps>(
+        &self,
+        dataset: &TrainingDataset,
+        binned_matrix: &BinnedMatrix,
+        spec: &CategoricalTargetEncodingSpec,
+        backend: &B,
+        objective: &O,
+        rounds: usize,
+    ) -> EngineResult<TrainedModel> {
+        let (encoded_dataset, encoded_binned_matrix) =
+            apply_single_categorical_target_encoding(dataset, binned_matrix, spec)?;
+        let categorical_state = CategoricalStatePayloadV1 {
+            format_version: alloygbm_core::CATEGORICAL_STATE_FORMAT_V1,
+            leakage_safe_target_encoding: spec.config.time_aware,
+            categorical_feature_indices: vec![spec.feature_index as u32],
+        };
+        let model = self.fit_iterations(
+            &encoded_dataset,
+            &encoded_binned_matrix,
+            backend,
+            objective,
+            rounds,
+        )?;
+        model.with_categorical_state(Some(categorical_state))
     }
 
     pub fn fit_iterations_with_controls<B: BackendOps, O: ObjectiveOps>(
@@ -996,6 +1048,7 @@ impl Trainer {
             baseline_prediction: fit_contract.baseline_prediction,
             feature_count: dataset.matrix.feature_count,
             stumps,
+            categorical_state: None,
         };
         let final_loss = current_loss;
 
@@ -1046,6 +1099,108 @@ fn validate_gradient_pairs(gradients: &[GradientPair], row_count: usize) -> Engi
         }
     }
     Ok(())
+}
+
+fn apply_single_categorical_target_encoding(
+    dataset: &TrainingDataset,
+    binned_matrix: &BinnedMatrix,
+    spec: &CategoricalTargetEncodingSpec,
+) -> EngineResult<(TrainingDataset, BinnedMatrix)> {
+    validate_training_alignment(dataset, binned_matrix)?;
+
+    let row_count = dataset.row_count();
+    let feature_count = dataset.matrix.feature_count;
+    if spec.feature_index >= feature_count {
+        return Err(EngineError::ContractViolation(format!(
+            "categorical feature index {} is out of bounds for feature_count {}",
+            spec.feature_index, feature_count
+        )));
+    }
+    if spec.values.len() != row_count {
+        return Err(EngineError::ContractViolation(format!(
+            "categorical values length {} does not match row_count {}",
+            spec.values.len(),
+            row_count
+        )));
+    }
+
+    let (_, encoded_values) = fit_transform_target_encoder(
+        &spec.config,
+        &spec.values,
+        &dataset.targets,
+        dataset.time_index.as_deref(),
+    )
+    .map_err(|error| EngineError::ContractViolation(error.to_string()))?;
+    let (encoded_bins, encoded_max_bin) = encode_bins_from_encoded_values(&encoded_values)?;
+
+    let mut encoded_dense_values = dataset.matrix.values.clone();
+    for (row_index, &encoded_value) in encoded_values.iter().enumerate() {
+        let offset = row_index * feature_count + spec.feature_index;
+        encoded_dense_values[offset] = encoded_value;
+    }
+
+    let encoded_dataset = TrainingDataset {
+        matrix: DatasetMatrix::new(row_count, feature_count, encoded_dense_values)?,
+        targets: dataset.targets.clone(),
+        sample_weights: dataset.sample_weights.clone(),
+        time_index: dataset.time_index.clone(),
+        group_id: dataset.group_id.clone(),
+    };
+
+    let mut encoded_bins_payload = binned_matrix.bins.clone();
+    for (row_index, &encoded_bin) in encoded_bins.iter().enumerate() {
+        let offset = row_index * feature_count + spec.feature_index;
+        encoded_bins_payload[offset] = encoded_bin;
+    }
+    let encoded_binned_matrix = BinnedMatrix::new(
+        row_count,
+        feature_count,
+        binned_matrix.max_bin.max(encoded_max_bin),
+        encoded_bins_payload,
+    )?;
+
+    Ok((encoded_dataset, encoded_binned_matrix))
+}
+
+fn encode_bins_from_encoded_values(encoded_values: &[f32]) -> EngineResult<(Vec<u16>, u16)> {
+    if encoded_values.is_empty() {
+        return Err(EngineError::ContractViolation(
+            "encoded values cannot be empty".to_string(),
+        ));
+    }
+
+    for (index, value) in encoded_values.iter().enumerate() {
+        if !value.is_finite() {
+            return Err(EngineError::ContractViolation(format!(
+                "encoded value at index {index} must be finite"
+            )));
+        }
+    }
+
+    let mut unique_values = encoded_values.to_vec();
+    unique_values.sort_by(f32::total_cmp);
+    unique_values.dedup_by(|left, right| left.to_bits() == right.to_bits());
+    if unique_values.len() > u16::MAX as usize + 1 {
+        return Err(EngineError::ContractViolation(format!(
+            "encoded cardinality {} exceeds supported max {}",
+            unique_values.len(),
+            u16::MAX as usize + 1
+        )));
+    }
+
+    let mut bins = Vec::with_capacity(encoded_values.len());
+    for value in encoded_values {
+        let position = unique_values
+            .binary_search_by(|probe| probe.total_cmp(value))
+            .map_err(|_| {
+                EngineError::ContractViolation(
+                    "encoded value lookup failed during bin mapping".to_string(),
+                )
+            })?;
+        bins.push(position as u16);
+    }
+    let max_bin = (unique_values.len().saturating_sub(1)) as u16;
+    Ok((bins, max_bin))
 }
 
 fn validate_training_alignment(
@@ -1699,6 +1854,7 @@ fn decode_trained_model_payload(bytes: &[u8]) -> EngineResult<TrainedModel> {
         baseline_prediction,
         feature_count,
         stumps,
+        categorical_state: None,
     })
 }
 
@@ -2436,6 +2592,7 @@ mod tests {
                     right_leaf_value: 20.0,
                 },
             ],
+            categorical_state: None,
         };
 
         let left = model.predict_row(&[0.0]).expect("left prediction succeeds");
@@ -2539,6 +2696,67 @@ mod tests {
         let original_preds = model.predict_batch(&rows).expect("predicts");
         let restored_preds = restored.predict_batch(&rows).expect("predicts");
         assert_eq!(original_preds, restored_preds);
+    }
+
+    #[test]
+    fn trained_model_artifact_roundtrip_preserves_optional_categorical_state() {
+        let model = sample_trained_model()
+            .with_categorical_state(Some(CategoricalStatePayloadV1 {
+                format_version: alloygbm_core::CATEGORICAL_STATE_FORMAT_V1,
+                leakage_safe_target_encoding: true,
+                categorical_feature_indices: vec![1],
+            }))
+            .expect("categorical state is valid");
+        let bytes = model.to_artifact_bytes().expect("artifact serializes");
+        let restored = TrainedModel::from_artifact_bytes(&bytes).expect("artifact parses");
+        let parsed = deserialize_model_artifact_v1(&bytes).expect("artifact decodes");
+
+        assert_eq!(parsed.sections.len(), 3);
+        assert_eq!(
+            parsed.sections[2].descriptor.kind,
+            ModelSectionKind::CategoricalState
+        );
+        assert_eq!(model.categorical_state, restored.categorical_state);
+    }
+
+    #[test]
+    fn fit_iterations_with_single_target_encoded_feature_attaches_categorical_state() {
+        let trainer = Trainer::new(TrainParams::default()).expect("valid params");
+        let spec = CategoricalTargetEncodingSpec {
+            feature_index: 1,
+            values: vec![
+                "A".to_string(),
+                "A".to_string(),
+                "B".to_string(),
+                "B".to_string(),
+            ],
+            config: TargetEncoderConfig {
+                smoothing: 0.0,
+                min_samples_leaf: 1,
+                time_aware: false,
+            },
+        };
+        let model = trainer
+            .fit_iterations_with_single_target_encoded_feature(
+                &sample_dataset(),
+                &sample_binned_matrix(),
+                &spec,
+                &MockBackend,
+                &SquaredErrorObjective,
+                2,
+            )
+            .expect("training succeeds");
+
+        let state = model
+            .categorical_state
+            .as_ref()
+            .expect("categorical state is attached");
+        assert_eq!(
+            state.format_version,
+            alloygbm_core::CATEGORICAL_STATE_FORMAT_V1
+        );
+        assert!(!state.leakage_safe_target_encoding);
+        assert_eq!(state.categorical_feature_indices, vec![1]);
     }
 
     #[test]

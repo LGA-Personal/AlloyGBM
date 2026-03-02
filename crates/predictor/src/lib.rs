@@ -1,7 +1,7 @@
 use alloygbm_core::{
-    CoreError, MODEL_FORMAT_V1, ModelArtifactSection, ModelMetadata, ModelSectionKind,
-    deserialize_model_artifact_v1, format_required_section_mode_error,
-    required_section_compatibility_report,
+    CategoricalStatePayloadV1, CoreError, MODEL_FORMAT_V1, ModelArtifactSection, ModelMetadata,
+    ModelSectionKind, decode_optional_categorical_state_section_v1, deserialize_model_artifact_v1,
+    format_required_section_mode_error, required_section_compatibility_report,
 };
 use std::collections::HashMap;
 use std::error::Error;
@@ -51,6 +51,7 @@ struct PredictorLayoutPayload {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Predictor {
     pub metadata: ModelMetadata,
+    pub categorical_state: Option<CategoricalStatePayloadV1>,
     baseline_prediction: f32,
     stumps: Vec<PredictorStump>,
 }
@@ -59,6 +60,7 @@ impl Predictor {
     pub fn new(metadata: ModelMetadata) -> Self {
         Self {
             metadata,
+            categorical_state: None,
             baseline_prediction: 0.0,
             stumps: Vec::new(),
         }
@@ -76,6 +78,9 @@ impl Predictor {
         let metadata_feature_count = metadata.feature_names.len();
         let trees_section = required_single_section(&parsed.sections, ModelSectionKind::Trees)?;
         let predictor_layout = resolve_predictor_layout(&parsed.sections, metadata_feature_count)?;
+        let categorical_state =
+            decode_optional_categorical_state_section_v1(&parsed.sections, metadata_feature_count)
+                .map_err(PredictorError::from)?;
         let (payload_feature_count, baseline_prediction, stumps) =
             decode_trained_model_payload(&trees_section.payload)?;
 
@@ -100,6 +105,7 @@ impl Predictor {
 
         Ok(Self {
             metadata,
+            categorical_state,
             baseline_prediction,
             stumps,
         })
@@ -387,8 +393,8 @@ mod tests {
     use super::*;
     use alloygbm_backend_cpu::CpuBackend;
     use alloygbm_core::{
-        BinnedMatrix, DatasetMatrix, Device, ModelSectionKind, TrainParams, TrainingDataset,
-        serialize_model_artifact_v1,
+        BinnedMatrix, CATEGORICAL_STATE_FORMAT_V1, CategoricalStatePayloadV1, DatasetMatrix,
+        Device, ModelSectionKind, TrainParams, TrainingDataset, serialize_model_artifact_v1,
     };
     use alloygbm_engine::{SquaredErrorObjective, Trainer};
 
@@ -508,6 +514,28 @@ mod tests {
         let predictor = Predictor::from_artifact_bytes(&artifact).expect("artifact parses");
         let rows = fixture_rows(&dataset);
 
+        let engine_predictions = engine_model.predict_batch(&rows).expect("engine predicts");
+        let predictor_predictions = predictor.predict_batch(&rows).expect("predictor predicts");
+        assert_eq!(engine_predictions, predictor_predictions);
+    }
+
+    #[test]
+    fn predictor_replays_artifact_with_optional_categorical_state() {
+        let (engine_model, dataset) = train_engine_model();
+        let engine_model = engine_model
+            .with_categorical_state(Some(CategoricalStatePayloadV1 {
+                format_version: CATEGORICAL_STATE_FORMAT_V1,
+                leakage_safe_target_encoding: true,
+                categorical_feature_indices: vec![1],
+            }))
+            .expect("categorical state is valid");
+        let artifact = engine_model
+            .to_artifact_bytes()
+            .expect("artifact serializes");
+        let predictor = Predictor::from_artifact_bytes(&artifact).expect("artifact parses");
+        let rows = fixture_rows(&dataset);
+
+        assert!(predictor.categorical_state.is_some());
         let engine_predictions = engine_model.predict_batch(&rows).expect("engine predicts");
         let predictor_predictions = predictor.predict_batch(&rows).expect("predictor predicts");
         assert_eq!(engine_predictions, predictor_predictions);
