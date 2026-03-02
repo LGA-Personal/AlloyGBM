@@ -78,6 +78,12 @@ class GBMRegressorContractTests(unittest.TestCase):
             GBMRegressor(early_stopping_rounds=0)
         with self.assertRaisesRegex(ValueError, "min_validation_improvement"):
             GBMRegressor(min_validation_improvement=-0.1)
+        with self.assertRaisesRegex(ValueError, "categorical_feature_index"):
+            GBMRegressor(categorical_feature_index=-1)
+        with self.assertRaisesRegex(ValueError, "categorical_smoothing"):
+            GBMRegressor(categorical_smoothing=-0.1)
+        with self.assertRaisesRegex(ValueError, "categorical_min_samples_leaf"):
+            GBMRegressor(categorical_min_samples_leaf=0)
 
     def test_get_params_and_set_params_roundtrip(self) -> None:
         model = GBMRegressor()
@@ -91,6 +97,10 @@ class GBMRegressorContractTests(unittest.TestCase):
         self.assertEqual(params["min_validation_improvement"], 0.0)
         self.assertEqual(params["seed"], 0)
         self.assertTrue(params["deterministic"])
+        self.assertIsNone(params["categorical_feature_index"])
+        self.assertEqual(params["categorical_smoothing"], 20.0)
+        self.assertEqual(params["categorical_min_samples_leaf"], 1)
+        self.assertFalse(params["categorical_time_aware"])
 
         updated = model.set_params(
             learning_rate=0.2,
@@ -102,6 +112,10 @@ class GBMRegressorContractTests(unittest.TestCase):
             min_validation_improvement=0.01,
             seed=7,
             deterministic=False,
+            categorical_feature_index=1,
+            categorical_smoothing=5.0,
+            categorical_min_samples_leaf=2,
+            categorical_time_aware=True,
         )
         self.assertIs(updated, model)
         self.assertEqual(model.get_params()["learning_rate"], 0.2)
@@ -113,6 +127,10 @@ class GBMRegressorContractTests(unittest.TestCase):
         self.assertEqual(model.get_params()["min_validation_improvement"], 0.01)
         self.assertEqual(model.get_params()["seed"], 7)
         self.assertFalse(model.get_params()["deterministic"])
+        self.assertEqual(model.get_params()["categorical_feature_index"], 1)
+        self.assertEqual(model.get_params()["categorical_smoothing"], 5.0)
+        self.assertEqual(model.get_params()["categorical_min_samples_leaf"], 2)
+        self.assertTrue(model.get_params()["categorical_time_aware"])
 
     def test_set_params_rejects_unknown_parameter(self) -> None:
         model = GBMRegressor()
@@ -130,37 +148,11 @@ class GBMRegressorContractTests(unittest.TestCase):
             model.predict([])
 
     def test_fit_and_predict_use_native_bridges(self) -> None:
-        train_calls: list[tuple[object, ...]] = []
+        train_calls: list[dict[str, object]] = []
         predict_calls: list[tuple[bytes, list[list[float]]]] = []
 
-        def fake_train(
-            rows: list[list[float]],
-            targets: list[float],
-            learning_rate: float,
-            max_depth: int,
-            row_subsample: float,
-            col_subsample: float,
-            rounds: int,
-            early_stopping_rounds: int | None,
-            min_validation_improvement: float,
-            seed: int,
-            deterministic: bool,
-        ) -> bytes:
-            train_calls.append(
-                (
-                    rows,
-                    targets,
-                    learning_rate,
-                    max_depth,
-                    row_subsample,
-                    col_subsample,
-                    rounds,
-                    early_stopping_rounds,
-                    min_validation_improvement,
-                    seed,
-                    deterministic,
-                )
-            )
+        def fake_train(**kwargs: object) -> bytes:
+            train_calls.append(kwargs)
             return b"trained-artifact"
 
         def fake_predictor(
@@ -204,19 +196,25 @@ class GBMRegressorContractTests(unittest.TestCase):
         self.assertEqual(
             train_calls,
             [
-                (
-                    [[1.0, 0.0], [2.0, 0.0], [3.0, 0.0]],
-                    [2.0, 4.0, 6.0],
-                    0.2,
-                    4,
-                    0.75,
-                    0.5,
-                    9,
-                    4,
-                    0.01,
-                    7,
-                    False,
-                )
+                {
+                    "rows": [[1.0, 0.0], [2.0, 0.0], [3.0, 0.0]],
+                    "targets": [2.0, 4.0, 6.0],
+                    "learning_rate": 0.2,
+                    "max_depth": 4,
+                    "row_subsample": 0.75,
+                    "col_subsample": 0.5,
+                    "min_validation_improvement": 0.01,
+                    "seed": 7,
+                    "deterministic": False,
+                    "rounds": 9,
+                    "early_stopping_rounds": 4,
+                    "categorical_feature_index": None,
+                    "categorical_feature_values": None,
+                    "categorical_smoothing": 20.0,
+                    "categorical_min_samples_leaf": 1,
+                    "categorical_time_aware": False,
+                    "time_index": None,
+                }
             ],
         )
         self.assertEqual(
@@ -228,6 +226,58 @@ class GBMRegressorContractTests(unittest.TestCase):
         model = GBMRegressor()
         with self.assertRaisesRegex(ValueError, "same number of rows"):
             model.fit([[1.0], [2.0]], [1.0])
+
+    def test_fit_rejects_missing_categorical_values(self) -> None:
+        model = GBMRegressor(categorical_feature_index=1)
+        with self.assertRaisesRegex(ValueError, "categorical_feature_values must be provided"):
+            model.fit([[1.0, 0.0], [2.0, 0.0]], [1.0, 2.0])
+
+    def test_fit_rejects_time_aware_categorical_without_time_index(self) -> None:
+        model = GBMRegressor(
+            categorical_feature_index=1,
+            categorical_time_aware=True,
+        )
+        with self.assertRaisesRegex(ValueError, "time_index must be provided"):
+            model.fit(
+                [[1.0, 0.0], [2.0, 0.0]],
+                [1.0, 2.0],
+                categorical_feature_values=["A", "B"],
+            )
+
+    def test_fit_passes_categorical_bridge_arguments(self) -> None:
+        train_calls: list[dict[str, object]] = []
+
+        def fake_train(**kwargs: object) -> bytes:
+            train_calls.append(kwargs)
+            return b"artifact"
+
+        original_train_loader = regressor_module._load_native_train_regression_artifact
+        regressor_module._load_native_train_regression_artifact = lambda: fake_train
+        try:
+            model = GBMRegressor(
+                categorical_feature_index=1,
+                categorical_smoothing=3.0,
+                categorical_min_samples_leaf=2,
+                categorical_time_aware=True,
+            )
+            model.fit(
+                [[1.0, 0.0], [2.0, 0.0], [3.0, 0.0]],
+                [1.0, 2.0, 3.0],
+                categorical_feature_values=["A", "B", "A"],
+                time_index=[1, 2, 3],
+            )
+        finally:
+            regressor_module._load_native_train_regression_artifact = (
+                original_train_loader
+            )
+
+        self.assertEqual(len(train_calls), 1)
+        self.assertEqual(train_calls[0]["categorical_feature_index"], 1)
+        self.assertEqual(train_calls[0]["categorical_feature_values"], ["A", "B", "A"])
+        self.assertEqual(train_calls[0]["categorical_smoothing"], 3.0)
+        self.assertEqual(train_calls[0]["categorical_min_samples_leaf"], 2)
+        self.assertTrue(train_calls[0]["categorical_time_aware"])
+        self.assertEqual(train_calls[0]["time_index"], [1, 2, 3])
 
     def test_fit_rejects_non_convertible_adapter_inputs(self) -> None:
         model = GBMRegressor()

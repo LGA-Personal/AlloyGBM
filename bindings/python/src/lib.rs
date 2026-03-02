@@ -1,7 +1,9 @@
 use alloygbm_backend_cpu::CpuBackend;
+use alloygbm_categorical::TargetEncoderConfig;
 use alloygbm_core::{BinnedMatrix, DatasetMatrix, TrainParams, TrainingDataset};
 use alloygbm_engine::{
-    ArtifactCompatibilityMode, EngineError, SquaredErrorObjective, TrainedModel, Trainer,
+    ArtifactCompatibilityMode, CategoricalTargetEncodingSpec, EngineError, SquaredErrorObjective,
+    TrainedModel, Trainer,
 };
 use alloygbm_predictor::{Predictor, PredictorError};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -54,11 +56,52 @@ fn engine_error_to_pyerr(error: EngineError) -> PyErr {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn resolve_categorical_spec(
+    categorical_feature_index: Option<usize>,
+    categorical_feature_values: Option<Vec<String>>,
+    categorical_smoothing: f64,
+    categorical_min_samples_leaf: u32,
+    categorical_time_aware: bool,
+    row_count: usize,
+) -> Result<Option<CategoricalTargetEncodingSpec>, EngineError> {
+    match (categorical_feature_index, categorical_feature_values) {
+        (None, None) => Ok(None),
+        (Some(_), None) => Err(EngineError::ContractViolation(
+            "categorical_feature_values must be provided when categorical_feature_index is set"
+                .to_string(),
+        )),
+        (None, Some(_)) => Err(EngineError::ContractViolation(
+            "categorical_feature_index must be provided when categorical_feature_values is set"
+                .to_string(),
+        )),
+        (Some(feature_index), Some(values)) => {
+            if values.len() != row_count {
+                return Err(EngineError::ContractViolation(format!(
+                    "categorical_feature_values length {} does not match row_count {row_count}",
+                    values.len()
+                )));
+            }
+            Ok(Some(CategoricalTargetEncodingSpec {
+                feature_index,
+                values,
+                config: TargetEncoderConfig {
+                    smoothing: categorical_smoothing,
+                    min_samples_leaf: categorical_min_samples_leaf,
+                    time_aware: categorical_time_aware,
+                },
+            }))
+        }
+    }
+}
+
 fn train_regression_artifact_impl(
     rows: &[Vec<f32>],
     targets: &[f32],
     params: TrainParams,
     rounds: usize,
+    time_index: Option<Vec<i64>>,
+    categorical_spec: Option<CategoricalTargetEncodingSpec>,
 ) -> Result<Vec<u8>, EngineError> {
     if rows.is_empty() {
         return Err(EngineError::ContractViolation(
@@ -127,7 +170,7 @@ fn train_regression_artifact_impl(
         matrix,
         targets: targets.to_vec(),
         sample_weights: None,
-        time_index: None,
+        time_index,
         group_id: None,
     };
     let binned = BinnedMatrix::new(
@@ -139,8 +182,18 @@ fn train_regression_artifact_impl(
 
     let trainer = Trainer::new(params)?;
     let backend = CpuBackend;
-    let model =
-        trainer.fit_iterations(&dataset, &binned, &backend, &SquaredErrorObjective, rounds)?;
+    let model = if let Some(spec) = categorical_spec.as_ref() {
+        trainer.fit_iterations_with_single_target_encoded_feature(
+            &dataset,
+            &binned,
+            spec,
+            &backend,
+            &SquaredErrorObjective,
+            rounds,
+        )?
+    } else {
+        trainer.fit_iterations(&dataset, &binned, &backend, &SquaredErrorObjective, rounds)?
+    };
     model.to_artifact_bytes()
 }
 
@@ -189,7 +242,13 @@ fn predictor_predict_batch_canonical(
     seed,
     deterministic,
     rounds=DEFAULT_TRAIN_ROUNDS,
-    early_stopping_rounds=None
+    early_stopping_rounds=None,
+    categorical_feature_index=None,
+    categorical_feature_values=None,
+    categorical_smoothing=20.0,
+    categorical_min_samples_leaf=1,
+    categorical_time_aware=false,
+    time_index=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact(
@@ -204,6 +263,12 @@ fn train_regression_artifact(
     deterministic: bool,
     rounds: usize,
     early_stopping_rounds: Option<u16>,
+    categorical_feature_index: Option<usize>,
+    categorical_feature_values: Option<Vec<String>>,
+    categorical_smoothing: f64,
+    categorical_min_samples_leaf: u32,
+    categorical_time_aware: bool,
+    time_index: Option<Vec<i64>>,
 ) -> PyResult<Vec<u8>> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -220,7 +285,25 @@ fn train_regression_artifact(
         min_validation_improvement,
     };
 
-    train_regression_artifact_impl(&rows, &targets, params, rounds).map_err(engine_error_to_pyerr)
+    let categorical_spec = resolve_categorical_spec(
+        categorical_feature_index,
+        categorical_feature_values,
+        categorical_smoothing,
+        categorical_min_samples_leaf,
+        categorical_time_aware,
+        rows.len(),
+    )
+    .map_err(engine_error_to_pyerr)?;
+
+    train_regression_artifact_impl(
+        &rows,
+        &targets,
+        params,
+        rounds,
+        time_index,
+        categorical_spec,
+    )
+    .map_err(engine_error_to_pyerr)
 }
 
 #[pymodule]
@@ -240,11 +323,12 @@ mod tests {
         train_regression_artifact_impl,
     };
     use alloygbm_backend_cpu::CpuBackend;
+    use alloygbm_categorical::TargetEncoderConfig;
     use alloygbm_core::{
         BinnedMatrix, DatasetMatrix, ModelSectionKind, TrainParams, TrainingDataset,
         deserialize_model_artifact_v1, serialize_model_artifact_v1,
     };
-    use alloygbm_engine::{SquaredErrorObjective, Trainer};
+    use alloygbm_engine::{CategoricalTargetEncodingSpec, SquaredErrorObjective, Trainer};
 
     fn quality_fixture_dataset() -> TrainingDataset {
         TrainingDataset {
@@ -309,6 +393,19 @@ mod tests {
             early_stopping_rounds: None,
             min_validation_improvement: 0.0,
         }
+    }
+
+    fn fixture_categorical_values() -> Vec<String> {
+        vec![
+            "A".to_string(),
+            "A".to_string(),
+            "A".to_string(),
+            "A".to_string(),
+            "B".to_string(),
+            "B".to_string(),
+            "B".to_string(),
+            "B".to_string(),
+        ]
     }
 
     fn train_fixture_model() -> (alloygbm_engine::TrainedModel, TrainingDataset) {
@@ -376,6 +473,8 @@ mod tests {
             &dataset.targets,
             fixture_params(),
             DEFAULT_TRAIN_ROUNDS,
+            None,
+            None,
         )
         .expect("bridge training succeeds");
         let engine_predictions = model.predict_batch(&rows).expect("engine predicts");
@@ -405,6 +504,77 @@ mod tests {
         assert!(matches!(
             result,
             Err(alloygbm_predictor::PredictorError::ContractViolation(_))
+        ));
+    }
+
+    #[test]
+    fn train_bridge_categorical_path_matches_engine_predictions() {
+        let dataset = quality_fixture_dataset();
+        let binned = quality_fixture_binned_matrix();
+        let rows = fixture_rows(&dataset);
+        let categorical_spec = CategoricalTargetEncodingSpec {
+            feature_index: 1,
+            values: fixture_categorical_values(),
+            config: TargetEncoderConfig {
+                smoothing: 0.0,
+                min_samples_leaf: 1,
+                time_aware: false,
+            },
+        };
+
+        let trainer = Trainer::new(fixture_params()).expect("params are valid");
+        let backend = CpuBackend;
+        let engine_model = trainer
+            .fit_iterations_with_single_target_encoded_feature(
+                &dataset,
+                &binned,
+                &categorical_spec,
+                &backend,
+                &SquaredErrorObjective,
+                DEFAULT_TRAIN_ROUNDS,
+            )
+            .expect("categorical engine training succeeds");
+        let bridge_artifact = train_regression_artifact_impl(
+            &rows,
+            &dataset.targets,
+            fixture_params(),
+            DEFAULT_TRAIN_ROUNDS,
+            None,
+            Some(categorical_spec.clone()),
+        )
+        .expect("categorical bridge training succeeds");
+
+        let bridge_model =
+            alloygbm_engine::TrainedModel::from_artifact_bytes(&bridge_artifact).expect("parses");
+        assert!(bridge_model.categorical_state.is_some());
+
+        let engine_predictions = engine_model.predict_batch(&rows).expect("engine predicts");
+        let bridge_predictions =
+            predictor_predict_batch_impl(&bridge_artifact, &rows).expect("bridge predicts");
+        assert_eq!(bridge_predictions, engine_predictions);
+    }
+
+    #[test]
+    fn train_bridge_rejects_partial_categorical_arguments() {
+        let rows = fixture_rows(&quality_fixture_dataset());
+
+        let missing_values = super::resolve_categorical_spec(Some(1), None, 20.0, 1, false, 8);
+        assert!(matches!(
+            missing_values,
+            Err(alloygbm_engine::EngineError::ContractViolation(_))
+        ));
+
+        let missing_index = super::resolve_categorical_spec(
+            None,
+            Some(fixture_categorical_values()),
+            20.0,
+            1,
+            false,
+            rows.len(),
+        );
+        assert!(matches!(
+            missing_index,
+            Err(alloygbm_engine::EngineError::ContractViolation(_))
         ));
     }
 }

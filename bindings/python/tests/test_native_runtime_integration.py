@@ -36,6 +36,8 @@ FIT_ROWS = [
     [7.0, 0.0],
 ]
 FIT_TARGETS = [-3.0, -2.0, -1.0, 0.0, 0.0, 1.0, 2.0, 3.0]
+FIT_CATEGORICAL_VALUES = ["A", "A", "A", "A", "B", "B", "B", "B"]
+FIT_TIME_INDEX = [0, 1, 2, 3, 4, 5, 6, 7]
 
 
 class _RuntimeNumpyLike:
@@ -312,6 +314,58 @@ class NativeRuntimeIntegrationTests(unittest.TestCase):
                 for short_value, long_value in zip(predictions_short, predictions_long)
             )
         )
+
+    def test_native_and_regressor_categorical_bridge_paths_match(self) -> None:
+        native_artifact = self.alloygbm._alloygbm.train_regression_artifact(
+            rows=FIT_ROWS,
+            targets=FIT_TARGETS,
+            learning_rate=0.3,
+            max_depth=2,
+            row_subsample=1.0,
+            col_subsample=1.0,
+            min_validation_improvement=0.0,
+            seed=7,
+            deterministic=True,
+            rounds=6,
+            early_stopping_rounds=None,
+            categorical_feature_index=1,
+            categorical_feature_values=FIT_CATEGORICAL_VALUES,
+            categorical_smoothing=0.0,
+            categorical_min_samples_leaf=1,
+            categorical_time_aware=True,
+            time_index=FIT_TIME_INDEX,
+        )
+        native_predictions = list(
+            self.alloygbm._alloygbm.predictor_predict_batch_canonical(
+                native_artifact, [[1.0, 0.0], [6.0, 0.0], [3.0, 0.0]]
+            )
+        )
+
+        model = self.alloygbm.GBMRegressor(
+            learning_rate=0.3,
+            max_depth=2,
+            n_estimators=6,
+            row_subsample=1.0,
+            col_subsample=1.0,
+            early_stopping_rounds=None,
+            min_validation_improvement=0.0,
+            seed=7,
+            deterministic=True,
+            categorical_feature_index=1,
+            categorical_smoothing=0.0,
+            categorical_min_samples_leaf=1,
+            categorical_time_aware=True,
+        )
+        bridge_predictions = model.fit(
+            FIT_ROWS,
+            FIT_TARGETS,
+            categorical_feature_values=FIT_CATEGORICAL_VALUES,
+            time_index=FIT_TIME_INDEX,
+        ).predict([[1.0, 0.0], [6.0, 0.0], [3.0, 0.0]])
+
+        self.assertEqual(len(native_predictions), len(bridge_predictions))
+        for native_value, bridge_value in zip(native_predictions, bridge_predictions):
+            self.assertAlmostEqual(native_value, bridge_value, places=6)
 
     def test_public_regressor_accepts_dataframe_like_adapters(self) -> None:
         model = self.alloygbm.GBMRegressor(
