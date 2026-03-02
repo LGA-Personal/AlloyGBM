@@ -32,12 +32,12 @@
 | Artifact compatibility | strict/legacy artifact compatibility behavior | `v0.7.3` and parent `v0.8` verification PASS | Baseline locked; non-regression target |
 | Python contract | `GBMRegressor` fit/predict and SHAP contract behavior | parent `v0.8` verification + CI smoke | Baseline locked; non-regression target |
 
-## Open Hardening Buckets for `v0.8.2+`
-| Bucket | Description | Planned Child Slice |
-| --- | --- | --- |
-| Test-gap closure | Expand deterministic edge-case coverage tied to compatibility/error semantics and cross-boundary contract edges. | `v0.8.2` |
-| Benchmark reproducibility | Define command protocol, environment capture, and run-to-run evidence packaging for benchmark repeatability. | `v0.8.3` |
-| Migration and compatibility narrative | Finalize migration/checklist guidance and traceability package used for `1.0.0` go/no-go review. | `v0.8.4` |
+## Hardening Bucket Progress (`v0.8.2+`)
+| Bucket | Description | Planned Child Slice | Completion Status | Completion Evidence |
+| --- | --- | --- | --- | --- |
+| Test-gap closure | Expand deterministic edge-case coverage tied to compatibility/error semantics and cross-boundary contract edges. | `v0.8.2` | Complete | [docs/architecture/v1.0/v0.9/v0.8.2/verification_report.md](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.9/v0.8.2/verification_report.md) |
+| Benchmark reproducibility | Define command protocol, environment capture, and run-to-run evidence packaging for benchmark repeatability. | `v0.8.3` | Complete | [docs/architecture/v1.0/v0.9/v0.8.3/verification_report.md](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.9/v0.8.3/verification_report.md), [benchmark_run_summary.md](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.9/v0.8.3/benchmark_run_summary.md) |
+| Migration and compatibility narrative | Finalize migration/checklist guidance and traceability package used for `1.0.0` go/no-go review. | `v0.8.4` | Complete | [docs/architecture/v1.0/v0.9/v0.8.4/migration_compatibility_narrative.md](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.9/v0.8.4/migration_compatibility_narrative.md), `v0.8.4` verification report |
 
 ## Operational Notes
 - `v0.8.1` is documentation/state focused; production code changes are not planned in this slice.
