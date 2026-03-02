@@ -1,54 +1,51 @@
 # Session Brief (2026-03-02)
 
 ## Current Target
-- Layer: `docs/architecture/v1.0/v0.7`
+- Layer: `docs/architecture/v1.0/v0.8/v0.7.4`
 - Reason this is next:
-  - `docs/architecture/state/layer_index.yaml` (`generated_at: 2026-03-02T16:13:39Z`) sets both `active_target` and `suggested_next_layer` to `docs/architecture/v1.0/v0.7`.
-  - Parent `docs/architecture/v1.0/v0.6` is now closed with verified child slices and parent rollup artifacts.
+  - `docs/architecture/state/layer_index.yaml` (`generated_at: 2026-03-02T20:30:30Z`) sets:
+    - `active_target: docs/architecture/v1.0/v0.8/v0.7.4`
+    - `suggested_next_layer: docs/architecture/v1.0/v0.8/v0.7.4`
+  - `docs/architecture/v1.0/v0.8/v0.7.3` is now `verified`.
+  - `docs/architecture/v1.0/v0.8/v0.7.4/` exists but has no layer artifacts yet.
 
 ## Parent Constraints
-- Ancestor chain: `docs/architecture/v1.0` -> `docs/architecture/v1.0/v0.7`.
-- `docs/architecture/README.md`: keep strict parent-to-child decomposition and avoid skipping plan levels.
-- `docs/architecture/gpu_financial_gbm_roadmap.md`: maintain CPU-first and correctness-first sequencing.
-- `docs/architecture/v1.0/plan.md`: preserve deterministic behavior, stable model format contracts, and Python API continuity.
-- `docs/architecture/v1.0/v0.6/plan.md` closeout constraints remain informative for compatibility policy continuity.
+- Ancestor chain: `docs/architecture/v1.0` -> `docs/architecture/v1.0/v0.8` -> `docs/architecture/v1.0/v0.8/v0.7.4`.
+- `docs/architecture/README.md`: execute against the deepest active layer and do not skip decomposition levels.
+- `docs/architecture/gpu_financial_gbm_roadmap.md`: remain CPU-first and correctness-first for this phase; no CUDA/Metal scope in this layer.
+- `docs/architecture/v1.0/plan.md`: `0.8.0` scope is TreeSHAP CPU with deterministic behavior and stable model format expectations.
+- `docs/architecture/v1.0/v0.8/plan.md`: `v0.7.4` is the Python SHAP bridge slice; preserve Rust SHAP artifact semantics and avoid model-format changes.
 
 ## Progress Snapshot
 - Completed layers:
-  - `docs/architecture/v1.0/v0.6` (`verified`, parent rollup completed `2026-03-02`)
-  - `docs/architecture/v1.0/v0.6/v0.5.3` (`verified`)
-  - `docs/architecture/v1.0/v0.6/v0.5.2` (`verified`)
-  - `docs/architecture/v1.0/v0.6/v0.5.1` (`verified`)
+  - `docs/architecture/v1.0/v0.8/v0.7.3` (verified on 2026-03-02)
+  - `docs/architecture/v1.0/v0.8/v0.7.2` (verified on 2026-03-02)
+  - `docs/architecture/v1.0/v0.8/v0.7.1` (verified on 2026-03-02)
+  - `docs/architecture/v1.0/v0.7` (verified parent milestone)
 - In-progress layer:
-  - none recorded
+  - none marked as `in-progress`; current target is `planned-only`.
 - Missing artifacts:
-  - `docs/architecture/v1.0/v0.7/plan.md`
-  - `docs/architecture/v1.0/v0.7/implementation_notes.md`
-  - `docs/architecture/v1.0/v0.7/verification_report.md`
-
-## Repo Execution Context
-- Git branch state: `main...origin/main [ahead 3]`
-- Pending workspace docs updates are expected context/closeout artifacts and should be committed together.
-- Key manifests/config remain unchanged:
-  - `Cargo.toml` workspace crates and `unsafe_code = "forbid"`
-  - `rust-toolchain.toml` (`1.92.0`, `rustfmt`, `clippy`)
-  - `pyproject.toml` (`maturin` backend, `alloygbm._alloygbm` module)
+  - `docs/architecture/v1.0/v0.8/v0.7.4/plan.md`
+  - `docs/architecture/v1.0/v0.8/v0.7.4/implementation_notes.md`
+  - `docs/architecture/v1.0/v0.8/v0.7.4/verification_report.md`
 
 ## Blockers
-- Blocker: no hard technical blocker currently identified.
-- Impact: work can proceed directly into `v0.7` planning.
-- Suggested unblock: create `docs/architecture/v1.0/v0.7/plan.md` and scope categorical support v1 boundaries before implementation.
+- Blocker: `v0.7.4` planning artifact is missing.
+- Impact: Python SHAP bridge implementation cannot be traced to explicit acceptance criteria.
+- Suggested unblock: author `docs/architecture/v1.0/v0.8/v0.7.4/plan.md` before touching Python bindings/regressor files.
+- Blocker: working tree is already dirty (`docs/architecture/context/handoff.md`, this brief).
+- Impact: context updates and implementation changes can mix if not staged carefully.
+- Suggested unblock: keep documentation-only edits scoped and review `git status` before implementation work.
 
 ## Immediate Next Actions
-1. Create `docs/architecture/v1.0/v0.7/plan.md` with explicit in-scope/out-of-scope definitions.
-2. Implement `v0.7` against parent constraints and produce `implementation_notes.md`.
-3. Verify `v0.7`, produce `verification_report.md`, and update `layer_index.yaml`.
+1. Create `docs/architecture/v1.0/v0.8/v0.7.4/plan.md` for Python SHAP bridge and regressor integration scope.
+2. Implement `v0.7.4` in `bindings/python/src/lib.rs` and `bindings/python/alloygbm/regressor.py` without changing Rust SHAP public contracts.
+3. Add/extend Python tests for SHAP output shape, error mapping, and additivity consistency, then run full verification gates and update layer index.
 
 ## High-Priority Files
 - `docs/architecture/state/layer_index.yaml`
+- `docs/architecture/v1.0/v0.8/plan.md`
+- `docs/architecture/v1.0/v0.8/v0.7.3/verification_report.md`
+- `docs/architecture/context/handoff.md`
 - `docs/architecture/v1.0/plan.md`
-- `docs/architecture/v1.0/v0.6/implementation_notes.md`
-- `docs/architecture/v1.0/v0.6/verification_report.md`
-- `docs/architecture/v1.0/v0.6/v0.5.3/implementation_notes.md`
-- `docs/architecture/v1.0/v0.6/v0.5.3/verification_report.md`
 - `docs/architecture/gpu_financial_gbm_roadmap.md`

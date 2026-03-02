@@ -1,6 +1,6 @@
-generated_at: "2026-03-02T19:45:31Z"
-active_target: "docs/architecture/v1.0/v0.8/v0.7.3"
-suggested_next_layer: "docs/architecture/v1.0/v0.8/v0.7.3"
+generated_at: "2026-03-02T20:30:30Z"
+active_target: "docs/architecture/v1.0/v0.8/v0.7.4"
+suggested_next_layer: "docs/architecture/v1.0/v0.8/v0.7.4"
 layers:
   - path: "docs/architecture/v1.0"
     status: "planned-only"
@@ -124,6 +124,16 @@ layers:
     previous_siblings:
       - "docs/architecture/v1.0/v0.8/v0.7.1"
   - path: "docs/architecture/v1.0/v0.8/v0.7.3"
+    status: "verified"
+    has_plan: true
+    has_implementation_notes: true
+    has_verification_report: true
+    missing_artifacts: []
+    parent: "docs/architecture/v1.0/v0.8"
+    previous_siblings:
+      - "docs/architecture/v1.0/v0.8/v0.7.1"
+      - "docs/architecture/v1.0/v0.8/v0.7.2"
+  - path: "docs/architecture/v1.0/v0.8/v0.7.4"
     status: "planned-only"
     has_plan: false
     has_implementation_notes: false
@@ -136,6 +146,7 @@ layers:
     previous_siblings:
       - "docs/architecture/v1.0/v0.8/v0.7.1"
       - "docs/architecture/v1.0/v0.8/v0.7.2"
+      - "docs/architecture/v1.0/v0.8/v0.7.3"
   - path: "docs/architecture/v1.0/v0.7/v0.6.1"
     status: "verified"
     has_plan: true
