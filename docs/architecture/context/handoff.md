@@ -1,53 +1,70 @@
 # Handoff
 
-## Session Scope
-- Layer: `docs/architecture/v1.0/v0.6` parent closeout completed.
-- Goal achieved: finalized `v0.6` rollup artifacts and moved next target to `docs/architecture/v1.0/v0.7` in `layer_index.yaml`.
+## Current Layer and Status
+- Parent milestone: `docs/architecture/v1.0/v0.8` (`planned-only`; child execution in progress).
+- Most recently completed child layer: `docs/architecture/v1.0/v0.8/v0.7.3`.
+- Status: `v0.7.3` is `verified` in working tree (documentation + tests complete; not yet committed in this session).
+- State index now points to next target:
+  - `active_target: docs/architecture/v1.0/v0.8/v0.7.4`
+  - `suggested_next_layer: docs/architecture/v1.0/v0.8/v0.7.4`
 
-## Completed
-- `v0.5.3` implementation and verification committed:
-  - commit: `83e6783 feat(v0.5.3): harden artifact validation and compatibility diagnostics`
-- Parent `v0.6` rollup artifacts created:
-  - `docs/architecture/v1.0/v0.6/implementation_notes.md`
-  - `docs/architecture/v1.0/v0.6/verification_report.md`
-- Context and continuity artifacts refreshed:
+## Completed This Session
+- Authored `docs/architecture/v1.0/v0.8/v0.7.3/plan.md` for compatibility/parity hardening.
+- Implemented `v0.7.3` hardening updates:
+  - added test-only dependency on `alloygbm-predictor` in `crates/shap/Cargo.toml`,
+  - extended `crates/shap/src/lib.rs` tests with:
+    - legacy trees-only artifact acceptance coverage,
+    - duplicate required-section and metadata/payload mismatch compatibility rejection coverage,
+    - predictor-parity additivity reconstruction test,
+    - deterministic global-importance tie-break ordering test.
+- Added `v0.7.3` layer artifacts:
+  - `docs/architecture/v1.0/v0.8/v0.7.3/implementation_notes.md`
+  - `docs/architecture/v1.0/v0.8/v0.7.3/verification_report.md`
+- Updated `docs/architecture/state/layer_index.yaml`:
+  - marked `v0.7.3` as `verified`,
+  - advanced next target to `v0.7.4`.
+- Created next child directory: `docs/architecture/v1.0/v0.8/v0.7.4/`.
+- Synchronized context docs:
   - `docs/architecture/context/session_brief.md`
   - `docs/architecture/context/handoff.md`
-- `v0.5.2` doc evidence additions included for continuity:
-  - `docs/architecture/v1.0/v0.6/v0.5.2/verification_report.md` (test-gap section)
-  - `docs/architecture/v1.0/v0.6/v0.5.2/contract_drift_report.md`
-- Layer state transition applied:
-  - `docs/architecture/state/layer_index.yaml` marks `v0.6` as `verified` and sets next target to `v0.7` (`planned-only` placeholder).
 
 ## Validation Evidence
-- Latest closeout gate run:
-  - `cargo fmt -- --check` -> PASS
-  - `cargo clippy --workspace --all-targets -- -D warnings` -> PASS
-  - `cargo test --workspace` -> PASS
-  - `cargo doc --workspace --no-deps` -> PASS
-  - `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'` -> PASS (`Ran 54 tests`, `OK`)
+- Verification evidence recorded in:
+  - `docs/architecture/v1.0/v0.8/v0.7.3/verification_report.md`
+- Commands executed with PASS for `v0.7.3`:
+  - `cargo test -p alloygbm-shap` (14 tests passed)
+  - `cargo fmt -- --check`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo test --workspace`
+  - `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'` (`Ran 58 tests`, `OK`)
+- No blocked verification commands were recorded for `v0.7.3`.
 
-## Open Work
-1. Start `docs/architecture/v1.0/v0.7` planning and define categorical support v1 scope boundaries.
-2. Implement and verify `v0.7` with required artifacts (`plan.md`, `implementation_notes.md`, `verification_report.md`).
+## Unresolved Decisions and Blockers
+- Blockers: none.
+- Decisions deferred to `v0.7.4` planning:
+  - exact Python API shape for SHAP entrypoints (`shap_values`, optional expected value access, feature-importance routing),
+  - error mapping behavior from Rust `ShapError` into Python exception types/messages,
+  - whether to include Python-side additivity assertions in unit tests only or also through fit/predict integration tests.
 
-## Blockers
-- No hard technical blocker currently identified.
-- Process blocker: `v0.7` plan file does not exist yet.
+## Exact Unfinished Tasks
+1. Author `docs/architecture/v1.0/v0.8/v0.7.4/plan.md` for Python SHAP bridge scope and acceptance criteria.
+2. Implement `v0.7.4` in:
+   - `bindings/python/src/lib.rs`
+   - `bindings/python/alloygbm/regressor.py`
+3. Add Python tests for SHAP shape/errors/additivity consistency in `bindings/python/tests`.
+4. Run full verification gates and create:
+   - `docs/architecture/v1.0/v0.8/v0.7.4/implementation_notes.md`
+   - `docs/architecture/v1.0/v0.8/v0.7.4/verification_report.md`
+5. Update `docs/architecture/state/layer_index.yaml` to mark `v0.7.4` status and advance next target.
+6. Keep context docs synchronized (`docs/architecture/context/session_brief.md`, this handoff).
 
-## Next Command
-`cd /Users/lashby/Projects/AlloyGBM && ls docs/architecture/v1.0/v0.7`
+## Exact Next Command
+`cd /Users/lashby/Projects/AlloyGBM && cat docs/architecture/v1.0/v0.8/plan.md && ls -la docs/architecture/v1.0/v0.8/v0.7.4`
 
 Expected outcome:
-- path absent (or empty) until `v0.7` planning starts.
-
-## First Files to Open Next
-- `docs/architecture/state/layer_index.yaml`
-- `docs/architecture/v1.0/plan.md`
-- `docs/architecture/gpu_financial_gbm_roadmap.md`
-- `docs/architecture/v1.0/v0.6/implementation_notes.md`
-- `docs/architecture/v1.0/v0.6/verification_report.md`
+- Parent `v0.8` sequence/acceptance criteria are visible in terminal and `v0.7.4` directory presence is confirmed, unblocking immediate authoring of `docs/architecture/v1.0/v0.8/v0.7.4/plan.md`.
 
 ## Known Risks and Gotchas
-- Keep canonical-vs-compatibility artifact behavior aligned with shared core compatibility helpers.
-- Avoid introducing v0.7 scope into serialization contract behavior already closed in `v0.6`.
+- `v0.7.2` exact Shapley path currently uses exponential subset enumeration with guardrail `MAX_EXACT_SPLIT_FEATURES = 20`; wide split-feature models will return deterministic contract violations.
+- `v0.7.4` should avoid mutating Rust SHAP algorithms unless a bridge bug requires it; keep scope on Python exposure and tests.
+- Working tree currently includes `v0.7.3` implementation + documentation changes and context updates; review staged scope carefully before commit.

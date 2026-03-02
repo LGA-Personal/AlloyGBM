@@ -516,6 +516,7 @@ mod tests {
         serialize_model_artifact_v1,
     };
     use alloygbm_engine::TrainedModel;
+    use alloygbm_predictor::Predictor;
 
     fn sample_metadata(feature_names: &[&str]) -> ModelMetadata {
         ModelMetadata {
@@ -590,6 +591,19 @@ mod tests {
         ]
     }
 
+    fn fixture_trees_payload() -> Vec<u8> {
+        let artifact = fixture_model()
+            .to_artifact_bytes()
+            .expect("artifact serializes");
+        let parsed = deserialize_model_artifact_v1(&artifact).expect("artifact parses");
+        parsed
+            .sections
+            .iter()
+            .find(|section| section.descriptor.kind == ModelSectionKind::Trees)
+            .map(|section| section.payload.clone())
+            .expect("trees payload exists")
+    }
+
     fn assert_close(actual: f32, expected: f32) {
         assert!(
             (actual - expected).abs() <= ADDITIVITY_TOLERANCE,
@@ -626,15 +640,18 @@ mod tests {
 
     #[test]
     fn explain_rows_from_artifact_rejects_incompatible_required_sections() {
-        let model = fixture_model();
-        let strict_artifact = model.to_artifact_bytes().expect("artifact serializes");
-        let parsed = deserialize_model_artifact_v1(&strict_artifact).expect("artifact parses");
-        let layout_payload = parsed
-            .sections
-            .iter()
-            .find(|section| section.descriptor.kind == ModelSectionKind::PredictorLayout)
-            .map(|section| section.payload.clone())
-            .expect("predictor layout payload exists");
+        let layout_payload = {
+            let strict_artifact = fixture_model()
+                .to_artifact_bytes()
+                .expect("artifact serializes");
+            let parsed = deserialize_model_artifact_v1(&strict_artifact).expect("artifact parses");
+            parsed
+                .sections
+                .iter()
+                .find(|section| section.descriptor.kind == ModelSectionKind::PredictorLayout)
+                .map(|section| section.payload.clone())
+                .expect("predictor layout payload exists")
+        };
 
         let incompatible_artifact = serialize_model_artifact_v1(
             &sample_metadata(&["f0", "f1"]),
@@ -643,6 +660,49 @@ mod tests {
         .expect("artifact serializes");
 
         let result = explain_rows_from_artifact_bytes(&incompatible_artifact, &[vec![0.0, 0.0]]);
+        assert!(matches!(result, Err(ShapError::ContractViolation(_))));
+    }
+
+    #[test]
+    fn explain_rows_from_artifact_accepts_legacy_trees_only_artifact() {
+        let legacy_artifact = serialize_model_artifact_v1(
+            &sample_metadata(&["f0", "f1"]),
+            &[(ModelSectionKind::Trees, fixture_trees_payload())],
+        )
+        .expect("artifact serializes");
+
+        let explanation = explain_rows_from_artifact_bytes(&legacy_artifact, &fixture_rows())
+            .expect("legacy artifact explains");
+        assert_close(explanation.expected_value, 2.25);
+        assert_eq!(explanation.values.len(), 4);
+        assert_eq!(explanation.values[0].len(), 2);
+    }
+
+    #[test]
+    fn explain_rows_from_artifact_rejects_duplicate_trees_sections() {
+        let trees_payload = fixture_trees_payload();
+        let duplicate_trees_artifact = serialize_model_artifact_v1(
+            &sample_metadata(&["f0", "f1"]),
+            &[
+                (ModelSectionKind::Trees, trees_payload.clone()),
+                (ModelSectionKind::Trees, trees_payload),
+            ],
+        )
+        .expect("artifact serializes");
+
+        let result = explain_rows_from_artifact_bytes(&duplicate_trees_artifact, &[vec![0.0, 0.0]]);
+        assert!(matches!(result, Err(ShapError::ContractViolation(_))));
+    }
+
+    #[test]
+    fn explain_rows_from_artifact_rejects_metadata_feature_count_mismatch() {
+        let mismatched_artifact = serialize_model_artifact_v1(
+            &sample_metadata(&["f0", "f1", "f2"]),
+            &[(ModelSectionKind::Trees, fixture_trees_payload())],
+        )
+        .expect("artifact serializes");
+
+        let result = explain_rows_from_artifact_bytes(&mismatched_artifact, &[vec![0.0, 0.0, 0.0]]);
         assert!(matches!(result, Err(ShapError::ContractViolation(_))));
     }
 
@@ -675,6 +735,23 @@ mod tests {
         for (row, values) in rows.iter().zip(explanation.values.iter()) {
             let predicted = model.predict_row(row).expect("predicts");
             let reconstructed = explanation.expected_value + values.iter().sum::<f32>();
+            assert_close(reconstructed, predicted);
+        }
+    }
+
+    #[test]
+    fn explain_rows_from_artifact_matches_predictor_predictions() {
+        let artifact = fixture_model()
+            .to_artifact_bytes()
+            .expect("artifact serializes");
+        let predictor = Predictor::from_artifact_bytes(&artifact).expect("predictor loads");
+        let rows = fixture_rows();
+
+        let explanation = explain_rows_from_artifact_bytes(&artifact, &rows).expect("explains");
+        for (row_index, row) in rows.iter().enumerate() {
+            let predicted = predictor.predict_row(row).expect("predicts");
+            let reconstructed =
+                explanation.expected_value + explanation.values[row_index].iter().sum::<f32>();
             assert_close(reconstructed, predicted);
         }
     }
@@ -720,6 +797,23 @@ mod tests {
         assert_eq!(global.len(), 2);
         assert_eq!(global[0].0, "f0");
         assert_eq!(global[1].0, "f1");
+    }
+
+    #[test]
+    fn global_importance_breaks_ties_by_feature_name() {
+        let feature_names = vec!["zeta".to_string(), "alpha".to_string(), "beta".to_string()];
+        let shap_values = vec![vec![1.0, -1.0, 0.0], vec![-1.0, 1.0, 0.0]];
+
+        let global = global_importance_from_shap_values(&feature_names, &shap_values)
+            .expect("global importance computes");
+
+        assert_eq!(global.len(), 3);
+        assert_eq!(global[0].0, "alpha");
+        assert_eq!(global[1].0, "zeta");
+        assert_eq!(global[2].0, "beta");
+        assert_close(global[0].1, 1.0);
+        assert_close(global[1].1, 1.0);
+        assert_close(global[2].1, 0.0);
     }
 
     #[test]
