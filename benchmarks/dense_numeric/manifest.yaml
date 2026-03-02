@@ -1,0 +1,14 @@
+name: dense_numeric
+version: 1
+kind: uci_download
+description: Dense numeric regression benchmark derived from UCI Wine Quality (red wine).
+source:
+  dataset: wine-quality
+  url: https://archive.ics.uci.edu/ml/machine-learning-databases/wine-quality/winequality-red.csv
+raw:
+  filename: winequality-red.csv
+  delimiter: ";"
+prepared:
+  filename: prepared.csv
+  target: quality
+  note: Preserves all numeric columns and normalizes delimiter to comma.

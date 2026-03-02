@@ -1,0 +1,14 @@
+name: panel_time_series
+version: 1
+kind: uci_download
+description: Time-series benchmark derived from UCI Air Quality.
+source:
+  dataset: air-quality
+  url: https://archive.ics.uci.edu/ml/machine-learning-databases/00360/AirQualityUCI.zip
+raw:
+  filename: AirQualityUCI.zip
+  delimiter: ";"
+prepared:
+  filename: prepared.csv
+  target: target_co_gt
+  note: Adds group_id and normalized timestamp; drops rows with missing sentinel values.
