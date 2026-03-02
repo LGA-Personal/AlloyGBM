@@ -227,6 +227,31 @@ class NativeRuntimeIntegrationTests(unittest.TestCase):
         for actual, expected in zip(predictions, FIXTURE_PREDICTIONS):
             self.assertAlmostEqual(actual, expected, places=5)
 
+    def test_runtime_native_shap_explain_rows_is_additive(self) -> None:
+        expected_value, shap_values = self.alloygbm._alloygbm.shap_explain_rows(
+            FIXTURE_ARTIFACT_BYTES, FIXTURE_ROWS
+        )
+        self.assertEqual(len(shap_values), len(FIXTURE_ROWS))
+        self.assertEqual(len(shap_values[0]), len(FIXTURE_ROWS[0]))
+
+        predictions = list(
+            self.alloygbm._alloygbm.predictor_predict_batch(
+                FIXTURE_ARTIFACT_BYTES, FIXTURE_ROWS
+            )
+        )
+        for row_values, prediction in zip(shap_values, predictions):
+            reconstructed = expected_value + sum(row_values)
+            self.assertAlmostEqual(reconstructed, prediction, places=5)
+
+    def test_runtime_native_shap_global_importance_returns_expected_shape(self) -> None:
+        importance = self.alloygbm._alloygbm.shap_global_importance(
+            FIXTURE_ARTIFACT_BYTES, FIXTURE_ROWS
+        )
+        self.assertEqual(len(importance), len(FIXTURE_ROWS[0]))
+        self.assertGreaterEqual(importance[0][1], importance[1][1])
+        self.assertTrue(all(name.startswith("f") for name, _ in importance))
+        self.assertTrue(all(value >= 0.0 for _, value in importance))
+
     def test_public_regressor_bridge_matches_native_success_path(self) -> None:
         native_predictions = list(
             self.alloygbm._alloygbm.predictor_predict_batch(
@@ -239,6 +264,34 @@ class NativeRuntimeIntegrationTests(unittest.TestCase):
         self.assertEqual(len(bridge_predictions), len(native_predictions))
         for bridge_value, native_value in zip(bridge_predictions, native_predictions):
             self.assertAlmostEqual(bridge_value, native_value, places=6)
+
+    def test_public_regressor_shap_values_and_feature_importances_match_native(self) -> None:
+        model = self.alloygbm.GBMRegressor(
+            learning_rate=0.3,
+            max_depth=2,
+            n_estimators=6,
+            row_subsample=1.0,
+            col_subsample=1.0,
+            early_stopping_rounds=None,
+            min_validation_improvement=0.0,
+            seed=7,
+            deterministic=True,
+        ).fit(FIT_ROWS, FIT_TARGETS)
+
+        expected_value, shap_values = model.shap_values(
+            [[1.0, 0.0], [6.0, 0.0], [3.0, 0.0]], include_expected_value=True
+        )
+        predictions = model.predict([[1.0, 0.0], [6.0, 0.0], [3.0, 0.0]])
+        for row_values, prediction in zip(shap_values, predictions):
+            self.assertAlmostEqual(expected_value + sum(row_values), prediction, places=5)
+
+        regressor_importance = model.feature_importances(
+            [[1.0, 0.0], [6.0, 0.0], [3.0, 0.0]], method="shap"
+        )
+        native_importance = self.alloygbm._alloygbm.shap_global_importance(
+            model._artifact_bytes, [[1.0, 0.0], [6.0, 0.0], [3.0, 0.0]]
+        )
+        self.assertEqual(regressor_importance, native_importance)
 
     def test_public_regressor_fit_predict_is_native_backed_and_deterministic(self) -> None:
         model_a = self.alloygbm.GBMRegressor(

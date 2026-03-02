@@ -16,6 +16,7 @@ alloygbm-categorical = { path = "../../crates/categorical" }
 alloygbm-core = { path = "../../crates/core" }
 alloygbm-engine = { path = "../../crates/engine" }
 alloygbm-predictor = { path = "../../crates/predictor" }
+alloygbm-shap = { path = "../../crates/shap" }
 
 [package.metadata.maturin]
 python-source = "."

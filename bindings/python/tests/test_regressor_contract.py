@@ -147,6 +147,16 @@ class GBMRegressorContractTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "must be fit"):
             model.predict([])
 
+    def test_shap_values_requires_fit(self) -> None:
+        model = GBMRegressor()
+        with self.assertRaisesRegex(RuntimeError, "must be fit"):
+            model.shap_values([[1.0, 0.0]])
+
+    def test_feature_importances_requires_fit(self) -> None:
+        model = GBMRegressor()
+        with self.assertRaisesRegex(RuntimeError, "must be fit"):
+            model.feature_importances([[1.0, 0.0]])
+
     def test_fit_and_predict_use_native_bridges(self) -> None:
         train_calls: list[dict[str, object]] = []
         predict_calls: list[tuple[bytes, list[list[float]]]] = []
@@ -221,6 +231,107 @@ class GBMRegressorContractTests(unittest.TestCase):
             predict_calls,
             [(b"trained-artifact", [[1.0, 0.0], [2.0, 0.0]])],
         )
+
+    def test_shap_values_use_native_bridge_with_optional_expected_value(self) -> None:
+        shap_calls: list[tuple[bytes, list[list[float]]]] = []
+
+        def fake_shap(
+            artifact_bytes: bytes, rows: list[list[float]]
+        ) -> tuple[float, list[list[float]]]:
+            shap_calls.append((artifact_bytes, rows))
+            return (1.25, [[0.1, -0.1], [0.2, -0.2]])
+
+        original_train_loader = regressor_module._load_native_train_regression_artifact
+        original_shap_loader = regressor_module._load_native_shap_explain_rows
+        regressor_module._load_native_train_regression_artifact = lambda: (
+            lambda *_args, **_kwargs: b"artifact"
+        )
+        regressor_module._load_native_shap_explain_rows = lambda: fake_shap
+        try:
+            model = GBMRegressor().fit([[1.0, 0.0], [2.0, 0.0]], [1.0, 2.0])
+            values = model.shap_values([[1.0, 0.0], [2.0, 0.0]])
+            with_expected = model.shap_values(
+                [[1.0, 0.0], [2.0, 0.0]], include_expected_value=True
+            )
+        finally:
+            regressor_module._load_native_train_regression_artifact = (
+                original_train_loader
+            )
+            regressor_module._load_native_shap_explain_rows = original_shap_loader
+
+        self.assertEqual(values, [[0.1, -0.1], [0.2, -0.2]])
+        self.assertEqual(with_expected, (1.25, [[0.1, -0.1], [0.2, -0.2]]))
+        self.assertEqual(
+            shap_calls,
+            [
+                (b"artifact", [[1.0, 0.0], [2.0, 0.0]]),
+                (b"artifact", [[1.0, 0.0], [2.0, 0.0]]),
+            ],
+        )
+
+    def test_shap_values_reject_feature_count_mismatch(self) -> None:
+        original_train_loader = regressor_module._load_native_train_regression_artifact
+        original_shap_loader = regressor_module._load_native_shap_explain_rows
+        regressor_module._load_native_train_regression_artifact = lambda: (
+            lambda *_args, **_kwargs: b"artifact"
+        )
+        regressor_module._load_native_shap_explain_rows = lambda: (
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("native SHAP loader should not be called on shape mismatch")
+            )
+        )
+        try:
+            model = GBMRegressor().fit([[1.0, 0.0], [2.0, 0.0]], [1.0, 2.0])
+            with self.assertRaisesRegex(ValueError, "feature count"):
+                model.shap_values([[1.0]])
+        finally:
+            regressor_module._load_native_train_regression_artifact = (
+                original_train_loader
+            )
+            regressor_module._load_native_shap_explain_rows = original_shap_loader
+
+    def test_feature_importances_use_native_shap_global_bridge(self) -> None:
+        calls: list[tuple[bytes, list[list[float]]]] = []
+
+        def fake_importance(
+            artifact_bytes: bytes, rows: list[list[float]]
+        ) -> list[tuple[str, float]]:
+            calls.append((artifact_bytes, rows))
+            return [("f0", 0.6), ("f1", 0.05)]
+
+        original_train_loader = regressor_module._load_native_train_regression_artifact
+        original_importance_loader = regressor_module._load_native_shap_global_importance
+        regressor_module._load_native_train_regression_artifact = lambda: (
+            lambda *_args, **_kwargs: b"artifact"
+        )
+        regressor_module._load_native_shap_global_importance = lambda: fake_importance
+        try:
+            model = GBMRegressor().fit([[1.0, 0.0], [2.0, 0.0]], [1.0, 2.0])
+            importance = model.feature_importances([[1.0, 0.0], [2.0, 0.0]])
+        finally:
+            regressor_module._load_native_train_regression_artifact = (
+                original_train_loader
+            )
+            regressor_module._load_native_shap_global_importance = (
+                original_importance_loader
+            )
+
+        self.assertEqual(importance, [("f0", 0.6), ("f1", 0.05)])
+        self.assertEqual(calls, [(b"artifact", [[1.0, 0.0], [2.0, 0.0]])])
+
+    def test_feature_importances_reject_unsupported_method(self) -> None:
+        original_train_loader = regressor_module._load_native_train_regression_artifact
+        regressor_module._load_native_train_regression_artifact = lambda: (
+            lambda *_args, **_kwargs: b"artifact"
+        )
+        try:
+            model = GBMRegressor().fit([[1.0, 0.0], [2.0, 0.0]], [1.0, 2.0])
+            with self.assertRaisesRegex(ValueError, "unsupported feature importance method"):
+                model.feature_importances([[1.0, 0.0]], method="gain")
+        finally:
+            regressor_module._load_native_train_regression_artifact = (
+                original_train_loader
+            )
 
     def test_fit_rejects_mismatched_lengths(self) -> None:
         model = GBMRegressor()
