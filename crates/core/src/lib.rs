@@ -5,6 +5,9 @@ pub const MODEL_FORMAT_V1: u32 = 1;
 pub const MODEL_BINARY_MAGIC: [u8; 4] = *b"AGBM";
 pub const MODEL_BINARY_HEADER_LEN: usize = 16;
 pub const MODEL_SECTION_DESCRIPTOR_LEN: usize = 20;
+pub const CATEGORICAL_STATE_FORMAT_V1: u32 = 1;
+const CATEGORICAL_STATE_HEADER_LEN: usize = 16;
+const CATEGORICAL_STATE_FLAG_LEAKAGE_SAFE_TARGET_ENCODING: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Device {
@@ -393,6 +396,13 @@ pub struct ParsedModelArtifactV1 {
     pub sections: Vec<ModelArtifactSection>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CategoricalStatePayloadV1 {
+    pub format_version: u32,
+    pub leakage_safe_target_encoding: bool,
+    pub categorical_feature_indices: Vec<u32>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RequiredSectionCompatibilityReport {
     pub trees_section_count: usize,
@@ -480,6 +490,157 @@ pub fn format_required_section_auto_mode_error(
     )
 }
 
+pub fn encode_categorical_state_payload_v1(
+    payload: &CategoricalStatePayloadV1,
+) -> CoreResult<Vec<u8>> {
+    validate_categorical_state_payload_v1(payload, None)?;
+
+    let feature_count = u32::try_from(payload.categorical_feature_indices.len()).map_err(|_| {
+        CoreError::Serialization("categorical feature count exceeds u32::MAX".to_string())
+    })?;
+    let mut bytes = Vec::with_capacity(
+        CATEGORICAL_STATE_HEADER_LEN + payload.categorical_feature_indices.len() * 4,
+    );
+    bytes.extend_from_slice(&payload.format_version.to_le_bytes());
+    let mut flags = 0_u32;
+    if payload.leakage_safe_target_encoding {
+        flags |= CATEGORICAL_STATE_FLAG_LEAKAGE_SAFE_TARGET_ENCODING;
+    }
+    bytes.extend_from_slice(&flags.to_le_bytes());
+    bytes.extend_from_slice(&feature_count.to_le_bytes());
+    bytes.extend_from_slice(&0_u32.to_le_bytes());
+    for &feature_index in &payload.categorical_feature_indices {
+        bytes.extend_from_slice(&feature_index.to_le_bytes());
+    }
+    Ok(bytes)
+}
+
+pub fn decode_categorical_state_payload_v1(bytes: &[u8]) -> CoreResult<CategoricalStatePayloadV1> {
+    if bytes.len() < CATEGORICAL_STATE_HEADER_LEN {
+        return Err(CoreError::Serialization(format!(
+            "categorical state payload length {} is smaller than header length {CATEGORICAL_STATE_HEADER_LEN}",
+            bytes.len()
+        )));
+    }
+
+    let format_version = read_u32_le(bytes, 0)?;
+    let flags = read_u32_le(bytes, 4)?;
+    let feature_count = read_u32_le(bytes, 8)? as usize;
+    let _reserved = read_u32_le(bytes, 12)?;
+
+    if flags & !CATEGORICAL_STATE_FLAG_LEAKAGE_SAFE_TARGET_ENCODING != 0 {
+        return Err(CoreError::Serialization(format!(
+            "categorical state payload contains unknown flags: {}",
+            flags & !CATEGORICAL_STATE_FLAG_LEAKAGE_SAFE_TARGET_ENCODING
+        )));
+    }
+
+    let expected_len = CATEGORICAL_STATE_HEADER_LEN
+        .checked_add(feature_count.checked_mul(4).ok_or_else(|| {
+            CoreError::Serialization("categorical state length overflow".to_string())
+        })?)
+        .ok_or_else(|| CoreError::Serialization("categorical state length overflow".to_string()))?;
+    if bytes.len() != expected_len {
+        return Err(CoreError::Serialization(format!(
+            "categorical state payload length {} does not match expected {}",
+            bytes.len(),
+            expected_len
+        )));
+    }
+
+    let mut categorical_feature_indices = Vec::with_capacity(feature_count);
+    let mut cursor = CATEGORICAL_STATE_HEADER_LEN;
+    for _ in 0..feature_count {
+        categorical_feature_indices.push(read_u32_le(bytes, cursor)?);
+        cursor += 4;
+    }
+
+    let payload = CategoricalStatePayloadV1 {
+        format_version,
+        leakage_safe_target_encoding: (flags & CATEGORICAL_STATE_FLAG_LEAKAGE_SAFE_TARGET_ENCODING)
+            != 0,
+        categorical_feature_indices,
+    };
+    validate_categorical_state_payload_v1(&payload, None)?;
+    Ok(payload)
+}
+
+pub fn validate_categorical_state_payload_v1(
+    payload: &CategoricalStatePayloadV1,
+    model_feature_count: Option<usize>,
+) -> CoreResult<()> {
+    if payload.format_version != CATEGORICAL_STATE_FORMAT_V1 {
+        return Err(CoreError::Validation(format!(
+            "unsupported categorical state format_version {}, expected {CATEGORICAL_STATE_FORMAT_V1}",
+            payload.format_version
+        )));
+    }
+    if payload.categorical_feature_indices.is_empty() {
+        return Err(CoreError::Validation(
+            "categorical state must include at least one categorical feature index".to_string(),
+        ));
+    }
+
+    let mut previous = None;
+    for &feature_index in &payload.categorical_feature_indices {
+        if let Some(previous) = previous
+            && feature_index <= previous
+        {
+            return Err(CoreError::Validation(format!(
+                "categorical state feature indices must be strictly increasing (found {feature_index} after {previous})"
+            )));
+        }
+        previous = Some(feature_index);
+    }
+
+    if let Some(model_feature_count) = model_feature_count {
+        for &feature_index in &payload.categorical_feature_indices {
+            if feature_index as usize >= model_feature_count {
+                return Err(CoreError::Validation(format!(
+                    "categorical state feature index {} is out of bounds for feature_count {}",
+                    feature_index, model_feature_count
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub fn optional_single_section(
+    sections: &[ModelArtifactSection],
+    kind: ModelSectionKind,
+) -> CoreResult<Option<&ModelArtifactSection>> {
+    let mut found = None;
+    for section in sections {
+        if section.descriptor.kind != kind {
+            continue;
+        }
+        if found.is_some() {
+            return Err(CoreError::Serialization(format!(
+                "model artifact contains duplicate {:?} sections",
+                kind
+            )));
+        }
+        found = Some(section);
+    }
+    Ok(found)
+}
+
+pub fn decode_optional_categorical_state_section_v1(
+    sections: &[ModelArtifactSection],
+    model_feature_count: usize,
+) -> CoreResult<Option<CategoricalStatePayloadV1>> {
+    let Some(section) = optional_single_section(sections, ModelSectionKind::CategoricalState)?
+    else {
+        return Ok(None);
+    };
+
+    let payload = decode_categorical_state_payload_v1(&section.payload)?;
+    validate_categorical_state_payload_v1(&payload, Some(model_feature_count))?;
+    Ok(Some(payload))
+}
+
 pub fn validate_train_params(params: &TrainParams) -> CoreResult<()> {
     if !(0.0..=1.0).contains(&params.learning_rate) || params.learning_rate == 0.0 {
         return Err(CoreError::InvalidConfig(
@@ -529,6 +690,7 @@ pub fn validate_dataset_schema(schema: &DatasetSchema) -> CoreResult<()> {
         ));
     }
 
+    let mut previous = None;
     for &feature_index in &schema.categorical_feature_indices {
         if feature_index >= schema.feature_count {
             return Err(CoreError::Validation(format!(
@@ -536,6 +698,14 @@ pub fn validate_dataset_schema(schema: &DatasetSchema) -> CoreResult<()> {
                 schema.feature_count
             )));
         }
+        if let Some(previous) = previous
+            && feature_index <= previous
+        {
+            return Err(CoreError::Validation(format!(
+                "categorical feature indices must be strictly increasing (found {feature_index} after {previous})"
+            )));
+        }
+        previous = Some(feature_index);
     }
 
     Ok(())
@@ -1063,6 +1233,23 @@ fn parse_quoted_string(input: &str, index: usize) -> CoreResult<(String, usize)>
     ))
 }
 
+fn read_u32_le(bytes: &[u8], offset: usize) -> CoreResult<u32> {
+    let end = offset
+        .checked_add(4)
+        .ok_or_else(|| CoreError::Serialization("u32 read overflow".to_string()))?;
+    if end > bytes.len() {
+        return Err(CoreError::Serialization(format!(
+            "u32 read out of bounds at offset {offset}"
+        )));
+    }
+    Ok(u32::from_le_bytes([
+        bytes[offset],
+        bytes[offset + 1],
+        bytes[offset + 2],
+        bytes[offset + 3],
+    ]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1150,6 +1337,31 @@ mod tests {
             categorical_feature_indices: vec![1, 3],
         };
         assert!(validate_dataset_schema(&schema).is_ok());
+    }
+
+    #[test]
+    fn rejects_dataset_schema_with_unsorted_or_duplicate_categorical_indices() {
+        let duplicate = DatasetSchema {
+            feature_count: 4,
+            has_time_index: false,
+            has_group_id: false,
+            categorical_feature_indices: vec![1, 1],
+        };
+        assert!(matches!(
+            validate_dataset_schema(&duplicate),
+            Err(CoreError::Validation(_))
+        ));
+
+        let unsorted = DatasetSchema {
+            feature_count: 4,
+            has_time_index: false,
+            has_group_id: false,
+            categorical_feature_indices: vec![2, 1],
+        };
+        assert!(matches!(
+            validate_dataset_schema(&unsorted),
+            Err(CoreError::Validation(_))
+        ));
     }
 
     #[test]
@@ -1374,6 +1586,102 @@ mod tests {
         let truncated = &bytes[..bytes.len() - 1];
         assert!(matches!(
             deserialize_model_artifact_v1(truncated),
+            Err(CoreError::Serialization(_))
+        ));
+    }
+
+    #[test]
+    fn categorical_state_payload_roundtrip() {
+        let payload = CategoricalStatePayloadV1 {
+            format_version: CATEGORICAL_STATE_FORMAT_V1,
+            leakage_safe_target_encoding: true,
+            categorical_feature_indices: vec![0, 3, 7],
+        };
+        let encoded = encode_categorical_state_payload_v1(&payload).expect("encodes");
+        let decoded = decode_categorical_state_payload_v1(&encoded).expect("decodes");
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn categorical_state_payload_rejects_invalid_ordering() {
+        let payload = CategoricalStatePayloadV1 {
+            format_version: CATEGORICAL_STATE_FORMAT_V1,
+            leakage_safe_target_encoding: false,
+            categorical_feature_indices: vec![2, 1],
+        };
+        assert!(matches!(
+            encode_categorical_state_payload_v1(&payload),
+            Err(CoreError::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn categorical_state_payload_decode_rejects_unknown_flags() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&CATEGORICAL_STATE_FORMAT_V1.to_le_bytes());
+        bytes.extend_from_slice(&2_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        assert!(matches!(
+            decode_categorical_state_payload_v1(&bytes),
+            Err(CoreError::Serialization(_))
+        ));
+    }
+
+    #[test]
+    fn strict_compatibility_allows_optional_categorical_state_section() {
+        let metadata = sample_metadata();
+        let categorical_state = encode_categorical_state_payload_v1(&CategoricalStatePayloadV1 {
+            format_version: CATEGORICAL_STATE_FORMAT_V1,
+            leakage_safe_target_encoding: true,
+            categorical_feature_indices: vec![1],
+        })
+        .expect("categorical payload encodes");
+
+        let bytes = serialize_model_artifact_v1(
+            &metadata,
+            &[
+                (ModelSectionKind::Trees, vec![1_u8, 2, 3, 4]),
+                (ModelSectionKind::PredictorLayout, vec![9_u8, 8, 7]),
+                (ModelSectionKind::CategoricalState, categorical_state),
+            ],
+        )
+        .expect("artifact encodes");
+        let parsed = deserialize_model_artifact_v1(&bytes).expect("artifact decodes");
+        let report = required_section_compatibility_report(&parsed.sections);
+        assert!(report.strict_compatible);
+
+        let decoded_categorical = decode_optional_categorical_state_section_v1(
+            &parsed.sections,
+            metadata.feature_names.len(),
+        )
+        .expect("categorical state decodes");
+        assert!(decoded_categorical.is_some());
+    }
+
+    #[test]
+    fn decode_optional_categorical_state_section_rejects_duplicate_sections() {
+        let sections = vec![
+            ModelArtifactSection {
+                descriptor: ModelSectionDescriptor {
+                    kind: ModelSectionKind::CategoricalState,
+                    offset: 100,
+                    length: 20,
+                },
+                payload: vec![1_u8; 20],
+            },
+            ModelArtifactSection {
+                descriptor: ModelSectionDescriptor {
+                    kind: ModelSectionKind::CategoricalState,
+                    offset: 120,
+                    length: 20,
+                },
+                payload: vec![1_u8; 20],
+            },
+        ];
+        assert!(matches!(
+            decode_optional_categorical_state_section_v1(&sections, 8),
             Err(CoreError::Serialization(_))
         ));
     }
