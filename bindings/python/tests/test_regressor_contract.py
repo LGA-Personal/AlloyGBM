@@ -333,10 +333,44 @@ class GBMRegressorContractTests(unittest.TestCase):
                 original_train_loader
             )
 
+    def test_feature_importances_reject_feature_count_mismatch(self) -> None:
+        original_train_loader = regressor_module._load_native_train_regression_artifact
+        original_importance_loader = regressor_module._load_native_shap_global_importance
+        regressor_module._load_native_train_regression_artifact = lambda: (
+            lambda *_args, **_kwargs: b"artifact"
+        )
+        regressor_module._load_native_shap_global_importance = lambda: (
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError(
+                    "native SHAP global-importance loader should not be called on shape mismatch"
+                )
+            )
+        )
+        try:
+            model = GBMRegressor().fit([[1.0, 0.0], [2.0, 0.0]], [1.0, 2.0])
+            with self.assertRaisesRegex(ValueError, "feature count"):
+                model.feature_importances([[1.0]])
+        finally:
+            regressor_module._load_native_train_regression_artifact = (
+                original_train_loader
+            )
+            regressor_module._load_native_shap_global_importance = (
+                original_importance_loader
+            )
+
     def test_fit_rejects_mismatched_lengths(self) -> None:
         model = GBMRegressor()
         with self.assertRaisesRegex(ValueError, "same number of rows"):
             model.fit([[1.0], [2.0]], [1.0])
+
+    def test_fit_rejects_out_of_bounds_categorical_feature_index(self) -> None:
+        model = GBMRegressor(categorical_feature_index=2)
+        with self.assertRaisesRegex(ValueError, "within fitted feature bounds"):
+            model.fit(
+                [[1.0, 0.0], [2.0, 0.0]],
+                [1.0, 2.0],
+                categorical_feature_values=["A", "B"],
+            )
 
     def test_fit_rejects_missing_categorical_values(self) -> None:
         model = GBMRegressor(categorical_feature_index=1)
@@ -558,6 +592,48 @@ class GBMRegressorContractTests(unittest.TestCase):
     def test_predict_from_artifact_rejects_non_bytes_payload(self) -> None:
         with self.assertRaisesRegex(TypeError, "artifact_bytes"):
             GBMRegressor.predict_from_artifact("artifact", [[1.0]])  # type: ignore[arg-type]
+
+    def test_predict_from_artifact_accepts_bytearray_payload(self) -> None:
+        calls: list[tuple[bytes, list[list[float]]]] = []
+
+        def fake_predictor(
+            artifact_bytes: bytes, rows: list[list[float]]
+        ) -> list[float]:
+            calls.append((artifact_bytes, rows))
+            return [1.0] * len(rows)
+
+        original_loader = regressor_module._load_native_predictor_predict_batch
+        regressor_module._load_native_predictor_predict_batch = lambda: fake_predictor
+        try:
+            predictions = GBMRegressor.predict_from_artifact(
+                bytearray(b"artifact"), [[1.0, 0.0], [2.0, 0.0]]
+            )
+        finally:
+            regressor_module._load_native_predictor_predict_batch = original_loader
+
+        self.assertEqual(predictions, [1.0, 1.0])
+        self.assertEqual(calls, [(b"artifact", [[1.0, 0.0], [2.0, 0.0]])])
+
+    def test_predict_from_artifact_accepts_memoryview_payload(self) -> None:
+        calls: list[tuple[bytes, list[list[float]]]] = []
+
+        def fake_predictor(
+            artifact_bytes: bytes, rows: list[list[float]]
+        ) -> list[float]:
+            calls.append((artifact_bytes, rows))
+            return [2.0] * len(rows)
+
+        original_loader = regressor_module._load_native_predictor_predict_batch
+        regressor_module._load_native_predictor_predict_batch = lambda: fake_predictor
+        try:
+            predictions = GBMRegressor.predict_from_artifact(
+                memoryview(b"artifact"), [[1.0, 0.0], [2.0, 0.0]]
+            )
+        finally:
+            regressor_module._load_native_predictor_predict_batch = original_loader
+
+        self.assertEqual(predictions, [2.0, 2.0])
+        self.assertEqual(calls, [(b"artifact", [[1.0, 0.0], [2.0, 0.0]])])
 
     def test_predict_from_artifact_rejects_non_convertible_rows(self) -> None:
         with self.assertRaisesRegex(TypeError, "to_numpy/to_list/tolist"):
