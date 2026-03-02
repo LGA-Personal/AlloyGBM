@@ -1,58 +1,54 @@
-# Session Brief (2026-03-01)
+# Session Brief (2026-03-02)
 
 ## Current Target
-- Layer: `docs/architecture/v1.0/v0.5` (`planned-only`, `active_target` in `docs/architecture/state/layer_index.yaml` generated `2026-03-01T15:31:56Z`)
+- Layer: `docs/architecture/v1.0/v0.7`
 - Reason this is next:
-  - `v0.5` is the most recent incomplete layer with missing closeout artifacts.
-  - Most recent child slice `v0.4.2` is verified, so next concrete execution is opening `v0.4.3` under `v0.5`.
+  - `docs/architecture/state/layer_index.yaml` (`generated_at: 2026-03-02T16:13:39Z`) sets both `active_target` and `suggested_next_layer` to `docs/architecture/v1.0/v0.7`.
+  - Parent `docs/architecture/v1.0/v0.6` is now closed with verified child slices and parent rollup artifacts.
 
-## Ancestor Chain and Constraints
-- Ancestor chain: `docs/architecture/v1.0` -> `docs/architecture/v1.0/v0.5`
-- `docs/architecture/README.md`: preserve strict parent-to-child decomposition; do not skip levels.
-- `docs/architecture/gpu_financial_gbm_roadmap.md`: remain CPU-first and correctness-first in this phase.
-- `docs/architecture/v1.0/plan.md`: `0.5.0` is CPU-kernel optimization + SIMD readiness with deterministic parity.
-- `docs/architecture/v1.0/v0.5/plan.md`: in scope is backend hot-path optimization, AVX2 runtime dispatch with scalar fallback, and benchmark evidence; out of scope is ranking/SHAP/categorical/model-format work.
+## Parent Constraints
+- Ancestor chain: `docs/architecture/v1.0` -> `docs/architecture/v1.0/v0.7`.
+- `docs/architecture/README.md`: keep strict parent-to-child decomposition and avoid skipping plan levels.
+- `docs/architecture/gpu_financial_gbm_roadmap.md`: maintain CPU-first and correctness-first sequencing.
+- `docs/architecture/v1.0/plan.md`: preserve deterministic behavior, stable model format contracts, and Python API continuity.
+- `docs/architecture/v1.0/v0.6/plan.md` closeout constraints remain informative for compatibility policy continuity.
 
 ## Progress Snapshot
-- Most recent completed layer(s):
-  - `docs/architecture/v1.0/v0.5/v0.4.2` (`verified`, verification report dated 2026-03-01)
-  - `docs/architecture/v1.0/v0.5/v0.4.1` (`verified`, verification report dated 2026-02-28)
-  - `docs/architecture/v1.0/v0.4` (`verified`, parent prior to current `v0.5` track)
+- Completed layers:
+  - `docs/architecture/v1.0/v0.6` (`verified`, parent rollup completed `2026-03-02`)
+  - `docs/architecture/v1.0/v0.6/v0.5.3` (`verified`)
+  - `docs/architecture/v1.0/v0.6/v0.5.2` (`verified`)
+  - `docs/architecture/v1.0/v0.6/v0.5.1` (`verified`)
 - In-progress layer:
-  - none recorded (no `v0.4.3` plan exists yet)
+  - none recorded
 - Missing artifacts:
-  - `docs/architecture/v1.0/v0.5/implementation_notes.md`
-  - `docs/architecture/v1.0/v0.5/verification_report.md`
+  - `docs/architecture/v1.0/v0.7/plan.md`
+  - `docs/architecture/v1.0/v0.7/implementation_notes.md`
+  - `docs/architecture/v1.0/v0.7/verification_report.md`
 
 ## Repo Execution Context
-- Git branch state: `main...origin/main [ahead 11]`
-- Current changed paths:
-  - `docs/architecture/context/handoff.md`
-- Key manifests/config:
-  - `Cargo.toml`: workspace crates `core`, `engine`, `backend_cpu`, `predictor`, `shap`, `categorical`, `bindings/python`.
-  - `rust-toolchain.toml`: Rust `1.92.0`, components `rustfmt`, `clippy`.
-  - `pyproject.toml`: Python package `alloygbm` via `maturin`.
-- Latest verification evidence:
-  - `docs/architecture/v1.0/v0.5/v0.4.2/verification_report.md` shows PASS for benchmark + fmt + clippy + tests + docs + Python tests.
+- Git branch state: `main...origin/main [ahead 3]`
+- Pending workspace docs updates are expected context/closeout artifacts and should be committed together.
+- Key manifests/config remain unchanged:
+  - `Cargo.toml` workspace crates and `unsafe_code = "forbid"`
+  - `rust-toolchain.toml` (`1.92.0`, `rustfmt`, `clippy`)
+  - `pyproject.toml` (`maturin` backend, `alloygbm._alloygbm` module)
 
 ## Blockers
-- No hard blocker recorded.
-- Constraint blocker: SIMD work in next slice must preserve deterministic parity and explicit scalar fallback behavior.
-- Process blocker: `v0.5` cannot close until parent rollup artifacts are written after remaining child slices.
+- Blocker: no hard technical blocker currently identified.
+- Impact: work can proceed directly into `v0.7` planning.
+- Suggested unblock: create `docs/architecture/v1.0/v0.7/plan.md` and scope categorical support v1 boundaries before implementation.
 
 ## Immediate Next Actions
-1. Create `docs/architecture/v1.0/v0.5/v0.4.3/plan.md` aligned to AVX2 runtime dispatch + scalar fallback validation.
-2. Implement `v0.4.3` in `crates/backend_cpu/src/lib.rs` with runtime feature detection and parity tests.
-3. Extend/validate benchmarks in `crates/backend_cpu/benches/histogram_kernels.rs` for SIMD vs scalar evidence.
-4. Run verification gates (`cargo fmt`, `cargo clippy`, `cargo test`, `cargo doc`, Python tests, targeted bench) and publish `v0.4.3` artifacts.
-5. Update `docs/architecture/state/layer_index.yaml` after `v0.4.3`, then prepare `v0.5` rollup artifacts when remaining child work is complete.
+1. Create `docs/architecture/v1.0/v0.7/plan.md` with explicit in-scope/out-of-scope definitions.
+2. Implement `v0.7` against parent constraints and produce `implementation_notes.md`.
+3. Verify `v0.7`, produce `verification_report.md`, and update `layer_index.yaml`.
 
-## High-Priority Files (Read First)
+## High-Priority Files
 - `docs/architecture/state/layer_index.yaml`
-- `docs/architecture/v1.0/v0.5/plan.md`
-- `docs/architecture/v1.0/v0.5/v0.4.2/plan.md`
-- `docs/architecture/v1.0/v0.5/v0.4.2/implementation_notes.md`
-- `docs/architecture/v1.0/v0.5/v0.4.2/verification_report.md`
-- `docs/architecture/context/handoff.md`
-- `crates/backend_cpu/src/lib.rs`
-- `crates/backend_cpu/benches/histogram_kernels.rs`
+- `docs/architecture/v1.0/plan.md`
+- `docs/architecture/v1.0/v0.6/implementation_notes.md`
+- `docs/architecture/v1.0/v0.6/verification_report.md`
+- `docs/architecture/v1.0/v0.6/v0.5.3/implementation_notes.md`
+- `docs/architecture/v1.0/v0.6/v0.5.3/verification_report.md`
+- `docs/architecture/gpu_financial_gbm_roadmap.md`
