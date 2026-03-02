@@ -1,6 +1,6 @@
-generated_at: "2026-03-02T21:26:28Z"
-active_target: "docs/architecture/v1.0/v0.8/v0.7.5"
-suggested_next_layer: "docs/architecture/v1.0/v0.8/v0.7.5"
+generated_at: "2026-03-02T22:05:02Z"
+active_target: "docs/architecture/v1.0/v0.9/v0.8.2"
+suggested_next_layer: "docs/architecture/v1.0/v0.9/v0.8.2"
 layers:
   - path: "docs/architecture/v1.0"
     status: "planned-only"
@@ -90,6 +90,21 @@ layers:
       - "docs/architecture/v1.0/v0.5"
       - "docs/architecture/v1.0/v0.6"
   - path: "docs/architecture/v1.0/v0.8"
+    status: "verified"
+    has_plan: true
+    has_implementation_notes: true
+    has_verification_report: true
+    missing_artifacts: []
+    parent: "docs/architecture/v1.0"
+    previous_siblings:
+      - "docs/architecture/v1.0/v0.1"
+      - "docs/architecture/v1.0/v0.2"
+      - "docs/architecture/v1.0/v0.3"
+      - "docs/architecture/v1.0/v0.4"
+      - "docs/architecture/v1.0/v0.5"
+      - "docs/architecture/v1.0/v0.6"
+      - "docs/architecture/v1.0/v0.7"
+  - path: "docs/architecture/v1.0/v0.9"
     status: "planned-only"
     has_plan: true
     has_implementation_notes: false
@@ -106,6 +121,27 @@ layers:
       - "docs/architecture/v1.0/v0.5"
       - "docs/architecture/v1.0/v0.6"
       - "docs/architecture/v1.0/v0.7"
+      - "docs/architecture/v1.0/v0.8"
+  - path: "docs/architecture/v1.0/v0.9/v0.8.1"
+    status: "verified"
+    has_plan: true
+    has_implementation_notes: true
+    has_verification_report: true
+    missing_artifacts: []
+    parent: "docs/architecture/v1.0/v0.9"
+    previous_siblings: []
+  - path: "docs/architecture/v1.0/v0.9/v0.8.2"
+    status: "planned-only"
+    has_plan: false
+    has_implementation_notes: false
+    has_verification_report: false
+    missing_artifacts:
+      - "plan.md"
+      - "implementation_notes.md"
+      - "verification_report.md"
+    parent: "docs/architecture/v1.0/v0.9"
+    previous_siblings:
+      - "docs/architecture/v1.0/v0.9/v0.8.1"
   - path: "docs/architecture/v1.0/v0.8/v0.7.1"
     status: "verified"
     has_plan: true
@@ -145,14 +181,11 @@ layers:
       - "docs/architecture/v1.0/v0.8/v0.7.2"
       - "docs/architecture/v1.0/v0.8/v0.7.3"
   - path: "docs/architecture/v1.0/v0.8/v0.7.5"
-    status: "planned-only"
-    has_plan: false
-    has_implementation_notes: false
-    has_verification_report: false
-    missing_artifacts:
-      - "plan.md"
-      - "implementation_notes.md"
-      - "verification_report.md"
+    status: "verified"
+    has_plan: true
+    has_implementation_notes: true
+    has_verification_report: true
+    missing_artifacts: []
     parent: "docs/architecture/v1.0/v0.8"
     previous_siblings:
       - "docs/architecture/v1.0/v0.8/v0.7.1"
