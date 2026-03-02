@@ -1,0 +1,14 @@
+name: histogram_stress
+version: 1
+kind: synthetic
+description: Synthetic dense benchmark designed to stress histogram binning and split scans.
+source:
+  generator: benchmarks/histogram_stress/prepare.py
+prepared:
+  filename: prepared.csv
+  target: target
+  defaults:
+    rows: 50000
+    features: 32
+    seed: 7
+  note: Mixes highly skewed and heavily quantized features to amplify histogram pressure.
