@@ -393,6 +393,15 @@ pub struct ParsedModelArtifactV1 {
     pub sections: Vec<ModelArtifactSection>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequiredSectionCompatibilityReport {
+    pub trees_section_count: usize,
+    pub predictor_layout_section_count: usize,
+    pub strict_compatible: bool,
+    pub legacy_trees_only_compatible: bool,
+    pub legacy_compatible: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoreError {
     InvalidConfig(String),
@@ -417,6 +426,59 @@ impl Display for CoreError {
 impl Error for CoreError {}
 
 pub type CoreResult<T> = Result<T, CoreError>;
+
+pub fn required_section_compatibility_report(
+    sections: &[ModelArtifactSection],
+) -> RequiredSectionCompatibilityReport {
+    let trees_section_count = sections
+        .iter()
+        .filter(|section| section.descriptor.kind == ModelSectionKind::Trees)
+        .count();
+    let predictor_layout_section_count = sections
+        .iter()
+        .filter(|section| section.descriptor.kind == ModelSectionKind::PredictorLayout)
+        .count();
+
+    let strict_compatible = trees_section_count == 1 && predictor_layout_section_count == 1;
+    let legacy_trees_only_compatible = trees_section_count == 1
+        && predictor_layout_section_count == 0
+        && sections.len() == 1
+        && sections[0].descriptor.kind == ModelSectionKind::Trees;
+    let legacy_compatible = strict_compatible || legacy_trees_only_compatible;
+
+    RequiredSectionCompatibilityReport {
+        trees_section_count,
+        predictor_layout_section_count,
+        strict_compatible,
+        legacy_trees_only_compatible,
+        legacy_compatible,
+    }
+}
+
+pub fn format_required_section_mode_error(
+    report: RequiredSectionCompatibilityReport,
+    allow_legacy_trees_only: bool,
+) -> String {
+    if allow_legacy_trees_only {
+        return format!(
+            "legacy-compatible mode only supports strict dual-section artifacts or legacy Trees-only artifacts (found Trees={}, PredictorLayout={})",
+            report.trees_section_count, report.predictor_layout_section_count
+        );
+    }
+    format!(
+        "strict compatibility mode requires exactly one Trees and one PredictorLayout section (found Trees={}, PredictorLayout={})",
+        report.trees_section_count, report.predictor_layout_section_count
+    )
+}
+
+pub fn format_required_section_auto_mode_error(
+    report: RequiredSectionCompatibilityReport,
+) -> String {
+    format!(
+        "unable to determine artifact compatibility mode (Trees sections: {}, PredictorLayout sections: {})",
+        report.trees_section_count, report.predictor_layout_section_count
+    )
+}
 
 pub fn validate_train_params(params: &TrainParams) -> CoreResult<()> {
     if !(0.0..=1.0).contains(&params.learning_rate) || params.learning_rate == 0.0 {
@@ -603,19 +665,37 @@ pub fn validate_model_contract_v1(contract: &ModelIoContractV1) -> CoreResult<()
         )));
     }
 
-    let mut previous_end = 0_u64;
+    let descriptor_table_len = contract
+        .sections
+        .len()
+        .checked_mul(MODEL_SECTION_DESCRIPTOR_LEN)
+        .ok_or_else(|| CoreError::Serialization("section table length overflow".to_string()))?;
+    let payload_start = MODEL_BINARY_HEADER_LEN
+        .checked_add(descriptor_table_len)
+        .and_then(|value| value.checked_add(contract.header.metadata_json_len as usize))
+        .ok_or_else(|| CoreError::Serialization("artifact header length overflow".to_string()))?
+        as u64;
+
+    let mut expected_offset = payload_start;
     for section in &contract.sections {
         if section.length == 0 {
             return Err(CoreError::Serialization(
                 "section length must be greater than 0".to_string(),
             ));
         }
-        if section.offset < previous_end {
-            return Err(CoreError::Serialization(
-                "section offsets must be non-overlapping and ordered".to_string(),
-            ));
+        if section.offset < payload_start {
+            return Err(CoreError::Serialization(format!(
+                "section offset {} precedes payload start {payload_start}",
+                section.offset
+            )));
         }
-        previous_end = section
+        if section.offset != expected_offset {
+            return Err(CoreError::Serialization(format!(
+                "section offsets must be contiguous and ordered (expected {}, found {})",
+                expected_offset, section.offset
+            )));
+        }
+        expected_offset = section
             .offset
             .checked_add(section.length)
             .ok_or_else(|| CoreError::Serialization("section offset overflow".to_string()))?;
@@ -1147,6 +1227,45 @@ mod tests {
     }
 
     #[test]
+    fn required_section_compatibility_report_classifies_strict_and_legacy_layouts() {
+        let strict_sections = vec![
+            ModelArtifactSection {
+                descriptor: ModelSectionDescriptor {
+                    kind: ModelSectionKind::Trees,
+                    offset: 120,
+                    length: 4,
+                },
+                payload: vec![1_u8, 2, 3, 4],
+            },
+            ModelArtifactSection {
+                descriptor: ModelSectionDescriptor {
+                    kind: ModelSectionKind::PredictorLayout,
+                    offset: 124,
+                    length: 4,
+                },
+                payload: vec![5_u8, 6, 7, 8],
+            },
+        ];
+        let strict_report = required_section_compatibility_report(&strict_sections);
+        assert!(strict_report.strict_compatible);
+        assert!(!strict_report.legacy_trees_only_compatible);
+        assert!(strict_report.legacy_compatible);
+
+        let legacy_sections = vec![ModelArtifactSection {
+            descriptor: ModelSectionDescriptor {
+                kind: ModelSectionKind::Trees,
+                offset: 120,
+                length: 4,
+            },
+            payload: vec![1_u8, 2, 3, 4],
+        }];
+        let legacy_report = required_section_compatibility_report(&legacy_sections);
+        assert!(!legacy_report.strict_compatible);
+        assert!(legacy_report.legacy_trees_only_compatible);
+        assert!(legacy_report.legacy_compatible);
+    }
+
+    #[test]
     fn model_contract_rejects_overlapping_sections() {
         let contract = ModelIoContractV1 {
             header: ModelBinaryHeader::new(2, 64),
@@ -1168,6 +1287,57 @@ mod tests {
                 trained_device: Device::Cpu,
             },
         };
+        assert!(matches!(
+            validate_model_contract_v1(&contract),
+            Err(CoreError::Serialization(_))
+        ));
+    }
+
+    #[test]
+    fn model_contract_rejects_section_offset_before_payload_start() {
+        let contract = ModelIoContractV1 {
+            header: ModelBinaryHeader::new(1, 64),
+            sections: vec![ModelSectionDescriptor {
+                kind: ModelSectionKind::Trees,
+                offset: 79,
+                length: 4,
+            }],
+            metadata: ModelMetadata {
+                format_version: MODEL_FORMAT_V1,
+                feature_names: vec!["f0".to_string()],
+                trained_device: Device::Cpu,
+            },
+        };
+
+        assert!(matches!(
+            validate_model_contract_v1(&contract),
+            Err(CoreError::Serialization(_))
+        ));
+    }
+
+    #[test]
+    fn model_contract_rejects_non_contiguous_section_offsets() {
+        let contract = ModelIoContractV1 {
+            header: ModelBinaryHeader::new(2, 64),
+            sections: vec![
+                ModelSectionDescriptor {
+                    kind: ModelSectionKind::Trees,
+                    offset: 120,
+                    length: 8,
+                },
+                ModelSectionDescriptor {
+                    kind: ModelSectionKind::PredictorLayout,
+                    offset: 130,
+                    length: 4,
+                },
+            ],
+            metadata: ModelMetadata {
+                format_version: MODEL_FORMAT_V1,
+                feature_names: vec!["f0".to_string()],
+                trained_device: Device::Cpu,
+            },
+        };
+
         assert!(matches!(
             validate_model_contract_v1(&contract),
             Err(CoreError::Serialization(_))

@@ -1,6 +1,7 @@
 use alloygbm_core::{
     CoreError, MODEL_FORMAT_V1, ModelArtifactSection, ModelMetadata, ModelSectionKind,
-    deserialize_model_artifact_v1,
+    deserialize_model_artifact_v1, format_required_section_mode_error,
+    required_section_compatibility_report,
 };
 use std::collections::HashMap;
 use std::error::Error;
@@ -65,6 +66,12 @@ impl Predictor {
 
     pub fn from_artifact_bytes(bytes: &[u8]) -> PredictorResult<Self> {
         let parsed = deserialize_model_artifact_v1(bytes).map_err(PredictorError::from)?;
+        let compatibility_report = required_section_compatibility_report(&parsed.sections);
+        if !compatibility_report.legacy_compatible {
+            return Err(PredictorError::ContractViolation(
+                format_required_section_mode_error(compatibility_report, true),
+            ));
+        }
         let metadata = parsed.contract.metadata;
         let metadata_feature_count = metadata.feature_names.len();
         let trees_section = required_single_section(&parsed.sections, ModelSectionKind::Trees)?;
@@ -561,10 +568,20 @@ mod tests {
         )
         .expect("duplicate artifact serializes");
 
-        assert!(matches!(
-            Predictor::from_artifact_bytes(&duplicate_layout_artifact),
-            Err(PredictorError::ContractViolation(_))
-        ));
+        let result = Predictor::from_artifact_bytes(&duplicate_layout_artifact);
+        match result {
+            Err(PredictorError::ContractViolation(message)) => {
+                let parsed =
+                    alloygbm_core::deserialize_model_artifact_v1(&duplicate_layout_artifact)
+                        .expect("artifact parses");
+                let report = alloygbm_core::required_section_compatibility_report(&parsed.sections);
+                assert_eq!(
+                    message,
+                    alloygbm_core::format_required_section_mode_error(report, true)
+                );
+            }
+            other => panic!("expected contract violation, got {other:?}"),
+        }
     }
 
     #[test]
@@ -594,10 +611,19 @@ mod tests {
         )
         .expect("artifact serializes");
 
-        assert!(matches!(
-            Predictor::from_artifact_bytes(&missing_trees),
-            Err(PredictorError::ContractViolation(_))
-        ));
+        let result = Predictor::from_artifact_bytes(&missing_trees);
+        match result {
+            Err(PredictorError::ContractViolation(message)) => {
+                let parsed =
+                    alloygbm_core::deserialize_model_artifact_v1(&missing_trees).expect("parses");
+                let report = alloygbm_core::required_section_compatibility_report(&parsed.sections);
+                assert_eq!(
+                    message,
+                    alloygbm_core::format_required_section_mode_error(report, true)
+                );
+            }
+            other => panic!("expected contract violation, got {other:?}"),
+        }
     }
 
     #[test]
