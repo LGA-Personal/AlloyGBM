@@ -12,6 +12,7 @@ crate-type = ["cdylib"]
 [dependencies]
 pyo3 = { version = "0.23.5", features = ["extension-module", "abi3-py310"] }
 alloygbm-backend-cpu = { path = "../../crates/backend_cpu" }
+alloygbm-categorical = { path = "../../crates/categorical" }
 alloygbm-core = { path = "../../crates/core" }
 alloygbm-engine = { path = "../../crates/engine" }
 alloygbm-predictor = { path = "../../crates/predictor" }

@@ -50,6 +50,10 @@ class GBMRegressor:
         min_validation_improvement: float = 0.0,
         seed: int = 0,
         deterministic: bool = True,
+        categorical_feature_index: int | None = None,
+        categorical_smoothing: float = 20.0,
+        categorical_min_samples_leaf: int = 1,
+        categorical_time_aware: bool = False,
     ) -> None:
         if not (0.0 < learning_rate <= 1.0):
             raise ValueError("learning_rate must be in (0.0, 1.0]")
@@ -65,6 +69,12 @@ class GBMRegressor:
             raise ValueError("early_stopping_rounds must be greater than 0 when set")
         if min_validation_improvement < 0.0:
             raise ValueError("min_validation_improvement must be >= 0")
+        if categorical_feature_index is not None and int(categorical_feature_index) < 0:
+            raise ValueError("categorical_feature_index must be >= 0 when set")
+        if categorical_smoothing < 0.0:
+            raise ValueError("categorical_smoothing must be >= 0")
+        if int(categorical_min_samples_leaf) <= 0:
+            raise ValueError("categorical_min_samples_leaf must be greater than 0")
 
         self.learning_rate = float(learning_rate)
         self.max_depth = int(max_depth)
@@ -79,6 +89,14 @@ class GBMRegressor:
         self.min_validation_improvement = float(min_validation_improvement)
         self.seed = int(seed)
         self.deterministic = bool(deterministic)
+        self.categorical_feature_index = (
+            int(categorical_feature_index)
+            if categorical_feature_index is not None
+            else None
+        )
+        self.categorical_smoothing = float(categorical_smoothing)
+        self.categorical_min_samples_leaf = int(categorical_min_samples_leaf)
+        self.categorical_time_aware = bool(categorical_time_aware)
         self._is_fitted = False
         self._artifact_bytes: bytes | None = None
         self._n_features_in = 0
@@ -94,7 +112,11 @@ class GBMRegressor:
             f"early_stopping_rounds={self.early_stopping_rounds}, "
             f"min_validation_improvement={self.min_validation_improvement}, "
             f"seed={self.seed}, "
-            f"deterministic={self.deterministic}"
+            f"deterministic={self.deterministic}, "
+            f"categorical_feature_index={self.categorical_feature_index}, "
+            f"categorical_smoothing={self.categorical_smoothing}, "
+            f"categorical_min_samples_leaf={self.categorical_min_samples_leaf}, "
+            f"categorical_time_aware={self.categorical_time_aware}"
             ")"
         )
 
@@ -111,6 +133,10 @@ class GBMRegressor:
             "min_validation_improvement": self.min_validation_improvement,
             "seed": self.seed,
             "deterministic": self.deterministic,
+            "categorical_feature_index": self.categorical_feature_index,
+            "categorical_smoothing": self.categorical_smoothing,
+            "categorical_min_samples_leaf": self.categorical_min_samples_leaf,
+            "categorical_time_aware": self.categorical_time_aware,
         }
 
     def set_params(self, **params: float | int | bool | None) -> "GBMRegressor":
@@ -125,6 +151,10 @@ class GBMRegressor:
             "min_validation_improvement",
             "seed",
             "deterministic",
+            "categorical_feature_index",
+            "categorical_smoothing",
+            "categorical_min_samples_leaf",
+            "categorical_time_aware",
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
@@ -183,14 +213,79 @@ class GBMRegressor:
         if "deterministic" in params:
             self.deterministic = bool(params["deterministic"])
 
+        if "categorical_feature_index" in params:
+            if params["categorical_feature_index"] is None:
+                self.categorical_feature_index = None
+            else:
+                categorical_feature_index = int(params["categorical_feature_index"])
+                if categorical_feature_index < 0:
+                    raise ValueError("categorical_feature_index must be >= 0 when set")
+                self.categorical_feature_index = categorical_feature_index
+
+        if "categorical_smoothing" in params:
+            categorical_smoothing = float(params["categorical_smoothing"])
+            if categorical_smoothing < 0.0:
+                raise ValueError("categorical_smoothing must be >= 0")
+            self.categorical_smoothing = categorical_smoothing
+
+        if "categorical_min_samples_leaf" in params:
+            categorical_min_samples_leaf = int(params["categorical_min_samples_leaf"])
+            if categorical_min_samples_leaf <= 0:
+                raise ValueError("categorical_min_samples_leaf must be greater than 0")
+            self.categorical_min_samples_leaf = categorical_min_samples_leaf
+
+        if "categorical_time_aware" in params:
+            self.categorical_time_aware = bool(params["categorical_time_aware"])
+
         return self
 
-    def fit(self, X: object, y: object) -> "GBMRegressor":
+    def fit(
+        self,
+        X: object,
+        y: object,
+        *,
+        categorical_feature_values: object | None = None,
+        time_index: object | None = None,
+    ) -> "GBMRegressor":
         """Fit native-backed regression model artifact state."""
         rows = self._validate_rows(X)
         targets = self._validate_targets(y)
         if len(rows) != len(targets):
             raise ValueError("X and y must contain the same number of rows")
+        if (
+            self.categorical_feature_index is not None
+            and self.categorical_feature_index >= len(rows[0])
+        ):
+            raise ValueError(
+                "categorical_feature_index must be within fitted feature bounds"
+            )
+
+        categorical_values = None
+        if categorical_feature_values is not None:
+            categorical_values = self._validate_categorical_values(
+                categorical_feature_values, len(rows)
+            )
+
+        if self.categorical_feature_index is None and categorical_values is not None:
+            raise ValueError(
+                "categorical_feature_values requires categorical_feature_index to be set"
+            )
+        if self.categorical_feature_index is not None and categorical_values is None:
+            raise ValueError(
+                "categorical_feature_values must be provided when categorical_feature_index is set"
+            )
+
+        validated_time_index = None
+        if time_index is not None:
+            validated_time_index = self._validate_time_index(time_index, len(rows))
+        if (
+            self.categorical_feature_index is not None
+            and self.categorical_time_aware
+            and validated_time_index is None
+        ):
+            raise ValueError(
+                "time_index must be provided when categorical_time_aware=True and categorical_feature_index is set"
+            )
 
         train_regression_artifact = _load_native_train_regression_artifact()
         artifact_bytes = train_regression_artifact(
@@ -205,6 +300,12 @@ class GBMRegressor:
             deterministic=self.deterministic,
             rounds=self.n_estimators,
             early_stopping_rounds=self.early_stopping_rounds,
+            categorical_feature_index=self.categorical_feature_index,
+            categorical_feature_values=categorical_values,
+            categorical_smoothing=self.categorical_smoothing,
+            categorical_min_samples_leaf=self.categorical_min_samples_leaf,
+            categorical_time_aware=self.categorical_time_aware,
+            time_index=validated_time_index,
         )
 
         self._n_features_in = len(rows[0])
@@ -272,6 +373,30 @@ class GBMRegressor:
         if len(targets_like) == 0:
             raise ValueError("y must contain at least one value")
         return [float(value) for value in targets_like]
+
+    @staticmethod
+    def _validate_categorical_values(
+        categorical_feature_values: object, row_count: int
+    ) -> list[str]:
+        values_like = GBMRegressor._coerce_sequence_like(
+            categorical_feature_values, "categorical_feature_values"
+        )
+        if not isinstance(values_like, Sequence) or isinstance(values_like, (str, bytes)):
+            raise TypeError("categorical_feature_values must be a sequence of strings")
+        if len(values_like) != row_count:
+            raise ValueError(
+                "categorical_feature_values must have the same number of rows as X"
+            )
+        return [str(value) for value in values_like]
+
+    @staticmethod
+    def _validate_time_index(time_index: object, row_count: int) -> list[int]:
+        values_like = GBMRegressor._coerce_sequence_like(time_index, "time_index")
+        if not isinstance(values_like, Sequence) or isinstance(values_like, (str, bytes)):
+            raise TypeError("time_index must be a sequence of integer-like values")
+        if len(values_like) != row_count:
+            raise ValueError("time_index must have the same number of rows as X")
+        return [int(value) for value in values_like]
 
     @staticmethod
     def _coerce_sequence_like(value: object, argument_name: str) -> object:
