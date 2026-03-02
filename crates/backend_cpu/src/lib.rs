@@ -7,9 +7,70 @@ use alloygbm_engine::{BackendOps, EngineError, EngineResult};
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CpuBackend;
 
+const SMALL_TILE_WORKLOAD_THRESHOLD: usize = 16_384;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HistogramKernelPath {
+    PerFeatureScalar,
+    RowFirstScalar,
+    RowFirstAvx2,
+}
+
 impl CpuBackend {
     pub fn device(&self) -> Device {
         Device::Cpu
+    }
+
+    fn runtime_avx2_available() -> bool {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            std::arch::is_x86_feature_detected!("avx2")
+        }
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+        {
+            false
+        }
+    }
+
+    fn select_histogram_kernel_path(
+        tile_workload: usize,
+        avx2_available: bool,
+    ) -> HistogramKernelPath {
+        if tile_workload <= SMALL_TILE_WORKLOAD_THRESHOLD {
+            HistogramKernelPath::PerFeatureScalar
+        } else if avx2_available {
+            HistogramKernelPath::RowFirstAvx2
+        } else {
+            HistogramKernelPath::RowFirstScalar
+        }
+    }
+
+    fn materialize_tile_histograms(
+        start_feature: usize,
+        bin_count: usize,
+        grad_sums: &[f32],
+        hess_sums: &[f32],
+        counts: &[u32],
+        feature_histograms: &mut Vec<FeatureHistogram>,
+    ) {
+        let tile_feature_count = grad_sums.len() / bin_count;
+        for local_feature_index in 0..tile_feature_count {
+            let base = local_feature_index * bin_count;
+            let mut bins = Vec::with_capacity(bin_count);
+            for bin_index in 0..bin_count {
+                let flat_index = base + bin_index;
+                bins.push(HistogramBin {
+                    grad_sum: grad_sums[flat_index],
+                    hess_sum: hess_sums[flat_index],
+                    count: counts[flat_index],
+                });
+            }
+
+            feature_histograms.push(FeatureHistogram {
+                feature_index: (start_feature + local_feature_index) as u32,
+                bins,
+            });
+        }
     }
 
     fn build_tile_histograms_per_feature(
@@ -77,23 +138,131 @@ impl CpuBackend {
             }
         }
 
-        for local_feature_index in 0..tile_feature_count {
-            let base = local_feature_index * bin_count;
-            let mut bins = Vec::with_capacity(bin_count);
-            for bin_index in 0..bin_count {
-                let flat_index = base + bin_index;
-                bins.push(HistogramBin {
-                    grad_sum: grad_sums[flat_index],
-                    hess_sum: hess_sums[flat_index],
-                    count: counts[flat_index],
-                });
-            }
+        Self::materialize_tile_histograms(
+            start_feature,
+            bin_count,
+            &grad_sums,
+            &hess_sums,
+            &counts,
+            feature_histograms,
+        );
+    }
 
-            feature_histograms.push(FeatureHistogram {
-                feature_index: (start_feature + local_feature_index) as u32,
-                bins,
-            });
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[target_feature(enable = "avx2")]
+    unsafe fn build_tile_histograms_row_first_avx2(
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: &NodeSlice,
+        start_feature: usize,
+        end_feature: usize,
+        bin_count: usize,
+        feature_histograms: &mut Vec<FeatureHistogram>,
+    ) {
+        let tile_feature_count = end_feature - start_feature;
+        let flat_len = tile_feature_count * bin_count;
+        let mut grad_sums = vec![0.0_f32; flat_len];
+        let mut hess_sums = vec![0.0_f32; flat_len];
+        let mut counts = vec![0_u32; flat_len];
+        let feature_count = binned_matrix.feature_count;
+
+        // Process rows in AVX2-width chunks to keep the hot loop structure SIMD-friendly.
+        let mut row_chunks = node.row_indices.chunks_exact(8);
+        for row_chunk in &mut row_chunks {
+            let row0 = row_chunk[0] as usize;
+            let row1 = row_chunk[1] as usize;
+            let row2 = row_chunk[2] as usize;
+            let row3 = row_chunk[3] as usize;
+            let row4 = row_chunk[4] as usize;
+            let row5 = row_chunk[5] as usize;
+            let row6 = row_chunk[6] as usize;
+            let row7 = row_chunk[7] as usize;
+
+            let gradient0 = gradients[row0];
+            let gradient1 = gradients[row1];
+            let gradient2 = gradients[row2];
+            let gradient3 = gradients[row3];
+            let gradient4 = gradients[row4];
+            let gradient5 = gradients[row5];
+            let gradient6 = gradients[row6];
+            let gradient7 = gradients[row7];
+
+            let row_base0 = row0 * feature_count + start_feature;
+            let row_base1 = row1 * feature_count + start_feature;
+            let row_base2 = row2 * feature_count + start_feature;
+            let row_base3 = row3 * feature_count + start_feature;
+            let row_base4 = row4 * feature_count + start_feature;
+            let row_base5 = row5 * feature_count + start_feature;
+            let row_base6 = row6 * feature_count + start_feature;
+            let row_base7 = row7 * feature_count + start_feature;
+
+            for local_feature_index in 0..tile_feature_count {
+                let base = local_feature_index * bin_count;
+
+                let idx0 = base + binned_matrix.bins[row_base0 + local_feature_index] as usize;
+                let idx1 = base + binned_matrix.bins[row_base1 + local_feature_index] as usize;
+                let idx2 = base + binned_matrix.bins[row_base2 + local_feature_index] as usize;
+                let idx3 = base + binned_matrix.bins[row_base3 + local_feature_index] as usize;
+                let idx4 = base + binned_matrix.bins[row_base4 + local_feature_index] as usize;
+                let idx5 = base + binned_matrix.bins[row_base5 + local_feature_index] as usize;
+                let idx6 = base + binned_matrix.bins[row_base6 + local_feature_index] as usize;
+                let idx7 = base + binned_matrix.bins[row_base7 + local_feature_index] as usize;
+
+                grad_sums[idx0] += gradient0.grad;
+                hess_sums[idx0] += gradient0.hess;
+                counts[idx0] += 1;
+
+                grad_sums[idx1] += gradient1.grad;
+                hess_sums[idx1] += gradient1.hess;
+                counts[idx1] += 1;
+
+                grad_sums[idx2] += gradient2.grad;
+                hess_sums[idx2] += gradient2.hess;
+                counts[idx2] += 1;
+
+                grad_sums[idx3] += gradient3.grad;
+                hess_sums[idx3] += gradient3.hess;
+                counts[idx3] += 1;
+
+                grad_sums[idx4] += gradient4.grad;
+                hess_sums[idx4] += gradient4.hess;
+                counts[idx4] += 1;
+
+                grad_sums[idx5] += gradient5.grad;
+                hess_sums[idx5] += gradient5.hess;
+                counts[idx5] += 1;
+
+                grad_sums[idx6] += gradient6.grad;
+                hess_sums[idx6] += gradient6.hess;
+                counts[idx6] += 1;
+
+                grad_sums[idx7] += gradient7.grad;
+                hess_sums[idx7] += gradient7.hess;
+                counts[idx7] += 1;
+            }
         }
+
+        for &row_index in row_chunks.remainder() {
+            let row_index = row_index as usize;
+            let row_base = row_index * feature_count + start_feature;
+            let gradient = gradients[row_index];
+            for local_feature_index in 0..tile_feature_count {
+                let bin_index = binned_matrix.bins[row_base + local_feature_index] as usize;
+                let flat_index = local_feature_index * bin_count + bin_index;
+                grad_sums[flat_index] += gradient.grad;
+                hess_sums[flat_index] += gradient.hess;
+                counts[flat_index] += 1;
+            }
+        }
+
+        Self::materialize_tile_histograms(
+            start_feature,
+            bin_count,
+            &grad_sums,
+            &hess_sums,
+            &counts,
+            feature_histograms,
+        );
     }
 }
 
@@ -126,7 +295,7 @@ impl BackendOps for CpuBackend {
             .map(|tile| (tile.end_feature - tile.start_feature) as usize)
             .sum();
         let mut feature_histograms = Vec::with_capacity(selected_feature_count);
-        const SMALL_TILE_WORKLOAD_THRESHOLD: usize = 16_384;
+        let avx2_available = Self::runtime_avx2_available();
 
         for tile in feature_tiles {
             if tile.end_feature as usize > feature_count {
@@ -141,26 +310,54 @@ impl BackendOps for CpuBackend {
             let tile_feature_count = end_feature - start_feature;
             let tile_workload = node.row_indices.len().saturating_mul(tile_feature_count);
 
-            if tile_workload <= SMALL_TILE_WORKLOAD_THRESHOLD {
-                Self::build_tile_histograms_per_feature(
-                    binned_matrix,
-                    gradients,
-                    node,
-                    start_feature,
-                    end_feature,
-                    bin_count,
-                    &mut feature_histograms,
-                );
-            } else {
-                Self::build_tile_histograms_row_first(
-                    binned_matrix,
-                    gradients,
-                    node,
-                    start_feature,
-                    end_feature,
-                    bin_count,
-                    &mut feature_histograms,
-                );
+            match Self::select_histogram_kernel_path(tile_workload, avx2_available) {
+                HistogramKernelPath::PerFeatureScalar => {
+                    Self::build_tile_histograms_per_feature(
+                        binned_matrix,
+                        gradients,
+                        node,
+                        start_feature,
+                        end_feature,
+                        bin_count,
+                        &mut feature_histograms,
+                    );
+                }
+                HistogramKernelPath::RowFirstScalar => {
+                    Self::build_tile_histograms_row_first(
+                        binned_matrix,
+                        gradients,
+                        node,
+                        start_feature,
+                        end_feature,
+                        bin_count,
+                        &mut feature_histograms,
+                    );
+                }
+                HistogramKernelPath::RowFirstAvx2 => {
+                    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+                    unsafe {
+                        // SAFETY: this branch is only selected when runtime AVX2 support is detected.
+                        Self::build_tile_histograms_row_first_avx2(
+                            binned_matrix,
+                            gradients,
+                            node,
+                            start_feature,
+                            end_feature,
+                            bin_count,
+                            &mut feature_histograms,
+                        );
+                    }
+                    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+                    Self::build_tile_histograms_row_first(
+                        binned_matrix,
+                        gradients,
+                        node,
+                        start_feature,
+                        end_feature,
+                        bin_count,
+                        &mut feature_histograms,
+                    );
+                }
             }
         }
 
@@ -520,6 +717,72 @@ mod tests {
         );
 
         assert_eq!(per_feature, row_first);
+    }
+
+    #[test]
+    fn histogram_kernel_path_prefers_per_feature_for_small_tiles() {
+        let path = CpuBackend::select_histogram_kernel_path(SMALL_TILE_WORKLOAD_THRESHOLD, true);
+        assert_eq!(path, HistogramKernelPath::PerFeatureScalar);
+    }
+
+    #[test]
+    fn histogram_kernel_path_prefers_avx2_for_large_tiles_when_available() {
+        let path =
+            CpuBackend::select_histogram_kernel_path(SMALL_TILE_WORKLOAD_THRESHOLD + 1, true);
+        assert_eq!(path, HistogramKernelPath::RowFirstAvx2);
+    }
+
+    #[test]
+    fn histogram_kernel_path_falls_back_to_scalar_when_avx2_unavailable() {
+        let path =
+            CpuBackend::select_histogram_kernel_path(SMALL_TILE_WORKLOAD_THRESHOLD + 1, false);
+        assert_eq!(path, HistogramKernelPath::RowFirstScalar);
+    }
+
+    #[test]
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn avx2_row_first_histograms_match_scalar_when_supported() {
+        if !CpuBackend::runtime_avx2_available() {
+            return;
+        }
+
+        let matrix = quality_fixture_binned_matrix();
+        let gradients = (0..matrix.row_count)
+            .map(|row_index| {
+                GradientPair::new((row_index as f32 - 3.5) * 0.5, 1.0 + row_index as f32 * 0.1)
+                    .expect("gradient pair is finite")
+            })
+            .collect::<Vec<_>>();
+        let node = NodeSlice::new(0, (0..matrix.row_count as u32).collect())
+            .expect("node indices are valid");
+        let bin_count = matrix.max_bin as usize + 1;
+
+        let mut scalar = Vec::new();
+        CpuBackend::build_tile_histograms_row_first(
+            &matrix,
+            &gradients,
+            &node,
+            0,
+            matrix.feature_count,
+            bin_count,
+            &mut scalar,
+        );
+
+        let mut avx2 = Vec::new();
+        unsafe {
+            // SAFETY: runtime AVX2 support is checked at the start of the test.
+            CpuBackend::build_tile_histograms_row_first_avx2(
+                &matrix,
+                &gradients,
+                &node,
+                0,
+                matrix.feature_count,
+                bin_count,
+                &mut avx2,
+            );
+        }
+
+        assert_eq!(scalar, avx2);
     }
 
     #[test]
