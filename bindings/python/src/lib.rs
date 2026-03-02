@@ -1,6 +1,8 @@
 use alloygbm_backend_cpu::CpuBackend;
 use alloygbm_core::{BinnedMatrix, DatasetMatrix, TrainParams, TrainingDataset};
-use alloygbm_engine::{EngineError, SquaredErrorObjective, Trainer};
+use alloygbm_engine::{
+    ArtifactCompatibilityMode, EngineError, SquaredErrorObjective, TrainedModel, Trainer,
+};
 use alloygbm_predictor::{Predictor, PredictorError};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -150,9 +152,30 @@ fn predictor_predict_batch_impl(
     predictor.predict_batch(rows)
 }
 
+fn predictor_predict_batch_canonical_impl(
+    artifact_bytes: &[u8],
+    rows: &[Vec<f32>],
+) -> Result<Vec<f32>, PredictorError> {
+    TrainedModel::from_artifact_bytes_with_mode(artifact_bytes, ArtifactCompatibilityMode::Strict)
+        .map_err(|error| {
+            PredictorError::ContractViolation(format!(
+                "canonical predictor path requires strict dual-section artifact: {error}"
+            ))
+        })?;
+    predictor_predict_batch_impl(artifact_bytes, rows)
+}
+
 #[pyfunction]
 fn predictor_predict_batch(artifact_bytes: &[u8], rows: Vec<Vec<f32>>) -> PyResult<Vec<f32>> {
     predictor_predict_batch_impl(artifact_bytes, &rows).map_err(predictor_error_to_pyerr)
+}
+
+#[pyfunction]
+fn predictor_predict_batch_canonical(
+    artifact_bytes: &[u8],
+    rows: Vec<Vec<f32>>,
+) -> PyResult<Vec<f32>> {
+    predictor_predict_batch_canonical_impl(artifact_bytes, &rows).map_err(predictor_error_to_pyerr)
 }
 
 #[pyfunction(signature = (
@@ -205,6 +228,7 @@ fn _alloygbm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<NativeRuntimeInfo>()?;
     m.add_function(wrap_pyfunction!(native_runtime_info, m)?)?;
     m.add_function(wrap_pyfunction!(predictor_predict_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(predictor_predict_batch_canonical, m)?)?;
     m.add_function(wrap_pyfunction!(train_regression_artifact, m)?)?;
     Ok(())
 }
@@ -212,10 +236,14 @@ fn _alloygbm(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_TRAIN_ROUNDS, predictor_predict_batch_impl, train_regression_artifact_impl,
+        DEFAULT_TRAIN_ROUNDS, predictor_predict_batch_canonical_impl, predictor_predict_batch_impl,
+        train_regression_artifact_impl,
     };
     use alloygbm_backend_cpu::CpuBackend;
-    use alloygbm_core::{BinnedMatrix, DatasetMatrix, TrainParams, TrainingDataset};
+    use alloygbm_core::{
+        BinnedMatrix, DatasetMatrix, ModelSectionKind, TrainParams, TrainingDataset,
+        deserialize_model_artifact_v1, serialize_model_artifact_v1,
+    };
     use alloygbm_engine::{SquaredErrorObjective, Trainer};
 
     fn quality_fixture_dataset() -> TrainingDataset {
@@ -283,6 +311,42 @@ mod tests {
         }
     }
 
+    fn train_fixture_model() -> (alloygbm_engine::TrainedModel, TrainingDataset) {
+        let dataset = quality_fixture_dataset();
+        let binned = quality_fixture_binned_matrix();
+        let trainer = Trainer::new(fixture_params()).expect("params are valid");
+        let backend = CpuBackend;
+        let model = trainer
+            .fit_iterations(
+                &dataset,
+                &binned,
+                &backend,
+                &SquaredErrorObjective,
+                DEFAULT_TRAIN_ROUNDS,
+            )
+            .expect("training succeeds");
+        (model, dataset)
+    }
+
+    fn legacy_trees_only_artifact_bytes() -> (Vec<u8>, Vec<Vec<f32>>) {
+        let (model, dataset) = train_fixture_model();
+        let rows = fixture_rows(&dataset);
+        let strict_artifact = model.to_artifact_bytes().expect("artifact serializes");
+        let parsed = deserialize_model_artifact_v1(&strict_artifact).expect("artifact parses");
+        let trees_payload = parsed
+            .sections
+            .iter()
+            .find(|section| section.descriptor.kind == ModelSectionKind::Trees)
+            .map(|section| section.payload.clone())
+            .expect("trees payload exists");
+        let legacy_artifact = serialize_model_artifact_v1(
+            &parsed.contract.metadata,
+            &[(ModelSectionKind::Trees, trees_payload)],
+        )
+        .expect("legacy artifact serializes");
+        (legacy_artifact, rows)
+    }
+
     #[test]
     fn binding_bridge_predictions_match_engine_predictions() {
         let dataset = quality_fixture_dataset();
@@ -304,20 +368,8 @@ mod tests {
 
     #[test]
     fn train_bridge_artifact_predictions_match_engine_predictions() {
-        let dataset = quality_fixture_dataset();
-        let binned = quality_fixture_binned_matrix();
+        let (model, dataset) = train_fixture_model();
         let rows = fixture_rows(&dataset);
-        let trainer = Trainer::new(fixture_params()).expect("params are valid");
-        let backend = CpuBackend;
-        let model = trainer
-            .fit_iterations(
-                &dataset,
-                &binned,
-                &backend,
-                &SquaredErrorObjective,
-                DEFAULT_TRAIN_ROUNDS,
-            )
-            .expect("training succeeds");
 
         let artifact = train_regression_artifact_impl(
             &rows,
@@ -331,5 +383,28 @@ mod tests {
             predictor_predict_batch_impl(&artifact, &rows).expect("bridge predicts");
 
         assert_eq!(bridge_predictions, engine_predictions);
+    }
+
+    #[test]
+    fn canonical_bridge_predictions_match_engine_for_strict_artifacts() {
+        let (model, dataset) = train_fixture_model();
+        let rows = fixture_rows(&dataset);
+        let strict_artifact = model.to_artifact_bytes().expect("artifact serializes");
+
+        let engine_predictions = model.predict_batch(&rows).expect("engine predicts");
+        let canonical_predictions = predictor_predict_batch_canonical_impl(&strict_artifact, &rows)
+            .expect("canonical bridge predicts");
+
+        assert_eq!(canonical_predictions, engine_predictions);
+    }
+
+    #[test]
+    fn canonical_bridge_rejects_legacy_trees_only_artifacts() {
+        let (legacy_artifact, rows) = legacy_trees_only_artifact_bytes();
+        let result = predictor_predict_batch_canonical_impl(&legacy_artifact, &rows);
+        assert!(matches!(
+            result,
+            Err(alloygbm_predictor::PredictorError::ContractViolation(_))
+        ));
     }
 }
