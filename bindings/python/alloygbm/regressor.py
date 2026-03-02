@@ -35,6 +35,26 @@ def _load_native_train_regression_artifact():
     return train_regression_artifact
 
 
+def _load_native_shap_explain_rows():
+    try:
+        from alloygbm._alloygbm import shap_explain_rows
+    except Exception as exc:  # pragma: no cover - exercised via contract tests.
+        raise RuntimeError(
+            "native SHAP explain binding is unavailable; build/install the alloygbm extension module"
+        ) from exc
+    return shap_explain_rows
+
+
+def _load_native_shap_global_importance():
+    try:
+        from alloygbm._alloygbm import shap_global_importance
+    except Exception as exc:  # pragma: no cover - exercised via contract tests.
+        raise RuntimeError(
+            "native SHAP global-importance binding is unavailable; build/install the alloygbm extension module"
+        ) from exc
+    return shap_global_importance
+
+
 class GBMRegressor:
     """Sklearn-style contract stub for the future native estimator."""
 
@@ -329,6 +349,51 @@ class GBMRegressor:
             _load_native_predictor_predict_batch_canonical()
         )
         return list(predictor_predict_batch_canonical(self._artifact_bytes, rows))
+
+    def shap_values(
+        self, X: object, *, include_expected_value: bool = False
+    ) -> list[list[float]] | tuple[float, list[list[float]]]:
+        """Return SHAP values for the provided rows using the fitted artifact."""
+        if not self._is_fitted:
+            raise RuntimeError("GBMRegressor must be fit before shap_values")
+        if self._artifact_bytes is None:
+            raise RuntimeError("GBMRegressor native artifact is not available")
+
+        rows = self._validate_rows(X)
+        if len(rows[0]) != self._n_features_in:
+            raise ValueError(
+                f"X feature count {len(rows[0])} does not match fitted feature count "
+                f"{self._n_features_in}"
+            )
+
+        shap_explain_rows = _load_native_shap_explain_rows()
+        expected_value, values = shap_explain_rows(self._artifact_bytes, rows)
+        shap_matrix = [list(row) for row in values]
+        if include_expected_value:
+            return float(expected_value), shap_matrix
+        return shap_matrix
+
+    def feature_importances(
+        self, X: object, *, method: str = "shap"
+    ) -> list[tuple[str, float]]:
+        """Return feature importances for the provided rows."""
+        if method != "shap":
+            raise ValueError("unsupported feature importance method; expected 'shap'")
+        if not self._is_fitted:
+            raise RuntimeError("GBMRegressor must be fit before feature_importances")
+        if self._artifact_bytes is None:
+            raise RuntimeError("GBMRegressor native artifact is not available")
+
+        rows = self._validate_rows(X)
+        if len(rows[0]) != self._n_features_in:
+            raise ValueError(
+                f"X feature count {len(rows[0])} does not match fitted feature count "
+                f"{self._n_features_in}"
+            )
+
+        shap_global_importance = _load_native_shap_global_importance()
+        importance = shap_global_importance(self._artifact_bytes, rows)
+        return [(str(name), float(value)) for name, value in importance]
 
     @staticmethod
     def predict_from_artifact(

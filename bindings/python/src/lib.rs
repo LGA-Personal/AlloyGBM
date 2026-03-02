@@ -6,6 +6,9 @@ use alloygbm_engine::{
     TrainedModel, Trainer,
 };
 use alloygbm_predictor::{Predictor, PredictorError};
+use alloygbm_shap::{
+    ShapError, explain_rows_from_artifact_bytes, global_importance_from_artifact_bytes,
+};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
@@ -53,6 +56,13 @@ fn engine_error_to_pyerr(error: EngineError) -> PyErr {
             PyRuntimeError::new_err(message)
         }
         EngineError::Core(error) => PyRuntimeError::new_err(error.to_string()),
+    }
+}
+
+fn shap_error_to_pyerr(error: ShapError) -> PyErr {
+    match error {
+        ShapError::InvalidInput(message) => PyValueError::new_err(message),
+        ShapError::ContractViolation(message) => PyRuntimeError::new_err(message),
     }
 }
 
@@ -218,6 +228,21 @@ fn predictor_predict_batch_canonical_impl(
     predictor_predict_batch_impl(artifact_bytes, rows)
 }
 
+fn shap_explain_rows_impl(
+    artifact_bytes: &[u8],
+    rows: &[Vec<f32>],
+) -> Result<(f32, Vec<Vec<f32>>), ShapError> {
+    let explanation = explain_rows_from_artifact_bytes(artifact_bytes, rows)?;
+    Ok((explanation.expected_value, explanation.values))
+}
+
+fn shap_global_importance_impl(
+    artifact_bytes: &[u8],
+    rows: &[Vec<f32>],
+) -> Result<Vec<(String, f32)>, ShapError> {
+    global_importance_from_artifact_bytes(artifact_bytes, rows)
+}
+
 #[pyfunction]
 fn predictor_predict_batch(artifact_bytes: &[u8], rows: Vec<Vec<f32>>) -> PyResult<Vec<f32>> {
     predictor_predict_batch_impl(artifact_bytes, &rows).map_err(predictor_error_to_pyerr)
@@ -229,6 +254,19 @@ fn predictor_predict_batch_canonical(
     rows: Vec<Vec<f32>>,
 ) -> PyResult<Vec<f32>> {
     predictor_predict_batch_canonical_impl(artifact_bytes, &rows).map_err(predictor_error_to_pyerr)
+}
+
+#[pyfunction]
+fn shap_explain_rows(artifact_bytes: &[u8], rows: Vec<Vec<f32>>) -> PyResult<(f32, Vec<Vec<f32>>)> {
+    shap_explain_rows_impl(artifact_bytes, &rows).map_err(shap_error_to_pyerr)
+}
+
+#[pyfunction]
+fn shap_global_importance(
+    artifact_bytes: &[u8],
+    rows: Vec<Vec<f32>>,
+) -> PyResult<Vec<(String, f32)>> {
+    shap_global_importance_impl(artifact_bytes, &rows).map_err(shap_error_to_pyerr)
 }
 
 #[pyfunction(signature = (
@@ -312,6 +350,8 @@ fn _alloygbm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(native_runtime_info, m)?)?;
     m.add_function(wrap_pyfunction!(predictor_predict_batch, m)?)?;
     m.add_function(wrap_pyfunction!(predictor_predict_batch_canonical, m)?)?;
+    m.add_function(wrap_pyfunction!(shap_explain_rows, m)?)?;
+    m.add_function(wrap_pyfunction!(shap_global_importance, m)?)?;
     m.add_function(wrap_pyfunction!(train_regression_artifact, m)?)?;
     Ok(())
 }
@@ -320,7 +360,7 @@ fn _alloygbm(m: &Bound<'_, PyModule>) -> PyResult<()> {
 mod tests {
     use super::{
         DEFAULT_TRAIN_ROUNDS, predictor_predict_batch_canonical_impl, predictor_predict_batch_impl,
-        train_regression_artifact_impl,
+        shap_explain_rows_impl, shap_global_importance_impl, train_regression_artifact_impl,
     };
     use alloygbm_backend_cpu::CpuBackend;
     use alloygbm_categorical::TargetEncoderConfig;
@@ -576,5 +616,49 @@ mod tests {
             missing_index,
             Err(alloygbm_engine::EngineError::ContractViolation(_))
         ));
+    }
+
+    #[test]
+    fn shap_bridge_explain_rows_matches_model_additivity() {
+        let (model, dataset) = train_fixture_model();
+        let rows = fixture_rows(&dataset);
+        let artifact = model.to_artifact_bytes().expect("artifact serializes");
+
+        let (expected_value, values) =
+            shap_explain_rows_impl(&artifact, &rows).expect("shap bridge explains");
+        assert_eq!(values.len(), rows.len());
+        assert_eq!(values[0].len(), dataset.matrix.feature_count);
+
+        let predictions = predictor_predict_batch_impl(&artifact, &rows).expect("predicts");
+        for (row_values, prediction) in values.iter().zip(predictions.iter()) {
+            let reconstructed = expected_value + row_values.iter().sum::<f32>();
+            assert!((reconstructed - prediction).abs() <= 1e-5);
+        }
+    }
+
+    #[test]
+    fn shap_bridge_global_importance_is_sorted_descending() {
+        let (_model, dataset) = train_fixture_model();
+        let rows = fixture_rows(&dataset);
+        let artifact = train_regression_artifact_impl(
+            &rows,
+            &dataset.targets,
+            fixture_params(),
+            DEFAULT_TRAIN_ROUNDS,
+            None,
+            None,
+        )
+        .expect("bridge training succeeds");
+
+        let global =
+            shap_global_importance_impl(&artifact, &rows).expect("global importance computes");
+        assert_eq!(global.len(), dataset.matrix.feature_count);
+        for (name, value) in &global {
+            assert!(name.starts_with('f'));
+            assert!(*value >= 0.0);
+        }
+        for pair in global.windows(2) {
+            assert!(pair[0].1 >= pair[1].1);
+        }
     }
 }
