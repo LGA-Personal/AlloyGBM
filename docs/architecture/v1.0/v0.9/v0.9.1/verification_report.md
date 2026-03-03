@@ -79,7 +79,7 @@
 
 ## Residual Risks
 - `BG-902`: shallow/deep benchmark matrix is not yet implemented (`v0.9.2` follow-up).
-- `BG-903`: benchmark threshold policy is still not enforced as CI pass/fail (`v0.9.2`/`v0.9.4` follow-up).
+- `BG-903`: benchmark threshold policy is still not enforced as CI pass/fail (`v0.9.2`/`v0.9.5` follow-up).
 
 ## Final Readiness
 - Ready: Yes

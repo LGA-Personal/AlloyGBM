@@ -45,6 +45,13 @@ python3 benchmarks/run_model_comparison.py \
   --profile-seeds 7,17,29
 ```
 
+The benchmark runner now validates the loaded `alloygbm` runtime contract before running:
+
+- `GBMRegressor` must expose benchmark training controls (`n_estimators`, subsampling knobs).
+- native extension must expose `train_regression_artifact`.
+
+If the runtime check fails, benchmarks stop early with an actionable error instead of silently benchmarking a stale baseline package.
+
 Optional ultra profile (`10000` rounds) on constrained scenarios:
 
 ```bash

@@ -46,6 +46,14 @@ ULTRA_PROFILE = BenchmarkProfile(
     "ultra_low_lr", learning_rate=0.005, max_depth=8, rounds=10000
 )
 
+REQUIRED_ALLOY_INIT_PARAMS = (
+    "learning_rate",
+    "max_depth",
+    "n_estimators",
+    "row_subsample",
+    "col_subsample",
+)
+
 
 @dataclass
 class BenchmarkRecord:
@@ -68,6 +76,49 @@ class BenchmarkRecord:
     r2: float
     status: str
     error: str
+
+
+def _verify_alloygbm_runtime_contract(
+    gbm_regressor_cls: type, native_module: object
+) -> tuple[str, ...]:
+    signature = inspect.signature(gbm_regressor_cls.__init__)
+    parameter_names = tuple(signature.parameters.keys())
+    missing = sorted(
+        required
+        for required in REQUIRED_ALLOY_INIT_PARAMS
+        if required not in signature.parameters
+    )
+    if missing:
+        raise RuntimeError(
+            "loaded alloygbm.GBMRegressor is not benchmark-compatible; "
+            f"missing required __init__ parameters: {', '.join(missing)}"
+        )
+    if not hasattr(native_module, "train_regression_artifact"):
+        raise RuntimeError(
+            "loaded alloygbm native extension is not benchmark-compatible; "
+            "missing train_regression_artifact"
+        )
+    return parameter_names
+
+
+def _load_alloygbm_runtime() -> tuple[type, dict[str, object]]:
+    try:
+        import alloygbm
+        import alloygbm._alloygbm as native_module
+        from alloygbm import GBMRegressor
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            "failed to import benchmark runtime package 'alloygbm'; "
+            "install a current local alloygbm build before running benchmarks"
+        ) from exc
+
+    init_parameters = _verify_alloygbm_runtime_contract(GBMRegressor, native_module)
+    runtime = {
+        "module_path": str(Path(alloygbm.__file__).resolve()),
+        "native_module_path": str(Path(native_module.__file__).resolve()),
+        "init_parameters": list(init_parameters),
+    }
+    return GBMRegressor, runtime
 
 
 def _prepare_dataset(
@@ -274,12 +325,13 @@ def _run_model(
         )
 
 
-def _model_factories(seed: int, learning_rate: float, max_depth: int, rounds: int) -> dict:
-    from alloygbm import GBMRegressor
+def _model_factories(
+    gbm_regressor_cls: type, seed: int, learning_rate: float, max_depth: int, rounds: int
+) -> dict:
     from lightgbm import LGBMRegressor
     from xgboost import XGBRegressor
 
-    alloy_signature = inspect.signature(GBMRegressor.__init__)
+    alloy_signature = inspect.signature(gbm_regressor_cls.__init__)
     alloy_params: dict[str, object] = {}
     if "learning_rate" in alloy_signature.parameters:
         alloy_params["learning_rate"] = learning_rate
@@ -299,7 +351,7 @@ def _model_factories(seed: int, learning_rate: float, max_depth: int, rounds: in
         alloy_params["deterministic"] = True
 
     return {
-        "alloygbm": lambda: GBMRegressor(**alloy_params),
+        "alloygbm": lambda: gbm_regressor_cls(**alloy_params),
         "lightgbm": lambda: LGBMRegressor(
             objective="regression",
             learning_rate=learning_rate,
@@ -673,6 +725,16 @@ def main(argv: list[str]) -> int:
         return 2
 
     repo_root = Path(__file__).resolve().parents[1]
+    try:
+        gbm_regressor_cls, alloy_runtime = _load_alloygbm_runtime()
+    except RuntimeError as exc:
+        print(f"alloygbm runtime check failed: {exc}", file=sys.stderr)
+        return 2
+    print(
+        "alloygbm runtime: "
+        f"module={alloy_runtime['module_path']} "
+        f"native={alloy_runtime['native_module_path']}"
+    )
 
     datasets: dict[str, tuple[pd.DataFrame, str]] = {}
     dataset_errors: dict[str, str] = {}
@@ -688,6 +750,7 @@ def main(argv: list[str]) -> int:
     for profile_index, profile in enumerate(profiles, start=1):
         for run_index, seed in enumerate(seeds, start=1):
             factories = _model_factories(
+                gbm_regressor_cls=gbm_regressor_cls,
                 seed=seed,
                 learning_rate=profile.learning_rate,
                 max_depth=profile.max_depth,
@@ -792,6 +855,7 @@ def main(argv: list[str]) -> int:
         "rounds": args.rounds,
         "test_size": args.test_size,
         "scenarios": args.scenarios,
+        "alloygbm_runtime": alloy_runtime,
     }
     paths = _write_outputs(args.output_dir, run_id, records, params)
     print(f"wrote comparison csv: {paths['csv']}")

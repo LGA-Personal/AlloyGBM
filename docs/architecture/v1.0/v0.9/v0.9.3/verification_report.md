@@ -98,4 +98,6 @@
 ## Final Readiness
 - Ready: Yes
 - Required follow-up before merge/release:
-  - execute `docs/architecture/v1.0/v0.9/v0.9.4` for documentation/tutorial and policy closeout using leakage-hardened benchmark baseline.
+  - execute `docs/architecture/v1.0/v0.9/v0.9.4` for benchmark runtime provenance hardening,
+  - execute `docs/architecture/v1.0/v0.9/v0.9.5` for competitiveness/policy improvements on the corrected harness,
+  - execute `docs/architecture/v1.0/v0.9/v0.9.6` for documentation/tutorial and closeout readiness packaging.
