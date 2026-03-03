@@ -1,16 +1,16 @@
 # Benchmark Regression Report (2026-03-03)
 
 ## Status
-This report replaces the earlier provisional benchmark narrative and captures the full rerun results after:
-- `v0.9.4` runtime provenance guards were added,
-- the local editable `alloygbm` package was installed,
-- full benchmark matrices were executed again top-to-bottom.
+PASS for benchmark execution and runtime compatibility.  
+Decision: keep `linear` as default; keep `rank` as configurable opt-in variant.
 
 ## Scope
-Re-ran benchmark suite end-to-end and interpreted results against the current local runtime.
+- Added and benchmarked configurable Alloy continuous binning strategies (`linear`, `rank`).
+- Ran full benchmark matrices for both strategies.
+- Compared strategy deltas and competitiveness against `lightgbm` and `xgboost`.
 
 ## Environment
-- git commit: `b35903ce1ef4753dece58daaca55aa31d5b4dbb6`
+- git commit: `6b912650969987a06b99aa72b48921acdefc4338`
 - OS: `Darwin 24.6.0 arm64`
 - Python: `3.12.10`
 - Rust/Cargo: `1.92.0`
@@ -19,60 +19,77 @@ Re-ran benchmark suite end-to-end and interpreted results against the current lo
   - native extension: `bindings/python/alloygbm/_alloygbm.abi3.so`
 
 ## Commands Executed
-1. `python3 -m pip install -e .`
-2. `python3 -B benchmarks/run_model_comparison.py --force-prepare --profile-grid default --profile-seeds 7,17,29`
-3. `python3 -B benchmarks/run_model_comparison.py --force-prepare --profile-grid default_ultra --profile-seeds 7 --scenarios dense_numeric dow_jones_financial`
-4. `bash scripts/benchmark_avx2_compare.sh --runs 3`
+1. `python3 -B benchmarks/run_model_comparison.py --force-prepare --profile-grid default --profile-seeds 7,17,29 --alloy-continuous-binning-strategy linear --output-dir benchmarks/results/strategy_linear`
+2. `python3 -B benchmarks/run_model_comparison.py --force-prepare --profile-grid default_ultra --profile-seeds 7 --scenarios dense_numeric dow_jones_financial --alloy-continuous-binning-strategy linear --output-dir benchmarks/results/strategy_linear`
+3. `python3 -B benchmarks/run_model_comparison.py --force-prepare --profile-grid default --profile-seeds 7,17,29 --alloy-continuous-binning-strategy rank --output-dir benchmarks/results/strategy_rank`
+4. `python3 -B benchmarks/run_model_comparison.py --force-prepare --profile-grid default_ultra --profile-seeds 7 --scenarios dense_numeric dow_jones_financial --alloy-continuous-binning-strategy rank --output-dir benchmarks/results/strategy_rank`
+5. `bash scripts/benchmark_avx2_compare.sh --runs 3 > benchmarks/results/avx2_compare_20260303_rank_linear_eval.log 2>&1`
 
 ## Produced Artifacts
-- Full matrix (4 scenarios, 3 profiles, 3 seeds):
-  - `benchmarks/results/model_comparison_20260303T094707Z.csv`
-  - `benchmarks/results/model_comparison_20260303T094707Z.json`
-  - `benchmarks/results/model_comparison_20260303T094707Z.md`
-  - `benchmarks/results/model_comparison_profile_summary_20260303T094707Z.csv`
-  - `benchmarks/results/model_comparison_profile_summary_20260303T094707Z.json`
-- Ultra constrained run (2 scenarios, default+ultra profiles, seed 7):
-  - `benchmarks/results/model_comparison_20260303T094739Z.csv`
-  - `benchmarks/results/model_comparison_20260303T094739Z.json`
-  - `benchmarks/results/model_comparison_20260303T094739Z.md`
-  - `benchmarks/results/model_comparison_profile_summary_20260303T094739Z.csv`
-  - `benchmarks/results/model_comparison_profile_summary_20260303T094739Z.json`
+- `linear` default matrix:
+  - `benchmarks/results/strategy_linear/model_comparison_20260303T183621Z.csv`
+  - `benchmarks/results/strategy_linear/model_comparison_profile_summary_20260303T183621Z.csv`
+- `linear` default_ultra matrix:
+  - `benchmarks/results/strategy_linear/model_comparison_20260303T183706Z.csv`
+  - `benchmarks/results/strategy_linear/model_comparison_profile_summary_20260303T183706Z.csv`
+- `rank` default matrix:
+  - `benchmarks/results/strategy_rank/model_comparison_20260303T184847Z.csv`
+  - `benchmarks/results/strategy_rank/model_comparison_profile_summary_20260303T184847Z.csv`
+- `rank` default_ultra matrix:
+  - `benchmarks/results/strategy_rank/model_comparison_20260303T184935Z.csv`
+  - `benchmarks/results/strategy_rank/model_comparison_profile_summary_20260303T184935Z.csv`
+- AVX2 compare log:
+  - `benchmarks/results/avx2_compare_20260303_rank_linear_eval.log`
 
 ## Pass/Fail Summary
-- Full matrix records (`20260303T094707Z`): `72 PASS / 36 FAIL`
-  - `alloygbm`: `36 FAIL`
-  - `lightgbm`: `36 PASS`
-  - `xgboost`: `36 PASS`
-- Ultra run records (`20260303T094739Z`): `16 PASS / 8 FAIL`
-  - `alloygbm`: `8 FAIL`
-  - `lightgbm`: `8 PASS`
-  - `xgboost`: `8 PASS`
+- `linear` default: `108 PASS / 0 FAIL`
+- `linear` default_ultra: `24 PASS / 0 FAIL`
+- `rank` default: `108 PASS / 0 FAIL`
+- `rank` default_ultra: `24 PASS / 0 FAIL`
 
-## Blocking Issue Observed
-All Alloy benchmark training attempts failed with native input validation errors:
-- `ValueError: row 0 feature 0 must be an integer-valued bin`
-- `ValueError: row 0 feature 1 must be an integer-valued bin`
+## Strategy Delta (Rank vs Linear, Alloy Only)
+Regression threshold used for triage: `>5%` slowdown in fit/predict median.
 
-This is consistent with the current native training contract in `bindings/python/src/lib.rs`:
-- features are required to be non-negative integer-valued bins,
-- benchmark datasets currently provide continuous floating-point features.
+### Default matrix (`4 scenarios x 3 profiles x 3 seeds`)
+- Fit median delta: `+11.61%` (rank slower), better in `2/12` scenario/profile cells.
+- Predict median delta: `+36.17%` (rank slower), better in `1/12` cells.
+- RMSE median delta: `+1.13%` (mixed), better in `6/12` cells.
+- MAE median delta: `-2.17%` (slight improvement), better in `7/12` cells.
+- Largest regression cluster: `histogram_stress` (`+31.90%` fit, `+81.61%` predict, `+6.94%` RMSE).
 
-## Interpretation
-1. Runtime provenance hardening is working as designed:
-   - stale runtime imports are blocked,
-   - benchmark runner now executes against the intended local package.
-2. The current blocker is no longer "wrong package loaded"; it is native trainer capability mismatch with continuous features.
-3. Because all Alloy rows fail, no valid Alloy-vs-LightGBM speed/quality competitiveness conclusions can be drawn from this rerun.
+### Default_ultra matrix (`2 scenarios x 4 profiles x 1 seed`)
+- Fit median delta: `-9.23%` (rank faster), better in `8/8` cells.
+- Predict median delta: `-4.04%` (rank slightly faster), better in `5/8` cells.
+- RMSE median delta: `+0.05%` (near parity), better in `4/8` cells.
+
+Interpretation: `rank` is unstable across the full matrix and regresses heavily in the histogram-heavy scenario despite occasional wins.
+
+## Competitiveness Snapshot
+Using the full default matrix:
+- Best RMSE by scenario/profile is still dominated by `xgboost` (`11/12` cells; `lightgbm` wins `1/12`; `alloygbm` wins `0/12`).
+- Fastest fit is `lightgbm` in all `12/12` cells.
+- Fastest predict is `xgboost` in all `12/12` cells.
+
+Using default_ultra:
+- Best RMSE remains `xgboost` (`8/8` cells).
+- Fastest fit remains `lightgbm` (`8/8` cells).
+- Fastest predict remains `xgboost` (`8/8` cells).
 
 ## AVX2 Script Result
-`bash scripts/benchmark_avx2_compare.sh --runs 3` summary:
+`scripts/benchmark_avx2_compare.sh --runs 3` summary:
 - runtime target arch: `aarch64`
-- runtime AVX2 enabled: `false`
-- reported median delta: `n/a (runtime AVX2 unavailable)`
+- runtime AVX2 enabled (default): `false`
+- runtime AVX2 enabled (forced scalar): `false`
+- median delta: `n/a (runtime AVX2 unavailable)`
 
-Interpretation: on this host, AVX2 acceleration cannot be validated and is not a useful competitiveness signal.
+Interpretation: AVX2 tuning cannot be validated on this host; performance conclusions should rely on non-AVX2 metrics here.
+
+## Keep/Drop Decision
+1. Keep `continuous_binning_strategy` as a configurable variant (`linear` default, `rank` optional).
+2. Keep benchmark-runner configurability (`--alloy-continuous-binning-strategy`) for repeatable A/B testing.
+3. Do not promote `rank` to default in `v0.9.7` due to full-matrix speed regressions above threshold.
 
 ## Required Follow-up
-1. Prioritize native training support for continuous features in upcoming `v0.9.x` slices.
-2. Re-run full benchmark matrix only after continuous-feature support is available in Alloy native training path.
-3. Preserve this report as the formal issue note: current Alloy benchmark failures are capability-bound, not harness-bound.
+1. Implement true capped quantile histogram binning (for example, fixed `<=256` bins) to reduce `rank` lookup overhead while preserving distribution awareness.
+2. Add optional strategy-specific calibration knobs (for example, quantile bin count / sketch epsilon) behind config flags.
+3. Re-run this exact matrix on a native AVX2-capable `x86_64` host for SIMD-path evidence.

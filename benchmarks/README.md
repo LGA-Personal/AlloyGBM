@@ -45,6 +45,18 @@ python3 benchmarks/run_model_comparison.py \
   --profile-seeds 7,17,29
 ```
 
+Alloy continuous-feature binning strategy A/B:
+
+```bash
+python3 benchmarks/run_model_comparison.py \
+  --force-prepare \
+  --profile-grid default \
+  --profile-seeds 7,17,29 \
+  --alloy-continuous-binning-strategy linear
+```
+
+Supported values: `linear` (default), `rank`.
+
 The benchmark runner now validates the loaded `alloygbm` runtime contract before running:
 
 - `GBMRegressor` must expose benchmark training controls (`n_estimators`, subsampling knobs).
