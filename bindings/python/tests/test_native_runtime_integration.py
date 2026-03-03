@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import random
 import re
 import subprocess
 import sys
@@ -448,6 +449,145 @@ class NativeRuntimeIntegrationTests(unittest.TestCase):
         self.assertEqual(len(adapter_predictions), len(native_predictions))
         for adapter_value, native_value in zip(adapter_predictions, native_predictions):
             self.assertAlmostEqual(adapter_value, native_value, places=6)
+
+    @staticmethod
+    def _rmse(y_true: list[float], y_pred: list[float]) -> float:
+        return (
+            sum((actual - predicted) ** 2 for actual, predicted in zip(y_true, y_pred))
+            / len(y_true)
+        ) ** 0.5
+
+    def test_continuous_dense_profile_depth_rounds_change_capacity(self) -> None:
+        random.seed(101)
+        rows: list[list[float]] = []
+        targets: list[float] = []
+        for _ in range(420):
+            x0 = random.uniform(-4.0, 4.0)
+            x1 = random.uniform(-3.0, 3.0)
+            x2 = random.uniform(-2.0, 2.0)
+            target = (
+                (1.7 if x0 > 0.25 else -1.3)
+                + (1.1 if x1 > 1.0 else -0.9)
+                + 0.35 * x2
+                + 0.2 * x0 * x1
+                + random.gauss(0.0, 0.15)
+            )
+            rows.append([x0, x1, x2])
+            targets.append(target)
+
+        train_rows = rows[:320]
+        train_targets = targets[:320]
+        test_rows = rows[320:]
+
+        shallow = self.alloygbm.GBMRegressor(
+            learning_rate=0.2,
+            max_depth=2,
+            n_estimators=24,
+            row_subsample=1.0,
+            col_subsample=1.0,
+            early_stopping_rounds=None,
+            min_validation_improvement=0.0,
+            seed=19,
+            deterministic=True,
+        ).fit(train_rows, train_targets)
+        deep = self.alloygbm.GBMRegressor(
+            learning_rate=0.08,
+            max_depth=6,
+            n_estimators=220,
+            row_subsample=1.0,
+            col_subsample=1.0,
+            early_stopping_rounds=None,
+            min_validation_improvement=0.0,
+            seed=19,
+            deterministic=True,
+        ).fit(train_rows, train_targets)
+
+        shallow_train_rmse = self._rmse(train_targets, shallow.predict(train_rows))
+        deep_train_rmse = self._rmse(train_targets, deep.predict(train_rows))
+        self.assertGreater(shallow_train_rmse - deep_train_rmse, 0.01)
+        self.assertNotEqual(shallow._artifact_bytes, deep._artifact_bytes)
+
+        shallow_test_predictions = shallow.predict(test_rows)
+        deep_test_predictions = deep.predict(test_rows)
+        avg_abs_delta = sum(
+            abs(shallow_value - deep_value)
+            for shallow_value, deep_value in zip(
+                shallow_test_predictions, deep_test_predictions
+            )
+        ) / len(test_rows)
+        self.assertGreater(avg_abs_delta, 0.02)
+
+    def test_continuous_low_snr_financial_profiles_show_nontrivial_effects(self) -> None:
+        random.seed(202)
+        rows: list[list[float]] = []
+        targets: list[float] = []
+        for _ in range(540):
+            f0 = random.gauss(0.0, 1.0)
+            f1 = random.gauss(0.0, 1.2)
+            f2 = random.gauss(0.0, 0.8)
+            f3 = random.gauss(0.0, 0.6)
+            signal = 0.11 * f0 - 0.07 * f1 + 0.05 * f2 - 0.03 * f3
+            target = signal + random.gauss(0.0, 1.3)
+            rows.append([f0, f1, f2, f3])
+            targets.append(target)
+
+        train_rows = rows[:420]
+        train_targets = targets[:420]
+        test_rows = rows[420:]
+        test_targets = targets[420:]
+
+        profiles = [
+            self.alloygbm.GBMRegressor(
+                learning_rate=0.2,
+                max_depth=2,
+                n_estimators=60,
+                row_subsample=1.0,
+                col_subsample=1.0,
+                early_stopping_rounds=None,
+                min_validation_improvement=0.0,
+                seed=23,
+                deterministic=True,
+            ).fit(train_rows, train_targets),
+            self.alloygbm.GBMRegressor(
+                learning_rate=0.1,
+                max_depth=4,
+                n_estimators=180,
+                row_subsample=1.0,
+                col_subsample=1.0,
+                early_stopping_rounds=None,
+                min_validation_improvement=0.0,
+                seed=23,
+                deterministic=True,
+            ).fit(train_rows, train_targets),
+            self.alloygbm.GBMRegressor(
+                learning_rate=0.05,
+                max_depth=6,
+                n_estimators=420,
+                row_subsample=1.0,
+                col_subsample=1.0,
+                early_stopping_rounds=None,
+                min_validation_improvement=0.0,
+                seed=23,
+                deterministic=True,
+            ).fit(train_rows, train_targets),
+        ]
+
+        train_rmses = [
+            self._rmse(train_targets, model.predict(train_rows)) for model in profiles
+        ]
+        test_predictions = [model.predict(test_rows) for model in profiles]
+        test_rmses = [
+            self._rmse(test_targets, predictions) for predictions in test_predictions
+        ]
+
+        self.assertGreater(train_rmses[0] - train_rmses[2], 0.01)
+        self.assertGreater(max(test_rmses) - min(test_rmses), 0.005)
+
+        shallow_vs_deep_avg_delta = sum(
+            abs(shallow_value - deep_value)
+            for shallow_value, deep_value in zip(test_predictions[0], test_predictions[2])
+        ) / len(test_rows)
+        self.assertGreater(shallow_vs_deep_avg_delta, 0.02)
 
 
 if __name__ == "__main__":
