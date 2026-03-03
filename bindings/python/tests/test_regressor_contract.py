@@ -232,6 +232,64 @@ class GBMRegressorContractTests(unittest.TestCase):
             [(b"trained-artifact", [[1.0, 0.0], [2.0, 0.0]])],
         )
 
+    def test_fit_quantizes_continuous_rows_before_native_training(self) -> None:
+        train_calls: list[dict[str, object]] = []
+
+        def fake_train(**kwargs: object) -> bytes:
+            train_calls.append(kwargs)
+            return b"artifact"
+
+        original_train_loader = regressor_module._load_native_train_regression_artifact
+        regressor_module._load_native_train_regression_artifact = lambda: fake_train
+        try:
+            GBMRegressor().fit(
+                [[-1.2, 0.49], [0.51, 300.1], [2.6, 12.9]],
+                [0.0, 1.0, 2.0],
+            )
+        finally:
+            regressor_module._load_native_train_regression_artifact = (
+                original_train_loader
+            )
+
+        self.assertEqual(len(train_calls), 1)
+        self.assertEqual(
+            train_calls[0]["rows"],
+            [[0.0, 0.0], [1.0, 255.0], [3.0, 13.0]],
+        )
+
+    def test_predict_quantizes_rows_when_model_fitted_on_continuous_inputs(self) -> None:
+        predict_calls: list[list[list[float]]] = []
+
+        def fake_predictor(_artifact_bytes: bytes, rows: list[list[float]]) -> list[float]:
+            predict_calls.append(rows)
+            return [0.0] * len(rows)
+
+        original_train_loader = regressor_module._load_native_train_regression_artifact
+        original_predict_loader = (
+            regressor_module._load_native_predictor_predict_batch_canonical
+        )
+        regressor_module._load_native_train_regression_artifact = lambda: (
+            lambda *_args, **_kwargs: b"artifact"
+        )
+        regressor_module._load_native_predictor_predict_batch_canonical = (
+            lambda: fake_predictor
+        )
+        try:
+            model = GBMRegressor().fit(
+                [[-1.2, 0.49], [0.51, 300.1], [2.6, 12.9]],
+                [0.0, 1.0, 2.0],
+            )
+            model.predict([[-0.7, 0.2], [4.4, 1200.4]])
+        finally:
+            regressor_module._load_native_train_regression_artifact = (
+                original_train_loader
+            )
+            regressor_module._load_native_predictor_predict_batch_canonical = (
+                original_predict_loader
+            )
+
+        self.assertEqual(predict_calls, [[[0.0, 0.0], [4.0, 255.0]]])
+
     def test_shap_values_use_native_bridge_with_optional_expected_value(self) -> None:
         shap_calls: list[tuple[bytes, list[list[float]]]] = []
 
