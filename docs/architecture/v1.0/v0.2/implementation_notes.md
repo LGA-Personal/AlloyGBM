@@ -1,36 +1,44 @@
-# AlloyGBM v0.2 Parent Implementation Notes
+# AlloyGBM v0.2 Implementation Notes (Parent Rollup)
 
-## Scope and Purpose
-This parent rollup summarizes the completed `v0.2` child layers (`v0.1.1` through `v0.1.10`) and records how the milestone moved from contract scaffolding to a verified minimal histogram GBDT CPU regression baseline.
+## Summary of What Was Built
+- Completed `v0.2` through child slices `v0.2.1` to `v0.2.3` with full plan/implementation/verification artifacts.
+- Delivered sklearn-style wrapper contract hardening in [regressor.py](/Users/lashby/Projects/AlloyGBM/bindings/python/alloygbm/regressor.py):
+  - native-backed `fit`/`predict` flow,
+  - stable parameter roundtrip (`get_params`/`set_params`),
+  - deterministic input normalization for NumPy-like/pandas-like/Polars-like containers.
+- Extended native bridge entrypoints in [lib.rs](/Users/lashby/Projects/AlloyGBM/bindings/python/src/lib.rs):
+  - artifact-based training/prediction path,
+  - explicit round-count control (`rounds`) for training.
+- Consolidated verification evidence via contract tests and runtime wheel integration tests in:
+  - [test_regressor_contract.py](/Users/lashby/Projects/AlloyGBM/bindings/python/tests/test_regressor_contract.py)
+  - [test_native_runtime_integration.py](/Users/lashby/Projects/AlloyGBM/bindings/python/tests/test_native_runtime_integration.py)
 
-## Child-Layer Contributions
-- `v0.1.1`: locked training-control contracts for `row_subsample`, `col_subsample`, `early_stopping_rounds`, `min_validation_improvement`, and validation-aware stop-path plumbing.
-- `v0.1.2`: replaced prefix-only sampling with seeded deterministic per-round row/feature subsampling semantics and summary telemetry.
-- `v0.1.3`: added real `Trainer + CpuBackend` integration evidence for baseline quality (`model_mse < naive_mse`) and deterministic artifact reproducibility.
-- `v0.1.4`: corrected validation plateau rollback semantics to retain best-checkpoint model state and aligned summary traces.
-- `v0.1.5`: implemented depth-limited multi-node-per-round growth and path-conditioned non-root split application semantics.
-- `v0.1.6`: implemented predictor artifact import/inference parity (strict + legacy) with row/batch prediction path and input validation behavior.
-- `v0.1.7`: exposed predictor-backed Python native bridge (`predictor_predict_batch`) and public regressor artifact inference path.
-- `v0.1.8`: added Python runtime wheel-build/install integration tests for native extension import/execution and error-path propagation.
-- `v0.1.9`: added Python runtime success-path parity assertions with valid artifact bytes and deterministic native prediction checks.
-- `v0.1.10`: consolidated parent closeout artifacts/state-index bookkeeping and added explicit single-row predictor parity test evidence (`predictor_row_matches_engine_prediction`).
+## Non-Intuitive Decisions
+- Decision: decompose `v0.2` into three focused child slices instead of one broad implementation pass.
+- Reason: isolate risk across bridge wiring (`v0.2.1`), adapter normalization (`v0.2.2`), and estimator round-control (`v0.2.3`) with verification at each boundary.
+- Impact: stronger traceability and easier rollback/debugging for regressions in wrapper behavior.
 
-## Outcome vs v0.2 Goals
-- Histogram-based regression behavior is implemented with depth-limited growth and path-aware application.
-- Training loop controls (shrinkage, row/column subsampling, validation early stopping) are implemented and test-backed.
-- Row and batch inference are available from serialized artifacts through predictor and Python bridge/runtime paths.
-- Correctness-oriented command gates and Python integration coverage are green at closeout time.
+- Decision: keep adapter handling dependency-agnostic via duck typing (`to_numpy`/`to_list`/`tolist`).
+- Reason: support common dataframe ecosystems without introducing hard runtime dependencies into the package.
+- Impact: broader compatibility while preserving deterministic validation paths.
 
-## Non-Intuitive Decisions Across v0.2
-- Kept predictor runtime independent from engine internals even when decode/path semantics were mirrored, to preserve lightweight inference boundaries.
-- Implemented Python runtime checks via wheel-install harness to validate true extension execution rather than source-only imports.
-- Used layered child slices to land behavior deterministically before closeout rollup, reducing cross-layer drift risk.
+## Plan Contradictions and Why
+- Original Plan Statement: none contradicted.
+- Implemented Decision: N/A.
+- Reason: N/A.
+- Impact: N/A.
+- Rollback or Migration Consideration: none required.
 
-## Known Residuals at Parent Closeout
-- LightGBM-relative performance benchmarking for the roadmap target (`3–5x`) is not yet represented in dedicated benchmark artifacts in this closeout.
-- Parent `v1.0` rollup artifacts are still pending:
-  - `docs/architecture/v1.0/implementation_notes.md`
-  - `docs/architecture/v1.0/verification_report.md`
+## Boundary/Interface Changes vs Plan
+- `GBMRegressor` now consistently executes native-backed training and prediction rather than scaffold fallback behavior.
+- `GBMRegressor` parameter surface now includes explicit estimator round control (`n_estimators`) with bridge forwarding.
+- Native extension training entrypoint accepts explicit `rounds` and validates non-zero values.
+- Scope remained inside `v0.2` parent boundaries; no ranking, SHAP expansion, categorical expansion, or backend/perf campaigns were introduced.
 
-## Closeout Readiness
-- Parent `v0.2` implementation scope is considered complete for architecture-layer closeout based on child-layer evidence and gate-command health.
+## Known Gaps Deferred to Next Layer
+- `v0.3` finance-evaluation scope (metrics and leakage guardrails) remains unimplemented in this layer.
+- Bridge training currently expects pre-binned integer-valued non-negative features; full continuous-feature quantization remains deferred.
+
+## Follow-Up Actions
+- Open and execute `docs/architecture/v1.0/v0.3/v0.3.1` as the first child slice of `0.3.0`.
+- Keep `docs/architecture/state/layer_index.yaml` aligned as `v0.3` child layers progress.

@@ -117,7 +117,7 @@ Design principle: Categorical handling should integrate into binning pipeline.
 
 # 0.x.x — Foundations and Reference Implementation (Pre-1.0)
 
-## 0.1.0 — Repo + Interfaces + Data Model
+## 0.0.0 — Repo + Interfaces + Data Model
 
 Responsibility boundaries: `core/` defines public types, configs, and serialization contracts; `engine/` contains the training algorithms and tree construction logic; `backend_*` crates implement hardware-specific primitives (CPU/CUDA/Metal) behind a common trait; `predictor/` is a minimal, dependency-light inference path; `shap/` provides explanation algorithms; `categorical/` handles encoding pipelines; and `bindings_python/` exposes the stable Python API.
 
@@ -140,7 +140,7 @@ Canonical dataset supports:
 
 ---
 
-## 0.2.0 — Minimal Histogram GBDT (CPU), Regression Only
+## 0.1.0 — Minimal Histogram GBDT (CPU), Regression Only
 
 **Deliverables**
 
@@ -163,7 +163,7 @@ Canonical dataset supports:
 
 ---
 
-## 0.3.0 — Python Wrapper (Sklearn-Compatible)
+## 0.2.0 — Python Wrapper (Sklearn-Compatible)
 
 **Deliverables**
 
@@ -181,7 +181,7 @@ Canonical dataset supports:
 
 ---
 
-## 0.4.0 — Finance-Grade Evaluation + Leakage Guardrails
+## 0.3.0 — Finance-Grade Evaluation + Leakage Guardrails
 
 **Deliverables**
 
@@ -198,7 +198,7 @@ Canonical dataset supports:
 
 ---
 
-## 0.5.0 — Fast CPU Kernels + SIMD
+## 0.4.0 — Fast CPU Kernels + SIMD
 
 **Deliverables**
 
@@ -218,7 +218,7 @@ Canonical dataset supports:
 
 ---
 
-## 0.6.0 — Model IO + Predictor Integration
+## 0.5.0 — Model IO + Predictor Integration
 
 Predictor crate becomes production-ready.
 

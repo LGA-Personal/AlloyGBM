@@ -1,67 +1,73 @@
 # AlloyGBM v0.6 Technical Plan
 
 ## Summary
-- Goal: deliver the `0.6.0` milestone by making model artifact IO and predictor integration the canonical inference path ahead of `1.0.0`.
+- Goal: deliver the `0.6.0` milestone by implementing categorical support v1 with leakage-safe target encoding, frequency/count encoding, and artifact-integrated categorical state.
 - Success criteria:
-  - training output and inference input converge on a single validated artifact contract,
-  - predictor-backed inference is the default runtime path for model scoring,
-  - model-format v1 compatibility policy is explicit, tested, and documented for release gating.
-- Audience: engineers implementing `v0.6` child slices and reviewers gating readiness for `v0.7+` feature work.
+  - categorical encoding is deterministic and validated for both time-aware and non-time-aware flows,
+  - training and prediction paths use a single artifact contract that carries categorical state when categorical features are enabled,
+  - Python surface remains backward-compatible for existing numeric-only usage while adding categorical-capable options.
+- Audience: engineers implementing `v0.6` child slices and reviewers gating readiness for `v0.7` TreeSHAP scope.
 
 ## Scope
 ### In Scope
-- Model artifact IO hardening across `core`, `engine`, `predictor`, and Python binding surfaces:
-  - deterministic serialization/deserialization roundtrip behavior,
-  - explicit required-section validation (`Trees` + `PredictorLayout`) and legacy trees-only compatibility handling,
-  - clear compatibility-mode behavior and failure semantics.
-- Predictor integration as canonical inference route:
-  - training flow produces artifacts consumed by predictor path without adapter-only logic,
-  - Python prediction flows remain contract-stable while relying on predictor artifact execution.
-- `v0.6` child-layer decomposition using `v0.5.x` slices.
+- Categorical encoding functionality in `crates/categorical`:
+  - leakage-safe target encoding with smoothing and minimum-sample controls,
+  - frequency/count encoding for sparse identifiers,
+  - deterministic fit/transform behavior under fixed inputs and config.
+- Categorical metadata and artifact state integration:
+  - explicit categorical-state payload carried through model artifacts using `ModelSectionKind::CategoricalState`,
+  - schema-level tracking of categorical feature indices and encoder configuration needed for replay at inference.
+- Engine and Python integration for categorical-aware training and prediction:
+  - additive training options for categorical feature indices and optional time index where required for leakage-safe mode,
+  - parity between in-memory prediction and artifact-backed predictor path when categorical state is present.
+- Child-layer decomposition and execution under `v0.6` using `v0.5.x` slices.
 - Parent closeout artifacts:
   - `docs/architecture/v1.0/v0.6/implementation_notes.md`
   - `docs/architecture/v1.0/v0.6/verification_report.md`
 
 ### Out of Scope
-- New objectives (ranking), SHAP expansion, categorical expansion, or GPU backends.
-- Performance-only kernel optimization campaigns (`v0.5` scope, already closed).
-- Public Python API redesign that changes `GBMRegressor` constructor or existing method signatures.
-- Model format version bump beyond v1.
+- Learned embeddings for categorical features.
+- Ranking objectives and ranking-specific categorical strategies.
+- GPU backend work (CUDA/Metal/MLX) and TreeSHAP implementation details (`v0.7` scope).
+- Public API redesigns that break existing `GBMRegressor` constructor or current numeric-only workflows.
+- Model-format version bump beyond v1.
 
 ## Interfaces and Types
+- `crates/categorical/src/lib.rs`:
+  - replace placeholder APIs with concrete encoder/state types and fit/transform entrypoints.
 - `crates/core/src/lib.rs`:
-  - artifact headers/section descriptors and metadata JSON contract (`MODEL_FORMAT_V1`, `ModelSectionKind`, serialize/deserialize helpers).
+  - maintain canonical categorical section kind (`ModelSectionKind::CategoricalState`) and metadata/schema validation for categorical configuration.
 - `crates/engine/src/lib.rs`:
-  - `TrainedModel::{to_artifact_bytes, from_artifact_bytes, from_artifact_bytes_auto, artifact_compatibility_report}` as training/artifact boundary.
+  - integrate categorical transform path into training and artifact emission without changing numeric-only behavior.
 - `crates/predictor/src/lib.rs`:
-  - `Predictor::from_artifact_bytes`, `predict_row`, `predict_batch` as canonical inference boundary.
-- `bindings/python/alloygbm/regressor.py` and `bindings/python/src/lib.rs`:
-  - native train/predict bridge using artifact bytes; no breaking parameter-surface changes.
-- Verification artifacts and state tracking:
-  - child reports under `docs/architecture/v1.0/v0.6/v0.5.x/`,
-  - parent closeout plus `docs/architecture/state/layer_index.yaml`.
+  - support artifacts carrying categorical state while preserving strict required-section policy (`Trees` + `PredictorLayout`) and deterministic errors.
+- `bindings/python/src/lib.rs` and `bindings/python/alloygbm/regressor.py`:
+  - add categorical-capable, backward-compatible options for fit/predict flow.
 
 Backward-compatibility expectations:
-- keep existing model-format v1 artifact readability (strict dual-section and documented legacy trees-only mode),
-- keep Python estimator behavior and existing tests stable while switching internals to canonical predictor artifact usage.
+- numeric-only training and prediction results remain unchanged under existing tests.
+- existing strict/compatibility artifact behavior from `v0.5` remains intact.
+- new categorical options are additive; no required signature changes for current call sites.
 
 ## Implementation Sequence
-1. Execute `docs/architecture/v1.0/v0.6/v0.5.1/plan.md` for artifact compatibility policy lock-in and baseline IO contract tests.
-2. Open `v0.5.2` for predictor-path canonicalization across engine/predictor/Python scoring flow.
-3. Open `v0.5.3` for serialization contract hardening, migration notes, and failure-mode consistency.
-4. Open optional `v0.5.4` for residual acceptance gaps, docs polish, and release-evidence packaging.
-5. Close parent `v0.6` with rollup notes, verification report, and `layer_index.yaml` update.
+1. Execute `docs/architecture/v1.0/v0.6/v0.6.1/` as the first child slice to lock categorical state contract, schema validation rules, and artifact serialization expectations.
+2. Open `v0.6.2` for deterministic target/frequency encoder implementation in `crates/categorical` with unit coverage for leakage-safe defaults.
+3. Open `v0.6.3` for engine integration: categorical preprocessing in training path, artifact persistence, and predictor replay checks.
+4. Open `v0.6.4` for Python bridge integration and end-to-end contract tests across numeric + categorical fixtures.
+5. Close parent `v0.6` with rollup notes, verification report, and `docs/architecture/state/layer_index.yaml` update.
 
 ## Test Cases and Scenarios
 - Unit cases:
-  - artifact header/section validation and deterministic metadata roundtrip,
-  - compatibility-mode classification and expected mode selection behavior.
+  - target-encoding smoothing behavior and minimum-leaf handling,
+  - frequency/count encoding determinism and unknown-category handling,
+  - categorical schema/config validation errors.
 - Integration cases:
-  - train -> artifact -> predictor prediction parity versus engine prediction paths,
-  - Python `GBMRegressor.fit` + `predict` and `predict_from_artifact` parity on deterministic fixtures.
+  - train -> artifact -> predictor parity for models with categorical features enabled,
+  - numeric-only regression fixtures remain parity-stable versus pre-`v0.6` behavior.
 - Failure and edge cases:
-  - malformed artifacts (missing/duplicate required sections, invalid lengths/versions),
-  - feature-count mismatch and unsupported compatibility-mode paths.
+  - missing or invalid time index in leakage-safe mode,
+  - category cardinality edge cases and empty-category partitions,
+  - malformed categorical artifact section payloads.
 - Acceptance test mapping:
   - `cargo fmt -- --check`,
   - `cargo clippy --workspace --all-targets -- -D warnings`,
@@ -70,29 +76,29 @@ Backward-compatibility expectations:
   - `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'`.
 
 ## Acceptance Criteria
-1. `v0.6` child slices establish a decision-complete artifact compatibility policy for model-format v1 (strict and legacy behavior explicitly documented and tested).
-2. Predictor ingestion from training artifacts is validated as the canonical inference path with parity evidence against engine predictions.
-3. Python artifact-backed inference workflows remain green without public API breakage.
-4. Artifact validation behavior for malformed/unsupported payloads is deterministic and covered by tests.
-5. Parent rollup artifacts summarize compatibility decisions, residual caveats, and evidence links for all child slices.
-6. `cargo fmt -- --check` passes at closeout.
-7. `cargo clippy --workspace --all-targets -- -D warnings` passes at closeout.
-8. `cargo test --workspace` passes at closeout.
-9. `cargo doc --workspace --no-deps` passes at closeout.
+1. `v0.6` child slices deliver production-ready target and frequency/count encoders with deterministic fit/transform semantics.
+2. Leakage-safe categorical mode is explicitly validated, including time-index requirements and deterministic failure semantics.
+3. Categorical state is serialized/deserialized through model artifacts without changing v1 format version.
+4. Predictor path remains artifact-canonical and functionally consistent when categorical state is present.
+5. Python categorical-capable flow is additive and keeps existing numeric-only contracts green.
+6. Parent rollup artifacts summarize decisions, tradeoffs, and child-layer evidence links.
+7. `cargo fmt -- --check` passes at closeout.
+8. `cargo clippy --workspace --all-targets -- -D warnings` passes at closeout.
+9. `cargo test --workspace` passes at closeout.
 10. `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'` passes at closeout.
 
 ## Risks and Mitigations
-- Risk: compatibility behavior drifts between `engine` and `predictor`.
-  - Mitigation: enforce shared artifact-fixture parity tests and compatibility-report assertions.
-- Risk: legacy trees-only behavior becomes ambiguous during hardening.
-  - Mitigation: document compatibility modes and keep explicit tests for strict vs legacy paths.
-- Risk: internal canonicalization accidentally changes Python-visible behavior.
-  - Mitigation: treat Python contract tests as hard gates for each child slice.
-- Risk: scope creep into `v0.7+` feature milestones.
-  - Mitigation: constrain all child plans to model IO and predictor integration only.
+- Risk: categorical transforms introduce silent leakage in temporal data.
+  - Mitigation: leakage-safe mode defaults, explicit time-index validation, and focused temporal fixture tests.
+- Risk: artifact compatibility drift between engine and predictor.
+  - Mitigation: shared serialization fixtures and predictor parity tests for strict artifacts with categorical state.
+- Risk: categorical integration destabilizes numeric-only behavior.
+  - Mitigation: preserve numeric-only fast path and treat existing regression tests as hard gates.
+- Risk: scope creep into SHAP/ranking/GPU milestones.
+  - Mitigation: enforce `v0.6` boundary to categorical support v1 only.
 
 ## Assumptions and Defaults
-- Device scope remains CPU-only in `v0.6`.
+- Device scope remains CPU-only.
 - `v0.6` child layers use `v0.5.x` numbering.
-- Default execution order starts at `v0.5.1` before opening later child slices.
-- Model format remains v1 in this layer; compatibility policy is frozen/documented rather than version-bumped.
+- Immediate next child target is `docs/architecture/v1.0/v0.6/v0.6.1`.
+- No `v0.4.x` child planning is created under `v0.6` in this step.

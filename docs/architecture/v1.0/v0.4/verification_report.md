@@ -1,75 +1,93 @@
-# AlloyGBM v0.4 Verification Report (Parent Rollup)
+# AlloyGBM v0.4 Verification Report
 
 ## Layer
 - Path: `docs/architecture/v1.0/v0.4`
-- Date: 2026-02-27
+- Date: 2026-03-02
 
 ## Acceptance Criteria Matrix
-- Criterion: Python evaluation API covers baseline regression metrics (`RMSE`, `MAE`, `R2`, correlation) and finance diagnostics (`rank-IC`, `hit-rate`, `ICIR`) defined for `0.4.0`.
+- Criterion: (1) `v0.4` child slices collectively deliver benchmark harness coverage for backend CPU histogram/split hot paths with reproducible fixture definitions.
 - Evidence:
-  - Child slice verification confirms baseline metrics and exports: `docs/architecture/v1.0/v0.4/v0.3.1/verification_report.md`.
-  - Child slice verification confirms finance metrics and exports: `docs/architecture/v1.0/v0.4/v0.3.2/verification_report.md`.
-  - Runtime export/integration coverage retained in Python suite: `bindings/python/tests/test_native_runtime_integration.py`.
+  - Harness established in `v0.4.1` and expanded in `v0.4.2` with tiny/small/medium histogram plus split coverage.
+  - Runtime-context benchmark output and comparison scripting added in `v0.4.4`.
+  - Child reports:
+    - [v0.4.1 verification](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.4/v0.4.1/verification_report.md)
+    - [v0.4.2 verification](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.4/v0.4.2/verification_report.md)
+    - [v0.4.3 verification](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.4/v0.4.3/verification_report.md)
+    - [v0.4.4 verification](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.4/v0.4.4/verification_report.md)
 - Status: PASS
 
-- Criterion: Time-aware split helpers provide purge/embargo leakage controls for panel workflows.
+- Criterion: (2) Kernel optimization changes are implemented in additive, reviewable slices and maintain deterministic prediction/correctness parity.
 - Evidence:
-  - Child slice verification confirms `purged_time_series_splits` and `purged_panel_splits` implementation/export and leakage invariants: `docs/architecture/v1.0/v0.4/v0.3.3/verification_report.md`.
-  - Deterministic split and no-overlap/purge/embargo checks in `bindings/python/tests/test_validation_splits.py`.
+  - Optimization progression is incremental from scalar row-first (`v0.4.1`) to hybrid routing (`v0.4.2`) to SIMD-dispatchable route (`v0.4.3`) and x86 portability hardening (`v0.4.4`).
+  - Parity and invariance tests remained passing in each slice report.
 - Status: PASS
 
-- Criterion: Evaluation and split helpers enforce deterministic validation and explicit error semantics.
+- Criterion: (3) SIMD acceleration is introduced with explicit runtime feature detection and validated scalar fallback behavior.
 - Evidence:
-  - Input validation and deterministic fixture checks are covered in child reports and tests:
-    - `docs/architecture/v1.0/v0.4/v0.3.1/verification_report.md`
-    - `docs/architecture/v1.0/v0.4/v0.3.2/verification_report.md`
-    - `docs/architecture/v1.0/v0.4/v0.3.3/verification_report.md`
-    - `bindings/python/tests/test_evaluation_metrics.py`
-    - `bindings/python/tests/test_validation_splits.py`
+  - Runtime dispatch and AVX2 gating were introduced in `v0.4.3` and retained in `v0.4.4`.
+  - Scalar fallback behavior and override control (`ALLOYGBM_DISABLE_AVX2`) validated in `v0.4.4`.
+  - `x86_64` target compile/test/bench now pass after unsafe-code portability fix.
+- Status: PASS (with caveat below)
+
+- Criterion: (4) Parent verification report includes benchmark-evidence rollup summarizing baseline and post-change deltas for target workloads.
+- Evidence:
+  - Rollup summary:
+    - `v0.4.1`: small `+43.09%`, medium `-24.27%`
+    - `v0.4.2` median: small `+5.09%`, medium `-15.48%`
+    - `v0.4.3` median: small `+5.62%`, medium `-17.56%`
+    - `v0.4.4` (`x86_64` target compare script): medium delta (`default` vs forced scalar median) `-0.30%`
+  - Bench and comparison commands documented in child reports.
 - Status: PASS
 
-- Criterion: Existing `v0.3` wrapper compatibility remains stable while `v0.4` additions are additive.
+- Criterion: (5) Existing engine/predictor/wrapper regression tests remain green throughout `v0.4` execution.
 - Evidence:
-  - Parent rollup notes document additive-only API expansion and unchanged `GBMRegressor` contract: `docs/architecture/v1.0/v0.4/implementation_notes.md`.
-  - Full Python suite pass (`Ran 52 tests`, `OK`) includes regressor/runtime/metric/split compatibility checks.
+  - Full workspace and Python tests were run and passed in `v0.4.2`, `v0.4.3`, and `v0.4.4` verification passes.
 - Status: PASS
 
-- Criterion: Required verification gates pass for workspace and Python bindings.
+- Criterion: (6) `cargo fmt -- --check` passes at closeout.
 - Evidence:
-  - `cargo fmt -- --check` -> PASS.
-  - `cargo clippy --workspace --all-targets -- -D warnings` -> PASS.
-  - `cargo test --workspace` -> PASS.
-  - `cargo doc --workspace --no-deps` -> PASS.
-  - `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'` -> PASS (`Ran 52 tests`, `OK`).
+  - PASS in `v0.4.4` verification pass.
 - Status: PASS
 
-## Tests Added or Updated
-- None in this parent rollup pass.
-- Gap-closure result: existing `v0.3.1` + `v0.3.2` + `v0.3.3` test inventory already fully covers parent `v0.4` criteria.
+- Criterion: (7) `cargo clippy --workspace --all-targets -- -D warnings` passes at closeout.
+- Evidence:
+  - PASS in `v0.4.4` verification pass.
+- Status: PASS
 
-## Commands Executed
-- Command: `cargo fmt -- --check`
-- Result: PASS
+- Criterion: (8) `cargo test --workspace` passes at closeout.
+- Evidence:
+  - PASS in `v0.4.4` verification pass.
+- Status: PASS
 
-- Command: `cargo clippy --workspace --all-targets -- -D warnings`
-- Result: PASS
+- Criterion: (9) `cargo doc --workspace --no-deps` passes at closeout.
+- Evidence:
+  - PASS in `v0.4.4` verification pass.
+- Status: PASS
 
-- Command: `cargo test --workspace`
-- Result: PASS
+- Criterion: (10) `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'` passes at closeout.
+- Evidence:
+  - PASS in `v0.4.4` verification pass (`Ran 52 tests`, `OK`).
+- Status: PASS
 
-- Command: `cargo doc --workspace --no-deps`
-- Result: PASS
-
-- Command: `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'`
-- Result: PASS (`Ran 52 tests`, `OK`)
+## Commands and Evidence Sources
+- Primary command evidence source for closeout:
+  - [v0.4.4 verification report](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.4/v0.4.4/verification_report.md)
+- Additional slice evidence:
+  - [v0.4.1 verification report](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.4/v0.4.1/verification_report.md)
+  - [v0.4.2 verification report](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.4/v0.4.2/verification_report.md)
+  - [v0.4.3 verification report](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.4/v0.4.3/verification_report.md)
 
 ## Residual Uncovered Criteria
-- None. Parent `v0.4` acceptance criteria are fully mapped to verified child-slice evidence and passing gate commands.
+- None.
 
-## Residual Risks
-- Group balancing/stratified panel split policies remain out of scope for `v0.4` and may be considered in later layers.
-- Ranking objective training remains deferred to planned `1.1.0` scope.
+## Required Caveat (Apple Silicon / AVX2)
+- This closeout was performed on Apple Silicon (`aarch64`).
+- `x86_64` target benchmark binaries executed, but runtime output showed `runtime_avx2_enabled: false` on this machine.
+- Interpretation:
+  - portability, dispatch structure, and fallback behavior are verified,
+  - AVX2-on-native-`x86_64` speedup characterization remains pending and should be collected for release-gate confidence.
 
 ## Final Readiness
-- Ready: Yes (parent `v0.4` scope verified).
-- Required follow-up before merge/release: move planning/implementation to the next parent target under `docs/architecture/v1.0`.
+- Ready: Yes (`v0.4` acceptance criteria satisfied with explicit evidence rollup and documented caveat).
+- Required follow-up before higher-confidence performance gate:
+  - run `scripts/benchmark_avx2_compare.sh` on a native AVX2-capable `x86_64` host and append results to release evidence.

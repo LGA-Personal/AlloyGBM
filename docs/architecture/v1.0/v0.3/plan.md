@@ -1,57 +1,68 @@
 # AlloyGBM v0.3 Technical Plan
 
 ## Summary
-- Goal: provide a high-level `0.3.0` parent plan that organizes sklearn-wrapper delivery through nested `v0.2.x` child slices over the existing Rust CPU training/prediction core.
+- Goal: deliver the `0.3.0` milestone by adding finance-grade evaluation metrics and leakage guardrails on top of verified `v0.0`/`v0.1`/`v0.2` foundations.
 - Success criteria:
-  - `GBMRegressor` supports stable sklearn-style `fit`, `predict`, `get_params`, and `set_params` behavior,
-  - wrapper supports common tabular inputs (`numpy.ndarray`, `pandas.DataFrame`, and Polars-like array exports),
-  - packaging/runtime checks remain green for maturin-built extension and Python tests.
-- Audience: engineers implementing `v0.3` child layers and reviewers gating progression beyond wrapper-contract maturity.
+  - Python evaluation API covers baseline regression metrics and finance-oriented ranking diagnostics defined for `0.3.0`,
+  - time-aware split helpers provide purge/embargo controls that prevent common leakage patterns in panel workflows,
+  - all workspace and Python verification gates stay green while preserving `v0.2` wrapper compatibility.
+- Audience: engineers implementing `v0.3` child slices and reviewers deciding readiness to progress beyond evaluation-tooling scope.
 
 ## Scope
 ### In Scope
-- Python-facing estimator contract hardening for `GBMRegressor` and native bridge wiring needed to move beyond scaffold behavior.
-- Input normalization and validation compatible with major array/dataframe interfaces used in quant workflows.
-- Parameter surface compatibility and predictable error semantics for sklearn-style usage.
-- Packaging and import/runtime verification of the Python extension module as part of layer acceptance gates.
-- Child-layer decomposition and state-index updates for iterative `v0.3` delivery.
+- Additive evaluation API in `bindings/python/alloygbm/` for:
+  - baseline regression metrics (`RMSE`, `MAE`, `R2`, correlation),
+  - finance-oriented metrics required by parent scope (`rank-IC`, `hit-rate`, and `ICIR` support).
+- Time-aware validation helpers for leakage-safe evaluation:
+  - purge gap and embargo controls,
+  - time/group-aware split generation for panel datasets.
+- Deterministic input validation and explicit error semantics for evaluation/split helpers.
+- Child-layer decomposition and state tracking under `v0.3` using `v0.2.x` slices.
+- Parent closeout artifacts:
+  - `docs/architecture/v1.0/v0.3/implementation_notes.md`
+  - `docs/architecture/v1.0/v0.3/verification_report.md`
 
 ### Out of Scope
-- Ranking objectives/metrics.
-- SHAP algorithm implementation changes.
-- Categorical pipeline execution expansion.
-- SIMD/performance optimization campaigns (`0.5+` scope).
-- CUDA/Metal/MLX backend work.
+- Ranking objective training (`1.1.0` scope).
+- CUDA/Metal backend expansion.
+- SHAP algorithm expansion beyond already-verified behavior.
+- SIMD/performance optimization campaigns.
+- Continuous-feature quantization changes in native training bridge (known prior constraint).
 
 ## Interfaces and Types
-- `bindings/python/alloygbm/regressor.py`:
-  - canonical Python estimator behavior and contract validation.
-- `bindings/python/src/lib.rs`:
-  - native extension entrypoints required by wrapper behavior.
+- `bindings/python/alloygbm/evaluation.py` (new module expected in this layer):
+  - metric helper functions with deterministic float outputs and strict input validation.
+- `bindings/python/alloygbm/validation.py` (new module expected in this layer):
+  - leakage-aware split helper APIs for time/group indexed data.
+- `bindings/python/alloygbm/__init__.py`:
+  - additive exports for evaluation/validation helpers without breaking existing public names.
 - `bindings/python/tests/`:
-  - contract and runtime integration evidence.
-- `pyproject.toml` + `bindings/python/Cargo.toml`:
-  - wheel/extension packaging contract and test/runtime dependencies.
+  - deterministic unit/integration coverage for metrics and split behavior.
+- Existing native bridge interfaces in `bindings/python/src/lib.rs`:
+  - no breaking changes required for `v0.3`; Python-side evaluation tooling remains primary.
 
 Backward-compatibility expectations:
-- keep parameter names and validation semantics stable once introduced in `v0.3` child layers;
-- prefer additive bridge changes over breaking Python API shape changes during `0.3.x`.
+- preserve existing `GBMRegressor` constructor, `fit`, `predict`, `get_params`, and `set_params` behavior from `v0.2`.
+- introduce evaluation and validation helpers additively; no parameter renames or behavior flips in existing APIs.
 
 ## Implementation Sequence
-1. Execute the first child slice at `docs/architecture/v1.0/v0.3/v0.2.1/plan.md` and complete its implementation/verification artifacts.
-2. Re-evaluate remaining `0.3.0` acceptance gaps and open the next child slice (`v0.2.2`, then `v0.2.3`, etc.) one at a time.
-3. Keep `docs/architecture/state/layer_index.yaml` aligned to the deepest active child target after each slice.
-4. Close parent `v0.3` with rollup `implementation_notes.md` and `verification_report.md` once all child-slice acceptance criteria are satisfied.
+1. Execute `docs/architecture/v1.0/v0.3/v0.3.1/plan.md` for baseline metric helpers and test harness.
+2. Open next child slice (`v0.3.2`) for finance-oriented metrics (rank-IC, hit-rate, ICIR) and deterministic edge-case handling.
+3. Open next child slice (`v0.3.3`) for time-aware split helpers with purge/embargo controls and panel validation rules.
+4. Open final child slice (`v0.3.4`, if needed) for API polish, docs, and residual acceptance gaps.
+5. Close parent `v0.3` with rollup notes, verification report, and `docs/architecture/state/layer_index.yaml` update.
 
 ## Test Cases and Scenarios
 - Unit cases:
-  - parameter validation and roundtrip behavior (`get_params`/`set_params`),
-  - input-shape and type validation across supported Python containers.
+  - exact/near-exact fixture assertions for each metric function,
+  - split-index validity checks (no overlap, purge enforcement, embargo enforcement),
+  - deterministic behavior for repeated runs with identical inputs.
 - Integration cases:
-  - wrapper `fit` then `predict` behavior via native-backed path,
-  - wheel build/install/import and runtime invocation coverage.
+  - `GBMRegressor.fit`/`predict` output evaluated through new metric APIs in representative workflows,
+  - panel-like time/group split generation consumed by evaluation pipeline tests.
 - Failure and edge cases:
-  - malformed inputs, feature-count mismatches, and missing native module conditions.
+  - mismatched lengths, empty inputs, non-finite values, and malformed timestamps/groups,
+  - constant-target/constant-prediction paths with explicit documented behavior.
 - Acceptance test mapping:
   - `cargo fmt -- --check`,
   - `cargo clippy --workspace --all-targets -- -D warnings`,
@@ -60,15 +71,17 @@ Backward-compatibility expectations:
   - `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'`.
 
 ## Risks and Mitigations
-- Risk: wrapper scope drifts into non-`0.3` algorithmic work.
-  - Mitigation: keep child-layer plans constrained to Python API/bridge and runtime evidence.
-- Risk: input-adapter complexity causes inconsistent behavior across libraries.
-  - Mitigation: define deterministic normalization rules and assert parity in tests per input type.
-- Risk: packaging/runtime test steps are environment-sensitive.
-  - Mitigation: keep runtime tests isolated and use explicit build/install setup in test fixtures.
+- Risk: evaluation semantics drift from quant expectations.
+  - Mitigation: encode metric definitions and edge-case defaults in tests and layer docs before implementation.
+- Risk: leakage helper APIs become underspecified and inconsistent across child slices.
+  - Mitigation: define split contracts and validation defaults in each child plan before code changes.
+- Risk: scope creep into ranking training or backend work.
+  - Mitigation: keep `v0.3` strictly limited to evaluation/validation tooling and additive Python API changes.
+- Risk: changes regress previously verified `v0.2` wrapper contract.
+  - Mitigation: keep existing wrapper tests as non-negotiable gates in every `v0.3` child verification run.
 
 ## Assumptions and Defaults
-- CPU-only device scope remains unchanged.
-- `GBMRegressor` remains the primary public estimator class for `0.3.0`.
-- Child layers under `v0.3` use `v0.2.x` numbering for organization.
-- `v0.2.1` is the first execution step of `v0.3` and must be completed before opening later `v0.2.x` slices.
+- Device scope remains CPU-only through `v0.3`.
+- `v0.3` child layers continue `v0.2.x` numbering.
+- Default implementation locus is Python package modules first; Rust/native changes are only allowed when required by an explicit child-layer plan.
+- Parent completion requires both metric coverage and leakage guardrail coverage with passing gate commands.

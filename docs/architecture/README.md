@@ -13,14 +13,14 @@ This directory uses a nested planning structure so implementation can proceed fr
 - `docs/architecture/vX.Y/plan.md`
   - Plan for that version level (example: `v1.0` phase plan).
 - `docs/architecture/vX.Y/vA.B/plan.md`
-  - Child plan that decomposes the parent plan (example: `v1.0/v0.1`).
+  - Child plan that decomposes the parent plan (example: `v1.0/v0.0`).
 - `docs/architecture/vX.Y/vA.B/vC.D/`
   - Next decomposition level for implementation slices.
 
 Current active example:
-- `v1.0` contains the full phase plan (`0.1.0 -> 1.0.0`).
-- `v1.0/v0.1` contains the focused `0.1` implementation plan.
-- `v1.0/v0.1/v0.0.1` is reserved for the next sub-plan.
+- `v1.0` contains the full phase plan (`0.0.0 -> 1.0.0`).
+- `v1.0/v0.0` contains the focused `0.0` implementation plan.
+- `v1.0/v0.0/v0.0.1` is reserved for the next sub-plan.
 
 ## Planning Rules
 1. Each level must have exactly one `plan.md` (or temporary placeholder if not planned yet).
