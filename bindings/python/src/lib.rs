@@ -13,6 +13,23 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 const DEFAULT_TRAIN_ROUNDS: usize = 6;
+const MAX_SUPPORTED_TRAIN_ROUNDS: usize = 4096;
+const PRE_BINNED_INTEGER_TOLERANCE: f32 = 1e-6;
+const MAX_CONTINUOUS_QUANTIZED_BIN: u16 = 255;
+
+fn is_pre_binned_integer_value(value: f32) -> bool {
+    if value < 0.0 {
+        return false;
+    }
+    let rounded = value.round();
+    (value - rounded).abs() <= PRE_BINNED_INTEGER_TOLERANCE
+}
+
+fn quantize_continuous_value_to_bin(value: f32) -> u16 {
+    let rounded = value.round();
+    let clamped = rounded.clamp(0.0, MAX_CONTINUOUS_QUANTIZED_BIN as f32);
+    clamped as u16
+}
 
 #[pyclass]
 #[derive(Debug, Clone)]
@@ -133,9 +150,7 @@ fn train_regression_artifact_impl(
         ));
     }
 
-    let mut dense_values = Vec::with_capacity(rows.len() * feature_count);
-    let mut bins = Vec::with_capacity(rows.len() * feature_count);
-    let mut max_bin = 0_u16;
+    let mut use_pre_binned_path = true;
     for (row_index, row) in rows.iter().enumerate() {
         if row.len() != feature_count {
             return Err(EngineError::ContractViolation(format!(
@@ -149,28 +164,31 @@ fn train_regression_artifact_impl(
                     "row {row_index} feature {feature_index} must be finite"
                 )));
             }
-            if value < 0.0 {
-                return Err(EngineError::ContractViolation(format!(
-                    "row {row_index} feature {feature_index} must be >= 0 for pre-binned training"
-                )));
+            if use_pre_binned_path && !is_pre_binned_integer_value(value) {
+                use_pre_binned_path = false;
             }
+        }
+    }
 
-            let rounded = value.round();
-            if (value - rounded).abs() > 1e-6 {
-                return Err(EngineError::ContractViolation(format!(
-                    "row {row_index} feature {feature_index} must be an integer-valued bin"
-                )));
-            }
-            if rounded > u16::MAX as f32 {
-                return Err(EngineError::ContractViolation(format!(
-                    "row {row_index} feature {feature_index} exceeds max supported bin {}",
-                    u16::MAX
-                )));
-            }
-
-            let bin = rounded as u16;
+    let mut dense_values = Vec::with_capacity(rows.len() * feature_count);
+    let mut bins = Vec::with_capacity(rows.len() * feature_count);
+    let mut max_bin = 0_u16;
+    for (row_index, row) in rows.iter().enumerate() {
+        for (feature_index, &value) in row.iter().enumerate() {
+            let bin = if use_pre_binned_path {
+                let rounded = value.round();
+                if rounded > u16::MAX as f32 {
+                    return Err(EngineError::ContractViolation(format!(
+                        "row {row_index} feature {feature_index} exceeds max supported bin {}",
+                        u16::MAX
+                    )));
+                }
+                rounded as u16
+            } else {
+                quantize_continuous_value_to_bin(value)
+            };
             max_bin = max_bin.max(bin);
-            dense_values.push(value);
+            dense_values.push(bin as f32);
             bins.push(bin);
         }
     }
@@ -311,6 +329,7 @@ fn train_regression_artifact(
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
     }
+    let effective_rounds = rounds.min(MAX_SUPPORTED_TRAIN_ROUNDS);
 
     let params = TrainParams {
         seed,
@@ -337,7 +356,7 @@ fn train_regression_artifact(
         &rows,
         &targets,
         params,
-        rounds,
+        effective_rounds,
         time_index,
         categorical_spec,
     )
@@ -660,5 +679,95 @@ mod tests {
         for pair in global.windows(2) {
             assert!(pair[0].1 >= pair[1].1);
         }
+    }
+
+    #[test]
+    fn train_bridge_accepts_continuous_float_rows() {
+        let rows = vec![
+            vec![-2.7, 0.10],
+            vec![0.20, 1.90],
+            vec![3.60, 2.20],
+            vec![8.40, 5.50],
+            vec![15.25, 9.10],
+            vec![30.75, 12.80],
+        ];
+        let targets = vec![-2.0, -0.5, 0.5, 1.5, 3.0, 6.0];
+
+        let artifact = train_regression_artifact_impl(
+            &rows,
+            &targets,
+            fixture_params(),
+            DEFAULT_TRAIN_ROUNDS,
+            None,
+            None,
+        )
+        .expect("continuous rows should train");
+
+        let predictions =
+            predictor_predict_batch_impl(&artifact, &rows).expect("continuous rows should predict");
+        assert_eq!(predictions.len(), rows.len());
+    }
+
+    #[test]
+    fn train_bridge_quantization_is_deterministic_for_continuous_rows() {
+        let rows = vec![
+            vec![-1.5, 0.25],
+            vec![-0.6, 0.75],
+            vec![0.4, 1.20],
+            vec![1.4, 1.80],
+            vec![2.6, 3.40],
+            vec![5.9, 8.10],
+        ];
+        let targets = vec![-1.0, -0.5, 0.0, 0.5, 1.0, 2.0];
+
+        let artifact_a = train_regression_artifact_impl(
+            &rows,
+            &targets,
+            fixture_params(),
+            DEFAULT_TRAIN_ROUNDS,
+            None,
+            None,
+        )
+        .expect("first deterministic training succeeds");
+        let artifact_b = train_regression_artifact_impl(
+            &rows,
+            &targets,
+            fixture_params(),
+            DEFAULT_TRAIN_ROUNDS,
+            None,
+            None,
+        )
+        .expect("second deterministic training succeeds");
+
+        assert_eq!(artifact_a, artifact_b);
+    }
+
+    #[test]
+    fn train_bridge_pre_binned_path_rejects_u16_overflow() {
+        let rows = vec![vec![70000.0, 0.0], vec![1.0, 0.0]];
+        let targets = vec![0.0, 1.0];
+        let result =
+            train_regression_artifact_impl(&rows, &targets, fixture_params(), 1, None, None);
+        assert!(matches!(
+            result,
+            Err(alloygbm_engine::EngineError::ContractViolation(message))
+            if message.contains("exceeds max supported bin")
+        ));
+    }
+
+    #[test]
+    fn train_bridge_large_round_counts_remain_supported_via_round_cap() {
+        let dataset = quality_fixture_dataset();
+        let rows = fixture_rows(&dataset);
+        let artifact = train_regression_artifact_impl(
+            &rows,
+            &dataset.targets,
+            fixture_params(),
+            4096,
+            None,
+            None,
+        )
+        .expect("max supported round count should train");
+        assert!(!artifact.is_empty());
     }
 }

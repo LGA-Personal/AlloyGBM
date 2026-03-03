@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
+
+_PRE_BINNED_INTEGER_TOLERANCE = 1e-6
+_MAX_CONTINUOUS_QUANTIZED_BIN = 255
 
 
 def _load_native_predictor_predict_batch():
@@ -120,6 +124,7 @@ class GBMRegressor:
         self._is_fitted = False
         self._artifact_bytes: bytes | None = None
         self._n_features_in = 0
+        self._uses_continuous_binning = False
 
     def __repr__(self) -> str:
         return (
@@ -307,9 +312,16 @@ class GBMRegressor:
                 "time_index must be provided when categorical_time_aware=True and categorical_feature_index is set"
             )
 
+        self._uses_continuous_binning = not self._rows_are_pre_binned(rows)
+        training_rows = (
+            self._quantize_rows_for_native(rows)
+            if self._uses_continuous_binning
+            else rows
+        )
+
         train_regression_artifact = _load_native_train_regression_artifact()
         artifact_bytes = train_regression_artifact(
-            rows=rows,
+            rows=training_rows,
             targets=targets,
             learning_rate=self.learning_rate,
             max_depth=self.max_depth,
@@ -345,6 +357,8 @@ class GBMRegressor:
                 f"X feature count {len(rows[0])} does not match fitted feature count "
                 f"{self._n_features_in}"
             )
+        if self._uses_continuous_binning:
+            rows = self._quantize_rows_for_native(rows)
         predictor_predict_batch_canonical = (
             _load_native_predictor_predict_batch_canonical()
         )
@@ -365,6 +379,8 @@ class GBMRegressor:
                 f"X feature count {len(rows[0])} does not match fitted feature count "
                 f"{self._n_features_in}"
             )
+        if self._uses_continuous_binning:
+            rows = self._quantize_rows_for_native(rows)
 
         shap_explain_rows = _load_native_shap_explain_rows()
         expected_value, values = shap_explain_rows(self._artifact_bytes, rows)
@@ -390,6 +406,8 @@ class GBMRegressor:
                 f"X feature count {len(rows[0])} does not match fitted feature count "
                 f"{self._n_features_in}"
             )
+        if self._uses_continuous_binning:
+            rows = self._quantize_rows_for_native(rows)
 
         shap_global_importance = _load_native_shap_global_importance()
         importance = shap_global_importance(self._artifact_bytes, rows)
@@ -429,6 +447,35 @@ class GBMRegressor:
             normalized.append(row_values)
 
         return normalized
+
+    @staticmethod
+    def _round_half_away_from_zero(value: float) -> int:
+        if value >= 0.0:
+            return int(math.floor(value + 0.5))
+        return int(math.ceil(value - 0.5))
+
+    @staticmethod
+    def _rows_are_pre_binned(rows: Sequence[Sequence[float]]) -> bool:
+        for row in rows:
+            for value in row:
+                if value < 0.0:
+                    return False
+                rounded = float(GBMRegressor._round_half_away_from_zero(value))
+                if abs(value - rounded) > _PRE_BINNED_INTEGER_TOLERANCE:
+                    return False
+        return True
+
+    @staticmethod
+    def _quantize_rows_for_native(rows: Sequence[Sequence[float]]) -> list[list[float]]:
+        quantized: list[list[float]] = []
+        for row in rows:
+            quantized_row: list[float] = []
+            for value in row:
+                rounded = GBMRegressor._round_half_away_from_zero(value)
+                clamped = min(_MAX_CONTINUOUS_QUANTIZED_BIN, max(0, rounded))
+                quantized_row.append(float(clamped))
+            quantized.append(quantized_row)
+        return quantized
 
     @staticmethod
     def _validate_targets(y: object) -> list[float]:
