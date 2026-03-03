@@ -94,7 +94,13 @@ done
 
 default_median="$(median_of "${default_values[@]}")"
 fallback_median="$(median_of "${fallback_values[@]}")"
-delta_percent="$(awk -v d="${default_median}" -v f="${fallback_median}" 'BEGIN { printf("%.2f", ((d - f) / f) * 100.0) }')"
+delta_vs_forced_scalar=""
+if [[ "${default_avx2}" == "false" && "${fallback_avx2}" == "false" ]]; then
+  delta_vs_forced_scalar="n/a (runtime AVX2 unavailable)"
+else
+  delta_percent="$(awk -v d="${default_median}" -v f="${fallback_median}" 'BEGIN { printf("%.2f", ((d - f) / f) * 100.0) }')"
+  delta_vs_forced_scalar="${delta_percent}%"
+fi
 
 echo
 echo "AVX2 comparison summary"
@@ -108,4 +114,4 @@ echo "  medium_ns_per_iter(default_runs): ${default_values[*]}"
 echo "  medium_ns_per_iter(forced_scalar_runs): ${fallback_values[*]}"
 echo "  medium_ns_per_iter(default_median): ${default_median}"
 echo "  medium_ns_per_iter(forced_scalar_median): ${fallback_median}"
-echo "  medium_delta_vs_forced_scalar_median: ${delta_percent}%"
+echo "  medium_delta_vs_forced_scalar_median: ${delta_vs_forced_scalar}"

@@ -70,6 +70,12 @@ Exit criteria:
 - Expand tests, docs, and benchmark reproducibility artifacts.
 - Finalize migration notes and compatibility checks.
 
+### 0.9.0 - Debugging, Benchmark Improvement, and Documentation
+- Benchmark Expansion: Expand benchmark to include both shallow and deep runs
+- Debugging: Fix any bugs found during testing.
+- Benchmark Improvement: Improve benchmark performance (accuracy and speed) to compete with lightgbm & xgboost.
+- Documentation: Improve documentation and add tutorials.
+
 ### 1.0.0 - CPU Production Baseline
 - Stable CPU release with predictor, SHAP, categorical support, and robust Python API.
 - Release gates: correctness suite green, stable format, performance target met.
