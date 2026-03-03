@@ -1,0 +1,14 @@
+name: dow_jones_financial
+version: 1
+kind: uci_download
+description: Financial panel-style benchmark derived from UCI Dow Jones Index weekly data.
+source:
+  dataset: dow-jones-index
+  url: https://archive.ics.uci.edu/static/public/312/dow+jones+index.zip
+raw:
+  filename: dow_jones_index.zip
+  delimiter: ","
+prepared:
+  filename: prepared.csv
+  target: target_percent_change_next_weeks_price
+  note: Uses leakage-safe current-week features with stock group_id and weekly timestamp.

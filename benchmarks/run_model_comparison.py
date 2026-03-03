@@ -20,10 +20,43 @@ import yaml
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
 
+AVAILABLE_SCENARIOS = [
+    "dense_numeric",
+    "panel_time_series",
+    "histogram_stress",
+    "dow_jones_financial",
+]
+
+
+@dataclass(frozen=True)
+class BenchmarkProfile:
+    name: str
+    learning_rate: float
+    max_depth: int
+    rounds: int
+
+
+DEFAULT_PROFILES = [
+    BenchmarkProfile("shallow_high_lr", learning_rate=0.20, max_depth=4, rounds=200),
+    BenchmarkProfile("mid_balanced", learning_rate=0.05, max_depth=6, rounds=1200),
+    BenchmarkProfile("deep_low_lr", learning_rate=0.01, max_depth=8, rounds=5000),
+]
+
+ULTRA_PROFILE = BenchmarkProfile(
+    "ultra_low_lr", learning_rate=0.005, max_depth=8, rounds=10000
+)
+
 
 @dataclass
 class BenchmarkRecord:
     scenario: str
+    profile_name: str
+    profile_index: int
+    run_index: int
+    seed: int
+    learning_rate: float
+    max_depth: int
+    rounds: int
     model: str
     train_rows: int
     test_rows: int
@@ -38,21 +71,25 @@ class BenchmarkRecord:
 
 
 def _prepare_dataset(
-    repo_root: Path, scenario: str, force_prepare: bool, prepared_path: Path
+    repo_root: Path,
+    scenario: str,
+    force_prepare: bool,
+    prepared_path: Path,
+    manifest_kind: str,
 ) -> None:
     if prepared_path.exists() and not force_prepare:
         return
 
     scenario_script = repo_root / "benchmarks" / scenario / "prepare.py"
     command = [sys.executable, "-B", str(scenario_script)]
-    if force_prepare and scenario in {"dense_numeric", "panel_time_series"}:
+    if force_prepare and manifest_kind == "uci_download":
         command.append("--force-download")
     subprocess.run(command, cwd=repo_root, check=True)
 
 
 def _load_manifest(manifest_path: Path) -> dict:
-    with manifest_path.open("r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    with manifest_path.open("r", encoding="utf-8") as manifest_file:
+        return yaml.safe_load(manifest_file)
 
 
 def _load_dataset(
@@ -60,11 +97,12 @@ def _load_dataset(
 ) -> tuple[pd.DataFrame, str]:
     manifest_path = repo_root / "benchmarks" / scenario / "manifest.yaml"
     manifest = _load_manifest(manifest_path)
-    target_column = manifest["prepared"]["target"]
-    prepared_file = manifest["prepared"]["filename"]
+    target_column = str(manifest["prepared"]["target"])
+    prepared_file = str(manifest["prepared"]["filename"])
+    manifest_kind = str(manifest.get("kind", ""))
     prepared_path = repo_root / "benchmarks" / "data" / scenario / "prepared" / prepared_file
 
-    _prepare_dataset(repo_root, scenario, force_prepare, prepared_path)
+    _prepare_dataset(repo_root, scenario, force_prepare, prepared_path, manifest_kind)
     if not prepared_path.exists():
         raise FileNotFoundError(f"prepared dataset missing: {prepared_path}")
 
@@ -74,18 +112,58 @@ def _load_dataset(
     return frame, target_column
 
 
+def _split_by_timestamp(frame: pd.DataFrame, test_size: float) -> tuple[pd.DataFrame, pd.DataFrame]:
+    # Split on unique timestamps so no timestamp appears in both train and test.
+    ordered = frame.sort_values(["timestamp", "group_id"], kind="mergesort")
+    unique_timestamps = sorted({str(value) for value in ordered["timestamp"]})
+    if len(unique_timestamps) < 2:
+        raise ValueError("need at least 2 unique timestamps for split")
+
+    train_timestamp_count = max(1, int(len(unique_timestamps) * (1.0 - test_size)))
+    if train_timestamp_count >= len(unique_timestamps):
+        train_timestamp_count = len(unique_timestamps) - 1
+    train_timestamps = set(unique_timestamps[:train_timestamp_count])
+
+    train = ordered[ordered["timestamp"].astype(str).isin(train_timestamps)]
+    test = ordered[~ordered["timestamp"].astype(str).isin(train_timestamps)]
+    if train.empty or test.empty:
+        raise ValueError("timestamp split produced empty train/test partition")
+    return train, test
+
+
 def _split_dataset(
-    scenario: str, frame: pd.DataFrame, target_column: str, seed: int, test_size: float
+    scenario: str,
+    frame: pd.DataFrame,
+    target_column: str,
+    seed: int,
+    test_size: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    target_equivalent_features: list[str] = []
+    target_series = pd.to_numeric(frame[target_column], errors="coerce")
+    for column in frame.columns:
+        if column in {target_column, "group_id", "timestamp"}:
+            continue
+        feature_series = pd.to_numeric(frame[column], errors="coerce")
+        comparable = feature_series.notna() & target_series.notna()
+        if comparable.any() and (feature_series[comparable] == target_series[comparable]).all():
+            target_equivalent_features.append(column)
+
+    if target_equivalent_features:
+        raise ValueError(
+            f"{scenario}: target-equivalent features detected: "
+            + ", ".join(sorted(target_equivalent_features))
+        )
+
     feature_frame = frame.drop(columns=[target_column]).copy()
     if "group_id" in feature_frame.columns:
         feature_frame = feature_frame.drop(columns=["group_id"])
 
     if "timestamp" in feature_frame.columns:
-        ordered = frame.sort_values("timestamp")
-        cutoff = max(1, int(len(ordered) * (1.0 - test_size)))
-        train = ordered.iloc[:cutoff]
-        test = ordered.iloc[cutoff:]
+        try:
+            train, test = _split_by_timestamp(frame, test_size)
+        except ValueError as exc:
+            raise ValueError(f"{scenario}: {exc}") from exc
+
         x_train = train.drop(columns=[target_column, "group_id", "timestamp"], errors="ignore")
         x_test = test.drop(columns=[target_column, "group_id", "timestamp"], errors="ignore")
         y_train = train[target_column]
@@ -130,6 +208,10 @@ def _run_model(
     x_test: np.ndarray,
     y_test: np.ndarray,
     scenario: str,
+    profile: BenchmarkProfile,
+    profile_index: int,
+    run_index: int,
+    seed: int,
 ) -> BenchmarkRecord:
     try:
         model = factory()
@@ -149,6 +231,13 @@ def _run_model(
 
         return BenchmarkRecord(
             scenario=scenario,
+            profile_name=profile.name,
+            profile_index=profile_index,
+            run_index=run_index,
+            seed=seed,
+            learning_rate=profile.learning_rate,
+            max_depth=profile.max_depth,
+            rounds=profile.rounds,
             model=model_name,
             train_rows=int(len(x_train)),
             test_rows=int(len(x_test)),
@@ -164,10 +253,17 @@ def _run_model(
     except Exception as exc:  # noqa: BLE001
         return BenchmarkRecord(
             scenario=scenario,
+            profile_name=profile.name,
+            profile_index=profile_index,
+            run_index=run_index,
+            seed=seed,
+            learning_rate=profile.learning_rate,
+            max_depth=profile.max_depth,
+            rounds=profile.rounds,
             model=model_name,
-            train_rows=int(len(x_train)),
-            test_rows=int(len(x_test)),
-            n_features=int(x_train.shape[1]),
+            train_rows=0,
+            test_rows=0,
+            n_features=0,
             fit_seconds=0.0,
             predict_seconds=0.0,
             rmse=float("nan"),
@@ -230,16 +326,256 @@ def _model_factories(seed: int, learning_rate: float, max_depth: int, rounds: in
     }
 
 
+def _parse_seed_list(seed_text: str) -> list[int]:
+    raw_parts = [part.strip() for part in seed_text.split(",") if part.strip()]
+    if not raw_parts:
+        raise ValueError("profile seed list cannot be empty")
+
+    seeds: list[int] = []
+    seen: set[int] = set()
+    for part in raw_parts:
+        value = int(part)
+        if value in seen:
+            continue
+        seeds.append(value)
+        seen.add(value)
+    return seeds
+
+
+def _parse_profile_spec(spec: str) -> BenchmarkProfile:
+    parts = [part.strip() for part in spec.split(":")]
+    if len(parts) != 4:
+        raise ValueError(
+            "profile must use 'name:learning_rate:max_depth:rounds' format"
+        )
+
+    name, learning_rate_raw, max_depth_raw, rounds_raw = parts
+    learning_rate = float(learning_rate_raw)
+    max_depth = int(max_depth_raw)
+    rounds = int(rounds_raw)
+
+    if not name:
+        raise ValueError("profile name cannot be empty")
+    if learning_rate <= 0.0:
+        raise ValueError("profile learning_rate must be > 0")
+    if max_depth <= 0:
+        raise ValueError("profile max_depth must be > 0")
+    if rounds <= 0:
+        raise ValueError("profile rounds must be > 0")
+
+    return BenchmarkProfile(
+        name=name,
+        learning_rate=learning_rate,
+        max_depth=max_depth,
+        rounds=rounds,
+    )
+
+
+def _resolve_profiles(
+    args: argparse.Namespace,
+) -> tuple[list[BenchmarkProfile], list[int], bool]:
+    if args.profile and args.profile_grid != "none":
+        raise ValueError("use either --profile-grid or --profile, not both")
+
+    if args.profile:
+        profiles = [_parse_profile_spec(spec) for spec in args.profile]
+        seeds = _parse_seed_list(args.profile_seeds)
+        return profiles, seeds, True
+
+    if args.profile_grid == "default":
+        profiles = list(DEFAULT_PROFILES)
+        seeds = _parse_seed_list(args.profile_seeds)
+        return profiles, seeds, True
+
+    if args.profile_grid == "default_ultra":
+        profiles = list(DEFAULT_PROFILES) + [ULTRA_PROFILE]
+        seeds = _parse_seed_list(args.profile_seeds)
+        return profiles, seeds, True
+
+    profile = BenchmarkProfile(
+        name="single",
+        learning_rate=args.learning_rate,
+        max_depth=args.max_depth,
+        rounds=args.rounds,
+    )
+    return [profile], [args.seed], False
+
+
+def _summarize_profiles(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return pd.DataFrame()
+
+    passed = frame[frame["status"] == "PASS"].copy()
+    if passed.empty:
+        return pd.DataFrame()
+
+    summary = (
+        passed.groupby(
+            [
+                "scenario",
+                "profile_name",
+                "model",
+                "learning_rate",
+                "max_depth",
+                "rounds",
+            ],
+            as_index=False,
+        )
+        .agg(
+            runs=("fit_seconds", "count"),
+            fit_seconds_median=("fit_seconds", "median"),
+            predict_seconds_median=("predict_seconds", "median"),
+            rmse_median=("rmse", "median"),
+            mae_median=("mae", "median"),
+            r2_median=("r2", "median"),
+        )
+        .sort_values(["scenario", "profile_name", "model"])
+        .reset_index(drop=True)
+    )
+    return summary
+
+
+def _best_rows_by_scenario(
+    summary: pd.DataFrame, metric: str, ascending: bool
+) -> pd.DataFrame:
+    if summary.empty:
+        return pd.DataFrame()
+    grouped = summary.groupby("scenario", as_index=False)
+    index = grouped[metric].idxmin() if ascending else grouped[metric].idxmax()
+    return summary.loc[index[metric]].sort_values("scenario")
+
+
+def _render_results_markdown(
+    run_id: str,
+    params: dict,
+    frame: pd.DataFrame,
+    summary: pd.DataFrame,
+) -> str:
+    lines = [
+        f"# Model Comparison ({run_id})",
+        "",
+        "## Params",
+        f"- profile_mode: `{params['profile_mode']}`",
+        f"- scenarios: `{', '.join(params['scenarios'])}`",
+        f"- test_size: `{params['test_size']}`",
+    ]
+
+    if params["profile_mode"] == "single":
+        lines.extend(
+            [
+                f"- seed: `{params['seed']}`",
+                f"- learning_rate: `{params['learning_rate']}`",
+                f"- max_depth: `{params['max_depth']}`",
+                f"- rounds: `{params['rounds']}`",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                f"- profile_grid: `{params['profile_grid']}`",
+                f"- profile_seeds: `{params['profile_seeds']}`",
+                "",
+                "### Profiles",
+            ]
+        )
+        for profile in params["profiles"]:
+            lines.append(
+                "- "
+                f"`{profile['name']}`: "
+                f"lr={profile['learning_rate']}, "
+                f"max_depth={profile['max_depth']}, "
+                f"rounds={profile['rounds']}"
+            )
+
+    lines.extend(["", "## Raw Results", ""])
+
+    if frame.empty:
+        lines.append("No benchmark records were produced.")
+        return "\n".join(lines) + "\n"
+
+    lines.extend(
+        [
+            "| scenario | profile | model | seed | status | fit_seconds | predict_seconds | rmse | mae | r2 |",
+            "| --- | --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for _, row in frame.iterrows():
+        lines.append(
+            f"| {row['scenario']} | {row['profile_name']} | {row['model']} | {int(row['seed'])} | "
+            f"{row['status']} | {row['fit_seconds']:.6f} | {row['predict_seconds']:.6f} | "
+            f"{row['rmse']:.6f} | {row['mae']:.6f} | {row['r2']:.6f} |"
+        )
+
+    lines.extend(["", "## Profile Median Summary", ""])
+    if summary.empty:
+        lines.append("No PASS records available for profile summary.")
+        return "\n".join(lines) + "\n"
+
+    lines.extend(
+        [
+            "| scenario | profile | model | runs | lr | depth | rounds | fit_seconds_median | predict_seconds_median | rmse_median | mae_median | r2_median |",
+            "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for _, row in summary.iterrows():
+        lines.append(
+            f"| {row['scenario']} | {row['profile_name']} | {row['model']} | {int(row['runs'])} | "
+            f"{row['learning_rate']:.6f} | {int(row['max_depth'])} | {int(row['rounds'])} | "
+            f"{row['fit_seconds_median']:.6f} | {row['predict_seconds_median']:.6f} | "
+            f"{row['rmse_median']:.6f} | {row['mae_median']:.6f} | {row['r2_median']:.6f} |"
+        )
+
+    best_rmse = _best_rows_by_scenario(summary, metric="rmse_median", ascending=True)
+    fastest_fit = _best_rows_by_scenario(
+        summary, metric="fit_seconds_median", ascending=True
+    )
+
+    lines.extend(["", "## Best RMSE By Scenario", ""])
+    if best_rmse.empty:
+        lines.append("No best-RMSE rows available.")
+    else:
+        lines.extend(
+            [
+                "| scenario | profile | model | rmse_median |",
+                "| --- | --- | --- | ---: |",
+            ]
+        )
+        for _, row in best_rmse.iterrows():
+            lines.append(
+                f"| {row['scenario']} | {row['profile_name']} | {row['model']} | {row['rmse_median']:.6f} |"
+            )
+
+    lines.extend(["", "## Fastest Fit By Scenario", ""])
+    if fastest_fit.empty:
+        lines.append("No fastest-fit rows available.")
+    else:
+        lines.extend(
+            [
+                "| scenario | profile | model | fit_seconds_median |",
+                "| --- | --- | --- | ---: |",
+            ]
+        )
+        for _, row in fastest_fit.iterrows():
+            lines.append(
+                f"| {row['scenario']} | {row['profile_name']} | {row['model']} | {row['fit_seconds_median']:.6f} |"
+            )
+
+    return "\n".join(lines) + "\n"
+
+
 def _write_outputs(
     output_dir: Path,
     run_id: str,
     records: list[BenchmarkRecord],
     params: dict,
-) -> tuple[Path, Path, Path]:
+) -> dict[str, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    rows = [asdict(record) for record in records]
-    frame = pd.DataFrame(rows)
+    frame = pd.DataFrame([asdict(record) for record in records])
+    if not frame.empty:
+        frame = frame.sort_values(
+            ["scenario", "profile_index", "run_index", "model"]
+        ).reset_index(drop=True)
 
     csv_timestamped = output_dir / f"model_comparison_{run_id}.csv"
     csv_latest = output_dir / "model_comparison_latest.csv"
@@ -248,43 +584,48 @@ def _write_outputs(
 
     json_timestamped = output_dir / f"model_comparison_{run_id}.json"
     json_latest = output_dir / "model_comparison_latest.json"
-    json_payload = {
+    payload = {
         "run_id": run_id,
         "params": params,
-        "records": rows,
+        "records": frame.to_dict(orient="records"),
     }
-    json_timestamped.write_text(json.dumps(json_payload, indent=2), encoding="utf-8")
-    json_latest.write_text(json.dumps(json_payload, indent=2), encoding="utf-8")
+    json_timestamped.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    json_latest.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
+    summary = _summarize_profiles(frame)
+
+    summary_csv_timestamped = output_dir / f"model_comparison_profile_summary_{run_id}.csv"
+    summary_csv_latest = output_dir / "model_comparison_profile_summary_latest.csv"
+    summary.to_csv(summary_csv_timestamped, index=False)
+    summary.to_csv(summary_csv_latest, index=False)
+
+    summary_json_timestamped = output_dir / f"model_comparison_profile_summary_{run_id}.json"
+    summary_json_latest = output_dir / "model_comparison_profile_summary_latest.json"
+    summary_payload = {
+        "run_id": run_id,
+        "params": params,
+        "summary": summary.to_dict(orient="records"),
+    }
+    summary_json_timestamped.write_text(
+        json.dumps(summary_payload, indent=2), encoding="utf-8"
+    )
+    summary_json_latest.write_text(
+        json.dumps(summary_payload, indent=2), encoding="utf-8"
+    )
+
+    markdown_text = _render_results_markdown(run_id, params, frame, summary)
     markdown_timestamped = output_dir / f"model_comparison_{run_id}.md"
     markdown_latest = output_dir / "model_comparison_latest.md"
-
-    lines = [
-        f"# Model Comparison ({run_id})",
-        "",
-        "## Params",
-        f"- seed: `{params['seed']}`",
-        f"- learning_rate: `{params['learning_rate']}`",
-        f"- max_depth: `{params['max_depth']}`",
-        f"- rounds: `{params['rounds']}`",
-        "",
-        "## Results",
-        "",
-        "| scenario | model | status | fit_seconds | predict_seconds | rmse | mae | r2 |",
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
-    ]
-    for record in records:
-        lines.append(
-            f"| {record.scenario} | {record.model} | {record.status} | "
-            f"{record.fit_seconds:.6f} | {record.predict_seconds:.6f} | "
-            f"{record.rmse:.6f} | {record.mae:.6f} | {record.r2:.6f} |"
-        )
-
-    markdown_text = "\n".join(lines) + "\n"
     markdown_timestamped.write_text(markdown_text, encoding="utf-8")
     markdown_latest.write_text(markdown_text, encoding="utf-8")
 
-    return csv_timestamped, json_timestamped, markdown_timestamped
+    return {
+        "csv": csv_timestamped,
+        "json": json_timestamped,
+        "markdown": markdown_timestamped,
+        "summary_csv": summary_csv_timestamped,
+        "summary_json": summary_json_timestamped,
+    }
 
 
 def main(argv: list[str]) -> int:
@@ -292,8 +633,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument(
         "--scenarios",
         nargs="+",
-        default=["dense_numeric", "panel_time_series", "histogram_stress"],
-        choices=["dense_numeric", "panel_time_series", "histogram_stress"],
+        default=AVAILABLE_SCENARIOS,
+        choices=AVAILABLE_SCENARIOS,
     )
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--learning-rate", type=float, default=0.1)
@@ -302,65 +643,149 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--test-size", type=float, default=0.2)
     parser.add_argument("--force-prepare", action="store_true")
     parser.add_argument(
+        "--profile-grid",
+        choices=["none", "default", "default_ultra"],
+        default="none",
+        help="named profile matrix; use none for single-profile compatibility mode",
+    )
+    parser.add_argument(
+        "--profile",
+        action="append",
+        default=[],
+        help="custom profile spec: name:learning_rate:max_depth:rounds (repeatable)",
+    )
+    parser.add_argument(
+        "--profile-seeds",
+        default="7,17,29",
+        help="comma-separated seeds for profile-grid/custom-profile modes",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("benchmarks") / "results",
     )
     args = parser.parse_args(argv)
 
-    repo_root = Path(__file__).resolve().parents[1]
-    factories = _model_factories(args.seed, args.learning_rate, args.max_depth, args.rounds)
-    records: list[BenchmarkRecord] = []
+    try:
+        profiles, seeds, matrix_mode = _resolve_profiles(args)
+    except (TypeError, ValueError) as exc:
+        print(f"invalid profile configuration: {exc}", file=sys.stderr)
+        return 2
 
+    repo_root = Path(__file__).resolve().parents[1]
+
+    datasets: dict[str, tuple[pd.DataFrame, str]] = {}
+    dataset_errors: dict[str, str] = {}
     for scenario in args.scenarios:
         try:
             frame, target_column = _load_dataset(repo_root, scenario, args.force_prepare)
-            x_train, x_test, y_train, y_test = _split_dataset(
-                scenario, frame, target_column, args.seed, args.test_size
-            )
+            datasets[scenario] = (frame, target_column)
         except Exception as exc:  # noqa: BLE001
-            for model_name in factories:
-                records.append(
-                    BenchmarkRecord(
-                        scenario=scenario,
-                        model=model_name,
-                        train_rows=0,
-                        test_rows=0,
-                        n_features=0,
-                        fit_seconds=0.0,
-                        predict_seconds=0.0,
-                        rmse=float("nan"),
-                        mae=float("nan"),
-                        r2=float("nan"),
-                        status="FAIL",
-                        error=f"{type(exc).__name__}: {exc}",
-                    )
-                )
-                print(f"[{scenario}] {model_name}: FAIL")
-                print(f"  error: {type(exc).__name__}: {exc}")
-            continue
+            dataset_errors[scenario] = f"{type(exc).__name__}: {exc}"
 
-        for model_name, factory in factories.items():
-            record = _run_model(
-                model_name=model_name,
-                factory=factory,
-                x_train=x_train,
-                y_train=y_train,
-                x_test=x_test,
-                y_test=y_test,
-                scenario=scenario,
+    records: list[BenchmarkRecord] = []
+
+    for profile_index, profile in enumerate(profiles, start=1):
+        for run_index, seed in enumerate(seeds, start=1):
+            factories = _model_factories(
+                seed=seed,
+                learning_rate=profile.learning_rate,
+                max_depth=profile.max_depth,
+                rounds=profile.rounds,
             )
-            records.append(record)
-            print(
-                f"[{scenario}] {model_name}: {record.status} "
-                f"fit={record.fit_seconds:.4f}s pred={record.predict_seconds:.4f}s "
-                f"rmse={record.rmse:.6f} mae={record.mae:.6f} r2={record.r2:.6f}"
-            )
-            if record.status != "PASS":
-                print(f"  error: {record.error}")
+
+            for scenario in args.scenarios:
+                if scenario in dataset_errors:
+                    error = dataset_errors[scenario]
+                    for model_name in factories:
+                        records.append(
+                            BenchmarkRecord(
+                                scenario=scenario,
+                                profile_name=profile.name,
+                                profile_index=profile_index,
+                                run_index=run_index,
+                                seed=seed,
+                                learning_rate=profile.learning_rate,
+                                max_depth=profile.max_depth,
+                                rounds=profile.rounds,
+                                model=model_name,
+                                train_rows=0,
+                                test_rows=0,
+                                n_features=0,
+                                fit_seconds=0.0,
+                                predict_seconds=0.0,
+                                rmse=float("nan"),
+                                mae=float("nan"),
+                                r2=float("nan"),
+                                status="FAIL",
+                                error=error,
+                            )
+                        )
+                    continue
+
+                frame, target_column = datasets[scenario]
+                try:
+                    x_train, x_test, y_train, y_test = _split_dataset(
+                        scenario, frame, target_column, seed, args.test_size
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    error = f"{type(exc).__name__}: {exc}"
+                    for model_name in factories:
+                        records.append(
+                            BenchmarkRecord(
+                                scenario=scenario,
+                                profile_name=profile.name,
+                                profile_index=profile_index,
+                                run_index=run_index,
+                                seed=seed,
+                                learning_rate=profile.learning_rate,
+                                max_depth=profile.max_depth,
+                                rounds=profile.rounds,
+                                model=model_name,
+                                train_rows=0,
+                                test_rows=0,
+                                n_features=0,
+                                fit_seconds=0.0,
+                                predict_seconds=0.0,
+                                rmse=float("nan"),
+                                mae=float("nan"),
+                                r2=float("nan"),
+                                status="FAIL",
+                                error=error,
+                            )
+                        )
+                    continue
+
+                for model_name, factory in factories.items():
+                    record = _run_model(
+                        model_name=model_name,
+                        factory=factory,
+                        x_train=x_train,
+                        y_train=y_train,
+                        x_test=x_test,
+                        y_test=y_test,
+                        scenario=scenario,
+                        profile=profile,
+                        profile_index=profile_index,
+                        run_index=run_index,
+                        seed=seed,
+                    )
+                    records.append(record)
+                    print(
+                        f"[{scenario}][{profile.name}][seed={seed}] {model_name}: "
+                        f"{record.status} fit={record.fit_seconds:.4f}s "
+                        f"pred={record.predict_seconds:.4f}s rmse={record.rmse:.6f} "
+                        f"mae={record.mae:.6f} r2={record.r2:.6f}"
+                    )
+                    if record.status != "PASS":
+                        print(f"  error: {record.error}")
 
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     params = {
+        "profile_mode": "matrix" if matrix_mode else "single",
+        "profile_grid": args.profile_grid,
+        "profiles": [asdict(profile) for profile in profiles],
+        "profile_seeds": seeds,
         "seed": args.seed,
         "learning_rate": args.learning_rate,
         "max_depth": args.max_depth,
@@ -368,10 +793,12 @@ def main(argv: list[str]) -> int:
         "test_size": args.test_size,
         "scenarios": args.scenarios,
     }
-    csv_path, json_path, md_path = _write_outputs(args.output_dir, run_id, records, params)
-    print(f"wrote comparison csv: {csv_path}")
-    print(f"wrote comparison json: {json_path}")
-    print(f"wrote comparison markdown: {md_path}")
+    paths = _write_outputs(args.output_dir, run_id, records, params)
+    print(f"wrote comparison csv: {paths['csv']}")
+    print(f"wrote comparison json: {paths['json']}")
+    print(f"wrote comparison markdown: {paths['markdown']}")
+    print(f"wrote profile summary csv: {paths['summary_csv']}")
+    print(f"wrote profile summary json: {paths['summary_json']}")
     return 0
 
 

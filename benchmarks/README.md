@@ -13,6 +13,9 @@ This directory organizes benchmark dataset preparation for `v0.8.3` and later ha
 - `histogram_stress/`
   - `manifest.yaml`
   - `prepare.py`
+- `dow_jones_financial/`
+  - `manifest.yaml`
+  - `prepare.py`
 
 Generated data is written under `benchmarks/data/` (ignored by git).
 
@@ -24,6 +27,7 @@ Examples:
 python3 benchmarks/dense_numeric/prepare.py
 python3 benchmarks/panel_time_series/prepare.py --max-rows 150000
 python3 benchmarks/histogram_stress/prepare.py --rows 100000 --features 48
+python3 benchmarks/dow_jones_financial/prepare.py --force-download
 ```
 
 Cross-package model comparison (speed + accuracy):
@@ -32,14 +36,41 @@ Cross-package model comparison (speed + accuracy):
 python3 benchmarks/run_model_comparison.py --force-prepare
 ```
 
+Profile matrix comparisons (shallow/mid/deep):
+
+```bash
+python3 benchmarks/run_model_comparison.py \
+  --force-prepare \
+  --profile-grid default \
+  --profile-seeds 7,17,29
+```
+
+Optional ultra profile (`10000` rounds) on constrained scenarios:
+
+```bash
+python3 benchmarks/run_model_comparison.py \
+  --force-prepare \
+  --profile-grid default_ultra \
+  --profile-seeds 7 \
+  --scenarios dense_numeric dow_jones_financial
+```
+
 Outputs are written to `benchmarks/results/`:
 
 - `model_comparison_latest.csv`
 - `model_comparison_latest.json`
 - `model_comparison_latest.md`
+- `model_comparison_profile_summary_latest.csv`
+- `model_comparison_profile_summary_latest.json`
 
 Each `prepare.py` script is self-contained and uses:
 
 - UCI direct URLs where applicable.
 - Python stdlib download flow with fallback to `curl`/`wget` when available.
 - Deterministic output conventions suitable for repeatable benchmark runs.
+
+Temporal leakage safeguards:
+
+- `panel_time_series` uses a next-timestep target (`target_co_gt`) rather than same-timestep target duplication.
+- `dow_jones_financial` excludes forward-looking `next_weeks_*` fields from model features and keeps only the target as future information.
+- `run_model_comparison.py` performs timestamp-boundary splits so a timestamp cannot appear in both train and test partitions.

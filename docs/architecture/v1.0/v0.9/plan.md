@@ -4,6 +4,7 @@
 - Goal: deliver `0.9.0` by running a focused debugging, benchmark-expansion, performance-improvement, and documentation/tutorial cycle after `v0.8` hardening and before `v1.0` closeout.
 - Success criteria:
   - benchmark coverage includes both shallow and deep training runs across existing scenarios with reproducible outputs,
+  - benchmark quality metrics are produced under leakage-hardened temporal evaluation rules,
   - validated defects found during the cycle are fixed with regression tests,
   - benchmark competitiveness (speed and/or accuracy) improves from the current `v0.8.3` baseline with recorded evidence,
   - user/operator documentation is upgraded with runnable tutorial guidance for core CPU workflows.
@@ -14,7 +15,7 @@
 - Plan and execute `v0.9.x` child slices under `docs/architecture/v1.0/v0.9/`:
   - `v0.9.1`: bug triage + deterministic reproduction + fix plan with regression-test mapping.
   - `v0.9.2`: benchmark expansion to shallow/deep runs and refreshed comparison outputs.
-  - `v0.9.3`: targeted performance/quality improvements based on measured bottlenecks.
+  - `v0.9.3`: temporal leakage hardening for benchmark prep/splits plus benchmark integrity regression tests.
   - `v0.9.4`: documentation/tutorial pass and `v0.9` parent closeout readiness.
 - Maintain and extend benchmark evidence workflow:
   - `benchmarks/*/prepare.py`,
@@ -50,7 +51,10 @@ Backward-compatibility expectations:
 ## Implementation Sequence
 1. `v0.9.1`: collect current defects/perf anomalies from test and benchmark evidence, reproduce deterministically, and lock prioritized fix list plus acceptance tests.
 2. `v0.9.2`: expand benchmark protocol to shallow/deep runs and refresh comparison baselines with reproducible command set.
-3. `v0.9.3`: implement and verify targeted fixes/optimizations; include regression tests for each accepted bug class.
+3. `v0.9.3`: implement and verify benchmark temporal integrity hardening:
+   - enforce timestamp-boundary train/test splits for time-series scenarios,
+   - reject target-equivalent feature leakage in benchmark runner,
+   - add regression tests for these guarantees.
 4. `v0.9.4`: upgrade documentation/tutorials and produce operator-facing guidance for running training, benchmarking, and validation gates.
 5. Parent closeout: publish `v0.9` implementation/verification rollups and advance state index target toward `v1.0` final closeout.
 
@@ -59,8 +63,11 @@ Backward-compatibility expectations:
   - bug-specific regression tests for each fixed defect,
   - deterministic behavior checks for fixed paths.
 - Integration cases:
-  - end-to-end train/predict parity checks across Rust/Python surfaces after optimizations,
+  - end-to-end train/predict parity checks across Rust/Python surfaces after optimizations/hardening,
   - benchmark comparison runs covering shallow and deep configurations.
+- Temporal integrity cases:
+  - feature-target leakage guard checks in benchmark runner,
+  - timestamp-boundary train/test split checks for panel and financial scenarios.
 - Failure and edge cases:
   - malformed input/model artifacts continue to surface stable error semantics,
   - benchmark and prep scripts fail with actionable diagnostics on missing dependencies/network outages.
@@ -101,5 +108,5 @@ Backward-compatibility expectations:
 ## Assumptions and Defaults
 - Device scope remains CPU-only for `v0.9`.
 - Baseline comparator remains the `v0.8.3` benchmark evidence set.
-- Immediate next child target after this planning step is `docs/architecture/v1.0/v0.9/v0.9.1`.
+- Immediate next child target after `v0.9.3` verification is `docs/architecture/v1.0/v0.9/v0.9.4`.
 - Any unresolved large design change is deferred to post-`1.0.0` planning unless it blocks correctness.

@@ -11,4 +11,4 @@ raw:
 prepared:
   filename: prepared.csv
   target: target_co_gt
-  note: Adds group_id and normalized timestamp; drops rows with missing sentinel values.
+  note: Uses leakage-safe next-timestep CO target with current-timestep sensor features; adds group_id and normalized timestamp and drops rows with missing sentinel values.
