@@ -16,7 +16,9 @@
   - `v0.9.1`: bug triage + deterministic reproduction + fix plan with regression-test mapping.
   - `v0.9.2`: benchmark expansion to shallow/deep runs and refreshed comparison outputs.
   - `v0.9.3`: temporal leakage hardening for benchmark prep/splits plus benchmark integrity regression tests.
-  - `v0.9.4`: documentation/tutorial pass and `v0.9` parent closeout readiness.
+  - `v0.9.4`: benchmark runtime provenance and contract hardening so Alloy comparisons cannot silently run against stale package variants.
+  - `v0.9.5`: benchmark improvement and competitiveness iteration against leakage-hardened, provenance-validated harness outputs.
+  - `v0.9.6`: documentation/tutorial pass and `v0.9` parent closeout readiness.
 - Maintain and extend benchmark evidence workflow:
   - `benchmarks/*/prepare.py`,
   - `benchmarks/run_model_comparison.py`,
@@ -55,8 +57,10 @@ Backward-compatibility expectations:
    - enforce timestamp-boundary train/test splits for time-series scenarios,
    - reject target-equivalent feature leakage in benchmark runner,
    - add regression tests for these guarantees.
-4. `v0.9.4`: upgrade documentation/tutorials and produce operator-facing guidance for running training, benchmarking, and validation gates.
-5. Parent closeout: publish `v0.9` implementation/verification rollups and advance state index target toward `v1.0` final closeout.
+4. `v0.9.4`: enforce benchmark runtime provenance/contract requirements and add regression checks that fail fast on stale Alloy runtime bindings.
+5. `v0.9.5`: run targeted benchmark-improvement cycle and record measurable competitiveness deltas with the corrected harness.
+6. `v0.9.6`: upgrade documentation/tutorials and produce operator-facing guidance for running training, benchmarking, and validation gates.
+7. Parent closeout: publish `v0.9` implementation/verification rollups and advance state index target toward `v1.0` final closeout.
 
 ## Test Cases and Scenarios
 - Unit cases:
@@ -77,23 +81,25 @@ Backward-compatibility expectations:
   - `cargo test --workspace`
   - `cargo doc --workspace --no-deps`
   - `TESTING_WITH_LOCAL_MODULES=1 python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'`
-  - `python3 -B benchmarks/run_model_comparison.py --force-prepare --rounds 20`
-  - `python3 -B benchmarks/run_model_comparison.py --force-prepare --rounds 120`
+  - `python3 -m unittest discover -s benchmarks/tests -p 'test_*.py'`
+  - `python3 -B benchmarks/run_model_comparison.py --force-prepare --profile-grid default --profile-seeds 7`
+  - `python3 -B benchmarks/run_model_comparison.py --force-prepare --profile-grid default_ultra --profile-seeds 7 --scenarios dense_numeric dow_jones_financial`
   - `bash scripts/benchmark_avx2_compare.sh --runs 3`
 
 ## Acceptance Criteria
 1. `docs/architecture/v1.0/v0.9/plan.md` is present and decision-complete.
-2. `v0.9.1` through `v0.9.4` child layers each have `plan.md`, `implementation_notes.md`, and `verification_report.md`.
+2. `v0.9.1` through `v0.9.6` child layers each have `plan.md`, `implementation_notes.md`, and `verification_report.md`.
 3. A reproducible bug log and fix-to-test mapping are documented in `v0.9` child artifacts.
 4. Benchmark evidence includes both shallow and deep run outputs with preserved result artifacts in `benchmarks/results/`.
 5. At least one measurable performance and/or accuracy improvement versus the `v0.8.3` baseline is documented with command-backed evidence.
-6. Documentation/tutorial updates are published and validated for local execution.
-7. `docs/architecture/v1.0/v0.9/implementation_notes.md` is present and summarizes child-slice outcomes.
-8. `docs/architecture/v1.0/v0.9/verification_report.md` is present with criterion-to-evidence mapping.
-9. `cargo fmt -- --check` passes at closeout.
-10. `cargo clippy --workspace --all-targets -- -D warnings` passes at closeout.
-11. `cargo test --workspace`, `cargo doc --workspace --no-deps`, and Python unittest discovery pass at closeout.
-12. `docs/architecture/state/layer_index.yaml` marks `docs/architecture/v1.0/v0.9` as `planned-only`/`verified` according to progress and sets next execution target appropriately.
+6. Benchmark runtime provenance/contract checks prevent silent stale-package comparisons and are covered by regression tests.
+7. Documentation/tutorial updates are published and validated for local execution.
+8. `docs/architecture/v1.0/v0.9/implementation_notes.md` is present and summarizes child-slice outcomes.
+9. `docs/architecture/v1.0/v0.9/verification_report.md` is present with criterion-to-evidence mapping.
+10. `cargo fmt -- --check` passes at closeout.
+11. `cargo clippy --workspace --all-targets -- -D warnings` passes at closeout.
+12. `cargo test --workspace`, `cargo doc --workspace --no-deps`, and Python unittest discovery pass at closeout.
+13. `docs/architecture/state/layer_index.yaml` marks `docs/architecture/v1.0/v0.9` as `planned-only`/`verified` according to progress and sets next execution target appropriately.
 
 ## Risks and Mitigations
 - Risk: benchmark improvements overfit to one scenario and regress others.
@@ -109,4 +115,5 @@ Backward-compatibility expectations:
 - Device scope remains CPU-only for `v0.9`.
 - Baseline comparator remains the `v0.8.3` benchmark evidence set.
 - Immediate next child target after `v0.9.3` verification is `docs/architecture/v1.0/v0.9/v0.9.4`.
+- `v0.9.4` is now benchmark runtime provenance hardening; competitiveness iteration moves to `v0.9.5`, and closeout/doc readiness moves to `v0.9.6`.
 - Any unresolved large design change is deferred to post-`1.0.0` planning unless it blocks correctness.
