@@ -4,93 +4,83 @@
 - Path: `docs/architecture/v1.0/v0.7`
 - Date: 2026-03-02
 
-## Acceptance Criteria Matrix
-- Criterion: (1) `v0.7` child slices deliver production-ready target and frequency/count encoders with deterministic fit/transform semantics.
+## Parent Acceptance Criteria Matrix
+- Criterion: (1) `crates/shap` no longer returns placeholder `NotImplemented` for supported CPU regression artifacts.
 - Evidence:
-  - `v0.6.2` implemented deterministic target/frequency encoder runtime in `crates/categorical` and passed dedicated unit coverage.
-  - Reference: [docs/architecture/v1.0/v0.7/v0.6.2/verification_report.md](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.7/v0.6.2/verification_report.md).
+  - artifact-backed SHAP runtime delivered in `v0.7.1`/`v0.7.2` with exact math in [crates/shap/src/lib.rs](/Users/lashby/Projects/AlloyGBM/crates/shap/src/lib.rs),
+  - verified in [v0.7.2 verification report](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.7/v0.7.2/verification_report.md).
 - Status: PASS
 
-- Criterion: (2) Leakage-safe categorical mode is explicitly validated, including time-index requirements and deterministic failure semantics.
+- Criterion: (2) Per-row SHAP output dimensionality is `rows x feature_count` and validates input shapes deterministically.
 - Evidence:
-  - `v0.6.2` validates time-aware encoding requirements and leakage-safe behavior.
-  - `v0.6.4` enforces categorical/time-index consistency in Python and native bridge boundaries.
-  - References:
-    - [docs/architecture/v1.0/v0.7/v0.6.2/verification_report.md](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.7/v0.6.2/verification_report.md)
-    - [docs/architecture/v1.0/v0.7/v0.6.4/verification_report.md](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.7/v0.6.4/verification_report.md)
+  - row-shape and validation tests in [crates/shap/src/lib.rs](/Users/lashby/Projects/AlloyGBM/crates/shap/src/lib.rs),
+  - documented in [v0.7.1 verification report](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.7/v0.7.1/verification_report.md) and maintained through `v0.7.4`.
 - Status: PASS
 
-- Criterion: (3) Categorical state is serialized/deserialized through model artifacts without changing v1 format version.
+- Criterion: (3) For verified fixtures, `expected_value + sum(phi_i)` matches predictor output within documented tolerance.
 - Evidence:
-  - `v0.6.1` established categorical-state contract helpers in `core` for v1 artifacts.
-  - `v0.6.3` integrated optional categorical-state encode/decode in engine artifact flow.
-  - References:
-    - [docs/architecture/v1.0/v0.7/v0.6.1/verification_report.md](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.7/v0.6.1/verification_report.md)
-    - [docs/architecture/v1.0/v0.7/v0.6.3/verification_report.md](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.7/v0.6.3/verification_report.md)
+  - Rust predictor parity checks in `v0.7.3` (`tests::explain_rows_from_artifact_matches_predictor_predictions`) documented in [v0.7.3 verification report](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.7/v0.7.3/verification_report.md),
+  - Python/native additivity checks in `v0.7.4` documented in [v0.7.4 verification report](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.7/v0.7.4/verification_report.md).
 - Status: PASS
 
-- Criterion: (4) Predictor path remains artifact-canonical and functionally consistent when categorical state is present.
+- Criterion: (4) Global importance is computed from mean absolute SHAP contribution and exposed in deterministic ordering.
 - Evidence:
-  - `v0.6.3` added predictor optional categorical-state decode and parity test coverage.
-  - `v0.6.4` bridge categorical parity tests stayed green.
-  - References:
-    - [docs/architecture/v1.0/v0.7/v0.6.3/verification_report.md](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.7/v0.6.3/verification_report.md)
-    - [docs/architecture/v1.0/v0.7/v0.6.4/verification_report.md](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.7/v0.6.4/verification_report.md)
+  - Rust aggregation logic/tests in [crates/shap/src/lib.rs](/Users/lashby/Projects/AlloyGBM/crates/shap/src/lib.rs),
+  - deterministic tie-ordering coverage in `v0.7.3`,
+  - Python exposure and runtime checks in `v0.7.4`.
 - Status: PASS
 
-- Criterion: (5) Python categorical-capable flow is additive and keeps existing numeric-only contracts green.
+- Criterion: (5) SHAP artifact loading honors strict/legacy required-section compatibility checks without model-format changes.
 - Evidence:
-  - `v0.6.4` introduced additive `GBMRegressor` categorical controls and fit-time validation, while preserving numeric-only bridge behavior and tests.
-  - Reference: [docs/architecture/v1.0/v0.7/v0.6.4/verification_report.md](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.7/v0.6.4/verification_report.md).
+  - strict/legacy/malformed compatibility coverage in `v0.7.3`,
+  - corresponding evidence in [v0.7.3 verification report](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.7/v0.7.3/verification_report.md).
 - Status: PASS
 
-- Criterion: (6) Parent rollup artifacts summarize decisions, tradeoffs, and child-layer evidence links.
+- Criterion: (6) Python exposes additive SHAP APIs without regressing existing fit/predict contract tests.
 - Evidence:
-  - Parent rollup notes created at [docs/architecture/v1.0/v0.7/implementation_notes.md](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.7/implementation_notes.md).
-  - This parent verification report links all child evidence.
+  - Python bridge and regressor SHAP APIs delivered in `v0.7.4`:
+    - [bindings/python/src/lib.rs](/Users/lashby/Projects/AlloyGBM/bindings/python/src/lib.rs)
+    - [bindings/python/alloygbm/regressor.py](/Users/lashby/Projects/AlloyGBM/bindings/python/alloygbm/regressor.py)
+  - contract/runtime verification in [v0.7.4 verification report](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.7/v0.7.4/verification_report.md).
 - Status: PASS
 
-- Criterion: (7) `cargo fmt -- --check` passes at closeout.
+- Criterion: (7) `v0.7` child slices and parent rollup artifacts are present and linked in verification.
 - Evidence:
-  - Command executed in parent closeout verification pass -> PASS.
+  - verified child slices:
+    - [v0.7.1](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.7/v0.7.1/verification_report.md)
+    - [v0.7.2](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.7/v0.7.2/verification_report.md)
+    - [v0.7.3](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.7/v0.7.3/verification_report.md)
+    - [v0.7.4](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.7/v0.7.4/verification_report.md)
+  - parent rollup artifacts:
+    - [implementation_notes.md](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.7/implementation_notes.md)
+    - [verification_report.md](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.7/verification_report.md)
 - Status: PASS
 
-- Criterion: (8) `cargo clippy --workspace --all-targets -- -D warnings` passes at closeout.
-- Evidence:
-  - Command executed in parent closeout verification pass -> PASS.
+- Criterion: (8) `cargo fmt -- --check` passes at closeout.
+- Evidence: command executed successfully on 2026-03-02 during `v0.7.5` closeout.
 - Status: PASS
 
-- Criterion: (9) `cargo test --workspace` passes at closeout.
-- Evidence:
-  - Command executed in parent closeout verification pass -> PASS.
+- Criterion: (9) `cargo clippy --workspace --all-targets -- -D warnings` passes at closeout.
+- Evidence: command executed successfully on 2026-03-02 during `v0.7.5` closeout.
 - Status: PASS
 
-- Criterion: (10) `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'` passes at closeout.
+- Criterion: (10) `cargo test --workspace` and Python unittest suite pass at closeout.
 - Evidence:
-  - Command executed in parent closeout verification pass -> PASS (`Ran 58 tests`, `OK`).
+  - `cargo test --workspace`: PASS on 2026-03-02,
+  - `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'`: PASS (`Ran 67 tests`, `OK`) on 2026-03-02.
 - Status: PASS
 
-## Child-Layer Coverage Summary
-- `v0.6.1` verified: contract/schema baseline.
-- `v0.6.2` verified: encoder runtime.
-- `v0.6.3` verified: engine/predictor artifact integration.
-- `v0.6.4` verified: Python bridge and end-to-end categorical flow.
-
-## Commands Executed (Parent Closeout)
-- Command: `cargo fmt -- --check`
-- Result: PASS
-- Command: `cargo clippy --workspace --all-targets -- -D warnings`
-- Result: PASS
-- Command: `cargo test --workspace`
-- Result: PASS
-- Command: `cargo doc --workspace --no-deps`
-- Result: PASS
-- Command: `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'`
-- Result: PASS (`Ran 58 tests`, `OK`)
+## Commands Executed for Parent Closeout
+- `cargo fmt -- --check`: PASS
+- `cargo clippy --workspace --all-targets -- -D warnings`: PASS
+- `cargo test --workspace`: PASS
+- `cargo doc --workspace --no-deps`: PASS
+- `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'`: PASS (`Ran 67 tests`, `OK`)
 
 ## Residual Risks
-- Multi-feature categorical orchestration and richer predictor-side categorical transform replay remain deferred beyond `v0.7`.
+- Exact SHAP enumeration remains bounded by split-feature guardrail (`MAX_EXACT_SPLIT_FEATURES = 20`) and returns deterministic contract violations beyond that threshold.
+- SHAP expected-value/global-importance behavior remains dataset-dependent by design.
 
 ## Final Readiness
 - Ready: Yes
-- Required follow-up before merge/release: open `v0.8` planning for TreeSHAP CPU scope.
+- Release recommendation: mark `v0.7` complete and proceed to planning `v0.8`.

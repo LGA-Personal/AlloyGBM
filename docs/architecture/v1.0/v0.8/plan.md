@@ -1,108 +1,99 @@
 # AlloyGBM v0.8 Technical Plan
 
 ## Summary
-- Goal: deliver the `0.8.0` milestone by replacing SHAP placeholders with exact TreeSHAP for CPU regression artifacts and exposing global/per-row explanation APIs in Rust and Python.
+- Goal: deliver the `0.8.0` release-candidate hardening milestone by closing residual test, documentation, benchmark reproducibility, and compatibility-verification gaps ahead of `1.0.0`.
 - Success criteria:
-  - SHAP values are deterministic and satisfy additivity (`expected_value + sum(phi_i) == prediction` within tolerance),
-  - global feature importance is available as mean absolute SHAP contribution,
-  - Python API gains additive SHAP entrypoints without breaking existing training/prediction behavior.
-- Audience: engineers implementing `v0.8` child slices and reviewers gating readiness for `v0.9` hardening.
+  - release gates are explicit and reproducible across Rust and Python surfaces,
+  - `v0.7` SHAP/categorical/predictor behavior remains non-regressed while hardening work lands,
+  - migration notes and compatibility checks are complete enough for a `1.0.0` go/no-go review.
+- Audience: engineers implementing `v0.8` child slices and reviewers deciding readiness to plan `v1.0` closeout.
 
 ## Scope
 ### In Scope
-- Rust SHAP runtime in `crates/shap`:
-  - replace placeholder SHAP functions with exact TreeSHAP for current CPU regression tree payloads,
-  - support per-row SHAP values for batch inputs,
-  - support global importance aggregation from SHAP values.
-- Artifact-backed SHAP contract:
-  - decode model artifacts via existing `core` contract utilities,
-  - require `Trees` section and validate feature dimensions against metadata/layout,
-  - preserve existing model format version while consuming current payload structure.
-- Python SHAP API surface:
-  - add native bridge functions in `bindings/python/src/lib.rs` for per-row and global SHAP,
-  - add `GBMRegressor.shap_values(X)` and SHAP-based `feature_importances` path backed by fitted artifact state.
-- Child-layer planning and execution decomposition under `docs/architecture/v1.0/v0.8/v0.7.x`.
+- Release-candidate hardening for the existing CPU baseline:
+  - test expansion for edge/compatibility paths not yet covered by `v0.7` closeout artifacts,
+  - documentation updates for operational usage, compatibility expectations, and release gating,
+  - benchmark reproducibility artifacts and command discipline for repeated runs,
+  - migration notes and compatibility checks across current model artifact behaviors.
+- Child-layer decomposition under `docs/architecture/v1.0/v0.8/v0.7.x`.
 - Parent closeout artifacts:
   - `docs/architecture/v1.0/v0.8/implementation_notes.md`
   - `docs/architecture/v1.0/v0.8/verification_report.md`
 
 ### Out of Scope
-- GPU/Metal/MLX SHAP acceleration.
-- Interaction SHAP values or approximate SHAP modes.
-- Ranking/classification SHAP semantics.
-- Required model-format changes (including making `ShapAux` mandatory) or compatibility policy changes.
-- Non-SHAP roadmap work (ranking, probabilistic outputs, constraints, distributed execution).
+- New roadmap features (`1.0`+), including ranking objectives, probabilistic outputs, or GPU backends.
+- Model-format version bump beyond current v1 contract.
+- Public API redesigns that break current `GBMRegressor` call signatures.
+- Net-new algorithmic feature development outside hardening and compatibility validation.
 
 ## Interfaces and Types
-- `crates/shap/src/lib.rs`:
-  - replace `shap_values_stub` / `global_importance_stub` with artifact-backed exact implementations,
-  - standardize error semantics using `ShapError::{InvalidInput, ContractViolation}` with deterministic messages,
-  - enforce row/feature shape validation before computation.
-- `crates/core/src/lib.rs` (consume-only in this layer):
-  - continue using `deserialize_model_artifact_v1`, `required_section_compatibility_report`, and section-kind contracts.
-- `crates/predictor/src/lib.rs` and `crates/engine/src/lib.rs`:
-  - remain source-of-truth for prediction parity and artifact shape; SHAP integration must not alter prediction behavior.
-- `bindings/python/src/lib.rs`:
-  - add pyfunctions for SHAP from artifact bytes and route Rust SHAP errors to Python exceptions.
-- `bindings/python/alloygbm/regressor.py`:
-  - add additive SHAP methods using the fitted `_artifact_bytes` and existing row validation paths.
+- `crates/core`, `crates/engine`, `crates/predictor`, `crates/shap`, `crates/categorical`:
+  - may receive hardening fixes only where needed to satisfy deterministic behavior, compatibility checks, and release gates.
+- `bindings/python/src/lib.rs` and `bindings/python/alloygbm/regressor.py`:
+  - maintain additive/backward-compatible behavior while expanding contract coverage.
+- CI and release evidence artifacts:
+  - `.github/workflows/ci.yml` command alignment,
+  - architecture verification artifacts under `docs/architecture/v1.0/v0.8/`.
+- State tracking:
+  - `docs/architecture/state/layer_index.yaml` must be updated as child slices and parent closeout complete.
 
 Backward-compatibility expectations:
-- `GBMRegressor.fit/predict` behavior and signatures remain unchanged.
-- Existing artifact strict/legacy compatibility behavior remains unchanged.
-- No required new artifact sections; SHAP must work with existing strict dual-section artifacts.
+- preserve `v0.7` SHAP APIs and behavior baseline (`shap_values`, SHAP-based feature importance),
+- preserve artifact compatibility handling for strict and legacy-supported payloads,
+- keep numeric-only and categorical-capable workflows contract-stable in Python.
 
 ## Implementation Sequence
-1. `v0.7.1`: lock SHAP contract and tests for artifact/row validation, output shape, and additivity expectations on deterministic fixtures.
-2. `v0.7.2`: implement exact TreeSHAP core traversal for current regression tree payload, including expected-value handling and per-row SHAP outputs.
-3. `v0.7.3`: implement global importance aggregation (mean absolute SHAP), artifact compatibility checks, and parity tests against predictor outputs.
-4. `v0.7.4`: expose Python bridge APIs and regressor methods; add Python tests for SHAP shape, errors, and prediction additivity consistency.
-5. Parent closeout: run full verification gate, publish `implementation_notes.md` + `verification_report.md`, and update `docs/architecture/state/layer_index.yaml`.
+1. Execute `docs/architecture/v1.0/v0.8/v0.8.1/` first to lock the `v0.8` hardening matrix (release gates, artifact checklist, and baseline inventory).
+2. Open `v0.8.2` for targeted test-gap closure and deterministic edge-case coverage aligned to the matrix.
+3. Open `v0.8.3` for benchmark reproducibility artifacts, command normalization, and evidence packaging.
+4. Open `v0.8.4` for migration-note finalization, compatibility checks, and parent artifact rollup readiness.
+5. Close parent `v0.8` with implementation notes, verification report, and layer index update for next-layer planning.
 
 ## Test Cases and Scenarios
 - Unit cases:
-  - deterministic SHAP for single-stump and multi-stump toy payloads,
-  - feature-count mismatch and empty-row input validation,
-  - global importance aggregation correctness and stable ordering.
+  - deterministic serialization/compatibility assertions across strict and legacy artifact paths,
+  - SHAP and categorical guardrail/error-semantics stability checks.
 - Integration cases:
-  - artifact -> SHAP pipeline for trained fixture models,
-  - additivity check per row against predictor predictions,
-  - parity between Rust and Python SHAP outputs for identical artifact/rows.
+  - Rust train -> artifact -> predictor parity checks on representative fixtures,
+  - Python estimator contract + SHAP contract checks for fitted-model workflows.
+- Reproducibility/benchmark cases:
+  - repeated benchmark runs with documented environment and command inputs,
+  - evidence tables showing run-to-run stability for selected workloads.
 - Failure and edge cases:
-  - malformed artifacts (missing/duplicate required sections, invalid payload lengths),
-  - unsupported compatibility layouts,
-  - rows containing non-finite values or inconsistent widths.
+  - malformed artifact handling and deterministic error paths,
+  - feature/shape mismatch behavior at Rust and Python boundaries.
 - Acceptance test mapping:
   - `cargo fmt -- --check`
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace`
   - `cargo doc --workspace --no-deps`
   - `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'`
+  - child-defined reproducible benchmark commands with recorded environment context
 
 ## Acceptance Criteria
-1. `crates/shap` no longer returns placeholder `NotImplemented` for supported CPU regression artifacts.
-2. Per-row SHAP output dimensionality is `rows x feature_count` and validates input shapes deterministically.
-3. For verified fixtures, `expected_value + sum(phi_i)` matches predictor output within a documented floating-point tolerance.
-4. Global importance is computed from mean absolute SHAP contribution and exposed in deterministic ordering.
-5. SHAP artifact loading honors existing strict/legacy required-section compatibility checks without changing model format version.
-6. Python exposes additive SHAP APIs without regressing existing fit/predict contract tests.
-7. `v0.8` child slices and parent rollup artifacts are present and linked in verification.
-8. `cargo fmt -- --check` passes at closeout.
-9. `cargo clippy --workspace --all-targets -- -D warnings` passes at closeout.
-10. `cargo test --workspace` and Python unittest suite pass at closeout.
+1. `v0.8` child slices produce a decision-complete hardening matrix with explicit gate-to-evidence mapping.
+2. Test coverage is expanded for compatibility and deterministic edge paths without regressing `v0.7` behavior.
+3. Reproducible benchmark artifacts are published with stable command definitions and environment notes.
+4. Migration notes and compatibility checks are complete and traceable for `1.0.0` gate review.
+5. Parent rollup artifacts summarize all child evidence and residual risks.
+6. `cargo fmt -- --check` passes at closeout.
+7. `cargo clippy --workspace --all-targets -- -D warnings` passes at closeout.
+8. `cargo test --workspace` passes at closeout.
+9. `cargo doc --workspace --no-deps` passes at closeout.
+10. `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'` passes at closeout.
 
 ## Risks and Mitigations
-- Risk: exact TreeSHAP path logic is error-prone for encoded tree-node traversal.
-  - Mitigation: fixture-driven additivity tests and cross-check against predictor decisions.
-- Risk: numerical drift from floating-point accumulation yields unstable explanations.
-  - Mitigation: deterministic accumulation order and explicit tolerance assertions.
-- Risk: SHAP integration inadvertently changes predictor/engine contracts.
-  - Mitigation: treat prediction parity tests as hard gate and keep model-format behavior unchanged.
-- Risk: scope creep into interaction SHAP or GPU SHAP.
-  - Mitigation: enforce explicit out-of-scope boundary in child slices.
+- Risk: hardening work introduces unintended behavior drift while touching multiple crates.
+  - Mitigation: treat `v0.7` verification behaviors as non-regression gates in every child slice.
+- Risk: benchmark evidence is noisy or non-reproducible.
+  - Mitigation: standardize environment capture and repeated-run protocol before reporting deltas.
+- Risk: compatibility assumptions are documented but not executable.
+  - Mitigation: require command-backed compatibility checks referenced directly in verification artifacts.
+- Risk: scope creep into `1.0.0` feature changes.
+  - Mitigation: enforce hardening-only boundary in each `v0.7.x` child plan.
 
 ## Assumptions and Defaults
-- Device scope remains CPU-only for `v0.8`.
-- Tree traversal semantics for SHAP follow the current predictor branch rule (`<= threshold_bin` goes left).
-- Global importance default is mean absolute SHAP across provided rows.
-- Child-layer numbering under `v0.8` uses `v0.7.x`; immediate next child target is `docs/architecture/v1.0/v0.8/v0.7.1`.
+- Device scope remains CPU-only.
+- `v0.8` child layers use `v0.7.x` numbering.
+- Immediate next child target is `docs/architecture/v1.0/v0.8/v0.8.1`.
+- `v0.8` focuses on hardening and release evidence; feature expansion remains outside this layer.

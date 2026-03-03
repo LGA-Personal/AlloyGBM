@@ -1,48 +1,49 @@
-# AlloyGBM v0.4 Implementation Notes (Parent Rollup)
+# AlloyGBM v0.4 Implementation Notes
 
 ## Summary of What Was Built
-- Completed `v0.4` through three verified child slices:
-  - `v0.3.1`: baseline evaluation metrics (`rmse`, `mae`, `r2_score`, `pearson_correlation`)
-  - `v0.3.2`: finance metrics (`rank_ic`, `hit_rate`, `icir`)
-  - `v0.3.3`: leakage guardrail split helpers (`purged_time_series_splits`, `purged_panel_splits`)
-- Delivered additive Python API surface under `bindings/python/alloygbm/`:
-  - metric helpers in [evaluation.py](/Users/lashby/Projects/AlloyGBM/bindings/python/alloygbm/evaluation.py),
-  - validation helpers in [validation.py](/Users/lashby/Projects/AlloyGBM/bindings/python/alloygbm/validation.py),
-  - package exports via [__init__.py](/Users/lashby/Projects/AlloyGBM/bindings/python/alloygbm/__init__.py).
-- Consolidated deterministic coverage in Python tests:
-  - [test_evaluation_metrics.py](/Users/lashby/Projects/AlloyGBM/bindings/python/tests/test_evaluation_metrics.py)
-  - [test_validation_splits.py](/Users/lashby/Projects/AlloyGBM/bindings/python/tests/test_validation_splits.py)
-  - [test_native_runtime_integration.py](/Users/lashby/Projects/AlloyGBM/bindings/python/tests/test_native_runtime_integration.py)
-- Preserved existing `GBMRegressor` and native bridge behavior while extending evaluation tooling.
+- Completed `v0.4` through child slices `v0.4.1` -> `v0.4.4`:
+  - `v0.4.1`: introduced backend benchmark harness and first row-first histogram optimization.
+  - `v0.4.2`: added hybrid scalar routing to recover small-workload overhead while preserving medium-workload gains.
+  - `v0.4.3`: introduced explicit runtime AVX2-dispatchable histogram route with scalar fallback and parity tests.
+  - `v0.4.4`: removed x86 unsafe-code portability blocker, added AVX2 override control (`ALLOYGBM_DISABLE_AVX2`), and added repeated-run AVX2-vs-scalar comparison script.
+- Expanded benchmark tooling in [histogram_kernels.rs](/Users/lashby/Projects/AlloyGBM/crates/backend_cpu/benches/histogram_kernels.rs) to include tiny/small/medium histogram cases plus split cases and runtime context output.
+- Added reusable benchmark comparison script [benchmark_avx2_compare.sh](/Users/lashby/Projects/AlloyGBM/scripts/benchmark_avx2_compare.sh) for default-vs-forced-scalar median delta analysis.
+
+## Performance Evidence Rollup
+- `v0.4.1`:
+  - small delta (`backend` vs baseline): `+43.09%`
+  - medium delta (`backend` vs baseline): `-24.27%`
+- `v0.4.2` (3-run median):
+  - small delta: `+5.09%`
+  - medium delta: `-15.48%`
+- `v0.4.3` (3-run median):
+  - small delta: `+5.62%`
+  - medium delta: `-17.56%`
+- `v0.4.4` (`x86_64` target, 3-run medians from comparison script):
+  - medium backend delta (`default` vs forced scalar): `-0.30%`
+  - runtime context showed `runtime_avx2_enabled: false` in both modes on this machine.
 
 ## Non-Intuitive Decisions
-- Decision: keep `v0.4` implementation primarily in Python helper modules rather than changing native Rust bridge interfaces.
-- Reason: parent `v0.4` scope is evaluation/validation tooling and additive API growth, not training/inference bridge redesign.
-- Impact: reduced regression risk to `v0.3` wrapper contract while still delivering required finance and leakage-safe evaluation features.
+- Decision: keep benchmark comparisons same-matrix and median-based rather than single-run.
+- Reason: benchmark variance was non-trivial across runs; medians produced more stable gating signals.
+- Impact: small/medium thresholds in `v0.4.2+` were validated against repeated-run medians.
 
-- Decision: define panel split behavior as time-bucketed splitting across groups.
-- Reason: leakage controls (purge/embargo) are most naturally enforced on the time axis for finance panel workflows.
-- Impact: deterministic time-aware splits are available now; group balancing/stratified panel split policies remain future enhancement scope.
-
-## Plan Contradictions and Why
-- Original Plan Statement: optional `v0.3.4` polish slice may be opened if residual acceptance gaps exist.
-- Implemented Decision: no `v0.3.4` slice was opened.
-- Reason: `v0.3.1` through `v0.3.3` satisfied parent `v0.4` in-scope deliverables and verification gates.
-- Impact: parent closeout proceeded directly after `v0.3.3`.
-- Rollback or Migration Consideration: if future gaps are discovered, a follow-up child layer can still be opened without breaking existing APIs.
+- Decision: preserve explicit AVX2 dispatch structure while removing unsafe target-feature implementation for portability.
+- Reason: workspace lint policy (`unsafe_code = forbid`) blocked `x86_64` target verification when unsafe AVX2 code was present.
+- Impact: `x86_64` target compile/test/bench paths now execute in CI-style workflows without policy exceptions.
 
 ## Boundary/Interface Changes vs Plan
-- Added/expanded public evaluation and validation helpers exactly within `v0.4` scope.
-- No ranking objective training, SHAP expansion, categorical expansion, CUDA/Metal work, or performance campaign changes were introduced.
-- Existing `GBMRegressor` constructor/fit/predict contract remains unchanged.
+- No public API changes in `core`, `engine`, `predictor`, or Python bindings.
+- `v0.4` changes were confined to backend internals, benchmark harnesses, and documentation/state artifacts.
+- Deterministic behavior and contract validation semantics remained unchanged.
 
-## Known Gaps Deferred to Next Layer
-- `v0.4` child-scope items are closed for current parent plan.
-- Deferred beyond `v0.4`:
-  - ranking objective training (`1.1.0` scope),
-  - advanced panel split balancing/stratification policies,
-  - optional tail metrics and broader evaluation tooling expansion.
+## Apple Silicon AVX2 Caveat
+- This repository was verified on an Apple Silicon host (`aarch64`).
+- Even when running `x86_64` target binaries, benchmark output on this machine reported `runtime_avx2_enabled: false`.
+- Practical implication:
+  - portability and fallback behavior are verified,
+  - direct AVX2-on-hardware speedup evidence is still pending on a native AVX2-capable `x86_64` host.
 
 ## Follow-Up Actions
-- Move to next parent-layer planning/implementation target under `v1.0` (for example `v0.5` CPU optimization scope) via new child planning.
-- Keep `docs/architecture/state/layer_index.yaml` aligned as next layer planning begins.
+- Capture native AVX2-enabled benchmark evidence on an AVX2-capable `x86_64` runner using `scripts/benchmark_avx2_compare.sh`.
+- Proceed with next parent target planning (`v0.5` and beyond) while preserving the caveat in release-gate decisions until native AVX2 evidence is available.

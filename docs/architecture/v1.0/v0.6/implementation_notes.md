@@ -1,46 +1,58 @@
 # AlloyGBM v0.6 Implementation Notes
 
 ## Summary of What Was Built
-- Closed parent `v0.6` milestone by completing and verifying child slices:
-  - [v0.5.1](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.6/v0.5.1/plan.md): compatibility-policy baseline lock-in and malformed required-section test hardening.
-  - [v0.5.2](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.6/v0.5.2/plan.md): canonical strict predictor route for `GBMRegressor.predict` while preserving compatibility path for `predict_from_artifact`.
-  - [v0.5.3](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.6/v0.5.3/plan.md): serialization contract hardening and deterministic compatibility diagnostics across `core`, `engine`, and `predictor`.
-- Parent deliverables now present:
-  - [implementation_notes.md](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.6/implementation_notes.md)
-  - [verification_report.md](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.6/verification_report.md)
+- Closed `v0.6` as a four-slice delivery (`v0.6.1` through `v0.6.4`) for categorical support v1.
+- Delivered contract, runtime, integration, and Python bridge scope in order:
+  - `v0.6.1`: categorical artifact contract + schema invariant enforcement in `core`.
+  - `v0.6.2`: deterministic target/frequency encoders with leakage-safe time-aware behavior in `categorical`.
+  - `v0.6.3`: engine/predictor integration for optional categorical state artifact flow.
+  - `v0.6.4`: additive Python/native bridge exposure for categorical fit controls and end-to-end parity tests.
+- Preserved parent constraints:
+  - CPU-only scope,
+  - no model-format version bump,
+  - additive (non-breaking) API evolution for numeric-only call sites.
 
-## Decision Rollup
-- Compatibility policy is now explicit and test-backed:
-  - strict mode requires exactly one `Trees` and one `PredictorLayout` section,
-  - compatibility mode supports strict artifacts plus legacy trees-only artifacts,
-  - malformed required-section layouts fail deterministically with aligned diagnostics.
-- Canonical inference route is now explicit in Python surface behavior:
-  - `GBMRegressor.predict` uses strict canonical bridge,
-  - `GBMRegressor.predict_from_artifact` remains compatibility-oriented for external legacy payloads.
-- v1 artifact descriptor contract is hardened:
-  - offsets must begin at payload start,
-  - offsets must be contiguous and ordered.
+## Parent-Level Outcome by Contract Area
+- Categorical encoding functionality:
+  - Production-ready target/frequency/count encoders with deterministic behavior and explicit unknown-category fallbacks are in place.
+- Artifact contract continuity:
+  - `ModelSectionKind::CategoricalState` remains optional/additive and validated against feature bounds.
+  - Strict/legacy required-section behavior remains unchanged.
+- Engine/predictor integration:
+  - Engine can train with single-feature categorical target encoding wrapper and emit categorical state.
+  - Predictor accepts artifacts carrying optional categorical state and preserves prediction parity.
+- Python surface:
+  - `GBMRegressor` and native binding now expose additive categorical/time-index controls.
+  - Numeric-only behavior remains unchanged and validated.
 
-## Boundaries Preserved
-- No model-format version bump beyond v1.
-- No public `GBMRegressor` signature changes.
-- No ranking/SHAP/categorical/GPU scope expansion in this milestone.
+## Non-Intuitive Decisions
+- Decision: maintain single-feature categorical orchestration for this milestone.
+- Reason: aligns with scoped `v0.6` integration target and avoids unplanned multi-feature orchestration expansion.
+- Impact: v1 categorical support is available end-to-end for current wrapper path, while full multi-feature orchestration remains a follow-on item.
 
-## Evidence Sources
-- Child implementation notes:
-  - [v0.5.1/implementation_notes.md](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.6/v0.5.1/implementation_notes.md)
-  - [v0.5.2/implementation_notes.md](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.6/v0.5.2/implementation_notes.md)
-  - [v0.5.3/implementation_notes.md](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.6/v0.5.3/implementation_notes.md)
-- Child verification reports:
-  - [v0.5.1/verification_report.md](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.6/v0.5.1/verification_report.md)
-  - [v0.5.2/verification_report.md](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.6/v0.5.2/verification_report.md)
-  - [v0.5.3/verification_report.md](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.6/v0.5.3/verification_report.md)
-- Contract drift evidence:
-  - [v0.5.2/contract_drift_report.md](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.6/v0.5.2/contract_drift_report.md)
+- Decision: enforce strict categorical argument consistency in both Python and Rust bridge boundaries.
+- Reason: prevent silent fallback behavior and keep failure semantics deterministic.
+- Impact: callers get explicit input-contract errors when categorical mode is partially configured.
+
+## Plan Contradictions and Why
+- Original Plan Statement: none contradicted.
+- Implemented Decision: N/A.
+- Reason: N/A.
+- Impact: N/A.
+- Rollback or Migration Consideration: none.
+
+## Boundary/Interface Changes vs Plan
+- Planned boundaries were preserved:
+  - `core` contract additions landed in `v0.6.1`.
+  - `categorical` runtime landed in `v0.6.2`.
+  - `engine` + `predictor` artifact path integration landed in `v0.6.3`.
+  - Python/native bridge additions landed in `v0.6.4`.
+- No ranking/SHAP/GPU changes were introduced in `v0.6`.
 
 ## Residual Risks
-- External artifacts emitted by non-canonical tooling with descriptor-layout drift may fail under stricter contiguous-offset validation.
-- Canonical/compatibility split is currently enforced in Python bridge routing; future new entrypoints should continue using shared compatibility helpers to avoid drift.
+- Multi-feature categorical orchestration is not implemented yet.
+- Predictor/runtime categorical transform replay beyond optional state metadata remains deferred.
 
-## Next Layer Recommendation
-- Move to `docs/architecture/v1.0/v0.7` (categorical support v1 planning/execution) under existing `v1.0` constraints.
+## Follow-Up Actions
+- Mark `docs/architecture/v1.0/v0.6` verified in `docs/architecture/state/layer_index.yaml` and advance next active target to `v0.7` planning.
+- Open `docs/architecture/v1.0/v0.7/plan.md` for TreeSHAP CPU scope.

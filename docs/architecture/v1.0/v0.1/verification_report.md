@@ -1,87 +1,62 @@
-# v0.1 Verification Report
+# AlloyGBM v0.1 Parent Verification Report
 
 ## Layer
 - Path: `docs/architecture/v1.0/v0.1`
-- Date: 2026-02-25
-- Pass: `alloy-test-gap-closer` refresh
+- Date: 2026-02-26
 
-## Acceptance Criteria Matrix
-- Criterion: `cargo test --workspace` passes.
-- Evidence: local workspace tests passed across all crates (`alloygbm-core` 13 tests, `alloygbm-engine` 30 tests, and all remaining crate/unit/doc tests green).
-- Status: PASS
-
-- Criterion: all crate docs/build checks pass in CI on Linux and macOS.
+## Parent Goal Matrix
+- Goal 1: depth-limited histogram CART growth for regression.
 - Evidence:
-  - `.github/workflows/ci.yml` rust matrix targets `os: [ubuntu-latest, macos-latest]`.
-  - workflow includes `Cargo check`, `Cargo doc`, `Cargo fmt`, `Cargo clippy`, and `Cargo test`.
-  - local closeout reruns for docs/build checks passed (`cargo check`, `cargo doc --workspace --no-deps`).
+  - `v0.1.5` verification: multi-node-per-round depth-limited growth validated (`fit_iterations_grows_multiple_nodes_per_round_when_depth_allows`), plus path-conditioned non-root application.
+  - `v0.1.4` verification: validation rollback semantics aligned to best-checkpoint behavior.
 - Status: PASS
 
-- Criterion: model metadata/version roundtrip tests pass.
-- Evidence: `cargo test --workspace` includes `alloygbm-core` tests:
-  - `metadata_json_roundtrip`
-  - `model_header_roundtrip`
-  - `section_descriptor_roundtrip`
-  - `model_artifact_roundtrip`
-  all passed in this pass.
-- Status: PASS
-
-- Criterion: Python wheel builds and imports across supported Python versions.
+- Goal 2: training loop controls for shrinkage, row subsampling, column subsampling, and validation early stopping.
 - Evidence:
-  - `.github/workflows/ci.yml` python matrix includes `python-version: ["3.10", "3.11", "3.12", "3.13"]` and both Linux/macOS runners.
-  - workflow steps include wheel build/install/import smoke.
-  - local closeout rerun built wheel via `maturin` and successfully imported from installed wheel artifact.
+  - `v0.1.1` verification: control contracts and validation-stop interface implemented and validated.
+  - `v0.1.2` verification: seeded deterministic per-round row/column subsampling semantics and sample-count telemetry validated.
+  - `v0.1.5` verification: control contracts remain passing while depth behavior expands.
 - Status: PASS
 
-- Criterion: `GBMRegressor` constructor and parameter validation callable from Python.
+- Goal 3: row and batch prediction path from trained model artifacts.
 - Evidence:
-  - CI workflow `Python regressor contract smoke` step exercises constructor + invalid parameter rejection.
-  - local installed-wheel smoke in this pass validated constructor call and `ValueError` on invalid `learning_rate`.
+  - `v0.1.6` verification: predictor strict/legacy artifact load + row/batch parity with engine validated.
+  - direct test evidence: `crates/predictor/src/lib.rs` tests
+    - `predictor_from_artifact_matches_engine_predictions` (batch parity),
+    - `predictor_row_matches_engine_prediction` (single-row parity),
+    - `predictor_accepts_legacy_trees_only_artifact` (artifact compatibility).
+  - `v0.1.7` verification: Python native bridge entrypoint validates predictor-backed artifact inference path.
+  - `v0.1.8`/`v0.1.9` verification: runtime wheel-install import path executes both error and success parity paths from Python runtime.
 - Status: PASS
 
-## Criterion-to-Test/Command Mapping
-- `cargo test --workspace`:
-  - command: `cargo test --workspace`
-  - direct checks: all crate unit tests + doc tests
-- crate docs/build checks:
-  - commands: `cargo check --workspace`, `cargo doc --workspace --no-deps`
-  - CI contract: `.github/workflows/ci.yml` rust matrix on Linux/macOS with `Cargo check/doc/fmt/clippy/test`
-- metadata/version roundtrip tests:
-  - tests: `metadata_json_roundtrip`, `model_header_roundtrip`, `section_descriptor_roundtrip`, `model_artifact_roundtrip` in `alloygbm-core`
-  - command carrier: `cargo test --workspace`
-- Python wheel build/import across supported versions:
-  - local command: `python3 -m maturin build --manifest-path bindings/python/Cargo.toml --release --interpreter python3 --out dist`
-  - CI contract: python matrix on Linux/macOS with `python-version: ["3.10", "3.11", "3.12", "3.13"]` and wheel install/import smoke
-- `GBMRegressor` constructor + parameter validation:
-  - local command: installed-wheel smoke (`GBMRegressor(...)`, invalid `learning_rate` -> `ValueError`)
-  - CI contract: `Python regressor contract smoke` step
+- Goal 4: correctness-oriented quality signal beats naive baseline.
+- Evidence:
+  - `v0.1.3` verification: CPU backend integration test `cpu_backend_training_beats_naive_baseline_mse` validates model loss below naive constant baseline.
+- Status: PASS
 
-## Consolidated Evidence Scope
-- Child layers `v0.0.2` through `v0.0.11` were already verified and provide incremental interface and behavior traceability.
-- `v0.0.12` closed parent-layer documentation and process-completeness gaps.
-- Historical `v0.0.1` verification artifact was backfilled in this closeout pass.
+- Goal 5: verification command gates for workspace and Python runtime tests pass at closeout.
+- Evidence (closeout run, 2026-02-26):
+  - `cargo fmt -- --check` -> PASS
+  - `cargo clippy --workspace --all-targets -- -D warnings` -> PASS
+  - `cargo test --workspace` -> PASS
+  - `cargo doc --workspace --no-deps` -> PASS
+  - `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'` -> PASS (`Ran 15 tests`)
+- Status: PASS
 
-## Commands Executed in This Pass
-- `cargo check --workspace` -> PASS
+## Residual Uncovered Criteria
+- Performance target from roadmap context (`~3-5x` LightGBM CPU on selected dense tasks) remains uncovered by a dedicated in-repo benchmark comparison artifact.
+- Status: BLOCKED (no LightGBM comparison harness/report captured in current repository closeout artifacts).
+
+## Commands Executed for Closeout
 - `cargo fmt -- --check` -> PASS
 - `cargo clippy --workspace --all-targets -- -D warnings` -> PASS
 - `cargo test --workspace` -> PASS
 - `cargo doc --workspace --no-deps` -> PASS
-- `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'` -> PASS (`Ran 7 tests`, `OK`)
-- `python3 -m maturin build --manifest-path bindings/python/Cargo.toml --release --interpreter python3 --out dist` -> PASS
-- installed-wheel contract smoke from built wheel -> PASS
-
-## Command Output Status
-- PASS: all commands listed above.
-- FAIL: none.
-- BLOCKED: none.
-
-## Residual Uncovered Criteria
-- None. Every acceptance criterion in `docs/architecture/v1.0/v0.1/plan.md` has direct command/test or CI-workflow evidence.
+- `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'` -> PASS
 
 ## Residual Risks
-- Full CI execution across all runner permutations remains dependent on GitHub-hosted environment availability at run time.
-- `v0.1` closure does not imply `v0.2` algorithm completeness; next layer planning is required before implementation changes.
+- Roadmap-level LightGBM-relative performance target evidence remains blocked without a dedicated benchmark comparison artifact.
+- Parent `v1.0` rollup verification is still pending.
 
 ## Final Readiness
-- Ready: Yes (`v0.1` acceptance criteria satisfied and closeout artifacts complete).
+- Ready: Yes (parent `v0.1` closeout complete for architecture-layer scope based on verified child slices and passing gate commands).

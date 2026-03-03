@@ -1,62 +1,91 @@
-# AlloyGBM v0.2 Parent Verification Report
+# AlloyGBM v0.2 Verification Report (Parent Rollup)
 
 ## Layer
 - Path: `docs/architecture/v1.0/v0.2`
-- Date: 2026-02-26
+- Date: 2026-02-27
 
-## Parent Goal Matrix
-- Goal 1: depth-limited histogram CART growth for regression.
+## Acceptance Criteria Matrix
+- Criterion: `GBMRegressor` provides stable sklearn-style `fit`, `predict`, `get_params`, and `set_params` behavior.
 - Evidence:
-  - `v0.1.5` verification: multi-node-per-round depth-limited growth validated (`fit_iterations_grows_multiple_nodes_per_round_when_depth_allows`), plus path-conditioned non-root application.
-  - `v0.1.4` verification: validation rollback semantics aligned to best-checkpoint behavior.
+  - `bindings/python/alloygbm/regressor.py` exposes the expected methods and parameterized estimator contract.
+  - `bindings/python/tests/test_regressor_contract.py`: `test_fit_and_predict_use_native_bridges`, `test_get_params_and_set_params_roundtrip`, `test_set_params_rejects_unknown_parameter`.
+  - Child-layer verification coverage: `docs/architecture/v1.0/v0.2/v0.2.1/verification_report.md`, `docs/architecture/v1.0/v0.2/v0.2.3/verification_report.md`.
 - Status: PASS
 
-- Goal 2: training loop controls for shrinkage, row subsampling, column subsampling, and validation early stopping.
+- Criterion: Wrapper accepts common tabular containers (`numpy.ndarray`, `pandas.DataFrame`, Polars-like exports) with deterministic normalization/validation.
 - Evidence:
-  - `v0.1.1` verification: control contracts and validation-stop interface implemented and validated.
-  - `v0.1.2` verification: seeded deterministic per-round row/column subsampling semantics and sample-count telemetry validated.
-  - `v0.1.5` verification: control contracts remain passing while depth behavior expands.
+  - `bindings/python/alloygbm/regressor.py`: `_coerce_sequence_like(...)` and shared row/target validators.
+  - `bindings/python/tests/test_regressor_contract.py`: `test_fit_accepts_numpy_pandas_polars_like_inputs`, `test_predict_accepts_pandas_like_rows`, `test_predict_from_artifact_accepts_polars_like_rows`.
+  - `bindings/python/tests/test_native_runtime_integration.py`: `test_public_regressor_accepts_dataframe_like_adapters`.
+  - Child-layer verification coverage: `docs/architecture/v1.0/v0.2/v0.2.2/verification_report.md`.
 - Status: PASS
 
-- Goal 3: row and batch prediction path from trained model artifacts.
+- Criterion: Parameter surface compatibility and predictable error semantics remain stable through `v0.2` additions.
 - Evidence:
-  - `v0.1.6` verification: predictor strict/legacy artifact load + row/batch parity with engine validated.
-  - direct test evidence: `crates/predictor/src/lib.rs` tests
-    - `predictor_from_artifact_matches_engine_predictions` (batch parity),
-    - `predictor_row_matches_engine_prediction` (single-row parity),
-    - `predictor_accepts_legacy_trees_only_artifact` (artifact compatibility).
-  - `v0.1.7` verification: Python native bridge entrypoint validates predictor-backed artifact inference path.
-  - `v0.1.8`/`v0.1.9` verification: runtime wheel-install import path executes both error and success parity paths from Python runtime.
+  - `bindings/python/tests/test_regressor_contract.py` covers constructor validation and parameter updates: `test_constructor_rejects_invalid_values`, `test_set_params_rejects_invalid_n_estimators`, plus feature/count and malformed-input errors.
+  - `bindings/python/tests/test_native_runtime_integration.py`: `test_runtime_train_bridge_rejects_zero_rounds`.
+  - Child-layer verification coverage confirms no contract regressions after each slice (`v0.2.1` -> `v0.2.3`).
 - Status: PASS
 
-- Goal 4: correctness-oriented quality signal beats naive baseline.
+- Criterion: Native-backed wrapper integration is active (not scaffold-only fallback).
 - Evidence:
-  - `v0.1.3` verification: CPU backend integration test `cpu_backend_training_beats_naive_baseline_mse` validates model loss below naive constant baseline.
+  - `bindings/python/alloygbm/regressor.py` routes training/prediction to `_alloygbm.train_regression_artifact` and `_alloygbm.predictor_predict_batch`.
+  - `bindings/python/tests/test_native_runtime_integration.py`: `test_public_regressor_fit_predict_is_native_backed_and_deterministic`, `test_public_regressor_n_estimators_controls_training_rounds`.
+  - Child-layer verification coverage: `docs/architecture/v1.0/v0.2/v0.2.1/verification_report.md`, `docs/architecture/v1.0/v0.2/v0.2.3/verification_report.md`.
 - Status: PASS
 
-- Goal 5: verification command gates for workspace and Python runtime tests pass at closeout.
-- Evidence (closeout run, 2026-02-26):
-  - `cargo fmt -- --check` -> PASS
-  - `cargo clippy --workspace --all-targets -- -D warnings` -> PASS
-  - `cargo test --workspace` -> PASS
-  - `cargo doc --workspace --no-deps` -> PASS
-  - `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'` -> PASS (`Ran 15 tests`)
+- Criterion: Packaging/runtime checks for maturin-built extension remain green.
+- Evidence:
+  - `bindings/python/tests/test_native_runtime_integration.py` builds/install wheel in test setup and executes runtime bridge tests.
+  - `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'` completed successfully (`Ran 25 tests`, `OK`).
 - Status: PASS
+
+- Criterion: `cargo fmt -- --check` passes.
+- Evidence: command run completed successfully.
+- Status: PASS
+
+- Criterion: `cargo clippy --workspace --all-targets -- -D warnings` passes.
+- Evidence: command run completed successfully.
+- Status: PASS
+
+- Criterion: `cargo test --workspace` passes.
+- Evidence: command run completed successfully (workspace unit and doc tests all passing).
+- Status: PASS
+
+- Criterion: `cargo doc --workspace --no-deps` passes.
+- Evidence: command run completed successfully.
+- Status: PASS
+
+- Criterion: `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'` passes.
+- Evidence: command run completed successfully (`Ran 25 tests`, `OK`).
+- Status: PASS
+
+## Tests Added or Updated
+- None required in this rollup pass.
+- Gap-closer assessment result: existing `v0.2.1` + `v0.2.2` + `v0.2.3` test inventory already covers parent `v0.2` success criteria and test scenarios.
+
+## Commands Executed
+- Command: `cargo fmt -- --check`
+- Result: PASS
+
+- Command: `cargo clippy --workspace --all-targets -- -D warnings`
+- Result: PASS
+
+- Command: `cargo test --workspace`
+- Result: PASS
+
+- Command: `cargo doc --workspace --no-deps`
+- Result: PASS
+
+- Command: `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'`
+- Result: PASS (`Ran 25 tests`, `OK`)
 
 ## Residual Uncovered Criteria
-- Performance target from roadmap context (`~3-5x` LightGBM CPU on selected dense tasks) remains uncovered by a dedicated in-repo benchmark comparison artifact.
-- Status: BLOCKED (no LightGBM comparison harness/report captured in current repository closeout artifacts).
-
-## Commands Executed for Closeout
-- `cargo fmt -- --check` -> PASS
-- `cargo clippy --workspace --all-targets -- -D warnings` -> PASS
-- `cargo test --workspace` -> PASS
-- `cargo doc --workspace --no-deps` -> PASS
-- `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'` -> PASS
+- None.
 
 ## Residual Risks
-- Roadmap-level LightGBM-relative performance target evidence remains blocked without a dedicated benchmark comparison artifact.
-- Parent `v1.0` rollup verification is still pending.
+- Bridge training still expects pre-binned integer-valued non-negative features; full continuous-feature quantization remains outside `v0.2` scope and should be addressed in later layers.
 
 ## Final Readiness
-- Ready: Yes (parent `v0.2` closeout complete for architecture-layer scope based on verified child slices and passing gate commands).
+- Ready: Yes (verification evidence complete for parent `v0.2` scope).
+- Required follow-up before merge/release: execute next active target `docs/architecture/v1.0/v0.3/v0.3.1`.

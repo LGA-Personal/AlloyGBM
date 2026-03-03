@@ -1,58 +1,49 @@
 # AlloyGBM v0.8 Implementation Notes
 
 ## Summary of What Was Built
-- Delivered `v0.8` TreeSHAP milestone through child slices `v0.7.1` to `v0.7.4`:
-  - `v0.7.1`: established artifact-backed SHAP contract, deterministic validation, additivity harness, and global-importance baseline.
-  - `v0.7.2`: replaced baseline contribution assignment with exact Shapley traversal math over current tree payload semantics.
-  - `v0.7.3`: hardened compatibility/parity coverage (legacy/strict/malformed artifacts, predictor parity, deterministic tie-ordering).
-  - `v0.7.4`: exposed Python SHAP bridge APIs and `GBMRegressor` SHAP methods with runtime/contract coverage.
+- Delivered `v0.8` release-candidate hardening through child slices `v0.8.1` to `v0.8.4`:
+  - `v0.8.1`: locked hardening matrix baseline and gate-to-evidence contract.
+  - `v0.8.2`: closed Python contract edge-case coverage gaps for compatibility/error semantics.
+  - `v0.8.3`: established reproducible benchmark workspace, preparation workflows, and cross-package comparison evidence.
+  - `v0.8.4`: finalized migration/compatibility narrative and checklist with command-backed compatibility evidence.
+- Produced `v0.8` parent closeout artifacts:
+  - [docs/architecture/v1.0/v0.8/implementation_notes.md](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.8/implementation_notes.md)
+  - [docs/architecture/v1.0/v0.8/verification_report.md](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.8/verification_report.md)
 
 ## Key Implementation Outcomes by Area
-- Rust SHAP runtime (`crates/shap`):
-  - artifact-backed explanation entrypoint with expected value + per-row contribution matrix,
-  - exact Shapley subset-weighted contributions with deterministic additivity checks,
-  - deterministic global-importance aggregation from mean absolute SHAP contributions,
-  - compatibility handling for strict dual-section and legacy trees-only artifacts.
-- Python bridge (`bindings/python/src/lib.rs`):
-  - native SHAP entrypoints:
-    - `shap_explain_rows`
-    - `shap_global_importance`
-  - deterministic error mapping from Rust SHAP errors to Python exception types.
-- Python regressor surface (`bindings/python/alloygbm/regressor.py`):
-  - `GBMRegressor.shap_values(X, include_expected_value=False)`,
-  - `GBMRegressor.feature_importances(X, method="shap")`.
+- Hardening matrix and evidence traceability:
+  - baseline and bucket tracking established in [docs/architecture/v1.0/v0.8/v0.8.1/release_hardening_matrix.md](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.8/v0.8.1/release_hardening_matrix.md), with `v0.8.2+` completion states recorded.
+- Test-gap closure without feature drift:
+  - targeted `GBMRegressor` contract edge tests added in [bindings/python/tests/test_regressor_contract.py](/Users/lashby/Projects/AlloyGBM/bindings/python/tests/test_regressor_contract.py) via `v0.8.2`, preserving runtime behavior.
+- Benchmark reproducibility package:
+  - reproducible benchmark workspace and evidence artifacts delivered under [benchmarks](/Users/lashby/Projects/AlloyGBM/benchmarks) and [docs/architecture/v1.0/v0.8/v0.8.3/benchmark_run_summary.md](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.8/v0.8.3/benchmark_run_summary.md).
+- Migration and compatibility narrative:
+  - operator checklist and compatibility policy finalized in [docs/architecture/v1.0/v0.8/v0.8.4/migration_compatibility_narrative.md](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0/v0.8/v0.8.4/migration_compatibility_narrative.md).
 
 ## Non-Intuitive Decisions
-- Decision: retain legacy `shap_values_stub` / `global_importance_stub` compatibility shims while shifting to artifact-backed APIs.
-- Reason: avoid abrupt breakage for earlier call paths while migrating to deterministic runtime behavior.
-- Impact: newer APIs are authoritative, while compatibility helpers remain stable.
+- Decision: keep `v0.8` hardening mostly documentation/test/verification-oriented, avoiding net-new feature implementation.
+- Reason: parent `v0.8` scope is release-candidate hardening ahead of `1.0.0`, with explicit out-of-scope boundaries for new roadmap features.
+- Impact: improved release evidence quality with low regression risk.
 
-- Decision: exact Shapley computation bounded by split-feature guardrail (`MAX_EXACT_SPLIT_FEATURES = 20`).
-- Reason: exact subset enumeration is exponential in split-feature count.
-- Impact: wide split-feature models return deterministic contract violations rather than silent approximation.
-
-- Decision: Python `feature_importances` requires `X` and only supports `method="shap"` in this milestone.
-- Reason: SHAP global importance is data-distribution dependent and should be explicit about evaluation rows.
-- Impact: deterministic, explicit behavior with fast failure for unsupported methods.
+- Decision: preserve both focused compatibility checks and full gate reruns at closeout.
+- Reason: focused checks validate strict/legacy and bridge semantics directly, while full gates keep global non-regression confidence.
+- Impact: parent closeout is audit-friendly and command-traceable.
 
 ## Plan Contradictions and Why
-- No parent-plan contradictions were introduced.
-- Parent scope and ordering (`v0.7.1` -> `v0.7.4` -> closeout) remained intact.
+- No contradictions against `docs/architecture/v1.0/v0.8/plan.md` were introduced.
+- Child execution sequence and boundaries (`v0.8.1` -> `v0.8.4`) matched the parent plan.
 
 ## Boundary/Interface Changes vs Plan
-- Implemented planned interface additions:
-  - Rust SHAP artifact-backed interfaces,
-  - Python-native SHAP bridge APIs,
-  - `GBMRegressor` SHAP methods.
-- Preserved out-of-scope boundaries:
-  - no GPU/Metal SHAP work,
-  - no model format changes,
-  - no ranking/classification SHAP semantics.
+- No model-format version changes.
+- No breaking Python API changes.
+- No new `1.0+` feature delivery.
+- Changes were confined to hardening matrix/test coverage/benchmark reproducibility/migration narrative artifacts and evidence.
 
 ## Residual Risks
-- Exact SHAP complexity remains exponential in split-feature count for models at/above guardrail thresholds.
-- SHAP expected-value/global-importance outputs are row-set dependent by design and must be interpreted with consistent evaluation rows.
+- Benchmark thresholds remain informational artifacts and are not yet codified as CI pass/fail policy.
+- Parent `v1.0` closeout still needs final rollup artifacts and release-gate decisioning.
 
 ## Follow-Up Actions
-- Advance to top-level `v0.9` planning with `v0.8` accepted as verified.
-- Retain SHAP parity/additivity/compatibility tests as required non-regression gates during `v0.9` hardening.
+- Advance active layer to [docs/architecture/v1.0](/Users/lashby/Projects/AlloyGBM/docs/architecture/v1.0) for top-level phase closeout planning.
+- Run an explicit `v0.8.x` hardening/debugging series before final `v1.0` closeout to address any residual runtime/performance findings.
+- During `v1.0` closeout, explicitly decide CI policy for benchmark-regression thresholds using `v0.8.3` evidence as baseline input.
