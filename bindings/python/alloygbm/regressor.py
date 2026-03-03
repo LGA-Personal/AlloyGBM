@@ -8,7 +8,8 @@ from collections.abc import Sequence
 
 _PRE_BINNED_INTEGER_TOLERANCE = 1e-6
 _MAX_CONTINUOUS_QUANTIZED_BIN = 255
-_VALID_CONTINUOUS_BINNING_STRATEGIES = {"linear", "rank"}
+_MIN_CONTINUOUS_QUANTIZED_BINS = 2
+_VALID_CONTINUOUS_BINNING_STRATEGIES = {"linear", "rank", "quantile"}
 
 
 def _load_native_predictor_predict_batch():
@@ -77,6 +78,7 @@ class GBMRegressor:
         seed: int = 0,
         deterministic: bool = True,
         continuous_binning_strategy: str = "linear",
+        continuous_binning_max_bins: int = 256,
         categorical_feature_index: int | None = None,
         categorical_smoothing: float = 20.0,
         categorical_min_samples_leaf: int = 1,
@@ -107,6 +109,16 @@ class GBMRegressor:
                 "continuous_binning_strategy must be one of: "
                 + ", ".join(sorted(_VALID_CONTINUOUS_BINNING_STRATEGIES))
             )
+        max_bins = int(continuous_binning_max_bins)
+        if not (
+            _MIN_CONTINUOUS_QUANTIZED_BINS
+            <= max_bins
+            <= (_MAX_CONTINUOUS_QUANTIZED_BIN + 1)
+        ):
+            raise ValueError(
+                "continuous_binning_max_bins must be in "
+                f"[{_MIN_CONTINUOUS_QUANTIZED_BINS}, {_MAX_CONTINUOUS_QUANTIZED_BIN + 1}]"
+            )
 
         self.learning_rate = float(learning_rate)
         self.max_depth = int(max_depth)
@@ -122,6 +134,7 @@ class GBMRegressor:
         self.seed = int(seed)
         self.deterministic = bool(deterministic)
         self.continuous_binning_strategy = str(continuous_binning_strategy)
+        self.continuous_binning_max_bins = max_bins
         self.categorical_feature_index = (
             int(categorical_feature_index)
             if categorical_feature_index is not None
@@ -137,6 +150,7 @@ class GBMRegressor:
         self._continuous_feature_mins: list[float] | None = None
         self._continuous_feature_maxs: list[float] | None = None
         self._continuous_feature_sorted_values: list[list[float]] | None = None
+        self._continuous_feature_quantile_cuts: list[list[float]] | None = None
 
     def __repr__(self) -> str:
         return (
@@ -151,6 +165,7 @@ class GBMRegressor:
             f"seed={self.seed}, "
             f"deterministic={self.deterministic}, "
             f"continuous_binning_strategy='{self.continuous_binning_strategy}', "
+            f"continuous_binning_max_bins={self.continuous_binning_max_bins}, "
             f"categorical_feature_index={self.categorical_feature_index}, "
             f"categorical_smoothing={self.categorical_smoothing}, "
             f"categorical_min_samples_leaf={self.categorical_min_samples_leaf}, "
@@ -172,6 +187,7 @@ class GBMRegressor:
             "seed": self.seed,
             "deterministic": self.deterministic,
             "continuous_binning_strategy": self.continuous_binning_strategy,
+            "continuous_binning_max_bins": self.continuous_binning_max_bins,
             "categorical_feature_index": self.categorical_feature_index,
             "categorical_smoothing": self.categorical_smoothing,
             "categorical_min_samples_leaf": self.categorical_min_samples_leaf,
@@ -191,6 +207,7 @@ class GBMRegressor:
             "seed",
             "deterministic",
             "continuous_binning_strategy",
+            "continuous_binning_max_bins",
             "categorical_feature_index",
             "categorical_smoothing",
             "categorical_min_samples_leaf",
@@ -263,6 +280,21 @@ class GBMRegressor:
             if strategy != self.continuous_binning_strategy and self._is_fitted:
                 self._reset_fitted_state()
             self.continuous_binning_strategy = strategy
+
+        if "continuous_binning_max_bins" in params:
+            max_bins = int(params["continuous_binning_max_bins"])
+            if not (
+                _MIN_CONTINUOUS_QUANTIZED_BINS
+                <= max_bins
+                <= (_MAX_CONTINUOUS_QUANTIZED_BIN + 1)
+            ):
+                raise ValueError(
+                    "continuous_binning_max_bins must be in "
+                    f"[{_MIN_CONTINUOUS_QUANTIZED_BINS}, {_MAX_CONTINUOUS_QUANTIZED_BIN + 1}]"
+                )
+            if max_bins != self.continuous_binning_max_bins and self._is_fitted:
+                self._reset_fitted_state()
+            self.continuous_binning_max_bins = max_bins
 
         if "categorical_feature_index" in params:
             if params["categorical_feature_index"] is None:
@@ -345,17 +377,29 @@ class GBMRegressor:
                 self._continuous_feature_mins = mins
                 self._continuous_feature_maxs = maxs
                 self._continuous_feature_sorted_values = None
+                self._continuous_feature_quantile_cuts = None
                 training_rows = self._quantize_rows_linear(rows, mins, maxs)
-            else:
+            elif self.continuous_binning_strategy == "rank":
                 sorted_values = self._derive_continuous_feature_sorted_values(rows)
                 self._continuous_feature_sorted_values = sorted_values
                 self._continuous_feature_mins = None
                 self._continuous_feature_maxs = None
+                self._continuous_feature_quantile_cuts = None
                 training_rows = self._quantize_rows_rank(rows, sorted_values)
+            else:
+                quantile_cuts = self._derive_continuous_feature_quantile_cuts(
+                    rows, self.continuous_binning_max_bins
+                )
+                self._continuous_feature_quantile_cuts = quantile_cuts
+                self._continuous_feature_sorted_values = None
+                self._continuous_feature_mins = None
+                self._continuous_feature_maxs = None
+                training_rows = self._quantize_rows_quantile(rows, quantile_cuts)
         else:
             self._continuous_feature_mins = None
             self._continuous_feature_maxs = None
             self._continuous_feature_sorted_values = None
+            self._continuous_feature_quantile_cuts = None
             training_rows = rows
 
         train_regression_artifact = _load_native_train_regression_artifact()
@@ -587,14 +631,65 @@ class GBMRegressor:
             quantized.append(quantized_row)
         return quantized
 
+    @staticmethod
+    def _derive_continuous_feature_quantile_cuts(
+        rows: Sequence[Sequence[float]],
+        max_bins: int,
+    ) -> list[list[float]]:
+        feature_count = len(rows[0])
+        columns: list[list[float]] = [[] for _ in range(feature_count)]
+        for row in rows:
+            for feature_index, value in enumerate(row):
+                columns[feature_index].append(value)
+
+        feature_cuts: list[list[float]] = []
+        for feature_index in range(feature_count):
+            values = columns[feature_index]
+            values.sort()
+            if len(values) <= 1:
+                feature_cuts.append([])
+                continue
+
+            bin_count = min(max_bins, len(values))
+            cuts: list[float] = []
+            for quantile_index in range(1, bin_count):
+                rank = (quantile_index * len(values)) // bin_count
+                if rank >= len(values):
+                    rank = len(values) - 1
+                cut_value = values[rank]
+                if cuts and cut_value <= cuts[-1]:
+                    continue
+                cuts.append(cut_value)
+            feature_cuts.append(cuts)
+        return feature_cuts
+
+    @staticmethod
+    def _quantize_rows_quantile(
+        rows: Sequence[Sequence[float]],
+        feature_quantile_cuts: Sequence[Sequence[float]],
+    ) -> list[list[float]]:
+        quantized: list[list[float]] = []
+        for row in rows:
+            quantized_row: list[float] = []
+            for feature_index, value in enumerate(row):
+                cuts = feature_quantile_cuts[feature_index]
+                bucket = bisect.bisect_right(cuts, value)
+                clamped = min(_MAX_CONTINUOUS_QUANTIZED_BIN, max(0, bucket))
+                quantized_row.append(float(clamped))
+            quantized.append(quantized_row)
+        return quantized
+
     def _quantize_rows_for_prediction(
         self, rows: Sequence[Sequence[float]]
     ) -> list[list[float]]:
         if self.continuous_binning_strategy == "linear":
             mins, maxs = self._require_continuous_feature_bounds()
             return self._quantize_rows_linear(rows, mins, maxs)
-        sorted_values = self._require_continuous_feature_sorted_values()
-        return self._quantize_rows_rank(rows, sorted_values)
+        if self.continuous_binning_strategy == "rank":
+            sorted_values = self._require_continuous_feature_sorted_values()
+            return self._quantize_rows_rank(rows, sorted_values)
+        quantile_cuts = self._require_continuous_feature_quantile_cuts()
+        return self._quantize_rows_quantile(rows, quantile_cuts)
 
     def _require_continuous_feature_bounds(self) -> tuple[list[float], list[float]]:
         if self._continuous_feature_mins is None or self._continuous_feature_maxs is None:
@@ -610,6 +705,13 @@ class GBMRegressor:
             )
         return self._continuous_feature_sorted_values
 
+    def _require_continuous_feature_quantile_cuts(self) -> list[list[float]]:
+        if self._continuous_feature_quantile_cuts is None:
+            raise RuntimeError(
+                "continuous-feature quantization cuts are missing; refit the model"
+            )
+        return self._continuous_feature_quantile_cuts
+
     def _reset_fitted_state(self) -> None:
         self._is_fitted = False
         self._artifact_bytes = None
@@ -618,6 +720,7 @@ class GBMRegressor:
         self._continuous_feature_mins = None
         self._continuous_feature_maxs = None
         self._continuous_feature_sorted_values = None
+        self._continuous_feature_quantile_cuts = None
 
     @staticmethod
     def _validate_targets(y: object) -> list[float]:

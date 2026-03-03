@@ -53,7 +53,7 @@ REQUIRED_ALLOY_INIT_PARAMS = (
     "row_subsample",
     "col_subsample",
 )
-VALID_ALLOY_CONTINUOUS_BINNING_STRATEGIES = ("linear", "rank")
+VALID_ALLOY_CONTINUOUS_BINNING_STRATEGIES = ("linear", "rank", "quantile")
 
 
 @dataclass
@@ -333,6 +333,7 @@ def _model_factories(
     max_depth: int,
     rounds: int,
     alloy_continuous_binning_strategy: str,
+    alloy_continuous_binning_max_bins: int,
 ) -> dict:
     from lightgbm import LGBMRegressor
     from xgboost import XGBRegressor
@@ -357,6 +358,8 @@ def _model_factories(
         alloy_params["deterministic"] = True
     if "continuous_binning_strategy" in alloy_signature.parameters:
         alloy_params["continuous_binning_strategy"] = alloy_continuous_binning_strategy
+    if "continuous_binning_max_bins" in alloy_signature.parameters:
+        alloy_params["continuous_binning_max_bins"] = alloy_continuous_binning_max_bins
 
     return {
         "alloygbm": lambda: gbm_regressor_cls(**alloy_params),
@@ -518,6 +521,10 @@ def _render_results_markdown(
         (
             "- alloy_continuous_binning_strategy: "
             f"`{params['alloy_continuous_binning_strategy']}`"
+        ),
+        (
+            "- alloy_continuous_binning_max_bins: "
+            f"`{params['alloy_continuous_binning_max_bins']}`"
         ),
         f"- profile_mode: `{params['profile_mode']}`",
         f"- scenarios: `{', '.join(params['scenarios'])}`",
@@ -713,6 +720,12 @@ def main(argv: list[str]) -> int:
             "supported by the installed GBMRegressor"
         ),
     )
+    parser.add_argument(
+        "--alloy-continuous-binning-max-bins",
+        type=int,
+        default=256,
+        help="max quantized bins for alloy continuous binning modes that use cut points",
+    )
     parser.add_argument("--test-size", type=float, default=0.2)
     parser.add_argument("--force-prepare", action="store_true")
     parser.add_argument(
@@ -738,6 +751,13 @@ def main(argv: list[str]) -> int:
         default=Path("benchmarks") / "results",
     )
     args = parser.parse_args(argv)
+
+    if not (2 <= args.alloy_continuous_binning_max_bins <= 256):
+        print(
+            "invalid --alloy-continuous-binning-max-bins: expected integer in [2, 256]",
+            file=sys.stderr,
+        )
+        return 2
 
     try:
         profiles, seeds, matrix_mode = _resolve_profiles(args)
@@ -777,6 +797,7 @@ def main(argv: list[str]) -> int:
                 max_depth=profile.max_depth,
                 rounds=profile.rounds,
                 alloy_continuous_binning_strategy=args.alloy_continuous_binning_strategy,
+                alloy_continuous_binning_max_bins=args.alloy_continuous_binning_max_bins,
             )
 
             for scenario in args.scenarios:
@@ -876,6 +897,7 @@ def main(argv: list[str]) -> int:
         "max_depth": args.max_depth,
         "rounds": args.rounds,
         "alloy_continuous_binning_strategy": args.alloy_continuous_binning_strategy,
+        "alloy_continuous_binning_max_bins": args.alloy_continuous_binning_max_bins,
         "test_size": args.test_size,
         "scenarios": args.scenarios,
         "alloygbm_runtime": alloy_runtime,

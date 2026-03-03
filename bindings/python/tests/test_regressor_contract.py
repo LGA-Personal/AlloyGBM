@@ -86,6 +86,10 @@ class GBMRegressorContractTests(unittest.TestCase):
             GBMRegressor(categorical_min_samples_leaf=0)
         with self.assertRaisesRegex(ValueError, "continuous_binning_strategy"):
             GBMRegressor(continuous_binning_strategy="invalid")
+        with self.assertRaisesRegex(ValueError, "continuous_binning_max_bins"):
+            GBMRegressor(continuous_binning_max_bins=1)
+        with self.assertRaisesRegex(ValueError, "continuous_binning_max_bins"):
+            GBMRegressor(continuous_binning_max_bins=257)
 
     def test_get_params_and_set_params_roundtrip(self) -> None:
         model = GBMRegressor()
@@ -100,6 +104,7 @@ class GBMRegressorContractTests(unittest.TestCase):
         self.assertEqual(params["seed"], 0)
         self.assertTrue(params["deterministic"])
         self.assertEqual(params["continuous_binning_strategy"], "linear")
+        self.assertEqual(params["continuous_binning_max_bins"], 256)
         self.assertIsNone(params["categorical_feature_index"])
         self.assertEqual(params["categorical_smoothing"], 20.0)
         self.assertEqual(params["categorical_min_samples_leaf"], 1)
@@ -116,6 +121,7 @@ class GBMRegressorContractTests(unittest.TestCase):
             seed=7,
             deterministic=False,
             continuous_binning_strategy="rank",
+            continuous_binning_max_bins=128,
             categorical_feature_index=1,
             categorical_smoothing=5.0,
             categorical_min_samples_leaf=2,
@@ -132,6 +138,7 @@ class GBMRegressorContractTests(unittest.TestCase):
         self.assertEqual(model.get_params()["seed"], 7)
         self.assertFalse(model.get_params()["deterministic"])
         self.assertEqual(model.get_params()["continuous_binning_strategy"], "rank")
+        self.assertEqual(model.get_params()["continuous_binning_max_bins"], 128)
         self.assertEqual(model.get_params()["categorical_feature_index"], 1)
         self.assertEqual(model.get_params()["categorical_smoothing"], 5.0)
         self.assertEqual(model.get_params()["categorical_min_samples_leaf"], 2)
@@ -146,6 +153,11 @@ class GBMRegressorContractTests(unittest.TestCase):
         model = GBMRegressor()
         with self.assertRaisesRegex(ValueError, "continuous_binning_strategy"):
             model.set_params(continuous_binning_strategy="bad")
+
+    def test_set_params_rejects_invalid_continuous_binning_max_bins(self) -> None:
+        model = GBMRegressor()
+        with self.assertRaisesRegex(ValueError, "continuous_binning_max_bins"):
+            model.set_params(continuous_binning_max_bins=0)
 
     def test_set_params_rejects_invalid_n_estimators(self) -> None:
         model = GBMRegressor()
@@ -323,6 +335,31 @@ class GBMRegressorContractTests(unittest.TestCase):
         self.assertEqual(
             train_calls[0]["rows"],
             [[0.0, 0.0], [128.0, 255.0], [255.0, 128.0]],
+        )
+
+    def test_fit_quantizes_continuous_rows_with_quantile_strategy(self) -> None:
+        train_calls: list[dict[str, object]] = []
+
+        def fake_train(**kwargs: object) -> bytes:
+            train_calls.append(kwargs)
+            return b"artifact"
+
+        original_train_loader = regressor_module._load_native_train_regression_artifact
+        regressor_module._load_native_train_regression_artifact = lambda: fake_train
+        try:
+            GBMRegressor(continuous_binning_strategy="quantile").fit(
+                [[-1.2, 0.49], [0.51, 300.1], [2.6, 12.9]],
+                [0.0, 1.0, 2.0],
+            )
+        finally:
+            regressor_module._load_native_train_regression_artifact = (
+                original_train_loader
+            )
+
+        self.assertEqual(len(train_calls), 1)
+        self.assertEqual(
+            train_calls[0]["rows"],
+            [[0.0, 0.0], [1.0, 2.0], [2.0, 1.0]],
         )
 
     def test_set_params_binning_strategy_after_fit_requires_refit(self) -> None:
