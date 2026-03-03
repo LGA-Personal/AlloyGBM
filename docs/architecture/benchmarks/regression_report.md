@@ -2,11 +2,13 @@
 
 ## Status
 PASS for benchmark execution and runtime compatibility.  
-Decision: keep `linear` as default; keep `rank` as configurable opt-in variant.
+Decision: keep `linear` as default; keep `rank` and `quantile` as configurable opt-in variants.
 
 ## Scope
 - Added and benchmarked configurable Alloy continuous binning strategies (`linear`, `rank`).
+- Implemented and benchmarked capped quantile binning (`quantile`, `max_bins` configurable).
 - Ran full benchmark matrices for both strategies.
+- Ran additional full matrices for quantile and a focused quantile bin-cap sweep.
 - Compared strategy deltas and competitiveness against `lightgbm` and `xgboost`.
 
 ## Environment
@@ -24,6 +26,9 @@ Decision: keep `linear` as default; keep `rank` as configurable opt-in variant.
 3. `python3 -B benchmarks/run_model_comparison.py --force-prepare --profile-grid default --profile-seeds 7,17,29 --alloy-continuous-binning-strategy rank --output-dir benchmarks/results/strategy_rank`
 4. `python3 -B benchmarks/run_model_comparison.py --force-prepare --profile-grid default_ultra --profile-seeds 7 --scenarios dense_numeric dow_jones_financial --alloy-continuous-binning-strategy rank --output-dir benchmarks/results/strategy_rank`
 5. `bash scripts/benchmark_avx2_compare.sh --runs 3 > benchmarks/results/avx2_compare_20260303_rank_linear_eval.log 2>&1`
+6. `python3 -B benchmarks/run_model_comparison.py --force-prepare --profile-grid default --profile-seeds 7,17,29 --alloy-continuous-binning-strategy quantile --alloy-continuous-binning-max-bins 256 --output-dir benchmarks/results/strategy_quantile`
+7. `python3 -B benchmarks/run_model_comparison.py --force-prepare --profile-grid default_ultra --profile-seeds 7 --scenarios dense_numeric dow_jones_financial --alloy-continuous-binning-strategy quantile --alloy-continuous-binning-max-bins 256 --output-dir benchmarks/results/strategy_quantile`
+8. Focused sweep (`histogram_stress`, seed `7`, default profiles): `linear`, `quantile@256`, `quantile@128`, `quantile@64` with outputs in `benchmarks/results/quantile_bin_sweep/`
 
 ## Produced Artifacts
 - `linear` default matrix:
@@ -38,6 +43,17 @@ Decision: keep `linear` as default; keep `rank` as configurable opt-in variant.
 - `rank` default_ultra matrix:
   - `benchmarks/results/strategy_rank/model_comparison_20260303T184935Z.csv`
   - `benchmarks/results/strategy_rank/model_comparison_profile_summary_20260303T184935Z.csv`
+- `quantile` default matrix:
+  - `benchmarks/results/strategy_quantile/model_comparison_20260303T190907Z.csv`
+  - `benchmarks/results/strategy_quantile/model_comparison_profile_summary_20260303T190907Z.csv`
+- `quantile` default_ultra matrix:
+  - `benchmarks/results/strategy_quantile/model_comparison_20260303T190956Z.csv`
+  - `benchmarks/results/strategy_quantile/model_comparison_profile_summary_20260303T190956Z.csv`
+- Quantile bin-cap sweep:
+  - `benchmarks/results/quantile_bin_sweep/model_comparison_profile_summary_20260303T191319Z.csv` (`linear`)
+  - `benchmarks/results/quantile_bin_sweep/model_comparison_profile_summary_20260303T191559Z.csv` (`quantile@256`)
+  - `benchmarks/results/quantile_bin_sweep/model_comparison_profile_summary_20260303T191839Z.csv` (`quantile@128`)
+  - `benchmarks/results/quantile_bin_sweep/model_comparison_profile_summary_20260303T192110Z.csv` (`quantile@64`)
 - AVX2 compare log:
   - `benchmarks/results/avx2_compare_20260303_rank_linear_eval.log`
 
@@ -46,6 +62,8 @@ Decision: keep `linear` as default; keep `rank` as configurable opt-in variant.
 - `linear` default_ultra: `24 PASS / 0 FAIL`
 - `rank` default: `108 PASS / 0 FAIL`
 - `rank` default_ultra: `24 PASS / 0 FAIL`
+- `quantile` default: `108 PASS / 0 FAIL`
+- `quantile` default_ultra: `24 PASS / 0 FAIL`
 
 ## Strategy Delta (Rank vs Linear, Alloy Only)
 Regression threshold used for triage: `>5%` slowdown in fit/predict median.
@@ -63,6 +81,30 @@ Regression threshold used for triage: `>5%` slowdown in fit/predict median.
 - RMSE median delta: `+0.05%` (near parity), better in `4/8` cells.
 
 Interpretation: `rank` is unstable across the full matrix and regresses heavily in the histogram-heavy scenario despite occasional wins.
+
+## Strategy Delta (Quantile vs Linear, Alloy Only)
+Regression threshold used for triage: `>5%` slowdown in fit/predict median.
+
+### Default matrix (`4 scenarios x 3 profiles x 3 seeds`)
+- Fit median delta: `+0.02%` (near parity), better in `5/12` scenario/profile cells.
+- Predict median delta: `-0.08%` (near parity), better in `7/12` cells.
+- RMSE median delta: `+3.05%` (mixed), better in `6/12` cells.
+- Largest regression cluster: `histogram_stress` (`+9.78%` fit, `+1.47%` predict, `+16.76%` RMSE).
+
+### Default_ultra matrix (`2 scenarios x 4 profiles x 1 seed`)
+- Fit median delta: `-12.03%` (faster), better in `7/8` cells.
+- Predict median delta: `-8.03%` (faster), better in `6/8` cells.
+- RMSE median delta: `+0.08%` (near parity), better in `3/8` cells.
+
+Interpretation: quantile mode improves speed in constrained ultra runs but is not robust on full-matrix accuracy due to histogram-stress degradation.
+
+## Quantile Bin-Cap Sweep (`histogram_stress`, default profiles, seed `7`)
+Average percent delta vs `linear` baseline:
+- `quantile@256`: fit `+8.98%`, predict `+3.09%`, RMSE `+17.04%`
+- `quantile@128`: fit `+3.19%`, predict `+18.77%`, RMSE `+34.18%`
+- `quantile@64`: fit `-1.72%`, predict `+12.92%`, RMSE `+45.59%`
+
+Interpretation: lower bin caps reduce/flatten fit cost in some profiles but materially harm regression quality on this stress scenario.
 
 ## Competitiveness Snapshot
 Using the full default matrix:
@@ -88,8 +130,10 @@ Interpretation: AVX2 tuning cannot be validated on this host; performance conclu
 1. Keep `continuous_binning_strategy` as a configurable variant (`linear` default, `rank` optional).
 2. Keep benchmark-runner configurability (`--alloy-continuous-binning-strategy`) for repeatable A/B testing.
 3. Do not promote `rank` to default in `v0.9.7` due to full-matrix speed regressions above threshold.
+4. Keep `quantile` configurable for controlled experimentation, but do not promote it to default in `v0.9.7`.
+5. Keep `linear` as baseline for now.
 
 ## Required Follow-up
-1. Implement true capped quantile histogram binning (for example, fixed `<=256` bins) to reduce `rank` lookup overhead while preserving distribution awareness.
-2. Add optional strategy-specific calibration knobs (for example, quantile bin count / sketch epsilon) behind config flags.
+1. Investigate per-feature adaptive quantile bins (or weighted sketch) instead of a single global bin cap.
+2. Add calibration guardrails for quantile mode (for example, scenario-aware fallback to linear when RMSE regression exceeds threshold).
 3. Re-run this exact matrix on a native AVX2-capable `x86_64` host for SIMD-path evidence.

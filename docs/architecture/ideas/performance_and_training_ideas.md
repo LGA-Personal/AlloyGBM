@@ -52,3 +52,6 @@ This is an idea catalog only (no implementation commitment in this document).
 - Outcome: keep as configurable variant; do not promote to default in current state.
 - Reason: rank-mode speed regressions were significant on the full matrix (especially `histogram_stress`) despite mixed/near-parity accuracy.
 - Evidence: see `docs/architecture/benchmarks/regression_report.md`.
+- Variant tested: `continuous_binning_strategy=quantile` with `continuous_binning_max_bins` sweep (`64/128/256`).
+- Outcome: keep as configurable experimental variant; do not promote to default in current state.
+- Reason: ultra-profile speed gains were observed, but full-matrix quality regressed materially on `histogram_stress` (RMSE increase).

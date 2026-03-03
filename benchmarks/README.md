@@ -52,10 +52,11 @@ python3 benchmarks/run_model_comparison.py \
   --force-prepare \
   --profile-grid default \
   --profile-seeds 7,17,29 \
-  --alloy-continuous-binning-strategy linear
+  --alloy-continuous-binning-strategy quantile \
+  --alloy-continuous-binning-max-bins 256
 ```
 
-Supported values: `linear` (default), `rank`.
+Supported values: `linear` (default), `rank`, `quantile`.
 
 The benchmark runner now validates the loaded `alloygbm` runtime contract before running:
 
