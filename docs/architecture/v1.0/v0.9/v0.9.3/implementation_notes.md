@@ -44,12 +44,13 @@
 - Runner CLI flags and output schemas remain backward-compatible.
 
 ## Known Gaps Deferred to Next Layer
-- CI-level policy gating on benchmark quality/speed deltas is still deferred (`v0.9.5` or later).
+- CI-level policy gating on benchmark quality/speed deltas is still deferred (`v0.9.7`).
 - Benchmark runtime provenance hardening is deferred to `v0.9.4`.
 - This slice validates temporal integrity; it does not yet optimize post-hardening benchmark quality.
 
 ## Follow-Up Actions
 - Execute `v0.9.4` benchmark runtime provenance hardening so comparisons cannot silently run with stale Alloy package bindings.
-- Use the provenance-validated benchmark outputs as the baseline for `v0.9.5` competitiveness iteration.
-- Reserve documentation/tutorial and parent closeout packaging for `v0.9.6`.
+- Use the provenance-validated benchmark outputs as the baseline for `v0.9.5` and `v0.9.6` continuous-feature support work.
+- Reserve competitiveness/policy iteration for `v0.9.7`.
+- Reserve documentation/tutorial and parent closeout packaging for `v0.9.8`.
 - Consider adding group-aware rolling/purged split variants for future benchmark rigor upgrades.

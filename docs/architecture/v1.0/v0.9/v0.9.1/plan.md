@@ -26,7 +26,7 @@
 ### Out of Scope
 - Full shallow/deep benchmark expansion (`v0.9.2` scope).
 - Broad performance tuning of training/inference kernels (`v0.9.3` scope).
-- End-user documentation/tutorial authoring pass (`v0.9.6` scope).
+- End-user documentation/tutorial authoring pass (`v0.9.8` scope).
 - New roadmap features or API/model-format breaking changes.
 
 ## Interfaces and Types

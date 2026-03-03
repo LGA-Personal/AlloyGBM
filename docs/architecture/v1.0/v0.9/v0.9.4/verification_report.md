@@ -60,7 +60,7 @@
   - `python3 -m unittest discover -s benchmarks/tests -p 'test_*.py'` -> PASS
 - Status: PASS
 
-- Criterion: (11) `docs/architecture/state/layer_index.yaml` marks `v0.9.4` verified and advances target to `docs/architecture/v1.0/v0.9/v0.9.5` (with `v0.9.6` queued).
+- Criterion: (11) `docs/architecture/state/layer_index.yaml` marks `v0.9.4` verified and advances target to `docs/architecture/v1.0/v0.9/v0.9.5` (with `v0.9.6`/`v0.9.7`/`v0.9.8` queued).
 - Evidence: [layer_index.yaml](/Users/lashby/Projects/AlloyGBM/docs/architecture/state/layer_index.yaml) updated in this slice.
 - Status: PASS
 
@@ -94,5 +94,6 @@
 ## Final Readiness
 - Ready: Yes
 - Required follow-up before milestone closeout:
-  - execute `docs/architecture/v1.0/v0.9/v0.9.5` for benchmark competitiveness improvements,
-  - execute `docs/architecture/v1.0/v0.9/v0.9.6` for docs/tutorial and parent closeout readiness.
+  - execute `docs/architecture/v1.0/v0.9/v0.9.5` and `docs/architecture/v1.0/v0.9/v0.9.6` for continuous-feature native-training support,
+  - execute `docs/architecture/v1.0/v0.9/v0.9.7` for competitiveness/policy improvements,
+  - execute `docs/architecture/v1.0/v0.9/v0.9.8` for docs/tutorial and parent closeout readiness.

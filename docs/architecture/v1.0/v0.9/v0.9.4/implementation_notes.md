@@ -10,8 +10,9 @@
 - Updated benchmark operator docs in [benchmarks/README.md](/Users/lashby/Projects/AlloyGBM/benchmarks/README.md) to document fail-fast runtime guard behavior.
 - Re-sequenced `v0.9` milestone planning/docs:
   - `v0.9.4`: runtime provenance hardening (this slice),
-  - `v0.9.5`: benchmark improvement/competitiveness,
-  - `v0.9.6`: docs/tutorial + closeout readiness.
+  - `v0.9.5` and `v0.9.6`: native continuous-feature training support,
+  - `v0.9.7`: benchmark improvement/competitiveness and policy hardening,
+  - `v0.9.8`: docs/tutorial + closeout readiness.
 
 ## Non-Intuitive Decisions
 - Decision: enforce runtime contract checks as a hard benchmark precondition.
@@ -24,7 +25,7 @@
 
 ## Plan Contradictions and Why
 - Parent/continuity docs previously positioned `v0.9.4` as docs/tutorial closeout.
-- Updated sequence now places runtime provenance hardening first (`v0.9.4`) because benchmark evidence quality is prerequisite to meaningful `v0.9.5` improvement work and `v0.9.6` closeout artifacts.
+- Updated sequence now places runtime provenance hardening first (`v0.9.4`) because benchmark evidence quality is prerequisite to meaningful continuous-feature support and later competitiveness/closeout slices.
 
 ## Boundary/Interface Changes vs Plan
 - No Rust crate API changes.
@@ -33,10 +34,13 @@
 - JSON run metadata now includes additive `alloygbm_runtime` details.
 
 ## Known Gaps Deferred to Next Layer
-- `v0.9.5`: execute benchmark quality/speed improvement cycle using provenance-validated harness.
-- `v0.9.6`: documentation/tutorial and parent closeout rollup artifacts.
+- `v0.9.5`: execute continuous-feature support phase 1 (float ingestion + quantization bridge).
+- `v0.9.6`: execute continuous-feature support phase 2 (split/depth semantics validation).
+- `v0.9.7`: execute benchmark quality/speed improvement cycle and policy hardening.
+- `v0.9.8`: documentation/tutorial and parent closeout rollup artifacts.
 
 ## Follow-Up Actions
 1. Build/install a benchmark-compatible Alloy runtime in benchmark environments before rerunning comparison matrices.
-2. Execute `v0.9.5` competitiveness iteration and record deltas against the corrected harness.
-3. Execute `v0.9.6` docs/tutorial closeout and parent rollup packaging.
+2. Execute `v0.9.5` and `v0.9.6` continuous-feature native-training slices.
+3. Execute `v0.9.7` competitiveness iteration and record deltas against the corrected harness.
+4. Execute `v0.9.8` docs/tutorial closeout and parent rollup packaging.

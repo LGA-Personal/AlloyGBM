@@ -1,4 +1,4 @@
-generated_at: "2026-03-03T09:37:58Z"
+generated_at: "2026-03-03T10:04:07Z"
 active_target: "docs/architecture/v1.0/v0.9/v0.9.5"
 suggested_next_layer: "docs/architecture/v1.0/v0.9/v0.9.5"
 layers:
@@ -179,11 +179,10 @@ layers:
       - "docs/architecture/v1.0/v0.9/v0.9.3"
   - path: "docs/architecture/v1.0/v0.9/v0.9.5"
     status: "planned-only"
-    has_plan: false
+    has_plan: true
     has_implementation_notes: false
     has_verification_report: false
     missing_artifacts:
-      - "plan.md"
       - "implementation_notes.md"
       - "verification_report.md"
     parent: "docs/architecture/v1.0/v0.9"
@@ -194,11 +193,10 @@ layers:
       - "docs/architecture/v1.0/v0.9/v0.9.4"
   - path: "docs/architecture/v1.0/v0.9/v0.9.6"
     status: "planned-only"
-    has_plan: false
+    has_plan: true
     has_implementation_notes: false
     has_verification_report: false
     missing_artifacts:
-      - "plan.md"
       - "implementation_notes.md"
       - "verification_report.md"
     parent: "docs/architecture/v1.0/v0.9"
@@ -208,6 +206,39 @@ layers:
       - "docs/architecture/v1.0/v0.9/v0.9.3"
       - "docs/architecture/v1.0/v0.9/v0.9.4"
       - "docs/architecture/v1.0/v0.9/v0.9.5"
+  - path: "docs/architecture/v1.0/v0.9/v0.9.7"
+    status: "planned-only"
+    has_plan: true
+    has_implementation_notes: false
+    has_verification_report: false
+    missing_artifacts:
+      - "implementation_notes.md"
+      - "verification_report.md"
+    parent: "docs/architecture/v1.0/v0.9"
+    previous_siblings:
+      - "docs/architecture/v1.0/v0.9/v0.9.1"
+      - "docs/architecture/v1.0/v0.9/v0.9.2"
+      - "docs/architecture/v1.0/v0.9/v0.9.3"
+      - "docs/architecture/v1.0/v0.9/v0.9.4"
+      - "docs/architecture/v1.0/v0.9/v0.9.5"
+      - "docs/architecture/v1.0/v0.9/v0.9.6"
+  - path: "docs/architecture/v1.0/v0.9/v0.9.8"
+    status: "planned-only"
+    has_plan: true
+    has_implementation_notes: false
+    has_verification_report: false
+    missing_artifacts:
+      - "implementation_notes.md"
+      - "verification_report.md"
+    parent: "docs/architecture/v1.0/v0.9"
+    previous_siblings:
+      - "docs/architecture/v1.0/v0.9/v0.9.1"
+      - "docs/architecture/v1.0/v0.9/v0.9.2"
+      - "docs/architecture/v1.0/v0.9/v0.9.3"
+      - "docs/architecture/v1.0/v0.9/v0.9.4"
+      - "docs/architecture/v1.0/v0.9/v0.9.5"
+      - "docs/architecture/v1.0/v0.9/v0.9.6"
+      - "docs/architecture/v1.0/v0.9/v0.9.7"
   - path: "docs/architecture/v1.0/v0.8/v0.8.1"
     status: "verified"
     has_plan: true

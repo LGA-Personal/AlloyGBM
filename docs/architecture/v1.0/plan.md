@@ -70,11 +70,12 @@ Exit criteria:
 - Expand tests, docs, and benchmark reproducibility artifacts.
 - Finalize migration notes and compatibility checks.
 
-### 0.9.0 - Debugging, Benchmark Improvement, and Documentation
-- Benchmark Expansion: Expand benchmark to include both shallow and deep runs
-- Debugging: Fix any bugs found during testing.
-- Benchmark Improvement: Improve benchmark performance (accuracy and speed) to compete with lightgbm & xgboost.
-- Documentation: Improve documentation and add tutorials.
+### 0.9.0 - Debugging, Continuous-Feature Enablement, Competitiveness, and Documentation
+- Benchmark Expansion: Expand benchmark to include both shallow and deep runs.
+- Debugging: Fix bugs found during testing and benchmark validation.
+- Continuous-Feature Support: add native training support for continuous float features so Alloy can train on financial datasets without integer-bin failures.
+- Benchmark Improvement: improve benchmark performance (accuracy and speed) to compete with LightGBM and XGBoost after continuous-feature support is complete.
+- Documentation: improve documentation and add tutorials after the new training path is validated.
 
 ### 1.0.0 - CPU Production Baseline
 - Stable CPU release with predictor, SHAP, categorical support, and robust Python API.

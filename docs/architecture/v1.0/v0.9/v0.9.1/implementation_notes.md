@@ -16,7 +16,7 @@
   - Current behavior marks delta as not applicable when AVX2 is unavailable for both runs.
 - BG-902 (P2): deferred to `v0.9.2`.
   - shallow/deep benchmark protocol coverage still needs explicit expansion.
-- BG-903 (P2): deferred to `v0.9.2`/`v0.9.5`.
+- BG-903 (P2): deferred to `v0.9.2`/`v0.9.7`.
   - benchmark regression thresholds are still not codified as CI hard gates.
 
 ## Non-Intuitive Decisions
@@ -36,7 +36,7 @@
 
 ## Known Gaps Deferred to Next Layer
 - `v0.9.2`: implement shallow/deep benchmark run matrix and publish paired evidence outputs.
-- `v0.9.2`/`v0.9.5`: define and enforce benchmark-regression threshold policy in CI/release evidence.
+- `v0.9.2`/`v0.9.7`: define and enforce benchmark-regression threshold policy in CI/release evidence.
 
 ## Follow-Up Actions
 - Start `docs/architecture/v1.0/v0.9/v0.9.2` planning/implementation for benchmark protocol expansion.

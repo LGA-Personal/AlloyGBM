@@ -50,7 +50,7 @@
 
 ### BG-903 - Benchmark regressions not enforced as CI pass/fail policy
 - Severity: P2
-- Status: Open (target `v0.9.2`/`v0.9.5`)
+- Status: Open (target `v0.9.2`/`v0.9.7`)
 - Area: CI and release-gate policy
 - Expected behavior:
   - benchmark regression thresholds should have explicit go/no-go policy in CI/release gates.

@@ -1,12 +1,14 @@
 # AlloyGBM v0.9 Technical Plan
 
 ## Summary
-- Goal: deliver `0.9.0` by running a focused debugging, benchmark-expansion, performance-improvement, and documentation/tutorial cycle after `v0.8` hardening and before `v1.0` closeout.
+- Goal: deliver `0.9.0` by running a focused debugging, benchmark-expansion, temporal-integrity hardening, runtime-provenance hardening, and multi-slice native continuous-feature training enablement cycle before `v1.0` closeout.
 - Success criteria:
   - benchmark coverage includes both shallow and deep training runs across existing scenarios with reproducible outputs,
   - benchmark quality metrics are produced under leakage-hardened temporal evaluation rules,
-  - validated defects found during the cycle are fixed with regression tests,
-  - benchmark competitiveness (speed and/or accuracy) improves from the current `v0.8.3` baseline with recorded evidence,
+  - benchmark runner provenance checks prevent stale runtime comparisons,
+  - Alloy native training accepts continuous float features without integer-bin runtime failures,
+  - depth/round/profile controls materially affect Alloy quality/speed behavior on continuous-feature scenarios,
+  - at least one measurable performance and/or accuracy competitiveness improvement versus `v0.8.3` baseline is documented after continuous-feature support lands,
   - user/operator documentation is upgraded with runnable tutorial guidance for core CPU workflows.
 - Audience: engineers executing `v0.9.x` slices and reviewers deciding `v1.0` readiness.
 
@@ -17,8 +19,10 @@
   - `v0.9.2`: benchmark expansion to shallow/deep runs and refreshed comparison outputs.
   - `v0.9.3`: temporal leakage hardening for benchmark prep/splits plus benchmark integrity regression tests.
   - `v0.9.4`: benchmark runtime provenance and contract hardening so Alloy comparisons cannot silently run against stale package variants.
-  - `v0.9.5`: benchmark improvement and competitiveness iteration against leakage-hardened, provenance-validated harness outputs.
-  - `v0.9.6`: documentation/tutorial pass and `v0.9` parent closeout readiness.
+  - `v0.9.5`: native continuous-feature support phase 1 (input contract + quantization/binning ingestion path for float features).
+  - `v0.9.6`: native continuous-feature support phase 2 (split/histogram training integration + depth/round behavior validation).
+  - `v0.9.7`: benchmark competitiveness iteration and benchmark-threshold policy hardening on continuous-feature-capable training path.
+  - `v0.9.8`: documentation/tutorial pass and `v0.9` parent closeout readiness.
 - Maintain and extend benchmark evidence workflow:
   - `benchmarks/*/prepare.py`,
   - `benchmarks/run_model_comparison.py`,
@@ -58,20 +62,33 @@ Backward-compatibility expectations:
    - reject target-equivalent feature leakage in benchmark runner,
    - add regression tests for these guarantees.
 4. `v0.9.4`: enforce benchmark runtime provenance/contract requirements and add regression checks that fail fast on stale Alloy runtime bindings.
-5. `v0.9.5`: run targeted benchmark-improvement cycle and record measurable competitiveness deltas with the corrected harness.
-6. `v0.9.6`: upgrade documentation/tutorials and produce operator-facing guidance for running training, benchmarking, and validation gates.
-7. Parent closeout: publish `v0.9` implementation/verification rollups and advance state index target toward `v1.0` final closeout.
+5. `v0.9.5`: implement continuous-feature ingestion in native training path:
+   - accept float-valued features from Python without integer-bin contract errors,
+   - add deterministic quantization/binning bridge compatible with existing histogram trainer path,
+   - add regression tests for float-feature acceptance and legacy integer-bin compatibility.
+6. `v0.9.6`: complete continuous-feature training semantics:
+   - integrate quantized continuous features through split search/histogram accumulation,
+   - validate that depth/round/profile settings materially affect Alloy outcomes on benchmark scenarios,
+   - add focused diagnostics proving parameter sensitivity on dense and financial low-SNR tasks.
+7. `v0.9.7`: run benchmark-improvement cycle and policy hardening on continuous-capable trainer:
+   - tune performance/quality competitiveness against LightGBM/XGBoost,
+   - define and enforce benchmark threshold policy in release/CI evidence.
+8. `v0.9.8`: upgrade documentation/tutorials and produce operator-facing guidance for running training, benchmarking, and validation gates.
+9. Parent closeout: publish `v0.9` implementation/verification rollups and advance state index target toward `v1.0` final closeout.
 
 ## Test Cases and Scenarios
 - Unit cases:
   - bug-specific regression tests for each fixed defect,
   - deterministic behavior checks for fixed paths.
 - Integration cases:
-  - end-to-end train/predict parity checks across Rust/Python surfaces after optimizations/hardening,
+  - end-to-end train/predict parity checks across Rust/Python surfaces after continuous-feature support,
   - benchmark comparison runs covering shallow and deep configurations.
 - Temporal integrity cases:
   - feature-target leakage guard checks in benchmark runner,
   - timestamp-boundary train/test split checks for panel and financial scenarios.
+- Continuous-feature enablement cases:
+  - float-feature training succeeds without `integer-valued bin` runtime failures,
+  - parameter-sensitivity checks validate non-trivial depth/round effects in Alloy outputs.
 - Failure and edge cases:
   - malformed input/model artifacts continue to surface stable error semantics,
   - benchmark and prep scripts fail with actionable diagnostics on missing dependencies/network outages.
@@ -88,24 +105,26 @@ Backward-compatibility expectations:
 
 ## Acceptance Criteria
 1. `docs/architecture/v1.0/v0.9/plan.md` is present and decision-complete.
-2. `v0.9.1` through `v0.9.6` child layers each have `plan.md`, `implementation_notes.md`, and `verification_report.md`.
+2. `v0.9.1` through `v0.9.8` child layers each have `plan.md`, `implementation_notes.md`, and `verification_report.md` by milestone closeout.
 3. A reproducible bug log and fix-to-test mapping are documented in `v0.9` child artifacts.
 4. Benchmark evidence includes both shallow and deep run outputs with preserved result artifacts in `benchmarks/results/`.
-5. At least one measurable performance and/or accuracy improvement versus the `v0.8.3` baseline is documented with command-backed evidence.
-6. Benchmark runtime provenance/contract checks prevent silent stale-package comparisons and are covered by regression tests.
-7. Documentation/tutorial updates are published and validated for local execution.
-8. `docs/architecture/v1.0/v0.9/implementation_notes.md` is present and summarizes child-slice outcomes.
-9. `docs/architecture/v1.0/v0.9/verification_report.md` is present with criterion-to-evidence mapping.
-10. `cargo fmt -- --check` passes at closeout.
-11. `cargo clippy --workspace --all-targets -- -D warnings` passes at closeout.
-12. `cargo test --workspace`, `cargo doc --workspace --no-deps`, and Python unittest discovery pass at closeout.
-13. `docs/architecture/state/layer_index.yaml` marks `docs/architecture/v1.0/v0.9` as `planned-only`/`verified` according to progress and sets next execution target appropriately.
+5. Benchmark runtime provenance/contract checks prevent silent stale-package comparisons and are covered by regression tests.
+6. Alloy native training supports continuous float features across benchmark scenarios without integer-bin validation failures.
+7. Depth/round/profile settings show meaningful behavior changes in Alloy metrics after continuous-feature support.
+8. At least one measurable performance and/or accuracy improvement versus the `v0.8.3` baseline is documented with command-backed evidence.
+9. Documentation/tutorial updates are published and validated for local execution.
+10. `docs/architecture/v1.0/v0.9/implementation_notes.md` is present and summarizes child-slice outcomes.
+11. `docs/architecture/v1.0/v0.9/verification_report.md` is present with criterion-to-evidence mapping.
+12. `cargo fmt -- --check` passes at closeout.
+13. `cargo clippy --workspace --all-targets -- -D warnings` passes at closeout.
+14. `cargo test --workspace`, `cargo doc --workspace --no-deps`, and Python unittest discovery pass at closeout.
+15. `docs/architecture/state/layer_index.yaml` marks `docs/architecture/v1.0/v0.9` as `planned-only`/`verified` according to progress and sets next execution target appropriately.
 
 ## Risks and Mitigations
+- Risk: continuous-feature support expands into model-format or API-breaking redesign.
+  - Mitigation: keep public API/model compatibility constraints explicit and stage internal trainer changes across `v0.9.5`/`v0.9.6`.
 - Risk: benchmark improvements overfit to one scenario and regress others.
   - Mitigation: require scenario-by-scenario reporting for dense, panel, and histogram stress cases in shallow and deep settings.
-- Risk: bug-fix work expands scope into new feature development.
-  - Mitigation: enforce defect/optimization-only scope and track feature requests as deferred items.
 - Risk: benchmark results are noisy across local environments.
   - Mitigation: run repeated measurements, report medians, and capture environment metadata with each benchmark summary.
 - Risk: documentation drifts from actual commands.
@@ -114,6 +133,7 @@ Backward-compatibility expectations:
 ## Assumptions and Defaults
 - Device scope remains CPU-only for `v0.9`.
 - Baseline comparator remains the `v0.8.3` benchmark evidence set.
-- Immediate next child target after `v0.9.3` verification is `docs/architecture/v1.0/v0.9/v0.9.4`.
-- `v0.9.4` is now benchmark runtime provenance hardening; competitiveness iteration moves to `v0.9.5`, and closeout/doc readiness moves to `v0.9.6`.
+- Immediate next child target after `v0.9.4` verification is `docs/architecture/v1.0/v0.9/v0.9.5`.
+- `v0.9.5` through `v0.9.7` are now reserved for native continuous-feature support and resulting competitiveness/policy hardening.
+- `v0.9.8` is reserved for docs/tutorial and parent closeout readiness.
 - Any unresolved large design change is deferred to post-`1.0.0` planning unless it blocks correctness.
