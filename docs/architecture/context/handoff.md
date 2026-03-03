@@ -1,76 +1,57 @@
 # Handoff
 
 ## Current Layer and Status
-- Parent milestone: `docs/architecture/v1.0` (in progress).
-- Current active target: `docs/architecture/v1.0`.
-- Layer index status snapshot (`docs/architecture/state/layer_index.yaml`, `generated_at: 2026-03-02T23:17:45Z`):
-  - `active_target: docs/architecture/v1.0`
-  - `suggested_next_layer: docs/architecture/v1.0`
-  - `docs/architecture/v1.0/v0.8` is marked `verified`.
-- Most recently completed parent slice: `docs/architecture/v1.0/v0.8` (closed in commit `7fb67bc` on 2026-03-02).
+- Parent milestone: `docs/architecture/v1.0/v0.9` (in progress).
+- Active target (from `docs/architecture/state/layer_index.yaml`, `generated_at: 2026-03-03T08:53:23Z`):
+  - `active_target: docs/architecture/v1.0/v0.9/v0.9.4`
+  - `suggested_next_layer: docs/architecture/v1.0/v0.9/v0.9.4`
+- Recently completed layers:
+  - `docs/architecture/v1.0/v0.9/v0.9.2` (`verified`)
+  - `docs/architecture/v1.0/v0.9/v0.9.3` (`verified`)
 
 ## Completed This Session
-- Completed `v0.8.4` migration/compatibility slice and committed:
-  - `43d8855 docs(v0.8.4): finalize migration compatibility narrative and evidence`
-  - Added `docs/architecture/v1.0/v0.8/v0.8.4/{plan.md,migration_compatibility_narrative.md,implementation_notes.md,verification_report.md}`.
-  - Updated `docs/architecture/v1.0/v0.8/v0.8.1/release_hardening_matrix.md` with hardening-bucket completion evidence.
-  - Updated `docs/architecture/state/layer_index.yaml` to mark `v0.8.4` verified and advance target to `docs/architecture/v1.0/v0.8`.
-- Closed out parent `v0.8` and committed:
-  - `7fb67bc docs(v0.8): close parent hardening rollup and start v0.8.x series`
-  - Added parent rollup artifacts:
-    - `docs/architecture/v1.0/v0.8/implementation_notes.md`
-    - `docs/architecture/v1.0/v0.8/verification_report.md`
-  - Updated `docs/architecture/state/layer_index.yaml` to mark `docs/architecture/v1.0/v0.8` verified and set next active target to `docs/architecture/v1.0`.
-- Captured explicit direction for follow-on work: continue a `v0.8.x` debugging/improvement series before final `v1.0` closure.
+- Closed `v0.9.2` with full verification/docs artifacts and advanced layer index.
+- Inserted and closed `v0.9.3` as temporal leakage hardening:
+  - `panel_time_series` now uses future-horizon `target_co_gt`.
+  - benchmark runner now splits by timestamp boundaries (no shared timestamps across train/test).
+  - benchmark runner now rejects target-equivalent feature leakage.
+  - added benchmark leakage regression tests (`benchmarks/tests/test_temporal_leakage.py`).
+- Updated benchmark docs to reflect leakage safeguards.
+- Updated parent `v0.9` plan language to recognize `v0.9.3` temporal-integrity scope.
 
 ## Validation Evidence
-- `v0.8.4` verification commands (PASS):
-  - `cargo test -p alloygbm-core required_section_compatibility_report_classifies_strict_and_legacy_layouts`
-  - `cargo test -p alloygbm-core strict_compatibility_allows_optional_categorical_state_section`
-  - `cargo test -p alloygbm-predictor predictor_accepts_legacy_trees_only_artifact`
-  - `cargo test -p alloygbm-python canonical_bridge_rejects_legacy_trees_only_artifacts`
-  - `python3 -m unittest bindings/python/tests/test_regressor_contract.py` (`Ran 31 tests`, `OK`)
-  - `cargo fmt -- --check`
-  - `cargo clippy --workspace --all-targets -- -D warnings`
-  - `cargo test --workspace`
-  - `cargo doc --workspace --no-deps`
-  - `TESTING_WITH_LOCAL_MODULES=1 python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'` (`Ran 71 tests`, `OK`)
-- `v0.8` parent closeout verification commands (PASS):
-  - `cargo fmt -- --check`
-  - `cargo clippy --workspace --all-targets -- -D warnings`
-  - `cargo test --workspace`
-  - `cargo doc --workspace --no-deps`
-  - `TESTING_WITH_LOCAL_MODULES=1 python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'` (`Ran 71 tests`, `OK`)
+- Benchmark hardening tests:
+  - `python3 -m unittest discover -s benchmarks/tests -p 'test_*.py'` -> PASS (`Ran 4 tests`)
+- Benchmark scenario prep and matrix smoke run:
+  - `python3 -B benchmarks/panel_time_series/prepare.py --force-download ...` -> PASS
+  - `python3 -B benchmarks/dow_jones_financial/prepare.py --force-download ...` -> PASS
+  - `python3 -B benchmarks/run_model_comparison.py --force-prepare --profile-grid default --profile-seeds 7 --scenarios panel_time_series dow_jones_financial` -> PASS
+- Repository gates:
+  - `cargo fmt -- --check` -> PASS
+  - `cargo clippy --workspace --all-targets -- -D warnings` -> PASS
+  - `cargo test --workspace` -> PASS
+  - `cargo doc --workspace --no-deps` -> PASS
+  - `TESTING_WITH_LOCAL_MODULES=1 python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'` -> PASS (`Ran 71 tests`)
 
 ## Unresolved Decisions and Blockers
-- Blockers: none currently recorded.
-- Unresolved decisions:
-  - define the concrete `v0.8.x` slice scope (for example runtime debugging focus areas and performance hardening boundaries) before final `v1.0` closeout,
-  - decide whether benchmark regression thresholds become hard CI gates during `v1.0` closeout.
+- `v0.9.4` planning/implementation remains open.
+- `docs/architecture/v1.0/v0.9` parent rollup artifacts are not yet authored:
+  - `implementation_notes.md`
+  - `verification_report.md`
 
 ## Exact Unfinished Tasks
-1. Plan the first `v0.8.x` follow-on slice under `docs/architecture/v1.0/v0.8/` (suggested: create `v0.8.5/plan.md` as the next child hardening/debugging slice).
-2. Execute that slice with implementation + verification artifacts (`implementation_notes.md`, `verification_report.md`) and update state index accordingly.
-3. After `v0.8.x` follow-on slices are complete, close top-level `docs/architecture/v1.0` with parent rollup artifacts:
-   - `docs/architecture/v1.0/implementation_notes.md`
-   - `docs/architecture/v1.0/verification_report.md`
-4. Keep `v0.7`/`v0.8` compatibility and full gate command suite as non-regression requirements for any `v0.8.x` changes.
+1. Execute `v0.9.4` plan/implement/verify cycle.
+2. Produce `v0.9` parent rollup docs.
+3. Advance layer index after `v0.9.4` completion.
 
 ## Exact Next Command
-`cd /Users/lashby/Projects/AlloyGBM && cat docs/architecture/v1.0/plan.md && ls -la docs/architecture/v1.0/v0.8 && rg -n "v0.8.x|debug|benchmark|threshold" docs/architecture/v1.0/v0.8/implementation_notes.md docs/architecture/v1.0/v0.8/verification_report.md`
+`cd /Users/lashby/Projects/AlloyGBM && git status --short --branch && sed -n '1,220p' docs/architecture/state/layer_index.yaml && ls -la docs/architecture/v1.0/v0.9`
 
 Expected outcome:
-- confirms top-level `v1.0` constraints,
-- confirms `v0.8` parent closeout artifacts are present,
-- surfaces the explicit `v0.8.x` continuation notes to seed the next child-layer plan.
+- confirms `v0.9.4` is the active target,
+- confirms `v0.9.2` and `v0.9.3` are `verified`,
+- confirms `v0.9.4` is currently planned-only.
 
 ## Known Risks and Gotchas
-- CI does not yet enforce benchmark regression thresholds as hard failures; benchmark evidence exists but policy is pending.
-- Python test discovery with local modules triggers wheel builds (`maturin`) during runtime checks; keep this in timing expectations.
-- Working tree is intentionally dirty outside this closeout scope:
-  - modified: `docs/architecture/context/session_brief.md`
-  - modified: `docs/architecture/context/handoff.md`
-  - untracked: `docs/architecture/v1.0/v0.7/implementation_notes.md`
-  - untracked: `docs/architecture/v1.0/v0.7/verification_report.md`
-  - untracked: `docs/architecture/v1.0/v0.7/v0.7.5/`
-  Do not auto-stage these without explicit intent.
+- Post-hardening benchmark quality values are not directly comparable to pre-hardening panel-time-series values without noting the leakage fix.
+- `v0.9.4` should avoid re-opening benchmark semantics and focus on docs/tutorial/closeout readiness.

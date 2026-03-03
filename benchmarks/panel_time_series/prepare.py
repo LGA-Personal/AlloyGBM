@@ -86,8 +86,9 @@ def _to_float(raw: str) -> float:
     return float(cleaned.replace(",", "."))
 
 
-def _prepare_rows(raw_zip_path: Path, prepared_path: Path, max_rows: int) -> int:
-    kept = 0
+def _prepare_rows(raw_zip_path: Path, prepared_path: Path, max_rows: int) -> tuple[int, int]:
+    prepared_rows: list[dict[str, object]] = []
+    dropped_no_future_target = 0
     prepared_path.parent.mkdir(parents=True, exist_ok=True)
 
     with zipfile.ZipFile(raw_zip_path, "r") as archive:
@@ -101,19 +102,14 @@ def _prepare_rows(raw_zip_path: Path, prepared_path: Path, max_rows: int) -> int
         ) as prepared_file:
             raw_lines = (line.decode("latin1") for line in raw_member)
             reader = csv.DictReader(raw_lines, delimiter=";")
-            writer = csv.DictWriter(prepared_file, fieldnames=OUTPUT_FIELDS)
-            writer.writeheader()
-
             for row in reader:
-                if max_rows > 0 and kept >= max_rows:
-                    break
                 try:
                     timestamp = _parse_timestamp(row["Date"], row["Time"])
                     values = {_field: _to_float(row[_field]) for _field in SOURCE_FIELDS[2:]}
                 except (KeyError, ValueError):
                     continue
 
-                writer.writerow(
+                prepared_rows.append(
                     {
                         "group_id": "air_quality_station_1",
                         "timestamp": timestamp,
@@ -129,12 +125,35 @@ def _prepare_rows(raw_zip_path: Path, prepared_path: Path, max_rows: int) -> int
                         "temperature_c": values["T"],
                         "relative_humidity": values["RH"],
                         "absolute_humidity": values["AH"],
-                        "target_co_gt": values["CO(GT)"],
                     }
                 )
-                kept += 1
 
-    return kept
+    prepared_rows.sort(key=lambda row: str(row["timestamp"]))
+    finalized_rows: list[dict[str, object]] = []
+    for idx, row in enumerate(prepared_rows):
+        next_idx = idx + 1
+        while next_idx < len(prepared_rows) and (
+            str(prepared_rows[next_idx]["timestamp"]) <= str(row["timestamp"])
+        ):
+            next_idx += 1
+        if next_idx >= len(prepared_rows):
+            dropped_no_future_target += 1
+            continue
+
+        out_row = dict(row)
+        out_row["target_co_gt"] = float(prepared_rows[next_idx]["co_gt"])
+        finalized_rows.append(out_row)
+
+    if max_rows > 0:
+        finalized_rows = finalized_rows[:max_rows]
+
+    with prepared_path.open("w", encoding="utf-8", newline="") as prepared_file:
+        writer = csv.DictWriter(prepared_file, fieldnames=OUTPUT_FIELDS)
+        writer.writeheader()
+        for row in finalized_rows:
+            writer.writerow(row)
+
+    return len(finalized_rows), dropped_no_future_target
 
 
 def main(argv: list[str]) -> int:
@@ -169,10 +188,12 @@ def main(argv: list[str]) -> int:
     if args.force_download or not raw_path.exists():
         _download(RAW_URL, raw_path)
 
-    kept_rows = _prepare_rows(raw_path, prepared_path, max_rows=args.max_rows)
+    kept_rows, dropped_no_future_target = _prepare_rows(
+        raw_path, prepared_path, max_rows=args.max_rows
+    )
     print(
         "[panel_time_series] prepared dataset written to "
-        f"{prepared_path} (rows={kept_rows})"
+        f"{prepared_path} (rows={kept_rows}, dropped_no_future_target={dropped_no_future_target})"
     )
     return 0
 
