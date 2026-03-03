@@ -7,7 +7,7 @@
   - benchmark evidence includes low-tree/high-learning-rate and high-tree/low-learning-rate comparisons for AlloyGBM, LightGBM, and XGBoost,
   - a new `dow_jones_financial` scenario is available with leakage-aware preprocessing and deterministic preparation behavior,
   - `v0.9.1` deferred item `BG-902` is closed with command-backed evidence.
-- Audience: engineers preparing `v0.9.3` temporal integrity hardening, `v0.9.4` runtime provenance fixes, and later competitiveness/closeout slices.
+- Audience: engineers preparing `v0.9.3` temporal integrity hardening, `v0.9.4` runtime provenance fixes, and later continuous-feature/competitiveness/closeout slices.
 
 ## Scope
 ### In Scope
@@ -31,7 +31,7 @@
 
 ### Out of Scope
 - Algorithmic training/inference optimizations intended for `v0.9.3`.
-- CI hard-fail benchmark threshold enforcement finalization intended for `v0.9.5+` (policy draft updates allowed, full enforcement deferred).
+- CI hard-fail benchmark threshold enforcement finalization intended for `v0.9.7+` (policy draft updates allowed, full enforcement deferred).
 - Ranking/GPU/new-objective roadmap features.
 - Breaking changes to `GBMRegressor` public API or model format.
 

@@ -111,4 +111,5 @@
 - Required follow-up before merge/release:
   - plan and execute `docs/architecture/v1.0/v0.9/v0.9.3` temporal leakage hardening follow-up scope,
   - execute `docs/architecture/v1.0/v0.9/v0.9.4` runtime provenance hardening,
-  - continue competitiveness and policy/doc closeout in `v0.9.5` and `v0.9.6`.
+  - execute native continuous-feature support slices in `v0.9.5` and `v0.9.6`,
+  - continue competitiveness/policy hardening in `v0.9.7` and docs/closeout in `v0.9.8`.

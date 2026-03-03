@@ -7,7 +7,7 @@
   - benchmark runner fails fast when loaded native extension lacks training entrypoint,
   - benchmark outputs include runtime provenance metadata (module/native paths),
   - regression tests cover runtime contract checks.
-- Audience: engineers using benchmark evidence to judge competitiveness for `v0.9.5` tuning decisions.
+- Audience: engineers preparing `v0.9.5+` continuous-feature native-training enablement on top of trustworthy benchmark/runtime evidence.
 
 ## Scope
 ### In Scope
@@ -22,12 +22,13 @@
 - Add benchmark regression tests for runtime contract checks.
 - Update benchmark docs to describe the runtime contract guard behavior.
 - Update layer sequencing docs to:
-  - reserve `v0.9.5` for benchmark improvement,
-  - reserve `v0.9.6` for docs/tutorial closeout.
+  - reserve `v0.9.5` and `v0.9.6` for continuous-feature native-training support,
+  - reserve `v0.9.7` for competitiveness/policy hardening,
+  - reserve `v0.9.8` for docs/tutorial closeout.
 
 ### Out of Scope
-- Algorithmic benchmark improvements (`v0.9.5` scope).
-- Parent `v0.9` rollup closeout artifacts (`v0.9.6` scope).
+- Algorithmic benchmark competitiveness work (`v0.9.7` scope).
+- Parent `v0.9` rollup closeout artifacts (`v0.9.8` scope).
 - New model-family roadmap scope (ranking/GPU/new objectives).
 
 ## Interfaces and Types
@@ -42,7 +43,7 @@
 2. Fail benchmark execution early with actionable errors when contract checks fail.
 3. Add provenance metadata emission for loaded Alloy runtime.
 4. Add/extend benchmark tests for contract acceptance/rejection paths.
-5. Update benchmark README and `v0.9` sequencing docs (`v0.9.5`/`v0.9.6` shift).
+5. Update benchmark README and `v0.9` sequencing docs (`v0.9.5` through `v0.9.8` shift).
 6. Execute verification commands and update layer index target progression.
 
 ## Test Cases and Scenarios
@@ -65,7 +66,7 @@
 8. `docs/architecture/v1.0/v0.9/v0.9.4/implementation_notes.md` is present.
 9. `docs/architecture/v1.0/v0.9/v0.9.4/verification_report.md` is present with criterion-to-evidence mapping.
 10. `cargo fmt -- --check` and benchmark test suite command pass.
-11. `docs/architecture/state/layer_index.yaml` marks `v0.9.4` verified and advances target to `docs/architecture/v1.0/v0.9/v0.9.5` (with `v0.9.6` queued).
+11. `docs/architecture/state/layer_index.yaml` marks `v0.9.4` verified and advances target to `docs/architecture/v1.0/v0.9/v0.9.5` (with `v0.9.6`/`v0.9.7`/`v0.9.8` queued).
 
 ## Risks and Mitigations
 - Risk: users rely on older Alloy benchmark package variants.
@@ -77,5 +78,6 @@
 
 ## Assumptions and Defaults
 - Benchmark evidence is only valid when Alloy runtime contract matches the current benchmarked training interface.
-- `v0.9.5` remains the immediate optimization slice after this hardening.
-- `v0.9.6` remains reserved for docs/tutorial and parent closeout readiness.
+- `v0.9.5` and `v0.9.6` are reserved for native continuous-feature training support.
+- `v0.9.7` is reserved for competitiveness and policy hardening after continuous-feature support lands.
+- `v0.9.8` is reserved for docs/tutorial and parent closeout readiness.

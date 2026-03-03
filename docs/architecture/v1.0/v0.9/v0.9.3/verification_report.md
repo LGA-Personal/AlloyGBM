@@ -99,5 +99,6 @@
 - Ready: Yes
 - Required follow-up before merge/release:
   - execute `docs/architecture/v1.0/v0.9/v0.9.4` for benchmark runtime provenance hardening,
-  - execute `docs/architecture/v1.0/v0.9/v0.9.5` for competitiveness/policy improvements on the corrected harness,
-  - execute `docs/architecture/v1.0/v0.9/v0.9.6` for documentation/tutorial and closeout readiness packaging.
+  - execute `docs/architecture/v1.0/v0.9/v0.9.5` and `docs/architecture/v1.0/v0.9/v0.9.6` for native continuous-feature training support,
+  - execute `docs/architecture/v1.0/v0.9/v0.9.7` for competitiveness/policy improvements on the corrected harness,
+  - execute `docs/architecture/v1.0/v0.9/v0.9.8` for documentation/tutorial and closeout readiness packaging.
