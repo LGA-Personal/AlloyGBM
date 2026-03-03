@@ -53,6 +53,7 @@ REQUIRED_ALLOY_INIT_PARAMS = (
     "row_subsample",
     "col_subsample",
 )
+VALID_ALLOY_CONTINUOUS_BINNING_STRATEGIES = ("linear", "rank")
 
 
 @dataclass
@@ -326,7 +327,12 @@ def _run_model(
 
 
 def _model_factories(
-    gbm_regressor_cls: type, seed: int, learning_rate: float, max_depth: int, rounds: int
+    gbm_regressor_cls: type,
+    seed: int,
+    learning_rate: float,
+    max_depth: int,
+    rounds: int,
+    alloy_continuous_binning_strategy: str,
 ) -> dict:
     from lightgbm import LGBMRegressor
     from xgboost import XGBRegressor
@@ -349,6 +355,8 @@ def _model_factories(
         alloy_params["seed"] = seed
     if "deterministic" in alloy_signature.parameters:
         alloy_params["deterministic"] = True
+    if "continuous_binning_strategy" in alloy_signature.parameters:
+        alloy_params["continuous_binning_strategy"] = alloy_continuous_binning_strategy
 
     return {
         "alloygbm": lambda: gbm_regressor_cls(**alloy_params),
@@ -507,6 +515,10 @@ def _render_results_markdown(
         f"# Model Comparison ({run_id})",
         "",
         "## Params",
+        (
+            "- alloy_continuous_binning_strategy: "
+            f"`{params['alloy_continuous_binning_strategy']}`"
+        ),
         f"- profile_mode: `{params['profile_mode']}`",
         f"- scenarios: `{', '.join(params['scenarios'])}`",
         f"- test_size: `{params['test_size']}`",
@@ -692,6 +704,15 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--learning-rate", type=float, default=0.1)
     parser.add_argument("--max-depth", type=int, default=6)
     parser.add_argument("--rounds", type=int, default=120)
+    parser.add_argument(
+        "--alloy-continuous-binning-strategy",
+        choices=VALID_ALLOY_CONTINUOUS_BINNING_STRATEGIES,
+        default="linear",
+        help=(
+            "continuous-feature binning strategy passed to alloygbm runtime when "
+            "supported by the installed GBMRegressor"
+        ),
+    )
     parser.add_argument("--test-size", type=float, default=0.2)
     parser.add_argument("--force-prepare", action="store_true")
     parser.add_argument(
@@ -755,6 +776,7 @@ def main(argv: list[str]) -> int:
                 learning_rate=profile.learning_rate,
                 max_depth=profile.max_depth,
                 rounds=profile.rounds,
+                alloy_continuous_binning_strategy=args.alloy_continuous_binning_strategy,
             )
 
             for scenario in args.scenarios:
@@ -853,6 +875,7 @@ def main(argv: list[str]) -> int:
         "learning_rate": args.learning_rate,
         "max_depth": args.max_depth,
         "rounds": args.rounds,
+        "alloy_continuous_binning_strategy": args.alloy_continuous_binning_strategy,
         "test_size": args.test_size,
         "scenarios": args.scenarios,
         "alloygbm_runtime": alloy_runtime,
