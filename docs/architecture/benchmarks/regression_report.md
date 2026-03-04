@@ -137,3 +137,49 @@ Interpretation: AVX2 tuning cannot be validated on this host; performance conclu
 1. Investigate per-feature adaptive quantile bins (or weighted sketch) instead of a single global bin cap.
 2. Add calibration guardrails for quantile mode (for example, scenario-aware fallback to linear when RMSE regression exceeds threshold).
 3. Re-run this exact matrix on a native AVX2-capable `x86_64` host for SIMD-path evidence.
+
+---
+
+## Candidate Experiment: Parallel Histogram Tiles (2026-03-04)
+
+### Status
+PASS for compile/test/benchmark execution.  
+Decision: keep as default backend improvement candidate (no behavior/accuracy contract change observed).
+
+### Scope
+- Implemented deterministic parallelization of CPU histogram building across feature tiles in `alloygbm-backend-cpu`.
+- Added workload gate to avoid small-workload overhead.
+- Preserved feature-histogram materialization order to keep split behavior deterministic.
+
+### Commands Executed
+1. Kernel microbench (before/after capture):
+   - `cargo bench -p alloygbm-backend-cpu --bench histogram_kernels -- --nocapture`
+2. Focused benchmark run (shallow profile, all scenarios, seed `7`):
+   - `PYTHONPATH=/tmp/alloygbm-bench-runtime-par-tiles/site-packages python3 -B benchmarks/run_model_comparison.py --profile shallow_high_lr:0.20:4:200 --profile-seeds 7 --output-dir benchmarks/results/tile_parallel_candidate_shallow`
+3. A/B isolation with parallelism effectively disabled:
+   - `RAYON_NUM_THREADS=1 PYTHONPATH=/tmp/alloygbm-bench-runtime-par-tiles/site-packages python3 -B benchmarks/run_model_comparison.py --profile shallow_high_lr:0.20:4:200 --profile-seeds 7 --output-dir benchmarks/results/tile_parallel_candidate_shallow_rayon1`
+4. Heavy stress profile spot check:
+   - `PYTHONPATH=/tmp/alloygbm-bench-runtime-par-tiles/site-packages python3 -B benchmarks/run_model_comparison.py --profile mid_balanced:0.05:6:1200 --profile-seeds 7 --scenarios histogram_stress --output-dir benchmarks/results/tile_parallel_candidate_mid_hist`
+
+### Produced Artifacts
+- `benchmarks/results/tile_parallel_candidate_shallow/model_comparison_20260304T005348Z.csv`
+- `benchmarks/results/tile_parallel_candidate_shallow_rayon1/model_comparison_20260304T005509Z.csv`
+- `benchmarks/results/tile_parallel_candidate_mid_hist/model_comparison_20260304T010532Z.csv`
+
+### Histogram Kernel Microbench Delta
+`histogram_build_medium_backend` improved from ~`420,426 ns/iter` to ~`201,669 ns/iter` (about `52%` faster) on this host.
+
+### Alloy A/B Delta (Parallel vs `RAYON_NUM_THREADS=1`, shallow profile)
+Across `dense_numeric`, `panel_time_series`, `histogram_stress`, `dow_jones_financial`:
+- Median fit delta: `-16.72%` (parallel faster).
+- Largest fit improvement: `histogram_stress` `-38.87%`.
+- RMSE/MAE unchanged in all compared cells.
+
+### Heavy Scenario Spot Check
+`histogram_stress` + `mid_balanced` (seed `7`):
+- Alloy fit time: `198.584s` (parallel-enabled run).
+- RMSE/MAE unchanged from prior baseline values.
+
+### Notes
+- This candidate targets training throughput only; it does not change split math or objective behavior.
+- Current inference timings remain dominated by predictor-path behavior unrelated to this histogram candidate.

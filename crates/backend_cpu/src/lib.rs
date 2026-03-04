@@ -3,12 +3,14 @@ use alloygbm_core::{
     HistogramBundle, NodeSlice, NodeStats, PartitionResult, SplitCandidate,
 };
 use alloygbm_engine::{BackendOps, EngineError, EngineResult};
+use rayon::prelude::*;
 use std::sync::OnceLock;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CpuBackend;
 
 const SMALL_TILE_WORKLOAD_THRESHOLD: usize = 16_384;
+const PARALLEL_TILE_WORKLOAD_THRESHOLD: usize = 131_072;
 const DISABLE_AVX2_ENV_VAR: &str = "ALLOYGBM_DISABLE_AVX2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,6 +173,154 @@ impl CpuBackend {
         );
     }
 
+    fn should_parallelize_tiles(
+        feature_tile_count: usize,
+        row_count: usize,
+        selected_feature_count: usize,
+    ) -> bool {
+        feature_tile_count > 1
+            && row_count.saturating_mul(selected_feature_count) >= PARALLEL_TILE_WORKLOAD_THRESHOLD
+            && rayon::current_num_threads() > 1
+    }
+
+    fn build_feature_histograms_for_tile(
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: &NodeSlice,
+        tile: &FeatureTile,
+        bin_count: usize,
+        avx2_available: bool,
+    ) -> EngineResult<Vec<FeatureHistogram>> {
+        let feature_count = binned_matrix.feature_count;
+        if tile.end_feature as usize > feature_count {
+            return Err(EngineError::ContractViolation(format!(
+                "feature tile end {} exceeds feature_count {}",
+                tile.end_feature, feature_count
+            )));
+        }
+
+        let start_feature = tile.start_feature as usize;
+        let end_feature = tile.end_feature as usize;
+        let tile_feature_count = end_feature - start_feature;
+        let tile_workload = node.row_indices.len().saturating_mul(tile_feature_count);
+        let mut feature_histograms = Vec::with_capacity(tile_feature_count);
+
+        match Self::select_histogram_kernel_path(tile_workload, avx2_available) {
+            HistogramKernelPath::PerFeatureScalar => {
+                Self::build_tile_histograms_per_feature(
+                    binned_matrix,
+                    gradients,
+                    node,
+                    start_feature,
+                    end_feature,
+                    bin_count,
+                    &mut feature_histograms,
+                );
+            }
+            HistogramKernelPath::RowFirstScalar => {
+                Self::build_tile_histograms_row_first(
+                    binned_matrix,
+                    gradients,
+                    node,
+                    start_feature,
+                    end_feature,
+                    bin_count,
+                    &mut feature_histograms,
+                );
+            }
+            HistogramKernelPath::RowFirstAvx2 => {
+                #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+                Self::build_tile_histograms_row_first_x86(
+                    binned_matrix,
+                    gradients,
+                    node,
+                    start_feature,
+                    end_feature,
+                    bin_count,
+                    &mut feature_histograms,
+                );
+                #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+                Self::build_tile_histograms_row_first(
+                    binned_matrix,
+                    gradients,
+                    node,
+                    start_feature,
+                    end_feature,
+                    bin_count,
+                    &mut feature_histograms,
+                );
+            }
+        }
+
+        Ok(feature_histograms)
+    }
+
+    fn build_histograms_internal(
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: &NodeSlice,
+        feature_tiles: &[FeatureTile],
+        parallel_tiles: bool,
+    ) -> EngineResult<HistogramBundle> {
+        if gradients.len() != binned_matrix.row_count {
+            return Err(EngineError::ContractViolation(format!(
+                "gradients length {} does not match row_count {}",
+                gradients.len(),
+                binned_matrix.row_count
+            )));
+        }
+        if feature_tiles.is_empty() {
+            return Err(EngineError::ContractViolation(
+                "feature_tiles cannot be empty".to_string(),
+            ));
+        }
+        node.validate_bounds(binned_matrix.row_count)?;
+
+        let bin_count = binned_matrix.max_bin as usize + 1;
+        let selected_feature_count = feature_tiles
+            .iter()
+            .map(|tile| (tile.end_feature - tile.start_feature) as usize)
+            .sum();
+        let mut feature_histograms = Vec::with_capacity(selected_feature_count);
+        let avx2_available = Self::runtime_avx2_available();
+
+        if parallel_tiles {
+            let per_tile_histograms = feature_tiles
+                .par_iter()
+                .map(|tile| {
+                    Self::build_feature_histograms_for_tile(
+                        binned_matrix,
+                        gradients,
+                        node,
+                        tile,
+                        bin_count,
+                        avx2_available,
+                    )
+                })
+                .collect::<Vec<_>>();
+
+            for tile_histograms in per_tile_histograms {
+                feature_histograms.extend(tile_histograms?);
+            }
+        } else {
+            for tile in feature_tiles {
+                feature_histograms.extend(Self::build_feature_histograms_for_tile(
+                    binned_matrix,
+                    gradients,
+                    node,
+                    tile,
+                    bin_count,
+                    avx2_available,
+                )?);
+            }
+        }
+
+        Ok(HistogramBundle {
+            node_id: node.node_id,
+            feature_histograms,
+        })
+    }
+
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     fn build_tile_histograms_row_first_x86(
         binned_matrix: &BinnedMatrix,
@@ -296,94 +446,22 @@ impl BackendOps for CpuBackend {
         node: &NodeSlice,
         feature_tiles: &[FeatureTile],
     ) -> EngineResult<HistogramBundle> {
-        if gradients.len() != binned_matrix.row_count {
-            return Err(EngineError::ContractViolation(format!(
-                "gradients length {} does not match row_count {}",
-                gradients.len(),
-                binned_matrix.row_count
-            )));
-        }
-        if feature_tiles.is_empty() {
-            return Err(EngineError::ContractViolation(
-                "feature_tiles cannot be empty".to_string(),
-            ));
-        }
-        node.validate_bounds(binned_matrix.row_count)?;
-
-        let feature_count = binned_matrix.feature_count;
-        let bin_count = binned_matrix.max_bin as usize + 1;
         let selected_feature_count = feature_tiles
             .iter()
             .map(|tile| (tile.end_feature - tile.start_feature) as usize)
             .sum();
-        let mut feature_histograms = Vec::with_capacity(selected_feature_count);
-        let avx2_available = Self::runtime_avx2_available();
-
-        for tile in feature_tiles {
-            if tile.end_feature as usize > feature_count {
-                return Err(EngineError::ContractViolation(format!(
-                    "feature tile end {} exceeds feature_count {}",
-                    tile.end_feature, feature_count
-                )));
-            }
-
-            let start_feature = tile.start_feature as usize;
-            let end_feature = tile.end_feature as usize;
-            let tile_feature_count = end_feature - start_feature;
-            let tile_workload = node.row_indices.len().saturating_mul(tile_feature_count);
-
-            match Self::select_histogram_kernel_path(tile_workload, avx2_available) {
-                HistogramKernelPath::PerFeatureScalar => {
-                    Self::build_tile_histograms_per_feature(
-                        binned_matrix,
-                        gradients,
-                        node,
-                        start_feature,
-                        end_feature,
-                        bin_count,
-                        &mut feature_histograms,
-                    );
-                }
-                HistogramKernelPath::RowFirstScalar => {
-                    Self::build_tile_histograms_row_first(
-                        binned_matrix,
-                        gradients,
-                        node,
-                        start_feature,
-                        end_feature,
-                        bin_count,
-                        &mut feature_histograms,
-                    );
-                }
-                HistogramKernelPath::RowFirstAvx2 => {
-                    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-                    Self::build_tile_histograms_row_first_x86(
-                        binned_matrix,
-                        gradients,
-                        node,
-                        start_feature,
-                        end_feature,
-                        bin_count,
-                        &mut feature_histograms,
-                    );
-                    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-                    Self::build_tile_histograms_row_first(
-                        binned_matrix,
-                        gradients,
-                        node,
-                        start_feature,
-                        end_feature,
-                        bin_count,
-                        &mut feature_histograms,
-                    );
-                }
-            }
-        }
-
-        Ok(HistogramBundle {
-            node_id: node.node_id,
-            feature_histograms,
-        })
+        let parallel_tiles = Self::should_parallelize_tiles(
+            feature_tiles.len(),
+            node.row_indices.len(),
+            selected_feature_count,
+        );
+        Self::build_histograms_internal(
+            binned_matrix,
+            gradients,
+            node,
+            feature_tiles,
+            parallel_tiles,
+        )
     }
 
     fn best_split(&self, histograms: &HistogramBundle) -> EngineResult<Option<SplitCandidate>> {
@@ -756,6 +834,56 @@ mod tests {
         let path =
             CpuBackend::select_histogram_kernel_path(SMALL_TILE_WORKLOAD_THRESHOLD + 1, false);
         assert_eq!(path, HistogramKernelPath::RowFirstScalar);
+    }
+
+    #[test]
+    fn tile_parallelization_policy_requires_sufficient_workload() {
+        assert!(!CpuBackend::should_parallelize_tiles(1, 4096, 128));
+        assert!(!CpuBackend::should_parallelize_tiles(4, 128, 8));
+
+        let expected = rayon::current_num_threads() > 1;
+        assert_eq!(CpuBackend::should_parallelize_tiles(4, 4096, 128), expected);
+    }
+
+    #[test]
+    fn build_histograms_parallel_tiles_match_sequential() {
+        let backend = CpuBackend;
+        let matrix = quality_fixture_binned_matrix();
+        let gradients = (0..matrix.row_count)
+            .map(|row_index| {
+                let grad = (row_index as f32 % 23.0) - 11.0;
+                let hess = 1.0 + (row_index as f32 % 5.0) * 0.1;
+                GradientPair::new(grad, hess).expect("gradient pair should be valid")
+            })
+            .collect::<Vec<_>>();
+        let node = NodeSlice::new(0, (0..matrix.row_count as u32).collect())
+            .expect("node should be valid");
+        let feature_tiles = vec![
+            FeatureTile::new(0, 1).expect("feature tile should be valid"),
+            FeatureTile::new(1, 2).expect("feature tile should be valid"),
+        ];
+
+        let sequential = CpuBackend::build_histograms_internal(
+            &matrix,
+            &gradients,
+            &node,
+            &feature_tiles,
+            false,
+        )
+        .expect("sequential histograms should build");
+        let parallel =
+            CpuBackend::build_histograms_internal(&matrix, &gradients, &node, &feature_tiles, true)
+                .expect("parallel histograms should build");
+
+        assert_eq!(sequential, parallel);
+        assert_eq!(
+            backend
+                .best_split(&sequential)
+                .expect("sequential split should succeed"),
+            backend
+                .best_split(&parallel)
+                .expect("parallel split should succeed")
+        );
     }
 
     #[test]

@@ -17,6 +17,8 @@ This is an idea catalog only (no implementation commitment in this document).
 | Continuous features | Adaptive bin budget by feature (more bins for high-entropy/high-gain features) | Variant | Avoids over-allocating bins to low-value features while preserving fidelity where needed. | Per-feature max bins, entropy/gain thresholds. |
 | Split search | Exact greedy split search as an optional reference mode | Variant | Useful as a correctness/quality oracle on smaller datasets; not ideal as default due to cost. | `split_method=exact|hist`. |
 | Split search | Hybrid split mode (exact on top-k features, hist on the rest) | Variant | Can recover quality in sensitive features without full exact-search cost. | `exact_top_k_features`, feature ranking method. |
+| Base learner | Piece-wise linear trees (linear models in leaves) with half-additive fitting | Fundamental | Improves local trend modeling and extrapolation versus constant leaves, especially for time-series-style targets. | `leaf_model=constant|linear`, ridge/L2, max regressors, half-additive enable flag. |
+| Histogram engine | PL-adapted histograms (store additional sufficient statistics for linear-leaf fitting) | Fundamental | Enables scalable linear-leaf training without repeated dense-data rescans; required for production PL-tree throughput. | Stats granularity and compression strategy, fallback to dense scan for validation mode. |
 | Histogram engine | Parent/child histogram reuse and subtraction optimizations | Fundamental | Cuts repeated work during tree growth; common high-impact optimization in GBDT engines. | Node-size threshold for reuse/subtraction path. |
 | Sampling | Gradient-based row sampling (GOSS/MVS-style) | Variant | Better gradient signal per compute unit than uniform subsampling on noisy tasks. | Sampling fraction, high-gradient retention ratio. |
 | Feature handling | Exclusive Feature Bundling (EFB) for sparse/high-dimensional features | Variant | Reduces effective feature count and histogram cost in sparse settings. | Bundle conflict threshold, max bundle size. |
@@ -55,3 +57,16 @@ This is an idea catalog only (no implementation commitment in this document).
 - Variant tested: `continuous_binning_strategy=quantile` with `continuous_binning_max_bins` sweep (`64/128/256`).
 - Outcome: keep as configurable experimental variant; do not promote to default in current state.
 - Reason: ultra-profile speed gains were observed, but full-matrix quality regressed materially on `histogram_stress` (RMSE increase).
+- Fundamental tested: parallel histogram building across feature tiles (CPU backend).
+- Outcome: keep and proceed.
+- Reason: training fit-time improved materially in A/B checks (largest gain on `histogram_stress`) with no observed accuracy drift.
+- Variant tested: `leaf_model=linear` (stage-1 piece-wise linear leaf terms on split feature).
+- Outcome: keep as configurable experimental variant; do not promote to default in current state.
+- Reason: benchmark deltas were mixed with severe regression clusters on `panel_time_series` and `histogram_stress`; competitiveness against LightGBM/XGBoost did not improve.
+
+## Suggested Staging For PL Trees
+
+1. Add a low-risk variant path first: `leaf_model=linear` with strict regressor cap and strong regularization.
+2. Implement ancestor-feature-only regressor selection to bound leaf-model dimensionality.
+3. Add half-additive fitting (collapse prior regressors into one synthetic feature) for fixed-cost updates.
+4. Extend histogram payload with PL-relevant statistics and benchmark memory/runtime deltas before defaulting anywhere.
