@@ -350,3 +350,63 @@ Heavy spot check (`histogram_stress` + `mid_balanced`, seed `7`):
 ### Notes
 - This candidate materially improves one-shot benchmark predict latency, unlike parse-cache-only optimization.
 - Accuracy parity held across all comparison runs.
+
+---
+
+## Candidate Experiment: Histogram Subtraction In Depth Expansion (2026-03-04)
+
+### Status
+PASS for compile/test/benchmark execution.  
+Decision: keep as default training-path improvement.
+
+### Scope
+- Updated engine depth expansion to:
+  - build root histograms once,
+  - build histograms only for the smaller child partition per accepted split,
+  - derive sibling child histograms by subtracting from parent histograms,
+  - carry child histograms forward to the next depth level.
+- Added histogram-subtraction contract checks (feature/bin alignment and count underflow guards).
+- Added unit coverage for subtraction correctness.
+
+### Commands Executed
+1. Validation:
+   - `cargo fmt --all`
+   - `cargo clippy --workspace --all-targets -- -D warnings`
+   - `cargo test --workspace`
+   - `TESTING_WITH_LOCAL_MODULES=1 python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'`
+2. Runtime build for benchmark isolation:
+   - `python3 -m maturin build --manifest-path bindings/python/Cargo.toml --interpreter python3 --out /tmp/alloygbm-bench-runtime-histsub/wheelhouse -q`
+   - `python3 -m pip install --no-deps --no-cache-dir --target /tmp/alloygbm-bench-runtime-histsub/site-packages <wheel>`
+3. Focused benchmark run (shallow profile, all scenarios, seed `7`):
+   - `PYTHONPATH=/tmp/alloygbm-bench-runtime-histsub/site-packages python3 -B benchmarks/run_model_comparison.py --profile shallow_high_lr:0.20:4:200 --profile-seeds 7 --output-dir benchmarks/results/hist_subtraction_candidate_shallow`
+4. Heavy scenario spot check:
+   - `PYTHONPATH=/tmp/alloygbm-bench-runtime-histsub/site-packages python3 -B benchmarks/run_model_comparison.py --profile mid_balanced:0.05:6:1200 --profile-seeds 7 --scenarios histogram_stress --output-dir benchmarks/results/hist_subtraction_candidate_mid_hist`
+
+### Produced Artifacts
+- `benchmarks/results/hist_subtraction_candidate_shallow/model_comparison_20260304T072310Z.csv`
+- `benchmarks/results/hist_subtraction_candidate_mid_hist/model_comparison_20260304T072500Z.csv`
+
+### Alloy Delta vs Prior Candidate Build
+Compared against `predictor_row_parallel_candidate_*`:
+
+Shallow profile (`4` scenarios, seed `7`):
+- Median fit delta: `-30.49%`.
+- Median predict delta: `+2.25%`.
+- RMSE/MAE deltas: near zero (largest observed RMSE delta `+0.0077%`).
+
+Per-scenario fit deltas:
+- `dense_numeric`: `-20.50%`
+- `panel_time_series`: `-42.29%`
+- `histogram_stress`: `-40.48%`
+- `dow_jones_financial`: `-9.44%`
+
+Heavy spot check (`histogram_stress` + `mid_balanced`, seed `7`):
+- Fit delta: `-46.30%`
+- Predict delta: `+1.99%`
+- RMSE delta: `-0.0114%`
+- MAE delta: `-0.0015%`
+
+### Notes
+- This materially reduces training time in the current high-cost profiles.
+- Predict-time impact is small and slightly regressive in this run; training gain dominates.
+- Observed accuracy drift was negligible in this benchmark slice.
