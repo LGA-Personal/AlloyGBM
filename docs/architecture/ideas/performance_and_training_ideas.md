@@ -48,7 +48,7 @@ This is an idea catalog only (no implementation commitment in this document).
 - A **Fundamental** idea is not automatically "better" in every metric; it means it changes the baseline architecture.
 - A **Variant** idea may outperform the default on some scenarios and underperform on others; variants should remain benchmark-driven and configurable.
 
-## Experiment Notes (2026-03-03)
+## Experiment Notes (2026-03-03 to 2026-03-04)
 
 - Variant tested: `continuous_binning_strategy=rank` against `linear` baseline across full benchmark matrices.
 - Outcome: keep as configurable variant; do not promote to default in current state.
@@ -60,6 +60,9 @@ This is an idea catalog only (no implementation commitment in this document).
 - Fundamental tested: parallel histogram building across feature tiles (CPU backend).
 - Outcome: keep and proceed.
 - Reason: training fit-time improved materially in A/B checks (largest gain on `histogram_stress`) with no observed accuracy drift.
+- Fundamental tested: predictor tree-traversal inference path (prebuilt node tables, no per-row ancestor hash-map checks).
+- Outcome: keep and proceed.
+- Reason: inference latency improved dramatically in benchmark A/B checks (about `-97%` to `-99%` predict-time deltas) with unchanged RMSE/MAE.
 - Variant tested: `leaf_model=linear` (stage-1 piece-wise linear leaf terms on split feature).
 - Outcome: keep as configurable experimental variant; do not promote to default in current state.
 - Reason: benchmark deltas were mixed with severe regression clusters on `panel_time_series` and `histogram_stress`; competitiveness against LightGBM/XGBoost did not improve.
