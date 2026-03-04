@@ -826,7 +826,11 @@ impl Trainer {
             let mut candidate_predictions = predictions.clone();
             let mut candidate_round_stumps = Vec::new();
             let mut round_rejection_reason = IterationStopReason::NoSplitCandidate;
-            let mut active_nodes = vec![(0_u32, root_row_indices)];
+            let root_node_id = encode_tree_node_id(round_index, 0)?;
+            let root_node = NodeSlice::new(root_node_id, root_row_indices)?;
+            let root_histograms =
+                backend.build_histograms(binned_matrix, &gradients, &root_node, &feature_tiles)?;
+            let mut active_nodes = vec![(0_u32, root_node.row_indices, root_histograms)];
 
             for depth in 0..(self.params.max_depth as usize) {
                 if active_nodes.is_empty() {
@@ -834,15 +838,9 @@ impl Trainer {
                 }
 
                 let mut next_nodes = Vec::new();
-                for (local_node_id, node_rows) in active_nodes {
+                for (local_node_id, node_rows, histograms) in active_nodes {
                     let node_id = encode_tree_node_id(round_index, local_node_id)?;
                     let node = NodeSlice::new(node_id, node_rows)?;
-                    let histograms = backend.build_histograms(
-                        binned_matrix,
-                        &gradients,
-                        &node,
-                        &feature_tiles,
-                    )?;
                     let Some(mut split) = backend.best_split(&histograms)? else {
                         continue;
                     };
@@ -904,11 +902,63 @@ impl Trainer {
                     split.left_stats = left_stats;
                     split.right_stats = right_stats;
 
+                    let PartitionResult {
+                        left_row_indices,
+                        right_row_indices,
+                    } = partition;
                     if depth + 1 < self.params.max_depth as usize {
                         let left_local_node_id = left_child_node_id(local_node_id)?;
                         let right_local_node_id = right_child_node_id(local_node_id)?;
-                        next_nodes.push((left_local_node_id, partition.left_row_indices.clone()));
-                        next_nodes.push((right_local_node_id, partition.right_row_indices.clone()));
+                        let left_node_id = encode_tree_node_id(round_index, left_local_node_id)?;
+                        let right_node_id = encode_tree_node_id(round_index, right_local_node_id)?;
+
+                        if left_row_indices.len() <= right_row_indices.len() {
+                            let left_node = NodeSlice::new(left_node_id, left_row_indices)?;
+                            let left_histograms = backend.build_histograms(
+                                binned_matrix,
+                                &gradients,
+                                &left_node,
+                                &feature_tiles,
+                            )?;
+                            let right_histograms = subtract_histogram_bundle(
+                                &histograms,
+                                &left_histograms,
+                                right_node_id,
+                            )?;
+                            next_nodes.push((
+                                left_local_node_id,
+                                left_node.row_indices,
+                                left_histograms,
+                            ));
+                            next_nodes.push((
+                                right_local_node_id,
+                                right_row_indices,
+                                right_histograms,
+                            ));
+                        } else {
+                            let right_node = NodeSlice::new(right_node_id, right_row_indices)?;
+                            let right_histograms = backend.build_histograms(
+                                binned_matrix,
+                                &gradients,
+                                &right_node,
+                                &feature_tiles,
+                            )?;
+                            let left_histograms = subtract_histogram_bundle(
+                                &histograms,
+                                &right_histograms,
+                                left_node_id,
+                            )?;
+                            next_nodes.push((
+                                left_local_node_id,
+                                left_row_indices,
+                                left_histograms,
+                            ));
+                            next_nodes.push((
+                                right_local_node_id,
+                                right_node.row_indices,
+                                right_histograms,
+                            ));
+                        }
                     }
 
                     candidate_round_stumps.push(TrainedStump {
@@ -1236,6 +1286,67 @@ fn validate_partition_cover(row_count: usize, partition: &PartitionResult) -> En
         ));
     }
     Ok(())
+}
+
+fn subtract_histogram_bundle(
+    parent: &HistogramBundle,
+    child: &HistogramBundle,
+    node_id: u32,
+) -> EngineResult<HistogramBundle> {
+    if parent.feature_histograms.len() != child.feature_histograms.len() {
+        return Err(EngineError::ContractViolation(format!(
+            "parent histogram feature count {} does not match child histogram feature count {}",
+            parent.feature_histograms.len(),
+            child.feature_histograms.len()
+        )));
+    }
+
+    let mut feature_histograms = Vec::with_capacity(parent.feature_histograms.len());
+    for (parent_feature, child_feature) in parent
+        .feature_histograms
+        .iter()
+        .zip(&child.feature_histograms)
+    {
+        if parent_feature.feature_index != child_feature.feature_index {
+            return Err(EngineError::ContractViolation(format!(
+                "feature histogram mismatch between parent feature {} and child feature {}",
+                parent_feature.feature_index, child_feature.feature_index
+            )));
+        }
+        if parent_feature.bins.len() != child_feature.bins.len() {
+            return Err(EngineError::ContractViolation(format!(
+                "feature {} bin count mismatch between parent {} and child {}",
+                parent_feature.feature_index,
+                parent_feature.bins.len(),
+                child_feature.bins.len()
+            )));
+        }
+
+        let mut bins = Vec::with_capacity(parent_feature.bins.len());
+        for (parent_bin, child_bin) in parent_feature.bins.iter().zip(&child_feature.bins) {
+            if child_bin.count > parent_bin.count {
+                return Err(EngineError::ContractViolation(format!(
+                    "child histogram count {} exceeds parent count {} for feature {}",
+                    child_bin.count, parent_bin.count, parent_feature.feature_index
+                )));
+            }
+            bins.push(alloygbm_core::HistogramBin {
+                grad_sum: parent_bin.grad_sum - child_bin.grad_sum,
+                hess_sum: parent_bin.hess_sum - child_bin.hess_sum,
+                count: parent_bin.count - child_bin.count,
+            });
+        }
+
+        feature_histograms.push(alloygbm_core::FeatureHistogram {
+            feature_index: parent_feature.feature_index,
+            bins,
+        });
+    }
+
+    Ok(HistogramBundle {
+        node_id,
+        feature_histograms,
+    })
 }
 
 fn validate_iteration_controls(controls: IterationControls) -> EngineResult<()> {
@@ -2865,6 +2976,91 @@ mod tests {
             report.recommended_mode,
             Some(ArtifactCompatibilityMode::AllowLegacyTreesOnly)
         );
+    }
+
+    #[test]
+    fn subtract_histogram_bundle_derives_complementary_child() {
+        let parent = HistogramBundle {
+            node_id: 7,
+            feature_histograms: vec![
+                alloygbm_core::FeatureHistogram {
+                    feature_index: 0,
+                    bins: vec![
+                        alloygbm_core::HistogramBin {
+                            grad_sum: 3.0,
+                            hess_sum: 5.0,
+                            count: 4,
+                        },
+                        alloygbm_core::HistogramBin {
+                            grad_sum: -1.0,
+                            hess_sum: 2.0,
+                            count: 2,
+                        },
+                    ],
+                },
+                alloygbm_core::FeatureHistogram {
+                    feature_index: 1,
+                    bins: vec![
+                        alloygbm_core::HistogramBin {
+                            grad_sum: 1.5,
+                            hess_sum: 4.0,
+                            count: 3,
+                        },
+                        alloygbm_core::HistogramBin {
+                            grad_sum: -0.5,
+                            hess_sum: 1.0,
+                            count: 1,
+                        },
+                    ],
+                },
+            ],
+        };
+        let child = HistogramBundle {
+            node_id: 15,
+            feature_histograms: vec![
+                alloygbm_core::FeatureHistogram {
+                    feature_index: 0,
+                    bins: vec![
+                        alloygbm_core::HistogramBin {
+                            grad_sum: 2.0,
+                            hess_sum: 3.0,
+                            count: 2,
+                        },
+                        alloygbm_core::HistogramBin {
+                            grad_sum: -0.25,
+                            hess_sum: 0.5,
+                            count: 1,
+                        },
+                    ],
+                },
+                alloygbm_core::FeatureHistogram {
+                    feature_index: 1,
+                    bins: vec![
+                        alloygbm_core::HistogramBin {
+                            grad_sum: 1.0,
+                            hess_sum: 2.5,
+                            count: 2,
+                        },
+                        alloygbm_core::HistogramBin {
+                            grad_sum: -0.25,
+                            hess_sum: 0.25,
+                            count: 1,
+                        },
+                    ],
+                },
+            ],
+        };
+
+        let complement =
+            subtract_histogram_bundle(&parent, &child, 16).expect("subtraction should succeed");
+        assert_eq!(complement.node_id, 16);
+        assert_eq!(complement.feature_histograms.len(), 2);
+        assert_eq!(complement.feature_histograms[0].bins[0].count, 2);
+        assert_eq!(complement.feature_histograms[0].bins[1].count, 1);
+        assert!((complement.feature_histograms[0].bins[0].grad_sum - 1.0).abs() < 1e-6);
+        assert!((complement.feature_histograms[0].bins[1].grad_sum + 0.75).abs() < 1e-6);
+        assert!((complement.feature_histograms[1].bins[0].hess_sum - 1.5).abs() < 1e-6);
+        assert!((complement.feature_histograms[1].bins[1].hess_sum - 0.75).abs() < 1e-6);
     }
 
     #[test]
