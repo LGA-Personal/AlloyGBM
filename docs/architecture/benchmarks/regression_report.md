@@ -296,3 +296,57 @@ From `benchmarks/results/predictor_handle_cache_candidate_microbench_20260304.js
 - Full benchmark harness usually performs one predict per fit, so this candidate's value is underrepresented there.
 - The improvement scales with repeated prediction calls per fitted model, especially for low-latency small-batch inference.
 - Accuracy parity held across all benchmark comparisons in this run.
+
+---
+
+## Candidate Experiment: Predictor Batch Row Parallelization (2026-03-04)
+
+### Status
+PASS for compile/test/benchmark execution.  
+Decision: keep as default predictor-path improvement.
+
+### Scope
+- Added guarded Rayon row-parallel execution in `alloygbm-predictor` `predict_batch`.
+- Added a workload gate to avoid parallel overhead on small batches.
+- Preserved deterministic output ordering and existing input validation behavior.
+
+### Commands Executed
+1. Validation:
+   - `cargo fmt --all`
+   - `cargo clippy --workspace --all-targets -- -D warnings`
+   - `cargo test --workspace`
+   - `TESTING_WITH_LOCAL_MODULES=1 python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'`
+2. Runtime build for benchmark isolation:
+   - `python3 -m maturin build --manifest-path bindings/python/Cargo.toml --interpreter python3 --out /tmp/alloygbm-bench-runtime-predictor-rowpar/wheelhouse -q`
+   - `python3 -m pip install --no-deps --no-cache-dir --target /tmp/alloygbm-bench-runtime-predictor-rowpar/site-packages <wheel>`
+3. Focused benchmark run (shallow profile, all scenarios, seed `7`):
+   - `PYTHONPATH=/tmp/alloygbm-bench-runtime-predictor-rowpar/site-packages python3 -B benchmarks/run_model_comparison.py --profile shallow_high_lr:0.20:4:200 --profile-seeds 7 --output-dir benchmarks/results/predictor_row_parallel_candidate_shallow`
+4. Heavy scenario spot check:
+   - `PYTHONPATH=/tmp/alloygbm-bench-runtime-predictor-rowpar/site-packages python3 -B benchmarks/run_model_comparison.py --profile mid_balanced:0.05:6:1200 --profile-seeds 7 --scenarios histogram_stress --output-dir benchmarks/results/predictor_row_parallel_candidate_mid_hist`
+
+### Produced Artifacts
+- `benchmarks/results/predictor_row_parallel_candidate_shallow/model_comparison_20260304T060246Z.csv`
+- `benchmarks/results/predictor_row_parallel_candidate_mid_hist/model_comparison_20260304T060555Z.csv`
+
+### Alloy Delta vs Prior Candidate Build
+Compared against `predictor_handle_cache_candidate_*`:
+
+Shallow profile (`4` scenarios, seed `7`):
+- Median fit delta: `-2.37%`.
+- Median predict delta: `-53.89%`.
+- RMSE/MAE deltas: `0.00%` in all compared cells.
+
+Per-scenario predict deltas:
+- `dense_numeric`: `-57.90%`
+- `panel_time_series`: `-61.86%`
+- `histogram_stress`: `-49.88%`
+- `dow_jones_financial`: `+8.24%`
+
+Heavy spot check (`histogram_stress` + `mid_balanced`, seed `7`):
+- Fit delta: `-5.98%`
+- Predict delta: `-76.86%`
+- RMSE/MAE: unchanged
+
+### Notes
+- This candidate materially improves one-shot benchmark predict latency, unlike parse-cache-only optimization.
+- Accuracy parity held across all comparison runs.

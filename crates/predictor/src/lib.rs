@@ -3,9 +3,13 @@ use alloygbm_core::{
     ModelSectionKind, decode_optional_categorical_state_section_v1, deserialize_model_artifact_v1,
     format_required_section_mode_error, required_section_compatibility_report,
 };
+use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+
+const PARALLEL_PREDICT_MIN_ROWS: usize = 256;
+const PARALLEL_PREDICT_MIN_WORK_ITEMS: usize = 16_384;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PredictorError {
@@ -134,7 +138,14 @@ impl Predictor {
                 feature_count
             )));
         }
+        self.predict_row_with_feature_count(features, feature_count)
+    }
 
+    fn predict_row_with_feature_count(
+        &self,
+        features: &[f32],
+        feature_count: usize,
+    ) -> PredictorResult<f32> {
         let mut prediction = self.baseline_prediction;
         for tree in &self.trees {
             let mut local_node_id: usize = 0;
@@ -169,7 +180,26 @@ impl Predictor {
                 "rows cannot be empty".to_string(),
             ));
         }
-        rows.iter().map(|row| self.predict_row(row)).collect()
+        let feature_count = self.metadata.feature_names.len();
+        for row in rows {
+            if row.len() != feature_count {
+                return Err(PredictorError::InvalidInput(format!(
+                    "feature length {} does not match model feature_count {}",
+                    row.len(),
+                    feature_count
+                )));
+            }
+        }
+
+        if should_parallel_predict_batch(rows.len(), self.trees.len()) {
+            rows.par_iter()
+                .map(|row| self.predict_row_with_feature_count(row, feature_count))
+                .collect()
+        } else {
+            rows.iter()
+                .map(|row| self.predict_row_with_feature_count(row, feature_count))
+                .collect()
+        }
     }
 
     pub fn predict_row_stub(&self, features: &[f32]) -> PredictorResult<f32> {
@@ -179,6 +209,11 @@ impl Predictor {
     pub fn predict_batch_stub(&self, rows: &[Vec<f32>]) -> PredictorResult<Vec<f32>> {
         self.predict_batch(rows)
     }
+}
+
+fn should_parallel_predict_batch(row_count: usize, tree_count: usize) -> bool {
+    row_count >= PARALLEL_PREDICT_MIN_ROWS
+        && row_count.saturating_mul(tree_count.max(1)) >= PARALLEL_PREDICT_MIN_WORK_ITEMS
 }
 
 fn required_single_section(
@@ -688,5 +723,16 @@ mod tests {
         let pred = predictor_stub();
         let result = pred.predict_row_stub(&[1.0, 2.0]);
         assert!(matches!(result, Err(PredictorError::InvalidInput(_))));
+    }
+
+    #[test]
+    fn batch_parallelization_policy_requires_sufficient_workload() {
+        assert!(!should_parallel_predict_batch(
+            PARALLEL_PREDICT_MIN_ROWS - 1,
+            100
+        ));
+        assert!(!should_parallel_predict_batch(PARALLEL_PREDICT_MIN_ROWS, 1));
+        assert!(should_parallel_predict_batch(PARALLEL_PREDICT_MIN_ROWS, 64));
+        assert!(should_parallel_predict_batch(4_096, 4));
     }
 }
