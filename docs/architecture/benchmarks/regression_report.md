@@ -183,3 +183,52 @@ Across `dense_numeric`, `panel_time_series`, `histogram_stress`, `dow_jones_fina
 ### Notes
 - This candidate targets training throughput only; it does not change split math or objective behavior.
 - Current inference timings remain dominated by predictor-path behavior unrelated to this histogram candidate.
+
+---
+
+## Candidate Experiment: Predictor Tree Traversal Inference Path (2026-03-04)
+
+### Status
+PASS for compile/test/benchmark execution.  
+Decision: keep as default predictor inference path.
+
+### Scope
+- Replaced per-row per-stump ancestor validation (`HashMap` + path checks) with prebuilt per-tree node tables and direct tree-path traversal.
+- Tree structures are built once at predictor load time and reused for all row predictions.
+- No objective/split math changes; inference-only execution-path optimization.
+
+### Commands Executed
+1. Validation:
+   - `cargo clippy --workspace --all-targets -- -D warnings`
+   - `cargo test --workspace`
+   - `TESTING_WITH_LOCAL_MODULES=1 python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'`
+2. Focused shallow profile benchmark (all scenarios, seed `7`):
+   - `PYTHONPATH=/tmp/alloygbm-bench-runtime-predictor-opt/site-packages python3 -B benchmarks/run_model_comparison.py --profile shallow_high_lr:0.20:4:200 --profile-seeds 7 --output-dir benchmarks/results/predictor_treepath_candidate_shallow`
+3. Heavy scenario spot check:
+   - `PYTHONPATH=/tmp/alloygbm-bench-runtime-predictor-opt/site-packages python3 -B benchmarks/run_model_comparison.py --profile mid_balanced:0.05:6:1200 --profile-seeds 7 --scenarios histogram_stress --output-dir benchmarks/results/predictor_treepath_candidate_mid_hist`
+
+### Produced Artifacts
+- `benchmarks/results/predictor_treepath_candidate_shallow/model_comparison_20260304T023959Z.csv`
+- `benchmarks/results/predictor_treepath_candidate_mid_hist/model_comparison_20260304T024306Z.csv`
+
+### Alloy Delta vs Prior Candidate Build (Shallow Profile)
+Compared against `tile_parallel_candidate_shallow`:
+- Median fit delta: `-2.58%` (small improvement).
+- Median predict delta: `-97.78%` (major improvement).
+- RMSE/MAE deltas: `0.00%` in all compared cells.
+
+Per-scenario predict deltas:
+- `dense_numeric`: `-97.84%`
+- `panel_time_series`: `-98.23%`
+- `histogram_stress`: `-97.71%`
+- `dow_jones_financial`: `-97.46%`
+
+### Heavy Scenario Spot Check
+`histogram_stress` + `mid_balanced` (seed `7`) compared to prior candidate build:
+- Fit delta: `-15.98%`
+- Predict delta: `-99.50%`
+- RMSE/MAE: unchanged
+
+### Notes
+- This directly addresses the current predictor bottleneck identified in prior runs.
+- Accuracy parity held across all comparison runs.

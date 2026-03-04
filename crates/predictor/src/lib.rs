@@ -3,7 +3,7 @@ use alloygbm_core::{
     ModelSectionKind, decode_optional_categorical_state_section_v1, deserialize_model_artifact_v1,
     format_required_section_mode_error, required_section_compatibility_report,
 };
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
@@ -49,11 +49,24 @@ struct PredictorLayoutPayload {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+struct PredictorTreeNode {
+    feature_index: usize,
+    threshold_bin: f32,
+    left_leaf_value: f32,
+    right_leaf_value: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PredictorTree {
+    nodes_by_local_id: Vec<Option<PredictorTreeNode>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Predictor {
     pub metadata: ModelMetadata,
     pub categorical_state: Option<CategoricalStatePayloadV1>,
     baseline_prediction: f32,
-    stumps: Vec<PredictorStump>,
+    trees: Vec<PredictorTree>,
 }
 
 impl Predictor {
@@ -62,7 +75,7 @@ impl Predictor {
             metadata,
             categorical_state: None,
             baseline_prediction: 0.0,
-            stumps: Vec::new(),
+            trees: Vec::new(),
         }
     }
 
@@ -83,6 +96,7 @@ impl Predictor {
                 .map_err(PredictorError::from)?;
         let (payload_feature_count, baseline_prediction, stumps) =
             decode_trained_model_payload(&trees_section.payload)?;
+        let trees = build_predictor_trees(&stumps)?;
 
         if predictor_layout.feature_count != metadata_feature_count {
             return Err(PredictorError::ContractViolation(format!(
@@ -107,7 +121,7 @@ impl Predictor {
             metadata,
             categorical_state,
             baseline_prediction,
-            stumps,
+            trees,
         })
     }
 
@@ -120,25 +134,30 @@ impl Predictor {
                 feature_count
             )));
         }
-        let stumps_by_node = self
-            .stumps
-            .iter()
-            .map(|stump| (stump.node_id, stump))
-            .collect::<HashMap<_, _>>();
 
         let mut prediction = self.baseline_prediction;
-        for stump in &self.stumps {
-            if !row_satisfies_stump_path_features(features, stump, &stumps_by_node)? {
-                continue;
+        for tree in &self.trees {
+            let mut local_node_id: usize = 0;
+            while let Some(Some(node)) = tree.nodes_by_local_id.get(local_node_id) {
+                if node.feature_index >= feature_count {
+                    return Err(PredictorError::ContractViolation(format!(
+                        "split feature_index {} exceeds feature length {}",
+                        node.feature_index, feature_count
+                    )));
+                }
+                let feature_value = features[node.feature_index];
+                let went_left = feature_value <= node.threshold_bin;
+                prediction += if went_left {
+                    node.left_leaf_value
+                } else {
+                    node.right_leaf_value
+                };
+                local_node_id = if went_left {
+                    local_node_id.saturating_mul(2).saturating_add(1)
+                } else {
+                    local_node_id.saturating_mul(2).saturating_add(2)
+                };
             }
-            let feature_index = stump.feature_index as usize;
-            let feature_value = features[feature_index];
-            let threshold = stump.threshold_bin as f32;
-            prediction += if feature_value <= threshold {
-                stump.left_leaf_value
-            } else {
-                stump.right_leaf_value
-            };
         }
 
         Ok(prediction)
@@ -298,54 +317,46 @@ fn decode_trained_model_payload(
 
 const TREE_NODE_STRIDE: u32 = 1 << 20;
 
-fn encode_tree_node_id(tree_index: u32, local_node_id: u32) -> PredictorResult<u32> {
-    if local_node_id >= TREE_NODE_STRIDE {
-        return Err(PredictorError::ContractViolation(format!(
-            "local node_id {local_node_id} exceeds supported tree-node stride {TREE_NODE_STRIDE}"
-        )));
-    }
-    tree_index
-        .checked_mul(TREE_NODE_STRIDE)
-        .and_then(|base| base.checked_add(local_node_id))
-        .ok_or_else(|| {
-            PredictorError::ContractViolation(
-                "encoded tree node id overflowed u32 range".to_string(),
-            )
-        })
-}
-
 fn decode_tree_node_id(node_id: u32) -> (u32, u32) {
     (node_id / TREE_NODE_STRIDE, node_id % TREE_NODE_STRIDE)
 }
 
-fn row_satisfies_stump_path_features(
-    features: &[f32],
-    stump: &PredictorStump,
-    stumps_by_node: &HashMap<u32, &PredictorStump>,
-) -> PredictorResult<bool> {
-    let (tree_id, mut local_node_id) = decode_tree_node_id(stump.node_id);
-    while local_node_id > 0 {
-        let parent_local = (local_node_id - 1) / 2;
-        let parent_node_id = encode_tree_node_id(tree_id, parent_local)?;
-        let Some(parent_stump) = stumps_by_node.get(&parent_node_id) else {
-            return Ok(false);
-        };
-        let feature_index = parent_stump.feature_index as usize;
-        if feature_index >= features.len() {
-            return Err(PredictorError::ContractViolation(format!(
-                "split feature_index {} exceeds feature length {}",
-                parent_stump.feature_index,
-                features.len()
-            )));
-        }
-        let went_left = features[feature_index] <= parent_stump.threshold_bin as f32;
-        let expected_left = local_node_id == parent_local * 2 + 1;
-        if went_left != expected_left {
-            return Ok(false);
-        }
-        local_node_id = parent_local;
+fn build_predictor_trees(stumps: &[PredictorStump]) -> PredictorResult<Vec<PredictorTree>> {
+    let mut grouped_by_tree: BTreeMap<u32, Vec<(u32, PredictorTreeNode)>> = BTreeMap::new();
+    for stump in stumps {
+        let (tree_id, local_node_id) = decode_tree_node_id(stump.node_id);
+        grouped_by_tree.entry(tree_id).or_default().push((
+            local_node_id,
+            PredictorTreeNode {
+                feature_index: stump.feature_index as usize,
+                threshold_bin: stump.threshold_bin as f32,
+                left_leaf_value: stump.left_leaf_value,
+                right_leaf_value: stump.right_leaf_value,
+            },
+        ));
     }
-    Ok(true)
+
+    let mut trees = Vec::with_capacity(grouped_by_tree.len());
+    for (tree_id, nodes) in grouped_by_tree {
+        let max_local_node_id = nodes
+            .iter()
+            .map(|(local_node_id, _)| *local_node_id as usize)
+            .max()
+            .unwrap_or(0);
+        let mut nodes_by_local_id = vec![None; max_local_node_id + 1];
+        for (local_node_id, node) in nodes {
+            let local_node_id = local_node_id as usize;
+            if nodes_by_local_id[local_node_id].is_some() {
+                return Err(PredictorError::ContractViolation(format!(
+                    "tree {tree_id} contains duplicate local node_id {local_node_id}"
+                )));
+            }
+            nodes_by_local_id[local_node_id] = Some(node);
+        }
+        trees.push(PredictorTree { nodes_by_local_id });
+    }
+
+    Ok(trees)
 }
 
 fn read_u32_le(bytes: &[u8], start: usize) -> PredictorResult<u32> {
