@@ -567,6 +567,69 @@ impl BackendOps for CpuBackend {
         })
     }
 
+    fn apply_split_with_stats(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: &NodeSlice,
+        split: &SplitCandidate,
+    ) -> EngineResult<(PartitionResult, NodeStats, NodeStats)> {
+        node.validate_bounds(binned_matrix.row_count)?;
+        if gradients.len() != binned_matrix.row_count {
+            return Err(EngineError::ContractViolation(format!(
+                "gradients length {} does not match row_count {}",
+                gradients.len(),
+                binned_matrix.row_count
+            )));
+        }
+        if split.feature_index as usize >= binned_matrix.feature_count {
+            return Err(EngineError::ContractViolation(format!(
+                "split feature_index {} exceeds feature_count {}",
+                split.feature_index, binned_matrix.feature_count
+            )));
+        }
+
+        let mut left_row_indices = Vec::with_capacity(node.row_indices.len() / 2);
+        let mut right_row_indices = Vec::with_capacity(node.row_indices.len() / 2);
+        let mut left_grad_sum = 0.0_f32;
+        let mut left_hess_sum = 0.0_f32;
+        let mut right_grad_sum = 0.0_f32;
+        let mut right_hess_sum = 0.0_f32;
+
+        for &row_index_u32 in &node.row_indices {
+            let row_index = row_index_u32 as usize;
+            let cell_index = row_index * binned_matrix.feature_count + split.feature_index as usize;
+            let bin = binned_matrix.bins[cell_index];
+            let gradient = gradients[row_index];
+            if bin <= split.threshold_bin {
+                left_row_indices.push(row_index_u32);
+                left_grad_sum += gradient.grad;
+                left_hess_sum += gradient.hess;
+            } else {
+                right_row_indices.push(row_index_u32);
+                right_grad_sum += gradient.grad;
+                right_hess_sum += gradient.hess;
+            }
+        }
+
+        let partition = PartitionResult {
+            left_row_indices,
+            right_row_indices,
+        };
+        let left_stats = NodeStats {
+            grad_sum: left_grad_sum,
+            hess_sum: left_hess_sum,
+            row_count: partition.left_row_indices.len() as u32,
+        };
+        let right_stats = NodeStats {
+            grad_sum: right_grad_sum,
+            hess_sum: right_hess_sum,
+            row_count: partition.right_row_indices.len() as u32,
+        };
+
+        Ok((partition, left_stats, right_stats))
+    }
+
     fn reduce_sums(
         &self,
         gradients: &[GradientPair],
@@ -977,6 +1040,47 @@ mod tests {
 
         assert_eq!(partition.left_row_indices, vec![0, 1]);
         assert_eq!(partition.right_row_indices, vec![2, 3]);
+    }
+
+    #[test]
+    fn apply_split_with_stats_matches_partition_and_reduction_reference() {
+        let backend = CpuBackend;
+        let matrix = sample_binned_matrix();
+        let node = sample_node();
+        let gradients = sample_gradients();
+        let split = SplitCandidate {
+            node_id: 0,
+            feature_index: 0,
+            threshold_bin: 1,
+            gain: 1.0,
+            left_stats: NodeStats {
+                grad_sum: 0.0,
+                hess_sum: 0.0,
+                row_count: 0,
+            },
+            right_stats: NodeStats {
+                grad_sum: 0.0,
+                hess_sum: 0.0,
+                row_count: 0,
+            },
+        };
+
+        let (partition, left_stats, right_stats) = backend
+            .apply_split_with_stats(&matrix, &gradients, &node, &split)
+            .expect("fused split should succeed");
+        let reference_partition = backend
+            .apply_split(&matrix, &node, &split)
+            .expect("reference split should succeed");
+        let reference_left = backend
+            .reduce_sums(&gradients, &reference_partition.left_row_indices)
+            .expect("reference left reduction should succeed");
+        let reference_right = backend
+            .reduce_sums(&gradients, &reference_partition.right_row_indices)
+            .expect("reference right reduction should succeed");
+
+        assert_eq!(partition, reference_partition);
+        assert_eq!(left_stats, reference_left);
+        assert_eq!(right_stats, reference_right);
     }
 
     #[test]

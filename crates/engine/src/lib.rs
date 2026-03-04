@@ -60,6 +60,18 @@ pub trait BackendOps {
         node: &NodeSlice,
         split: &SplitCandidate,
     ) -> EngineResult<PartitionResult>;
+    fn apply_split_with_stats(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: &NodeSlice,
+        split: &SplitCandidate,
+    ) -> EngineResult<(PartitionResult, NodeStats, NodeStats)> {
+        let partition = self.apply_split(binned_matrix, node, split)?;
+        let left_stats = self.reduce_sums(gradients, &partition.left_row_indices)?;
+        let right_stats = self.reduce_sums(gradients, &partition.right_row_indices)?;
+        Ok((partition, left_stats, right_stats))
+    }
     fn reduce_sums(
         &self,
         gradients: &[GradientPair],
@@ -849,7 +861,8 @@ impl Trainer {
                         continue;
                     }
 
-                    let partition = backend.apply_split(binned_matrix, &node, &split)?;
+                    let (partition, left_stats, right_stats) =
+                        backend.apply_split_with_stats(binned_matrix, &gradients, &node, &split)?;
                     if partition.left_row_indices.len() + partition.right_row_indices.len()
                         != node.row_indices.len()
                     {
@@ -866,10 +879,6 @@ impl Trainer {
                         continue;
                     }
 
-                    let left_stats =
-                        backend.reduce_sums(&gradients, &partition.left_row_indices)?;
-                    let right_stats =
-                        backend.reduce_sums(&gradients, &partition.right_row_indices)?;
                     if left_stats.hess_sum <= 0.0 || right_stats.hess_sum <= 0.0 {
                         return Err(EngineError::ContractViolation(
                             "backend produced non-positive hessian sums".to_string(),
