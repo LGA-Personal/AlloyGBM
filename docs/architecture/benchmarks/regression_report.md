@@ -232,3 +232,67 @@ Per-scenario predict deltas:
 ### Notes
 - This directly addresses the current predictor bottleneck identified in prior runs.
 - Accuracy parity held across all comparison runs.
+
+---
+
+## Candidate Experiment: Cache Parsed Predictor Per Fitted Model (2026-03-04)
+
+### Status
+PASS for compile/test/benchmark execution.  
+Decision: keep as default regressor inference optimization (large wins for repeated small-batch inference; no accuracy impact observed).
+
+### Scope
+- Added `NativePredictorHandle` Python binding to parse/load predictor once and reuse it across `predict()` calls.
+- Updated `GBMRegressor.fit()` to cache a strict parsed predictor handle when available.
+- Updated `GBMRegressor.predict()` to use cached handle first, with canonical bridge fallback on handle runtime failure.
+- Added contract tests for both handle-fast-path and fallback behavior.
+
+### Commands Executed
+1. Validation:
+   - `cargo fmt --all`
+   - `cargo clippy --workspace --all-targets -- -D warnings`
+   - `cargo test --workspace`
+   - `TESTING_WITH_LOCAL_MODULES=1 python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'`
+2. Runtime build for benchmark isolation:
+   - `python3 -m maturin build --manifest-path bindings/python/Cargo.toml --interpreter python3 --out /tmp/alloygbm-bench-runtime-predictor-cache/wheelhouse -q`
+   - `python3 -m pip install --no-deps --no-cache-dir --target /tmp/alloygbm-bench-runtime-predictor-cache/site-packages <wheel>`
+3. Focused benchmark run (shallow profile, all scenarios, seed `7`):
+   - `PYTHONPATH=/tmp/alloygbm-bench-runtime-predictor-cache/site-packages python3 -B benchmarks/run_model_comparison.py --profile shallow_high_lr:0.20:4:200 --profile-seeds 7 --output-dir benchmarks/results/predictor_handle_cache_candidate_shallow`
+4. Heavy scenario spot check:
+   - `PYTHONPATH=/tmp/alloygbm-bench-runtime-predictor-cache/site-packages python3 -B benchmarks/run_model_comparison.py --profile mid_balanced:0.05:6:1200 --profile-seeds 7 --scenarios histogram_stress --output-dir benchmarks/results/predictor_handle_cache_candidate_mid_hist`
+5. Repeated-predict microbench A/B (cached handle vs canonical parse-each-call path):
+   - Results captured in `benchmarks/results/predictor_handle_cache_candidate_microbench_20260304.json`
+
+### Produced Artifacts
+- `benchmarks/results/predictor_handle_cache_candidate_shallow/model_comparison_20260304T054157Z.csv`
+- `benchmarks/results/predictor_handle_cache_candidate_mid_hist/model_comparison_20260304T054517Z.csv`
+- `benchmarks/results/predictor_handle_cache_candidate_microbench_20260304.json`
+
+### Alloy Delta vs Prior Candidate Build (Shallow Profile)
+Compared against `predictor_treepath_candidate_shallow`:
+- Median fit delta: `+3.46%` (noise-level regression in this single-seed run).
+- Median predict delta: `-8.91%` (small improvement in one-shot benchmark path).
+- RMSE/MAE deltas: `0.00%` in all compared cells.
+
+Per-scenario predict deltas:
+- `dense_numeric`: `-19.56%`
+- `panel_time_series`: `+1.74%`
+- `histogram_stress`: `+2.24%`
+- `dow_jones_financial`: `-28.37%`
+
+### Heavy Scenario Spot Check
+`histogram_stress` + `mid_balanced` (seed `7`) compared to prior candidate build:
+- Fit delta: `+9.54%`
+- Predict delta: `-1.46%`
+- RMSE/MAE: unchanged
+
+### Repeated-Predict Microbench (A/B)
+From `benchmarks/results/predictor_handle_cache_candidate_microbench_20260304.json`:
+- `rows=4000` (`80` loops): `-0.29%` delta (near parity; traversal dominates).
+- `rows=32` (`2000` loops): `-66.88%` delta (substantial improvement).
+- `rows=1` (`4000` loops): `-98.61%` delta (very large improvement).
+
+### Notes
+- Full benchmark harness usually performs one predict per fit, so this candidate's value is underrepresented there.
+- The improvement scales with repeated prediction calls per fitted model, especially for low-latency small-batch inference.
+- Accuracy parity held across all benchmark comparisons in this run.
