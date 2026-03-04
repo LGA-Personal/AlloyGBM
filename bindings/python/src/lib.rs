@@ -56,6 +56,29 @@ fn native_runtime_info() -> NativeRuntimeInfo {
     NativeRuntimeInfo::new()
 }
 
+#[pyclass]
+#[derive(Debug, Clone)]
+struct NativePredictorHandle {
+    predictor: Predictor,
+}
+
+#[pymethods]
+impl NativePredictorHandle {
+    #[new]
+    #[pyo3(signature = (artifact_bytes, strict=true))]
+    fn new(artifact_bytes: &[u8], strict: bool) -> PyResult<Self> {
+        let predictor = load_predictor_from_artifact_impl(artifact_bytes, strict)
+            .map_err(predictor_error_to_pyerr)?;
+        Ok(Self { predictor })
+    }
+
+    fn predict_batch(&self, rows: Vec<Vec<f32>>) -> PyResult<Vec<f32>> {
+        self.predictor
+            .predict_batch(&rows)
+            .map_err(predictor_error_to_pyerr)
+    }
+}
+
 fn predictor_error_to_pyerr(error: PredictorError) -> PyErr {
     match error {
         PredictorError::InvalidInput(message) => PyValueError::new_err(message),
@@ -225,11 +248,29 @@ fn train_regression_artifact_impl(
     model.to_artifact_bytes()
 }
 
+fn load_predictor_from_artifact_impl(
+    artifact_bytes: &[u8],
+    strict: bool,
+) -> Result<Predictor, PredictorError> {
+    if strict {
+        TrainedModel::from_artifact_bytes_with_mode(
+            artifact_bytes,
+            ArtifactCompatibilityMode::Strict,
+        )
+        .map_err(|error| {
+            PredictorError::ContractViolation(format!(
+                "canonical predictor path requires strict dual-section artifact: {error}"
+            ))
+        })?;
+    }
+    Predictor::from_artifact_bytes(artifact_bytes)
+}
+
 fn predictor_predict_batch_impl(
     artifact_bytes: &[u8],
     rows: &[Vec<f32>],
 ) -> Result<Vec<f32>, PredictorError> {
-    let predictor = Predictor::from_artifact_bytes(artifact_bytes)?;
+    let predictor = load_predictor_from_artifact_impl(artifact_bytes, false)?;
     predictor.predict_batch(rows)
 }
 
@@ -237,13 +278,8 @@ fn predictor_predict_batch_canonical_impl(
     artifact_bytes: &[u8],
     rows: &[Vec<f32>],
 ) -> Result<Vec<f32>, PredictorError> {
-    TrainedModel::from_artifact_bytes_with_mode(artifact_bytes, ArtifactCompatibilityMode::Strict)
-        .map_err(|error| {
-            PredictorError::ContractViolation(format!(
-                "canonical predictor path requires strict dual-section artifact: {error}"
-            ))
-        })?;
-    predictor_predict_batch_impl(artifact_bytes, rows)
+    let predictor = load_predictor_from_artifact_impl(artifact_bytes, true)?;
+    predictor.predict_batch(rows)
 }
 
 fn shap_explain_rows_impl(
@@ -366,6 +402,7 @@ fn train_regression_artifact(
 #[pymodule]
 fn _alloygbm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<NativeRuntimeInfo>()?;
+    m.add_class::<NativePredictorHandle>()?;
     m.add_function(wrap_pyfunction!(native_runtime_info, m)?)?;
     m.add_function(wrap_pyfunction!(predictor_predict_batch, m)?)?;
     m.add_function(wrap_pyfunction!(predictor_predict_batch_canonical, m)?)?;

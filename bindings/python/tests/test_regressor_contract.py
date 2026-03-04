@@ -673,6 +673,99 @@ class GBMRegressorContractTests(unittest.TestCase):
         self.assertEqual(predictions, [0.0, 0.0])
         self.assertEqual(predict_calls, [[[3.0, 0.0], [4.0, 0.0]]])
 
+    def test_predict_uses_cached_native_predictor_handle_when_available(self) -> None:
+        handle_inits: list[tuple[bytes, bool]] = []
+        handle_predict_calls: list[list[list[float]]] = []
+
+        class FakeHandle:
+            def __init__(self, artifact_bytes: bytes, strict: bool = True) -> None:
+                handle_inits.append((artifact_bytes, strict))
+
+            def predict_batch(self, rows: list[list[float]]) -> list[float]:
+                handle_predict_calls.append(rows)
+                return [8.0 + row[0] for row in rows]
+
+        original_train_loader = regressor_module._load_native_train_regression_artifact
+        original_handle_loader = regressor_module._load_native_predictor_handle_class
+        original_canonical_loader = (
+            regressor_module._load_native_predictor_predict_batch_canonical
+        )
+        regressor_module._load_native_train_regression_artifact = lambda: (
+            lambda *_args, **_kwargs: b"artifact"
+        )
+        regressor_module._load_native_predictor_handle_class = lambda: FakeHandle
+        regressor_module._load_native_predictor_predict_batch_canonical = lambda: (
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("canonical loader should not be used when handle is cached")
+            )
+        )
+        try:
+            model = GBMRegressor().fit([[1.0, 0.0], [2.0, 0.0]], [1.0, 2.0])
+            predictions = model.predict([[3.0, 0.0], [4.0, 0.0]])
+        finally:
+            regressor_module._load_native_train_regression_artifact = (
+                original_train_loader
+            )
+            regressor_module._load_native_predictor_handle_class = original_handle_loader
+            regressor_module._load_native_predictor_predict_batch_canonical = (
+                original_canonical_loader
+            )
+
+        self.assertEqual(handle_inits, [(b"artifact", True)])
+        self.assertEqual(handle_predict_calls, [[[3.0, 0.0], [4.0, 0.0]]])
+        self.assertEqual(predictions, [11.0, 12.0])
+
+    def test_predict_falls_back_to_canonical_when_cached_handle_runtime_errors(self) -> None:
+        handle_predict_calls: list[list[list[float]]] = []
+        canonical_calls: list[tuple[bytes, list[list[float]]]] = []
+
+        class FailingHandle:
+            def __init__(self, _artifact_bytes: bytes, strict: bool = True) -> None:
+                self.strict = strict
+
+            def predict_batch(self, rows: list[list[float]]) -> list[float]:
+                handle_predict_calls.append(rows)
+                raise RuntimeError("stale handle")
+
+        def fake_canonical(
+            artifact_bytes: bytes, rows: list[list[float]]
+        ) -> list[float]:
+            canonical_calls.append((artifact_bytes, rows))
+            return [5.0] * len(rows)
+
+        original_train_loader = regressor_module._load_native_train_regression_artifact
+        original_handle_loader = regressor_module._load_native_predictor_handle_class
+        original_canonical_loader = (
+            regressor_module._load_native_predictor_predict_batch_canonical
+        )
+        regressor_module._load_native_train_regression_artifact = lambda: (
+            lambda *_args, **_kwargs: b"artifact"
+        )
+        regressor_module._load_native_predictor_handle_class = lambda: FailingHandle
+        regressor_module._load_native_predictor_predict_batch_canonical = (
+            lambda: fake_canonical
+        )
+        try:
+            model = GBMRegressor().fit([[1.0, 0.0], [2.0, 0.0]], [1.0, 2.0])
+            first = model.predict([[3.0, 0.0]])
+            second = model.predict([[4.0, 0.0]])
+        finally:
+            regressor_module._load_native_train_regression_artifact = (
+                original_train_loader
+            )
+            regressor_module._load_native_predictor_handle_class = original_handle_loader
+            regressor_module._load_native_predictor_predict_batch_canonical = (
+                original_canonical_loader
+            )
+
+        self.assertEqual(first, [5.0])
+        self.assertEqual(second, [5.0])
+        self.assertEqual(handle_predict_calls, [[[3.0, 0.0]]])
+        self.assertEqual(
+            canonical_calls,
+            [(b"artifact", [[3.0, 0.0]]), (b"artifact", [[4.0, 0.0]])],
+        )
+
     def test_predict_uses_canonical_loader_not_compatibility_loader(self) -> None:
         calls: list[tuple[bytes, list[list[float]]]] = []
 

@@ -32,6 +32,16 @@ def _load_native_predictor_predict_batch_canonical():
     return predictor_predict_batch_canonical
 
 
+def _load_native_predictor_handle_class():
+    try:
+        from alloygbm._alloygbm import NativePredictorHandle
+    except Exception as exc:  # pragma: no cover - exercised via contract tests.
+        raise RuntimeError(
+            "native predictor handle binding is unavailable; build/install the alloygbm extension module"
+        ) from exc
+    return NativePredictorHandle
+
+
 def _load_native_train_regression_artifact():
     try:
         from alloygbm._alloygbm import train_regression_artifact
@@ -145,6 +155,7 @@ class GBMRegressor:
         self.categorical_time_aware = bool(categorical_time_aware)
         self._is_fitted = False
         self._artifact_bytes: bytes | None = None
+        self._native_predictor_handle: object | None = None
         self._n_features_in = 0
         self._uses_continuous_binning = False
         self._continuous_feature_mins: list[float] | None = None
@@ -425,6 +436,9 @@ class GBMRegressor:
 
         self._n_features_in = len(rows[0])
         self._artifact_bytes = bytes(artifact_bytes)
+        self._native_predictor_handle = self._build_native_predictor_handle(
+            self._artifact_bytes
+        )
         self._is_fitted = True
         return self
 
@@ -442,6 +456,13 @@ class GBMRegressor:
             )
         if self._uses_continuous_binning:
             rows = self._quantize_rows_for_prediction(rows)
+        if self._native_predictor_handle is not None:
+            predict_batch = getattr(self._native_predictor_handle, "predict_batch", None)
+            if callable(predict_batch):
+                try:
+                    return list(predict_batch(rows))
+                except RuntimeError:
+                    self._native_predictor_handle = None
         predictor_predict_batch_canonical = (
             _load_native_predictor_predict_batch_canonical()
         )
@@ -715,12 +736,24 @@ class GBMRegressor:
     def _reset_fitted_state(self) -> None:
         self._is_fitted = False
         self._artifact_bytes = None
+        self._native_predictor_handle = None
         self._n_features_in = 0
         self._uses_continuous_binning = False
         self._continuous_feature_mins = None
         self._continuous_feature_maxs = None
         self._continuous_feature_sorted_values = None
         self._continuous_feature_quantile_cuts = None
+
+    @staticmethod
+    def _build_native_predictor_handle(artifact_bytes: bytes) -> object | None:
+        try:
+            native_predictor_handle_class = _load_native_predictor_handle_class()
+        except RuntimeError:
+            return None
+        try:
+            return native_predictor_handle_class(artifact_bytes, strict=True)
+        except Exception:
+            return None
 
     @staticmethod
     def _validate_targets(y: object) -> list[float]:
