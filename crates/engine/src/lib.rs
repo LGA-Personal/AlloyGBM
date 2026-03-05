@@ -1591,12 +1591,13 @@ fn sampled_indices(
             (index, hash)
         })
         .collect::<Vec<_>>();
-    scored.sort_unstable_by(|lhs, rhs| lhs.1.cmp(&rhs.1).then_with(|| lhs.0.cmp(&rhs.0)));
+    scored.select_nth_unstable_by(keep_count, |lhs, rhs| {
+        lhs.1.cmp(&rhs.1).then_with(|| lhs.0.cmp(&rhs.0))
+    });
 
-    let mut selected = scored
-        .into_iter()
-        .take(keep_count)
-        .map(|(index, _)| index)
+    let mut selected = scored[..keep_count]
+        .iter()
+        .map(|(index, _)| *index)
         .collect::<Vec<_>>();
     selected.sort_unstable();
     selected
