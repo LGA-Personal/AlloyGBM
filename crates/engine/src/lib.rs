@@ -833,7 +833,10 @@ impl Trainer {
                 &dataset.targets,
                 dataset.sample_weights.as_deref(),
             )?;
-            validate_gradient_pairs(&gradients, dataset.row_count())?;
+            validate_gradient_pair_length(&gradients, dataset.row_count())?;
+            if cfg!(debug_assertions) {
+                validate_gradient_pairs(&gradients, dataset.row_count())?;
+            }
 
             let mut candidate_predictions = predictions.clone();
             let mut candidate_round_stumps = Vec::new();
@@ -1143,19 +1146,24 @@ impl Trainer {
 }
 
 fn validate_gradient_pairs(gradients: &[GradientPair], row_count: usize) -> EngineResult<()> {
-    if gradients.len() != row_count {
-        return Err(EngineError::ContractViolation(format!(
-            "objective returned {} gradients for row_count {}",
-            gradients.len(),
-            row_count
-        )));
-    }
+    validate_gradient_pair_length(gradients, row_count)?;
     for gradient in gradients {
         if !gradient.grad.is_finite() || !gradient.hess.is_finite() || gradient.hess <= 0.0 {
             return Err(EngineError::ContractViolation(
                 "objective produced invalid gradient/hessian values".to_string(),
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_gradient_pair_length(gradients: &[GradientPair], row_count: usize) -> EngineResult<()> {
+    if gradients.len() != row_count {
+        return Err(EngineError::ContractViolation(format!(
+            "objective returned {} gradients for row_count {}",
+            gradients.len(),
+            row_count
+        )));
     }
     Ok(())
 }
