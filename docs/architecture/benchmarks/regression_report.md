@@ -410,3 +410,92 @@ Heavy spot check (`histogram_stress` + `mid_balanced`, seed `7`):
 - This materially reduces training time in the current high-cost profiles.
 - Predict-time impact is small and slightly regressive in this run; training gain dominates.
 - Observed accuracy drift was negligible in this benchmark slice.
+
+---
+
+## Candidate Experiment: Predictor Repacked Tree Layout (2026-03-05)
+
+### Status
+PASS for compile/test/benchmark execution.  
+Decision: reject candidate and revert changes.
+
+### Scope
+- Reworked predictor tree storage from sparse `Option` node vectors to repacked per-tree arrays (`feature`, `threshold`, `left_leaf`, `right_leaf`) with sentinel slots.
+- Updated predictor row traversal loop to consume repacked arrays directly.
+- No training objective/split/leaf math changes.
+
+### Commands Executed
+1. Validation:
+   - `cargo fmt`
+   - `cargo test -p alloygbm-predictor`
+2. Full paired benchmark matrix:
+   - Baseline (clean worktree at `41f00ac`):  
+     `python3 -B benchmarks/run_model_comparison.py --profile-grid default --profile-seeds 7,17,29 --output-dir benchmarks/results/v097_candidate8_predictor_repack_baseline`
+   - After candidate change:  
+     `python3 -B benchmarks/run_model_comparison.py --profile-grid default --profile-seeds 7,17,29 --output-dir benchmarks/results/v097_candidate8_predictor_repack_after`
+
+### Produced Artifacts
+- Baseline:
+  - `benchmarks/results/v097_candidate8_predictor_repack_baseline/model_comparison_20260305T030228Z.csv`
+  - `benchmarks/results/v097_candidate8_predictor_repack_baseline/model_comparison_profile_summary_20260305T030228Z.csv`
+- After:
+  - `benchmarks/results/v097_candidate8_predictor_repack_after/model_comparison_20260305T031449Z.csv`
+  - `benchmarks/results/v097_candidate8_predictor_repack_after/model_comparison_profile_summary_20260305T031449Z.csv`
+
+### Alloy Delta vs Baseline (Full Matrix, 36 Alloy Runs)
+- Fit sum delta: `+5.35%` (regression)
+- Predict sum delta: `-6.00%` (improvement)
+- RMSE/MAE/R2 deltas: `0.00%` (no behavior change)
+
+Profile aggregates:
+- `shallow_high_lr`: fit `-10.42%`, predict `-8.76%`
+- `mid_balanced`: fit `-1.72%`, predict `-0.48%`
+- `deep_low_lr`: fit `+7.03%`, predict `-6.80%`
+
+### Rejection Rationale
+- For current `v0.9.7` priorities, fit-time improvements are weighted higher than predict-time-only gains.
+- Mid/deep training profiles dominate runtime cost and are the primary target for competitiveness progression.
+- Because deep fit regressed (`+7.03%`) and full-matrix fit regressed (`+5.35%`), this candidate is not acceptable as default and was reverted.
+
+---
+
+## Candidate Experiment: Release-Hotloop Gradient Validation Gating (2026-03-05)
+
+### Status
+PASS for compile/test/benchmark execution.  
+Decision: keep as default training-path improvement.
+
+### Scope
+- Kept initial fit-contract gradient validation unchanged.
+- In iterative training hot-loop, switched to:
+  - always validate gradient vector length,
+  - run full per-element finite/hessian validation only in debug builds.
+- No objective math, split scoring, or model serialization changes.
+
+### Commands Executed
+1. Validation:
+   - `cargo fmt`
+   - `cargo test -p alloygbm-engine -p alloygbm-backend-cpu`
+2. Full benchmark matrix (after candidate):
+   - `python3 -B benchmarks/run_model_comparison.py --profile-grid default --profile-seeds 7,17,29 --output-dir benchmarks/results/v097_candidate9_grad_validation_after`
+3. Baseline comparison source:
+   - `benchmarks/results/v097_candidate8_predictor_repack_baseline/model_comparison_20260305T030228Z.csv`
+   - (same pre-candidate runtime code state; predictor-repack candidate had been reverted)
+
+### Produced Artifacts
+- `benchmarks/results/v097_candidate9_grad_validation_after/model_comparison_20260305T034000Z.csv`
+- `benchmarks/results/v097_candidate9_grad_validation_after/model_comparison_profile_summary_20260305T034000Z.csv`
+
+### Alloy Delta vs Baseline (Full Matrix, 36 Alloy Runs)
+- Fit sum delta: `-8.71%` (improvement)
+- Predict sum delta: `-11.16%` (improvement)
+- RMSE/MAE/R2 deltas: `0.00%` (no behavior change)
+
+Profile aggregates:
+- `shallow_high_lr`: fit `-20.87%`, predict `-19.41%`
+- `mid_balanced`: fit `-11.99%`, predict `-7.90%`
+- `deep_low_lr`: fit `-7.80%`, predict `-11.37%`
+
+### Notes
+- This directly improves the mid/deep fit-time priority while preserving deterministic output metrics.
+- Safety contract remains enforced in full during debug/test builds and at initial fit-contract validation in all builds.
