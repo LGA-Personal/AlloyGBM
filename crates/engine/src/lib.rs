@@ -773,6 +773,7 @@ impl Trainer {
         let sampling_seed_base = sampling_seed_base(self.params.seed, self.params.deterministic);
 
         let mut predictions = vec![fit_contract.baseline_prediction; dataset.row_count()];
+        let mut candidate_predictions = predictions.clone();
         let mut validation_predictions = validation.map(|validation_ref| {
             vec![fit_contract.baseline_prediction; validation_ref.dataset.row_count()]
         });
@@ -838,7 +839,7 @@ impl Trainer {
                 validate_gradient_pairs(&gradients, dataset.row_count())?;
             }
 
-            let mut candidate_predictions = predictions.clone();
+            candidate_predictions.copy_from_slice(&predictions);
             let mut candidate_round_stumps = Vec::new();
             let mut round_rejection_reason = IterationStopReason::NoSplitCandidate;
             let root_node_id = encode_tree_node_id(round_index, 0)?;
@@ -1056,7 +1057,7 @@ impl Trainer {
                 candidate_validation_loss = Some(next_validation_loss);
             }
 
-            predictions = candidate_predictions;
+            std::mem::swap(&mut predictions, &mut candidate_predictions);
             current_loss = candidate_loss;
             loss_per_completed_round.push(candidate_loss);
             sampled_rows_per_completed_round.push(sampled_row_count);
