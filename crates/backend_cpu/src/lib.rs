@@ -464,7 +464,8 @@ impl CpuBackend {
             }
 
             let parent_denom = total_hess + options.l2_lambda + EPSILON;
-            let parent_gain_term = (total_grad * total_grad) / parent_denom;
+            let parent_grad = l1_threshold_gradient(total_grad, options.l1_alpha);
+            let parent_gain_term = (parent_grad * parent_grad) / parent_denom;
 
             let mut left_grad = 0.0_f32;
             let mut left_hess = 0.0_f32;
@@ -492,8 +493,12 @@ impl CpuBackend {
                     continue;
                 }
 
-                let gain = (left_grad * left_grad) / (left_hess + options.l2_lambda + EPSILON)
-                    + (right_grad * right_grad) / (right_hess + options.l2_lambda + EPSILON)
+                let left_grad_for_gain = l1_threshold_gradient(left_grad, options.l1_alpha);
+                let right_grad_for_gain = l1_threshold_gradient(right_grad, options.l1_alpha);
+                let gain = (left_grad_for_gain * left_grad_for_gain)
+                    / (left_hess + options.l2_lambda + EPSILON)
+                    + (right_grad_for_gain * right_grad_for_gain)
+                        / (right_hess + options.l2_lambda + EPSILON)
                     - parent_gain_term;
 
                 if gain > best_gain {
@@ -519,6 +524,19 @@ impl CpuBackend {
         }
 
         best_candidate
+    }
+}
+
+fn l1_threshold_gradient(grad_sum: f32, l1_alpha: f32) -> f32 {
+    if l1_alpha <= 0.0 {
+        return grad_sum;
+    }
+    if grad_sum > l1_alpha {
+        grad_sum - l1_alpha
+    } else if grad_sum < -l1_alpha {
+        grad_sum + l1_alpha
+    } else {
+        0.0
     }
 }
 
@@ -1065,6 +1083,40 @@ mod tests {
                 &histograms,
                 SplitSelectionOptions {
                     l2_lambda: 1.0,
+                    l1_alpha: 0.0,
+                    min_child_hessian: 0.0,
+                },
+            )
+            .expect("regularized split search should succeed")
+            .expect("regularized split should exist");
+
+        assert_eq!(unregularized.feature_index, regularized.feature_index);
+        assert_eq!(unregularized.threshold_bin, regularized.threshold_bin);
+        assert!(regularized.gain < unregularized.gain);
+    }
+
+    #[test]
+    fn best_split_with_l1_regularization_reduces_gain_magnitude() {
+        let backend = CpuBackend;
+        let histograms = backend
+            .build_histograms(
+                &sample_binned_matrix(),
+                &sample_gradients(),
+                &sample_node(),
+                &[FeatureTile::new(0, 2).expect("feature tile is valid")],
+            )
+            .expect("histograms should build");
+
+        let unregularized = backend
+            .best_split(&histograms)
+            .expect("unregularized split search should succeed")
+            .expect("unregularized split should exist");
+        let regularized = backend
+            .best_split_with_options(
+                &histograms,
+                SplitSelectionOptions {
+                    l2_lambda: 0.0,
+                    l1_alpha: 0.5,
                     min_child_hessian: 0.0,
                 },
             )
@@ -1093,6 +1145,7 @@ mod tests {
                 &histograms,
                 SplitSelectionOptions {
                     l2_lambda: 0.0,
+                    l1_alpha: 0.0,
                     min_child_hessian: 10.0,
                 },
             )
