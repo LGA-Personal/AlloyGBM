@@ -2,7 +2,7 @@ use alloygbm_core::{
     BinnedMatrix, Device, FeatureHistogram, FeatureTile, GradientPair, HistogramBin,
     HistogramBundle, NodeSlice, NodeStats, PartitionResult, SplitCandidate,
 };
-use alloygbm_engine::{BackendOps, EngineError, EngineResult};
+use alloygbm_engine::{BackendOps, EngineError, EngineResult, SplitSelectionOptions};
 use rayon::prelude::*;
 use std::sync::OnceLock;
 
@@ -436,6 +436,90 @@ impl CpuBackend {
             feature_histograms,
         );
     }
+
+    fn best_split_with_options_internal(
+        histograms: &HistogramBundle,
+        options: SplitSelectionOptions,
+    ) -> Option<SplitCandidate> {
+        let mut best_candidate: Option<SplitCandidate> = None;
+        let mut best_gain = 0.0_f32;
+        const EPSILON: f32 = 1e-6;
+
+        for feature_histogram in &histograms.feature_histograms {
+            if feature_histogram.bins.len() < 2 {
+                continue;
+            }
+
+            let mut total_grad = 0.0_f32;
+            let mut total_hess = 0.0_f32;
+            let mut total_count = 0_u32;
+            for bin in &feature_histogram.bins {
+                total_grad += bin.grad_sum;
+                total_hess += bin.hess_sum;
+                total_count += bin.count;
+            }
+
+            if total_hess <= options.min_child_hessian {
+                continue;
+            }
+
+            let parent_denom = total_hess + options.l2_lambda + EPSILON;
+            let parent_gain_term = (total_grad * total_grad) / parent_denom;
+
+            let mut left_grad = 0.0_f32;
+            let mut left_hess = 0.0_f32;
+            let mut left_count = 0_u32;
+
+            for (threshold_bin, bin) in feature_histogram
+                .bins
+                .iter()
+                .enumerate()
+                .take(feature_histogram.bins.len() - 1)
+            {
+                left_grad += bin.grad_sum;
+                left_hess += bin.hess_sum;
+                left_count += bin.count;
+
+                let right_grad = total_grad - left_grad;
+                let right_hess = total_hess - left_hess;
+                let right_count = total_count.saturating_sub(left_count);
+
+                if left_count == 0
+                    || right_count == 0
+                    || left_hess <= options.min_child_hessian
+                    || right_hess <= options.min_child_hessian
+                {
+                    continue;
+                }
+
+                let gain = (left_grad * left_grad) / (left_hess + options.l2_lambda + EPSILON)
+                    + (right_grad * right_grad) / (right_hess + options.l2_lambda + EPSILON)
+                    - parent_gain_term;
+
+                if gain > best_gain {
+                    best_gain = gain;
+                    best_candidate = Some(SplitCandidate {
+                        node_id: histograms.node_id,
+                        feature_index: feature_histogram.feature_index,
+                        threshold_bin: threshold_bin as u16,
+                        gain,
+                        left_stats: NodeStats {
+                            grad_sum: left_grad,
+                            hess_sum: left_hess,
+                            row_count: left_count,
+                        },
+                        right_stats: NodeStats {
+                            grad_sum: right_grad,
+                            hess_sum: right_hess,
+                            row_count: right_count,
+                        },
+                    });
+                }
+            }
+        }
+
+        best_candidate
+    }
 }
 
 impl BackendOps for CpuBackend {
@@ -465,73 +549,18 @@ impl BackendOps for CpuBackend {
     }
 
     fn best_split(&self, histograms: &HistogramBundle) -> EngineResult<Option<SplitCandidate>> {
-        let mut best_candidate: Option<SplitCandidate> = None;
-        let mut best_gain = 0.0_f32;
-        const EPSILON: f32 = 1e-6;
+        Ok(Self::best_split_with_options_internal(
+            histograms,
+            SplitSelectionOptions::default(),
+        ))
+    }
 
-        for feature_histogram in &histograms.feature_histograms {
-            if feature_histogram.bins.len() < 2 {
-                continue;
-            }
-
-            let mut total_grad = 0.0_f32;
-            let mut total_hess = 0.0_f32;
-            let mut total_count = 0_u32;
-            for bin in &feature_histogram.bins {
-                total_grad += bin.grad_sum;
-                total_hess += bin.hess_sum;
-                total_count += bin.count;
-            }
-
-            let mut left_grad = 0.0_f32;
-            let mut left_hess = 0.0_f32;
-            let mut left_count = 0_u32;
-
-            for (threshold_bin, bin) in feature_histogram
-                .bins
-                .iter()
-                .enumerate()
-                .take(feature_histogram.bins.len() - 1)
-            {
-                left_grad += bin.grad_sum;
-                left_hess += bin.hess_sum;
-                left_count += bin.count;
-
-                let right_grad = total_grad - left_grad;
-                let right_hess = total_hess - left_hess;
-                let right_count = total_count.saturating_sub(left_count);
-
-                if left_count == 0 || right_count == 0 || left_hess <= 0.0 || right_hess <= 0.0 {
-                    continue;
-                }
-
-                let gain = (left_grad * left_grad) / (left_hess + EPSILON)
-                    + (right_grad * right_grad) / (right_hess + EPSILON)
-                    - (total_grad * total_grad) / (total_hess + EPSILON);
-
-                if gain > best_gain {
-                    best_gain = gain;
-                    best_candidate = Some(SplitCandidate {
-                        node_id: histograms.node_id,
-                        feature_index: feature_histogram.feature_index,
-                        threshold_bin: threshold_bin as u16,
-                        gain,
-                        left_stats: NodeStats {
-                            grad_sum: left_grad,
-                            hess_sum: left_hess,
-                            row_count: left_count,
-                        },
-                        right_stats: NodeStats {
-                            grad_sum: right_grad,
-                            hess_sum: right_hess,
-                            row_count: right_count,
-                        },
-                    });
-                }
-            }
-        }
-
-        Ok(best_candidate)
+    fn best_split_with_options(
+        &self,
+        histograms: &HistogramBundle,
+        options: SplitSelectionOptions,
+    ) -> EngineResult<Option<SplitCandidate>> {
+        Ok(Self::best_split_with_options_internal(histograms, options))
     }
 
     fn apply_split(
@@ -1013,6 +1042,63 @@ mod tests {
         assert!(split.gain > 0.0);
         assert_eq!(split.left_stats.row_count, 2);
         assert_eq!(split.right_stats.row_count, 2);
+    }
+
+    #[test]
+    fn best_split_with_l2_regularization_reduces_gain_magnitude() {
+        let backend = CpuBackend;
+        let histograms = backend
+            .build_histograms(
+                &sample_binned_matrix(),
+                &sample_gradients(),
+                &sample_node(),
+                &[FeatureTile::new(0, 2).expect("feature tile is valid")],
+            )
+            .expect("histograms should build");
+
+        let unregularized = backend
+            .best_split(&histograms)
+            .expect("unregularized split search should succeed")
+            .expect("unregularized split should exist");
+        let regularized = backend
+            .best_split_with_options(
+                &histograms,
+                SplitSelectionOptions {
+                    l2_lambda: 1.0,
+                    min_child_hessian: 0.0,
+                },
+            )
+            .expect("regularized split search should succeed")
+            .expect("regularized split should exist");
+
+        assert_eq!(unregularized.feature_index, regularized.feature_index);
+        assert_eq!(unregularized.threshold_bin, regularized.threshold_bin);
+        assert!(regularized.gain < unregularized.gain);
+    }
+
+    #[test]
+    fn best_split_with_min_child_hessian_can_prune_all_splits() {
+        let backend = CpuBackend;
+        let histograms = backend
+            .build_histograms(
+                &sample_binned_matrix(),
+                &sample_gradients(),
+                &sample_node(),
+                &[FeatureTile::new(0, 2).expect("feature tile is valid")],
+            )
+            .expect("histograms should build");
+
+        let split = backend
+            .best_split_with_options(
+                &histograms,
+                SplitSelectionOptions {
+                    l2_lambda: 0.0,
+                    min_child_hessian: 10.0,
+                },
+            )
+            .expect("split search should succeed");
+
+        assert!(split.is_none());
     }
 
     #[test]
