@@ -1290,3 +1290,100 @@ Decision: keep candidate code and continue from this baseline.
 - This is accepted as an env-gated v0.9.7 tradeoff improvement because it materially reduces training and prediction time while preserving focused-slice quality.
 - The gain comes primarily from the deep-low-lr financial slice, where weak leaf updates are most common.
 - Unlike `candidate41` and `candidate42`, this filter does not give back quality on the panel slice that current benchmarks treat as the main accuracy direction.
+
+---
+
+## Candidate Experiment: Candidate36 + Candidate43 Coordinated Preset (Env-Gated) (2026-03-06)
+
+### Status
+PASS for benchmark execution.  
+Decision: keep coordinated preset and record it as an accepted v0.9.7 package.
+
+### Scope
+- Evaluated the coordinated use of:
+  - `ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK=1`
+  - `ALLOYGBM_EXPERIMENT_SPLIT_MIN_LEAF_MAGNITUDE=0.02`
+- No new product code was required; this candidate combined the two already-kept env-gated features on the same current code snapshot.
+- The goal was to see whether candidate36’s panel-quality lift and candidate43’s low-signal speed win could coexist cleanly.
+
+### Commands Executed
+1. Runtime build/install and validation on the current committed code:
+   - `python3 -m maturin build --manifest-path bindings/python/Cargo.toml --interpreter python3 --out /tmp/alloygbm-v097-candidate44/wheelhouse -q`
+   - `python3 -m pip install --upgrade --force-reinstall --no-deps --no-cache-dir --target /tmp/alloygbm-v097-candidate44/site-packages /tmp/alloygbm-v097-candidate44/wheelhouse/*.whl`
+   - `PYTHONPATH=/tmp/alloygbm-v097-candidate44/site-packages python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'`
+2. Same-snapshot reference runs:
+   - Baseline reused from candidate43 focused baseline:
+     - `benchmarks/results/v097_candidate43_focus_baseline/model_comparison_20260306T163849Z.csv`
+   - Candidate43-only reused from the same snapshot:
+     - `benchmarks/results/v097_candidate43_focus_mag_002/model_comparison_20260306T164220Z.csv`
+   - Candidate36-only rerun:
+     - `ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK=1 PYTHONPATH=/tmp/alloygbm-v097-candidate44/site-packages python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile deep_low_lr:0.01:8:5000 --profile-seeds 7,17,29 --scenarios panel_time_series dow_jones_financial --output-dir benchmarks/results/v097_candidate44_focus_tailrank_only`
+3. Coordinated preset run:
+   - `ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK=1 ALLOYGBM_EXPERIMENT_SPLIT_MIN_LEAF_MAGNITUDE=0.02 PYTHONPATH=/tmp/alloygbm-v097-candidate44/site-packages python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile deep_low_lr:0.01:8:5000 --profile-seeds 7,17,29 --scenarios panel_time_series dow_jones_financial --output-dir benchmarks/results/v097_candidate44_focus_combo`
+
+### Produced Artifacts
+- Baseline:
+  - `benchmarks/results/v097_candidate43_focus_baseline/model_comparison_20260306T163849Z.csv`
+- Candidate43-only:
+  - `benchmarks/results/v097_candidate43_focus_mag_002/model_comparison_20260306T164220Z.csv`
+- Candidate36-only:
+  - `benchmarks/results/v097_candidate44_focus_tailrank_only/model_comparison_20260306T183053Z.csv`
+  - `benchmarks/results/v097_candidate44_focus_tailrank_only/model_comparison_profile_summary_20260306T183053Z.csv`
+- Coordinated preset:
+  - `benchmarks/results/v097_candidate44_focus_combo/model_comparison_20260306T183417Z.csv`
+  - `benchmarks/results/v097_candidate44_focus_combo/model_comparison_profile_summary_20260306T183417Z.csv`
+
+### Candidate36-Only vs Baseline (Same Snapshot, 18 Alloy Runs)
+- Median fit delta: `-12.92%`
+- Median predict delta: `-8.54%`
+- Median RMSE delta: `-2.14%`
+- Median MAE delta: `-4.72%`
+- Median R2 delta: `+0.06526`
+
+### Candidate43-Only vs Baseline (Same Snapshot, 18 Alloy Runs)
+- Median fit delta: `-21.82%`
+- Median predict delta: `-22.52%`
+- Median RMSE delta: `-0.02%`
+- Median MAE delta: `-0.05%`
+- Median R2 delta: `+0.00068`
+
+### Coordinated Preset vs Baseline (18 Alloy Runs)
+- Median fit delta: `-33.39%`
+- Median predict delta: `-25.47%`
+- Median RMSE delta: `-2.34%`
+- Median MAE delta: `-4.89%`
+- Median R2 delta: `+0.07006`
+- Wins: fit `17/18`, predict `16/18`, RMSE `17/18`, MAE `16/18`, R2 `17/18`
+
+### Coordinated Preset vs Candidate36-Only
+- Median fit delta: `-19.20%`
+- Median predict delta: `-14.91%`
+- Median RMSE delta: `-0.02%`
+- Median MAE delta: `-0.04%`
+- Median R2 delta: `+0.00055`
+
+### Coordinated Preset vs Candidate43-Only
+- Median fit delta: `-8.50%`
+- Median predict delta: `-7.73%`
+- Median RMSE delta: `-2.16%`
+- Median MAE delta: `-4.67%`
+- Median R2 delta: `+0.06611`
+
+### Scenario Notes
+- `panel_time_series` vs baseline (`n=9`):
+  - fit `-10.06%`
+  - predict `-5.99%`
+  - RMSE `-6.59%`
+  - MAE `-14.38%`
+  - R2 `+0.19023`
+- `dow_jones_financial` vs baseline (`n=9`):
+  - fit `-50.78%`
+  - predict `-46.78%`
+  - RMSE `-0.20%`
+  - MAE `-0.06%`
+  - R2 `+0.00487`
+
+### Acceptance Note
+- This package is accepted because it cleanly combines the complementary strengths of the two component candidates.
+- Relative to candidate36 alone, it materially improves fit and predict speed while leaving quality effectively unchanged.
+- Relative to candidate43 alone, it preserves the low-signal speed win while restoring the strong panel-quality gains from candidate36.
