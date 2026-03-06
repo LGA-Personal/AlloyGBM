@@ -724,3 +724,57 @@ Decision: keep candidate code and continue from this baseline.
 ### Notes
 - This preserves the quality direction of regularization without the severe fit-time penalty seen in candidate31.
 - Tuning indicated `min_child_hessian=8` reduced quality in this slice; `min_child_hessian=0` is currently preferred.
+
+---
+
+## Candidate Experiment: L1 + L2 Regularized Split/Leaf Scoring (Env-Gated) (2026-03-06)
+
+### Status
+PASS for implementation/tests/benchmark execution.  
+Decision: keep candidate code and treat as accepted v0.9.7 improvement.
+
+### Scope
+- Extended split regularization with L1 term:
+  - `ALLOYGBM_EXPERIMENT_SPLIT_L1`
+  - paired with existing `ALLOYGBM_EXPERIMENT_SPLIT_L2` and `ALLOYGBM_EXPERIMENT_MIN_CHILD_HESS`
+- Applied L1 soft-thresholding in both:
+  - backend split gain evaluation,
+  - trainer leaf-value calculation.
+- Added backend unit test for L1 gain shrink behavior.
+
+### Commands Executed
+1. Validation:
+   - `cargo fmt --all`
+   - `cargo test -p alloygbm-engine -p alloygbm-backend-cpu`
+2. Runtime build/install:
+   - `python3 -m maturin build --manifest-path bindings/python/Cargo.toml --interpreter python3 --out /tmp/alloygbm-v097-candidate33/wheelhouse -q`
+   - `python3 -m pip install --force-reinstall /tmp/alloygbm-v097-candidate33/wheelhouse/*.whl`
+3. Focused A/B (`shallow_high_lr`, `mid_balanced`, seeds `7,17,29`):
+   - Baseline:
+     - `benchmarks/results/v097_candidate33_l1_reg_focus_baseline/model_comparison_20260306T013749Z.csv`
+   - Candidate:
+     - `ALLOYGBM_EXPERIMENT_SPLIT_L2=1 ALLOYGBM_EXPERIMENT_SPLIT_L1=0.1 ALLOYGBM_EXPERIMENT_MIN_CHILD_HESS=0`
+     - `benchmarks/results/v097_candidate33_l1_reg_focus_after/model_comparison_20260306T014027Z.csv`
+4. Deep low-lr finance/time-series supplemental A/B (`deep_low_lr`, seeds `7,17,29`, scenarios `panel_time_series` + `dow_jones_financial`):
+   - Baseline:
+     - `benchmarks/results/v097_candidate33_l1_reg_deep_finance_baseline/model_comparison_20260306T022549Z.csv`
+   - Candidate:
+     - `benchmarks/results/v097_candidate33_l1_reg_deep_finance_after/model_comparison_20260306T023048Z.csv`
+
+### Focused Slice Delta (24 Alloy Runs)
+- Median fit delta: `-0.37%`
+- Median predict delta: `+0.76%`
+- Median RMSE delta: `-0.88%`
+- Median MAE delta: `-0.29%`
+- Median R2 delta: `+0.00419`
+- Wins: RMSE `15/24`, MAE `16/24`, R2 `15/24`
+
+### Deep Low-LR Supplemental Delta (6 Alloy Runs)
+- Median fit delta: `-20.57%`
+- Median predict delta: `-15.14%`
+- Median RMSE delta: `+0.08%`
+- Median MAE delta: `-1.87%`
+- Median R2 delta: `-0.00088` (sub-0.5% absolute effect)
+
+### Acceptance Note
+- For the deep low-SNR slice, this is accepted as a strong tradeoff: ~20% fit-time reduction with very small overall quality movement (sub-0.5% R2 effect, slight RMSE increase, MAE improvement).
