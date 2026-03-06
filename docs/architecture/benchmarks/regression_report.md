@@ -499,3 +499,131 @@ Profile aggregates:
 ### Notes
 - This directly improves the mid/deep fit-time priority while preserving deterministic output metrics.
 - Safety contract remains enforced in full during debug/test builds and at initial fit-contract validation in all builds.
+
+---
+
+## Candidate Experiment: High-Resolution Continuous Binning for Linear/Rank (2026-03-05)
+
+### Status
+PASS for implementation/tests/benchmark execution.  
+Decision: reject candidate and revert code changes.
+
+### Scope
+- Extended `continuous_binning_max_bins` handling so `linear`, `rank`, and `quantile` strategies all honor the configured cap.
+- Raised supported bin-cap range to `2..4096` for controlled high-resolution experiments.
+- Added Python contract tests to verify `linear` and `rank` quantization paths obey non-default bin caps.
+- No engine/backend split math changes.
+
+### Commands Executed
+1. Validation:
+   - `python3 -m unittest bindings.python.tests.test_regressor_contract`
+2. Runtime build/install:
+   - `python3 -m maturin build --manifest-path bindings/python/Cargo.toml --interpreter python3 --out /tmp/alloygbm-v097-candidate27/wheelhouse -q`
+   - `python3 -m pip install --force-reinstall /tmp/alloygbm-v097-candidate27/wheelhouse/*.whl`
+3. Focused benchmark run (high-res candidate):
+   - `python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.05:6:1200 --profile-seeds 7,17,29 --alloy-continuous-binning-max-bins 1024 --output-dir benchmarks/results/v097_candidate27_highres_bins_1024_focus_after`
+4. Baseline comparison source:
+   - `benchmarks/results/v097_candidate17_round_buffer_reuse_after/model_comparison_20260305T125838Z.csv` (filtered to same profiles/seeds/scenarios)
+
+### Produced Artifacts
+- `benchmarks/results/v097_candidate27_highres_bins_1024_focus_after/model_comparison_20260305T181214Z.csv`
+- `benchmarks/results/v097_candidate27_highres_bins_1024_focus_after/model_comparison_profile_summary_20260305T181214Z.csv`
+
+### Alloy Delta vs Candidate17 Baseline (Focused Slice, 24 Alloy Runs)
+- Median fit delta: `+2621.92%` (major regression)
+- Median predict delta: `+217.66%` (regression)
+- Median RMSE delta: `-1.00%` (improvement)
+- Median MAE delta: `-1.28%` (improvement)
+- Median R2 delta: `+0.00417` (improvement)
+- Wins: RMSE `15/24`, MAE `18/24`, R2 `15/24`
+
+### Notes
+- This candidate confirms a real accuracy-vs-speed tradeoff lever exists in bin resolution.
+- Runtime cost at `1024` bins is too high for default use, especially on mid/deep fits.
+- Candidate code changes were reverted; benchmark artifacts are retained for future reference if we revisit a lower-cost high-resolution path.
+
+---
+
+## Candidate Experiment: Leafwise Best-First Expansion (Env-Gated) (2026-03-05)
+
+### Status
+PASS for implementation/tests/benchmark execution.  
+Decision: reject candidate and revert code changes.
+
+### Scope
+- Added an experimental leafwise/best-first split expansion path in engine training, gated by `ALLOYGBM_EXPERIMENT_LEAFWISE`.
+- Candidate built and benchmarked in strict A/B mode against same code/runtime with env flag off.
+- No objective/split-score math changes; only node expansion order differed.
+
+### Commands Executed
+1. Validation:
+   - `cargo fmt --all`
+   - `cargo test -p alloygbm-engine -p alloygbm-backend-cpu`
+2. Runtime build/install:
+   - `python3 -m maturin build --manifest-path bindings/python/Cargo.toml --interpreter python3 --out /tmp/alloygbm-v097-candidate28/wheelhouse -q`
+   - `python3 -m pip install --force-reinstall /tmp/alloygbm-v097-candidate28/wheelhouse/*.whl`
+3. Baseline focused run (env off):
+   - `python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile-seeds 7,17,29 --output-dir benchmarks/results/v097_candidate28_leafwise_focus_baseline`
+4. Candidate focused run (env on):
+   - `ALLOYGBM_EXPERIMENT_LEAFWISE=1 python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile-seeds 7,17,29 --output-dir benchmarks/results/v097_candidate28_leafwise_focus_after`
+
+### Produced Artifacts
+- `benchmarks/results/v097_candidate28_leafwise_focus_baseline/model_comparison_20260305T183004Z.csv`
+- `benchmarks/results/v097_candidate28_leafwise_focus_after/model_comparison_20260305T183409Z.csv`
+
+### Alloy Delta vs Baseline (Focused Slice, 24 Alloy Runs)
+- Median fit delta: `+84.51%` (regression)
+- Median predict delta: `+0.78%` (regression)
+- Median RMSE delta: `0.00%` (no change)
+- Median MAE delta: `0.00%` (no change)
+- Median R2 delta: `0.00000` (no change)
+- Wins: RMSE `0/24`, MAE `0/24`, R2 `0/24`
+
+### Notes
+- Candidate increased training cost materially without any measurable accuracy benefit.
+- Engine code changes were reverted after benchmarking; only artifacts/reporting retained.
+
+---
+
+## Candidate Experiment: Tree-Semantics Delta Updates Per Node (2026-03-05)
+
+### Status
+PASS for implementation/tests/benchmark execution.  
+Decision: keep as default training-path accuracy improvement.
+
+### Scope
+- Updated per-round depth expansion updates to use tree-semantics deltas:
+  - track each active node's current absolute leaf output,
+  - compute child absolute outputs from gradient/hessian,
+  - apply row updates as `child_output - parent_output` deltas.
+- This makes multi-depth rounds behave like standard tree leaf replacement rather than additive path stacking of full child outputs.
+- No histogram kernel, split gain formula, or predictor artifact contract changes.
+
+### Commands Executed
+1. Validation:
+   - `cargo fmt --all`
+   - `cargo test -p alloygbm-engine -p alloygbm-backend-cpu`
+   - `TESTING_WITH_LOCAL_MODULES=1 python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'`
+2. Runtime build/install:
+   - `python3 -m maturin build --manifest-path bindings/python/Cargo.toml --interpreter python3 --out /tmp/alloygbm-v097-candidate29/wheelhouse -q`
+   - `python3 -m pip install --force-reinstall /tmp/alloygbm-v097-candidate29/wheelhouse/*.whl`
+3. Baseline comparison source (same profile slice and seeds):
+   - `benchmarks/results/v097_candidate28_leafwise_focus_baseline/model_comparison_20260305T183004Z.csv`
+4. Candidate run:
+   - `python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile-seeds 7,17,29 --output-dir benchmarks/results/v097_candidate29_tree_semantics_focus_after`
+
+### Produced Artifacts
+- `benchmarks/results/v097_candidate29_tree_semantics_focus_after/model_comparison_20260305T193649Z.csv`
+- `benchmarks/results/v097_candidate29_tree_semantics_focus_after/model_comparison_profile_summary_20260305T193649Z.csv`
+
+### Alloy Delta vs Baseline (Focused Slice, 24 Alloy Runs)
+- Median fit delta: `+3.32%`
+- Median predict delta: `+1.88%`
+- Median RMSE delta: `-5.03%`
+- Median MAE delta: `-4.80%`
+- Median R2 delta: `+0.01994`
+- Wins: RMSE `18/24`, MAE `18/24`, R2 `18/24`
+
+### Notes
+- This is the first tested candidate in the recent sequence with consistent and material metric-quality improvement across the focused slice.
+- Runtime regression is small relative to quality gain and aligns with current `v0.9.7` priority shift toward fitting quality.

@@ -846,7 +846,9 @@ impl Trainer {
             let root_node = NodeSlice::new(root_node_id, root_row_indices)?;
             let root_histograms =
                 backend.build_histograms(binned_matrix, &gradients, &root_node, &feature_tiles)?;
-            let mut active_nodes = vec![(0_u32, root_node.row_indices, root_histograms)];
+            // Maintain each active node's absolute leaf output so child updates
+            // can replace parent contribution via deltas (tree semantics).
+            let mut active_nodes = vec![(0_u32, root_node.row_indices, root_histograms, 0.0_f32)];
 
             for depth in 0..(self.params.max_depth as usize) {
                 if active_nodes.is_empty() {
@@ -854,7 +856,7 @@ impl Trainer {
                 }
 
                 let mut next_nodes = Vec::new();
-                for (local_node_id, node_rows, histograms) in active_nodes {
+                for (local_node_id, node_rows, histograms, parent_leaf_value) in active_nodes {
                     let node_id = encode_tree_node_id(round_index, local_node_id)?;
                     let node = NodeSlice::new(node_id, node_rows)?;
                     let Some(mut split) = backend.best_split(&histograms)? else {
@@ -894,10 +896,12 @@ impl Trainer {
                     let raw_right_leaf_value = -self.params.learning_rate * right_stats.grad_sum
                         / (right_stats.hess_sum + LEAF_EPSILON);
 
-                    let left_leaf_value = raw_left_leaf_value
+                    let left_leaf_absolute = raw_left_leaf_value
                         .clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value);
-                    let right_leaf_value = raw_right_leaf_value
+                    let right_leaf_absolute = raw_right_leaf_value
                         .clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value);
+                    let left_leaf_value = left_leaf_absolute - parent_leaf_value;
+                    let right_leaf_value = right_leaf_absolute - parent_leaf_value;
                     if left_leaf_value.abs() < controls.min_abs_leaf_value
                         && right_leaf_value.abs() < controls.min_abs_leaf_value
                     {
@@ -942,11 +946,13 @@ impl Trainer {
                                 left_local_node_id,
                                 left_node.row_indices,
                                 left_histograms,
+                                left_leaf_absolute,
                             ));
                             next_nodes.push((
                                 right_local_node_id,
                                 right_row_indices,
                                 right_histograms,
+                                right_leaf_absolute,
                             ));
                         } else {
                             let right_node = NodeSlice::new(right_node_id, right_row_indices)?;
@@ -965,11 +971,13 @@ impl Trainer {
                                 left_local_node_id,
                                 left_row_indices,
                                 left_histograms,
+                                left_leaf_absolute,
                             ));
                             next_nodes.push((
                                 right_local_node_id,
                                 right_node.row_indices,
                                 right_histograms,
+                                right_leaf_absolute,
                             ));
                         }
                     }
