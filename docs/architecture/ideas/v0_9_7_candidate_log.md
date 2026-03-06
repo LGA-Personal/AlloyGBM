@@ -37,6 +37,7 @@ These repos are local reference material and should not be included in commits.
 - `candidate36`: selective tail-rank fallback for `linear` binning (env-gated).
 - `candidate43`: split leaf-magnitude filter in backend split scoring (env-gated).
 - `candidate44`: `candidate36 + candidate43` coordinated env preset.
+- `candidate45`: `candidate33 + candidate43` coordinated env preset.
 
 ## Candidate Outcomes (Recent Quality-Focused Wave)
 
@@ -59,6 +60,7 @@ These repos are local reference material and should not be included in commits.
 | 42 | Early min-child-row pruning in backend split scan (env-gated) | Rejected | seed-7 tuning vs baseline: `fit -8.37%`, `predict -0.57%`, `RMSE +1.18%`, `MAE +3.61%`, `R2 -0.03100` | Faster, but quality regressed immediately on both focus scenarios. Reject without running the full focused matrix. |
 | 43 | Split leaf-magnitude filter in backend split scoring (env-gated) | Kept | vs baseline: `fit -21.82%`, `predict -22.52%`, `RMSE -0.02%`, `MAE -0.05%`, `R2 +0.00068` | Strong deep-low-lr speed win with effectively flat focused-slice quality; neutral on `panel_time_series`, mildly positive on `dow_jones_financial`. |
 | 44 | Candidate36 + candidate43 coordinated env preset | Kept | vs baseline: `fit -33.39%`, `predict -25.47%`, `RMSE -2.34%`, `MAE -4.89%`, `R2 +0.07006`; vs candidate36: `fit -19.20%`, `predict -14.91%`, quality essentially flat-to-slightly better | This package preserves candidate36’s panel-quality gains while inheriting candidate43’s deep-low-lr/finance speed win. Strongest coordinated preset so far. |
+| 45 | Candidate33 + candidate43 coordinated env preset | Kept | vs baseline: `fit -26.84%`, `predict -6.16%`, `RMSE -0.64%`, `MAE -2.27%`, `R2 +0.01896`; vs candidate33: `fit -16.56%`, `predict -7.86%`, quality essentially flat | This package improves candidate33’s runtime materially while keeping its focused-slice quality profile nearly unchanged. Useful low-signal/deep-low-lr preset. |
 
 ## Scenario Notes for Candidate36
 - `panel_time_series` (`n=9`): `RMSE -6.57%`, `MAE -14.43%`, `R2 +0.19109`.
@@ -77,6 +79,11 @@ These repos are local reference material and should not be included in commits.
 - `panel_time_series` (`n=9`): `fit -10.06%`, `predict -5.99%`, `RMSE -6.59%`, `MAE -14.38%`, `R2 +0.19023`.
 - `dow_jones_financial` (`n=9`): `fit -50.78%`, `predict -46.78%`, `RMSE -0.20%`, `MAE -0.06%`, `R2 +0.00487`.
 - Relative to `candidate36` alone, the package keeps panel quality effectively unchanged while adding a large finance/deep-low-lr speed win.
+
+## Scenario Notes for Candidate45
+- `panel_time_series` (`n=9`): `fit -6.30%`, `predict -1.20%`, `RMSE -1.38%`, `MAE -4.85%`, `R2 +0.04372`.
+- `dow_jones_financial` (`n=9`): `fit -46.77%`, `predict -43.12%`, `RMSE +0.27%`, `MAE +0.47%`, `R2 -0.00622`.
+- Relative to `candidate33` alone, the package keeps panel quality unchanged and slightly improves finance quality while materially reducing runtime.
 
 ## Do-Not-Retry Standalone (Unless Architecture Changes)
 - High-resolution global bins as a direct knob (`candidate27` shape).
