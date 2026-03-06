@@ -35,6 +35,7 @@ These repos are local reference material and should not be included in commits.
 
 ### Newly kept in this step
 - `candidate36`: selective tail-rank fallback for `linear` binning (env-gated).
+- `candidate43`: split leaf-magnitude filter in backend split scoring (env-gated).
 
 ## Candidate Outcomes (Recent Quality-Focused Wave)
 
@@ -49,6 +50,13 @@ These repos are local reference material and should not be included in commits.
 | 34 | Coarse-to-fine line-search threshold refinement | Rejected | `fit +5.66%`, `predict +2.13%`, `RMSE +1.06%`, `MAE +0.48%`, `R2 -0.02912` | Clear negative. Do not retry in current form. |
 | 35 | Linear winsorized quantization (env-gated) | Rejected | `fit +3.68%`, `predict +2.82%`, quality unchanged (`RMSE/MAE/R2` flat) | No value. Keep out unless combined with a materially different binning/search redesign. |
 | 36 | Selective tail-rank fallback inside linear binning (env-gated) | Kept | `fit -0.39%`, `predict +1.34%`, `RMSE -2.14%`, `MAE -4.72%`, `R2 +0.06526`, wins `9/18` | Promising quality boost at near-flat fit cost; strongest on `panel_time_series`, neutral on `dow_jones_financial`. |
+| 37 | Piecewise heavy-tail hybrid inside linear binning (env-gated) | Rejected | `fit +16.47%`, `predict +15.28%`, `RMSE -2.14%`, `MAE -5.04%`, `R2 +0.06549`, wins `9/18` | Same directional quality as candidate36 but with much worse runtime. Full rank fallback already captures the useful gain more cheaply. |
+| 38 | Candidate33 + candidate36 combined env bundle | Rejected | vs baseline: `fit +19.45%`, `predict +17.86%`, `RMSE -4.26%`, `MAE -4.89%`, `R2 +0.11855`; vs candidate36: `fit +16.23%`, `predict +9.64%`, `RMSE -0.71%`, `MAE -1.63%`, `R2 +0.01906` | Small extra time-series lift is offset by finance regression and too much added runtime over candidate36 alone. |
+| 39 | Repeated-extreme endpoint bucket inside linear binning (env-gated) | Rejected | vs baseline: `fit -1.95%`, `predict -0.43%`, `RMSE -1.94%`, `MAE -4.65%`, `R2 +0.05954`; vs candidate36: `fit -3.98%`, `predict -6.52%`, quality roughly flat-to-slightly worse | Cheap surrogate for candidate36, but accuracy-first review favors candidate36’s slightly stronger panel quality. |
+| 40 | Lower-tail-only selective rank fallback inside linear binning (env-gated) | Rejected | vs baseline: `fit -1.54%`, `predict +0.70%`, `RMSE -1.94%`, `MAE -4.65%`, `R2 +0.05954`; vs candidate36: `fit -3.94%`, `predict -2.97%`, quality flat-to-slightly worse | Another cheaper candidate36 surrogate; keeping rank on only the dominant lower tail did not improve the panel slice enough to justify replacing full selective tail rank. |
+| 41 | Soft split-balance penalty in backend split scoring (env-gated) | Rejected | vs baseline: `fit +11.97%`, `predict +6.29%`, `RMSE -0.93%`, `MAE -0.88%`, `R2 +0.02540` | Panel quality did improve, but finance RMSE/R2 regressed and the runtime penalty was too large for the modest overall gain. |
+| 42 | Early min-child-row pruning in backend split scan (env-gated) | Rejected | seed-7 tuning vs baseline: `fit -8.37%`, `predict -0.57%`, `RMSE +1.18%`, `MAE +3.61%`, `R2 -0.03100` | Faster, but quality regressed immediately on both focus scenarios. Reject without running the full focused matrix. |
+| 43 | Split leaf-magnitude filter in backend split scoring (env-gated) | Kept | vs baseline: `fit -21.82%`, `predict -22.52%`, `RMSE -0.02%`, `MAE -0.05%`, `R2 +0.00068` | Strong deep-low-lr speed win with effectively flat focused-slice quality; neutral on `panel_time_series`, mildly positive on `dow_jones_financial`. |
 
 ## Scenario Notes for Candidate36
 - `panel_time_series` (`n=9`): `RMSE -6.57%`, `MAE -14.43%`, `R2 +0.19109`.
@@ -58,11 +66,22 @@ These repos are local reference material and should not be included in commits.
   - `mid_balanced`: quality improved with slight fit improvement.
   - `shallow_high_lr`: quality improved with slight fit regression.
 
+## Scenario Notes for Candidate43
+- `panel_time_series` (`n=9`): median quality unchanged (`RMSE 0.00%`, `MAE 0.00%`, `R2 0.00000`) with slight speed improvement.
+- `dow_jones_financial` (`n=9`): `fit -42.51%`, `predict -38.04%`, `RMSE -0.20%`, `MAE -0.06%`, `R2 +0.00487`.
+- The win is concentrated in deep-low-lr / low-signal behavior rather than the panel heavy-tail slice.
+
 ## Do-Not-Retry Standalone (Unless Architecture Changes)
 - High-resolution global bins as a direct knob (`candidate27` shape).
 - Leafwise expansion without sampling/control coupling (`candidate28` shape).
 - Coarse-to-fine line-search split refinement (`candidate34` shape).
 - Linear winsorization-only quantization (`candidate35` shape).
+- Piecewise heavy-tail hybrid remap on top of selective tail rank (`candidate37` shape).
+- Candidate33 regularization + candidate36 tail-rank as a blanket combined preset (`candidate38` shape).
+- Repeated-extreme endpoint bucket as a replacement for selective tail rank (`candidate39` shape).
+- Lower-tail-only selective rank fallback as a replacement for selective tail rank (`candidate40` shape).
+- Soft split-balance penalty as a standalone split-search quality knob (`candidate41` shape).
+- Early min-child-row pruning as a standalone split-search quality knob (`candidate42` shape).
 
 ## Likely Synergy Directions (Worth Coordinated Packages)
 1. Backend-regularized split scoring (`candidate32/33`) + selective tail-aware quantization (`candidate36`) under one controlled package.
@@ -71,6 +90,7 @@ These repos are local reference material and should not be included in commits.
    - staged row partition engine,
    - repacked split descriptors.
 3. Quality-first split-search improvements with strict fit-time guardrails and deep-low-lr included in every acceptance run.
+4. Backend-side split-search quality work rather than more linear-tail quantization variants, since the recent tail-focused candidates are converging on the same panel signal without surpassing `candidate36`.
 
 ## Benchmarking Protocol Reminder (Current)
 - Always include deep-low-lr slice in A/B:

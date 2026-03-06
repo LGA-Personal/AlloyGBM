@@ -778,3 +778,515 @@ Decision: keep candidate code and treat as accepted v0.9.7 improvement.
 
 ### Acceptance Note
 - For the deep low-SNR slice, this is accepted as a strong tradeoff: ~20% fit-time reduction with very small overall quality movement (sub-0.5% R2 effect, slight RMSE increase, MAE improvement).
+
+---
+
+## Candidate Experiment: Piecewise Heavy-Tail Hybrid Linear Quantization (Env-Gated) (2026-03-06)
+
+### Status
+PASS for implementation/tests/benchmark execution.  
+Decision: reject candidate and revert code changes.
+
+### Scope
+- Added an experimental linear-binning refinement gated by:
+  - `ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK=1`
+  - `ALLOYGBM_EXPERIMENT_LINEAR_TAIL_PIECEWISE=1`
+- Reused `candidate36` tail-feature detection, but mapped flagged features with:
+  - rank allocation in trimmed tails,
+  - linear scaling across the retained core span.
+- Added Python contract tests covering fit-time and predict-time persistence of the piecewise mapping.
+
+### Commands Executed
+1. Baseline runtime build/install:
+   - `python3 -m maturin build --manifest-path bindings/python/Cargo.toml --interpreter python3 --out /tmp/alloygbm-v097-candidate37-baseline/wheelhouse -q`
+   - `python3 -m pip install --upgrade --force-reinstall --no-deps --no-cache-dir --target /tmp/alloygbm-v097-candidate37-baseline/site-packages /tmp/alloygbm-v097-candidate37-baseline/wheelhouse/*.whl`
+2. Baseline focused A/B slice:
+   - `PYTHONPATH=/tmp/alloygbm-v097-candidate37-baseline/site-packages python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile deep_low_lr:0.01:8:5000 --profile-seeds 7,17,29 --scenarios panel_time_series dow_jones_financial --output-dir benchmarks/results/v097_candidate37_focus_baseline`
+3. Validation during candidate implementation:
+   - `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'`
+   - `python3 -m unittest discover -s benchmarks/tests -p 'test_*.py'`
+4. Candidate runtime build/install:
+   - `python3 -m maturin build --manifest-path bindings/python/Cargo.toml --interpreter python3 --out /tmp/alloygbm-v097-candidate37/wheelhouse -q`
+   - `python3 -m pip install --upgrade --force-reinstall --no-deps --no-cache-dir --target /tmp/alloygbm-v097-candidate37/site-packages /tmp/alloygbm-v097-candidate37/wheelhouse/*.whl`
+5. Candidate focused slice:
+   - `ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK=1 ALLOYGBM_EXPERIMENT_LINEAR_TAIL_PIECEWISE=1 PYTHONPATH=/tmp/alloygbm-v097-candidate37/site-packages python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile deep_low_lr:0.01:8:5000 --profile-seeds 7,17,29 --scenarios panel_time_series dow_jones_financial --output-dir benchmarks/results/v097_candidate37_focus_after`
+
+### Produced Artifacts
+- Baseline:
+  - `benchmarks/results/v097_candidate37_focus_baseline/model_comparison_20260306T043223Z.csv`
+  - `benchmarks/results/v097_candidate37_focus_baseline/model_comparison_profile_summary_20260306T043223Z.csv`
+- Candidate:
+  - `benchmarks/results/v097_candidate37_focus_after/model_comparison_20260306T043952Z.csv`
+  - `benchmarks/results/v097_candidate37_focus_after/model_comparison_profile_summary_20260306T043952Z.csv`
+
+### Alloy Delta vs Baseline (Focused Slice, 18 Alloy Runs)
+- Median fit delta: `+16.47%`
+- Median predict delta: `+15.28%`
+- Median RMSE delta: `-2.14%`
+- Median MAE delta: `-5.04%`
+- Median R2 delta: `+0.06549`
+- Wins: RMSE `9/18`, MAE `9/18`, R2 `9/18`
+
+### Scenario Notes
+- `panel_time_series` (`n=9`):
+  - fit `+16.03%`
+  - predict `+16.91%`
+  - RMSE `-6.45%`
+  - MAE `-14.17%`
+  - R2 `+0.20497`
+- `dow_jones_financial` (`n=9`):
+  - fit `+16.91%`
+  - predict `+13.65%`
+  - RMSE `0.00%`
+  - MAE `0.00%`
+  - R2 `0.00000`
+
+### Rejection Rationale
+- The quality movement is real, but it is not better than the already-kept `candidate36` selective tail-rank fallback in any meaningful way.
+- Runtime cost is materially worse than `candidate36` (`fit +16.47%` here versus near-flat cost on the kept path).
+- Because the improvement cluster remains confined to `panel_time_series` while `dow_jones_financial` stays neutral, the extra piecewise remap complexity is not justified.
+
+---
+
+## Candidate Experiment: Candidate33 + Candidate36 Combined Env Bundle (2026-03-06)
+
+### Status
+PASS for benchmark execution.  
+Decision: reject candidate and keep the two features independent.
+
+### Scope
+- Evaluated the most likely documented synergy bundle:
+  - `ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK=1`
+  - `ALLOYGBM_EXPERIMENT_SPLIT_L2=1`
+  - `ALLOYGBM_EXPERIMENT_SPLIT_L1=0.1`
+  - `ALLOYGBM_EXPERIMENT_MIN_CHILD_HESS=0`
+- Reused the current code baseline and reran `candidate36` alone on the exact same focused slice to get a same-snapshot reference before judging the combo.
+- No product code changes were kept for this candidate; validation only required benchmark harness checks because the runtime code was unchanged.
+
+### Commands Executed
+1. Harness validation:
+   - `python3 -m unittest discover -s benchmarks/tests -p 'test_*.py'`
+2. Tail-rank-only reference run (`candidate36` same-snapshot rerun):
+   - `ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK=1 PYTHONPATH=/tmp/alloygbm-v097-candidate37-baseline/site-packages python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile deep_low_lr:0.01:8:5000 --profile-seeds 7,17,29 --scenarios panel_time_series dow_jones_financial --output-dir benchmarks/results/v097_candidate38_focus_tailrank_only`
+3. Combined bundle run:
+   - `ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK=1 ALLOYGBM_EXPERIMENT_SPLIT_L2=1 ALLOYGBM_EXPERIMENT_SPLIT_L1=0.1 ALLOYGBM_EXPERIMENT_MIN_CHILD_HESS=0 PYTHONPATH=/tmp/alloygbm-v097-candidate37-baseline/site-packages python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile deep_low_lr:0.01:8:5000 --profile-seeds 7,17,29 --scenarios panel_time_series dow_jones_financial --output-dir benchmarks/results/v097_candidate38_focus_combo`
+
+### Produced Artifacts
+- Tail-rank-only reference:
+  - `benchmarks/results/v097_candidate38_focus_tailrank_only/model_comparison_20260306T045315Z.csv`
+  - `benchmarks/results/v097_candidate38_focus_tailrank_only/model_comparison_profile_summary_20260306T045315Z.csv`
+- Combined bundle:
+  - `benchmarks/results/v097_candidate38_focus_combo/model_comparison_20260306T045926Z.csv`
+  - `benchmarks/results/v097_candidate38_focus_combo/model_comparison_profile_summary_20260306T045926Z.csv`
+
+### Candidate36 Reference vs Baseline (Focused Slice, 18 Alloy Runs)
+- Median fit delta: `+1.77%`
+- Median predict delta: `+3.70%`
+- Median RMSE delta: `-2.14%`
+- Median MAE delta: `-4.72%`
+- Median R2 delta: `+0.06526`
+- Wins: RMSE `9/18`, MAE `9/18`, R2 `9/18`
+
+### Combined Bundle vs Baseline (Focused Slice, 18 Alloy Runs)
+- Median fit delta: `+19.45%`
+- Median predict delta: `+17.86%`
+- Median RMSE delta: `-4.26%`
+- Median MAE delta: `-4.89%`
+- Median R2 delta: `+0.11855`
+- Wins: RMSE `13/18`, MAE `12/18`, R2 `13/18`
+
+### Combined Bundle vs Candidate36-Only
+- Median fit delta: `+16.23%`
+- Median predict delta: `+9.64%`
+- Median RMSE delta: `-0.71%`
+- Median MAE delta: `-1.63%`
+- Median R2 delta: `+0.01906`
+- Wins: RMSE `12/18`, MAE `10/18`, R2 `12/18`
+
+### Scenario Notes
+- `panel_time_series` vs `candidate36` (`n=9`):
+  - fit `+19.24%`
+  - predict `+9.62%`
+  - RMSE `-1.19%`
+  - MAE `-2.16%`
+  - R2 `+0.03211`
+- `dow_jones_financial` vs `candidate36` (`n=9`):
+  - fit `+13.22%`
+  - predict `+9.66%`
+  - RMSE `+0.43%`
+  - MAE `+0.63%`
+  - R2 `-0.00983`
+
+### Rejection Rationale
+- The combo does improve the time-series slice beyond `candidate36`, but only modestly once `candidate36` is already active.
+- That incremental gain costs too much additional runtime (`fit +16.23%`, `predict +9.64%` versus `candidate36`).
+- More importantly, the bundle gives back quality on `dow_jones_financial`, so it fails the intended “synergy” requirement of improving split quality without broadening regressions.
+
+---
+
+## Candidate Experiment: Repeated-Extreme Endpoint Bucket in Linear Quantization (Env-Gated) (2026-03-06)
+
+### Status
+PASS for implementation/tests/benchmark execution.  
+Decision: reject candidate and revert code changes.
+
+### Scope
+- Added an experimental linear-binning refinement gated by:
+  - `ALLOYGBM_EXPERIMENT_LINEAR_EXTREME_BUCKET=1`
+- The candidate detected repeated extreme endpoint values with a large gap into the interior span and assigned them a dedicated edge bucket, while linearly scaling the remaining values.
+- The intended target was the `panel_time_series` `co_gt=-200` floor pattern observed during `candidate36` analysis.
+
+### Commands Executed
+1. Validation:
+   - `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'`
+   - `python3 -m unittest discover -s benchmarks/tests -p 'test_*.py'`
+2. Runtime build/install:
+   - `python3 -m maturin build --manifest-path bindings/python/Cargo.toml --interpreter python3 --out /tmp/alloygbm-v097-candidate39/wheelhouse -q`
+   - `python3 -m pip install --upgrade --force-reinstall --no-deps --no-cache-dir --target /tmp/alloygbm-v097-candidate39/site-packages /tmp/alloygbm-v097-candidate39/wheelhouse/*.whl`
+3. Focused candidate run:
+   - `ALLOYGBM_EXPERIMENT_LINEAR_EXTREME_BUCKET=1 PYTHONPATH=/tmp/alloygbm-v097-candidate39/site-packages python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile deep_low_lr:0.01:8:5000 --profile-seeds 7,17,29 --scenarios panel_time_series dow_jones_financial --output-dir benchmarks/results/v097_candidate39_focus_extreme_bucket`
+
+Baseline for comparison reused the immediately prior unchanged-code focused baseline:
+- `benchmarks/results/v097_candidate37_focus_baseline/model_comparison_20260306T043223Z.csv`
+
+Candidate36 same-snapshot reference reused:
+- `benchmarks/results/v097_candidate38_focus_tailrank_only/model_comparison_20260306T045315Z.csv`
+
+### Produced Artifacts
+- Candidate:
+  - `benchmarks/results/v097_candidate39_focus_extreme_bucket/model_comparison_20260306T052130Z.csv`
+  - `benchmarks/results/v097_candidate39_focus_extreme_bucket/model_comparison_profile_summary_20260306T052130Z.csv`
+
+### Candidate vs Baseline (Focused Slice, 18 Alloy Runs)
+- Median fit delta: `-1.95%`
+- Median predict delta: `-0.43%`
+- Median RMSE delta: `-1.94%`
+- Median MAE delta: `-4.65%`
+- Median R2 delta: `+0.05954`
+- Wins: fit `12/18`, predict `9/18`, RMSE `9/18`, MAE `9/18`, R2 `9/18`
+
+### Candidate vs Candidate36-Only
+- Median fit delta: `-3.98%`
+- Median predict delta: `-6.52%`
+- Median RMSE delta: `0.00%`
+- Median MAE delta: `0.00%`
+- Median R2 delta: `0.00000`
+- Wins: fit `17/18`, predict `15/18`, RMSE `3/18`, MAE `5/18`, R2 `3/18`
+
+### Scenario Notes vs Candidate36
+- `panel_time_series` (`n=9`):
+  - fit `-2.30%`
+  - predict `-3.35%`
+  - RMSE `+0.14%`
+  - MAE `-0.09%`
+  - R2 `-0.00370`
+- `dow_jones_financial` (`n=9`):
+  - fit `-10.03%`
+  - predict `-12.63%`
+  - RMSE `0.00%`
+  - MAE `0.00%`
+  - R2 `0.00000`
+
+### Rejection Rationale
+- The candidate is a plausible cheaper surrogate for `candidate36`, but it does not improve quality over `candidate36` on the slice that matters.
+- Under the current `v0.9.7` accuracy-first bar, `candidate36` remains preferable because its panel-time-series quality is still slightly stronger.
+- The in-flight full-matrix confirmation was intentionally stopped once the focused comparison showed this candidate was a speed-oriented substitute rather than a better quality package.
+
+---
+
+## Candidate Experiment: Lower-Tail-Only Selective Rank Fallback in Linear Quantization (Env-Gated) (2026-03-06)
+
+### Status
+PASS for implementation/tests/benchmark execution.  
+Decision: reject candidate and revert code changes.
+
+### Scope
+- Added an experimental selective-lower-tail variant gated by:
+  - `ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK=1`
+  - `ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK_LOWER_ONLY=1`
+- For heavy-tail features already flagged by `candidate36`, the candidate rank-mapped only the dominant lower tail and kept the remaining span linearly scaled.
+- The intended target was the same `panel_time_series` `co_gt` lower-floor pattern, but with less runtime overhead than full selective rank.
+
+### Commands Executed
+1. Validation:
+   - `python3 -m py_compile bindings/python/alloygbm/regressor.py bindings/python/tests/test_regressor_contract.py`
+   - `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'`
+2. Runtime build/install:
+   - `python3 -m maturin build --manifest-path bindings/python/Cargo.toml --interpreter python3 --out /tmp/alloygbm-v097-candidate40/wheelhouse -q`
+   - `python3 -m pip install --upgrade --force-reinstall --no-deps --no-cache-dir --target /tmp/alloygbm-v097-candidate40/site-packages /tmp/alloygbm-v097-candidate40/wheelhouse/*.whl`
+3. Focused candidate run:
+   - `ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK=1 ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK_LOWER_ONLY=1 PYTHONPATH=/tmp/alloygbm-v097-candidate40/site-packages python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile deep_low_lr:0.01:8:5000 --profile-seeds 7,17,29 --scenarios panel_time_series dow_jones_financial --output-dir benchmarks/results/v097_candidate40_focus_lower_only`
+4. Post-revert validation:
+   - `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'`
+
+Baseline for comparison reused the immediately prior unchanged-code focused baseline:
+- `benchmarks/results/v097_candidate37_focus_baseline/model_comparison_20260306T043223Z.csv`
+
+Candidate36 same-snapshot reference reused:
+- `benchmarks/results/v097_candidate38_focus_tailrank_only/model_comparison_20260306T045315Z.csv`
+
+### Produced Artifacts
+- Candidate:
+  - `benchmarks/results/v097_candidate40_focus_lower_only/model_comparison_20260306T063233Z.csv`
+  - `benchmarks/results/v097_candidate40_focus_lower_only/model_comparison_profile_summary_20260306T063233Z.csv`
+
+### Candidate vs Baseline (Focused Slice, 18 Alloy Runs)
+- Median fit delta: `-1.54%`
+- Median predict delta: `+0.70%`
+- Median RMSE delta: `-1.94%`
+- Median MAE delta: `-4.65%`
+- Median R2 delta: `+0.05954`
+- Wins: fit `12/18`, predict `9/18`, RMSE `9/18`, MAE `9/18`, R2 `9/18`
+
+### Candidate vs Candidate36-Only
+- Median fit delta: `-3.94%`
+- Median predict delta: `-2.97%`
+- Median RMSE delta: `0.00%`
+- Median MAE delta: `0.00%`
+- Median R2 delta: `0.00000`
+- Wins: fit `16/18`, predict `10/18`, RMSE `3/18`, MAE `5/18`, R2 `3/18`
+
+### Scenario Notes vs Candidate36
+- `panel_time_series` (`n=9`):
+  - fit `-3.59%`
+  - predict `+0.97%`
+  - RMSE `+0.14%`
+  - MAE `-0.09%`
+  - R2 `-0.00370`
+- `dow_jones_financial` (`n=9`):
+  - fit `-6.31%`
+  - predict `-9.11%`
+  - RMSE `0.00%`
+  - MAE `0.00%`
+  - R2 `0.00000`
+
+### Rejection Rationale
+- The candidate again behaves like a cheaper approximation of `candidate36`, not a better accuracy package.
+- It reduces fit time versus `candidate36`, but gives back the already-small panel quality edge (`RMSE +0.14%`, `R2 -0.00370`) while leaving finance flat.
+- That leaves no reason to replace `candidate36` in an accuracy-first phase, and it also argues against spending more time on near-duplicate linear-tail variants.
+
+---
+
+## Candidate Experiment: Soft Split-Balance Penalty in Backend Split Scoring (Env-Gated) (2026-03-06)
+
+### Status
+PASS for implementation/tests/benchmark execution.  
+Decision: reject candidate and revert code changes.
+
+### Scope
+- Added an experimental split-score penalty gated by:
+  - `ALLOYGBM_EXPERIMENT_SPLIT_BALANCE_PENALTY`
+- The candidate downweighted otherwise-high-gain splits that produced strongly imbalanced child row counts, with the intent of reducing tiny-leaf overfitting during the split scan itself.
+- This was a backend-side split-search experiment rather than another quantization variant.
+
+### Commands Executed
+1. Validation before benchmarking:
+   - `cargo fmt --all`
+   - `cargo test -p alloygbm-engine -p alloygbm-backend-cpu`
+   - `python3 -m maturin build --manifest-path bindings/python/Cargo.toml --interpreter python3 --out /tmp/alloygbm-v097-candidate41/wheelhouse -q`
+   - `python3 -m pip install --upgrade --force-reinstall --no-deps --no-cache-dir --target /tmp/alloygbm-v097-candidate41/site-packages /tmp/alloygbm-v097-candidate41/wheelhouse/*.whl`
+   - `PYTHONPATH=/tmp/alloygbm-v097-candidate41/site-packages python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'`
+2. Quick tuning sweep (seed `7`, focused scenarios):
+   - Baseline:
+     - `PYTHONPATH=/tmp/alloygbm-v097-candidate41/site-packages python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile deep_low_lr:0.01:8:5000 --profile-seeds 7 --scenarios panel_time_series dow_jones_financial --output-dir benchmarks/results/v097_candidate41_tune_baseline`
+   - `balance_penalty=0.10`:
+     - `ALLOYGBM_EXPERIMENT_SPLIT_BALANCE_PENALTY=0.1 PYTHONPATH=/tmp/alloygbm-v097-candidate41/site-packages python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile deep_low_lr:0.01:8:5000 --profile-seeds 7 --scenarios panel_time_series dow_jones_financial --output-dir benchmarks/results/v097_candidate41_tune_penalty_01`
+   - `balance_penalty=0.25`:
+     - `ALLOYGBM_EXPERIMENT_SPLIT_BALANCE_PENALTY=0.25 PYTHONPATH=/tmp/alloygbm-v097-candidate41/site-packages python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile deep_low_lr:0.01:8:5000 --profile-seeds 7 --scenarios panel_time_series dow_jones_financial --output-dir benchmarks/results/v097_candidate41_tune_penalty_025`
+   - `balance_penalty=0.50`:
+     - `ALLOYGBM_EXPERIMENT_SPLIT_BALANCE_PENALTY=0.5 PYTHONPATH=/tmp/alloygbm-v097-candidate41/site-packages python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile deep_low_lr:0.01:8:5000 --profile-seeds 7 --scenarios panel_time_series dow_jones_financial --output-dir benchmarks/results/v097_candidate41_tune_penalty_05`
+3. Full focused A/B (selected setting `balance_penalty=0.25`):
+   - Baseline:
+     - `PYTHONPATH=/tmp/alloygbm-v097-candidate41/site-packages python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile deep_low_lr:0.01:8:5000 --profile-seeds 7,17,29 --scenarios panel_time_series dow_jones_financial --output-dir benchmarks/results/v097_candidate41_focus_baseline`
+   - Candidate:
+     - `ALLOYGBM_EXPERIMENT_SPLIT_BALANCE_PENALTY=0.25 PYTHONPATH=/tmp/alloygbm-v097-candidate41/site-packages python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile deep_low_lr:0.01:8:5000 --profile-seeds 7,17,29 --scenarios panel_time_series dow_jones_financial --output-dir benchmarks/results/v097_candidate41_focus_balance_penalty`
+4. Post-revert validation:
+   - `cargo fmt --all`
+   - `cargo test -p alloygbm-engine -p alloygbm-backend-cpu`
+   - `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'`
+
+### Tuning Note
+- Seed-7 tuning indicated the candidate was only worth carrying forward at low penalty strengths.
+- `balance_penalty=0.25` had the strongest RMSE/R2 movement of the tested values, while `0.5` was clearly too destructive and `0.1` was nearly flat.
+
+### Produced Artifacts
+- Tuning:
+  - `benchmarks/results/v097_candidate41_tune_baseline/model_comparison_20260306T065522Z.csv`
+  - `benchmarks/results/v097_candidate41_tune_penalty_01/model_comparison_20260306T070243Z.csv`
+  - `benchmarks/results/v097_candidate41_tune_penalty_025/model_comparison_20260306T065743Z.csv`
+  - `benchmarks/results/v097_candidate41_tune_penalty_05/model_comparison_20260306T070008Z.csv`
+- Focused A/B:
+  - `benchmarks/results/v097_candidate41_focus_baseline/model_comparison_20260306T070906Z.csv`
+  - `benchmarks/results/v097_candidate41_focus_baseline/model_comparison_profile_summary_20260306T070906Z.csv`
+  - `benchmarks/results/v097_candidate41_focus_balance_penalty/model_comparison_20260306T071553Z.csv`
+  - `benchmarks/results/v097_candidate41_focus_balance_penalty/model_comparison_profile_summary_20260306T071553Z.csv`
+
+### Candidate vs Baseline (Focused Slice, 18 Alloy Runs)
+- Median fit delta: `+11.97%`
+- Median predict delta: `+6.29%`
+- Median RMSE delta: `-0.93%`
+- Median MAE delta: `-0.88%`
+- Median R2 delta: `+0.02540`
+- Wins: fit `0/18`, predict `4/18`, RMSE `11/18`, MAE `11/18`, R2 `11/18`
+
+### Scenario Notes
+- `panel_time_series` (`n=9`):
+  - fit `+9.27%`
+  - predict `+8.88%`
+  - RMSE `-2.23%`
+  - MAE `-1.34%`
+  - R2 `+0.06624`
+- `dow_jones_financial` (`n=9`):
+  - fit `+16.53%`
+  - predict `+6.12%`
+  - RMSE `+0.56%`
+  - MAE `-0.80%`
+  - R2 `-0.01296`
+
+### Rejection Rationale
+- The panel slice does improve, but not enough to justify a double-digit fit-time penalty.
+- More importantly, the candidate gives back finance quality on RMSE/R2 while also slowing prediction.
+- That makes this a weaker accuracy/runtime tradeoff than the already-kept quality candidates, so it should remain rejected.
+
+---
+
+## Candidate Experiment: Early Min-Child-Row Pruning in Backend Split Scan (Env-Gated) (2026-03-06)
+
+### Status
+PASS for implementation/tests/tuning benchmark execution.  
+Decision: reject candidate during tuning and revert code changes.
+
+### Scope
+- Added an experimental split-scan pruning control gated by:
+  - `ALLOYGBM_EXPERIMENT_SPLIT_MIN_CHILD_ROWS`
+- The candidate skipped thresholds during backend split search when either child would fall below the configured minimum row count.
+- The intent was to remove obviously tiny-leaf candidates earlier than the trainer currently does and see whether that improved both split quality and runtime.
+
+### Commands Executed
+1. Validation before benchmarking:
+   - `cargo fmt --all`
+   - `cargo test -p alloygbm-engine -p alloygbm-backend-cpu`
+   - `python3 -m maturin build --manifest-path bindings/python/Cargo.toml --interpreter python3 --out /tmp/alloygbm-v097-candidate42/wheelhouse -q`
+   - `python3 -m pip install --upgrade --force-reinstall --no-deps --no-cache-dir --target /tmp/alloygbm-v097-candidate42/site-packages /tmp/alloygbm-v097-candidate42/wheelhouse/*.whl`
+   - `PYTHONPATH=/tmp/alloygbm-v097-candidate42/site-packages python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'`
+2. Seed-7 tuning run:
+   - Baseline:
+     - `PYTHONPATH=/tmp/alloygbm-v097-candidate42/site-packages python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile deep_low_lr:0.01:8:5000 --profile-seeds 7 --scenarios panel_time_series dow_jones_financial --output-dir benchmarks/results/v097_candidate42_tune_baseline`
+   - Candidate (`min_child_rows=2`):
+     - `ALLOYGBM_EXPERIMENT_SPLIT_MIN_CHILD_ROWS=2 PYTHONPATH=/tmp/alloygbm-v097-candidate42/site-packages python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile deep_low_lr:0.01:8:5000 --profile-seeds 7 --scenarios panel_time_series dow_jones_financial --output-dir benchmarks/results/v097_candidate42_tune_rows_2`
+3. Post-revert validation:
+   - `cargo fmt --all`
+   - `cargo test -p alloygbm-engine -p alloygbm-backend-cpu`
+   - `python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'`
+
+### Produced Artifacts
+- Tuning baseline:
+  - `benchmarks/results/v097_candidate42_tune_baseline/model_comparison_20260306T160726Z.csv`
+  - `benchmarks/results/v097_candidate42_tune_baseline/model_comparison_profile_summary_20260306T160726Z.csv`
+- Candidate:
+  - `benchmarks/results/v097_candidate42_tune_rows_2/model_comparison_20260306T160908Z.csv`
+  - `benchmarks/results/v097_candidate42_tune_rows_2/model_comparison_profile_summary_20260306T160908Z.csv`
+
+### Candidate vs Baseline (Seed-7 Tuning Slice, 6 Alloy Runs)
+- Median fit delta: `-8.37%`
+- Median predict delta: `-0.57%`
+- Median RMSE delta: `+1.18%`
+- Median MAE delta: `+3.61%`
+- Median R2 delta: `-0.03100`
+
+### Scenario Notes
+- `panel_time_series` (`n=3`):
+  - fit `-2.56%`
+  - predict `+4.64%`
+  - RMSE `+1.02%`
+  - MAE `+6.72%`
+  - R2 `-0.03060`
+- `dow_jones_financial` (`n=3`):
+  - fit `-14.17%`
+  - predict `-5.79%`
+  - RMSE `+1.34%`
+  - MAE `+0.65%`
+  - R2 `-0.03140`
+
+### Rejection Rationale
+- The candidate does reduce fit time, but quality moves in the wrong direction immediately on both focus scenarios.
+- Because the regression was already clear in seed-7 tuning, the full focused 18-run matrix was intentionally skipped.
+- This suggests hard early row-pruning is too blunt as a standalone split-search control for the current accuracy-first phase.
+
+---
+
+## Candidate Experiment: Split Leaf-Magnitude Filter in Backend Split Scoring (Env-Gated) (2026-03-06)
+
+### Status
+PASS for implementation/tests/benchmark execution.  
+Decision: keep candidate code and continue from this baseline.
+
+### Scope
+- Added an experimental split-scan filter gated by:
+  - `ALLOYGBM_EXPERIMENT_SPLIT_MIN_LEAF_MAGNITUDE`
+- During backend split evaluation, the candidate skips thresholds whose implied leaf updates are both below the configured minimum magnitude.
+- This uses already-available split statistics and acts as a narrow tie-break / pruning rule rather than a broad gain reweighting.
+
+### Commands Executed
+1. Validation:
+   - `cargo fmt --all`
+   - `cargo test -p alloygbm-engine -p alloygbm-backend-cpu`
+   - `python3 -m maturin build --manifest-path bindings/python/Cargo.toml --interpreter python3 --out /tmp/alloygbm-v097-candidate43/wheelhouse -q`
+   - `python3 -m pip install --upgrade --force-reinstall --no-deps --no-cache-dir --target /tmp/alloygbm-v097-candidate43/site-packages /tmp/alloygbm-v097-candidate43/wheelhouse/*.whl`
+   - `PYTHONPATH=/tmp/alloygbm-v097-candidate43/site-packages python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'`
+2. Seed-7 tuning slice:
+   - Baseline:
+     - `PYTHONPATH=/tmp/alloygbm-v097-candidate43/site-packages python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile deep_low_lr:0.01:8:5000 --profile-seeds 7 --scenarios panel_time_series dow_jones_financial --output-dir benchmarks/results/v097_candidate43_tune_baseline`
+   - `min_leaf_magnitude=0.02`:
+     - `ALLOYGBM_EXPERIMENT_SPLIT_MIN_LEAF_MAGNITUDE=0.02 PYTHONPATH=/tmp/alloygbm-v097-candidate43/site-packages python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile deep_low_lr:0.01:8:5000 --profile-seeds 7 --scenarios panel_time_series dow_jones_financial --output-dir benchmarks/results/v097_candidate43_tune_mag_002`
+   - `min_leaf_magnitude=0.05`:
+     - `ALLOYGBM_EXPERIMENT_SPLIT_MIN_LEAF_MAGNITUDE=0.05 PYTHONPATH=/tmp/alloygbm-v097-candidate43/site-packages python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile deep_low_lr:0.01:8:5000 --profile-seeds 7 --scenarios panel_time_series dow_jones_financial --output-dir benchmarks/results/v097_candidate43_tune_mag_005`
+3. Full focused A/B (selected setting `min_leaf_magnitude=0.02`):
+   - Baseline:
+     - `PYTHONPATH=/tmp/alloygbm-v097-candidate43/site-packages python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile deep_low_lr:0.01:8:5000 --profile-seeds 7,17,29 --scenarios panel_time_series dow_jones_financial --output-dir benchmarks/results/v097_candidate43_focus_baseline`
+   - Candidate:
+     - `ALLOYGBM_EXPERIMENT_SPLIT_MIN_LEAF_MAGNITUDE=0.02 PYTHONPATH=/tmp/alloygbm-v097-candidate43/site-packages python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile deep_low_lr:0.01:8:5000 --profile-seeds 7,17,29 --scenarios panel_time_series dow_jones_financial --output-dir benchmarks/results/v097_candidate43_focus_mag_002`
+
+### Tuning Note
+- `min_leaf_magnitude=0.02` was the safer threshold:
+  - seed-7 median deltas vs baseline: `fit -17.78%`, `predict -22.32%`, `RMSE -0.04%`, `MAE -0.06%`, `R2 +0.00110`
+- `min_leaf_magnitude=0.05` was faster but slightly more accuracy-risky:
+  - seed-7 median deltas vs baseline: `fit -38.59%`, `predict -31.35%`, `RMSE +0.06%`, `MAE -0.26%`, `R2 -0.00190`
+
+### Produced Artifacts
+- Tuning:
+  - `benchmarks/results/v097_candidate43_tune_baseline/model_comparison_20260306T162940Z.csv`
+  - `benchmarks/results/v097_candidate43_tune_mag_002/model_comparison_20260306T163049Z.csv`
+  - `benchmarks/results/v097_candidate43_tune_mag_005/model_comparison_20260306T163156Z.csv`
+- Focused A/B:
+  - `benchmarks/results/v097_candidate43_focus_baseline/model_comparison_20260306T163849Z.csv`
+  - `benchmarks/results/v097_candidate43_focus_baseline/model_comparison_profile_summary_20260306T163849Z.csv`
+  - `benchmarks/results/v097_candidate43_focus_mag_002/model_comparison_20260306T164220Z.csv`
+  - `benchmarks/results/v097_candidate43_focus_mag_002/model_comparison_profile_summary_20260306T164220Z.csv`
+
+### Candidate vs Baseline (Focused Slice, 18 Alloy Runs)
+- Median fit delta: `-21.82%`
+- Median predict delta: `-22.52%`
+- Median RMSE delta: `-0.02%`
+- Median MAE delta: `-0.05%`
+- Median R2 delta: `+0.00068`
+- Wins: fit `13/18`, predict `13/18`, RMSE `11/18`, MAE `11/18`, R2 `11/18`
+
+### Scenario Notes
+- `panel_time_series` (`n=9`):
+  - fit `-3.36%`
+  - predict `-0.16%`
+  - RMSE `0.00%`
+  - MAE `0.00%`
+  - R2 `0.00000`
+- `dow_jones_financial` (`n=9`):
+  - fit `-42.51%`
+  - predict `-38.04%`
+  - RMSE `-0.20%`
+  - MAE `-0.06%`
+  - R2 `+0.00487`
+
+### Acceptance Note
+- This is accepted as an env-gated v0.9.7 tradeoff improvement because it materially reduces training and prediction time while preserving focused-slice quality.
+- The gain comes primarily from the deep-low-lr financial slice, where weak leaf updates are most common.
+- Unlike `candidate41` and `candidate42`, this filter does not give back quality on the panel slice that current benchmarks treat as the main accuracy direction.

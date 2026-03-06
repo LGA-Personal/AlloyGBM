@@ -495,10 +495,20 @@ impl CpuBackend {
 
                 let left_grad_for_gain = l1_threshold_gradient(left_grad, options.l1_alpha);
                 let right_grad_for_gain = l1_threshold_gradient(right_grad, options.l1_alpha);
-                let gain = (left_grad_for_gain * left_grad_for_gain)
-                    / (left_hess + options.l2_lambda + EPSILON)
-                    + (right_grad_for_gain * right_grad_for_gain)
-                        / (right_hess + options.l2_lambda + EPSILON)
+                let left_denom = left_hess + options.l2_lambda + EPSILON;
+                let right_denom = right_hess + options.l2_lambda + EPSILON;
+                if options.min_leaf_magnitude > 0.0 {
+                    let left_leaf_magnitude = left_grad_for_gain.abs() / left_denom;
+                    let right_leaf_magnitude = right_grad_for_gain.abs() / right_denom;
+                    if left_leaf_magnitude < options.min_leaf_magnitude
+                        && right_leaf_magnitude < options.min_leaf_magnitude
+                    {
+                        continue;
+                    }
+                }
+
+                let gain = (left_grad_for_gain * left_grad_for_gain) / left_denom
+                    + (right_grad_for_gain * right_grad_for_gain) / right_denom
                     - parent_gain_term;
 
                 if gain > best_gain {
@@ -1085,6 +1095,7 @@ mod tests {
                     l2_lambda: 1.0,
                     l1_alpha: 0.0,
                     min_child_hessian: 0.0,
+                    min_leaf_magnitude: 0.0,
                 },
             )
             .expect("regularized split search should succeed")
@@ -1118,6 +1129,7 @@ mod tests {
                     l2_lambda: 0.0,
                     l1_alpha: 0.5,
                     min_child_hessian: 0.0,
+                    min_leaf_magnitude: 0.0,
                 },
             )
             .expect("regularized split search should succeed")
@@ -1147,11 +1159,83 @@ mod tests {
                     l2_lambda: 0.0,
                     l1_alpha: 0.0,
                     min_child_hessian: 10.0,
+                    min_leaf_magnitude: 0.0,
                 },
             )
             .expect("split search should succeed");
 
         assert!(split.is_none());
+    }
+
+    #[test]
+    fn best_split_with_min_leaf_magnitude_skips_weak_leaf_updates() {
+        let backend = CpuBackend;
+        let histograms = HistogramBundle {
+            node_id: 0,
+            feature_histograms: vec![
+                FeatureHistogram {
+                    feature_index: 0,
+                    bins: vec![
+                        HistogramBin {
+                            grad_sum: 1.0,
+                            hess_sum: 20.0,
+                            count: 5,
+                        },
+                        HistogramBin {
+                            grad_sum: -1.0,
+                            hess_sum: 20.0,
+                            count: 5,
+                        },
+                        HistogramBin {
+                            grad_sum: 0.0,
+                            hess_sum: 0.0,
+                            count: 0,
+                        },
+                    ],
+                },
+                FeatureHistogram {
+                    feature_index: 1,
+                    bins: vec![
+                        HistogramBin {
+                            grad_sum: 0.5,
+                            hess_sum: 5.0,
+                            count: 5,
+                        },
+                        HistogramBin {
+                            grad_sum: -0.5,
+                            hess_sum: 5.0,
+                            count: 5,
+                        },
+                        HistogramBin {
+                            grad_sum: 0.0,
+                            hess_sum: 0.0,
+                            count: 0,
+                        },
+                    ],
+                },
+            ],
+        };
+
+        let unfiltered = backend
+            .best_split(&histograms)
+            .expect("default split search should succeed")
+            .expect("default split should exist");
+        let filtered = backend
+            .best_split_with_options(
+                &histograms,
+                SplitSelectionOptions {
+                    l2_lambda: 0.0,
+                    l1_alpha: 0.0,
+                    min_child_hessian: 0.0,
+                    min_leaf_magnitude: 0.06,
+                },
+            )
+            .expect("magnitude-filtered split search should succeed")
+            .expect("magnitude-filtered split should exist");
+
+        assert_eq!(unfiltered.feature_index, 0);
+        assert_eq!(filtered.feature_index, 1);
+        assert!(filtered.gain > 0.0);
     }
 
     #[test]

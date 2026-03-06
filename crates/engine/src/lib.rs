@@ -50,6 +50,7 @@ pub struct SplitSelectionOptions {
     pub l2_lambda: f32,
     pub l1_alpha: f32,
     pub min_child_hessian: f32,
+    pub min_leaf_magnitude: f32,
 }
 
 impl Default for SplitSelectionOptions {
@@ -58,6 +59,7 @@ impl Default for SplitSelectionOptions {
             l2_lambda: 0.0,
             l1_alpha: 0.0,
             min_child_hessian: 0.0,
+            min_leaf_magnitude: 0.0,
         }
     }
 }
@@ -1201,12 +1203,14 @@ fn validate_gradient_pairs(gradients: &[GradientPair], row_count: usize) -> Engi
 const SPLIT_L2_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_SPLIT_L2";
 const SPLIT_L1_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_SPLIT_L1";
 const MIN_CHILD_HESS_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_MIN_CHILD_HESS";
+const SPLIT_MIN_LEAF_MAGNITUDE_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_SPLIT_MIN_LEAF_MAGNITUDE";
 
 fn split_selection_options_from_env() -> EngineResult<SplitSelectionOptions> {
     Ok(SplitSelectionOptions {
         l2_lambda: parse_nonnegative_env_f32(SPLIT_L2_ENV_VAR)?,
         l1_alpha: parse_nonnegative_env_f32(SPLIT_L1_ENV_VAR)?,
         min_child_hessian: parse_nonnegative_env_f32(MIN_CHILD_HESS_ENV_VAR)?,
+        min_leaf_magnitude: parse_nonnegative_env_f32(SPLIT_MIN_LEAF_MAGNITUDE_ENV_VAR)?,
     })
 }
 
