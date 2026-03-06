@@ -627,3 +627,100 @@ Decision: keep as default training-path accuracy improvement.
 ### Notes
 - This is the first tested candidate in the recent sequence with consistent and material metric-quality improvement across the focused slice.
 - Runtime regression is small relative to quality gain and aligns with current `v0.9.7` priority shift toward fitting quality.
+
+---
+
+## Candidate Experiment: Engine-Side Regularized Split Re-Scoring (Env-Gated) (2026-03-06)
+
+### Status
+PASS for implementation/tests/benchmark execution.  
+Decision: reject candidate and revert code changes.
+
+### Scope
+- Added engine-side split re-scoring path gated by:
+  - `ALLOYGBM_EXPERIMENT_SPLIT_L2`
+  - `ALLOYGBM_EXPERIMENT_MIN_CHILD_HESS`
+- Applied regularization during candidate selection and leaf denominator in trainer.
+- Kept backend default split search as fallback.
+
+### Commands Executed
+1. Validation:
+   - `cargo fmt --all`
+   - `cargo test -p alloygbm-engine -p alloygbm-backend-cpu`
+2. Runtime build/install:
+   - `python3 -m maturin build --manifest-path bindings/python/Cargo.toml --interpreter python3 --out /tmp/alloygbm-v097-candidate31/wheelhouse -q`
+   - `python3 -m pip install --force-reinstall /tmp/alloygbm-v097-candidate31/wheelhouse/*.whl`
+3. Baseline focused run (env off):
+   - `python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile-seeds 7,17,29 --output-dir benchmarks/results/v097_candidate31_regsplit_focus_baseline`
+4. Candidate focused run (env on):
+   - `ALLOYGBM_EXPERIMENT_SPLIT_L2=1.0 ALLOYGBM_EXPERIMENT_MIN_CHILD_HESS=16 python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile-seeds 7,17,29 --output-dir benchmarks/results/v097_candidate31_regsplit_focus_after`
+
+### Produced Artifacts
+- `benchmarks/results/v097_candidate31_regsplit_focus_baseline/model_comparison_20260306T005619Z.csv`
+- `benchmarks/results/v097_candidate31_regsplit_focus_after/model_comparison_20260306T005914Z.csv`
+
+### Alloy Delta vs Baseline (Focused Slice, 24 Alloy Runs)
+- Median fit delta: `+39.14%`
+- Median predict delta: `+4.99%`
+- Median RMSE delta: `-1.32%`
+- Median MAE delta: `-0.20%`
+- Median R2 delta: `+0.00534`
+- Wins: RMSE `17/24`, MAE `13/24`, R2 `17/24`
+
+### Rejection Rationale
+- Quality improved, but fit-time regression is too large for the current v0.9.7 tradeoff target.
+- Candidate was reverted before next attempt.
+
+---
+
+## Candidate Experiment: Backend-Integrated Regularized Split Scoring (Env-Gated) (2026-03-06)
+
+### Status
+PASS for implementation/tests/benchmark execution.  
+Decision: keep candidate code and continue from this baseline.
+
+### Scope
+- Added split-selection options to backend contract:
+  - `l2_lambda`
+  - `min_child_hessian`
+- Implemented regularized gain directly in CPU backend split scan (single pass, no duplicate histogram walk).
+- Wired trainer to pass env-controlled options:
+  - `ALLOYGBM_EXPERIMENT_SPLIT_L2`
+  - `ALLOYGBM_EXPERIMENT_MIN_CHILD_HESS`
+- Leaf value denominator now includes configured `l2_lambda`.
+- Added backend tests covering:
+  - gain shrinkage under L2 regularization,
+  - split pruning under high `min_child_hessian`.
+
+### Commands Executed
+1. Validation:
+   - `cargo fmt --all`
+   - `cargo test -p alloygbm-engine -p alloygbm-backend-cpu`
+2. Runtime build/install:
+   - `python3 -m maturin build --manifest-path bindings/python/Cargo.toml --interpreter python3 --out /tmp/alloygbm-v097-candidate32/wheelhouse -q`
+   - `python3 -m pip install --force-reinstall /tmp/alloygbm-v097-candidate32/wheelhouse/*.whl`
+3. Quick tuning run (seed `7`):
+   - Baseline: `benchmarks/results/v097_candidate32_tune_baseline/model_comparison_20260306T011442Z.csv`
+   - `lambda=1,min_child_hess=0`: `benchmarks/results/v097_candidate32_tune_l2_1_h0/model_comparison_20260306T011537Z.csv`
+   - `lambda=1,min_child_hess=8`: `benchmarks/results/v097_candidate32_tune_l2_1_h8/model_comparison_20260306T011626Z.csv`
+4. Full focused A/B (selected setting `lambda=1,min_child_hess=0`):
+   - Baseline:  
+     `python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile-seeds 7,17,29 --output-dir benchmarks/results/v097_candidate32_regsplit_backend_focus_baseline`
+   - Candidate:  
+     `ALLOYGBM_EXPERIMENT_SPLIT_L2=1 ALLOYGBM_EXPERIMENT_MIN_CHILD_HESS=0 python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile-seeds 7,17,29 --output-dir benchmarks/results/v097_candidate32_regsplit_backend_focus_after`
+
+### Produced Artifacts
+- Baseline: `benchmarks/results/v097_candidate32_regsplit_backend_focus_baseline/model_comparison_20260306T011932Z.csv`
+- Candidate: `benchmarks/results/v097_candidate32_regsplit_backend_focus_after/model_comparison_20260306T012201Z.csv`
+
+### Alloy Delta vs Baseline (Focused Slice, 24 Alloy Runs)
+- Median fit delta: `+0.80%`
+- Median predict delta: `+0.36%`
+- Median RMSE delta: `-0.26%`
+- Median MAE delta: `-0.06%`
+- Median R2 delta: `+0.00119`
+- Wins: RMSE `13/24`, MAE `12/24`, R2 `13/24`
+
+### Notes
+- This preserves the quality direction of regularization without the severe fit-time penalty seen in candidate31.
+- Tuning indicated `min_child_hessian=8` reduced quality in this slice; `min_child_hessian=0` is currently preferred.

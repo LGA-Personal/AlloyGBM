@@ -45,6 +45,21 @@ impl From<CoreError> for EngineError {
 
 pub type EngineResult<T> = Result<T, EngineError>;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SplitSelectionOptions {
+    pub l2_lambda: f32,
+    pub min_child_hessian: f32,
+}
+
+impl Default for SplitSelectionOptions {
+    fn default() -> Self {
+        Self {
+            l2_lambda: 0.0,
+            min_child_hessian: 0.0,
+        }
+    }
+}
+
 pub trait BackendOps {
     fn build_histograms(
         &self,
@@ -54,6 +69,13 @@ pub trait BackendOps {
         feature_tiles: &[FeatureTile],
     ) -> EngineResult<HistogramBundle>;
     fn best_split(&self, histograms: &HistogramBundle) -> EngineResult<Option<SplitCandidate>>;
+    fn best_split_with_options(
+        &self,
+        histograms: &HistogramBundle,
+        _options: SplitSelectionOptions,
+    ) -> EngineResult<Option<SplitCandidate>> {
+        self.best_split(histograms)
+    }
     fn apply_split(
         &self,
         binned_matrix: &BinnedMatrix,
@@ -618,6 +640,7 @@ impl Trainer {
         let root_row_indices = (0..dataset.row_count() as u32).collect::<Vec<_>>();
         let root_node = NodeSlice::new(0, root_row_indices)?;
         let feature_tiles = vec![FeatureTile::new(0, binned_matrix.feature_count as u32)?];
+        let split_options = split_selection_options_from_env()?;
 
         let histograms = backend.build_histograms(
             binned_matrix,
@@ -625,7 +648,7 @@ impl Trainer {
             &root_node,
             &feature_tiles,
         )?;
-        let split_candidate = backend.best_split(&histograms)?;
+        let split_candidate = backend.best_split_with_options(&histograms, split_options)?;
         let root_stats = backend.reduce_sums(&fit_contract.gradients, &root_node.row_indices)?;
 
         let partition = if let Some(split) = &split_candidate {
@@ -812,6 +835,7 @@ impl Trainer {
         let mut validation_no_improvement_rounds = 0_usize;
         let mut weak_improvement_streak = 0_usize;
         let mut weak_improvement_rounds_committed = 0_usize;
+        let split_options = split_selection_options_from_env()?;
 
         const LEAF_EPSILON: f32 = 1e-6;
 
@@ -859,7 +883,9 @@ impl Trainer {
                 for (local_node_id, node_rows, histograms, parent_leaf_value) in active_nodes {
                     let node_id = encode_tree_node_id(round_index, local_node_id)?;
                     let node = NodeSlice::new(node_id, node_rows)?;
-                    let Some(mut split) = backend.best_split(&histograms)? else {
+                    let Some(mut split) =
+                        backend.best_split_with_options(&histograms, split_options)?
+                    else {
                         continue;
                     };
                     if !split.gain.is_finite() || split.gain <= controls.min_split_gain {
@@ -892,9 +918,9 @@ impl Trainer {
                     }
 
                     let raw_left_leaf_value = -self.params.learning_rate * left_stats.grad_sum
-                        / (left_stats.hess_sum + LEAF_EPSILON);
+                        / (left_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
                     let raw_right_leaf_value = -self.params.learning_rate * right_stats.grad_sum
-                        / (right_stats.hess_sum + LEAF_EPSILON);
+                        / (right_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
 
                     let left_leaf_absolute = raw_left_leaf_value
                         .clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value);
@@ -1164,6 +1190,39 @@ fn validate_gradient_pairs(gradients: &[GradientPair], row_count: usize) -> Engi
         }
     }
     Ok(())
+}
+
+const SPLIT_L2_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_SPLIT_L2";
+const MIN_CHILD_HESS_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_MIN_CHILD_HESS";
+
+fn split_selection_options_from_env() -> EngineResult<SplitSelectionOptions> {
+    Ok(SplitSelectionOptions {
+        l2_lambda: parse_nonnegative_env_f32(SPLIT_L2_ENV_VAR)?,
+        min_child_hessian: parse_nonnegative_env_f32(MIN_CHILD_HESS_ENV_VAR)?,
+    })
+}
+
+fn parse_nonnegative_env_f32(env_name: &str) -> EngineResult<f32> {
+    match std::env::var(env_name) {
+        Ok(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Ok(0.0);
+            }
+            let parsed = trimmed.parse::<f32>().map_err(|_| {
+                EngineError::InvalidConfig(format!(
+                    "{env_name} must be a finite, non-negative f32 value"
+                ))
+            })?;
+            if !parsed.is_finite() || parsed < 0.0 {
+                return Err(EngineError::InvalidConfig(format!(
+                    "{env_name} must be finite and >= 0"
+                )));
+            }
+            Ok(parsed)
+        }
+        Err(_) => Ok(0.0),
+    }
 }
 
 fn validate_gradient_pair_length(gradients: &[GradientPair], row_count: usize) -> EngineResult<()> {
