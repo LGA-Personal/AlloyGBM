@@ -48,6 +48,7 @@ pub type EngineResult<T> = Result<T, EngineError>;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SplitSelectionOptions {
     pub l2_lambda: f32,
+    pub l1_alpha: f32,
     pub min_child_hessian: f32,
 }
 
@@ -55,6 +56,7 @@ impl Default for SplitSelectionOptions {
     fn default() -> Self {
         Self {
             l2_lambda: 0.0,
+            l1_alpha: 0.0,
             min_child_hessian: 0.0,
         }
     }
@@ -917,9 +919,13 @@ impl Trainer {
                         ));
                     }
 
-                    let raw_left_leaf_value = -self.params.learning_rate * left_stats.grad_sum
+                    let left_grad =
+                        l1_threshold_gradient(left_stats.grad_sum, split_options.l1_alpha);
+                    let right_grad =
+                        l1_threshold_gradient(right_stats.grad_sum, split_options.l1_alpha);
+                    let raw_left_leaf_value = -self.params.learning_rate * left_grad
                         / (left_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
-                    let raw_right_leaf_value = -self.params.learning_rate * right_stats.grad_sum
+                    let raw_right_leaf_value = -self.params.learning_rate * right_grad
                         / (right_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
 
                     let left_leaf_absolute = raw_left_leaf_value
@@ -1193,11 +1199,13 @@ fn validate_gradient_pairs(gradients: &[GradientPair], row_count: usize) -> Engi
 }
 
 const SPLIT_L2_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_SPLIT_L2";
+const SPLIT_L1_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_SPLIT_L1";
 const MIN_CHILD_HESS_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_MIN_CHILD_HESS";
 
 fn split_selection_options_from_env() -> EngineResult<SplitSelectionOptions> {
     Ok(SplitSelectionOptions {
         l2_lambda: parse_nonnegative_env_f32(SPLIT_L2_ENV_VAR)?,
+        l1_alpha: parse_nonnegative_env_f32(SPLIT_L1_ENV_VAR)?,
         min_child_hessian: parse_nonnegative_env_f32(MIN_CHILD_HESS_ENV_VAR)?,
     })
 }
@@ -1222,6 +1230,19 @@ fn parse_nonnegative_env_f32(env_name: &str) -> EngineResult<f32> {
             Ok(parsed)
         }
         Err(_) => Ok(0.0),
+    }
+}
+
+fn l1_threshold_gradient(grad_sum: f32, l1_alpha: f32) -> f32 {
+    if l1_alpha <= 0.0 {
+        return grad_sum;
+    }
+    if grad_sum > l1_alpha {
+        grad_sum - l1_alpha
+    } else if grad_sum < -l1_alpha {
+        grad_sum + l1_alpha
+    } else {
+        0.0
     }
 }
 
