@@ -1484,3 +1484,86 @@ Decision: keep coordinated preset and record it as an accepted v0.9.7 package.
 - This package is accepted as a useful low-signal preset because it materially improves candidate33’s runtime while leaving its focused-slice quality profile effectively unchanged.
 - Relative to candidate33 alone, the package slightly improves finance RMSE/MAE/R2 and preserves the panel improvements while cutting fit and predict time.
 - It is not as strong a broad preset as candidate44, but it is a defensible coordinated option for the regularized-split path.
+
+---
+
+## Candidate Experiment: Candidate36 + Candidate33 + Candidate43 Coordinated Preset (Env-Gated) (2026-03-06)
+
+### Status
+PASS for benchmark execution.  
+Decision: keep coordinated preset and record it as an accepted v0.9.7 package.
+
+### Scope
+- Evaluated the coordinated use of:
+  - `ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK=1`
+  - `ALLOYGBM_EXPERIMENT_SPLIT_L2=1`
+  - `ALLOYGBM_EXPERIMENT_SPLIT_L1=0.1`
+  - `ALLOYGBM_EXPERIMENT_MIN_CHILD_HESS=0`
+  - `ALLOYGBM_EXPERIMENT_SPLIT_MIN_LEAF_MAGNITUDE=0.02`
+- No new product code was required; this candidate combined the three already-kept quality/runtime upgrades on the same runtime snapshot.
+- The goal was to check whether the candidate33 regularization layer still adds net value once candidate36 tail-rank and candidate43 weak-split suppression are already active.
+
+### Commands Executed
+1. Reused current runtime validation:
+   - `PYTHONPATH=/tmp/alloygbm-v097-candidate44/site-packages python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'`
+2. Same-snapshot references reused:
+   - Baseline:
+     - `benchmarks/results/v097_candidate43_focus_baseline/model_comparison_20260306T163849Z.csv`
+   - Candidate44 (`candidate36 + candidate43`):
+     - `benchmarks/results/v097_candidate44_focus_combo/model_comparison_20260306T183417Z.csv`
+   - Candidate45 (`candidate33 + candidate43`):
+     - `benchmarks/results/v097_candidate45_focus_combo/model_comparison_20260306T184657Z.csv`
+3. Coordinated preset run:
+   - `ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK=1 ALLOYGBM_EXPERIMENT_SPLIT_L2=1 ALLOYGBM_EXPERIMENT_SPLIT_L1=0.1 ALLOYGBM_EXPERIMENT_MIN_CHILD_HESS=0 ALLOYGBM_EXPERIMENT_SPLIT_MIN_LEAF_MAGNITUDE=0.02 PYTHONPATH=/tmp/alloygbm-v097-candidate44/site-packages python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile deep_low_lr:0.01:8:5000 --profile-seeds 7,17,29 --scenarios panel_time_series dow_jones_financial --output-dir benchmarks/results/v097_candidate46_focus_combo`
+
+### Produced Artifacts
+- Baseline:
+  - `benchmarks/results/v097_candidate43_focus_baseline/model_comparison_20260306T163849Z.csv`
+- Candidate44:
+  - `benchmarks/results/v097_candidate44_focus_combo/model_comparison_20260306T183417Z.csv`
+- Candidate45:
+  - `benchmarks/results/v097_candidate45_focus_combo/model_comparison_20260306T184657Z.csv`
+- Coordinated preset:
+  - `benchmarks/results/v097_candidate46_focus_combo/model_comparison_20260306T193743Z.csv`
+  - `benchmarks/results/v097_candidate46_focus_combo/model_comparison_profile_summary_20260306T193743Z.csv`
+
+### Coordinated Preset vs Baseline (18 Alloy Runs)
+- Median fit delta: `-32.36%`
+- Median predict delta: `-20.23%`
+- Median RMSE delta: `-4.32%`
+- Median MAE delta: `-4.89%`
+- Median R2 delta: `+0.12042`
+- Wins: fit `17/18`, predict `14/18`, RMSE `13/18`, MAE `13/18`, R2 `13/18`
+
+### Coordinated Preset vs Candidate44
+- Median fit delta: `-3.52%`
+- Median predict delta: `-0.23%`
+- Median RMSE delta: `-0.75%`
+- Median MAE delta: `-1.23%`
+- Median R2 delta: `+0.01969`
+
+### Coordinated Preset vs Candidate45
+- Median fit delta: `-5.31%`
+- Median predict delta: `-4.84%`
+- Median RMSE delta: `-2.28%`
+- Median MAE delta: `-3.63%`
+- Median R2 delta: `+0.06980`
+
+### Scenario Notes
+- `panel_time_series` vs baseline (`n=9`):
+  - fit `-13.39%`
+  - predict `-4.00%`
+  - RMSE `-7.18%`
+  - MAE `-17.13%`
+  - R2 `+0.22581`
+- `dow_jones_financial` vs baseline (`n=9`):
+  - fit `-49.72%`
+  - predict `-45.48%`
+  - RMSE `+0.27%`
+  - MAE `+0.47%`
+  - R2 `-0.00622`
+
+### Acceptance Note
+- This package is accepted as the strongest focused-slice quality preset so far.
+- Relative to candidate44, it gives back a small amount of finance quality but produces materially better aggregate RMSE and R2 while preserving large baseline-relative speed gains.
+- Relative to candidate45, it is better on both quality and runtime, which means the selective tail-rank component still adds clear value even on top of the regularized/filter stack.

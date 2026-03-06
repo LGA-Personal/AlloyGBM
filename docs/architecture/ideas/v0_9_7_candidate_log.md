@@ -38,6 +38,7 @@ These repos are local reference material and should not be included in commits.
 - `candidate43`: split leaf-magnitude filter in backend split scoring (env-gated).
 - `candidate44`: `candidate36 + candidate43` coordinated env preset.
 - `candidate45`: `candidate33 + candidate43` coordinated env preset.
+- `candidate46`: `candidate36 + candidate33 + candidate43` coordinated env preset.
 
 ## Candidate Outcomes (Recent Quality-Focused Wave)
 
@@ -61,6 +62,7 @@ These repos are local reference material and should not be included in commits.
 | 43 | Split leaf-magnitude filter in backend split scoring (env-gated) | Kept | vs baseline: `fit -21.82%`, `predict -22.52%`, `RMSE -0.02%`, `MAE -0.05%`, `R2 +0.00068` | Strong deep-low-lr speed win with effectively flat focused-slice quality; neutral on `panel_time_series`, mildly positive on `dow_jones_financial`. |
 | 44 | Candidate36 + candidate43 coordinated env preset | Kept | vs baseline: `fit -33.39%`, `predict -25.47%`, `RMSE -2.34%`, `MAE -4.89%`, `R2 +0.07006`; vs candidate36: `fit -19.20%`, `predict -14.91%`, quality essentially flat-to-slightly better | This package preserves candidate36’s panel-quality gains while inheriting candidate43’s deep-low-lr/finance speed win. Strongest coordinated preset so far. |
 | 45 | Candidate33 + candidate43 coordinated env preset | Kept | vs baseline: `fit -26.84%`, `predict -6.16%`, `RMSE -0.64%`, `MAE -2.27%`, `R2 +0.01896`; vs candidate33: `fit -16.56%`, `predict -7.86%`, quality essentially flat | This package improves candidate33’s runtime materially while keeping its focused-slice quality profile nearly unchanged. Useful low-signal/deep-low-lr preset. |
+| 46 | Candidate36 + Candidate33 + Candidate43 coordinated env preset | Kept | vs baseline: `fit -32.36%`, `predict -20.23%`, `RMSE -4.32%`, `MAE -4.89%`, `R2 +0.12042`; vs candidate44: `fit -3.52%`, `predict -0.23%`, `RMSE -0.75%`, `MAE -1.23%`, `R2 +0.01969` | Best focused-slice quality package so far. Finance gives back a small amount of quality relative to candidate44, but the overall accuracy gain is materially larger while runtime remains much better than baseline. |
 
 ## Scenario Notes for Candidate36
 - `panel_time_series` (`n=9`): `RMSE -6.57%`, `MAE -14.43%`, `R2 +0.19109`.
@@ -85,6 +87,11 @@ These repos are local reference material and should not be included in commits.
 - `dow_jones_financial` (`n=9`): `fit -46.77%`, `predict -43.12%`, `RMSE +0.27%`, `MAE +0.47%`, `R2 -0.00622`.
 - Relative to `candidate33` alone, the package keeps panel quality unchanged and slightly improves finance quality while materially reducing runtime.
 
+## Scenario Notes for Candidate46
+- `panel_time_series` (`n=9`): `fit -13.39%`, `predict -4.00%`, `RMSE -7.18%`, `MAE -17.13%`, `R2 +0.22581`.
+- `dow_jones_financial` (`n=9`): `fit -49.72%`, `predict -45.48%`, `RMSE +0.27%`, `MAE +0.47%`, `R2 -0.00622`.
+- Relative to `candidate44`, the package gives a further panel-quality lift while keeping large baseline-relative speed gains; the extra regularization mainly costs a small amount of finance quality rather than runtime.
+
 ## Do-Not-Retry Standalone (Unless Architecture Changes)
 - High-resolution global bins as a direct knob (`candidate27` shape).
 - Leafwise expansion without sampling/control coupling (`candidate28` shape).
@@ -104,7 +111,7 @@ These repos are local reference material and should not be included in commits.
    - staged row partition engine,
    - repacked split descriptors.
 3. Quality-first split-search improvements with strict fit-time guardrails and deep-low-lr included in every acceptance run.
-4. Backend-side split-search quality work rather than more linear-tail quantization variants, since the recent tail-focused candidates are converging on the same panel signal without surpassing `candidate36`.
+4. Backend-side split-search quality work beyond the now-accepted tail-rank/regularization/filter stack, rather than more linear-tail quantization variants.
 
 ## Benchmarking Protocol Reminder (Current)
 - Always include deep-low-lr slice in A/B:
