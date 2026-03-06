@@ -73,3 +73,16 @@ This is an idea catalog only (no implementation commitment in this document).
 2. Implement ancestor-feature-only regressor selection to bound leaf-model dimensionality.
 3. Add half-additive fitting (collapse prior regressors into one synthetic feature) for fixed-cost updates.
 4. Extend histogram payload with PL-relevant statistics and benchmark memory/runtime deltas before defaulting anywhere.
+
+## Experiment Notes (2026-03-06 Continuation)
+
+- Variant tested: coarse-to-fine line-search threshold refinement (`candidate34`).
+- Outcome: reject and revert.
+- Reason: quality degraded while fit/predict both slowed (`fit +5.66%`, `predict +2.13%`, `RMSE +1.06%`, `R2 -0.029`).
+- Variant tested: linear-winsorized quantization (`candidate35`, env-gated).
+- Outcome: reject and revert.
+- Reason: no quality movement with clear runtime regressions (`fit +3.68%`, `predict +2.82%`, RMSE/MAE/R2 unchanged).
+- Variant tested: selective tail-rank fallback for `linear` binning (`candidate36`, env-gated).
+- Outcome: keep and commit as v0.9.7 part.
+- Reason: quality improved on the focused matrix at near-flat fit cost (`fit -0.39%`, `RMSE -2.14%`, `MAE -4.72%`, `R2 +0.065`, `9/18` wins).
+- Execution ledger reference: `docs/architecture/ideas/v0_9_7_candidate_log.md`.

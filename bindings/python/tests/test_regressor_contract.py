@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import unittest
 from pathlib import Path
 
@@ -279,6 +280,61 @@ class GBMRegressorContractTests(unittest.TestCase):
             [[0.0, 0.0], [115.0, 255.0], [255.0, 11.0]],
         )
 
+    def test_fit_linear_tail_rank_fallback_quantizes_heavy_tail_features(self) -> None:
+        train_calls: list[dict[str, object]] = []
+
+        def fake_train(**kwargs: object) -> bytes:
+            train_calls.append(kwargs)
+            return b"artifact"
+
+        original_train_loader = regressor_module._load_native_train_regression_artifact
+        original_tail_rank = os.environ.get("ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK")
+        original_tail_ratio = os.environ.get(
+            "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_CORE_SPAN_RATIO"
+        )
+        regressor_module._load_native_train_regression_artifact = lambda: fake_train
+        os.environ["ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK"] = "1"
+        os.environ["ALLOYGBM_EXPERIMENT_LINEAR_TAIL_CORE_SPAN_RATIO"] = "0.05"
+        try:
+            GBMRegressor().fit(
+                [
+                    [0.1, 0.10],
+                    [0.2, 0.20],
+                    [0.3, 0.25],
+                    [0.4, 0.26],
+                    [1000.0, 0.50],
+                ],
+                [0.0, 1.0, 2.0, 3.0, 4.0],
+            )
+        finally:
+            regressor_module._load_native_train_regression_artifact = (
+                original_train_loader
+            )
+            if original_tail_rank is None:
+                os.environ.pop("ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK", None)
+            else:
+                os.environ["ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK"] = (
+                    original_tail_rank
+                )
+            if original_tail_ratio is None:
+                os.environ.pop("ALLOYGBM_EXPERIMENT_LINEAR_TAIL_CORE_SPAN_RATIO", None)
+            else:
+                os.environ["ALLOYGBM_EXPERIMENT_LINEAR_TAIL_CORE_SPAN_RATIO"] = (
+                    original_tail_ratio
+                )
+
+        self.assertEqual(len(train_calls), 1)
+        self.assertEqual(
+            train_calls[0]["rows"],
+            [
+                [0.0, 0.0],
+                [64.0, 64.0],
+                [128.0, 96.0],
+                [191.0, 102.0],
+                [255.0, 255.0],
+            ],
+        )
+
     def test_predict_quantizes_rows_when_model_fitted_on_continuous_inputs(self) -> None:
         predict_calls: list[list[list[float]]] = []
 
@@ -311,6 +367,66 @@ class GBMRegressorContractTests(unittest.TestCase):
             )
 
         self.assertEqual(predict_calls, [[[34.0, 0.0], [255.0, 255.0]]])
+
+    def test_predict_preserves_linear_tail_rank_fallback_after_fit(self) -> None:
+        predict_calls: list[list[list[float]]] = []
+
+        def fake_predictor(
+            _artifact_bytes: bytes, rows: list[list[float]]
+        ) -> list[float]:
+            predict_calls.append(rows)
+            return [0.0] * len(rows)
+
+        original_train_loader = regressor_module._load_native_train_regression_artifact
+        original_predict_loader = (
+            regressor_module._load_native_predictor_predict_batch_canonical
+        )
+        original_tail_rank = os.environ.get("ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK")
+        original_tail_ratio = os.environ.get(
+            "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_CORE_SPAN_RATIO"
+        )
+        regressor_module._load_native_train_regression_artifact = lambda: (
+            lambda *_args, **_kwargs: b"artifact"
+        )
+        regressor_module._load_native_predictor_predict_batch_canonical = (
+            lambda: fake_predictor
+        )
+        os.environ["ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK"] = "1"
+        os.environ["ALLOYGBM_EXPERIMENT_LINEAR_TAIL_CORE_SPAN_RATIO"] = "0.05"
+        try:
+            model = GBMRegressor().fit(
+                [
+                    [0.1, 0.10],
+                    [0.2, 0.20],
+                    [0.3, 0.25],
+                    [0.4, 0.26],
+                    [1000.0, 0.50],
+                ],
+                [0.0, 1.0, 2.0, 3.0, 4.0],
+            )
+            os.environ["ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK"] = "0"
+            model.predict([[0.35, 0.24], [2.0, 0.30]])
+        finally:
+            regressor_module._load_native_train_regression_artifact = (
+                original_train_loader
+            )
+            regressor_module._load_native_predictor_predict_batch_canonical = (
+                original_predict_loader
+            )
+            if original_tail_rank is None:
+                os.environ.pop("ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK", None)
+            else:
+                os.environ["ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK"] = (
+                    original_tail_rank
+                )
+            if original_tail_ratio is None:
+                os.environ.pop("ALLOYGBM_EXPERIMENT_LINEAR_TAIL_CORE_SPAN_RATIO", None)
+            else:
+                os.environ["ALLOYGBM_EXPERIMENT_LINEAR_TAIL_CORE_SPAN_RATIO"] = (
+                    original_tail_ratio
+                )
+
+        self.assertEqual(predict_calls, [[[128.0, 89.0], [191.0, 127.0]]])
 
     def test_fit_quantizes_continuous_rows_with_rank_strategy(self) -> None:
         train_calls: list[dict[str, object]] = []
