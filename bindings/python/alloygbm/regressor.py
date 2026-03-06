@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import bisect
 import math
+import os
 from collections.abc import Sequence
 
 _PRE_BINNED_INTEGER_TOLERANCE = 1e-6
 _MAX_CONTINUOUS_QUANTIZED_BIN = 255
 _MIN_CONTINUOUS_QUANTIZED_BINS = 2
 _VALID_CONTINUOUS_BINNING_STRATEGIES = {"linear", "rank", "quantile"}
+_LINEAR_TAIL_RANK_ENV_VAR = "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK"
+_LINEAR_TAIL_CORE_SPAN_RATIO_ENV_VAR = "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_CORE_SPAN_RATIO"
+_DEFAULT_LINEAR_TAIL_CORE_SPAN_RATIO_THRESHOLD = 0.10
 
 
 def _load_native_predictor_predict_batch():
@@ -70,6 +74,34 @@ def _load_native_shap_global_importance():
             "native SHAP global-importance binding is unavailable; build/install the alloygbm extension module"
         ) from exc
     return shap_global_importance
+
+
+def _parse_env_toggle(env_name: str) -> bool:
+    value = os.environ.get(env_name)
+    if value is None:
+        return False
+    normalized = value.strip().lower()
+    return normalized not in {"", "0", "false", "off"}
+
+
+def _linear_tail_rank_enabled_from_env() -> bool:
+    return _parse_env_toggle(_LINEAR_TAIL_RANK_ENV_VAR)
+
+
+def _linear_tail_core_span_ratio_threshold_from_env() -> float:
+    value = os.environ.get(_LINEAR_TAIL_CORE_SPAN_RATIO_ENV_VAR)
+    if value is None:
+        return _DEFAULT_LINEAR_TAIL_CORE_SPAN_RATIO_THRESHOLD
+    normalized = value.strip()
+    if normalized == "":
+        return _DEFAULT_LINEAR_TAIL_CORE_SPAN_RATIO_THRESHOLD
+    try:
+        parsed = float(normalized)
+    except ValueError:
+        return _DEFAULT_LINEAR_TAIL_CORE_SPAN_RATIO_THRESHOLD
+    if not math.isfinite(parsed):
+        return _DEFAULT_LINEAR_TAIL_CORE_SPAN_RATIO_THRESHOLD
+    return min(1.0, max(0.0, parsed))
 
 
 class GBMRegressor:
@@ -162,6 +194,7 @@ class GBMRegressor:
         self._continuous_feature_maxs: list[float] | None = None
         self._continuous_feature_sorted_values: list[list[float]] | None = None
         self._continuous_feature_quantile_cuts: list[list[float]] | None = None
+        self._continuous_feature_linear_rank_flags: list[bool] | None = None
 
     def __repr__(self) -> str:
         return (
@@ -387,15 +420,37 @@ class GBMRegressor:
                 mins, maxs = self._derive_continuous_feature_bounds(rows)
                 self._continuous_feature_mins = mins
                 self._continuous_feature_maxs = maxs
-                self._continuous_feature_sorted_values = None
+                if _linear_tail_rank_enabled_from_env():
+                    core_span_ratio_threshold = (
+                        _linear_tail_core_span_ratio_threshold_from_env()
+                    )
+                    (
+                        rank_flags,
+                        sorted_values,
+                    ) = self._derive_continuous_feature_tail_rank_plan(
+                        rows, core_span_ratio_threshold
+                    )
+                    self._continuous_feature_linear_rank_flags = rank_flags
+                    if any(rank_flags):
+                        self._continuous_feature_sorted_values = sorted_values
+                        training_rows = self._quantize_rows_linear_with_selective_rank(
+                            rows, mins, maxs, rank_flags, sorted_values
+                        )
+                    else:
+                        self._continuous_feature_sorted_values = None
+                        training_rows = self._quantize_rows_linear(rows, mins, maxs)
+                else:
+                    self._continuous_feature_sorted_values = None
+                    self._continuous_feature_linear_rank_flags = None
+                    training_rows = self._quantize_rows_linear(rows, mins, maxs)
                 self._continuous_feature_quantile_cuts = None
-                training_rows = self._quantize_rows_linear(rows, mins, maxs)
             elif self.continuous_binning_strategy == "rank":
                 sorted_values = self._derive_continuous_feature_sorted_values(rows)
                 self._continuous_feature_sorted_values = sorted_values
                 self._continuous_feature_mins = None
                 self._continuous_feature_maxs = None
                 self._continuous_feature_quantile_cuts = None
+                self._continuous_feature_linear_rank_flags = None
                 training_rows = self._quantize_rows_rank(rows, sorted_values)
             else:
                 quantile_cuts = self._derive_continuous_feature_quantile_cuts(
@@ -405,12 +460,14 @@ class GBMRegressor:
                 self._continuous_feature_sorted_values = None
                 self._continuous_feature_mins = None
                 self._continuous_feature_maxs = None
+                self._continuous_feature_linear_rank_flags = None
                 training_rows = self._quantize_rows_quantile(rows, quantile_cuts)
         else:
             self._continuous_feature_mins = None
             self._continuous_feature_maxs = None
             self._continuous_feature_sorted_values = None
             self._continuous_feature_quantile_cuts = None
+            self._continuous_feature_linear_rank_flags = None
             training_rows = rows
 
         train_regression_artifact = _load_native_train_regression_artifact()
@@ -598,6 +655,35 @@ class GBMRegressor:
         return columns
 
     @staticmethod
+    def _derive_continuous_feature_tail_rank_plan(
+        rows: Sequence[Sequence[float]],
+        core_span_ratio_threshold: float,
+    ) -> tuple[list[bool], list[list[float]]]:
+        columns = GBMRegressor._derive_continuous_feature_sorted_values(rows)
+        flags: list[bool] = []
+        for values in columns:
+            value_count = len(values)
+            if value_count < 5:
+                flags.append(False)
+                continue
+            full_span = values[-1] - values[0]
+            if full_span <= _PRE_BINNED_INTEGER_TOLERANCE:
+                flags.append(False)
+                continue
+            trim_count = max(1, int(math.floor(value_count * 0.1)))
+            if trim_count * 2 >= value_count:
+                flags.append(False)
+                continue
+            core_low = values[trim_count]
+            core_high = values[value_count - 1 - trim_count]
+            core_span = core_high - core_low
+            ratio = core_span / full_span
+            flags.append(
+                math.isfinite(ratio) and ratio <= core_span_ratio_threshold
+            )
+        return flags, columns
+
+    @staticmethod
     def _quantize_rows_linear(
         rows: Sequence[Sequence[float]],
         feature_mins: Sequence[float],
@@ -622,6 +708,51 @@ class GBMRegressor:
                         scaled = ((value - min_value) / span) * max_bin
                         rounded = GBMRegressor._round_half_away_from_zero(scaled)
                         clamped = min(max_bin, max(0, rounded))
+                quantized_row.append(float(clamped))
+            quantized.append(quantized_row)
+        return quantized
+
+    @staticmethod
+    def _quantize_rows_linear_with_selective_rank(
+        rows: Sequence[Sequence[float]],
+        feature_mins: Sequence[float],
+        feature_maxs: Sequence[float],
+        rank_flags: Sequence[bool],
+        feature_sorted_values: Sequence[Sequence[float]],
+    ) -> list[list[float]]:
+        quantized: list[list[float]] = []
+        max_bin = _MAX_CONTINUOUS_QUANTIZED_BIN
+        for row in rows:
+            quantized_row: list[float] = []
+            for feature_index, value in enumerate(row):
+                if rank_flags[feature_index]:
+                    sorted_values = feature_sorted_values[feature_index]
+                    if len(sorted_values) <= 1:
+                        clamped = 0
+                    else:
+                        rank = bisect.bisect_right(sorted_values, value) - 1
+                        if rank < 0:
+                            rank = 0
+                        elif rank >= len(sorted_values):
+                            rank = len(sorted_values) - 1
+                        scaled = (rank * max_bin) / (len(sorted_values) - 1)
+                        rounded = GBMRegressor._round_half_away_from_zero(scaled)
+                        clamped = min(max_bin, max(0, rounded))
+                else:
+                    min_value = feature_mins[feature_index]
+                    max_value = feature_maxs[feature_index]
+                    if value <= min_value:
+                        clamped = 0
+                    elif value >= max_value:
+                        clamped = max_bin
+                    else:
+                        span = max_value - min_value
+                        if span <= _PRE_BINNED_INTEGER_TOLERANCE:
+                            clamped = 0
+                        else:
+                            scaled = ((value - min_value) / span) * max_bin
+                            rounded = GBMRegressor._round_half_away_from_zero(scaled)
+                            clamped = min(max_bin, max(0, rounded))
                 quantized_row.append(float(clamped))
             quantized.append(quantized_row)
         return quantized
@@ -705,6 +836,12 @@ class GBMRegressor:
     ) -> list[list[float]]:
         if self.continuous_binning_strategy == "linear":
             mins, maxs = self._require_continuous_feature_bounds()
+            rank_flags = self._continuous_feature_linear_rank_flags
+            if rank_flags is not None and any(rank_flags):
+                sorted_values = self._require_continuous_feature_sorted_values()
+                return self._quantize_rows_linear_with_selective_rank(
+                    rows, mins, maxs, rank_flags, sorted_values
+                )
             return self._quantize_rows_linear(rows, mins, maxs)
         if self.continuous_binning_strategy == "rank":
             sorted_values = self._require_continuous_feature_sorted_values()
@@ -743,6 +880,7 @@ class GBMRegressor:
         self._continuous_feature_maxs = None
         self._continuous_feature_sorted_values = None
         self._continuous_feature_quantile_cuts = None
+        self._continuous_feature_linear_rank_flags = None
 
     @staticmethod
     def _build_native_predictor_handle(artifact_bytes: bytes) -> object | None:
