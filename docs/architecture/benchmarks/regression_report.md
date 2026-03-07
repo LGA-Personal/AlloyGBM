@@ -1567,3 +1567,218 @@ Decision: keep coordinated preset and record it as an accepted v0.9.7 package.
 - This package is accepted as the strongest focused-slice quality preset so far.
 - Relative to candidate44, it gives back a small amount of finance quality but produces materially better aggregate RMSE and R2 while preserving large baseline-relative speed gains.
 - Relative to candidate45, it is better on both quality and runtime, which means the selective tail-rank component still adds clear value even on top of the regularized/filter stack.
+
+---
+
+## Candidate Experiment: Candidate46 Retuned with Lower Split Leaf-Magnitude Threshold (Env-Gated) (2026-03-06)
+
+### Status
+PASS for benchmark execution.  
+Decision: reject and keep candidate46 unchanged.
+
+### Scope
+- Evaluated a narrow retune of the accepted candidate46 package:
+  - `ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK=1`
+  - `ALLOYGBM_EXPERIMENT_SPLIT_L2=1`
+  - `ALLOYGBM_EXPERIMENT_SPLIT_L1=0.1`
+  - `ALLOYGBM_EXPERIMENT_MIN_CHILD_HESS=0`
+  - `ALLOYGBM_EXPERIMENT_SPLIT_MIN_LEAF_MAGNITUDE=0.01`
+- The hypothesis was that a slightly looser weak-split filter might recover the small finance-quality giveback seen in candidate46 while preserving the panel lift.
+
+### Commands Executed
+1. Candidate46 reference reused:
+   - `benchmarks/results/v097_candidate46_focus_combo/model_comparison_20260306T193743Z.csv`
+2. Seed-7 tuning slice:
+   - `ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK=1 ALLOYGBM_EXPERIMENT_SPLIT_L2=1 ALLOYGBM_EXPERIMENT_SPLIT_L1=0.1 ALLOYGBM_EXPERIMENT_MIN_CHILD_HESS=0 ALLOYGBM_EXPERIMENT_SPLIT_MIN_LEAF_MAGNITUDE=0.01 PYTHONPATH=/tmp/alloygbm-v097-candidate44/site-packages python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile deep_low_lr:0.01:8:5000 --profile-seeds 7 --scenarios panel_time_series dow_jones_financial --output-dir benchmarks/results/v097_candidate47_tune_mag_001`
+
+### Produced Artifacts
+- Candidate46 reference:
+  - `benchmarks/results/v097_candidate46_focus_combo/model_comparison_20260306T193743Z.csv`
+- Tuning candidate:
+  - `benchmarks/results/v097_candidate47_tune_mag_001/model_comparison_20260306T200659Z.csv`
+  - `benchmarks/results/v097_candidate47_tune_mag_001/model_comparison_profile_summary_20260306T200659Z.csv`
+
+### Tuning Candidate vs Baseline (Seed 7, 6 Alloy Runs)
+- Median fit delta: `-27.86%`
+- Median predict delta: `-16.68%`
+- Median RMSE delta: `-3.69%`
+- Median MAE delta: `-4.41%`
+- Median R2 delta: `+0.10383`
+
+### Tuning Candidate vs Candidate46 (Seed 7, 6 Alloy Runs)
+- Median fit delta: `+4.86%`
+- Median predict delta: `-2.57%`
+- Median RMSE delta: `+0.06%`
+- Median MAE delta: `+0.09%`
+- Median R2 delta: `-0.00149`
+
+### Rejection Note
+- The lower threshold did not recover finance quality; it slightly worsened the overall quality profile relative to candidate46 while also making fit time worse.
+- Because the tuning slice failed immediately, the candidate was rejected without running the full 18-run focus matrix.
+
+---
+
+## Candidate Experiment: Candidate46 with Depth-Gated Leaf-Magnitude Filter (Env-Gated) (2026-03-06)
+
+### Status
+PASS for benchmark execution.  
+Decision: reject and keep candidate46 unchanged.
+
+### Scope
+- Evaluated a narrow engine-side gating variant of the accepted candidate46 package:
+  - `ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK=1`
+  - `ALLOYGBM_EXPERIMENT_SPLIT_L2=1`
+  - `ALLOYGBM_EXPERIMENT_SPLIT_L1=0.1`
+  - `ALLOYGBM_EXPERIMENT_MIN_CHILD_HESS=0`
+  - `ALLOYGBM_EXPERIMENT_SPLIT_MIN_LEAF_MAGNITUDE=0.02`
+  - `ALLOYGBM_EXPERIMENT_SPLIT_MIN_LEAF_MAGNITUDE_START_DEPTH=1`
+- The hypothesis was that leaving the root split unfiltered might recover some finance quality while preserving the deeper weak-split suppression that helped the accepted stack.
+
+### Commands Executed
+1. Fresh runtime build and install:
+   - `python3 -m maturin build --manifest-path bindings/python/Cargo.toml --interpreter python3 --out /tmp/alloygbm-v097-candidate48a/wheelhouse -q`
+   - `python3 -m pip install --no-deps --no-cache-dir --target /tmp/alloygbm-v097-candidate48a/site-packages /tmp/alloygbm-v097-candidate48a/wheelhouse/alloygbm-0.0.1-cp310-abi3-macosx_11_0_arm64.whl`
+2. Validation:
+   - `cargo test -p alloygbm-engine -p alloygbm-backend-cpu`
+   - `PYTHONPATH=/tmp/alloygbm-v097-candidate48a/site-packages python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'`
+3. Same-snapshot tuning reference:
+   - `ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK=1 ALLOYGBM_EXPERIMENT_SPLIT_L2=1 ALLOYGBM_EXPERIMENT_SPLIT_L1=0.1 ALLOYGBM_EXPERIMENT_MIN_CHILD_HESS=0 ALLOYGBM_EXPERIMENT_SPLIT_MIN_LEAF_MAGNITUDE=0.02 PYTHONPATH=/tmp/alloygbm-v097-candidate48a/site-packages python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile deep_low_lr:0.01:8:5000 --profile-seeds 7 --scenarios panel_time_series dow_jones_financial --output-dir benchmarks/results/v097_candidate48_tune_baseline`
+4. Depth-gated tuning slice:
+   - `ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK=1 ALLOYGBM_EXPERIMENT_SPLIT_L2=1 ALLOYGBM_EXPERIMENT_SPLIT_L1=0.1 ALLOYGBM_EXPERIMENT_MIN_CHILD_HESS=0 ALLOYGBM_EXPERIMENT_SPLIT_MIN_LEAF_MAGNITUDE=0.02 ALLOYGBM_EXPERIMENT_SPLIT_MIN_LEAF_MAGNITUDE_START_DEPTH=1 PYTHONPATH=/tmp/alloygbm-v097-candidate48a/site-packages python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile deep_low_lr:0.01:8:5000 --profile-seeds 7 --scenarios panel_time_series dow_jones_financial --output-dir benchmarks/results/v097_candidate48_tune_depth1`
+
+### Produced Artifacts
+- Tuning baseline:
+  - `benchmarks/results/v097_candidate48_tune_baseline/model_comparison_20260306T202320Z.csv`
+  - `benchmarks/results/v097_candidate48_tune_baseline/model_comparison_profile_summary_20260306T202320Z.csv`
+- Depth-gated candidate:
+  - `benchmarks/results/v097_candidate48_tune_depth1/model_comparison_20260306T202503Z.csv`
+  - `benchmarks/results/v097_candidate48_tune_depth1/model_comparison_profile_summary_20260306T202503Z.csv`
+
+### Depth-Gated Candidate vs Current-Snapshot Candidate46 (Seed 7, 6 Alloy Runs)
+- Median fit delta: `+31.19%`
+- Median predict delta: `+23.12%`
+- Median RMSE delta: `+0.01993%`
+- Median MAE delta: `+0.05001%`
+- Median R2 delta: `-0.00046`
+
+### Scenario Notes
+- `panel_time_series` vs current-snapshot candidate46:
+  - fit `+13.93%`
+  - predict `+7.34%`
+  - RMSE `0.00%`
+  - MAE `0.00%`
+  - R2 `0.00000`
+- `dow_jones_financial` vs current-snapshot candidate46:
+  - fit `+45.46%`
+  - predict `+38.91%`
+  - RMSE `+0.08964%`
+  - MAE `+0.05705%`
+  - R2 `-0.00211`
+
+### Rejection Note
+- Delaying the weak-split filter to depth 1 removed too much of the runtime benefit and did not recover finance quality.
+- Because the tuning slice was clearly dominated by the current candidate46 preset, the candidate was rejected without running the full 18-run focus matrix.
+
+---
+
+## Candidate Experiment: Candidate46 with Parent-Relative Split Gain Floor (Env-Gated) (2026-03-06)
+
+### Status
+PASS for benchmark execution.  
+Decision: reject and keep candidate46 unchanged.
+
+### Scope
+- Evaluated a narrow engine-side gain-shaping variant of the accepted candidate46 package:
+  - `ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK=1`
+  - `ALLOYGBM_EXPERIMENT_SPLIT_L2=1`
+  - `ALLOYGBM_EXPERIMENT_SPLIT_L1=0.1`
+  - `ALLOYGBM_EXPERIMENT_MIN_CHILD_HESS=0`
+  - `ALLOYGBM_EXPERIMENT_SPLIT_MIN_LEAF_MAGNITUDE=0.02`
+  - `ALLOYGBM_EXPERIMENT_RELATIVE_SPLIT_GAIN_FLOOR=0.02`
+- The hypothesis was that weak splits could be pruned more consistently by requiring gain to clear a small fraction of the parent gain term.
+
+### Commands Executed
+1. Fresh runtime build and install:
+   - `python3 -m maturin build --manifest-path bindings/python/Cargo.toml --interpreter python3 --out /tmp/alloygbm-v097-candidate49/wheelhouse -q`
+   - `python3 -m pip install --no-deps --no-cache-dir --target /tmp/alloygbm-v097-candidate49/site-packages /tmp/alloygbm-v097-candidate49/wheelhouse/alloygbm-0.0.1-cp310-abi3-macosx_11_0_arm64.whl`
+2. Validation:
+   - `cargo test -p alloygbm-engine -p alloygbm-backend-cpu`
+   - `PYTHONPATH=/tmp/alloygbm-v097-candidate49/site-packages python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'`
+3. Same-snapshot tuning reference:
+   - `ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK=1 ALLOYGBM_EXPERIMENT_SPLIT_L2=1 ALLOYGBM_EXPERIMENT_SPLIT_L1=0.1 ALLOYGBM_EXPERIMENT_MIN_CHILD_HESS=0 ALLOYGBM_EXPERIMENT_SPLIT_MIN_LEAF_MAGNITUDE=0.02 PYTHONPATH=/tmp/alloygbm-v097-candidate49/site-packages python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile deep_low_lr:0.01:8:5000 --profile-seeds 7 --scenarios panel_time_series dow_jones_financial --output-dir benchmarks/results/v097_candidate49_tune_baseline`
+4. Gain-floor tuning slice:
+   - `ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK=1 ALLOYGBM_EXPERIMENT_SPLIT_L2=1 ALLOYGBM_EXPERIMENT_SPLIT_L1=0.1 ALLOYGBM_EXPERIMENT_MIN_CHILD_HESS=0 ALLOYGBM_EXPERIMENT_SPLIT_MIN_LEAF_MAGNITUDE=0.02 ALLOYGBM_EXPERIMENT_RELATIVE_SPLIT_GAIN_FLOOR=0.02 PYTHONPATH=/tmp/alloygbm-v097-candidate49/site-packages python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile deep_low_lr:0.01:8:5000 --profile-seeds 7 --scenarios panel_time_series dow_jones_financial --output-dir benchmarks/results/v097_candidate49_tune_gain_002`
+
+### Produced Artifacts
+- Tuning baseline:
+  - `benchmarks/results/v097_candidate49_tune_baseline/model_comparison_20260306T203942Z.csv`
+  - `benchmarks/results/v097_candidate49_tune_baseline/model_comparison_profile_summary_20260306T203942Z.csv`
+- Gain-floor candidate:
+  - `benchmarks/results/v097_candidate49_tune_gain_002/model_comparison_20260306T204051Z.csv`
+  - `benchmarks/results/v097_candidate49_tune_gain_002/model_comparison_profile_summary_20260306T204051Z.csv`
+
+### Gain-Floor Candidate vs Current-Snapshot Candidate46 (Seed 7, 6 Alloy Runs)
+- Median fit delta: `+1.11%`
+- Median predict delta: `+1.09%`
+- Median RMSE delta: `-0.13445%`
+- Median MAE delta: `-0.81647%`
+- Median R2 delta: `+0.00289`
+
+### Scenario Notes
+- `dow_jones_financial` vs current-snapshot candidate46:
+  - fit `-0.86665%`
+  - predict `-5.56648%`
+  - RMSE `-0.41960%`
+  - MAE `-0.78480%`
+  - R2 `+0.00940`
+- `panel_time_series` vs current-snapshot candidate46:
+  - fit `+2.55213%`
+  - predict `+7.04848%`
+  - RMSE `+0.58812%`
+  - MAE `-1.55800%`
+  - R2 `-0.01531`
+
+### Rejection Note
+- The floor modestly helped the finance slice, but it weakened the panel slice and did not produce a runtime win.
+- Because the tuning slice did not clearly improve the accepted candidate46 tradeoff, the candidate was rejected without running the full 18-run focus matrix.
+
+---
+
+## Candidate Experiment: Stronger Tail-Asymmetry Activation Gate on Selective Tail Rank (Env-Gated) (2026-03-06)
+
+### Status
+PASS for benchmark execution.  
+Decision: reject and keep the accepted tail-rank path unchanged.
+
+### Scope
+- Evaluated a narrow Python-side activation gate on the existing selective linear tail-rank fallback:
+  - `ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK=1`
+  - `ALLOYGBM_EXPERIMENT_LINEAR_TAIL_ASYMMETRY_RATIO=2.0`
+- The goal was to require more one-sided tail structure before activating rank fallback, in hopes of keeping the panel lift while reducing neutral activations.
+
+### Commands Executed
+1. Validation:
+   - `PYTHONPATH=bindings/python python3 -m unittest discover -s bindings/python/tests -p 'test_*.py'`
+2. Same-snapshot tuning reference:
+   - `ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK=1 ALLOYGBM_EXPERIMENT_SPLIT_L2=1 ALLOYGBM_EXPERIMENT_SPLIT_L1=0.1 ALLOYGBM_EXPERIMENT_MIN_CHILD_HESS=0 ALLOYGBM_EXPERIMENT_SPLIT_MIN_LEAF_MAGNITUDE=0.02 PYTHONPATH=bindings/python python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile deep_low_lr:0.01:8:5000 --profile-seeds 7 --scenarios panel_time_series dow_jones_financial --output-dir benchmarks/results/v097_candidate50_tune_baseline`
+3. Asymmetry-gated tuning slice:
+   - `ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK=1 ALLOYGBM_EXPERIMENT_LINEAR_TAIL_ASYMMETRY_RATIO=2.0 ALLOYGBM_EXPERIMENT_SPLIT_L2=1 ALLOYGBM_EXPERIMENT_SPLIT_L1=0.1 ALLOYGBM_EXPERIMENT_MIN_CHILD_HESS=0 ALLOYGBM_EXPERIMENT_SPLIT_MIN_LEAF_MAGNITUDE=0.02 PYTHONPATH=bindings/python python3 -B benchmarks/run_model_comparison.py --profile-grid none --profile shallow_high_lr:0.2:4:200 --profile mid_balanced:0.1:6:400 --profile deep_low_lr:0.01:8:5000 --profile-seeds 7 --scenarios panel_time_series dow_jones_financial --output-dir benchmarks/results/v097_candidate50_tune_asym_20`
+
+### Produced Artifacts
+- Same-snapshot baseline:
+  - `benchmarks/results/v097_candidate50_tune_baseline/model_comparison_20260306T205154Z.csv`
+  - `benchmarks/results/v097_candidate50_tune_baseline/model_comparison_profile_summary_20260306T205154Z.csv`
+- Asymmetry-gated candidate:
+  - `benchmarks/results/v097_candidate50_tune_asym_20/model_comparison_20260306T205352Z.csv`
+  - `benchmarks/results/v097_candidate50_tune_asym_20/model_comparison_profile_summary_20260306T205352Z.csv`
+
+### Asymmetry-Gated Candidate vs Same-Snapshot Baseline (Seed 7, 6 Alloy Runs)
+- Median fit delta: `+12.69%`
+- Median predict delta: `-0.20%`
+- Median RMSE delta: `0.0%`
+- Median MAE delta: `0.0%`
+- Median R2 delta: `0.0`
+
+### Rejection Note
+- The stronger activation gate changed runtime behavior but produced no quality movement on the tuning slice.
+- Since the candidate only added fit overhead without improving RMSE/MAE/R2, it was rejected without running the full 18-run focus matrix.

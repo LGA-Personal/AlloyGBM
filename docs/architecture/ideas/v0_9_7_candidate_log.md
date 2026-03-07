@@ -63,6 +63,10 @@ These repos are local reference material and should not be included in commits.
 | 44 | Candidate36 + candidate43 coordinated env preset | Kept | vs baseline: `fit -33.39%`, `predict -25.47%`, `RMSE -2.34%`, `MAE -4.89%`, `R2 +0.07006`; vs candidate36: `fit -19.20%`, `predict -14.91%`, quality essentially flat-to-slightly better | This package preserves candidate36’s panel-quality gains while inheriting candidate43’s deep-low-lr/finance speed win. Strongest coordinated preset so far. |
 | 45 | Candidate33 + candidate43 coordinated env preset | Kept | vs baseline: `fit -26.84%`, `predict -6.16%`, `RMSE -0.64%`, `MAE -2.27%`, `R2 +0.01896`; vs candidate33: `fit -16.56%`, `predict -7.86%`, quality essentially flat | This package improves candidate33’s runtime materially while keeping its focused-slice quality profile nearly unchanged. Useful low-signal/deep-low-lr preset. |
 | 46 | Candidate36 + Candidate33 + Candidate43 coordinated env preset | Kept | vs baseline: `fit -32.36%`, `predict -20.23%`, `RMSE -4.32%`, `MAE -4.89%`, `R2 +0.12042`; vs candidate44: `fit -3.52%`, `predict -0.23%`, `RMSE -0.75%`, `MAE -1.23%`, `R2 +0.01969` | Best focused-slice quality package so far. Finance gives back a small amount of quality relative to candidate44, but the overall accuracy gain is materially larger while runtime remains much better than baseline. |
+| 47 | Candidate46 retuned with lower split leaf-magnitude threshold (`0.01`) | Rejected | seed-7 tuning vs candidate46: `fit +4.86%`, `predict -2.57%`, `RMSE +0.06%`, `MAE +0.09%`, `R2 -0.00149` | Lowering the threshold weakened the full-stack tradeoff instead of recovering finance quality. Reject without escalating to the full 18-run matrix. |
+| 48 | Candidate46 with depth-gated leaf-magnitude filter (`start_depth=1`) | Rejected | seed-7 tuning vs current-snapshot candidate46: `fit +31.19%`, `predict +23.12%`, `RMSE +0.01993%`, `MAE +0.05001%`, `R2 -0.00046` | Delaying the weak-split filter hurt both runtime and quality. Reject without escalating to the full 18-run matrix. |
+| 49 | Candidate46 with parent-relative split gain floor (`0.02`) | Rejected | seed-7 tuning vs current-snapshot candidate46: `fit +1.11%`, `predict +1.09%`, `RMSE -0.13445%`, `MAE -0.81647%`, `R2 +0.00289` | Mixed direction: slight finance improvement, but panel RMSE/R2 got worse and runtime did not improve. Reject without escalating to the full 18-run matrix. |
+| 50 | Candidate36/46 with stronger tail-asymmetry activation gate (`ratio=2.0`) | Rejected | seed-7 tuning vs same-snapshot baseline: `fit +12.69%`, `predict -0.20%`, quality unchanged (`RMSE/MAE/R2` all flat) | The asymmetry gate changed which features activated, but not model quality. It only added overhead, so reject without escalating to the full 18-run matrix. |
 
 ## Scenario Notes for Candidate36
 - `panel_time_series` (`n=9`): `RMSE -6.57%`, `MAE -14.43%`, `R2 +0.19109`.
@@ -103,6 +107,10 @@ These repos are local reference material and should not be included in commits.
 - Lower-tail-only selective rank fallback as a replacement for selective tail rank (`candidate40` shape).
 - Soft split-balance penalty as a standalone split-search quality knob (`candidate41` shape).
 - Early min-child-row pruning as a standalone split-search quality knob (`candidate42` shape).
+- Lower split leaf-magnitude retuning inside the accepted full stack (`candidate47` shape).
+- Depth-gating the accepted leaf-magnitude filter inside the full stack (`candidate48` shape).
+- Parent-relative split gain floor inside the accepted full stack (`candidate49` shape).
+- Stronger tail-asymmetry activation gating on top of selective tail rank (`candidate50` shape).
 
 ## Likely Synergy Directions (Worth Coordinated Packages)
 1. Backend-regularized split scoring (`candidate32/33`) + selective tail-aware quantization (`candidate36`) under one controlled package.
