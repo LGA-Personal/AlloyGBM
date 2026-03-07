@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run cross-model benchmark comparisons for AlloyGBM, LightGBM, and XGBoost."""
+"""Run cross-model benchmark comparisons for AlloyGBM and peer GBM libraries."""
 
 from __future__ import annotations
 
@@ -120,6 +120,22 @@ def _load_alloygbm_runtime() -> tuple[type, dict[str, object]]:
         "init_parameters": list(init_parameters),
     }
     return GBMRegressor, runtime
+
+
+def _load_optional_catboost_regressor() -> tuple[type | None, dict[str, object]]:
+    try:
+        import catboost
+        from catboost import CatBoostRegressor
+    except Exception as exc:  # noqa: BLE001
+        return None, {
+            "available": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    return CatBoostRegressor, {
+        "available": True,
+        "version": getattr(catboost, "__version__", "unknown"),
+    }
 
 
 def _prepare_dataset(
@@ -328,6 +344,7 @@ def _run_model(
 
 def _model_factories(
     gbm_regressor_cls: type,
+    catboost_regressor_cls: type | None,
     seed: int,
     learning_rate: float,
     max_depth: int,
@@ -361,7 +378,7 @@ def _model_factories(
     if "continuous_binning_max_bins" in alloy_signature.parameters:
         alloy_params["continuous_binning_max_bins"] = alloy_continuous_binning_max_bins
 
-    return {
+    factories = {
         "alloygbm": lambda: gbm_regressor_cls(**alloy_params),
         "lightgbm": lambda: LGBMRegressor(
             objective="regression",
@@ -387,6 +404,18 @@ def _model_factories(
             verbosity=0,
         ),
     }
+    if catboost_regressor_cls is not None:
+        factories["catboost"] = lambda: catboost_regressor_cls(
+            loss_function="RMSE",
+            learning_rate=learning_rate,
+            depth=max_depth,
+            iterations=rounds,
+            random_seed=seed,
+            verbose=False,
+            allow_writing_files=False,
+            thread_count=1,
+        )
+    return factories
 
 
 def _parse_seed_list(seed_text: str) -> list[int]:
@@ -771,11 +800,16 @@ def main(argv: list[str]) -> int:
     except RuntimeError as exc:
         print(f"alloygbm runtime check failed: {exc}", file=sys.stderr)
         return 2
+    catboost_regressor_cls, catboost_runtime = _load_optional_catboost_regressor()
     print(
         "alloygbm runtime: "
         f"module={alloy_runtime['module_path']} "
         f"native={alloy_runtime['native_module_path']}"
     )
+    if catboost_runtime["available"]:
+        print(f"catboost runtime: version={catboost_runtime['version']}")
+    else:
+        print(f"catboost runtime: unavailable ({catboost_runtime['error']})")
 
     datasets: dict[str, tuple[pd.DataFrame, str]] = {}
     dataset_errors: dict[str, str] = {}
@@ -792,6 +826,7 @@ def main(argv: list[str]) -> int:
         for run_index, seed in enumerate(seeds, start=1):
             factories = _model_factories(
                 gbm_regressor_cls=gbm_regressor_cls,
+                catboost_regressor_cls=catboost_regressor_cls,
                 seed=seed,
                 learning_rate=profile.learning_rate,
                 max_depth=profile.max_depth,
@@ -901,6 +936,7 @@ def main(argv: list[str]) -> int:
         "test_size": args.test_size,
         "scenarios": args.scenarios,
         "alloygbm_runtime": alloy_runtime,
+        "catboost_runtime": catboost_runtime,
     }
     paths = _write_outputs(args.output_dir, run_id, records, params)
     print(f"wrote comparison csv: {paths['csv']}")
