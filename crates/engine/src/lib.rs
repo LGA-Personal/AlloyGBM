@@ -916,15 +916,20 @@ impl Trainer {
         let mut controls = self.default_iteration_controls(rounds)?;
         let row_count = dataset.row_count();
         let feature_count = binned_matrix.feature_count;
+        let target_variance = target_variance(&dataset.targets, dataset.sample_weights.as_deref())?;
         if row_count < 1_024 {
-            if feature_count >= 8 && rounds > 256 {
-                controls.rounds = rounds.min(128);
+            let rows_per_feature = row_count as f32 / feature_count.max(1) as f32;
+            if feature_count >= 8
+                && rounds > 256
+                && rows_per_feature < 64.0
+                && target_variance > 1.0
+            {
+                controls.rounds = rounds.min(96);
             }
             return Ok(controls);
         }
 
         let binned_density = binned_feature_density(binned_matrix);
-        let target_variance = target_variance(&dataset.targets, dataset.sample_weights.as_deref())?;
 
         let suggested_min_rows = if row_count < 128 {
             1
@@ -3309,7 +3314,7 @@ mod tests {
             )
             .expect("auto controls should build");
 
-        assert_eq!(controls.rounds, 128);
+        assert_eq!(controls.rounds, 96);
     }
 
     #[test]
