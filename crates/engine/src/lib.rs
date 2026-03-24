@@ -779,13 +779,16 @@ impl Trainer {
     ) -> EngineResult<TrainedModel> {
         let controls =
             self.iteration_controls_for_policy(dataset, binned_matrix, rounds, policy_mode)?;
-        let model = self.fit_iterations_with_controls(
+        let summary = self.fit_iterations_with_optional_validation_summary(
             dataset,
             binned_matrix,
             backend,
             objective,
             controls,
+            None,
+            Some(policy_mode),
         )?;
+        let model = summary.model;
         if store_node_debug_stats {
             model.with_node_debug_stats_from_stumps()
         } else {
@@ -872,6 +875,7 @@ impl Trainer {
             objective,
             controls,
             None,
+            None,
         )
     }
 
@@ -891,6 +895,7 @@ impl Trainer {
             objective,
             controls,
             Some(validation),
+            None,
         )
     }
 
@@ -987,6 +992,7 @@ impl Trainer {
         objective: &O,
         controls: IterationControls,
         validation: Option<ValidationDatasetRef<'_>>,
+        policy_mode: Option<TrainingPolicyMode>,
     ) -> EngineResult<IterationRunSummary> {
         validate_iteration_controls(controls)?;
         if controls.early_stopping_rounds.is_some() && validation.is_none() {
@@ -1006,6 +1012,8 @@ impl Trainer {
         }
         let fit_contract = self.validate_fit_contract(dataset, objective)?;
         let sampling_seed_base = sampling_seed_base(self.params.seed, self.params.deterministic);
+        let split_options =
+            split_selection_options_for_training(policy_mode, dataset, binned_matrix)?;
 
         let mut predictions = vec![fit_contract.baseline_prediction; dataset.row_count()];
         let mut candidate_predictions = predictions.clone();
@@ -1047,7 +1055,6 @@ impl Trainer {
         let mut validation_no_improvement_rounds = 0_usize;
         let mut weak_improvement_streak = 0_usize;
         let mut weak_improvement_rounds_committed = 0_usize;
-        let split_options = split_selection_options_from_env()?;
 
         const LEAF_EPSILON: f32 = 1e-6;
 
@@ -1459,6 +1466,7 @@ const MIN_CHILD_HESS_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_MIN_CHILD_HESS";
 const SPLIT_MIN_LEAF_MAGNITUDE_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_SPLIT_MIN_LEAF_MAGNITUDE";
 const FORCE_MANUAL_POLICY_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_FORCE_MANUAL_POLICY";
 const ENABLE_LEAF_REFINEMENT_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_ENABLE_LEAF_REFINEMENT";
+const AUTO_SPLIT_L2_NOISY_SMALL_WIDE: f32 = 2.0;
 
 fn split_selection_options_from_env() -> EngineResult<SplitSelectionOptions> {
     Ok(SplitSelectionOptions {
@@ -1521,6 +1529,44 @@ fn l1_threshold_gradient(grad_sum: f32, l1_alpha: f32) -> f32 {
     } else {
         0.0
     }
+}
+
+fn split_selection_options_for_training(
+    policy_mode: Option<TrainingPolicyMode>,
+    dataset: &TrainingDataset,
+    binned_matrix: &BinnedMatrix,
+) -> EngineResult<SplitSelectionOptions> {
+    let mut options = split_selection_options_from_env()?;
+    if !split_l2_env_is_configured()
+        && matches!(policy_mode, Some(TrainingPolicyMode::Auto))
+        && should_apply_auto_split_l2(dataset, binned_matrix)?
+    {
+        options.l2_lambda = AUTO_SPLIT_L2_NOISY_SMALL_WIDE;
+    }
+    Ok(options)
+}
+
+fn split_l2_env_is_configured() -> bool {
+    std::env::var_os(SPLIT_L2_ENV_VAR).is_some()
+}
+
+fn should_apply_auto_split_l2(
+    dataset: &TrainingDataset,
+    binned_matrix: &BinnedMatrix,
+) -> EngineResult<bool> {
+    let row_count = dataset.row_count();
+    let feature_count = binned_matrix.feature_count.max(1);
+    if row_count >= 1_024 || feature_count < 8 {
+        return Ok(false);
+    }
+
+    let rows_per_feature = row_count as f32 / feature_count as f32;
+    if rows_per_feature >= 64.0 {
+        return Ok(false);
+    }
+
+    let target_variance = target_variance(&dataset.targets, dataset.sample_weights.as_deref())?;
+    Ok(target_variance > 4.0)
 }
 
 fn validate_gradient_pair_length(gradients: &[GradientPair], row_count: usize) -> EngineResult<()> {
@@ -3005,6 +3051,26 @@ mod tests {
         .expect("binned matrix is valid")
     }
 
+    fn sample_noisy_wide_small_dataset() -> TrainingDataset {
+        TrainingDataset {
+            matrix: alloygbm_core::DatasetMatrix::new(
+                4,
+                8,
+                vec![
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, //
+                    1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, //
+                    2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, //
+                    3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, //
+                ],
+            )
+            .expect("matrix is valid"),
+            targets: vec![10.0, 5.0, -5.0, -10.0],
+            sample_weights: None,
+            time_index: None,
+            group_id: None,
+        }
+    }
+
     fn sample_trained_model() -> TrainedModel {
         let trainer = Trainer::new(TrainParams::default()).expect("valid params");
         trainer
@@ -3315,6 +3381,25 @@ mod tests {
             .expect("auto controls should build");
 
         assert_eq!(controls.rounds, 96);
+    }
+
+    #[test]
+    fn auto_split_l2_targets_noisy_small_wide_datasets() {
+        assert!(
+            should_apply_auto_split_l2(
+                &sample_noisy_wide_small_dataset(),
+                &sample_wide_small_binned_matrix()
+            )
+            .expect("heuristic should evaluate")
+        );
+    }
+
+    #[test]
+    fn auto_split_l2_skips_dense_numeric_style_datasets() {
+        assert!(
+            !should_apply_auto_split_l2(&sample_dataset(), &sample_binned_matrix())
+                .expect("heuristic should evaluate")
+        );
     }
 
     #[test]
