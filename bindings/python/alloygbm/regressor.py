@@ -5,6 +5,7 @@ from __future__ import annotations
 import bisect
 import math
 import os
+import struct
 from collections.abc import Sequence
 
 _PRE_BINNED_INTEGER_TOLERANCE = 1e-6
@@ -26,6 +27,16 @@ def _load_native_predictor_predict_batch():
     return predictor_predict_batch
 
 
+def _load_native_predictor_predict_batch_dense():
+    try:
+        from alloygbm._alloygbm import predictor_predict_batch_dense
+    except Exception as exc:  # pragma: no cover - exercised via contract tests.
+        raise RuntimeError(
+            "native dense predictor binding is unavailable; build/install the alloygbm extension module"
+        ) from exc
+    return predictor_predict_batch_dense
+
+
 def _load_native_predictor_predict_batch_canonical():
     try:
         from alloygbm._alloygbm import predictor_predict_batch_canonical
@@ -34,6 +45,16 @@ def _load_native_predictor_predict_batch_canonical():
             "native canonical predictor binding is unavailable; build/install the alloygbm extension module"
         ) from exc
     return predictor_predict_batch_canonical
+
+
+def _load_native_predictor_predict_batch_canonical_dense():
+    try:
+        from alloygbm._alloygbm import predictor_predict_batch_canonical_dense
+    except Exception as exc:  # pragma: no cover - exercised via contract tests.
+        raise RuntimeError(
+            "native dense canonical predictor binding is unavailable; build/install the alloygbm extension module"
+        ) from exc
+    return predictor_predict_batch_canonical_dense
 
 
 def _load_native_predictor_handle_class():
@@ -56,6 +77,16 @@ def _load_native_train_regression_artifact():
     return train_regression_artifact
 
 
+def _load_native_train_regression_artifact_dense():
+    try:
+        from alloygbm._alloygbm import train_regression_artifact_dense
+    except Exception as exc:  # pragma: no cover - exercised via contract tests.
+        raise RuntimeError(
+            "native dense training binding is unavailable; build/install the alloygbm extension module"
+        ) from exc
+    return train_regression_artifact_dense
+
+
 def _load_native_shap_explain_rows():
     try:
         from alloygbm._alloygbm import shap_explain_rows
@@ -66,6 +97,16 @@ def _load_native_shap_explain_rows():
     return shap_explain_rows
 
 
+def _load_native_shap_explain_rows_dense():
+    try:
+        from alloygbm._alloygbm import shap_explain_rows_dense
+    except Exception as exc:  # pragma: no cover - exercised via contract tests.
+        raise RuntimeError(
+            "native dense SHAP explain binding is unavailable; build/install the alloygbm extension module"
+        ) from exc
+    return shap_explain_rows_dense
+
+
 def _load_native_shap_global_importance():
     try:
         from alloygbm._alloygbm import shap_global_importance
@@ -74,6 +115,16 @@ def _load_native_shap_global_importance():
             "native SHAP global-importance binding is unavailable; build/install the alloygbm extension module"
         ) from exc
     return shap_global_importance
+
+
+def _load_native_shap_global_importance_dense():
+    try:
+        from alloygbm._alloygbm import shap_global_importance_dense
+    except Exception as exc:  # pragma: no cover - exercised via contract tests.
+        raise RuntimeError(
+            "native dense SHAP global-importance binding is unavailable; build/install the alloygbm extension module"
+        ) from exc
+    return shap_global_importance_dense
 
 
 def _parse_env_toggle(env_name: str) -> bool:
@@ -122,6 +173,8 @@ class GBMRegressor:
         continuous_binning_strategy: str = "linear",
         continuous_binning_max_bins: int = 256,
         categorical_feature_index: int | None = None,
+        training_policy: str = "auto",
+        store_node_stats: bool = False,
         categorical_smoothing: float = 20.0,
         categorical_min_samples_leaf: int = 1,
         categorical_time_aware: bool = False,
@@ -146,6 +199,8 @@ class GBMRegressor:
             raise ValueError("categorical_smoothing must be >= 0")
         if int(categorical_min_samples_leaf) <= 0:
             raise ValueError("categorical_min_samples_leaf must be greater than 0")
+        if training_policy not in {"auto", "manual"}:
+            raise ValueError("training_policy must be 'auto' or 'manual'")
         if continuous_binning_strategy not in _VALID_CONTINUOUS_BINNING_STRATEGIES:
             raise ValueError(
                 "continuous_binning_strategy must be one of: "
@@ -182,6 +237,8 @@ class GBMRegressor:
             if categorical_feature_index is not None
             else None
         )
+        self.training_policy = str(training_policy)
+        self.store_node_stats = bool(store_node_stats)
         self.categorical_smoothing = float(categorical_smoothing)
         self.categorical_min_samples_leaf = int(categorical_min_samples_leaf)
         self.categorical_time_aware = bool(categorical_time_aware)
@@ -211,6 +268,8 @@ class GBMRegressor:
             f"continuous_binning_strategy='{self.continuous_binning_strategy}', "
             f"continuous_binning_max_bins={self.continuous_binning_max_bins}, "
             f"categorical_feature_index={self.categorical_feature_index}, "
+            f"training_policy='{self.training_policy}', "
+            f"store_node_stats={self.store_node_stats}, "
             f"categorical_smoothing={self.categorical_smoothing}, "
             f"categorical_min_samples_leaf={self.categorical_min_samples_leaf}, "
             f"categorical_time_aware={self.categorical_time_aware}"
@@ -233,6 +292,8 @@ class GBMRegressor:
             "continuous_binning_strategy": self.continuous_binning_strategy,
             "continuous_binning_max_bins": self.continuous_binning_max_bins,
             "categorical_feature_index": self.categorical_feature_index,
+            "training_policy": self.training_policy,
+            "store_node_stats": self.store_node_stats,
             "categorical_smoothing": self.categorical_smoothing,
             "categorical_min_samples_leaf": self.categorical_min_samples_leaf,
             "categorical_time_aware": self.categorical_time_aware,
@@ -253,6 +314,8 @@ class GBMRegressor:
             "continuous_binning_strategy",
             "continuous_binning_max_bins",
             "categorical_feature_index",
+            "training_policy",
+            "store_node_stats",
             "categorical_smoothing",
             "categorical_min_samples_leaf",
             "categorical_time_aware",
@@ -349,6 +412,15 @@ class GBMRegressor:
                     raise ValueError("categorical_feature_index must be >= 0 when set")
                 self.categorical_feature_index = categorical_feature_index
 
+        if "training_policy" in params:
+            training_policy = str(params["training_policy"])
+            if training_policy not in {"auto", "manual"}:
+                raise ValueError("training_policy must be 'auto' or 'manual'")
+            self.training_policy = training_policy
+
+        if "store_node_stats" in params:
+            self.store_node_stats = bool(params["store_node_stats"])
+
         if "categorical_smoothing" in params:
             categorical_smoothing = float(params["categorical_smoothing"])
             if categorical_smoothing < 0.0:
@@ -375,38 +447,76 @@ class GBMRegressor:
         time_index: object | None = None,
     ) -> "GBMRegressor":
         """Fit native-backed regression model artifact state."""
-        rows = self._validate_rows(X)
         targets = self._validate_targets(y)
-        if len(rows) != len(targets):
-            raise ValueError("X and y must contain the same number of rows")
+        effective_categorical_feature_index = self.categorical_feature_index
+        categorical_values = None
+        if categorical_feature_values is not None:
+            categorical_values = self._validate_categorical_values(
+                categorical_feature_values,
+                len(targets),
+            )
+        elif effective_categorical_feature_index is None:
+            inferred = self._infer_explicit_categorical_feature(X)
+            if inferred is not None:
+                effective_categorical_feature_index, categorical_values = inferred
+
+        native_training_rows: object | None = None
+        rows: list[list[float]] | None = None
+        row_count = len(targets)
+        feature_count: int
+        dense_training_payload: tuple[list[float], int, int] | None = None
+
+        if effective_categorical_feature_index is None:
+            dense_training_payload = self._native_matrix_flat_payload(
+                X, require_integer=True
+            )
+            if dense_training_payload is not None:
+                _, row_count, feature_count = dense_training_payload
+                if row_count != len(targets):
+                    raise ValueError("X and y must contain the same number of rows")
+                self._uses_continuous_binning = False
+                self._continuous_feature_mins = None
+                self._continuous_feature_maxs = None
+                self._continuous_feature_sorted_values = None
+                self._continuous_feature_quantile_cuts = None
+                self._continuous_feature_linear_rank_flags = None
+            else:
+                rows = self._validate_rows(X)
+                row_count = len(rows)
+                feature_count = len(rows[0])
+                if row_count != len(targets):
+                    raise ValueError("X and y must contain the same number of rows")
+        else:
+            rows = self._validate_rows(
+                X, categorical_feature_index=effective_categorical_feature_index
+            )
+            row_count = len(rows)
+            feature_count = len(rows[0])
+            if row_count != len(targets):
+                raise ValueError("X and y must contain the same number of rows")
+
         if (
-            self.categorical_feature_index is not None
-            and self.categorical_feature_index >= len(rows[0])
+            effective_categorical_feature_index is not None
+            and effective_categorical_feature_index >= feature_count
         ):
             raise ValueError(
                 "categorical_feature_index must be within fitted feature bounds"
             )
 
-        categorical_values = None
-        if categorical_feature_values is not None:
-            categorical_values = self._validate_categorical_values(
-                categorical_feature_values, len(rows)
-            )
-
-        if self.categorical_feature_index is None and categorical_values is not None:
+        if effective_categorical_feature_index is None and categorical_values is not None:
             raise ValueError(
                 "categorical_feature_values requires categorical_feature_index to be set"
             )
-        if self.categorical_feature_index is not None and categorical_values is None:
+        if effective_categorical_feature_index is not None and categorical_values is None:
             raise ValueError(
                 "categorical_feature_values must be provided when categorical_feature_index is set"
             )
 
         validated_time_index = None
         if time_index is not None:
-            validated_time_index = self._validate_time_index(time_index, len(rows))
+            validated_time_index = self._validate_time_index(time_index, row_count)
         if (
-            self.categorical_feature_index is not None
+            effective_categorical_feature_index is not None
             and self.categorical_time_aware
             and validated_time_index is None
         ):
@@ -414,8 +524,15 @@ class GBMRegressor:
                 "time_index must be provided when categorical_time_aware=True and categorical_feature_index is set"
             )
 
-        self._uses_continuous_binning = not self._rows_are_pre_binned(rows)
-        if self._uses_continuous_binning:
+        if native_training_rows is None and dense_training_payload is None:
+            assert rows is not None
+            self._uses_continuous_binning = not self._rows_are_pre_binned(rows)
+        if (
+            native_training_rows is None
+            and dense_training_payload is None
+            and self._uses_continuous_binning
+        ):
+            assert rows is not None
             if self.continuous_binning_strategy == "linear":
                 mins, maxs = self._derive_continuous_feature_bounds(rows)
                 self._continuous_feature_mins = mins
@@ -462,36 +579,67 @@ class GBMRegressor:
                 self._continuous_feature_maxs = None
                 self._continuous_feature_linear_rank_flags = None
                 training_rows = self._quantize_rows_quantile(rows, quantile_cuts)
-        else:
+            native_training_rows = training_rows
+        elif native_training_rows is None and dense_training_payload is None:
+            assert rows is not None
             self._continuous_feature_mins = None
             self._continuous_feature_maxs = None
             self._continuous_feature_sorted_values = None
             self._continuous_feature_quantile_cuts = None
             self._continuous_feature_linear_rank_flags = None
-            training_rows = rows
+            native_training_rows = rows
 
-        train_regression_artifact = _load_native_train_regression_artifact()
-        artifact_bytes = train_regression_artifact(
-            rows=training_rows,
-            targets=targets,
-            learning_rate=self.learning_rate,
-            max_depth=self.max_depth,
-            row_subsample=self.row_subsample,
-            col_subsample=self.col_subsample,
-            min_validation_improvement=self.min_validation_improvement,
-            seed=self.seed,
-            deterministic=self.deterministic,
-            rounds=self.n_estimators,
-            early_stopping_rounds=self.early_stopping_rounds,
-            categorical_feature_index=self.categorical_feature_index,
-            categorical_feature_values=categorical_values,
-            categorical_smoothing=self.categorical_smoothing,
-            categorical_min_samples_leaf=self.categorical_min_samples_leaf,
-            categorical_time_aware=self.categorical_time_aware,
-            time_index=validated_time_index,
-        )
+        if dense_training_payload is not None:
+            flat_values, dense_row_count, dense_feature_count = dense_training_payload
+            train_regression_artifact_dense = _load_native_train_regression_artifact_dense()
+            artifact_bytes = train_regression_artifact_dense(
+                values=flat_values,
+                row_count=dense_row_count,
+                feature_count=dense_feature_count,
+                targets=targets,
+                learning_rate=self.learning_rate,
+                max_depth=self.max_depth,
+                row_subsample=self.row_subsample,
+                col_subsample=self.col_subsample,
+                min_validation_improvement=self.min_validation_improvement,
+                seed=self.seed,
+                deterministic=self.deterministic,
+                rounds=self.n_estimators,
+                early_stopping_rounds=self.early_stopping_rounds,
+                categorical_feature_index=effective_categorical_feature_index,
+                categorical_feature_values=categorical_values,
+                training_policy=self.training_policy,
+                store_node_stats=self.store_node_stats,
+                categorical_smoothing=self.categorical_smoothing,
+                categorical_min_samples_leaf=self.categorical_min_samples_leaf,
+                categorical_time_aware=self.categorical_time_aware,
+                time_index=validated_time_index,
+            )
+        else:
+            train_regression_artifact = _load_native_train_regression_artifact()
+            artifact_bytes = train_regression_artifact(
+                rows=native_training_rows,
+                targets=targets,
+                learning_rate=self.learning_rate,
+                max_depth=self.max_depth,
+                row_subsample=self.row_subsample,
+                col_subsample=self.col_subsample,
+                min_validation_improvement=self.min_validation_improvement,
+                seed=self.seed,
+                deterministic=self.deterministic,
+                rounds=self.n_estimators,
+                early_stopping_rounds=self.early_stopping_rounds,
+                categorical_feature_index=effective_categorical_feature_index,
+                categorical_feature_values=categorical_values,
+                training_policy=self.training_policy,
+                store_node_stats=self.store_node_stats,
+                categorical_smoothing=self.categorical_smoothing,
+                categorical_min_samples_leaf=self.categorical_min_samples_leaf,
+                categorical_time_aware=self.categorical_time_aware,
+                time_index=validated_time_index,
+            )
 
-        self._n_features_in = len(rows[0])
+        self._n_features_in = feature_count
         self._artifact_bytes = bytes(artifact_bytes)
         self._native_predictor_handle = self._build_native_predictor_handle(
             self._artifact_bytes
@@ -505,24 +653,62 @@ class GBMRegressor:
             raise RuntimeError("GBMRegressor must be fit before predict")
         if self._artifact_bytes is None:
             raise RuntimeError("GBMRegressor native artifact is not available")
-        rows = self._validate_rows(X)
-        if len(rows[0]) != self._n_features_in:
-            raise ValueError(
-                f"X feature count {len(rows[0])} does not match fitted feature count "
-                f"{self._n_features_in}"
-            )
+        rows: object
         if self._uses_continuous_binning:
-            rows = self._quantize_rows_for_prediction(rows)
+            quantized_rows = self._quantize_rows_for_prediction(self._validate_rows(X))
+            if len(quantized_rows[0]) != self._n_features_in:
+                raise ValueError(
+                    f"X feature count {len(quantized_rows[0])} does not match fitted feature count "
+                    f"{self._n_features_in}"
+                )
+            rows = quantized_rows
+        else:
+            dense_payload = self._native_matrix_flat_payload(X)
+            if dense_payload is not None:
+                _, _, feature_count = dense_payload
+                if feature_count != self._n_features_in:
+                    raise ValueError(
+                        f"X feature count {feature_count} does not match fitted feature count "
+                        f"{self._n_features_in}"
+                    )
+                rows = dense_payload
+            else:
+                validated_rows = self._validate_rows(X)
+                if len(validated_rows[0]) != self._n_features_in:
+                    raise ValueError(
+                        f"X feature count {len(validated_rows[0])} does not match fitted feature count "
+                        f"{self._n_features_in}"
+                    )
+                rows = validated_rows
         if self._native_predictor_handle is not None:
+            if isinstance(rows, tuple):
+                predict_dense = getattr(self._native_predictor_handle, "predict_dense", None)
+                if callable(predict_dense):
+                    try:
+                        flat_values, row_count, feature_count = rows
+                        return list(predict_dense(flat_values, row_count, feature_count))
+                    except RuntimeError:
+                        self._native_predictor_handle = None
             predict_batch = getattr(self._native_predictor_handle, "predict_batch", None)
-            if callable(predict_batch):
+            if callable(predict_batch) and not isinstance(rows, tuple):
                 try:
                     return list(predict_batch(rows))
                 except RuntimeError:
                     self._native_predictor_handle = None
-        predictor_predict_batch_canonical = (
-            _load_native_predictor_predict_batch_canonical()
-        )
+        if isinstance(rows, tuple):
+            flat_values, row_count, feature_count = rows
+            predictor_predict_batch_canonical_dense = (
+                _load_native_predictor_predict_batch_canonical_dense()
+            )
+            return list(
+                predictor_predict_batch_canonical_dense(
+                    self._artifact_bytes,
+                    flat_values,
+                    row_count=row_count,
+                    feature_count=feature_count,
+                )
+            )
+        predictor_predict_batch_canonical = _load_native_predictor_predict_batch_canonical()
         return list(predictor_predict_batch_canonical(self._artifact_bytes, rows))
 
     def shap_values(
@@ -534,17 +720,43 @@ class GBMRegressor:
         if self._artifact_bytes is None:
             raise RuntimeError("GBMRegressor native artifact is not available")
 
-        rows = self._validate_rows(X)
-        if len(rows[0]) != self._n_features_in:
-            raise ValueError(
-                f"X feature count {len(rows[0])} does not match fitted feature count "
-                f"{self._n_features_in}"
-            )
         if self._uses_continuous_binning:
-            rows = self._quantize_rows_for_prediction(rows)
+            rows: object = self._quantize_rows_for_prediction(self._validate_rows(X))
+            if len(rows[0]) != self._n_features_in:
+                raise ValueError(
+                    f"X feature count {len(rows[0])} does not match fitted feature count "
+                    f"{self._n_features_in}"
+                )
+        else:
+            dense_payload = self._native_matrix_flat_payload(X)
+            if dense_payload is not None:
+                _, _, feature_count = dense_payload
+                if feature_count != self._n_features_in:
+                    raise ValueError(
+                        f"X feature count {feature_count} does not match fitted feature count "
+                        f"{self._n_features_in}"
+                    )
+                rows = dense_payload
+            else:
+                rows = self._validate_rows(X)
+                if len(rows[0]) != self._n_features_in:
+                    raise ValueError(
+                        f"X feature count {len(rows[0])} does not match fitted feature count "
+                        f"{self._n_features_in}"
+                    )
 
-        shap_explain_rows = _load_native_shap_explain_rows()
-        expected_value, values = shap_explain_rows(self._artifact_bytes, rows)
+        if isinstance(rows, tuple):
+            flat_values, row_count, feature_count = rows
+            shap_explain_rows_dense = _load_native_shap_explain_rows_dense()
+            expected_value, values = shap_explain_rows_dense(
+                self._artifact_bytes,
+                flat_values,
+                row_count=row_count,
+                feature_count=feature_count,
+            )
+        else:
+            shap_explain_rows = _load_native_shap_explain_rows()
+            expected_value, values = shap_explain_rows(self._artifact_bytes, rows)
         shap_matrix = [list(row) for row in values]
         if include_expected_value:
             return float(expected_value), shap_matrix
@@ -561,17 +773,43 @@ class GBMRegressor:
         if self._artifact_bytes is None:
             raise RuntimeError("GBMRegressor native artifact is not available")
 
-        rows = self._validate_rows(X)
-        if len(rows[0]) != self._n_features_in:
-            raise ValueError(
-                f"X feature count {len(rows[0])} does not match fitted feature count "
-                f"{self._n_features_in}"
-            )
         if self._uses_continuous_binning:
-            rows = self._quantize_rows_for_prediction(rows)
+            rows: object = self._quantize_rows_for_prediction(self._validate_rows(X))
+            if len(rows[0]) != self._n_features_in:
+                raise ValueError(
+                    f"X feature count {len(rows[0])} does not match fitted feature count "
+                    f"{self._n_features_in}"
+                )
+        else:
+            dense_payload = self._native_matrix_flat_payload(X)
+            if dense_payload is not None:
+                _, _, feature_count = dense_payload
+                if feature_count != self._n_features_in:
+                    raise ValueError(
+                        f"X feature count {feature_count} does not match fitted feature count "
+                        f"{self._n_features_in}"
+                    )
+                rows = dense_payload
+            else:
+                rows = self._validate_rows(X)
+                if len(rows[0]) != self._n_features_in:
+                    raise ValueError(
+                        f"X feature count {len(rows[0])} does not match fitted feature count "
+                        f"{self._n_features_in}"
+                    )
 
-        shap_global_importance = _load_native_shap_global_importance()
-        importance = shap_global_importance(self._artifact_bytes, rows)
+        if isinstance(rows, tuple):
+            flat_values, row_count, feature_count = rows
+            shap_global_importance_dense = _load_native_shap_global_importance_dense()
+            importance = shap_global_importance_dense(
+                self._artifact_bytes,
+                flat_values,
+                row_count=row_count,
+                feature_count=feature_count,
+            )
+        else:
+            shap_global_importance = _load_native_shap_global_importance()
+            importance = shap_global_importance(self._artifact_bytes, rows)
         return [(str(name), float(value)) for name, value in importance]
 
     @staticmethod
@@ -581,12 +819,26 @@ class GBMRegressor:
         """Run predictor-backed inference from serialized model artifact bytes."""
         if not isinstance(artifact_bytes, (bytes, bytearray, memoryview)):
             raise TypeError("artifact_bytes must be bytes-like")
+        dense_payload = GBMRegressor._native_matrix_flat_payload(X)
+        if dense_payload is not None:
+            flat_values, row_count, feature_count = dense_payload
+            predictor_predict_batch_dense = _load_native_predictor_predict_batch_dense()
+            return list(
+                predictor_predict_batch_dense(
+                    bytes(artifact_bytes),
+                    flat_values,
+                    row_count=row_count,
+                    feature_count=feature_count,
+                )
+            )
         rows = GBMRegressor._validate_rows(X)
         predictor_predict_batch = _load_native_predictor_predict_batch()
         return list(predictor_predict_batch(bytes(artifact_bytes), rows))
 
     @staticmethod
-    def _validate_rows(X: object) -> list[list[float]]:
+    def _validate_rows(
+        X: object, *, categorical_feature_index: int | None = None
+    ) -> list[list[float]]:
         rows_like = GBMRegressor._coerce_sequence_like(X, "X")
         if not isinstance(rows_like, Sequence) or isinstance(rows_like, (str, bytes)):
             raise TypeError("X must be a sequence of feature rows")
@@ -600,7 +852,18 @@ class GBMRegressor:
                 raise TypeError("each X row must be a sequence of numeric values")
             if len(row) == 0:
                 raise ValueError("each X row must contain at least one feature value")
-            row_values = [float(value) for value in row]
+            row_values: list[float] = []
+            for feature_index, value in enumerate(row):
+                if (
+                    categorical_feature_index is not None
+                    and feature_index == categorical_feature_index
+                ):
+                    try:
+                        row_values.append(float(value))
+                    except (TypeError, ValueError):
+                        row_values.append(0.0)
+                else:
+                    row_values.append(float(value))
             if expected_width is None:
                 expected_width = len(row_values)
             elif len(row_values) != expected_width:
@@ -608,6 +871,154 @@ class GBMRegressor:
             normalized.append(row_values)
 
         return normalized
+
+    @staticmethod
+    def _adapt_native_array_candidate(value: object) -> object | None:
+        current = value
+        for _ in range(2):
+            try:
+                view = memoryview(current)
+            except TypeError:
+                view = None
+            if view is not None and getattr(view, "ndim", 0) == 2:
+                return current
+            if hasattr(current, "to_numpy"):
+                next_value = current.to_numpy()  # type: ignore[call-arg]
+                if next_value is current:
+                    break
+                current = next_value
+                continue
+            break
+        return None
+
+    @staticmethod
+    def _native_matrix_shape(value: object) -> tuple[int, int]:
+        try:
+            view = memoryview(value)
+        except TypeError as exc:
+            raise TypeError("X is not a native dense matrix candidate") from exc
+        shape = getattr(view, "shape", None)
+        if view.ndim != 2 or shape is None or len(shape) != 2:
+            raise TypeError("X is not a 2D native dense matrix candidate")
+        row_count = int(shape[0])
+        feature_count = int(shape[1])
+        if row_count <= 0 or feature_count <= 0:
+            raise ValueError("X must contain at least one row and one feature")
+        return row_count, feature_count
+
+    @staticmethod
+    def _buffer_format_is_integer(value: object) -> bool:
+        try:
+            view = memoryview(value)
+        except TypeError:
+            return False
+        format_code = getattr(view, "format", "") or ""
+        normalized = str(format_code).lower()
+        return normalized not in {"f", "d", "e"}
+
+    @staticmethod
+    def _native_matrix_fast_path_candidate(
+        X: object, *, require_integer: bool = False
+    ) -> object | None:
+        candidate = GBMRegressor._adapt_native_array_candidate(X)
+        if candidate is None:
+            return None
+        GBMRegressor._native_matrix_shape(candidate)
+        if require_integer and not GBMRegressor._buffer_format_is_integer(candidate):
+            return None
+        return candidate
+
+    @staticmethod
+    def _native_matrix_flat_payload(
+        X: object, *, require_integer: bool = False
+    ) -> tuple[list[float], int, int] | None:
+        candidate = GBMRegressor._native_matrix_fast_path_candidate(
+            X, require_integer=require_integer
+        )
+        if candidate is None:
+            return None
+        row_count, feature_count = GBMRegressor._native_matrix_shape(candidate)
+        return (
+            GBMRegressor._flatten_native_matrix_candidate(candidate),
+            row_count,
+            feature_count,
+        )
+
+    @staticmethod
+    def _flatten_native_matrix_candidate(candidate: object) -> list[float]:
+        view = memoryview(candidate)
+        format_code = getattr(view, "format", "") or ""
+        normalized = str(format_code).strip()
+        type_code = next(
+            (character for character in reversed(normalized) if character.isalpha()),
+            "",
+        )
+        if type_code == "":
+            raise TypeError("native dense matrix format is not supported")
+        if type_code == "?":
+            unpack_code = "?"
+        else:
+            unpack_code = type_code
+        if unpack_code not in {"b", "B", "h", "H", "i", "I", "l", "L", "q", "Q", "f", "d"}:
+            raise TypeError(
+                f"native dense matrix format '{normalized}' is not supported"
+            )
+        raw_bytes = view.tobytes()
+        return [float(value[0]) for value in struct.iter_unpack("@" + unpack_code, raw_bytes)]
+
+    @staticmethod
+    def _dtype_is_explicit_categorical(dtype: object) -> bool:
+        dtype_name = getattr(dtype, "name", None)
+        normalized = str(dtype_name if dtype_name is not None else dtype).strip().lower()
+        return normalized in {"category", "categorical", "enum"} or "categor" in normalized
+
+    @staticmethod
+    def _extract_column_values(
+        X: object, column_label: object, column_index: int
+    ) -> list[str]:
+        candidate = None
+        try:
+            candidate = X[column_label]  # type: ignore[index]
+        except Exception:
+            if hasattr(X, "__getitem__"):
+                candidate = X[column_index]  # type: ignore[index]
+        if candidate is None:
+            raise TypeError(
+                "X exposes categorical dtypes but column values could not be retrieved"
+            )
+        values_like = GBMRegressor._coerce_sequence_like(candidate, "categorical_feature_values")
+        if not isinstance(values_like, Sequence) or isinstance(values_like, (str, bytes)):
+            raise TypeError("categorical_feature_values must be a sequence of strings")
+        return [str(value) for value in values_like]
+
+    @staticmethod
+    def _infer_explicit_categorical_feature(
+        X: object,
+    ) -> tuple[int, list[str]] | None:
+        if not hasattr(X, "dtypes") or not hasattr(X, "columns"):
+            return None
+        dtypes = GBMRegressor._coerce_sequence_like(getattr(X, "dtypes"), "X.dtypes")
+        columns = GBMRegressor._coerce_sequence_like(getattr(X, "columns"), "X.columns")
+        if not isinstance(dtypes, Sequence) or not isinstance(columns, Sequence):
+            return None
+        if len(dtypes) != len(columns) or len(columns) == 0:
+            return None
+        categorical_indices = [
+            index
+            for index, dtype in enumerate(dtypes)
+            if GBMRegressor._dtype_is_explicit_categorical(dtype)
+        ]
+        if not categorical_indices:
+            return None
+        if len(categorical_indices) > 1:
+            raise ValueError(
+                "X contains multiple explicit categorical columns; set categorical_feature_index explicitly"
+            )
+        categorical_index = categorical_indices[0]
+        column_values = GBMRegressor._extract_column_values(
+            X, columns[categorical_index], categorical_index
+        )
+        return categorical_index, column_values
 
     @staticmethod
     def _round_half_away_from_zero(value: float) -> int:

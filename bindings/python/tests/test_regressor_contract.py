@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import unittest
+from array import array
 from pathlib import Path
 
 
@@ -63,6 +64,42 @@ class _NonConvertible:
     pass
 
 
+class _FakeCategoricalSeries:
+    def __init__(self, values: list[object]) -> None:
+        self._values = values
+
+    def to_list(self) -> list[object]:
+        return self._values
+
+
+class _FakeCategoricalFrame:
+    def __init__(
+        self,
+        rows: list[list[object]],
+        columns: list[str],
+        dtypes: list[object],
+    ) -> None:
+        self._rows = rows
+        self.columns = columns
+        self.dtypes = dtypes
+        self._column_map = {
+            column: [row[index] for row in rows] for index, column in enumerate(columns)
+        }
+
+    def to_numpy(self) -> list[list[object]]:
+        return self._rows
+
+    def __getitem__(self, key: object) -> _FakeCategoricalSeries:
+        return _FakeCategoricalSeries(self._column_map[str(key)])
+
+
+def _dense_memoryview(
+    values: list[float] | list[int], rows: int, cols: int, *, typecode: str = "f"
+) -> memoryview:
+    base = memoryview(array(typecode, values))
+    return base.cast("B").cast(typecode, shape=[rows, cols])
+
+
 class GBMRegressorContractTests(unittest.TestCase):
     def test_constructor_rejects_invalid_values(self) -> None:
         with self.assertRaisesRegex(ValueError, "learning_rate"):
@@ -107,6 +144,8 @@ class GBMRegressorContractTests(unittest.TestCase):
         self.assertEqual(params["continuous_binning_strategy"], "linear")
         self.assertEqual(params["continuous_binning_max_bins"], 256)
         self.assertIsNone(params["categorical_feature_index"])
+        self.assertEqual(params["training_policy"], "auto")
+        self.assertFalse(params["store_node_stats"])
         self.assertEqual(params["categorical_smoothing"], 20.0)
         self.assertEqual(params["categorical_min_samples_leaf"], 1)
         self.assertFalse(params["categorical_time_aware"])
@@ -124,6 +163,8 @@ class GBMRegressorContractTests(unittest.TestCase):
             continuous_binning_strategy="rank",
             continuous_binning_max_bins=128,
             categorical_feature_index=1,
+            training_policy="manual",
+            store_node_stats=True,
             categorical_smoothing=5.0,
             categorical_min_samples_leaf=2,
             categorical_time_aware=True,
@@ -141,6 +182,8 @@ class GBMRegressorContractTests(unittest.TestCase):
         self.assertEqual(model.get_params()["continuous_binning_strategy"], "rank")
         self.assertEqual(model.get_params()["continuous_binning_max_bins"], 128)
         self.assertEqual(model.get_params()["categorical_feature_index"], 1)
+        self.assertEqual(model.get_params()["training_policy"], "manual")
+        self.assertTrue(model.get_params()["store_node_stats"])
         self.assertEqual(model.get_params()["categorical_smoothing"], 5.0)
         self.assertEqual(model.get_params()["categorical_min_samples_leaf"], 2)
         self.assertTrue(model.get_params()["categorical_time_aware"])
@@ -243,6 +286,8 @@ class GBMRegressorContractTests(unittest.TestCase):
                     "early_stopping_rounds": 4,
                     "categorical_feature_index": None,
                     "categorical_feature_values": None,
+                    "training_policy": "auto",
+                    "store_node_stats": False,
                     "categorical_smoothing": 20.0,
                     "categorical_min_samples_leaf": 1,
                     "categorical_time_aware": False,
@@ -742,6 +787,79 @@ class GBMRegressorContractTests(unittest.TestCase):
                 ([[5.0, 0.0], [6.0, 0.0]], [5.0, 6.0]),
             ],
         )
+
+    def test_fit_uses_dense_native_training_bridge_for_integer_buffer_inputs(self) -> None:
+        dense_train_calls: list[dict[str, object]] = []
+
+        def fake_dense_train(**kwargs: object) -> bytes:
+            dense_train_calls.append(kwargs)
+            return b"dense-artifact"
+
+        original_dense_train_loader = (
+            regressor_module._load_native_train_regression_artifact_dense
+        )
+        regressor_module._load_native_train_regression_artifact_dense = (
+            lambda: fake_dense_train
+        )
+        try:
+            model = GBMRegressor()
+            model.fit(
+                _dense_memoryview([1, 0, 2, 0], 2, 2, typecode="I"),
+                [1.0, 2.0],
+            )
+        finally:
+            regressor_module._load_native_train_regression_artifact_dense = (
+                original_dense_train_loader
+            )
+
+        self.assertEqual(len(dense_train_calls), 1)
+        self.assertEqual(dense_train_calls[0]["row_count"], 2)
+        self.assertEqual(dense_train_calls[0]["feature_count"], 2)
+        self.assertEqual(dense_train_calls[0]["values"], [1.0, 0.0, 2.0, 0.0])
+
+    def test_fit_infers_single_explicit_categorical_column(self) -> None:
+        train_calls: list[dict[str, object]] = []
+
+        def fake_train(**kwargs: object) -> bytes:
+            train_calls.append(kwargs)
+            return b"artifact"
+
+        original_train_loader = regressor_module._load_native_train_regression_artifact
+        regressor_module._load_native_train_regression_artifact = lambda: fake_train
+        try:
+            model = GBMRegressor()
+            model.fit(
+                _FakeCategoricalFrame(
+                    rows=[["A", 1.0], ["B", 2.0], ["A", 3.0]],
+                    columns=["kind", "value"],
+                    dtypes=["category", "float64"],
+                ),
+                [1.0, 2.0, 3.0],
+            )
+        finally:
+            regressor_module._load_native_train_regression_artifact = (
+                original_train_loader
+            )
+
+        self.assertEqual(train_calls[0]["categorical_feature_index"], 0)
+        self.assertEqual(train_calls[0]["categorical_feature_values"], ["A", "B", "A"])
+        self.assertEqual(train_calls[0]["rows"], [[0.0, 1.0], [0.0, 2.0], [0.0, 3.0]])
+
+    def test_fit_rejects_multiple_explicit_categorical_columns_without_manual_selection(
+        self,
+    ) -> None:
+        model = GBMRegressor()
+        with self.assertRaisesRegex(
+            ValueError, "multiple explicit categorical columns"
+        ):
+            model.fit(
+                _FakeCategoricalFrame(
+                    rows=[["A", "X", 1.0], ["B", "Y", 2.0]],
+                    columns=["kind_a", "kind_b", "value"],
+                    dtypes=["category", "categorical", "float64"],
+                ),
+                [1.0, 2.0],
+            )
 
     def test_predict_rejects_feature_count_mismatch(self) -> None:
         original_train_loader = regressor_module._load_native_train_regression_artifact

@@ -85,6 +85,107 @@ impl DatasetMatrix {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DenseMatrixView<'a> {
+    pub row_count: usize,
+    pub feature_count: usize,
+    pub values: &'a [f32],
+}
+
+impl<'a> DenseMatrixView<'a> {
+    pub fn new(row_count: usize, feature_count: usize, values: &'a [f32]) -> CoreResult<Self> {
+        let view = Self {
+            row_count,
+            feature_count,
+            values,
+        };
+        validate_dense_matrix_view(&view)?;
+        Ok(view)
+    }
+
+    pub fn row(&self, row_index: usize) -> CoreResult<&'a [f32]> {
+        if row_index >= self.row_count {
+            return Err(CoreError::Validation(format!(
+                "row index {row_index} is out of bounds for row_count {}",
+                self.row_count
+            )));
+        }
+        let start = row_index * self.feature_count;
+        let end = start + self.feature_count;
+        Ok(&self.values[start..end])
+    }
+
+    pub fn value_at(&self, row_index: usize, feature_index: usize) -> CoreResult<f32> {
+        if feature_index >= self.feature_count {
+            return Err(CoreError::Validation(format!(
+                "feature index {feature_index} is out of bounds for feature_count {}",
+                self.feature_count
+            )));
+        }
+        Ok(self.row(row_index)?[feature_index])
+    }
+
+    pub fn to_dataset_matrix(&self) -> CoreResult<DatasetMatrix> {
+        DatasetMatrix::new(self.row_count, self.feature_count, self.values.to_vec())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ColumnarMatrixColumnView<'a> {
+    pub values: &'a [f32],
+    pub validity: Option<&'a [bool]>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColumnarMatrixView<'a> {
+    pub row_count: usize,
+    pub columns: Vec<ColumnarMatrixColumnView<'a>>,
+}
+
+impl<'a> ColumnarMatrixView<'a> {
+    pub fn new(row_count: usize, columns: Vec<ColumnarMatrixColumnView<'a>>) -> CoreResult<Self> {
+        let view = Self { row_count, columns };
+        validate_columnar_matrix_view(&view)?;
+        Ok(view)
+    }
+
+    pub fn feature_count(&self) -> usize {
+        self.columns.len()
+    }
+
+    pub fn value_at(&self, row_index: usize, feature_index: usize) -> CoreResult<Option<f32>> {
+        if row_index >= self.row_count {
+            return Err(CoreError::Validation(format!(
+                "row index {row_index} is out of bounds for row_count {}",
+                self.row_count
+            )));
+        }
+        let column = self.columns.get(feature_index).ok_or_else(|| {
+            CoreError::Validation(format!(
+                "feature index {feature_index} is out of bounds for feature_count {}",
+                self.feature_count()
+            ))
+        })?;
+        if column.validity.is_some_and(|mask| !mask[row_index]) {
+            return Ok(None);
+        }
+        Ok(Some(column.values[row_index]))
+    }
+
+    pub fn to_dataset_matrix(&self, null_fill_value: f32) -> CoreResult<DatasetMatrix> {
+        let mut values = Vec::with_capacity(self.row_count * self.feature_count());
+        for row_index in 0..self.row_count {
+            for feature_index in 0..self.feature_count() {
+                values.push(
+                    self.value_at(row_index, feature_index)?
+                        .unwrap_or(null_fill_value),
+                );
+            }
+        }
+        DatasetMatrix::new(self.row_count, self.feature_count(), values)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrainingDataset {
     pub matrix: DatasetMatrix,
@@ -310,6 +411,7 @@ pub enum ModelSectionKind {
     PredictorLayout,
     ShapAux,
     CategoricalState,
+    NodeDebugStats,
     Unknown(u32),
 }
 
@@ -320,6 +422,7 @@ impl ModelSectionKind {
             Self::PredictorLayout => 2,
             Self::ShapAux => 3,
             Self::CategoricalState => 4,
+            Self::NodeDebugStats => 5,
             Self::Unknown(value) => value,
         }
     }
@@ -330,6 +433,7 @@ impl ModelSectionKind {
             2 => Self::PredictorLayout,
             3 => Self::ShapAux,
             4 => Self::CategoricalState,
+            5 => Self::NodeDebugStats,
             other => Self::Unknown(other),
         }
     }
@@ -728,6 +832,59 @@ pub fn validate_dataset_matrix(matrix: &DatasetMatrix) -> CoreResult<()> {
             matrix.values.len(),
             matrix.row_count * matrix.feature_count
         )));
+    }
+    Ok(())
+}
+
+pub fn validate_dense_matrix_view(matrix: &DenseMatrixView<'_>) -> CoreResult<()> {
+    if matrix.row_count == 0 {
+        return Err(CoreError::Validation(
+            "row_count must be greater than 0".to_string(),
+        ));
+    }
+    if matrix.feature_count == 0 {
+        return Err(CoreError::Validation(
+            "feature_count must be greater than 0".to_string(),
+        ));
+    }
+    if matrix.values.len() != matrix.row_count * matrix.feature_count {
+        return Err(CoreError::Validation(format!(
+            "matrix values length {} does not match row_count * feature_count {}",
+            matrix.values.len(),
+            matrix.row_count * matrix.feature_count
+        )));
+    }
+    Ok(())
+}
+
+pub fn validate_columnar_matrix_view(matrix: &ColumnarMatrixView<'_>) -> CoreResult<()> {
+    if matrix.row_count == 0 {
+        return Err(CoreError::Validation(
+            "row_count must be greater than 0".to_string(),
+        ));
+    }
+    if matrix.columns.is_empty() {
+        return Err(CoreError::Validation(
+            "feature_count must be greater than 0".to_string(),
+        ));
+    }
+    for (feature_index, column) in matrix.columns.iter().enumerate() {
+        if column.values.len() != matrix.row_count {
+            return Err(CoreError::Validation(format!(
+                "column {feature_index} length {} does not match row_count {}",
+                column.values.len(),
+                matrix.row_count
+            )));
+        }
+        if let Some(validity) = column.validity
+            && validity.len() != matrix.row_count
+        {
+            return Err(CoreError::Validation(format!(
+                "column {feature_index} validity length {} does not match row_count {}",
+                validity.len(),
+                matrix.row_count
+            )));
+        }
     }
     Ok(())
 }
@@ -1684,5 +1841,69 @@ mod tests {
             decode_optional_categorical_state_section_v1(&sections, 8),
             Err(CoreError::Serialization(_))
         ));
+    }
+
+    #[test]
+    fn dense_matrix_view_matches_dataset_layout() {
+        let view = DenseMatrixView::new(2, 3, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+            .expect("dense view is valid");
+        assert_eq!(view.row(1).expect("row resolves"), &[4.0, 5.0, 6.0]);
+        assert_eq!(view.value_at(0, 2).expect("value resolves"), 3.0);
+
+        let dataset = view.to_dataset_matrix().expect("dataset materializes");
+        assert_eq!(dataset.values, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn columnar_matrix_view_materializes_rows_and_honors_validity() {
+        let view = ColumnarMatrixView::new(
+            3,
+            vec![
+                ColumnarMatrixColumnView {
+                    values: &[1.0, 2.0, 3.0],
+                    validity: None,
+                },
+                ColumnarMatrixColumnView {
+                    values: &[10.0, 20.0, 30.0],
+                    validity: Some(&[true, false, true]),
+                },
+            ],
+        )
+        .expect("columnar view is valid");
+
+        assert_eq!(view.value_at(1, 1).expect("value resolves"), None);
+        let dataset = view
+            .to_dataset_matrix(-1.0)
+            .expect("dataset materializes from columnar view");
+        assert_eq!(dataset.values, vec![1.0, 10.0, 2.0, -1.0, 3.0, 30.0]);
+    }
+
+    #[test]
+    fn columnar_matrix_view_rejects_misaligned_validity() {
+        let result = ColumnarMatrixView::new(
+            2,
+            vec![ColumnarMatrixColumnView {
+                values: &[1.0, 2.0],
+                validity: Some(&[true]),
+            }],
+        );
+        assert!(matches!(result, Err(CoreError::Validation(_))));
+    }
+
+    #[test]
+    fn strict_compatibility_ignores_optional_node_debug_stats_section() {
+        let metadata = sample_metadata();
+        let bytes = serialize_model_artifact_v1(
+            &metadata,
+            &[
+                (ModelSectionKind::Trees, vec![1_u8, 2, 3, 4]),
+                (ModelSectionKind::PredictorLayout, vec![9_u8, 8, 7]),
+                (ModelSectionKind::NodeDebugStats, vec![5_u8, 4, 3, 2]),
+            ],
+        )
+        .expect("artifact encodes");
+        let parsed = deserialize_model_artifact_v1(&bytes).expect("artifact decodes");
+        let report = required_section_compatibility_report(&parsed.sections);
+        assert!(report.strict_compatible);
     }
 }

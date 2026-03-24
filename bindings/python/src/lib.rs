@@ -1,9 +1,9 @@
 use alloygbm_backend_cpu::CpuBackend;
 use alloygbm_categorical::TargetEncoderConfig;
-use alloygbm_core::{BinnedMatrix, DatasetMatrix, TrainParams, TrainingDataset};
+use alloygbm_core::{BinnedMatrix, DatasetMatrix, DenseMatrixView, TrainParams, TrainingDataset};
 use alloygbm_engine::{
     ArtifactCompatibilityMode, CategoricalTargetEncodingSpec, EngineError, SquaredErrorObjective,
-    TrainedModel, Trainer,
+    TrainedModel, Trainer, TrainingPolicyMode,
 };
 use alloygbm_predictor::{Predictor, PredictorError};
 use alloygbm_shap::{
@@ -29,6 +29,28 @@ fn quantize_continuous_value_to_bin(value: f32) -> u16 {
     let rounded = value.round();
     let clamped = rounded.clamp(0.0, MAX_CONTINUOUS_QUANTIZED_BIN as f32);
     clamped as u16
+}
+
+fn parse_training_policy(value: &str) -> Result<TrainingPolicyMode, EngineError> {
+    match value {
+        "manual" => Ok(TrainingPolicyMode::Manual),
+        "auto" => Ok(TrainingPolicyMode::Auto),
+        other => Err(EngineError::InvalidConfig(format!(
+            "training_policy must be 'auto' or 'manual', received '{other}'"
+        ))),
+    }
+}
+
+fn dense_rows_from_flat_values(
+    values: &[f32],
+    row_count: usize,
+    feature_count: usize,
+) -> Result<Vec<Vec<f32>>, String> {
+    DenseMatrixView::new(row_count, feature_count, values).map_err(|error| error.to_string())?;
+    Ok(values
+        .chunks(feature_count)
+        .map(|row| row.to_vec())
+        .collect::<Vec<_>>())
 }
 
 #[pyclass]
@@ -76,6 +98,21 @@ impl NativePredictorHandle {
         self.predictor
             .predict_batch(&rows)
             .map_err(predictor_error_to_pyerr)
+    }
+
+    fn predict_dense(
+        &self,
+        values: Vec<f32>,
+        row_count: usize,
+        feature_count: usize,
+    ) -> PyResult<Vec<f32>> {
+        predictor_predict_batch_dense_with_predictor(
+            &self.predictor,
+            row_count,
+            feature_count,
+            &values,
+        )
+        .map_err(predictor_error_to_pyerr)
     }
 }
 
@@ -152,6 +189,8 @@ fn train_regression_artifact_impl(
     rounds: usize,
     time_index: Option<Vec<i64>>,
     categorical_spec: Option<CategoricalTargetEncodingSpec>,
+    training_policy: TrainingPolicyMode,
+    store_node_debug_stats: bool,
 ) -> Result<Vec<u8>, EngineError> {
     if rows.is_empty() {
         return Err(EngineError::ContractViolation(
@@ -194,9 +233,65 @@ fn train_regression_artifact_impl(
     }
 
     let mut dense_values = Vec::with_capacity(rows.len() * feature_count);
-    let mut bins = Vec::with_capacity(rows.len() * feature_count);
+    for row in rows {
+        dense_values.extend_from_slice(row);
+    }
+    train_regression_artifact_dense_impl(
+        &dense_values,
+        rows.len(),
+        feature_count,
+        targets,
+        params,
+        rounds,
+        time_index,
+        categorical_spec,
+        training_policy,
+        store_node_debug_stats,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn train_regression_artifact_dense_impl(
+    values: &[f32],
+    row_count: usize,
+    feature_count: usize,
+    targets: &[f32],
+    params: TrainParams,
+    rounds: usize,
+    time_index: Option<Vec<i64>>,
+    categorical_spec: Option<CategoricalTargetEncodingSpec>,
+    training_policy: TrainingPolicyMode,
+    store_node_debug_stats: bool,
+) -> Result<Vec<u8>, EngineError> {
+    let dense_view = DenseMatrixView::new(row_count, feature_count, values)?;
+    if targets.len() != dense_view.row_count {
+        return Err(EngineError::ContractViolation(format!(
+            "rows length {} does not match targets length {}",
+            dense_view.row_count,
+            targets.len()
+        )));
+    }
+
+    let mut use_pre_binned_path = true;
+    for row_index in 0..dense_view.row_count {
+        let row = dense_view.row(row_index)?;
+        for (feature_index, &value) in row.iter().enumerate() {
+            if !value.is_finite() {
+                return Err(EngineError::ContractViolation(format!(
+                    "row {row_index} feature {feature_index} must be finite"
+                )));
+            }
+            if use_pre_binned_path && !is_pre_binned_integer_value(value) {
+                use_pre_binned_path = false;
+            }
+        }
+    }
+
+    let mut bins = Vec::with_capacity(dense_view.row_count * feature_count);
     let mut max_bin = 0_u16;
-    for (row_index, row) in rows.iter().enumerate() {
+    let mut dense_values = Vec::with_capacity(values.len());
+    for row_index in 0..dense_view.row_count {
+        let row = dense_view.row(row_index)?;
         for (feature_index, &value) in row.iter().enumerate() {
             let bin = if use_pre_binned_path {
                 let rounded = value.round();
@@ -216,7 +311,7 @@ fn train_regression_artifact_impl(
         }
     }
 
-    let matrix = DatasetMatrix::new(rows.len(), feature_count, dense_values)?;
+    let matrix = DatasetMatrix::new(dense_view.row_count, feature_count, dense_values)?;
     let dataset = TrainingDataset {
         matrix,
         targets: targets.to_vec(),
@@ -225,7 +320,7 @@ fn train_regression_artifact_impl(
         group_id: None,
     };
     let binned = BinnedMatrix::new(
-        rows.len(),
+        dense_view.row_count,
         feature_count,
         if max_bin == 0 { 1 } else { max_bin },
         bins,
@@ -234,16 +329,26 @@ fn train_regression_artifact_impl(
     let trainer = Trainer::new(params)?;
     let backend = CpuBackend;
     let model = if let Some(spec) = categorical_spec.as_ref() {
-        trainer.fit_iterations_with_single_target_encoded_feature(
+        trainer.fit_iterations_with_single_target_encoded_feature_and_policy(
             &dataset,
             &binned,
             spec,
             &backend,
             &SquaredErrorObjective,
             rounds,
+            training_policy,
+            store_node_debug_stats,
         )?
     } else {
-        trainer.fit_iterations(&dataset, &binned, &backend, &SquaredErrorObjective, rounds)?
+        trainer.fit_iterations_with_policy(
+            &dataset,
+            &binned,
+            &backend,
+            &SquaredErrorObjective,
+            rounds,
+            training_policy,
+            store_node_debug_stats,
+        )?
     };
     model.to_artifact_bytes()
 }
@@ -274,12 +379,43 @@ fn predictor_predict_batch_impl(
     predictor.predict_batch(rows)
 }
 
+fn predictor_predict_batch_dense_with_predictor(
+    predictor: &Predictor,
+    row_count: usize,
+    feature_count: usize,
+    values: &[f32],
+) -> Result<Vec<f32>, PredictorError> {
+    let rows = dense_rows_from_flat_values(values, row_count, feature_count)
+        .map_err(PredictorError::InvalidInput)?;
+    predictor.predict_batch(&rows)
+}
+
+fn predictor_predict_batch_dense_impl(
+    artifact_bytes: &[u8],
+    row_count: usize,
+    feature_count: usize,
+    values: &[f32],
+) -> Result<Vec<f32>, PredictorError> {
+    let predictor = load_predictor_from_artifact_impl(artifact_bytes, false)?;
+    predictor_predict_batch_dense_with_predictor(&predictor, row_count, feature_count, values)
+}
+
 fn predictor_predict_batch_canonical_impl(
     artifact_bytes: &[u8],
     rows: &[Vec<f32>],
 ) -> Result<Vec<f32>, PredictorError> {
     let predictor = load_predictor_from_artifact_impl(artifact_bytes, true)?;
     predictor.predict_batch(rows)
+}
+
+fn predictor_predict_batch_canonical_dense_impl(
+    artifact_bytes: &[u8],
+    row_count: usize,
+    feature_count: usize,
+    values: &[f32],
+) -> Result<Vec<f32>, PredictorError> {
+    let predictor = load_predictor_from_artifact_impl(artifact_bytes, true)?;
+    predictor_predict_batch_dense_with_predictor(&predictor, row_count, feature_count, values)
 }
 
 fn shap_explain_rows_impl(
@@ -290,6 +426,17 @@ fn shap_explain_rows_impl(
     Ok((explanation.expected_value, explanation.values))
 }
 
+fn shap_explain_rows_dense_impl(
+    artifact_bytes: &[u8],
+    row_count: usize,
+    feature_count: usize,
+    values: &[f32],
+) -> Result<(f32, Vec<Vec<f32>>), ShapError> {
+    let rows = dense_rows_from_flat_values(values, row_count, feature_count)
+        .map_err(ShapError::InvalidInput)?;
+    shap_explain_rows_impl(artifact_bytes, &rows)
+}
+
 fn shap_global_importance_impl(
     artifact_bytes: &[u8],
     rows: &[Vec<f32>],
@@ -297,9 +444,31 @@ fn shap_global_importance_impl(
     global_importance_from_artifact_bytes(artifact_bytes, rows)
 }
 
+fn shap_global_importance_dense_impl(
+    artifact_bytes: &[u8],
+    row_count: usize,
+    feature_count: usize,
+    values: &[f32],
+) -> Result<Vec<(String, f32)>, ShapError> {
+    let rows = dense_rows_from_flat_values(values, row_count, feature_count)
+        .map_err(ShapError::InvalidInput)?;
+    shap_global_importance_impl(artifact_bytes, &rows)
+}
+
 #[pyfunction]
 fn predictor_predict_batch(artifact_bytes: &[u8], rows: Vec<Vec<f32>>) -> PyResult<Vec<f32>> {
     predictor_predict_batch_impl(artifact_bytes, &rows).map_err(predictor_error_to_pyerr)
+}
+
+#[pyfunction]
+fn predictor_predict_batch_dense(
+    artifact_bytes: &[u8],
+    values: Vec<f32>,
+    row_count: usize,
+    feature_count: usize,
+) -> PyResult<Vec<f32>> {
+    predictor_predict_batch_dense_impl(artifact_bytes, row_count, feature_count, &values)
+        .map_err(predictor_error_to_pyerr)
 }
 
 #[pyfunction]
@@ -311,8 +480,30 @@ fn predictor_predict_batch_canonical(
 }
 
 #[pyfunction]
+fn predictor_predict_batch_canonical_dense(
+    artifact_bytes: &[u8],
+    values: Vec<f32>,
+    row_count: usize,
+    feature_count: usize,
+) -> PyResult<Vec<f32>> {
+    predictor_predict_batch_canonical_dense_impl(artifact_bytes, row_count, feature_count, &values)
+        .map_err(predictor_error_to_pyerr)
+}
+
+#[pyfunction]
 fn shap_explain_rows(artifact_bytes: &[u8], rows: Vec<Vec<f32>>) -> PyResult<(f32, Vec<Vec<f32>>)> {
     shap_explain_rows_impl(artifact_bytes, &rows).map_err(shap_error_to_pyerr)
+}
+
+#[pyfunction]
+fn shap_explain_rows_dense(
+    artifact_bytes: &[u8],
+    values: Vec<f32>,
+    row_count: usize,
+    feature_count: usize,
+) -> PyResult<(f32, Vec<Vec<f32>>)> {
+    shap_explain_rows_dense_impl(artifact_bytes, row_count, feature_count, &values)
+        .map_err(shap_error_to_pyerr)
 }
 
 #[pyfunction]
@@ -321,6 +512,17 @@ fn shap_global_importance(
     rows: Vec<Vec<f32>>,
 ) -> PyResult<Vec<(String, f32)>> {
     shap_global_importance_impl(artifact_bytes, &rows).map_err(shap_error_to_pyerr)
+}
+
+#[pyfunction]
+fn shap_global_importance_dense(
+    artifact_bytes: &[u8],
+    values: Vec<f32>,
+    row_count: usize,
+    feature_count: usize,
+) -> PyResult<Vec<(String, f32)>> {
+    shap_global_importance_dense_impl(artifact_bytes, row_count, feature_count, &values)
+        .map_err(shap_error_to_pyerr)
 }
 
 #[pyfunction(signature = (
@@ -337,6 +539,8 @@ fn shap_global_importance(
     early_stopping_rounds=None,
     categorical_feature_index=None,
     categorical_feature_values=None,
+    training_policy="auto",
+    store_node_stats=false,
     categorical_smoothing=20.0,
     categorical_min_samples_leaf=1,
     categorical_time_aware=false,
@@ -357,6 +561,8 @@ fn train_regression_artifact(
     early_stopping_rounds: Option<u16>,
     categorical_feature_index: Option<usize>,
     categorical_feature_values: Option<Vec<String>>,
+    training_policy: &str,
+    store_node_stats: bool,
     categorical_smoothing: f64,
     categorical_min_samples_leaf: u32,
     categorical_time_aware: bool,
@@ -366,6 +572,7 @@ fn train_regression_artifact(
         return Err(PyValueError::new_err("rounds must be greater than 0"));
     }
     let effective_rounds = rounds.min(MAX_SUPPORTED_TRAIN_ROUNDS);
+    let training_policy = parse_training_policy(training_policy).map_err(engine_error_to_pyerr)?;
 
     let params = TrainParams {
         seed,
@@ -395,6 +602,94 @@ fn train_regression_artifact(
         effective_rounds,
         time_index,
         categorical_spec,
+        training_policy,
+        store_node_stats,
+    )
+    .map_err(engine_error_to_pyerr)
+}
+
+#[pyfunction(signature = (
+    values,
+    row_count,
+    feature_count,
+    targets,
+    learning_rate,
+    max_depth,
+    row_subsample,
+    col_subsample,
+    min_validation_improvement,
+    seed,
+    deterministic,
+    rounds=DEFAULT_TRAIN_ROUNDS,
+    early_stopping_rounds=None,
+    categorical_feature_index=None,
+    categorical_feature_values=None,
+    training_policy="auto",
+    store_node_stats=false,
+    categorical_smoothing=20.0,
+    categorical_min_samples_leaf=1,
+    categorical_time_aware=false,
+    time_index=None
+))]
+#[allow(clippy::too_many_arguments)]
+fn train_regression_artifact_dense(
+    values: Vec<f32>,
+    row_count: usize,
+    feature_count: usize,
+    targets: Vec<f32>,
+    learning_rate: f32,
+    max_depth: u16,
+    row_subsample: f32,
+    col_subsample: f32,
+    min_validation_improvement: f32,
+    seed: u64,
+    deterministic: bool,
+    rounds: usize,
+    early_stopping_rounds: Option<u16>,
+    categorical_feature_index: Option<usize>,
+    categorical_feature_values: Option<Vec<String>>,
+    training_policy: &str,
+    store_node_stats: bool,
+    categorical_smoothing: f64,
+    categorical_min_samples_leaf: u32,
+    categorical_time_aware: bool,
+    time_index: Option<Vec<i64>>,
+) -> PyResult<Vec<u8>> {
+    if rounds == 0 {
+        return Err(PyValueError::new_err("rounds must be greater than 0"));
+    }
+    let effective_rounds = rounds.min(MAX_SUPPORTED_TRAIN_ROUNDS);
+    let training_policy = parse_training_policy(training_policy).map_err(engine_error_to_pyerr)?;
+    let params = TrainParams {
+        seed,
+        deterministic,
+        learning_rate,
+        max_depth,
+        row_subsample,
+        col_subsample,
+        early_stopping_rounds,
+        min_validation_improvement,
+    };
+    let categorical_spec = resolve_categorical_spec(
+        categorical_feature_index,
+        categorical_feature_values,
+        categorical_smoothing,
+        categorical_min_samples_leaf,
+        categorical_time_aware,
+        row_count,
+    )
+    .map_err(engine_error_to_pyerr)?;
+    train_regression_artifact_dense_impl(
+        &values,
+        row_count,
+        feature_count,
+        &targets,
+        params,
+        effective_rounds,
+        time_index,
+        categorical_spec,
+        training_policy,
+        store_node_stats,
     )
     .map_err(engine_error_to_pyerr)
 }
@@ -405,10 +700,18 @@ fn _alloygbm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<NativePredictorHandle>()?;
     m.add_function(wrap_pyfunction!(native_runtime_info, m)?)?;
     m.add_function(wrap_pyfunction!(predictor_predict_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(predictor_predict_batch_dense, m)?)?;
     m.add_function(wrap_pyfunction!(predictor_predict_batch_canonical, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        predictor_predict_batch_canonical_dense,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(shap_explain_rows, m)?)?;
+    m.add_function(wrap_pyfunction!(shap_explain_rows_dense, m)?)?;
     m.add_function(wrap_pyfunction!(shap_global_importance, m)?)?;
+    m.add_function(wrap_pyfunction!(shap_global_importance_dense, m)?)?;
     m.add_function(wrap_pyfunction!(train_regression_artifact, m)?)?;
+    m.add_function(wrap_pyfunction!(train_regression_artifact_dense, m)?)?;
     Ok(())
 }
 
@@ -424,7 +727,9 @@ mod tests {
         BinnedMatrix, DatasetMatrix, ModelSectionKind, TrainParams, TrainingDataset,
         deserialize_model_artifact_v1, serialize_model_artifact_v1,
     };
-    use alloygbm_engine::{CategoricalTargetEncodingSpec, SquaredErrorObjective, Trainer};
+    use alloygbm_engine::{
+        CategoricalTargetEncodingSpec, SquaredErrorObjective, Trainer, TrainingPolicyMode,
+    };
 
     fn quality_fixture_dataset() -> TrainingDataset {
         TrainingDataset {
@@ -571,6 +876,8 @@ mod tests {
             DEFAULT_TRAIN_ROUNDS,
             None,
             None,
+            TrainingPolicyMode::Manual,
+            false,
         )
         .expect("bridge training succeeds");
         let engine_predictions = model.predict_batch(&rows).expect("engine predicts");
@@ -637,6 +944,8 @@ mod tests {
             DEFAULT_TRAIN_ROUNDS,
             None,
             Some(categorical_spec.clone()),
+            TrainingPolicyMode::Manual,
+            false,
         )
         .expect("categorical bridge training succeeds");
 
@@ -703,6 +1012,8 @@ mod tests {
             DEFAULT_TRAIN_ROUNDS,
             None,
             None,
+            TrainingPolicyMode::Manual,
+            false,
         )
         .expect("bridge training succeeds");
 
@@ -737,6 +1048,8 @@ mod tests {
             DEFAULT_TRAIN_ROUNDS,
             None,
             None,
+            TrainingPolicyMode::Manual,
+            false,
         )
         .expect("continuous rows should train");
 
@@ -764,6 +1077,8 @@ mod tests {
             DEFAULT_TRAIN_ROUNDS,
             None,
             None,
+            TrainingPolicyMode::Manual,
+            false,
         )
         .expect("first deterministic training succeeds");
         let artifact_b = train_regression_artifact_impl(
@@ -773,6 +1088,8 @@ mod tests {
             DEFAULT_TRAIN_ROUNDS,
             None,
             None,
+            TrainingPolicyMode::Manual,
+            false,
         )
         .expect("second deterministic training succeeds");
 
@@ -783,8 +1100,16 @@ mod tests {
     fn train_bridge_pre_binned_path_rejects_u16_overflow() {
         let rows = vec![vec![70000.0, 0.0], vec![1.0, 0.0]];
         let targets = vec![0.0, 1.0];
-        let result =
-            train_regression_artifact_impl(&rows, &targets, fixture_params(), 1, None, None);
+        let result = train_regression_artifact_impl(
+            &rows,
+            &targets,
+            fixture_params(),
+            1,
+            None,
+            None,
+            TrainingPolicyMode::Manual,
+            false,
+        );
         assert!(matches!(
             result,
             Err(alloygbm_engine::EngineError::ContractViolation(message))
@@ -803,8 +1128,34 @@ mod tests {
             4096,
             None,
             None,
+            TrainingPolicyMode::Manual,
+            false,
         )
         .expect("max supported round count should train");
         assert!(!artifact.is_empty());
+    }
+
+    #[test]
+    fn train_bridge_can_store_node_debug_stats_section() {
+        let dataset = quality_fixture_dataset();
+        let rows = fixture_rows(&dataset);
+        let artifact = train_regression_artifact_impl(
+            &rows,
+            &dataset.targets,
+            fixture_params(),
+            DEFAULT_TRAIN_ROUNDS,
+            None,
+            None,
+            TrainingPolicyMode::Manual,
+            true,
+        )
+        .expect("bridge training succeeds");
+        let parsed = deserialize_model_artifact_v1(&artifact).expect("artifact parses");
+        assert!(
+            parsed
+                .sections
+                .iter()
+                .any(|section| section.descriptor.kind == ModelSectionKind::NodeDebugStats)
+        );
     }
 }

@@ -570,6 +570,7 @@ mod tests {
                 },
             ],
             categorical_state: None,
+            node_debug_stats: None,
         }
     }
 
@@ -579,6 +580,7 @@ mod tests {
             feature_count: 3,
             stumps: fixture_model().stumps,
             categorical_state: None,
+            node_debug_stats: None,
         }
     }
 

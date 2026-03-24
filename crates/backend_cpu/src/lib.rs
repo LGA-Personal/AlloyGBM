@@ -11,13 +11,47 @@ pub struct CpuBackend;
 
 const SMALL_TILE_WORKLOAD_THRESHOLD: usize = 16_384;
 const PARALLEL_TILE_WORKLOAD_THRESHOLD: usize = 131_072;
+const TINY_NODE_ROW_THRESHOLD: usize = 32;
+const BIN_HEAVY_THRESHOLD: usize = 512;
 const DISABLE_AVX2_ENV_VAR: &str = "ALLOYGBM_DISABLE_AVX2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HistogramKernelPath {
-    PerFeatureScalar,
-    RowFirstScalar,
-    RowFirstAvx2,
+    TinyNodeScalar,
+    BinHeavyPerFeatureScalar,
+    ArenaRowFirstScalar,
+    ArenaRowFirstAvx2,
+}
+
+#[derive(Debug, Clone)]
+struct HistogramArena {
+    bin_count: usize,
+    grad_sums: Vec<f32>,
+    hess_sums: Vec<f32>,
+    counts: Vec<u32>,
+}
+
+impl HistogramArena {
+    fn new(tile_feature_count: usize, bin_count: usize) -> Self {
+        let flat_len = tile_feature_count * bin_count;
+        Self {
+            bin_count,
+            grad_sums: vec![0.0; flat_len],
+            hess_sums: vec![0.0; flat_len],
+            counts: vec![0; flat_len],
+        }
+    }
+
+    fn materialize(&self, start_feature: usize, feature_histograms: &mut Vec<FeatureHistogram>) {
+        CpuBackend::materialize_tile_histograms(
+            start_feature,
+            self.bin_count,
+            &self.grad_sums,
+            &self.hess_sums,
+            &self.counts,
+            feature_histograms,
+        );
+    }
 }
 
 impl CpuBackend {
@@ -58,15 +92,19 @@ impl CpuBackend {
     }
 
     fn select_histogram_kernel_path(
+        row_count: usize,
         tile_workload: usize,
+        bin_count: usize,
         avx2_available: bool,
     ) -> HistogramKernelPath {
-        if tile_workload <= SMALL_TILE_WORKLOAD_THRESHOLD {
-            HistogramKernelPath::PerFeatureScalar
+        if row_count <= TINY_NODE_ROW_THRESHOLD || tile_workload <= SMALL_TILE_WORKLOAD_THRESHOLD {
+            HistogramKernelPath::TinyNodeScalar
+        } else if bin_count >= BIN_HEAVY_THRESHOLD {
+            HistogramKernelPath::BinHeavyPerFeatureScalar
         } else if avx2_available {
-            HistogramKernelPath::RowFirstAvx2
+            HistogramKernelPath::ArenaRowFirstAvx2
         } else {
-            HistogramKernelPath::RowFirstScalar
+            HistogramKernelPath::ArenaRowFirstScalar
         }
     }
 
@@ -141,14 +179,9 @@ impl CpuBackend {
         node: &NodeSlice,
         start_feature: usize,
         end_feature: usize,
-        bin_count: usize,
-        feature_histograms: &mut Vec<FeatureHistogram>,
+        arena: &mut HistogramArena,
     ) {
         let tile_feature_count = end_feature - start_feature;
-        let flat_len = tile_feature_count * bin_count;
-        let mut grad_sums = vec![0.0_f32; flat_len];
-        let mut hess_sums = vec![0.0_f32; flat_len];
-        let mut counts = vec![0_u32; flat_len];
 
         for &row_index in &node.row_indices {
             let row_index = row_index as usize;
@@ -156,21 +189,12 @@ impl CpuBackend {
             let gradient = gradients[row_index];
             for local_feature_index in 0..tile_feature_count {
                 let bin_index = binned_matrix.bins[row_base + local_feature_index] as usize;
-                let flat_index = local_feature_index * bin_count + bin_index;
-                grad_sums[flat_index] += gradient.grad;
-                hess_sums[flat_index] += gradient.hess;
-                counts[flat_index] += 1;
+                let flat_index = local_feature_index * arena.bin_count + bin_index;
+                arena.grad_sums[flat_index] += gradient.grad;
+                arena.hess_sums[flat_index] += gradient.hess;
+                arena.counts[flat_index] += 1;
             }
         }
-
-        Self::materialize_tile_histograms(
-            start_feature,
-            bin_count,
-            &grad_sums,
-            &hess_sums,
-            &counts,
-            feature_histograms,
-        );
     }
 
     fn should_parallelize_tiles(
@@ -205,8 +229,13 @@ impl CpuBackend {
         let tile_workload = node.row_indices.len().saturating_mul(tile_feature_count);
         let mut feature_histograms = Vec::with_capacity(tile_feature_count);
 
-        match Self::select_histogram_kernel_path(tile_workload, avx2_available) {
-            HistogramKernelPath::PerFeatureScalar => {
+        match Self::select_histogram_kernel_path(
+            node.row_indices.len(),
+            tile_workload,
+            bin_count,
+            avx2_available,
+        ) {
+            HistogramKernelPath::TinyNodeScalar | HistogramKernelPath::BinHeavyPerFeatureScalar => {
                 Self::build_tile_histograms_per_feature(
                     binned_matrix,
                     gradients,
@@ -217,18 +246,20 @@ impl CpuBackend {
                     &mut feature_histograms,
                 );
             }
-            HistogramKernelPath::RowFirstScalar => {
+            HistogramKernelPath::ArenaRowFirstScalar => {
+                let mut arena = HistogramArena::new(tile_feature_count, bin_count);
                 Self::build_tile_histograms_row_first(
                     binned_matrix,
                     gradients,
                     node,
                     start_feature,
                     end_feature,
-                    bin_count,
-                    &mut feature_histograms,
+                    &mut arena,
                 );
+                arena.materialize(start_feature, &mut feature_histograms);
             }
-            HistogramKernelPath::RowFirstAvx2 => {
+            HistogramKernelPath::ArenaRowFirstAvx2 => {
+                let mut arena = HistogramArena::new(tile_feature_count, bin_count);
                 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
                 Self::build_tile_histograms_row_first_x86(
                     binned_matrix,
@@ -236,8 +267,7 @@ impl CpuBackend {
                     node,
                     start_feature,
                     end_feature,
-                    bin_count,
-                    &mut feature_histograms,
+                    &mut arena,
                 );
                 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
                 Self::build_tile_histograms_row_first(
@@ -246,9 +276,9 @@ impl CpuBackend {
                     node,
                     start_feature,
                     end_feature,
-                    bin_count,
-                    &mut feature_histograms,
+                    &mut arena,
                 );
+                arena.materialize(start_feature, &mut feature_histograms);
             }
         }
 
@@ -328,14 +358,9 @@ impl CpuBackend {
         node: &NodeSlice,
         start_feature: usize,
         end_feature: usize,
-        bin_count: usize,
-        feature_histograms: &mut Vec<FeatureHistogram>,
+        arena: &mut HistogramArena,
     ) {
         let tile_feature_count = end_feature - start_feature;
-        let flat_len = tile_feature_count * bin_count;
-        let mut grad_sums = vec![0.0_f32; flat_len];
-        let mut hess_sums = vec![0.0_f32; flat_len];
-        let mut counts = vec![0_u32; flat_len];
         let feature_count = binned_matrix.feature_count;
 
         // Process rows in AVX2-width chunks to keep the hot loop structure SIMD-friendly.
@@ -369,7 +394,7 @@ impl CpuBackend {
             let row_base7 = row7 * feature_count + start_feature;
 
             for local_feature_index in 0..tile_feature_count {
-                let base = local_feature_index * bin_count;
+                let base = local_feature_index * arena.bin_count;
 
                 let idx0 = base + binned_matrix.bins[row_base0 + local_feature_index] as usize;
                 let idx1 = base + binned_matrix.bins[row_base1 + local_feature_index] as usize;
@@ -380,37 +405,37 @@ impl CpuBackend {
                 let idx6 = base + binned_matrix.bins[row_base6 + local_feature_index] as usize;
                 let idx7 = base + binned_matrix.bins[row_base7 + local_feature_index] as usize;
 
-                grad_sums[idx0] += gradient0.grad;
-                hess_sums[idx0] += gradient0.hess;
-                counts[idx0] += 1;
+                arena.grad_sums[idx0] += gradient0.grad;
+                arena.hess_sums[idx0] += gradient0.hess;
+                arena.counts[idx0] += 1;
 
-                grad_sums[idx1] += gradient1.grad;
-                hess_sums[idx1] += gradient1.hess;
-                counts[idx1] += 1;
+                arena.grad_sums[idx1] += gradient1.grad;
+                arena.hess_sums[idx1] += gradient1.hess;
+                arena.counts[idx1] += 1;
 
-                grad_sums[idx2] += gradient2.grad;
-                hess_sums[idx2] += gradient2.hess;
-                counts[idx2] += 1;
+                arena.grad_sums[idx2] += gradient2.grad;
+                arena.hess_sums[idx2] += gradient2.hess;
+                arena.counts[idx2] += 1;
 
-                grad_sums[idx3] += gradient3.grad;
-                hess_sums[idx3] += gradient3.hess;
-                counts[idx3] += 1;
+                arena.grad_sums[idx3] += gradient3.grad;
+                arena.hess_sums[idx3] += gradient3.hess;
+                arena.counts[idx3] += 1;
 
-                grad_sums[idx4] += gradient4.grad;
-                hess_sums[idx4] += gradient4.hess;
-                counts[idx4] += 1;
+                arena.grad_sums[idx4] += gradient4.grad;
+                arena.hess_sums[idx4] += gradient4.hess;
+                arena.counts[idx4] += 1;
 
-                grad_sums[idx5] += gradient5.grad;
-                hess_sums[idx5] += gradient5.hess;
-                counts[idx5] += 1;
+                arena.grad_sums[idx5] += gradient5.grad;
+                arena.hess_sums[idx5] += gradient5.hess;
+                arena.counts[idx5] += 1;
 
-                grad_sums[idx6] += gradient6.grad;
-                hess_sums[idx6] += gradient6.hess;
-                counts[idx6] += 1;
+                arena.grad_sums[idx6] += gradient6.grad;
+                arena.hess_sums[idx6] += gradient6.hess;
+                arena.counts[idx6] += 1;
 
-                grad_sums[idx7] += gradient7.grad;
-                hess_sums[idx7] += gradient7.hess;
-                counts[idx7] += 1;
+                arena.grad_sums[idx7] += gradient7.grad;
+                arena.hess_sums[idx7] += gradient7.hess;
+                arena.counts[idx7] += 1;
             }
         }
 
@@ -420,21 +445,12 @@ impl CpuBackend {
             let gradient = gradients[row_index];
             for local_feature_index in 0..tile_feature_count {
                 let bin_index = binned_matrix.bins[row_base + local_feature_index] as usize;
-                let flat_index = local_feature_index * bin_count + bin_index;
-                grad_sums[flat_index] += gradient.grad;
-                hess_sums[flat_index] += gradient.hess;
-                counts[flat_index] += 1;
+                let flat_index = local_feature_index * arena.bin_count + bin_index;
+                arena.grad_sums[flat_index] += gradient.grad;
+                arena.hess_sums[flat_index] += gradient.hess;
+                arena.counts[flat_index] += 1;
             }
         }
-
-        Self::materialize_tile_histograms(
-            start_feature,
-            bin_count,
-            &grad_sums,
-            &hess_sums,
-            &counts,
-            feature_histograms,
-        );
     }
 
     fn best_split_with_options_internal(
@@ -923,37 +939,51 @@ mod tests {
         );
 
         let mut row_first = Vec::new();
-        CpuBackend::build_tile_histograms_row_first(
-            &matrix,
-            &gradients,
-            &node,
-            0,
-            2,
-            bin_count,
-            &mut row_first,
-        );
+        let mut arena = HistogramArena::new(2, bin_count);
+        CpuBackend::build_tile_histograms_row_first(&matrix, &gradients, &node, 0, 2, &mut arena);
+        arena.materialize(0, &mut row_first);
 
         assert_eq!(per_feature, row_first);
     }
 
     #[test]
-    fn histogram_kernel_path_prefers_per_feature_for_small_tiles() {
-        let path = CpuBackend::select_histogram_kernel_path(SMALL_TILE_WORKLOAD_THRESHOLD, true);
-        assert_eq!(path, HistogramKernelPath::PerFeatureScalar);
+    fn histogram_kernel_path_prefers_tiny_node_scalar_for_small_nodes() {
+        let path =
+            CpuBackend::select_histogram_kernel_path(8, SMALL_TILE_WORKLOAD_THRESHOLD, 16, true);
+        assert_eq!(path, HistogramKernelPath::TinyNodeScalar);
     }
 
     #[test]
     fn histogram_kernel_path_prefers_avx2_for_large_tiles_when_available() {
-        let path =
-            CpuBackend::select_histogram_kernel_path(SMALL_TILE_WORKLOAD_THRESHOLD + 1, true);
-        assert_eq!(path, HistogramKernelPath::RowFirstAvx2);
+        let path = CpuBackend::select_histogram_kernel_path(
+            256,
+            SMALL_TILE_WORKLOAD_THRESHOLD + 1,
+            64,
+            true,
+        );
+        assert_eq!(path, HistogramKernelPath::ArenaRowFirstAvx2);
     }
 
     #[test]
     fn histogram_kernel_path_falls_back_to_scalar_when_avx2_unavailable() {
-        let path =
-            CpuBackend::select_histogram_kernel_path(SMALL_TILE_WORKLOAD_THRESHOLD + 1, false);
-        assert_eq!(path, HistogramKernelPath::RowFirstScalar);
+        let path = CpuBackend::select_histogram_kernel_path(
+            256,
+            SMALL_TILE_WORKLOAD_THRESHOLD + 1,
+            64,
+            false,
+        );
+        assert_eq!(path, HistogramKernelPath::ArenaRowFirstScalar);
+    }
+
+    #[test]
+    fn histogram_kernel_path_prefers_bin_heavy_fallback_for_wide_bins() {
+        let path = CpuBackend::select_histogram_kernel_path(
+            512,
+            SMALL_TILE_WORKLOAD_THRESHOLD + 1,
+            BIN_HEAVY_THRESHOLD,
+            true,
+        );
+        assert_eq!(path, HistogramKernelPath::BinHeavyPerFeatureScalar);
     }
 
     #[test]
@@ -1025,26 +1055,28 @@ mod tests {
         let bin_count = matrix.max_bin as usize + 1;
 
         let mut scalar = Vec::new();
+        let mut scalar_arena = HistogramArena::new(matrix.feature_count, bin_count);
         CpuBackend::build_tile_histograms_row_first(
             &matrix,
             &gradients,
             &node,
             0,
             matrix.feature_count,
-            bin_count,
-            &mut scalar,
+            &mut scalar_arena,
         );
+        scalar_arena.materialize(0, &mut scalar);
 
         let mut avx2 = Vec::new();
+        let mut avx2_arena = HistogramArena::new(matrix.feature_count, bin_count);
         CpuBackend::build_tile_histograms_row_first_x86(
             &matrix,
             &gradients,
             &node,
             0,
             matrix.feature_count,
-            bin_count,
-            &mut avx2,
+            &mut avx2_arena,
         );
+        avx2_arena.materialize(0, &mut avx2);
 
         assert_eq!(scalar, avx2);
     }
