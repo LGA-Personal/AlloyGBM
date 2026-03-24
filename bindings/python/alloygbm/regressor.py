@@ -465,21 +465,131 @@ class GBMRegressor:
         row_count = len(targets)
         feature_count: int
         dense_training_payload: tuple[list[float], int, int] | None = None
+        dense_continuous_training_payload: tuple[list[float], int, int] | None = None
 
         if effective_categorical_feature_index is None:
-            dense_training_payload = self._native_matrix_flat_payload(
-                X, require_integer=True
-            )
-            if dense_training_payload is not None:
-                _, row_count, feature_count = dense_training_payload
+            dense_float_payload = self._native_matrix_flat_payload(X)
+            if dense_float_payload is not None:
+                flat_values, row_count, feature_count = dense_float_payload
                 if row_count != len(targets):
                     raise ValueError("X and y must contain the same number of rows")
-                self._uses_continuous_binning = False
-                self._continuous_feature_mins = None
-                self._continuous_feature_maxs = None
-                self._continuous_feature_sorted_values = None
-                self._continuous_feature_quantile_cuts = None
-                self._continuous_feature_linear_rank_flags = None
+                if all(
+                    value >= 0.0
+                    and abs(value - float(self._round_half_away_from_zero(value)))
+                    <= _PRE_BINNED_INTEGER_TOLERANCE
+                    for value in flat_values
+                ):
+                    dense_training_payload = dense_float_payload
+                    self._uses_continuous_binning = False
+                    self._continuous_feature_mins = None
+                    self._continuous_feature_maxs = None
+                    self._continuous_feature_sorted_values = None
+                    self._continuous_feature_quantile_cuts = None
+                    self._continuous_feature_linear_rank_flags = None
+                else:
+                    self._uses_continuous_binning = True
+                    if self.continuous_binning_strategy == "linear":
+                        mins, maxs = self._derive_dense_feature_bounds(
+                            flat_values, row_count, feature_count
+                        )
+                        self._continuous_feature_mins = mins
+                        self._continuous_feature_maxs = maxs
+                        if _linear_tail_rank_enabled_from_env():
+                            core_span_ratio_threshold = (
+                                _linear_tail_core_span_ratio_threshold_from_env()
+                            )
+                            rows = self._validate_rows(X)
+                            (
+                                rank_flags,
+                                sorted_values,
+                            ) = self._derive_continuous_feature_tail_rank_plan(
+                                rows, core_span_ratio_threshold
+                            )
+                            self._continuous_feature_linear_rank_flags = rank_flags
+                            if any(rank_flags):
+                                self._continuous_feature_sorted_values = sorted_values
+                                dense_continuous_training_payload = (
+                                    self._quantize_dense_values_linear_with_selective_rank(
+                                        flat_values,
+                                        row_count,
+                                        feature_count,
+                                        mins,
+                                        maxs,
+                                        rank_flags,
+                                        sorted_values,
+                                    ),
+                                    row_count,
+                                    feature_count,
+                                )
+                            else:
+                                self._continuous_feature_sorted_values = None
+                                dense_continuous_training_payload = (
+                                    self._quantize_dense_values_linear(
+                                        flat_values,
+                                        row_count,
+                                        feature_count,
+                                        mins,
+                                        maxs,
+                                    ),
+                                    row_count,
+                                    feature_count,
+                                )
+                        else:
+                            self._continuous_feature_sorted_values = None
+                            self._continuous_feature_linear_rank_flags = None
+                            dense_continuous_training_payload = (
+                                self._quantize_dense_values_linear(
+                                    flat_values,
+                                    row_count,
+                                    feature_count,
+                                    mins,
+                                    maxs,
+                                ),
+                                row_count,
+                                feature_count,
+                            )
+                        self._continuous_feature_quantile_cuts = None
+                    elif self.continuous_binning_strategy == "rank":
+                        sorted_values = self._derive_dense_sorted_feature_values(
+                            flat_values, row_count, feature_count
+                        )
+                        self._continuous_feature_sorted_values = sorted_values
+                        self._continuous_feature_mins = None
+                        self._continuous_feature_maxs = None
+                        self._continuous_feature_quantile_cuts = None
+                        self._continuous_feature_linear_rank_flags = None
+                        dense_continuous_training_payload = (
+                            self._quantize_dense_values_rank(
+                                flat_values,
+                                row_count,
+                                feature_count,
+                                sorted_values,
+                            ),
+                            row_count,
+                            feature_count,
+                        )
+                    else:
+                        quantile_cuts = self._derive_dense_feature_quantile_cuts(
+                            flat_values,
+                            row_count,
+                            feature_count,
+                            self.continuous_binning_max_bins,
+                        )
+                        self._continuous_feature_quantile_cuts = quantile_cuts
+                        self._continuous_feature_sorted_values = None
+                        self._continuous_feature_mins = None
+                        self._continuous_feature_maxs = None
+                        self._continuous_feature_linear_rank_flags = None
+                        dense_continuous_training_payload = (
+                            self._quantize_dense_values_quantile(
+                                flat_values,
+                                row_count,
+                                feature_count,
+                                quantile_cuts,
+                            ),
+                            row_count,
+                            feature_count,
+                        )
             else:
                 rows = self._validate_rows(X)
                 row_count = len(rows)
@@ -524,12 +634,17 @@ class GBMRegressor:
                 "time_index must be provided when categorical_time_aware=True and categorical_feature_index is set"
             )
 
-        if native_training_rows is None and dense_training_payload is None:
+        if (
+            native_training_rows is None
+            and dense_training_payload is None
+            and dense_continuous_training_payload is None
+        ):
             assert rows is not None
             self._uses_continuous_binning = not self._rows_are_pre_binned(rows)
         if (
             native_training_rows is None
             and dense_training_payload is None
+            and dense_continuous_training_payload is None
             and self._uses_continuous_binning
         ):
             assert rows is not None
@@ -580,7 +695,11 @@ class GBMRegressor:
                 self._continuous_feature_linear_rank_flags = None
                 training_rows = self._quantize_rows_quantile(rows, quantile_cuts)
             native_training_rows = training_rows
-        elif native_training_rows is None and dense_training_payload is None:
+        elif (
+            native_training_rows is None
+            and dense_training_payload is None
+            and dense_continuous_training_payload is None
+        ):
             assert rows is not None
             self._continuous_feature_mins = None
             self._continuous_feature_maxs = None
@@ -589,8 +708,14 @@ class GBMRegressor:
             self._continuous_feature_linear_rank_flags = None
             native_training_rows = rows
 
-        if dense_training_payload is not None:
-            flat_values, dense_row_count, dense_feature_count = dense_training_payload
+        active_dense_training_payload = (
+            dense_training_payload
+            if dense_training_payload is not None
+            else dense_continuous_training_payload
+        )
+
+        if active_dense_training_payload is not None:
+            flat_values, dense_row_count, dense_feature_count = active_dense_training_payload
             train_regression_artifact_dense = _load_native_train_regression_artifact_dense()
             artifact_bytes = train_regression_artifact_dense(
                 values=flat_values,
@@ -655,6 +780,78 @@ class GBMRegressor:
             raise RuntimeError("GBMRegressor native artifact is not available")
         rows: object
         if self._uses_continuous_binning:
+            dense_payload = self._native_matrix_flat_payload(X)
+            if dense_payload is not None:
+                flat_values, row_count, feature_count = dense_payload
+                if feature_count != self._n_features_in:
+                    raise ValueError(
+                        f"X feature count {feature_count} does not match fitted feature count "
+                        f"{self._n_features_in}"
+                    )
+                if self.continuous_binning_strategy == "linear":
+                    mins, maxs = self._require_continuous_feature_bounds()
+                    rank_flags = self._continuous_feature_linear_rank_flags
+                    if rank_flags is not None and any(rank_flags):
+                        sorted_values = self._require_continuous_feature_sorted_values()
+                        dense_payload = (
+                            self._quantize_dense_values_linear_with_selective_rank(
+                                flat_values,
+                                row_count,
+                                feature_count,
+                                mins,
+                                maxs,
+                                rank_flags,
+                                sorted_values,
+                            ),
+                            row_count,
+                            feature_count,
+                        )
+                    else:
+                        dense_payload = (
+                            self._quantize_dense_values_linear(
+                                flat_values,
+                                row_count,
+                                feature_count,
+                                mins,
+                                maxs,
+                            ),
+                            row_count,
+                            feature_count,
+                        )
+                elif self.continuous_binning_strategy == "rank":
+                    sorted_values = self._require_continuous_feature_sorted_values()
+                    dense_payload = (
+                        self._quantize_dense_values_rank(
+                            flat_values,
+                            row_count,
+                            feature_count,
+                            sorted_values,
+                        ),
+                        row_count,
+                        feature_count,
+                    )
+                else:
+                    quantile_cuts = self._require_continuous_feature_quantile_cuts()
+                    dense_payload = (
+                        self._quantize_dense_values_quantile(
+                            flat_values,
+                            row_count,
+                            feature_count,
+                            quantile_cuts,
+                        ),
+                        row_count,
+                        feature_count,
+                    )
+                flat_values, row_count, feature_count = dense_payload
+                predict_dense = getattr(self._native_predictor_handle, "predict_dense", None)
+                if callable(predict_dense):
+                    return list(predict_dense(flat_values, row_count, feature_count))
+                predictor_predict_batch_dense = _load_native_predictor_predict_batch_dense()
+                return list(
+                    predictor_predict_batch_dense(
+                        self._artifact_bytes, flat_values, row_count, feature_count
+                    )
+                )
             quantized_rows = self._quantize_rows_for_prediction(self._validate_rows(X))
             if len(quantized_rows[0]) != self._n_features_in:
                 raise ValueError(
@@ -965,6 +1162,195 @@ class GBMRegressor:
             )
         raw_bytes = view.tobytes()
         return [float(value[0]) for value in struct.iter_unpack("@" + unpack_code, raw_bytes)]
+
+    @staticmethod
+    def _column_values_from_flat_payload(
+        flat_values: Sequence[float], row_count: int, feature_count: int, feature_index: int
+    ) -> list[float]:
+        return [
+            float(flat_values[row_index * feature_count + feature_index])
+            for row_index in range(row_count)
+        ]
+
+    @staticmethod
+    def _derive_dense_feature_bounds(
+        flat_values: Sequence[float], row_count: int, feature_count: int
+    ) -> tuple[list[float], list[float]]:
+        mins = [float("inf")] * feature_count
+        maxs = [float("-inf")] * feature_count
+        for row_index in range(row_count):
+            row_base = row_index * feature_count
+            for feature_index in range(feature_count):
+                value = float(flat_values[row_base + feature_index])
+                if value < mins[feature_index]:
+                    mins[feature_index] = value
+                if value > maxs[feature_index]:
+                    maxs[feature_index] = value
+        return mins, maxs
+
+    @staticmethod
+    def _derive_dense_sorted_feature_values(
+        flat_values: Sequence[float], row_count: int, feature_count: int
+    ) -> list[list[float]]:
+        sorted_values: list[list[float]] = []
+        for feature_index in range(feature_count):
+            values = GBMRegressor._column_values_from_flat_payload(
+                flat_values, row_count, feature_count, feature_index
+            )
+            values.sort()
+            sorted_values.append(values)
+        return sorted_values
+
+    @staticmethod
+    def _derive_dense_feature_quantile_cuts(
+        flat_values: Sequence[float], row_count: int, feature_count: int, max_bins: int
+    ) -> list[list[float]]:
+        feature_cuts: list[list[float]] = []
+        for feature_index in range(feature_count):
+            values = GBMRegressor._column_values_from_flat_payload(
+                flat_values, row_count, feature_count, feature_index
+            )
+            values.sort()
+            if len(values) <= 1:
+                feature_cuts.append([])
+                continue
+
+            bin_count = min(max_bins, len(values))
+            cuts: list[float] = []
+            for quantile_index in range(1, bin_count):
+                rank = (quantile_index * len(values)) // bin_count
+                if rank >= len(values):
+                    rank = len(values) - 1
+                cut_value = values[rank]
+                if cuts and cut_value <= cuts[-1]:
+                    continue
+                cuts.append(cut_value)
+            feature_cuts.append(cuts)
+        return feature_cuts
+
+    @staticmethod
+    def _quantize_dense_values_linear(
+        flat_values: Sequence[float],
+        row_count: int,
+        feature_count: int,
+        feature_mins: Sequence[float],
+        feature_maxs: Sequence[float],
+    ) -> list[float]:
+        quantized: list[float] = []
+        max_bin = _MAX_CONTINUOUS_QUANTIZED_BIN
+        for row_index in range(row_count):
+            row_base = row_index * feature_count
+            for feature_index in range(feature_count):
+                value = float(flat_values[row_base + feature_index])
+                min_value = feature_mins[feature_index]
+                max_value = feature_maxs[feature_index]
+                if value <= min_value:
+                    clamped = 0
+                elif value >= max_value:
+                    clamped = max_bin
+                else:
+                    span = max_value - min_value
+                    if span <= _PRE_BINNED_INTEGER_TOLERANCE:
+                        clamped = 0
+                    else:
+                        scaled = ((value - min_value) / span) * max_bin
+                        rounded = GBMRegressor._round_half_away_from_zero(scaled)
+                        clamped = min(max_bin, max(0, rounded))
+                quantized.append(float(clamped))
+        return quantized
+
+    @staticmethod
+    def _quantize_dense_values_linear_with_selective_rank(
+        flat_values: Sequence[float],
+        row_count: int,
+        feature_count: int,
+        feature_mins: Sequence[float],
+        feature_maxs: Sequence[float],
+        rank_flags: Sequence[bool],
+        feature_sorted_values: Sequence[Sequence[float]],
+    ) -> list[float]:
+        quantized: list[float] = []
+        max_bin = _MAX_CONTINUOUS_QUANTIZED_BIN
+        for row_index in range(row_count):
+            row_base = row_index * feature_count
+            for feature_index in range(feature_count):
+                value = float(flat_values[row_base + feature_index])
+                if rank_flags[feature_index]:
+                    sorted_values = feature_sorted_values[feature_index]
+                    if len(sorted_values) <= 1:
+                        clamped = 0
+                    else:
+                        rank = bisect.bisect_right(sorted_values, value) - 1
+                        if rank < 0:
+                            rank = 0
+                        elif rank >= len(sorted_values):
+                            rank = len(sorted_values) - 1
+                        scaled = (rank * max_bin) / (len(sorted_values) - 1)
+                        rounded = GBMRegressor._round_half_away_from_zero(scaled)
+                        clamped = min(max_bin, max(0, rounded))
+                else:
+                    min_value = feature_mins[feature_index]
+                    max_value = feature_maxs[feature_index]
+                    if value <= min_value:
+                        clamped = 0
+                    elif value >= max_value:
+                        clamped = max_bin
+                    else:
+                        span = max_value - min_value
+                        if span <= _PRE_BINNED_INTEGER_TOLERANCE:
+                            clamped = 0
+                        else:
+                            scaled = ((value - min_value) / span) * max_bin
+                            rounded = GBMRegressor._round_half_away_from_zero(scaled)
+                            clamped = min(max_bin, max(0, rounded))
+                quantized.append(float(clamped))
+        return quantized
+
+    @staticmethod
+    def _quantize_dense_values_rank(
+        flat_values: Sequence[float],
+        row_count: int,
+        feature_count: int,
+        feature_sorted_values: Sequence[Sequence[float]],
+    ) -> list[float]:
+        quantized: list[float] = []
+        max_bin = _MAX_CONTINUOUS_QUANTIZED_BIN
+        for row_index in range(row_count):
+            row_base = row_index * feature_count
+            for feature_index in range(feature_count):
+                value = float(flat_values[row_base + feature_index])
+                sorted_values = feature_sorted_values[feature_index]
+                if len(sorted_values) <= 1:
+                    clamped = 0
+                else:
+                    rank = bisect.bisect_right(sorted_values, value) - 1
+                    if rank < 0:
+                        rank = 0
+                    elif rank >= len(sorted_values):
+                        rank = len(sorted_values) - 1
+                    scaled = (rank * max_bin) / (len(sorted_values) - 1)
+                    rounded = GBMRegressor._round_half_away_from_zero(scaled)
+                    clamped = min(max_bin, max(0, rounded))
+                quantized.append(float(clamped))
+        return quantized
+
+    @staticmethod
+    def _quantize_dense_values_quantile(
+        flat_values: Sequence[float],
+        row_count: int,
+        feature_count: int,
+        feature_quantile_cuts: Sequence[Sequence[float]],
+    ) -> list[float]:
+        quantized: list[float] = []
+        for row_index in range(row_count):
+            row_base = row_index * feature_count
+            for feature_index in range(feature_count):
+                value = float(flat_values[row_base + feature_index])
+                cuts = feature_quantile_cuts[feature_index]
+                bucket = bisect.bisect_right(cuts, value)
+                clamped = min(_MAX_CONTINUOUS_QUANTIZED_BIN, max(0, bucket))
+                quantized.append(float(clamped))
+        return quantized
 
     @staticmethod
     def _dtype_is_explicit_categorical(dtype: object) -> bool:

@@ -2,6 +2,7 @@ import importlib.util
 import sys
 import unittest
 from pathlib import Path
+import numpy as np
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -49,6 +50,23 @@ class _FakeCatBoostRegressor:
         self.kwargs = kwargs
 
 
+class _TrackingAlloyRegressor:
+    fit_input: object | None = None
+    predict_input: object | None = None
+
+    def __init__(self, **kwargs: object) -> None:
+        self.kwargs = kwargs
+
+    def fit(self, X: object, y: object) -> "_TrackingAlloyRegressor":
+        type(self).fit_input = X
+        return self
+
+    def predict(self, X: object) -> list[float]:
+        type(self).predict_input = X
+        row_count = int(getattr(X, "shape", [len(X)])[0])  # type: ignore[arg-type]
+        return [0.0] * row_count
+
+
 class RunModelComparisonTests(unittest.TestCase):
     def test_model_factories_exclude_catboost_when_unavailable(self) -> None:
         factories = RUNNER._model_factories(
@@ -83,6 +101,29 @@ class RunModelComparisonTests(unittest.TestCase):
         self.assertIsInstance(model, _FakeCatBoostRegressor)
         self.assertEqual(model.kwargs["loss_function"], "RMSE")
         self.assertEqual(model.kwargs["iterations"], 120)
+
+    def test_run_model_passes_numpy_arrays_to_alloy(self) -> None:
+        x_train = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=float)
+        y_train = np.array([0.0, 1.0], dtype=float)
+        x_test = np.array([[0.5, 0.5]], dtype=float)
+        y_test = np.array([0.0], dtype=float)
+
+        RUNNER._run_model(
+            model_name="alloygbm",
+            factory=_TrackingAlloyRegressor,
+            x_train=x_train,
+            y_train=y_train,
+            x_test=x_test,
+            y_test=y_test,
+            scenario="dense_numeric",
+            profile=RUNNER.DEFAULT_PROFILES[0],
+            profile_index=1,
+            run_index=1,
+            seed=7,
+        )
+
+        self.assertIs(_TrackingAlloyRegressor.fit_input, x_train)
+        self.assertIs(_TrackingAlloyRegressor.predict_input, x_test)
 
 
 if __name__ == "__main__":

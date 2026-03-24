@@ -285,14 +285,14 @@ def _run_model(
         model = factory()
         fit_start = time.perf_counter()
         if model_name == "alloygbm":
-            model.fit(x_train.tolist(), y_train.tolist())
+            model.fit(x_train, y_train)
         else:
             model.fit(x_train, y_train)
         fit_seconds = time.perf_counter() - fit_start
 
         predict_start = time.perf_counter()
         if model_name == "alloygbm":
-            predictions = np.array(model.predict(x_test.tolist()), dtype=float)
+            predictions = np.array(model.predict(x_test), dtype=float)
         else:
             predictions = np.array(model.predict(x_test), dtype=float)
         predict_seconds = time.perf_counter() - predict_start
