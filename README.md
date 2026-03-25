@@ -135,10 +135,16 @@ The current public benchmark suite compares AlloyGBM against XGBoost, LightGBM, 
 Current headline results from the expanded suite:
 
 - AlloyGBM is best on the `panel_time_series` benchmark across the tested profiles.
-- AlloyGBM is best on `dow_jones_financial` under the deeper low-learning-rate profile.
+- AlloyGBM is strong on `dow_jones_financial`, with its best showing under the deeper low-learning-rate profile.
 - AlloyGBM is competitive on `dense_numeric`, but still trails XGBoost and CatBoost on RMSE.
 - AlloyGBM currently lags all three libraries on `california_housing` and `bike_sharing`.
 - LightGBM is usually the fastest trainer in the comparison set.
+
+The honest short version is:
+
+- strong on `panel_time_series`
+- strong on `dow_jones_financial`
+- weaker on `california_housing` and `bike_sharing`
 
 Benchmark tooling and methodology live in [benchmarks/README.md](benchmarks/README.md).
 

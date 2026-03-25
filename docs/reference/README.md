@@ -8,6 +8,7 @@ Useful repo entry points:
 - core crates: `crates/`
 - benchmark runner: `benchmarks/run_model_comparison.py`
 - benchmark guide: `benchmarks/README.md`
+- release checklist: `docs/reference/release_checklist.md`
 
 For broad repo orientation:
 
