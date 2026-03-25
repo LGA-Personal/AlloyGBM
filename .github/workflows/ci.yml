@@ -58,7 +58,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.92.0
-          components: clippy
+          components: rustfmt, clippy
 
       - name: Install build tooling
         run: python -m pip install --upgrade pip maturin
