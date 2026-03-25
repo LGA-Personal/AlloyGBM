@@ -33,6 +33,13 @@ maturin develop --manifest-path bindings/python/Cargo.toml --release
 
 AlloyGBM currently targets Python `3.10+` and uses a native Rust extension module.
 
+Initial `0.1.0` packaging policy:
+
+- tested directly on macOS Apple Silicon
+- planned wheel targets: macOS `arm64` and Linux `x86_64`
+- Windows support is deferred until after `0.1.0`
+- source distribution remains the fallback for unsupported environments
+
 ## Minimal Example
 
 ```python

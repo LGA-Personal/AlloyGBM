@@ -55,6 +55,14 @@ The following release-hardening check has already been run locally for `0.1.0`:
 That verifies the package works as a clean installed artifact, not only from a
 source checkout.
 
+The publish workflow is also expected to run wheel smoke tests before the final
+PyPI publish step:
+
+- build the wheel artifact
+- install that exact artifact in a fresh job
+- import the package
+- fit and predict with a small `GBMRegressor`
+
 ## Pre-Release Checklist
 
 - confirm `README.md` reflects the current package capabilities and limitations
