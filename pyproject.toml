@@ -4,10 +4,49 @@ build-backend = "maturin"
 
 [project]
 name = "alloygbm"
-version = "0.0.1"
-description = "Rust-first GBDT scaffolding with Python bindings"
+version = "0.1.0"
+description = "Rust-first gradient boosting for structured regression with time-aware validation utilities and Python bindings"
 readme = "README.md"
 requires-python = ">=3.10"
+license = { text = "MIT" }
+license-files = ["LICENSE"]
+authors = [
+    { name = "Logan Ashby", email = "ashbylogan12@gmail.com" },
+]
+keywords = [
+    "gradient boosting",
+    "gbdt",
+    "machine learning",
+    "tabular",
+    "time series",
+    "finance",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.urls]
+Homepage = "https://github.com/LGA-Personal/AlloyGBM"
+Repository = "https://github.com/LGA-Personal/AlloyGBM"
+Issues = "https://github.com/LGA-Personal/AlloyGBM/issues"
+Documentation = "https://github.com/LGA-Personal/AlloyGBM/tree/main/docs"
+Benchmarks = "https://github.com/LGA-Personal/AlloyGBM/tree/main/benchmarks"
 
 [tool.maturin]
 manifest-path = "bindings/python/Cargo.toml"
