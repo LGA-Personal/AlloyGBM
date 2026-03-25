@@ -4,6 +4,7 @@ This documentation is split into two layers:
 
 - user-facing package documentation in `docs/user/`
 - internal project documentation in the rest of `docs/`
+- a Read the Docs style Sphinx site source tree in `docs/site/`
 
 ## User Docs
 
@@ -39,6 +40,12 @@ If you are trying to understand the project as a maintainer, start here:
 1. `docs/roadmap/current.md`
 2. `benchmarks/README.md`
 3. `docs/reference/README.md`
+
+If you are working on the hosted documentation site itself, start here:
+
+1. `.readthedocs.yaml`
+2. `docs/site/source/index.rst`
+3. `docs/site/source/conf.py`
 
 The old nested architecture tree is intentionally kept only for historical
 context. It is not the active planning model for the repository.
