@@ -1,6 +1,6 @@
 # Archive Notes
 
-The repository previously used a deeply nested version-layer planning system under `docs/architecture/v1.0/`.
+The repository previously used a deeply nested version-layer planning system, now preserved under `docs/archive/legacy_v1_plans/`.
 
 That material is being retired into `docs/archive/` and is no longer the active way this project is organized.
 

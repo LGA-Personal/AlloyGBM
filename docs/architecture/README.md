@@ -1,8 +1,6 @@
 # Transitional Legacy Docs
 
-Most legacy planning material has moved to `docs/archive/`.
-
-What remains here is the old `v1.0/` planning tree, kept only for historical reference until you decide whether to keep or remove it entirely.
+Legacy planning material has moved to `docs/archive/`.
 
 Use instead:
 
@@ -10,4 +8,4 @@ Use instead:
 - `docs/roadmap/current.md`
 - `docs/archive/README.md`
 
-Do not treat this directory as the active documentation model for the repository.
+This directory should not be treated as the active documentation model for the repository.
