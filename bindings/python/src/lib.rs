@@ -182,6 +182,7 @@ fn resolve_categorical_spec(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_impl(
     rows: &[Vec<f32>],
     targets: &[f32],

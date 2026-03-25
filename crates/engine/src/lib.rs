@@ -316,6 +316,20 @@ pub enum TrainingPolicyMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PolicyFitRequest {
+    rounds: usize,
+    policy_mode: TrainingPolicyMode,
+    store_node_debug_stats: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct IterationExecutionContext<'a> {
+    controls: IterationControls,
+    validation: Option<ValidationDatasetRef<'a>>,
+    policy_mode: Option<TrainingPolicyMode>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArtifactCompatibilityReport {
     pub trees_section_count: usize,
     pub predictor_layout_section_count: usize,
@@ -767,6 +781,7 @@ impl Trainer {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn fit_iterations_with_policy<B: BackendOps, O: ObjectiveOps>(
         &self,
         dataset: &TrainingDataset,
@@ -777,25 +792,53 @@ impl Trainer {
         policy_mode: TrainingPolicyMode,
         store_node_debug_stats: bool,
     ) -> EngineResult<TrainedModel> {
-        let controls =
-            self.iteration_controls_for_policy(dataset, binned_matrix, rounds, policy_mode)?;
+        self.fit_iterations_with_policy_request(
+            dataset,
+            binned_matrix,
+            backend,
+            objective,
+            PolicyFitRequest {
+                rounds,
+                policy_mode,
+                store_node_debug_stats,
+            },
+        )
+    }
+
+    fn fit_iterations_with_policy_request<B: BackendOps, O: ObjectiveOps>(
+        &self,
+        dataset: &TrainingDataset,
+        binned_matrix: &BinnedMatrix,
+        backend: &B,
+        objective: &O,
+        request: PolicyFitRequest,
+    ) -> EngineResult<TrainedModel> {
+        let controls = self.iteration_controls_for_policy(
+            dataset,
+            binned_matrix,
+            request.rounds,
+            request.policy_mode,
+        )?;
         let summary = self.fit_iterations_with_optional_validation_summary(
             dataset,
             binned_matrix,
             backend,
             objective,
-            controls,
-            None,
-            Some(policy_mode),
+            IterationExecutionContext {
+                controls,
+                validation: None,
+                policy_mode: Some(request.policy_mode),
+            },
         )?;
         let model = summary.model;
-        if store_node_debug_stats {
+        if request.store_node_debug_stats {
             model.with_node_debug_stats_from_stumps()
         } else {
             Ok(model)
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn fit_iterations_with_single_target_encoded_feature_and_policy<
         B: BackendOps,
         O: ObjectiveOps,
@@ -810,6 +853,32 @@ impl Trainer {
         policy_mode: TrainingPolicyMode,
         store_node_debug_stats: bool,
     ) -> EngineResult<TrainedModel> {
+        self.fit_iterations_with_single_target_encoded_feature_and_policy_request(
+            dataset,
+            binned_matrix,
+            spec,
+            backend,
+            objective,
+            PolicyFitRequest {
+                rounds,
+                policy_mode,
+                store_node_debug_stats,
+            },
+        )
+    }
+
+    fn fit_iterations_with_single_target_encoded_feature_and_policy_request<
+        B: BackendOps,
+        O: ObjectiveOps,
+    >(
+        &self,
+        dataset: &TrainingDataset,
+        binned_matrix: &BinnedMatrix,
+        spec: &CategoricalTargetEncodingSpec,
+        backend: &B,
+        objective: &O,
+        request: PolicyFitRequest,
+    ) -> EngineResult<TrainedModel> {
         let (encoded_dataset, encoded_binned_matrix) =
             apply_single_categorical_target_encoding(dataset, binned_matrix, spec)?;
         let categorical_state = CategoricalStatePayloadV1 {
@@ -817,14 +886,12 @@ impl Trainer {
             leakage_safe_target_encoding: spec.config.time_aware,
             categorical_feature_indices: vec![spec.feature_index as u32],
         };
-        let model = self.fit_iterations_with_policy(
+        let model = self.fit_iterations_with_policy_request(
             &encoded_dataset,
             &encoded_binned_matrix,
             backend,
             objective,
-            rounds,
-            policy_mode,
-            store_node_debug_stats,
+            request,
         )?;
         model.with_categorical_state(Some(categorical_state))
     }
@@ -873,9 +940,11 @@ impl Trainer {
             binned_matrix,
             backend,
             objective,
-            controls,
-            None,
-            None,
+            IterationExecutionContext {
+                controls,
+                validation: None,
+                policy_mode: None,
+            },
         )
     }
 
@@ -893,9 +962,11 @@ impl Trainer {
             binned_matrix,
             backend,
             objective,
-            controls,
-            Some(validation),
-            None,
+            IterationExecutionContext {
+                controls,
+                validation: Some(validation),
+                policy_mode: None,
+            },
         )
     }
 
@@ -990,10 +1061,10 @@ impl Trainer {
         binned_matrix: &BinnedMatrix,
         backend: &B,
         objective: &O,
-        controls: IterationControls,
-        validation: Option<ValidationDatasetRef<'_>>,
-        policy_mode: Option<TrainingPolicyMode>,
+        execution: IterationExecutionContext<'_>,
     ) -> EngineResult<IterationRunSummary> {
+        let controls = execution.controls;
+        let validation = execution.validation;
         validate_iteration_controls(controls)?;
         if controls.early_stopping_rounds.is_some() && validation.is_none() {
             return Err(EngineError::InvalidConfig(
@@ -1013,7 +1084,7 @@ impl Trainer {
         let fit_contract = self.validate_fit_contract(dataset, objective)?;
         let sampling_seed_base = sampling_seed_base(self.params.seed, self.params.deterministic);
         let split_options =
-            split_selection_options_for_training(policy_mode, dataset, binned_matrix)?;
+            split_selection_options_for_training(execution.policy_mode, dataset, binned_matrix)?;
 
         let mut predictions = vec![fit_contract.baseline_prediction; dataset.row_count()];
         let mut candidate_predictions = predictions.clone();
