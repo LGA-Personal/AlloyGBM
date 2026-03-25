@@ -1,0 +1,14 @@
+name: california_housing
+version: 1
+kind: sklearn_fetch
+description: Real-world regression benchmark from the California Housing dataset.
+source:
+  dataset: california-housing
+  url: https://scikit-learn.org/stable/datasets/real_world.html
+raw:
+  filename: california_housing.csv
+  delimiter: ","
+prepared:
+  filename: prepared.csv
+  target: median_house_value
+  note: Numeric regression benchmark fetched through scikit-learn and normalized to the shared prepared.csv format.

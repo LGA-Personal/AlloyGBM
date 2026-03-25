@@ -68,6 +68,10 @@ class _TrackingAlloyRegressor:
 
 
 class RunModelComparisonTests(unittest.TestCase):
+    def test_available_scenarios_include_real_application_additions(self) -> None:
+        self.assertIn("california_housing", RUNNER.AVAILABLE_SCENARIOS)
+        self.assertIn("bike_sharing", RUNNER.AVAILABLE_SCENARIOS)
+
     def test_model_factories_exclude_catboost_when_unavailable(self) -> None:
         factories = RUNNER._model_factories(
             gbm_regressor_cls=_CompatibleRegressor,

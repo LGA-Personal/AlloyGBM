@@ -21,6 +21,8 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
 
 AVAILABLE_SCENARIOS = [
+    "california_housing",
+    "bike_sharing",
     "dense_numeric",
     "panel_time_series",
     "histogram_stress",

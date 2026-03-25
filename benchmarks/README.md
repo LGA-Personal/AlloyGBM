@@ -7,6 +7,12 @@ This directory organizes benchmark dataset preparation for `v0.8.3` and later ha
 - `dense_numeric/`
   - `manifest.yaml`
   - `prepare.py`
+- `california_housing/`
+  - `manifest.yaml`
+  - `prepare.py`
+- `bike_sharing/`
+  - `manifest.yaml`
+  - `prepare.py`
 - `panel_time_series/`
   - `manifest.yaml`
   - `prepare.py`
@@ -25,6 +31,8 @@ Examples:
 
 ```bash
 python3 benchmarks/dense_numeric/prepare.py
+python3 benchmarks/california_housing/prepare.py
+python3 benchmarks/bike_sharing/prepare.py
 python3 benchmarks/panel_time_series/prepare.py --max-rows 150000
 python3 benchmarks/histogram_stress/prepare.py --rows 100000 --features 48
 python3 benchmarks/dow_jones_financial/prepare.py --force-download
@@ -43,6 +51,16 @@ python3 benchmarks/run_model_comparison.py \
   --force-prepare \
   --profile-grid default \
   --profile-seeds 7,17,29
+```
+
+Focused real-application comparison on the expanded public regression set:
+
+```bash
+python3 benchmarks/run_model_comparison.py \
+  --force-prepare \
+  --scenarios california_housing bike_sharing dense_numeric panel_time_series dow_jones_financial \
+  --profile-grid default \
+  --profile-seeds 7
 ```
 
 Alloy continuous-feature binning strategy A/B:
@@ -86,6 +104,7 @@ Outputs are written to `benchmarks/results/`:
 Each `prepare.py` script is self-contained and uses:
 
 - UCI direct URLs where applicable.
+- `scikit-learn` fetchers where the dataset is already a stable public benchmark fixture.
 - Python stdlib download flow with fallback to `curl`/`wget` when available.
 - Deterministic output conventions suitable for repeatable benchmark runs.
 

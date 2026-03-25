@@ -1,0 +1,14 @@
+name: bike_sharing
+version: 1
+kind: uci_download
+description: Real-world hourly bike demand regression benchmark from UCI Bike Sharing.
+source:
+  dataset: bike-sharing
+  url: https://archive.ics.uci.edu/ml/machine-learning-databases/00275/Bike-Sharing-Dataset.zip
+raw:
+  filename: Bike-Sharing-Dataset.zip
+  delimiter: ","
+prepared:
+  filename: prepared.csv
+  target: cnt
+  note: Uses hourly bike demand with leakage-safe timestamp/group_id fields and drops casual/registered because they sum to the target.
