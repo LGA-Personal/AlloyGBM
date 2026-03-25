@@ -1,4 +1,6 @@
-# AlloyGBM v0.9.7 Plan (Competitiveness and Benchmark Policy Hardening)
+# Archived Plan: Competitiveness And Benchmark Policy Hardening
+
+This file is preserved as a historical planning artifact from the previous version-layer documentation system.
 
 ## Summary
 - Goal: improve Alloy competitiveness on the now-valid continuous-feature training path and formalize benchmark threshold policy.
@@ -13,9 +15,10 @@
 - Re-run benchmark suites (`default`, constrained `default_ultra`, AVX2 script where applicable).
 - Produce benchmark regression report with scenario-by-scenario deltas.
 - Define and document benchmark threshold policy and enforcement point.
+- Competitive analysis against LightGBM and XGBoost on both speed and accuracy.
 
 ### Out of Scope
-- Final docs/tutorial closeout packaging (`v0.9.8`).
+- Final docs/tutorial closeout packaging in the follow-on documentation pass.
 
 ## Interfaces and Types
 - Maintain Python API and model-format compatibility.
@@ -40,12 +43,12 @@
 - `bash scripts/benchmark_avx2_compare.sh --runs 3`
 
 ## Acceptance Criteria
-1. `docs/architecture/v1.0/v0.9/v0.9.7/plan.md` is present and decision-complete.
+1. This archived plan records the intended scope and success criteria for the competitiveness pass.
 2. Full benchmark reruns complete with Alloy rows passing on supported scenarios.
 3. At least one measurable competitiveness improvement versus `v0.8.3` is documented.
 4. Benchmark threshold policy is explicitly documented for CI/release evidence.
-5. `docs/architecture/v1.0/v0.9/v0.9.7/implementation_notes.md` is present.
-6. `docs/architecture/v1.0/v0.9/v0.9.7/verification_report.md` is present with criterion-to-evidence mapping.
+5. Implementation notes are captured alongside the resulting benchmark and tuning work.
+6. Verification evidence is captured in the benchmark artifacts and follow-on documentation.
 
 ## Risks and Mitigations
 - Risk: improvements on one scenario regress others.
@@ -55,4 +58,4 @@
 
 ## Assumptions and Defaults
 - Continuous-feature correctness work in `v0.9.5/0.9.6` is complete.
-- Immediate next layer after verification is `docs/architecture/v1.0/v0.9/v0.9.8`.
+- The follow-on documentation closeout was treated as a separate pass.

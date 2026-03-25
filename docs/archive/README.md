@@ -7,7 +7,12 @@ Archived here:
 - benchmark writeups
 - context handoff notes
 - idea logs and experiment notes
+- archived planning slices
 - state metadata from the version-layer workflow
 - the older GPU-first roadmap note
 
-Some legacy files still remain under `docs/architecture/` because they currently have local in-progress edits and were intentionally left in place during the archive move.
+Examples:
+
+- `docs/archive/plans/competitiveness_and_benchmark_policy_hardening.md`
+- `docs/archive/ideas/performance_and_training_ideas.md`
+- `docs/archive/state/layer_index.yaml`

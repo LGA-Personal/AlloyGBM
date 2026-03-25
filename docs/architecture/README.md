@@ -2,7 +2,7 @@
 
 Most legacy planning material has moved to `docs/archive/`.
 
-This directory still exists only because a small amount of older material currently has local in-progress edits and was intentionally left in place during the archive move.
+What remains here is the old `v1.0/` planning tree, kept only for historical reference until you decide whether to keep or remove it entirely.
 
 Use instead:
 
