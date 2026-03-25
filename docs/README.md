@@ -10,8 +10,10 @@ This repository now uses a simple documentation layout:
   - Research notes, inspiration, and candidate follow-ups.
 - `reference/`
   - Stable pointers into the codebase and developer-facing entry points.
+- `archive/`
+  - Legacy material from the previous version-layer planning system.
 - `architecture/`
-  - Legacy archive from the previous version-layer planning system.
+  - Transitional location for a small amount of not-yet-moved legacy material.
 
 If you are trying to understand the project today, start here:
 

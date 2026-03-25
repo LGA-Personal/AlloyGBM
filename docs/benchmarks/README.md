@@ -18,4 +18,4 @@ Current benchmark entry points:
 
 - runner guide: `benchmarks/README.md`
 - comparative inspiration and follow-ups: `docs/plans/perpetual_inspiration_for_alloygbm.md`
-- older benchmark writeups: `docs/architecture/benchmarks/`
+- older benchmark writeups: `docs/archive/benchmarks/`

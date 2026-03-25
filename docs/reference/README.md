@@ -17,4 +17,4 @@ For broad repo orientation:
 
 For historical architecture notes:
 
-- `docs/architecture/README.md`
+- `docs/archive/README.md`

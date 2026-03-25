@@ -2,7 +2,7 @@
 
 The repository previously used a deeply nested version-layer planning system under `docs/architecture/v1.0/`.
 
-That material is preserved as historical context, but it is no longer the active way this project is organized.
+That material is being retired into `docs/archive/` and is no longer the active way this project is organized.
 
 Use the archive when you need:
 
