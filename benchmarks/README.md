@@ -1,6 +1,6 @@
 # Benchmark Dataset Workspace
 
-This directory organizes benchmark dataset preparation for `v0.8.3` and later hardening slices.
+This directory organizes benchmark dataset preparation and cross-library comparison for AlloyGBM.
 
 ## Layout
 
@@ -114,7 +114,7 @@ Temporal leakage safeguards:
 - `dow_jones_financial` excludes forward-looking `next_weeks_*` fields from model features and keeps only the target as future information.
 - `run_model_comparison.py` performs timestamp-boundary splits so a timestamp cannot appear in both train and test partitions.
 
-Continuous-feature training caveats (`v0.9.6` context):
+Continuous-feature training notes:
 
 - Alloy native training now accepts continuous float features via deterministic bridge quantization.
 - Capacity/profile diagnostics should be interpreted from repeated profile runs (`--profile-grid default --profile-seeds 7,17,29`), not single-seed snapshots.
