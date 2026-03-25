@@ -35,19 +35,13 @@ At a high level, Python training flows like this:
 5. artifact serialization
 6. native predictor handle creation for later inference
 
-Suggested figure placeholder
-----------------------------
+.. figure:: _static/training_pipeline.png
+   :alt: AlloyGBM training pipeline from Python inputs through quantization, engine training, backend execution, artifact serialization, and native predictor creation.
+   :width: 100%
+   :align: center
 
-.. note::
-
-   Suggested diagram to add here:
-
-   - filename: ``_static/training_pipeline.png``
-   - placement: directly below this note
-   - concept: a left-to-right flow diagram showing
-     ``Python inputs -> quantization -> engine -> backend_cpu -> artifact -> predictor handle``
-
-   This should be the primary architecture diagram for the docs site.
+   High-level AlloyGBM training pipeline from Python inputs to serialized model
+   artifact and native predictor handle.
 
 Artifact design
 ---------------
@@ -82,17 +76,10 @@ wide Python surface yet. The current approach is:
 - stay explicit about current limitations
 - let benchmark evidence drive capability expansion
 
-Suggested figure placeholder
-----------------------------
+.. figure:: _static/tree_node_structure.png
+   :alt: AlloyGBM split node structure showing threshold bin, gain, child nodes, and optional node statistics.
+   :width: 85%
+   :align: center
 
-.. note::
-
-   Suggested second diagram to add here:
-
-   - filename: ``_static/tree_node_structure.png``
-   - placement: after the "Artifact design" section
-   - concept: a split node with threshold bin, left/right child stats, gain,
-     and optional debug metrics
-
-   This would support both the architecture explanation and the diagnostics
-   story.
+   Conceptual split-node structure used to explain artifact layout and optional
+   node-level diagnostics.

@@ -44,17 +44,9 @@ Current expectations
 - ``feature_importances(...)`` returns ``(feature_name, importance)`` tuples
 - feature names currently default to generated names such as ``f0`` and ``f1``
 
-Suggested figure placeholder
-----------------------------
+.. figure:: _static/shap_tree_path_example.png
+   :alt: SHAP explanation example showing a highlighted decision-tree path and additive feature contributions to a prediction.
+   :width: 90%
+   :align: center
 
-.. note::
-
-   Suggested diagram to add here:
-
-   - filename: ``_static/shap_tree_path_example.png``
-   - placement: directly below this note
-   - concept: a small decision tree with one highlighted prediction path and
-     a side panel showing the additive decomposition
-
-   This would make the local-explanation story much easier to understand for
-   first-time users.
+   Example of a prediction path and additive SHAP-style contribution breakdown.
