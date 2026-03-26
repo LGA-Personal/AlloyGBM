@@ -15,6 +15,9 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 rust-version = "1.92.0"
+homepage = "https://github.com/LGA-Personal/AlloyGBM"
+repository = "https://github.com/LGA-Personal/AlloyGBM"
+documentation = "https://alloygbm.readthedocs.io/en/latest/"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

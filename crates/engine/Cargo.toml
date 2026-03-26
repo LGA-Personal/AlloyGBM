@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+description = "Training engine and policy-controlled boosting loop for AlloyGBM"
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
 
 [dependencies]
 alloygbm-core = { path = "../core" }

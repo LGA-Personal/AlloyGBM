@@ -45,7 +45,7 @@ classifiers = [
 Homepage = "https://github.com/LGA-Personal/AlloyGBM"
 Repository = "https://github.com/LGA-Personal/AlloyGBM"
 Issues = "https://github.com/LGA-Personal/AlloyGBM/issues"
-Documentation = "https://github.com/LGA-Personal/AlloyGBM/tree/main/docs"
+Documentation = "https://alloygbm.readthedocs.io/en/latest/"
 Benchmarks = "https://github.com/LGA-Personal/AlloyGBM/tree/main/benchmarks"
 
 [tool.maturin]
