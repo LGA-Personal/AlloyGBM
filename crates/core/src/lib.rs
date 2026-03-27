@@ -41,6 +41,10 @@ pub struct TrainParams {
     pub col_subsample: f32,
     pub early_stopping_rounds: Option<u16>,
     pub min_validation_improvement: f32,
+    pub min_data_in_leaf: u32,
+    pub lambda_l1: f32,
+    pub lambda_l2: f32,
+    pub min_child_hessian: f32,
 }
 
 impl Default for TrainParams {
@@ -54,6 +58,10 @@ impl Default for TrainParams {
             col_subsample: 1.0,
             early_stopping_rounds: None,
             min_validation_improvement: 0.0,
+            min_data_in_leaf: 1,
+            lambda_l1: 0.0,
+            lambda_l2: 0.0,
+            min_child_hessian: 0.0,
         }
     }
 }
@@ -781,6 +789,30 @@ pub fn validate_train_params(params: &TrainParams) -> CoreResult<()> {
     if !params.min_validation_improvement.is_finite() || params.min_validation_improvement < 0.0 {
         return Err(CoreError::InvalidConfig(
             "min_validation_improvement must be finite and >= 0".to_string(),
+        ));
+    }
+
+    if params.min_data_in_leaf == 0 {
+        return Err(CoreError::InvalidConfig(
+            "min_data_in_leaf must be greater than 0".to_string(),
+        ));
+    }
+
+    if !params.lambda_l1.is_finite() || params.lambda_l1 < 0.0 {
+        return Err(CoreError::InvalidConfig(
+            "lambda_l1 must be finite and >= 0".to_string(),
+        ));
+    }
+
+    if !params.lambda_l2.is_finite() || params.lambda_l2 < 0.0 {
+        return Err(CoreError::InvalidConfig(
+            "lambda_l2 must be finite and >= 0".to_string(),
+        ));
+    }
+
+    if !params.min_child_hessian.is_finite() || params.min_child_hessian < 0.0 {
+        return Err(CoreError::InvalidConfig(
+            "min_child_hessian must be finite and >= 0".to_string(),
         ));
     }
 

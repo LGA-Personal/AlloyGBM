@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+from types import SimpleNamespace
 import unittest
 from array import array
 from pathlib import Path
@@ -116,6 +117,14 @@ class GBMRegressorContractTests(unittest.TestCase):
             GBMRegressor(early_stopping_rounds=0)
         with self.assertRaisesRegex(ValueError, "min_validation_improvement"):
             GBMRegressor(min_validation_improvement=-0.1)
+        with self.assertRaisesRegex(ValueError, "min_data_in_leaf"):
+            GBMRegressor(min_data_in_leaf=0)
+        with self.assertRaisesRegex(ValueError, "lambda_l1"):
+            GBMRegressor(lambda_l1=-0.1)
+        with self.assertRaisesRegex(ValueError, "lambda_l2"):
+            GBMRegressor(lambda_l2=-0.1)
+        with self.assertRaisesRegex(ValueError, "min_child_hessian"):
+            GBMRegressor(min_child_hessian=-0.1)
         with self.assertRaisesRegex(ValueError, "categorical_feature_index"):
             GBMRegressor(categorical_feature_index=-1)
         with self.assertRaisesRegex(ValueError, "categorical_smoothing"):
@@ -139,6 +148,10 @@ class GBMRegressorContractTests(unittest.TestCase):
         self.assertEqual(params["col_subsample"], 1.0)
         self.assertIsNone(params["early_stopping_rounds"])
         self.assertEqual(params["min_validation_improvement"], 0.0)
+        self.assertEqual(params["min_data_in_leaf"], 1)
+        self.assertEqual(params["lambda_l1"], 0.0)
+        self.assertEqual(params["lambda_l2"], 0.0)
+        self.assertEqual(params["min_child_hessian"], 0.0)
         self.assertEqual(params["seed"], 0)
         self.assertTrue(params["deterministic"])
         self.assertEqual(params["continuous_binning_strategy"], "linear")
@@ -158,6 +171,10 @@ class GBMRegressorContractTests(unittest.TestCase):
             col_subsample=0.5,
             early_stopping_rounds=4,
             min_validation_improvement=0.01,
+            min_data_in_leaf=3,
+            lambda_l1=0.2,
+            lambda_l2=0.4,
+            min_child_hessian=0.6,
             seed=7,
             deterministic=False,
             continuous_binning_strategy="rank",
@@ -177,6 +194,10 @@ class GBMRegressorContractTests(unittest.TestCase):
         self.assertEqual(model.get_params()["col_subsample"], 0.5)
         self.assertEqual(model.get_params()["early_stopping_rounds"], 4)
         self.assertEqual(model.get_params()["min_validation_improvement"], 0.01)
+        self.assertEqual(model.get_params()["min_data_in_leaf"], 3)
+        self.assertEqual(model.get_params()["lambda_l1"], 0.2)
+        self.assertEqual(model.get_params()["lambda_l2"], 0.4)
+        self.assertEqual(model.get_params()["min_child_hessian"], 0.6)
         self.assertEqual(model.get_params()["seed"], 7)
         self.assertFalse(model.get_params()["deterministic"])
         self.assertEqual(model.get_params()["continuous_binning_strategy"], "rank")
@@ -252,7 +273,6 @@ class GBMRegressorContractTests(unittest.TestCase):
                 n_estimators=9,
                 row_subsample=0.75,
                 col_subsample=0.5,
-                early_stopping_rounds=4,
                 min_validation_improvement=0.01,
                 seed=7,
                 deterministic=False,
@@ -283,7 +303,7 @@ class GBMRegressorContractTests(unittest.TestCase):
                     "seed": 7,
                     "deterministic": False,
                     "rounds": 9,
-                    "early_stopping_rounds": 4,
+                    "early_stopping_rounds": None,
                     "categorical_feature_index": None,
                     "categorical_feature_values": None,
                     "training_policy": "auto",
@@ -292,6 +312,8 @@ class GBMRegressorContractTests(unittest.TestCase):
                     "categorical_min_samples_leaf": 1,
                     "categorical_time_aware": False,
                     "time_index": None,
+                    "continuous_binning_strategy": "linear",
+                    "continuous_binning_max_bins": 256,
                 }
             ],
         )
@@ -299,6 +321,72 @@ class GBMRegressorContractTests(unittest.TestCase):
             predict_calls,
             [(b"trained-artifact", [[1.0, 0.0], [2.0, 0.0]])],
         )
+
+    def test_fit_requires_eval_set_when_early_stopping_is_enabled(self) -> None:
+        model = GBMRegressor(early_stopping_rounds=3)
+        with self.assertRaisesRegex(ValueError, "early_stopping_rounds"):
+            model.fit([[1.0], [2.0]], [1.0, 2.0])
+
+    def test_fit_with_eval_set_populates_training_summary_attributes(self) -> None:
+        result = SimpleNamespace(
+            artifact_bytes=b"artifact",
+            summary=SimpleNamespace(
+                rounds_requested=12,
+                rounds_completed=5,
+                best_validation_round=3,
+                best_validation_loss=0.16,
+                train_rmse=[1.0, 0.8, 0.6, 0.5, 0.4],
+                validation_rmse=[1.1, 0.9, 0.7, 0.6, 0.5],
+                stop_reason="ValidationLossPlateau",
+                bridge_prepare_seconds=0.01,
+                native_train_seconds=0.02,
+            ),
+            continuous_binning_metadata=SimpleNamespace(
+                uses_continuous_binning=True,
+                feature_mins=[0.0],
+                feature_maxs=[2.0],
+                feature_sorted_values=None,
+                feature_quantile_cuts=None,
+                feature_linear_rank_flags=None,
+            ),
+        )
+        original_loader = (
+            regressor_module._load_native_train_regression_artifact_dense_with_summary
+        )
+        regressor_module._load_native_train_regression_artifact_dense_with_summary = (
+            lambda: (lambda **_kwargs: result)
+        )
+        try:
+            model = GBMRegressor(
+                early_stopping_rounds=2,
+                min_data_in_leaf=4,
+                lambda_l1=0.1,
+                lambda_l2=0.2,
+                min_child_hessian=0.3,
+            )
+            fitted = model.fit(
+                _dense_memoryview([0.0, 1.0, 2.0], 3, 1),
+                [0.0, 1.0, 2.0],
+                eval_set=(_dense_memoryview([0.5, 1.5], 2, 1), [0.4, 1.4]),
+            )
+        finally:
+            regressor_module._load_native_train_regression_artifact_dense_with_summary = (
+                original_loader
+            )
+
+        self.assertIs(fitted, model)
+        self.assertEqual(model.best_iteration_, 3)
+        self.assertEqual(model.best_score_, 0.16)
+        self.assertEqual(model.n_estimators_, 5)
+        self.assertEqual(
+            model.evals_result_,
+            {
+                "train": {"rmse": [1.0, 0.8, 0.6, 0.5, 0.4]},
+                "validation": {"rmse": [1.1, 0.9, 0.7, 0.6, 0.5]},
+            },
+        )
+        self.assertEqual(model.fit_timing_["native_bridge_prepare_seconds"], 0.01)
+        self.assertEqual(model.fit_timing_["native_train_seconds"], 0.02)
 
     def test_fit_quantizes_continuous_rows_before_native_training(self) -> None:
         train_calls: list[dict[str, object]] = []

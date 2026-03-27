@@ -13,6 +13,7 @@ Benchmark documentation in `docs/` should stay focused on:
 - how to interpret the benchmark suite
 - which scenarios are representative
 - what the benchmark results say about AlloyGBM's current strengths and gaps
+- what the stage timing columns say about Python adaptation versus native training cost
 
 Current benchmark entry points:
 

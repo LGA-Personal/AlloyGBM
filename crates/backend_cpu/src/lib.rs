@@ -830,6 +830,10 @@ mod tests {
             col_subsample: 1.0,
             early_stopping_rounds: None,
             min_validation_improvement: 0.0,
+            min_data_in_leaf: 1,
+            lambda_l1: 0.0,
+            lambda_l2: 0.0,
+            min_child_hessian: 0.0,
         }
     }
 

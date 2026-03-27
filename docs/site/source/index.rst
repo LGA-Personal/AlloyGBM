@@ -3,7 +3,8 @@ AlloyGBM Documentation
 
 **AlloyGBM** is a Rust-first gradient boosting library for structured
 regression, with a Python API oriented around native execution, deterministic
-training, time-aware validation, and artifact-backed prediction.
+training, explicit validation, time-aware validation, and artifact-backed
+prediction.
 
 The project is currently strongest on panel-style and finance-style regression
 workloads, while remaining honest about weaker regimes such as broader
