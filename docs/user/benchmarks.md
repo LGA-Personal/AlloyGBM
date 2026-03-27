@@ -32,7 +32,14 @@ From the current expanded public regression suite:
 - AlloyGBM is strong on `dow_jones_financial`, especially under the deeper low-learning-rate profile.
 - AlloyGBM is competitive but not leading on `dense_numeric`.
 - AlloyGBM currently trails on `california_housing` and `bike_sharing`.
-- LightGBM is usually the fastest trainer in the comparison set.
+- In the latest recorded benchmark refresh, AlloyGBM was also the fastest trainer on most scenario/profile rows.
+
+The latest recorded benchmark refresh also verified that the new training
+contract and native dense preprocessing path did not collapse AlloyGBM quality:
+
+- RMSE stayed unchanged on most AlloyGBM benchmark rows.
+- The few changed rows were small and did not indicate a broad regression.
+- Fit time improved materially versus the prior stored benchmark artifact.
 
 The concise public summary should be:
 
@@ -49,6 +56,19 @@ Representative best-RMSE results from the latest recorded comparison:
 | `dense_numeric` | CatBoost / XGBoost | `deep_low_lr` | Alloy remains competitive but behind |
 | `california_housing` | XGBoost | `deep_low_lr` | Alloy still has a visible regression gap |
 | `bike_sharing` | CatBoost | `mid_balanced` | Alloy improves with depth but does not lead |
+
+## Stage Timing Output
+
+The benchmark runner now breaks AlloyGBM fit time into:
+
+- `input_adaptation_seconds`
+- `native_bridge_prepare_seconds`
+- `native_train_seconds`
+- `fit_seconds`
+- `predict_seconds`
+
+Use those columns to distinguish preprocessing-heavy regressions from actual
+trainer regressions.
 
 ## How To Run Them
 
@@ -69,6 +89,15 @@ python3 benchmarks/run_model_comparison.py \
 ```
 
 See the full runner guide in [benchmarks/README.md](../../benchmarks/README.md).
+
+To inspect the stage timing output from the current public suite:
+
+```bash
+python3 benchmarks/run_model_comparison.py \
+  --scenarios california_housing bike_sharing dense_numeric panel_time_series dow_jones_financial \
+  --profile-grid default \
+  --profile-seeds 7
+```
 
 ## How To Interpret The Results
 

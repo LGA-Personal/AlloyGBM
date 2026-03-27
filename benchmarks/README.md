@@ -101,6 +101,17 @@ Outputs are written to `benchmarks/results/`:
 - `model_comparison_profile_summary_latest.csv`
 - `model_comparison_profile_summary_latest.json`
 
+Per-record timing output now includes:
+
+- `input_adaptation_seconds`
+- `native_bridge_prepare_seconds`
+- `native_train_seconds`
+- `fit_seconds`
+- `predict_seconds`
+
+Those stage timings are intended to separate Python-side adaptation cost from
+native trainer cost when AlloyGBM changes.
+
 Each `prepare.py` script is self-contained and uses:
 
 - UCI direct URLs where applicable.
@@ -116,6 +127,6 @@ Temporal leakage safeguards:
 
 Continuous-feature training notes:
 
-- Alloy native training now accepts continuous float features via deterministic bridge quantization.
+- Alloy native training now accepts continuous float features via deterministic native quantization inside the Rust training path.
 - Capacity/profile diagnostics should be interpreted from repeated profile runs (`--profile-grid default --profile-seeds 7,17,29`), not single-seed snapshots.
 - Low-SNR financial scenarios (for example `dow_jones_financial`) can show small RMSE spread across profiles even when predictions/artifact capacity differ materially.

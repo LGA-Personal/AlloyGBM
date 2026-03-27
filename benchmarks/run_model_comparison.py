@@ -72,6 +72,9 @@ class BenchmarkRecord:
     train_rows: int
     test_rows: int
     n_features: int
+    input_adaptation_seconds: float
+    native_bridge_prepare_seconds: float
+    native_train_seconds: float
     fit_seconds: float
     predict_seconds: float
     rmse: float
@@ -286,17 +289,21 @@ def _run_model(
     try:
         model = factory()
         fit_start = time.perf_counter()
-        if model_name == "alloygbm":
-            model.fit(x_train, y_train)
-        else:
-            model.fit(x_train, y_train)
+        model.fit(x_train, y_train)
         fit_seconds = time.perf_counter() - fit_start
+        fit_timing = getattr(model, "fit_timing_", None)
+        input_adaptation_seconds = float(
+            fit_timing.get("input_adaptation_seconds", float("nan"))
+        ) if isinstance(fit_timing, dict) else float("nan")
+        native_bridge_prepare_seconds = float(
+            fit_timing.get("native_bridge_prepare_seconds", float("nan"))
+        ) if isinstance(fit_timing, dict) else float("nan")
+        native_train_seconds = float(
+            fit_timing.get("native_train_seconds", float("nan"))
+        ) if isinstance(fit_timing, dict) else float("nan")
 
         predict_start = time.perf_counter()
-        if model_name == "alloygbm":
-            predictions = np.array(model.predict(x_test), dtype=float)
-        else:
-            predictions = np.array(model.predict(x_test), dtype=float)
+        predictions = np.array(model.predict(x_test), dtype=float)
         predict_seconds = time.perf_counter() - predict_start
 
         return BenchmarkRecord(
@@ -312,6 +319,9 @@ def _run_model(
             train_rows=int(len(x_train)),
             test_rows=int(len(x_test)),
             n_features=int(x_train.shape[1]),
+            input_adaptation_seconds=input_adaptation_seconds,
+            native_bridge_prepare_seconds=native_bridge_prepare_seconds,
+            native_train_seconds=native_train_seconds,
             fit_seconds=float(fit_seconds),
             predict_seconds=float(predict_seconds),
             rmse=float(np.sqrt(mean_squared_error(y_test, predictions))),
@@ -334,6 +344,9 @@ def _run_model(
             train_rows=0,
             test_rows=0,
             n_features=0,
+            input_adaptation_seconds=float("nan"),
+            native_bridge_prepare_seconds=float("nan"),
+            native_train_seconds=float("nan"),
             fit_seconds=0.0,
             predict_seconds=0.0,
             rmse=float("nan"),
@@ -517,6 +530,12 @@ def _summarize_profiles(frame: pd.DataFrame) -> pd.DataFrame:
         )
         .agg(
             runs=("fit_seconds", "count"),
+            input_adaptation_seconds_median=("input_adaptation_seconds", "median"),
+            native_bridge_prepare_seconds_median=(
+                "native_bridge_prepare_seconds",
+                "median",
+            ),
+            native_train_seconds_median=("native_train_seconds", "median"),
             fit_seconds_median=("fit_seconds", "median"),
             predict_seconds_median=("predict_seconds", "median"),
             rmse_median=("rmse", "median"),
@@ -597,14 +616,16 @@ def _render_results_markdown(
 
     lines.extend(
         [
-            "| scenario | profile | model | seed | status | fit_seconds | predict_seconds | rmse | mae | r2 |",
-            "| --- | --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |",
+            "| scenario | profile | model | seed | status | input_adaptation_seconds | native_bridge_prepare_seconds | native_train_seconds | fit_seconds | predict_seconds | rmse | mae | r2 |",
+            "| --- | --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
     for _, row in frame.iterrows():
         lines.append(
             f"| {row['scenario']} | {row['profile_name']} | {row['model']} | {int(row['seed'])} | "
-            f"{row['status']} | {row['fit_seconds']:.6f} | {row['predict_seconds']:.6f} | "
+            f"{row['status']} | {row['input_adaptation_seconds']:.6f} | "
+            f"{row['native_bridge_prepare_seconds']:.6f} | {row['native_train_seconds']:.6f} | "
+            f"{row['fit_seconds']:.6f} | {row['predict_seconds']:.6f} | "
             f"{row['rmse']:.6f} | {row['mae']:.6f} | {row['r2']:.6f} |"
         )
 
@@ -615,14 +636,17 @@ def _render_results_markdown(
 
     lines.extend(
         [
-            "| scenario | profile | model | runs | lr | depth | rounds | fit_seconds_median | predict_seconds_median | rmse_median | mae_median | r2_median |",
-            "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            "| scenario | profile | model | runs | lr | depth | rounds | input_adaptation_seconds_median | native_bridge_prepare_seconds_median | native_train_seconds_median | fit_seconds_median | predict_seconds_median | rmse_median | mae_median | r2_median |",
+            "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
     for _, row in summary.iterrows():
         lines.append(
             f"| {row['scenario']} | {row['profile_name']} | {row['model']} | {int(row['runs'])} | "
             f"{row['learning_rate']:.6f} | {int(row['max_depth'])} | {int(row['rounds'])} | "
+            f"{row['input_adaptation_seconds_median']:.6f} | "
+            f"{row['native_bridge_prepare_seconds_median']:.6f} | "
+            f"{row['native_train_seconds_median']:.6f} | "
             f"{row['fit_seconds_median']:.6f} | {row['predict_seconds_median']:.6f} | "
             f"{row['rmse_median']:.6f} | {row['mae_median']:.6f} | {row['r2_median']:.6f} |"
         )
@@ -855,6 +879,9 @@ def main(argv: list[str]) -> int:
                                 train_rows=0,
                                 test_rows=0,
                                 n_features=0,
+                                input_adaptation_seconds=float("nan"),
+                                native_bridge_prepare_seconds=float("nan"),
+                                native_train_seconds=float("nan"),
                                 fit_seconds=0.0,
                                 predict_seconds=0.0,
                                 rmse=float("nan"),
@@ -888,6 +915,9 @@ def main(argv: list[str]) -> int:
                                 train_rows=0,
                                 test_rows=0,
                                 n_features=0,
+                                input_adaptation_seconds=float("nan"),
+                                native_bridge_prepare_seconds=float("nan"),
+                                native_train_seconds=float("nan"),
                                 fit_seconds=0.0,
                                 predict_seconds=0.0,
                                 rmse=float("nan"),
@@ -917,6 +947,9 @@ def main(argv: list[str]) -> int:
                     print(
                         f"[{scenario}][{profile.name}][seed={seed}] {model_name}: "
                         f"{record.status} fit={record.fit_seconds:.4f}s "
+                        f"(adapt={record.input_adaptation_seconds:.4f}s "
+                        f"bridge={record.native_bridge_prepare_seconds:.4f}s "
+                        f"native={record.native_train_seconds:.4f}s) "
                         f"pred={record.predict_seconds:.4f}s rmse={record.rmse:.6f} "
                         f"mae={record.mae:.6f} r2={record.r2:.6f}"
                     )

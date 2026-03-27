@@ -37,7 +37,10 @@ The narrow, defensible release claim is:
 Additional nuance:
 
 - AlloyGBM is competitive but not leading on ``dense_numeric``
-- LightGBM is usually the fastest trainer in the comparison set
+- in the latest recorded benchmark refresh, AlloyGBM was also the fastest
+  trainer on most scenario/profile rows
+- the latest benchmark refresh did not show a broad AlloyGBM RMSE regression
+  after the training-contract and native dense-preprocessing changes
 
 Representative results
 ----------------------
@@ -86,6 +89,20 @@ Focused public regression comparison:
      --scenarios california_housing bike_sharing dense_numeric panel_time_series dow_jones_financial \
      --profile-grid default \
      --profile-seeds 7
+
+Stage timing output
+-------------------
+
+Per-record benchmark output now includes:
+
+- ``input_adaptation_seconds``
+- ``native_bridge_prepare_seconds``
+- ``native_train_seconds``
+- ``fit_seconds``
+- ``predict_seconds``
+
+Use those timing columns to tell apart Python-side adaptation cost and native
+training cost when AlloyGBM performance changes.
 
 Interpretation
 --------------

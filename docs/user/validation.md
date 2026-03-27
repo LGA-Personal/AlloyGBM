@@ -77,6 +77,40 @@ for train_idx, test_idx in purged_time_series_splits(time_index, n_splits=5):
     scores.append(rmse([targets[i] for i in test_idx], preds))
 ```
 
+## Explicit Validation With `fit(...)`
+
+Use `eval_set` when you want AlloyGBM to track validation RMSE during training
+or to enable early stopping:
+
+```python
+from alloygbm import GBMRegressor
+
+model = GBMRegressor(
+    n_estimators=1200,
+    early_stopping_rounds=50,
+    min_validation_improvement=1e-4,
+    deterministic=True,
+    seed=7,
+)
+
+model.fit(
+    X_train,
+    y_train,
+    eval_set=(X_valid, y_valid),
+)
+
+print(model.best_iteration_)
+print(model.best_score_)
+print(model.n_estimators_)
+```
+
+Rules:
+
+- `early_stopping_rounds` requires `eval_set`.
+- `eval_time_index` requires `eval_set`.
+- Validation early stopping always monitors validation RMSE derived from the
+  squared-error objective.
+
 ## When To Pass `time_index` Into `fit(...)`
 
 Pass `time_index=` to `GBMRegressor.fit(...)` when you are using:
@@ -85,3 +119,6 @@ Pass `time_index=` to `GBMRegressor.fit(...)` when you are using:
 - `categorical_time_aware=True`
 
 That combination enables time-aware categorical handling during training.
+
+If you also pass `eval_set` with `categorical_time_aware=True`, you must pass
+`eval_time_index=` for the validation rows as well.

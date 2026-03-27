@@ -119,10 +119,46 @@ print(fold_scores)
 
 For panel data, use `purged_panel_splits(...)`.
 
+## Validation And Early Stopping
+
+```python
+from alloygbm import GBMRegressor
+
+model = GBMRegressor(
+    learning_rate=0.05,
+    max_depth=6,
+    n_estimators=1200,
+    early_stopping_rounds=50,
+    min_validation_improvement=1e-4,
+    min_data_in_leaf=32,
+    lambda_l2=1.0,
+    deterministic=True,
+    seed=7,
+)
+
+model.fit(
+    X_train,
+    y_train,
+    eval_set=(X_valid, y_valid),
+)
+
+print(model.best_iteration_)
+print(model.best_score_)
+print(model.n_estimators_)
+print(model.evals_result_)
+print(model.fit_timing_)
+```
+
+`early_stopping_rounds` is explicit-only: pass `eval_set=(X_valid, y_valid)` when
+you enable it.
+
 ## Feature Summary
 
 - Native Rust-backed training and prediction from Python
 - `GBMRegressor` with deterministic training controls and dataset-aware `training_policy`
+- Explicit validation support via `fit(..., eval_set=..., eval_time_index=...)`
+- Early stopping with fitted summaries: `best_iteration_`, `best_score_`, `n_estimators_`, `evals_result_`
+- Leaf and split controls: `min_data_in_leaf`, `lambda_l1`, `lambda_l2`, `min_child_hessian`
 - Continuous-feature binning strategies: `linear`, `rank`, `quantile`
 - Optional single-column categorical encoding path
 - Artifact-backed prediction via `predict_from_artifact(...)`
@@ -145,7 +181,18 @@ Current headline results from the expanded suite:
 - AlloyGBM is strong on `dow_jones_financial`, with its best showing under the deeper low-learning-rate profile.
 - AlloyGBM is competitive on `dense_numeric`, but still trails XGBoost and CatBoost on RMSE.
 - AlloyGBM currently lags all three libraries on `california_housing` and `bike_sharing`.
-- LightGBM is usually the fastest trainer in the comparison set.
+- In the latest recorded public-suite refresh, AlloyGBM was also the fastest trainer on most scenario/profile rows.
+
+The latest recorded benchmark refresh after moving dense continuous-feature
+preprocessing into Rust did not show an RMSE collapse for AlloyGBM, and fit time
+on the public suite improved materially versus the previous stored comparison.
+The benchmark runner now also reports stage timings for:
+
+- Python input adaptation
+- native bridge preparation
+- native training
+- total fit time
+- predict time
 
 The honest short version is:
 

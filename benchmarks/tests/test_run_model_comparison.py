@@ -56,6 +56,11 @@ class _TrackingAlloyRegressor:
 
     def __init__(self, **kwargs: object) -> None:
         self.kwargs = kwargs
+        self.fit_timing_ = {
+            "input_adaptation_seconds": 0.01,
+            "native_bridge_prepare_seconds": 0.02,
+            "native_train_seconds": 0.03,
+        }
 
     def fit(self, X: object, y: object) -> "_TrackingAlloyRegressor":
         type(self).fit_input = X
@@ -112,7 +117,7 @@ class RunModelComparisonTests(unittest.TestCase):
         x_test = np.array([[0.5, 0.5]], dtype=float)
         y_test = np.array([0.0], dtype=float)
 
-        RUNNER._run_model(
+        record = RUNNER._run_model(
             model_name="alloygbm",
             factory=_TrackingAlloyRegressor,
             x_train=x_train,
@@ -128,6 +133,9 @@ class RunModelComparisonTests(unittest.TestCase):
 
         self.assertIs(_TrackingAlloyRegressor.fit_input, x_train)
         self.assertIs(_TrackingAlloyRegressor.predict_input, x_test)
+        self.assertEqual(record.input_adaptation_seconds, 0.01)
+        self.assertEqual(record.native_bridge_prepare_seconds, 0.02)
+        self.assertEqual(record.native_train_seconds, 0.03)
 
 
 if __name__ == "__main__":

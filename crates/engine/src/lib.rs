@@ -971,7 +971,15 @@ impl Trainer {
     }
 
     fn default_iteration_controls(&self, rounds: usize) -> EngineResult<IterationControls> {
-        let mut controls = IterationControls::new(rounds, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)?
+        let mut controls = IterationControls::new(
+            rounds,
+            0.0,
+            self.params.min_data_in_leaf as usize,
+            0.0,
+            1_000_000.0,
+            0.0,
+            0,
+        )?
             .with_subsample_rates(self.params.row_subsample, self.params.col_subsample)?;
         if let Some(early_stopping_rounds) = self.params.early_stopping_rounds {
             controls = controls.with_validation_early_stopping(
@@ -1018,7 +1026,10 @@ impl Trainer {
         } else {
             16
         };
-        controls.min_rows_per_leaf = suggested_min_rows.min(row_count.saturating_div(2).max(1));
+        let user_min = self.params.min_data_in_leaf as usize;
+        controls.min_rows_per_leaf = suggested_min_rows
+            .max(user_min)
+            .min(row_count.saturating_div(2).max(1));
         controls.min_split_gain = if binned_density < 0.10 {
             0.001
         } else if row_count.saturating_mul(feature_count) >= 65_536 {
@@ -1083,8 +1094,12 @@ impl Trainer {
         }
         let fit_contract = self.validate_fit_contract(dataset, objective)?;
         let sampling_seed_base = sampling_seed_base(self.params.seed, self.params.deterministic);
-        let split_options =
-            split_selection_options_for_training(execution.policy_mode, dataset, binned_matrix)?;
+        let split_options = split_selection_options_for_training(
+            &self.params,
+            execution.policy_mode,
+            dataset,
+            binned_matrix,
+        )?;
 
         let mut predictions = vec![fit_contract.baseline_prediction; dataset.row_count()];
         let mut candidate_predictions = predictions.clone();
@@ -1603,13 +1618,28 @@ fn l1_threshold_gradient(grad_sum: f32, l1_alpha: f32) -> f32 {
 }
 
 fn split_selection_options_for_training(
+    params: &TrainParams,
     policy_mode: Option<TrainingPolicyMode>,
     dataset: &TrainingDataset,
     binned_matrix: &BinnedMatrix,
 ) -> EngineResult<SplitSelectionOptions> {
-    let mut options = split_selection_options_from_env()?;
+    let env_options = split_selection_options_from_env()?;
+    let user_set_regularization =
+        params.lambda_l2 != 0.0 || params.lambda_l1 != 0.0 || params.min_child_hessian != 0.0;
+    let mut options = SplitSelectionOptions {
+        l2_lambda: params.lambda_l2,
+        l1_alpha: params.lambda_l1,
+        min_child_hessian: params.min_child_hessian,
+        min_leaf_magnitude: env_options.min_leaf_magnitude,
+    };
+    if !user_set_regularization {
+        options.l2_lambda = env_options.l2_lambda;
+        options.l1_alpha = env_options.l1_alpha;
+        options.min_child_hessian = env_options.min_child_hessian;
+    }
     if !split_l2_env_is_configured()
         && matches!(policy_mode, Some(TrainingPolicyMode::Auto))
+        && params.lambda_l2 == 0.0
         && should_apply_auto_split_l2(dataset, binned_matrix)?
     {
         options.l2_lambda = AUTO_SPLIT_L2_NOISY_SMALL_WIDE;

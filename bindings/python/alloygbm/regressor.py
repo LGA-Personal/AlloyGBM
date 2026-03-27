@@ -6,6 +6,7 @@ import bisect
 import math
 import os
 import struct
+import time
 from collections.abc import Sequence
 
 _PRE_BINNED_INTEGER_TOLERANCE = 1e-6
@@ -87,6 +88,26 @@ def _load_native_train_regression_artifact_dense():
     return train_regression_artifact_dense
 
 
+def _load_native_train_regression_artifact_with_summary():
+    try:
+        from alloygbm._alloygbm import train_regression_artifact_with_summary
+    except Exception as exc:  # pragma: no cover - exercised via contract tests.
+        raise RuntimeError(
+            "native training summary binding is unavailable; build/install the alloygbm extension module"
+        ) from exc
+    return train_regression_artifact_with_summary
+
+
+def _load_native_train_regression_artifact_dense_with_summary():
+    try:
+        from alloygbm._alloygbm import train_regression_artifact_dense_with_summary
+    except Exception as exc:  # pragma: no cover - exercised via contract tests.
+        raise RuntimeError(
+            "native dense training summary binding is unavailable; build/install the alloygbm extension module"
+        ) from exc
+    return train_regression_artifact_dense_with_summary
+
+
 def _load_native_shap_explain_rows():
     try:
         from alloygbm._alloygbm import shap_explain_rows
@@ -132,7 +153,7 @@ def _parse_env_toggle(env_name: str) -> bool:
     if value is None:
         return False
     normalized = value.strip().lower()
-    return normalized not in {"", "0", "false", "off"}
+    return normalized in {"1", "true", "yes", "on"}
 
 
 def _linear_tail_rank_enabled_from_env() -> bool:
@@ -168,6 +189,10 @@ class GBMRegressor:
         col_subsample: float = 1.0,
         early_stopping_rounds: int | None = None,
         min_validation_improvement: float = 0.0,
+        min_data_in_leaf: int = 1,
+        lambda_l1: float = 0.0,
+        lambda_l2: float = 0.0,
+        min_child_hessian: float = 0.0,
         seed: int = 0,
         deterministic: bool = True,
         continuous_binning_strategy: str = "linear",
@@ -193,6 +218,14 @@ class GBMRegressor:
             raise ValueError("early_stopping_rounds must be greater than 0 when set")
         if min_validation_improvement < 0.0:
             raise ValueError("min_validation_improvement must be >= 0")
+        if int(min_data_in_leaf) <= 0:
+            raise ValueError("min_data_in_leaf must be greater than 0")
+        if lambda_l1 < 0.0:
+            raise ValueError("lambda_l1 must be >= 0")
+        if lambda_l2 < 0.0:
+            raise ValueError("lambda_l2 must be >= 0")
+        if min_child_hessian < 0.0:
+            raise ValueError("min_child_hessian must be >= 0")
         if categorical_feature_index is not None and int(categorical_feature_index) < 0:
             raise ValueError("categorical_feature_index must be >= 0 when set")
         if categorical_smoothing < 0.0:
@@ -228,6 +261,10 @@ class GBMRegressor:
             else None
         )
         self.min_validation_improvement = float(min_validation_improvement)
+        self.min_data_in_leaf = int(min_data_in_leaf)
+        self.lambda_l1 = float(lambda_l1)
+        self.lambda_l2 = float(lambda_l2)
+        self.min_child_hessian = float(min_child_hessian)
         self.seed = int(seed)
         self.deterministic = bool(deterministic)
         self.continuous_binning_strategy = str(continuous_binning_strategy)
@@ -252,6 +289,11 @@ class GBMRegressor:
         self._continuous_feature_sorted_values: list[list[float]] | None = None
         self._continuous_feature_quantile_cuts: list[list[float]] | None = None
         self._continuous_feature_linear_rank_flags: list[bool] | None = None
+        self.best_iteration_: int | None = None
+        self.best_score_: float | None = None
+        self.n_estimators_: int | None = None
+        self.evals_result_: dict[str, dict[str, list[float]]] | None = None
+        self.fit_timing_: dict[str, float] | None = None
 
     def __repr__(self) -> str:
         return (
@@ -263,6 +305,10 @@ class GBMRegressor:
             f"col_subsample={self.col_subsample}, "
             f"early_stopping_rounds={self.early_stopping_rounds}, "
             f"min_validation_improvement={self.min_validation_improvement}, "
+            f"min_data_in_leaf={self.min_data_in_leaf}, "
+            f"lambda_l1={self.lambda_l1}, "
+            f"lambda_l2={self.lambda_l2}, "
+            f"min_child_hessian={self.min_child_hessian}, "
             f"seed={self.seed}, "
             f"deterministic={self.deterministic}, "
             f"continuous_binning_strategy='{self.continuous_binning_strategy}', "
@@ -287,6 +333,10 @@ class GBMRegressor:
             "col_subsample": self.col_subsample,
             "early_stopping_rounds": self.early_stopping_rounds,
             "min_validation_improvement": self.min_validation_improvement,
+            "min_data_in_leaf": self.min_data_in_leaf,
+            "lambda_l1": self.lambda_l1,
+            "lambda_l2": self.lambda_l2,
+            "min_child_hessian": self.min_child_hessian,
             "seed": self.seed,
             "deterministic": self.deterministic,
             "continuous_binning_strategy": self.continuous_binning_strategy,
@@ -309,6 +359,10 @@ class GBMRegressor:
             "col_subsample",
             "early_stopping_rounds",
             "min_validation_improvement",
+            "min_data_in_leaf",
+            "lambda_l1",
+            "lambda_l2",
+            "min_child_hessian",
             "seed",
             "deterministic",
             "continuous_binning_strategy",
@@ -370,6 +424,30 @@ class GBMRegressor:
             if min_validation_improvement < 0.0:
                 raise ValueError("min_validation_improvement must be >= 0")
             self.min_validation_improvement = min_validation_improvement
+
+        if "min_data_in_leaf" in params:
+            min_data_in_leaf = int(params["min_data_in_leaf"])
+            if min_data_in_leaf <= 0:
+                raise ValueError("min_data_in_leaf must be greater than 0")
+            self.min_data_in_leaf = min_data_in_leaf
+
+        if "lambda_l1" in params:
+            lambda_l1 = float(params["lambda_l1"])
+            if lambda_l1 < 0.0:
+                raise ValueError("lambda_l1 must be >= 0")
+            self.lambda_l1 = lambda_l1
+
+        if "lambda_l2" in params:
+            lambda_l2 = float(params["lambda_l2"])
+            if lambda_l2 < 0.0:
+                raise ValueError("lambda_l2 must be >= 0")
+            self.lambda_l2 = lambda_l2
+
+        if "min_child_hessian" in params:
+            min_child_hessian = float(params["min_child_hessian"])
+            if min_child_hessian < 0.0:
+                raise ValueError("min_child_hessian must be >= 0")
+            self.min_child_hessian = min_child_hessian
 
         if "seed" in params:
             self.seed = int(params["seed"])
@@ -443,11 +521,19 @@ class GBMRegressor:
         X: object,
         y: object,
         *,
+        eval_set: tuple[object, object] | None = None,
+        eval_time_index: object | None = None,
         categorical_feature_values: object | None = None,
         time_index: object | None = None,
     ) -> "GBMRegressor":
         """Fit native-backed regression model artifact state."""
+        fit_start = time.perf_counter()
         targets = self._validate_targets(y)
+        if self.early_stopping_rounds is not None and eval_set is None:
+            raise ValueError("early_stopping_rounds requires eval_set to be provided")
+        if eval_time_index is not None and eval_set is None:
+            raise ValueError("eval_time_index requires eval_set to be provided")
+
         effective_categorical_feature_index = self.categorical_feature_index
         categorical_values = None
         if categorical_feature_values is not None:
@@ -460,150 +546,21 @@ class GBMRegressor:
             if inferred is not None:
                 effective_categorical_feature_index, categorical_values = inferred
 
-        native_training_rows: object | None = None
-        rows: list[list[float]] | None = None
-        row_count = len(targets)
-        feature_count: int
-        dense_training_payload: tuple[list[float], int, int] | None = None
-        dense_continuous_training_payload: tuple[list[float], int, int] | None = None
-
-        if effective_categorical_feature_index is None:
-            dense_float_payload = self._native_matrix_flat_payload(X)
-            if dense_float_payload is not None:
-                flat_values, row_count, feature_count = dense_float_payload
-                if row_count != len(targets):
-                    raise ValueError("X and y must contain the same number of rows")
-                if all(
-                    value >= 0.0
-                    and abs(value - float(self._round_half_away_from_zero(value)))
-                    <= _PRE_BINNED_INTEGER_TOLERANCE
-                    for value in flat_values
-                ):
-                    dense_training_payload = dense_float_payload
-                    self._uses_continuous_binning = False
-                    self._continuous_feature_mins = None
-                    self._continuous_feature_maxs = None
-                    self._continuous_feature_sorted_values = None
-                    self._continuous_feature_quantile_cuts = None
-                    self._continuous_feature_linear_rank_flags = None
-                else:
-                    self._uses_continuous_binning = True
-                    if self.continuous_binning_strategy == "linear":
-                        mins, maxs = self._derive_dense_feature_bounds(
-                            flat_values, row_count, feature_count
-                        )
-                        self._continuous_feature_mins = mins
-                        self._continuous_feature_maxs = maxs
-                        if _linear_tail_rank_enabled_from_env():
-                            core_span_ratio_threshold = (
-                                _linear_tail_core_span_ratio_threshold_from_env()
-                            )
-                            rows = self._validate_rows(X)
-                            (
-                                rank_flags,
-                                sorted_values,
-                            ) = self._derive_continuous_feature_tail_rank_plan(
-                                rows, core_span_ratio_threshold
-                            )
-                            self._continuous_feature_linear_rank_flags = rank_flags
-                            if any(rank_flags):
-                                self._continuous_feature_sorted_values = sorted_values
-                                dense_continuous_training_payload = (
-                                    self._quantize_dense_values_linear_with_selective_rank(
-                                        flat_values,
-                                        row_count,
-                                        feature_count,
-                                        mins,
-                                        maxs,
-                                        rank_flags,
-                                        sorted_values,
-                                    ),
-                                    row_count,
-                                    feature_count,
-                                )
-                            else:
-                                self._continuous_feature_sorted_values = None
-                                dense_continuous_training_payload = (
-                                    self._quantize_dense_values_linear(
-                                        flat_values,
-                                        row_count,
-                                        feature_count,
-                                        mins,
-                                        maxs,
-                                    ),
-                                    row_count,
-                                    feature_count,
-                                )
-                        else:
-                            self._continuous_feature_sorted_values = None
-                            self._continuous_feature_linear_rank_flags = None
-                            dense_continuous_training_payload = (
-                                self._quantize_dense_values_linear(
-                                    flat_values,
-                                    row_count,
-                                    feature_count,
-                                    mins,
-                                    maxs,
-                                ),
-                                row_count,
-                                feature_count,
-                            )
-                        self._continuous_feature_quantile_cuts = None
-                    elif self.continuous_binning_strategy == "rank":
-                        sorted_values = self._derive_dense_sorted_feature_values(
-                            flat_values, row_count, feature_count
-                        )
-                        self._continuous_feature_sorted_values = sorted_values
-                        self._continuous_feature_mins = None
-                        self._continuous_feature_maxs = None
-                        self._continuous_feature_quantile_cuts = None
-                        self._continuous_feature_linear_rank_flags = None
-                        dense_continuous_training_payload = (
-                            self._quantize_dense_values_rank(
-                                flat_values,
-                                row_count,
-                                feature_count,
-                                sorted_values,
-                            ),
-                            row_count,
-                            feature_count,
-                        )
-                    else:
-                        quantile_cuts = self._derive_dense_feature_quantile_cuts(
-                            flat_values,
-                            row_count,
-                            feature_count,
-                            self.continuous_binning_max_bins,
-                        )
-                        self._continuous_feature_quantile_cuts = quantile_cuts
-                        self._continuous_feature_sorted_values = None
-                        self._continuous_feature_mins = None
-                        self._continuous_feature_maxs = None
-                        self._continuous_feature_linear_rank_flags = None
-                        dense_continuous_training_payload = (
-                            self._quantize_dense_values_quantile(
-                                flat_values,
-                                row_count,
-                                feature_count,
-                                quantile_cuts,
-                            ),
-                            row_count,
-                            feature_count,
-                        )
-            else:
-                rows = self._validate_rows(X)
-                row_count = len(rows)
-                feature_count = len(rows[0])
-                if row_count != len(targets):
-                    raise ValueError("X and y must contain the same number of rows")
+        dense_training_payload = (
+            self._native_matrix_flat_payload(X)
+            if effective_categorical_feature_index is None
+            else None
+        )
+        if dense_training_payload is not None:
+            _, row_count, feature_count = dense_training_payload
         else:
-            rows = self._validate_rows(
+            training_rows = self._validate_rows(
                 X, categorical_feature_index=effective_categorical_feature_index
             )
-            row_count = len(rows)
-            feature_count = len(rows[0])
-            if row_count != len(targets):
-                raise ValueError("X and y must contain the same number of rows")
+            row_count = len(training_rows)
+            feature_count = len(training_rows[0])
+        if row_count != len(targets):
+            raise ValueError("X and y must contain the same number of rows")
 
         if (
             effective_categorical_feature_index is not None
@@ -622,9 +579,50 @@ class GBMRegressor:
                 "categorical_feature_values must be provided when categorical_feature_index is set"
             )
 
-        validated_time_index = None
-        if time_index is not None:
-            validated_time_index = self._validate_time_index(time_index, row_count)
+        validated_time_index = (
+            self._validate_time_index(time_index, row_count) if time_index is not None else None
+        )
+
+        validation_X: object | None = None
+        validation_targets: list[float] | None = None
+        validation_dense_payload: tuple[list[float], int, int] | None = None
+        validation_rows: list[list[float]] | None = None
+        validation_categorical_values: list[str] | None = None
+        validated_eval_time_index: list[int] | None = None
+        if eval_set is not None:
+            validation_X, validation_y = eval_set
+            validation_targets = self._validate_targets(validation_y)
+            validation_dense_payload = (
+                self._native_matrix_flat_payload(validation_X)
+                if effective_categorical_feature_index is None
+                else None
+            )
+            if validation_dense_payload is not None:
+                _, validation_row_count, validation_feature_count = validation_dense_payload
+            else:
+                validation_rows = self._validate_rows(
+                    validation_X,
+                    categorical_feature_index=effective_categorical_feature_index,
+                )
+                validation_row_count = len(validation_rows)
+                validation_feature_count = len(validation_rows[0])
+            if validation_row_count != len(validation_targets):
+                raise ValueError("eval_set X and y must contain the same number of rows")
+            if validation_feature_count != feature_count:
+                raise ValueError(
+                    "eval_set feature count must match training feature count"
+                )
+            if eval_time_index is not None:
+                validated_eval_time_index = self._validate_time_index(
+                    eval_time_index, validation_row_count
+                )
+            if effective_categorical_feature_index is not None:
+                validation_categorical_values = self._extract_categorical_values_for_index(
+                    validation_X,
+                    effective_categorical_feature_index,
+                    validation_row_count,
+                )
+
         if (
             effective_categorical_feature_index is not None
             and self.categorical_time_aware
@@ -633,94 +631,41 @@ class GBMRegressor:
             raise ValueError(
                 "time_index must be provided when categorical_time_aware=True and categorical_feature_index is set"
             )
+        if (
+            effective_categorical_feature_index is not None
+            and self.categorical_time_aware
+            and eval_set is not None
+            and validated_eval_time_index is None
+        ):
+            raise ValueError(
+                "eval_time_index must be provided when categorical_time_aware=True and eval_set is used"
+            )
 
-        if (
-            native_training_rows is None
-            and dense_training_payload is None
-            and dense_continuous_training_payload is None
-        ):
-            assert rows is not None
-            self._uses_continuous_binning = not self._rows_are_pre_binned(rows)
-        if (
-            native_training_rows is None
-            and dense_training_payload is None
-            and dense_continuous_training_payload is None
-            and self._uses_continuous_binning
-        ):
-            assert rows is not None
-            if self.continuous_binning_strategy == "linear":
-                mins, maxs = self._derive_continuous_feature_bounds(rows)
-                self._continuous_feature_mins = mins
-                self._continuous_feature_maxs = maxs
-                if _linear_tail_rank_enabled_from_env():
-                    core_span_ratio_threshold = (
-                        _linear_tail_core_span_ratio_threshold_from_env()
-                    )
-                    (
-                        rank_flags,
-                        sorted_values,
-                    ) = self._derive_continuous_feature_tail_rank_plan(
-                        rows, core_span_ratio_threshold
-                    )
-                    self._continuous_feature_linear_rank_flags = rank_flags
-                    if any(rank_flags):
-                        self._continuous_feature_sorted_values = sorted_values
-                        training_rows = self._quantize_rows_linear_with_selective_rank(
-                            rows, mins, maxs, rank_flags, sorted_values
-                        )
-                    else:
-                        self._continuous_feature_sorted_values = None
-                        training_rows = self._quantize_rows_linear(rows, mins, maxs)
-                else:
-                    self._continuous_feature_sorted_values = None
-                    self._continuous_feature_linear_rank_flags = None
-                    training_rows = self._quantize_rows_linear(rows, mins, maxs)
-                self._continuous_feature_quantile_cuts = None
-            elif self.continuous_binning_strategy == "rank":
-                sorted_values = self._derive_continuous_feature_sorted_values(rows)
-                self._continuous_feature_sorted_values = sorted_values
-                self._continuous_feature_mins = None
-                self._continuous_feature_maxs = None
-                self._continuous_feature_quantile_cuts = None
-                self._continuous_feature_linear_rank_flags = None
-                training_rows = self._quantize_rows_rank(rows, sorted_values)
+        input_adaptation_seconds = time.perf_counter() - fit_start
+        try:
+            if dense_training_payload is not None:
+                train_with_summary = _load_native_train_regression_artifact_dense_with_summary()
             else:
-                quantile_cuts = self._derive_continuous_feature_quantile_cuts(
-                    rows, self.continuous_binning_max_bins
-                )
-                self._continuous_feature_quantile_cuts = quantile_cuts
-                self._continuous_feature_sorted_values = None
-                self._continuous_feature_mins = None
-                self._continuous_feature_maxs = None
-                self._continuous_feature_linear_rank_flags = None
-                training_rows = self._quantize_rows_quantile(rows, quantile_cuts)
-            native_training_rows = training_rows
-        elif (
-            native_training_rows is None
-            and dense_training_payload is None
-            and dense_continuous_training_payload is None
-        ):
-            assert rows is not None
-            self._continuous_feature_mins = None
-            self._continuous_feature_maxs = None
-            self._continuous_feature_sorted_values = None
-            self._continuous_feature_quantile_cuts = None
-            self._continuous_feature_linear_rank_flags = None
-            native_training_rows = rows
+                train_with_summary = _load_native_train_regression_artifact_with_summary()
+        except RuntimeError:
+            return self._fit_with_legacy_native_bridge(
+                X=X,
+                targets=targets,
+                dense_training_payload=dense_training_payload,
+                training_rows=training_rows if dense_training_payload is None else None,
+                feature_count=feature_count,
+                categorical_feature_index=effective_categorical_feature_index,
+                categorical_values=categorical_values,
+                time_index=validated_time_index,
+                eval_set=eval_set,
+                input_adaptation_seconds=input_adaptation_seconds,
+            )
 
-        active_dense_training_payload = (
-            dense_training_payload
-            if dense_training_payload is not None
-            else dense_continuous_training_payload
-        )
-
-        if active_dense_training_payload is not None:
-            flat_values, dense_row_count, dense_feature_count = active_dense_training_payload
-            train_regression_artifact_dense = _load_native_train_regression_artifact_dense()
-            artifact_bytes = train_regression_artifact_dense(
-                values=flat_values,
-                row_count=dense_row_count,
-                feature_count=dense_feature_count,
+        if dense_training_payload is not None:
+            native_result = train_with_summary(
+                values=dense_training_payload[0],
+                row_count=dense_training_payload[1],
+                feature_count=dense_training_payload[2],
                 targets=targets,
                 learning_rate=self.learning_rate,
                 max_depth=self.max_depth,
@@ -731,14 +676,319 @@ class GBMRegressor:
                 deterministic=self.deterministic,
                 rounds=self.n_estimators,
                 early_stopping_rounds=self.early_stopping_rounds,
+                min_data_in_leaf=self.min_data_in_leaf,
+                lambda_l1=self.lambda_l1,
+                lambda_l2=self.lambda_l2,
+                min_child_hessian=self.min_child_hessian,
+                validation_values=(
+                    validation_dense_payload[0]
+                    if validation_dense_payload is not None
+                    else None
+                ),
+                validation_row_count=(
+                    validation_dense_payload[1]
+                    if validation_dense_payload is not None
+                    else None
+                ),
+                validation_targets=validation_targets,
+                validation_time_index=validated_eval_time_index,
                 categorical_feature_index=effective_categorical_feature_index,
                 categorical_feature_values=categorical_values,
+                validation_categorical_feature_values=validation_categorical_values,
                 training_policy=self.training_policy,
                 store_node_stats=self.store_node_stats,
                 categorical_smoothing=self.categorical_smoothing,
                 categorical_min_samples_leaf=self.categorical_min_samples_leaf,
                 categorical_time_aware=self.categorical_time_aware,
                 time_index=validated_time_index,
+                continuous_binning_strategy=self.continuous_binning_strategy,
+                continuous_binning_max_bins=self.continuous_binning_max_bins,
+            )
+        else:
+            assert training_rows is not None
+            native_result = train_with_summary(
+                rows=training_rows,
+                targets=targets,
+                learning_rate=self.learning_rate,
+                max_depth=self.max_depth,
+                row_subsample=self.row_subsample,
+                col_subsample=self.col_subsample,
+                min_validation_improvement=self.min_validation_improvement,
+                seed=self.seed,
+                deterministic=self.deterministic,
+                rounds=self.n_estimators,
+                early_stopping_rounds=self.early_stopping_rounds,
+                min_data_in_leaf=self.min_data_in_leaf,
+                lambda_l1=self.lambda_l1,
+                lambda_l2=self.lambda_l2,
+                min_child_hessian=self.min_child_hessian,
+                validation_rows=validation_rows,
+                validation_targets=validation_targets,
+                validation_time_index=validated_eval_time_index,
+                categorical_feature_index=effective_categorical_feature_index,
+                categorical_feature_values=categorical_values,
+                validation_categorical_feature_values=validation_categorical_values,
+                training_policy=self.training_policy,
+                store_node_stats=self.store_node_stats,
+                categorical_smoothing=self.categorical_smoothing,
+                categorical_min_samples_leaf=self.categorical_min_samples_leaf,
+                categorical_time_aware=self.categorical_time_aware,
+                time_index=validated_time_index,
+                continuous_binning_strategy=self.continuous_binning_strategy,
+                continuous_binning_max_bins=self.continuous_binning_max_bins,
+            )
+
+        self._apply_continuous_binning_metadata(native_result.continuous_binning_metadata)
+        self._n_features_in = feature_count
+        self._artifact_bytes = bytes(native_result.artifact_bytes)
+        self._native_predictor_handle = self._build_native_predictor_handle(
+            self._artifact_bytes
+        )
+        summary = native_result.summary
+        self.best_iteration_ = summary.best_validation_round
+        self.best_score_ = (
+            float(summary.best_validation_loss)
+            if summary.best_validation_loss is not None
+            else None
+        )
+        self.n_estimators_ = int(summary.rounds_completed)
+        self.evals_result_ = {"train": {"rmse": [float(v) for v in summary.train_rmse]}}
+        if summary.validation_rmse:
+            self.evals_result_["validation"] = {
+                "rmse": [float(v) for v in summary.validation_rmse]
+            }
+        total_fit_seconds = time.perf_counter() - fit_start
+        self.fit_timing_ = {
+            "input_adaptation_seconds": float(input_adaptation_seconds),
+            "native_bridge_prepare_seconds": float(summary.bridge_prepare_seconds),
+            "native_train_seconds": float(summary.native_train_seconds),
+            "total_fit_seconds": float(total_fit_seconds),
+        }
+        self._is_fitted = True
+        return self
+
+    def _fit_with_legacy_native_bridge(
+        self,
+        *,
+        X: object,
+        targets: list[float],
+        dense_training_payload: tuple[list[float], int, int] | None,
+        training_rows: list[list[float]] | None,
+        feature_count: int,
+        categorical_feature_index: int | None,
+        categorical_values: list[str] | None,
+        time_index: list[int] | None,
+        eval_set: tuple[object, object] | None,
+        input_adaptation_seconds: float,
+    ) -> "GBMRegressor":
+        if eval_set is not None:
+            raise RuntimeError(
+                "eval_set requires a native alloygbm build with training summary support"
+            )
+        if (
+            self.min_data_in_leaf != 1
+            or self.lambda_l1 != 0.0
+            or self.lambda_l2 != 0.0
+            or self.min_child_hessian != 0.0
+        ):
+            raise RuntimeError(
+                "explicit regularization and min_data_in_leaf require a native alloygbm build with training summary support"
+            )
+
+        fit_start = time.perf_counter()
+        native_training_rows: object | None = None
+        active_dense_training_payload = dense_training_payload
+        rows = training_rows
+        if active_dense_training_payload is None:
+            assert rows is not None
+            self._uses_continuous_binning = not self._rows_are_pre_binned(rows)
+            if self._uses_continuous_binning:
+                if self.continuous_binning_strategy == "linear":
+                    mins, maxs = self._derive_continuous_feature_bounds(rows)
+                    self._continuous_feature_mins = mins
+                    self._continuous_feature_maxs = maxs
+                    if _linear_tail_rank_enabled_from_env():
+                        core_span_ratio_threshold = (
+                            _linear_tail_core_span_ratio_threshold_from_env()
+                        )
+                        rank_flags, sorted_values = (
+                            self._derive_continuous_feature_tail_rank_plan(
+                                rows, core_span_ratio_threshold
+                            )
+                        )
+                        self._continuous_feature_linear_rank_flags = rank_flags
+                        if any(rank_flags):
+                            self._continuous_feature_sorted_values = sorted_values
+                            native_training_rows = (
+                                self._quantize_rows_linear_with_selective_rank(
+                                    rows, mins, maxs, rank_flags, sorted_values
+                                )
+                            )
+                        else:
+                            self._continuous_feature_sorted_values = None
+                            native_training_rows = self._quantize_rows_linear(
+                                rows, mins, maxs
+                            )
+                    else:
+                        self._continuous_feature_sorted_values = None
+                        self._continuous_feature_linear_rank_flags = None
+                        native_training_rows = self._quantize_rows_linear(rows, mins, maxs)
+                    self._continuous_feature_quantile_cuts = None
+                elif self.continuous_binning_strategy == "rank":
+                    sorted_values = self._derive_continuous_feature_sorted_values(rows)
+                    self._continuous_feature_sorted_values = sorted_values
+                    self._continuous_feature_mins = None
+                    self._continuous_feature_maxs = None
+                    self._continuous_feature_quantile_cuts = None
+                    self._continuous_feature_linear_rank_flags = None
+                    native_training_rows = self._quantize_rows_rank(rows, sorted_values)
+                else:
+                    quantile_cuts = self._derive_continuous_feature_quantile_cuts(
+                        rows, self.continuous_binning_max_bins
+                    )
+                    self._continuous_feature_quantile_cuts = quantile_cuts
+                    self._continuous_feature_sorted_values = None
+                    self._continuous_feature_mins = None
+                    self._continuous_feature_maxs = None
+                    self._continuous_feature_linear_rank_flags = None
+                    native_training_rows = self._quantize_rows_quantile(rows, quantile_cuts)
+            else:
+                self._continuous_feature_mins = None
+                self._continuous_feature_maxs = None
+                self._continuous_feature_sorted_values = None
+                self._continuous_feature_quantile_cuts = None
+                self._continuous_feature_linear_rank_flags = None
+                native_training_rows = rows
+        else:
+            flat_values, row_count, dense_feature_count = active_dense_training_payload
+            if all(
+                value >= 0.0
+                and abs(value - float(self._round_half_away_from_zero(value)))
+                <= _PRE_BINNED_INTEGER_TOLERANCE
+                for value in flat_values
+            ):
+                self._uses_continuous_binning = False
+                self._continuous_feature_mins = None
+                self._continuous_feature_maxs = None
+                self._continuous_feature_sorted_values = None
+                self._continuous_feature_quantile_cuts = None
+                self._continuous_feature_linear_rank_flags = None
+            else:
+                self._uses_continuous_binning = True
+                rows = self._validate_rows(X)
+                if self.continuous_binning_strategy == "linear":
+                    mins, maxs = self._derive_dense_feature_bounds(
+                        flat_values, row_count, dense_feature_count
+                    )
+                    self._continuous_feature_mins = mins
+                    self._continuous_feature_maxs = maxs
+                    if _linear_tail_rank_enabled_from_env():
+                        core_span_ratio_threshold = (
+                            _linear_tail_core_span_ratio_threshold_from_env()
+                        )
+                        rank_flags, sorted_values = (
+                            self._derive_continuous_feature_tail_rank_plan(
+                                rows, core_span_ratio_threshold
+                            )
+                        )
+                        self._continuous_feature_linear_rank_flags = rank_flags
+                        if any(rank_flags):
+                            self._continuous_feature_sorted_values = sorted_values
+                            active_dense_training_payload = (
+                                self._quantize_dense_values_linear_with_selective_rank(
+                                    flat_values,
+                                    row_count,
+                                    dense_feature_count,
+                                    mins,
+                                    maxs,
+                                    rank_flags,
+                                    sorted_values,
+                                ),
+                                row_count,
+                                dense_feature_count,
+                            )
+                        else:
+                            self._continuous_feature_sorted_values = None
+                            active_dense_training_payload = (
+                                self._quantize_dense_values_linear(
+                                    flat_values, row_count, dense_feature_count, mins, maxs
+                                ),
+                                row_count,
+                                dense_feature_count,
+                            )
+                    else:
+                        self._continuous_feature_sorted_values = None
+                        self._continuous_feature_linear_rank_flags = None
+                        active_dense_training_payload = (
+                            self._quantize_dense_values_linear(
+                                flat_values, row_count, dense_feature_count, mins, maxs
+                            ),
+                            row_count,
+                            dense_feature_count,
+                        )
+                    self._continuous_feature_quantile_cuts = None
+                elif self.continuous_binning_strategy == "rank":
+                    sorted_values = self._derive_dense_sorted_feature_values(
+                        flat_values, row_count, dense_feature_count
+                    )
+                    self._continuous_feature_sorted_values = sorted_values
+                    self._continuous_feature_mins = None
+                    self._continuous_feature_maxs = None
+                    self._continuous_feature_quantile_cuts = None
+                    self._continuous_feature_linear_rank_flags = None
+                    active_dense_training_payload = (
+                        self._quantize_dense_values_rank(
+                            flat_values, row_count, dense_feature_count, sorted_values
+                        ),
+                        row_count,
+                        dense_feature_count,
+                    )
+                else:
+                    quantile_cuts = self._derive_dense_feature_quantile_cuts(
+                        flat_values,
+                        row_count,
+                        dense_feature_count,
+                        self.continuous_binning_max_bins,
+                    )
+                    self._continuous_feature_quantile_cuts = quantile_cuts
+                    self._continuous_feature_sorted_values = None
+                    self._continuous_feature_mins = None
+                    self._continuous_feature_maxs = None
+                    self._continuous_feature_linear_rank_flags = None
+                    active_dense_training_payload = (
+                        self._quantize_dense_values_quantile(
+                            flat_values, row_count, dense_feature_count, quantile_cuts
+                        ),
+                        row_count,
+                        dense_feature_count,
+                    )
+
+        if active_dense_training_payload is not None:
+            train_regression_artifact_dense = _load_native_train_regression_artifact_dense()
+            artifact_bytes = train_regression_artifact_dense(
+                values=active_dense_training_payload[0],
+                row_count=active_dense_training_payload[1],
+                feature_count=active_dense_training_payload[2],
+                targets=targets,
+                learning_rate=self.learning_rate,
+                max_depth=self.max_depth,
+                row_subsample=self.row_subsample,
+                col_subsample=self.col_subsample,
+                min_validation_improvement=self.min_validation_improvement,
+                seed=self.seed,
+                deterministic=self.deterministic,
+                rounds=self.n_estimators,
+                early_stopping_rounds=self.early_stopping_rounds,
+                categorical_feature_index=categorical_feature_index,
+                categorical_feature_values=categorical_values,
+                training_policy=self.training_policy,
+                store_node_stats=self.store_node_stats,
+                categorical_smoothing=self.categorical_smoothing,
+                categorical_min_samples_leaf=self.categorical_min_samples_leaf,
+                categorical_time_aware=self.categorical_time_aware,
+                time_index=time_index,
+                continuous_binning_strategy=self.continuous_binning_strategy,
+                continuous_binning_max_bins=self.continuous_binning_max_bins,
             )
         else:
             train_regression_artifact = _load_native_train_regression_artifact()
@@ -754,14 +1004,16 @@ class GBMRegressor:
                 deterministic=self.deterministic,
                 rounds=self.n_estimators,
                 early_stopping_rounds=self.early_stopping_rounds,
-                categorical_feature_index=effective_categorical_feature_index,
+                categorical_feature_index=categorical_feature_index,
                 categorical_feature_values=categorical_values,
                 training_policy=self.training_policy,
                 store_node_stats=self.store_node_stats,
                 categorical_smoothing=self.categorical_smoothing,
                 categorical_min_samples_leaf=self.categorical_min_samples_leaf,
                 categorical_time_aware=self.categorical_time_aware,
-                time_index=validated_time_index,
+                time_index=time_index,
+                continuous_binning_strategy=self.continuous_binning_strategy,
+                continuous_binning_max_bins=self.continuous_binning_max_bins,
             )
 
         self._n_features_in = feature_count
@@ -769,6 +1021,17 @@ class GBMRegressor:
         self._native_predictor_handle = self._build_native_predictor_handle(
             self._artifact_bytes
         )
+        self.best_iteration_ = None
+        self.best_score_ = None
+        self.n_estimators_ = self.n_estimators
+        self.evals_result_ = {"train": {"rmse": []}}
+        total_fit_seconds = time.perf_counter() - fit_start
+        self.fit_timing_ = {
+            "input_adaptation_seconds": float(input_adaptation_seconds),
+            "native_bridge_prepare_seconds": 0.0,
+            "native_train_seconds": float(total_fit_seconds),
+            "total_fit_seconds": float(total_fit_seconds),
+        }
         self._is_fitted = True
         return self
 
@@ -1378,6 +1641,38 @@ class GBMRegressor:
         return [str(value) for value in values_like]
 
     @staticmethod
+    def _extract_categorical_values_for_index(
+        X: object, categorical_feature_index: int, row_count: int
+    ) -> list[str]:
+        if hasattr(X, "columns") and hasattr(X, "dtypes"):
+            columns = GBMRegressor._coerce_sequence_like(getattr(X, "columns"), "X.columns")
+            if isinstance(columns, Sequence) and categorical_feature_index < len(columns):
+                return GBMRegressor._extract_column_values(
+                    X, columns[categorical_feature_index], categorical_feature_index
+                )
+
+        rows_like = GBMRegressor._coerce_sequence_like(X, "X")
+        if not isinstance(rows_like, Sequence) or isinstance(rows_like, (str, bytes)):
+            raise TypeError(
+                "categorical eval_set values could not be extracted from X"
+            )
+        if len(rows_like) != row_count:
+            raise ValueError(
+                "categorical eval_set values must match the number of validation rows"
+            )
+
+        values: list[str] = []
+        for row in rows_like:
+            if not isinstance(row, Sequence) or isinstance(row, (str, bytes)):
+                raise TypeError("each X row must be a sequence when extracting categories")
+            if categorical_feature_index >= len(row):
+                raise ValueError(
+                    "categorical_feature_index must be within validation feature bounds"
+                )
+            values.append(str(row[categorical_feature_index]))
+        return values
+
+    @staticmethod
     def _infer_explicit_categorical_feature(
         X: object,
     ) -> tuple[int, list[str]] | None:
@@ -1667,6 +1962,22 @@ class GBMRegressor:
             )
         return self._continuous_feature_quantile_cuts
 
+    def _apply_continuous_binning_metadata(self, metadata: object) -> None:
+        self._uses_continuous_binning = bool(
+            getattr(metadata, "uses_continuous_binning", False)
+        )
+        self._continuous_feature_mins = getattr(metadata, "feature_mins", None)
+        self._continuous_feature_maxs = getattr(metadata, "feature_maxs", None)
+        self._continuous_feature_sorted_values = getattr(
+            metadata, "feature_sorted_values", None
+        )
+        self._continuous_feature_quantile_cuts = getattr(
+            metadata, "feature_quantile_cuts", None
+        )
+        self._continuous_feature_linear_rank_flags = getattr(
+            metadata, "feature_linear_rank_flags", None
+        )
+
     def _reset_fitted_state(self) -> None:
         self._is_fitted = False
         self._artifact_bytes = None
@@ -1678,6 +1989,11 @@ class GBMRegressor:
         self._continuous_feature_sorted_values = None
         self._continuous_feature_quantile_cuts = None
         self._continuous_feature_linear_rank_flags = None
+        self.best_iteration_ = None
+        self.best_score_ = None
+        self.n_estimators_ = None
+        self.evals_result_ = None
+        self.fit_timing_ = None
 
     @staticmethod
     def _build_native_predictor_handle(artifact_bytes: bytes) -> object | None:

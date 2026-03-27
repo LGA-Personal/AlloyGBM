@@ -28,6 +28,25 @@ Stopping and policy controls
 recommended default for practical use. ``manual`` is more appropriate for
 controlled ablation work.
 
+Early stopping is explicit-only. If ``early_stopping_rounds`` is set, call
+``fit(..., eval_set=(X_valid, y_valid))``.
+
+Leaf and split controls
+-----------------------
+
+- ``min_data_in_leaf: int = 1`` — when ``training_policy="auto"``, the engine
+  may increase this based on dataset size but will never reduce it below the
+  value you set.
+- ``lambda_l1: float = 0.0``
+- ``lambda_l2: float = 0.0``
+- ``min_child_hessian: float = 0.0``
+
+These map directly to native training controls instead of relying on
+environment-variable overrides.
+
+Current non-goal: AlloyGBM does not expose ``num_leaves`` yet. The trainer
+remains depth-oriented rather than leaf-budget-oriented.
+
 Reproducibility
 ---------------
 
@@ -65,11 +84,29 @@ analysis. It is not required for ordinary prediction.
 Main methods
 ------------
 
-- ``fit(X, y, *, categorical_feature_values=None, time_index=None)``
+- ``fit(X, y, *, eval_set=None, eval_time_index=None, categorical_feature_values=None, time_index=None)``
 - ``predict(X)``
 - ``shap_values(X, *, include_expected_value=False)``
 - ``feature_importances(X, *, method="shap")``
 - ``predict_from_artifact(artifact_bytes, X)``
+
+Important ``fit(...)`` rules:
+
+- ``early_stopping_rounds`` requires ``eval_set``
+- ``eval_time_index`` requires ``eval_set``
+- ``categorical_time_aware=True`` requires ``time_index`` during training and
+  ``eval_time_index`` for validation when ``eval_set`` is used
+
+Post-fit attributes
+-------------------
+
+After fitting, the estimator may expose:
+
+- ``best_iteration_``
+- ``best_score_``
+- ``n_estimators_``
+- ``evals_result_``
+- ``fit_timing_``
 
 Recommended usage pattern
 -------------------------
