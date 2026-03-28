@@ -4,7 +4,6 @@ use alloygbm_core::{
 };
 use alloygbm_engine::{BackendOps, EngineError, EngineResult, SplitSelectionOptions};
 use rayon::prelude::*;
-use std::sync::OnceLock;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CpuBackend;
@@ -13,14 +12,12 @@ const SMALL_TILE_WORKLOAD_THRESHOLD: usize = 16_384;
 const PARALLEL_TILE_WORKLOAD_THRESHOLD: usize = 131_072;
 const TINY_NODE_ROW_THRESHOLD: usize = 32;
 const BIN_HEAVY_THRESHOLD: usize = 512;
-const DISABLE_AVX2_ENV_VAR: &str = "ALLOYGBM_DISABLE_AVX2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HistogramKernelPath {
     TinyNodeScalar,
     BinHeavyPerFeatureScalar,
-    ArenaRowFirstScalar,
-    ArenaRowFirstAvx2,
+    ArenaRowFirstUnrolled,
 }
 
 #[derive(Debug, Clone)]
@@ -59,52 +56,17 @@ impl CpuBackend {
         Device::Cpu
     }
 
-    fn avx2_disabled_by_env() -> bool {
-        static AVX2_DISABLED: OnceLock<bool> = OnceLock::new();
-        *AVX2_DISABLED.get_or_init(|| match std::env::var(DISABLE_AVX2_ENV_VAR) {
-            Ok(value) => {
-                let normalized = value.trim().to_ascii_lowercase();
-                !(normalized.is_empty()
-                    || normalized == "0"
-                    || normalized == "false"
-                    || normalized == "off")
-            }
-            Err(_) => false,
-        })
-    }
-
-    fn runtime_avx2_available() -> bool {
-        static AVX2_AVAILABLE: OnceLock<bool> = OnceLock::new();
-        *AVX2_AVAILABLE.get_or_init(|| {
-            if Self::avx2_disabled_by_env() {
-                return false;
-            }
-
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            {
-                std::arch::is_x86_feature_detected!("avx2")
-            }
-            #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-            {
-                false
-            }
-        })
-    }
-
     fn select_histogram_kernel_path(
         row_count: usize,
         tile_workload: usize,
         bin_count: usize,
-        avx2_available: bool,
     ) -> HistogramKernelPath {
         if row_count <= TINY_NODE_ROW_THRESHOLD || tile_workload <= SMALL_TILE_WORKLOAD_THRESHOLD {
             HistogramKernelPath::TinyNodeScalar
         } else if bin_count >= BIN_HEAVY_THRESHOLD {
             HistogramKernelPath::BinHeavyPerFeatureScalar
-        } else if avx2_available {
-            HistogramKernelPath::ArenaRowFirstAvx2
         } else {
-            HistogramKernelPath::ArenaRowFirstScalar
+            HistogramKernelPath::ArenaRowFirstUnrolled
         }
     }
 
@@ -145,6 +107,8 @@ impl CpuBackend {
         bin_count: usize,
         feature_histograms: &mut Vec<FeatureHistogram>,
     ) {
+        let row_count = binned_matrix.row_count;
+        let use_col_major = !binned_matrix.bins_col.is_empty();
         for feature_index in start_feature..end_feature {
             let mut bins = vec![
                 HistogramBin {
@@ -155,15 +119,29 @@ impl CpuBackend {
                 bin_count
             ];
 
-            for &row_index in &node.row_indices {
-                let row_index = row_index as usize;
-                let cell_index = row_index * binned_matrix.feature_count + feature_index;
-                let bin_index = binned_matrix.bins[cell_index] as usize;
-                let gradient = gradients[row_index];
-                let target_bin = &mut bins[bin_index];
-                target_bin.grad_sum += gradient.grad;
-                target_bin.hess_sum += gradient.hess;
-                target_bin.count += 1;
+            if use_col_major {
+                // Column-major: sequential bin reads (1-byte stride) — cache-friendly
+                let col_base = feature_index * row_count;
+                for &row_index in &node.row_indices {
+                    let row_index = row_index as usize;
+                    let bin_index = binned_matrix.bins_col[col_base + row_index] as usize;
+                    let gradient = gradients[row_index];
+                    let target_bin = &mut bins[bin_index];
+                    target_bin.grad_sum += gradient.grad;
+                    target_bin.hess_sum += gradient.hess;
+                    target_bin.count += 1;
+                }
+            } else {
+                for &row_index in &node.row_indices {
+                    let row_index = row_index as usize;
+                    let cell_index = row_index * binned_matrix.feature_count + feature_index;
+                    let bin_index = binned_matrix.bins[cell_index] as usize;
+                    let gradient = gradients[row_index];
+                    let target_bin = &mut bins[bin_index];
+                    target_bin.grad_sum += gradient.grad;
+                    target_bin.hess_sum += gradient.hess;
+                    target_bin.count += 1;
+                }
             }
 
             feature_histograms.push(FeatureHistogram {
@@ -173,6 +151,7 @@ impl CpuBackend {
         }
     }
 
+    #[cfg(test)]
     fn build_tile_histograms_row_first(
         binned_matrix: &BinnedMatrix,
         gradients: &[GradientPair],
@@ -213,7 +192,6 @@ impl CpuBackend {
         node: &NodeSlice,
         tile: &FeatureTile,
         bin_count: usize,
-        avx2_available: bool,
     ) -> EngineResult<Vec<FeatureHistogram>> {
         let feature_count = binned_matrix.feature_count;
         if tile.end_feature as usize > feature_count {
@@ -233,7 +211,6 @@ impl CpuBackend {
             node.row_indices.len(),
             tile_workload,
             bin_count,
-            avx2_available,
         ) {
             HistogramKernelPath::TinyNodeScalar | HistogramKernelPath::BinHeavyPerFeatureScalar => {
                 Self::build_tile_histograms_per_feature(
@@ -246,39 +223,30 @@ impl CpuBackend {
                     &mut feature_histograms,
                 );
             }
-            HistogramKernelPath::ArenaRowFirstScalar => {
-                let mut arena = HistogramArena::new(tile_feature_count, bin_count);
-                Self::build_tile_histograms_row_first(
-                    binned_matrix,
-                    gradients,
-                    node,
-                    start_feature,
-                    end_feature,
-                    &mut arena,
-                );
-                arena.materialize(start_feature, &mut feature_histograms);
-            }
-            HistogramKernelPath::ArenaRowFirstAvx2 => {
-                let mut arena = HistogramArena::new(tile_feature_count, bin_count);
-                #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-                Self::build_tile_histograms_row_first_x86(
-                    binned_matrix,
-                    gradients,
-                    node,
-                    start_feature,
-                    end_feature,
-                    &mut arena,
-                );
-                #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-                Self::build_tile_histograms_row_first(
-                    binned_matrix,
-                    gradients,
-                    node,
-                    start_feature,
-                    end_feature,
-                    &mut arena,
-                );
-                arena.materialize(start_feature, &mut feature_histograms);
+            HistogramKernelPath::ArenaRowFirstUnrolled => {
+                if !binned_matrix.bins_col.is_empty() {
+                    // Feature-first with column-major bins: 3KB working set per feature (fits L1).
+                    Self::build_tile_histograms_per_feature(
+                        binned_matrix,
+                        gradients,
+                        node,
+                        start_feature,
+                        end_feature,
+                        bin_count,
+                        &mut feature_histograms,
+                    );
+                } else {
+                    let mut arena = HistogramArena::new(tile_feature_count, bin_count);
+                    Self::build_tile_histograms_row_first_unrolled(
+                        binned_matrix,
+                        gradients,
+                        node,
+                        start_feature,
+                        end_feature,
+                        &mut arena,
+                    );
+                    arena.materialize(start_feature, &mut feature_histograms);
+                }
             }
         }
 
@@ -312,7 +280,6 @@ impl CpuBackend {
             .map(|tile| (tile.end_feature - tile.start_feature) as usize)
             .sum();
         let mut feature_histograms = Vec::with_capacity(selected_feature_count);
-        let avx2_available = Self::runtime_avx2_available();
 
         if parallel_tiles {
             let per_tile_histograms = feature_tiles
@@ -324,7 +291,6 @@ impl CpuBackend {
                         node,
                         tile,
                         bin_count,
-                        avx2_available,
                     )
                 })
                 .collect::<Vec<_>>();
@@ -340,7 +306,6 @@ impl CpuBackend {
                     node,
                     tile,
                     bin_count,
-                    avx2_available,
                 )?);
             }
         }
@@ -351,8 +316,7 @@ impl CpuBackend {
         })
     }
 
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    fn build_tile_histograms_row_first_x86(
+    fn build_tile_histograms_row_first_unrolled(
         binned_matrix: &BinnedMatrix,
         gradients: &[GradientPair],
         node: &NodeSlice,
@@ -363,7 +327,7 @@ impl CpuBackend {
         let tile_feature_count = end_feature - start_feature;
         let feature_count = binned_matrix.feature_count;
 
-        // Process rows in AVX2-width chunks to keep the hot loop structure SIMD-friendly.
+        // Process rows in 8-wide chunks to improve instruction-level parallelism.
         let mut row_chunks = node.row_indices.chunks_exact(8);
         for row_chunk in &mut row_chunks {
             let row0 = row_chunk[0] as usize;
@@ -453,103 +417,204 @@ impl CpuBackend {
         }
     }
 
-    fn best_split_with_options_internal(
-        histograms: &HistogramBundle,
+    fn best_split_for_feature(
+        feature_histogram: &FeatureHistogram,
+        node_id: u32,
         options: SplitSelectionOptions,
     ) -> Option<SplitCandidate> {
-        let mut best_candidate: Option<SplitCandidate> = None;
-        let mut best_gain = 0.0_f32;
         const EPSILON: f32 = 1e-6;
 
-        for feature_histogram in &histograms.feature_histograms {
-            if feature_histogram.bins.len() < 2 {
-                continue;
-            }
+        if feature_histogram.bins.len() < 2 {
+            return None;
+        }
 
-            let mut total_grad = 0.0_f32;
-            let mut total_hess = 0.0_f32;
-            let mut total_count = 0_u32;
-            for bin in &feature_histogram.bins {
-                total_grad += bin.grad_sum;
-                total_hess += bin.hess_sum;
-                total_count += bin.count;
-            }
+        let mut total_grad = 0.0_f32;
+        let mut total_hess = 0.0_f32;
+        let mut total_count = 0_u32;
+        for bin in &feature_histogram.bins {
+            total_grad += bin.grad_sum;
+            total_hess += bin.hess_sum;
+            total_count += bin.count;
+        }
 
-            if total_hess <= options.min_child_hessian {
-                continue;
-            }
+        if total_hess <= options.min_child_hessian {
+            return None;
+        }
 
-            let parent_denom = total_hess + options.l2_lambda + EPSILON;
-            let parent_grad = l1_threshold_gradient(total_grad, options.l1_alpha);
-            let parent_gain_term = (parent_grad * parent_grad) / parent_denom;
+        let parent_denom = total_hess + options.l2_lambda + EPSILON;
+        let parent_grad = l1_threshold_gradient(total_grad, options.l1_alpha);
+        let parent_gain_term = (parent_grad * parent_grad) / parent_denom;
 
-            let mut left_grad = 0.0_f32;
-            let mut left_hess = 0.0_f32;
-            let mut left_count = 0_u32;
+        let mut best_candidate: Option<SplitCandidate> = None;
+        let mut best_gain = 0.0_f32;
+        let mut left_grad = 0.0_f32;
+        let mut left_hess = 0.0_f32;
+        let mut left_count = 0_u32;
 
-            for (threshold_bin, bin) in feature_histogram
-                .bins
-                .iter()
-                .enumerate()
-                .take(feature_histogram.bins.len() - 1)
+        for (threshold_bin, bin) in feature_histogram
+            .bins
+            .iter()
+            .enumerate()
+            .take(feature_histogram.bins.len() - 1)
+        {
+            left_grad += bin.grad_sum;
+            left_hess += bin.hess_sum;
+            left_count += bin.count;
+
+            let right_grad = total_grad - left_grad;
+            let right_hess = total_hess - left_hess;
+            let right_count = total_count.saturating_sub(left_count);
+
+            if left_count == 0
+                || right_count == 0
+                || left_hess <= options.min_child_hessian
+                || right_hess <= options.min_child_hessian
             {
-                left_grad += bin.grad_sum;
-                left_hess += bin.hess_sum;
-                left_count += bin.count;
+                continue;
+            }
 
-                let right_grad = total_grad - left_grad;
-                let right_hess = total_hess - left_hess;
-                let right_count = total_count.saturating_sub(left_count);
-
-                if left_count == 0
-                    || right_count == 0
-                    || left_hess <= options.min_child_hessian
-                    || right_hess <= options.min_child_hessian
+            let left_grad_for_gain = l1_threshold_gradient(left_grad, options.l1_alpha);
+            let right_grad_for_gain = l1_threshold_gradient(right_grad, options.l1_alpha);
+            let left_denom = left_hess + options.l2_lambda + EPSILON;
+            let right_denom = right_hess + options.l2_lambda + EPSILON;
+            if options.min_leaf_magnitude > 0.0 {
+                let left_leaf_magnitude = left_grad_for_gain.abs() / left_denom;
+                let right_leaf_magnitude = right_grad_for_gain.abs() / right_denom;
+                if left_leaf_magnitude < options.min_leaf_magnitude
+                    && right_leaf_magnitude < options.min_leaf_magnitude
                 {
                     continue;
                 }
+            }
 
-                let left_grad_for_gain = l1_threshold_gradient(left_grad, options.l1_alpha);
-                let right_grad_for_gain = l1_threshold_gradient(right_grad, options.l1_alpha);
-                let left_denom = left_hess + options.l2_lambda + EPSILON;
-                let right_denom = right_hess + options.l2_lambda + EPSILON;
-                if options.min_leaf_magnitude > 0.0 {
-                    let left_leaf_magnitude = left_grad_for_gain.abs() / left_denom;
-                    let right_leaf_magnitude = right_grad_for_gain.abs() / right_denom;
-                    if left_leaf_magnitude < options.min_leaf_magnitude
-                        && right_leaf_magnitude < options.min_leaf_magnitude
-                    {
-                        continue;
-                    }
-                }
+            let gain = (left_grad_for_gain * left_grad_for_gain) / left_denom
+                + (right_grad_for_gain * right_grad_for_gain) / right_denom
+                - parent_gain_term;
 
-                let gain = (left_grad_for_gain * left_grad_for_gain) / left_denom
-                    + (right_grad_for_gain * right_grad_for_gain) / right_denom
-                    - parent_gain_term;
-
-                if gain > best_gain {
-                    best_gain = gain;
-                    best_candidate = Some(SplitCandidate {
-                        node_id: histograms.node_id,
-                        feature_index: feature_histogram.feature_index,
-                        threshold_bin: threshold_bin as u16,
-                        gain,
-                        left_stats: NodeStats {
-                            grad_sum: left_grad,
-                            hess_sum: left_hess,
-                            row_count: left_count,
-                        },
-                        right_stats: NodeStats {
-                            grad_sum: right_grad,
-                            hess_sum: right_hess,
-                            row_count: right_count,
-                        },
-                    });
-                }
+            if gain > best_gain {
+                best_gain = gain;
+                best_candidate = Some(SplitCandidate {
+                    node_id,
+                    feature_index: feature_histogram.feature_index,
+                    threshold_bin: threshold_bin as u16,
+                    gain,
+                    left_stats: NodeStats {
+                        grad_sum: left_grad,
+                        hess_sum: left_hess,
+                        row_count: left_count,
+                    },
+                    right_stats: NodeStats {
+                        grad_sum: right_grad,
+                        hess_sum: right_hess,
+                        row_count: right_count,
+                    },
+                });
             }
         }
 
         best_candidate
+    }
+
+    const PARALLEL_SPLIT_FEATURE_THRESHOLD: usize = 16;
+
+    fn best_split_with_options_internal(
+        histograms: &HistogramBundle,
+        options: SplitSelectionOptions,
+    ) -> Option<SplitCandidate> {
+        if histograms.feature_histograms.len() >= Self::PARALLEL_SPLIT_FEATURE_THRESHOLD {
+            histograms
+                .feature_histograms
+                .par_iter()
+                .filter_map(|fh| Self::best_split_for_feature(fh, histograms.node_id, options))
+                .reduce_with(|a, b| if b.gain > a.gain { b } else { a })
+        } else {
+            histograms
+                .feature_histograms
+                .iter()
+                .filter_map(|fh| Self::best_split_for_feature(fh, histograms.node_id, options))
+                .reduce(|a, b| if b.gain > a.gain { b } else { a })
+        }
+    }
+
+    fn apply_split_with_stats_parallel(
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: &NodeSlice,
+        split: &SplitCandidate,
+    ) -> EngineResult<(PartitionResult, NodeStats, NodeStats)> {
+        let chunk_size = (node.row_indices.len() / rayon::current_num_threads().max(1)).max(4096);
+        let chunk_results: Vec<(Vec<u32>, Vec<u32>, f32, f32, f32, f32)> = node
+            .row_indices
+            .par_chunks(chunk_size)
+            .map(|chunk| {
+                let mut left = Vec::new();
+                let mut right = Vec::new();
+                let mut lg = 0.0_f32;
+                let mut lh = 0.0_f32;
+                let mut rg = 0.0_f32;
+                let mut rh = 0.0_f32;
+                let feature_index = split.feature_index as usize;
+                let use_col_major = !binned_matrix.bins_col.is_empty();
+                let col_base = feature_index * binned_matrix.row_count;
+                for &row_index_u32 in chunk {
+                    let row_index = row_index_u32 as usize;
+                    let bin = if use_col_major {
+                        u16::from(binned_matrix.bins_col[col_base + row_index])
+                    } else {
+                        let cell_index =
+                            row_index * binned_matrix.feature_count + feature_index;
+                        u16::from(binned_matrix.bins[cell_index])
+                    };
+                    let gradient = gradients[row_index];
+                    if bin <= split.threshold_bin {
+                        left.push(row_index_u32);
+                        lg += gradient.grad;
+                        lh += gradient.hess;
+                    } else {
+                        right.push(row_index_u32);
+                        rg += gradient.grad;
+                        rh += gradient.hess;
+                    }
+                }
+                (left, right, lg, lh, rg, rh)
+            })
+            .collect();
+
+        let total_rows = node.row_indices.len();
+        let mut left_row_indices = Vec::with_capacity(total_rows / 2);
+        let mut right_row_indices = Vec::with_capacity(total_rows / 2);
+        let mut left_grad_sum = 0.0_f32;
+        let mut left_hess_sum = 0.0_f32;
+        let mut right_grad_sum = 0.0_f32;
+        let mut right_hess_sum = 0.0_f32;
+
+        for (left, right, lg, lh, rg, rh) in chunk_results {
+            left_row_indices.extend(left);
+            right_row_indices.extend(right);
+            left_grad_sum += lg;
+            left_hess_sum += lh;
+            right_grad_sum += rg;
+            right_hess_sum += rh;
+        }
+
+        let left_count = left_row_indices.len() as u32;
+        let right_count = right_row_indices.len() as u32;
+        Ok((
+            PartitionResult {
+                left_row_indices,
+                right_row_indices,
+            },
+            NodeStats {
+                grad_sum: left_grad_sum,
+                hess_sum: left_hess_sum,
+                row_count: left_count,
+            },
+            NodeStats {
+                grad_sum: right_grad_sum,
+                hess_sum: right_hess_sum,
+                row_count: right_count,
+            },
+        ))
     }
 }
 
@@ -623,10 +688,17 @@ impl BackendOps for CpuBackend {
 
         let mut left_row_indices = Vec::new();
         let mut right_row_indices = Vec::new();
+        let feature_index = split.feature_index as usize;
+        let use_col_major = !binned_matrix.bins_col.is_empty();
+        let col_base = feature_index * binned_matrix.row_count;
         for &row_index in &node.row_indices {
             let row_index = row_index as usize;
-            let cell_index = row_index * binned_matrix.feature_count + split.feature_index as usize;
-            let bin = binned_matrix.bins[cell_index];
+            let bin = if use_col_major {
+                u16::from(binned_matrix.bins_col[col_base + row_index])
+            } else {
+                let cell_index = row_index * binned_matrix.feature_count + feature_index;
+                u16::from(binned_matrix.bins[cell_index])
+            };
             if bin <= split.threshold_bin {
                 left_row_indices.push(row_index as u32);
             } else {
@@ -662,6 +734,12 @@ impl BackendOps for CpuBackend {
             )));
         }
 
+        const PARALLEL_PARTITION_THRESHOLD: usize = 50_000;
+
+        if node.row_indices.len() >= PARALLEL_PARTITION_THRESHOLD {
+            return Self::apply_split_with_stats_parallel(binned_matrix, gradients, node, split);
+        }
+
         let mut left_row_indices = Vec::with_capacity(node.row_indices.len() / 2);
         let mut right_row_indices = Vec::with_capacity(node.row_indices.len() / 2);
         let mut left_grad_sum = 0.0_f32;
@@ -669,10 +747,17 @@ impl BackendOps for CpuBackend {
         let mut right_grad_sum = 0.0_f32;
         let mut right_hess_sum = 0.0_f32;
 
+        let feature_index = split.feature_index as usize;
+        let use_col_major = !binned_matrix.bins_col.is_empty();
+        let col_base = feature_index * binned_matrix.row_count;
         for &row_index_u32 in &node.row_indices {
             let row_index = row_index_u32 as usize;
-            let cell_index = row_index * binned_matrix.feature_count + split.feature_index as usize;
-            let bin = binned_matrix.bins[cell_index];
+            let bin = if use_col_major {
+                u16::from(binned_matrix.bins_col[col_base + row_index])
+            } else {
+                let cell_index = row_index * binned_matrix.feature_count + feature_index;
+                u16::from(binned_matrix.bins[cell_index])
+            };
             let gradient = gradients[row_index];
             if bin <= split.threshold_bin {
                 left_row_indices.push(row_index_u32);
@@ -953,30 +1038,18 @@ mod tests {
     #[test]
     fn histogram_kernel_path_prefers_tiny_node_scalar_for_small_nodes() {
         let path =
-            CpuBackend::select_histogram_kernel_path(8, SMALL_TILE_WORKLOAD_THRESHOLD, 16, true);
+            CpuBackend::select_histogram_kernel_path(8, SMALL_TILE_WORKLOAD_THRESHOLD, 16);
         assert_eq!(path, HistogramKernelPath::TinyNodeScalar);
     }
 
     #[test]
-    fn histogram_kernel_path_prefers_avx2_for_large_tiles_when_available() {
+    fn histogram_kernel_path_prefers_unrolled_for_large_tiles() {
         let path = CpuBackend::select_histogram_kernel_path(
             256,
             SMALL_TILE_WORKLOAD_THRESHOLD + 1,
             64,
-            true,
         );
-        assert_eq!(path, HistogramKernelPath::ArenaRowFirstAvx2);
-    }
-
-    #[test]
-    fn histogram_kernel_path_falls_back_to_scalar_when_avx2_unavailable() {
-        let path = CpuBackend::select_histogram_kernel_path(
-            256,
-            SMALL_TILE_WORKLOAD_THRESHOLD + 1,
-            64,
-            false,
-        );
-        assert_eq!(path, HistogramKernelPath::ArenaRowFirstScalar);
+        assert_eq!(path, HistogramKernelPath::ArenaRowFirstUnrolled);
     }
 
     #[test]
@@ -985,7 +1058,6 @@ mod tests {
             512,
             SMALL_TILE_WORKLOAD_THRESHOLD + 1,
             BIN_HEAVY_THRESHOLD,
-            true,
         );
         assert_eq!(path, HistogramKernelPath::BinHeavyPerFeatureScalar);
     }
@@ -1041,12 +1113,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    fn x86_row_first_histograms_match_scalar_when_avx2_supported() {
-        if !CpuBackend::runtime_avx2_available() {
-            return;
-        }
-
+    fn unrolled_row_first_histograms_match_per_feature() {
         let matrix = quality_fixture_binned_matrix();
         let gradients = (0..matrix.row_count)
             .map(|row_index| {
@@ -1058,31 +1125,30 @@ mod tests {
             .expect("node indices are valid");
         let bin_count = matrix.max_bin as usize + 1;
 
-        let mut scalar = Vec::new();
-        let mut scalar_arena = HistogramArena::new(matrix.feature_count, bin_count);
-        CpuBackend::build_tile_histograms_row_first(
+        let mut per_feature = Vec::new();
+        CpuBackend::build_tile_histograms_per_feature(
             &matrix,
             &gradients,
             &node,
             0,
             matrix.feature_count,
-            &mut scalar_arena,
+            bin_count,
+            &mut per_feature,
         );
-        scalar_arena.materialize(0, &mut scalar);
 
-        let mut avx2 = Vec::new();
-        let mut avx2_arena = HistogramArena::new(matrix.feature_count, bin_count);
-        CpuBackend::build_tile_histograms_row_first_x86(
+        let mut unrolled = Vec::new();
+        let mut unrolled_arena = HistogramArena::new(matrix.feature_count, bin_count);
+        CpuBackend::build_tile_histograms_row_first_unrolled(
             &matrix,
             &gradients,
             &node,
             0,
             matrix.feature_count,
-            &mut avx2_arena,
+            &mut unrolled_arena,
         );
-        avx2_arena.materialize(0, &mut avx2);
+        unrolled_arena.materialize(0, &mut unrolled);
 
-        assert_eq!(scalar, avx2);
+        assert_eq!(per_feature, unrolled);
     }
 
     #[test]

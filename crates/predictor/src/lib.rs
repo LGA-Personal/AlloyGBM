@@ -71,6 +71,9 @@ pub struct Predictor {
     pub categorical_state: Option<CategoricalStatePayloadV1>,
     baseline_prediction: f32,
     trees: Vec<PredictorTree>,
+    /// When true, `threshold_bin` fields contain float thresholds (not bin indices)
+    /// and prediction uses `<` comparison instead of `<=`.
+    use_float_thresholds: bool,
 }
 
 impl Predictor {
@@ -80,6 +83,7 @@ impl Predictor {
             categorical_state: None,
             baseline_prediction: 0.0,
             trees: Vec::new(),
+            use_float_thresholds: false,
         }
     }
 
@@ -126,7 +130,97 @@ impl Predictor {
             categorical_state,
             baseline_prediction,
             trees,
+            use_float_thresholds: false,
         })
+    }
+
+    /// Convert bin-index thresholds to float thresholds using per-feature min/max.
+    /// After calling this, prediction compares raw float features directly — no quantization needed.
+    /// Uses the midpoint between adjacent bin boundaries as the float threshold, with `<` comparison.
+    pub fn convert_bin_thresholds_to_float(
+        &mut self,
+        feature_mins: &[f32],
+        feature_maxs: &[f32],
+    ) -> PredictorResult<()> {
+        let feature_count = self.metadata.feature_names.len();
+        if feature_mins.len() != feature_count || feature_maxs.len() != feature_count {
+            return Err(PredictorError::InvalidInput(format!(
+                "feature_mins/maxs length ({}/{}) must match feature_count {}",
+                feature_mins.len(),
+                feature_maxs.len(),
+                feature_count
+            )));
+        }
+        for tree in &mut self.trees {
+            for node_opt in &mut tree.nodes_by_local_id {
+                if let Some(node) = node_opt {
+                    let fi = node.feature_index;
+                    let min_val = feature_mins[fi];
+                    let max_val = feature_maxs[fi];
+                    let span = max_val - min_val;
+                    if span <= f32::EPSILON {
+                        // Constant feature — any threshold works since all values are equal.
+                        node.threshold_bin = min_val + f32::EPSILON;
+                    } else {
+                        // bin = round(((value - min) / span) * 255)
+                        // Split: bin <= threshold_bin  ↔  value < min + ((threshold_bin + 0.5) / 255) * span
+                        let bin = node.threshold_bin;
+                        node.threshold_bin = min_val + ((bin + 0.5) / 255.0) * span;
+                    }
+                }
+            }
+        }
+        self.use_float_thresholds = true;
+        Ok(())
+    }
+
+    /// Convert bin-index thresholds to float thresholds using per-feature quantile cuts.
+    /// For quantile binning: `bin = bisect_right(cuts, value)`, split is `bin <= threshold_bin`.
+    /// The float equivalent: `value < cuts[threshold_bin]`.
+    pub fn convert_bin_thresholds_to_float_quantile(
+        &mut self,
+        feature_cuts: &[Vec<f32>],
+    ) -> PredictorResult<()> {
+        let feature_count = self.metadata.feature_names.len();
+        if feature_cuts.len() != feature_count {
+            return Err(PredictorError::InvalidInput(format!(
+                "feature_cuts length {} must match feature_count {}",
+                feature_cuts.len(),
+                feature_count
+            )));
+        }
+        for tree in &mut self.trees {
+            for node_opt in &mut tree.nodes_by_local_id {
+                if let Some(node) = node_opt {
+                    let fi = node.feature_index;
+                    let cuts = &feature_cuts[fi];
+                    let bin = node.threshold_bin as usize;
+                    if bin < cuts.len() {
+                        node.threshold_bin = cuts[bin];
+                    } else {
+                        // All values go left — set threshold beyond any possible value
+                        node.threshold_bin = f32::MAX;
+                    }
+                }
+            }
+        }
+        self.use_float_thresholds = true;
+        Ok(())
+    }
+
+    /// Convert bin-index thresholds to float thresholds for pre-binned integer data.
+    /// For pre-binned data, values are integers (0..max_bin) and split is `bin <= threshold_bin`.
+    /// The float equivalent: `value < threshold_bin + 0.5`.
+    pub fn convert_bin_thresholds_to_float_prebinned(&mut self) -> PredictorResult<()> {
+        for tree in &mut self.trees {
+            for node_opt in &mut tree.nodes_by_local_id {
+                if let Some(node) = node_opt {
+                    node.threshold_bin += 0.5;
+                }
+            }
+        }
+        self.use_float_thresholds = true;
+        Ok(())
     }
 
     pub fn predict_row(&self, features: &[f32]) -> PredictorResult<f32> {
@@ -146,6 +240,7 @@ impl Predictor {
         features: &[f32],
         feature_count: usize,
     ) -> PredictorResult<f32> {
+        let use_float = self.use_float_thresholds;
         let mut prediction = self.baseline_prediction;
         for tree in &self.trees {
             let mut local_node_id: usize = 0;
@@ -157,7 +252,11 @@ impl Predictor {
                     )));
                 }
                 let feature_value = features[node.feature_index];
-                let went_left = feature_value <= node.threshold_bin;
+                let went_left = if use_float {
+                    feature_value < node.threshold_bin
+                } else {
+                    feature_value <= node.threshold_bin
+                };
                 prediction += if went_left {
                     node.left_leaf_value
                 } else {
@@ -200,6 +299,152 @@ impl Predictor {
                 .map(|row| self.predict_row_with_feature_count(row, feature_count))
                 .collect()
         }
+    }
+
+    /// Predict from a flat row-major dense slice — zero per-row allocation.
+    pub fn predict_batch_dense(
+        &self,
+        values: &[f32],
+        row_count: usize,
+        feature_count: usize,
+    ) -> PredictorResult<Vec<f32>> {
+        let model_feature_count = self.metadata.feature_names.len();
+        if feature_count != model_feature_count {
+            return Err(PredictorError::InvalidInput(format!(
+                "feature_count {} does not match model feature_count {}",
+                feature_count, model_feature_count
+            )));
+        }
+        if values.len() != row_count * feature_count {
+            return Err(PredictorError::InvalidInput(format!(
+                "values length {} does not match row_count * feature_count {}",
+                values.len(),
+                row_count * feature_count
+            )));
+        }
+        if row_count == 0 {
+            return Err(PredictorError::InvalidInput(
+                "row_count must be greater than 0".to_string(),
+            ));
+        }
+
+        if should_parallel_predict_batch(row_count, self.trees.len()) {
+            (0..row_count)
+                .into_par_iter()
+                .map(|row_index| {
+                    let row = &values[row_index * feature_count..(row_index + 1) * feature_count];
+                    self.predict_row_dense_unchecked(row, feature_count)
+                })
+                .collect()
+        } else {
+            (0..row_count)
+                .map(|row_index| {
+                    let row = &values[row_index * feature_count..(row_index + 1) * feature_count];
+                    self.predict_row_dense_unchecked(row, feature_count)
+                })
+                .collect()
+        }
+    }
+
+    /// Inner prediction on a row slice — no length validation (caller ensures correctness).
+    fn predict_row_dense_unchecked(
+        &self,
+        features: &[f32],
+        feature_count: usize,
+    ) -> PredictorResult<f32> {
+        let use_float = self.use_float_thresholds;
+        let mut prediction = self.baseline_prediction;
+        for tree in &self.trees {
+            let mut local_node_id: usize = 0;
+            while let Some(Some(node)) = tree.nodes_by_local_id.get(local_node_id) {
+                if node.feature_index >= feature_count {
+                    return Err(PredictorError::ContractViolation(format!(
+                        "split feature_index {} exceeds feature length {}",
+                        node.feature_index, feature_count
+                    )));
+                }
+                let feature_value = features[node.feature_index];
+                let went_left = if use_float {
+                    feature_value < node.threshold_bin
+                } else {
+                    feature_value <= node.threshold_bin
+                };
+                prediction += if went_left {
+                    node.left_leaf_value
+                } else {
+                    node.right_leaf_value
+                };
+                local_node_id = if went_left {
+                    local_node_id * 2 + 1
+                } else {
+                    local_node_id * 2 + 2
+                };
+            }
+        }
+        Ok(prediction)
+    }
+
+    /// Predict from raw native-endian f32 bytes — avoids Python list→Vec<f32> overhead.
+    /// Each parallel chunk converts bytes→f32 and predicts on the fly using a thread-local
+    /// row buffer, avoiding any large intermediate allocation.
+    pub fn predict_batch_dense_bytes(
+        &self,
+        bytes: &[u8],
+        row_count: usize,
+        feature_count: usize,
+    ) -> PredictorResult<Vec<f32>> {
+        let model_feature_count = self.metadata.feature_names.len();
+        if feature_count != model_feature_count {
+            return Err(PredictorError::InvalidInput(format!(
+                "feature_count {} does not match model feature_count {}",
+                feature_count, model_feature_count
+            )));
+        }
+        let expected_bytes = row_count * feature_count * 4;
+        if bytes.len() != expected_bytes {
+            return Err(PredictorError::InvalidInput(format!(
+                "bytes length {} does not match expected {} (row_count={} * feature_count={} * 4)",
+                bytes.len(),
+                expected_bytes,
+                row_count,
+                feature_count
+            )));
+        }
+        if row_count == 0 {
+            return Err(PredictorError::InvalidInput(
+                "row_count must be greater than 0".to_string(),
+            ));
+        }
+
+        let row_bytes = feature_count * 4;
+        let chunk_size = 4096.max(row_count / (rayon::current_num_threads().max(1) * 4));
+        let mut predictions = vec![0.0_f32; row_count];
+
+        // Each parallel chunk gets one reusable row buffer (feature_count × 4 bytes).
+        predictions
+            .par_chunks_mut(chunk_size)
+            .enumerate()
+            .try_for_each(|(chunk_idx, out_chunk)| {
+                let row_start = chunk_idx * chunk_size;
+                let mut row_buf = vec![0.0_f32; feature_count];
+                for (local_idx, pred) in out_chunk.iter_mut().enumerate() {
+                    let row_index = row_start + local_idx;
+                    let byte_start = row_index * row_bytes;
+                    for fi in 0..feature_count {
+                        let bi = byte_start + fi * 4;
+                        row_buf[fi] = f32::from_ne_bytes([
+                            bytes[bi],
+                            bytes[bi + 1],
+                            bytes[bi + 2],
+                            bytes[bi + 3],
+                        ]);
+                    }
+                    *pred = self.predict_row_dense_unchecked(&row_buf, feature_count)?;
+                }
+                Ok::<(), PredictorError>(())
+            })?;
+
+        Ok(predictions)
     }
 
     pub fn predict_row_stub(&self, features: &[f32]) -> PredictorResult<f32> {

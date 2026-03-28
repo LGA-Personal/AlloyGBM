@@ -117,6 +117,18 @@ pub trait ObjectiveOps {
         targets: &[f32],
         sample_weights: Option<&[f32]>,
     ) -> EngineResult<Vec<GradientPair>>;
+    fn compute_gradients_into(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+        buffer: &mut Vec<GradientPair>,
+    ) -> EngineResult<()> {
+        let gradients = self.compute_gradients(predictions, targets, sample_weights)?;
+        buffer.clear();
+        buffer.extend(gradients);
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,6 +212,35 @@ impl ObjectiveOps for SquaredErrorObjective {
             gradients.push(GradientPair::new(residual * weight, weight)?);
         }
         Ok(gradients)
+    }
+
+    fn compute_gradients_into(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+        buffer: &mut Vec<GradientPair>,
+    ) -> EngineResult<()> {
+        if predictions.len() != targets.len() {
+            return Err(EngineError::ContractViolation(format!(
+                "predictions length {} does not match targets length {}",
+                predictions.len(),
+                targets.len()
+            )));
+        }
+        buffer.clear();
+        if buffer.capacity() < predictions.len() {
+            buffer.reserve(predictions.len() - buffer.capacity());
+        }
+        for index in 0..predictions.len() {
+            let weight = sample_weights.map_or(1.0, |weights| weights[index]);
+            let residual = predictions[index] - targets[index];
+            buffer.push(GradientPair {
+                grad: residual * weight,
+                hess: weight,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -1144,6 +1185,8 @@ impl Trainer {
 
         const LEAF_EPSILON: f32 = 1e-6;
 
+        let mut gradient_buffer: Vec<GradientPair> = Vec::with_capacity(dataset.row_count());
+
         for round_index in 0..effective_round_cap {
             let root_row_indices = sampled_row_indices(
                 dataset.row_count(),
@@ -1158,12 +1201,14 @@ impl Trainer {
                 round_index as u64,
             )?;
             let sampled_row_count = root_row_indices.len();
-            let gradients = objective.compute_gradients(
+            objective.compute_gradients_into(
                 &predictions,
                 &dataset.targets,
                 dataset.sample_weights.as_deref(),
+                &mut gradient_buffer,
             )?;
-            validate_gradient_pair_length(&gradients, dataset.row_count())?;
+            let gradients = &gradient_buffer;
+            validate_gradient_pair_length(gradients, dataset.row_count())?;
             if cfg!(debug_assertions) {
                 validate_gradient_pairs(&gradients, dataset.row_count())?;
             }
@@ -1356,24 +1401,16 @@ impl Trainer {
             let mut candidate_validation_loss = None;
             let mut stop_for_validation_plateau = false;
             if let Some(validation_ref) = validation {
-                let mut next_validation_predictions =
-                    validation_predictions.clone().ok_or_else(|| {
-                        EngineError::ContractViolation(
-                            "validation predictions were not initialized".to_string(),
-                        )
-                    })?;
-                let mut round_stumps_by_node = HashMap::new();
-                for stump in &candidate_round_stumps {
-                    apply_stump_to_binned_predictions_with_path(
-                        &mut next_validation_predictions,
-                        validation_ref.binned_matrix,
-                        stump,
-                        stump.left_leaf_value,
-                        stump.right_leaf_value,
-                        &round_stumps_by_node,
-                    )?;
-                    round_stumps_by_node.insert(stump.split.node_id, stump);
-                }
+                let mut next_validation_predictions = validation_predictions.take().ok_or_else(|| {
+                    EngineError::ContractViolation(
+                        "validation predictions were not initialized".to_string(),
+                    )
+                })?;
+                apply_round_stumps_tree_walk(
+                    &mut next_validation_predictions,
+                    validation_ref.binned_matrix,
+                    &candidate_round_stumps,
+                )?;
                 let next_validation_loss = squared_error_loss(
                     &next_validation_predictions,
                     &validation_ref.dataset.targets,
@@ -1742,7 +1779,7 @@ fn apply_single_categorical_target_encoding(
     Ok((encoded_dataset, encoded_binned_matrix))
 }
 
-fn encode_bins_from_encoded_values(encoded_values: &[f32]) -> EngineResult<(Vec<u16>, u16)> {
+fn encode_bins_from_encoded_values(encoded_values: &[f32]) -> EngineResult<(Vec<u8>, u16)> {
     if encoded_values.is_empty() {
         return Err(EngineError::ContractViolation(
             "encoded values cannot be empty".to_string(),
@@ -1760,11 +1797,10 @@ fn encode_bins_from_encoded_values(encoded_values: &[f32]) -> EngineResult<(Vec<
     let mut unique_values = encoded_values.to_vec();
     unique_values.sort_by(f32::total_cmp);
     unique_values.dedup_by(|left, right| left.to_bits() == right.to_bits());
-    if unique_values.len() > u16::MAX as usize + 1 {
+    if unique_values.len() > 256 {
         return Err(EngineError::ContractViolation(format!(
-            "encoded cardinality {} exceeds supported max {}",
+            "encoded cardinality {} exceeds supported max 256",
             unique_values.len(),
-            u16::MAX as usize + 1
         )));
     }
 
@@ -1777,7 +1813,7 @@ fn encode_bins_from_encoded_values(encoded_values: &[f32]) -> EngineResult<(Vec<
                     "encoded value lookup failed during bin mapping".to_string(),
                 )
             })?;
-        bins.push(position as u16);
+        bins.push(position as u8);
     }
     let max_bin = (unique_values.len().saturating_sub(1)) as u16;
     Ok((bins, max_bin))
@@ -2085,45 +2121,6 @@ fn row_satisfies_stump_path_features(
     Ok(true)
 }
 
-fn row_satisfies_stump_path_bins(
-    row_index: usize,
-    binned_matrix: &BinnedMatrix,
-    stump: &TrainedStump,
-    stumps_by_node: &HashMap<u32, &TrainedStump>,
-) -> EngineResult<bool> {
-    let (tree_id, mut local_node_id) = decode_tree_node_id(stump.split.node_id);
-    while local_node_id > 0 {
-        let parent_local = (local_node_id - 1) / 2;
-        let parent_node_id = encode_tree_node_id(tree_id as usize, parent_local)?;
-        let Some(parent_stump) = stumps_by_node.get(&parent_node_id) else {
-            return Ok(false);
-        };
-        let feature_index = parent_stump.split.feature_index as usize;
-        if feature_index >= binned_matrix.feature_count {
-            return Err(EngineError::ContractViolation(format!(
-                "split feature_index {} exceeds feature_count {}",
-                parent_stump.split.feature_index, binned_matrix.feature_count
-            )));
-        }
-        let cell_index = row_index
-            .checked_mul(binned_matrix.feature_count)
-            .and_then(|base| base.checked_add(feature_index))
-            .ok_or_else(|| {
-                EngineError::ContractViolation(
-                    "row/feature index overflow while applying stump path".to_string(),
-                )
-            })?;
-        let bin = binned_matrix.bins[cell_index];
-        let went_left = bin <= parent_stump.split.threshold_bin;
-        let expected_left = local_node_id == parent_local * 2 + 1;
-        if went_left != expected_left {
-            return Ok(false);
-        }
-        local_node_id = parent_local;
-    }
-    Ok(true)
-}
-
 fn sampling_seed_base(seed: u64, deterministic: bool) -> u64 {
     if deterministic {
         return seed;
@@ -2195,6 +2192,11 @@ fn sampled_row_indices(
         .collect()
 }
 
+/// Maximum features per tile. Keeps the histogram arena small enough to fit in
+/// L2 cache (64 features × 256 bins × 12 bytes ≈ 192 KB) and creates enough
+/// tiles for rayon to parallelize across cores.
+const MAX_TILE_FEATURE_WIDTH: usize = 64;
+
 fn feature_tiles_from_sorted_indices(indices: &[usize]) -> EngineResult<Vec<FeatureTile>> {
     if indices.is_empty() {
         return Err(EngineError::ContractViolation(
@@ -2203,18 +2205,18 @@ fn feature_tiles_from_sorted_indices(indices: &[usize]) -> EngineResult<Vec<Feat
     }
 
     let mut tiles = Vec::new();
-    let mut start = indices[0];
+    let mut run_start = indices[0];
     let mut previous = indices[0];
     for &current in indices.iter().skip(1) {
-        if current == previous + 1 {
+        if current == previous + 1 && (current - run_start) < MAX_TILE_FEATURE_WIDTH {
             previous = current;
             continue;
         }
-        tiles.push(FeatureTile::new(start as u32, (previous + 1) as u32)?);
-        start = current;
+        tiles.push(FeatureTile::new(run_start as u32, (previous + 1) as u32)?);
+        run_start = current;
         previous = current;
     }
-    tiles.push(FeatureTile::new(start as u32, (previous + 1) as u32)?);
+    tiles.push(FeatureTile::new(run_start as u32, (previous + 1) as u32)?);
     Ok(tiles)
 }
 
@@ -2258,40 +2260,41 @@ fn apply_partition_leaf_updates(
     Ok(())
 }
 
-fn apply_stump_to_binned_predictions_with_path(
+fn apply_round_stumps_tree_walk(
     predictions: &mut [f32],
     binned_matrix: &BinnedMatrix,
-    stump: &TrainedStump,
-    left_leaf_value: f32,
-    right_leaf_value: f32,
-    stumps_by_node: &HashMap<u32, &TrainedStump>,
+    stumps: &[TrainedStump],
 ) -> EngineResult<()> {
-    if predictions.len() != binned_matrix.row_count {
-        return Err(EngineError::ContractViolation(format!(
-            "predictions length {} does not match binned row_count {}",
-            predictions.len(),
-            binned_matrix.row_count
-        )));
+    if stumps.is_empty() {
+        return Ok(());
     }
-    let feature_index = stump.split.feature_index as usize;
-    if feature_index >= binned_matrix.feature_count {
-        return Err(EngineError::ContractViolation(format!(
-            "split feature_index {} exceeds feature_count {}",
-            stump.split.feature_index, binned_matrix.feature_count
-        )));
+    // Build a lookup from local_node_id to stump for tree traversal
+    let mut stump_by_local: HashMap<u32, &TrainedStump> = HashMap::with_capacity(stumps.len());
+    for stump in stumps {
+        let (_, local_id) = decode_tree_node_id(stump.split.node_id);
+        stump_by_local.insert(local_id, stump);
     }
+    let feature_count = binned_matrix.feature_count;
+    let bins = &binned_matrix.bins;
 
     for (row_index, prediction) in predictions.iter_mut().enumerate() {
-        if !row_satisfies_stump_path_bins(row_index, binned_matrix, stump, stumps_by_node)? {
-            continue;
+        let row_base = row_index * feature_count;
+        // Walk the tree starting from the root (local_node_id = 0)
+        let mut local_id = 0_u32;
+        loop {
+            let Some(stump) = stump_by_local.get(&local_id) else {
+                break; // reached a leaf — no stump at this node
+            };
+            let feature_index = stump.split.feature_index as usize;
+            let bin = u16::from(bins[row_base + feature_index]);
+            if bin <= stump.split.threshold_bin {
+                *prediction += stump.left_leaf_value;
+                local_id = local_id * 2 + 1; // left child
+            } else {
+                *prediction += stump.right_leaf_value;
+                local_id = local_id * 2 + 2; // right child
+            }
         }
-        let cell_index = row_index * binned_matrix.feature_count + feature_index;
-        let bin = binned_matrix.bins[cell_index];
-        *prediction += if bin <= stump.split.threshold_bin {
-            left_leaf_value
-        } else {
-            right_leaf_value
-        };
     }
     Ok(())
 }
@@ -2301,18 +2304,21 @@ fn apply_tree_to_binned_predictions(
     binned_matrix: &BinnedMatrix,
     stumps: &[TrainedStump],
 ) -> EngineResult<()> {
-    let mut stumps_by_node = HashMap::new();
-    for stump in stumps {
-        apply_stump_to_binned_predictions_with_path(
-            predictions,
-            binned_matrix,
-            stump,
-            stump.left_leaf_value,
-            stump.right_leaf_value,
-            &stumps_by_node,
-        )?;
-        stumps_by_node.insert(stump.split.node_id, stump);
+    if stumps.is_empty() {
+        return Ok(());
     }
+    // Split stumps into per-round groups by detecting tree_id changes
+    let mut round_start = 0;
+    let mut current_tree_id = decode_tree_node_id(stumps[0].split.node_id).0;
+    for i in 1..stumps.len() {
+        let tree_id = decode_tree_node_id(stumps[i].split.node_id).0;
+        if tree_id != current_tree_id {
+            apply_round_stumps_tree_walk(predictions, binned_matrix, &stumps[round_start..i])?;
+            round_start = i;
+            current_tree_id = tree_id;
+        }
+    }
+    apply_round_stumps_tree_walk(predictions, binned_matrix, &stumps[round_start..])?;
     Ok(())
 }
 
@@ -2572,7 +2578,7 @@ fn terminal_local_node_id_for_row(
                 binned_matrix.bins.len()
             ))
         })?;
-        let next_local_node_id = if bin <= stump.split.threshold_bin {
+        let next_local_node_id = if u16::from(bin) <= stump.split.threshold_bin {
             left_child_node_id(local_node_id)?
         } else {
             right_child_node_id(local_node_id)?
@@ -2706,19 +2712,47 @@ fn squared_error_loss(
         )));
     }
 
-    let mut total = 0.0_f32;
-    for index in 0..predictions.len() {
-        let weight = sample_weights.map_or(1.0, |weights| weights[index]);
-        if !weight.is_finite() || weight <= 0.0 {
-            return Err(EngineError::ContractViolation(
-                "sample weights must be finite and > 0".to_string(),
-            ));
-        }
-        let residual = predictions[index] - targets[index];
-        total += residual * residual * weight;
-    }
+    Ok(squared_error_loss_unchecked(predictions, targets, sample_weights))
+}
 
-    Ok(total)
+fn squared_error_loss_unchecked(
+    predictions: &[f32],
+    targets: &[f32],
+    sample_weights: Option<&[f32]>,
+) -> f32 {
+    let n = predictions.len();
+    if let Some(weights) = sample_weights {
+        let mut total = 0.0_f32;
+        for index in 0..n {
+            let residual = predictions[index] - targets[index];
+            total += residual * residual * weights[index];
+        }
+        total
+    } else {
+        // Unrolled 4-wide accumulation for auto-vectorization
+        let mut sum0 = 0.0_f32;
+        let mut sum1 = 0.0_f32;
+        let mut sum2 = 0.0_f32;
+        let mut sum3 = 0.0_f32;
+        let chunks = n / 4;
+        for i in 0..chunks {
+            let base = i * 4;
+            let r0 = predictions[base] - targets[base];
+            let r1 = predictions[base + 1] - targets[base + 1];
+            let r2 = predictions[base + 2] - targets[base + 2];
+            let r3 = predictions[base + 3] - targets[base + 3];
+            sum0 += r0 * r0;
+            sum1 += r1 * r1;
+            sum2 += r2 * r2;
+            sum3 += r3 * r3;
+        }
+        let mut total = sum0 + sum1 + sum2 + sum3;
+        for index in (chunks * 4)..n {
+            let residual = predictions[index] - targets[index];
+            total += residual * residual;
+        }
+        total
+    }
 }
 
 fn required_single_section(
@@ -3239,7 +3273,7 @@ mod tests {
                 let row_index = row_index as usize;
                 let cell_index =
                     row_index * binned_matrix.feature_count + split.feature_index as usize;
-                let bin = binned_matrix.bins[cell_index];
+                let bin = u16::from(binned_matrix.bins[cell_index]);
                 if bin <= split.threshold_bin {
                     left_row_indices.push(row_index as u32);
                 } else {

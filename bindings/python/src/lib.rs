@@ -14,8 +14,10 @@ use alloygbm_predictor::{Predictor, PredictorError};
 use alloygbm_shap::{
     ShapError, explain_rows_from_artifact_bytes, global_importance_from_artifact_bytes,
 };
+use numpy::{PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use rayon::prelude::*;
 use std::time::Instant;
 
 const DEFAULT_TRAIN_ROUNDS: usize = 6;
@@ -116,6 +118,193 @@ impl NativePredictorHandle {
             row_count,
             feature_count,
             &values,
+        )
+        .map_err(predictor_error_to_pyerr)
+    }
+
+    /// Predict from a numpy array (zero-copy). Requires float thresholds converted.
+    fn predict_numpy(&self, array: PyReadonlyArray2<f32>) -> PyResult<Vec<f32>> {
+        let shape = array.shape();
+        let row_count = shape[0];
+        let feature_count = shape[1];
+        let array_view = array.as_array();
+        // Access the underlying contiguous slice (zero-copy)
+        let values = array_view
+            .as_slice()
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err("numpy array must be C-contiguous")
+            })?;
+        self.predictor
+            .predict_batch_dense(values, row_count, feature_count)
+            .map_err(predictor_error_to_pyerr)
+    }
+
+    /// Predict from raw f32 bytes — zero Python-to-Rust list overhead.
+    /// Requires float thresholds to be converted first (convert_thresholds_to_float).
+    fn predict_dense_float_bytes(
+        &self,
+        values_bytes: &[u8],
+        row_count: usize,
+        feature_count: usize,
+    ) -> PyResult<Vec<f32>> {
+        self.predictor
+            .predict_batch_dense_bytes(values_bytes, row_count, feature_count)
+            .map_err(predictor_error_to_pyerr)
+    }
+
+
+
+    /// Quantize raw f32 bytes to bins using linear scaling, then predict.
+    /// Single-pass: fuses bytes→f32 conversion with quantization (one allocation).
+    fn predict_dense_quantized_linear_bytes(
+        &self,
+        values_bytes: &[u8],
+        row_count: usize,
+        feature_count: usize,
+        feature_mins: Vec<f32>,
+        feature_maxs: Vec<f32>,
+    ) -> PyResult<Vec<f32>> {
+        if values_bytes.len() % 4 != 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "values_bytes length must be a multiple of 4 (f32)",
+            ));
+        }
+        if feature_mins.len() != feature_count || feature_maxs.len() != feature_count {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "feature_mins/feature_maxs length must match feature_count",
+            ));
+        }
+        // Fused bytes→f32+quantize (single allocation, parallel), then predict.
+        let total = row_count * feature_count;
+        let mut quantized = vec![0.0_f32; total];
+        let chunk_size = 4096.max(row_count / rayon::current_num_threads().max(1));
+        quantized
+            .par_chunks_mut(chunk_size * feature_count)
+            .enumerate()
+            .for_each(|(chunk_idx, out_chunk)| {
+                let row_start = chunk_idx * chunk_size;
+                let rows_in_chunk = out_chunk.len() / feature_count;
+                for local_row in 0..rows_in_chunk {
+                    let row_index = row_start + local_row;
+                    let byte_base = row_index * feature_count * 4;
+                    let out_base = local_row * feature_count;
+                    for fi in 0..feature_count {
+                        let bi = byte_base + fi * 4;
+                        let value = f32::from_ne_bytes([
+                            values_bytes[bi],
+                            values_bytes[bi + 1],
+                            values_bytes[bi + 2],
+                            values_bytes[bi + 3],
+                        ]);
+                        out_chunk[out_base + fi] =
+                            quantize_linear_value(value, feature_mins[fi], feature_maxs[fi]) as f32;
+                    }
+                }
+            });
+        predictor_predict_batch_dense_with_predictor(
+            &self.predictor,
+            row_count,
+            feature_count,
+            &quantized,
+        )
+        .map_err(predictor_error_to_pyerr)
+    }
+
+    /// Quantize raw float values to bins using linear scaling, then predict.
+    /// Avoids the Python-side quantization loop (1.95B iterations for 2.5M×780).
+    fn predict_dense_quantized_linear(
+        &self,
+        values: Vec<f32>,
+        row_count: usize,
+        feature_count: usize,
+        feature_mins: Vec<f32>,
+        feature_maxs: Vec<f32>,
+    ) -> PyResult<Vec<f32>> {
+        if feature_mins.len() != feature_count || feature_maxs.len() != feature_count {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "feature_mins/feature_maxs length must match feature_count",
+            ));
+        }
+        let quantized = quantize_dense_values_linear_inplace(
+            &values,
+            row_count,
+            feature_count,
+            &feature_mins,
+            &feature_maxs,
+        );
+        predictor_predict_batch_dense_with_predictor(
+            &self.predictor,
+            row_count,
+            feature_count,
+            &quantized,
+        )
+        .map_err(predictor_error_to_pyerr)
+    }
+
+    /// Convert bin-index thresholds to float thresholds using per-feature min/max.
+    /// After calling this, predict_dense works directly on raw floats — no quantization needed.
+    fn convert_thresholds_to_float(
+        &mut self,
+        feature_mins: Vec<f32>,
+        feature_maxs: Vec<f32>,
+    ) -> PyResult<()> {
+        self.predictor
+            .convert_bin_thresholds_to_float(&feature_mins, &feature_maxs)
+            .map_err(predictor_error_to_pyerr)
+    }
+
+    /// Convert bin-index thresholds to float thresholds using per-feature quantile cuts.
+    fn convert_thresholds_to_float_quantile(
+        &mut self,
+        feature_cuts: Vec<Vec<f32>>,
+    ) -> PyResult<()> {
+        self.predictor
+            .convert_bin_thresholds_to_float_quantile(&feature_cuts)
+            .map_err(predictor_error_to_pyerr)
+    }
+
+    /// Convert bin-index thresholds to float thresholds for pre-binned integer data.
+    fn convert_thresholds_to_float_prebinned(&mut self) -> PyResult<()> {
+        self.predictor
+            .convert_bin_thresholds_to_float_prebinned()
+            .map_err(predictor_error_to_pyerr)
+    }
+
+    /// Quantize raw float values using selective rank (linear + rank fallback), then predict.
+    fn predict_dense_quantized_linear_rank(
+        &self,
+        values: Vec<f32>,
+        row_count: usize,
+        feature_count: usize,
+        feature_mins: Vec<f32>,
+        feature_maxs: Vec<f32>,
+        rank_flags: Vec<bool>,
+        feature_sorted_values: Vec<Vec<f32>>,
+    ) -> PyResult<Vec<f32>> {
+        if feature_mins.len() != feature_count || feature_maxs.len() != feature_count {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "feature_mins/feature_maxs length must match feature_count",
+            ));
+        }
+        if rank_flags.len() != feature_count || feature_sorted_values.len() != feature_count {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "rank_flags/feature_sorted_values length must match feature_count",
+            ));
+        }
+        let quantized = quantize_dense_values_linear_rank_inplace(
+            &values,
+            row_count,
+            feature_count,
+            &feature_mins,
+            &feature_maxs,
+            &rank_flags,
+            &feature_sorted_values,
+        );
+        predictor_predict_batch_dense_with_predictor(
+            &self.predictor,
+            row_count,
+            feature_count,
+            &quantized,
         )
         .map_err(predictor_error_to_pyerr)
     }
@@ -282,12 +471,12 @@ fn round_half_away_from_zero(value: f32) -> i32 {
     }
 }
 
-fn quantize_linear_value(value: f32, min_value: f32, max_value: f32) -> u16 {
+fn quantize_linear_value(value: f32, min_value: f32, max_value: f32) -> u8 {
     if value <= min_value {
         return 0;
     }
     if value >= max_value {
-        return MAX_CONTINUOUS_QUANTIZED_BIN;
+        return MAX_CONTINUOUS_QUANTIZED_BIN as u8;
     }
     let span = max_value - min_value;
     if span <= PRE_BINNED_INTEGER_TOLERANCE {
@@ -295,10 +484,10 @@ fn quantize_linear_value(value: f32, min_value: f32, max_value: f32) -> u16 {
     }
     let scaled = ((value - min_value) / span) * MAX_CONTINUOUS_QUANTIZED_BIN as f32;
     round_half_away_from_zero(scaled)
-        .clamp(0, MAX_CONTINUOUS_QUANTIZED_BIN as i32) as u16
+        .clamp(0, MAX_CONTINUOUS_QUANTIZED_BIN as i32) as u8
 }
 
-fn quantize_rank_value(value: f32, sorted_values: &[f32]) -> u16 {
+fn quantize_rank_value(value: f32, sorted_values: &[f32]) -> u8 {
     if sorted_values.len() <= 1 {
         return 0;
     }
@@ -307,23 +496,101 @@ fn quantize_rank_value(value: f32, sorted_values: &[f32]) -> u16 {
     let scaled = (rank as f32 * MAX_CONTINUOUS_QUANTIZED_BIN as f32)
         / (sorted_values.len().saturating_sub(1) as f32);
     round_half_away_from_zero(scaled)
-        .clamp(0, MAX_CONTINUOUS_QUANTIZED_BIN as i32) as u16
+        .clamp(0, MAX_CONTINUOUS_QUANTIZED_BIN as i32) as u8
+}
+
+/// Quantize a flat row-major f32 array using linear scaling. Returns quantized f32 bins.
+/// Uses rayon to parallelize by row chunks for cache-friendly access.
+fn quantize_dense_values_linear_inplace(
+    values: &[f32],
+    row_count: usize,
+    feature_count: usize,
+    feature_mins: &[f32],
+    feature_maxs: &[f32],
+) -> Vec<f32> {
+    let total = row_count * feature_count;
+    let mut quantized = vec![0.0_f32; total];
+    let chunk_size = 4096.max(row_count / rayon::current_num_threads().max(1));
+    quantized
+        .par_chunks_mut(chunk_size * feature_count)
+        .enumerate()
+        .for_each(|(chunk_idx, out_chunk)| {
+            let row_start = chunk_idx * chunk_size;
+            let rows_in_chunk = out_chunk.len() / feature_count;
+            for local_row in 0..rows_in_chunk {
+                let row_index = row_start + local_row;
+                let base = row_index * feature_count;
+                let out_base = local_row * feature_count;
+                for fi in 0..feature_count {
+                    let value = values[base + fi];
+                    out_chunk[out_base + fi] =
+                        quantize_linear_value(value, feature_mins[fi], feature_maxs[fi]) as f32;
+                }
+            }
+        });
+    quantized
+}
+
+/// Quantize using linear scaling with selective rank fallback per feature.
+fn quantize_dense_values_linear_rank_inplace(
+    values: &[f32],
+    row_count: usize,
+    feature_count: usize,
+    feature_mins: &[f32],
+    feature_maxs: &[f32],
+    rank_flags: &[bool],
+    feature_sorted_values: &[Vec<f32>],
+) -> Vec<f32> {
+    let total = row_count * feature_count;
+    let mut quantized = vec![0.0_f32; total];
+    let chunk_size = 4096.max(row_count / rayon::current_num_threads().max(1));
+    quantized
+        .par_chunks_mut(chunk_size * feature_count)
+        .enumerate()
+        .for_each(|(chunk_idx, out_chunk)| {
+            let row_start = chunk_idx * chunk_size;
+            let rows_in_chunk = out_chunk.len() / feature_count;
+            for local_row in 0..rows_in_chunk {
+                let row_index = row_start + local_row;
+                let base = row_index * feature_count;
+                let out_base = local_row * feature_count;
+                for fi in 0..feature_count {
+                    let value = values[base + fi];
+                    let bin = if rank_flags[fi] {
+                        quantize_rank_value(value, &feature_sorted_values[fi])
+                    } else {
+                        quantize_linear_value(value, feature_mins[fi], feature_maxs[fi])
+                    };
+                    out_chunk[out_base + fi] = bin as f32;
+                }
+            }
+        });
+    quantized
 }
 
 fn derive_dense_feature_bounds(values: &[f32], row_count: usize, feature_count: usize) -> (Vec<f32>, Vec<f32>) {
-    let mut mins = vec![f32::INFINITY; feature_count];
-    let mut maxs = vec![f32::NEG_INFINITY; feature_count];
-    for row_index in 0..row_count {
-        let row_base = row_index * feature_count;
-        for feature_index in 0..feature_count {
-            let value = values[row_base + feature_index];
-            if value < mins[feature_index] {
-                mins[feature_index] = value;
+    let results: Vec<(f32, f32)> = (0..feature_count)
+        .into_par_iter()
+        .map(|feature_index| {
+            let mut min_val = f32::INFINITY;
+            let mut max_val = f32::NEG_INFINITY;
+            for row_index in 0..row_count {
+                let value = values[row_index * feature_count + feature_index];
+                if value < min_val {
+                    min_val = value;
+                }
+                if value > max_val {
+                    max_val = value;
+                }
             }
-            if value > maxs[feature_index] {
-                maxs[feature_index] = value;
-            }
-        }
+            (min_val, max_val)
+        })
+        .collect();
+    let mut mins = Vec::with_capacity(feature_count);
+    let mut maxs = Vec::with_capacity(feature_count);
+    for (min_val, max_val) in results {
+        mins.push(min_val);
+        maxs.push(max_val);
     }
     (mins, maxs)
 }
@@ -333,17 +600,17 @@ fn derive_dense_sorted_feature_values(
     row_count: usize,
     feature_count: usize,
 ) -> Vec<Vec<f32>> {
-    let mut columns = vec![Vec::with_capacity(row_count); feature_count];
-    for row_index in 0..row_count {
-        let row_base = row_index * feature_count;
-        for feature_index in 0..feature_count {
-            columns[feature_index].push(values[row_base + feature_index]);
-        }
-    }
-    for column in &mut columns {
-        column.sort_by(f32::total_cmp);
-    }
-    columns
+    (0..feature_count)
+        .into_par_iter()
+        .map(|feature_index| {
+            let mut column = Vec::with_capacity(row_count);
+            for row_index in 0..row_count {
+                column.push(values[row_index * feature_count + feature_index]);
+            }
+            column.sort_by(f32::total_cmp);
+            column
+        })
+        .collect()
 }
 
 fn derive_dense_feature_quantile_cuts(
@@ -354,7 +621,7 @@ fn derive_dense_feature_quantile_cuts(
 ) -> Vec<Vec<f32>> {
     let sorted_values = derive_dense_sorted_feature_values(values, row_count, feature_count);
     sorted_values
-        .into_iter()
+        .into_par_iter()
         .map(|column| {
             if column.len() <= 1 {
                 return Vec::new();
@@ -382,7 +649,7 @@ fn derive_linear_tail_rank_plan(
     core_span_ratio_threshold: f32,
 ) -> Vec<bool> {
     sorted_values
-        .iter()
+        .par_iter()
         .map(|values| {
             let value_count = values.len();
             if value_count < 5 {
@@ -432,6 +699,7 @@ fn prepare_validation_matrices_from_dense_values(
     time_index: Option<Vec<i64>>,
     strategy: ContinuousBinningStrategy,
     training_metadata: &ContinuousBinningMetadataInternal,
+    need_dense_values: bool,
 ) -> Result<PreparedTrainingMatrices, EngineError> {
     if targets.len() != row_count {
         return Err(EngineError::ContractViolation(format!(
@@ -447,9 +715,14 @@ fn prepare_validation_matrices_from_dense_values(
         feature_count,
         strategy,
         training_metadata,
+        need_dense_values,
     )?;
     let dataset = TrainingDataset {
-        matrix: DatasetMatrix::new(row_count, feature_count, dense_values)?,
+        matrix: if need_dense_values {
+            DatasetMatrix::new(row_count, feature_count, dense_values)?
+        } else {
+            DatasetMatrix::new_metadata_only(row_count, feature_count)?
+        },
         targets: targets.to_vec(),
         sample_weights: None,
         time_index,
@@ -474,61 +747,131 @@ fn quantize_dense_values_with_metadata(
     feature_count: usize,
     strategy: ContinuousBinningStrategy,
     metadata: &ContinuousBinningMetadataInternal,
-) -> Result<(Vec<f32>, Vec<u16>, u16), EngineError> {
-    let mut dense_values = Vec::with_capacity(values.len());
-    let mut bins = Vec::with_capacity(values.len());
-    let mut max_bin = 0_u16;
-    for row_index in 0..row_count {
-        let row_base = row_index * feature_count;
-        for feature_index in 0..feature_count {
-            let value = values[row_base + feature_index];
-            let bin = match strategy {
-                ContinuousBinningStrategy::Linear => {
-                    let mins = metadata.feature_mins.as_ref().ok_or_else(|| {
-                        EngineError::ContractViolation(
-                            "continuous linear minima are missing".to_string(),
-                        )
-                    })?;
-                    let maxs = metadata.feature_maxs.as_ref().ok_or_else(|| {
-                        EngineError::ContractViolation(
-                            "continuous linear maxima are missing".to_string(),
-                        )
-                    })?;
-                    let rank_flags = metadata.feature_linear_rank_flags.as_ref();
-                    if rank_flags.is_some_and(|flags| flags[feature_index]) {
-                        let sorted_values =
-                            metadata.feature_sorted_values.as_ref().ok_or_else(|| {
-                                EngineError::ContractViolation(
-                                    "continuous linear sorted values are missing".to_string(),
-                                )
-                            })?;
-                        quantize_rank_value(value, &sorted_values[feature_index])
-                    } else {
-                        quantize_linear_value(value, mins[feature_index], maxs[feature_index])
+    need_dense_values: bool,
+) -> Result<(Vec<f32>, Vec<u8>, u16), EngineError> {
+    // Validate metadata upfront so parallel closures don't need to return Result.
+    let mins_ref = match strategy {
+        ContinuousBinningStrategy::Linear => Some(metadata.feature_mins.as_ref().ok_or_else(|| {
+            EngineError::ContractViolation("continuous linear minima are missing".to_string())
+        })?),
+        _ => None,
+    };
+    let maxs_ref = match strategy {
+        ContinuousBinningStrategy::Linear => Some(metadata.feature_maxs.as_ref().ok_or_else(|| {
+            EngineError::ContractViolation("continuous linear maxima are missing".to_string())
+        })?),
+        _ => None,
+    };
+    let sorted_ref = match strategy {
+        ContinuousBinningStrategy::Rank => Some(metadata.feature_sorted_values.as_ref().ok_or_else(|| {
+            EngineError::ContractViolation("continuous rank sorted values are missing".to_string())
+        })?),
+        ContinuousBinningStrategy::Linear => metadata.feature_sorted_values.as_ref(),
+        _ => None,
+    };
+    let cuts_ref = match strategy {
+        ContinuousBinningStrategy::Quantile => Some(metadata.feature_quantile_cuts.as_ref().ok_or_else(|| {
+            EngineError::ContractViolation("continuous quantile cuts are missing".to_string())
+        })?),
+        _ => None,
+    };
+    let rank_flags = metadata.feature_linear_rank_flags.as_ref();
+
+    let total_cells = row_count * feature_count;
+    let mut dense_values = if need_dense_values {
+        vec![0.0_f32; total_cells]
+    } else {
+        Vec::new()
+    };
+    let mut bins = vec![0_u8; total_cells];
+
+    let chunk_size = (row_count / rayon::current_num_threads().max(1)).max(256);
+
+    let max_bin = if need_dense_values {
+        dense_values
+            .par_chunks_mut(chunk_size * feature_count)
+            .zip(bins.par_chunks_mut(chunk_size * feature_count))
+            .enumerate()
+            .map(|(chunk_idx, (dense_chunk, bin_chunk))| {
+                let row_start = chunk_idx * chunk_size;
+                let chunk_rows = dense_chunk.len() / feature_count;
+                let mut local_max_bin = 0_u8;
+                for local_row in 0..chunk_rows {
+                    let row_index = row_start + local_row;
+                    let src_base = row_index * feature_count;
+                    let dst_base = local_row * feature_count;
+                    for feature_index in 0..feature_count {
+                        let value = values[src_base + feature_index];
+                        let bin = match strategy {
+                            ContinuousBinningStrategy::Linear => {
+                                if rank_flags.is_some_and(|flags| flags[feature_index]) {
+                                    let sv = sorted_ref.expect("sorted values validated");
+                                    quantize_rank_value(value, &sv[feature_index])
+                                } else {
+                                    let mins = mins_ref.expect("mins validated");
+                                    let maxs = maxs_ref.expect("maxs validated");
+                                    quantize_linear_value(value, mins[feature_index], maxs[feature_index])
+                                }
+                            }
+                            ContinuousBinningStrategy::Rank => {
+                                let sv = sorted_ref.expect("sorted values validated");
+                                quantize_rank_value(value, &sv[feature_index])
+                            }
+                            ContinuousBinningStrategy::Quantile => {
+                                let cuts = cuts_ref.expect("cuts validated");
+                                cuts[feature_index].partition_point(|probe| *probe <= value) as u8
+                            }
+                        };
+                        local_max_bin = local_max_bin.max(bin);
+                        dense_chunk[dst_base + feature_index] = bin as f32;
+                        bin_chunk[dst_base + feature_index] = bin;
                     }
                 }
-                ContinuousBinningStrategy::Rank => {
-                    let sorted_values = metadata.feature_sorted_values.as_ref().ok_or_else(|| {
-                        EngineError::ContractViolation(
-                            "continuous rank sorted values are missing".to_string(),
-                        )
-                    })?;
-                    quantize_rank_value(value, &sorted_values[feature_index])
+                u16::from(local_max_bin)
+            })
+            .reduce(|| 0_u16, |a, b| a.max(b))
+    } else {
+        bins.par_chunks_mut(chunk_size * feature_count)
+            .enumerate()
+            .map(|(chunk_idx, bin_chunk)| {
+                let row_start = chunk_idx * chunk_size;
+                let chunk_rows = bin_chunk.len() / feature_count;
+                let mut local_max_bin = 0_u8;
+                for local_row in 0..chunk_rows {
+                    let row_index = row_start + local_row;
+                    let src_base = row_index * feature_count;
+                    let dst_base = local_row * feature_count;
+                    for feature_index in 0..feature_count {
+                        let value = values[src_base + feature_index];
+                        let bin = match strategy {
+                            ContinuousBinningStrategy::Linear => {
+                                if rank_flags.is_some_and(|flags| flags[feature_index]) {
+                                    let sv = sorted_ref.expect("sorted values validated");
+                                    quantize_rank_value(value, &sv[feature_index])
+                                } else {
+                                    let mins = mins_ref.expect("mins validated");
+                                    let maxs = maxs_ref.expect("maxs validated");
+                                    quantize_linear_value(value, mins[feature_index], maxs[feature_index])
+                                }
+                            }
+                            ContinuousBinningStrategy::Rank => {
+                                let sv = sorted_ref.expect("sorted values validated");
+                                quantize_rank_value(value, &sv[feature_index])
+                            }
+                            ContinuousBinningStrategy::Quantile => {
+                                let cuts = cuts_ref.expect("cuts validated");
+                                cuts[feature_index].partition_point(|probe| *probe <= value) as u8
+                            }
+                        };
+                        local_max_bin = local_max_bin.max(bin);
+                        bin_chunk[dst_base + feature_index] = bin;
+                    }
                 }
-                ContinuousBinningStrategy::Quantile => {
-                    let cuts = metadata.feature_quantile_cuts.as_ref().ok_or_else(|| {
-                        EngineError::ContractViolation(
-                            "continuous quantile cuts are missing".to_string(),
-                        )
-                    })?;
-                    cuts[feature_index].partition_point(|probe| *probe <= value) as u16
-                }
-            };
-            max_bin = max_bin.max(bin);
-            dense_values.push(bin as f32);
-            bins.push(bin);
-        }
-    }
+                u16::from(local_max_bin)
+            })
+            .reduce(|| 0_u16, |a, b| a.max(b))
+    };
+
     Ok((dense_values, bins, max_bin))
 }
 
@@ -540,6 +883,7 @@ fn prepare_training_matrices_from_dense_values(
     time_index: Option<Vec<i64>>,
     strategy: ContinuousBinningStrategy,
     max_bins: usize,
+    need_dense_values: bool,
 ) -> Result<PreparedTrainingMatrices, EngineError> {
     validate_continuous_binning_max_bins(max_bins)?;
     let dense_view = DenseMatrixView::new(row_count, feature_count, values)?;
@@ -568,20 +912,25 @@ fn prepare_training_matrices_from_dense_values(
 
     let (dense_values, bins, max_bin, metadata) = if use_pre_binned_path {
         let mut bins = Vec::with_capacity(values.len());
-        let mut dense_values = Vec::with_capacity(values.len());
+        let mut dense_values = if need_dense_values {
+            Vec::with_capacity(values.len())
+        } else {
+            Vec::new()
+        };
         let mut max_bin = 0_u16;
         for (index, &value) in values.iter().enumerate() {
             let rounded = value.round();
-            if rounded > u16::MAX as f32 {
+            if rounded > 255.0 {
                 return Err(EngineError::ContractViolation(format!(
-                    "value at index {index} exceeds max supported bin {}",
-                    u16::MAX
+                    "value at index {index} exceeds max supported bin 255"
                 )));
             }
-            let bin = rounded as u16;
-            max_bin = max_bin.max(bin);
+            let bin = rounded as u8;
+            max_bin = max_bin.max(u16::from(bin));
             bins.push(bin);
-            dense_values.push(bin as f32);
+            if need_dense_values {
+                dense_values.push(bin as f32);
+            }
         }
         (
             dense_values,
@@ -656,12 +1005,17 @@ fn prepare_training_matrices_from_dense_values(
             feature_count,
             strategy,
             &metadata,
+            need_dense_values,
         )?;
         (dense_values, bins, max_bin, metadata)
     };
 
     let dataset = TrainingDataset {
-        matrix: DatasetMatrix::new(row_count, feature_count, dense_values)?,
+        matrix: if need_dense_values {
+            DatasetMatrix::new(row_count, feature_count, dense_values)?
+        } else {
+            DatasetMatrix::new_metadata_only(row_count, feature_count)?
+        },
         targets: targets.to_vec(),
         sample_weights: None,
         time_index,
@@ -771,7 +1125,7 @@ fn flatten_rows(rows: &[Vec<f32>]) -> Result<(Vec<f32>, usize, usize), EngineErr
     Ok((dense_values, rows.len(), feature_count))
 }
 
-fn encode_bins_from_encoded_values(encoded_values: &[f32]) -> Result<(Vec<u16>, u16), EngineError> {
+fn encode_bins_from_encoded_values(encoded_values: &[f32]) -> Result<(Vec<u8>, u16), EngineError> {
     if encoded_values.is_empty() {
         return Err(EngineError::ContractViolation(
             "encoded values cannot be empty".to_string(),
@@ -787,11 +1141,10 @@ fn encode_bins_from_encoded_values(encoded_values: &[f32]) -> Result<(Vec<u16>, 
     let mut unique_values = encoded_values.to_vec();
     unique_values.sort_by(f32::total_cmp);
     unique_values.dedup_by(|left, right| left.to_bits() == right.to_bits());
-    if unique_values.len() > u16::MAX as usize + 1 {
+    if unique_values.len() > 256 {
         return Err(EngineError::ContractViolation(format!(
-            "encoded cardinality {} exceeds supported max {}",
+            "encoded cardinality {} exceeds supported max 256",
             unique_values.len(),
-            u16::MAX as usize + 1
         )));
     }
     let mut bins = Vec::with_capacity(encoded_values.len());
@@ -803,7 +1156,7 @@ fn encode_bins_from_encoded_values(encoded_values: &[f32]) -> Result<(Vec<u16>, 
                     "encoded value lookup failed during bin mapping".to_string(),
                 )
             })?;
-        bins.push(position as u16);
+        bins.push(position as u8);
     }
     Ok((bins, (unique_values.len().saturating_sub(1)) as u16))
 }
@@ -979,6 +1332,7 @@ fn train_regression_artifact_with_summary_dense_impl(
     continuous_binning_max_bins: usize,
 ) -> Result<NativeTrainingResult, EngineError> {
     let bridge_start = Instant::now();
+    let need_dense_values = categorical_spec.is_some();
     let mut prepared = prepare_training_matrices_from_dense_values(
         values,
         row_count,
@@ -987,6 +1341,7 @@ fn train_regression_artifact_with_summary_dense_impl(
         time_index,
         continuous_binning_strategy,
         continuous_binning_max_bins,
+        need_dense_values,
     )?;
 
     let training_targets_for_validation = prepared.dataset.targets.clone();
@@ -1015,6 +1370,7 @@ fn train_regression_artifact_with_summary_dense_impl(
                 validation_time_index,
                 continuous_binning_strategy,
                 &prepared.metadata,
+                need_dense_values,
             )?;
 
             if let Some(spec) = categorical_spec.as_ref() {
@@ -1170,9 +1526,7 @@ fn predictor_predict_batch_dense_with_predictor(
     feature_count: usize,
     values: &[f32],
 ) -> Result<Vec<f32>, PredictorError> {
-    let rows = dense_rows_from_flat_values(values, row_count, feature_count)
-        .map_err(PredictorError::InvalidInput)?;
-    predictor.predict_batch(&rows)
+    predictor.predict_batch_dense(values, row_count, feature_count)
 }
 
 fn predictor_predict_batch_dense_impl(
@@ -1806,6 +2160,151 @@ fn train_regression_artifact_dense_with_summary(
     .map_err(engine_error_to_pyerr)
 }
 
+/// Reinterpret raw bytes as f32 slice (safe, no allocation).
+fn bytes_to_f32_vec(bytes: &[u8]) -> PyResult<Vec<f32>> {
+    if bytes.len() % 4 != 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "values_bytes length must be a multiple of 4 (f32)",
+        ));
+    }
+    let count = bytes.len() / 4;
+    let mut result = vec![0.0_f32; count];
+    for (i, chunk) in bytes.chunks_exact(4).enumerate() {
+        result[i] = f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    }
+    Ok(result)
+}
+
+#[pyfunction(signature = (
+    values_bytes,
+    row_count,
+    feature_count,
+    targets_bytes,
+    learning_rate,
+    max_depth,
+    row_subsample,
+    col_subsample,
+    min_validation_improvement,
+    seed,
+    deterministic,
+    rounds=DEFAULT_TRAIN_ROUNDS,
+    early_stopping_rounds=None,
+    min_data_in_leaf=1,
+    lambda_l1=0.0,
+    lambda_l2=0.0,
+    min_child_hessian=0.0,
+    validation_values_bytes=None,
+    validation_row_count=None,
+    validation_targets_bytes=None,
+    validation_time_index=None,
+    categorical_feature_index=None,
+    categorical_feature_values=None,
+    validation_categorical_feature_values=None,
+    training_policy="auto",
+    store_node_stats=false,
+    categorical_smoothing=20.0,
+    categorical_min_samples_leaf=1,
+    categorical_time_aware=false,
+    time_index=None,
+    continuous_binning_strategy="linear",
+    continuous_binning_max_bins=256
+))]
+#[allow(clippy::too_many_arguments)]
+fn train_regression_artifact_dense_with_summary_bytes(
+    values_bytes: &[u8],
+    row_count: usize,
+    feature_count: usize,
+    targets_bytes: &[u8],
+    learning_rate: f32,
+    max_depth: u16,
+    row_subsample: f32,
+    col_subsample: f32,
+    min_validation_improvement: f32,
+    seed: u64,
+    deterministic: bool,
+    rounds: usize,
+    early_stopping_rounds: Option<u16>,
+    min_data_in_leaf: u32,
+    lambda_l1: f32,
+    lambda_l2: f32,
+    min_child_hessian: f32,
+    validation_values_bytes: Option<&[u8]>,
+    validation_row_count: Option<usize>,
+    validation_targets_bytes: Option<&[u8]>,
+    validation_time_index: Option<Vec<i64>>,
+    categorical_feature_index: Option<usize>,
+    categorical_feature_values: Option<Vec<String>>,
+    validation_categorical_feature_values: Option<Vec<String>>,
+    training_policy: &str,
+    store_node_stats: bool,
+    categorical_smoothing: f64,
+    categorical_min_samples_leaf: u32,
+    categorical_time_aware: bool,
+    time_index: Option<Vec<i64>>,
+    continuous_binning_strategy: &str,
+    continuous_binning_max_bins: usize,
+) -> PyResult<NativeTrainingResult> {
+    let values = bytes_to_f32_vec(values_bytes)?;
+    let targets = bytes_to_f32_vec(targets_bytes)?;
+    let validation_values = validation_values_bytes
+        .map(bytes_to_f32_vec)
+        .transpose()?;
+    let validation_targets = validation_targets_bytes
+        .map(bytes_to_f32_vec)
+        .transpose()?;
+    if rounds == 0 {
+        return Err(PyValueError::new_err("rounds must be greater than 0"));
+    }
+    let effective_rounds = rounds.min(MAX_SUPPORTED_TRAIN_ROUNDS);
+    let training_policy = parse_training_policy(training_policy).map_err(engine_error_to_pyerr)?;
+    let continuous_binning_strategy =
+        parse_continuous_binning_strategy(continuous_binning_strategy)
+            .map_err(engine_error_to_pyerr)?;
+    let params = build_train_params(
+        learning_rate,
+        max_depth,
+        row_subsample,
+        col_subsample,
+        min_validation_improvement,
+        seed,
+        deterministic,
+        early_stopping_rounds,
+        min_data_in_leaf,
+        lambda_l1,
+        lambda_l2,
+        min_child_hessian,
+    );
+    let categorical_spec = resolve_categorical_spec(
+        categorical_feature_index,
+        categorical_feature_values,
+        categorical_smoothing,
+        categorical_min_samples_leaf,
+        categorical_time_aware,
+        row_count,
+    )
+    .map_err(engine_error_to_pyerr)?;
+    train_regression_artifact_with_summary_dense_impl(
+        &values,
+        row_count,
+        feature_count,
+        &targets,
+        validation_values.as_deref(),
+        validation_row_count,
+        validation_targets.as_deref(),
+        params,
+        effective_rounds,
+        time_index,
+        validation_time_index,
+        categorical_spec,
+        validation_categorical_feature_values,
+        training_policy,
+        store_node_stats,
+        continuous_binning_strategy,
+        continuous_binning_max_bins,
+    )
+    .map_err(engine_error_to_pyerr)
+}
+
 #[pymodule]
 fn _alloygbm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<NativeRuntimeInfo>()?;
@@ -1830,6 +2329,10 @@ fn _alloygbm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(train_regression_artifact_with_summary, m)?)?;
     m.add_function(wrap_pyfunction!(
         train_regression_artifact_dense_with_summary,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        train_regression_artifact_dense_with_summary_bytes,
         m
     )?)?;
     Ok(())

@@ -282,6 +282,7 @@ class GBMRegressor:
         self._is_fitted = False
         self._artifact_bytes: bytes | None = None
         self._native_predictor_handle: object | None = None
+        self._float_thresholds_converted: bool = False
         self._n_features_in = 0
         self._uses_continuous_binning = False
         self._continuous_feature_mins: list[float] | None = None
@@ -528,6 +529,7 @@ class GBMRegressor:
     ) -> "GBMRegressor":
         """Fit native-backed regression model artifact state."""
         fit_start = time.perf_counter()
+        self._fit_start_time = fit_start
         targets = self._validate_targets(y)
         if self.early_stopping_rounds is not None and eval_set is None:
             raise ValueError("early_stopping_rounds requires eval_set to be provided")
@@ -546,12 +548,21 @@ class GBMRegressor:
             if inferred is not None:
                 effective_categorical_feature_index, categorical_values = inferred
 
-        dense_training_payload = (
-            self._native_matrix_flat_payload(X)
+        # Prefer bytes payload (zero-copy numpy→Rust) over list[float] payload
+        dense_training_bytes_payload = (
+            self._native_matrix_bytes_payload(X)
             if effective_categorical_feature_index is None
             else None
         )
-        if dense_training_payload is not None:
+        dense_training_payload = (
+            self._native_matrix_flat_payload(X)
+            if effective_categorical_feature_index is None and dense_training_bytes_payload is None
+            else None
+        )
+        training_rows: list[list[float]] | None = None
+        if dense_training_bytes_payload is not None:
+            _, row_count, feature_count = dense_training_bytes_payload
+        elif dense_training_payload is not None:
             _, row_count, feature_count = dense_training_payload
         else:
             training_rows = self._validate_rows(
@@ -586,18 +597,26 @@ class GBMRegressor:
         validation_X: object | None = None
         validation_targets: list[float] | None = None
         validation_dense_payload: tuple[list[float], int, int] | None = None
+        validation_dense_bytes_payload: tuple[bytes, int, int] | None = None
         validation_rows: list[list[float]] | None = None
         validation_categorical_values: list[str] | None = None
         validated_eval_time_index: list[int] | None = None
         if eval_set is not None:
             validation_X, validation_y = eval_set
             validation_targets = self._validate_targets(validation_y)
-            validation_dense_payload = (
-                self._native_matrix_flat_payload(validation_X)
+            validation_dense_bytes_payload = (
+                self._native_matrix_bytes_payload(validation_X)
                 if effective_categorical_feature_index is None
                 else None
             )
-            if validation_dense_payload is not None:
+            validation_dense_payload = (
+                self._native_matrix_flat_payload(validation_X)
+                if effective_categorical_feature_index is None and validation_dense_bytes_payload is None
+                else None
+            )
+            if validation_dense_bytes_payload is not None:
+                _, validation_row_count, validation_feature_count = validation_dense_bytes_payload
+            elif validation_dense_payload is not None:
                 _, validation_row_count, validation_feature_count = validation_dense_payload
             else:
                 validation_rows = self._validate_rows(
@@ -641,7 +660,72 @@ class GBMRegressor:
                 "eval_time_index must be provided when categorical_time_aware=True and eval_set is used"
             )
 
+        import numpy as np
+        targets_bytes = np.asarray(targets, dtype=np.float32).tobytes() if dense_training_bytes_payload is not None else None
+        validation_targets_bytes = (
+            np.asarray(validation_targets, dtype=np.float32).tobytes()
+            if validation_targets is not None and dense_training_bytes_payload is not None
+            else None
+        )
+
         input_adaptation_seconds = time.perf_counter() - fit_start
+
+        # Try bytes path first (avoids Python list→Vec<f32> conversion overhead)
+        if dense_training_bytes_payload is not None:
+            try:
+                from alloygbm._alloygbm import train_regression_artifact_dense_with_summary_bytes
+                native_result = train_regression_artifact_dense_with_summary_bytes(
+                    values_bytes=dense_training_bytes_payload[0],
+                    row_count=dense_training_bytes_payload[1],
+                    feature_count=dense_training_bytes_payload[2],
+                    targets_bytes=targets_bytes,
+                    learning_rate=self.learning_rate,
+                    max_depth=self.max_depth,
+                    row_subsample=self.row_subsample,
+                    col_subsample=self.col_subsample,
+                    min_validation_improvement=self.min_validation_improvement,
+                    seed=self.seed,
+                    deterministic=self.deterministic,
+                    rounds=self.n_estimators,
+                    early_stopping_rounds=self.early_stopping_rounds,
+                    min_data_in_leaf=self.min_data_in_leaf,
+                    lambda_l1=self.lambda_l1,
+                    lambda_l2=self.lambda_l2,
+                    min_child_hessian=self.min_child_hessian,
+                    validation_values_bytes=(
+                        validation_dense_bytes_payload[0]
+                        if validation_dense_bytes_payload is not None
+                        else None
+                    ),
+                    validation_row_count=(
+                        validation_dense_bytes_payload[1]
+                        if validation_dense_bytes_payload is not None
+                        else None
+                    ),
+                    validation_targets_bytes=validation_targets_bytes,
+                    validation_time_index=validated_eval_time_index,
+                    categorical_feature_index=effective_categorical_feature_index,
+                    categorical_feature_values=categorical_values,
+                    validation_categorical_feature_values=validation_categorical_values,
+                    training_policy=self.training_policy,
+                    store_node_stats=self.store_node_stats,
+                    categorical_smoothing=self.categorical_smoothing,
+                    categorical_min_samples_leaf=self.categorical_min_samples_leaf,
+                    categorical_time_aware=self.categorical_time_aware,
+                    time_index=validated_time_index,
+                    continuous_binning_strategy=self.continuous_binning_strategy,
+                    continuous_binning_max_bins=self.continuous_binning_max_bins,
+                )
+                return self._finalize_training_result(native_result, input_adaptation_seconds, feature_count=feature_count)
+            except (ImportError, AttributeError):
+                pass  # Fall through to list-based path
+            except Exception:
+                pass  # Bytes path not available or failed; fall through
+
+        # Compute dense_training_payload lazily if only bytes payload was prepared
+        if dense_training_payload is None and dense_training_bytes_payload is not None:
+            dense_training_payload = self._native_matrix_flat_payload(X)
+
         try:
             if dense_training_payload is not None:
                 train_with_summary = _load_native_train_regression_artifact_dense_with_summary()
@@ -744,6 +828,7 @@ class GBMRegressor:
         self._native_predictor_handle = self._build_native_predictor_handle(
             self._artifact_bytes
         )
+        self._convert_predictor_thresholds_to_float()
         summary = native_result.summary
         self.best_iteration_ = summary.best_validation_round
         self.best_score_ = (
@@ -758,6 +843,43 @@ class GBMRegressor:
                 "rmse": [float(v) for v in summary.validation_rmse]
             }
         total_fit_seconds = time.perf_counter() - fit_start
+        self.fit_timing_ = {
+            "input_adaptation_seconds": float(input_adaptation_seconds),
+            "native_bridge_prepare_seconds": float(summary.bridge_prepare_seconds),
+            "native_train_seconds": float(summary.native_train_seconds),
+            "total_fit_seconds": float(total_fit_seconds),
+        }
+        self._is_fitted = True
+        return self
+
+    def _finalize_training_result(
+        self,
+        native_result: object,
+        input_adaptation_seconds: float,
+        feature_count: int | None = None,
+    ) -> "GBMRegressor":
+        self._apply_continuous_binning_metadata(native_result.continuous_binning_metadata)
+        if feature_count is not None:
+            self._n_features_in = feature_count
+        self._artifact_bytes = bytes(native_result.artifact_bytes)
+        self._native_predictor_handle = self._build_native_predictor_handle(
+            self._artifact_bytes
+        )
+        self._convert_predictor_thresholds_to_float()
+        summary = native_result.summary
+        self.best_iteration_ = summary.best_validation_round
+        self.best_score_ = (
+            float(summary.best_validation_loss)
+            if summary.best_validation_loss is not None
+            else None
+        )
+        self.n_estimators_ = int(summary.rounds_completed)
+        self.evals_result_ = {"train": {"rmse": [float(v) for v in summary.train_rmse]}}
+        if summary.validation_rmse:
+            self.evals_result_["validation"] = {
+                "rmse": [float(v) for v in summary.validation_rmse]
+            }
+        total_fit_seconds = time.perf_counter() - self._fit_start_time
         self.fit_timing_ = {
             "input_adaptation_seconds": float(input_adaptation_seconds),
             "native_bridge_prepare_seconds": float(summary.bridge_prepare_seconds),
@@ -861,12 +983,7 @@ class GBMRegressor:
                 native_training_rows = rows
         else:
             flat_values, row_count, dense_feature_count = active_dense_training_payload
-            if all(
-                value >= 0.0
-                and abs(value - float(self._round_half_away_from_zero(value)))
-                <= _PRE_BINNED_INTEGER_TOLERANCE
-                for value in flat_values
-            ):
+            if self._check_pre_binned_integers(flat_values):
                 self._uses_continuous_binning = False
                 self._continuous_feature_mins = None
                 self._continuous_feature_maxs = None
@@ -1021,6 +1138,7 @@ class GBMRegressor:
         self._native_predictor_handle = self._build_native_predictor_handle(
             self._artifact_bytes
         )
+        self._convert_predictor_thresholds_to_float()
         self.best_iteration_ = None
         self.best_score_ = None
         self.n_estimators_ = self.n_estimators
@@ -1042,6 +1160,27 @@ class GBMRegressor:
         if self._artifact_bytes is None:
             raise RuntimeError("GBMRegressor native artifact is not available")
         rows: object
+        # Fast path: float thresholds + zero-copy numpy — no data copying
+        if self._float_thresholds_converted:
+            try:
+                import numpy as _np
+
+                candidate = self._native_matrix_fast_path_candidate(X)
+                if candidate is not None:
+                    arr = _np.ascontiguousarray(candidate, dtype=_np.float32)
+                    if arr.shape[1] != self._n_features_in:
+                        raise ValueError(
+                            f"X feature count {arr.shape[1]} does not match fitted "
+                            f"feature count {self._n_features_in}"
+                        )
+                    predict_numpy = getattr(
+                        self._native_predictor_handle, "predict_numpy", None
+                    )
+                    if callable(predict_numpy):
+                        return list(predict_numpy(arr))
+            except ImportError:
+                pass
+
         if self._uses_continuous_binning:
             dense_payload = self._native_matrix_flat_payload(X)
             if dense_payload is not None:
@@ -1051,11 +1190,38 @@ class GBMRegressor:
                         f"X feature count {feature_count} does not match fitted feature count "
                         f"{self._n_features_in}"
                     )
+                # Float threshold fallback (when bytes path unavailable)
+                if self._float_thresholds_converted:
+                    predict_dense = getattr(
+                        self._native_predictor_handle, "predict_dense", None
+                    )
+                    if callable(predict_dense):
+                        return list(predict_dense(flat_values, row_count, feature_count))
+
+                # Use Rust-side fused quantize+predict when native handle is available
                 if self.continuous_binning_strategy == "linear":
                     mins, maxs = self._require_continuous_feature_bounds()
                     rank_flags = self._continuous_feature_linear_rank_flags
                     if rank_flags is not None and any(rank_flags):
                         sorted_values = self._require_continuous_feature_sorted_values()
+                        predict_fn = getattr(
+                            self._native_predictor_handle,
+                            "predict_dense_quantized_linear_rank",
+                            None,
+                        )
+                        if callable(predict_fn):
+                            return list(
+                                predict_fn(
+                                    flat_values,
+                                    row_count,
+                                    feature_count,
+                                    list(mins),
+                                    list(maxs),
+                                    list(rank_flags),
+                                    [list(sv) for sv in sorted_values],
+                                )
+                            )
+                        # Fallback to Python quantization
                         dense_payload = (
                             self._quantize_dense_values_linear_with_selective_rank(
                                 flat_values,
@@ -1070,6 +1236,22 @@ class GBMRegressor:
                             feature_count,
                         )
                     else:
+                        predict_fn = getattr(
+                            self._native_predictor_handle,
+                            "predict_dense_quantized_linear",
+                            None,
+                        )
+                        if callable(predict_fn):
+                            return list(
+                                predict_fn(
+                                    flat_values,
+                                    row_count,
+                                    feature_count,
+                                    list(mins),
+                                    list(maxs),
+                                )
+                            )
+                        # Fallback to Python quantization
                         dense_payload = (
                             self._quantize_dense_values_linear(
                                 flat_values,
@@ -1115,13 +1297,23 @@ class GBMRegressor:
                         self._artifact_bytes, flat_values, row_count, feature_count
                     )
                 )
-            quantized_rows = self._quantize_rows_for_prediction(self._validate_rows(X))
-            if len(quantized_rows[0]) != self._n_features_in:
-                raise ValueError(
-                    f"X feature count {len(quantized_rows[0])} does not match fitted feature count "
-                    f"{self._n_features_in}"
-                )
-            rows = quantized_rows
+            if self._float_thresholds_converted:
+                # Float thresholds: send raw (unquantized) rows directly
+                validated_rows = self._validate_rows(X)
+                if len(validated_rows[0]) != self._n_features_in:
+                    raise ValueError(
+                        f"X feature count {len(validated_rows[0])} does not match fitted "
+                        f"feature count {self._n_features_in}"
+                    )
+                rows = validated_rows
+            else:
+                quantized_rows = self._quantize_rows_for_prediction(self._validate_rows(X))
+                if len(quantized_rows[0]) != self._n_features_in:
+                    raise ValueError(
+                        f"X feature count {len(quantized_rows[0])} does not match fitted "
+                        f"feature count {self._n_features_in}"
+                    )
+                rows = quantized_rows
         else:
             dense_payload = self._native_matrix_flat_payload(X)
             if dense_payload is not None:
@@ -1405,7 +1597,33 @@ class GBMRegressor:
         )
 
     @staticmethod
+    def _native_matrix_bytes_payload(
+        X: object,
+    ) -> tuple[bytes, int, int] | None:
+        """Return raw f32 bytes of the matrix for zero-copy transfer to Rust."""
+        try:
+            import numpy as np
+            candidate = GBMRegressor._native_matrix_fast_path_candidate(X)
+            if candidate is None:
+                return None
+            row_count, feature_count = GBMRegressor._native_matrix_shape(candidate)
+            arr = np.ascontiguousarray(candidate, dtype=np.float32)
+            return (arr.tobytes(), row_count, feature_count)
+        except ImportError:
+            return None
+
+    @staticmethod
     def _flatten_native_matrix_candidate(candidate: object) -> list[float]:
+        # Fast path: numpy arrays can use .astype(float32).ravel().tolist()
+        # which is 10-100× faster than struct.iter_unpack for large arrays
+        try:
+            import numpy as np
+            if isinstance(candidate, np.ndarray):
+                flat = np.ascontiguousarray(candidate, dtype=np.float32).ravel()
+                return flat.tolist()
+        except ImportError:
+            pass
+
         view = memoryview(candidate)
         format_code = getattr(view, "format", "") or ""
         normalized = str(format_code).strip()
@@ -1439,6 +1657,12 @@ class GBMRegressor:
     def _derive_dense_feature_bounds(
         flat_values: Sequence[float], row_count: int, feature_count: int
     ) -> tuple[list[float], list[float]]:
+        try:
+            import numpy as np
+            arr = np.asarray(flat_values, dtype=np.float32).reshape(row_count, feature_count)
+            return arr.min(axis=0).tolist(), arr.max(axis=0).tolist()
+        except (ImportError, ValueError):
+            pass
         mins = [float("inf")] * feature_count
         maxs = [float("-inf")] * feature_count
         for row_index in range(row_count):
@@ -1499,8 +1723,30 @@ class GBMRegressor:
         feature_mins: Sequence[float],
         feature_maxs: Sequence[float],
     ) -> list[float]:
-        quantized: list[float] = []
         max_bin = _MAX_CONTINUOUS_QUANTIZED_BIN
+        try:
+            import numpy as np
+            arr = np.asarray(flat_values, dtype=np.float32).reshape(row_count, feature_count)
+            mins = np.asarray(feature_mins, dtype=np.float32)
+            maxs = np.asarray(feature_maxs, dtype=np.float32)
+            span = maxs - mins
+            span_ok = span > _PRE_BINNED_INTEGER_TOLERANCE
+            # Vectorized quantization
+            result = np.zeros_like(arr)
+            for fi in range(feature_count):
+                if not span_ok[fi]:
+                    result[:, fi] = 0.0
+                else:
+                    scaled = ((arr[:, fi] - mins[fi]) / span[fi]) * max_bin
+                    rounded = np.floor(scaled + 0.5)
+                    result[:, fi] = np.clip(rounded, 0, max_bin)
+            # Clamp min/max boundaries
+            result = np.where(arr <= mins, 0.0, result)
+            result = np.where(arr >= maxs, float(max_bin), result)
+            return result.ravel().tolist()
+        except (ImportError, ValueError):
+            pass
+        quantized: list[float] = []
         for row_index in range(row_count):
             row_base = row_index * feature_count
             for feature_index in range(feature_count):
@@ -1512,11 +1758,11 @@ class GBMRegressor:
                 elif value >= max_value:
                     clamped = max_bin
                 else:
-                    span = max_value - min_value
-                    if span <= _PRE_BINNED_INTEGER_TOLERANCE:
+                    s = max_value - min_value
+                    if s <= _PRE_BINNED_INTEGER_TOLERANCE:
                         clamped = 0
                     else:
-                        scaled = ((value - min_value) / span) * max_bin
+                        scaled = ((value - min_value) / s) * max_bin
                         rounded = GBMRegressor._round_half_away_from_zero(scaled)
                         clamped = min(max_bin, max(0, rounded))
                 quantized.append(float(clamped))
@@ -1700,6 +1946,26 @@ class GBMRegressor:
             X, columns[categorical_index], categorical_index
         )
         return categorical_index, column_values
+
+    @staticmethod
+    def _check_pre_binned_integers(flat_values: Sequence[float]) -> bool:
+        """Check if flat values are pre-binned non-negative integers. Uses numpy fast path."""
+        try:
+            import numpy as np
+            arr = np.asarray(flat_values, dtype=np.float32)
+            if np.any(arr < 0.0):
+                return False
+            rounded = np.where(arr >= 0.0, np.floor(arr + 0.5), np.ceil(arr - 0.5))
+            return bool(np.all(np.abs(arr - rounded) <= _PRE_BINNED_INTEGER_TOLERANCE))
+        except ImportError:
+            pass
+        for value in flat_values:
+            if value < 0.0:
+                return False
+            rounded = GBMRegressor._round_half_away_from_zero(value)
+            if abs(value - float(rounded)) > _PRE_BINNED_INTEGER_TOLERANCE:
+                return False
+        return True
 
     @staticmethod
     def _round_half_away_from_zero(value: float) -> int:
@@ -1982,6 +2248,7 @@ class GBMRegressor:
         self._is_fitted = False
         self._artifact_bytes = None
         self._native_predictor_handle = None
+        self._float_thresholds_converted = False
         self._n_features_in = 0
         self._uses_continuous_binning = False
         self._continuous_feature_mins = None
@@ -2005,6 +2272,63 @@ class GBMRegressor:
             return native_predictor_handle_class(artifact_bytes, strict=True)
         except Exception:
             return None
+
+    def _convert_predictor_thresholds_to_float(self) -> None:
+        """Convert bin-index thresholds to float thresholds on the native predictor.
+
+        After conversion, predict_dense works directly on raw floats — no quantization needed.
+        Supports linear binning, quantile binning, and pre-binned integer data.
+        """
+        if self._native_predictor_handle is None:
+            return
+        try:
+            if not self._uses_continuous_binning:
+                # Pre-binned integer data: threshold_float = bin + 0.5
+                convert_fn = getattr(
+                    self._native_predictor_handle,
+                    "convert_thresholds_to_float_prebinned",
+                    None,
+                )
+                if callable(convert_fn):
+                    result = convert_fn()
+                    if result is None:
+                        self._float_thresholds_converted = True
+                return
+
+            strategy = self.continuous_binning_strategy
+            if strategy == "linear":
+                rank_flags = self._continuous_feature_linear_rank_flags
+                if rank_flags is not None and any(rank_flags):
+                    return  # rank features need bin-based prediction
+                convert_fn = getattr(
+                    self._native_predictor_handle, "convert_thresholds_to_float", None
+                )
+                if not callable(convert_fn):
+                    return
+                mins, maxs = self._require_continuous_feature_bounds()
+                result = convert_fn(list(mins), list(maxs))
+                # Rust PyO3 method returns None on success; mock objects return Mock.
+                if result is None:
+                    self._float_thresholds_converted = True
+            elif strategy == "quantile":
+                convert_fn = getattr(
+                    self._native_predictor_handle,
+                    "convert_thresholds_to_float_quantile",
+                    None,
+                )
+                if not callable(convert_fn):
+                    return
+                cuts = self._continuous_feature_quantile_cuts
+                if cuts is None:
+                    return
+                # Convert list[list[float]] → list[list[f32]] for Rust
+                result = convert_fn(
+                    [[float(v) for v in c] for c in cuts]
+                )
+                if result is None:
+                    self._float_thresholds_converted = True
+        except Exception:
+            self._float_thresholds_converted = False
 
     @staticmethod
     def _validate_targets(y: object) -> list[float]:

@@ -91,6 +91,27 @@ impl DatasetMatrix {
         validate_dataset_matrix(&matrix)?;
         Ok(matrix)
     }
+
+    /// Create a lightweight matrix that only stores row/feature dimensions.
+    /// Values are not populated — only use when the training path does not
+    /// need dense float values (i.e. no categorical target encoding).
+    pub fn new_metadata_only(row_count: usize, feature_count: usize) -> CoreResult<Self> {
+        if row_count == 0 {
+            return Err(CoreError::Validation(
+                "row_count must be greater than 0".to_string(),
+            ));
+        }
+        if feature_count == 0 {
+            return Err(CoreError::Validation(
+                "feature_count must be greater than 0".to_string(),
+            ));
+        }
+        Ok(Self {
+            row_count,
+            feature_count,
+            values: Vec::new(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -214,7 +235,10 @@ pub struct BinnedMatrix {
     pub row_count: usize,
     pub feature_count: usize,
     pub max_bin: u16,
-    pub bins: Vec<u16>,
+    /// Row-major: bins[row * feature_count + feature]
+    pub bins: Vec<u8>,
+    /// Column-major: bins_col[feature * row_count + row] — for cache-friendly histogram building.
+    pub bins_col: Vec<u8>,
 }
 
 impl BinnedMatrix {
@@ -222,17 +246,35 @@ impl BinnedMatrix {
         row_count: usize,
         feature_count: usize,
         max_bin: u16,
-        bins: Vec<u16>,
+        bins: Vec<u8>,
     ) -> CoreResult<Self> {
+        let bins_col = transpose_bins_to_column_major(&bins, row_count, feature_count);
         let matrix = Self {
             row_count,
             feature_count,
             max_bin,
             bins,
+            bins_col,
         };
         validate_binned_matrix(&matrix)?;
         Ok(matrix)
     }
+}
+
+/// Transpose row-major bins to column-major for cache-friendly per-feature access.
+fn transpose_bins_to_column_major(bins: &[u8], row_count: usize, feature_count: usize) -> Vec<u8> {
+    let total = row_count * feature_count;
+    if total == 0 || bins.len() != total {
+        return Vec::new();
+    }
+    let mut col_major = vec![0u8; total];
+    for row in 0..row_count {
+        let row_base = row * feature_count;
+        for feature in 0..feature_count {
+            col_major[feature * row_count + row] = bins[row_base + feature];
+        }
+    }
+    col_major
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -858,7 +900,10 @@ pub fn validate_dataset_matrix(matrix: &DatasetMatrix) -> CoreResult<()> {
             "feature_count must be greater than 0".to_string(),
         ));
     }
-    if matrix.values.len() != matrix.row_count * matrix.feature_count {
+    // Allow empty values for metadata-only matrices (no categorical encoding).
+    if !matrix.values.is_empty()
+        && matrix.values.len() != matrix.row_count * matrix.feature_count
+    {
         return Err(CoreError::Validation(format!(
             "matrix values length {} does not match row_count * feature_count {}",
             matrix.values.len(),
@@ -988,7 +1033,7 @@ pub fn validate_binned_matrix(matrix: &BinnedMatrix) -> CoreResult<()> {
         )));
     }
     for &bin in &matrix.bins {
-        if bin > matrix.max_bin {
+        if u16::from(bin) > matrix.max_bin {
             return Err(CoreError::Validation(format!(
                 "bin value {bin} exceeds max_bin {}",
                 matrix.max_bin
@@ -1575,6 +1620,7 @@ mod tests {
             feature_count: 2,
             max_bin: 7,
             bins: vec![3, 8],
+            bins_col: vec![3, 8],
         };
         assert!(matches!(
             validate_binned_matrix(&matrix),
