@@ -207,11 +207,7 @@ impl CpuBackend {
         let tile_workload = node.row_indices.len().saturating_mul(tile_feature_count);
         let mut feature_histograms = Vec::with_capacity(tile_feature_count);
 
-        match Self::select_histogram_kernel_path(
-            node.row_indices.len(),
-            tile_workload,
-            bin_count,
-        ) {
+        match Self::select_histogram_kernel_path(node.row_indices.len(), tile_workload, bin_count) {
             HistogramKernelPath::TinyNodeScalar | HistogramKernelPath::BinHeavyPerFeatureScalar => {
                 Self::build_tile_histograms_per_feature(
                     binned_matrix,
@@ -542,8 +538,9 @@ impl CpuBackend {
         node: &NodeSlice,
         split: &SplitCandidate,
     ) -> EngineResult<(PartitionResult, NodeStats, NodeStats)> {
+        type ChunkResult = (Vec<u32>, Vec<u32>, f32, f32, f32, f32);
         let chunk_size = (node.row_indices.len() / rayon::current_num_threads().max(1)).max(4096);
-        let chunk_results: Vec<(Vec<u32>, Vec<u32>, f32, f32, f32, f32)> = node
+        let chunk_results: Vec<ChunkResult> = node
             .row_indices
             .par_chunks(chunk_size)
             .map(|chunk| {
@@ -561,8 +558,7 @@ impl CpuBackend {
                     let bin = if use_col_major {
                         u16::from(binned_matrix.bins_col[col_base + row_index])
                     } else {
-                        let cell_index =
-                            row_index * binned_matrix.feature_count + feature_index;
+                        let cell_index = row_index * binned_matrix.feature_count + feature_index;
                         u16::from(binned_matrix.bins[cell_index])
                     };
                     let gradient = gradients[row_index];
@@ -1037,18 +1033,14 @@ mod tests {
 
     #[test]
     fn histogram_kernel_path_prefers_tiny_node_scalar_for_small_nodes() {
-        let path =
-            CpuBackend::select_histogram_kernel_path(8, SMALL_TILE_WORKLOAD_THRESHOLD, 16);
+        let path = CpuBackend::select_histogram_kernel_path(8, SMALL_TILE_WORKLOAD_THRESHOLD, 16);
         assert_eq!(path, HistogramKernelPath::TinyNodeScalar);
     }
 
     #[test]
     fn histogram_kernel_path_prefers_unrolled_for_large_tiles() {
-        let path = CpuBackend::select_histogram_kernel_path(
-            256,
-            SMALL_TILE_WORKLOAD_THRESHOLD + 1,
-            64,
-        );
+        let path =
+            CpuBackend::select_histogram_kernel_path(256, SMALL_TILE_WORKLOAD_THRESHOLD + 1, 64);
         assert_eq!(path, HistogramKernelPath::ArenaRowFirstUnrolled);
     }
 

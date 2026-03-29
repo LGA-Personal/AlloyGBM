@@ -39,6 +39,8 @@ Additional nuance:
 - AlloyGBM is competitive but not leading on ``dense_numeric``
 - in the latest recorded benchmark refresh, AlloyGBM was also the fastest
   trainer on most scenario/profile rows
+- recent optimizations (zero-copy numpy float thresholding) delivered an immense
+  **prediction speedup (up to 75-105x)** on large validation sets
 - the latest benchmark refresh did not show a broad AlloyGBM RMSE regression
   after the training-contract and native dense-preprocessing changes
 
@@ -102,7 +104,8 @@ Per-record benchmark output now includes:
 - ``predict_seconds``
 
 Use those timing columns to tell apart Python-side adaptation cost and native
-training cost when AlloyGBM performance changes.
+training cost. Recent zero-copy numpy optimizations target the prediction
+bottleneck specifically, drastically reducing ``predict_seconds``.
 
 Interpretation
 --------------

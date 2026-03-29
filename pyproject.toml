@@ -4,10 +4,11 @@ build-backend = "maturin"
 
 [project]
 name = "alloygbm"
-version = "0.1.1"
+version = "0.1.2"
 description = "Rust-first gradient boosting for structured regression with time-aware validation utilities and Python bindings"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
+dependencies = ["numpy>=1.24"]
 license = { text = "MIT" }
 license-files = ["LICENSE"]
 authors = [
@@ -32,7 +33,6 @@ classifiers = [
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",

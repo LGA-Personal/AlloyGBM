@@ -901,9 +901,7 @@ pub fn validate_dataset_matrix(matrix: &DatasetMatrix) -> CoreResult<()> {
         ));
     }
     // Allow empty values for metadata-only matrices (no categorical encoding).
-    if !matrix.values.is_empty()
-        && matrix.values.len() != matrix.row_count * matrix.feature_count
-    {
+    if !matrix.values.is_empty() && matrix.values.len() != matrix.row_count * matrix.feature_count {
         return Err(CoreError::Validation(format!(
             "matrix values length {} does not match row_count * feature_count {}",
             matrix.values.len(),

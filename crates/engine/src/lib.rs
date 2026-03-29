@@ -1021,7 +1021,7 @@ impl Trainer {
             0.0,
             0,
         )?
-            .with_subsample_rates(self.params.row_subsample, self.params.col_subsample)?;
+        .with_subsample_rates(self.params.row_subsample, self.params.col_subsample)?;
         if let Some(early_stopping_rounds) = self.params.early_stopping_rounds {
             controls = controls.with_validation_early_stopping(
                 early_stopping_rounds as usize,
@@ -1210,7 +1210,7 @@ impl Trainer {
             let gradients = &gradient_buffer;
             validate_gradient_pair_length(gradients, dataset.row_count())?;
             if cfg!(debug_assertions) {
-                validate_gradient_pairs(&gradients, dataset.row_count())?;
+                validate_gradient_pairs(gradients, dataset.row_count())?;
             }
 
             candidate_predictions.copy_from_slice(&predictions);
@@ -1219,7 +1219,7 @@ impl Trainer {
             let root_node_id = encode_tree_node_id(round_index, 0)?;
             let root_node = NodeSlice::new(root_node_id, root_row_indices)?;
             let root_histograms =
-                backend.build_histograms(binned_matrix, &gradients, &root_node, &feature_tiles)?;
+                backend.build_histograms(binned_matrix, gradients, &root_node, &feature_tiles)?;
             // Maintain each active node's absolute leaf output so child updates
             // can replace parent contribution via deltas (tree semantics).
             let mut active_nodes = vec![(0_u32, root_node.row_indices, root_histograms, 0.0_f32)];
@@ -1244,7 +1244,7 @@ impl Trainer {
                     }
 
                     let (partition, left_stats, right_stats) =
-                        backend.apply_split_with_stats(binned_matrix, &gradients, &node, &split)?;
+                        backend.apply_split_with_stats(binned_matrix, gradients, &node, &split)?;
                     if partition.left_row_indices.len() + partition.right_row_indices.len()
                         != node.row_indices.len()
                     {
@@ -1313,7 +1313,7 @@ impl Trainer {
                             let left_node = NodeSlice::new(left_node_id, left_row_indices)?;
                             let left_histograms = backend.build_histograms(
                                 binned_matrix,
-                                &gradients,
+                                gradients,
                                 &left_node,
                                 &feature_tiles,
                             )?;
@@ -1338,7 +1338,7 @@ impl Trainer {
                             let right_node = NodeSlice::new(right_node_id, right_row_indices)?;
                             let right_histograms = backend.build_histograms(
                                 binned_matrix,
-                                &gradients,
+                                gradients,
                                 &right_node,
                                 &feature_tiles,
                             )?;
@@ -1401,11 +1401,12 @@ impl Trainer {
             let mut candidate_validation_loss = None;
             let mut stop_for_validation_plateau = false;
             if let Some(validation_ref) = validation {
-                let mut next_validation_predictions = validation_predictions.take().ok_or_else(|| {
-                    EngineError::ContractViolation(
-                        "validation predictions were not initialized".to_string(),
-                    )
-                })?;
+                let mut next_validation_predictions =
+                    validation_predictions.take().ok_or_else(|| {
+                        EngineError::ContractViolation(
+                            "validation predictions were not initialized".to_string(),
+                        )
+                    })?;
                 apply_round_stumps_tree_walk(
                     &mut next_validation_predictions,
                     validation_ref.binned_matrix,
@@ -2712,7 +2713,11 @@ fn squared_error_loss(
         )));
     }
 
-    Ok(squared_error_loss_unchecked(predictions, targets, sample_weights))
+    Ok(squared_error_loss_unchecked(
+        predictions,
+        targets,
+        sample_weights,
+    ))
 }
 
 fn squared_error_loss_unchecked(

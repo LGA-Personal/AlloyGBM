@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use alloygbm_backend_cpu::CpuBackend;
 use alloygbm_categorical::{
     TargetEncoderConfig, fit_target_encoder, fit_transform_target_encoder, transform_target_encoder,
@@ -7,8 +9,8 @@ use alloygbm_core::{
     DenseMatrixView, TrainParams, TrainingDataset,
 };
 use alloygbm_engine::{
-    ArtifactCompatibilityMode, CategoricalTargetEncodingSpec, EngineError, SquaredErrorObjective,
-    IterationRunSummary, TrainedModel, Trainer, TrainingPolicyMode,
+    ArtifactCompatibilityMode, CategoricalTargetEncodingSpec, EngineError, IterationRunSummary,
+    SquaredErrorObjective, TrainedModel, Trainer, TrainingPolicyMode,
 };
 use alloygbm_predictor::{Predictor, PredictorError};
 use alloygbm_shap::{
@@ -26,8 +28,7 @@ const PRE_BINNED_INTEGER_TOLERANCE: f32 = 1e-6;
 const MAX_CONTINUOUS_QUANTIZED_BIN: u16 = 255;
 const MIN_CONTINUOUS_QUANTIZED_BINS: usize = 2;
 const LINEAR_TAIL_RANK_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK";
-const LINEAR_TAIL_CORE_SPAN_RATIO_ENV_VAR: &str =
-    "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_CORE_SPAN_RATIO";
+const LINEAR_TAIL_CORE_SPAN_RATIO_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_CORE_SPAN_RATIO";
 const DEFAULT_LINEAR_TAIL_CORE_SPAN_RATIO_THRESHOLD: f32 = 0.10;
 
 fn is_pre_binned_integer_value(value: f32) -> bool {
@@ -129,11 +130,9 @@ impl NativePredictorHandle {
         let feature_count = shape[1];
         let array_view = array.as_array();
         // Access the underlying contiguous slice (zero-copy)
-        let values = array_view
-            .as_slice()
-            .ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err("numpy array must be C-contiguous")
-            })?;
+        let values = array_view.as_slice().ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err("numpy array must be C-contiguous")
+        })?;
         self.predictor
             .predict_batch_dense(values, row_count, feature_count)
             .map_err(predictor_error_to_pyerr)
@@ -152,8 +151,6 @@ impl NativePredictorHandle {
             .map_err(predictor_error_to_pyerr)
     }
 
-
-
     /// Quantize raw f32 bytes to bins using linear scaling, then predict.
     /// Single-pass: fuses bytes→f32 conversion with quantization (one allocation).
     fn predict_dense_quantized_linear_bytes(
@@ -164,7 +161,7 @@ impl NativePredictorHandle {
         feature_mins: Vec<f32>,
         feature_maxs: Vec<f32>,
     ) -> PyResult<Vec<f32>> {
-        if values_bytes.len() % 4 != 0 {
+        if !values_bytes.len().is_multiple_of(4) {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "values_bytes length must be a multiple of 4 (f32)",
             ));
@@ -483,8 +480,7 @@ fn quantize_linear_value(value: f32, min_value: f32, max_value: f32) -> u8 {
         return 0;
     }
     let scaled = ((value - min_value) / span) * MAX_CONTINUOUS_QUANTIZED_BIN as f32;
-    round_half_away_from_zero(scaled)
-        .clamp(0, MAX_CONTINUOUS_QUANTIZED_BIN as i32) as u8
+    round_half_away_from_zero(scaled).clamp(0, MAX_CONTINUOUS_QUANTIZED_BIN as i32) as u8
 }
 
 fn quantize_rank_value(value: f32, sorted_values: &[f32]) -> u8 {
@@ -495,8 +491,7 @@ fn quantize_rank_value(value: f32, sorted_values: &[f32]) -> u8 {
     let rank = insertion.saturating_sub(1).min(sorted_values.len() - 1);
     let scaled = (rank as f32 * MAX_CONTINUOUS_QUANTIZED_BIN as f32)
         / (sorted_values.len().saturating_sub(1) as f32);
-    round_half_away_from_zero(scaled)
-        .clamp(0, MAX_CONTINUOUS_QUANTIZED_BIN as i32) as u8
+    round_half_away_from_zero(scaled).clamp(0, MAX_CONTINUOUS_QUANTIZED_BIN as i32) as u8
 }
 
 /// Quantize a flat row-major f32 array using linear scaling. Returns quantized f32 bins.
@@ -568,7 +563,11 @@ fn quantize_dense_values_linear_rank_inplace(
     quantized
 }
 
-fn derive_dense_feature_bounds(values: &[f32], row_count: usize, feature_count: usize) -> (Vec<f32>, Vec<f32>) {
+fn derive_dense_feature_bounds(
+    values: &[f32],
+    row_count: usize,
+    feature_count: usize,
+) -> (Vec<f32>, Vec<f32>) {
     let results: Vec<(f32, f32)> = (0..feature_count)
         .into_par_iter()
         .map(|feature_index| {
@@ -751,28 +750,38 @@ fn quantize_dense_values_with_metadata(
 ) -> Result<(Vec<f32>, Vec<u8>, u16), EngineError> {
     // Validate metadata upfront so parallel closures don't need to return Result.
     let mins_ref = match strategy {
-        ContinuousBinningStrategy::Linear => Some(metadata.feature_mins.as_ref().ok_or_else(|| {
-            EngineError::ContractViolation("continuous linear minima are missing".to_string())
-        })?),
+        ContinuousBinningStrategy::Linear => {
+            Some(metadata.feature_mins.as_ref().ok_or_else(|| {
+                EngineError::ContractViolation("continuous linear minima are missing".to_string())
+            })?)
+        }
         _ => None,
     };
     let maxs_ref = match strategy {
-        ContinuousBinningStrategy::Linear => Some(metadata.feature_maxs.as_ref().ok_or_else(|| {
-            EngineError::ContractViolation("continuous linear maxima are missing".to_string())
-        })?),
+        ContinuousBinningStrategy::Linear => {
+            Some(metadata.feature_maxs.as_ref().ok_or_else(|| {
+                EngineError::ContractViolation("continuous linear maxima are missing".to_string())
+            })?)
+        }
         _ => None,
     };
     let sorted_ref = match strategy {
-        ContinuousBinningStrategy::Rank => Some(metadata.feature_sorted_values.as_ref().ok_or_else(|| {
-            EngineError::ContractViolation("continuous rank sorted values are missing".to_string())
-        })?),
+        ContinuousBinningStrategy::Rank => {
+            Some(metadata.feature_sorted_values.as_ref().ok_or_else(|| {
+                EngineError::ContractViolation(
+                    "continuous rank sorted values are missing".to_string(),
+                )
+            })?)
+        }
         ContinuousBinningStrategy::Linear => metadata.feature_sorted_values.as_ref(),
         _ => None,
     };
     let cuts_ref = match strategy {
-        ContinuousBinningStrategy::Quantile => Some(metadata.feature_quantile_cuts.as_ref().ok_or_else(|| {
-            EngineError::ContractViolation("continuous quantile cuts are missing".to_string())
-        })?),
+        ContinuousBinningStrategy::Quantile => {
+            Some(metadata.feature_quantile_cuts.as_ref().ok_or_else(|| {
+                EngineError::ContractViolation("continuous quantile cuts are missing".to_string())
+            })?)
+        }
         _ => None,
     };
     let rank_flags = metadata.feature_linear_rank_flags.as_ref();
@@ -810,7 +819,11 @@ fn quantize_dense_values_with_metadata(
                                 } else {
                                     let mins = mins_ref.expect("mins validated");
                                     let maxs = maxs_ref.expect("maxs validated");
-                                    quantize_linear_value(value, mins[feature_index], maxs[feature_index])
+                                    quantize_linear_value(
+                                        value,
+                                        mins[feature_index],
+                                        maxs[feature_index],
+                                    )
                                 }
                             }
                             ContinuousBinningStrategy::Rank => {
@@ -851,7 +864,11 @@ fn quantize_dense_values_with_metadata(
                                 } else {
                                     let mins = mins_ref.expect("mins validated");
                                     let maxs = maxs_ref.expect("maxs validated");
-                                    quantize_linear_value(value, mins[feature_index], maxs[feature_index])
+                                    quantize_linear_value(
+                                        value,
+                                        mins[feature_index],
+                                        maxs[feature_index],
+                                    )
                                 }
                             }
                             ContinuousBinningStrategy::Rank => {
@@ -1398,7 +1415,7 @@ fn train_regression_artifact_with_summary_dense_impl(
         _ => {
             return Err(EngineError::ContractViolation(
                 "validation rows, targets, and row_count must be provided together".to_string(),
-            ))
+            ));
         }
     };
 
@@ -1458,40 +1475,6 @@ fn train_regression_artifact_with_summary_dense_impl(
         ),
         continuous_binning_metadata: prepared.metadata.into(),
     })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn train_regression_artifact_impl(
-    rows: &[Vec<f32>],
-    targets: &[f32],
-    params: TrainParams,
-    rounds: usize,
-    time_index: Option<Vec<i64>>,
-    categorical_spec: Option<CategoricalTargetEncodingSpec>,
-    training_policy: TrainingPolicyMode,
-    store_node_debug_stats: bool,
-) -> Result<Vec<u8>, EngineError> {
-    let (dense_values, row_count, feature_count) = flatten_rows(rows)?;
-    train_regression_artifact_with_summary_dense_impl(
-        &dense_values,
-        row_count,
-        feature_count,
-        targets,
-        None,
-        None,
-        None,
-        params,
-        rounds,
-        time_index,
-        None,
-        categorical_spec,
-        None,
-        training_policy,
-        store_node_debug_stats,
-        ContinuousBinningStrategy::Linear,
-        MAX_CONTINUOUS_QUANTIZED_BIN as usize + 1,
-    )
-    .map(|result| result.artifact_bytes)
 }
 
 fn load_predictor_from_artifact_impl(
@@ -2021,7 +2004,9 @@ fn train_regression_artifact_with_summary(
         row_count,
         feature_count,
         &targets,
-        validation_payload.as_ref().map(|(values, _, _)| values.as_slice()),
+        validation_payload
+            .as_ref()
+            .map(|(values, _, _)| values.as_slice()),
         validation_row_count,
         validation_targets.as_deref(),
         params,
@@ -2162,7 +2147,7 @@ fn train_regression_artifact_dense_with_summary(
 
 /// Reinterpret raw bytes as f32 slice (safe, no allocation).
 fn bytes_to_f32_vec(bytes: &[u8]) -> PyResult<Vec<f32>> {
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "values_bytes length must be a multiple of 4 (f32)",
         ));
@@ -2246,12 +2231,8 @@ fn train_regression_artifact_dense_with_summary_bytes(
 ) -> PyResult<NativeTrainingResult> {
     let values = bytes_to_f32_vec(values_bytes)?;
     let targets = bytes_to_f32_vec(targets_bytes)?;
-    let validation_values = validation_values_bytes
-        .map(bytes_to_f32_vec)
-        .transpose()?;
-    let validation_targets = validation_targets_bytes
-        .map(bytes_to_f32_vec)
-        .transpose()?;
+    let validation_values = validation_values_bytes.map(bytes_to_f32_vec).transpose()?;
+    let validation_targets = validation_targets_bytes.map(bytes_to_f32_vec).transpose()?;
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
     }
@@ -2341,8 +2322,10 @@ fn _alloygbm(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_TRAIN_ROUNDS, predictor_predict_batch_canonical_impl, predictor_predict_batch_impl,
-        shap_explain_rows_impl, shap_global_importance_impl, train_regression_artifact_impl,
+        ContinuousBinningStrategy, DEFAULT_TRAIN_ROUNDS, MAX_CONTINUOUS_QUANTIZED_BIN,
+        flatten_rows, predictor_predict_batch_canonical_impl, predictor_predict_batch_impl,
+        shap_explain_rows_impl, shap_global_importance_impl,
+        train_regression_artifact_with_summary_dense_impl,
     };
     use alloygbm_backend_cpu::CpuBackend;
     use alloygbm_categorical::TargetEncoderConfig;
@@ -2351,8 +2334,42 @@ mod tests {
         deserialize_model_artifact_v1, serialize_model_artifact_v1,
     };
     use alloygbm_engine::{
-        CategoricalTargetEncodingSpec, SquaredErrorObjective, Trainer, TrainingPolicyMode,
+        CategoricalTargetEncodingSpec, EngineError, SquaredErrorObjective, Trainer,
+        TrainingPolicyMode,
     };
+
+    fn train_regression_artifact_impl(
+        rows: &[Vec<f32>],
+        targets: &[f32],
+        params: TrainParams,
+        rounds: usize,
+        time_index: Option<Vec<i64>>,
+        categorical_spec: Option<CategoricalTargetEncodingSpec>,
+        training_policy: TrainingPolicyMode,
+        store_node_debug_stats: bool,
+    ) -> Result<Vec<u8>, EngineError> {
+        let (dense_values, row_count, feature_count) = flatten_rows(rows)?;
+        train_regression_artifact_with_summary_dense_impl(
+            &dense_values,
+            row_count,
+            feature_count,
+            targets,
+            None,
+            None,
+            None,
+            params,
+            rounds,
+            time_index,
+            None,
+            categorical_spec,
+            None,
+            training_policy,
+            store_node_debug_stats,
+            ContinuousBinningStrategy::Linear,
+            MAX_CONTINUOUS_QUANTIZED_BIN as usize + 1,
+        )
+        .map(|result| result.artifact_bytes)
+    }
 
     fn quality_fixture_dataset() -> TrainingDataset {
         TrainingDataset {

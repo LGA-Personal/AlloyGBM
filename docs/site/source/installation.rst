@@ -4,7 +4,7 @@ Installation
 Requirements
 ------------
 
-- Python ``3.10+``
+- Python ``3.11+``
 - macOS or Linux
 - a supported prebuilt wheel, or a local Rust toolchain when building from source
 
@@ -43,7 +43,7 @@ Verify the install
 The native runtime info object confirms that the extension module loaded
 correctly.
 
-Platform policy for ``0.1.0``
+Platform policy for ``0.1.x``
 -----------------------------
 
 - officially targeted wheel platforms:
@@ -51,4 +51,4 @@ Platform policy for ``0.1.0``
   - Linux ``x86_64`` manylinux
 - source distribution provided as a fallback
 - Windows support deferred until a later release
-- macOS Intel not treated as a first-class target for ``0.1.0``
+- macOS Intel not treated as a first-class target for ``0.1.x``

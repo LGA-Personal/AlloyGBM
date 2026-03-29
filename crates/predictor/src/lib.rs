@@ -152,21 +152,19 @@ impl Predictor {
             )));
         }
         for tree in &mut self.trees {
-            for node_opt in &mut tree.nodes_by_local_id {
-                if let Some(node) = node_opt {
-                    let fi = node.feature_index;
-                    let min_val = feature_mins[fi];
-                    let max_val = feature_maxs[fi];
-                    let span = max_val - min_val;
-                    if span <= f32::EPSILON {
-                        // Constant feature — any threshold works since all values are equal.
-                        node.threshold_bin = min_val + f32::EPSILON;
-                    } else {
-                        // bin = round(((value - min) / span) * 255)
-                        // Split: bin <= threshold_bin  ↔  value < min + ((threshold_bin + 0.5) / 255) * span
-                        let bin = node.threshold_bin;
-                        node.threshold_bin = min_val + ((bin + 0.5) / 255.0) * span;
-                    }
+            for node in tree.nodes_by_local_id.iter_mut().flatten() {
+                let fi = node.feature_index;
+                let min_val = feature_mins[fi];
+                let max_val = feature_maxs[fi];
+                let span = max_val - min_val;
+                if span <= f32::EPSILON {
+                    // Constant feature — any threshold works since all values are equal.
+                    node.threshold_bin = min_val + f32::EPSILON;
+                } else {
+                    // bin = round(((value - min) / span) * 255)
+                    // Split: bin <= threshold_bin  ↔  value < min + ((threshold_bin + 0.5) / 255) * span
+                    let bin = node.threshold_bin;
+                    node.threshold_bin = min_val + ((bin + 0.5) / 255.0) * span;
                 }
             }
         }
@@ -190,17 +188,15 @@ impl Predictor {
             )));
         }
         for tree in &mut self.trees {
-            for node_opt in &mut tree.nodes_by_local_id {
-                if let Some(node) = node_opt {
-                    let fi = node.feature_index;
-                    let cuts = &feature_cuts[fi];
-                    let bin = node.threshold_bin as usize;
-                    if bin < cuts.len() {
-                        node.threshold_bin = cuts[bin];
-                    } else {
-                        // All values go left — set threshold beyond any possible value
-                        node.threshold_bin = f32::MAX;
-                    }
+            for node in tree.nodes_by_local_id.iter_mut().flatten() {
+                let fi = node.feature_index;
+                let cuts = &feature_cuts[fi];
+                let bin = node.threshold_bin as usize;
+                if bin < cuts.len() {
+                    node.threshold_bin = cuts[bin];
+                } else {
+                    // All values go left — set threshold beyond any possible value
+                    node.threshold_bin = f32::MAX;
                 }
             }
         }
@@ -213,10 +209,8 @@ impl Predictor {
     /// The float equivalent: `value < threshold_bin + 0.5`.
     pub fn convert_bin_thresholds_to_float_prebinned(&mut self) -> PredictorResult<()> {
         for tree in &mut self.trees {
-            for node_opt in &mut tree.nodes_by_local_id {
-                if let Some(node) = node_opt {
-                    node.threshold_bin += 0.5;
-                }
+            for node in tree.nodes_by_local_id.iter_mut().flatten() {
+                node.threshold_bin += 0.5;
             }
         }
         self.use_float_thresholds = true;
@@ -430,9 +424,9 @@ impl Predictor {
                 for (local_idx, pred) in out_chunk.iter_mut().enumerate() {
                     let row_index = row_start + local_idx;
                     let byte_start = row_index * row_bytes;
-                    for fi in 0..feature_count {
+                    for (fi, item) in row_buf.iter_mut().enumerate().take(feature_count) {
                         let bi = byte_start + fi * 4;
-                        row_buf[fi] = f32::from_ne_bytes([
+                        *item = f32::from_ne_bytes([
                             bytes[bi],
                             bytes[bi + 1],
                             bytes[bi + 2],

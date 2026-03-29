@@ -26,7 +26,7 @@ fn build_fixture(
     for row_index in 0..row_count {
         for feature_index in 0..feature_count {
             let value = ((row_index.wrapping_mul(31) + feature_index.wrapping_mul(17))
-                % (max_bin as usize + 1)) as u16;
+                % (max_bin as usize + 1)) as u8;
             bins.push(value);
         }
     }
