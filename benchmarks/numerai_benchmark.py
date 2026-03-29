@@ -490,10 +490,13 @@ def run_benchmark(args: argparse.Namespace) -> list[NumeraiBenchmarkRecord]:
             test_ids = fold_test["id"].values
             y_raw = fold_train["target"].values.astype(np.float64)
 
-            y_train, valid = residualize_targets(y_raw, train_ids, benchmark_train, args.residual_weight)
-            if not valid.all():
-                fold_train = fold_train[valid]
-                y_train = y_train[valid]
+            y_train, _valid = residualize_targets(y_raw, train_ids, benchmark_train, args.residual_weight)
+            # Keep all rows — residualize_targets only adjusts rows with benchmark data,
+            # leaving the rest as raw targets. Only filter out NaN targets.
+            target_valid = np.isfinite(y_train)
+            if not target_valid.all():
+                fold_train = fold_train[target_valid]
+                y_train = y_train[target_valid]
 
             X_train = fold_train[feature_cols].to_numpy(dtype=np.float32, copy=False)
             X_test = fold_test[feature_cols].to_numpy(dtype=np.float32, copy=False)
@@ -541,14 +544,15 @@ def run_benchmark(args: argparse.Namespace) -> list[NumeraiBenchmarkRecord]:
         # Extract training features/targets, then free train_df to reduce memory
         train_ids_all = train_df["id"].values
         y_all_raw = train_df["target"].values.astype(np.float64)
-        y_all, valid_all = residualize_targets(y_all_raw, train_ids_all, benchmark_train, args.residual_weight)
-        train_filtered = train_df[valid_all] if not valid_all.all() else train_df
-        y_all = y_all[valid_all] if not valid_all.all() else y_all
+        y_all, _valid_all = residualize_targets(y_all_raw, train_ids_all, benchmark_train, args.residual_weight)
+        target_valid_all = np.isfinite(y_all)
+        train_filtered = train_df[target_valid_all] if not target_valid_all.all() else train_df
+        y_all = y_all[target_valid_all] if not target_valid_all.all() else y_all
         val_train_rows = len(train_filtered)
 
         X_train_full = train_filtered[feature_cols].to_numpy(dtype=np.float32, copy=False)
         is_last_arm = (arm == args.resolved_arms[-1])
-        del train_filtered, train_ids_all, y_all_raw, valid_all, oof_df
+        del train_filtered, train_ids_all, y_all_raw, oof_df
         if is_last_arm:
             del train_df
         gc.collect()
@@ -669,7 +673,7 @@ def main() -> None:
     parser.add_argument("--max-depth", type=int, default=6)
     parser.add_argument("--row-subsample", type=float, default=0.8)
     parser.add_argument("--col-subsample", type=float, default=0.3)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=12)
     parser.add_argument("--residual-weight", type=float, default=0.5)
     parser.add_argument("--no-residualize", action="store_true")
     parser.add_argument("--binning-strategy", default="quantile", choices=["linear", "rank", "quantile"])

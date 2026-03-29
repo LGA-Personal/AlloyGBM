@@ -38,3 +38,5 @@ pip-wheel-metadata/
 # Editors
 .idea/
 .vscode/
+
+catboost_info/
