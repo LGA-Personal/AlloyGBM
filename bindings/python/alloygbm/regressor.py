@@ -176,8 +176,23 @@ def _linear_tail_core_span_ratio_threshold_from_env() -> float:
     return min(1.0, max(0.0, parsed))
 
 
-class GBMRegressor:
-    """Sklearn-style contract stub for the future native estimator."""
+try:
+    from sklearn.base import BaseEstimator, RegressorMixin
+
+    class _GBMRegressorBase(BaseEstimator, RegressorMixin):
+        pass
+
+    _SKLEARN_AVAILABLE = True
+except ImportError:
+
+    class _GBMRegressorBase:  # type: ignore[no-redef]
+        pass
+
+    _SKLEARN_AVAILABLE = False
+
+
+class GBMRegressor(_GBMRegressorBase):
+    """Gradient Boosted Decision Tree regressor with sklearn-compatible API."""
 
     def __init__(
         self,
@@ -290,6 +305,7 @@ class GBMRegressor:
         self._continuous_feature_sorted_values: list[list[float]] | None = None
         self._continuous_feature_quantile_cuts: list[list[float]] | None = None
         self._continuous_feature_linear_rank_flags: list[bool] | None = None
+        self.feature_names_in_: list[str] | None = None
         self.best_iteration_: int | None = None
         self.best_score_: float | None = None
         self.n_estimators_: int | None = None
@@ -572,6 +588,17 @@ class GBMRegressor:
             feature_count = len(training_rows[0])
         if row_count != len(targets):
             raise ValueError("X and y must contain the same number of rows")
+
+        # Capture feature names from DataFrame columns if available.
+        columns = getattr(X, "columns", None)
+        if columns is not None:
+            names = [str(c) for c in columns]
+            if len(names) == feature_count:
+                self.feature_names_in_ = names
+            else:
+                self.feature_names_in_ = None
+        else:
+            self.feature_names_in_ = None
 
         if (
             effective_categorical_feature_index is not None
@@ -1471,7 +1498,42 @@ class GBMRegressor:
         else:
             shap_global_importance = _load_native_shap_global_importance()
             importance = shap_global_importance(self._artifact_bytes, rows)
-        return [(str(name), float(value)) for name, value in importance]
+        result = [(str(name), float(value)) for name, value in importance]
+        if self.feature_names_in_ is not None and len(result) == len(
+            self.feature_names_in_
+        ):
+            result = [
+                (self.feature_names_in_[i], score)
+                for i, (_name, score) in enumerate(result)
+            ]
+        return result
+
+    def score(self, X: object, y: object, sample_weight: object = None) -> float:
+        """Return R² score for the given test data and labels."""
+        from alloygbm.evaluation import r2_score
+
+        predictions = self.predict(X)
+        targets = self._validate_targets(y)
+        return float(r2_score(targets, predictions))
+
+    def __sklearn_tags__(self):
+        if not hasattr(super(), "__sklearn_tags__"):
+            return {
+                "non_deterministic": not self.deterministic,
+                "requires_y": True,
+                "allow_nan": False,
+                "X_types": ["2darray"],
+            }
+        tags = super().__sklearn_tags__()
+        # sklearn >= 1.6 returns a Tags dataclass
+        if hasattr(tags, "non_deterministic"):
+            tags.non_deterministic = not self.deterministic
+        if hasattr(tags, "input_tags") and hasattr(tags.input_tags, "allow_nan"):
+            tags.input_tags.allow_nan = False
+        return tags
+
+    def _more_tags(self):
+        return {"allow_nan": False, "requires_y": True}
 
     @staticmethod
     def predict_from_artifact(
@@ -2265,6 +2327,7 @@ class GBMRegressor:
         self._continuous_feature_sorted_values = None
         self._continuous_feature_quantile_cuts = None
         self._continuous_feature_linear_rank_flags = None
+        self.feature_names_in_ = None
         self.best_iteration_ = None
         self.best_score_ = None
         self.n_estimators_ = None
@@ -2310,6 +2373,7 @@ class GBMRegressor:
             "best_score": self.best_score_,
             "n_estimators_actual": self.n_estimators_,
             "evals_result": self.evals_result_,
+            "feature_names_in": self.feature_names_in_,
         }
         metadata_json = json.dumps(metadata).encode("utf-8")
         metadata_len = len(metadata_json)
@@ -2361,6 +2425,7 @@ class GBMRegressor:
         model.best_score_ = metadata.get("best_score")
         model.n_estimators_ = metadata.get("n_estimators_actual")
         model.evals_result_ = metadata.get("evals_result")
+        model.feature_names_in_ = metadata.get("feature_names_in")
         model._is_fitted = True
         model._native_predictor_handle = None
         model._float_thresholds_converted = False
