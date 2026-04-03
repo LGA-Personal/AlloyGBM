@@ -10,7 +10,7 @@ use std::fmt::{Display, Formatter};
 
 const TREE_NODE_STRIDE: u32 = 1 << 20;
 const ADDITIVITY_TOLERANCE: f32 = 1e-5;
-const MAX_EXACT_SPLIT_FEATURES: usize = 20;
+const MAX_EXACT_SPLIT_FEATURES: usize = 25;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShapError {
