@@ -696,6 +696,8 @@ fn prepare_validation_matrices_from_dense_values(
     feature_count: usize,
     targets: &[f32],
     time_index: Option<Vec<i64>>,
+    sample_weights: Option<Vec<f32>>,
+    group_id: Option<Vec<u32>>,
     strategy: ContinuousBinningStrategy,
     training_metadata: &ContinuousBinningMetadataInternal,
     need_dense_values: bool,
@@ -723,9 +725,9 @@ fn prepare_validation_matrices_from_dense_values(
             DatasetMatrix::new_metadata_only(row_count, feature_count)?
         },
         targets: targets.to_vec(),
-        sample_weights: None,
+        sample_weights,
         time_index,
-        group_id: None,
+        group_id,
     };
     let binned_matrix = BinnedMatrix::new(
         row_count,
@@ -898,6 +900,8 @@ fn prepare_training_matrices_from_dense_values(
     feature_count: usize,
     targets: &[f32],
     time_index: Option<Vec<i64>>,
+    sample_weights: Option<Vec<f32>>,
+    group_id: Option<Vec<u32>>,
     strategy: ContinuousBinningStrategy,
     max_bins: usize,
     need_dense_values: bool,
@@ -1034,9 +1038,9 @@ fn prepare_training_matrices_from_dense_values(
             DatasetMatrix::new_metadata_only(row_count, feature_count)?
         },
         targets: targets.to_vec(),
-        sample_weights: None,
+        sample_weights,
         time_index,
-        group_id: None,
+        group_id,
     };
     let binned_matrix = BinnedMatrix::new(
         row_count,
@@ -1334,9 +1338,13 @@ fn train_regression_artifact_with_summary_dense_impl(
     row_count: usize,
     feature_count: usize,
     targets: &[f32],
+    sample_weights: Option<Vec<f32>>,
+    group_id: Option<Vec<u32>>,
     validation_values: Option<&[f32]>,
     validation_row_count: Option<usize>,
     validation_targets: Option<&[f32]>,
+    validation_sample_weights: Option<Vec<f32>>,
+    validation_group_id: Option<Vec<u32>>,
     params: TrainParams,
     rounds: usize,
     time_index: Option<Vec<i64>>,
@@ -1356,6 +1364,8 @@ fn train_regression_artifact_with_summary_dense_impl(
         feature_count,
         targets,
         time_index,
+        sample_weights,
+        group_id,
         continuous_binning_strategy,
         continuous_binning_max_bins,
         need_dense_values,
@@ -1385,6 +1395,8 @@ fn train_regression_artifact_with_summary_dense_impl(
                 feature_count,
                 targets,
                 validation_time_index,
+                validation_sample_weights,
+                validation_group_id,
                 continuous_binning_strategy,
                 &prepared.metadata,
                 need_dense_values,
@@ -1591,6 +1603,7 @@ fn build_train_params(
     lambda_l1: f32,
     lambda_l2: f32,
     min_child_hessian: f32,
+    min_split_gain: f32,
 ) -> TrainParams {
     TrainParams {
         seed,
@@ -1605,6 +1618,7 @@ fn build_train_params(
         lambda_l1,
         lambda_l2,
         min_child_hessian,
+        min_split_gain,
     }
 }
 
@@ -1746,6 +1760,7 @@ fn train_regression_artifact(
         0.0,
         0.0,
         0.0,
+        0.0, // min_split_gain
     );
 
     let categorical_spec = resolve_categorical_spec(
@@ -1765,9 +1780,13 @@ fn train_regression_artifact(
         row_count,
         feature_count,
         &targets,
+        None, // sample_weights
+        None, // group_id
         None,
         None,
         None,
+        None, // validation_sample_weights
+        None, // validation_group_id
         params,
         effective_rounds,
         time_index,
@@ -1855,6 +1874,7 @@ fn train_regression_artifact_dense(
         0.0,
         0.0,
         0.0,
+        0.0, // min_split_gain
     );
     let categorical_spec = resolve_categorical_spec(
         categorical_feature_index,
@@ -1870,9 +1890,13 @@ fn train_regression_artifact_dense(
         row_count,
         feature_count,
         &targets,
+        None, // sample_weights
+        None, // group_id
         None,
         None,
         None,
+        None, // validation_sample_weights
+        None, // validation_group_id
         params,
         effective_rounds,
         time_index,
@@ -1904,8 +1928,13 @@ fn train_regression_artifact_dense(
     lambda_l1=0.0,
     lambda_l2=0.0,
     min_child_hessian=0.0,
+    sample_weights=None,
+    group_id=None,
+    min_split_gain=0.0,
     validation_rows=None,
     validation_targets=None,
+    validation_sample_weights=None,
+    validation_group_id=None,
     validation_time_index=None,
     categorical_feature_index=None,
     categorical_feature_values=None,
@@ -1936,8 +1965,13 @@ fn train_regression_artifact_with_summary(
     lambda_l1: f32,
     lambda_l2: f32,
     min_child_hessian: f32,
+    sample_weights: Option<Vec<f32>>,
+    group_id: Option<Vec<u32>>,
+    min_split_gain: f32,
     validation_rows: Option<Vec<Vec<f32>>>,
     validation_targets: Option<Vec<f32>>,
+    validation_sample_weights: Option<Vec<f32>>,
+    validation_group_id: Option<Vec<u32>>,
     validation_time_index: Option<Vec<i64>>,
     categorical_feature_index: Option<usize>,
     categorical_feature_values: Option<Vec<String>>,
@@ -1972,6 +2006,7 @@ fn train_regression_artifact_with_summary(
         lambda_l1,
         lambda_l2,
         min_child_hessian,
+        min_split_gain,
     );
     let categorical_spec = resolve_categorical_spec(
         categorical_feature_index,
@@ -2004,11 +2039,15 @@ fn train_regression_artifact_with_summary(
         row_count,
         feature_count,
         &targets,
+        sample_weights,
+        group_id,
         validation_payload
             .as_ref()
             .map(|(values, _, _)| values.as_slice()),
         validation_row_count,
         validation_targets.as_deref(),
+        validation_sample_weights,
+        validation_group_id,
         params,
         effective_rounds,
         time_index,
@@ -2041,9 +2080,14 @@ fn train_regression_artifact_with_summary(
     lambda_l1=0.0,
     lambda_l2=0.0,
     min_child_hessian=0.0,
+    sample_weights=None,
+    group_id=None,
+    min_split_gain=0.0,
     validation_values=None,
     validation_row_count=None,
     validation_targets=None,
+    validation_sample_weights=None,
+    validation_group_id=None,
     validation_time_index=None,
     categorical_feature_index=None,
     categorical_feature_values=None,
@@ -2076,9 +2120,14 @@ fn train_regression_artifact_dense_with_summary(
     lambda_l1: f32,
     lambda_l2: f32,
     min_child_hessian: f32,
+    sample_weights: Option<Vec<f32>>,
+    group_id: Option<Vec<u32>>,
+    min_split_gain: f32,
     validation_values: Option<Vec<f32>>,
     validation_row_count: Option<usize>,
     validation_targets: Option<Vec<f32>>,
+    validation_sample_weights: Option<Vec<f32>>,
+    validation_group_id: Option<Vec<u32>>,
     validation_time_index: Option<Vec<i64>>,
     categorical_feature_index: Option<usize>,
     categorical_feature_values: Option<Vec<String>>,
@@ -2113,6 +2162,7 @@ fn train_regression_artifact_dense_with_summary(
         lambda_l1,
         lambda_l2,
         min_child_hessian,
+        min_split_gain,
     );
     let categorical_spec = resolve_categorical_spec(
         categorical_feature_index,
@@ -2128,9 +2178,13 @@ fn train_regression_artifact_dense_with_summary(
         row_count,
         feature_count,
         &targets,
+        sample_weights,
+        group_id,
         validation_values.as_deref(),
         validation_row_count,
         validation_targets.as_deref(),
+        validation_sample_weights,
+        validation_group_id,
         params,
         effective_rounds,
         time_index,
@@ -2178,9 +2232,14 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> PyResult<Vec<f32>> {
     lambda_l1=0.0,
     lambda_l2=0.0,
     min_child_hessian=0.0,
+    sample_weights=None,
+    group_id=None,
+    min_split_gain=0.0,
     validation_values_bytes=None,
     validation_row_count=None,
     validation_targets_bytes=None,
+    validation_sample_weights=None,
+    validation_group_id=None,
     validation_time_index=None,
     categorical_feature_index=None,
     categorical_feature_values=None,
@@ -2213,9 +2272,14 @@ fn train_regression_artifact_dense_with_summary_bytes(
     lambda_l1: f32,
     lambda_l2: f32,
     min_child_hessian: f32,
+    sample_weights: Option<Vec<f32>>,
+    group_id: Option<Vec<u32>>,
+    min_split_gain: f32,
     validation_values_bytes: Option<&[u8]>,
     validation_row_count: Option<usize>,
     validation_targets_bytes: Option<&[u8]>,
+    validation_sample_weights: Option<Vec<f32>>,
+    validation_group_id: Option<Vec<u32>>,
     validation_time_index: Option<Vec<i64>>,
     categorical_feature_index: Option<usize>,
     categorical_feature_values: Option<Vec<String>>,
@@ -2254,6 +2318,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
         lambda_l1,
         lambda_l2,
         min_child_hessian,
+        min_split_gain,
     );
     let categorical_spec = resolve_categorical_spec(
         categorical_feature_index,
@@ -2269,9 +2334,13 @@ fn train_regression_artifact_dense_with_summary_bytes(
         row_count,
         feature_count,
         &targets,
+        sample_weights,
+        group_id,
         validation_values.as_deref(),
         validation_row_count,
         validation_targets.as_deref(),
+        validation_sample_weights,
+        validation_group_id,
         params,
         effective_rounds,
         time_index,
@@ -2354,9 +2423,13 @@ mod tests {
             row_count,
             feature_count,
             targets,
+            None, // sample_weights
+            None, // group_id
             None,
             None,
             None,
+            None, // validation_sample_weights
+            None, // validation_group_id
             params,
             rounds,
             time_index,
@@ -2437,6 +2510,7 @@ mod tests {
             lambda_l1: 0.0,
             lambda_l2: 0.0,
             min_child_hessian: 0.0,
+            min_split_gain: 0.0,
         }
     }
 

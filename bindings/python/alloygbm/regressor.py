@@ -208,6 +208,7 @@ class GBMRegressor(_GBMRegressorBase):
         lambda_l1: float = 0.0,
         lambda_l2: float = 0.0,
         min_child_hessian: float = 0.0,
+        min_split_gain: float = 0.0,
         seed: int = 0,
         deterministic: bool = True,
         continuous_binning_strategy: str = "linear",
@@ -241,6 +242,8 @@ class GBMRegressor(_GBMRegressorBase):
             raise ValueError("lambda_l2 must be >= 0")
         if min_child_hessian < 0.0:
             raise ValueError("min_child_hessian must be >= 0")
+        if not math.isfinite(min_split_gain) or min_split_gain < 0.0:
+            raise ValueError("min_split_gain must be a finite value >= 0")
         if categorical_feature_index is not None and int(categorical_feature_index) < 0:
             raise ValueError("categorical_feature_index must be >= 0 when set")
         if categorical_smoothing < 0.0:
@@ -280,6 +283,7 @@ class GBMRegressor(_GBMRegressorBase):
         self.lambda_l1 = float(lambda_l1)
         self.lambda_l2 = float(lambda_l2)
         self.min_child_hessian = float(min_child_hessian)
+        self.min_split_gain = float(min_split_gain)
         self.seed = int(seed)
         self.deterministic = bool(deterministic)
         self.continuous_binning_strategy = str(continuous_binning_strategy)
@@ -326,6 +330,7 @@ class GBMRegressor(_GBMRegressorBase):
             f"lambda_l1={self.lambda_l1}, "
             f"lambda_l2={self.lambda_l2}, "
             f"min_child_hessian={self.min_child_hessian}, "
+            f"min_split_gain={self.min_split_gain}, "
             f"seed={self.seed}, "
             f"deterministic={self.deterministic}, "
             f"continuous_binning_strategy='{self.continuous_binning_strategy}', "
@@ -354,6 +359,7 @@ class GBMRegressor(_GBMRegressorBase):
             "lambda_l1": self.lambda_l1,
             "lambda_l2": self.lambda_l2,
             "min_child_hessian": self.min_child_hessian,
+            "min_split_gain": self.min_split_gain,
             "seed": self.seed,
             "deterministic": self.deterministic,
             "continuous_binning_strategy": self.continuous_binning_strategy,
@@ -380,6 +386,7 @@ class GBMRegressor(_GBMRegressorBase):
             "lambda_l1",
             "lambda_l2",
             "min_child_hessian",
+            "min_split_gain",
             "seed",
             "deterministic",
             "continuous_binning_strategy",
@@ -466,6 +473,12 @@ class GBMRegressor(_GBMRegressorBase):
                 raise ValueError("min_child_hessian must be >= 0")
             self.min_child_hessian = min_child_hessian
 
+        if "min_split_gain" in params:
+            min_split_gain = float(params["min_split_gain"])
+            if not math.isfinite(min_split_gain) or min_split_gain < 0.0:
+                raise ValueError("min_split_gain must be a finite value >= 0")
+            self.min_split_gain = min_split_gain
+
         if "seed" in params:
             self.seed = int(params["seed"])
 
@@ -538,7 +551,11 @@ class GBMRegressor(_GBMRegressorBase):
         X: object,
         y: object,
         *,
+        sample_weight: object | None = None,
         eval_set: tuple[object, object] | None = None,
+        eval_sample_weight: object | None = None,
+        group: object | None = None,
+        eval_group: object | None = None,
         eval_time_index: object | None = None,
         categorical_feature_values: object | None = None,
         time_index: object | None = None,
@@ -589,6 +606,21 @@ class GBMRegressor(_GBMRegressorBase):
         if row_count != len(targets):
             raise ValueError("X and y must contain the same number of rows")
 
+        # Validate sample_weight if provided.
+        validated_sample_weights: list[float] | None = None
+        if sample_weight is not None:
+            validated_sample_weights = self._validate_sample_weight(sample_weight, row_count)
+
+        # Validate group if provided.
+        validated_group_id: list[int] | None = None
+        if group is not None:
+            validated_group_id = self._validate_group(group, row_count)
+
+        if eval_sample_weight is not None and eval_set is None:
+            raise ValueError("eval_sample_weight requires eval_set to be provided")
+        if eval_group is not None and eval_set is None:
+            raise ValueError("eval_group requires eval_set to be provided")
+
         # Capture feature names from DataFrame columns if available.
         columns = getattr(X, "columns", None)
         if columns is not None:
@@ -628,6 +660,8 @@ class GBMRegressor(_GBMRegressorBase):
         validation_rows: list[list[float]] | None = None
         validation_categorical_values: list[str] | None = None
         validated_eval_time_index: list[int] | None = None
+        validated_eval_sample_weights: list[float] | None = None
+        validated_eval_group_id: list[int] | None = None
         if eval_set is not None:
             validation_X, validation_y = eval_set
             validation_targets = self._validate_targets(validation_y)
@@ -667,6 +701,14 @@ class GBMRegressor(_GBMRegressorBase):
                     validation_X,
                     effective_categorical_feature_index,
                     validation_row_count,
+                )
+            if eval_sample_weight is not None:
+                validated_eval_sample_weights = self._validate_sample_weight(
+                    eval_sample_weight, validation_row_count
+                )
+            if eval_group is not None:
+                validated_eval_group_id = self._validate_group(
+                    eval_group, validation_row_count
                 )
 
         if (
@@ -719,6 +761,9 @@ class GBMRegressor(_GBMRegressorBase):
                     lambda_l1=self.lambda_l1,
                     lambda_l2=self.lambda_l2,
                     min_child_hessian=self.min_child_hessian,
+                    sample_weights=validated_sample_weights,
+                    group_id=validated_group_id,
+                    min_split_gain=self.min_split_gain,
                     validation_values_bytes=(
                         validation_dense_bytes_payload[0]
                         if validation_dense_bytes_payload is not None
@@ -730,6 +775,8 @@ class GBMRegressor(_GBMRegressorBase):
                         else None
                     ),
                     validation_targets_bytes=validation_targets_bytes,
+                    validation_sample_weights=validated_eval_sample_weights,
+                    validation_group_id=validated_eval_group_id,
                     validation_time_index=validated_eval_time_index,
                     categorical_feature_index=effective_categorical_feature_index,
                     categorical_feature_values=categorical_values,
@@ -791,6 +838,9 @@ class GBMRegressor(_GBMRegressorBase):
                 lambda_l1=self.lambda_l1,
                 lambda_l2=self.lambda_l2,
                 min_child_hessian=self.min_child_hessian,
+                sample_weights=validated_sample_weights,
+                group_id=validated_group_id,
+                min_split_gain=self.min_split_gain,
                 validation_values=(
                     validation_dense_payload[0]
                     if validation_dense_payload is not None
@@ -802,6 +852,8 @@ class GBMRegressor(_GBMRegressorBase):
                     else None
                 ),
                 validation_targets=validation_targets,
+                validation_sample_weights=validated_eval_sample_weights,
+                validation_group_id=validated_eval_group_id,
                 validation_time_index=validated_eval_time_index,
                 categorical_feature_index=effective_categorical_feature_index,
                 categorical_feature_values=categorical_values,
@@ -833,8 +885,13 @@ class GBMRegressor(_GBMRegressorBase):
                 lambda_l1=self.lambda_l1,
                 lambda_l2=self.lambda_l2,
                 min_child_hessian=self.min_child_hessian,
+                sample_weights=validated_sample_weights,
+                group_id=validated_group_id,
+                min_split_gain=self.min_split_gain,
                 validation_rows=validation_rows,
                 validation_targets=validation_targets,
+                validation_sample_weights=validated_eval_sample_weights,
+                validation_group_id=validated_eval_group_id,
                 validation_time_index=validated_eval_time_index,
                 categorical_feature_index=effective_categorical_feature_index,
                 categorical_feature_values=categorical_values,
@@ -2558,6 +2615,46 @@ class GBMRegressor(_GBMRegressorBase):
         if len(values_like) != row_count:
             raise ValueError("time_index must have the same number of rows as X")
         return [int(value) for value in values_like]
+
+    @staticmethod
+    def _validate_sample_weight(
+        sample_weight: object, row_count: int
+    ) -> list[float]:
+        values_like = GBMRegressor._coerce_sequence_like(
+            sample_weight, "sample_weight"
+        )
+        if not isinstance(values_like, Sequence) or isinstance(values_like, (str, bytes)):
+            raise TypeError("sample_weight must be a sequence of numeric values")
+        if len(values_like) != row_count:
+            raise ValueError(
+                "sample_weight must have the same number of elements as rows in X"
+            )
+        weights: list[float] = []
+        for i, w in enumerate(values_like):
+            fw = float(w)
+            if not math.isfinite(fw):
+                raise ValueError(f"sample_weight[{i}] must be finite")
+            if fw < 0.0:
+                raise ValueError(f"sample_weight[{i}] must be non-negative")
+            weights.append(fw)
+        return weights
+
+    @staticmethod
+    def _validate_group(group: object, row_count: int) -> list[int]:
+        values_like = GBMRegressor._coerce_sequence_like(group, "group")
+        if not isinstance(values_like, Sequence) or isinstance(values_like, (str, bytes)):
+            raise TypeError("group must be a sequence of integer-like values")
+        if len(values_like) != row_count:
+            raise ValueError(
+                "group must have the same number of elements as rows in X"
+            )
+        group_ids: list[int] = []
+        for i, g in enumerate(values_like):
+            gi = int(g)
+            if gi < 0:
+                raise ValueError(f"group[{i}] must be non-negative")
+            group_ids.append(gi)
+        return group_ids
 
     @staticmethod
     def _coerce_sequence_like(value: object, argument_name: str) -> object:

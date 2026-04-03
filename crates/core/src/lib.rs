@@ -45,6 +45,7 @@ pub struct TrainParams {
     pub lambda_l1: f32,
     pub lambda_l2: f32,
     pub min_child_hessian: f32,
+    pub min_split_gain: f32,
 }
 
 impl Default for TrainParams {
@@ -62,6 +63,7 @@ impl Default for TrainParams {
             lambda_l1: 0.0,
             lambda_l2: 0.0,
             min_child_hessian: 0.0,
+            min_split_gain: 0.0,
         }
     }
 }

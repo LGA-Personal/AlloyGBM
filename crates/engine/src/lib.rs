@@ -1014,7 +1014,7 @@ impl Trainer {
     fn default_iteration_controls(&self, rounds: usize) -> EngineResult<IterationControls> {
         let mut controls = IterationControls::new(
             rounds,
-            0.0,
+            self.params.min_split_gain,
             self.params.min_data_in_leaf as usize,
             0.0,
             1_000_000.0,
@@ -1071,13 +1071,14 @@ impl Trainer {
         controls.min_rows_per_leaf = suggested_min_rows
             .max(user_min)
             .min(row_count.saturating_div(2).max(1));
-        controls.min_split_gain = if binned_density < 0.10 {
+        let auto_min_split_gain: f32 = if binned_density < 0.10 {
             0.001
         } else if row_count.saturating_mul(feature_count) >= 65_536 {
             0.0001
         } else {
             0.0
         };
+        controls.min_split_gain = auto_min_split_gain.max(self.params.min_split_gain);
         controls.min_loss_improvement = if row_count < 4_096 {
             0.0
         } else {
