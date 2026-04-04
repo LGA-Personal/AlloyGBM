@@ -179,9 +179,36 @@ def _direction(value: float, threshold: float) -> int:
     return 0
 
 
+def accuracy(y_true: object, y_pred: object) -> float:
+    """Compute classification accuracy (fraction of correct predictions)."""
+    true_values, pred_values = _validated_pair(y_true, y_pred)
+    correct = sum(
+        1 for true_value, pred_value in zip(true_values, pred_values)
+        if true_value == pred_value
+    )
+    return correct / len(true_values)
+
+
+def log_loss(y_true: object, y_prob: object) -> float:
+    """Compute binary cross-entropy (log-loss).
+
+    ``y_true`` should contain values in {0, 1} and ``y_prob`` should contain
+    predicted probabilities in (0, 1).
+    """
+    true_values, prob_values = _validated_pair(y_true, y_prob)
+    eps = 1e-15
+    total = 0.0
+    for y, p in zip(true_values, prob_values):
+        p_clamped = max(eps, min(1.0 - eps, p))
+        total += -(y * math.log(p_clamped) + (1.0 - y) * math.log(1.0 - p_clamped))
+    return total / len(true_values)
+
+
 __all__ = [
+    "accuracy",
     "hit_rate",
     "icir",
+    "log_loss",
     "mae",
     "pearson_correlation",
     "r2_score",
