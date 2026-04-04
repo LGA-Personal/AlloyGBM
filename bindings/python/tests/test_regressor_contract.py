@@ -366,6 +366,9 @@ class GBMRegressorContractTests(unittest.TestCase):
                 best_validation_loss=0.16,
                 train_rmse=[1.0, 0.8, 0.6, 0.5, 0.4],
                 validation_rmse=[1.1, 0.9, 0.7, 0.6, 0.5],
+                train_loss=[1.0, 0.64, 0.36, 0.25, 0.16],
+                validation_loss=[1.21, 0.81, 0.49, 0.36, 0.25],
+                objective="squared_error",
                 stop_reason="ValidationLossPlateau",
                 bridge_prepare_seconds=0.01,
                 native_train_seconds=0.02,
@@ -410,8 +413,14 @@ class GBMRegressorContractTests(unittest.TestCase):
         self.assertEqual(
             model.evals_result_,
             {
-                "train": {"rmse": [1.0, 0.8, 0.6, 0.5, 0.4]},
-                "validation": {"rmse": [1.1, 0.9, 0.7, 0.6, 0.5]},
+                "train": {
+                    "rmse": [1.0, 0.8, 0.6, 0.5, 0.4],
+                    "mse": [1.0, 0.64, 0.36, 0.25, 0.16],
+                },
+                "validation": {
+                    "rmse": [1.1, 0.9, 0.7, 0.6, 0.5],
+                    "mse": [1.21, 0.81, 0.49, 0.36, 0.25],
+                },
             },
         )
         self.assertEqual(model.fit_timing_["native_bridge_prepare_seconds"], 0.01)

@@ -551,6 +551,39 @@ class GBMRegressor(_GBMRegressorBase):
         """Return the objective function name passed to the native training bridge."""
         return "squared_error"
 
+    @staticmethod
+    def _loss_metric_name_for(objective: str) -> str:
+        """Map an objective name to its natural loss metric name."""
+        if objective == "binary_crossentropy":
+            return "logloss"
+        return "mse"
+
+    def _loss_metric_name(self) -> str:
+        """Return the natural loss metric name for this estimator's objective."""
+        return self._loss_metric_name_for(self._objective_name())
+
+    @staticmethod
+    def _build_evals_result(summary: object) -> dict:
+        """Build ``evals_result_`` from a ``NativeTrainingSummary``.
+
+        The result always contains a backward-compatible ``"rmse"`` key plus
+        the objective-native loss metric (``"mse"`` for squared_error,
+        ``"logloss"`` for binary_crossentropy).
+        """
+        loss_metric = GBMRegressor._loss_metric_name_for(summary.objective)
+        result: dict[str, dict[str, list[float]]] = {
+            "train": {
+                "rmse": [float(v) for v in summary.train_rmse],
+                loss_metric: [float(v) for v in summary.train_loss],
+            }
+        }
+        if summary.validation_rmse:
+            result["validation"] = {
+                "rmse": [float(v) for v in summary.validation_rmse],
+                loss_metric: [float(v) for v in summary.validation_loss],
+            }
+        return result
+
     def fit(
         self,
         X: object,
@@ -929,11 +962,7 @@ class GBMRegressor(_GBMRegressorBase):
             else None
         )
         self.n_estimators_ = int(summary.rounds_completed)
-        self.evals_result_ = {"train": {"rmse": [float(v) for v in summary.train_rmse]}}
-        if summary.validation_rmse:
-            self.evals_result_["validation"] = {
-                "rmse": [float(v) for v in summary.validation_rmse]
-            }
+        self.evals_result_ = self._build_evals_result(summary)
         total_fit_seconds = time.perf_counter() - fit_start
         self.fit_timing_ = {
             "input_adaptation_seconds": float(input_adaptation_seconds),
@@ -966,11 +995,7 @@ class GBMRegressor(_GBMRegressorBase):
             else None
         )
         self.n_estimators_ = int(summary.rounds_completed)
-        self.evals_result_ = {"train": {"rmse": [float(v) for v in summary.train_rmse]}}
-        if summary.validation_rmse:
-            self.evals_result_["validation"] = {
-                "rmse": [float(v) for v in summary.validation_rmse]
-            }
+        self.evals_result_ = self._build_evals_result(summary)
         total_fit_seconds = time.perf_counter() - self._fit_start_time
         self.fit_timing_ = {
             "input_adaptation_seconds": float(input_adaptation_seconds),
@@ -1236,7 +1261,8 @@ class GBMRegressor(_GBMRegressorBase):
         self.best_iteration_ = None
         self.best_score_ = None
         self.n_estimators_ = self.n_estimators
-        self.evals_result_ = {"train": {"rmse": []}}
+        loss_metric = self._loss_metric_name()
+        self.evals_result_ = {"train": {"rmse": [], loss_metric: []}}
         total_fit_seconds = time.perf_counter() - fit_start
         self.fit_timing_ = {
             "input_adaptation_seconds": float(input_adaptation_seconds),

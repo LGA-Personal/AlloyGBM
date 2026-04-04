@@ -383,6 +383,15 @@ struct NativeTrainingSummary {
     train_rmse: Vec<f32>,
     #[pyo3(get)]
     validation_rmse: Vec<f32>,
+    /// Raw objective loss per completed round (no sqrt transform).
+    #[pyo3(get)]
+    train_loss: Vec<f32>,
+    /// Raw validation objective loss per completed round (no sqrt transform).
+    #[pyo3(get)]
+    validation_loss: Vec<f32>,
+    /// Objective name (e.g. "squared_error", "binary_crossentropy").
+    #[pyo3(get)]
+    objective: String,
     #[pyo3(get)]
     stop_reason: String,
     #[pyo3(get)]
@@ -1322,6 +1331,7 @@ fn build_native_training_summary(
     summary: &IterationRunSummary,
     bridge_prepare_seconds: f64,
     native_train_seconds: f64,
+    objective: &str,
 ) -> NativeTrainingSummary {
     NativeTrainingSummary {
         rounds_requested: summary.rounds_requested,
@@ -1340,6 +1350,9 @@ fn build_native_training_summary(
             .iter()
             .map(|loss| loss.max(0.0).sqrt())
             .collect(),
+        train_loss: summary.loss_per_completed_round.clone(),
+        validation_loss: summary.validation_loss_per_completed_round.clone(),
+        objective: objective.to_string(),
         stop_reason: format!("{:?}", summary.stop_reason),
         bridge_prepare_seconds,
         native_train_seconds,
@@ -1510,6 +1523,7 @@ fn train_regression_artifact_with_summary_dense_impl(
             &summary,
             bridge_prepare_seconds,
             native_train_seconds,
+            objective,
         ),
         continuous_binning_metadata: prepared.metadata.into(),
     })
