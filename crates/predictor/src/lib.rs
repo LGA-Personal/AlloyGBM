@@ -228,7 +228,8 @@ impl Predictor {
                 feature_count
             )));
         }
-        self.predict_row_with_feature_count(features, feature_count)
+        let raw = self.predict_row_with_feature_count(features, feature_count)?;
+        Ok(self.post_transform(raw))
     }
 
     fn predict_row_with_feature_count(
@@ -290,11 +291,17 @@ impl Predictor {
 
         if should_parallel_predict_batch(rows.len(), self.trees.len()) {
             rows.par_iter()
-                .map(|row| self.predict_row_with_feature_count(row, feature_count))
+                .map(|row| {
+                    let raw = self.predict_row_with_feature_count(row, feature_count)?;
+                    Ok(self.post_transform(raw))
+                })
                 .collect()
         } else {
             rows.iter()
-                .map(|row| self.predict_row_with_feature_count(row, feature_count))
+                .map(|row| {
+                    let raw = self.predict_row_with_feature_count(row, feature_count)?;
+                    Ok(self.post_transform(raw))
+                })
                 .collect()
         }
     }
@@ -331,14 +338,16 @@ impl Predictor {
                 .into_par_iter()
                 .map(|row_index| {
                     let row = &values[row_index * feature_count..(row_index + 1) * feature_count];
-                    self.predict_row_dense_unchecked(row, feature_count)
+                    let raw = self.predict_row_dense_unchecked(row, feature_count)?;
+                    Ok(self.post_transform(raw))
                 })
                 .collect()
         } else {
             (0..row_count)
                 .map(|row_index| {
                     let row = &values[row_index * feature_count..(row_index + 1) * feature_count];
-                    self.predict_row_dense_unchecked(row, feature_count)
+                    let raw = self.predict_row_dense_unchecked(row, feature_count)?;
+                    Ok(self.post_transform(raw))
                 })
                 .collect()
         }
@@ -439,7 +448,8 @@ impl Predictor {
                             bytes[bi + 3],
                         ]);
                     }
-                    *pred = self.predict_row_dense_unchecked(&row_buf, feature_count)?;
+                    let raw = self.predict_row_dense_unchecked(&row_buf, feature_count)?;
+                    *pred = self.post_transform(raw);
                 }
                 Ok::<(), PredictorError>(())
             })?;
@@ -453,6 +463,69 @@ impl Predictor {
 
     pub fn predict_batch_stub(&self, rows: &[Vec<f32>]) -> PredictorResult<Vec<f32>> {
         self.predict_batch(rows)
+    }
+
+    /// Apply objective-specific post-transform to a raw prediction (logit).
+    /// For `"squared_error"` this is identity; for `"binary_crossentropy"` this applies sigmoid.
+    #[inline]
+    fn post_transform(&self, raw: f32) -> f32 {
+        if self.metadata.objective == "binary_crossentropy" {
+            sigmoid(raw)
+        } else {
+            raw
+        }
+    }
+
+    /// Predict raw logits (before post-transform).
+    pub fn predict_row_raw(&self, features: &[f32]) -> PredictorResult<f32> {
+        let feature_count = self.metadata.feature_names.len();
+        if features.len() != feature_count {
+            return Err(PredictorError::InvalidInput(format!(
+                "feature length {} does not match model feature_count {}",
+                features.len(),
+                feature_count
+            )));
+        }
+        self.predict_row_with_feature_count(features, feature_count)
+    }
+
+    /// Predict raw logits in batch (before post-transform).
+    pub fn predict_batch_raw(&self, rows: &[Vec<f32>]) -> PredictorResult<Vec<f32>> {
+        if rows.is_empty() {
+            return Err(PredictorError::InvalidInput(
+                "rows cannot be empty".to_string(),
+            ));
+        }
+        let feature_count = self.metadata.feature_names.len();
+        for row in rows {
+            if row.len() != feature_count {
+                return Err(PredictorError::InvalidInput(format!(
+                    "feature length {} does not match model feature_count {}",
+                    row.len(),
+                    feature_count
+                )));
+            }
+        }
+        if should_parallel_predict_batch(rows.len(), self.trees.len()) {
+            rows.par_iter()
+                .map(|row| self.predict_row_with_feature_count(row, feature_count))
+                .collect()
+        } else {
+            rows.iter()
+                .map(|row| self.predict_row_with_feature_count(row, feature_count))
+                .collect()
+        }
+    }
+}
+
+/// Numerically stable sigmoid: avoids overflow for large negative inputs.
+#[inline]
+fn sigmoid(x: f32) -> f32 {
+    if x >= 0.0 {
+        1.0 / (1.0 + (-x).exp())
+    } else {
+        let ex = x.exp();
+        ex / (1.0 + ex)
     }
 }
 
@@ -698,6 +771,7 @@ mod tests {
             format_version: 1,
             feature_names: vec!["f0".to_string()],
             trained_device: Device::Cpu,
+            objective: "squared_error".to_string(),
         };
         Predictor::new(metadata)
     }

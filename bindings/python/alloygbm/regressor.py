@@ -547,6 +547,10 @@ class GBMRegressor(_GBMRegressorBase):
 
         return self
 
+    def _objective_name(self) -> str:
+        """Return the objective function name passed to the native training bridge."""
+        return "squared_error"
+
     def fit(
         self,
         X: object,
@@ -790,6 +794,7 @@ class GBMRegressor(_GBMRegressorBase):
                     time_index=validated_time_index,
                     continuous_binning_strategy=self.continuous_binning_strategy,
                     continuous_binning_max_bins=self.continuous_binning_max_bins,
+                    objective=self._objective_name(),
                 )
                 return self._finalize_training_result(native_result, input_adaptation_seconds, feature_count=feature_count)
             except (ImportError, AttributeError):
@@ -867,6 +872,7 @@ class GBMRegressor(_GBMRegressorBase):
                 time_index=validated_time_index,
                 continuous_binning_strategy=self.continuous_binning_strategy,
                 continuous_binning_max_bins=self.continuous_binning_max_bins,
+                objective=self._objective_name(),
             )
         else:
             assert training_rows is not None
@@ -905,6 +911,7 @@ class GBMRegressor(_GBMRegressorBase):
                 time_index=validated_time_index,
                 continuous_binning_strategy=self.continuous_binning_strategy,
                 continuous_binning_max_bins=self.continuous_binning_max_bins,
+                objective=self._objective_name(),
             )
 
         self._apply_continuous_binning_metadata(native_result.continuous_binning_metadata)
@@ -1191,6 +1198,7 @@ class GBMRegressor(_GBMRegressorBase):
                 time_index=time_index,
                 continuous_binning_strategy=self.continuous_binning_strategy,
                 continuous_binning_max_bins=self.continuous_binning_max_bins,
+                objective=self._objective_name(),
             )
         else:
             train_regression_artifact = _load_native_train_regression_artifact()
@@ -1216,6 +1224,7 @@ class GBMRegressor(_GBMRegressorBase):
                 time_index=time_index,
                 continuous_binning_strategy=self.continuous_binning_strategy,
                 continuous_binning_max_bins=self.continuous_binning_max_bins,
+                objective=self._objective_name(),
             )
 
         self._n_features_in = feature_count

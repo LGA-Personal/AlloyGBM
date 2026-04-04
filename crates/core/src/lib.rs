@@ -402,6 +402,9 @@ pub struct ModelMetadata {
     pub format_version: u32,
     pub feature_names: Vec<String>,
     pub trained_device: Device,
+    /// Objective used to train this model (e.g. "squared_error", "binary_crossentropy").
+    /// Defaults to "squared_error" for backward compatibility with older artifacts.
+    pub objective: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1119,10 +1122,11 @@ pub fn serialize_metadata_json(metadata: &ModelMetadata) -> String {
         .join(",");
 
     format!(
-        "{{\"format_version\":{},\"feature_names\":[{}],\"trained_device\":\"{}\"}}",
+        "{{\"format_version\":{},\"feature_names\":[{}],\"trained_device\":\"{}\",\"objective\":\"{}\"}}",
         metadata.format_version,
         feature_names,
-        metadata.trained_device.as_metadata_label()
+        metadata.trained_device.as_metadata_label(),
+        escape_json_string(&metadata.objective)
     )
 }
 
@@ -1142,6 +1146,16 @@ pub fn deserialize_metadata_json(input: &str) -> CoreResult<ModelMetadata> {
     let (trained_device_raw, next_index) = parse_quoted_string(&compact, index)?;
     index = next_index;
 
+    // Optional objective field — backward compatible with older artifacts.
+    let objective = if index < compact.len() && compact.as_bytes()[index] == b',' {
+        let next = consume_literal(&compact, index, ",\"objective\":")?;
+        let (objective_raw, next_index) = parse_quoted_string(&compact, next)?;
+        index = next_index;
+        objective_raw
+    } else {
+        "squared_error".to_string()
+    };
+
     index = consume_literal(&compact, index, "}")?;
     if index != compact.len() {
         return Err(CoreError::Serialization(
@@ -1153,6 +1167,7 @@ pub fn deserialize_metadata_json(input: &str) -> CoreResult<ModelMetadata> {
         format_version,
         feature_names,
         trained_device: Device::parse_metadata_label(&trained_device_raw)?,
+        objective,
     })
 }
 
@@ -1495,6 +1510,7 @@ mod tests {
             format_version: MODEL_FORMAT_V1,
             feature_names: vec!["feature_0".to_string(), "ticker\"id".to_string()],
             trained_device: Device::Cpu,
+            objective: "squared_error".to_string(),
         }
     }
 
@@ -1734,6 +1750,7 @@ mod tests {
                 format_version: MODEL_FORMAT_V1,
                 feature_names: vec!["f0".to_string()],
                 trained_device: Device::Cpu,
+                objective: "squared_error".to_string(),
             },
         };
         assert!(matches!(
@@ -1755,6 +1772,7 @@ mod tests {
                 format_version: MODEL_FORMAT_V1,
                 feature_names: vec!["f0".to_string()],
                 trained_device: Device::Cpu,
+                objective: "squared_error".to_string(),
             },
         };
 
@@ -1784,6 +1802,7 @@ mod tests {
                 format_version: MODEL_FORMAT_V1,
                 feature_names: vec!["f0".to_string()],
                 trained_device: Device::Cpu,
+                objective: "squared_error".to_string(),
             },
         };
 

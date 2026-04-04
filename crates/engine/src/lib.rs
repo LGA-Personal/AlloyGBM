@@ -106,17 +106,31 @@ pub trait BackendOps {
 }
 
 pub trait ObjectiveOps {
+    /// Canonical name for this objective (e.g. "squared_error", "binary_crossentropy").
+    fn objective_name(&self) -> &str;
+
     fn initial_prediction(
         &self,
         targets: &[f32],
         sample_weights: Option<&[f32]>,
     ) -> EngineResult<f32>;
+
     fn compute_gradients(
         &self,
         predictions: &[f32],
         targets: &[f32],
         sample_weights: Option<&[f32]>,
     ) -> EngineResult<Vec<GradientPair>>;
+
+    /// Compute the objective loss for a set of predictions.
+    /// This is used for monitoring convergence and early stopping.
+    fn loss(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+    ) -> EngineResult<f32>;
+
     fn compute_gradients_into(
         &self,
         predictions: &[f32],
@@ -135,6 +149,10 @@ pub trait ObjectiveOps {
 pub struct SquaredErrorObjective;
 
 impl ObjectiveOps for SquaredErrorObjective {
+    fn objective_name(&self) -> &str {
+        "squared_error"
+    }
+
     fn initial_prediction(
         &self,
         targets: &[f32],
@@ -242,6 +260,154 @@ impl ObjectiveOps for SquaredErrorObjective {
         }
         Ok(())
     }
+
+    fn loss(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+    ) -> EngineResult<f32> {
+        squared_error_loss(predictions, targets, sample_weights)
+    }
+}
+
+/// Binary cross-entropy (log loss) objective for binary classification.
+/// Targets must be 0.0 or 1.0. Predictions are in log-odds (logit) space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BinaryCrossEntropyObjective;
+
+/// Numerically stable sigmoid: avoids overflow for large positive/negative inputs.
+fn sigmoid(x: f32) -> f32 {
+    if x >= 0.0 {
+        let exp_neg = (-x).exp();
+        1.0 / (1.0 + exp_neg)
+    } else {
+        let exp_pos = x.exp();
+        exp_pos / (1.0 + exp_pos)
+    }
+}
+
+impl ObjectiveOps for BinaryCrossEntropyObjective {
+    fn objective_name(&self) -> &str {
+        "binary_crossentropy"
+    }
+
+    fn initial_prediction(
+        &self,
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+    ) -> EngineResult<f32> {
+        if targets.is_empty() {
+            return Err(EngineError::ContractViolation(
+                "targets cannot be empty".to_string(),
+            ));
+        }
+        // Compute weighted mean of targets, then convert to log-odds.
+        let (positive_weight, total_weight) = if let Some(weights) = sample_weights {
+            if weights.len() != targets.len() {
+                return Err(EngineError::ContractViolation(format!(
+                    "weights length {} does not match targets length {}",
+                    weights.len(),
+                    targets.len()
+                )));
+            }
+            let mut pos_w = 0.0_f32;
+            let mut tot_w = 0.0_f32;
+            for (&target, &weight) in targets.iter().zip(weights) {
+                if !weight.is_finite() || weight <= 0.0 {
+                    return Err(EngineError::ContractViolation(
+                        "sample weights must be finite and > 0".to_string(),
+                    ));
+                }
+                pos_w += target * weight;
+                tot_w += weight;
+            }
+            (pos_w, tot_w)
+        } else {
+            let pos = targets.iter().sum::<f32>();
+            (pos, targets.len() as f32)
+        };
+        if total_weight <= 0.0 {
+            return Err(EngineError::ContractViolation(
+                "sample weight sum must be greater than 0".to_string(),
+            ));
+        }
+        let p = (positive_weight / total_weight).clamp(1e-7, 1.0 - 1e-7);
+        // log-odds: log(p / (1 - p))
+        Ok((p / (1.0 - p)).ln())
+    }
+
+    fn compute_gradients(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+    ) -> EngineResult<Vec<GradientPair>> {
+        if predictions.len() != targets.len() {
+            return Err(EngineError::ContractViolation(format!(
+                "predictions length {} does not match targets length {}",
+                predictions.len(),
+                targets.len()
+            )));
+        }
+        if let Some(weights) = sample_weights
+            && weights.len() != targets.len()
+        {
+            return Err(EngineError::ContractViolation(format!(
+                "weights length {} does not match targets length {}",
+                weights.len(),
+                targets.len()
+            )));
+        }
+
+        let mut gradients = Vec::with_capacity(predictions.len());
+        for index in 0..predictions.len() {
+            let weight = sample_weights.map_or(1.0, |weights| weights[index]);
+            let p = sigmoid(predictions[index]);
+            // grad = (p - y) * w, hess = p * (1 - p) * w
+            let grad = (p - targets[index]) * weight;
+            let hess = (p * (1.0 - p)).max(1e-7) * weight;
+            gradients.push(GradientPair::new(grad, hess)?);
+        }
+        Ok(gradients)
+    }
+
+    fn compute_gradients_into(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+        buffer: &mut Vec<GradientPair>,
+    ) -> EngineResult<()> {
+        if predictions.len() != targets.len() {
+            return Err(EngineError::ContractViolation(format!(
+                "predictions length {} does not match targets length {}",
+                predictions.len(),
+                targets.len()
+            )));
+        }
+        buffer.clear();
+        if buffer.capacity() < predictions.len() {
+            buffer.reserve(predictions.len() - buffer.capacity());
+        }
+        for index in 0..predictions.len() {
+            let weight = sample_weights.map_or(1.0, |weights| weights[index]);
+            let p = sigmoid(predictions[index]);
+            let grad = (p - targets[index]) * weight;
+            let hess = (p * (1.0 - p)).max(1e-7) * weight;
+            buffer.push(GradientPair { grad, hess });
+        }
+        Ok(())
+    }
+
+    fn loss(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+    ) -> EngineResult<f32> {
+        binary_crossentropy_loss(predictions, targets, sample_weights)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -289,6 +455,8 @@ pub struct TrainedModel {
     pub stumps: Vec<TrainedStump>,
     pub categorical_state: Option<CategoricalStatePayloadV1>,
     pub node_debug_stats: Option<Vec<NodeDebugStats>>,
+    /// Objective name recorded in the model artifact metadata.
+    pub objective: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -594,6 +762,7 @@ impl TrainedModel {
                 .map(|index| format!("f{index}"))
                 .collect(),
             trained_device: Device::Cpu,
+            objective: self.objective.clone(),
         };
 
         let mut sections = vec![
@@ -697,6 +866,7 @@ impl TrainedModel {
             decode_optional_categorical_state_section_v1(&parsed.sections, metadata_feature_count)?;
         model.node_debug_stats = decode_optional_node_debug_stats_section(&parsed.sections)?;
         model.feature_count = metadata_feature_count;
+        model.objective = parsed.contract.metadata.objective.clone();
         Ok(model)
     }
 }
@@ -1157,7 +1327,7 @@ impl Trainer {
         let mut rounds_completed = 0_usize;
         let effective_round_cap = controls.rounds;
         let mut stop_reason = IterationStopReason::CompletedRequestedRounds;
-        let initial_loss = squared_error_loss(
+        let initial_loss = objective.loss(
             &predictions,
             &dataset.targets,
             dataset.sample_weights.as_deref(),
@@ -1168,7 +1338,7 @@ impl Trainer {
                     "validation predictions were not initialized".to_string(),
                 )
             })?;
-            Some(squared_error_loss(
+            Some(objective.loss(
                 validation_predictions_ref,
                 &validation_ref.dataset.targets,
                 validation_ref.dataset.sample_weights.as_deref(),
@@ -1381,7 +1551,7 @@ impl Trainer {
                 break;
             }
 
-            let candidate_loss = squared_error_loss(
+            let candidate_loss = objective.loss(
                 &candidate_predictions,
                 &dataset.targets,
                 dataset.sample_weights.as_deref(),
@@ -1417,7 +1587,7 @@ impl Trainer {
                     validation_ref.binned_matrix,
                     &candidate_round_stumps,
                 )?;
-                let next_validation_loss = squared_error_loss(
+                let next_validation_loss = objective.loss(
                     &next_validation_predictions,
                     &validation_ref.dataset.targets,
                     validation_ref.dataset.sample_weights.as_deref(),
@@ -1507,7 +1677,7 @@ impl Trainer {
             let mut refined_predictions =
                 vec![fit_contract.baseline_prediction; dataset.row_count()];
             apply_tree_to_binned_predictions(&mut refined_predictions, binned_matrix, &stumps)?;
-            current_loss = squared_error_loss(
+            current_loss = objective.loss(
                 &refined_predictions,
                 &dataset.targets,
                 dataset.sample_weights.as_deref(),
@@ -1523,7 +1693,7 @@ impl Trainer {
                     validation_ref.binned_matrix,
                     &stumps,
                 )?;
-                current_validation_loss = Some(squared_error_loss(
+                current_validation_loss = Some(objective.loss(
                     &refined_validation_predictions,
                     &validation_ref.dataset.targets,
                     validation_ref.dataset.sample_weights.as_deref(),
@@ -1543,6 +1713,7 @@ impl Trainer {
             stumps,
             categorical_state: None,
             node_debug_stats: None,
+            objective: objective.objective_name().to_string(),
         };
         let final_loss = current_loss;
 
@@ -2770,6 +2941,42 @@ fn squared_error_loss_unchecked(
     }
 }
 
+fn binary_crossentropy_loss(
+    predictions: &[f32],
+    targets: &[f32],
+    sample_weights: Option<&[f32]>,
+) -> EngineResult<f32> {
+    if predictions.len() != targets.len() {
+        return Err(EngineError::ContractViolation(format!(
+            "predictions length {} does not match targets length {}",
+            predictions.len(),
+            targets.len()
+        )));
+    }
+    if let Some(weights) = sample_weights
+        && weights.len() != targets.len()
+    {
+        return Err(EngineError::ContractViolation(format!(
+            "weights length {} does not match targets length {}",
+            weights.len(),
+            targets.len()
+        )));
+    }
+    // Numerically stable log-loss: -[y*log(p) + (1-y)*log(1-p)]
+    // where p = sigmoid(prediction) and prediction is in logit space.
+    // Stable formulation: max(pred,0) - pred*y + log(1 + exp(-|pred|))
+    let n = predictions.len();
+    let mut total = 0.0_f32;
+    for index in 0..n {
+        let pred = predictions[index];
+        let y = targets[index];
+        let weight = sample_weights.map_or(1.0, |w| w[index]);
+        let loss = pred.max(0.0) - pred * y + (1.0 + (-pred.abs()).exp()).ln();
+        total += loss * weight;
+    }
+    Ok(total)
+}
+
 fn required_single_section(
     sections: &[ModelArtifactSection],
     kind: ModelSectionKind,
@@ -3088,6 +3295,7 @@ fn decode_trained_model_payload(bytes: &[u8]) -> EngineResult<TrainedModel> {
         stumps,
         categorical_state: None,
         node_debug_stats: None,
+        objective: "squared_error".to_string(),
     })
 }
 
@@ -3334,6 +3542,10 @@ mod tests {
     }
 
     impl ObjectiveOps for BadObjective {
+        fn objective_name(&self) -> &str {
+            "bad"
+        }
+
         fn initial_prediction(
             &self,
             _targets: &[f32],
@@ -3352,6 +3564,15 @@ mod tests {
                 grad: 0.1,
                 hess: 1.0,
             }])
+        }
+
+        fn loss(
+            &self,
+            predictions: &[f32],
+            targets: &[f32],
+            sample_weights: Option<&[f32]>,
+        ) -> EngineResult<f32> {
+            squared_error_loss(predictions, targets, sample_weights)
         }
     }
 
@@ -3988,6 +4209,7 @@ mod tests {
             ],
             categorical_state: None,
             node_debug_stats: None,
+            objective: "squared_error".to_string(),
         };
 
         let left = model.predict_row(&[0.0]).expect("left prediction succeeds");
@@ -4163,6 +4385,7 @@ mod tests {
                 .map(|index| format!("f{index}"))
                 .collect(),
             trained_device: Device::Cpu,
+            objective: "squared_error".to_string(),
         };
         let trees_payload = encode_trained_model_payload(&model).expect("trees encode");
 
@@ -4187,6 +4410,7 @@ mod tests {
                 .map(|index| format!("f{index}"))
                 .collect(),
             trained_device: Device::Cpu,
+            objective: "squared_error".to_string(),
         };
         let trees_payload = encode_trained_model_payload(&model).expect("trees encode");
         let legacy_trees_only =
@@ -4243,6 +4467,7 @@ mod tests {
                 .map(|index| format!("f{index}"))
                 .collect(),
             trained_device: Device::Cpu,
+            objective: "squared_error".to_string(),
         };
         let trees_payload = encode_trained_model_payload(&model).expect("trees encode");
         let legacy_trees_only =
@@ -4356,6 +4581,7 @@ mod tests {
                 .map(|index| format!("f{index}"))
                 .collect(),
             trained_device: Device::Cpu,
+            objective: "squared_error".to_string(),
         };
         let trees_payload = encode_trained_model_payload(&model).expect("trees encode");
         let layout_payload =
@@ -4403,6 +4629,7 @@ mod tests {
                 .map(|index| format!("f{index}"))
                 .collect(),
             trained_device: Device::Cpu,
+            objective: "squared_error".to_string(),
         };
         let trees_payload = encode_trained_model_payload(&model).expect("trees encode");
         let legacy_trees_only =
@@ -4431,6 +4658,7 @@ mod tests {
                 .map(|index| format!("f{index}"))
                 .collect(),
             trained_device: Device::Cpu,
+            objective: "squared_error".to_string(),
         };
         let trees_payload = encode_trained_model_payload(&model).expect("trees encode");
         let layout_payload =
@@ -4470,6 +4698,7 @@ mod tests {
                 .map(|index| format!("f{index}"))
                 .collect(),
             trained_device: Device::Cpu,
+            objective: "squared_error".to_string(),
         };
         let trees_payload = encode_trained_model_payload(&model).expect("trees encode");
         let layout_payload =
@@ -4508,6 +4737,7 @@ mod tests {
                 .map(|index| format!("f{index}"))
                 .collect(),
             trained_device: Device::Cpu,
+            objective: "squared_error".to_string(),
         };
         let trees_payload = encode_trained_model_payload(&model).expect("trees encode");
         let layout_payload =

@@ -9,8 +9,9 @@ use alloygbm_core::{
     DenseMatrixView, MISSING_BIN, TrainParams, TrainingDataset,
 };
 use alloygbm_engine::{
-    ArtifactCompatibilityMode, CategoricalTargetEncodingSpec, EngineError, IterationRunSummary,
-    SquaredErrorObjective, TrainedModel, Trainer, TrainingPolicyMode,
+    ArtifactCompatibilityMode, BinaryCrossEntropyObjective, CategoricalTargetEncodingSpec,
+    EngineError, IterationRunSummary, SquaredErrorObjective, TrainedModel, Trainer,
+    TrainingPolicyMode,
 };
 use alloygbm_predictor::{Predictor, PredictorError};
 use alloygbm_shap::{
@@ -1368,6 +1369,7 @@ fn train_regression_artifact_with_summary_dense_impl(
     store_node_debug_stats: bool,
     continuous_binning_strategy: ContinuousBinningStrategy,
     continuous_binning_max_bins: usize,
+    objective: &str,
 ) -> Result<NativeTrainingResult, EngineError> {
     let bridge_start = Instant::now();
     let need_dense_values = categorical_spec.is_some();
@@ -1448,36 +1450,47 @@ fn train_regression_artifact_with_summary_dense_impl(
     let trainer = Trainer::new(params)?;
     let backend = CpuBackend;
     let native_start = Instant::now();
-    let mut summary = if let Some(validation_prepared) = validation_prepared.as_ref() {
-        trainer.fit_iterations_with_validation_summary(
-            &prepared.dataset,
-            &prepared.binned_matrix,
-            alloygbm_engine::ValidationDatasetRef {
-                dataset: &validation_prepared.dataset,
-                binned_matrix: &validation_prepared.binned_matrix,
-            },
-            &backend,
-            &SquaredErrorObjective,
-            trainer.iteration_controls_for_policy(
+
+    macro_rules! run_training {
+        ($obj:expr) => {{
+            let controls = trainer.iteration_controls_for_policy(
                 &prepared.dataset,
                 &prepared.binned_matrix,
                 rounds,
                 training_policy,
-            )?,
-        )?
-    } else {
-        trainer.fit_iterations_with_summary(
-            &prepared.dataset,
-            &prepared.binned_matrix,
-            &backend,
-            &SquaredErrorObjective,
-            trainer.iteration_controls_for_policy(
-                &prepared.dataset,
-                &prepared.binned_matrix,
-                rounds,
-                training_policy,
-            )?,
-        )?
+            )?;
+            if let Some(validation_prepared) = validation_prepared.as_ref() {
+                trainer.fit_iterations_with_validation_summary(
+                    &prepared.dataset,
+                    &prepared.binned_matrix,
+                    alloygbm_engine::ValidationDatasetRef {
+                        dataset: &validation_prepared.dataset,
+                        binned_matrix: &validation_prepared.binned_matrix,
+                    },
+                    &backend,
+                    $obj,
+                    controls,
+                )?
+            } else {
+                trainer.fit_iterations_with_summary(
+                    &prepared.dataset,
+                    &prepared.binned_matrix,
+                    &backend,
+                    $obj,
+                    controls,
+                )?
+            }
+        }};
+    }
+
+    let mut summary = match objective {
+        "squared_error" => run_training!(&SquaredErrorObjective),
+        "binary_crossentropy" => run_training!(&BinaryCrossEntropyObjective),
+        other => {
+            return Err(EngineError::InvalidConfig(format!(
+                "unknown objective '{other}', expected 'squared_error' or 'binary_crossentropy'"
+            )));
+        }
     };
     let native_train_seconds = native_start.elapsed().as_secs_f64();
 
@@ -1726,7 +1739,8 @@ fn shap_global_importance_dense(
     categorical_time_aware=false,
     time_index=None,
     continuous_binning_strategy="linear",
-    continuous_binning_max_bins=256
+    continuous_binning_max_bins=255,
+    objective="squared_error"
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact(
@@ -1751,6 +1765,7 @@ fn train_regression_artifact(
     time_index: Option<Vec<i64>>,
     continuous_binning_strategy: &str,
     continuous_binning_max_bins: usize,
+    objective: &str,
 ) -> PyResult<Vec<u8>> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -1810,6 +1825,7 @@ fn train_regression_artifact(
         store_node_stats,
         continuous_binning_strategy,
         continuous_binning_max_bins,
+        objective,
     )
     .map(|result| result.artifact_bytes)
     .map_err(engine_error_to_pyerr)
@@ -1838,7 +1854,8 @@ fn train_regression_artifact(
     categorical_time_aware=false,
     time_index=None,
     continuous_binning_strategy="linear",
-    continuous_binning_max_bins=256
+    continuous_binning_max_bins=255,
+    objective="squared_error"
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense(
@@ -1865,6 +1882,7 @@ fn train_regression_artifact_dense(
     time_index: Option<Vec<i64>>,
     continuous_binning_strategy: &str,
     continuous_binning_max_bins: usize,
+    objective: &str,
 ) -> PyResult<Vec<u8>> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -1920,6 +1938,7 @@ fn train_regression_artifact_dense(
         store_node_stats,
         continuous_binning_strategy,
         continuous_binning_max_bins,
+        objective,
     )
     .map(|result| result.artifact_bytes)
     .map_err(engine_error_to_pyerr)
@@ -1959,7 +1978,8 @@ fn train_regression_artifact_dense(
     categorical_time_aware=false,
     time_index=None,
     continuous_binning_strategy="linear",
-    continuous_binning_max_bins=256
+    continuous_binning_max_bins=255,
+    objective="squared_error"
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_with_summary(
@@ -1997,6 +2017,7 @@ fn train_regression_artifact_with_summary(
     time_index: Option<Vec<i64>>,
     continuous_binning_strategy: &str,
     continuous_binning_max_bins: usize,
+    objective: &str,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -2071,6 +2092,7 @@ fn train_regression_artifact_with_summary(
         store_node_stats,
         continuous_binning_strategy,
         continuous_binning_max_bins,
+        objective,
     )
     .map_err(engine_error_to_pyerr)
 }
@@ -2112,7 +2134,8 @@ fn train_regression_artifact_with_summary(
     categorical_time_aware=false,
     time_index=None,
     continuous_binning_strategy="linear",
-    continuous_binning_max_bins=256
+    continuous_binning_max_bins=255,
+    objective="squared_error"
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary(
@@ -2153,6 +2176,7 @@ fn train_regression_artifact_dense_with_summary(
     time_index: Option<Vec<i64>>,
     continuous_binning_strategy: &str,
     continuous_binning_max_bins: usize,
+    objective: &str,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -2208,6 +2232,7 @@ fn train_regression_artifact_dense_with_summary(
         store_node_stats,
         continuous_binning_strategy,
         continuous_binning_max_bins,
+        objective,
     )
     .map_err(engine_error_to_pyerr)
 }
@@ -2264,7 +2289,8 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> PyResult<Vec<f32>> {
     categorical_time_aware=false,
     time_index=None,
     continuous_binning_strategy="linear",
-    continuous_binning_max_bins=256
+    continuous_binning_max_bins=255,
+    objective="squared_error"
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary_bytes(
@@ -2305,6 +2331,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
     time_index: Option<Vec<i64>>,
     continuous_binning_strategy: &str,
     continuous_binning_max_bins: usize,
+    objective: &str,
 ) -> PyResult<NativeTrainingResult> {
     let values = bytes_to_f32_vec(values_bytes)?;
     let targets = bytes_to_f32_vec(targets_bytes)?;
@@ -2364,6 +2391,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
         store_node_stats,
         continuous_binning_strategy,
         continuous_binning_max_bins,
+        objective,
     )
     .map_err(engine_error_to_pyerr)
 }
@@ -2453,6 +2481,7 @@ mod tests {
             store_node_debug_stats,
             ContinuousBinningStrategy::Linear,
             MAX_CONTINUOUS_QUANTIZED_BIN as usize + 1,
+            "squared_error",
         )
         .map(|result| result.artifact_bytes)
     }

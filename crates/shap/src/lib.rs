@@ -526,6 +526,7 @@ mod tests {
                 .map(|value| (*value).to_string())
                 .collect(),
             trained_device: Device::Cpu,
+            objective: "squared_error".to_string(),
         }
     }
 
@@ -572,6 +573,7 @@ mod tests {
             ],
             categorical_state: None,
             node_debug_stats: None,
+            objective: "squared_error".to_string(),
         }
     }
 
@@ -582,6 +584,7 @@ mod tests {
             stumps: fixture_model().stumps,
             categorical_state: None,
             node_debug_stats: None,
+            objective: "squared_error".to_string(),
         }
     }
 

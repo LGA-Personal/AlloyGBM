@@ -342,6 +342,7 @@ class GBMRegressorContractTests(unittest.TestCase):
                         "time_index": None,
                         "continuous_binning_strategy": "linear",
                         "continuous_binning_max_bins": 255,
+                        "objective": "squared_error",
                     }
                 ],
             )
