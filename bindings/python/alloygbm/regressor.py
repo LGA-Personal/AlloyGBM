@@ -10,7 +10,8 @@ import time
 from collections.abc import Sequence
 
 _PRE_BINNED_INTEGER_TOLERANCE = 1e-6
-_MAX_CONTINUOUS_QUANTIZED_BIN = 255
+_MAX_CONTINUOUS_QUANTIZED_BIN = 254
+_MISSING_BIN = 255
 _MIN_CONTINUOUS_QUANTIZED_BINS = 2
 _VALID_CONTINUOUS_BINNING_STRATEGIES = {"linear", "rank", "quantile"}
 _LINEAR_TAIL_RANK_ENV_VAR = "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK"
@@ -212,7 +213,7 @@ class GBMRegressor(_GBMRegressorBase):
         seed: int = 0,
         deterministic: bool = True,
         continuous_binning_strategy: str = "linear",
-        continuous_binning_max_bins: int = 256,
+        continuous_binning_max_bins: int = 255,
         categorical_feature_index: int | None = None,
         training_policy: str = "auto",
         store_node_stats: bool = False,
@@ -1578,7 +1579,7 @@ class GBMRegressor(_GBMRegressorBase):
             return {
                 "non_deterministic": not self.deterministic,
                 "requires_y": True,
-                "allow_nan": False,
+                "allow_nan": True,
                 "X_types": ["2darray"],
             }
         tags = super().__sklearn_tags__()
@@ -1586,11 +1587,11 @@ class GBMRegressor(_GBMRegressorBase):
         if hasattr(tags, "non_deterministic"):
             tags.non_deterministic = not self.deterministic
         if hasattr(tags, "input_tags") and hasattr(tags.input_tags, "allow_nan"):
-            tags.input_tags.allow_nan = False
+            tags.input_tags.allow_nan = True
         return tags
 
     def _more_tags(self):
-        return {"allow_nan": False, "requires_y": True}
+        return {"allow_nan": True, "requires_y": True}
 
     @staticmethod
     def predict_from_artifact(
@@ -1788,7 +1789,7 @@ class GBMRegressor(_GBMRegressorBase):
         try:
             import numpy as np
             arr = np.asarray(flat_values, dtype=np.float32).reshape(row_count, feature_count)
-            return arr.min(axis=0).tolist(), arr.max(axis=0).tolist()
+            return np.nanmin(arr, axis=0).tolist(), np.nanmax(arr, axis=0).tolist()
         except (ImportError, ValueError):
             pass
         mins = [float("inf")] * feature_count
@@ -1797,6 +1798,8 @@ class GBMRegressor(_GBMRegressorBase):
             row_base = row_index * feature_count
             for feature_index in range(feature_count):
                 value = float(flat_values[row_base + feature_index])
+                if math.isnan(value):
+                    continue
                 if value < mins[feature_index]:
                     mins[feature_index] = value
                 if value > maxs[feature_index]:
@@ -1812,6 +1815,7 @@ class GBMRegressor(_GBMRegressorBase):
             values = GBMRegressor._column_values_from_flat_payload(
                 flat_values, row_count, feature_count, feature_index
             )
+            values = [v for v in values if not math.isnan(v)]
             values.sort()
             sorted_values.append(values)
         return sorted_values
@@ -1825,6 +1829,7 @@ class GBMRegressor(_GBMRegressorBase):
             values = GBMRegressor._column_values_from_flat_payload(
                 flat_values, row_count, feature_count, feature_index
             )
+            values = [v for v in values if not math.isnan(v)]
             values.sort()
             if len(values) <= 1:
                 feature_cuts.append([])
@@ -1859,6 +1864,7 @@ class GBMRegressor(_GBMRegressorBase):
             maxs = np.asarray(feature_maxs, dtype=np.float32)
             span = maxs - mins
             span_ok = span > _PRE_BINNED_INTEGER_TOLERANCE
+            nan_mask = np.isnan(arr)
             # Vectorized quantization
             result = np.zeros_like(arr)
             for fi in range(feature_count):
@@ -1871,6 +1877,7 @@ class GBMRegressor(_GBMRegressorBase):
             # Clamp min/max boundaries
             result = np.where(arr <= mins, 0.0, result)
             result = np.where(arr >= maxs, float(max_bin), result)
+            result = np.where(nan_mask, float(_MISSING_BIN), result)
             return result.ravel().tolist()
         except (ImportError, ValueError):
             pass
@@ -1879,6 +1886,9 @@ class GBMRegressor(_GBMRegressorBase):
             row_base = row_index * feature_count
             for feature_index in range(feature_count):
                 value = float(flat_values[row_base + feature_index])
+                if math.isnan(value):
+                    quantized.append(float(_MISSING_BIN))
+                    continue
                 min_value = feature_mins[feature_index]
                 max_value = feature_maxs[feature_index]
                 if value <= min_value:
@@ -1912,6 +1922,9 @@ class GBMRegressor(_GBMRegressorBase):
             row_base = row_index * feature_count
             for feature_index in range(feature_count):
                 value = float(flat_values[row_base + feature_index])
+                if math.isnan(value):
+                    quantized.append(float(_MISSING_BIN))
+                    continue
                 if rank_flags[feature_index]:
                     sorted_values = feature_sorted_values[feature_index]
                     if len(sorted_values) <= 1:
@@ -1956,6 +1969,9 @@ class GBMRegressor(_GBMRegressorBase):
             row_base = row_index * feature_count
             for feature_index in range(feature_count):
                 value = float(flat_values[row_base + feature_index])
+                if math.isnan(value):
+                    quantized.append(float(_MISSING_BIN))
+                    continue
                 sorted_values = feature_sorted_values[feature_index]
                 if len(sorted_values) <= 1:
                     clamped = 0
@@ -1983,6 +1999,9 @@ class GBMRegressor(_GBMRegressorBase):
             row_base = row_index * feature_count
             for feature_index in range(feature_count):
                 value = float(flat_values[row_base + feature_index])
+                if math.isnan(value):
+                    quantized.append(float(_MISSING_BIN))
+                    continue
                 cuts = feature_quantile_cuts[feature_index]
                 bucket = bisect.bisect_right(cuts, value)
                 clamped = min(_MAX_CONTINUOUS_QUANTIZED_BIN, max(0, bucket))
@@ -2081,6 +2100,8 @@ class GBMRegressor(_GBMRegressorBase):
         try:
             import numpy as np
             arr = np.asarray(flat_values, dtype=np.float32)
+            if np.any(np.isnan(arr)):
+                return False
             if np.any(arr < 0.0):
                 return False
             rounded = np.where(arr >= 0.0, np.floor(arr + 0.5), np.ceil(arr - 0.5))
@@ -2088,6 +2109,8 @@ class GBMRegressor(_GBMRegressorBase):
         except ImportError:
             pass
         for value in flat_values:
+            if math.isnan(value):
+                return False
             if value < 0.0:
                 return False
             rounded = GBMRegressor._round_half_away_from_zero(value)
@@ -2105,6 +2128,8 @@ class GBMRegressor(_GBMRegressorBase):
     def _rows_are_pre_binned(rows: Sequence[Sequence[float]]) -> bool:
         for row in rows:
             for value in row:
+                if math.isnan(value):
+                    return False
                 if value < 0.0:
                     return False
                 rounded = float(GBMRegressor._round_half_away_from_zero(value))
@@ -2135,7 +2160,8 @@ class GBMRegressor(_GBMRegressorBase):
         columns: list[list[float]] = [[] for _ in range(feature_count)]
         for row in rows:
             for feature_index, value in enumerate(row):
-                columns[feature_index].append(value)
+                if not math.isnan(value):
+                    columns[feature_index].append(value)
         for feature_index in range(feature_count):
             columns[feature_index].sort()
         return columns
@@ -2180,6 +2206,9 @@ class GBMRegressor(_GBMRegressorBase):
         for row in rows:
             quantized_row: list[float] = []
             for feature_index, value in enumerate(row):
+                if math.isnan(value):
+                    quantized_row.append(float(_MISSING_BIN))
+                    continue
                 min_value = feature_mins[feature_index]
                 max_value = feature_maxs[feature_index]
                 if value <= min_value:
@@ -2211,6 +2240,9 @@ class GBMRegressor(_GBMRegressorBase):
         for row in rows:
             quantized_row: list[float] = []
             for feature_index, value in enumerate(row):
+                if math.isnan(value):
+                    quantized_row.append(float(_MISSING_BIN))
+                    continue
                 if rank_flags[feature_index]:
                     sorted_values = feature_sorted_values[feature_index]
                     if len(sorted_values) <= 1:
@@ -2253,6 +2285,9 @@ class GBMRegressor(_GBMRegressorBase):
         for row in rows:
             quantized_row: list[float] = []
             for feature_index, value in enumerate(row):
+                if math.isnan(value):
+                    quantized_row.append(float(_MISSING_BIN))
+                    continue
                 sorted_values = feature_sorted_values[feature_index]
                 if len(sorted_values) <= 1:
                     clamped = 0
@@ -2278,7 +2313,8 @@ class GBMRegressor(_GBMRegressorBase):
         columns: list[list[float]] = [[] for _ in range(feature_count)]
         for row in rows:
             for feature_index, value in enumerate(row):
-                columns[feature_index].append(value)
+                if not math.isnan(value):
+                    columns[feature_index].append(value)
 
         feature_cuts: list[list[float]] = []
         for feature_index in range(feature_count):
@@ -2310,6 +2346,9 @@ class GBMRegressor(_GBMRegressorBase):
         for row in rows:
             quantized_row: list[float] = []
             for feature_index, value in enumerate(row):
+                if math.isnan(value):
+                    quantized_row.append(float(_MISSING_BIN))
+                    continue
                 cuts = feature_quantile_cuts[feature_index]
                 bucket = bisect.bisect_right(cuts, value)
                 clamped = min(_MAX_CONTINUOUS_QUANTIZED_BIN, max(0, bucket))

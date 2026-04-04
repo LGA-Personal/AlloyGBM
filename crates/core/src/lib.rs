@@ -6,6 +6,7 @@ pub const MODEL_BINARY_MAGIC: [u8; 4] = *b"AGBM";
 pub const MODEL_BINARY_HEADER_LEN: usize = 16;
 pub const MODEL_SECTION_DESCRIPTOR_LEN: usize = 20;
 pub const CATEGORICAL_STATE_FORMAT_V1: u32 = 1;
+pub const MISSING_BIN: u8 = 255;
 const CATEGORICAL_STATE_HEADER_LEN: usize = 16;
 const CATEGORICAL_STATE_FLAG_LEAKAGE_SAFE_TARGET_ENCODING: u32 = 1;
 
@@ -385,6 +386,7 @@ pub struct SplitCandidate {
     pub feature_index: u32,
     pub threshold_bin: u16,
     pub gain: f32,
+    pub default_left: bool,
     pub left_stats: NodeStats,
     pub right_stats: NodeStats,
 }

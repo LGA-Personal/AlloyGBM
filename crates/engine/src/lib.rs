@@ -277,6 +277,7 @@ pub struct NodeDebugStats {
     pub feature_index: u32,
     pub threshold_bin: u16,
     pub gain: f32,
+    pub default_left: bool,
     pub left_stats: NodeStats,
     pub right_stats: NodeStats,
 }
@@ -533,6 +534,7 @@ impl TrainedModel {
                 feature_index: stump.split.feature_index,
                 threshold_bin: stump.split.threshold_bin,
                 gain: stump.split.gain,
+                default_left: stump.split.default_left,
                 left_stats: stump.split.left_stats.clone(),
                 right_stats: stump.split.right_stats.clone(),
             })
@@ -562,7 +564,9 @@ impl TrainedModel {
             let feature_index = stump.split.feature_index as usize;
             let feature_value = features[feature_index];
             let threshold = stump.split.threshold_bin as f32;
-            prediction += if feature_value <= threshold {
+            prediction += if feature_value.is_nan() {
+                if stump.split.default_left { stump.left_leaf_value } else { stump.right_leaf_value }
+            } else if feature_value <= threshold {
                 stump.left_leaf_value
             } else {
                 stump.right_leaf_value
@@ -2113,7 +2117,12 @@ fn row_satisfies_stump_path_features(
                 features.len()
             )));
         }
-        let went_left = features[feature_index] <= parent_stump.split.threshold_bin as f32;
+        let feature_value = features[feature_index];
+        let went_left = if feature_value.is_nan() {
+            parent_stump.split.default_left
+        } else {
+            feature_value <= parent_stump.split.threshold_bin as f32
+        };
         let expected_left = local_node_id == parent_local * 2 + 1;
         if went_left != expected_left {
             return Ok(false);
@@ -2897,7 +2906,8 @@ fn encode_node_debug_stats_payload(node_debug_stats: &[NodeDebugStats]) -> Engin
         bytes.extend_from_slice(&record.node_id.to_le_bytes());
         bytes.extend_from_slice(&record.feature_index.to_le_bytes());
         bytes.extend_from_slice(&record.threshold_bin.to_le_bytes());
-        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        let flags: u16 = if record.default_left { 1 } else { 0 };
+        bytes.extend_from_slice(&flags.to_le_bytes());
         bytes.extend_from_slice(&record.gain.to_le_bytes());
         bytes.extend_from_slice(&record.left_stats.grad_sum.to_le_bytes());
         bytes.extend_from_slice(&record.left_stats.hess_sum.to_le_bytes());
@@ -2943,11 +2953,13 @@ fn decode_node_debug_stats_payload(bytes: &[u8]) -> EngineResult<Vec<NodeDebugSt
     let mut records = Vec::with_capacity(record_count);
     for record_index in 0..record_count {
         let base = HEADER_SIZE + record_index * RECORD_SIZE;
+        let nds_flags = read_u16_le(bytes, base + 10)?;
         records.push(NodeDebugStats {
             node_id: read_u32_le(bytes, base)?,
             feature_index: read_u32_le(bytes, base + 4)?,
             threshold_bin: read_u16_le(bytes, base + 8)?,
             gain: read_f32_le(bytes, base + 12)?,
+            default_left: (nds_flags & 1) != 0,
             left_stats: NodeStats {
                 grad_sum: read_f32_le(bytes, base + 16)?,
                 hess_sum: read_f32_le(bytes, base + 20)?,
@@ -2989,7 +3001,8 @@ fn encode_trained_model_payload(model: &TrainedModel) -> EngineResult<Vec<u8>> {
         bytes.extend_from_slice(&stump.split.node_id.to_le_bytes());
         bytes.extend_from_slice(&stump.split.feature_index.to_le_bytes());
         bytes.extend_from_slice(&stump.split.threshold_bin.to_le_bytes());
-        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        let stump_flags: u16 = if stump.split.default_left { 1 } else { 0 };
+        bytes.extend_from_slice(&stump_flags.to_le_bytes());
         bytes.extend_from_slice(&stump.split.gain.to_le_bytes());
         bytes.extend_from_slice(&stump.left_leaf_value.to_le_bytes());
         bytes.extend_from_slice(&stump.right_leaf_value.to_le_bytes());
@@ -3038,6 +3051,8 @@ fn decode_trained_model_payload(bytes: &[u8]) -> EngineResult<TrainedModel> {
         let node_id = read_u32_le(bytes, base)?;
         let feature_index = read_u32_le(bytes, base + 4)?;
         let threshold_bin = read_u16_le(bytes, base + 8)?;
+        let flags = read_u16_le(bytes, base + 10)?;
+        let default_left = (flags & 1) != 0;
         let gain = read_f32_le(bytes, base + 12)?;
         let left_leaf_value = read_f32_le(bytes, base + 16)?;
         let right_leaf_value = read_f32_le(bytes, base + 20)?;
@@ -3050,6 +3065,7 @@ fn decode_trained_model_payload(bytes: &[u8]) -> EngineResult<TrainedModel> {
                 feature_index,
                 threshold_bin,
                 gain,
+                default_left,
                 left_stats: NodeStats {
                     grad_sum: 0.0,
                     hess_sum: left_count as f32,
@@ -3252,6 +3268,7 @@ mod tests {
                 feature_index: 0,
                 threshold_bin,
                 gain: 3.0,
+                default_left: false,
                 left_stats: NodeStats {
                     grad_sum: 0.0,
                     hess_sum: 0.0,
@@ -3425,6 +3442,7 @@ mod tests {
                 feature_index: 0,
                 threshold_bin: 1,
                 gain: 1.0,
+                default_left: false,
                 left_stats: NodeStats {
                     grad_sum: 0.0,
                     hess_sum: 2.0,
@@ -3931,6 +3949,7 @@ mod tests {
                         feature_index: 0,
                         threshold_bin: 0,
                         gain: 1.0,
+                        default_left: false,
                         left_stats: NodeStats {
                             grad_sum: 0.0,
                             hess_sum: 1.0,
@@ -3951,6 +3970,7 @@ mod tests {
                         feature_index: 0,
                         threshold_bin: 0,
                         gain: 1.0,
+                        default_left: false,
                         left_stats: NodeStats {
                             grad_sum: 0.0,
                             hess_sum: 1.0,

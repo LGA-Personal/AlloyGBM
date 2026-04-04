@@ -1,6 +1,6 @@
 use alloygbm_core::{
     BinnedMatrix, Device, FeatureHistogram, FeatureTile, GradientPair, HistogramBin,
-    HistogramBundle, NodeSlice, NodeStats, PartitionResult, SplitCandidate,
+    HistogramBundle, MISSING_BIN, NodeSlice, NodeStats, PartitionResult, SplitCandidate,
 };
 use alloygbm_engine::{BackendOps, EngineError, EngineResult, SplitSelectionOptions};
 use rayon::prelude::*;
@@ -424,6 +424,16 @@ impl CpuBackend {
             return None;
         }
 
+        // Extract missing-value stats if the histogram covers MISSING_BIN.
+        let missing_bin_idx = MISSING_BIN as usize;
+        let (missing_grad, missing_hess, missing_count) =
+            if missing_bin_idx < feature_histogram.bins.len() {
+                let mb = &feature_histogram.bins[missing_bin_idx];
+                (mb.grad_sum, mb.hess_sum, mb.count)
+            } else {
+                (0.0, 0.0, 0)
+            };
+
         let mut total_grad = 0.0_f32;
         let mut total_hess = 0.0_f32;
         let mut total_count = 0_u32;
@@ -437,6 +447,11 @@ impl CpuBackend {
             return None;
         }
 
+        // Non-missing totals for the scan loop.
+        let nm_total_grad = total_grad - missing_grad;
+        let nm_total_hess = total_hess - missing_hess;
+        let nm_total_count = total_count.saturating_sub(missing_count);
+
         let parent_denom = total_hess + options.l2_lambda + EPSILON;
         let parent_grad = l1_threshold_gradient(total_grad, options.l1_alpha);
         let parent_gain_term = (parent_grad * parent_grad) / parent_denom;
@@ -447,64 +462,99 @@ impl CpuBackend {
         let mut left_hess = 0.0_f32;
         let mut left_count = 0_u32;
 
+        // Scan only non-missing bins (0..min(num_bins-1, MISSING_BIN-1)).
+        let scan_limit = feature_histogram.bins.len().min(missing_bin_idx);
         for (threshold_bin, bin) in feature_histogram
             .bins
             .iter()
             .enumerate()
-            .take(feature_histogram.bins.len() - 1)
+            .take(scan_limit)
         {
             left_grad += bin.grad_sum;
             left_hess += bin.hess_sum;
             left_count += bin.count;
 
-            let right_grad = total_grad - left_grad;
-            let right_hess = total_hess - left_hess;
-            let right_count = total_count.saturating_sub(left_count);
-
-            if left_count == 0
-                || right_count == 0
-                || left_hess <= options.min_child_hessian
-                || right_hess <= options.min_child_hessian
-            {
+            // Skip if this isn't a valid split point (need at least the
+            // next non-missing bin on the right).
+            if threshold_bin + 1 >= scan_limit && nm_total_count == left_count {
                 continue;
             }
 
-            let left_grad_for_gain = l1_threshold_gradient(left_grad, options.l1_alpha);
-            let right_grad_for_gain = l1_threshold_gradient(right_grad, options.l1_alpha);
-            let left_denom = left_hess + options.l2_lambda + EPSILON;
-            let right_denom = right_hess + options.l2_lambda + EPSILON;
-            if options.min_leaf_magnitude > 0.0 {
-                let left_leaf_magnitude = left_grad_for_gain.abs() / left_denom;
-                let right_leaf_magnitude = right_grad_for_gain.abs() / right_denom;
-                if left_leaf_magnitude < options.min_leaf_magnitude
-                    && right_leaf_magnitude < options.min_leaf_magnitude
+            let right_grad = nm_total_grad - left_grad;
+            let right_hess = nm_total_hess - left_hess;
+            let right_count = nm_total_count.saturating_sub(left_count);
+
+            // Try both NaN directions and pick the better one.
+            let candidates: [(f32, f32, u32, f32, f32, u32, bool); 2] = [
+                // NaN goes left
+                (
+                    left_grad + missing_grad,
+                    left_hess + missing_hess,
+                    left_count + missing_count,
+                    right_grad,
+                    right_hess,
+                    right_count,
+                    true,
+                ),
+                // NaN goes right
+                (
+                    left_grad,
+                    left_hess,
+                    left_count,
+                    right_grad + missing_grad,
+                    right_hess + missing_hess,
+                    right_count + missing_count,
+                    false,
+                ),
+            ];
+
+            for &(eff_lg, eff_lh, eff_lc, eff_rg, eff_rh, eff_rc, default_left) in &candidates {
+                if eff_lc == 0
+                    || eff_rc == 0
+                    || eff_lh <= options.min_child_hessian
+                    || eff_rh <= options.min_child_hessian
                 {
                     continue;
                 }
-            }
 
-            let gain = (left_grad_for_gain * left_grad_for_gain) / left_denom
-                + (right_grad_for_gain * right_grad_for_gain) / right_denom
-                - parent_gain_term;
+                let left_grad_for_gain = l1_threshold_gradient(eff_lg, options.l1_alpha);
+                let right_grad_for_gain = l1_threshold_gradient(eff_rg, options.l1_alpha);
+                let left_denom = eff_lh + options.l2_lambda + EPSILON;
+                let right_denom = eff_rh + options.l2_lambda + EPSILON;
+                if options.min_leaf_magnitude > 0.0 {
+                    let left_leaf_magnitude = left_grad_for_gain.abs() / left_denom;
+                    let right_leaf_magnitude = right_grad_for_gain.abs() / right_denom;
+                    if left_leaf_magnitude < options.min_leaf_magnitude
+                        && right_leaf_magnitude < options.min_leaf_magnitude
+                    {
+                        continue;
+                    }
+                }
 
-            if gain > best_gain {
-                best_gain = gain;
-                best_candidate = Some(SplitCandidate {
-                    node_id,
-                    feature_index: feature_histogram.feature_index,
-                    threshold_bin: threshold_bin as u16,
-                    gain,
-                    left_stats: NodeStats {
-                        grad_sum: left_grad,
-                        hess_sum: left_hess,
-                        row_count: left_count,
-                    },
-                    right_stats: NodeStats {
-                        grad_sum: right_grad,
-                        hess_sum: right_hess,
-                        row_count: right_count,
-                    },
-                });
+                let gain = (left_grad_for_gain * left_grad_for_gain) / left_denom
+                    + (right_grad_for_gain * right_grad_for_gain) / right_denom
+                    - parent_gain_term;
+
+                if gain > best_gain {
+                    best_gain = gain;
+                    best_candidate = Some(SplitCandidate {
+                        node_id,
+                        feature_index: feature_histogram.feature_index,
+                        threshold_bin: threshold_bin as u16,
+                        gain,
+                        default_left,
+                        left_stats: NodeStats {
+                            grad_sum: eff_lg,
+                            hess_sum: eff_lh,
+                            row_count: eff_lc,
+                        },
+                        right_stats: NodeStats {
+                            grad_sum: eff_rg,
+                            hess_sum: eff_rh,
+                            row_count: eff_rc,
+                        },
+                    });
+                }
             }
         }
 
@@ -555,14 +605,19 @@ impl CpuBackend {
                 let col_base = feature_index * binned_matrix.row_count;
                 for &row_index_u32 in chunk {
                     let row_index = row_index_u32 as usize;
-                    let bin = if use_col_major {
-                        u16::from(binned_matrix.bins_col[col_base + row_index])
+                    let bin_u8 = if use_col_major {
+                        binned_matrix.bins_col[col_base + row_index]
                     } else {
                         let cell_index = row_index * binned_matrix.feature_count + feature_index;
-                        u16::from(binned_matrix.bins[cell_index])
+                        binned_matrix.bins[cell_index]
                     };
                     let gradient = gradients[row_index];
-                    if bin <= split.threshold_bin {
+                    let goes_left = if bin_u8 == MISSING_BIN {
+                        split.default_left
+                    } else {
+                        u16::from(bin_u8) <= split.threshold_bin
+                    };
+                    if goes_left {
                         left.push(row_index_u32);
                         lg += gradient.grad;
                         lh += gradient.hess;
@@ -689,13 +744,18 @@ impl BackendOps for CpuBackend {
         let col_base = feature_index * binned_matrix.row_count;
         for &row_index in &node.row_indices {
             let row_index = row_index as usize;
-            let bin = if use_col_major {
-                u16::from(binned_matrix.bins_col[col_base + row_index])
+            let bin_u8 = if use_col_major {
+                binned_matrix.bins_col[col_base + row_index]
             } else {
                 let cell_index = row_index * binned_matrix.feature_count + feature_index;
-                u16::from(binned_matrix.bins[cell_index])
+                binned_matrix.bins[cell_index]
             };
-            if bin <= split.threshold_bin {
+            let goes_left = if bin_u8 == MISSING_BIN {
+                split.default_left
+            } else {
+                u16::from(bin_u8) <= split.threshold_bin
+            };
+            if goes_left {
                 left_row_indices.push(row_index as u32);
             } else {
                 right_row_indices.push(row_index as u32);
@@ -748,14 +808,19 @@ impl BackendOps for CpuBackend {
         let col_base = feature_index * binned_matrix.row_count;
         for &row_index_u32 in &node.row_indices {
             let row_index = row_index_u32 as usize;
-            let bin = if use_col_major {
-                u16::from(binned_matrix.bins_col[col_base + row_index])
+            let bin_u8 = if use_col_major {
+                binned_matrix.bins_col[col_base + row_index]
             } else {
                 let cell_index = row_index * binned_matrix.feature_count + feature_index;
-                u16::from(binned_matrix.bins[cell_index])
+                binned_matrix.bins[cell_index]
             };
             let gradient = gradients[row_index];
-            if bin <= split.threshold_bin {
+            let goes_left = if bin_u8 == MISSING_BIN {
+                split.default_left
+            } else {
+                u16::from(bin_u8) <= split.threshold_bin
+            };
+            if goes_left {
                 left_row_indices.push(row_index_u32);
                 left_grad_sum += gradient.grad;
                 left_hess_sum += gradient.hess;
@@ -1341,6 +1406,7 @@ mod tests {
             feature_index: 0,
             threshold_bin: 1,
             gain: 1.0,
+            default_left: false,
             left_stats: NodeStats {
                 grad_sum: 3.0,
                 hess_sum: 2.0,
@@ -1371,6 +1437,7 @@ mod tests {
             feature_index: 0,
             threshold_bin: 1,
             gain: 1.0,
+            default_left: false,
             left_stats: NodeStats {
                 grad_sum: 0.0,
                 hess_sum: 0.0,

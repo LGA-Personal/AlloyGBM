@@ -43,6 +43,7 @@ struct PredictorStump {
     node_id: u32,
     feature_index: u32,
     threshold_bin: u16,
+    default_left: bool,
     left_leaf_value: f32,
     right_leaf_value: f32,
 }
@@ -56,6 +57,7 @@ struct PredictorLayoutPayload {
 struct PredictorTreeNode {
     feature_index: usize,
     threshold_bin: f32,
+    default_left: bool,
     left_leaf_value: f32,
     right_leaf_value: f32,
 }
@@ -161,10 +163,10 @@ impl Predictor {
                     // Constant feature — any threshold works since all values are equal.
                     node.threshold_bin = min_val + f32::EPSILON;
                 } else {
-                    // bin = round(((value - min) / span) * 255)
-                    // Split: bin <= threshold_bin  ↔  value < min + ((threshold_bin + 0.5) / 255) * span
+                    // bin = round(((value - min) / span) * 254)
+                    // Split: bin <= threshold_bin  ↔  value < min + ((threshold_bin + 0.5) / 254) * span
                     let bin = node.threshold_bin;
-                    node.threshold_bin = min_val + ((bin + 0.5) / 255.0) * span;
+                    node.threshold_bin = min_val + ((bin + 0.5) / 254.0) * span;
                 }
             }
         }
@@ -246,7 +248,9 @@ impl Predictor {
                     )));
                 }
                 let feature_value = features[node.feature_index];
-                let went_left = if use_float {
+                let went_left = if feature_value.is_nan() {
+                    node.default_left
+                } else if use_float {
                     feature_value < node.threshold_bin
                 } else {
                     feature_value <= node.threshold_bin
@@ -358,7 +362,9 @@ impl Predictor {
                     )));
                 }
                 let feature_value = features[node.feature_index];
-                let went_left = if use_float {
+                let went_left = if feature_value.is_nan() {
+                    node.default_left
+                } else if use_float {
                     feature_value < node.threshold_bin
                 } else {
                     feature_value <= node.threshold_bin
@@ -574,6 +580,8 @@ fn decode_trained_model_payload(
         let node_id = read_u32_le(bytes, base)?;
         let feature_index = read_u32_le(bytes, base + 4)?;
         let threshold_bin = read_u16_le(bytes, base + 8)?;
+        let stump_flags = read_u16_le(bytes, base + 10)?;
+        let default_left = (stump_flags & 1) != 0;
         let _gain = read_f32_le(bytes, base + 12)?;
         let left_leaf_value = read_f32_le(bytes, base + 16)?;
         let right_leaf_value = read_f32_le(bytes, base + 20)?;
@@ -581,6 +589,7 @@ fn decode_trained_model_payload(
             node_id,
             feature_index,
             threshold_bin,
+            default_left,
             left_leaf_value,
             right_leaf_value,
         });
@@ -604,6 +613,7 @@ fn build_predictor_trees(stumps: &[PredictorStump]) -> PredictorResult<Vec<Predi
             PredictorTreeNode {
                 feature_index: stump.feature_index as usize,
                 threshold_bin: stump.threshold_bin as f32,
+                default_left: stump.default_left,
                 left_leaf_value: stump.left_leaf_value,
                 right_leaf_value: stump.right_leaf_value,
             },

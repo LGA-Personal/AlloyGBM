@@ -182,7 +182,7 @@ class GBMRegressorContractTests(unittest.TestCase):
         self.assertEqual(params["seed"], 0)
         self.assertTrue(params["deterministic"])
         self.assertEqual(params["continuous_binning_strategy"], "linear")
-        self.assertEqual(params["continuous_binning_max_bins"], 256)
+        self.assertEqual(params["continuous_binning_max_bins"], 255)
         self.assertIsNone(params["categorical_feature_index"])
         self.assertEqual(params["training_policy"], "auto")
         self.assertFalse(params["store_node_stats"])
@@ -341,7 +341,7 @@ class GBMRegressorContractTests(unittest.TestCase):
                         "categorical_time_aware": False,
                         "time_index": None,
                         "continuous_binning_strategy": "linear",
-                        "continuous_binning_max_bins": 256,
+                        "continuous_binning_max_bins": 255,
                     }
                 ],
             )
@@ -439,7 +439,7 @@ class GBMRegressorContractTests(unittest.TestCase):
             self.assertEqual(len(train_calls), 1)
             self.assertEqual(
                 train_calls[0]["rows"],
-                [[0.0, 0.0], [115.0, 255.0], [255.0, 11.0]],
+                [[0.0, 0.0], [114.0, 254.0], [254.0, 11.0]],
             )
 
     def test_fit_linear_tail_rank_fallback_quantizes_heavy_tail_features(self) -> None:
@@ -492,9 +492,9 @@ class GBMRegressorContractTests(unittest.TestCase):
                 [
                     [0.0, 0.0],
                     [64.0, 64.0],
-                    [128.0, 96.0],
+                    [127.0, 95.0],
                     [191.0, 102.0],
-                    [255.0, 255.0],
+                    [254.0, 254.0],
                 ],
             )
 
@@ -530,7 +530,7 @@ class GBMRegressorContractTests(unittest.TestCase):
                     original_predict_loader
                 )
 
-            self.assertEqual(predict_calls, [[[34.0, 0.0], [255.0, 255.0]]])
+            self.assertEqual(predict_calls, [[[33.0, 0.0], [254.0, 254.0]]])
 
     def test_predict_preserves_linear_tail_rank_fallback_after_fit(self) -> None:
         with _force_legacy_train_path():
@@ -591,7 +591,7 @@ class GBMRegressorContractTests(unittest.TestCase):
                         original_tail_ratio
                     )
 
-            self.assertEqual(predict_calls, [[[128.0, 89.0], [191.0, 127.0]]])
+            self.assertEqual(predict_calls, [[[127.0, 89.0], [191.0, 127.0]]])
 
     def test_fit_quantizes_continuous_rows_with_rank_strategy(self) -> None:
         with _force_legacy_train_path():
@@ -616,7 +616,7 @@ class GBMRegressorContractTests(unittest.TestCase):
             self.assertEqual(len(train_calls), 1)
             self.assertEqual(
                 train_calls[0]["rows"],
-                [[0.0, 0.0], [128.0, 255.0], [255.0, 128.0]],
+                [[0.0, 0.0], [127.0, 254.0], [254.0, 127.0]],
             )
 
     def test_fit_quantizes_continuous_rows_with_quantile_strategy(self) -> None:

@@ -535,6 +535,7 @@ mod tests {
             feature_index,
             threshold_bin,
             gain: 1.0,
+            default_left: false,
             left_stats: NodeStats {
                 grad_sum: 0.0,
                 hess_sum: 1.0,

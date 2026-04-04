@@ -6,7 +6,7 @@ use alloygbm_categorical::{
 };
 use alloygbm_core::{
     BinnedMatrix, CATEGORICAL_STATE_FORMAT_V1, CategoricalStatePayloadV1, DatasetMatrix,
-    DenseMatrixView, TrainParams, TrainingDataset,
+    DenseMatrixView, MISSING_BIN, TrainParams, TrainingDataset,
 };
 use alloygbm_engine::{
     ArtifactCompatibilityMode, CategoricalTargetEncodingSpec, EngineError, IterationRunSummary,
@@ -25,7 +25,7 @@ use std::time::Instant;
 const DEFAULT_TRAIN_ROUNDS: usize = 6;
 const MAX_SUPPORTED_TRAIN_ROUNDS: usize = 4096;
 const PRE_BINNED_INTEGER_TOLERANCE: f32 = 1e-6;
-const MAX_CONTINUOUS_QUANTIZED_BIN: u16 = 255;
+const MAX_CONTINUOUS_QUANTIZED_BIN: u16 = 254;
 const MIN_CONTINUOUS_QUANTIZED_BINS: usize = 2;
 const LINEAR_TAIL_RANK_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK";
 const LINEAR_TAIL_CORE_SPAN_RATIO_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_CORE_SPAN_RATIO";
@@ -604,7 +604,10 @@ fn derive_dense_sorted_feature_values(
         .map(|feature_index| {
             let mut column = Vec::with_capacity(row_count);
             for row_index in 0..row_count {
-                column.push(values[row_index * feature_count + feature_index]);
+                let value = values[row_index * feature_count + feature_index];
+                if !value.is_nan() {
+                    column.push(value);
+                }
             }
             column.sort_by(f32::total_cmp);
             column
@@ -671,7 +674,7 @@ fn derive_linear_tail_rank_plan(
         .collect()
 }
 
-fn validate_dense_values_finite(
+fn validate_dense_values_allow_nan(
     values: &[f32],
     row_count: usize,
     feature_count: usize,
@@ -680,9 +683,9 @@ fn validate_dense_values_finite(
     for row_index in 0..dense_view.row_count {
         let row = dense_view.row(row_index)?;
         for (feature_index, &value) in row.iter().enumerate() {
-            if !value.is_finite() {
+            if value.is_infinite() {
                 return Err(EngineError::ContractViolation(format!(
-                    "row {row_index} feature {feature_index} must be finite"
+                    "row {row_index} feature {feature_index} must not be infinite"
                 )));
             }
         }
@@ -709,7 +712,7 @@ fn prepare_validation_matrices_from_dense_values(
             targets.len()
         )));
     }
-    validate_dense_values_finite(values, row_count, feature_count)?;
+    validate_dense_values_allow_nan(values, row_count, feature_count)?;
     let (dense_values, bins, max_bin) = quantize_dense_values_with_metadata(
         values,
         row_count,
@@ -813,28 +816,33 @@ fn quantize_dense_values_with_metadata(
                     let dst_base = local_row * feature_count;
                     for feature_index in 0..feature_count {
                         let value = values[src_base + feature_index];
-                        let bin = match strategy {
-                            ContinuousBinningStrategy::Linear => {
-                                if rank_flags.is_some_and(|flags| flags[feature_index]) {
+                        let bin = if value.is_nan() {
+                            MISSING_BIN
+                        } else {
+                            match strategy {
+                                ContinuousBinningStrategy::Linear => {
+                                    if rank_flags.is_some_and(|flags| flags[feature_index]) {
+                                        let sv = sorted_ref.expect("sorted values validated");
+                                        quantize_rank_value(value, &sv[feature_index])
+                                    } else {
+                                        let mins = mins_ref.expect("mins validated");
+                                        let maxs = maxs_ref.expect("maxs validated");
+                                        quantize_linear_value(
+                                            value,
+                                            mins[feature_index],
+                                            maxs[feature_index],
+                                        )
+                                    }
+                                }
+                                ContinuousBinningStrategy::Rank => {
                                     let sv = sorted_ref.expect("sorted values validated");
                                     quantize_rank_value(value, &sv[feature_index])
-                                } else {
-                                    let mins = mins_ref.expect("mins validated");
-                                    let maxs = maxs_ref.expect("maxs validated");
-                                    quantize_linear_value(
-                                        value,
-                                        mins[feature_index],
-                                        maxs[feature_index],
-                                    )
                                 }
-                            }
-                            ContinuousBinningStrategy::Rank => {
-                                let sv = sorted_ref.expect("sorted values validated");
-                                quantize_rank_value(value, &sv[feature_index])
-                            }
-                            ContinuousBinningStrategy::Quantile => {
-                                let cuts = cuts_ref.expect("cuts validated");
-                                cuts[feature_index].partition_point(|probe| *probe <= value) as u8
+                                ContinuousBinningStrategy::Quantile => {
+                                    let cuts = cuts_ref.expect("cuts validated");
+                                    cuts[feature_index].partition_point(|probe| *probe <= value)
+                                        as u8
+                                }
                             }
                         };
                         local_max_bin = local_max_bin.max(bin);
@@ -858,28 +866,33 @@ fn quantize_dense_values_with_metadata(
                     let dst_base = local_row * feature_count;
                     for feature_index in 0..feature_count {
                         let value = values[src_base + feature_index];
-                        let bin = match strategy {
-                            ContinuousBinningStrategy::Linear => {
-                                if rank_flags.is_some_and(|flags| flags[feature_index]) {
+                        let bin = if value.is_nan() {
+                            MISSING_BIN
+                        } else {
+                            match strategy {
+                                ContinuousBinningStrategy::Linear => {
+                                    if rank_flags.is_some_and(|flags| flags[feature_index]) {
+                                        let sv = sorted_ref.expect("sorted values validated");
+                                        quantize_rank_value(value, &sv[feature_index])
+                                    } else {
+                                        let mins = mins_ref.expect("mins validated");
+                                        let maxs = maxs_ref.expect("maxs validated");
+                                        quantize_linear_value(
+                                            value,
+                                            mins[feature_index],
+                                            maxs[feature_index],
+                                        )
+                                    }
+                                }
+                                ContinuousBinningStrategy::Rank => {
                                     let sv = sorted_ref.expect("sorted values validated");
                                     quantize_rank_value(value, &sv[feature_index])
-                                } else {
-                                    let mins = mins_ref.expect("mins validated");
-                                    let maxs = maxs_ref.expect("maxs validated");
-                                    quantize_linear_value(
-                                        value,
-                                        mins[feature_index],
-                                        maxs[feature_index],
-                                    )
                                 }
-                            }
-                            ContinuousBinningStrategy::Rank => {
-                                let sv = sorted_ref.expect("sorted values validated");
-                                quantize_rank_value(value, &sv[feature_index])
-                            }
-                            ContinuousBinningStrategy::Quantile => {
-                                let cuts = cuts_ref.expect("cuts validated");
-                                cuts[feature_index].partition_point(|probe| *probe <= value) as u8
+                                ContinuousBinningStrategy::Quantile => {
+                                    let cuts = cuts_ref.expect("cuts validated");
+                                    cuts[feature_index].partition_point(|probe| *probe <= value)
+                                        as u8
+                                }
                             }
                         };
                         local_max_bin = local_max_bin.max(bin);
@@ -920,12 +933,12 @@ fn prepare_training_matrices_from_dense_values(
     for row_index in 0..dense_view.row_count {
         let row = dense_view.row(row_index)?;
         for (feature_index, &value) in row.iter().enumerate() {
-            if !value.is_finite() {
+            if value.is_infinite() {
                 return Err(EngineError::ContractViolation(format!(
-                    "row {row_index} feature {feature_index} must be finite"
+                    "row {row_index} feature {feature_index} must not be infinite"
                 )));
             }
-            if use_pre_binned_path && !is_pre_binned_integer_value(value) {
+            if use_pre_binned_path && (value.is_nan() || !is_pre_binned_integer_value(value)) {
                 use_pre_binned_path = false;
             }
         }
