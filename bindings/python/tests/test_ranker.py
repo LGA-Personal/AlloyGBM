@@ -1,0 +1,242 @@
+"""Tests for GBMRanker and NDCG evaluation metric."""
+
+from __future__ import annotations
+
+import pickle
+import unittest
+
+import numpy as np
+
+from alloygbm import GBMRanker, ndcg
+
+
+def _make_ranking_dataset(
+    n_queries: int = 10,
+    docs_per_query: int = 15,
+    n_features: int = 4,
+    seed: int = 42,
+) -> tuple:
+    """Create a synthetic ranking dataset with linearly separable relevance."""
+    rng = np.random.RandomState(seed)
+    n_total = n_queries * docs_per_query
+    group = np.repeat(np.arange(n_queries, dtype=np.uint32), docs_per_query)
+    X = rng.randn(n_total, n_features).astype(np.float32)
+    # Relevance labels: correlated with first feature.
+    raw_rel = X[:, 0] + 0.5 * X[:, 1]
+    # Bin into 0-4 graded relevance.
+    y = np.clip(np.digitize(raw_rel, [-1.5, -0.5, 0.5, 1.5]), 0, 4).astype(np.float32)
+    return X, y, group
+
+
+class GBMRankerObjectiveTests(unittest.TestCase):
+    """Test that all ranking objectives can train and predict."""
+
+    _OBJECTIVES = [
+        "rank:ndcg",
+        "rank:pairwise",
+        "rank:xendcg",
+        "queryrmse",
+        "yetirank",
+    ]
+
+    def test_all_objectives_train_without_error(self) -> None:
+        X, y, group = _make_ranking_dataset()
+        for obj in self._OBJECTIVES:
+            with self.subTest(objective=obj):
+                ranker = GBMRanker(
+                    ranking_objective=obj,
+                    n_estimators=5,
+                    seed=42,
+                    training_policy="manual",
+                    min_split_gain=0.0,
+                )
+                ranker.fit(X, y, group=group)
+                preds = ranker.predict(X)
+                self.assertEqual(len(preds), len(y))
+                self.assertTrue(all(isinstance(p, float) for p in preds))
+
+    def test_objective_name_mapping(self) -> None:
+        self.assertEqual(GBMRanker(ranking_objective="rank:ndcg")._objective_name(), "rank_ndcg")
+        self.assertEqual(GBMRanker(ranking_objective="rank:pairwise")._objective_name(), "rank_pairwise")
+        self.assertEqual(GBMRanker(ranking_objective="rank:xendcg")._objective_name(), "rank_xendcg")
+        self.assertEqual(GBMRanker(ranking_objective="queryrmse")._objective_name(), "queryrmse")
+        self.assertEqual(GBMRanker(ranking_objective="yetirank")._objective_name(), "yetirank")
+
+    def test_invalid_objective_raises(self) -> None:
+        with self.assertRaisesRegex(ValueError, "ranking_objective"):
+            GBMRanker(ranking_objective="invalid")
+
+    def test_group_required(self) -> None:
+        X, y, _group = _make_ranking_dataset()
+        ranker = GBMRanker(n_estimators=3, seed=42)
+        with self.assertRaisesRegex(ValueError, "group"):
+            ranker.fit(X, y, group=None)
+
+    def test_sorts_by_group(self) -> None:
+        """Data with shuffled group IDs should still train correctly."""
+        X, y, group = _make_ranking_dataset(n_queries=3, docs_per_query=5)
+        # Shuffle the data.
+        rng = np.random.RandomState(123)
+        perm = rng.permutation(len(y))
+        X_shuffled = X[perm]
+        y_shuffled = y[perm]
+        group_shuffled = group[perm]
+
+        ranker = GBMRanker(
+            ranking_objective="rank:ndcg",
+            n_estimators=5,
+            seed=42,
+            training_policy="manual",
+            min_split_gain=0.0,
+        )
+        # Should not raise — internal sorting handles it.
+        ranker.fit(X_shuffled, y_shuffled, group=group_shuffled)
+        preds = ranker.predict(X_shuffled)
+        self.assertEqual(len(preds), len(y))
+
+
+class GBMRankerEarlyStoppingTests(unittest.TestCase):
+    """Test ranking with validation and early stopping."""
+
+    def test_early_stopping_with_eval_set(self) -> None:
+        X, y, group = _make_ranking_dataset(n_queries=15, docs_per_query=20, seed=42)
+        X_val, y_val, group_val = _make_ranking_dataset(
+            n_queries=5, docs_per_query=20, seed=99
+        )
+        ranker = GBMRanker(
+            ranking_objective="rank:ndcg",
+            n_estimators=100,
+            early_stopping_rounds=5,
+            seed=42,
+            training_policy="manual",
+            min_split_gain=0.0,
+        )
+        ranker.fit(X, y, group=group, eval_set=(X_val, y_val), eval_group=group_val)
+        # Early stopping should have kicked in.
+        self.assertLess(ranker.n_estimators_, 100)
+        self.assertIsNotNone(ranker.best_iteration_)
+
+    def test_eval_group_required_with_eval_set(self) -> None:
+        X, y, group = _make_ranking_dataset(n_queries=5, docs_per_query=5)
+        ranker = GBMRanker(n_estimators=3, seed=42)
+        with self.assertRaisesRegex(ValueError, "eval_group"):
+            ranker.fit(
+                X, y, group=group,
+                eval_set=(X[:10], y[:10]),
+                # eval_group missing
+            )
+
+    def test_evals_result_has_ndcg_for_ranking(self) -> None:
+        X, y, group = _make_ranking_dataset(n_queries=10, docs_per_query=10)
+        ranker = GBMRanker(
+            ranking_objective="rank:ndcg",
+            n_estimators=5,
+            seed=42,
+            training_policy="manual",
+            min_split_gain=0.0,
+        )
+        ranker.fit(X, y, group=group)
+        er = ranker.evals_result_
+        self.assertIn("ndcg", er["train"])
+        self.assertEqual(len(er["train"]["ndcg"]), 5)
+
+    def test_evals_result_has_queryrmse_for_queryrmse(self) -> None:
+        X, y, group = _make_ranking_dataset(n_queries=10, docs_per_query=10)
+        ranker = GBMRanker(
+            ranking_objective="queryrmse",
+            n_estimators=5,
+            seed=42,
+            training_policy="manual",
+            min_split_gain=0.0,
+        )
+        ranker.fit(X, y, group=group)
+        er = ranker.evals_result_
+        self.assertIn("queryrmse", er["train"])
+
+
+class GBMRankerSerializationTests(unittest.TestCase):
+    """Test pickle and get_params/set_params."""
+
+    def test_pickle_roundtrip(self) -> None:
+        X, y, group = _make_ranking_dataset(n_queries=5, docs_per_query=10)
+        ranker = GBMRanker(
+            ranking_objective="rank:ndcg",
+            n_estimators=5,
+            seed=42,
+            training_policy="manual",
+            min_split_gain=0.0,
+        )
+        ranker.fit(X, y, group=group)
+        preds1 = ranker.predict(X)
+
+        restored = pickle.loads(pickle.dumps(ranker))
+        preds2 = restored.predict(X)
+        for a, b in zip(preds1, preds2):
+            self.assertAlmostEqual(a, b, places=5)
+
+    def test_get_params_includes_ranking_objective(self) -> None:
+        ranker = GBMRanker(ranking_objective="yetirank")
+        params = ranker.get_params()
+        self.assertEqual(params["ranking_objective"], "yetirank")
+
+    def test_set_params_ranking_objective(self) -> None:
+        ranker = GBMRanker(ranking_objective="rank:ndcg")
+        ranker.set_params(ranking_objective="rank:pairwise")
+        self.assertEqual(ranker.ranking_objective, "rank:pairwise")
+
+    def test_repr(self) -> None:
+        ranker = GBMRanker(ranking_objective="rank:ndcg")
+        r = repr(ranker)
+        self.assertIn("GBMRanker(", r)
+        self.assertIn("ranking_objective='rank:ndcg'", r)
+
+
+class NDCGMetricTests(unittest.TestCase):
+    """Test the ndcg evaluation metric."""
+
+    def test_perfect_ranking(self) -> None:
+        score = ndcg([3, 2, 1, 0], [3, 2, 1, 0], group=[0, 0, 0, 0])
+        self.assertAlmostEqual(score, 1.0)
+
+    def test_reversed_ranking(self) -> None:
+        score = ndcg([3, 2, 1, 0], [0, 1, 2, 3], group=[0, 0, 0, 0])
+        self.assertLess(score, 1.0)
+        self.assertGreater(score, 0.0)
+
+    def test_all_same_labels(self) -> None:
+        score = ndcg([1, 1, 1], [3, 1, 2], group=[0, 0, 0])
+        self.assertAlmostEqual(score, 1.0)
+
+    def test_multi_group(self) -> None:
+        # Two groups, both perfectly ranked.
+        score = ndcg(
+            [2, 1, 0, 2, 1, 0],
+            [3, 2, 1, 3, 2, 1],
+            group=[0, 0, 0, 1, 1, 1],
+        )
+        self.assertAlmostEqual(score, 1.0)
+
+    def test_single_document_group(self) -> None:
+        score = ndcg([1], [0.5], group=[0])
+        self.assertAlmostEqual(score, 1.0)
+
+    def test_k_truncation(self) -> None:
+        # With k=1, only the top-ranked document matters.
+        # Perfect: doc with label 3 ranked first.
+        perfect_at_1 = ndcg([3, 0, 0], [3, 0, 0], group=[0, 0, 0], k=1)
+        self.assertAlmostEqual(perfect_at_1, 1.0)
+        # Worst at 1: doc with label 0 ranked first.
+        worst_at_1 = ndcg([3, 0, 0], [0, 0, 3], group=[0, 0, 0], k=1)
+        self.assertAlmostEqual(worst_at_1, 0.0)
+
+    def test_validates_same_length(self) -> None:
+        with self.assertRaises(ValueError):
+            ndcg([1, 2], [1, 2, 3], group=[0, 0])
+
+    def test_validates_group_length(self) -> None:
+        with self.assertRaises(ValueError):
+            ndcg([1, 2], [1, 2], group=[0])
+
+
+if __name__ == "__main__":
+    unittest.main()

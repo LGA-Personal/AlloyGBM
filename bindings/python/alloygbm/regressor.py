@@ -556,6 +556,10 @@ class GBMRegressor(_GBMRegressorBase):
         """Map an objective name to its natural loss metric name."""
         if objective == "binary_crossentropy":
             return "logloss"
+        if objective in ("rank_pairwise", "rank_ndcg", "rank_xendcg", "yetirank"):
+            return "ndcg"
+        if objective == "queryrmse":
+            return "queryrmse"
         return "mse"
 
     def _loss_metric_name(self) -> str:

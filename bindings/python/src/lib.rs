@@ -10,8 +10,9 @@ use alloygbm_core::{
 };
 use alloygbm_engine::{
     ArtifactCompatibilityMode, BinaryCrossEntropyObjective, CategoricalTargetEncodingSpec,
-    EngineError, IterationRunSummary, SquaredErrorObjective, TrainedModel, Trainer,
-    TrainingPolicyMode,
+    EngineError, IterationRunSummary, LambdaMARTObjective, PairwiseRankingObjective,
+    QueryRMSEObjective, SquaredErrorObjective, TrainedModel, Trainer, TrainingPolicyMode,
+    XeNDCGObjective, YetiRankObjective,
 };
 use alloygbm_predictor::{Predictor, PredictorError};
 use alloygbm_shap::{
@@ -1499,9 +1500,63 @@ fn train_regression_artifact_with_summary_dense_impl(
     let mut summary = match objective {
         "squared_error" => run_training!(&SquaredErrorObjective),
         "binary_crossentropy" => run_training!(&BinaryCrossEntropyObjective),
+        "queryrmse" | "rank_pairwise" | "rank_ndcg" | "rank_xendcg" | "yetirank" => {
+            let group_id = prepared
+                .dataset
+                .group_id
+                .as_ref()
+                .ok_or_else(|| {
+                    EngineError::ContractViolation(format!(
+                        "objective '{objective}' requires group_id to be provided"
+                    ))
+                })?;
+            let val_group_id = validation_prepared
+                .as_ref()
+                .and_then(|vp| vp.dataset.group_id.as_ref());
+            match objective {
+                "queryrmse" => {
+                    let mut obj = QueryRMSEObjective::new(group_id);
+                    if let Some(vg) = val_group_id {
+                        obj = obj.with_validation_group(vg);
+                    }
+                    run_training!(&obj)
+                }
+                "rank_pairwise" => {
+                    let mut obj = PairwiseRankingObjective::new(group_id);
+                    if let Some(vg) = val_group_id {
+                        obj = obj.with_validation_group(vg);
+                    }
+                    run_training!(&obj)
+                }
+                "rank_ndcg" => {
+                    let mut obj = LambdaMARTObjective::new(group_id);
+                    if let Some(vg) = val_group_id {
+                        obj = obj.with_validation_group(vg);
+                    }
+                    run_training!(&obj)
+                }
+                "rank_xendcg" => {
+                    let mut obj = XeNDCGObjective::new(group_id);
+                    if let Some(vg) = val_group_id {
+                        obj = obj.with_validation_group(vg);
+                    }
+                    run_training!(&obj)
+                }
+                "yetirank" => {
+                    let mut obj = YetiRankObjective::new(group_id, 10, 42);
+                    if let Some(vg) = val_group_id {
+                        obj = obj.with_validation_group(vg);
+                    }
+                    run_training!(&obj)
+                }
+                _ => unreachable!(),
+            }
+        }
         other => {
             return Err(EngineError::InvalidConfig(format!(
-                "unknown objective '{other}', expected 'squared_error' or 'binary_crossentropy'"
+                "unknown objective '{other}', expected one of: squared_error, \
+                 binary_crossentropy, queryrmse, rank_pairwise, rank_ndcg, \
+                 rank_xendcg, yetirank"
             )));
         }
     };
