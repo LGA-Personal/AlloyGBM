@@ -6,7 +6,7 @@ use alloygbm_categorical::{
 };
 use alloygbm_core::{
     BinnedMatrix, CATEGORICAL_STATE_FORMAT_V1, CategoricalStatePayloadV1, DatasetMatrix,
-    DenseMatrixView, MISSING_BIN, TrainParams, TrainingDataset,
+    DenseMatrixView, MISSING_BIN_U8, TrainParams, TrainingDataset,
 };
 use alloygbm_engine::{
     ArtifactCompatibilityMode, BinaryCrossEntropyObjective, CategoricalTargetEncodingSpec,
@@ -27,7 +27,8 @@ use std::time::Instant;
 const DEFAULT_TRAIN_ROUNDS: usize = 6;
 const MAX_SUPPORTED_TRAIN_ROUNDS: usize = 4096;
 const PRE_BINNED_INTEGER_TOLERANCE: f32 = 1e-6;
-const MAX_CONTINUOUS_QUANTIZED_BIN: u16 = 254;
+const MAX_CONTINUOUS_QUANTIZED_BIN_U8: u16 = 254;
+const MAX_CONTINUOUS_QUANTIZED_BIN_U16: u16 = 65534;
 const MIN_CONTINUOUS_QUANTIZED_BINS: usize = 2;
 const LINEAR_TAIL_RANK_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK";
 const LINEAR_TAIL_CORE_SPAN_RATIO_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_CORE_SPAN_RATIO";
@@ -211,6 +212,7 @@ impl NativePredictorHandle {
 
     /// Quantize raw float values to bins using linear scaling, then predict.
     /// Avoids the Python-side quantization loop (1.95B iterations for 2.5M×780).
+    #[pyo3(signature = (values, row_count, feature_count, feature_mins, feature_maxs, max_data_bin=None))]
     fn predict_dense_quantized_linear(
         &self,
         values: Vec<f32>,
@@ -218,18 +220,21 @@ impl NativePredictorHandle {
         feature_count: usize,
         feature_mins: Vec<f32>,
         feature_maxs: Vec<f32>,
+        max_data_bin: Option<u16>,
     ) -> PyResult<Vec<f32>> {
         if feature_mins.len() != feature_count || feature_maxs.len() != feature_count {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "feature_mins/feature_maxs length must match feature_count",
             ));
         }
-        let quantized = quantize_dense_values_linear_inplace(
+        let mdb = max_data_bin.unwrap_or(MAX_CONTINUOUS_QUANTIZED_BIN_U8);
+        let quantized = quantize_dense_values_linear_inplace_wide(
             &values,
             row_count,
             feature_count,
             &feature_mins,
             &feature_maxs,
+            mdb,
         );
         predictor_predict_batch_dense_with_predictor(
             &self.predictor,
@@ -242,13 +247,15 @@ impl NativePredictorHandle {
 
     /// Convert bin-index thresholds to float thresholds using per-feature min/max.
     /// After calling this, predict_dense works directly on raw floats — no quantization needed.
+    /// `max_data_bin` is the maximum data bin index (e.g. 254 for 256 bins, 510 for 512 bins).
     fn convert_thresholds_to_float(
         &mut self,
         feature_mins: Vec<f32>,
         feature_maxs: Vec<f32>,
+        max_data_bin: u16,
     ) -> PyResult<()> {
         self.predictor
-            .convert_bin_thresholds_to_float(&feature_mins, &feature_maxs)
+            .convert_bin_thresholds_to_float(&feature_mins, &feature_maxs, max_data_bin)
             .map_err(predictor_error_to_pyerr)
     }
 
@@ -270,6 +277,7 @@ impl NativePredictorHandle {
     }
 
     /// Quantize raw float values using selective rank (linear + rank fallback), then predict.
+    #[pyo3(signature = (values, row_count, feature_count, feature_mins, feature_maxs, rank_flags, feature_sorted_values, max_data_bin=None))]
     fn predict_dense_quantized_linear_rank(
         &self,
         values: Vec<f32>,
@@ -279,6 +287,7 @@ impl NativePredictorHandle {
         feature_maxs: Vec<f32>,
         rank_flags: Vec<bool>,
         feature_sorted_values: Vec<Vec<f32>>,
+        max_data_bin: Option<u16>,
     ) -> PyResult<Vec<f32>> {
         if feature_mins.len() != feature_count || feature_maxs.len() != feature_count {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -290,7 +299,8 @@ impl NativePredictorHandle {
                 "rank_flags/feature_sorted_values length must match feature_count",
             ));
         }
-        let quantized = quantize_dense_values_linear_rank_inplace(
+        let mdb = max_data_bin.unwrap_or(MAX_CONTINUOUS_QUANTIZED_BIN_U8);
+        let quantized = quantize_dense_values_linear_rank_inplace_wide(
             &values,
             row_count,
             feature_count,
@@ -298,6 +308,7 @@ impl NativePredictorHandle {
             &feature_maxs,
             &rank_flags,
             &feature_sorted_values,
+            mdb,
         );
         predictor_predict_batch_dense_with_predictor(
             &self.predictor,
@@ -433,15 +444,20 @@ fn parse_continuous_binning_strategy(
 }
 
 fn validate_continuous_binning_max_bins(max_bins: usize) -> Result<(), EngineError> {
-    if !(MIN_CONTINUOUS_QUANTIZED_BINS..=(MAX_CONTINUOUS_QUANTIZED_BIN as usize + 1))
+    if !(MIN_CONTINUOUS_QUANTIZED_BINS..=(MAX_CONTINUOUS_QUANTIZED_BIN_U16 as usize + 1))
         .contains(&max_bins)
     {
         return Err(EngineError::InvalidConfig(format!(
             "continuous_binning_max_bins must be in [{MIN_CONTINUOUS_QUANTIZED_BINS}, {}]",
-            MAX_CONTINUOUS_QUANTIZED_BIN as usize + 1
+            MAX_CONTINUOUS_QUANTIZED_BIN_U16 as usize + 1
         )));
     }
     Ok(())
+}
+
+/// Whether the given max_bins requires u16 bin storage.
+fn needs_wide_bins(max_bins: usize) -> bool {
+    max_bins > (MAX_CONTINUOUS_QUANTIZED_BIN_U8 as usize + 1)
 }
 
 fn env_toggle_enabled(env_name: &str) -> bool {
@@ -480,39 +496,49 @@ fn round_half_away_from_zero(value: f32) -> i32 {
 }
 
 fn quantize_linear_value(value: f32, min_value: f32, max_value: f32) -> u8 {
+    quantize_linear_value_wide(value, min_value, max_value, MAX_CONTINUOUS_QUANTIZED_BIN_U8) as u8
+}
+
+fn quantize_rank_value(value: f32, sorted_values: &[f32]) -> u8 {
+    quantize_rank_value_wide(value, sorted_values, MAX_CONTINUOUS_QUANTIZED_BIN_U8) as u8
+}
+
+/// Parameterized linear quantization that supports arbitrary max_data_bin (u16).
+fn quantize_linear_value_wide(value: f32, min_value: f32, max_value: f32, max_data_bin: u16) -> u16 {
     if value <= min_value {
         return 0;
     }
     if value >= max_value {
-        return MAX_CONTINUOUS_QUANTIZED_BIN as u8;
+        return max_data_bin;
     }
     let span = max_value - min_value;
     if span <= PRE_BINNED_INTEGER_TOLERANCE {
         return 0;
     }
-    let scaled = ((value - min_value) / span) * MAX_CONTINUOUS_QUANTIZED_BIN as f32;
-    round_half_away_from_zero(scaled).clamp(0, MAX_CONTINUOUS_QUANTIZED_BIN as i32) as u8
+    let scaled = ((value - min_value) / span) * max_data_bin as f32;
+    round_half_away_from_zero(scaled).clamp(0, max_data_bin as i32) as u16
 }
 
-fn quantize_rank_value(value: f32, sorted_values: &[f32]) -> u8 {
+/// Parameterized rank quantization that supports arbitrary max_data_bin (u16).
+fn quantize_rank_value_wide(value: f32, sorted_values: &[f32], max_data_bin: u16) -> u16 {
     if sorted_values.len() <= 1 {
         return 0;
     }
     let insertion = sorted_values.partition_point(|probe| *probe <= value);
     let rank = insertion.saturating_sub(1).min(sorted_values.len() - 1);
-    let scaled = (rank as f32 * MAX_CONTINUOUS_QUANTIZED_BIN as f32)
+    let scaled = (rank as f32 * max_data_bin as f32)
         / (sorted_values.len().saturating_sub(1) as f32);
-    round_half_away_from_zero(scaled).clamp(0, MAX_CONTINUOUS_QUANTIZED_BIN as i32) as u8
+    round_half_away_from_zero(scaled).clamp(0, max_data_bin as i32) as u16
 }
 
-/// Quantize a flat row-major f32 array using linear scaling. Returns quantized f32 bins.
-/// Uses rayon to parallelize by row chunks for cache-friendly access.
-fn quantize_dense_values_linear_inplace(
+/// Parameterized linear quantize for predict-time: supports arbitrary max_data_bin.
+fn quantize_dense_values_linear_inplace_wide(
     values: &[f32],
     row_count: usize,
     feature_count: usize,
     feature_mins: &[f32],
     feature_maxs: &[f32],
+    max_data_bin: u16,
 ) -> Vec<f32> {
     let total = row_count * feature_count;
     let mut quantized = vec![0.0_f32; total];
@@ -530,15 +556,15 @@ fn quantize_dense_values_linear_inplace(
                 for fi in 0..feature_count {
                     let value = values[base + fi];
                     out_chunk[out_base + fi] =
-                        quantize_linear_value(value, feature_mins[fi], feature_maxs[fi]) as f32;
+                        quantize_linear_value_wide(value, feature_mins[fi], feature_maxs[fi], max_data_bin) as f32;
                 }
             }
         });
     quantized
 }
 
-/// Quantize using linear scaling with selective rank fallback per feature.
-fn quantize_dense_values_linear_rank_inplace(
+/// Parameterized linear+rank quantize for predict-time: supports arbitrary max_data_bin.
+fn quantize_dense_values_linear_rank_inplace_wide(
     values: &[f32],
     row_count: usize,
     feature_count: usize,
@@ -546,6 +572,7 @@ fn quantize_dense_values_linear_rank_inplace(
     feature_maxs: &[f32],
     rank_flags: &[bool],
     feature_sorted_values: &[Vec<f32>],
+    max_data_bin: u16,
 ) -> Vec<f32> {
     let total = row_count * feature_count;
     let mut quantized = vec![0.0_f32; total];
@@ -563,9 +590,9 @@ fn quantize_dense_values_linear_rank_inplace(
                 for fi in 0..feature_count {
                     let value = values[base + fi];
                     let bin = if rank_flags[fi] {
-                        quantize_rank_value(value, &feature_sorted_values[fi])
+                        quantize_rank_value_wide(value, &feature_sorted_values[fi], max_data_bin)
                     } else {
-                        quantize_linear_value(value, feature_mins[fi], feature_maxs[fi])
+                        quantize_linear_value_wide(value, feature_mins[fi], feature_maxs[fi], max_data_bin)
                     };
                     out_chunk[out_base + fi] = bin as f32;
                 }
@@ -715,6 +742,7 @@ fn prepare_validation_matrices_from_dense_values(
     strategy: ContinuousBinningStrategy,
     training_metadata: &ContinuousBinningMetadataInternal,
     need_dense_values: bool,
+    max_bins: usize,
 ) -> Result<PreparedTrainingMatrices, EngineError> {
     if targets.len() != row_count {
         return Err(EngineError::ContractViolation(format!(
@@ -724,36 +752,74 @@ fn prepare_validation_matrices_from_dense_values(
         )));
     }
     validate_dense_values_allow_nan(values, row_count, feature_count)?;
-    let (dense_values, bins, max_bin) = quantize_dense_values_with_metadata(
-        values,
-        row_count,
-        feature_count,
-        strategy,
-        training_metadata,
-        need_dense_values,
-    )?;
-    let dataset = TrainingDataset {
-        matrix: if need_dense_values {
-            DatasetMatrix::new(row_count, feature_count, dense_values)?
-        } else {
-            DatasetMatrix::new_metadata_only(row_count, feature_count)?
-        },
-        targets: targets.to_vec(),
-        sample_weights,
-        time_index,
-        group_id,
-    };
-    let binned_matrix = BinnedMatrix::new(
-        row_count,
-        feature_count,
-        if max_bin == 0 { 1 } else { max_bin },
-        bins,
-    )?;
-    Ok(PreparedTrainingMatrices {
-        dataset,
-        binned_matrix,
-        metadata: training_metadata.clone(),
-    })
+
+    if needs_wide_bins(max_bins) {
+        let max_data_bin = (max_bins - 2) as u16;
+        let nan_bin = max_data_bin + 1;
+        let (dense_values, bins_u16, max_bin) = quantize_dense_values_with_metadata_wide(
+            values,
+            row_count,
+            feature_count,
+            strategy,
+            training_metadata,
+            need_dense_values,
+            max_data_bin,
+        )?;
+        let dataset = TrainingDataset {
+            matrix: if need_dense_values {
+                DatasetMatrix::new(row_count, feature_count, dense_values)?
+            } else {
+                DatasetMatrix::new_metadata_only(row_count, feature_count)?
+            },
+            targets: targets.to_vec(),
+            sample_weights,
+            time_index,
+            group_id,
+        };
+        let binned_matrix = BinnedMatrix::new_u16(
+            row_count,
+            feature_count,
+            if max_bin == 0 { 1 } else { max_bin },
+            nan_bin,
+            bins_u16,
+        )?;
+        Ok(PreparedTrainingMatrices {
+            dataset,
+            binned_matrix,
+            metadata: training_metadata.clone(),
+        })
+    } else {
+        let (dense_values, bins, max_bin) = quantize_dense_values_with_metadata(
+            values,
+            row_count,
+            feature_count,
+            strategy,
+            training_metadata,
+            need_dense_values,
+        )?;
+        let dataset = TrainingDataset {
+            matrix: if need_dense_values {
+                DatasetMatrix::new(row_count, feature_count, dense_values)?
+            } else {
+                DatasetMatrix::new_metadata_only(row_count, feature_count)?
+            },
+            targets: targets.to_vec(),
+            sample_weights,
+            time_index,
+            group_id,
+        };
+        let binned_matrix = BinnedMatrix::new(
+            row_count,
+            feature_count,
+            if max_bin == 0 { 1 } else { max_bin },
+            bins,
+        )?;
+        Ok(PreparedTrainingMatrices {
+            dataset,
+            binned_matrix,
+            metadata: training_metadata.clone(),
+        })
+    }
 }
 
 fn quantize_dense_values_with_metadata(
@@ -828,7 +894,7 @@ fn quantize_dense_values_with_metadata(
                     for feature_index in 0..feature_count {
                         let value = values[src_base + feature_index];
                         let bin = if value.is_nan() {
-                            MISSING_BIN
+                            MISSING_BIN_U8
                         } else {
                             match strategy {
                                 ContinuousBinningStrategy::Linear => {
@@ -878,7 +944,7 @@ fn quantize_dense_values_with_metadata(
                     for feature_index in 0..feature_count {
                         let value = values[src_base + feature_index];
                         let bin = if value.is_nan() {
-                            MISSING_BIN
+                            MISSING_BIN_U8
                         } else {
                             match strategy {
                                 ContinuousBinningStrategy::Linear => {
@@ -911,6 +977,173 @@ fn quantize_dense_values_with_metadata(
                     }
                 }
                 u16::from(local_max_bin)
+            })
+            .reduce(|| 0_u16, |a, b| a.max(b))
+    };
+
+    Ok((dense_values, bins, max_bin))
+}
+
+/// u16 variant of `quantize_dense_values_with_metadata` for max_bins > 256.
+/// Data bins scale to 0..max_data_bin; NaN gets max_data_bin + 1.
+fn quantize_dense_values_with_metadata_wide(
+    values: &[f32],
+    row_count: usize,
+    feature_count: usize,
+    strategy: ContinuousBinningStrategy,
+    metadata: &ContinuousBinningMetadataInternal,
+    need_dense_values: bool,
+    max_data_bin: u16,
+) -> Result<(Vec<f32>, Vec<u16>, u16), EngineError> {
+    let nan_bin = max_data_bin + 1;
+    let mins_ref = match strategy {
+        ContinuousBinningStrategy::Linear => {
+            Some(metadata.feature_mins.as_ref().ok_or_else(|| {
+                EngineError::ContractViolation("continuous linear minima are missing".to_string())
+            })?)
+        }
+        _ => None,
+    };
+    let maxs_ref = match strategy {
+        ContinuousBinningStrategy::Linear => {
+            Some(metadata.feature_maxs.as_ref().ok_or_else(|| {
+                EngineError::ContractViolation("continuous linear maxima are missing".to_string())
+            })?)
+        }
+        _ => None,
+    };
+    let sorted_ref = match strategy {
+        ContinuousBinningStrategy::Rank => {
+            Some(metadata.feature_sorted_values.as_ref().ok_or_else(|| {
+                EngineError::ContractViolation(
+                    "continuous rank sorted values are missing".to_string(),
+                )
+            })?)
+        }
+        ContinuousBinningStrategy::Linear => metadata.feature_sorted_values.as_ref(),
+        _ => None,
+    };
+    let cuts_ref = match strategy {
+        ContinuousBinningStrategy::Quantile => {
+            Some(metadata.feature_quantile_cuts.as_ref().ok_or_else(|| {
+                EngineError::ContractViolation("continuous quantile cuts are missing".to_string())
+            })?)
+        }
+        _ => None,
+    };
+    let rank_flags = metadata.feature_linear_rank_flags.as_ref();
+
+    let total_cells = row_count * feature_count;
+    let mut dense_values = if need_dense_values {
+        vec![0.0_f32; total_cells]
+    } else {
+        Vec::new()
+    };
+    let mut bins = vec![0_u16; total_cells];
+
+    let chunk_size = (row_count / rayon::current_num_threads().max(1)).max(256);
+
+    let max_bin = if need_dense_values {
+        dense_values
+            .par_chunks_mut(chunk_size * feature_count)
+            .zip(bins.par_chunks_mut(chunk_size * feature_count))
+            .enumerate()
+            .map(|(chunk_idx, (dense_chunk, bin_chunk))| {
+                let row_start = chunk_idx * chunk_size;
+                let chunk_rows = dense_chunk.len() / feature_count;
+                let mut local_max_bin = 0_u16;
+                for local_row in 0..chunk_rows {
+                    let row_index = row_start + local_row;
+                    let src_base = row_index * feature_count;
+                    let dst_base = local_row * feature_count;
+                    for feature_index in 0..feature_count {
+                        let value = values[src_base + feature_index];
+                        let bin = if value.is_nan() {
+                            nan_bin
+                        } else {
+                            match strategy {
+                                ContinuousBinningStrategy::Linear => {
+                                    if rank_flags.is_some_and(|flags| flags[feature_index]) {
+                                        let sv = sorted_ref.expect("sorted values validated");
+                                        quantize_rank_value_wide(value, &sv[feature_index], max_data_bin)
+                                    } else {
+                                        let mins = mins_ref.expect("mins validated");
+                                        let maxs = maxs_ref.expect("maxs validated");
+                                        quantize_linear_value_wide(
+                                            value,
+                                            mins[feature_index],
+                                            maxs[feature_index],
+                                            max_data_bin,
+                                        )
+                                    }
+                                }
+                                ContinuousBinningStrategy::Rank => {
+                                    let sv = sorted_ref.expect("sorted values validated");
+                                    quantize_rank_value_wide(value, &sv[feature_index], max_data_bin)
+                                }
+                                ContinuousBinningStrategy::Quantile => {
+                                    let cuts = cuts_ref.expect("cuts validated");
+                                    cuts[feature_index].partition_point(|probe| *probe <= value)
+                                        as u16
+                                }
+                            }
+                        };
+                        local_max_bin = local_max_bin.max(bin);
+                        dense_chunk[dst_base + feature_index] = bin as f32;
+                        bin_chunk[dst_base + feature_index] = bin;
+                    }
+                }
+                local_max_bin
+            })
+            .reduce(|| 0_u16, |a, b| a.max(b))
+    } else {
+        bins.par_chunks_mut(chunk_size * feature_count)
+            .enumerate()
+            .map(|(chunk_idx, bin_chunk)| {
+                let row_start = chunk_idx * chunk_size;
+                let chunk_rows = bin_chunk.len() / feature_count;
+                let mut local_max_bin = 0_u16;
+                for local_row in 0..chunk_rows {
+                    let row_index = row_start + local_row;
+                    let src_base = row_index * feature_count;
+                    let dst_base = local_row * feature_count;
+                    for feature_index in 0..feature_count {
+                        let value = values[src_base + feature_index];
+                        let bin = if value.is_nan() {
+                            nan_bin
+                        } else {
+                            match strategy {
+                                ContinuousBinningStrategy::Linear => {
+                                    if rank_flags.is_some_and(|flags| flags[feature_index]) {
+                                        let sv = sorted_ref.expect("sorted values validated");
+                                        quantize_rank_value_wide(value, &sv[feature_index], max_data_bin)
+                                    } else {
+                                        let mins = mins_ref.expect("mins validated");
+                                        let maxs = maxs_ref.expect("maxs validated");
+                                        quantize_linear_value_wide(
+                                            value,
+                                            mins[feature_index],
+                                            maxs[feature_index],
+                                            max_data_bin,
+                                        )
+                                    }
+                                }
+                                ContinuousBinningStrategy::Rank => {
+                                    let sv = sorted_ref.expect("sorted values validated");
+                                    quantize_rank_value_wide(value, &sv[feature_index], max_data_bin)
+                                }
+                                ContinuousBinningStrategy::Quantile => {
+                                    let cuts = cuts_ref.expect("cuts validated");
+                                    cuts[feature_index].partition_point(|probe| *probe <= value)
+                                        as u16
+                                }
+                            }
+                        };
+                        local_max_bin = local_max_bin.max(bin);
+                        bin_chunk[dst_base + feature_index] = bin;
+                    }
+                }
+                local_max_bin
             })
             .reduce(|| 0_u16, |a, b| a.max(b))
     };
@@ -955,36 +1188,12 @@ fn prepare_training_matrices_from_dense_values(
         }
     }
 
-    let (dense_values, bins, max_bin, metadata) = if use_pre_binned_path {
-        let mut bins = Vec::with_capacity(values.len());
-        let mut dense_values = if need_dense_values {
-            Vec::with_capacity(values.len())
-        } else {
-            Vec::new()
-        };
-        let mut max_bin = 0_u16;
-        for (index, &value) in values.iter().enumerate() {
-            let rounded = value.round();
-            if rounded > 255.0 {
-                return Err(EngineError::ContractViolation(format!(
-                    "value at index {index} exceeds max supported bin 255"
-                )));
-            }
-            let bin = rounded as u8;
-            max_bin = max_bin.max(u16::from(bin));
-            bins.push(bin);
-            if need_dense_values {
-                dense_values.push(bin as f32);
-            }
-        }
-        (
-            dense_values,
-            bins,
-            max_bin,
-            ContinuousBinningMetadataInternal::pre_binned(),
-        )
+    // Build binning metadata (shared by u8 and u16 paths).
+    let wide_bins = needs_wide_bins(max_bins);
+    let (metadata, use_wide) = if use_pre_binned_path {
+        (ContinuousBinningMetadataInternal::pre_binned(), wide_bins)
     } else {
-        let metadata = match strategy {
+        let meta = match strategy {
             ContinuousBinningStrategy::Linear => {
                 let (feature_mins, feature_maxs) =
                     derive_dense_feature_bounds(values, row_count, feature_count);
@@ -1044,39 +1253,129 @@ fn prepare_training_matrices_from_dense_values(
                 feature_linear_rank_flags: None,
             },
         };
-        let (dense_values, bins, max_bin) = quantize_dense_values_with_metadata(
-            values,
-            row_count,
-            feature_count,
-            strategy,
-            &metadata,
-            need_dense_values,
-        )?;
-        (dense_values, bins, max_bin, metadata)
+        (meta, wide_bins)
     };
 
-    let dataset = TrainingDataset {
-        matrix: if need_dense_values {
-            DatasetMatrix::new(row_count, feature_count, dense_values)?
+    // Encode bins and build BinnedMatrix — u8 fast path or u16 wide path.
+    if use_wide {
+        let max_data_bin = (max_bins - 2) as u16;
+        let nan_bin = max_data_bin + 1;
+        let (dense_values, bins_u16, max_bin) = if use_pre_binned_path {
+            // Pre-binned u16 path: Python already quantized values as f32 integers.
+            let mut bins_u16 = Vec::with_capacity(values.len());
+            let mut dense_values_out = if need_dense_values {
+                Vec::with_capacity(values.len())
+            } else {
+                Vec::new()
+            };
+            let mut max_bin = 0_u16;
+            for (index, &value) in values.iter().enumerate() {
+                let rounded = value.round();
+                if rounded > 65535.0 {
+                    return Err(EngineError::ContractViolation(format!(
+                        "value at index {index} exceeds max supported bin 65535"
+                    )));
+                }
+                let bin = rounded as u16;
+                max_bin = max_bin.max(bin);
+                bins_u16.push(bin);
+                if need_dense_values {
+                    dense_values_out.push(bin as f32);
+                }
+            }
+            (dense_values_out, bins_u16, max_bin)
         } else {
-            DatasetMatrix::new_metadata_only(row_count, feature_count)?
-        },
-        targets: targets.to_vec(),
-        sample_weights,
-        time_index,
-        group_id,
-    };
-    let binned_matrix = BinnedMatrix::new(
-        row_count,
-        feature_count,
-        if max_bin == 0 { 1 } else { max_bin },
-        bins,
-    )?;
-    Ok(PreparedTrainingMatrices {
-        dataset,
-        binned_matrix,
-        metadata,
-    })
+            quantize_dense_values_with_metadata_wide(
+                values,
+                row_count,
+                feature_count,
+                strategy,
+                &metadata,
+                need_dense_values,
+                max_data_bin,
+            )?
+        };
+        let dataset = TrainingDataset {
+            matrix: if need_dense_values {
+                DatasetMatrix::new(row_count, feature_count, dense_values)?
+            } else {
+                DatasetMatrix::new_metadata_only(row_count, feature_count)?
+            },
+            targets: targets.to_vec(),
+            sample_weights,
+            time_index,
+            group_id,
+        };
+        let binned_matrix = BinnedMatrix::new_u16(
+            row_count,
+            feature_count,
+            if max_bin == 0 { 1 } else { max_bin },
+            nan_bin,
+            bins_u16,
+        )?;
+        Ok(PreparedTrainingMatrices {
+            dataset,
+            binned_matrix,
+            metadata,
+        })
+    } else {
+        // u8 path: pre-binned or continuous with max_bins <= 256.
+        let (dense_values, bins, max_bin) = if use_pre_binned_path {
+            let mut bins = Vec::with_capacity(values.len());
+            let mut dense_values_out = if need_dense_values {
+                Vec::with_capacity(values.len())
+            } else {
+                Vec::new()
+            };
+            let mut max_bin = 0_u16;
+            for (index, &value) in values.iter().enumerate() {
+                let rounded = value.round();
+                if rounded > 255.0 {
+                    return Err(EngineError::ContractViolation(format!(
+                        "value at index {index} exceeds max supported bin 255"
+                    )));
+                }
+                let bin = rounded as u8;
+                max_bin = max_bin.max(u16::from(bin));
+                bins.push(bin);
+                if need_dense_values {
+                    dense_values_out.push(bin as f32);
+                }
+            }
+            (dense_values_out, bins, max_bin)
+        } else {
+            quantize_dense_values_with_metadata(
+                values,
+                row_count,
+                feature_count,
+                strategy,
+                &metadata,
+                need_dense_values,
+            )?
+        };
+        let dataset = TrainingDataset {
+            matrix: if need_dense_values {
+                DatasetMatrix::new(row_count, feature_count, dense_values)?
+            } else {
+                DatasetMatrix::new_metadata_only(row_count, feature_count)?
+            },
+            targets: targets.to_vec(),
+            sample_weights,
+            time_index,
+            group_id,
+        };
+        let binned_matrix = BinnedMatrix::new(
+            row_count,
+            feature_count,
+            if max_bin == 0 { 1 } else { max_bin },
+            bins,
+        )?;
+        Ok(PreparedTrainingMatrices {
+            dataset,
+            binned_matrix,
+            metadata,
+        })
+    }
 }
 
 fn predictor_error_to_pyerr(error: PredictorError) -> PyErr {
@@ -1429,6 +1728,7 @@ fn train_regression_artifact_with_summary_dense_impl(
                 continuous_binning_strategy,
                 &prepared.metadata,
                 need_dense_values,
+                continuous_binning_max_bins,
             )?;
 
             if let Some(spec) = categorical_spec.as_ref() {
@@ -2540,7 +2840,7 @@ fn _alloygbm(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ContinuousBinningStrategy, DEFAULT_TRAIN_ROUNDS, MAX_CONTINUOUS_QUANTIZED_BIN,
+        ContinuousBinningStrategy, DEFAULT_TRAIN_ROUNDS, MAX_CONTINUOUS_QUANTIZED_BIN_U8,
         flatten_rows, predictor_predict_batch_canonical_impl, predictor_predict_batch_impl,
         shap_explain_rows_impl, shap_global_importance_impl,
         train_regression_artifact_with_summary_dense_impl,
@@ -2588,7 +2888,7 @@ mod tests {
             training_policy,
             store_node_debug_stats,
             ContinuousBinningStrategy::Linear,
-            MAX_CONTINUOUS_QUANTIZED_BIN as usize + 1,
+            MAX_CONTINUOUS_QUANTIZED_BIN_U8 as usize + 1,
             "squared_error",
         )
         .map(|result| result.artifact_bytes)

@@ -1,6 +1,6 @@
 use alloygbm_core::{
     BinnedMatrix, Device, FeatureHistogram, FeatureTile, GradientPair, HistogramBin,
-    HistogramBundle, MISSING_BIN, NodeSlice, NodeStats, PartitionResult, SplitCandidate,
+    HistogramBundle, NodeSlice, NodeStats, PartitionResult, SplitCandidate,
 };
 use alloygbm_engine::{BackendOps, EngineError, EngineResult, SplitSelectionOptions};
 use rayon::prelude::*;
@@ -108,7 +108,7 @@ impl CpuBackend {
         feature_histograms: &mut Vec<FeatureHistogram>,
     ) {
         let row_count = binned_matrix.row_count;
-        let use_col_major = !binned_matrix.bins_col.is_empty();
+        let use_col_major = binned_matrix.has_col_major();
         for feature_index in start_feature..end_feature {
             let mut bins = vec![
                 HistogramBin {
@@ -120,11 +120,11 @@ impl CpuBackend {
             ];
 
             if use_col_major {
-                // Column-major: sequential bin reads (1-byte stride) — cache-friendly
+                // Column-major: sequential bin reads — cache-friendly
                 let col_base = feature_index * row_count;
                 for &row_index in &node.row_indices {
                     let row_index = row_index as usize;
-                    let bin_index = binned_matrix.bins_col[col_base + row_index] as usize;
+                    let bin_index = binned_matrix.col_bin(col_base + row_index) as usize;
                     let gradient = gradients[row_index];
                     let target_bin = &mut bins[bin_index];
                     target_bin.grad_sum += gradient.grad;
@@ -135,7 +135,7 @@ impl CpuBackend {
                 for &row_index in &node.row_indices {
                     let row_index = row_index as usize;
                     let cell_index = row_index * binned_matrix.feature_count + feature_index;
-                    let bin_index = binned_matrix.bins[cell_index] as usize;
+                    let bin_index = binned_matrix.row_bin(cell_index) as usize;
                     let gradient = gradients[row_index];
                     let target_bin = &mut bins[bin_index];
                     target_bin.grad_sum += gradient.grad;
@@ -167,7 +167,7 @@ impl CpuBackend {
             let row_base = row_index * binned_matrix.feature_count + start_feature;
             let gradient = gradients[row_index];
             for local_feature_index in 0..tile_feature_count {
-                let bin_index = binned_matrix.bins[row_base + local_feature_index] as usize;
+                let bin_index = binned_matrix.row_bin(row_base + local_feature_index) as usize;
                 let flat_index = local_feature_index * arena.bin_count + bin_index;
                 arena.grad_sums[flat_index] += gradient.grad;
                 arena.hess_sums[flat_index] += gradient.hess;
@@ -220,7 +220,7 @@ impl CpuBackend {
                 );
             }
             HistogramKernelPath::ArenaRowFirstUnrolled => {
-                if !binned_matrix.bins_col.is_empty() {
+                if binned_matrix.has_col_major() {
                     // Feature-first with column-major bins: 3KB working set per feature (fits L1).
                     Self::build_tile_histograms_per_feature(
                         binned_matrix,
@@ -356,14 +356,14 @@ impl CpuBackend {
             for local_feature_index in 0..tile_feature_count {
                 let base = local_feature_index * arena.bin_count;
 
-                let idx0 = base + binned_matrix.bins[row_base0 + local_feature_index] as usize;
-                let idx1 = base + binned_matrix.bins[row_base1 + local_feature_index] as usize;
-                let idx2 = base + binned_matrix.bins[row_base2 + local_feature_index] as usize;
-                let idx3 = base + binned_matrix.bins[row_base3 + local_feature_index] as usize;
-                let idx4 = base + binned_matrix.bins[row_base4 + local_feature_index] as usize;
-                let idx5 = base + binned_matrix.bins[row_base5 + local_feature_index] as usize;
-                let idx6 = base + binned_matrix.bins[row_base6 + local_feature_index] as usize;
-                let idx7 = base + binned_matrix.bins[row_base7 + local_feature_index] as usize;
+                let idx0 = base + binned_matrix.row_bin(row_base0 + local_feature_index) as usize;
+                let idx1 = base + binned_matrix.row_bin(row_base1 + local_feature_index) as usize;
+                let idx2 = base + binned_matrix.row_bin(row_base2 + local_feature_index) as usize;
+                let idx3 = base + binned_matrix.row_bin(row_base3 + local_feature_index) as usize;
+                let idx4 = base + binned_matrix.row_bin(row_base4 + local_feature_index) as usize;
+                let idx5 = base + binned_matrix.row_bin(row_base5 + local_feature_index) as usize;
+                let idx6 = base + binned_matrix.row_bin(row_base6 + local_feature_index) as usize;
+                let idx7 = base + binned_matrix.row_bin(row_base7 + local_feature_index) as usize;
 
                 arena.grad_sums[idx0] += gradient0.grad;
                 arena.hess_sums[idx0] += gradient0.hess;
@@ -404,7 +404,7 @@ impl CpuBackend {
             let row_base = row_index * feature_count + start_feature;
             let gradient = gradients[row_index];
             for local_feature_index in 0..tile_feature_count {
-                let bin_index = binned_matrix.bins[row_base + local_feature_index] as usize;
+                let bin_index = binned_matrix.row_bin(row_base + local_feature_index) as usize;
                 let flat_index = local_feature_index * arena.bin_count + bin_index;
                 arena.grad_sums[flat_index] += gradient.grad;
                 arena.hess_sums[flat_index] += gradient.hess;
@@ -424,8 +424,8 @@ impl CpuBackend {
             return None;
         }
 
-        // Extract missing-value stats if the histogram covers MISSING_BIN.
-        let missing_bin_idx = MISSING_BIN as usize;
+        // Extract missing-value stats if the histogram covers the NaN bin.
+        let missing_bin_idx = options.missing_bin_index;
         let (missing_grad, missing_hess, missing_count) =
             if missing_bin_idx < feature_histogram.bins.len() {
                 let mb = &feature_histogram.bins[missing_bin_idx];
@@ -626,21 +626,22 @@ impl CpuBackend {
                 let mut rg = 0.0_f32;
                 let mut rh = 0.0_f32;
                 let feature_index = split.feature_index as usize;
-                let use_col_major = !binned_matrix.bins_col.is_empty();
+                let use_col_major = binned_matrix.has_col_major();
                 let col_base = feature_index * binned_matrix.row_count;
+                let missing = binned_matrix.missing_bin();
                 for &row_index_u32 in chunk {
                     let row_index = row_index_u32 as usize;
-                    let bin_u8 = if use_col_major {
-                        binned_matrix.bins_col[col_base + row_index]
+                    let bin_val = if use_col_major {
+                        binned_matrix.col_bin(col_base + row_index)
                     } else {
                         let cell_index = row_index * binned_matrix.feature_count + feature_index;
-                        binned_matrix.bins[cell_index]
+                        binned_matrix.row_bin(cell_index)
                     };
                     let gradient = gradients[row_index];
-                    let goes_left = if bin_u8 == MISSING_BIN {
+                    let goes_left = if bin_val == missing {
                         split.default_left
                     } else {
-                        u16::from(bin_u8) <= split.threshold_bin
+                        bin_val <= split.threshold_bin
                     };
                     if goes_left {
                         left.push(row_index_u32);
@@ -771,20 +772,21 @@ impl BackendOps for CpuBackend {
         let mut left_row_indices = Vec::new();
         let mut right_row_indices = Vec::new();
         let feature_index = split.feature_index as usize;
-        let use_col_major = !binned_matrix.bins_col.is_empty();
+        let use_col_major = binned_matrix.has_col_major();
         let col_base = feature_index * binned_matrix.row_count;
+        let missing = binned_matrix.missing_bin();
         for &row_index in &node.row_indices {
             let row_index = row_index as usize;
-            let bin_u8 = if use_col_major {
-                binned_matrix.bins_col[col_base + row_index]
+            let bin_val = if use_col_major {
+                binned_matrix.col_bin(col_base + row_index)
             } else {
                 let cell_index = row_index * binned_matrix.feature_count + feature_index;
-                binned_matrix.bins[cell_index]
+                binned_matrix.row_bin(cell_index)
             };
-            let goes_left = if bin_u8 == MISSING_BIN {
+            let goes_left = if bin_val == missing {
                 split.default_left
             } else {
-                u16::from(bin_u8) <= split.threshold_bin
+                bin_val <= split.threshold_bin
             };
             if goes_left {
                 left_row_indices.push(row_index as u32);
@@ -835,21 +837,22 @@ impl BackendOps for CpuBackend {
         let mut right_hess_sum = 0.0_f32;
 
         let feature_index = split.feature_index as usize;
-        let use_col_major = !binned_matrix.bins_col.is_empty();
+        let use_col_major = binned_matrix.has_col_major();
         let col_base = feature_index * binned_matrix.row_count;
+        let missing = binned_matrix.missing_bin();
         for &row_index_u32 in &node.row_indices {
             let row_index = row_index_u32 as usize;
-            let bin_u8 = if use_col_major {
-                binned_matrix.bins_col[col_base + row_index]
+            let bin_val = if use_col_major {
+                binned_matrix.col_bin(col_base + row_index)
             } else {
                 let cell_index = row_index * binned_matrix.feature_count + feature_index;
-                binned_matrix.bins[cell_index]
+                binned_matrix.row_bin(cell_index)
             };
             let gradient = gradients[row_index];
-            let goes_left = if bin_u8 == MISSING_BIN {
+            let goes_left = if bin_val == missing {
                 split.default_left
             } else {
-                u16::from(bin_u8) <= split.threshold_bin
+                bin_val <= split.threshold_bin
             };
             if goes_left {
                 left_row_indices.push(row_index_u32);
@@ -1290,6 +1293,7 @@ mod tests {
                     l1_alpha: 0.0,
                     min_child_hessian: 0.0,
                     min_leaf_magnitude: 0.0,
+                    missing_bin_index: 255,
                 },
                 &[],
             )
@@ -1325,6 +1329,7 @@ mod tests {
                     l1_alpha: 0.5,
                     min_child_hessian: 0.0,
                     min_leaf_magnitude: 0.0,
+                    missing_bin_index: 255,
                 },
                 &[],
             )
@@ -1356,6 +1361,7 @@ mod tests {
                     l1_alpha: 0.0,
                     min_child_hessian: 10.0,
                     min_leaf_magnitude: 0.0,
+                    missing_bin_index: 255,
                 },
                 &[],
             )
@@ -1425,6 +1431,7 @@ mod tests {
                     l1_alpha: 0.0,
                     min_child_hessian: 0.0,
                     min_leaf_magnitude: 0.06,
+                    missing_bin_index: 255,
                 },
                 &[],
             )

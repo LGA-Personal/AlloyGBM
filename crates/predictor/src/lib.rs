@@ -139,10 +139,15 @@ impl Predictor {
     /// Convert bin-index thresholds to float thresholds using per-feature min/max.
     /// After calling this, prediction compares raw float features directly — no quantization needed.
     /// Uses the midpoint between adjacent bin boundaries as the float threshold, with `<` comparison.
+    ///
+    /// `max_data_bin` is the maximum bin index used for data (excluding the NaN sentinel).
+    /// For the default 256-bin configuration this is 254; for wider bins (e.g. 512) it is
+    /// `max_bins - 2`.
     pub fn convert_bin_thresholds_to_float(
         &mut self,
         feature_mins: &[f32],
         feature_maxs: &[f32],
+        max_data_bin: u16,
     ) -> PredictorResult<()> {
         let feature_count = self.metadata.feature_names.len();
         if feature_mins.len() != feature_count || feature_maxs.len() != feature_count {
@@ -153,6 +158,7 @@ impl Predictor {
                 feature_count
             )));
         }
+        let divisor = max_data_bin as f32;
         for tree in &mut self.trees {
             for node in tree.nodes_by_local_id.iter_mut().flatten() {
                 let fi = node.feature_index;
@@ -163,10 +169,10 @@ impl Predictor {
                     // Constant feature — any threshold works since all values are equal.
                     node.threshold_bin = min_val + f32::EPSILON;
                 } else {
-                    // bin = round(((value - min) / span) * 254)
-                    // Split: bin <= threshold_bin  ↔  value < min + ((threshold_bin + 0.5) / 254) * span
+                    // bin = round(((value - min) / span) * max_data_bin)
+                    // Split: bin <= threshold_bin  ↔  value < min + ((threshold_bin + 0.5) / max_data_bin) * span
                     let bin = node.threshold_bin;
-                    node.threshold_bin = min_val + ((bin + 0.5) / 254.0) * span;
+                    node.threshold_bin = min_val + ((bin + 0.5) / divisor) * span;
                 }
             }
         }

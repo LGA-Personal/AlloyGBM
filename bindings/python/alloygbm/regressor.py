@@ -10,8 +10,23 @@ import time
 from collections.abc import Sequence
 
 _PRE_BINNED_INTEGER_TOLERANCE = 1e-6
-_MAX_CONTINUOUS_QUANTIZED_BIN = 254
-_MISSING_BIN = 255
+_MAX_CONTINUOUS_QUANTIZED_BIN_U8 = 254
+_MISSING_BIN_U8 = 255
+_MAX_CONTINUOUS_QUANTIZED_BIN = 65534
+
+
+def _max_data_bin_for_max_bins(max_bins):
+    """Return the highest data bin index for a given max_bins setting.
+
+    For max_bins=256 (default): max_data_bin=254, nan_bin=255 (u8 path).
+    For max_bins=512: max_data_bin=510, nan_bin=511 (u16 path).
+    """
+    return max_bins - 2
+
+
+def _nan_bin_for_max_bins(max_bins):
+    """Return the NaN sentinel bin index for a given max_bins setting."""
+    return max_bins - 1
 _MIN_CONTINUOUS_QUANTIZED_BINS = 2
 _VALID_CONTINUOUS_BINNING_STRATEGIES = {"linear", "rank", "quantile"}
 _LINEAR_TAIL_RANK_ENV_VAR = "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK"
@@ -213,7 +228,7 @@ class GBMRegressor(_GBMRegressorBase):
         seed: int = 0,
         deterministic: bool = True,
         continuous_binning_strategy: str = "linear",
-        continuous_binning_max_bins: int = 255,
+        continuous_binning_max_bins: int = 256,
         categorical_feature_index: int | None = None,
         training_policy: str = "auto",
         store_node_stats: bool = False,
@@ -1176,18 +1191,23 @@ class GBMRegressor(_GBMRegressorBase):
                             self._continuous_feature_sorted_values = sorted_values
                             native_training_rows = (
                                 self._quantize_rows_linear_with_selective_rank(
-                                    rows, mins, maxs, rank_flags, sorted_values
+                                    rows, mins, maxs, rank_flags, sorted_values,
+                                    max_bins=self.continuous_binning_max_bins,
                                 )
                             )
                         else:
                             self._continuous_feature_sorted_values = None
                             native_training_rows = self._quantize_rows_linear(
-                                rows, mins, maxs
+                                rows, mins, maxs,
+                                max_bins=self.continuous_binning_max_bins,
                             )
                     else:
                         self._continuous_feature_sorted_values = None
                         self._continuous_feature_linear_rank_flags = None
-                        native_training_rows = self._quantize_rows_linear(rows, mins, maxs)
+                        native_training_rows = self._quantize_rows_linear(
+                            rows, mins, maxs,
+                            max_bins=self.continuous_binning_max_bins,
+                        )
                     self._continuous_feature_quantile_cuts = None
                 elif self.continuous_binning_strategy == "rank":
                     sorted_values = self._derive_continuous_feature_sorted_values(rows)
@@ -1196,7 +1216,10 @@ class GBMRegressor(_GBMRegressorBase):
                     self._continuous_feature_maxs = None
                     self._continuous_feature_quantile_cuts = None
                     self._continuous_feature_linear_rank_flags = None
-                    native_training_rows = self._quantize_rows_rank(rows, sorted_values)
+                    native_training_rows = self._quantize_rows_rank(
+                        rows, sorted_values,
+                        max_bins=self.continuous_binning_max_bins,
+                    )
                 else:
                     quantile_cuts = self._derive_continuous_feature_quantile_cuts(
                         rows, self.continuous_binning_max_bins
@@ -1206,7 +1229,10 @@ class GBMRegressor(_GBMRegressorBase):
                     self._continuous_feature_mins = None
                     self._continuous_feature_maxs = None
                     self._continuous_feature_linear_rank_flags = None
-                    native_training_rows = self._quantize_rows_quantile(rows, quantile_cuts)
+                    native_training_rows = self._quantize_rows_quantile(
+                        rows, quantile_cuts,
+                        max_bins=self.continuous_binning_max_bins,
+                    )
             else:
                 self._continuous_feature_mins = None
                 self._continuous_feature_maxs = None
@@ -1253,6 +1279,7 @@ class GBMRegressor(_GBMRegressorBase):
                                     maxs,
                                     rank_flags,
                                     sorted_values,
+                                    max_bins=self.continuous_binning_max_bins,
                                 ),
                                 row_count,
                                 dense_feature_count,
@@ -1261,7 +1288,8 @@ class GBMRegressor(_GBMRegressorBase):
                             self._continuous_feature_sorted_values = None
                             active_dense_training_payload = (
                                 self._quantize_dense_values_linear(
-                                    flat_values, row_count, dense_feature_count, mins, maxs
+                                    flat_values, row_count, dense_feature_count, mins, maxs,
+                                    max_bins=self.continuous_binning_max_bins,
                                 ),
                                 row_count,
                                 dense_feature_count,
@@ -1271,7 +1299,8 @@ class GBMRegressor(_GBMRegressorBase):
                         self._continuous_feature_linear_rank_flags = None
                         active_dense_training_payload = (
                             self._quantize_dense_values_linear(
-                                flat_values, row_count, dense_feature_count, mins, maxs
+                                flat_values, row_count, dense_feature_count, mins, maxs,
+                                max_bins=self.continuous_binning_max_bins,
                             ),
                             row_count,
                             dense_feature_count,
@@ -1288,7 +1317,8 @@ class GBMRegressor(_GBMRegressorBase):
                     self._continuous_feature_linear_rank_flags = None
                     active_dense_training_payload = (
                         self._quantize_dense_values_rank(
-                            flat_values, row_count, dense_feature_count, sorted_values
+                            flat_values, row_count, dense_feature_count, sorted_values,
+                            max_bins=self.continuous_binning_max_bins,
                         ),
                         row_count,
                         dense_feature_count,
@@ -1307,7 +1337,8 @@ class GBMRegressor(_GBMRegressorBase):
                     self._continuous_feature_linear_rank_flags = None
                     active_dense_training_payload = (
                         self._quantize_dense_values_quantile(
-                            flat_values, row_count, dense_feature_count, quantile_cuts
+                            flat_values, row_count, dense_feature_count, quantile_cuts,
+                            max_bins=self.continuous_binning_max_bins,
                         ),
                         row_count,
                         dense_feature_count,
@@ -1464,6 +1495,9 @@ class GBMRegressor(_GBMRegressorBase):
                                     list(maxs),
                                     list(rank_flags),
                                     [list(sv) for sv in sorted_values],
+                                    _max_data_bin_for_max_bins(
+                                        self.continuous_binning_max_bins
+                                    ),
                                 )
                             )
                         # Fallback to Python quantization
@@ -1476,6 +1510,7 @@ class GBMRegressor(_GBMRegressorBase):
                                 maxs,
                                 rank_flags,
                                 sorted_values,
+                                max_bins=self.continuous_binning_max_bins,
                             ),
                             row_count,
                             feature_count,
@@ -1494,6 +1529,9 @@ class GBMRegressor(_GBMRegressorBase):
                                     feature_count,
                                     list(mins),
                                     list(maxs),
+                                    _max_data_bin_for_max_bins(
+                                        self.continuous_binning_max_bins
+                                    ),
                                 )
                             )
                         # Fallback to Python quantization
@@ -1504,6 +1542,7 @@ class GBMRegressor(_GBMRegressorBase):
                                 feature_count,
                                 mins,
                                 maxs,
+                                max_bins=self.continuous_binning_max_bins,
                             ),
                             row_count,
                             feature_count,
@@ -1516,6 +1555,7 @@ class GBMRegressor(_GBMRegressorBase):
                             row_count,
                             feature_count,
                             sorted_values,
+                            max_bins=self.continuous_binning_max_bins,
                         ),
                         row_count,
                         feature_count,
@@ -1528,6 +1568,7 @@ class GBMRegressor(_GBMRegressorBase):
                             row_count,
                             feature_count,
                             quantile_cuts,
+                            max_bins=self.continuous_binning_max_bins,
                         ),
                         row_count,
                         feature_count,
@@ -2006,8 +2047,10 @@ class GBMRegressor(_GBMRegressorBase):
         feature_count: int,
         feature_mins: Sequence[float],
         feature_maxs: Sequence[float],
+        max_bins: int = 256,
     ) -> list[float]:
-        max_bin = _MAX_CONTINUOUS_QUANTIZED_BIN
+        max_bin = _max_data_bin_for_max_bins(max_bins)
+        nan_bin = _nan_bin_for_max_bins(max_bins)
         try:
             import numpy as np
             arr = np.asarray(flat_values, dtype=np.float32).reshape(row_count, feature_count)
@@ -2028,7 +2071,7 @@ class GBMRegressor(_GBMRegressorBase):
             # Clamp min/max boundaries
             result = np.where(arr <= mins, 0.0, result)
             result = np.where(arr >= maxs, float(max_bin), result)
-            result = np.where(nan_mask, float(_MISSING_BIN), result)
+            result = np.where(nan_mask, float(nan_bin), result)
             return result.ravel().tolist()
         except (ImportError, ValueError):
             pass
@@ -2038,7 +2081,7 @@ class GBMRegressor(_GBMRegressorBase):
             for feature_index in range(feature_count):
                 value = float(flat_values[row_base + feature_index])
                 if math.isnan(value):
-                    quantized.append(float(_MISSING_BIN))
+                    quantized.append(float(nan_bin))
                     continue
                 min_value = feature_mins[feature_index]
                 max_value = feature_maxs[feature_index]
@@ -2066,15 +2109,17 @@ class GBMRegressor(_GBMRegressorBase):
         feature_maxs: Sequence[float],
         rank_flags: Sequence[bool],
         feature_sorted_values: Sequence[Sequence[float]],
+        max_bins: int = 256,
     ) -> list[float]:
         quantized: list[float] = []
-        max_bin = _MAX_CONTINUOUS_QUANTIZED_BIN
+        max_bin = _max_data_bin_for_max_bins(max_bins)
+        nan_bin = _nan_bin_for_max_bins(max_bins)
         for row_index in range(row_count):
             row_base = row_index * feature_count
             for feature_index in range(feature_count):
                 value = float(flat_values[row_base + feature_index])
                 if math.isnan(value):
-                    quantized.append(float(_MISSING_BIN))
+                    quantized.append(float(nan_bin))
                     continue
                 if rank_flags[feature_index]:
                     sorted_values = feature_sorted_values[feature_index]
@@ -2113,15 +2158,17 @@ class GBMRegressor(_GBMRegressorBase):
         row_count: int,
         feature_count: int,
         feature_sorted_values: Sequence[Sequence[float]],
+        max_bins: int = 256,
     ) -> list[float]:
         quantized: list[float] = []
-        max_bin = _MAX_CONTINUOUS_QUANTIZED_BIN
+        max_bin = _max_data_bin_for_max_bins(max_bins)
+        nan_bin = _nan_bin_for_max_bins(max_bins)
         for row_index in range(row_count):
             row_base = row_index * feature_count
             for feature_index in range(feature_count):
                 value = float(flat_values[row_base + feature_index])
                 if math.isnan(value):
-                    quantized.append(float(_MISSING_BIN))
+                    quantized.append(float(nan_bin))
                     continue
                 sorted_values = feature_sorted_values[feature_index]
                 if len(sorted_values) <= 1:
@@ -2144,18 +2191,21 @@ class GBMRegressor(_GBMRegressorBase):
         row_count: int,
         feature_count: int,
         feature_quantile_cuts: Sequence[Sequence[float]],
+        max_bins: int = 256,
     ) -> list[float]:
         quantized: list[float] = []
+        max_bin = _max_data_bin_for_max_bins(max_bins)
+        nan_bin = _nan_bin_for_max_bins(max_bins)
         for row_index in range(row_count):
             row_base = row_index * feature_count
             for feature_index in range(feature_count):
                 value = float(flat_values[row_base + feature_index])
                 if math.isnan(value):
-                    quantized.append(float(_MISSING_BIN))
+                    quantized.append(float(nan_bin))
                     continue
                 cuts = feature_quantile_cuts[feature_index]
                 bucket = bisect.bisect_right(cuts, value)
-                clamped = min(_MAX_CONTINUOUS_QUANTIZED_BIN, max(0, bucket))
+                clamped = min(max_bin, max(0, bucket))
                 quantized.append(float(clamped))
         return quantized
 
@@ -2351,14 +2401,16 @@ class GBMRegressor(_GBMRegressorBase):
         rows: Sequence[Sequence[float]],
         feature_mins: Sequence[float],
         feature_maxs: Sequence[float],
+        max_bins: int = 256,
     ) -> list[list[float]]:
         quantized: list[list[float]] = []
-        max_bin = _MAX_CONTINUOUS_QUANTIZED_BIN
+        max_bin = _max_data_bin_for_max_bins(max_bins)
+        nan_bin = _nan_bin_for_max_bins(max_bins)
         for row in rows:
             quantized_row: list[float] = []
             for feature_index, value in enumerate(row):
                 if math.isnan(value):
-                    quantized_row.append(float(_MISSING_BIN))
+                    quantized_row.append(float(nan_bin))
                     continue
                 min_value = feature_mins[feature_index]
                 max_value = feature_maxs[feature_index]
@@ -2385,14 +2437,16 @@ class GBMRegressor(_GBMRegressorBase):
         feature_maxs: Sequence[float],
         rank_flags: Sequence[bool],
         feature_sorted_values: Sequence[Sequence[float]],
+        max_bins: int = 256,
     ) -> list[list[float]]:
         quantized: list[list[float]] = []
-        max_bin = _MAX_CONTINUOUS_QUANTIZED_BIN
+        max_bin = _max_data_bin_for_max_bins(max_bins)
+        nan_bin = _nan_bin_for_max_bins(max_bins)
         for row in rows:
             quantized_row: list[float] = []
             for feature_index, value in enumerate(row):
                 if math.isnan(value):
-                    quantized_row.append(float(_MISSING_BIN))
+                    quantized_row.append(float(nan_bin))
                     continue
                 if rank_flags[feature_index]:
                     sorted_values = feature_sorted_values[feature_index]
@@ -2430,14 +2484,16 @@ class GBMRegressor(_GBMRegressorBase):
     def _quantize_rows_rank(
         rows: Sequence[Sequence[float]],
         feature_sorted_values: Sequence[Sequence[float]],
+        max_bins: int = 256,
     ) -> list[list[float]]:
         quantized: list[list[float]] = []
-        max_bin = _MAX_CONTINUOUS_QUANTIZED_BIN
+        max_bin = _max_data_bin_for_max_bins(max_bins)
+        nan_bin = _nan_bin_for_max_bins(max_bins)
         for row in rows:
             quantized_row: list[float] = []
             for feature_index, value in enumerate(row):
                 if math.isnan(value):
-                    quantized_row.append(float(_MISSING_BIN))
+                    quantized_row.append(float(nan_bin))
                     continue
                 sorted_values = feature_sorted_values[feature_index]
                 if len(sorted_values) <= 1:
@@ -2492,17 +2548,20 @@ class GBMRegressor(_GBMRegressorBase):
     def _quantize_rows_quantile(
         rows: Sequence[Sequence[float]],
         feature_quantile_cuts: Sequence[Sequence[float]],
+        max_bins: int = 256,
     ) -> list[list[float]]:
         quantized: list[list[float]] = []
+        max_bin = _max_data_bin_for_max_bins(max_bins)
+        nan_bin = _nan_bin_for_max_bins(max_bins)
         for row in rows:
             quantized_row: list[float] = []
             for feature_index, value in enumerate(row):
                 if math.isnan(value):
-                    quantized_row.append(float(_MISSING_BIN))
+                    quantized_row.append(float(nan_bin))
                     continue
                 cuts = feature_quantile_cuts[feature_index]
                 bucket = bisect.bisect_right(cuts, value)
-                clamped = min(_MAX_CONTINUOUS_QUANTIZED_BIN, max(0, bucket))
+                clamped = min(max_bin, max(0, bucket))
                 quantized_row.append(float(clamped))
             quantized.append(quantized_row)
         return quantized
@@ -2516,14 +2575,24 @@ class GBMRegressor(_GBMRegressorBase):
             if rank_flags is not None and any(rank_flags):
                 sorted_values = self._require_continuous_feature_sorted_values()
                 return self._quantize_rows_linear_with_selective_rank(
-                    rows, mins, maxs, rank_flags, sorted_values
+                    rows, mins, maxs, rank_flags, sorted_values,
+                    max_bins=self.continuous_binning_max_bins,
                 )
-            return self._quantize_rows_linear(rows, mins, maxs)
+            return self._quantize_rows_linear(
+                rows, mins, maxs,
+                max_bins=self.continuous_binning_max_bins,
+            )
         if self.continuous_binning_strategy == "rank":
             sorted_values = self._require_continuous_feature_sorted_values()
-            return self._quantize_rows_rank(rows, sorted_values)
+            return self._quantize_rows_rank(
+                rows, sorted_values,
+                max_bins=self.continuous_binning_max_bins,
+            )
         quantile_cuts = self._require_continuous_feature_quantile_cuts()
-        return self._quantize_rows_quantile(rows, quantile_cuts)
+        return self._quantize_rows_quantile(
+            rows, quantile_cuts,
+            max_bins=self.continuous_binning_max_bins,
+        )
 
     def _require_continuous_feature_bounds(self) -> tuple[list[float], list[float]]:
         if self._continuous_feature_mins is None or self._continuous_feature_maxs is None:
@@ -2749,7 +2818,10 @@ class GBMRegressor(_GBMRegressorBase):
                 if not callable(convert_fn):
                     return
                 mins, maxs = self._require_continuous_feature_bounds()
-                result = convert_fn(list(mins), list(maxs))
+                max_data_bin = _max_data_bin_for_max_bins(
+                    self.continuous_binning_max_bins
+                )
+                result = convert_fn(list(mins), list(maxs), max_data_bin)
                 # Rust PyO3 method returns None on success; mock objects return Mock.
                 if result is None:
                     self._float_thresholds_converted = True

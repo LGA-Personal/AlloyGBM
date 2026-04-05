@@ -1,6 +1,6 @@
 use alloygbm_categorical::{TargetEncoderConfig, fit_transform_target_encoder};
 use alloygbm_core::{
-    BinnedMatrix, CategoricalStatePayloadV1, CoreError, DatasetMatrix, Device, FeatureTile,
+    BinnedMatrix, CategoricalStatePayloadV1, CoreError, DatasetMatrix, Device, FeatureTile, MISSING_BIN_U8,
     GradientPair, HistogramBundle, MODEL_FORMAT_V1, ModelArtifactSection, ModelMetadata,
     ModelSectionKind, NodeSlice, NodeStats, PartitionResult, SplitCandidate, TrainParams,
     TrainingDataset, decode_optional_categorical_state_section_v1, deserialize_model_artifact_v1,
@@ -51,6 +51,9 @@ pub struct SplitSelectionOptions {
     pub l1_alpha: f32,
     pub min_child_hessian: f32,
     pub min_leaf_magnitude: f32,
+    /// Histogram index for the NaN/missing bin.
+    /// For u8 bins: 255. For u16 bins: max_data_bin + 1 (dynamic).
+    pub missing_bin_index: usize,
 }
 
 impl Default for SplitSelectionOptions {
@@ -60,6 +63,7 @@ impl Default for SplitSelectionOptions {
             l1_alpha: 0.0,
             min_child_hessian: 0.0,
             min_leaf_magnitude: 0.0,
+            missing_bin_index: MISSING_BIN_U8 as usize,
         }
     }
 }
@@ -2706,6 +2710,7 @@ fn split_selection_options_from_env() -> EngineResult<SplitSelectionOptions> {
         l1_alpha: parse_nonnegative_env_f32(SPLIT_L1_ENV_VAR)?,
         min_child_hessian: parse_nonnegative_env_f32(MIN_CHILD_HESS_ENV_VAR)?,
         min_leaf_magnitude: parse_nonnegative_env_f32(SPLIT_MIN_LEAF_MAGNITUDE_ENV_VAR)?,
+        missing_bin_index: MISSING_BIN_U8 as usize,
     })
 }
 
@@ -2777,6 +2782,7 @@ fn split_selection_options_for_training(
         l1_alpha: params.lambda_l1,
         min_child_hessian: params.min_child_hessian,
         min_leaf_magnitude: env_options.min_leaf_magnitude,
+        missing_bin_index: binned_matrix.nan_bin_index as usize,
     };
     if !user_set_regularization {
         options.l2_lambda = env_options.l2_lambda;
@@ -2975,7 +2981,7 @@ fn binned_feature_density(binned_matrix: &BinnedMatrix) -> f32 {
     for row_index in 0..binned_matrix.row_count {
         let row_base = row_index * feature_count;
         for feature_index in 0..feature_count {
-            let bin = binned_matrix.bins[row_base + feature_index] as usize;
+            let bin = binned_matrix.row_bin(row_base + feature_index) as usize;
             seen[feature_index * bin_count + bin] = true;
         }
     }
@@ -3389,7 +3395,6 @@ fn apply_round_stumps_tree_walk(
         stump_by_local.insert(local_id, stump);
     }
     let feature_count = binned_matrix.feature_count;
-    let bins = &binned_matrix.bins;
 
     for (row_index, prediction) in predictions.iter_mut().enumerate() {
         let row_base = row_index * feature_count;
@@ -3400,7 +3405,7 @@ fn apply_round_stumps_tree_walk(
                 break; // reached a leaf — no stump at this node
             };
             let feature_index = stump.split.feature_index as usize;
-            let bin = u16::from(bins[row_base + feature_index]);
+            let bin = binned_matrix.row_bin(row_base + feature_index);
             if bin <= stump.split.threshold_bin {
                 *prediction += stump.left_leaf_value;
                 local_id = local_id * 2 + 1; // left child
@@ -3686,13 +3691,14 @@ fn terminal_local_node_id_for_row(
             .ok_or_else(|| {
                 EngineError::ContractViolation("binned cell index overflow".to_string())
             })?;
-        let bin = binned_matrix.bins.get(cell_index).copied().ok_or_else(|| {
-            EngineError::ContractViolation(format!(
+        if cell_index >= binned_matrix.bins_adaptive.len() {
+            return Err(EngineError::ContractViolation(format!(
                 "binned cell index {cell_index} is out of bounds for bins length {}",
-                binned_matrix.bins.len()
-            ))
-        })?;
-        let next_local_node_id = if u16::from(bin) <= stump.split.threshold_bin {
+                binned_matrix.bins_adaptive.len()
+            )));
+        }
+        let bin = binned_matrix.row_bin(cell_index);
+        let next_local_node_id = if bin <= stump.split.threshold_bin {
             left_child_node_id(local_node_id)?
         } else {
             right_child_node_id(local_node_id)?
@@ -4436,7 +4442,7 @@ mod tests {
                 let row_index = row_index as usize;
                 let cell_index =
                     row_index * binned_matrix.feature_count + split.feature_index as usize;
-                let bin = u16::from(binned_matrix.bins[cell_index]);
+                let bin = binned_matrix.row_bin(cell_index);
                 if bin <= split.threshold_bin {
                     left_row_indices.push(row_index as u32);
                 } else {

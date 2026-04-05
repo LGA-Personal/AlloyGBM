@@ -163,7 +163,7 @@ class GBMRegressorContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "continuous_binning_max_bins"):
             GBMRegressor(continuous_binning_max_bins=1)
         with self.assertRaisesRegex(ValueError, "continuous_binning_max_bins"):
-            GBMRegressor(continuous_binning_max_bins=257)
+            GBMRegressor(continuous_binning_max_bins=65536)
 
     def test_get_params_and_set_params_roundtrip(self) -> None:
         model = GBMRegressor()
@@ -182,7 +182,7 @@ class GBMRegressorContractTests(unittest.TestCase):
         self.assertEqual(params["seed"], 0)
         self.assertTrue(params["deterministic"])
         self.assertEqual(params["continuous_binning_strategy"], "linear")
-        self.assertEqual(params["continuous_binning_max_bins"], 255)
+        self.assertEqual(params["continuous_binning_max_bins"], 256)
         self.assertIsNone(params["categorical_feature_index"])
         self.assertEqual(params["training_policy"], "auto")
         self.assertFalse(params["store_node_stats"])
@@ -341,7 +341,7 @@ class GBMRegressorContractTests(unittest.TestCase):
                         "categorical_time_aware": False,
                         "time_index": None,
                         "continuous_binning_strategy": "linear",
-                        "continuous_binning_max_bins": 255,
+                        "continuous_binning_max_bins": 256,
                         "objective": "squared_error",
                     }
                 ],
