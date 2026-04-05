@@ -566,19 +566,44 @@ impl CpuBackend {
     fn best_split_with_options_internal(
         histograms: &HistogramBundle,
         options: SplitSelectionOptions,
+        feature_weights: &[f32],
     ) -> Option<SplitCandidate> {
+        // Apply per-feature weights when comparing splits across features.
+        // The gain stored in SplitCandidate remains unweighted (the true gain);
+        // the weighted gain is only used for the cross-feature comparison.
+        let weighted_gain = |candidate: &SplitCandidate| -> f32 {
+            let fi = candidate.feature_index as usize;
+            if fi < feature_weights.len() {
+                candidate.gain * feature_weights[fi]
+            } else {
+                candidate.gain
+            }
+        };
+
         if histograms.feature_histograms.len() >= Self::PARALLEL_SPLIT_FEATURE_THRESHOLD {
             histograms
                 .feature_histograms
                 .par_iter()
                 .filter_map(|fh| Self::best_split_for_feature(fh, histograms.node_id, options))
-                .reduce_with(|a, b| if b.gain > a.gain { b } else { a })
+                .reduce_with(|a, b| {
+                    if weighted_gain(&b) > weighted_gain(&a) {
+                        b
+                    } else {
+                        a
+                    }
+                })
         } else {
             histograms
                 .feature_histograms
                 .iter()
                 .filter_map(|fh| Self::best_split_for_feature(fh, histograms.node_id, options))
-                .reduce(|a, b| if b.gain > a.gain { b } else { a })
+                .reduce(|a, b| {
+                    if weighted_gain(&b) > weighted_gain(&a) {
+                        b
+                    } else {
+                        a
+                    }
+                })
         }
     }
 
@@ -712,6 +737,7 @@ impl BackendOps for CpuBackend {
         Ok(Self::best_split_with_options_internal(
             histograms,
             SplitSelectionOptions::default(),
+            &[],
         ))
     }
 
@@ -719,8 +745,13 @@ impl BackendOps for CpuBackend {
         &self,
         histograms: &HistogramBundle,
         options: SplitSelectionOptions,
+        feature_weights: &[f32],
     ) -> EngineResult<Option<SplitCandidate>> {
-        Ok(Self::best_split_with_options_internal(histograms, options))
+        Ok(Self::best_split_with_options_internal(
+            histograms,
+            options,
+            feature_weights,
+        ))
     }
 
     fn apply_split(
@@ -981,6 +1012,9 @@ mod tests {
             lambda_l2: 0.0,
             min_child_hessian: 0.0,
             min_split_gain: 0.0,
+            monotone_constraints: Vec::new(),
+            feature_weights: Vec::new(),
+            max_leaves: None,
         }
     }
 
@@ -1257,6 +1291,7 @@ mod tests {
                     min_child_hessian: 0.0,
                     min_leaf_magnitude: 0.0,
                 },
+                &[],
             )
             .expect("regularized split search should succeed")
             .expect("regularized split should exist");
@@ -1291,6 +1326,7 @@ mod tests {
                     min_child_hessian: 0.0,
                     min_leaf_magnitude: 0.0,
                 },
+                &[],
             )
             .expect("regularized split search should succeed")
             .expect("regularized split should exist");
@@ -1321,6 +1357,7 @@ mod tests {
                     min_child_hessian: 10.0,
                     min_leaf_magnitude: 0.0,
                 },
+                &[],
             )
             .expect("split search should succeed");
 
@@ -1389,6 +1426,7 @@ mod tests {
                     min_child_hessian: 0.0,
                     min_leaf_magnitude: 0.06,
                 },
+                &[],
             )
             .expect("magnitude-filtered split search should succeed")
             .expect("magnitude-filtered split should exist");

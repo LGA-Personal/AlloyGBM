@@ -47,6 +47,14 @@ pub struct TrainParams {
     pub lambda_l2: f32,
     pub min_child_hessian: f32,
     pub min_split_gain: f32,
+    /// Per-feature monotone constraints: +1 non-decreasing, -1 non-increasing, 0 unconstrained.
+    /// Empty means no constraints.
+    pub monotone_constraints: Vec<i8>,
+    /// Per-feature importance weights for split selection (gain is multiplied by weight).
+    /// Empty means uniform weighting.
+    pub feature_weights: Vec<f32>,
+    /// Maximum number of leaves per tree. None means depth-limited only.
+    pub max_leaves: Option<usize>,
 }
 
 impl Default for TrainParams {
@@ -65,6 +73,9 @@ impl Default for TrainParams {
             lambda_l2: 0.0,
             min_child_hessian: 0.0,
             min_split_gain: 0.0,
+            monotone_constraints: Vec::new(),
+            feature_weights: Vec::new(),
+            max_leaves: None,
         }
     }
 }
@@ -863,6 +874,30 @@ pub fn validate_train_params(params: &TrainParams) -> CoreResult<()> {
         return Err(CoreError::InvalidConfig(
             "min_child_hessian must be finite and >= 0".to_string(),
         ));
+    }
+
+    for &c in &params.monotone_constraints {
+        if c != -1 && c != 0 && c != 1 {
+            return Err(CoreError::InvalidConfig(
+                "monotone_constraints values must be -1, 0, or +1".to_string(),
+            ));
+        }
+    }
+
+    for &w in &params.feature_weights {
+        if !w.is_finite() || w < 0.0 {
+            return Err(CoreError::InvalidConfig(
+                "feature_weights values must be finite and >= 0".to_string(),
+            ));
+        }
+    }
+
+    if let Some(max_leaves) = params.max_leaves {
+        if max_leaves < 2 {
+            return Err(CoreError::InvalidConfig(
+                "max_leaves must be >= 2 when set (a tree needs at least 2 leaves)".to_string(),
+            ));
+        }
     }
 
     Ok(())

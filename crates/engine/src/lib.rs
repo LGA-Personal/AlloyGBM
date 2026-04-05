@@ -77,6 +77,7 @@ pub trait BackendOps {
         &self,
         histograms: &HistogramBundle,
         _options: SplitSelectionOptions,
+        _feature_weights: &[f32],
     ) -> EngineResult<Option<SplitCandidate>> {
         self.best_split(histograms)
     }
@@ -1349,6 +1350,8 @@ pub struct IterationControls {
     pub col_subsample: f32,
     pub early_stopping_rounds: Option<usize>,
     pub min_validation_improvement: f32,
+    /// Maximum number of leaves per tree. None means depth-limited only.
+    pub max_leaves: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1360,6 +1363,8 @@ pub enum IterationStopReason {
     LeafRowsBelowThreshold,
     LeafMagnitudeBelowThreshold,
     LossImprovementBelowThreshold,
+    MonotoneConstraintViolation,
+    MaxLeavesReached,
     ValidationLossPlateau,
 }
 
@@ -1489,7 +1494,20 @@ impl IterationControls {
             col_subsample: 1.0,
             early_stopping_rounds: None,
             min_validation_improvement: 0.0,
+            max_leaves: None,
         })
+    }
+
+    pub fn with_max_leaves(mut self, max_leaves: Option<usize>) -> EngineResult<Self> {
+        if let Some(n) = max_leaves {
+            if n < 2 {
+                return Err(EngineError::InvalidConfig(
+                    "max_leaves must be >= 2 when set".to_string(),
+                ));
+            }
+        }
+        self.max_leaves = max_leaves;
+        Ok(self)
     }
 
     pub fn with_subsample_rates(
@@ -1807,7 +1825,8 @@ impl Trainer {
             &root_node,
             &feature_tiles,
         )?;
-        let split_candidate = backend.best_split_with_options(&histograms, split_options)?;
+        let split_candidate =
+            backend.best_split_with_options(&histograms, split_options, &self.params.feature_weights)?;
         let root_stats = backend.reduce_sums(&fit_contract.gradients, &root_node.row_indices)?;
 
         let partition = if let Some(split) = &split_candidate {
@@ -2072,6 +2091,7 @@ impl Trainer {
                 self.params.min_validation_improvement,
             )?;
         }
+        controls = controls.with_max_leaves(self.params.max_leaves)?;
         Ok(controls)
     }
 
@@ -2291,7 +2311,7 @@ impl Trainer {
                     let node_id = encode_tree_node_id(round_index, local_node_id)?;
                     let node = NodeSlice::new(node_id, node_rows)?;
                     let Some(mut split) =
-                        backend.best_split_with_options(&histograms, split_options)?
+                        backend.best_split_with_options(&histograms, split_options, &self.params.feature_weights)?
                     else {
                         continue;
                     };
@@ -2344,6 +2364,36 @@ impl Trainer {
                     {
                         round_rejection_reason = IterationStopReason::LeafMagnitudeBelowThreshold;
                         continue;
+                    }
+
+                    // Monotone constraint enforcement: for a feature with constraint +1,
+                    // the left child prediction must be <= right child prediction; for -1, >=.
+                    if !self.params.monotone_constraints.is_empty() {
+                        let fi = split.feature_index as usize;
+                        if fi < self.params.monotone_constraints.len() {
+                            let constraint = self.params.monotone_constraints[fi];
+                            if constraint == 1 && left_leaf_absolute > right_leaf_absolute {
+                                round_rejection_reason =
+                                    IterationStopReason::MonotoneConstraintViolation;
+                                continue;
+                            }
+                            if constraint == -1 && left_leaf_absolute < right_leaf_absolute {
+                                round_rejection_reason =
+                                    IterationStopReason::MonotoneConstraintViolation;
+                                continue;
+                            }
+                        }
+                    }
+
+                    // max_leaves enforcement: track leaf count and stop expanding when reached.
+                    if let Some(max_leaves) = controls.max_leaves {
+                        // Each split converts one leaf into two, net +1 leaf.
+                        // Initial tree has 1 leaf (root). After k splits we have k+1 leaves.
+                        let leaves_after_split = candidate_round_stumps.len() + 2;
+                        if leaves_after_split > max_leaves {
+                            round_rejection_reason = IterationStopReason::MaxLeavesReached;
+                            continue;
+                        }
                     }
 
                     apply_partition_leaf_updates(

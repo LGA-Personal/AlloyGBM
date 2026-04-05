@@ -843,6 +843,9 @@ mod tests {
             lambda_l2: 0.0,
             min_child_hessian: 0.0,
             min_split_gain: 0.0,
+            monotone_constraints: Vec::new(),
+            feature_weights: Vec::new(),
+            max_leaves: None,
         }
     }
 

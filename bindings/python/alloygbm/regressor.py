@@ -220,6 +220,9 @@ class GBMRegressor(_GBMRegressorBase):
         categorical_smoothing: float = 20.0,
         categorical_min_samples_leaf: int = 1,
         categorical_time_aware: bool = False,
+        monotone_constraints: list[int] | dict[int, int] | None = None,
+        feature_weights: list[float] | dict[int, float] | None = None,
+        max_leaves: int | None = None,
     ) -> None:
         if not (0.0 < learning_rate <= 1.0):
             raise ValueError("learning_rate must be in (0.0, 1.0]")
@@ -268,6 +271,35 @@ class GBMRegressor(_GBMRegressorBase):
                 "continuous_binning_max_bins must be in "
                 f"[{_MIN_CONTINUOUS_QUANTIZED_BINS}, {_MAX_CONTINUOUS_QUANTIZED_BIN + 1}]"
             )
+        if monotone_constraints is not None:
+            if isinstance(monotone_constraints, dict):
+                for v in monotone_constraints.values():
+                    if int(v) not in (-1, 0, 1):
+                        raise ValueError(
+                            "monotone_constraints values must be -1, 0, or +1"
+                        )
+            else:
+                for v in monotone_constraints:
+                    if int(v) not in (-1, 0, 1):
+                        raise ValueError(
+                            "monotone_constraints values must be -1, 0, or +1"
+                        )
+        if feature_weights is not None:
+            vals = (
+                feature_weights.values()
+                if isinstance(feature_weights, dict)
+                else feature_weights
+            )
+            for w in vals:
+                if not math.isfinite(float(w)) or float(w) < 0.0:
+                    raise ValueError(
+                        "feature_weights values must be finite and >= 0"
+                    )
+        if max_leaves is not None:
+            if int(max_leaves) < 2:
+                raise ValueError(
+                    "max_leaves must be >= 2 when set"
+                )
 
         self.learning_rate = float(learning_rate)
         self.max_depth = int(max_depth)
@@ -299,6 +331,13 @@ class GBMRegressor(_GBMRegressorBase):
         self.categorical_smoothing = float(categorical_smoothing)
         self.categorical_min_samples_leaf = int(categorical_min_samples_leaf)
         self.categorical_time_aware = bool(categorical_time_aware)
+        self.monotone_constraints = (
+            monotone_constraints if monotone_constraints is not None else None
+        )
+        self.feature_weights = (
+            feature_weights if feature_weights is not None else None
+        )
+        self.max_leaves = int(max_leaves) if max_leaves is not None else None
         self._is_fitted = False
         self._artifact_bytes: bytes | None = None
         self._native_predictor_handle: object | None = None
@@ -341,7 +380,10 @@ class GBMRegressor(_GBMRegressorBase):
             f"store_node_stats={self.store_node_stats}, "
             f"categorical_smoothing={self.categorical_smoothing}, "
             f"categorical_min_samples_leaf={self.categorical_min_samples_leaf}, "
-            f"categorical_time_aware={self.categorical_time_aware}"
+            f"categorical_time_aware={self.categorical_time_aware}, "
+            f"monotone_constraints={self.monotone_constraints}, "
+            f"feature_weights={self.feature_weights}, "
+            f"max_leaves={self.max_leaves}"
             ")"
         )
 
@@ -371,6 +413,9 @@ class GBMRegressor(_GBMRegressorBase):
             "categorical_smoothing": self.categorical_smoothing,
             "categorical_min_samples_leaf": self.categorical_min_samples_leaf,
             "categorical_time_aware": self.categorical_time_aware,
+            "monotone_constraints": self.monotone_constraints,
+            "feature_weights": self.feature_weights,
+            "max_leaves": self.max_leaves,
         }
 
     def set_params(self, **params: float | int | bool | str | None) -> "GBMRegressor":
@@ -398,6 +443,9 @@ class GBMRegressor(_GBMRegressorBase):
             "categorical_smoothing",
             "categorical_min_samples_leaf",
             "categorical_time_aware",
+            "monotone_constraints",
+            "feature_weights",
+            "max_leaves",
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
@@ -545,7 +593,62 @@ class GBMRegressor(_GBMRegressorBase):
         if "categorical_time_aware" in params:
             self.categorical_time_aware = bool(params["categorical_time_aware"])
 
+        if "monotone_constraints" in params:
+            mc = params["monotone_constraints"]
+            if mc is not None:
+                vals = mc.values() if isinstance(mc, dict) else mc
+                for v in vals:
+                    if int(v) not in (-1, 0, 1):
+                        raise ValueError(
+                            "monotone_constraints values must be -1, 0, or +1"
+                        )
+            self.monotone_constraints = mc
+
+        if "feature_weights" in params:
+            fw = params["feature_weights"]
+            if fw is not None:
+                vals = fw.values() if isinstance(fw, dict) else fw
+                for w in vals:
+                    if not math.isfinite(float(w)) or float(w) < 0.0:
+                        raise ValueError(
+                            "feature_weights values must be finite and >= 0"
+                        )
+            self.feature_weights = fw
+
+        if "max_leaves" in params:
+            if params["max_leaves"] is None:
+                self.max_leaves = None
+            else:
+                ml = int(params["max_leaves"])
+                if ml < 2:
+                    raise ValueError("max_leaves must be >= 2 when set")
+                self.max_leaves = ml
+
         return self
+
+    def _resolve_monotone_constraints(self, feature_count: int) -> list[int]:
+        """Resolve monotone_constraints to a dense list[int] for the bridge."""
+        if self.monotone_constraints is None:
+            return []
+        if isinstance(self.monotone_constraints, dict):
+            dense = [0] * feature_count
+            for idx, val in self.monotone_constraints.items():
+                if 0 <= int(idx) < feature_count:
+                    dense[int(idx)] = int(val)
+            return dense
+        return [int(v) for v in self.monotone_constraints]
+
+    def _resolve_feature_weights(self, feature_count: int) -> list[float]:
+        """Resolve feature_weights to a dense list[float] for the bridge."""
+        if self.feature_weights is None:
+            return []
+        if isinstance(self.feature_weights, dict):
+            dense = [1.0] * feature_count
+            for idx, val in self.feature_weights.items():
+                if 0 <= int(idx) < feature_count:
+                    dense[int(idx)] = float(val)
+            return dense
+        return [float(w) for w in self.feature_weights]
 
     def _objective_name(self) -> str:
         """Return the objective function name passed to the native training bridge."""
@@ -832,6 +935,9 @@ class GBMRegressor(_GBMRegressorBase):
                     continuous_binning_strategy=self.continuous_binning_strategy,
                     continuous_binning_max_bins=self.continuous_binning_max_bins,
                     objective=self._objective_name(),
+                    monotone_constraints=self._resolve_monotone_constraints(feature_count),
+                    feature_weights=self._resolve_feature_weights(feature_count),
+                    max_leaves=self.max_leaves,
                 )
                 return self._finalize_training_result(native_result, input_adaptation_seconds, feature_count=feature_count)
             except (ImportError, AttributeError):
@@ -910,6 +1016,9 @@ class GBMRegressor(_GBMRegressorBase):
                 continuous_binning_strategy=self.continuous_binning_strategy,
                 continuous_binning_max_bins=self.continuous_binning_max_bins,
                 objective=self._objective_name(),
+                monotone_constraints=self._resolve_monotone_constraints(feature_count),
+                feature_weights=self._resolve_feature_weights(feature_count),
+                max_leaves=self.max_leaves,
             )
         else:
             assert training_rows is not None
@@ -949,6 +1058,9 @@ class GBMRegressor(_GBMRegressorBase):
                 continuous_binning_strategy=self.continuous_binning_strategy,
                 continuous_binning_max_bins=self.continuous_binning_max_bins,
                 objective=self._objective_name(),
+                monotone_constraints=self._resolve_monotone_constraints(feature_count),
+                feature_weights=self._resolve_feature_weights(feature_count),
+                max_leaves=self.max_leaves,
             )
 
         self._apply_continuous_binning_metadata(native_result.continuous_binning_metadata)

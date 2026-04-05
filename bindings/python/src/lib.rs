@@ -1699,6 +1699,9 @@ fn build_train_params(
     lambda_l2: f32,
     min_child_hessian: f32,
     min_split_gain: f32,
+    monotone_constraints: Vec<i8>,
+    feature_weights: Vec<f32>,
+    max_leaves: Option<usize>,
 ) -> TrainParams {
     TrainParams {
         seed,
@@ -1714,6 +1717,9 @@ fn build_train_params(
         lambda_l2,
         min_child_hessian,
         min_split_gain,
+        monotone_constraints,
+        feature_weights,
+        max_leaves,
     }
 }
 
@@ -1858,6 +1864,9 @@ fn train_regression_artifact(
         0.0,
         0.0,
         0.0, // min_split_gain
+        Vec::new(),
+        Vec::new(),
+        None,
     );
 
     let categorical_spec = resolve_categorical_spec(
@@ -1975,6 +1984,9 @@ fn train_regression_artifact_dense(
         0.0,
         0.0,
         0.0, // min_split_gain
+        Vec::new(),
+        Vec::new(),
+        None,
     );
     let categorical_spec = resolve_categorical_spec(
         categorical_feature_index,
@@ -2048,7 +2060,10 @@ fn train_regression_artifact_dense(
     time_index=None,
     continuous_binning_strategy="linear",
     continuous_binning_max_bins=255,
-    objective="squared_error"
+    objective="squared_error",
+    monotone_constraints=Vec::new(),
+    feature_weights=Vec::new(),
+    max_leaves=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_with_summary(
@@ -2087,6 +2102,9 @@ fn train_regression_artifact_with_summary(
     continuous_binning_strategy: &str,
     continuous_binning_max_bins: usize,
     objective: &str,
+    monotone_constraints: Vec<i8>,
+    feature_weights: Vec<f32>,
+    max_leaves: Option<usize>,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -2110,6 +2128,9 @@ fn train_regression_artifact_with_summary(
         lambda_l2,
         min_child_hessian,
         min_split_gain,
+        monotone_constraints,
+        feature_weights,
+        max_leaves,
     );
     let categorical_spec = resolve_categorical_spec(
         categorical_feature_index,
@@ -2204,7 +2225,10 @@ fn train_regression_artifact_with_summary(
     time_index=None,
     continuous_binning_strategy="linear",
     continuous_binning_max_bins=255,
-    objective="squared_error"
+    objective="squared_error",
+    monotone_constraints=Vec::new(),
+    feature_weights=Vec::new(),
+    max_leaves=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary(
@@ -2246,6 +2270,9 @@ fn train_regression_artifact_dense_with_summary(
     continuous_binning_strategy: &str,
     continuous_binning_max_bins: usize,
     objective: &str,
+    monotone_constraints: Vec<i8>,
+    feature_weights: Vec<f32>,
+    max_leaves: Option<usize>,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -2269,6 +2296,9 @@ fn train_regression_artifact_dense_with_summary(
         lambda_l2,
         min_child_hessian,
         min_split_gain,
+        monotone_constraints,
+        feature_weights,
+        max_leaves,
     );
     let categorical_spec = resolve_categorical_spec(
         categorical_feature_index,
@@ -2359,7 +2389,10 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> PyResult<Vec<f32>> {
     time_index=None,
     continuous_binning_strategy="linear",
     continuous_binning_max_bins=255,
-    objective="squared_error"
+    objective="squared_error",
+    monotone_constraints=Vec::new(),
+    feature_weights=Vec::new(),
+    max_leaves=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary_bytes(
@@ -2401,6 +2434,9 @@ fn train_regression_artifact_dense_with_summary_bytes(
     continuous_binning_strategy: &str,
     continuous_binning_max_bins: usize,
     objective: &str,
+    monotone_constraints: Vec<i8>,
+    feature_weights: Vec<f32>,
+    max_leaves: Option<usize>,
 ) -> PyResult<NativeTrainingResult> {
     let values = bytes_to_f32_vec(values_bytes)?;
     let targets = bytes_to_f32_vec(targets_bytes)?;
@@ -2428,6 +2464,9 @@ fn train_regression_artifact_dense_with_summary_bytes(
         lambda_l2,
         min_child_hessian,
         min_split_gain,
+        monotone_constraints,
+        feature_weights,
+        max_leaves,
     );
     let categorical_spec = resolve_categorical_spec(
         categorical_feature_index,
@@ -2622,6 +2661,9 @@ mod tests {
             lambda_l2: 0.0,
             min_child_hessian: 0.0,
             min_split_gain: 0.0,
+            monotone_constraints: Vec::new(),
+            feature_weights: Vec::new(),
+            max_leaves: None,
         }
     }
 
