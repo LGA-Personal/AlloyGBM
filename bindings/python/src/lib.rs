@@ -6,7 +6,7 @@ use alloygbm_categorical::{
 };
 use alloygbm_core::{
     BinnedMatrix, CATEGORICAL_STATE_FORMAT_V1, CategoricalStatePayloadV1, DatasetMatrix,
-    DenseMatrixView, MISSING_BIN_U8, TrainParams, TrainingDataset,
+    DenseMatrixView, MISSING_BIN_U8, TrainParams, TrainingDataset, TreeGrowth,
 };
 use alloygbm_engine::{
     ArtifactCompatibilityMode, BinaryCrossEntropyObjective, CategoricalTargetEncodingSpec,
@@ -48,6 +48,16 @@ fn parse_training_policy(value: &str) -> Result<TrainingPolicyMode, EngineError>
         "auto" => Ok(TrainingPolicyMode::Auto),
         other => Err(EngineError::InvalidConfig(format!(
             "training_policy must be 'auto' or 'manual', received '{other}'"
+        ))),
+    }
+}
+
+fn parse_tree_growth(value: &str) -> Result<TreeGrowth, EngineError> {
+    match value {
+        "level" => Ok(TreeGrowth::Level),
+        "leaf" => Ok(TreeGrowth::Leaf),
+        other => Err(EngineError::InvalidConfig(format!(
+            "tree_growth must be 'level' or 'leaf', received '{other}'"
         ))),
     }
 }
@@ -2002,6 +2012,7 @@ fn build_train_params(
     monotone_constraints: Vec<i8>,
     feature_weights: Vec<f32>,
     max_leaves: Option<usize>,
+    tree_growth: TreeGrowth,
 ) -> TrainParams {
     TrainParams {
         seed,
@@ -2020,6 +2031,7 @@ fn build_train_params(
         monotone_constraints,
         feature_weights,
         max_leaves,
+        tree_growth,
     }
 }
 
@@ -2167,6 +2179,7 @@ fn train_regression_artifact(
         Vec::new(),
         Vec::new(),
         None,
+        TreeGrowth::Level,
     );
 
     let categorical_spec = resolve_categorical_spec(
@@ -2287,6 +2300,7 @@ fn train_regression_artifact_dense(
         Vec::new(),
         Vec::new(),
         None,
+        TreeGrowth::Level,
     );
     let categorical_spec = resolve_categorical_spec(
         categorical_feature_index,
@@ -2363,7 +2377,8 @@ fn train_regression_artifact_dense(
     objective="squared_error",
     monotone_constraints=Vec::new(),
     feature_weights=Vec::new(),
-    max_leaves=None
+    max_leaves=None,
+    tree_growth="level"
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_with_summary(
@@ -2405,6 +2420,7 @@ fn train_regression_artifact_with_summary(
     monotone_constraints: Vec<i8>,
     feature_weights: Vec<f32>,
     max_leaves: Option<usize>,
+    tree_growth: &str,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -2414,6 +2430,7 @@ fn train_regression_artifact_with_summary(
     let continuous_binning_strategy =
         parse_continuous_binning_strategy(continuous_binning_strategy)
             .map_err(engine_error_to_pyerr)?;
+    let tree_growth = parse_tree_growth(tree_growth).map_err(engine_error_to_pyerr)?;
     let params = build_train_params(
         learning_rate,
         max_depth,
@@ -2431,6 +2448,7 @@ fn train_regression_artifact_with_summary(
         monotone_constraints,
         feature_weights,
         max_leaves,
+        tree_growth,
     );
     let categorical_spec = resolve_categorical_spec(
         categorical_feature_index,
@@ -2528,7 +2546,8 @@ fn train_regression_artifact_with_summary(
     objective="squared_error",
     monotone_constraints=Vec::new(),
     feature_weights=Vec::new(),
-    max_leaves=None
+    max_leaves=None,
+    tree_growth="level"
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary(
@@ -2573,6 +2592,7 @@ fn train_regression_artifact_dense_with_summary(
     monotone_constraints: Vec<i8>,
     feature_weights: Vec<f32>,
     max_leaves: Option<usize>,
+    tree_growth: &str,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -2582,6 +2602,7 @@ fn train_regression_artifact_dense_with_summary(
     let continuous_binning_strategy =
         parse_continuous_binning_strategy(continuous_binning_strategy)
             .map_err(engine_error_to_pyerr)?;
+    let tree_growth = parse_tree_growth(tree_growth).map_err(engine_error_to_pyerr)?;
     let params = build_train_params(
         learning_rate,
         max_depth,
@@ -2599,6 +2620,7 @@ fn train_regression_artifact_dense_with_summary(
         monotone_constraints,
         feature_weights,
         max_leaves,
+        tree_growth,
     );
     let categorical_spec = resolve_categorical_spec(
         categorical_feature_index,
@@ -2692,7 +2714,8 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> PyResult<Vec<f32>> {
     objective="squared_error",
     monotone_constraints=Vec::new(),
     feature_weights=Vec::new(),
-    max_leaves=None
+    max_leaves=None,
+    tree_growth="level"
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary_bytes(
@@ -2737,6 +2760,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
     monotone_constraints: Vec<i8>,
     feature_weights: Vec<f32>,
     max_leaves: Option<usize>,
+    tree_growth: &str,
 ) -> PyResult<NativeTrainingResult> {
     let values = bytes_to_f32_vec(values_bytes)?;
     let targets = bytes_to_f32_vec(targets_bytes)?;
@@ -2750,6 +2774,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
     let continuous_binning_strategy =
         parse_continuous_binning_strategy(continuous_binning_strategy)
             .map_err(engine_error_to_pyerr)?;
+    let tree_growth = parse_tree_growth(tree_growth).map_err(engine_error_to_pyerr)?;
     let params = build_train_params(
         learning_rate,
         max_depth,
@@ -2767,6 +2792,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
         monotone_constraints,
         feature_weights,
         max_leaves,
+        tree_growth,
     );
     let categorical_spec = resolve_categorical_spec(
         categorical_feature_index,
@@ -2848,7 +2874,7 @@ mod tests {
     use alloygbm_backend_cpu::CpuBackend;
     use alloygbm_categorical::TargetEncoderConfig;
     use alloygbm_core::{
-        BinnedMatrix, DatasetMatrix, ModelSectionKind, TrainParams, TrainingDataset,
+        BinnedMatrix, DatasetMatrix, ModelSectionKind, TrainParams, TrainingDataset, TreeGrowth,
         deserialize_model_artifact_v1, serialize_model_artifact_v1,
     };
     use alloygbm_engine::{
@@ -2964,6 +2990,7 @@ mod tests {
             monotone_constraints: Vec::new(),
             feature_weights: Vec::new(),
             max_leaves: None,
+            tree_growth: TreeGrowth::Level,
         }
     }
 

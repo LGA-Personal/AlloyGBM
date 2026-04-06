@@ -918,7 +918,7 @@ impl BackendOps for CpuBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloygbm_core::{DatasetMatrix, FeatureTile, TrainParams, TrainingDataset};
+    use alloygbm_core::{DatasetMatrix, FeatureTile, TrainParams, TrainingDataset, TreeGrowth};
     use alloygbm_engine::{SquaredErrorObjective, Trainer};
 
     fn sample_binned_matrix() -> BinnedMatrix {
@@ -1018,6 +1018,7 @@ mod tests {
             monotone_constraints: Vec::new(),
             feature_weights: Vec::new(),
             max_leaves: None,
+            tree_growth: TreeGrowth::Level,
         }
     }
 

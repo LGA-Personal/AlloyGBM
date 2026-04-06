@@ -768,7 +768,8 @@ mod tests {
     use alloygbm_backend_cpu::CpuBackend;
     use alloygbm_core::{
         BinnedMatrix, CATEGORICAL_STATE_FORMAT_V1, CategoricalStatePayloadV1, DatasetMatrix,
-        Device, ModelSectionKind, TrainParams, TrainingDataset, serialize_model_artifact_v1,
+        Device, ModelSectionKind, TrainParams, TrainingDataset, TreeGrowth,
+        serialize_model_artifact_v1,
     };
     use alloygbm_engine::{SquaredErrorObjective, Trainer};
 
@@ -852,6 +853,7 @@ mod tests {
             monotone_constraints: Vec::new(),
             feature_weights: Vec::new(),
             max_leaves: None,
+            tree_growth: TreeGrowth::Level,
         }
     }
 

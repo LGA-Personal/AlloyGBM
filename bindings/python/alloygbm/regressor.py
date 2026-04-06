@@ -238,6 +238,7 @@ class GBMRegressor(_GBMRegressorBase):
         monotone_constraints: list[int] | dict[int, int] | None = None,
         feature_weights: list[float] | dict[int, float] | None = None,
         max_leaves: int | None = None,
+        tree_growth: str = "level",
     ) -> None:
         if not (0.0 < learning_rate <= 1.0):
             raise ValueError("learning_rate must be in (0.0, 1.0]")
@@ -315,6 +316,15 @@ class GBMRegressor(_GBMRegressorBase):
                 raise ValueError(
                     "max_leaves must be >= 2 when set"
                 )
+        _VALID_TREE_GROWTH = {"level", "leaf"}
+        if tree_growth not in _VALID_TREE_GROWTH:
+            raise ValueError(
+                "tree_growth must be one of: " + ", ".join(sorted(_VALID_TREE_GROWTH))
+            )
+        if tree_growth == "leaf" and max_leaves is None:
+            raise ValueError(
+                "max_leaves must be set when tree_growth='leaf'"
+            )
 
         self.learning_rate = float(learning_rate)
         self.max_depth = int(max_depth)
@@ -353,6 +363,7 @@ class GBMRegressor(_GBMRegressorBase):
             feature_weights if feature_weights is not None else None
         )
         self.max_leaves = int(max_leaves) if max_leaves is not None else None
+        self.tree_growth = str(tree_growth)
         self._is_fitted = False
         self._artifact_bytes: bytes | None = None
         self._native_predictor_handle: object | None = None
@@ -398,7 +409,8 @@ class GBMRegressor(_GBMRegressorBase):
             f"categorical_time_aware={self.categorical_time_aware}, "
             f"monotone_constraints={self.monotone_constraints}, "
             f"feature_weights={self.feature_weights}, "
-            f"max_leaves={self.max_leaves}"
+            f"max_leaves={self.max_leaves}, "
+            f"tree_growth='{self.tree_growth}'"
             ")"
         )
 
@@ -431,6 +443,7 @@ class GBMRegressor(_GBMRegressorBase):
             "monotone_constraints": self.monotone_constraints,
             "feature_weights": self.feature_weights,
             "max_leaves": self.max_leaves,
+            "tree_growth": self.tree_growth,
         }
 
     def set_params(self, **params: float | int | bool | str | None) -> "GBMRegressor":
@@ -461,6 +474,7 @@ class GBMRegressor(_GBMRegressorBase):
             "monotone_constraints",
             "feature_weights",
             "max_leaves",
+            "tree_growth",
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
@@ -638,6 +652,16 @@ class GBMRegressor(_GBMRegressorBase):
                 if ml < 2:
                     raise ValueError("max_leaves must be >= 2 when set")
                 self.max_leaves = ml
+
+        if "tree_growth" in params:
+            tg = str(params["tree_growth"])
+            if tg not in {"level", "leaf"}:
+                raise ValueError("tree_growth must be 'level' or 'leaf'")
+            self.tree_growth = tg
+
+        # Cross-field validation: leaf growth requires max_leaves
+        if self.tree_growth == "leaf" and self.max_leaves is None:
+            raise ValueError("max_leaves must be set when tree_growth='leaf'")
 
         return self
 
@@ -953,6 +977,7 @@ class GBMRegressor(_GBMRegressorBase):
                     monotone_constraints=self._resolve_monotone_constraints(feature_count),
                     feature_weights=self._resolve_feature_weights(feature_count),
                     max_leaves=self.max_leaves,
+                    tree_growth=self.tree_growth,
                 )
                 return self._finalize_training_result(native_result, input_adaptation_seconds, feature_count=feature_count)
             except (ImportError, AttributeError):
@@ -1034,6 +1059,7 @@ class GBMRegressor(_GBMRegressorBase):
                 monotone_constraints=self._resolve_monotone_constraints(feature_count),
                 feature_weights=self._resolve_feature_weights(feature_count),
                 max_leaves=self.max_leaves,
+                tree_growth=self.tree_growth,
             )
         else:
             assert training_rows is not None
@@ -1076,6 +1102,7 @@ class GBMRegressor(_GBMRegressorBase):
                 monotone_constraints=self._resolve_monotone_constraints(feature_count),
                 feature_weights=self._resolve_feature_weights(feature_count),
                 max_leaves=self.max_leaves,
+                tree_growth=self.tree_growth,
             )
 
         self._apply_continuous_binning_metadata(native_result.continuous_binning_metadata)

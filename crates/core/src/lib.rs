@@ -11,6 +11,15 @@ pub const MISSING_BIN_U16: u16 = 65535;
 const CATEGORICAL_STATE_HEADER_LEN: usize = 16;
 const CATEGORICAL_STATE_FLAG_LEAKAGE_SAFE_TARGET_ENCODING: u32 = 1;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TreeGrowth {
+    /// Level-wise (breadth-first): split all nodes at depth d before depth d+1.
+    #[default]
+    Level,
+    /// Leaf-wise (best-first): always split the leaf with the highest gain.
+    Leaf,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Device {
     Cpu,
@@ -56,6 +65,8 @@ pub struct TrainParams {
     pub feature_weights: Vec<f32>,
     /// Maximum number of leaves per tree. None means depth-limited only.
     pub max_leaves: Option<usize>,
+    /// Tree growth strategy: level-wise (default) or leaf-wise (best-first).
+    pub tree_growth: TreeGrowth,
 }
 
 impl Default for TrainParams {
@@ -77,6 +88,7 @@ impl Default for TrainParams {
             monotone_constraints: Vec::new(),
             feature_weights: Vec::new(),
             max_leaves: None,
+            tree_growth: TreeGrowth::Level,
         }
     }
 }
@@ -1028,12 +1040,18 @@ pub fn validate_train_params(params: &TrainParams) -> CoreResult<()> {
         }
     }
 
-    if let Some(max_leaves) = params.max_leaves {
-        if max_leaves < 2 {
-            return Err(CoreError::InvalidConfig(
-                "max_leaves must be >= 2 when set (a tree needs at least 2 leaves)".to_string(),
-            ));
-        }
+    if let Some(max_leaves) = params.max_leaves
+        && max_leaves < 2
+    {
+        return Err(CoreError::InvalidConfig(
+            "max_leaves must be >= 2 when set (a tree needs at least 2 leaves)".to_string(),
+        ));
+    }
+
+    if params.tree_growth == TreeGrowth::Leaf && params.max_leaves.is_none() {
+        return Err(CoreError::InvalidConfig(
+            "tree_growth='leaf' requires max_leaves to be set".to_string(),
+        ));
     }
 
     Ok(())

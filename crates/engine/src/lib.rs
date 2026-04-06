@@ -3,16 +3,20 @@ use alloygbm_core::{
     BinnedMatrix, CategoricalStatePayloadV1, CoreError, DatasetMatrix, Device, FeatureTile, MISSING_BIN_U8,
     GradientPair, HistogramBundle, MODEL_FORMAT_V1, ModelArtifactSection, ModelMetadata,
     ModelSectionKind, NodeSlice, NodeStats, PartitionResult, SplitCandidate, TrainParams,
-    TrainingDataset, decode_optional_categorical_state_section_v1, deserialize_model_artifact_v1,
+    TreeGrowth, TrainingDataset, decode_optional_categorical_state_section_v1, deserialize_model_artifact_v1,
     encode_categorical_state_payload_v1, format_required_section_auto_mode_error,
     format_required_section_mode_error, required_section_compatibility_report,
     serialize_model_artifact_v1, validate_binned_matrix, validate_categorical_state_payload_v1,
     validate_train_params, validate_training_dataset,
 };
-use std::collections::HashMap;
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Small epsilon added to leaf value denominators to prevent division by zero.
+const LEAF_EPSILON: f32 = 1e-6;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineError {
@@ -2264,8 +2268,6 @@ impl Trainer {
         let mut weak_improvement_streak = 0_usize;
         let mut weak_improvement_rounds_committed = 0_usize;
 
-        const LEAF_EPSILON: f32 = 1e-6;
-
         let mut gradient_buffer: Vec<GradientPair> = Vec::with_capacity(dataset.row_count());
 
         for round_index in 0..effective_round_cap {
@@ -2295,192 +2297,37 @@ impl Trainer {
             }
 
             candidate_predictions.copy_from_slice(&predictions);
-            let mut candidate_round_stumps = Vec::new();
-            let mut round_rejection_reason = IterationStopReason::NoSplitCandidate;
-            let root_node_id = encode_tree_node_id(round_index, 0)?;
-            let root_node = NodeSlice::new(root_node_id, root_row_indices)?;
-            let root_histograms =
-                backend.build_histograms(binned_matrix, gradients, &root_node, &feature_tiles)?;
-            // Maintain each active node's absolute leaf output so child updates
-            // can replace parent contribution via deltas (tree semantics).
-            let mut active_nodes = vec![(0_u32, root_node.row_indices, root_histograms, 0.0_f32)];
 
-            for depth in 0..(self.params.max_depth as usize) {
-                if active_nodes.is_empty() {
-                    break;
-                }
-
-                let mut next_nodes = Vec::new();
-                for (local_node_id, node_rows, histograms, parent_leaf_value) in active_nodes {
-                    let node_id = encode_tree_node_id(round_index, local_node_id)?;
-                    let node = NodeSlice::new(node_id, node_rows)?;
-                    let Some(mut split) =
-                        backend.best_split_with_options(&histograms, split_options, &self.params.feature_weights)?
-                    else {
-                        continue;
-                    };
-                    if !split.gain.is_finite() || split.gain <= controls.min_split_gain {
-                        round_rejection_reason = IterationStopReason::GainBelowThreshold;
-                        continue;
-                    }
-
-                    let (partition, left_stats, right_stats) =
-                        backend.apply_split_with_stats(binned_matrix, gradients, &node, &split)?;
-                    if partition.left_row_indices.len() + partition.right_row_indices.len()
-                        != node.row_indices.len()
-                    {
-                        return Err(EngineError::ContractViolation(
-                            "split partition does not cover all node rows".to_string(),
-                        ));
-                    }
-                    if partition.left_row_indices.is_empty()
-                        || partition.right_row_indices.is_empty()
-                        || partition.left_row_indices.len() < controls.min_rows_per_leaf
-                        || partition.right_row_indices.len() < controls.min_rows_per_leaf
-                    {
-                        round_rejection_reason = IterationStopReason::LeafRowsBelowThreshold;
-                        continue;
-                    }
-
-                    if left_stats.hess_sum <= 0.0 || right_stats.hess_sum <= 0.0 {
-                        return Err(EngineError::ContractViolation(
-                            "backend produced non-positive hessian sums".to_string(),
-                        ));
-                    }
-
-                    let left_grad =
-                        l1_threshold_gradient(left_stats.grad_sum, split_options.l1_alpha);
-                    let right_grad =
-                        l1_threshold_gradient(right_stats.grad_sum, split_options.l1_alpha);
-                    let raw_left_leaf_value = -self.params.learning_rate * left_grad
-                        / (left_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
-                    let raw_right_leaf_value = -self.params.learning_rate * right_grad
-                        / (right_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
-
-                    let left_leaf_absolute = raw_left_leaf_value
-                        .clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value);
-                    let right_leaf_absolute = raw_right_leaf_value
-                        .clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value);
-                    let left_leaf_value = left_leaf_absolute - parent_leaf_value;
-                    let right_leaf_value = right_leaf_absolute - parent_leaf_value;
-                    if left_leaf_value.abs() < controls.min_abs_leaf_value
-                        && right_leaf_value.abs() < controls.min_abs_leaf_value
-                    {
-                        round_rejection_reason = IterationStopReason::LeafMagnitudeBelowThreshold;
-                        continue;
-                    }
-
-                    // Monotone constraint enforcement: for a feature with constraint +1,
-                    // the left child prediction must be <= right child prediction; for -1, >=.
-                    if !self.params.monotone_constraints.is_empty() {
-                        let fi = split.feature_index as usize;
-                        if fi < self.params.monotone_constraints.len() {
-                            let constraint = self.params.monotone_constraints[fi];
-                            if constraint == 1 && left_leaf_absolute > right_leaf_absolute {
-                                round_rejection_reason =
-                                    IterationStopReason::MonotoneConstraintViolation;
-                                continue;
-                            }
-                            if constraint == -1 && left_leaf_absolute < right_leaf_absolute {
-                                round_rejection_reason =
-                                    IterationStopReason::MonotoneConstraintViolation;
-                                continue;
-                            }
-                        }
-                    }
-
-                    // max_leaves enforcement: track leaf count and stop expanding when reached.
-                    if let Some(max_leaves) = controls.max_leaves {
-                        // Each split converts one leaf into two, net +1 leaf.
-                        // Initial tree has 1 leaf (root). After k splits we have k+1 leaves.
-                        let leaves_after_split = candidate_round_stumps.len() + 2;
-                        if leaves_after_split > max_leaves {
-                            round_rejection_reason = IterationStopReason::MaxLeavesReached;
-                            continue;
-                        }
-                    }
-
-                    apply_partition_leaf_updates(
+            let (candidate_round_stumps, round_rejection_reason) =
+                if self.params.tree_growth == TreeGrowth::Leaf {
+                    build_tree_leaf_wise(
+                        backend,
+                        binned_matrix,
+                        gradients,
+                        root_row_indices,
+                        round_index,
+                        &feature_tiles,
+                        split_options,
+                        &self.params,
+                        &controls,
                         &mut candidate_predictions,
-                        &partition,
-                        left_leaf_value,
-                        right_leaf_value,
-                    )?;
-
-                    split.left_stats = left_stats;
-                    split.right_stats = right_stats;
-
-                    let PartitionResult {
-                        left_row_indices,
-                        right_row_indices,
-                    } = partition;
-                    if depth + 1 < self.params.max_depth as usize {
-                        let left_local_node_id = left_child_node_id(local_node_id)?;
-                        let right_local_node_id = right_child_node_id(local_node_id)?;
-                        let left_node_id = encode_tree_node_id(round_index, left_local_node_id)?;
-                        let right_node_id = encode_tree_node_id(round_index, right_local_node_id)?;
-
-                        if left_row_indices.len() <= right_row_indices.len() {
-                            let left_node = NodeSlice::new(left_node_id, left_row_indices)?;
-                            let left_histograms = backend.build_histograms(
-                                binned_matrix,
-                                gradients,
-                                &left_node,
-                                &feature_tiles,
-                            )?;
-                            let right_histograms = subtract_histogram_bundle(
-                                &histograms,
-                                &left_histograms,
-                                right_node_id,
-                            )?;
-                            next_nodes.push((
-                                left_local_node_id,
-                                left_node.row_indices,
-                                left_histograms,
-                                left_leaf_absolute,
-                            ));
-                            next_nodes.push((
-                                right_local_node_id,
-                                right_row_indices,
-                                right_histograms,
-                                right_leaf_absolute,
-                            ));
-                        } else {
-                            let right_node = NodeSlice::new(right_node_id, right_row_indices)?;
-                            let right_histograms = backend.build_histograms(
-                                binned_matrix,
-                                gradients,
-                                &right_node,
-                                &feature_tiles,
-                            )?;
-                            let left_histograms = subtract_histogram_bundle(
-                                &histograms,
-                                &right_histograms,
-                                left_node_id,
-                            )?;
-                            next_nodes.push((
-                                left_local_node_id,
-                                left_row_indices,
-                                left_histograms,
-                                left_leaf_absolute,
-                            ));
-                            next_nodes.push((
-                                right_local_node_id,
-                                right_node.row_indices,
-                                right_histograms,
-                                right_leaf_absolute,
-                            ));
-                        }
-                    }
-
-                    candidate_round_stumps.push(TrainedStump {
-                        split,
-                        left_leaf_value,
-                        right_leaf_value,
-                    });
-                }
-                active_nodes = next_nodes;
-            }
+                        &self.params.feature_weights,
+                    )?
+                } else {
+                    build_tree_level_wise(
+                        backend,
+                        binned_matrix,
+                        gradients,
+                        root_row_indices,
+                        round_index,
+                        &feature_tiles,
+                        split_options,
+                        &self.params,
+                        &controls,
+                        &mut candidate_predictions,
+                        &self.params.feature_weights,
+                    )?
+                };
 
             if candidate_round_stumps.is_empty() {
                 stop_reason = round_rejection_reason;
@@ -3026,6 +2873,465 @@ fn target_variance(targets: &[f32], sample_weights: Option<&[f32]>) -> EngineRes
         squared_sum += centered * centered * weight;
     }
     Ok(squared_sum / weight_sum)
+}
+
+/// Build a single tree using level-wise (breadth-first) growth strategy.
+///
+/// Splits all nodes at depth d before moving to depth d+1.
+#[allow(clippy::too_many_arguments)]
+fn build_tree_level_wise<B: BackendOps>(
+    backend: &B,
+    binned_matrix: &BinnedMatrix,
+    gradients: &[GradientPair],
+    root_row_indices: Vec<u32>,
+    round_index: usize,
+    feature_tiles: &[FeatureTile],
+    split_options: SplitSelectionOptions,
+    params: &TrainParams,
+    controls: &IterationControls,
+    candidate_predictions: &mut [f32],
+    feature_weights: &[f32],
+) -> EngineResult<(Vec<TrainedStump>, IterationStopReason)> {
+    let mut candidate_round_stumps = Vec::new();
+    let mut round_rejection_reason = IterationStopReason::NoSplitCandidate;
+    let root_node_id = encode_tree_node_id(round_index, 0)?;
+    let root_node = NodeSlice::new(root_node_id, root_row_indices)?;
+    let root_histograms =
+        backend.build_histograms(binned_matrix, gradients, &root_node, feature_tiles)?;
+    // Maintain each active node's absolute leaf output so child updates
+    // can replace parent contribution via deltas (tree semantics).
+    let mut active_nodes = vec![(0_u32, root_node.row_indices, root_histograms, 0.0_f32)];
+
+    for depth in 0..(params.max_depth as usize) {
+        if active_nodes.is_empty() {
+            break;
+        }
+
+        let mut next_nodes = Vec::new();
+        for (local_node_id, node_rows, histograms, parent_leaf_value) in active_nodes {
+            let node_id = encode_tree_node_id(round_index, local_node_id)?;
+            let node = NodeSlice::new(node_id, node_rows)?;
+            let Some(mut split) =
+                backend.best_split_with_options(&histograms, split_options, feature_weights)?
+            else {
+                continue;
+            };
+            if !split.gain.is_finite() || split.gain <= controls.min_split_gain {
+                round_rejection_reason = IterationStopReason::GainBelowThreshold;
+                continue;
+            }
+
+            let (partition, left_stats, right_stats) =
+                backend.apply_split_with_stats(binned_matrix, gradients, &node, &split)?;
+            if partition.left_row_indices.len() + partition.right_row_indices.len()
+                != node.row_indices.len()
+            {
+                return Err(EngineError::ContractViolation(
+                    "split partition does not cover all node rows".to_string(),
+                ));
+            }
+            if partition.left_row_indices.is_empty()
+                || partition.right_row_indices.is_empty()
+                || partition.left_row_indices.len() < controls.min_rows_per_leaf
+                || partition.right_row_indices.len() < controls.min_rows_per_leaf
+            {
+                round_rejection_reason = IterationStopReason::LeafRowsBelowThreshold;
+                continue;
+            }
+
+            if left_stats.hess_sum <= 0.0 || right_stats.hess_sum <= 0.0 {
+                return Err(EngineError::ContractViolation(
+                    "backend produced non-positive hessian sums".to_string(),
+                ));
+            }
+
+            let left_grad =
+                l1_threshold_gradient(left_stats.grad_sum, split_options.l1_alpha);
+            let right_grad =
+                l1_threshold_gradient(right_stats.grad_sum, split_options.l1_alpha);
+            let raw_left_leaf_value = -params.learning_rate * left_grad
+                / (left_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
+            let raw_right_leaf_value = -params.learning_rate * right_grad
+                / (right_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
+
+            let left_leaf_absolute = raw_left_leaf_value
+                .clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value);
+            let right_leaf_absolute = raw_right_leaf_value
+                .clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value);
+            let left_leaf_value = left_leaf_absolute - parent_leaf_value;
+            let right_leaf_value = right_leaf_absolute - parent_leaf_value;
+            if left_leaf_value.abs() < controls.min_abs_leaf_value
+                && right_leaf_value.abs() < controls.min_abs_leaf_value
+            {
+                round_rejection_reason = IterationStopReason::LeafMagnitudeBelowThreshold;
+                continue;
+            }
+
+            // Monotone constraint enforcement.
+            if !params.monotone_constraints.is_empty() {
+                let fi = split.feature_index as usize;
+                if fi < params.monotone_constraints.len() {
+                    let constraint = params.monotone_constraints[fi];
+                    if constraint == 1 && left_leaf_absolute > right_leaf_absolute {
+                        round_rejection_reason =
+                            IterationStopReason::MonotoneConstraintViolation;
+                        continue;
+                    }
+                    if constraint == -1 && left_leaf_absolute < right_leaf_absolute {
+                        round_rejection_reason =
+                            IterationStopReason::MonotoneConstraintViolation;
+                        continue;
+                    }
+                }
+            }
+
+            // max_leaves enforcement.
+            if let Some(max_leaves) = controls.max_leaves {
+                let leaves_after_split = candidate_round_stumps.len() + 2;
+                if leaves_after_split > max_leaves {
+                    round_rejection_reason = IterationStopReason::MaxLeavesReached;
+                    continue;
+                }
+            }
+
+            apply_partition_leaf_updates(
+                candidate_predictions,
+                &partition,
+                left_leaf_value,
+                right_leaf_value,
+            )?;
+
+            split.left_stats = left_stats;
+            split.right_stats = right_stats;
+
+            let PartitionResult {
+                left_row_indices,
+                right_row_indices,
+            } = partition;
+            if depth + 1 < params.max_depth as usize {
+                let left_local_node_id = left_child_node_id(local_node_id)?;
+                let right_local_node_id = right_child_node_id(local_node_id)?;
+                let left_node_id = encode_tree_node_id(round_index, left_local_node_id)?;
+                let right_node_id = encode_tree_node_id(round_index, right_local_node_id)?;
+
+                if left_row_indices.len() <= right_row_indices.len() {
+                    let left_node = NodeSlice::new(left_node_id, left_row_indices)?;
+                    let left_histograms = backend.build_histograms(
+                        binned_matrix,
+                        gradients,
+                        &left_node,
+                        feature_tiles,
+                    )?;
+                    let right_histograms = subtract_histogram_bundle(
+                        &histograms,
+                        &left_histograms,
+                        right_node_id,
+                    )?;
+                    next_nodes.push((
+                        left_local_node_id,
+                        left_node.row_indices,
+                        left_histograms,
+                        left_leaf_absolute,
+                    ));
+                    next_nodes.push((
+                        right_local_node_id,
+                        right_row_indices,
+                        right_histograms,
+                        right_leaf_absolute,
+                    ));
+                } else {
+                    let right_node = NodeSlice::new(right_node_id, right_row_indices)?;
+                    let right_histograms = backend.build_histograms(
+                        binned_matrix,
+                        gradients,
+                        &right_node,
+                        feature_tiles,
+                    )?;
+                    let left_histograms = subtract_histogram_bundle(
+                        &histograms,
+                        &right_histograms,
+                        left_node_id,
+                    )?;
+                    next_nodes.push((
+                        left_local_node_id,
+                        left_row_indices,
+                        left_histograms,
+                        left_leaf_absolute,
+                    ));
+                    next_nodes.push((
+                        right_local_node_id,
+                        right_node.row_indices,
+                        right_histograms,
+                        right_leaf_absolute,
+                    ));
+                }
+            }
+
+            candidate_round_stumps.push(TrainedStump {
+                split,
+                left_leaf_value,
+                right_leaf_value,
+            });
+        }
+        active_nodes = next_nodes;
+    }
+
+    if candidate_round_stumps.is_empty() {
+        return Ok((Vec::new(), round_rejection_reason));
+    }
+
+    Ok((candidate_round_stumps, IterationStopReason::CompletedRequestedRounds))
+}
+
+/// A pending leaf split for the leaf-wise priority queue.
+/// Ordered by gain (highest gain = highest priority).
+struct PendingSplit {
+    local_node_id: u32,
+    row_indices: Vec<u32>,
+    split_candidate: SplitCandidate,
+    histograms: HistogramBundle,
+    parent_leaf_value: f32,
+    depth: usize,
+}
+
+impl PartialEq for PendingSplit {
+    fn eq(&self, other: &Self) -> bool {
+        self.split_candidate.gain == other.split_candidate.gain
+    }
+}
+
+impl Eq for PendingSplit {}
+
+impl PartialOrd for PendingSplit {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PendingSplit {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.split_candidate
+            .gain
+            .partial_cmp(&other.split_candidate.gain)
+            .unwrap_or(Ordering::Equal)
+    }
+}
+
+/// Build a single tree using leaf-wise (best-first) growth strategy.
+///
+/// Instead of splitting all nodes at depth d before moving to depth d+1,
+/// this always splits the leaf with the highest gain across the entire tree.
+/// Stops when `max_leaves` is reached or no valid splits remain.
+#[allow(clippy::too_many_arguments)]
+fn build_tree_leaf_wise<B: BackendOps>(
+    backend: &B,
+    binned_matrix: &BinnedMatrix,
+    gradients: &[GradientPair],
+    root_row_indices: Vec<u32>,
+    round_index: usize,
+    feature_tiles: &[FeatureTile],
+    split_options: SplitSelectionOptions,
+    params: &TrainParams,
+    controls: &IterationControls,
+    candidate_predictions: &mut [f32],
+    feature_weights: &[f32],
+) -> EngineResult<(Vec<TrainedStump>, IterationStopReason)> {
+    let max_leaves = controls.max_leaves.unwrap_or(usize::MAX);
+    let max_depth = params.max_depth as usize;
+
+    // Build root histograms and find best split.
+    let root_node_id = encode_tree_node_id(round_index, 0)?;
+    let root_node = NodeSlice::new(root_node_id, root_row_indices)?;
+    let root_histograms =
+        backend.build_histograms(binned_matrix, gradients, &root_node, feature_tiles)?;
+    let root_split = backend.best_split_with_options(&root_histograms, split_options, feature_weights)?;
+
+    let Some(root_split) = root_split else {
+        return Ok((Vec::new(), IterationStopReason::NoSplitCandidate));
+    };
+    if !root_split.gain.is_finite() || root_split.gain <= controls.min_split_gain {
+        return Ok((Vec::new(), IterationStopReason::GainBelowThreshold));
+    }
+
+    let mut queue = BinaryHeap::new();
+    queue.push(PendingSplit {
+        local_node_id: 0,
+        row_indices: root_node.row_indices,
+        split_candidate: root_split,
+        histograms: root_histograms,
+        parent_leaf_value: 0.0,
+        depth: 0,
+    });
+
+    // Start with 1 leaf (the root). Each split adds 1 net leaf (splits one into two).
+    let mut leaves_used = 1_usize;
+    let mut stumps = Vec::new();
+    let mut last_rejection = IterationStopReason::NoSplitCandidate;
+
+    while let Some(pending) = queue.pop() {
+        // Check max_leaves: splitting adds 1 net leaf.
+        if leaves_used + 1 > max_leaves {
+            last_rejection = IterationStopReason::MaxLeavesReached;
+            break;
+        }
+
+        // Check max_depth constraint.
+        if pending.depth >= max_depth {
+            last_rejection = IterationStopReason::DepthBudgetReached;
+            continue;
+        }
+
+        let local_node_id = pending.local_node_id;
+        let node_id = encode_tree_node_id(round_index, local_node_id)?;
+        let node = NodeSlice::new(node_id, pending.row_indices)?;
+        let split = pending.split_candidate;
+
+        // Apply the split: partition rows and get stats.
+        let (partition, left_stats, right_stats) =
+            backend.apply_split_with_stats(binned_matrix, gradients, &node, &split)?;
+
+        if partition.left_row_indices.len() + partition.right_row_indices.len()
+            != node.row_indices.len()
+        {
+            return Err(EngineError::ContractViolation(
+                "split partition does not cover all node rows".to_string(),
+            ));
+        }
+        if partition.left_row_indices.is_empty()
+            || partition.right_row_indices.is_empty()
+            || partition.left_row_indices.len() < controls.min_rows_per_leaf
+            || partition.right_row_indices.len() < controls.min_rows_per_leaf
+        {
+            last_rejection = IterationStopReason::LeafRowsBelowThreshold;
+            continue;
+        }
+
+        if left_stats.hess_sum <= 0.0 || right_stats.hess_sum <= 0.0 {
+            return Err(EngineError::ContractViolation(
+                "backend produced non-positive hessian sums".to_string(),
+            ));
+        }
+
+        // Compute leaf values.
+        let left_grad = l1_threshold_gradient(left_stats.grad_sum, split_options.l1_alpha);
+        let right_grad = l1_threshold_gradient(right_stats.grad_sum, split_options.l1_alpha);
+        let raw_left_leaf_value = -params.learning_rate * left_grad
+            / (left_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
+        let raw_right_leaf_value = -params.learning_rate * right_grad
+            / (right_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
+
+        let left_leaf_absolute = raw_left_leaf_value
+            .clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value);
+        let right_leaf_absolute = raw_right_leaf_value
+            .clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value);
+        let left_leaf_value = left_leaf_absolute - pending.parent_leaf_value;
+        let right_leaf_value = right_leaf_absolute - pending.parent_leaf_value;
+
+        if left_leaf_value.abs() < controls.min_abs_leaf_value
+            && right_leaf_value.abs() < controls.min_abs_leaf_value
+        {
+            last_rejection = IterationStopReason::LeafMagnitudeBelowThreshold;
+            continue;
+        }
+
+        // Monotone constraint enforcement.
+        if !params.monotone_constraints.is_empty() {
+            let fi = split.feature_index as usize;
+            if fi < params.monotone_constraints.len() {
+                let constraint = params.monotone_constraints[fi];
+                if constraint == 1 && left_leaf_absolute > right_leaf_absolute {
+                    last_rejection = IterationStopReason::MonotoneConstraintViolation;
+                    continue;
+                }
+                if constraint == -1 && left_leaf_absolute < right_leaf_absolute {
+                    last_rejection = IterationStopReason::MonotoneConstraintViolation;
+                    continue;
+                }
+            }
+        }
+
+        // Commit the split: update predictions and record stump.
+        apply_partition_leaf_updates(
+            candidate_predictions,
+            &partition,
+            left_leaf_value,
+            right_leaf_value,
+        )?;
+
+        let mut committed_split = split;
+        committed_split.left_stats = left_stats;
+        committed_split.right_stats = right_stats;
+
+        stumps.push(TrainedStump {
+            split: committed_split,
+            left_leaf_value,
+            right_leaf_value,
+        });
+        leaves_used += 1;
+
+        // Enqueue children if within depth budget.
+        let child_depth = pending.depth + 1;
+        if child_depth < max_depth {
+            let left_local = left_child_node_id(local_node_id)?;
+            let right_local = right_child_node_id(local_node_id)?;
+            let left_node_id = encode_tree_node_id(round_index, left_local)?;
+            let right_node_id = encode_tree_node_id(round_index, right_local)?;
+
+            // Subtraction trick: build smaller child, subtract from parent for larger.
+            let (smaller_indices, larger_indices, smaller_node_id, larger_node_id, smaller_local, larger_local, smaller_leaf_abs, larger_leaf_abs) =
+                if partition.left_row_indices.len() <= partition.right_row_indices.len() {
+                    (partition.left_row_indices, partition.right_row_indices, left_node_id, right_node_id, left_local, right_local, left_leaf_absolute, right_leaf_absolute)
+                } else {
+                    (partition.right_row_indices, partition.left_row_indices, right_node_id, left_node_id, right_local, left_local, right_leaf_absolute, left_leaf_absolute)
+                };
+
+            let smaller_node = NodeSlice::new(smaller_node_id, smaller_indices)?;
+            let smaller_histograms =
+                backend.build_histograms(binned_matrix, gradients, &smaller_node, feature_tiles)?;
+            let larger_histograms = subtract_histogram_bundle(
+                &pending.histograms,
+                &smaller_histograms,
+                larger_node_id,
+            )?;
+
+            // Find best split for each child and enqueue if valid.
+            if let Some(child_split) =
+                backend.best_split_with_options(&smaller_histograms, split_options, feature_weights)?
+            {
+                if child_split.gain.is_finite() && child_split.gain > controls.min_split_gain {
+                    queue.push(PendingSplit {
+                        local_node_id: smaller_local,
+                        row_indices: smaller_node.row_indices,
+                        split_candidate: child_split,
+                        histograms: smaller_histograms,
+                        parent_leaf_value: smaller_leaf_abs,
+                        depth: child_depth,
+                    });
+                }
+            }
+
+            if let Some(child_split) =
+                backend.best_split_with_options(&larger_histograms, split_options, feature_weights)?
+            {
+                if child_split.gain.is_finite() && child_split.gain > controls.min_split_gain {
+                    queue.push(PendingSplit {
+                        local_node_id: larger_local,
+                        row_indices: larger_indices,
+                        split_candidate: child_split,
+                        histograms: larger_histograms,
+                        parent_leaf_value: larger_leaf_abs,
+                        depth: child_depth,
+                    });
+                }
+            }
+        }
+    }
+
+    if stumps.is_empty() {
+        return Ok((Vec::new(), last_rejection));
+    }
+
+    Ok((stumps, IterationStopReason::CompletedRequestedRounds))
 }
 
 fn subtract_histogram_bundle(
