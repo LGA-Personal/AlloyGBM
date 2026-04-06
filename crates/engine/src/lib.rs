@@ -3334,11 +3334,16 @@ fn build_tree_leaf_wise<B: BackendOps>(
     Ok((stumps, IterationStopReason::CompletedRequestedRounds))
 }
 
-fn subtract_histogram_bundle(
+/// Subtract child histogram from parent, writing into an existing buffer.
+///
+/// This avoids allocating a new `HistogramBundle` by reusing `dest`.
+/// `dest` must have the same feature count and bin counts as `parent`.
+fn subtract_histogram_bundle_into(
     parent: &HistogramBundle,
     child: &HistogramBundle,
     node_id: u32,
-) -> EngineResult<HistogramBundle> {
+    dest: &mut HistogramBundle,
+) -> EngineResult<()> {
     if parent.feature_histograms.len() != child.feature_histograms.len() {
         return Err(EngineError::ContractViolation(format!(
             "parent histogram feature count {} does not match child histogram feature count {}",
@@ -3346,53 +3351,46 @@ fn subtract_histogram_bundle(
             child.feature_histograms.len()
         )));
     }
-
-    let mut feature_histograms = Vec::with_capacity(parent.feature_histograms.len());
-    for (parent_feature, child_feature) in parent
+    dest.node_id = node_id;
+    for ((dest_fh, parent_fh), child_fh) in dest
         .feature_histograms
-        .iter()
+        .iter_mut()
+        .zip(&parent.feature_histograms)
         .zip(&child.feature_histograms)
     {
-        if parent_feature.feature_index != child_feature.feature_index {
-            return Err(EngineError::ContractViolation(format!(
-                "feature histogram mismatch between parent feature {} and child feature {}",
-                parent_feature.feature_index, child_feature.feature_index
-            )));
+        dest_fh.feature_index = parent_fh.feature_index;
+        for ((dest_bin, parent_bin), child_bin) in dest_fh
+            .bins
+            .iter_mut()
+            .zip(&parent_fh.bins)
+            .zip(&child_fh.bins)
+        {
+            dest_bin.grad_sum = parent_bin.grad_sum - child_bin.grad_sum;
+            dest_bin.hess_sum = parent_bin.hess_sum - child_bin.hess_sum;
+            dest_bin.count = parent_bin.count - child_bin.count;
         }
-        if parent_feature.bins.len() != child_feature.bins.len() {
-            return Err(EngineError::ContractViolation(format!(
-                "feature {} bin count mismatch between parent {} and child {}",
-                parent_feature.feature_index,
-                parent_feature.bins.len(),
-                child_feature.bins.len()
-            )));
-        }
-
-        let mut bins = Vec::with_capacity(parent_feature.bins.len());
-        for (parent_bin, child_bin) in parent_feature.bins.iter().zip(&child_feature.bins) {
-            if child_bin.count > parent_bin.count {
-                return Err(EngineError::ContractViolation(format!(
-                    "child histogram count {} exceeds parent count {} for feature {}",
-                    child_bin.count, parent_bin.count, parent_feature.feature_index
-                )));
-            }
-            bins.push(alloygbm_core::HistogramBin {
-                grad_sum: parent_bin.grad_sum - child_bin.grad_sum,
-                hess_sum: parent_bin.hess_sum - child_bin.hess_sum,
-                count: parent_bin.count - child_bin.count,
-            });
-        }
-
-        feature_histograms.push(alloygbm_core::FeatureHistogram {
-            feature_index: parent_feature.feature_index,
-            bins,
-        });
     }
+    Ok(())
+}
 
-    Ok(HistogramBundle {
-        node_id,
-        feature_histograms,
-    })
+fn subtract_histogram_bundle(
+    parent: &HistogramBundle,
+    child: &HistogramBundle,
+    node_id: u32,
+) -> EngineResult<HistogramBundle> {
+    // Pre-allocate a dest with the same structure, then delegate to the in-place variant.
+    let feature_indices: Vec<u32> = parent
+        .feature_histograms
+        .iter()
+        .map(|fh| fh.feature_index)
+        .collect();
+    let bin_count = parent
+        .feature_histograms
+        .first()
+        .map_or(0, |fh| fh.bins.len());
+    let mut dest = HistogramBundle::new_zeroed(&feature_indices, bin_count);
+    subtract_histogram_bundle_into(parent, child, node_id, &mut dest)?;
+    Ok(dest)
 }
 
 fn validate_iteration_controls(controls: IterationControls) -> EngineResult<()> {
@@ -5814,6 +5812,104 @@ mod tests {
         assert!((complement.feature_histograms[0].bins[1].grad_sum + 0.75).abs() < 1e-6);
         assert!((complement.feature_histograms[1].bins[0].hess_sum - 1.5).abs() < 1e-6);
         assert!((complement.feature_histograms[1].bins[1].hess_sum - 0.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn subtract_histogram_bundle_into_matches_allocating_variant() {
+        let parent = HistogramBundle {
+            node_id: 7,
+            feature_histograms: vec![
+                alloygbm_core::FeatureHistogram {
+                    feature_index: 0,
+                    bins: vec![
+                        alloygbm_core::HistogramBin {
+                            grad_sum: 3.0,
+                            hess_sum: 5.0,
+                            count: 4,
+                        },
+                        alloygbm_core::HistogramBin {
+                            grad_sum: -1.0,
+                            hess_sum: 2.0,
+                            count: 2,
+                        },
+                    ],
+                },
+            ],
+        };
+        let child = HistogramBundle {
+            node_id: 15,
+            feature_histograms: vec![
+                alloygbm_core::FeatureHistogram {
+                    feature_index: 0,
+                    bins: vec![
+                        alloygbm_core::HistogramBin {
+                            grad_sum: 2.0,
+                            hess_sum: 3.0,
+                            count: 2,
+                        },
+                        alloygbm_core::HistogramBin {
+                            grad_sum: -0.25,
+                            hess_sum: 0.5,
+                            count: 1,
+                        },
+                    ],
+                },
+            ],
+        };
+
+        // Allocating variant
+        let allocated =
+            subtract_histogram_bundle(&parent, &child, 16).expect("subtraction should succeed");
+
+        // In-place variant
+        let mut dest = HistogramBundle::new_zeroed(&[0], 2);
+        subtract_histogram_bundle_into(&parent, &child, 16, &mut dest)
+            .expect("in-place subtraction should succeed");
+
+        assert_eq!(allocated.node_id, dest.node_id);
+        assert_eq!(allocated.feature_histograms.len(), dest.feature_histograms.len());
+        for (a, d) in allocated.feature_histograms.iter().zip(&dest.feature_histograms) {
+            assert_eq!(a.feature_index, d.feature_index);
+            for (ab, db) in a.bins.iter().zip(&d.bins) {
+                assert!((ab.grad_sum - db.grad_sum).abs() < 1e-6);
+                assert!((ab.hess_sum - db.hess_sum).abs() < 1e-6);
+                assert_eq!(ab.count, db.count);
+            }
+        }
+    }
+
+    #[test]
+    fn histogram_bundle_reset_zeros_all_bins() {
+        let mut bundle = HistogramBundle::new_zeroed(&[0, 1], 3);
+        // Set some values
+        bundle.feature_histograms[0].bins[0].grad_sum = 5.0;
+        bundle.feature_histograms[0].bins[0].hess_sum = 3.0;
+        bundle.feature_histograms[0].bins[0].count = 10;
+        bundle.feature_histograms[1].bins[2].grad_sum = -2.5;
+        bundle.feature_histograms[1].bins[2].count = 7;
+
+        bundle.reset(42);
+        assert_eq!(bundle.node_id, 42);
+        for fh in &bundle.feature_histograms {
+            for bin in &fh.bins {
+                assert_eq!(bin.grad_sum, 0.0);
+                assert_eq!(bin.hess_sum, 0.0);
+                assert_eq!(bin.count, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn histogram_bundle_new_zeroed_creates_correct_structure() {
+        let features = [0, 3, 7];
+        let bundle = HistogramBundle::new_zeroed(&features, 5);
+        assert_eq!(bundle.feature_histograms.len(), 3);
+        assert_eq!(bundle.feature_histograms[0].feature_index, 0);
+        assert_eq!(bundle.feature_histograms[1].feature_index, 3);
+        assert_eq!(bundle.feature_histograms[2].feature_index, 7);
+        for fh in &bundle.feature_histograms {
+            assert_eq!(fh.bins.len(), 5);
+        }
     }
 
     #[test]

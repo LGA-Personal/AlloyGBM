@@ -539,6 +539,46 @@ pub struct HistogramBundle {
     pub feature_histograms: Vec<FeatureHistogram>,
 }
 
+impl HistogramBundle {
+    /// Zero all bin values in-place without deallocating.
+    ///
+    /// This resets gradient sums, hessian sums, and counts to zero for every
+    /// bin in every feature histogram, allowing the bundle to be reused for a
+    /// new node without re-allocating.
+    pub fn reset(&mut self, node_id: u32) {
+        self.node_id = node_id;
+        for fh in &mut self.feature_histograms {
+            for bin in &mut fh.bins {
+                bin.grad_sum = 0.0;
+                bin.hess_sum = 0.0;
+                bin.count = 0;
+            }
+        }
+    }
+
+    /// Create a pre-allocated, zeroed histogram bundle for the given features and bin count.
+    pub fn new_zeroed(feature_indices: &[u32], bin_count: usize) -> Self {
+        let feature_histograms = feature_indices
+            .iter()
+            .map(|&fi| FeatureHistogram {
+                feature_index: fi,
+                bins: vec![
+                    HistogramBin {
+                        grad_sum: 0.0,
+                        hess_sum: 0.0,
+                        count: 0,
+                    };
+                    bin_count
+                ],
+            })
+            .collect();
+        Self {
+            node_id: 0,
+            feature_histograms,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SplitCandidate {
     pub node_id: u32,
