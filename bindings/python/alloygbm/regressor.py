@@ -230,6 +230,7 @@ class GBMRegressor(_GBMRegressorBase):
         continuous_binning_strategy: str = "linear",
         continuous_binning_max_bins: int = 256,
         categorical_feature_index: int | None = None,
+        categorical_feature_indices: list[int] | None = None,
         training_policy: str = "auto",
         store_node_stats: bool = False,
         categorical_smoothing: float = 20.0,
@@ -266,6 +267,24 @@ class GBMRegressor(_GBMRegressorBase):
             raise ValueError("min_split_gain must be a finite value >= 0")
         if categorical_feature_index is not None and int(categorical_feature_index) < 0:
             raise ValueError("categorical_feature_index must be >= 0 when set")
+        if categorical_feature_indices is not None:
+            if not isinstance(categorical_feature_indices, (list, tuple)):
+                raise TypeError("categorical_feature_indices must be a list of ints")
+            for idx in categorical_feature_indices:
+                if int(idx) < 0:
+                    raise ValueError(
+                        "all values in categorical_feature_indices must be >= 0"
+                    )
+            if len(set(int(i) for i in categorical_feature_indices)) != len(
+                categorical_feature_indices
+            ):
+                raise ValueError(
+                    "categorical_feature_indices must not contain duplicates"
+                )
+        if categorical_feature_index is not None and categorical_feature_indices is not None:
+            raise ValueError(
+                "categorical_feature_index and categorical_feature_indices are mutually exclusive; use categorical_feature_indices for multiple columns"
+            )
         if categorical_smoothing < 0.0:
             raise ValueError("categorical_smoothing must be >= 0")
         if int(categorical_min_samples_leaf) <= 0:
@@ -351,6 +370,11 @@ class GBMRegressor(_GBMRegressorBase):
             if categorical_feature_index is not None
             else None
         )
+        self.categorical_feature_indices = (
+            [int(i) for i in categorical_feature_indices]
+            if categorical_feature_indices is not None
+            else None
+        )
         self.training_policy = str(training_policy)
         self.store_node_stats = bool(store_node_stats)
         self.categorical_smoothing = float(categorical_smoothing)
@@ -402,6 +426,7 @@ class GBMRegressor(_GBMRegressorBase):
             f"continuous_binning_strategy='{self.continuous_binning_strategy}', "
             f"continuous_binning_max_bins={self.continuous_binning_max_bins}, "
             f"categorical_feature_index={self.categorical_feature_index}, "
+            f"categorical_feature_indices={self.categorical_feature_indices}, "
             f"training_policy='{self.training_policy}', "
             f"store_node_stats={self.store_node_stats}, "
             f"categorical_smoothing={self.categorical_smoothing}, "
@@ -435,6 +460,7 @@ class GBMRegressor(_GBMRegressorBase):
             "continuous_binning_strategy": self.continuous_binning_strategy,
             "continuous_binning_max_bins": self.continuous_binning_max_bins,
             "categorical_feature_index": self.categorical_feature_index,
+            "categorical_feature_indices": self.categorical_feature_indices,
             "training_policy": self.training_policy,
             "store_node_stats": self.store_node_stats,
             "categorical_smoothing": self.categorical_smoothing,
@@ -466,6 +492,7 @@ class GBMRegressor(_GBMRegressorBase):
             "continuous_binning_strategy",
             "continuous_binning_max_bins",
             "categorical_feature_index",
+            "categorical_feature_indices",
             "training_policy",
             "store_node_stats",
             "categorical_smoothing",
@@ -597,6 +624,31 @@ class GBMRegressor(_GBMRegressorBase):
                 if categorical_feature_index < 0:
                     raise ValueError("categorical_feature_index must be >= 0 when set")
                 self.categorical_feature_index = categorical_feature_index
+
+        if "categorical_feature_indices" in params:
+            if params["categorical_feature_indices"] is None:
+                self.categorical_feature_indices = None
+            else:
+                indices = params["categorical_feature_indices"]
+                if not isinstance(indices, (list, tuple)):
+                    raise TypeError("categorical_feature_indices must be a list of ints")
+                int_indices = [int(i) for i in indices]
+                for idx in int_indices:
+                    if idx < 0:
+                        raise ValueError(
+                            "all values in categorical_feature_indices must be >= 0"
+                        )
+                if len(set(int_indices)) != len(int_indices):
+                    raise ValueError(
+                        "categorical_feature_indices must not contain duplicates"
+                    )
+                self.categorical_feature_indices = int_indices
+
+        # Mutual exclusion check after both may have been set
+        if self.categorical_feature_index is not None and self.categorical_feature_indices is not None:
+            raise ValueError(
+                "categorical_feature_index and categorical_feature_indices are mutually exclusive; use categorical_feature_indices for multiple columns"
+            )
 
         if "training_policy" in params:
             training_policy = str(params["training_policy"])
@@ -742,6 +794,7 @@ class GBMRegressor(_GBMRegressorBase):
         eval_group: object | None = None,
         eval_time_index: object | None = None,
         categorical_feature_values: object | None = None,
+        categorical_feature_values_list: object | None = None,
         time_index: object | None = None,
     ) -> "GBMRegressor":
         """Fit native-backed regression model artifact state."""
@@ -752,28 +805,65 @@ class GBMRegressor(_GBMRegressorBase):
             raise ValueError("early_stopping_rounds requires eval_set to be provided")
         if eval_time_index is not None and eval_set is None:
             raise ValueError("eval_time_index requires eval_set to be provided")
-
-        effective_categorical_feature_index = self.categorical_feature_index
-        categorical_values = None
-        if categorical_feature_values is not None:
-            categorical_values = self._validate_categorical_values(
-                categorical_feature_values,
-                len(targets),
+        if categorical_feature_values is not None and categorical_feature_values_list is not None:
+            raise ValueError(
+                "categorical_feature_values and categorical_feature_values_list are "
+                "mutually exclusive"
             )
-        elif effective_categorical_feature_index is None:
-            inferred = self._infer_explicit_categorical_feature(X)
+
+        # ── Normalize categorical configuration to plural form ──────────
+        # effective_categorical_indices: list of column indices (or None if no categoricals)
+        # categorical_values_list: list of per-column string values (or None)
+        effective_categorical_indices: list[int] | None = None
+        categorical_values_list: list[list[str]] | None = None
+
+        if self.categorical_feature_indices is not None:
+            effective_categorical_indices = list(self.categorical_feature_indices)
+        elif self.categorical_feature_index is not None:
+            effective_categorical_indices = [self.categorical_feature_index]
+
+        if categorical_feature_values_list is not None:
+            categorical_values_list = self._validate_categorical_values_list(
+                categorical_feature_values_list, len(targets)
+            )
+        elif categorical_feature_values is not None:
+            categorical_values_list = [
+                self._validate_categorical_values(
+                    categorical_feature_values, len(targets)
+                )
+            ]
+        elif effective_categorical_indices is None:
+            # Auto-infer from DataFrame dtypes
+            inferred = self._infer_explicit_categorical_features(X)
             if inferred is not None:
-                effective_categorical_feature_index, categorical_values = inferred
+                effective_categorical_indices, categorical_values_list = inferred
+
+        has_categorical = (
+            effective_categorical_indices is not None
+            and len(effective_categorical_indices) > 0
+        )
+
+        # Backward-compat aliases used by some downstream code paths
+        effective_categorical_feature_index: int | None = (
+            effective_categorical_indices[0]
+            if has_categorical and len(effective_categorical_indices) == 1
+            else None
+        )
+        categorical_values: list[str] | None = (
+            categorical_values_list[0]
+            if categorical_values_list is not None and len(categorical_values_list) == 1
+            else None
+        )
 
         # Prefer bytes payload (zero-copy numpy→Rust) over list[float] payload
         dense_training_bytes_payload = (
             self._native_matrix_bytes_payload(X)
-            if effective_categorical_feature_index is None
+            if not has_categorical
             else None
         )
         dense_training_payload = (
             self._native_matrix_flat_payload(X)
-            if effective_categorical_feature_index is None and dense_training_bytes_payload is None
+            if not has_categorical and dense_training_bytes_payload is None
             else None
         )
         training_rows: list[list[float]] | None = None
@@ -783,7 +873,7 @@ class GBMRegressor(_GBMRegressorBase):
             _, row_count, feature_count = dense_training_payload
         else:
             training_rows = self._validate_rows(
-                X, categorical_feature_index=effective_categorical_feature_index
+                X, categorical_feature_indices=effective_categorical_indices
             )
             row_count = len(training_rows)
             feature_count = len(training_rows[0])
@@ -816,21 +906,30 @@ class GBMRegressor(_GBMRegressorBase):
         else:
             self.feature_names_in_ = None
 
+        if has_categorical:
+            assert effective_categorical_indices is not None
+            for idx in effective_categorical_indices:
+                if idx >= feature_count:
+                    raise ValueError(
+                        f"categorical feature index {idx} must be within fitted feature bounds (feature_count={feature_count})"
+                    )
+
+        if not has_categorical and categorical_values_list is not None:
+            raise ValueError(
+                "categorical_feature_values requires categorical_feature_index or categorical_feature_indices to be set"
+            )
+        if has_categorical and categorical_values_list is None:
+            raise ValueError(
+                "categorical_feature_values must be provided when categorical feature indices are set"
+            )
         if (
-            effective_categorical_feature_index is not None
-            and effective_categorical_feature_index >= feature_count
+            has_categorical
+            and categorical_values_list is not None
+            and len(categorical_values_list) != len(effective_categorical_indices)  # type: ignore[arg-type]
         ):
             raise ValueError(
-                "categorical_feature_index must be within fitted feature bounds"
-            )
-
-        if effective_categorical_feature_index is None and categorical_values is not None:
-            raise ValueError(
-                "categorical_feature_values requires categorical_feature_index to be set"
-            )
-        if effective_categorical_feature_index is not None and categorical_values is None:
-            raise ValueError(
-                "categorical_feature_values must be provided when categorical_feature_index is set"
+                f"categorical_feature_values_list length ({len(categorical_values_list)}) "
+                f"does not match categorical_feature_indices length ({len(effective_categorical_indices)})"  # type: ignore[arg-type]
             )
 
         validated_time_index = (
@@ -843,6 +942,7 @@ class GBMRegressor(_GBMRegressorBase):
         validation_dense_bytes_payload: tuple[bytes, int, int] | None = None
         validation_rows: list[list[float]] | None = None
         validation_categorical_values: list[str] | None = None
+        validation_categorical_values_list: list[list[str]] | None = None
         validated_eval_time_index: list[int] | None = None
         validated_eval_sample_weights: list[float] | None = None
         validated_eval_group_id: list[int] | None = None
@@ -851,12 +951,12 @@ class GBMRegressor(_GBMRegressorBase):
             validation_targets = self._validate_targets(validation_y)
             validation_dense_bytes_payload = (
                 self._native_matrix_bytes_payload(validation_X)
-                if effective_categorical_feature_index is None
+                if not has_categorical
                 else None
             )
             validation_dense_payload = (
                 self._native_matrix_flat_payload(validation_X)
-                if effective_categorical_feature_index is None and validation_dense_bytes_payload is None
+                if not has_categorical and validation_dense_bytes_payload is None
                 else None
             )
             if validation_dense_bytes_payload is not None:
@@ -866,7 +966,7 @@ class GBMRegressor(_GBMRegressorBase):
             else:
                 validation_rows = self._validate_rows(
                     validation_X,
-                    categorical_feature_index=effective_categorical_feature_index,
+                    categorical_feature_indices=effective_categorical_indices,
                 )
                 validation_row_count = len(validation_rows)
                 validation_feature_count = len(validation_rows[0])
@@ -880,12 +980,17 @@ class GBMRegressor(_GBMRegressorBase):
                 validated_eval_time_index = self._validate_time_index(
                     eval_time_index, validation_row_count
                 )
-            if effective_categorical_feature_index is not None:
-                validation_categorical_values = self._extract_categorical_values_for_index(
-                    validation_X,
-                    effective_categorical_feature_index,
-                    validation_row_count,
+            if has_categorical:
+                validation_categorical_values_list = (
+                    self._extract_categorical_values_for_indices(
+                        validation_X,
+                        effective_categorical_indices,  # type: ignore[arg-type]
+                        validation_row_count,
+                    )
                 )
+                # Keep backward-compat alias for singular case
+                if len(effective_categorical_indices) == 1:  # type: ignore[arg-type]
+                    validation_categorical_values = validation_categorical_values_list[0]
             if eval_sample_weight is not None:
                 validated_eval_sample_weights = self._validate_sample_weight(
                     eval_sample_weight, validation_row_count
@@ -896,15 +1001,15 @@ class GBMRegressor(_GBMRegressorBase):
                 )
 
         if (
-            effective_categorical_feature_index is not None
+            has_categorical
             and self.categorical_time_aware
             and validated_time_index is None
         ):
             raise ValueError(
-                "time_index must be provided when categorical_time_aware=True and categorical_feature_index is set"
+                "time_index must be provided when categorical_time_aware=True and categorical features are set"
             )
         if (
-            effective_categorical_feature_index is not None
+            has_categorical
             and self.categorical_time_aware
             and eval_set is not None
             and validated_eval_time_index is None
@@ -978,6 +1083,9 @@ class GBMRegressor(_GBMRegressorBase):
                     feature_weights=self._resolve_feature_weights(feature_count),
                     max_leaves=self.max_leaves,
                     tree_growth=self.tree_growth,
+                    categorical_feature_indices=effective_categorical_indices if has_categorical else None,
+                    categorical_feature_values_list=categorical_values_list if has_categorical else None,
+                    validation_categorical_feature_values_list=validation_categorical_values_list if has_categorical else None,
                 )
                 return self._finalize_training_result(native_result, input_adaptation_seconds, feature_count=feature_count)
             except (ImportError, AttributeError):
@@ -1060,6 +1168,9 @@ class GBMRegressor(_GBMRegressorBase):
                 feature_weights=self._resolve_feature_weights(feature_count),
                 max_leaves=self.max_leaves,
                 tree_growth=self.tree_growth,
+                categorical_feature_indices=effective_categorical_indices if has_categorical else None,
+                categorical_feature_values_list=categorical_values_list if has_categorical else None,
+                validation_categorical_feature_values_list=validation_categorical_values_list if has_categorical else None,
             )
         else:
             assert training_rows is not None
@@ -1103,6 +1214,9 @@ class GBMRegressor(_GBMRegressorBase):
                 feature_weights=self._resolve_feature_weights(feature_count),
                 max_leaves=self.max_leaves,
                 tree_growth=self.tree_growth,
+                categorical_feature_indices=effective_categorical_indices if has_categorical else None,
+                categorical_feature_values_list=categorical_values_list if has_categorical else None,
+                validation_categorical_feature_values_list=validation_categorical_values_list if has_categorical else None,
             )
 
         self._apply_continuous_binning_metadata(native_result.continuous_binning_metadata)
@@ -1837,13 +1951,23 @@ class GBMRegressor(_GBMRegressorBase):
 
     @staticmethod
     def _validate_rows(
-        X: object, *, categorical_feature_index: int | None = None
+        X: object,
+        *,
+        categorical_feature_index: int | None = None,
+        categorical_feature_indices: list[int] | None = None,
     ) -> list[list[float]]:
         rows_like = GBMRegressor._coerce_sequence_like(X, "X")
         if not isinstance(rows_like, Sequence) or isinstance(rows_like, (str, bytes)):
             raise TypeError("X must be a sequence of feature rows")
         if len(rows_like) == 0:
             raise ValueError("X must contain at least one row")
+
+        # Build a set of all categorical column indices for fast lookup
+        cat_indices_set: set[int] = set()
+        if categorical_feature_indices is not None:
+            cat_indices_set.update(categorical_feature_indices)
+        elif categorical_feature_index is not None:
+            cat_indices_set.add(categorical_feature_index)
 
         normalized: list[list[float]] = []
         expected_width: int | None = None
@@ -1854,10 +1978,7 @@ class GBMRegressor(_GBMRegressorBase):
                 raise ValueError("each X row must contain at least one feature value")
             row_values: list[float] = []
             for feature_index, value in enumerate(row):
-                if (
-                    categorical_feature_index is not None
-                    and feature_index == categorical_feature_index
-                ):
+                if feature_index in cat_indices_set:
                     try:
                         row_values.append(float(value))
                     except (TypeError, ValueError):
@@ -2297,6 +2418,30 @@ class GBMRegressor(_GBMRegressorBase):
     def _infer_explicit_categorical_feature(
         X: object,
     ) -> tuple[int, list[str]] | None:
+        """Infer a single categorical column from X (backward-compat).
+
+        Raises ValueError if multiple categorical columns are found.
+        """
+        result = GBMRegressor._infer_explicit_categorical_features(X)
+        if result is None:
+            return None
+        indices, values_list = result
+        if len(indices) > 1:
+            raise ValueError(
+                "X contains multiple explicit categorical columns; set categorical_feature_index explicitly"
+            )
+        return indices[0], values_list[0]
+
+    @staticmethod
+    def _infer_explicit_categorical_features(
+        X: object,
+    ) -> tuple[list[int], list[list[str]]] | None:
+        """Infer all categorical columns from a DataFrame-like X.
+
+        Returns (indices, values_lists) where each element in values_lists
+        is the string values for the corresponding categorical column.
+        Returns None if no categorical columns are detected.
+        """
         if not hasattr(X, "dtypes") or not hasattr(X, "columns"):
             return None
         dtypes = GBMRegressor._coerce_sequence_like(getattr(X, "dtypes"), "X.dtypes")
@@ -2312,15 +2457,13 @@ class GBMRegressor(_GBMRegressorBase):
         ]
         if not categorical_indices:
             return None
-        if len(categorical_indices) > 1:
-            raise ValueError(
-                "X contains multiple explicit categorical columns; set categorical_feature_index explicitly"
+        values_list: list[list[str]] = []
+        for idx in categorical_indices:
+            column_values = GBMRegressor._extract_column_values(
+                X, columns[idx], idx
             )
-        categorical_index = categorical_indices[0]
-        column_values = GBMRegressor._extract_column_values(
-            X, columns[categorical_index], categorical_index
-        )
-        return categorical_index, column_values
+            values_list.append(column_values)
+        return categorical_indices, values_list
 
     @staticmethod
     def _check_pre_binned_integers(flat_values: Sequence[float]) -> bool:
@@ -2895,6 +3038,36 @@ class GBMRegressor(_GBMRegressorBase):
                 "categorical_feature_values must have the same number of rows as X"
             )
         return [str(value) for value in values_like]
+
+    @staticmethod
+    def _validate_categorical_values_list(
+        categorical_feature_values_list: object, row_count: int
+    ) -> list[list[str]]:
+        """Validate a list of per-column categorical value sequences."""
+        outer = GBMRegressor._coerce_sequence_like(
+            categorical_feature_values_list, "categorical_feature_values_list"
+        )
+        if not isinstance(outer, Sequence) or isinstance(outer, (str, bytes)):
+            raise TypeError(
+                "categorical_feature_values_list must be a sequence of value sequences"
+            )
+        result: list[list[str]] = []
+        for i, inner in enumerate(outer):
+            validated = GBMRegressor._validate_categorical_values(inner, row_count)
+            result.append(validated)
+        return result
+
+    @staticmethod
+    def _extract_categorical_values_for_indices(
+        X: object, categorical_feature_indices: list[int], row_count: int
+    ) -> list[list[str]]:
+        """Extract categorical string values for multiple feature indices."""
+        return [
+            GBMRegressor._extract_categorical_values_for_index(
+                X, idx, row_count
+            )
+            for idx in categorical_feature_indices
+        ]
 
     @staticmethod
     def _validate_time_index(time_index: object, row_count: int) -> list[int]:

@@ -1454,6 +1454,121 @@ fn resolve_categorical_spec(
     }
 }
 
+/// Resolve categorical specs, preferring plural form over singular.
+///
+/// When plural params (`categorical_feature_indices` / `categorical_feature_values_list`)
+/// are provided, they take precedence. Otherwise, the singular params are converted to
+/// a one-element Vec for backward compatibility.
+fn resolve_categorical_specs_from_params(
+    // singular (backward-compat)
+    categorical_feature_index: Option<usize>,
+    categorical_feature_values: Option<Vec<String>>,
+    // plural (preferred)
+    categorical_feature_indices: Option<Vec<usize>>,
+    categorical_feature_values_list: Option<Vec<Vec<String>>>,
+    // validation
+    validation_categorical_feature_values: Option<Vec<String>>,
+    validation_categorical_feature_values_list: Option<Vec<Vec<String>>>,
+    // config
+    categorical_smoothing: f64,
+    categorical_min_samples_leaf: u32,
+    categorical_time_aware: bool,
+    row_count: usize,
+) -> Result<(Vec<CategoricalTargetEncodingSpec>, Vec<Vec<String>>), EngineError> {
+    // Plural form takes precedence
+    if categorical_feature_indices.is_some() || categorical_feature_values_list.is_some() {
+        let specs = resolve_categorical_specs(
+            categorical_feature_indices,
+            categorical_feature_values_list,
+            categorical_smoothing,
+            categorical_min_samples_leaf,
+            categorical_time_aware,
+            row_count,
+        )?;
+        let val_list = validation_categorical_feature_values_list.unwrap_or_default();
+        return Ok((specs, val_list));
+    }
+    // Fall back to singular form
+    let spec = resolve_categorical_spec(
+        categorical_feature_index,
+        categorical_feature_values,
+        categorical_smoothing,
+        categorical_min_samples_leaf,
+        categorical_time_aware,
+        row_count,
+    )?;
+    let val_list = validation_categorical_feature_values
+        .map(|v| vec![v])
+        .unwrap_or_default();
+    Ok((spec.into_iter().collect(), val_list))
+}
+
+/// Resolve multiple categorical feature specs from parallel vectors.
+///
+/// `categorical_feature_indices` and `categorical_feature_values_list` must be
+/// provided together or both be `None`. Each entry in `values_list` corresponds
+/// to the feature index at the same position in `indices`.
+fn resolve_categorical_specs(
+    categorical_feature_indices: Option<Vec<usize>>,
+    categorical_feature_values_list: Option<Vec<Vec<String>>>,
+    categorical_smoothing: f64,
+    categorical_min_samples_leaf: u32,
+    categorical_time_aware: bool,
+    row_count: usize,
+) -> Result<Vec<CategoricalTargetEncodingSpec>, EngineError> {
+    match (categorical_feature_indices, categorical_feature_values_list) {
+        (None, None) => Ok(Vec::new()),
+        (Some(_), None) => Err(EngineError::ContractViolation(
+            "categorical_feature_values_list must be provided when categorical_feature_indices is set"
+                .to_string(),
+        )),
+        (None, Some(_)) => Err(EngineError::ContractViolation(
+            "categorical_feature_indices must be provided when categorical_feature_values_list is set"
+                .to_string(),
+        )),
+        (Some(indices), Some(values_list)) => {
+            if indices.len() != values_list.len() {
+                return Err(EngineError::ContractViolation(format!(
+                    "categorical_feature_indices length {} does not match categorical_feature_values_list length {}",
+                    indices.len(),
+                    values_list.len()
+                )));
+            }
+            // Validate uniqueness
+            let mut seen = std::collections::HashSet::new();
+            for &idx in &indices {
+                if !seen.insert(idx) {
+                    return Err(EngineError::ContractViolation(format!(
+                        "duplicate categorical_feature_index: {idx}"
+                    )));
+                }
+            }
+            let config = TargetEncoderConfig {
+                smoothing: categorical_smoothing,
+                min_samples_leaf: categorical_min_samples_leaf,
+                time_aware: categorical_time_aware,
+            };
+            let mut specs = Vec::with_capacity(indices.len());
+            for (feature_index, values) in indices.into_iter().zip(values_list) {
+                if values.len() != row_count {
+                    return Err(EngineError::ContractViolation(format!(
+                        "categorical_feature_values for feature {feature_index} has length {} but row_count is {row_count}",
+                        values.len()
+                    )));
+                }
+                specs.push(CategoricalTargetEncodingSpec {
+                    feature_index,
+                    values,
+                    config: config.clone(),
+                });
+            }
+            // Sort by feature_index for deterministic ordering
+            specs.sort_by_key(|s| s.feature_index);
+            Ok(specs)
+        }
+    }
+}
+
 fn flatten_rows(rows: &[Vec<f32>]) -> Result<(Vec<f32>, usize, usize), EngineError> {
     if rows.is_empty() {
         return Err(EngineError::ContractViolation(
@@ -1519,43 +1634,71 @@ fn apply_categorical_encoding_to_training_matrices(
     prepared: PreparedTrainingMatrices,
     categorical_spec: &CategoricalTargetEncodingSpec,
 ) -> Result<(PreparedTrainingMatrices, CategoricalStatePayloadV1), EngineError> {
+    apply_categorical_encoding_to_training_matrices_multi(prepared, std::slice::from_ref(categorical_spec))
+}
+
+/// Encode multiple categorical features in the training matrices via target encoding.
+fn apply_categorical_encoding_to_training_matrices_multi(
+    prepared: PreparedTrainingMatrices,
+    categorical_specs: &[CategoricalTargetEncodingSpec],
+) -> Result<(PreparedTrainingMatrices, CategoricalStatePayloadV1), EngineError> {
+    if categorical_specs.is_empty() {
+        let empty_state = CategoricalStatePayloadV1 {
+            format_version: CATEGORICAL_STATE_FORMAT_V1,
+            leakage_safe_target_encoding: false,
+            categorical_feature_indices: Vec::new(),
+        };
+        return Ok((prepared, empty_state));
+    }
+
     let row_count = prepared.dataset.row_count();
     let feature_count = prepared.dataset.matrix.feature_count;
-    if categorical_spec.feature_index >= feature_count {
-        return Err(EngineError::ContractViolation(format!(
-            "categorical feature index {} is out of bounds for feature_count {}",
-            categorical_spec.feature_index, feature_count
-        )));
-    }
-    if categorical_spec.values.len() != row_count {
-        return Err(EngineError::ContractViolation(format!(
-            "categorical values length {} does not match row_count {}",
-            categorical_spec.values.len(),
-            row_count
-        )));
-    }
-
-    let (_, encoded_values) = fit_transform_target_encoder(
-        &categorical_spec.config,
-        &categorical_spec.values,
-        &prepared.dataset.targets,
-        prepared.dataset.time_index.as_deref(),
-    )
-    .map_err(|error| EngineError::ContractViolation(error.to_string()))?;
-
     let mut dense_values = prepared.dataset.matrix.values.clone();
-    let (encoded_bins, encoded_max_bin) = encode_bins_from_encoded_values(&encoded_values)?;
     let mut bins = prepared.binned_matrix.bins.clone();
-    for (row_index, &encoded_value) in encoded_values.iter().enumerate() {
-        let offset = row_index * feature_count + categorical_spec.feature_index;
-        dense_values[offset] = encoded_value;
-        bins[offset] = encoded_bins[row_index];
+    let mut max_bin = prepared.binned_matrix.max_bin;
+    let mut any_time_aware = false;
+
+    for spec in categorical_specs {
+        if spec.feature_index >= feature_count {
+            return Err(EngineError::ContractViolation(format!(
+                "categorical feature index {} is out of bounds for feature_count {}",
+                spec.feature_index, feature_count
+            )));
+        }
+        if spec.values.len() != row_count {
+            return Err(EngineError::ContractViolation(format!(
+                "categorical values length {} does not match row_count {}",
+                spec.values.len(), row_count
+            )));
+        }
+        if spec.config.time_aware {
+            any_time_aware = true;
+        }
+
+        let (_, encoded_values) = fit_transform_target_encoder(
+            &spec.config,
+            &spec.values,
+            &prepared.dataset.targets,
+            prepared.dataset.time_index.as_deref(),
+        )
+        .map_err(|error| EngineError::ContractViolation(error.to_string()))?;
+
+        let (encoded_bins, encoded_max_bin) = encode_bins_from_encoded_values(&encoded_values)?;
+        max_bin = max_bin.max(encoded_max_bin);
+        for (row_index, &encoded_value) in encoded_values.iter().enumerate() {
+            let offset = row_index * feature_count + spec.feature_index;
+            dense_values[offset] = encoded_value;
+            bins[offset] = encoded_bins[row_index];
+        }
     }
 
     let categorical_state = CategoricalStatePayloadV1 {
         format_version: CATEGORICAL_STATE_FORMAT_V1,
-        leakage_safe_target_encoding: categorical_spec.config.time_aware,
-        categorical_feature_indices: vec![categorical_spec.feature_index as u32],
+        leakage_safe_target_encoding: any_time_aware,
+        categorical_feature_indices: categorical_specs
+            .iter()
+            .map(|s| s.feature_index as u32)
+            .collect(),
     };
     Ok((
         PreparedTrainingMatrices {
@@ -1569,7 +1712,7 @@ fn apply_categorical_encoding_to_training_matrices(
             binned_matrix: BinnedMatrix::new(
                 row_count,
                 feature_count,
-                prepared.binned_matrix.max_bin.max(encoded_max_bin),
+                max_bin,
                 bins,
             )?,
             metadata: prepared.metadata,
@@ -1580,43 +1723,79 @@ fn apply_categorical_encoding_to_training_matrices(
 
 fn apply_categorical_encoding_to_validation_matrices(
     prepared: PreparedTrainingMatrices,
-    categorical_spec: &CategoricalTargetEncodingSpec,
+    training_spec: &CategoricalTargetEncodingSpec,
+    validation_spec: &CategoricalTargetEncodingSpec,
     training_targets: &[f32],
     training_time_index: Option<&[i64]>,
 ) -> Result<PreparedTrainingMatrices, EngineError> {
-    let row_count = prepared.dataset.row_count();
-    let feature_count = prepared.dataset.matrix.feature_count;
-    if categorical_spec.feature_index >= feature_count {
-        return Err(EngineError::ContractViolation(format!(
-            "categorical feature index {} is out of bounds for feature_count {}",
-            categorical_spec.feature_index, feature_count
-        )));
-    }
-    if categorical_spec.values.len() != row_count {
-        return Err(EngineError::ContractViolation(format!(
-            "categorical values length {} does not match row_count {}",
-            categorical_spec.values.len(),
-            row_count
-        )));
-    }
-
-    let encoder_state = fit_target_encoder(
-        &categorical_spec.config,
-        &categorical_spec.values,
+    apply_categorical_encoding_to_validation_matrices_multi(
+        prepared,
+        std::slice::from_ref(training_spec),
+        std::slice::from_ref(validation_spec),
         training_targets,
         training_time_index,
     )
-    .map_err(|error| EngineError::ContractViolation(error.to_string()))?;
-    let encoded_values = transform_target_encoder(&encoder_state, &categorical_spec.values)
-        .map_err(|error| EngineError::ContractViolation(error.to_string()))?;
+}
 
+/// Encode multiple categorical features in the validation matrices via target encoding.
+///
+/// `training_specs` are used to fit the encoder (training values + training targets).
+/// `validation_specs` provide the validation values to transform.
+fn apply_categorical_encoding_to_validation_matrices_multi(
+    prepared: PreparedTrainingMatrices,
+    training_specs: &[CategoricalTargetEncodingSpec],
+    validation_specs: &[CategoricalTargetEncodingSpec],
+    training_targets: &[f32],
+    training_time_index: Option<&[i64]>,
+) -> Result<PreparedTrainingMatrices, EngineError> {
+    if training_specs.is_empty() {
+        return Ok(prepared);
+    }
+    if training_specs.len() != validation_specs.len() {
+        return Err(EngineError::ContractViolation(format!(
+            "training specs count {} does not match validation specs count {}",
+            training_specs.len(),
+            validation_specs.len()
+        )));
+    }
+
+    let row_count = prepared.dataset.row_count();
+    let feature_count = prepared.dataset.matrix.feature_count;
     let mut dense_values = prepared.dataset.matrix.values.clone();
-    let (encoded_bins, encoded_max_bin) = encode_bins_from_encoded_values(&encoded_values)?;
     let mut bins = prepared.binned_matrix.bins.clone();
-    for (row_index, &encoded_value) in encoded_values.iter().enumerate() {
-        let offset = row_index * feature_count + categorical_spec.feature_index;
-        dense_values[offset] = encoded_value;
-        bins[offset] = encoded_bins[row_index];
+    let mut max_bin = prepared.binned_matrix.max_bin;
+
+    for (training_spec, validation_spec) in training_specs.iter().zip(validation_specs) {
+        if validation_spec.feature_index >= feature_count {
+            return Err(EngineError::ContractViolation(format!(
+                "categorical feature index {} is out of bounds for feature_count {}",
+                validation_spec.feature_index, feature_count
+            )));
+        }
+        if validation_spec.values.len() != row_count {
+            return Err(EngineError::ContractViolation(format!(
+                "categorical values length {} does not match row_count {}",
+                validation_spec.values.len(), row_count
+            )));
+        }
+
+        let encoder_state = fit_target_encoder(
+            &training_spec.config,
+            &training_spec.values,
+            training_targets,
+            training_time_index,
+        )
+        .map_err(|error| EngineError::ContractViolation(error.to_string()))?;
+        let encoded_values = transform_target_encoder(&encoder_state, &validation_spec.values)
+            .map_err(|error| EngineError::ContractViolation(error.to_string()))?;
+
+        let (encoded_bins, encoded_max_bin) = encode_bins_from_encoded_values(&encoded_values)?;
+        max_bin = max_bin.max(encoded_max_bin);
+        for (row_index, &encoded_value) in encoded_values.iter().enumerate() {
+            let offset = row_index * feature_count + validation_spec.feature_index;
+            dense_values[offset] = encoded_value;
+            bins[offset] = encoded_bins[row_index];
+        }
     }
 
     Ok(PreparedTrainingMatrices {
@@ -1630,7 +1809,7 @@ fn apply_categorical_encoding_to_validation_matrices(
         binned_matrix: BinnedMatrix::new(
             row_count,
             feature_count,
-            prepared.binned_matrix.max_bin.max(encoded_max_bin),
+            max_bin,
             bins,
         )?,
         metadata: prepared.metadata,
@@ -1686,8 +1865,8 @@ fn train_regression_artifact_with_summary_dense_impl(
     rounds: usize,
     time_index: Option<Vec<i64>>,
     validation_time_index: Option<Vec<i64>>,
-    categorical_spec: Option<CategoricalTargetEncodingSpec>,
-    validation_categorical_values: Option<Vec<String>>,
+    categorical_specs: Vec<CategoricalTargetEncodingSpec>,
+    validation_categorical_values_list: Vec<Vec<String>>,
     training_policy: TrainingPolicyMode,
     store_node_debug_stats: bool,
     continuous_binning_strategy: ContinuousBinningStrategy,
@@ -1695,7 +1874,7 @@ fn train_regression_artifact_with_summary_dense_impl(
     objective: &str,
 ) -> Result<NativeTrainingResult, EngineError> {
     let bridge_start = Instant::now();
-    let need_dense_values = categorical_spec.is_some();
+    let need_dense_values = !categorical_specs.is_empty();
     let mut prepared = prepare_training_matrices_from_dense_values(
         values,
         row_count,
@@ -1713,9 +1892,9 @@ fn train_regression_artifact_with_summary_dense_impl(
     let training_time_index_for_validation = prepared.dataset.time_index.clone();
 
     let mut categorical_state = None;
-    if let Some(spec) = categorical_spec.as_ref() {
+    if !categorical_specs.is_empty() {
         let (encoded_prepared, state) =
-            apply_categorical_encoding_to_training_matrices(prepared, spec)?;
+            apply_categorical_encoding_to_training_matrices_multi(prepared, &categorical_specs)?;
         prepared = encoded_prepared;
         categorical_state = Some(state);
     }
@@ -1741,21 +1920,27 @@ fn train_regression_artifact_with_summary_dense_impl(
                 continuous_binning_max_bins,
             )?;
 
-            if let Some(spec) = categorical_spec.as_ref() {
-                let validation_values = validation_categorical_values.ok_or_else(|| {
-                    EngineError::ContractViolation(
-                        "validation categorical values must be provided when categorical_feature_index is set"
-                            .to_string(),
-                    )
-                })?;
-                let validation_spec = CategoricalTargetEncodingSpec {
-                    feature_index: spec.feature_index,
-                    values: validation_values,
-                    config: spec.config.clone(),
-                };
-                prepared_validation = apply_categorical_encoding_to_validation_matrices(
+            if !categorical_specs.is_empty() {
+                if validation_categorical_values_list.len() != categorical_specs.len() {
+                    return Err(EngineError::ContractViolation(format!(
+                        "validation categorical values list length {} does not match categorical specs count {}",
+                        validation_categorical_values_list.len(),
+                        categorical_specs.len()
+                    )));
+                }
+                let validation_specs: Vec<CategoricalTargetEncodingSpec> = categorical_specs
+                    .iter()
+                    .zip(validation_categorical_values_list)
+                    .map(|(spec, values)| CategoricalTargetEncodingSpec {
+                        feature_index: spec.feature_index,
+                        values,
+                        config: spec.config.clone(),
+                    })
+                    .collect();
+                prepared_validation = apply_categorical_encoding_to_validation_matrices_multi(
                     prepared_validation,
-                    &validation_spec,
+                    &categorical_specs,
+                    &validation_specs,
                     &training_targets_for_validation,
                     training_time_index_for_validation.as_deref(),
                 )?;
@@ -2210,8 +2395,8 @@ fn train_regression_artifact(
         effective_rounds,
         time_index,
         None,
-        categorical_spec,
-        None,
+        categorical_spec.into_iter().collect(),
+        Vec::new(),
         training_policy,
         store_node_stats,
         continuous_binning_strategy,
@@ -2327,8 +2512,8 @@ fn train_regression_artifact_dense(
         effective_rounds,
         time_index,
         None,
-        categorical_spec,
-        None,
+        categorical_spec.into_iter().collect(),
+        Vec::new(),
         training_policy,
         store_node_stats,
         continuous_binning_strategy,
@@ -2378,7 +2563,10 @@ fn train_regression_artifact_dense(
     monotone_constraints=Vec::new(),
     feature_weights=Vec::new(),
     max_leaves=None,
-    tree_growth="level"
+    tree_growth="level",
+    categorical_feature_indices=None,
+    categorical_feature_values_list=None,
+    validation_categorical_feature_values_list=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_with_summary(
@@ -2421,6 +2609,9 @@ fn train_regression_artifact_with_summary(
     feature_weights: Vec<f32>,
     max_leaves: Option<usize>,
     tree_growth: &str,
+    categorical_feature_indices: Option<Vec<usize>>,
+    categorical_feature_values_list: Option<Vec<Vec<String>>>,
+    validation_categorical_feature_values_list: Option<Vec<Vec<String>>>,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -2450,15 +2641,20 @@ fn train_regression_artifact_with_summary(
         max_leaves,
         tree_growth,
     );
-    let categorical_spec = resolve_categorical_spec(
-        categorical_feature_index,
-        categorical_feature_values,
-        categorical_smoothing,
-        categorical_min_samples_leaf,
-        categorical_time_aware,
-        rows.len(),
-    )
-    .map_err(engine_error_to_pyerr)?;
+    let (categorical_specs, validation_categorical_values_list) =
+        resolve_categorical_specs_from_params(
+            categorical_feature_index,
+            categorical_feature_values,
+            categorical_feature_indices,
+            categorical_feature_values_list,
+            validation_categorical_feature_values,
+            validation_categorical_feature_values_list,
+            categorical_smoothing,
+            categorical_min_samples_leaf,
+            categorical_time_aware,
+            rows.len(),
+        )
+        .map_err(engine_error_to_pyerr)?;
     let (dense_values, row_count, feature_count) =
         flatten_rows(&rows).map_err(engine_error_to_pyerr)?;
     let validation_payload = if let Some(validation_rows) = validation_rows.as_ref() {
@@ -2494,8 +2690,8 @@ fn train_regression_artifact_with_summary(
         effective_rounds,
         time_index,
         validation_time_index,
-        categorical_spec,
-        validation_categorical_feature_values,
+        categorical_specs,
+        validation_categorical_values_list,
         training_policy,
         store_node_stats,
         continuous_binning_strategy,
@@ -2547,7 +2743,10 @@ fn train_regression_artifact_with_summary(
     monotone_constraints=Vec::new(),
     feature_weights=Vec::new(),
     max_leaves=None,
-    tree_growth="level"
+    tree_growth="level",
+    categorical_feature_indices=None,
+    categorical_feature_values_list=None,
+    validation_categorical_feature_values_list=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary(
@@ -2593,6 +2792,9 @@ fn train_regression_artifact_dense_with_summary(
     feature_weights: Vec<f32>,
     max_leaves: Option<usize>,
     tree_growth: &str,
+    categorical_feature_indices: Option<Vec<usize>>,
+    categorical_feature_values_list: Option<Vec<Vec<String>>>,
+    validation_categorical_feature_values_list: Option<Vec<Vec<String>>>,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -2622,15 +2824,20 @@ fn train_regression_artifact_dense_with_summary(
         max_leaves,
         tree_growth,
     );
-    let categorical_spec = resolve_categorical_spec(
-        categorical_feature_index,
-        categorical_feature_values,
-        categorical_smoothing,
-        categorical_min_samples_leaf,
-        categorical_time_aware,
-        row_count,
-    )
-    .map_err(engine_error_to_pyerr)?;
+    let (categorical_specs, validation_categorical_values_list) =
+        resolve_categorical_specs_from_params(
+            categorical_feature_index,
+            categorical_feature_values,
+            categorical_feature_indices,
+            categorical_feature_values_list,
+            validation_categorical_feature_values,
+            validation_categorical_feature_values_list,
+            categorical_smoothing,
+            categorical_min_samples_leaf,
+            categorical_time_aware,
+            row_count,
+        )
+        .map_err(engine_error_to_pyerr)?;
     train_regression_artifact_with_summary_dense_impl(
         &values,
         row_count,
@@ -2647,8 +2854,8 @@ fn train_regression_artifact_dense_with_summary(
         effective_rounds,
         time_index,
         validation_time_index,
-        categorical_spec,
-        validation_categorical_feature_values,
+        categorical_specs,
+        validation_categorical_values_list,
         training_policy,
         store_node_stats,
         continuous_binning_strategy,
@@ -2715,7 +2922,10 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> PyResult<Vec<f32>> {
     monotone_constraints=Vec::new(),
     feature_weights=Vec::new(),
     max_leaves=None,
-    tree_growth="level"
+    tree_growth="level",
+    categorical_feature_indices=None,
+    categorical_feature_values_list=None,
+    validation_categorical_feature_values_list=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary_bytes(
@@ -2761,6 +2971,9 @@ fn train_regression_artifact_dense_with_summary_bytes(
     feature_weights: Vec<f32>,
     max_leaves: Option<usize>,
     tree_growth: &str,
+    categorical_feature_indices: Option<Vec<usize>>,
+    categorical_feature_values_list: Option<Vec<Vec<String>>>,
+    validation_categorical_feature_values_list: Option<Vec<Vec<String>>>,
 ) -> PyResult<NativeTrainingResult> {
     let values = bytes_to_f32_vec(values_bytes)?;
     let targets = bytes_to_f32_vec(targets_bytes)?;
@@ -2794,15 +3007,20 @@ fn train_regression_artifact_dense_with_summary_bytes(
         max_leaves,
         tree_growth,
     );
-    let categorical_spec = resolve_categorical_spec(
-        categorical_feature_index,
-        categorical_feature_values,
-        categorical_smoothing,
-        categorical_min_samples_leaf,
-        categorical_time_aware,
-        row_count,
-    )
-    .map_err(engine_error_to_pyerr)?;
+    let (categorical_specs, validation_categorical_values_list) =
+        resolve_categorical_specs_from_params(
+            categorical_feature_index,
+            categorical_feature_values,
+            categorical_feature_indices,
+            categorical_feature_values_list,
+            validation_categorical_feature_values,
+            validation_categorical_feature_values_list,
+            categorical_smoothing,
+            categorical_min_samples_leaf,
+            categorical_time_aware,
+            row_count,
+        )
+        .map_err(engine_error_to_pyerr)?;
     train_regression_artifact_with_summary_dense_impl(
         &values,
         row_count,
@@ -2819,8 +3037,8 @@ fn train_regression_artifact_dense_with_summary_bytes(
         effective_rounds,
         time_index,
         validation_time_index,
-        categorical_spec,
-        validation_categorical_feature_values,
+        categorical_specs,
+        validation_categorical_values_list,
         training_policy,
         store_node_stats,
         continuous_binning_strategy,
@@ -2909,8 +3127,8 @@ mod tests {
             rounds,
             time_index,
             None,
-            categorical_spec,
-            None,
+            categorical_spec.into_iter().collect(),
+            Vec::new(),
             training_policy,
             store_node_debug_stats,
             ContinuousBinningStrategy::Linear,

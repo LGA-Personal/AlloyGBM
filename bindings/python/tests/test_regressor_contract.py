@@ -897,21 +897,21 @@ class GBMRegressorContractTests(unittest.TestCase):
             self.assertEqual(train_calls[0]["categorical_feature_values"], ["A", "B", "A"])
             self.assertEqual(train_calls[0]["rows"], [[0.0, 1.0], [0.0, 2.0], [0.0, 3.0]])
 
-    def test_fit_rejects_multiple_explicit_categorical_columns_without_manual_selection(
+    def test_fit_auto_infers_multiple_explicit_categorical_columns(
         self,
     ) -> None:
-        model = GBMRegressor()
-        with self.assertRaisesRegex(
-            ValueError, "multiple explicit categorical columns"
-        ):
-            model.fit(
-                _FakeCategoricalFrame(
-                    rows=[["A", "X", 1.0], ["B", "Y", 2.0]],
-                    columns=["kind_a", "kind_b", "value"],
-                    dtypes=["category", "categorical", "float64"],
-                ),
-                [1.0, 2.0],
-            )
+        """Multiple categorical columns in a DataFrame should be auto-inferred."""
+        model = GBMRegressor(n_estimators=3, training_policy="manual")
+        model.fit(
+            _FakeCategoricalFrame(
+                rows=[["A", "X", 1.0], ["B", "Y", 2.0], ["A", "X", 3.0]],
+                columns=["kind_a", "kind_b", "value"],
+                dtypes=["category", "categorical", "float64"],
+            ),
+            [1.0, 2.0, 3.0],
+        )
+        preds = model.predict([[0.0, 0.0, 1.5]])
+        self.assertEqual(len(preds), 1)
 
     def test_predict_rejects_feature_count_mismatch(self) -> None:
         with _force_legacy_train_path():
