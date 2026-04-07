@@ -195,6 +195,31 @@ fn explain_rows_from_model(
 ) -> ShapResult<ShapExplanationBatch> {
     validate_rows(rows, model.feature_count)?;
 
+    // Count distinct split features to choose algorithm.
+    let distinct_split_feature_count = {
+        let mut features: Vec<usize> = model
+            .stumps
+            .iter()
+            .map(|s| s.split.feature_index as usize)
+            .collect();
+        features.sort_unstable();
+        features.dedup();
+        features.len()
+    };
+
+    if distinct_split_feature_count > MAX_EXACT_SPLIT_FEATURES {
+        // Too many features for brute-force O(2^N); use TreeSHAP O(TLD^2).
+        return explain_rows_tree_shap(model, rows);
+    }
+
+    // Brute-force exact Shapley values for models with few split features.
+    explain_rows_brute_force(model, rows)
+}
+
+fn explain_rows_brute_force(
+    model: &TrainedModel,
+    rows: &[Vec<f32>],
+) -> ShapResult<ShapExplanationBatch> {
     let model_structure = build_model_structure(model)?;
     let expected_value =
         expected_prediction_for_subset(model, rows[0].as_slice(), 0, &model_structure)?;
@@ -508,6 +533,373 @@ fn decode_tree_node_id(node_id: u32) -> (u32, u32) {
     (node_id / TREE_NODE_STRIDE, node_id % TREE_NODE_STRIDE)
 }
 
+// ---------------------------------------------------------------------------
+// TreeSHAP: Polynomial-time O(TLD^2) exact Shapley values
+// Based on Lundberg et al. (2020), "From local explanations to global
+// understanding with explainable AI for trees"
+// ---------------------------------------------------------------------------
+
+/// Standard tree node used by TreeSHAP. Converts from AlloyGBM's stump-based
+/// representation where each stump carries left/right leaf values into a
+/// conventional tree where leaf values represent total accumulated prediction.
+#[derive(Debug, Clone)]
+enum StdTreeNode {
+    Leaf {
+        value: f64,
+        cover: f64,
+    },
+    Internal {
+        feature_index: usize,
+        threshold: f32,
+        left: Box<StdTreeNode>,
+        right: Box<StdTreeNode>,
+    },
+}
+
+impl StdTreeNode {
+    fn cover(&self) -> f64 {
+        match self {
+            Self::Leaf { cover, .. } => *cover,
+            Self::Internal { left, right, .. } => left.cover() + right.cover(),
+        }
+    }
+
+    /// Cover-weighted sum of leaf values. Divide by `cover()` to get E[f_tree(x)].
+    fn cover_weighted_value_sum(&self) -> f64 {
+        match self {
+            Self::Leaf { value, cover } => value * cover,
+            Self::Internal { left, right, .. } => {
+                left.cover_weighted_value_sum() + right.cover_weighted_value_sum()
+            }
+        }
+    }
+}
+
+/// One element in the TreeSHAP path tracking structure.
+#[derive(Clone, Copy)]
+struct PathElement {
+    feature_index: usize,
+    zero_fraction: f64,
+    one_fraction: f64,
+    pweight: f64,
+}
+
+/// Build a standard tree from AlloyGBM's stump representation for a single
+/// tree. Accumulated leaf values are pushed down so that each leaf's `value`
+/// is the total prediction contribution for samples reaching that leaf.
+fn build_std_tree(
+    tree_id: u32,
+    local_id: u32,
+    accumulated_value: f64,
+    parent_cover: f64,
+    nodes: &HashMap<u64, &TrainedStump>,
+) -> StdTreeNode {
+    let key = tree_local_key(tree_id, local_id);
+    match nodes.get(&key) {
+        None => StdTreeNode::Leaf {
+            value: accumulated_value,
+            cover: parent_cover,
+        },
+        Some(stump) => {
+            let left_cover = stump.split.left_stats.row_count as f64;
+            let right_cover = stump.split.right_stats.row_count as f64;
+            StdTreeNode::Internal {
+                feature_index: stump.split.feature_index as usize,
+                threshold: stump.split.threshold_bin as f32,
+                left: Box::new(build_std_tree(
+                    tree_id,
+                    2 * local_id + 1,
+                    accumulated_value + stump.left_leaf_value as f64,
+                    left_cover,
+                    nodes,
+                )),
+                right: Box::new(build_std_tree(
+                    tree_id,
+                    2 * local_id + 2,
+                    accumulated_value + stump.right_leaf_value as f64,
+                    right_cover,
+                    nodes,
+                )),
+            }
+        }
+    }
+}
+
+/// Extend the unique path with a new feature (Algorithm 2, Lundberg et al.).
+fn ts_extend_path(
+    path: &mut [PathElement],
+    depth: usize,
+    zero_fraction: f64,
+    one_fraction: f64,
+    feature_index: usize,
+) {
+    path[depth] = PathElement {
+        feature_index,
+        zero_fraction,
+        one_fraction,
+        pweight: if depth == 0 { 1.0 } else { 0.0 },
+    };
+    for i in (0..depth).rev() {
+        path[i + 1].pweight +=
+            one_fraction * path[i].pweight * (i + 1) as f64 / (depth + 1) as f64;
+        path[i].pweight =
+            zero_fraction * path[i].pweight * (depth - i) as f64 / (depth + 1) as f64;
+    }
+}
+
+/// Remove a feature from the path and shift remaining elements
+/// (Algorithm 3, Lundberg et al.).
+fn ts_unextend_path(path: &mut [PathElement], depth: usize, path_index: usize) {
+    let one_fraction = path[path_index].one_fraction;
+    let zero_fraction = path[path_index].zero_fraction;
+    let mut next_one_portion = path[depth].pweight;
+
+    for i in (0..depth).rev() {
+        if one_fraction.abs() > 0.0 {
+            let tmp = path[i].pweight;
+            path[i].pweight =
+                next_one_portion * (depth + 1) as f64 / ((i + 1) as f64 * one_fraction);
+            next_one_portion = tmp
+                - path[i].pweight * zero_fraction * (depth - i) as f64 / (depth + 1) as f64;
+        } else {
+            path[i].pweight =
+                path[i].pweight * (depth + 1) as f64 / (zero_fraction * (depth - i) as f64);
+        }
+    }
+
+    // Shift elements to fill the gap at path_index.
+    for i in path_index..depth {
+        path[i] = path[i + 1];
+    }
+}
+
+/// Compute the SHAP weight for unwinding the feature at `path_index`
+/// (Algorithm 4, Lundberg et al.).
+fn ts_unwound_path_sum(path: &[PathElement], depth: usize, path_index: usize) -> f64 {
+    let one_fraction = path[path_index].one_fraction;
+    let zero_fraction = path[path_index].zero_fraction;
+    let mut next_one_portion = path[depth].pweight;
+    let mut total = 0.0_f64;
+
+    for i in (0..depth).rev() {
+        if one_fraction.abs() > 0.0 {
+            let tmp =
+                next_one_portion * (depth + 1) as f64 / ((i + 1) as f64 * one_fraction);
+            total += tmp;
+            next_one_portion = path[i].pweight
+                - tmp * zero_fraction * (depth - i) as f64 / (depth + 1) as f64;
+        } else if zero_fraction.abs() > 0.0 {
+            let ratio = (depth - i) as f64 / (depth + 1) as f64;
+            total += path[i].pweight / (zero_fraction * ratio);
+        }
+    }
+
+    total
+}
+
+/// Recursive TreeSHAP walk (Algorithm 1, Lundberg et al.).
+///
+/// At each node the incoming edge's feature is added to the path. At leaves
+/// the path is unwound to attribute contributions. At internal nodes the path
+/// is cloned for each child so that modifications are independent.
+#[allow(clippy::too_many_arguments)]
+fn ts_recurse(
+    node: &StdTreeNode,
+    row: &[f32],
+    path: &mut Vec<PathElement>,
+    depth: usize,
+    phi: &mut [f64],
+    zero_fraction: f64,
+    one_fraction: f64,
+    feature_index: usize,
+) {
+    // Ensure the path vector has room for this depth.
+    while path.len() <= depth {
+        path.push(PathElement {
+            feature_index: usize::MAX,
+            zero_fraction: 0.0,
+            one_fraction: 0.0,
+            pweight: 0.0,
+        });
+    }
+
+    ts_extend_path(path, depth, zero_fraction, one_fraction, feature_index);
+
+    match node {
+        StdTreeNode::Leaf { value, .. } => {
+            // Unwind each feature to compute its contribution.
+            for i in 1..=depth {
+                let w = ts_unwound_path_sum(path, depth, i);
+                let feat = path[i].feature_index;
+                if feat < phi.len() {
+                    phi[feat] += w * (path[i].one_fraction - path[i].zero_fraction) * value;
+                }
+            }
+        }
+        StdTreeNode::Internal {
+            feature_index: node_feature,
+            threshold,
+            left,
+            right,
+        } => {
+            let goes_left = row
+                .get(*node_feature)
+                .map(|v| *v <= *threshold)
+                .unwrap_or(true);
+            let (hot, cold) = if goes_left {
+                (left.as_ref(), right.as_ref())
+            } else {
+                (right.as_ref(), left.as_ref())
+            };
+
+            let node_cover = node.cover();
+            let hot_zero = if node_cover > 0.0 {
+                hot.cover() / node_cover
+            } else {
+                0.5
+            };
+            let cold_zero = if node_cover > 0.0 {
+                cold.cover() / node_cover
+            } else {
+                0.5
+            };
+
+            // Check whether this split feature already appears in the path.
+            let duplicate_index = path[1..=depth]
+                .iter()
+                .position(|e| e.feature_index == *node_feature)
+                .map(|pos| pos + 1);
+
+            // Clone the path for each child so modifications are independent.
+            let mut hot_path = path[..=depth].to_vec();
+            let mut cold_path = path[..=depth].to_vec();
+
+            if let Some(dup_idx) = duplicate_index {
+                // Duplicate feature: combine incoming fractions.
+                let incoming_zero = hot_path[dup_idx].zero_fraction;
+                let incoming_one = hot_path[dup_idx].one_fraction;
+                ts_unextend_path(&mut hot_path, depth, dup_idx);
+                ts_unextend_path(&mut cold_path, depth, dup_idx);
+                let child_depth = depth - 1;
+
+                ts_recurse(
+                    hot,
+                    row,
+                    &mut hot_path,
+                    child_depth + 1,
+                    phi,
+                    incoming_zero * hot_zero,
+                    incoming_one,
+                    *node_feature,
+                );
+                ts_recurse(
+                    cold,
+                    row,
+                    &mut cold_path,
+                    child_depth + 1,
+                    phi,
+                    incoming_zero * cold_zero,
+                    0.0,
+                    *node_feature,
+                );
+            } else {
+                ts_recurse(
+                    hot,
+                    row,
+                    &mut hot_path,
+                    depth + 1,
+                    phi,
+                    hot_zero,
+                    1.0,
+                    *node_feature,
+                );
+                ts_recurse(
+                    cold,
+                    row,
+                    &mut cold_path,
+                    depth + 1,
+                    phi,
+                    cold_zero,
+                    0.0,
+                    *node_feature,
+                );
+            }
+        }
+    }
+}
+
+/// Compute SHAP values for a single row using pre-built standard trees.
+fn tree_shap_row(
+    trees: &[StdTreeNode],
+    row: &[f32],
+    feature_count: usize,
+) -> Vec<f64> {
+    let mut phi = vec![0.0_f64; feature_count];
+    for tree in trees {
+        let mut path = Vec::with_capacity(32);
+        ts_recurse(tree, row, &mut path, 0, &mut phi, 1.0, 1.0, usize::MAX);
+    }
+    phi
+}
+
+/// Compute SHAP values for multiple rows using TreeSHAP.
+fn explain_rows_tree_shap(
+    model: &TrainedModel,
+    rows: &[Vec<f32>],
+) -> ShapResult<ShapExplanationBatch> {
+    validate_rows(rows, model.feature_count)?;
+
+    // Build node lookup and standard trees once for all rows.
+    let mut nodes_map: HashMap<u64, &TrainedStump> = HashMap::new();
+    let mut tree_roots: Vec<u32> = Vec::new();
+    for stump in &model.stumps {
+        let (tree_id, local_id) = decode_tree_node_id(stump.split.node_id);
+        nodes_map.insert(tree_local_key(tree_id, local_id), stump);
+        if local_id == 0 {
+            tree_roots.push(tree_id);
+        }
+    }
+    tree_roots.sort_unstable();
+    tree_roots.dedup();
+
+    let mut std_trees = Vec::with_capacity(tree_roots.len());
+    let mut expected_value_f64 = model.baseline_prediction as f64;
+
+    for &tree_id in &tree_roots {
+        let root_key = tree_local_key(tree_id, 0);
+        let root_stump = nodes_map.get(&root_key).ok_or_else(|| {
+            ShapError::ContractViolation(format!("missing root stump for tree {tree_id}"))
+        })?;
+        let root_cover = root_stump.split.left_stats.row_count as f64
+            + root_stump.split.right_stats.row_count as f64;
+
+        let tree = build_std_tree(tree_id, 0, 0.0, root_cover, &nodes_map);
+
+        // E[f_tree(x)] = cover-weighted average leaf value.
+        let tree_cover = tree.cover();
+        if tree_cover > 0.0 {
+            expected_value_f64 += tree.cover_weighted_value_sum() / tree_cover;
+        }
+
+        std_trees.push(tree);
+    }
+
+    let expected_value = expected_value_f64 as f32;
+
+    let mut row_contributions = Vec::with_capacity(rows.len());
+    for (row_index, row) in rows.iter().enumerate() {
+        let phi = tree_shap_row(&std_trees, row, model.feature_count);
+        let contributions: Vec<f32> = phi.iter().map(|v| *v as f32).collect();
+        verify_additivity(model, row, &contributions, row_index, expected_value)?;
+        row_contributions.push(contributions);
+    }
+
+    Ok(ShapExplanationBatch {
+        expected_value,
+        values: row_contributions,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,6 +938,32 @@ mod tests {
                 grad_sum: 0.0,
                 hess_sum: 1.0,
                 row_count: 1,
+            },
+        }
+    }
+
+    fn split_with_counts(
+        node_id: u32,
+        feature_index: u32,
+        threshold_bin: u16,
+        left_count: u32,
+        right_count: u32,
+    ) -> SplitCandidate {
+        SplitCandidate {
+            node_id,
+            feature_index,
+            threshold_bin,
+            gain: 1.0,
+            default_left: false,
+            left_stats: NodeStats {
+                grad_sum: 0.0,
+                hess_sum: left_count as f32,
+                row_count: left_count,
+            },
+            right_stats: NodeStats {
+                grad_sum: 0.0,
+                hess_sum: right_count as f32,
+                row_count: right_count,
             },
         }
     }
@@ -836,5 +1254,196 @@ mod tests {
             global,
             vec![("f0".to_string(), 0.0), ("f1".to_string(), 0.0)]
         );
+    }
+
+    // -------------------------------------------------------------------
+    // TreeSHAP tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn tree_shap_matches_brute_force_on_fixture_model() {
+        let model = fixture_model();
+        let rows = fixture_rows();
+
+        let brute_force = explain_rows_brute_force(&model, &rows).expect("brute force works");
+        let tree_shap = explain_rows_tree_shap(&model, &rows).expect("tree shap works");
+
+        assert_close(brute_force.expected_value, tree_shap.expected_value);
+        assert_eq!(brute_force.values.len(), tree_shap.values.len());
+
+        for (bf_row, ts_row) in brute_force.values.iter().zip(tree_shap.values.iter()) {
+            assert_eq!(bf_row.len(), ts_row.len());
+            for (bf_val, ts_val) in bf_row.iter().zip(ts_row.iter()) {
+                assert!(
+                    (bf_val - ts_val).abs() <= ADDITIVITY_TOLERANCE,
+                    "brute force {bf_val} vs tree shap {ts_val}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tree_shap_matches_brute_force_on_unused_feature_model() {
+        let model = fixture_model_with_unused_feature();
+        let rows = vec![vec![0.0, 0.0, 5.0], vec![3.0, 2.0, 9.0]];
+
+        let brute_force = explain_rows_brute_force(&model, &rows).expect("brute force works");
+        let tree_shap = explain_rows_tree_shap(&model, &rows).expect("tree shap works");
+
+        for (bf_row, ts_row) in brute_force.values.iter().zip(tree_shap.values.iter()) {
+            for (bf_val, ts_val) in bf_row.iter().zip(ts_row.iter()) {
+                assert!(
+                    (bf_val - ts_val).abs() <= ADDITIVITY_TOLERANCE,
+                    "brute force {bf_val} vs tree shap {ts_val}"
+                );
+            }
+        }
+        // Feature 2 should be zero in both.
+        assert_close(tree_shap.values[0][2], 0.0);
+        assert_close(tree_shap.values[1][2], 0.0);
+    }
+
+    #[test]
+    fn tree_shap_additivity_holds_for_all_rows() {
+        let model = fixture_model();
+        let rows = fixture_rows();
+        let explanation = explain_rows_tree_shap(&model, &rows).expect("tree shap works");
+
+        for (row, values) in rows.iter().zip(explanation.values.iter()) {
+            let predicted = model.predict_row(row).expect("predicts");
+            let reconstructed = explanation.expected_value + values.iter().sum::<f32>();
+            assert_close(reconstructed, predicted);
+        }
+    }
+
+    #[test]
+    fn tree_shap_single_stump_model() {
+        // A single-tree, single-node (depth-1) model splitting on feature 0.
+        let model = TrainedModel {
+            baseline_prediction: 1.0,
+            feature_count: 2,
+            stumps: vec![TrainedStump {
+                split: split_with_counts(0, 0, 5, 3, 7),
+                left_leaf_value: -0.5,
+                right_leaf_value: 0.3,
+            }],
+            categorical_state: None,
+            node_debug_stats: None,
+            objective: "squared_error".to_string(),
+        };
+
+        let rows = vec![vec![3.0, 0.0], vec![8.0, 0.0]];
+
+        let brute_force = explain_rows_brute_force(&model, &rows).expect("brute force works");
+        let tree_shap = explain_rows_tree_shap(&model, &rows).expect("tree shap works");
+
+        for (bf_row, ts_row) in brute_force.values.iter().zip(tree_shap.values.iter()) {
+            for (bf_val, ts_val) in bf_row.iter().zip(ts_row.iter()) {
+                assert!(
+                    (bf_val - ts_val).abs() <= ADDITIVITY_TOLERANCE,
+                    "brute force {bf_val} vs tree shap {ts_val}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tree_shap_multi_tree_model() {
+        // Two trees, each with depth 1, splitting on different features.
+        let stride = 1u32 << 20;
+        let model = TrainedModel {
+            baseline_prediction: 0.0,
+            feature_count: 3,
+            stumps: vec![
+                TrainedStump {
+                    split: split_with_counts(0, 0, 5, 4, 6),
+                    left_leaf_value: 1.0,
+                    right_leaf_value: -1.0,
+                },
+                TrainedStump {
+                    split: split_with_counts(stride, 1, 3, 5, 5),
+                    left_leaf_value: 0.5,
+                    right_leaf_value: -0.5,
+                },
+            ],
+            categorical_state: None,
+            node_debug_stats: None,
+            objective: "squared_error".to_string(),
+        };
+
+        let rows = vec![
+            vec![3.0, 1.0, 0.0],
+            vec![8.0, 5.0, 0.0],
+            vec![3.0, 5.0, 0.0],
+        ];
+
+        let brute_force = explain_rows_brute_force(&model, &rows).expect("brute force works");
+        let tree_shap = explain_rows_tree_shap(&model, &rows).expect("tree shap works");
+
+        for (row_idx, (bf_row, ts_row)) in
+            brute_force.values.iter().zip(tree_shap.values.iter()).enumerate()
+        {
+            for (feat_idx, (bf_val, ts_val)) in bf_row.iter().zip(ts_row.iter()).enumerate() {
+                assert!(
+                    (bf_val - ts_val).abs() <= ADDITIVITY_TOLERANCE,
+                    "row {row_idx} feature {feat_idx}: brute force {bf_val} vs tree shap {ts_val}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tree_shap_deep_tree_with_repeated_feature() {
+        // A single tree of depth 2 that splits on feature 0 at both levels.
+        // Root (node 0): split on f0 at 5
+        //   Left (node 1): split on f0 at 2
+        //   Right (node 2): split on f1 at 3
+        let model = TrainedModel {
+            baseline_prediction: 0.5,
+            feature_count: 2,
+            stumps: vec![
+                TrainedStump {
+                    split: split_with_counts(0, 0, 5, 6, 4),
+                    left_leaf_value: 0.2,
+                    right_leaf_value: -0.3,
+                },
+                TrainedStump {
+                    split: split_with_counts(1, 0, 2, 3, 3),
+                    left_leaf_value: 0.1,
+                    right_leaf_value: -0.1,
+                },
+                TrainedStump {
+                    split: split_with_counts(2, 1, 3, 2, 2),
+                    left_leaf_value: 0.15,
+                    right_leaf_value: -0.15,
+                },
+            ],
+            categorical_state: None,
+            node_debug_stats: None,
+            objective: "squared_error".to_string(),
+        };
+
+        let rows = vec![
+            vec![1.0, 1.0],
+            vec![1.0, 5.0],
+            vec![4.0, 1.0],
+            vec![4.0, 5.0],
+            vec![8.0, 1.0],
+            vec![8.0, 5.0],
+        ];
+
+        let brute_force = explain_rows_brute_force(&model, &rows).expect("brute force works");
+        let tree_shap = explain_rows_tree_shap(&model, &rows).expect("tree shap works");
+
+        for (row_idx, (bf_row, ts_row)) in
+            brute_force.values.iter().zip(tree_shap.values.iter()).enumerate()
+        {
+            for (feat_idx, (bf_val, ts_val)) in bf_row.iter().zip(ts_row.iter()).enumerate() {
+                assert!(
+                    (bf_val - ts_val).abs() <= ADDITIVITY_TOLERANCE,
+                    "row {row_idx} feature {feat_idx}: brute force {bf_val} vs tree shap {ts_val}"
+                );
+            }
+        }
     }
 }
