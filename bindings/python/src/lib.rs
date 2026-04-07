@@ -12,7 +12,7 @@ use alloygbm_engine::{
     ArtifactCompatibilityMode, BinaryCrossEntropyObjective, CategoricalTargetEncodingSpec,
     EngineError, IterationRunSummary, LambdaMARTObjective, PairwiseRankingObjective,
     QueryRMSEObjective, SquaredErrorObjective, TrainedModel, Trainer, TrainingPolicyMode,
-    XeNDCGObjective, YetiRankObjective,
+    WarmStartState, XeNDCGObjective, YetiRankObjective,
 };
 use alloygbm_predictor::{Predictor, PredictorError};
 use alloygbm_shap::{
@@ -1872,6 +1872,7 @@ fn train_regression_artifact_with_summary_dense_impl(
     continuous_binning_strategy: ContinuousBinningStrategy,
     continuous_binning_max_bins: usize,
     objective: &str,
+    init_artifact_bytes: Option<&[u8]>,
 ) -> Result<NativeTrainingResult, EngineError> {
     let bridge_start = Instant::now();
     let need_dense_values = !categorical_specs.is_empty();
@@ -1955,6 +1956,25 @@ fn train_regression_artifact_with_summary_dense_impl(
         }
     };
 
+    // Warm-start: load existing model if init_artifact_bytes is provided
+    let warm_start_state = if let Some(init_bytes) = init_artifact_bytes {
+        let init_model = TrainedModel::from_artifact_bytes(init_bytes)?;
+        if init_model.feature_count != feature_count {
+            return Err(EngineError::ContractViolation(format!(
+                "init_model feature_count {} does not match training data feature_count {}",
+                init_model.feature_count, feature_count,
+            )));
+        }
+        let initial_rounds = init_model.rounds_completed();
+        Some(WarmStartState {
+            baseline_prediction: init_model.baseline_prediction,
+            stumps: init_model.stumps,
+            initial_rounds_completed: initial_rounds,
+        })
+    } else {
+        None
+    };
+
     let bridge_prepare_seconds = bridge_start.elapsed().as_secs_f64();
     let trainer = Trainer::new(params)?;
     let backend = CpuBackend;
@@ -1968,7 +1988,31 @@ fn train_regression_artifact_with_summary_dense_impl(
                 rounds,
                 training_policy,
             )?;
-            if let Some(validation_prepared) = validation_prepared.as_ref() {
+            if let Some(warm_start) = warm_start_state.clone() {
+                if let Some(validation_prepared) = validation_prepared.as_ref() {
+                    trainer.fit_iterations_warm_start_with_validation(
+                        &prepared.dataset,
+                        &prepared.binned_matrix,
+                        alloygbm_engine::ValidationDatasetRef {
+                            dataset: &validation_prepared.dataset,
+                            binned_matrix: &validation_prepared.binned_matrix,
+                        },
+                        &backend,
+                        $obj,
+                        controls,
+                        warm_start,
+                    )?
+                } else {
+                    trainer.fit_iterations_warm_start(
+                        &prepared.dataset,
+                        &prepared.binned_matrix,
+                        &backend,
+                        $obj,
+                        controls,
+                        warm_start,
+                    )?
+                }
+            } else if let Some(validation_prepared) = validation_prepared.as_ref() {
                 trainer.fit_iterations_with_validation_summary(
                     &prepared.dataset,
                     &prepared.binned_matrix,
@@ -2402,6 +2446,7 @@ fn train_regression_artifact(
         continuous_binning_strategy,
         continuous_binning_max_bins,
         objective,
+        None, // init_artifact_bytes
     )
     .map(|result| result.artifact_bytes)
     .map_err(engine_error_to_pyerr)
@@ -2519,6 +2564,7 @@ fn train_regression_artifact_dense(
         continuous_binning_strategy,
         continuous_binning_max_bins,
         objective,
+        None, // init_artifact_bytes
     )
     .map(|result| result.artifact_bytes)
     .map_err(engine_error_to_pyerr)
@@ -2566,7 +2612,8 @@ fn train_regression_artifact_dense(
     tree_growth="level",
     categorical_feature_indices=None,
     categorical_feature_values_list=None,
-    validation_categorical_feature_values_list=None
+    validation_categorical_feature_values_list=None,
+    init_artifact_bytes=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_with_summary(
@@ -2612,6 +2659,7 @@ fn train_regression_artifact_with_summary(
     categorical_feature_indices: Option<Vec<usize>>,
     categorical_feature_values_list: Option<Vec<Vec<String>>>,
     validation_categorical_feature_values_list: Option<Vec<Vec<String>>>,
+    init_artifact_bytes: Option<Vec<u8>>,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -2697,6 +2745,7 @@ fn train_regression_artifact_with_summary(
         continuous_binning_strategy,
         continuous_binning_max_bins,
         objective,
+        init_artifact_bytes.as_deref(),
     )
     .map_err(engine_error_to_pyerr)
 }
@@ -2746,7 +2795,8 @@ fn train_regression_artifact_with_summary(
     tree_growth="level",
     categorical_feature_indices=None,
     categorical_feature_values_list=None,
-    validation_categorical_feature_values_list=None
+    validation_categorical_feature_values_list=None,
+    init_artifact_bytes=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary(
@@ -2795,6 +2845,7 @@ fn train_regression_artifact_dense_with_summary(
     categorical_feature_indices: Option<Vec<usize>>,
     categorical_feature_values_list: Option<Vec<Vec<String>>>,
     validation_categorical_feature_values_list: Option<Vec<Vec<String>>>,
+    init_artifact_bytes: Option<Vec<u8>>,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -2861,6 +2912,7 @@ fn train_regression_artifact_dense_with_summary(
         continuous_binning_strategy,
         continuous_binning_max_bins,
         objective,
+        init_artifact_bytes.as_deref(),
     )
     .map_err(engine_error_to_pyerr)
 }
@@ -2925,7 +2977,8 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> PyResult<Vec<f32>> {
     tree_growth="level",
     categorical_feature_indices=None,
     categorical_feature_values_list=None,
-    validation_categorical_feature_values_list=None
+    validation_categorical_feature_values_list=None,
+    init_artifact_bytes=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary_bytes(
@@ -2974,6 +3027,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
     categorical_feature_indices: Option<Vec<usize>>,
     categorical_feature_values_list: Option<Vec<Vec<String>>>,
     validation_categorical_feature_values_list: Option<Vec<Vec<String>>>,
+    init_artifact_bytes: Option<Vec<u8>>,
 ) -> PyResult<NativeTrainingResult> {
     let values = bytes_to_f32_vec(values_bytes)?;
     let targets = bytes_to_f32_vec(targets_bytes)?;
@@ -3044,6 +3098,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
         continuous_binning_strategy,
         continuous_binning_max_bins,
         objective,
+        init_artifact_bytes.as_deref(),
     )
     .map_err(engine_error_to_pyerr)
 }
@@ -3134,6 +3189,7 @@ mod tests {
             ContinuousBinningStrategy::Linear,
             MAX_CONTINUOUS_QUANTIZED_BIN_U8 as usize + 1,
             "squared_error",
+            None, // init_artifact_bytes
         )
         .map(|result| result.artifact_bytes)
     }

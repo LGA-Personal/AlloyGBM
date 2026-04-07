@@ -1415,11 +1415,23 @@ struct PolicyFitRequest {
     store_node_debug_stats: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
+/// Initial model state for warm-starting (continuing training from a previous model).
+#[derive(Debug, Clone)]
+pub struct WarmStartState {
+    /// Baseline prediction (initial bias) from the original model.
+    pub baseline_prediction: f32,
+    /// Previously trained tree stumps.
+    pub stumps: Vec<TrainedStump>,
+    /// Number of rounds already completed in the initial model.
+    pub initial_rounds_completed: usize,
+}
+
+#[derive(Debug, Clone)]
 struct IterationExecutionContext<'a> {
     controls: IterationControls,
     validation: Option<ValidationDatasetRef<'a>>,
     policy_mode: Option<TrainingPolicyMode>,
+    warm_start: Option<WarmStartState>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1560,6 +1572,20 @@ impl IterationControls {
 }
 
 impl TrainedModel {
+    /// Count the number of distinct tree rounds in this model.
+    pub fn rounds_completed(&self) -> usize {
+        if self.stumps.is_empty() {
+            return 0;
+        }
+        let max_tree_id = self
+            .stumps
+            .iter()
+            .map(|s| decode_tree_node_id(s.split.node_id).0 as usize)
+            .max()
+            .unwrap_or(0);
+        max_tree_id + 1
+    }
+
     pub fn with_categorical_state(
         mut self,
         categorical_state: Option<CategoricalStatePayloadV1>,
@@ -1940,6 +1966,7 @@ impl Trainer {
                 controls,
                 validation: None,
                 policy_mode: Some(request.policy_mode),
+                warm_start: None,
             },
         )?;
         let model = summary.model;
@@ -2056,6 +2083,7 @@ impl Trainer {
                 controls,
                 validation: None,
                 policy_mode: None,
+                warm_start: None,
             },
         )
     }
@@ -2078,6 +2106,56 @@ impl Trainer {
                 controls,
                 validation: Some(validation),
                 policy_mode: None,
+                warm_start: None,
+            },
+        )
+    }
+
+    /// Continue training from a previously fitted model (warm-start).
+    pub fn fit_iterations_warm_start<B: BackendOps, O: ObjectiveOps>(
+        &self,
+        dataset: &TrainingDataset,
+        binned_matrix: &BinnedMatrix,
+        backend: &B,
+        objective: &O,
+        controls: IterationControls,
+        warm_start: WarmStartState,
+    ) -> EngineResult<IterationRunSummary> {
+        self.fit_iterations_with_optional_validation_summary(
+            dataset,
+            binned_matrix,
+            backend,
+            objective,
+            IterationExecutionContext {
+                controls,
+                validation: None,
+                policy_mode: None,
+                warm_start: Some(warm_start),
+            },
+        )
+    }
+
+    /// Continue training from a previously fitted model with validation (warm-start).
+    pub fn fit_iterations_warm_start_with_validation<B: BackendOps, O: ObjectiveOps>(
+        &self,
+        dataset: &TrainingDataset,
+        binned_matrix: &BinnedMatrix,
+        validation: ValidationDatasetRef<'_>,
+        backend: &B,
+        objective: &O,
+        controls: IterationControls,
+        warm_start: WarmStartState,
+    ) -> EngineResult<IterationRunSummary> {
+        self.fit_iterations_with_optional_validation_summary(
+            dataset,
+            binned_matrix,
+            backend,
+            objective,
+            IterationExecutionContext {
+                controls,
+                validation: Some(validation),
+                policy_mode: None,
+                warm_start: Some(warm_start),
             },
         )
     }
@@ -2227,12 +2305,41 @@ impl Trainer {
             binned_matrix,
         )?;
 
-        let mut predictions = vec![fit_contract.baseline_prediction; dataset.row_count()];
+        // Warm-start: use existing model's baseline + apply existing trees
+        let (baseline_prediction, initial_stumps, round_index_offset) =
+            if let Some(warm_start) = execution.warm_start {
+                (
+                    warm_start.baseline_prediction,
+                    warm_start.stumps,
+                    warm_start.initial_rounds_completed,
+                )
+            } else {
+                (fit_contract.baseline_prediction, Vec::new(), 0)
+            };
+        let mut predictions = vec![baseline_prediction; dataset.row_count()];
+        if !initial_stumps.is_empty() {
+            apply_tree_to_binned_predictions(
+                &mut predictions,
+                binned_matrix,
+                &initial_stumps,
+            )?;
+        }
         let mut candidate_predictions = predictions.clone();
-        let mut validation_predictions = validation.map(|validation_ref| {
-            vec![fit_contract.baseline_prediction; validation_ref.dataset.row_count()]
-        });
-        let mut stumps = Vec::new();
+        let mut validation_predictions = if let Some(validation_ref) = validation {
+            let mut vp = vec![baseline_prediction; validation_ref.dataset.row_count()];
+            if !initial_stumps.is_empty() {
+                apply_tree_to_binned_predictions(
+                    &mut vp,
+                    validation_ref.binned_matrix,
+                    &initial_stumps,
+                )?;
+            }
+            Some(vp)
+        } else {
+            None
+        };
+        let mut stumps = initial_stumps;
+        let initial_stump_count = stumps.len();
         let mut stumps_per_completed_round = Vec::new();
         let mut rounds_completed = 0_usize;
         let effective_round_cap = controls.rounds;
@@ -2271,17 +2378,19 @@ impl Trainer {
         let mut gradient_buffer: Vec<GradientPair> = Vec::with_capacity(dataset.row_count());
 
         for round_index in 0..effective_round_cap {
+            // Offset round_index for sampling seeds and tree IDs when warm-starting
+            let effective_round_index = round_index + round_index_offset;
             let root_row_indices = sampled_row_indices(
                 dataset.row_count(),
                 controls.row_subsample,
                 sampling_seed_base,
-                round_index as u64,
+                effective_round_index as u64,
             );
             let (feature_tiles, sampled_feature_count) = sampled_feature_tiles(
                 binned_matrix.feature_count,
                 controls.col_subsample,
                 sampling_seed_base,
-                round_index as u64,
+                effective_round_index as u64,
             )?;
             let sampled_row_count = root_row_indices.len();
             objective.compute_gradients_into(
@@ -2305,7 +2414,7 @@ impl Trainer {
                         binned_matrix,
                         gradients,
                         root_row_indices,
-                        round_index,
+                        effective_round_index,
                         &feature_tiles,
                         split_options,
                         &self.params,
@@ -2319,7 +2428,7 @@ impl Trainer {
                         binned_matrix,
                         gradients,
                         root_row_indices,
-                        round_index,
+                        effective_round_index,
                         &feature_tiles,
                         split_options,
                         &self.params,
@@ -2425,7 +2534,7 @@ impl Trainer {
         {
             let kept_stumps =
                 retained_stump_count_for_rounds(&stumps_per_completed_round, best_round);
-            stumps.truncate(kept_stumps);
+            stumps.truncate(initial_stump_count + kept_stumps);
             stumps_per_completed_round.truncate(best_round);
             loss_per_completed_round.truncate(best_round);
             validation_loss_per_completed_round.truncate(best_round);
@@ -2448,7 +2557,7 @@ impl Trainer {
 
         if experiment_leaf_refinement_enabled() && objective.supports_leaf_refinement() {
             refine_regression_leaf_values(
-                fit_contract.baseline_prediction,
+                baseline_prediction,
                 &dataset.targets,
                 dataset.sample_weights.as_deref(),
                 binned_matrix,
@@ -2458,7 +2567,7 @@ impl Trainer {
             )?;
 
             let mut refined_predictions =
-                vec![fit_contract.baseline_prediction; dataset.row_count()];
+                vec![baseline_prediction; dataset.row_count()];
             apply_tree_to_binned_predictions(&mut refined_predictions, binned_matrix, &stumps)?;
             current_loss = objective.loss(
                 &refined_predictions,
@@ -2470,7 +2579,7 @@ impl Trainer {
             }
             if let Some(validation_ref) = validation {
                 let mut refined_validation_predictions =
-                    vec![fit_contract.baseline_prediction; validation_ref.dataset.row_count()];
+                    vec![baseline_prediction; validation_ref.dataset.row_count()];
                 apply_tree_to_binned_predictions(
                     &mut refined_validation_predictions,
                     validation_ref.binned_matrix,
@@ -2491,7 +2600,7 @@ impl Trainer {
         }
 
         let model = TrainedModel {
-            baseline_prediction: fit_contract.baseline_prediction,
+            baseline_prediction,
             feature_count: dataset.matrix.feature_count,
             stumps,
             categorical_state: None,

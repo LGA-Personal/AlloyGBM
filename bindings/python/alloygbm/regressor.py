@@ -240,6 +240,7 @@ class GBMRegressor(_GBMRegressorBase):
         feature_weights: list[float] | dict[int, float] | None = None,
         max_leaves: int | None = None,
         tree_growth: str = "level",
+        warm_start: bool = False,
     ) -> None:
         if not (0.0 < learning_rate <= 1.0):
             raise ValueError("learning_rate must be in (0.0, 1.0]")
@@ -388,6 +389,7 @@ class GBMRegressor(_GBMRegressorBase):
         )
         self.max_leaves = int(max_leaves) if max_leaves is not None else None
         self.tree_growth = str(tree_growth)
+        self.warm_start = bool(warm_start)
         self._is_fitted = False
         self._artifact_bytes: bytes | None = None
         self._native_predictor_handle: object | None = None
@@ -435,7 +437,8 @@ class GBMRegressor(_GBMRegressorBase):
             f"monotone_constraints={self.monotone_constraints}, "
             f"feature_weights={self.feature_weights}, "
             f"max_leaves={self.max_leaves}, "
-            f"tree_growth='{self.tree_growth}'"
+            f"tree_growth='{self.tree_growth}', "
+            f"warm_start={self.warm_start}"
             ")"
         )
 
@@ -470,6 +473,7 @@ class GBMRegressor(_GBMRegressorBase):
             "feature_weights": self.feature_weights,
             "max_leaves": self.max_leaves,
             "tree_growth": self.tree_growth,
+            "warm_start": self.warm_start,
         }
 
     def set_params(self, **params: float | int | bool | str | None) -> "GBMRegressor":
@@ -502,6 +506,7 @@ class GBMRegressor(_GBMRegressorBase):
             "feature_weights",
             "max_leaves",
             "tree_growth",
+            "warm_start",
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
@@ -711,6 +716,9 @@ class GBMRegressor(_GBMRegressorBase):
                 raise ValueError("tree_growth must be 'level' or 'leaf'")
             self.tree_growth = tg
 
+        if "warm_start" in params:
+            self.warm_start = bool(params["warm_start"])
+
         # Cross-field validation: leaf growth requires max_leaves
         if self.tree_growth == "leaf" and self.max_leaves is None:
             raise ValueError("max_leaves must be set when tree_growth='leaf'")
@@ -796,8 +804,19 @@ class GBMRegressor(_GBMRegressorBase):
         categorical_feature_values: object | None = None,
         categorical_feature_values_list: object | None = None,
         time_index: object | None = None,
+        init_model: "GBMRegressor | None" = None,
     ) -> "GBMRegressor":
-        """Fit native-backed regression model artifact state."""
+        """Fit native-backed regression model artifact state.
+
+        Parameters
+        ----------
+        init_model : GBMRegressor or None, optional
+            A previously fitted model to continue training from (warm-start).
+            When provided, training resumes from this model's trees and
+            ``n_estimators`` additional rounds are trained. If ``warm_start=True``
+            is set on the estimator, the model's own previous state is used
+            instead. ``init_model`` takes priority over ``warm_start``.
+        """
         fit_start = time.perf_counter()
         self._fit_start_time = fit_start
         targets = self._validate_targets(y)
@@ -810,6 +829,15 @@ class GBMRegressor(_GBMRegressorBase):
                 "categorical_feature_values and categorical_feature_values_list are "
                 "mutually exclusive"
             )
+
+        # ── Resolve warm-start artifact bytes ──────────────────────────
+        init_artifact_bytes: bytes | None = None
+        if init_model is not None:
+            if not hasattr(init_model, "_artifact_bytes") or init_model._artifact_bytes is None:
+                raise ValueError("init_model must be a fitted GBMRegressor with artifact bytes")
+            init_artifact_bytes = init_model._artifact_bytes
+        elif self.warm_start and self._is_fitted and self._artifact_bytes is not None:
+            init_artifact_bytes = self._artifact_bytes
 
         # ── Normalize categorical configuration to plural form ──────────
         # effective_categorical_indices: list of column indices (or None if no categoricals)
@@ -1086,6 +1114,7 @@ class GBMRegressor(_GBMRegressorBase):
                     categorical_feature_indices=effective_categorical_indices if has_categorical else None,
                     categorical_feature_values_list=categorical_values_list if has_categorical else None,
                     validation_categorical_feature_values_list=validation_categorical_values_list if has_categorical else None,
+                    init_artifact_bytes=init_artifact_bytes,
                 )
                 return self._finalize_training_result(native_result, input_adaptation_seconds, feature_count=feature_count)
             except (ImportError, AttributeError):
@@ -1171,6 +1200,7 @@ class GBMRegressor(_GBMRegressorBase):
                 categorical_feature_indices=effective_categorical_indices if has_categorical else None,
                 categorical_feature_values_list=categorical_values_list if has_categorical else None,
                 validation_categorical_feature_values_list=validation_categorical_values_list if has_categorical else None,
+                init_artifact_bytes=init_artifact_bytes,
             )
         else:
             assert training_rows is not None
@@ -1217,6 +1247,7 @@ class GBMRegressor(_GBMRegressorBase):
                 categorical_feature_indices=effective_categorical_indices if has_categorical else None,
                 categorical_feature_values_list=categorical_values_list if has_categorical else None,
                 validation_categorical_feature_values_list=validation_categorical_values_list if has_categorical else None,
+                init_artifact_bytes=init_artifact_bytes,
             )
 
         self._apply_continuous_binning_metadata(native_result.continuous_binning_metadata)
