@@ -835,6 +835,14 @@ class GBMRegressor(_GBMRegressorBase):
         if init_model is not None:
             if not hasattr(init_model, "_artifact_bytes") or init_model._artifact_bytes is None:
                 raise ValueError("init_model must be a fitted GBMRegressor with artifact bytes")
+            if hasattr(init_model, "_objective_name"):
+                init_objective = init_model._objective_name()
+                current_objective = self._objective_name()
+                if init_objective != current_objective:
+                    raise ValueError(
+                        f"init_model objective '{init_objective}' does not match "
+                        f"current objective '{current_objective}'"
+                    )
             init_artifact_bytes = init_model._artifact_bytes
         elif self.warm_start and self._is_fitted and self._artifact_bytes is not None:
             init_artifact_bytes = self._artifact_bytes
@@ -908,10 +916,29 @@ class GBMRegressor(_GBMRegressorBase):
         if row_count != len(targets):
             raise ValueError("X and y must contain the same number of rows")
 
+        if init_model is not None and hasattr(init_model, "_n_features_in"):
+            if (
+                init_model._n_features_in is not None
+                and init_model._n_features_in != feature_count
+            ):
+                raise ValueError(
+                    f"init_model was fitted with {init_model._n_features_in} features, "
+                    f"but X has {feature_count} features"
+                )
+
         # Validate sample_weight if provided.
         validated_sample_weights: list[float] | None = None
         if sample_weight is not None:
             validated_sample_weights = self._validate_sample_weight(sample_weight, row_count)
+            obj = self._objective_name()
+            if obj in ("rank_pairwise", "rank_ndcg", "rank_xendcg", "yetirank"):
+                import warnings
+
+                warnings.warn(
+                    f"sample_weight is ignored by ranking objective '{obj}'",
+                    UserWarning,
+                    stacklevel=2,
+                )
 
         # Validate group if provided.
         validated_group_id: list[int] | None = None
