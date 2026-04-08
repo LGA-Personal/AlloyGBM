@@ -1630,13 +1630,6 @@ fn encode_bins_from_encoded_values(encoded_values: &[f32]) -> Result<(Vec<u8>, u
     Ok((bins, (unique_values.len().saturating_sub(1)) as u16))
 }
 
-fn apply_categorical_encoding_to_training_matrices(
-    prepared: PreparedTrainingMatrices,
-    categorical_spec: &CategoricalTargetEncodingSpec,
-) -> Result<(PreparedTrainingMatrices, CategoricalStatePayloadV1), EngineError> {
-    apply_categorical_encoding_to_training_matrices_multi(prepared, std::slice::from_ref(categorical_spec))
-}
-
 /// Encode multiple categorical features in the training matrices via target encoding.
 fn apply_categorical_encoding_to_training_matrices_multi(
     prepared: PreparedTrainingMatrices,
@@ -1719,22 +1712,6 @@ fn apply_categorical_encoding_to_training_matrices_multi(
         },
         categorical_state,
     ))
-}
-
-fn apply_categorical_encoding_to_validation_matrices(
-    prepared: PreparedTrainingMatrices,
-    training_spec: &CategoricalTargetEncodingSpec,
-    validation_spec: &CategoricalTargetEncodingSpec,
-    training_targets: &[f32],
-    training_time_index: Option<&[i64]>,
-) -> Result<PreparedTrainingMatrices, EngineError> {
-    apply_categorical_encoding_to_validation_matrices_multi(
-        prepared,
-        std::slice::from_ref(training_spec),
-        std::slice::from_ref(validation_spec),
-        training_targets,
-        training_time_index,
-    )
 }
 
 /// Encode multiple categorical features in the validation matrices via target encoding.
@@ -1976,6 +1953,7 @@ fn train_regression_artifact_with_summary_dense_impl(
     };
 
     let bridge_prepare_seconds = bridge_start.elapsed().as_secs_f64();
+    let user_seed = params.seed;
     let trainer = Trainer::new(params)?;
     let backend = CpuBackend;
     let native_start = Instant::now();
@@ -2082,7 +2060,7 @@ fn train_regression_artifact_with_summary_dense_impl(
                     run_training!(&obj)
                 }
                 "yetirank" => {
-                    let mut obj = YetiRankObjective::new(group_id, 10, 42);
+                    let mut obj = YetiRankObjective::new(group_id, 10, user_seed);
                     if let Some(vg) = val_group_id {
                         obj = obj.with_validation_group(vg);
                     }

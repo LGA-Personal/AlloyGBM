@@ -168,8 +168,8 @@ class GBMRanker(GBMRegressor):
 
     def __repr__(self) -> str:
         return (
-            f"GBMRanker("
-            f"ranking_objective={self.ranking_objective!r}, "
+            "GBMRanker("
+            f"ranking_objective='{self.ranking_objective}', "
             f"learning_rate={self.learning_rate}, "
             f"max_depth={self.max_depth}, "
             f"n_estimators={self.n_estimators}, "
@@ -184,14 +184,21 @@ class GBMRanker(GBMRegressor):
             f"min_split_gain={self.min_split_gain}, "
             f"seed={self.seed}, "
             f"deterministic={self.deterministic}, "
-            f"continuous_binning_strategy={self.continuous_binning_strategy!r}, "
+            f"continuous_binning_strategy='{self.continuous_binning_strategy}', "
             f"continuous_binning_max_bins={self.continuous_binning_max_bins}, "
             f"categorical_feature_index={self.categorical_feature_index}, "
-            f"training_policy={self.training_policy!r}, "
+            f"categorical_feature_indices={self.categorical_feature_indices}, "
+            f"training_policy='{self.training_policy}', "
             f"store_node_stats={self.store_node_stats}, "
             f"categorical_smoothing={self.categorical_smoothing}, "
             f"categorical_min_samples_leaf={self.categorical_min_samples_leaf}, "
-            f"categorical_time_aware={self.categorical_time_aware})"
+            f"categorical_time_aware={self.categorical_time_aware}, "
+            f"monotone_constraints={self.monotone_constraints}, "
+            f"feature_weights={self.feature_weights}, "
+            f"max_leaves={self.max_leaves}, "
+            f"tree_growth='{self.tree_growth}', "
+            f"warm_start={self.warm_start}"
+            ")"
         )
 
     def get_params(self, deep: bool = True) -> dict:

@@ -38,9 +38,10 @@ class GBMClassifierTests(unittest.TestCase):
         clf = GBMClassifier(n_estimators=10, seed=42)
         clf.fit(X_train, y_train)
         probs = clf.predict_proba(X_train)
-        self.assertIsInstance(probs, list)
-        self.assertEqual(len(probs), len(y_train))
-        self.assertTrue(all(0.0 <= p <= 1.0 for p in probs))
+        self.assertIsInstance(probs, np.ndarray)
+        self.assertEqual(probs.shape, (len(y_train), 2))
+        self.assertTrue(np.all(probs >= 0.0) and np.all(probs <= 1.0))
+        self.assertTrue(np.allclose(probs.sum(axis=1), 1.0))
 
     def test_predict_log_proba(self) -> None:
         X_train, y_train, _, _ = self._make_binary_dataset()
@@ -48,8 +49,9 @@ class GBMClassifierTests(unittest.TestCase):
         clf.fit(X_train, y_train)
         log_probs = clf.predict_log_proba(X_train)
         probs = clf.predict_proba(X_train)
-        for lp, p in zip(log_probs, probs):
-            self.assertAlmostEqual(lp, math.log(max(p, 1e-15)), places=10)
+        self.assertEqual(log_probs.shape, probs.shape)
+        expected = np.log(np.clip(probs, 1e-15, None))
+        self.assertTrue(np.allclose(log_probs, expected, atol=1e-10))
 
     def test_fitted_attributes(self) -> None:
         X_train, y_train, _, _ = self._make_binary_dataset()
@@ -85,8 +87,7 @@ class GBMClassifierTests(unittest.TestCase):
         original_preds = clf.predict_proba(X_train)
         restored = pickle.loads(pickle.dumps(clf))
         restored_preds = restored.predict_proba(X_train)
-        for orig, rest in zip(original_preds, restored_preds):
-            self.assertAlmostEqual(orig, rest, places=5)
+        self.assertTrue(np.allclose(original_preds, restored_preds, atol=1e-5))
 
     def test_objective_name_is_binary_crossentropy(self) -> None:
         clf = GBMClassifier()

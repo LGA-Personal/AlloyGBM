@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 from .regressor import GBMRegressor
 
 if TYPE_CHECKING:
@@ -97,39 +99,39 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
         Returns a list of integers (0 or 1) by thresholding predicted
         probabilities at 0.5.
         """
-        probabilities = self.predict_proba(X)
-        return [1 if p >= 0.5 else 0 for p in probabilities]
+        p1 = super().predict(X)
+        return [1 if p >= 0.5 else 0 for p in p1]
 
     # -- predict_proba --------------------------------------------------------
 
-    def predict_proba(self, X: object) -> list[float]:
+    def predict_proba(self, X: object) -> np.ndarray:
         """Predict class probabilities for samples in X.
 
-        Returns a list of P(y=1) values in [0, 1]. The predictor applies
-        sigmoid to the raw log-odds output automatically (the artifact records
-        ``objective='binary_crossentropy'`` and the native predictor applies
-        the post-transform).
+        Returns an ndarray of shape ``(n_samples, 2)`` with columns
+        ``[P(y=0), P(y=1)]``, compatible with the sklearn classifier API.
         """
-        # GBMRegressor.predict already returns sigmoid-transformed probabilities
+        # GBMRegressor.predict returns sigmoid-transformed probabilities
         # because the predictor crate applies the post-transform based on the
         # objective stored in the model artifact.
-        return super().predict(X)
+        p1 = np.asarray(super().predict(X), dtype=np.float64)
+        return np.column_stack([1.0 - p1, p1])
 
     # -- predict_log_proba ----------------------------------------------------
 
-    def predict_log_proba(self, X: object) -> list[float]:
+    def predict_log_proba(self, X: object) -> np.ndarray:
         """Predict log-probabilities for samples in X.
 
-        Returns a list of log(P(y=1)) values.
+        Returns an ndarray of shape ``(n_samples, 2)`` with columns
+        ``[log(P(y=0)), log(P(y=1))]``.
         """
-        probabilities = self.predict_proba(X)
-        return [math.log(max(p, 1e-15)) for p in probabilities]
+        proba = self.predict_proba(X)
+        return np.log(np.clip(proba, 1e-15, None))
 
     # -- sklearn overrides ----------------------------------------------------
 
     def __repr__(self) -> str:
         return (
-            f"GBMClassifier("
+            "GBMClassifier("
             f"learning_rate={self.learning_rate}, "
             f"max_depth={self.max_depth}, "
             f"n_estimators={self.n_estimators}, "
@@ -144,14 +146,21 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
             f"min_split_gain={self.min_split_gain}, "
             f"seed={self.seed}, "
             f"deterministic={self.deterministic}, "
-            f"continuous_binning_strategy={self.continuous_binning_strategy!r}, "
+            f"continuous_binning_strategy='{self.continuous_binning_strategy}', "
             f"continuous_binning_max_bins={self.continuous_binning_max_bins}, "
             f"categorical_feature_index={self.categorical_feature_index}, "
-            f"training_policy={self.training_policy!r}, "
+            f"categorical_feature_indices={self.categorical_feature_indices}, "
+            f"training_policy='{self.training_policy}', "
             f"store_node_stats={self.store_node_stats}, "
             f"categorical_smoothing={self.categorical_smoothing}, "
             f"categorical_min_samples_leaf={self.categorical_min_samples_leaf}, "
-            f"categorical_time_aware={self.categorical_time_aware})"
+            f"categorical_time_aware={self.categorical_time_aware}, "
+            f"monotone_constraints={self.monotone_constraints}, "
+            f"feature_weights={self.feature_weights}, "
+            f"max_leaves={self.max_leaves}, "
+            f"tree_growth='{self.tree_growth}', "
+            f"warm_start={self.warm_start}"
+            ")"
         )
 
     def __sklearn_tags__(self):

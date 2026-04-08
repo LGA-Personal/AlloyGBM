@@ -265,6 +265,15 @@ impl ObjectiveOps for SquaredErrorObjective {
                 targets.len()
             )));
         }
+        if let Some(weights) = sample_weights
+            && weights.len() != targets.len()
+        {
+            return Err(EngineError::ContractViolation(format!(
+                "weights length {} does not match targets length {}",
+                weights.len(),
+                targets.len()
+            )));
+        }
         buffer.clear();
         if buffer.capacity() < predictions.len() {
             buffer.reserve(predictions.len() - buffer.capacity());
@@ -405,6 +414,15 @@ impl ObjectiveOps for BinaryCrossEntropyObjective {
                 targets.len()
             )));
         }
+        if let Some(weights) = sample_weights
+            && weights.len() != targets.len()
+        {
+            return Err(EngineError::ContractViolation(format!(
+                "weights length {} does not match targets length {}",
+                weights.len(),
+                targets.len()
+            )));
+        }
         buffer.clear();
         if buffer.capacity() < predictions.len() {
             buffer.reserve(predictions.len() - buffer.capacity());
@@ -524,17 +542,16 @@ fn resolve_boundaries_for_len(
     validation_boundaries: &Option<Vec<usize>>,
     data_len: usize,
 ) -> Vec<usize> {
-    if let Some(last) = train_boundaries.last() {
-        if *last == data_len {
-            return train_boundaries.to_vec();
-        }
+    if let Some(last) = train_boundaries.last()
+        && *last == data_len
+    {
+        return train_boundaries.to_vec();
     }
-    if let Some(val_b) = validation_boundaries {
-        if let Some(last) = val_b.last() {
-            if *last == data_len {
-                return val_b.clone();
-            }
-        }
+    if let Some(val_b) = validation_boundaries
+        && let Some(last) = val_b.last()
+        && *last == data_len
+    {
+        return val_b.clone();
     }
     // Fallback: treat entire slice as a single group.
     vec![0, data_len]
@@ -1519,12 +1536,12 @@ impl IterationControls {
     }
 
     pub fn with_max_leaves(mut self, max_leaves: Option<usize>) -> EngineResult<Self> {
-        if let Some(n) = max_leaves {
-            if n < 2 {
-                return Err(EngineError::InvalidConfig(
-                    "max_leaves must be >= 2 when set".to_string(),
-                ));
-            }
+        if let Some(n) = max_leaves
+            && n < 2
+        {
+            return Err(EngineError::InvalidConfig(
+                "max_leaves must be >= 2 when set".to_string(),
+            ));
         }
         self.max_leaves = max_leaves;
         Ok(self)
@@ -2136,6 +2153,7 @@ impl Trainer {
     }
 
     /// Continue training from a previously fitted model with validation (warm-start).
+    #[allow(clippy::too_many_arguments)]
     pub fn fit_iterations_warm_start_with_validation<B: BackendOps, O: ObjectiveOps>(
         &self,
         dataset: &TrainingDataset,
@@ -3203,6 +3221,9 @@ struct PendingSplit {
     depth: usize,
 }
 
+// PartialEq uses exact float comparison for the Eq trait bound required by
+// BinaryHeap. NaN gains are filtered before insertion; ordering is handled
+// by the Ord impl which falls back to Equal for NaN.
 impl PartialEq for PendingSplit {
     fn eq(&self, other: &Self) -> bool {
         self.split_candidate.gain == other.split_candidate.gain
@@ -3406,32 +3427,30 @@ fn build_tree_leaf_wise<B: BackendOps>(
             // Find best split for each child and enqueue if valid.
             if let Some(child_split) =
                 backend.best_split_with_options(&smaller_histograms, split_options, feature_weights)?
+                && child_split.gain.is_finite() && child_split.gain > controls.min_split_gain
             {
-                if child_split.gain.is_finite() && child_split.gain > controls.min_split_gain {
-                    queue.push(PendingSplit {
-                        local_node_id: smaller_local,
-                        row_indices: smaller_node.row_indices,
-                        split_candidate: child_split,
-                        histograms: smaller_histograms,
-                        parent_leaf_value: smaller_leaf_abs,
-                        depth: child_depth,
-                    });
-                }
+                queue.push(PendingSplit {
+                    local_node_id: smaller_local,
+                    row_indices: smaller_node.row_indices,
+                    split_candidate: child_split,
+                    histograms: smaller_histograms,
+                    parent_leaf_value: smaller_leaf_abs,
+                    depth: child_depth,
+                });
             }
 
             if let Some(child_split) =
                 backend.best_split_with_options(&larger_histograms, split_options, feature_weights)?
+                && child_split.gain.is_finite() && child_split.gain > controls.min_split_gain
             {
-                if child_split.gain.is_finite() && child_split.gain > controls.min_split_gain {
-                    queue.push(PendingSplit {
-                        local_node_id: larger_local,
-                        row_indices: larger_indices,
-                        split_candidate: child_split,
-                        histograms: larger_histograms,
-                        parent_leaf_value: larger_leaf_abs,
-                        depth: child_depth,
-                    });
-                }
+                queue.push(PendingSplit {
+                    local_node_id: larger_local,
+                    row_indices: larger_indices,
+                    split_candidate: child_split,
+                    histograms: larger_histograms,
+                    parent_leaf_value: larger_leaf_abs,
+                    depth: child_depth,
+                });
             }
         }
     }
@@ -4258,7 +4277,10 @@ fn squared_error_loss_unchecked(
     sample_weights: Option<&[f32]>,
 ) -> f32 {
     let n = predictions.len();
-    if let Some(weights) = sample_weights {
+    if n == 0 {
+        return 0.0;
+    }
+    let sum = if let Some(weights) = sample_weights {
         let mut total = 0.0_f32;
         for index in 0..n {
             let residual = predictions[index] - targets[index];
@@ -4289,7 +4311,9 @@ fn squared_error_loss_unchecked(
             total += residual * residual;
         }
         total
-    }
+    };
+    // Return mean squared error (not sum) for scale-independent loss values.
+    sum / n as f32
 }
 
 fn binary_crossentropy_loss(
@@ -4317,6 +4341,9 @@ fn binary_crossentropy_loss(
     // where p = sigmoid(prediction) and prediction is in logit space.
     // Stable formulation: max(pred,0) - pred*y + log(1 + exp(-|pred|))
     let n = predictions.len();
+    if n == 0 {
+        return Ok(0.0);
+    }
     let mut total = 0.0_f32;
     for index in 0..n {
         let pred = predictions[index];
@@ -4325,7 +4352,8 @@ fn binary_crossentropy_loss(
         let loss = pred.max(0.0) - pred * y + (1.0 + (-pred.abs()).exp()).ln();
         total += loss * weight;
     }
-    Ok(total)
+    // Return mean log-loss (not sum) for scale-independent loss values.
+    Ok(total / n as f32)
 }
 
 fn required_single_section(

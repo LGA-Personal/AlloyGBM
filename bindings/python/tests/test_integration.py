@@ -108,7 +108,8 @@ class TestLeafWiseWithObjectives(unittest.TestCase):
         )
         clf.fit(X, y, eval_set=(X_val, y_val))
         probs = clf.predict_proba(X)
-        self.assertTrue(all(0.0 <= p <= 1.0 for p in probs))
+        self.assertEqual(probs.shape[1], 2)
+        self.assertTrue(np.all((probs >= 0.0) & (probs <= 1.0)))
         labels = clf.predict(X)
         acc = sum(int(p == int(t)) for p, t in zip(labels, y)) / len(y)
         self.assertGreater(acc, 0.6)
@@ -156,7 +157,8 @@ class TestLeafWiseWithObjectives(unittest.TestCase):
         )
         clf.fit(X, y)
         probs = clf.predict_proba(X)
-        self.assertTrue(all(0.0 <= p <= 1.0 for p in probs))
+        self.assertEqual(probs.shape[1], 2)
+        self.assertTrue(np.all((probs >= 0.0) & (probs <= 1.0)))
 
 
 class TestSHAPAcrossObjectives(unittest.TestCase):
@@ -177,12 +179,12 @@ class TestSHAPAcrossObjectives(unittest.TestCase):
         # The Rust layer already verifies additivity internally. Here we
         # verify the Python-level result is consistent: the SHAP values
         # should be in log-odds space and sum + expected ≈ raw logits.
-        # Sigmoid of raw logits should ≈ predict_proba.
+        # Sigmoid of raw logits should ≈ predict_proba[:, 1].
         probs = clf.predict_proba(X[:10])
         for i, row_shap in enumerate(shap_matrix):
             raw_logit = expected_value + sum(row_shap)
             prob_from_shap = 1.0 / (1.0 + math.exp(-raw_logit))
-            self.assertAlmostEqual(prob_from_shap, probs[i], places=3)
+            self.assertAlmostEqual(prob_from_shap, probs[i, 1], places=3)
 
     def test_shap_ranking_additivity(self) -> None:
         X, y, group = _make_ranking_data(n_queries=8, n_features=4, seed=50)
@@ -255,17 +257,15 @@ class TestWarmStartCompatibility(unittest.TestCase):
         X, y = _make_classification_data(n=400, seed=80)
         clf1 = GBMClassifier(n_estimators=10, warm_start=True, seed=42)
         clf1.fit(X, y)
-        preds_10 = clf1.predict_proba(X)
+        preds_10 = clf1.predict_proba(X)[:, 1]
 
         clf1.n_estimators = 20
         clf1.fit(X, y)
-        preds_20 = clf1.predict_proba(X)
+        preds_20 = clf1.predict_proba(X)[:, 1]
 
         # After warm-start continuation, predictions should differ
         # (more trees were added).
-        self.assertFalse(
-            all(abs(a - b) < 1e-8 for a, b in zip(preds_10, preds_20))
-        )
+        self.assertFalse(np.allclose(preds_10, preds_20, atol=1e-8))
 
     def test_warm_start_ranking(self) -> None:
         # Warm-start with ranking: verify the pipeline doesn't crash.
@@ -356,7 +356,8 @@ class TestCategoricalWithObjectives(unittest.TestCase):
         )
         clf.fit(rows, y, categorical_feature_values=cat_col)
         probs = clf.predict_proba(rows)
-        self.assertTrue(all(0.0 <= p <= 1.0 for p in probs))
+        self.assertEqual(probs.shape[1], 2)
+        self.assertTrue(np.all((probs >= 0.0) & (probs <= 1.0)))
 
     def test_categorical_ranking(self) -> None:
         n_q, dpq = 10, 15
@@ -427,7 +428,8 @@ class TestWideBinsWithObjectives(unittest.TestCase):
         )
         clf.fit(X, y)
         probs = clf.predict_proba(X)
-        self.assertTrue(all(0.0 <= p <= 1.0 for p in probs))
+        self.assertEqual(probs.shape[1], 2)
+        self.assertTrue(np.all((probs >= 0.0) & (probs <= 1.0)))
         labels = clf.predict(X)
         acc = sum(int(p == int(t)) for p, t in zip(labels, y)) / len(y)
         self.assertGreater(acc, 0.6)
@@ -472,7 +474,8 @@ class TestConstraintsWithObjectives(unittest.TestCase):
         )
         clf.fit(X, y)
         probs = clf.predict_proba(X)
-        self.assertTrue(all(0.0 <= p <= 1.0 for p in probs))
+        self.assertEqual(probs.shape[1], 2)
+        self.assertTrue(np.all((probs >= 0.0) & (probs <= 1.0)))
 
         # Verify monotonicity: sort X by feature 0 (fixing others at median),
         # predictions should be non-decreasing.
@@ -481,7 +484,7 @@ class TestConstraintsWithObjectives(unittest.TestCase):
         test_X[:, 0] = np.linspace(X[:, 0].min(), X[:, 0].max(), 50).astype(
             np.float32
         )
-        mono_probs = clf.predict_proba(test_X)
+        mono_probs = clf.predict_proba(test_X)[:, 1]
         # Check overall monotone trend: correlation with sorted indices.
         # Small local violations can occur at sigmoid boundaries, so
         # we verify the overall trend rather than strict pairwise ordering.
@@ -557,7 +560,8 @@ class TestKitchenSink(unittest.TestCase):
 
         # Predictions are valid probabilities.
         probs = clf.predict_proba(X)
-        self.assertTrue(all(0.0 <= p <= 1.0 for p in probs))
+        self.assertEqual(probs.shape[1], 2)
+        self.assertTrue(np.all((probs >= 0.0) & (probs <= 1.0)))
 
         labels = clf.predict(X)
         acc = sum(int(p == int(t)) for p, t in zip(labels, y)) / len(y)
@@ -705,6 +709,31 @@ class TestSampleWeightWarning(unittest.TestCase):
                 x for x in w if "sample_weight is ignored" in str(x.message)
             ]
             self.assertEqual(len(ranking_warnings), 0)
+
+
+class TestSHAPNaNHandling(unittest.TestCase):
+    """SHAP handles models trained on NaN-containing data."""
+
+    def test_shap_on_nan_trained_model(self) -> None:
+        """Train on NaN-containing data, verify SHAP works on clean input.
+
+        Models trained with NaN-containing data learn NaN-aware splits.
+        SHAP values should still satisfy additivity on clean (non-NaN) input.
+        """
+        X, y = _make_regression_data(n=300, nan_frac=0.05, seed=500)
+        reg = GBMRegressor(n_estimators=10, seed=42)
+        reg.fit(X, y)
+
+        # Use clean (non-NaN) rows for SHAP — additivity should hold.
+        rng = np.random.RandomState(501)
+        X_clean = rng.randn(5, 8).astype(np.float32)
+        expected_value, shap_matrix = reg.shap_values(
+            X_clean, include_expected_value=True
+        )
+        preds = reg.predict(X_clean)
+        for i, row_shap in enumerate(shap_matrix):
+            reconstructed = expected_value + sum(row_shap)
+            self.assertAlmostEqual(reconstructed, preds[i], places=2)
 
 
 if __name__ == "__main__":

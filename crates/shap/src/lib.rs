@@ -520,7 +520,9 @@ fn validate_rows(rows: &[Vec<f32>], feature_count: usize) -> ShapResult<()> {
         for (feature_index, value) in row.iter().enumerate() {
             if !value.is_finite() {
                 return Err(ShapError::InvalidInput(format!(
-                    "row {row_index} feature {feature_index} must be finite"
+                    "row {row_index} feature {feature_index} contains NaN/Inf. \
+                     SHAP values require finite feature values. If your data \
+                     contains missing values, impute them before calling shap_values()."
                 )));
             }
         }

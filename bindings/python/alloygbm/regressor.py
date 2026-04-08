@@ -3140,6 +3140,12 @@ class GBMRegressor(_GBMRegressorBase):
     def _validate_sample_weight(
         sample_weight: object, row_count: int
     ) -> list[float]:
+        """Validate and convert sample weights.
+
+        Weights must be finite and non-negative. Zero weights are allowed
+        and produce zero-gradient pairs (effectively excluding the row from
+        that training round).
+        """
         values_like = GBMRegressor._coerce_sequence_like(
             sample_weight, "sample_weight"
         )
