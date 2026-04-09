@@ -1,6 +1,7 @@
 name: dow_jones_financial
 version: 1
 kind: uci_download
+task_type: regression
 description: Financial panel-style benchmark derived from UCI Dow Jones Index weekly data.
 source:
   dataset: dow-jones-index
