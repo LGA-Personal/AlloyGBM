@@ -163,7 +163,7 @@ class GBMRegressorContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "continuous_binning_max_bins"):
             GBMRegressor(continuous_binning_max_bins=1)
         with self.assertRaisesRegex(ValueError, "continuous_binning_max_bins"):
-            GBMRegressor(continuous_binning_max_bins=257)
+            GBMRegressor(continuous_binning_max_bins=65536)
 
     def test_get_params_and_set_params_roundtrip(self) -> None:
         model = GBMRegressor()
@@ -342,6 +342,7 @@ class GBMRegressorContractTests(unittest.TestCase):
                         "time_index": None,
                         "continuous_binning_strategy": "linear",
                         "continuous_binning_max_bins": 256,
+                        "objective": "squared_error",
                     }
                 ],
             )
@@ -365,6 +366,9 @@ class GBMRegressorContractTests(unittest.TestCase):
                 best_validation_loss=0.16,
                 train_rmse=[1.0, 0.8, 0.6, 0.5, 0.4],
                 validation_rmse=[1.1, 0.9, 0.7, 0.6, 0.5],
+                train_loss=[1.0, 0.64, 0.36, 0.25, 0.16],
+                validation_loss=[1.21, 0.81, 0.49, 0.36, 0.25],
+                objective="squared_error",
                 stop_reason="ValidationLossPlateau",
                 bridge_prepare_seconds=0.01,
                 native_train_seconds=0.02,
@@ -409,8 +413,14 @@ class GBMRegressorContractTests(unittest.TestCase):
         self.assertEqual(
             model.evals_result_,
             {
-                "train": {"rmse": [1.0, 0.8, 0.6, 0.5, 0.4]},
-                "validation": {"rmse": [1.1, 0.9, 0.7, 0.6, 0.5]},
+                "train": {
+                    "rmse": [1.0, 0.8, 0.6, 0.5, 0.4],
+                    "mse": [1.0, 0.64, 0.36, 0.25, 0.16],
+                },
+                "validation": {
+                    "rmse": [1.1, 0.9, 0.7, 0.6, 0.5],
+                    "mse": [1.21, 0.81, 0.49, 0.36, 0.25],
+                },
             },
         )
         self.assertEqual(model.fit_timing_["native_bridge_prepare_seconds"], 0.01)
@@ -439,7 +449,7 @@ class GBMRegressorContractTests(unittest.TestCase):
             self.assertEqual(len(train_calls), 1)
             self.assertEqual(
                 train_calls[0]["rows"],
-                [[0.0, 0.0], [115.0, 255.0], [255.0, 11.0]],
+                [[0.0, 0.0], [114.0, 254.0], [254.0, 11.0]],
             )
 
     def test_fit_linear_tail_rank_fallback_quantizes_heavy_tail_features(self) -> None:
@@ -492,9 +502,9 @@ class GBMRegressorContractTests(unittest.TestCase):
                 [
                     [0.0, 0.0],
                     [64.0, 64.0],
-                    [128.0, 96.0],
+                    [127.0, 95.0],
                     [191.0, 102.0],
-                    [255.0, 255.0],
+                    [254.0, 254.0],
                 ],
             )
 
@@ -530,7 +540,7 @@ class GBMRegressorContractTests(unittest.TestCase):
                     original_predict_loader
                 )
 
-            self.assertEqual(predict_calls, [[[34.0, 0.0], [255.0, 255.0]]])
+            self.assertEqual(predict_calls, [[[33.0, 0.0], [254.0, 254.0]]])
 
     def test_predict_preserves_linear_tail_rank_fallback_after_fit(self) -> None:
         with _force_legacy_train_path():
@@ -591,7 +601,7 @@ class GBMRegressorContractTests(unittest.TestCase):
                         original_tail_ratio
                     )
 
-            self.assertEqual(predict_calls, [[[128.0, 89.0], [191.0, 127.0]]])
+            self.assertEqual(predict_calls, [[[127.0, 89.0], [191.0, 127.0]]])
 
     def test_fit_quantizes_continuous_rows_with_rank_strategy(self) -> None:
         with _force_legacy_train_path():
@@ -616,7 +626,7 @@ class GBMRegressorContractTests(unittest.TestCase):
             self.assertEqual(len(train_calls), 1)
             self.assertEqual(
                 train_calls[0]["rows"],
-                [[0.0, 0.0], [128.0, 255.0], [255.0, 128.0]],
+                [[0.0, 0.0], [127.0, 254.0], [254.0, 127.0]],
             )
 
     def test_fit_quantizes_continuous_rows_with_quantile_strategy(self) -> None:
@@ -887,21 +897,21 @@ class GBMRegressorContractTests(unittest.TestCase):
             self.assertEqual(train_calls[0]["categorical_feature_values"], ["A", "B", "A"])
             self.assertEqual(train_calls[0]["rows"], [[0.0, 1.0], [0.0, 2.0], [0.0, 3.0]])
 
-    def test_fit_rejects_multiple_explicit_categorical_columns_without_manual_selection(
+    def test_fit_auto_infers_multiple_explicit_categorical_columns(
         self,
     ) -> None:
-        model = GBMRegressor()
-        with self.assertRaisesRegex(
-            ValueError, "multiple explicit categorical columns"
-        ):
-            model.fit(
-                _FakeCategoricalFrame(
-                    rows=[["A", "X", 1.0], ["B", "Y", 2.0]],
-                    columns=["kind_a", "kind_b", "value"],
-                    dtypes=["category", "categorical", "float64"],
-                ),
-                [1.0, 2.0],
-            )
+        """Multiple categorical columns in a DataFrame should be auto-inferred."""
+        model = GBMRegressor(n_estimators=3, training_policy="manual")
+        model.fit(
+            _FakeCategoricalFrame(
+                rows=[["A", "X", 1.0], ["B", "Y", 2.0], ["A", "X", 3.0]],
+                columns=["kind_a", "kind_b", "value"],
+                dtypes=["category", "categorical", "float64"],
+            ),
+            [1.0, 2.0, 3.0],
+        )
+        preds = model.predict([[0.0, 0.0, 1.5]])
+        self.assertEqual(len(preds), 1)
 
     def test_predict_rejects_feature_count_mismatch(self) -> None:
         with _force_legacy_train_path():

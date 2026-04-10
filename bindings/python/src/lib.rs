@@ -6,11 +6,13 @@ use alloygbm_categorical::{
 };
 use alloygbm_core::{
     BinnedMatrix, CATEGORICAL_STATE_FORMAT_V1, CategoricalStatePayloadV1, DatasetMatrix,
-    DenseMatrixView, TrainParams, TrainingDataset,
+    DenseMatrixView, MISSING_BIN_U8, TrainParams, TrainingDataset, TreeGrowth,
 };
 use alloygbm_engine::{
-    ArtifactCompatibilityMode, CategoricalTargetEncodingSpec, EngineError, IterationRunSummary,
-    SquaredErrorObjective, TrainedModel, Trainer, TrainingPolicyMode,
+    ArtifactCompatibilityMode, BinaryCrossEntropyObjective, CategoricalTargetEncodingSpec,
+    EngineError, IterationRunSummary, LambdaMARTObjective, PairwiseRankingObjective,
+    QueryRMSEObjective, SquaredErrorObjective, TrainedModel, Trainer, TrainingPolicyMode,
+    WarmStartState, XeNDCGObjective, YetiRankObjective,
 };
 use alloygbm_predictor::{Predictor, PredictorError};
 use alloygbm_shap::{
@@ -25,7 +27,8 @@ use std::time::Instant;
 const DEFAULT_TRAIN_ROUNDS: usize = 6;
 const MAX_SUPPORTED_TRAIN_ROUNDS: usize = 4096;
 const PRE_BINNED_INTEGER_TOLERANCE: f32 = 1e-6;
-const MAX_CONTINUOUS_QUANTIZED_BIN: u16 = 255;
+const MAX_CONTINUOUS_QUANTIZED_BIN_U8: u16 = 254;
+const MAX_CONTINUOUS_QUANTIZED_BIN_U16: u16 = 65534;
 const MIN_CONTINUOUS_QUANTIZED_BINS: usize = 2;
 const LINEAR_TAIL_RANK_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK";
 const LINEAR_TAIL_CORE_SPAN_RATIO_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_CORE_SPAN_RATIO";
@@ -45,6 +48,16 @@ fn parse_training_policy(value: &str) -> Result<TrainingPolicyMode, EngineError>
         "auto" => Ok(TrainingPolicyMode::Auto),
         other => Err(EngineError::InvalidConfig(format!(
             "training_policy must be 'auto' or 'manual', received '{other}'"
+        ))),
+    }
+}
+
+fn parse_tree_growth(value: &str) -> Result<TreeGrowth, EngineError> {
+    match value {
+        "level" => Ok(TreeGrowth::Level),
+        "leaf" => Ok(TreeGrowth::Leaf),
+        other => Err(EngineError::InvalidConfig(format!(
+            "tree_growth must be 'level' or 'leaf', received '{other}'"
         ))),
     }
 }
@@ -209,6 +222,7 @@ impl NativePredictorHandle {
 
     /// Quantize raw float values to bins using linear scaling, then predict.
     /// Avoids the Python-side quantization loop (1.95B iterations for 2.5M×780).
+    #[pyo3(signature = (values, row_count, feature_count, feature_mins, feature_maxs, max_data_bin=None))]
     fn predict_dense_quantized_linear(
         &self,
         values: Vec<f32>,
@@ -216,18 +230,21 @@ impl NativePredictorHandle {
         feature_count: usize,
         feature_mins: Vec<f32>,
         feature_maxs: Vec<f32>,
+        max_data_bin: Option<u16>,
     ) -> PyResult<Vec<f32>> {
         if feature_mins.len() != feature_count || feature_maxs.len() != feature_count {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "feature_mins/feature_maxs length must match feature_count",
             ));
         }
-        let quantized = quantize_dense_values_linear_inplace(
+        let mdb = max_data_bin.unwrap_or(MAX_CONTINUOUS_QUANTIZED_BIN_U8);
+        let quantized = quantize_dense_values_linear_inplace_wide(
             &values,
             row_count,
             feature_count,
             &feature_mins,
             &feature_maxs,
+            mdb,
         );
         predictor_predict_batch_dense_with_predictor(
             &self.predictor,
@@ -240,13 +257,15 @@ impl NativePredictorHandle {
 
     /// Convert bin-index thresholds to float thresholds using per-feature min/max.
     /// After calling this, predict_dense works directly on raw floats — no quantization needed.
+    /// `max_data_bin` is the maximum data bin index (e.g. 254 for 256 bins, 510 for 512 bins).
     fn convert_thresholds_to_float(
         &mut self,
         feature_mins: Vec<f32>,
         feature_maxs: Vec<f32>,
+        max_data_bin: u16,
     ) -> PyResult<()> {
         self.predictor
-            .convert_bin_thresholds_to_float(&feature_mins, &feature_maxs)
+            .convert_bin_thresholds_to_float(&feature_mins, &feature_maxs, max_data_bin)
             .map_err(predictor_error_to_pyerr)
     }
 
@@ -268,6 +287,7 @@ impl NativePredictorHandle {
     }
 
     /// Quantize raw float values using selective rank (linear + rank fallback), then predict.
+    #[pyo3(signature = (values, row_count, feature_count, feature_mins, feature_maxs, rank_flags, feature_sorted_values, max_data_bin=None))]
     fn predict_dense_quantized_linear_rank(
         &self,
         values: Vec<f32>,
@@ -277,6 +297,7 @@ impl NativePredictorHandle {
         feature_maxs: Vec<f32>,
         rank_flags: Vec<bool>,
         feature_sorted_values: Vec<Vec<f32>>,
+        max_data_bin: Option<u16>,
     ) -> PyResult<Vec<f32>> {
         if feature_mins.len() != feature_count || feature_maxs.len() != feature_count {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -288,7 +309,8 @@ impl NativePredictorHandle {
                 "rank_flags/feature_sorted_values length must match feature_count",
             ));
         }
-        let quantized = quantize_dense_values_linear_rank_inplace(
+        let mdb = max_data_bin.unwrap_or(MAX_CONTINUOUS_QUANTIZED_BIN_U8);
+        let quantized = quantize_dense_values_linear_rank_inplace_wide(
             &values,
             row_count,
             feature_count,
@@ -296,6 +318,7 @@ impl NativePredictorHandle {
             &feature_maxs,
             &rank_flags,
             &feature_sorted_values,
+            mdb,
         );
         predictor_predict_batch_dense_with_predictor(
             &self.predictor,
@@ -382,6 +405,15 @@ struct NativeTrainingSummary {
     train_rmse: Vec<f32>,
     #[pyo3(get)]
     validation_rmse: Vec<f32>,
+    /// Raw objective loss per completed round (no sqrt transform).
+    #[pyo3(get)]
+    train_loss: Vec<f32>,
+    /// Raw validation objective loss per completed round (no sqrt transform).
+    #[pyo3(get)]
+    validation_loss: Vec<f32>,
+    /// Objective name (e.g. "squared_error", "binary_crossentropy").
+    #[pyo3(get)]
+    objective: String,
     #[pyo3(get)]
     stop_reason: String,
     #[pyo3(get)]
@@ -422,15 +454,20 @@ fn parse_continuous_binning_strategy(
 }
 
 fn validate_continuous_binning_max_bins(max_bins: usize) -> Result<(), EngineError> {
-    if !(MIN_CONTINUOUS_QUANTIZED_BINS..=(MAX_CONTINUOUS_QUANTIZED_BIN as usize + 1))
+    if !(MIN_CONTINUOUS_QUANTIZED_BINS..=(MAX_CONTINUOUS_QUANTIZED_BIN_U16 as usize + 1))
         .contains(&max_bins)
     {
         return Err(EngineError::InvalidConfig(format!(
             "continuous_binning_max_bins must be in [{MIN_CONTINUOUS_QUANTIZED_BINS}, {}]",
-            MAX_CONTINUOUS_QUANTIZED_BIN as usize + 1
+            MAX_CONTINUOUS_QUANTIZED_BIN_U16 as usize + 1
         )));
     }
     Ok(())
+}
+
+/// Whether the given max_bins requires u16 bin storage.
+fn needs_wide_bins(max_bins: usize) -> bool {
+    max_bins > (MAX_CONTINUOUS_QUANTIZED_BIN_U8 as usize + 1)
 }
 
 fn env_toggle_enabled(env_name: &str) -> bool {
@@ -469,39 +506,54 @@ fn round_half_away_from_zero(value: f32) -> i32 {
 }
 
 fn quantize_linear_value(value: f32, min_value: f32, max_value: f32) -> u8 {
+    quantize_linear_value_wide(value, min_value, max_value, MAX_CONTINUOUS_QUANTIZED_BIN_U8) as u8
+}
+
+fn quantize_rank_value(value: f32, sorted_values: &[f32]) -> u8 {
+    quantize_rank_value_wide(value, sorted_values, MAX_CONTINUOUS_QUANTIZED_BIN_U8) as u8
+}
+
+/// Parameterized linear quantization that supports arbitrary max_data_bin (u16).
+fn quantize_linear_value_wide(
+    value: f32,
+    min_value: f32,
+    max_value: f32,
+    max_data_bin: u16,
+) -> u16 {
     if value <= min_value {
         return 0;
     }
     if value >= max_value {
-        return MAX_CONTINUOUS_QUANTIZED_BIN as u8;
+        return max_data_bin;
     }
     let span = max_value - min_value;
     if span <= PRE_BINNED_INTEGER_TOLERANCE {
         return 0;
     }
-    let scaled = ((value - min_value) / span) * MAX_CONTINUOUS_QUANTIZED_BIN as f32;
-    round_half_away_from_zero(scaled).clamp(0, MAX_CONTINUOUS_QUANTIZED_BIN as i32) as u8
+    let scaled = ((value - min_value) / span) * max_data_bin as f32;
+    round_half_away_from_zero(scaled).clamp(0, max_data_bin as i32) as u16
 }
 
-fn quantize_rank_value(value: f32, sorted_values: &[f32]) -> u8 {
+/// Parameterized rank quantization that supports arbitrary max_data_bin (u16).
+fn quantize_rank_value_wide(value: f32, sorted_values: &[f32], max_data_bin: u16) -> u16 {
     if sorted_values.len() <= 1 {
         return 0;
     }
     let insertion = sorted_values.partition_point(|probe| *probe <= value);
     let rank = insertion.saturating_sub(1).min(sorted_values.len() - 1);
-    let scaled = (rank as f32 * MAX_CONTINUOUS_QUANTIZED_BIN as f32)
-        / (sorted_values.len().saturating_sub(1) as f32);
-    round_half_away_from_zero(scaled).clamp(0, MAX_CONTINUOUS_QUANTIZED_BIN as i32) as u8
+    let scaled =
+        (rank as f32 * max_data_bin as f32) / (sorted_values.len().saturating_sub(1) as f32);
+    round_half_away_from_zero(scaled).clamp(0, max_data_bin as i32) as u16
 }
 
-/// Quantize a flat row-major f32 array using linear scaling. Returns quantized f32 bins.
-/// Uses rayon to parallelize by row chunks for cache-friendly access.
-fn quantize_dense_values_linear_inplace(
+/// Parameterized linear quantize for predict-time: supports arbitrary max_data_bin.
+fn quantize_dense_values_linear_inplace_wide(
     values: &[f32],
     row_count: usize,
     feature_count: usize,
     feature_mins: &[f32],
     feature_maxs: &[f32],
+    max_data_bin: u16,
 ) -> Vec<f32> {
     let total = row_count * feature_count;
     let mut quantized = vec![0.0_f32; total];
@@ -518,16 +570,20 @@ fn quantize_dense_values_linear_inplace(
                 let out_base = local_row * feature_count;
                 for fi in 0..feature_count {
                     let value = values[base + fi];
-                    out_chunk[out_base + fi] =
-                        quantize_linear_value(value, feature_mins[fi], feature_maxs[fi]) as f32;
+                    out_chunk[out_base + fi] = quantize_linear_value_wide(
+                        value,
+                        feature_mins[fi],
+                        feature_maxs[fi],
+                        max_data_bin,
+                    ) as f32;
                 }
             }
         });
     quantized
 }
 
-/// Quantize using linear scaling with selective rank fallback per feature.
-fn quantize_dense_values_linear_rank_inplace(
+/// Parameterized linear+rank quantize for predict-time: supports arbitrary max_data_bin.
+fn quantize_dense_values_linear_rank_inplace_wide(
     values: &[f32],
     row_count: usize,
     feature_count: usize,
@@ -535,6 +591,7 @@ fn quantize_dense_values_linear_rank_inplace(
     feature_maxs: &[f32],
     rank_flags: &[bool],
     feature_sorted_values: &[Vec<f32>],
+    max_data_bin: u16,
 ) -> Vec<f32> {
     let total = row_count * feature_count;
     let mut quantized = vec![0.0_f32; total];
@@ -552,9 +609,14 @@ fn quantize_dense_values_linear_rank_inplace(
                 for fi in 0..feature_count {
                     let value = values[base + fi];
                     let bin = if rank_flags[fi] {
-                        quantize_rank_value(value, &feature_sorted_values[fi])
+                        quantize_rank_value_wide(value, &feature_sorted_values[fi], max_data_bin)
                     } else {
-                        quantize_linear_value(value, feature_mins[fi], feature_maxs[fi])
+                        quantize_linear_value_wide(
+                            value,
+                            feature_mins[fi],
+                            feature_maxs[fi],
+                            max_data_bin,
+                        )
                     };
                     out_chunk[out_base + fi] = bin as f32;
                 }
@@ -604,7 +666,10 @@ fn derive_dense_sorted_feature_values(
         .map(|feature_index| {
             let mut column = Vec::with_capacity(row_count);
             for row_index in 0..row_count {
-                column.push(values[row_index * feature_count + feature_index]);
+                let value = values[row_index * feature_count + feature_index];
+                if !value.is_nan() {
+                    column.push(value);
+                }
             }
             column.sort_by(f32::total_cmp);
             column
@@ -671,7 +736,7 @@ fn derive_linear_tail_rank_plan(
         .collect()
 }
 
-fn validate_dense_values_finite(
+fn validate_dense_values_allow_nan(
     values: &[f32],
     row_count: usize,
     feature_count: usize,
@@ -680,9 +745,9 @@ fn validate_dense_values_finite(
     for row_index in 0..dense_view.row_count {
         let row = dense_view.row(row_index)?;
         for (feature_index, &value) in row.iter().enumerate() {
-            if !value.is_finite() {
+            if value.is_infinite() {
                 return Err(EngineError::ContractViolation(format!(
-                    "row {row_index} feature {feature_index} must be finite"
+                    "row {row_index} feature {feature_index} must not be infinite"
                 )));
             }
         }
@@ -696,9 +761,12 @@ fn prepare_validation_matrices_from_dense_values(
     feature_count: usize,
     targets: &[f32],
     time_index: Option<Vec<i64>>,
+    sample_weights: Option<Vec<f32>>,
+    group_id: Option<Vec<u32>>,
     strategy: ContinuousBinningStrategy,
     training_metadata: &ContinuousBinningMetadataInternal,
     need_dense_values: bool,
+    max_bins: usize,
 ) -> Result<PreparedTrainingMatrices, EngineError> {
     if targets.len() != row_count {
         return Err(EngineError::ContractViolation(format!(
@@ -707,37 +775,75 @@ fn prepare_validation_matrices_from_dense_values(
             targets.len()
         )));
     }
-    validate_dense_values_finite(values, row_count, feature_count)?;
-    let (dense_values, bins, max_bin) = quantize_dense_values_with_metadata(
-        values,
-        row_count,
-        feature_count,
-        strategy,
-        training_metadata,
-        need_dense_values,
-    )?;
-    let dataset = TrainingDataset {
-        matrix: if need_dense_values {
-            DatasetMatrix::new(row_count, feature_count, dense_values)?
-        } else {
-            DatasetMatrix::new_metadata_only(row_count, feature_count)?
-        },
-        targets: targets.to_vec(),
-        sample_weights: None,
-        time_index,
-        group_id: None,
-    };
-    let binned_matrix = BinnedMatrix::new(
-        row_count,
-        feature_count,
-        if max_bin == 0 { 1 } else { max_bin },
-        bins,
-    )?;
-    Ok(PreparedTrainingMatrices {
-        dataset,
-        binned_matrix,
-        metadata: training_metadata.clone(),
-    })
+    validate_dense_values_allow_nan(values, row_count, feature_count)?;
+
+    if needs_wide_bins(max_bins) {
+        let max_data_bin = (max_bins - 2) as u16;
+        let nan_bin = max_data_bin + 1;
+        let (dense_values, bins_u16, max_bin) = quantize_dense_values_with_metadata_wide(
+            values,
+            row_count,
+            feature_count,
+            strategy,
+            training_metadata,
+            need_dense_values,
+            max_data_bin,
+        )?;
+        let dataset = TrainingDataset {
+            matrix: if need_dense_values {
+                DatasetMatrix::new(row_count, feature_count, dense_values)?
+            } else {
+                DatasetMatrix::new_metadata_only(row_count, feature_count)?
+            },
+            targets: targets.to_vec(),
+            sample_weights,
+            time_index,
+            group_id,
+        };
+        let binned_matrix = BinnedMatrix::new_u16(
+            row_count,
+            feature_count,
+            if max_bin == 0 { 1 } else { max_bin },
+            nan_bin,
+            bins_u16,
+        )?;
+        Ok(PreparedTrainingMatrices {
+            dataset,
+            binned_matrix,
+            metadata: training_metadata.clone(),
+        })
+    } else {
+        let (dense_values, bins, max_bin) = quantize_dense_values_with_metadata(
+            values,
+            row_count,
+            feature_count,
+            strategy,
+            training_metadata,
+            need_dense_values,
+        )?;
+        let dataset = TrainingDataset {
+            matrix: if need_dense_values {
+                DatasetMatrix::new(row_count, feature_count, dense_values)?
+            } else {
+                DatasetMatrix::new_metadata_only(row_count, feature_count)?
+            },
+            targets: targets.to_vec(),
+            sample_weights,
+            time_index,
+            group_id,
+        };
+        let binned_matrix = BinnedMatrix::new(
+            row_count,
+            feature_count,
+            if max_bin == 0 { 1 } else { max_bin },
+            bins,
+        )?;
+        Ok(PreparedTrainingMatrices {
+            dataset,
+            binned_matrix,
+            metadata: training_metadata.clone(),
+        })
+    }
 }
 
 fn quantize_dense_values_with_metadata(
@@ -811,28 +917,33 @@ fn quantize_dense_values_with_metadata(
                     let dst_base = local_row * feature_count;
                     for feature_index in 0..feature_count {
                         let value = values[src_base + feature_index];
-                        let bin = match strategy {
-                            ContinuousBinningStrategy::Linear => {
-                                if rank_flags.is_some_and(|flags| flags[feature_index]) {
+                        let bin = if value.is_nan() {
+                            MISSING_BIN_U8
+                        } else {
+                            match strategy {
+                                ContinuousBinningStrategy::Linear => {
+                                    if rank_flags.is_some_and(|flags| flags[feature_index]) {
+                                        let sv = sorted_ref.expect("sorted values validated");
+                                        quantize_rank_value(value, &sv[feature_index])
+                                    } else {
+                                        let mins = mins_ref.expect("mins validated");
+                                        let maxs = maxs_ref.expect("maxs validated");
+                                        quantize_linear_value(
+                                            value,
+                                            mins[feature_index],
+                                            maxs[feature_index],
+                                        )
+                                    }
+                                }
+                                ContinuousBinningStrategy::Rank => {
                                     let sv = sorted_ref.expect("sorted values validated");
                                     quantize_rank_value(value, &sv[feature_index])
-                                } else {
-                                    let mins = mins_ref.expect("mins validated");
-                                    let maxs = maxs_ref.expect("maxs validated");
-                                    quantize_linear_value(
-                                        value,
-                                        mins[feature_index],
-                                        maxs[feature_index],
-                                    )
                                 }
-                            }
-                            ContinuousBinningStrategy::Rank => {
-                                let sv = sorted_ref.expect("sorted values validated");
-                                quantize_rank_value(value, &sv[feature_index])
-                            }
-                            ContinuousBinningStrategy::Quantile => {
-                                let cuts = cuts_ref.expect("cuts validated");
-                                cuts[feature_index].partition_point(|probe| *probe <= value) as u8
+                                ContinuousBinningStrategy::Quantile => {
+                                    let cuts = cuts_ref.expect("cuts validated");
+                                    cuts[feature_index].partition_point(|probe| *probe <= value)
+                                        as u8
+                                }
                             }
                         };
                         local_max_bin = local_max_bin.max(bin);
@@ -856,28 +967,33 @@ fn quantize_dense_values_with_metadata(
                     let dst_base = local_row * feature_count;
                     for feature_index in 0..feature_count {
                         let value = values[src_base + feature_index];
-                        let bin = match strategy {
-                            ContinuousBinningStrategy::Linear => {
-                                if rank_flags.is_some_and(|flags| flags[feature_index]) {
+                        let bin = if value.is_nan() {
+                            MISSING_BIN_U8
+                        } else {
+                            match strategy {
+                                ContinuousBinningStrategy::Linear => {
+                                    if rank_flags.is_some_and(|flags| flags[feature_index]) {
+                                        let sv = sorted_ref.expect("sorted values validated");
+                                        quantize_rank_value(value, &sv[feature_index])
+                                    } else {
+                                        let mins = mins_ref.expect("mins validated");
+                                        let maxs = maxs_ref.expect("maxs validated");
+                                        quantize_linear_value(
+                                            value,
+                                            mins[feature_index],
+                                            maxs[feature_index],
+                                        )
+                                    }
+                                }
+                                ContinuousBinningStrategy::Rank => {
                                     let sv = sorted_ref.expect("sorted values validated");
                                     quantize_rank_value(value, &sv[feature_index])
-                                } else {
-                                    let mins = mins_ref.expect("mins validated");
-                                    let maxs = maxs_ref.expect("maxs validated");
-                                    quantize_linear_value(
-                                        value,
-                                        mins[feature_index],
-                                        maxs[feature_index],
-                                    )
                                 }
-                            }
-                            ContinuousBinningStrategy::Rank => {
-                                let sv = sorted_ref.expect("sorted values validated");
-                                quantize_rank_value(value, &sv[feature_index])
-                            }
-                            ContinuousBinningStrategy::Quantile => {
-                                let cuts = cuts_ref.expect("cuts validated");
-                                cuts[feature_index].partition_point(|probe| *probe <= value) as u8
+                                ContinuousBinningStrategy::Quantile => {
+                                    let cuts = cuts_ref.expect("cuts validated");
+                                    cuts[feature_index].partition_point(|probe| *probe <= value)
+                                        as u8
+                                }
                             }
                         };
                         local_max_bin = local_max_bin.max(bin);
@@ -892,12 +1008,197 @@ fn quantize_dense_values_with_metadata(
     Ok((dense_values, bins, max_bin))
 }
 
+/// u16 variant of `quantize_dense_values_with_metadata` for max_bins > 256.
+/// Data bins scale to 0..max_data_bin; NaN gets max_data_bin + 1.
+fn quantize_dense_values_with_metadata_wide(
+    values: &[f32],
+    row_count: usize,
+    feature_count: usize,
+    strategy: ContinuousBinningStrategy,
+    metadata: &ContinuousBinningMetadataInternal,
+    need_dense_values: bool,
+    max_data_bin: u16,
+) -> Result<(Vec<f32>, Vec<u16>, u16), EngineError> {
+    let nan_bin = max_data_bin + 1;
+    let mins_ref = match strategy {
+        ContinuousBinningStrategy::Linear => {
+            Some(metadata.feature_mins.as_ref().ok_or_else(|| {
+                EngineError::ContractViolation("continuous linear minima are missing".to_string())
+            })?)
+        }
+        _ => None,
+    };
+    let maxs_ref = match strategy {
+        ContinuousBinningStrategy::Linear => {
+            Some(metadata.feature_maxs.as_ref().ok_or_else(|| {
+                EngineError::ContractViolation("continuous linear maxima are missing".to_string())
+            })?)
+        }
+        _ => None,
+    };
+    let sorted_ref = match strategy {
+        ContinuousBinningStrategy::Rank => {
+            Some(metadata.feature_sorted_values.as_ref().ok_or_else(|| {
+                EngineError::ContractViolation(
+                    "continuous rank sorted values are missing".to_string(),
+                )
+            })?)
+        }
+        ContinuousBinningStrategy::Linear => metadata.feature_sorted_values.as_ref(),
+        _ => None,
+    };
+    let cuts_ref = match strategy {
+        ContinuousBinningStrategy::Quantile => {
+            Some(metadata.feature_quantile_cuts.as_ref().ok_or_else(|| {
+                EngineError::ContractViolation("continuous quantile cuts are missing".to_string())
+            })?)
+        }
+        _ => None,
+    };
+    let rank_flags = metadata.feature_linear_rank_flags.as_ref();
+
+    let total_cells = row_count * feature_count;
+    let mut dense_values = if need_dense_values {
+        vec![0.0_f32; total_cells]
+    } else {
+        Vec::new()
+    };
+    let mut bins = vec![0_u16; total_cells];
+
+    let chunk_size = (row_count / rayon::current_num_threads().max(1)).max(256);
+
+    let max_bin = if need_dense_values {
+        dense_values
+            .par_chunks_mut(chunk_size * feature_count)
+            .zip(bins.par_chunks_mut(chunk_size * feature_count))
+            .enumerate()
+            .map(|(chunk_idx, (dense_chunk, bin_chunk))| {
+                let row_start = chunk_idx * chunk_size;
+                let chunk_rows = dense_chunk.len() / feature_count;
+                let mut local_max_bin = 0_u16;
+                for local_row in 0..chunk_rows {
+                    let row_index = row_start + local_row;
+                    let src_base = row_index * feature_count;
+                    let dst_base = local_row * feature_count;
+                    for feature_index in 0..feature_count {
+                        let value = values[src_base + feature_index];
+                        let bin = if value.is_nan() {
+                            nan_bin
+                        } else {
+                            match strategy {
+                                ContinuousBinningStrategy::Linear => {
+                                    if rank_flags.is_some_and(|flags| flags[feature_index]) {
+                                        let sv = sorted_ref.expect("sorted values validated");
+                                        quantize_rank_value_wide(
+                                            value,
+                                            &sv[feature_index],
+                                            max_data_bin,
+                                        )
+                                    } else {
+                                        let mins = mins_ref.expect("mins validated");
+                                        let maxs = maxs_ref.expect("maxs validated");
+                                        quantize_linear_value_wide(
+                                            value,
+                                            mins[feature_index],
+                                            maxs[feature_index],
+                                            max_data_bin,
+                                        )
+                                    }
+                                }
+                                ContinuousBinningStrategy::Rank => {
+                                    let sv = sorted_ref.expect("sorted values validated");
+                                    quantize_rank_value_wide(
+                                        value,
+                                        &sv[feature_index],
+                                        max_data_bin,
+                                    )
+                                }
+                                ContinuousBinningStrategy::Quantile => {
+                                    let cuts = cuts_ref.expect("cuts validated");
+                                    cuts[feature_index].partition_point(|probe| *probe <= value)
+                                        as u16
+                                }
+                            }
+                        };
+                        local_max_bin = local_max_bin.max(bin);
+                        dense_chunk[dst_base + feature_index] = bin as f32;
+                        bin_chunk[dst_base + feature_index] = bin;
+                    }
+                }
+                local_max_bin
+            })
+            .reduce(|| 0_u16, |a, b| a.max(b))
+    } else {
+        bins.par_chunks_mut(chunk_size * feature_count)
+            .enumerate()
+            .map(|(chunk_idx, bin_chunk)| {
+                let row_start = chunk_idx * chunk_size;
+                let chunk_rows = bin_chunk.len() / feature_count;
+                let mut local_max_bin = 0_u16;
+                for local_row in 0..chunk_rows {
+                    let row_index = row_start + local_row;
+                    let src_base = row_index * feature_count;
+                    let dst_base = local_row * feature_count;
+                    for feature_index in 0..feature_count {
+                        let value = values[src_base + feature_index];
+                        let bin = if value.is_nan() {
+                            nan_bin
+                        } else {
+                            match strategy {
+                                ContinuousBinningStrategy::Linear => {
+                                    if rank_flags.is_some_and(|flags| flags[feature_index]) {
+                                        let sv = sorted_ref.expect("sorted values validated");
+                                        quantize_rank_value_wide(
+                                            value,
+                                            &sv[feature_index],
+                                            max_data_bin,
+                                        )
+                                    } else {
+                                        let mins = mins_ref.expect("mins validated");
+                                        let maxs = maxs_ref.expect("maxs validated");
+                                        quantize_linear_value_wide(
+                                            value,
+                                            mins[feature_index],
+                                            maxs[feature_index],
+                                            max_data_bin,
+                                        )
+                                    }
+                                }
+                                ContinuousBinningStrategy::Rank => {
+                                    let sv = sorted_ref.expect("sorted values validated");
+                                    quantize_rank_value_wide(
+                                        value,
+                                        &sv[feature_index],
+                                        max_data_bin,
+                                    )
+                                }
+                                ContinuousBinningStrategy::Quantile => {
+                                    let cuts = cuts_ref.expect("cuts validated");
+                                    cuts[feature_index].partition_point(|probe| *probe <= value)
+                                        as u16
+                                }
+                            }
+                        };
+                        local_max_bin = local_max_bin.max(bin);
+                        bin_chunk[dst_base + feature_index] = bin;
+                    }
+                }
+                local_max_bin
+            })
+            .reduce(|| 0_u16, |a, b| a.max(b))
+    };
+
+    Ok((dense_values, bins, max_bin))
+}
+
 fn prepare_training_matrices_from_dense_values(
     values: &[f32],
     row_count: usize,
     feature_count: usize,
     targets: &[f32],
     time_index: Option<Vec<i64>>,
+    sample_weights: Option<Vec<f32>>,
+    group_id: Option<Vec<u32>>,
     strategy: ContinuousBinningStrategy,
     max_bins: usize,
     need_dense_values: bool,
@@ -916,47 +1217,23 @@ fn prepare_training_matrices_from_dense_values(
     for row_index in 0..dense_view.row_count {
         let row = dense_view.row(row_index)?;
         for (feature_index, &value) in row.iter().enumerate() {
-            if !value.is_finite() {
+            if value.is_infinite() {
                 return Err(EngineError::ContractViolation(format!(
-                    "row {row_index} feature {feature_index} must be finite"
+                    "row {row_index} feature {feature_index} must not be infinite"
                 )));
             }
-            if use_pre_binned_path && !is_pre_binned_integer_value(value) {
+            if use_pre_binned_path && (value.is_nan() || !is_pre_binned_integer_value(value)) {
                 use_pre_binned_path = false;
             }
         }
     }
 
-    let (dense_values, bins, max_bin, metadata) = if use_pre_binned_path {
-        let mut bins = Vec::with_capacity(values.len());
-        let mut dense_values = if need_dense_values {
-            Vec::with_capacity(values.len())
-        } else {
-            Vec::new()
-        };
-        let mut max_bin = 0_u16;
-        for (index, &value) in values.iter().enumerate() {
-            let rounded = value.round();
-            if rounded > 255.0 {
-                return Err(EngineError::ContractViolation(format!(
-                    "value at index {index} exceeds max supported bin 255"
-                )));
-            }
-            let bin = rounded as u8;
-            max_bin = max_bin.max(u16::from(bin));
-            bins.push(bin);
-            if need_dense_values {
-                dense_values.push(bin as f32);
-            }
-        }
-        (
-            dense_values,
-            bins,
-            max_bin,
-            ContinuousBinningMetadataInternal::pre_binned(),
-        )
+    // Build binning metadata (shared by u8 and u16 paths).
+    let wide_bins = needs_wide_bins(max_bins);
+    let (metadata, use_wide) = if use_pre_binned_path {
+        (ContinuousBinningMetadataInternal::pre_binned(), wide_bins)
     } else {
-        let metadata = match strategy {
+        let meta = match strategy {
             ContinuousBinningStrategy::Linear => {
                 let (feature_mins, feature_maxs) =
                     derive_dense_feature_bounds(values, row_count, feature_count);
@@ -1016,39 +1293,129 @@ fn prepare_training_matrices_from_dense_values(
                 feature_linear_rank_flags: None,
             },
         };
-        let (dense_values, bins, max_bin) = quantize_dense_values_with_metadata(
-            values,
-            row_count,
-            feature_count,
-            strategy,
-            &metadata,
-            need_dense_values,
-        )?;
-        (dense_values, bins, max_bin, metadata)
+        (meta, wide_bins)
     };
 
-    let dataset = TrainingDataset {
-        matrix: if need_dense_values {
-            DatasetMatrix::new(row_count, feature_count, dense_values)?
+    // Encode bins and build BinnedMatrix — u8 fast path or u16 wide path.
+    if use_wide {
+        let max_data_bin = (max_bins - 2) as u16;
+        let nan_bin = max_data_bin + 1;
+        let (dense_values, bins_u16, max_bin) = if use_pre_binned_path {
+            // Pre-binned u16 path: Python already quantized values as f32 integers.
+            let mut bins_u16 = Vec::with_capacity(values.len());
+            let mut dense_values_out = if need_dense_values {
+                Vec::with_capacity(values.len())
+            } else {
+                Vec::new()
+            };
+            let mut max_bin = 0_u16;
+            for (index, &value) in values.iter().enumerate() {
+                let rounded = value.round();
+                if rounded > 65535.0 {
+                    return Err(EngineError::ContractViolation(format!(
+                        "value at index {index} exceeds max supported bin 65535"
+                    )));
+                }
+                let bin = rounded as u16;
+                max_bin = max_bin.max(bin);
+                bins_u16.push(bin);
+                if need_dense_values {
+                    dense_values_out.push(bin as f32);
+                }
+            }
+            (dense_values_out, bins_u16, max_bin)
         } else {
-            DatasetMatrix::new_metadata_only(row_count, feature_count)?
-        },
-        targets: targets.to_vec(),
-        sample_weights: None,
-        time_index,
-        group_id: None,
-    };
-    let binned_matrix = BinnedMatrix::new(
-        row_count,
-        feature_count,
-        if max_bin == 0 { 1 } else { max_bin },
-        bins,
-    )?;
-    Ok(PreparedTrainingMatrices {
-        dataset,
-        binned_matrix,
-        metadata,
-    })
+            quantize_dense_values_with_metadata_wide(
+                values,
+                row_count,
+                feature_count,
+                strategy,
+                &metadata,
+                need_dense_values,
+                max_data_bin,
+            )?
+        };
+        let dataset = TrainingDataset {
+            matrix: if need_dense_values {
+                DatasetMatrix::new(row_count, feature_count, dense_values)?
+            } else {
+                DatasetMatrix::new_metadata_only(row_count, feature_count)?
+            },
+            targets: targets.to_vec(),
+            sample_weights,
+            time_index,
+            group_id,
+        };
+        let binned_matrix = BinnedMatrix::new_u16(
+            row_count,
+            feature_count,
+            if max_bin == 0 { 1 } else { max_bin },
+            nan_bin,
+            bins_u16,
+        )?;
+        Ok(PreparedTrainingMatrices {
+            dataset,
+            binned_matrix,
+            metadata,
+        })
+    } else {
+        // u8 path: pre-binned or continuous with max_bins <= 256.
+        let (dense_values, bins, max_bin) = if use_pre_binned_path {
+            let mut bins = Vec::with_capacity(values.len());
+            let mut dense_values_out = if need_dense_values {
+                Vec::with_capacity(values.len())
+            } else {
+                Vec::new()
+            };
+            let mut max_bin = 0_u16;
+            for (index, &value) in values.iter().enumerate() {
+                let rounded = value.round();
+                if rounded > 255.0 {
+                    return Err(EngineError::ContractViolation(format!(
+                        "value at index {index} exceeds max supported bin 255"
+                    )));
+                }
+                let bin = rounded as u8;
+                max_bin = max_bin.max(u16::from(bin));
+                bins.push(bin);
+                if need_dense_values {
+                    dense_values_out.push(bin as f32);
+                }
+            }
+            (dense_values_out, bins, max_bin)
+        } else {
+            quantize_dense_values_with_metadata(
+                values,
+                row_count,
+                feature_count,
+                strategy,
+                &metadata,
+                need_dense_values,
+            )?
+        };
+        let dataset = TrainingDataset {
+            matrix: if need_dense_values {
+                DatasetMatrix::new(row_count, feature_count, dense_values)?
+            } else {
+                DatasetMatrix::new_metadata_only(row_count, feature_count)?
+            },
+            targets: targets.to_vec(),
+            sample_weights,
+            time_index,
+            group_id,
+        };
+        let binned_matrix = BinnedMatrix::new(
+            row_count,
+            feature_count,
+            if max_bin == 0 { 1 } else { max_bin },
+            bins,
+        )?;
+        Ok(PreparedTrainingMatrices {
+            dataset,
+            binned_matrix,
+            metadata,
+        })
+    }
 }
 
 fn predictor_error_to_pyerr(error: PredictorError) -> PyErr {
@@ -1117,6 +1484,121 @@ fn resolve_categorical_spec(
     }
 }
 
+/// Resolve categorical specs, preferring plural form over singular.
+///
+/// When plural params (`categorical_feature_indices` / `categorical_feature_values_list`)
+/// are provided, they take precedence. Otherwise, the singular params are converted to
+/// a one-element Vec for backward compatibility.
+fn resolve_categorical_specs_from_params(
+    // singular (backward-compat)
+    categorical_feature_index: Option<usize>,
+    categorical_feature_values: Option<Vec<String>>,
+    // plural (preferred)
+    categorical_feature_indices: Option<Vec<usize>>,
+    categorical_feature_values_list: Option<Vec<Vec<String>>>,
+    // validation
+    validation_categorical_feature_values: Option<Vec<String>>,
+    validation_categorical_feature_values_list: Option<Vec<Vec<String>>>,
+    // config
+    categorical_smoothing: f64,
+    categorical_min_samples_leaf: u32,
+    categorical_time_aware: bool,
+    row_count: usize,
+) -> Result<(Vec<CategoricalTargetEncodingSpec>, Vec<Vec<String>>), EngineError> {
+    // Plural form takes precedence
+    if categorical_feature_indices.is_some() || categorical_feature_values_list.is_some() {
+        let specs = resolve_categorical_specs(
+            categorical_feature_indices,
+            categorical_feature_values_list,
+            categorical_smoothing,
+            categorical_min_samples_leaf,
+            categorical_time_aware,
+            row_count,
+        )?;
+        let val_list = validation_categorical_feature_values_list.unwrap_or_default();
+        return Ok((specs, val_list));
+    }
+    // Fall back to singular form
+    let spec = resolve_categorical_spec(
+        categorical_feature_index,
+        categorical_feature_values,
+        categorical_smoothing,
+        categorical_min_samples_leaf,
+        categorical_time_aware,
+        row_count,
+    )?;
+    let val_list = validation_categorical_feature_values
+        .map(|v| vec![v])
+        .unwrap_or_default();
+    Ok((spec.into_iter().collect(), val_list))
+}
+
+/// Resolve multiple categorical feature specs from parallel vectors.
+///
+/// `categorical_feature_indices` and `categorical_feature_values_list` must be
+/// provided together or both be `None`. Each entry in `values_list` corresponds
+/// to the feature index at the same position in `indices`.
+fn resolve_categorical_specs(
+    categorical_feature_indices: Option<Vec<usize>>,
+    categorical_feature_values_list: Option<Vec<Vec<String>>>,
+    categorical_smoothing: f64,
+    categorical_min_samples_leaf: u32,
+    categorical_time_aware: bool,
+    row_count: usize,
+) -> Result<Vec<CategoricalTargetEncodingSpec>, EngineError> {
+    match (categorical_feature_indices, categorical_feature_values_list) {
+        (None, None) => Ok(Vec::new()),
+        (Some(_), None) => Err(EngineError::ContractViolation(
+            "categorical_feature_values_list must be provided when categorical_feature_indices is set"
+                .to_string(),
+        )),
+        (None, Some(_)) => Err(EngineError::ContractViolation(
+            "categorical_feature_indices must be provided when categorical_feature_values_list is set"
+                .to_string(),
+        )),
+        (Some(indices), Some(values_list)) => {
+            if indices.len() != values_list.len() {
+                return Err(EngineError::ContractViolation(format!(
+                    "categorical_feature_indices length {} does not match categorical_feature_values_list length {}",
+                    indices.len(),
+                    values_list.len()
+                )));
+            }
+            // Validate uniqueness
+            let mut seen = std::collections::HashSet::new();
+            for &idx in &indices {
+                if !seen.insert(idx) {
+                    return Err(EngineError::ContractViolation(format!(
+                        "duplicate categorical_feature_index: {idx}"
+                    )));
+                }
+            }
+            let config = TargetEncoderConfig {
+                smoothing: categorical_smoothing,
+                min_samples_leaf: categorical_min_samples_leaf,
+                time_aware: categorical_time_aware,
+            };
+            let mut specs = Vec::with_capacity(indices.len());
+            for (feature_index, values) in indices.into_iter().zip(values_list) {
+                if values.len() != row_count {
+                    return Err(EngineError::ContractViolation(format!(
+                        "categorical_feature_values for feature {feature_index} has length {} but row_count is {row_count}",
+                        values.len()
+                    )));
+                }
+                specs.push(CategoricalTargetEncodingSpec {
+                    feature_index,
+                    values,
+                    config: config.clone(),
+                });
+            }
+            // Sort by feature_index for deterministic ordering
+            specs.sort_by_key(|s| s.feature_index);
+            Ok(specs)
+        }
+    }
+}
+
 fn flatten_rows(rows: &[Vec<f32>]) -> Result<(Vec<f32>, usize, usize), EngineError> {
     if rows.is_empty() {
         return Err(EngineError::ContractViolation(
@@ -1178,47 +1660,69 @@ fn encode_bins_from_encoded_values(encoded_values: &[f32]) -> Result<(Vec<u8>, u
     Ok((bins, (unique_values.len().saturating_sub(1)) as u16))
 }
 
-fn apply_categorical_encoding_to_training_matrices(
+/// Encode multiple categorical features in the training matrices via target encoding.
+fn apply_categorical_encoding_to_training_matrices_multi(
     prepared: PreparedTrainingMatrices,
-    categorical_spec: &CategoricalTargetEncodingSpec,
+    categorical_specs: &[CategoricalTargetEncodingSpec],
 ) -> Result<(PreparedTrainingMatrices, CategoricalStatePayloadV1), EngineError> {
+    if categorical_specs.is_empty() {
+        let empty_state = CategoricalStatePayloadV1 {
+            format_version: CATEGORICAL_STATE_FORMAT_V1,
+            leakage_safe_target_encoding: false,
+            categorical_feature_indices: Vec::new(),
+        };
+        return Ok((prepared, empty_state));
+    }
+
     let row_count = prepared.dataset.row_count();
     let feature_count = prepared.dataset.matrix.feature_count;
-    if categorical_spec.feature_index >= feature_count {
-        return Err(EngineError::ContractViolation(format!(
-            "categorical feature index {} is out of bounds for feature_count {}",
-            categorical_spec.feature_index, feature_count
-        )));
-    }
-    if categorical_spec.values.len() != row_count {
-        return Err(EngineError::ContractViolation(format!(
-            "categorical values length {} does not match row_count {}",
-            categorical_spec.values.len(),
-            row_count
-        )));
-    }
-
-    let (_, encoded_values) = fit_transform_target_encoder(
-        &categorical_spec.config,
-        &categorical_spec.values,
-        &prepared.dataset.targets,
-        prepared.dataset.time_index.as_deref(),
-    )
-    .map_err(|error| EngineError::ContractViolation(error.to_string()))?;
-
     let mut dense_values = prepared.dataset.matrix.values.clone();
-    let (encoded_bins, encoded_max_bin) = encode_bins_from_encoded_values(&encoded_values)?;
     let mut bins = prepared.binned_matrix.bins.clone();
-    for (row_index, &encoded_value) in encoded_values.iter().enumerate() {
-        let offset = row_index * feature_count + categorical_spec.feature_index;
-        dense_values[offset] = encoded_value;
-        bins[offset] = encoded_bins[row_index];
+    let mut max_bin = prepared.binned_matrix.max_bin;
+    let mut any_time_aware = false;
+
+    for spec in categorical_specs {
+        if spec.feature_index >= feature_count {
+            return Err(EngineError::ContractViolation(format!(
+                "categorical feature index {} is out of bounds for feature_count {}",
+                spec.feature_index, feature_count
+            )));
+        }
+        if spec.values.len() != row_count {
+            return Err(EngineError::ContractViolation(format!(
+                "categorical values length {} does not match row_count {}",
+                spec.values.len(),
+                row_count
+            )));
+        }
+        if spec.config.time_aware {
+            any_time_aware = true;
+        }
+
+        let (_, encoded_values) = fit_transform_target_encoder(
+            &spec.config,
+            &spec.values,
+            &prepared.dataset.targets,
+            prepared.dataset.time_index.as_deref(),
+        )
+        .map_err(|error| EngineError::ContractViolation(error.to_string()))?;
+
+        let (encoded_bins, encoded_max_bin) = encode_bins_from_encoded_values(&encoded_values)?;
+        max_bin = max_bin.max(encoded_max_bin);
+        for (row_index, &encoded_value) in encoded_values.iter().enumerate() {
+            let offset = row_index * feature_count + spec.feature_index;
+            dense_values[offset] = encoded_value;
+            bins[offset] = encoded_bins[row_index];
+        }
     }
 
     let categorical_state = CategoricalStatePayloadV1 {
         format_version: CATEGORICAL_STATE_FORMAT_V1,
-        leakage_safe_target_encoding: categorical_spec.config.time_aware,
-        categorical_feature_indices: vec![categorical_spec.feature_index as u32],
+        leakage_safe_target_encoding: any_time_aware,
+        categorical_feature_indices: categorical_specs
+            .iter()
+            .map(|s| s.feature_index as u32)
+            .collect(),
     };
     Ok((
         PreparedTrainingMatrices {
@@ -1229,57 +1733,73 @@ fn apply_categorical_encoding_to_training_matrices(
                 time_index: prepared.dataset.time_index,
                 group_id: prepared.dataset.group_id,
             },
-            binned_matrix: BinnedMatrix::new(
-                row_count,
-                feature_count,
-                prepared.binned_matrix.max_bin.max(encoded_max_bin),
-                bins,
-            )?,
+            binned_matrix: BinnedMatrix::new(row_count, feature_count, max_bin, bins)?,
             metadata: prepared.metadata,
         },
         categorical_state,
     ))
 }
 
-fn apply_categorical_encoding_to_validation_matrices(
+/// Encode multiple categorical features in the validation matrices via target encoding.
+///
+/// `training_specs` are used to fit the encoder (training values + training targets).
+/// `validation_specs` provide the validation values to transform.
+fn apply_categorical_encoding_to_validation_matrices_multi(
     prepared: PreparedTrainingMatrices,
-    categorical_spec: &CategoricalTargetEncodingSpec,
+    training_specs: &[CategoricalTargetEncodingSpec],
+    validation_specs: &[CategoricalTargetEncodingSpec],
     training_targets: &[f32],
     training_time_index: Option<&[i64]>,
 ) -> Result<PreparedTrainingMatrices, EngineError> {
+    if training_specs.is_empty() {
+        return Ok(prepared);
+    }
+    if training_specs.len() != validation_specs.len() {
+        return Err(EngineError::ContractViolation(format!(
+            "training specs count {} does not match validation specs count {}",
+            training_specs.len(),
+            validation_specs.len()
+        )));
+    }
+
     let row_count = prepared.dataset.row_count();
     let feature_count = prepared.dataset.matrix.feature_count;
-    if categorical_spec.feature_index >= feature_count {
-        return Err(EngineError::ContractViolation(format!(
-            "categorical feature index {} is out of bounds for feature_count {}",
-            categorical_spec.feature_index, feature_count
-        )));
-    }
-    if categorical_spec.values.len() != row_count {
-        return Err(EngineError::ContractViolation(format!(
-            "categorical values length {} does not match row_count {}",
-            categorical_spec.values.len(),
-            row_count
-        )));
-    }
-
-    let encoder_state = fit_target_encoder(
-        &categorical_spec.config,
-        &categorical_spec.values,
-        training_targets,
-        training_time_index,
-    )
-    .map_err(|error| EngineError::ContractViolation(error.to_string()))?;
-    let encoded_values = transform_target_encoder(&encoder_state, &categorical_spec.values)
-        .map_err(|error| EngineError::ContractViolation(error.to_string()))?;
-
     let mut dense_values = prepared.dataset.matrix.values.clone();
-    let (encoded_bins, encoded_max_bin) = encode_bins_from_encoded_values(&encoded_values)?;
     let mut bins = prepared.binned_matrix.bins.clone();
-    for (row_index, &encoded_value) in encoded_values.iter().enumerate() {
-        let offset = row_index * feature_count + categorical_spec.feature_index;
-        dense_values[offset] = encoded_value;
-        bins[offset] = encoded_bins[row_index];
+    let mut max_bin = prepared.binned_matrix.max_bin;
+
+    for (training_spec, validation_spec) in training_specs.iter().zip(validation_specs) {
+        if validation_spec.feature_index >= feature_count {
+            return Err(EngineError::ContractViolation(format!(
+                "categorical feature index {} is out of bounds for feature_count {}",
+                validation_spec.feature_index, feature_count
+            )));
+        }
+        if validation_spec.values.len() != row_count {
+            return Err(EngineError::ContractViolation(format!(
+                "categorical values length {} does not match row_count {}",
+                validation_spec.values.len(),
+                row_count
+            )));
+        }
+
+        let encoder_state = fit_target_encoder(
+            &training_spec.config,
+            &training_spec.values,
+            training_targets,
+            training_time_index,
+        )
+        .map_err(|error| EngineError::ContractViolation(error.to_string()))?;
+        let encoded_values = transform_target_encoder(&encoder_state, &validation_spec.values)
+            .map_err(|error| EngineError::ContractViolation(error.to_string()))?;
+
+        let (encoded_bins, encoded_max_bin) = encode_bins_from_encoded_values(&encoded_values)?;
+        max_bin = max_bin.max(encoded_max_bin);
+        for (row_index, &encoded_value) in encoded_values.iter().enumerate() {
+            let offset = row_index * feature_count + validation_spec.feature_index;
+            dense_values[offset] = encoded_value;
+            bins[offset] = encoded_bins[row_index];
+        }
     }
 
     Ok(PreparedTrainingMatrices {
@@ -1290,12 +1810,7 @@ fn apply_categorical_encoding_to_validation_matrices(
             time_index: prepared.dataset.time_index,
             group_id: prepared.dataset.group_id,
         },
-        binned_matrix: BinnedMatrix::new(
-            row_count,
-            feature_count,
-            prepared.binned_matrix.max_bin.max(encoded_max_bin),
-            bins,
-        )?,
+        binned_matrix: BinnedMatrix::new(row_count, feature_count, max_bin, bins)?,
         metadata: prepared.metadata,
     })
 }
@@ -1304,6 +1819,7 @@ fn build_native_training_summary(
     summary: &IterationRunSummary,
     bridge_prepare_seconds: f64,
     native_train_seconds: f64,
+    objective: &str,
 ) -> NativeTrainingSummary {
     NativeTrainingSummary {
         rounds_requested: summary.rounds_requested,
@@ -1322,6 +1838,9 @@ fn build_native_training_summary(
             .iter()
             .map(|loss| loss.max(0.0).sqrt())
             .collect(),
+        train_loss: summary.loss_per_completed_round.clone(),
+        validation_loss: summary.validation_loss_per_completed_round.clone(),
+        objective: objective.to_string(),
         stop_reason: format!("{:?}", summary.stop_reason),
         bridge_prepare_seconds,
         native_train_seconds,
@@ -1334,28 +1853,36 @@ fn train_regression_artifact_with_summary_dense_impl(
     row_count: usize,
     feature_count: usize,
     targets: &[f32],
+    sample_weights: Option<Vec<f32>>,
+    group_id: Option<Vec<u32>>,
     validation_values: Option<&[f32]>,
     validation_row_count: Option<usize>,
     validation_targets: Option<&[f32]>,
+    validation_sample_weights: Option<Vec<f32>>,
+    validation_group_id: Option<Vec<u32>>,
     params: TrainParams,
     rounds: usize,
     time_index: Option<Vec<i64>>,
     validation_time_index: Option<Vec<i64>>,
-    categorical_spec: Option<CategoricalTargetEncodingSpec>,
-    validation_categorical_values: Option<Vec<String>>,
+    categorical_specs: Vec<CategoricalTargetEncodingSpec>,
+    validation_categorical_values_list: Vec<Vec<String>>,
     training_policy: TrainingPolicyMode,
     store_node_debug_stats: bool,
     continuous_binning_strategy: ContinuousBinningStrategy,
     continuous_binning_max_bins: usize,
+    objective: &str,
+    init_artifact_bytes: Option<&[u8]>,
 ) -> Result<NativeTrainingResult, EngineError> {
     let bridge_start = Instant::now();
-    let need_dense_values = categorical_spec.is_some();
+    let need_dense_values = !categorical_specs.is_empty();
     let mut prepared = prepare_training_matrices_from_dense_values(
         values,
         row_count,
         feature_count,
         targets,
         time_index,
+        sample_weights,
+        group_id,
         continuous_binning_strategy,
         continuous_binning_max_bins,
         need_dense_values,
@@ -1365,9 +1892,9 @@ fn train_regression_artifact_with_summary_dense_impl(
     let training_time_index_for_validation = prepared.dataset.time_index.clone();
 
     let mut categorical_state = None;
-    if let Some(spec) = categorical_spec.as_ref() {
+    if !categorical_specs.is_empty() {
         let (encoded_prepared, state) =
-            apply_categorical_encoding_to_training_matrices(prepared, spec)?;
+            apply_categorical_encoding_to_training_matrices_multi(prepared, &categorical_specs)?;
         prepared = encoded_prepared;
         categorical_state = Some(state);
     }
@@ -1385,26 +1912,35 @@ fn train_regression_artifact_with_summary_dense_impl(
                 feature_count,
                 targets,
                 validation_time_index,
+                validation_sample_weights,
+                validation_group_id,
                 continuous_binning_strategy,
                 &prepared.metadata,
                 need_dense_values,
+                continuous_binning_max_bins,
             )?;
 
-            if let Some(spec) = categorical_spec.as_ref() {
-                let validation_values = validation_categorical_values.ok_or_else(|| {
-                    EngineError::ContractViolation(
-                        "validation categorical values must be provided when categorical_feature_index is set"
-                            .to_string(),
-                    )
-                })?;
-                let validation_spec = CategoricalTargetEncodingSpec {
-                    feature_index: spec.feature_index,
-                    values: validation_values,
-                    config: spec.config.clone(),
-                };
-                prepared_validation = apply_categorical_encoding_to_validation_matrices(
+            if !categorical_specs.is_empty() {
+                if validation_categorical_values_list.len() != categorical_specs.len() {
+                    return Err(EngineError::ContractViolation(format!(
+                        "validation categorical values list length {} does not match categorical specs count {}",
+                        validation_categorical_values_list.len(),
+                        categorical_specs.len()
+                    )));
+                }
+                let validation_specs: Vec<CategoricalTargetEncodingSpec> = categorical_specs
+                    .iter()
+                    .zip(validation_categorical_values_list)
+                    .map(|(spec, values)| CategoricalTargetEncodingSpec {
+                        feature_index: spec.feature_index,
+                        values,
+                        config: spec.config.clone(),
+                    })
+                    .collect();
+                prepared_validation = apply_categorical_encoding_to_validation_matrices_multi(
                     prepared_validation,
-                    &validation_spec,
+                    &categorical_specs,
+                    &validation_specs,
                     &training_targets_for_validation,
                     training_time_index_for_validation.as_deref(),
                 )?;
@@ -1419,40 +1955,145 @@ fn train_regression_artifact_with_summary_dense_impl(
         }
     };
 
+    // Warm-start: load existing model if init_artifact_bytes is provided
+    let warm_start_state = if let Some(init_bytes) = init_artifact_bytes {
+        let init_model = TrainedModel::from_artifact_bytes(init_bytes)?;
+        if init_model.feature_count != feature_count {
+            return Err(EngineError::ContractViolation(format!(
+                "init_model feature_count {} does not match training data feature_count {}",
+                init_model.feature_count, feature_count,
+            )));
+        }
+        let initial_rounds = init_model.rounds_completed();
+        Some(WarmStartState {
+            baseline_prediction: init_model.baseline_prediction,
+            stumps: init_model.stumps,
+            initial_rounds_completed: initial_rounds,
+        })
+    } else {
+        None
+    };
+
     let bridge_prepare_seconds = bridge_start.elapsed().as_secs_f64();
+    let user_seed = params.seed;
     let trainer = Trainer::new(params)?;
     let backend = CpuBackend;
     let native_start = Instant::now();
-    let mut summary = if let Some(validation_prepared) = validation_prepared.as_ref() {
-        trainer.fit_iterations_with_validation_summary(
-            &prepared.dataset,
-            &prepared.binned_matrix,
-            alloygbm_engine::ValidationDatasetRef {
-                dataset: &validation_prepared.dataset,
-                binned_matrix: &validation_prepared.binned_matrix,
-            },
-            &backend,
-            &SquaredErrorObjective,
-            trainer.iteration_controls_for_policy(
+
+    macro_rules! run_training {
+        ($obj:expr) => {{
+            let controls = trainer.iteration_controls_for_policy(
                 &prepared.dataset,
                 &prepared.binned_matrix,
                 rounds,
                 training_policy,
-            )?,
-        )?
-    } else {
-        trainer.fit_iterations_with_summary(
-            &prepared.dataset,
-            &prepared.binned_matrix,
-            &backend,
-            &SquaredErrorObjective,
-            trainer.iteration_controls_for_policy(
-                &prepared.dataset,
-                &prepared.binned_matrix,
-                rounds,
-                training_policy,
-            )?,
-        )?
+            )?;
+            if let Some(warm_start) = warm_start_state.clone() {
+                if let Some(validation_prepared) = validation_prepared.as_ref() {
+                    trainer.fit_iterations_warm_start_with_validation(
+                        &prepared.dataset,
+                        &prepared.binned_matrix,
+                        alloygbm_engine::ValidationDatasetRef {
+                            dataset: &validation_prepared.dataset,
+                            binned_matrix: &validation_prepared.binned_matrix,
+                        },
+                        &backend,
+                        $obj,
+                        controls,
+                        warm_start,
+                    )?
+                } else {
+                    trainer.fit_iterations_warm_start(
+                        &prepared.dataset,
+                        &prepared.binned_matrix,
+                        &backend,
+                        $obj,
+                        controls,
+                        warm_start,
+                    )?
+                }
+            } else if let Some(validation_prepared) = validation_prepared.as_ref() {
+                trainer.fit_iterations_with_validation_summary(
+                    &prepared.dataset,
+                    &prepared.binned_matrix,
+                    alloygbm_engine::ValidationDatasetRef {
+                        dataset: &validation_prepared.dataset,
+                        binned_matrix: &validation_prepared.binned_matrix,
+                    },
+                    &backend,
+                    $obj,
+                    controls,
+                )?
+            } else {
+                trainer.fit_iterations_with_summary(
+                    &prepared.dataset,
+                    &prepared.binned_matrix,
+                    &backend,
+                    $obj,
+                    controls,
+                )?
+            }
+        }};
+    }
+
+    let mut summary = match objective {
+        "squared_error" => run_training!(&SquaredErrorObjective),
+        "binary_crossentropy" => run_training!(&BinaryCrossEntropyObjective),
+        "queryrmse" | "rank_pairwise" | "rank_ndcg" | "rank_xendcg" | "yetirank" => {
+            let group_id = prepared.dataset.group_id.as_ref().ok_or_else(|| {
+                EngineError::ContractViolation(format!(
+                    "objective '{objective}' requires group_id to be provided"
+                ))
+            })?;
+            let val_group_id = validation_prepared
+                .as_ref()
+                .and_then(|vp| vp.dataset.group_id.as_ref());
+            match objective {
+                "queryrmse" => {
+                    let mut obj = QueryRMSEObjective::new(group_id);
+                    if let Some(vg) = val_group_id {
+                        obj = obj.with_validation_group(vg);
+                    }
+                    run_training!(&obj)
+                }
+                "rank_pairwise" => {
+                    let mut obj = PairwiseRankingObjective::new(group_id);
+                    if let Some(vg) = val_group_id {
+                        obj = obj.with_validation_group(vg);
+                    }
+                    run_training!(&obj)
+                }
+                "rank_ndcg" => {
+                    let mut obj = LambdaMARTObjective::new(group_id);
+                    if let Some(vg) = val_group_id {
+                        obj = obj.with_validation_group(vg);
+                    }
+                    run_training!(&obj)
+                }
+                "rank_xendcg" => {
+                    let mut obj = XeNDCGObjective::new(group_id);
+                    if let Some(vg) = val_group_id {
+                        obj = obj.with_validation_group(vg);
+                    }
+                    run_training!(&obj)
+                }
+                "yetirank" => {
+                    let mut obj = YetiRankObjective::new(group_id, 10, user_seed);
+                    if let Some(vg) = val_group_id {
+                        obj = obj.with_validation_group(vg);
+                    }
+                    run_training!(&obj)
+                }
+                _ => unreachable!(),
+            }
+        }
+        other => {
+            return Err(EngineError::InvalidConfig(format!(
+                "unknown objective '{other}', expected one of: squared_error, \
+                 binary_crossentropy, queryrmse, rank_pairwise, rank_ndcg, \
+                 rank_xendcg, yetirank"
+            )));
+        }
     };
     let native_train_seconds = native_start.elapsed().as_secs_f64();
 
@@ -1472,6 +2113,7 @@ fn train_regression_artifact_with_summary_dense_impl(
             &summary,
             bridge_prepare_seconds,
             native_train_seconds,
+            objective,
         ),
         continuous_binning_metadata: prepared.metadata.into(),
     })
@@ -1591,6 +2233,11 @@ fn build_train_params(
     lambda_l1: f32,
     lambda_l2: f32,
     min_child_hessian: f32,
+    min_split_gain: f32,
+    monotone_constraints: Vec<i8>,
+    feature_weights: Vec<f32>,
+    max_leaves: Option<usize>,
+    tree_growth: TreeGrowth,
 ) -> TrainParams {
     TrainParams {
         seed,
@@ -1605,6 +2252,11 @@ fn build_train_params(
         lambda_l1,
         lambda_l2,
         min_child_hessian,
+        min_split_gain,
+        monotone_constraints,
+        feature_weights,
+        max_leaves,
+        tree_growth,
     }
 }
 
@@ -1699,7 +2351,8 @@ fn shap_global_importance_dense(
     categorical_time_aware=false,
     time_index=None,
     continuous_binning_strategy="linear",
-    continuous_binning_max_bins=256
+    continuous_binning_max_bins=255,
+    objective="squared_error"
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact(
@@ -1724,6 +2377,7 @@ fn train_regression_artifact(
     time_index: Option<Vec<i64>>,
     continuous_binning_strategy: &str,
     continuous_binning_max_bins: usize,
+    objective: &str,
 ) -> PyResult<Vec<u8>> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -1746,6 +2400,11 @@ fn train_regression_artifact(
         0.0,
         0.0,
         0.0,
+        0.0, // min_split_gain
+        Vec::new(),
+        Vec::new(),
+        None,
+        TreeGrowth::Level,
     );
 
     let categorical_spec = resolve_categorical_spec(
@@ -1765,19 +2424,25 @@ fn train_regression_artifact(
         row_count,
         feature_count,
         &targets,
+        None, // sample_weights
+        None, // group_id
         None,
         None,
         None,
+        None, // validation_sample_weights
+        None, // validation_group_id
         params,
         effective_rounds,
         time_index,
         None,
-        categorical_spec,
-        None,
+        categorical_spec.into_iter().collect(),
+        Vec::new(),
         training_policy,
         store_node_stats,
         continuous_binning_strategy,
         continuous_binning_max_bins,
+        objective,
+        None, // init_artifact_bytes
     )
     .map(|result| result.artifact_bytes)
     .map_err(engine_error_to_pyerr)
@@ -1806,7 +2471,8 @@ fn train_regression_artifact(
     categorical_time_aware=false,
     time_index=None,
     continuous_binning_strategy="linear",
-    continuous_binning_max_bins=256
+    continuous_binning_max_bins=255,
+    objective="squared_error"
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense(
@@ -1833,6 +2499,7 @@ fn train_regression_artifact_dense(
     time_index: Option<Vec<i64>>,
     continuous_binning_strategy: &str,
     continuous_binning_max_bins: usize,
+    objective: &str,
 ) -> PyResult<Vec<u8>> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -1855,6 +2522,11 @@ fn train_regression_artifact_dense(
         0.0,
         0.0,
         0.0,
+        0.0, // min_split_gain
+        Vec::new(),
+        Vec::new(),
+        None,
+        TreeGrowth::Level,
     );
     let categorical_spec = resolve_categorical_spec(
         categorical_feature_index,
@@ -1870,19 +2542,25 @@ fn train_regression_artifact_dense(
         row_count,
         feature_count,
         &targets,
+        None, // sample_weights
+        None, // group_id
         None,
         None,
         None,
+        None, // validation_sample_weights
+        None, // validation_group_id
         params,
         effective_rounds,
         time_index,
         None,
-        categorical_spec,
-        None,
+        categorical_spec.into_iter().collect(),
+        Vec::new(),
         training_policy,
         store_node_stats,
         continuous_binning_strategy,
         continuous_binning_max_bins,
+        objective,
+        None, // init_artifact_bytes
     )
     .map(|result| result.artifact_bytes)
     .map_err(engine_error_to_pyerr)
@@ -1904,8 +2582,13 @@ fn train_regression_artifact_dense(
     lambda_l1=0.0,
     lambda_l2=0.0,
     min_child_hessian=0.0,
+    sample_weights=None,
+    group_id=None,
+    min_split_gain=0.0,
     validation_rows=None,
     validation_targets=None,
+    validation_sample_weights=None,
+    validation_group_id=None,
     validation_time_index=None,
     categorical_feature_index=None,
     categorical_feature_values=None,
@@ -1917,7 +2600,16 @@ fn train_regression_artifact_dense(
     categorical_time_aware=false,
     time_index=None,
     continuous_binning_strategy="linear",
-    continuous_binning_max_bins=256
+    continuous_binning_max_bins=255,
+    objective="squared_error",
+    monotone_constraints=Vec::new(),
+    feature_weights=Vec::new(),
+    max_leaves=None,
+    tree_growth="level",
+    categorical_feature_indices=None,
+    categorical_feature_values_list=None,
+    validation_categorical_feature_values_list=None,
+    init_artifact_bytes=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_with_summary(
@@ -1936,8 +2628,13 @@ fn train_regression_artifact_with_summary(
     lambda_l1: f32,
     lambda_l2: f32,
     min_child_hessian: f32,
+    sample_weights: Option<Vec<f32>>,
+    group_id: Option<Vec<u32>>,
+    min_split_gain: f32,
     validation_rows: Option<Vec<Vec<f32>>>,
     validation_targets: Option<Vec<f32>>,
+    validation_sample_weights: Option<Vec<f32>>,
+    validation_group_id: Option<Vec<u32>>,
     validation_time_index: Option<Vec<i64>>,
     categorical_feature_index: Option<usize>,
     categorical_feature_values: Option<Vec<String>>,
@@ -1950,6 +2647,15 @@ fn train_regression_artifact_with_summary(
     time_index: Option<Vec<i64>>,
     continuous_binning_strategy: &str,
     continuous_binning_max_bins: usize,
+    objective: &str,
+    monotone_constraints: Vec<i8>,
+    feature_weights: Vec<f32>,
+    max_leaves: Option<usize>,
+    tree_growth: &str,
+    categorical_feature_indices: Option<Vec<usize>>,
+    categorical_feature_values_list: Option<Vec<Vec<String>>>,
+    validation_categorical_feature_values_list: Option<Vec<Vec<String>>>,
+    init_artifact_bytes: Option<Vec<u8>>,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -1959,6 +2665,7 @@ fn train_regression_artifact_with_summary(
     let continuous_binning_strategy =
         parse_continuous_binning_strategy(continuous_binning_strategy)
             .map_err(engine_error_to_pyerr)?;
+    let tree_growth = parse_tree_growth(tree_growth).map_err(engine_error_to_pyerr)?;
     let params = build_train_params(
         learning_rate,
         max_depth,
@@ -1972,16 +2679,26 @@ fn train_regression_artifact_with_summary(
         lambda_l1,
         lambda_l2,
         min_child_hessian,
+        min_split_gain,
+        monotone_constraints,
+        feature_weights,
+        max_leaves,
+        tree_growth,
     );
-    let categorical_spec = resolve_categorical_spec(
-        categorical_feature_index,
-        categorical_feature_values,
-        categorical_smoothing,
-        categorical_min_samples_leaf,
-        categorical_time_aware,
-        rows.len(),
-    )
-    .map_err(engine_error_to_pyerr)?;
+    let (categorical_specs, validation_categorical_values_list) =
+        resolve_categorical_specs_from_params(
+            categorical_feature_index,
+            categorical_feature_values,
+            categorical_feature_indices,
+            categorical_feature_values_list,
+            validation_categorical_feature_values,
+            validation_categorical_feature_values_list,
+            categorical_smoothing,
+            categorical_min_samples_leaf,
+            categorical_time_aware,
+            rows.len(),
+        )
+        .map_err(engine_error_to_pyerr)?;
     let (dense_values, row_count, feature_count) =
         flatten_rows(&rows).map_err(engine_error_to_pyerr)?;
     let validation_payload = if let Some(validation_rows) = validation_rows.as_ref() {
@@ -2004,21 +2721,27 @@ fn train_regression_artifact_with_summary(
         row_count,
         feature_count,
         &targets,
+        sample_weights,
+        group_id,
         validation_payload
             .as_ref()
             .map(|(values, _, _)| values.as_slice()),
         validation_row_count,
         validation_targets.as_deref(),
+        validation_sample_weights,
+        validation_group_id,
         params,
         effective_rounds,
         time_index,
         validation_time_index,
-        categorical_spec,
-        validation_categorical_feature_values,
+        categorical_specs,
+        validation_categorical_values_list,
         training_policy,
         store_node_stats,
         continuous_binning_strategy,
         continuous_binning_max_bins,
+        objective,
+        init_artifact_bytes.as_deref(),
     )
     .map_err(engine_error_to_pyerr)
 }
@@ -2041,9 +2764,14 @@ fn train_regression_artifact_with_summary(
     lambda_l1=0.0,
     lambda_l2=0.0,
     min_child_hessian=0.0,
+    sample_weights=None,
+    group_id=None,
+    min_split_gain=0.0,
     validation_values=None,
     validation_row_count=None,
     validation_targets=None,
+    validation_sample_weights=None,
+    validation_group_id=None,
     validation_time_index=None,
     categorical_feature_index=None,
     categorical_feature_values=None,
@@ -2055,7 +2783,16 @@ fn train_regression_artifact_with_summary(
     categorical_time_aware=false,
     time_index=None,
     continuous_binning_strategy="linear",
-    continuous_binning_max_bins=256
+    continuous_binning_max_bins=255,
+    objective="squared_error",
+    monotone_constraints=Vec::new(),
+    feature_weights=Vec::new(),
+    max_leaves=None,
+    tree_growth="level",
+    categorical_feature_indices=None,
+    categorical_feature_values_list=None,
+    validation_categorical_feature_values_list=None,
+    init_artifact_bytes=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary(
@@ -2076,9 +2813,14 @@ fn train_regression_artifact_dense_with_summary(
     lambda_l1: f32,
     lambda_l2: f32,
     min_child_hessian: f32,
+    sample_weights: Option<Vec<f32>>,
+    group_id: Option<Vec<u32>>,
+    min_split_gain: f32,
     validation_values: Option<Vec<f32>>,
     validation_row_count: Option<usize>,
     validation_targets: Option<Vec<f32>>,
+    validation_sample_weights: Option<Vec<f32>>,
+    validation_group_id: Option<Vec<u32>>,
     validation_time_index: Option<Vec<i64>>,
     categorical_feature_index: Option<usize>,
     categorical_feature_values: Option<Vec<String>>,
@@ -2091,6 +2833,15 @@ fn train_regression_artifact_dense_with_summary(
     time_index: Option<Vec<i64>>,
     continuous_binning_strategy: &str,
     continuous_binning_max_bins: usize,
+    objective: &str,
+    monotone_constraints: Vec<i8>,
+    feature_weights: Vec<f32>,
+    max_leaves: Option<usize>,
+    tree_growth: &str,
+    categorical_feature_indices: Option<Vec<usize>>,
+    categorical_feature_values_list: Option<Vec<Vec<String>>>,
+    validation_categorical_feature_values_list: Option<Vec<Vec<String>>>,
+    init_artifact_bytes: Option<Vec<u8>>,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -2100,6 +2851,7 @@ fn train_regression_artifact_dense_with_summary(
     let continuous_binning_strategy =
         parse_continuous_binning_strategy(continuous_binning_strategy)
             .map_err(engine_error_to_pyerr)?;
+    let tree_growth = parse_tree_growth(tree_growth).map_err(engine_error_to_pyerr)?;
     let params = build_train_params(
         learning_rate,
         max_depth,
@@ -2113,34 +2865,50 @@ fn train_regression_artifact_dense_with_summary(
         lambda_l1,
         lambda_l2,
         min_child_hessian,
+        min_split_gain,
+        monotone_constraints,
+        feature_weights,
+        max_leaves,
+        tree_growth,
     );
-    let categorical_spec = resolve_categorical_spec(
-        categorical_feature_index,
-        categorical_feature_values,
-        categorical_smoothing,
-        categorical_min_samples_leaf,
-        categorical_time_aware,
-        row_count,
-    )
-    .map_err(engine_error_to_pyerr)?;
+    let (categorical_specs, validation_categorical_values_list) =
+        resolve_categorical_specs_from_params(
+            categorical_feature_index,
+            categorical_feature_values,
+            categorical_feature_indices,
+            categorical_feature_values_list,
+            validation_categorical_feature_values,
+            validation_categorical_feature_values_list,
+            categorical_smoothing,
+            categorical_min_samples_leaf,
+            categorical_time_aware,
+            row_count,
+        )
+        .map_err(engine_error_to_pyerr)?;
     train_regression_artifact_with_summary_dense_impl(
         &values,
         row_count,
         feature_count,
         &targets,
+        sample_weights,
+        group_id,
         validation_values.as_deref(),
         validation_row_count,
         validation_targets.as_deref(),
+        validation_sample_weights,
+        validation_group_id,
         params,
         effective_rounds,
         time_index,
         validation_time_index,
-        categorical_spec,
-        validation_categorical_feature_values,
+        categorical_specs,
+        validation_categorical_values_list,
         training_policy,
         store_node_stats,
         continuous_binning_strategy,
         continuous_binning_max_bins,
+        objective,
+        init_artifact_bytes.as_deref(),
     )
     .map_err(engine_error_to_pyerr)
 }
@@ -2178,9 +2946,14 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> PyResult<Vec<f32>> {
     lambda_l1=0.0,
     lambda_l2=0.0,
     min_child_hessian=0.0,
+    sample_weights=None,
+    group_id=None,
+    min_split_gain=0.0,
     validation_values_bytes=None,
     validation_row_count=None,
     validation_targets_bytes=None,
+    validation_sample_weights=None,
+    validation_group_id=None,
     validation_time_index=None,
     categorical_feature_index=None,
     categorical_feature_values=None,
@@ -2192,7 +2965,16 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> PyResult<Vec<f32>> {
     categorical_time_aware=false,
     time_index=None,
     continuous_binning_strategy="linear",
-    continuous_binning_max_bins=256
+    continuous_binning_max_bins=255,
+    objective="squared_error",
+    monotone_constraints=Vec::new(),
+    feature_weights=Vec::new(),
+    max_leaves=None,
+    tree_growth="level",
+    categorical_feature_indices=None,
+    categorical_feature_values_list=None,
+    validation_categorical_feature_values_list=None,
+    init_artifact_bytes=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary_bytes(
@@ -2213,9 +2995,14 @@ fn train_regression_artifact_dense_with_summary_bytes(
     lambda_l1: f32,
     lambda_l2: f32,
     min_child_hessian: f32,
+    sample_weights: Option<Vec<f32>>,
+    group_id: Option<Vec<u32>>,
+    min_split_gain: f32,
     validation_values_bytes: Option<&[u8]>,
     validation_row_count: Option<usize>,
     validation_targets_bytes: Option<&[u8]>,
+    validation_sample_weights: Option<Vec<f32>>,
+    validation_group_id: Option<Vec<u32>>,
     validation_time_index: Option<Vec<i64>>,
     categorical_feature_index: Option<usize>,
     categorical_feature_values: Option<Vec<String>>,
@@ -2228,6 +3015,15 @@ fn train_regression_artifact_dense_with_summary_bytes(
     time_index: Option<Vec<i64>>,
     continuous_binning_strategy: &str,
     continuous_binning_max_bins: usize,
+    objective: &str,
+    monotone_constraints: Vec<i8>,
+    feature_weights: Vec<f32>,
+    max_leaves: Option<usize>,
+    tree_growth: &str,
+    categorical_feature_indices: Option<Vec<usize>>,
+    categorical_feature_values_list: Option<Vec<Vec<String>>>,
+    validation_categorical_feature_values_list: Option<Vec<Vec<String>>>,
+    init_artifact_bytes: Option<Vec<u8>>,
 ) -> PyResult<NativeTrainingResult> {
     let values = bytes_to_f32_vec(values_bytes)?;
     let targets = bytes_to_f32_vec(targets_bytes)?;
@@ -2241,6 +3037,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
     let continuous_binning_strategy =
         parse_continuous_binning_strategy(continuous_binning_strategy)
             .map_err(engine_error_to_pyerr)?;
+    let tree_growth = parse_tree_growth(tree_growth).map_err(engine_error_to_pyerr)?;
     let params = build_train_params(
         learning_rate,
         max_depth,
@@ -2254,34 +3051,50 @@ fn train_regression_artifact_dense_with_summary_bytes(
         lambda_l1,
         lambda_l2,
         min_child_hessian,
+        min_split_gain,
+        monotone_constraints,
+        feature_weights,
+        max_leaves,
+        tree_growth,
     );
-    let categorical_spec = resolve_categorical_spec(
-        categorical_feature_index,
-        categorical_feature_values,
-        categorical_smoothing,
-        categorical_min_samples_leaf,
-        categorical_time_aware,
-        row_count,
-    )
-    .map_err(engine_error_to_pyerr)?;
+    let (categorical_specs, validation_categorical_values_list) =
+        resolve_categorical_specs_from_params(
+            categorical_feature_index,
+            categorical_feature_values,
+            categorical_feature_indices,
+            categorical_feature_values_list,
+            validation_categorical_feature_values,
+            validation_categorical_feature_values_list,
+            categorical_smoothing,
+            categorical_min_samples_leaf,
+            categorical_time_aware,
+            row_count,
+        )
+        .map_err(engine_error_to_pyerr)?;
     train_regression_artifact_with_summary_dense_impl(
         &values,
         row_count,
         feature_count,
         &targets,
+        sample_weights,
+        group_id,
         validation_values.as_deref(),
         validation_row_count,
         validation_targets.as_deref(),
+        validation_sample_weights,
+        validation_group_id,
         params,
         effective_rounds,
         time_index,
         validation_time_index,
-        categorical_spec,
-        validation_categorical_feature_values,
+        categorical_specs,
+        validation_categorical_values_list,
         training_policy,
         store_node_stats,
         continuous_binning_strategy,
         continuous_binning_max_bins,
+        objective,
+        init_artifact_bytes.as_deref(),
     )
     .map_err(engine_error_to_pyerr)
 }
@@ -2322,7 +3135,7 @@ fn _alloygbm(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ContinuousBinningStrategy, DEFAULT_TRAIN_ROUNDS, MAX_CONTINUOUS_QUANTIZED_BIN,
+        ContinuousBinningStrategy, DEFAULT_TRAIN_ROUNDS, MAX_CONTINUOUS_QUANTIZED_BIN_U8,
         flatten_rows, predictor_predict_batch_canonical_impl, predictor_predict_batch_impl,
         shap_explain_rows_impl, shap_global_importance_impl,
         train_regression_artifact_with_summary_dense_impl,
@@ -2330,7 +3143,7 @@ mod tests {
     use alloygbm_backend_cpu::CpuBackend;
     use alloygbm_categorical::TargetEncoderConfig;
     use alloygbm_core::{
-        BinnedMatrix, DatasetMatrix, ModelSectionKind, TrainParams, TrainingDataset,
+        BinnedMatrix, DatasetMatrix, ModelSectionKind, TrainParams, TrainingDataset, TreeGrowth,
         deserialize_model_artifact_v1, serialize_model_artifact_v1,
     };
     use alloygbm_engine::{
@@ -2354,19 +3167,25 @@ mod tests {
             row_count,
             feature_count,
             targets,
+            None, // sample_weights
+            None, // group_id
             None,
             None,
             None,
+            None, // validation_sample_weights
+            None, // validation_group_id
             params,
             rounds,
             time_index,
             None,
-            categorical_spec,
-            None,
+            categorical_spec.into_iter().collect(),
+            Vec::new(),
             training_policy,
             store_node_debug_stats,
             ContinuousBinningStrategy::Linear,
-            MAX_CONTINUOUS_QUANTIZED_BIN as usize + 1,
+            MAX_CONTINUOUS_QUANTIZED_BIN_U8 as usize + 1,
+            "squared_error",
+            None, // init_artifact_bytes
         )
         .map(|result| result.artifact_bytes)
     }
@@ -2437,6 +3256,11 @@ mod tests {
             lambda_l1: 0.0,
             lambda_l2: 0.0,
             min_child_hessian: 0.0,
+            min_split_gain: 0.0,
+            monotone_constraints: Vec::new(),
+            feature_weights: Vec::new(),
+            max_leaves: None,
+            tree_growth: TreeGrowth::Level,
         }
     }
 

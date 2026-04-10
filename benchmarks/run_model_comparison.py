@@ -17,7 +17,14 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 import yaml
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.metrics import (
+    accuracy_score,
+    log_loss as sklearn_log_loss,
+    mean_absolute_error,
+    mean_squared_error,
+    r2_score,
+    roc_auc_score,
+)
 from sklearn.model_selection import train_test_split
 
 AVAILABLE_SCENARIOS = [
@@ -27,6 +34,9 @@ AVAILABLE_SCENARIOS = [
     "panel_time_series",
     "histogram_stress",
     "dow_jones_financial",
+    "breast_cancer",
+    "synthetic_classification",
+    "synthetic_ranking",
 ]
 
 
@@ -61,6 +71,7 @@ VALID_ALLOY_CONTINUOUS_BINNING_STRATEGIES = ("linear", "rank", "quantile")
 @dataclass
 class BenchmarkRecord:
     scenario: str
+    task_type: str
     profile_name: str
     profile_index: int
     run_index: int
@@ -80,6 +91,12 @@ class BenchmarkRecord:
     rmse: float
     mae: float
     r2: float
+    accuracy: float
+    log_loss_val: float
+    auc: float
+    ndcg_5: float
+    ndcg_10: float
+    ndcg_full: float
     status: str
     error: str
 
@@ -143,6 +160,89 @@ def _load_optional_catboost_regressor() -> tuple[type | None, dict[str, object]]
     }
 
 
+def _load_alloygbm_classifier_runtime() -> tuple[type, dict[str, object]]:
+    try:
+        from alloygbm import GBMClassifier
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            "failed to import GBMClassifier from alloygbm"
+        ) from exc
+    return GBMClassifier, {"available": True}
+
+
+def _load_alloygbm_ranker_runtime() -> tuple[type, dict[str, object]]:
+    try:
+        from alloygbm import GBMRanker
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            "failed to import GBMRanker from alloygbm"
+        ) from exc
+    return GBMRanker, {"available": True}
+
+
+def _load_optional_catboost_classifier() -> tuple[type | None, dict[str, object]]:
+    try:
+        from catboost import CatBoostClassifier
+        return CatBoostClassifier, {"available": True}
+    except Exception:  # noqa: BLE001
+        return None, {"available": False}
+
+
+def _group_ids_to_sizes(group_ids: np.ndarray) -> np.ndarray:
+    """Convert sorted per-row group IDs to group size array for LightGBM."""
+    changes = np.where(np.diff(group_ids) != 0)[0] + 1
+    boundaries = np.concatenate([[0], changes, [len(group_ids)]])
+    return np.diff(boundaries)
+
+
+class _LGBMRankerAdapter:
+    """Wraps LGBMRanker to accept per-row group IDs like AlloyGBM."""
+
+    def __init__(self, **kwargs: object) -> None:
+        from lightgbm import LGBMRanker
+        self._model = LGBMRanker(**kwargs)
+
+    def fit(self, X: object, y: object, group: object = None) -> "_LGBMRankerAdapter":
+        group_sizes = _group_ids_to_sizes(np.asarray(group))
+        self._model.fit(X, y, group=group_sizes)
+        return self
+
+    def predict(self, X: object) -> object:
+        return self._model.predict(X)
+
+
+class _XGBRankerAdapter:
+    """Wraps XGBRanker to accept per-row group IDs like AlloyGBM."""
+
+    def __init__(self, **kwargs: object) -> None:
+        from xgboost import XGBRanker
+        self._model = XGBRanker(**kwargs)
+
+    def fit(self, X: object, y: object, group: object = None) -> "_XGBRankerAdapter":
+        self._model.fit(X, y, qid=group)
+        return self
+
+    def predict(self, X: object) -> object:
+        return self._model.predict(X)
+
+
+class _CatBoostRankerAdapter:
+    """Wraps CatBoost with YetiRank for ranking."""
+
+    def __init__(self, **kwargs: object) -> None:
+        from catboost import CatBoost
+        self._model = CatBoost({**kwargs, "loss_function": "YetiRank"})
+
+    def fit(self, X: object, y: object, group: object = None) -> "_CatBoostRankerAdapter":
+        from catboost import Pool
+        train_pool = Pool(data=X, label=y, group_id=group)
+        self._model.fit(train_pool)
+        return self
+
+    def predict(self, X: object) -> object:
+        return self._model.predict(X)
+
+
 def _prepare_dataset(
     repo_root: Path,
     scenario: str,
@@ -167,12 +267,16 @@ def _load_manifest(manifest_path: Path) -> dict:
 
 def _load_dataset(
     repo_root: Path, scenario: str, force_prepare: bool
-) -> tuple[pd.DataFrame, str]:
+) -> tuple[pd.DataFrame, str, str, str | None]:
     manifest_path = repo_root / "benchmarks" / scenario / "manifest.yaml"
     manifest = _load_manifest(manifest_path)
     target_column = str(manifest["prepared"]["target"])
     prepared_file = str(manifest["prepared"]["filename"])
     manifest_kind = str(manifest.get("kind", ""))
+    task_type = str(manifest.get("task_type", "regression"))
+    group_column = manifest["prepared"].get("group_column")
+    if group_column is not None:
+        group_column = str(group_column)
     prepared_path = repo_root / "benchmarks" / "data" / scenario / "prepared" / prepared_file
 
     _prepare_dataset(repo_root, scenario, force_prepare, prepared_path, manifest_kind)
@@ -182,7 +286,7 @@ def _load_dataset(
     frame = pd.read_csv(prepared_path)
     if target_column not in frame.columns:
         raise ValueError(f"target column '{target_column}' missing in {prepared_path}")
-    return frame, target_column
+    return frame, target_column, task_type, group_column
 
 
 def _split_by_timestamp(frame: pd.DataFrame, test_size: float) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -210,11 +314,18 @@ def _split_dataset(
     target_column: str,
     seed: int,
     test_size: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    task_type: str = "regression",
+    group_column: str | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]:
+    # Leakage check: skip group/timestamp/target columns.
+    skip_columns = {target_column, "group_id", "timestamp"}
+    if group_column is not None:
+        skip_columns.add(group_column)
+
     target_equivalent_features: list[str] = []
     target_series = pd.to_numeric(frame[target_column], errors="coerce")
     for column in frame.columns:
-        if column in {target_column, "group_id", "timestamp"}:
+        if column in skip_columns:
             continue
         feature_series = pd.to_numeric(frame[column], errors="coerce")
         comparable = feature_series.notna() & target_series.notna()
@@ -227,6 +338,89 @@ def _split_dataset(
             + ", ".join(sorted(target_equivalent_features))
         )
 
+    # Ranking: group-aware split keeping entire queries together.
+    if task_type == "ranking" and group_column is not None:
+        group_arr = frame[group_column].to_numpy()
+        unique_groups = np.unique(group_arr)
+        rng = np.random.RandomState(seed)
+        rng.shuffle(unique_groups)
+        split_point = max(1, int(len(unique_groups) * (1.0 - test_size)))
+        train_groups = set(unique_groups[:split_point].tolist())
+
+        train_mask = frame[group_column].isin(train_groups)
+        test_mask = ~train_mask
+
+        # Sort by group to ensure contiguous group IDs for ranking adapters.
+        train_frame = frame.loc[train_mask].sort_values(group_column)
+        test_frame = frame.loc[test_mask].sort_values(group_column)
+
+        drop_cols = [target_column, group_column]
+        x_train = train_frame.drop(columns=drop_cols, errors="ignore")
+        x_test = test_frame.drop(columns=drop_cols, errors="ignore")
+        y_train = train_frame[target_column]
+        y_test = test_frame[target_column]
+        g_train = train_frame[group_column].to_numpy(dtype=np.uint32)
+        g_test = test_frame[group_column].to_numpy(dtype=np.uint32)
+
+        x_train = x_train.apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan)
+        x_test = x_test.apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan)
+        y_train = pd.to_numeric(y_train, errors="coerce")
+        y_test = pd.to_numeric(y_test, errors="coerce")
+
+        if len(x_train) == 0 or len(x_test) == 0:
+            raise ValueError(f"{scenario}: no rows left after ranking split")
+
+        return (
+            x_train.to_numpy(dtype=float),
+            x_test.to_numpy(dtype=float),
+            y_train.to_numpy(dtype=float),
+            y_test.to_numpy(dtype=float),
+            g_train,
+            g_test,
+        )
+
+    # Classification: stratified split.
+    if task_type == "classification":
+        feature_frame = frame.drop(
+            columns=[target_column, "group_id", "timestamp"], errors="ignore"
+        ).copy()
+        feature_frame = feature_frame.apply(
+            pd.to_numeric, errors="coerce"
+        ).replace([np.inf, -np.inf], np.nan)
+        target_vals = frame[target_column]
+
+        x_train, x_test, y_train, y_test = train_test_split(
+            feature_frame,
+            target_vals,
+            test_size=test_size,
+            random_state=seed,
+            shuffle=True,
+            stratify=target_vals,
+        )
+
+        y_train = pd.to_numeric(y_train, errors="coerce")
+        y_test = pd.to_numeric(y_test, errors="coerce")
+
+        train_mask = x_train.notna().all(axis=1) & y_train.notna()
+        test_mask = x_test.notna().all(axis=1) & y_test.notna()
+        x_train = x_train[train_mask]
+        y_train = y_train[train_mask]
+        x_test = x_test[test_mask]
+        y_test = y_test[test_mask]
+
+        if len(x_train) == 0 or len(x_test) == 0:
+            raise ValueError(f"{scenario}: no rows left after numeric/finite filtering")
+
+        return (
+            x_train.to_numpy(dtype=float),
+            x_test.to_numpy(dtype=float),
+            y_train.to_numpy(dtype=float),
+            y_test.to_numpy(dtype=float),
+            None,
+            None,
+        )
+
+    # Regression: existing logic (timestamp-based or random split).
     feature_frame = frame.drop(columns=[target_column]).copy()
     if "group_id" in feature_frame.columns:
         feature_frame = feature_frame.drop(columns=["group_id"])
@@ -270,6 +464,8 @@ def _split_dataset(
         x_test.to_numpy(dtype=float),
         y_train.to_numpy(dtype=float),
         y_test.to_numpy(dtype=float),
+        None,
+        None,
     )
 
 
@@ -285,29 +481,77 @@ def _run_model(
     profile_index: int,
     run_index: int,
     seed: int,
+    task_type: str = "regression",
+    group_train: np.ndarray | None = None,
+    group_test: np.ndarray | None = None,
 ) -> BenchmarkRecord:
+    nan = float("nan")
     try:
         model = factory()
+
         fit_start = time.perf_counter()
-        model.fit(x_train, y_train)
+        if task_type == "ranking":
+            model.fit(x_train, y_train, group=group_train)
+        else:
+            model.fit(x_train, y_train)
         fit_seconds = time.perf_counter() - fit_start
+
         fit_timing = getattr(model, "fit_timing_", None)
         input_adaptation_seconds = float(
-            fit_timing.get("input_adaptation_seconds", float("nan"))
-        ) if isinstance(fit_timing, dict) else float("nan")
+            fit_timing.get("input_adaptation_seconds", nan)
+        ) if isinstance(fit_timing, dict) else nan
         native_bridge_prepare_seconds = float(
-            fit_timing.get("native_bridge_prepare_seconds", float("nan"))
-        ) if isinstance(fit_timing, dict) else float("nan")
+            fit_timing.get("native_bridge_prepare_seconds", nan)
+        ) if isinstance(fit_timing, dict) else nan
         native_train_seconds = float(
-            fit_timing.get("native_train_seconds", float("nan"))
-        ) if isinstance(fit_timing, dict) else float("nan")
+            fit_timing.get("native_train_seconds", nan)
+        ) if isinstance(fit_timing, dict) else nan
 
         predict_start = time.perf_counter()
-        predictions = np.array(model.predict(x_test), dtype=float)
+        class_predictions = None
+        if task_type == "classification" and hasattr(model, "predict_proba"):
+            proba = np.array(model.predict_proba(x_test), dtype=float)
+            prob_positive = proba[:, 1] if proba.ndim == 2 else proba
+            class_predictions = (prob_positive >= 0.5).astype(int)
+            predictions = prob_positive
+        else:
+            predictions = np.array(model.predict(x_test), dtype=float)
         predict_seconds = time.perf_counter() - predict_start
+
+        rmse_val = mae_val = r2_val = nan
+        accuracy_val = log_loss_metric = auc_val = nan
+        ndcg_5_val = ndcg_10_val = ndcg_full_val = nan
+
+        if task_type == "regression":
+            rmse_val = float(np.sqrt(mean_squared_error(y_test, predictions)))
+            mae_val = float(mean_absolute_error(y_test, predictions))
+            r2_val = float(r2_score(y_test, predictions))
+        elif task_type == "classification":
+            if class_predictions is None:
+                class_predictions = (predictions >= 0.5).astype(int)
+            accuracy_val = float(accuracy_score(y_test, class_predictions))
+            log_loss_metric = float(
+                sklearn_log_loss(y_test, np.clip(predictions, 1e-15, 1 - 1e-15))
+            )
+            try:
+                auc_val = float(roc_auc_score(y_test, predictions))
+            except ValueError:
+                auc_val = nan
+        elif task_type == "ranking":
+            from alloygbm.evaluation import ndcg as alloy_ndcg
+            ndcg_5_val = float(
+                alloy_ndcg(y_test.tolist(), predictions.tolist(), group=group_test.tolist(), k=5)
+            )
+            ndcg_10_val = float(
+                alloy_ndcg(y_test.tolist(), predictions.tolist(), group=group_test.tolist(), k=10)
+            )
+            ndcg_full_val = float(
+                alloy_ndcg(y_test.tolist(), predictions.tolist(), group=group_test.tolist())
+            )
 
         return BenchmarkRecord(
             scenario=scenario,
+            task_type=task_type,
             profile_name=profile.name,
             profile_index=profile_index,
             run_index=run_index,
@@ -324,15 +568,22 @@ def _run_model(
             native_train_seconds=native_train_seconds,
             fit_seconds=float(fit_seconds),
             predict_seconds=float(predict_seconds),
-            rmse=float(np.sqrt(mean_squared_error(y_test, predictions))),
-            mae=float(mean_absolute_error(y_test, predictions)),
-            r2=float(r2_score(y_test, predictions)),
+            rmse=rmse_val,
+            mae=mae_val,
+            r2=r2_val,
+            accuracy=accuracy_val,
+            log_loss_val=log_loss_metric,
+            auc=auc_val,
+            ndcg_5=ndcg_5_val,
+            ndcg_10=ndcg_10_val,
+            ndcg_full=ndcg_full_val,
             status="PASS",
             error="",
         )
     except Exception as exc:  # noqa: BLE001
         return BenchmarkRecord(
             scenario=scenario,
+            task_type=task_type,
             profile_name=profile.name,
             profile_index=profile_index,
             run_index=run_index,
@@ -344,14 +595,20 @@ def _run_model(
             train_rows=0,
             test_rows=0,
             n_features=0,
-            input_adaptation_seconds=float("nan"),
-            native_bridge_prepare_seconds=float("nan"),
-            native_train_seconds=float("nan"),
+            input_adaptation_seconds=nan,
+            native_bridge_prepare_seconds=nan,
+            native_train_seconds=nan,
             fit_seconds=0.0,
             predict_seconds=0.0,
-            rmse=float("nan"),
-            mae=float("nan"),
-            r2=float("nan"),
+            rmse=nan,
+            mae=nan,
+            r2=nan,
+            accuracy=nan,
+            log_loss_val=nan,
+            auc=nan,
+            ndcg_5=nan,
+            ndcg_10=nan,
+            ndcg_full=nan,
             status="FAIL",
             error=f"{type(exc).__name__}: {exc}",
         )
@@ -422,6 +679,151 @@ def _model_factories(
     if catboost_regressor_cls is not None:
         factories["catboost"] = lambda: catboost_regressor_cls(
             loss_function="RMSE",
+            learning_rate=learning_rate,
+            depth=max_depth,
+            iterations=rounds,
+            random_seed=seed,
+            verbose=False,
+            allow_writing_files=False,
+            thread_count=1,
+        )
+    return factories
+
+
+def _build_alloy_params(
+    cls: type,
+    seed: int,
+    learning_rate: float,
+    max_depth: int,
+    rounds: int,
+    alloy_continuous_binning_strategy: str,
+    alloy_continuous_binning_max_bins: int,
+) -> dict[str, object]:
+    sig = inspect.signature(cls.__init__)
+    params: dict[str, object] = {}
+    if "learning_rate" in sig.parameters:
+        params["learning_rate"] = learning_rate
+    if "max_depth" in sig.parameters:
+        params["max_depth"] = max_depth
+    if "n_estimators" in sig.parameters:
+        params["n_estimators"] = rounds
+    if "rounds" in sig.parameters:
+        params["rounds"] = rounds
+    if "row_subsample" in sig.parameters:
+        params["row_subsample"] = 0.8
+    if "col_subsample" in sig.parameters:
+        params["col_subsample"] = 0.8
+    if "seed" in sig.parameters:
+        params["seed"] = seed
+    if "deterministic" in sig.parameters:
+        params["deterministic"] = True
+    if "continuous_binning_strategy" in sig.parameters:
+        params["continuous_binning_strategy"] = alloy_continuous_binning_strategy
+    if "continuous_binning_max_bins" in sig.parameters:
+        params["continuous_binning_max_bins"] = alloy_continuous_binning_max_bins
+    return params
+
+
+def _classifier_factories(
+    gbm_classifier_cls: type,
+    catboost_classifier_cls: type | None,
+    seed: int,
+    learning_rate: float,
+    max_depth: int,
+    rounds: int,
+    alloy_continuous_binning_strategy: str,
+    alloy_continuous_binning_max_bins: int,
+) -> dict:
+    from lightgbm import LGBMClassifier
+    from xgboost import XGBClassifier
+
+    alloy_params = _build_alloy_params(
+        gbm_classifier_cls, seed, learning_rate, max_depth, rounds,
+        alloy_continuous_binning_strategy, alloy_continuous_binning_max_bins,
+    )
+    factories: dict[str, Callable[[], object]] = {
+        "alloygbm": lambda: gbm_classifier_cls(**alloy_params),
+        "lightgbm": lambda: LGBMClassifier(
+            objective="binary",
+            learning_rate=learning_rate,
+            max_depth=max_depth,
+            n_estimators=rounds,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=seed,
+            n_jobs=1,
+            verbose=-1,
+        ),
+        "xgboost": lambda: XGBClassifier(
+            objective="binary:logistic",
+            eval_metric="logloss",
+            learning_rate=learning_rate,
+            max_depth=max_depth,
+            n_estimators=rounds,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=seed,
+            n_jobs=1,
+            tree_method="hist",
+            verbosity=0,
+        ),
+    }
+    if catboost_classifier_cls is not None:
+        factories["catboost"] = lambda: catboost_classifier_cls(
+            loss_function="Logloss",
+            learning_rate=learning_rate,
+            depth=max_depth,
+            iterations=rounds,
+            random_seed=seed,
+            verbose=False,
+            allow_writing_files=False,
+            thread_count=1,
+        )
+    return factories
+
+
+def _ranker_factories(
+    gbm_ranker_cls: type,
+    catboost_available: bool,
+    seed: int,
+    learning_rate: float,
+    max_depth: int,
+    rounds: int,
+    alloy_continuous_binning_strategy: str,
+    alloy_continuous_binning_max_bins: int,
+) -> dict:
+    alloy_params = _build_alloy_params(
+        gbm_ranker_cls, seed, learning_rate, max_depth, rounds,
+        alloy_continuous_binning_strategy, alloy_continuous_binning_max_bins,
+    )
+    factories: dict[str, Callable[[], object]] = {
+        "alloygbm": lambda: gbm_ranker_cls(**alloy_params),
+        "lightgbm": lambda: _LGBMRankerAdapter(
+            objective="lambdarank",
+            learning_rate=learning_rate,
+            max_depth=max_depth,
+            n_estimators=rounds,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=seed,
+            n_jobs=1,
+            verbose=-1,
+        ),
+        "xgboost": lambda: _XGBRankerAdapter(
+            objective="rank:ndcg",
+            learning_rate=learning_rate,
+            max_depth=max_depth,
+            n_estimators=rounds,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=seed,
+            n_jobs=1,
+            tree_method="hist",
+            verbosity=0,
+        ),
+    }
+    if catboost_available:
+        factories["catboost"] = lambda: _CatBoostRankerAdapter(
             learning_rate=learning_rate,
             depth=max_depth,
             iterations=rounds,
@@ -520,6 +922,7 @@ def _summarize_profiles(frame: pd.DataFrame) -> pd.DataFrame:
         passed.groupby(
             [
                 "scenario",
+                "task_type",
                 "profile_name",
                 "model",
                 "learning_rate",
@@ -541,6 +944,12 @@ def _summarize_profiles(frame: pd.DataFrame) -> pd.DataFrame:
             rmse_median=("rmse", "median"),
             mae_median=("mae", "median"),
             r2_median=("r2", "median"),
+            accuracy_median=("accuracy", "median"),
+            log_loss_val_median=("log_loss_val", "median"),
+            auc_median=("auc", "median"),
+            ndcg_5_median=("ndcg_5", "median"),
+            ndcg_10_median=("ndcg_10", "median"),
+            ndcg_full_median=("ndcg_full", "median"),
         )
         .sort_values(["scenario", "profile_name", "model"])
         .reset_index(drop=True)
@@ -614,77 +1023,103 @@ def _render_results_markdown(
         lines.append("No benchmark records were produced.")
         return "\n".join(lines) + "\n"
 
-    lines.extend(
-        [
-            "| scenario | profile | model | seed | status | input_adaptation_seconds | native_bridge_prepare_seconds | native_train_seconds | fit_seconds | predict_seconds | rmse | mae | r2 |",
-            "| --- | --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
-        ]
-    )
-    for _, row in frame.iterrows():
-        lines.append(
-            f"| {row['scenario']} | {row['profile_name']} | {row['model']} | {int(row['seed'])} | "
-            f"{row['status']} | {row['input_adaptation_seconds']:.6f} | "
-            f"{row['native_bridge_prepare_seconds']:.6f} | {row['native_train_seconds']:.6f} | "
-            f"{row['fit_seconds']:.6f} | {row['predict_seconds']:.6f} | "
-            f"{row['rmse']:.6f} | {row['mae']:.6f} | {row['r2']:.6f} |"
-        )
+    # Render raw results by task type.
+    timing_cols = "input_adaptation_seconds | native_bridge_prepare_seconds | native_train_seconds | fit_seconds | predict_seconds"
+    timing_align = "---: | ---: | ---: | ---: | ---:"
 
-    lines.extend(["", "## Profile Median Summary", ""])
+    for task_type, task_label, metric_header, metric_align, metric_fmt in [
+        ("regression", "Regression", "rmse | mae | r2", "---: | ---: | ---:",
+         lambda r: f"{r['rmse']:.6f} | {r['mae']:.6f} | {r['r2']:.6f}"),
+        ("classification", "Classification", "accuracy | log_loss | auc", "---: | ---: | ---:",
+         lambda r: f"{r['accuracy']:.6f} | {r['log_loss_val']:.6f} | {r['auc']:.6f}"),
+        ("ranking", "Ranking", "ndcg@5 | ndcg@10 | ndcg", "---: | ---: | ---:",
+         lambda r: f"{r['ndcg_5']:.6f} | {r['ndcg_10']:.6f} | {r['ndcg_full']:.6f}"),
+    ]:
+        task_frame = frame[frame["task_type"] == task_type] if "task_type" in frame.columns else frame
+        if task_frame.empty:
+            continue
+        lines.extend([f"### {task_label}", ""])
+        lines.extend([
+            f"| scenario | profile | model | seed | status | {timing_cols} | {metric_header} |",
+            f"| --- | --- | --- | ---: | --- | {timing_align} | {metric_align} |",
+        ])
+        for _, row in task_frame.iterrows():
+            lines.append(
+                f"| {row['scenario']} | {row['profile_name']} | {row['model']} | {int(row['seed'])} | "
+                f"{row['status']} | {row['input_adaptation_seconds']:.6f} | "
+                f"{row['native_bridge_prepare_seconds']:.6f} | {row['native_train_seconds']:.6f} | "
+                f"{row['fit_seconds']:.6f} | {row['predict_seconds']:.6f} | "
+                f"{metric_fmt(row)} |"
+            )
+        lines.append("")
+
+    lines.extend(["## Profile Median Summary", ""])
     if summary.empty:
         lines.append("No PASS records available for profile summary.")
         return "\n".join(lines) + "\n"
 
-    lines.extend(
-        [
-            "| scenario | profile | model | runs | lr | depth | rounds | input_adaptation_seconds_median | native_bridge_prepare_seconds_median | native_train_seconds_median | fit_seconds_median | predict_seconds_median | rmse_median | mae_median | r2_median |",
-            "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
-        ]
-    )
-    for _, row in summary.iterrows():
-        lines.append(
-            f"| {row['scenario']} | {row['profile_name']} | {row['model']} | {int(row['runs'])} | "
-            f"{row['learning_rate']:.6f} | {int(row['max_depth'])} | {int(row['rounds'])} | "
-            f"{row['input_adaptation_seconds_median']:.6f} | "
-            f"{row['native_bridge_prepare_seconds_median']:.6f} | "
-            f"{row['native_train_seconds_median']:.6f} | "
-            f"{row['fit_seconds_median']:.6f} | {row['predict_seconds_median']:.6f} | "
-            f"{row['rmse_median']:.6f} | {row['mae_median']:.6f} | {row['r2_median']:.6f} |"
-        )
-
-    best_rmse = _best_rows_by_scenario(summary, metric="rmse_median", ascending=True)
-    fastest_fit = _best_rows_by_scenario(
-        summary, metric="fit_seconds_median", ascending=True
-    )
-
-    lines.extend(["", "## Best RMSE By Scenario", ""])
-    if best_rmse.empty:
-        lines.append("No best-RMSE rows available.")
-    else:
-        lines.extend(
-            [
-                "| scenario | profile | model | rmse_median |",
-                "| --- | --- | --- | ---: |",
-            ]
-        )
-        for _, row in best_rmse.iterrows():
+    for task_type, task_label, metric_header, metric_align, metric_fmt in [
+        ("regression", "Regression", "rmse_median | mae_median | r2_median", "---: | ---: | ---:",
+         lambda r: f"{r['rmse_median']:.6f} | {r['mae_median']:.6f} | {r['r2_median']:.6f}"),
+        ("classification", "Classification", "accuracy_median | log_loss_median | auc_median", "---: | ---: | ---:",
+         lambda r: f"{r['accuracy_median']:.6f} | {r['log_loss_val_median']:.6f} | {r['auc_median']:.6f}"),
+        ("ranking", "Ranking", "ndcg@5_median | ndcg@10_median | ndcg_median", "---: | ---: | ---:",
+         lambda r: f"{r['ndcg_5_median']:.6f} | {r['ndcg_10_median']:.6f} | {r['ndcg_full_median']:.6f}"),
+    ]:
+        task_summary = summary[summary["task_type"] == task_type] if "task_type" in summary.columns else summary
+        if task_summary.empty:
+            continue
+        lines.extend([f"### {task_label}", ""])
+        lines.extend([
+            f"| scenario | profile | model | runs | lr | depth | rounds | fit_seconds_median | predict_seconds_median | {metric_header} |",
+            f"| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | {metric_align} |",
+        ])
+        for _, row in task_summary.iterrows():
             lines.append(
-                f"| {row['scenario']} | {row['profile_name']} | {row['model']} | {row['rmse_median']:.6f} |"
+                f"| {row['scenario']} | {row['profile_name']} | {row['model']} | {int(row['runs'])} | "
+                f"{row['learning_rate']:.6f} | {int(row['max_depth'])} | {int(row['rounds'])} | "
+                f"{row['fit_seconds_median']:.6f} | {row['predict_seconds_median']:.6f} | "
+                f"{metric_fmt(row)} |"
             )
+        lines.append("")
 
-    lines.extend(["", "## Fastest Fit By Scenario", ""])
+    # Best-metric sections by task type.
+    reg_summary = summary[summary["task_type"] == "regression"] if "task_type" in summary.columns else summary
+    clf_summary = summary[summary["task_type"] == "classification"] if "task_type" in summary.columns else pd.DataFrame()
+    rank_summary = summary[summary["task_type"] == "ranking"] if "task_type" in summary.columns else pd.DataFrame()
+
+    best_rmse = _best_rows_by_scenario(reg_summary, metric="rmse_median", ascending=True)
+    if not best_rmse.empty:
+        lines.extend(["## Best RMSE By Scenario (Regression)", ""])
+        lines.extend(["| scenario | profile | model | rmse_median |", "| --- | --- | --- | ---: |"])
+        for _, row in best_rmse.iterrows():
+            lines.append(f"| {row['scenario']} | {row['profile_name']} | {row['model']} | {row['rmse_median']:.6f} |")
+        lines.append("")
+
+    best_acc = _best_rows_by_scenario(clf_summary, metric="accuracy_median", ascending=False)
+    if not best_acc.empty:
+        lines.extend(["## Best Accuracy By Scenario (Classification)", ""])
+        lines.extend(["| scenario | profile | model | accuracy_median |", "| --- | --- | --- | ---: |"])
+        for _, row in best_acc.iterrows():
+            lines.append(f"| {row['scenario']} | {row['profile_name']} | {row['model']} | {row['accuracy_median']:.6f} |")
+        lines.append("")
+
+    best_ndcg = _best_rows_by_scenario(rank_summary, metric="ndcg_full_median", ascending=False)
+    if not best_ndcg.empty:
+        lines.extend(["## Best NDCG By Scenario (Ranking)", ""])
+        lines.extend(["| scenario | profile | model | ndcg_median |", "| --- | --- | --- | ---: |"])
+        for _, row in best_ndcg.iterrows():
+            lines.append(f"| {row['scenario']} | {row['profile_name']} | {row['model']} | {row['ndcg_full_median']:.6f} |")
+        lines.append("")
+
+    fastest_fit = _best_rows_by_scenario(summary, metric="fit_seconds_median", ascending=True)
+    lines.extend(["## Fastest Fit By Scenario", ""])
     if fastest_fit.empty:
         lines.append("No fastest-fit rows available.")
     else:
-        lines.extend(
-            [
-                "| scenario | profile | model | fit_seconds_median |",
-                "| --- | --- | --- | ---: |",
-            ]
-        )
+        lines.extend(["| scenario | profile | model | fit_seconds_median |", "| --- | --- | --- | ---: |"])
         for _, row in fastest_fit.iterrows():
-            lines.append(
-                f"| {row['scenario']} | {row['profile_name']} | {row['model']} | {row['fit_seconds_median']:.6f} |"
-            )
+            lines.append(f"| {row['scenario']} | {row['profile_name']} | {row['model']} | {row['fit_seconds_median']:.6f} |")
 
     return "\n".join(lines) + "\n"
 
@@ -826,33 +1261,57 @@ def main(argv: list[str]) -> int:
     except RuntimeError as exc:
         print(f"alloygbm runtime check failed: {exc}", file=sys.stderr)
         return 2
+    gbm_classifier_cls, _ = _load_alloygbm_classifier_runtime()
+    gbm_ranker_cls, _ = _load_alloygbm_ranker_runtime()
     catboost_regressor_cls, catboost_runtime = _load_optional_catboost_regressor()
+    catboost_classifier_cls, _ = _load_optional_catboost_classifier()
+    catboost_ranker_available = catboost_runtime.get("available", False)
     print(
         "alloygbm runtime: "
         f"module={alloy_runtime['module_path']} "
         f"native={alloy_runtime['native_module_path']}"
     )
-    if catboost_runtime["available"]:
+    if catboost_runtime.get("available"):
         print(f"catboost runtime: version={catboost_runtime['version']}")
     else:
-        print(f"catboost runtime: unavailable ({catboost_runtime['error']})")
+        print(f"catboost runtime: unavailable ({catboost_runtime.get('error', 'unknown')})")
 
-    datasets: dict[str, tuple[pd.DataFrame, str]] = {}
+    datasets: dict[str, tuple[pd.DataFrame, str, str, str | None]] = {}
     dataset_errors: dict[str, str] = {}
     for scenario in args.scenarios:
         try:
-            frame, target_column = _load_dataset(repo_root, scenario, args.force_prepare)
-            datasets[scenario] = (frame, target_column)
+            frame, target_column, task_type, group_column = _load_dataset(
+                repo_root, scenario, args.force_prepare
+            )
+            datasets[scenario] = (frame, target_column, task_type, group_column)
         except Exception as exc:  # noqa: BLE001
             dataset_errors[scenario] = f"{type(exc).__name__}: {exc}"
+
+    nan = float("nan")
+
+    def _make_fail_record(
+        scenario: str, task_type: str, profile: BenchmarkProfile,
+        profile_index: int, run_index: int, seed: int, model_name: str, error: str,
+    ) -> BenchmarkRecord:
+        return BenchmarkRecord(
+            scenario=scenario, task_type=task_type, profile_name=profile.name,
+            profile_index=profile_index, run_index=run_index, seed=seed,
+            learning_rate=profile.learning_rate, max_depth=profile.max_depth,
+            rounds=profile.rounds, model=model_name,
+            train_rows=0, test_rows=0, n_features=0,
+            input_adaptation_seconds=nan, native_bridge_prepare_seconds=nan,
+            native_train_seconds=nan, fit_seconds=0.0, predict_seconds=0.0,
+            rmse=nan, mae=nan, r2=nan,
+            accuracy=nan, log_loss_val=nan, auc=nan,
+            ndcg_5=nan, ndcg_10=nan, ndcg_full=nan,
+            status="FAIL", error=error,
+        )
 
     records: list[BenchmarkRecord] = []
 
     for profile_index, profile in enumerate(profiles, start=1):
         for run_index, seed in enumerate(seeds, start=1):
-            factories = _model_factories(
-                gbm_regressor_cls=gbm_regressor_cls,
-                catboost_regressor_cls=catboost_regressor_cls,
+            common_factory_args = dict(
                 seed=seed,
                 learning_rate=profile.learning_rate,
                 max_depth=profile.max_depth,
@@ -862,71 +1321,55 @@ def main(argv: list[str]) -> int:
             )
 
             for scenario in args.scenarios:
+                # Determine task type (default to regression for error cases).
+                if scenario in datasets:
+                    _, _, task_type, group_column = datasets[scenario]
+                else:
+                    task_type = "regression"
+                    group_column = None
+
+                # Select factories for this task type.
+                if task_type == "classification":
+                    factories = _classifier_factories(
+                        gbm_classifier_cls=gbm_classifier_cls,
+                        catboost_classifier_cls=catboost_classifier_cls,
+                        **common_factory_args,
+                    )
+                elif task_type == "ranking":
+                    factories = _ranker_factories(
+                        gbm_ranker_cls=gbm_ranker_cls,
+                        catboost_available=catboost_ranker_available,
+                        **common_factory_args,
+                    )
+                else:
+                    factories = _model_factories(
+                        gbm_regressor_cls=gbm_regressor_cls,
+                        catboost_regressor_cls=catboost_regressor_cls,
+                        **common_factory_args,
+                    )
+
                 if scenario in dataset_errors:
                     error = dataset_errors[scenario]
                     for model_name in factories:
-                        records.append(
-                            BenchmarkRecord(
-                                scenario=scenario,
-                                profile_name=profile.name,
-                                profile_index=profile_index,
-                                run_index=run_index,
-                                seed=seed,
-                                learning_rate=profile.learning_rate,
-                                max_depth=profile.max_depth,
-                                rounds=profile.rounds,
-                                model=model_name,
-                                train_rows=0,
-                                test_rows=0,
-                                n_features=0,
-                                input_adaptation_seconds=float("nan"),
-                                native_bridge_prepare_seconds=float("nan"),
-                                native_train_seconds=float("nan"),
-                                fit_seconds=0.0,
-                                predict_seconds=0.0,
-                                rmse=float("nan"),
-                                mae=float("nan"),
-                                r2=float("nan"),
-                                status="FAIL",
-                                error=error,
-                            )
-                        )
+                        records.append(_make_fail_record(
+                            scenario, task_type, profile, profile_index,
+                            run_index, seed, model_name, error,
+                        ))
                     continue
 
-                frame, target_column = datasets[scenario]
+                frame, target_column, task_type, group_column = datasets[scenario]
                 try:
-                    x_train, x_test, y_train, y_test = _split_dataset(
-                        scenario, frame, target_column, seed, args.test_size
+                    x_train, x_test, y_train, y_test, g_train, g_test = _split_dataset(
+                        scenario, frame, target_column, seed, args.test_size,
+                        task_type=task_type, group_column=group_column,
                     )
                 except Exception as exc:  # noqa: BLE001
                     error = f"{type(exc).__name__}: {exc}"
                     for model_name in factories:
-                        records.append(
-                            BenchmarkRecord(
-                                scenario=scenario,
-                                profile_name=profile.name,
-                                profile_index=profile_index,
-                                run_index=run_index,
-                                seed=seed,
-                                learning_rate=profile.learning_rate,
-                                max_depth=profile.max_depth,
-                                rounds=profile.rounds,
-                                model=model_name,
-                                train_rows=0,
-                                test_rows=0,
-                                n_features=0,
-                                input_adaptation_seconds=float("nan"),
-                                native_bridge_prepare_seconds=float("nan"),
-                                native_train_seconds=float("nan"),
-                                fit_seconds=0.0,
-                                predict_seconds=0.0,
-                                rmse=float("nan"),
-                                mae=float("nan"),
-                                r2=float("nan"),
-                                status="FAIL",
-                                error=error,
-                            )
-                        )
+                        records.append(_make_fail_record(
+                            scenario, task_type, profile, profile_index,
+                            run_index, seed, model_name, error,
+                        ))
                     continue
 
                 for model_name, factory in factories.items():
@@ -942,16 +1385,27 @@ def main(argv: list[str]) -> int:
                         profile_index=profile_index,
                         run_index=run_index,
                         seed=seed,
+                        task_type=task_type,
+                        group_train=g_train,
+                        group_test=g_test,
                     )
                     records.append(record)
-                    print(
-                        f"[{scenario}][{profile.name}][seed={seed}] {model_name}: "
-                        f"{record.status} fit={record.fit_seconds:.4f}s "
+                    timing_str = (
+                        f"fit={record.fit_seconds:.4f}s "
                         f"(adapt={record.input_adaptation_seconds:.4f}s "
                         f"bridge={record.native_bridge_prepare_seconds:.4f}s "
                         f"native={record.native_train_seconds:.4f}s) "
-                        f"pred={record.predict_seconds:.4f}s rmse={record.rmse:.6f} "
-                        f"mae={record.mae:.6f} r2={record.r2:.6f}"
+                        f"pred={record.predict_seconds:.4f}s"
+                    )
+                    if task_type == "classification":
+                        metric_str = f"acc={record.accuracy:.4f} logloss={record.log_loss_val:.6f} auc={record.auc:.4f}"
+                    elif task_type == "ranking":
+                        metric_str = f"ndcg@5={record.ndcg_5:.4f} ndcg@10={record.ndcg_10:.4f} ndcg={record.ndcg_full:.4f}"
+                    else:
+                        metric_str = f"rmse={record.rmse:.6f} mae={record.mae:.6f} r2={record.r2:.6f}"
+                    print(
+                        f"[{scenario}][{profile.name}][seed={seed}] {model_name}: "
+                        f"{record.status} {timing_str} {metric_str}"
                     )
                     if record.status != "PASS":
                         print(f"  error: {record.error}")

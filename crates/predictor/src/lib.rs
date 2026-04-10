@@ -43,6 +43,7 @@ struct PredictorStump {
     node_id: u32,
     feature_index: u32,
     threshold_bin: u16,
+    default_left: bool,
     left_leaf_value: f32,
     right_leaf_value: f32,
 }
@@ -56,6 +57,7 @@ struct PredictorLayoutPayload {
 struct PredictorTreeNode {
     feature_index: usize,
     threshold_bin: f32,
+    default_left: bool,
     left_leaf_value: f32,
     right_leaf_value: f32,
 }
@@ -137,10 +139,15 @@ impl Predictor {
     /// Convert bin-index thresholds to float thresholds using per-feature min/max.
     /// After calling this, prediction compares raw float features directly — no quantization needed.
     /// Uses the midpoint between adjacent bin boundaries as the float threshold, with `<` comparison.
+    ///
+    /// `max_data_bin` is the maximum bin index used for data (excluding the NaN sentinel).
+    /// For the default 256-bin configuration this is 254; for wider bins (e.g. 512) it is
+    /// `max_bins - 2`.
     pub fn convert_bin_thresholds_to_float(
         &mut self,
         feature_mins: &[f32],
         feature_maxs: &[f32],
+        max_data_bin: u16,
     ) -> PredictorResult<()> {
         let feature_count = self.metadata.feature_names.len();
         if feature_mins.len() != feature_count || feature_maxs.len() != feature_count {
@@ -151,6 +158,7 @@ impl Predictor {
                 feature_count
             )));
         }
+        let divisor = max_data_bin as f32;
         for tree in &mut self.trees {
             for node in tree.nodes_by_local_id.iter_mut().flatten() {
                 let fi = node.feature_index;
@@ -161,10 +169,10 @@ impl Predictor {
                     // Constant feature — any threshold works since all values are equal.
                     node.threshold_bin = min_val + f32::EPSILON;
                 } else {
-                    // bin = round(((value - min) / span) * 255)
-                    // Split: bin <= threshold_bin  ↔  value < min + ((threshold_bin + 0.5) / 255) * span
+                    // bin = round(((value - min) / span) * max_data_bin)
+                    // Split: bin <= threshold_bin  ↔  value < min + ((threshold_bin + 0.5) / max_data_bin) * span
                     let bin = node.threshold_bin;
-                    node.threshold_bin = min_val + ((bin + 0.5) / 255.0) * span;
+                    node.threshold_bin = min_val + ((bin + 0.5) / divisor) * span;
                 }
             }
         }
@@ -226,7 +234,8 @@ impl Predictor {
                 feature_count
             )));
         }
-        self.predict_row_with_feature_count(features, feature_count)
+        let raw = self.predict_row_with_feature_count(features, feature_count)?;
+        Ok(self.post_transform(raw))
     }
 
     fn predict_row_with_feature_count(
@@ -246,7 +255,9 @@ impl Predictor {
                     )));
                 }
                 let feature_value = features[node.feature_index];
-                let went_left = if use_float {
+                let went_left = if feature_value.is_nan() {
+                    node.default_left
+                } else if use_float {
                     feature_value < node.threshold_bin
                 } else {
                     feature_value <= node.threshold_bin
@@ -286,11 +297,17 @@ impl Predictor {
 
         if should_parallel_predict_batch(rows.len(), self.trees.len()) {
             rows.par_iter()
-                .map(|row| self.predict_row_with_feature_count(row, feature_count))
+                .map(|row| {
+                    let raw = self.predict_row_with_feature_count(row, feature_count)?;
+                    Ok(self.post_transform(raw))
+                })
                 .collect()
         } else {
             rows.iter()
-                .map(|row| self.predict_row_with_feature_count(row, feature_count))
+                .map(|row| {
+                    let raw = self.predict_row_with_feature_count(row, feature_count)?;
+                    Ok(self.post_transform(raw))
+                })
                 .collect()
         }
     }
@@ -327,14 +344,16 @@ impl Predictor {
                 .into_par_iter()
                 .map(|row_index| {
                     let row = &values[row_index * feature_count..(row_index + 1) * feature_count];
-                    self.predict_row_dense_unchecked(row, feature_count)
+                    let raw = self.predict_row_dense_unchecked(row, feature_count)?;
+                    Ok(self.post_transform(raw))
                 })
                 .collect()
         } else {
             (0..row_count)
                 .map(|row_index| {
                     let row = &values[row_index * feature_count..(row_index + 1) * feature_count];
-                    self.predict_row_dense_unchecked(row, feature_count)
+                    let raw = self.predict_row_dense_unchecked(row, feature_count)?;
+                    Ok(self.post_transform(raw))
                 })
                 .collect()
         }
@@ -358,7 +377,9 @@ impl Predictor {
                     )));
                 }
                 let feature_value = features[node.feature_index];
-                let went_left = if use_float {
+                let went_left = if feature_value.is_nan() {
+                    node.default_left
+                } else if use_float {
                     feature_value < node.threshold_bin
                 } else {
                     feature_value <= node.threshold_bin
@@ -433,7 +454,8 @@ impl Predictor {
                             bytes[bi + 3],
                         ]);
                     }
-                    *pred = self.predict_row_dense_unchecked(&row_buf, feature_count)?;
+                    let raw = self.predict_row_dense_unchecked(&row_buf, feature_count)?;
+                    *pred = self.post_transform(raw);
                 }
                 Ok::<(), PredictorError>(())
             })?;
@@ -447,6 +469,69 @@ impl Predictor {
 
     pub fn predict_batch_stub(&self, rows: &[Vec<f32>]) -> PredictorResult<Vec<f32>> {
         self.predict_batch(rows)
+    }
+
+    /// Apply objective-specific post-transform to a raw prediction (logit).
+    /// For `"squared_error"` this is identity; for `"binary_crossentropy"` this applies sigmoid.
+    #[inline]
+    fn post_transform(&self, raw: f32) -> f32 {
+        if self.metadata.objective == "binary_crossentropy" {
+            sigmoid(raw)
+        } else {
+            raw
+        }
+    }
+
+    /// Predict raw logits (before post-transform).
+    pub fn predict_row_raw(&self, features: &[f32]) -> PredictorResult<f32> {
+        let feature_count = self.metadata.feature_names.len();
+        if features.len() != feature_count {
+            return Err(PredictorError::InvalidInput(format!(
+                "feature length {} does not match model feature_count {}",
+                features.len(),
+                feature_count
+            )));
+        }
+        self.predict_row_with_feature_count(features, feature_count)
+    }
+
+    /// Predict raw logits in batch (before post-transform).
+    pub fn predict_batch_raw(&self, rows: &[Vec<f32>]) -> PredictorResult<Vec<f32>> {
+        if rows.is_empty() {
+            return Err(PredictorError::InvalidInput(
+                "rows cannot be empty".to_string(),
+            ));
+        }
+        let feature_count = self.metadata.feature_names.len();
+        for row in rows {
+            if row.len() != feature_count {
+                return Err(PredictorError::InvalidInput(format!(
+                    "feature length {} does not match model feature_count {}",
+                    row.len(),
+                    feature_count
+                )));
+            }
+        }
+        if should_parallel_predict_batch(rows.len(), self.trees.len()) {
+            rows.par_iter()
+                .map(|row| self.predict_row_with_feature_count(row, feature_count))
+                .collect()
+        } else {
+            rows.iter()
+                .map(|row| self.predict_row_with_feature_count(row, feature_count))
+                .collect()
+        }
+    }
+}
+
+/// Numerically stable sigmoid: avoids overflow for large negative inputs.
+#[inline]
+fn sigmoid(x: f32) -> f32 {
+    if x >= 0.0 {
+        1.0 / (1.0 + (-x).exp())
+    } else {
+        let ex = x.exp();
+        ex / (1.0 + ex)
     }
 }
 
@@ -574,6 +659,8 @@ fn decode_trained_model_payload(
         let node_id = read_u32_le(bytes, base)?;
         let feature_index = read_u32_le(bytes, base + 4)?;
         let threshold_bin = read_u16_le(bytes, base + 8)?;
+        let stump_flags = read_u16_le(bytes, base + 10)?;
+        let default_left = (stump_flags & 1) != 0;
         let _gain = read_f32_le(bytes, base + 12)?;
         let left_leaf_value = read_f32_le(bytes, base + 16)?;
         let right_leaf_value = read_f32_le(bytes, base + 20)?;
@@ -581,6 +668,7 @@ fn decode_trained_model_payload(
             node_id,
             feature_index,
             threshold_bin,
+            default_left,
             left_leaf_value,
             right_leaf_value,
         });
@@ -604,6 +692,7 @@ fn build_predictor_trees(stumps: &[PredictorStump]) -> PredictorResult<Vec<Predi
             PredictorTreeNode {
                 feature_index: stump.feature_index as usize,
                 threshold_bin: stump.threshold_bin as f32,
+                default_left: stump.default_left,
                 left_leaf_value: stump.left_leaf_value,
                 right_leaf_value: stump.right_leaf_value,
             },
@@ -679,7 +768,8 @@ mod tests {
     use alloygbm_backend_cpu::CpuBackend;
     use alloygbm_core::{
         BinnedMatrix, CATEGORICAL_STATE_FORMAT_V1, CategoricalStatePayloadV1, DatasetMatrix,
-        Device, ModelSectionKind, TrainParams, TrainingDataset, serialize_model_artifact_v1,
+        Device, ModelSectionKind, TrainParams, TrainingDataset, TreeGrowth,
+        serialize_model_artifact_v1,
     };
     use alloygbm_engine::{SquaredErrorObjective, Trainer};
 
@@ -688,6 +778,7 @@ mod tests {
             format_version: 1,
             feature_names: vec!["f0".to_string()],
             trained_device: Device::Cpu,
+            objective: "squared_error".to_string(),
         };
         Predictor::new(metadata)
     }
@@ -758,6 +849,11 @@ mod tests {
             lambda_l1: 0.0,
             lambda_l2: 0.0,
             min_child_hessian: 0.0,
+            min_split_gain: 0.0,
+            monotone_constraints: Vec::new(),
+            feature_weights: Vec::new(),
+            max_leaves: None,
+            tree_growth: TreeGrowth::Level,
         }
     }
 

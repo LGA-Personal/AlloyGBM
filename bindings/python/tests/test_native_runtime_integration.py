@@ -590,5 +590,158 @@ class NativeRuntimeIntegrationTests(unittest.TestCase):
         self.assertGreater(shallow_vs_deep_avg_delta, 0.02)
 
 
+    # ── Persistence / serialization tests ─────────────────────────────────
+
+    def test_pickle_roundtrip_preserves_predictions(self) -> None:
+        import pickle
+
+        model = self.alloygbm.GBMRegressor(
+            learning_rate=0.3,
+            max_depth=2,
+            n_estimators=6,
+            seed=7,
+            deterministic=True,
+        ).fit(FIT_ROWS, FIT_TARGETS)
+
+        test_X = [[1.0, 0.0], [6.0, 0.0], [3.0, 0.0]]
+        original_preds = model.predict(test_X)
+
+        restored = pickle.loads(pickle.dumps(model))
+        restored_preds = restored.predict(test_X)
+
+        for orig, rest in zip(original_preds, restored_preds):
+            self.assertAlmostEqual(orig, rest, places=6)
+
+    def test_pickle_roundtrip_preserves_params(self) -> None:
+        import pickle
+
+        model = self.alloygbm.GBMRegressor(
+            learning_rate=0.25,
+            max_depth=3,
+            n_estimators=4,
+            lambda_l2=0.5,
+            seed=42,
+            deterministic=True,
+        ).fit(FIT_ROWS, FIT_TARGETS)
+
+        restored = pickle.loads(pickle.dumps(model))
+        self.assertEqual(model.get_params(), restored.get_params())
+        self.assertEqual(model.best_iteration_, restored.best_iteration_)
+        self.assertEqual(model.n_estimators_, restored.n_estimators_)
+
+    def test_save_load_model_roundtrip(self) -> None:
+        model = self.alloygbm.GBMRegressor(
+            learning_rate=0.3,
+            max_depth=2,
+            n_estimators=6,
+            seed=7,
+            deterministic=True,
+        ).fit(FIT_ROWS, FIT_TARGETS)
+
+        test_X = [[1.0, 0.0], [6.0, 0.0], [3.0, 0.0]]
+        original_preds = model.predict(test_X)
+
+        path = os.path.join(self._tempdir.name, "test_model.agbm")
+        model.save_model(path)
+
+        restored = self.alloygbm.GBMRegressor.load_model(path)
+        restored_preds = restored.predict(test_X)
+
+        for orig, rest in zip(original_preds, restored_preds):
+            self.assertAlmostEqual(orig, rest, places=6)
+        self.assertEqual(model.get_params(), restored.get_params())
+
+    def test_save_model_file_has_magic_header(self) -> None:
+        model = self.alloygbm.GBMRegressor(
+            learning_rate=0.3,
+            max_depth=2,
+            n_estimators=3,
+            seed=7,
+            deterministic=True,
+        ).fit(FIT_ROWS, FIT_TARGETS)
+
+        path = os.path.join(self._tempdir.name, "header_test.agbm")
+        model.save_model(path)
+
+        with open(path, "rb") as f:
+            magic = f.read(4)
+        self.assertEqual(magic, b"AGBP")
+
+    def test_load_model_rejects_invalid_magic(self) -> None:
+        path = os.path.join(self._tempdir.name, "bad_magic.agbm")
+        with open(path, "wb") as f:
+            f.write(b"NOPE" + b"\x00" * 100)
+
+        with self.assertRaises(ValueError) as ctx:
+            self.alloygbm.GBMRegressor.load_model(path)
+        self.assertIn("AGBP", str(ctx.exception))
+
+    def test_save_model_raises_on_unfitted(self) -> None:
+        model = self.alloygbm.GBMRegressor()
+        with self.assertRaises(ValueError):
+            model.save_model(os.path.join(self._tempdir.name, "unfitted.agbm"))
+
+    def test_save_artifact_and_predict_from_artifact(self) -> None:
+        model = self.alloygbm.GBMRegressor(
+            learning_rate=0.3,
+            max_depth=2,
+            n_estimators=6,
+            seed=7,
+            deterministic=True,
+        ).fit(FIT_ROWS, FIT_TARGETS)
+
+        test_X = [[1.0, 0.0], [6.0, 0.0], [3.0, 0.0]]
+        original_preds = model.predict(test_X)
+
+        path = os.path.join(self._tempdir.name, "test_artifact.bin")
+        model.save_artifact(path)
+
+        with open(path, "rb") as f:
+            artifact_bytes = f.read()
+
+        artifact_preds = self.alloygbm.GBMRegressor.predict_from_artifact(
+            artifact_bytes, test_X
+        )
+        for orig, art in zip(original_preds, artifact_preds):
+            self.assertAlmostEqual(orig, art, places=6)
+
+    def test_artifact_bytes_property(self) -> None:
+        model = self.alloygbm.GBMRegressor(
+            learning_rate=0.3,
+            max_depth=2,
+            n_estimators=3,
+            seed=7,
+            deterministic=True,
+        ).fit(FIT_ROWS, FIT_TARGETS)
+
+        ab = model.artifact_bytes
+        self.assertIsInstance(ab, bytes)
+        self.assertTrue(ab.startswith(b"AGBM"))
+
+    def test_artifact_bytes_raises_on_unfitted(self) -> None:
+        model = self.alloygbm.GBMRegressor()
+        with self.assertRaises(ValueError):
+            _ = model.artifact_bytes
+
+    def test_save_load_model_preserves_evals_result(self) -> None:
+        model = self.alloygbm.GBMRegressor(
+            learning_rate=0.3,
+            max_depth=2,
+            n_estimators=6,
+            seed=7,
+            deterministic=True,
+        ).fit(FIT_ROWS, FIT_TARGETS)
+
+        path = os.path.join(self._tempdir.name, "evals_test.agbm")
+        model.save_model(path)
+        restored = self.alloygbm.GBMRegressor.load_model(path)
+
+        self.assertIsNotNone(model.evals_result_)
+        self.assertEqual(
+            len(model.evals_result_["train"]["rmse"]),
+            len(restored.evals_result_["train"]["rmse"]),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

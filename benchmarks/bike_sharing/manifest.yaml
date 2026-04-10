@@ -1,6 +1,7 @@
 name: bike_sharing
 version: 1
 kind: uci_download
+task_type: regression
 description: Real-world hourly bike demand regression benchmark from UCI Bike Sharing.
 source:
   dataset: bike-sharing

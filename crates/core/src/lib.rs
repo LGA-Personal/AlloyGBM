@@ -6,8 +6,19 @@ pub const MODEL_BINARY_MAGIC: [u8; 4] = *b"AGBM";
 pub const MODEL_BINARY_HEADER_LEN: usize = 16;
 pub const MODEL_SECTION_DESCRIPTOR_LEN: usize = 20;
 pub const CATEGORICAL_STATE_FORMAT_V1: u32 = 1;
+pub const MISSING_BIN_U8: u8 = 255;
+pub const MISSING_BIN_U16: u16 = 65535;
 const CATEGORICAL_STATE_HEADER_LEN: usize = 16;
 const CATEGORICAL_STATE_FLAG_LEAKAGE_SAFE_TARGET_ENCODING: u32 = 1;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TreeGrowth {
+    /// Level-wise (breadth-first): split all nodes at depth d before depth d+1.
+    #[default]
+    Level,
+    /// Leaf-wise (best-first): always split the leaf with the highest gain.
+    Leaf,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Device {
@@ -45,6 +56,17 @@ pub struct TrainParams {
     pub lambda_l1: f32,
     pub lambda_l2: f32,
     pub min_child_hessian: f32,
+    pub min_split_gain: f32,
+    /// Per-feature monotone constraints: +1 non-decreasing, -1 non-increasing, 0 unconstrained.
+    /// Empty means no constraints.
+    pub monotone_constraints: Vec<i8>,
+    /// Per-feature importance weights for split selection (gain is multiplied by weight).
+    /// Empty means uniform weighting.
+    pub feature_weights: Vec<f32>,
+    /// Maximum number of leaves per tree. None means depth-limited only.
+    pub max_leaves: Option<usize>,
+    /// Tree growth strategy: level-wise (default) or leaf-wise (best-first).
+    pub tree_growth: TreeGrowth,
 }
 
 impl Default for TrainParams {
@@ -62,6 +84,11 @@ impl Default for TrainParams {
             lambda_l1: 0.0,
             lambda_l2: 0.0,
             min_child_hessian: 0.0,
+            min_split_gain: 0.0,
+            monotone_constraints: Vec::new(),
+            feature_weights: Vec::new(),
+            max_leaves: None,
+            tree_growth: TreeGrowth::Level,
         }
     }
 }
@@ -230,44 +257,187 @@ impl TrainingDataset {
     }
 }
 
+/// Adaptive bin storage: u8 for <=255 max bins, u16 for >255.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BinStorage {
+    U8(Vec<u8>),
+    U16(Vec<u16>),
+}
+
+impl BinStorage {
+    /// Get the bin value at the given index as a u16.
+    #[inline]
+    pub fn get(&self, index: usize) -> u16 {
+        match self {
+            Self::U8(bins) => u16::from(bins[index]),
+            Self::U16(bins) => bins[index],
+        }
+    }
+
+    /// Total number of elements.
+    pub fn len(&self) -> usize {
+        match self {
+            Self::U8(bins) => bins.len(),
+            Self::U16(bins) => bins.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The sentinel value used for missing/NaN bins.
+    pub fn missing_bin(&self) -> u16 {
+        match self {
+            Self::U8(_) => u16::from(MISSING_BIN_U8),
+            Self::U16(_) => MISSING_BIN_U16,
+        }
+    }
+
+    /// Whether this storage uses u8 bins.
+    pub fn is_u8(&self) -> bool {
+        matches!(self, Self::U8(_))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BinnedMatrix {
     pub row_count: usize,
     pub feature_count: usize,
     pub max_bin: u16,
+    /// The bin index used for NaN/missing values.
+    /// For u8 mode: always 255 (MISSING_BIN_U8).
+    /// For u16 mode: max_data_bin + 1 (dynamic, avoids wasteful 65535 sentinel).
+    pub nan_bin_index: u16,
     /// Row-major: bins[row * feature_count + feature]
     pub bins: Vec<u8>,
     /// Column-major: bins_col[feature * row_count + row] — for cache-friendly histogram building.
     pub bins_col: Vec<u8>,
+    /// Row-major adaptive storage (mirrors `bins` but supports u16).
+    pub bins_adaptive: BinStorage,
+    /// Column-major adaptive storage (mirrors `bins_col` but supports u16).
+    pub bins_col_adaptive: BinStorage,
 }
 
 impl BinnedMatrix {
+    /// Create a BinnedMatrix from u8 bins (max_bin <= 254).
     pub fn new(
         row_count: usize,
         feature_count: usize,
         max_bin: u16,
         bins: Vec<u8>,
     ) -> CoreResult<Self> {
-        let bins_col = transpose_bins_to_column_major(&bins, row_count, feature_count);
+        let bins_col = transpose_bins_to_column_major_u8(&bins, row_count, feature_count);
+        let bins_adaptive = BinStorage::U8(bins.clone());
+        let bins_col_adaptive = BinStorage::U8(bins_col.clone());
         let matrix = Self {
             row_count,
             feature_count,
             max_bin,
+            nan_bin_index: MISSING_BIN_U8 as u16,
             bins,
             bins_col,
+            bins_adaptive,
+            bins_col_adaptive,
         };
         validate_binned_matrix(&matrix)?;
         Ok(matrix)
     }
+
+    /// Create a BinnedMatrix from u16 bins (max_bin > 254).
+    /// `nan_bin_index` is the bin value used for NaN/missing data (typically max_data_bin + 1).
+    pub fn new_u16(
+        row_count: usize,
+        feature_count: usize,
+        max_bin: u16,
+        nan_bin_index: u16,
+        bins_u16: Vec<u16>,
+    ) -> CoreResult<Self> {
+        // For backward compatibility, also create u8 vecs (clamped) for legacy code paths.
+        let bins_u8: Vec<u8> = bins_u16
+            .iter()
+            .map(|&b| if b >= 255 { 255 } else { b as u8 })
+            .collect();
+        let bins_col_u8 = transpose_bins_to_column_major_u8(&bins_u8, row_count, feature_count);
+        let bins_col_u16 = transpose_bins_to_column_major_u16(&bins_u16, row_count, feature_count);
+        let bins_adaptive = BinStorage::U16(bins_u16);
+        let bins_col_adaptive = BinStorage::U16(bins_col_u16);
+        let matrix = Self {
+            row_count,
+            feature_count,
+            max_bin,
+            nan_bin_index,
+            bins: bins_u8,
+            bins_col: bins_col_u8,
+            bins_adaptive,
+            bins_col_adaptive,
+        };
+        validate_binned_matrix(&matrix)?;
+        Ok(matrix)
+    }
+
+    /// Whether this matrix uses u16 bin storage.
+    pub fn is_wide_bins(&self) -> bool {
+        matches!(self.bins_adaptive, BinStorage::U16(_))
+    }
+
+    /// Read a bin value from column-major adaptive storage.
+    /// `index` is the flat offset (feature * row_count + row).
+    #[inline]
+    pub fn col_bin(&self, index: usize) -> u16 {
+        self.bins_col_adaptive.get(index)
+    }
+
+    /// Read a bin value from row-major adaptive storage.
+    /// `index` is the flat offset (row * feature_count + feature).
+    #[inline]
+    pub fn row_bin(&self, index: usize) -> u16 {
+        self.bins_adaptive.get(index)
+    }
+
+    /// The sentinel value used for missing/NaN bins in this matrix.
+    #[inline]
+    pub fn missing_bin(&self) -> u16 {
+        self.nan_bin_index
+    }
+
+    /// Whether column-major adaptive storage is available (non-empty).
+    #[inline]
+    pub fn has_col_major(&self) -> bool {
+        !self.bins_col_adaptive.is_empty()
+    }
 }
 
 /// Transpose row-major bins to column-major for cache-friendly per-feature access.
-fn transpose_bins_to_column_major(bins: &[u8], row_count: usize, feature_count: usize) -> Vec<u8> {
+fn transpose_bins_to_column_major_u8(
+    bins: &[u8],
+    row_count: usize,
+    feature_count: usize,
+) -> Vec<u8> {
     let total = row_count * feature_count;
     if total == 0 || bins.len() != total {
         return Vec::new();
     }
     let mut col_major = vec![0u8; total];
+    for row in 0..row_count {
+        let row_base = row * feature_count;
+        for feature in 0..feature_count {
+            col_major[feature * row_count + row] = bins[row_base + feature];
+        }
+    }
+    col_major
+}
+
+fn transpose_bins_to_column_major_u16(
+    bins: &[u16],
+    row_count: usize,
+    feature_count: usize,
+) -> Vec<u16> {
+    let total = row_count * feature_count;
+    if total == 0 || bins.len() != total {
+        return Vec::new();
+    }
+    let mut col_major = vec![0u16; total];
     for row in 0..row_count {
         let row_base = row * feature_count;
         for feature in 0..feature_count {
@@ -377,12 +547,53 @@ pub struct HistogramBundle {
     pub feature_histograms: Vec<FeatureHistogram>,
 }
 
+impl HistogramBundle {
+    /// Zero all bin values in-place without deallocating.
+    ///
+    /// This resets gradient sums, hessian sums, and counts to zero for every
+    /// bin in every feature histogram, allowing the bundle to be reused for a
+    /// new node without re-allocating.
+    pub fn reset(&mut self, node_id: u32) {
+        self.node_id = node_id;
+        for fh in &mut self.feature_histograms {
+            for bin in &mut fh.bins {
+                bin.grad_sum = 0.0;
+                bin.hess_sum = 0.0;
+                bin.count = 0;
+            }
+        }
+    }
+
+    /// Create a pre-allocated, zeroed histogram bundle for the given features and bin count.
+    pub fn new_zeroed(feature_indices: &[u32], bin_count: usize) -> Self {
+        let feature_histograms = feature_indices
+            .iter()
+            .map(|&fi| FeatureHistogram {
+                feature_index: fi,
+                bins: vec![
+                    HistogramBin {
+                        grad_sum: 0.0,
+                        hess_sum: 0.0,
+                        count: 0,
+                    };
+                    bin_count
+                ],
+            })
+            .collect();
+        Self {
+            node_id: 0,
+            feature_histograms,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SplitCandidate {
     pub node_id: u32,
     pub feature_index: u32,
     pub threshold_bin: u16,
     pub gain: f32,
+    pub default_left: bool,
     pub left_stats: NodeStats,
     pub right_stats: NodeStats,
 }
@@ -398,6 +609,9 @@ pub struct ModelMetadata {
     pub format_version: u32,
     pub feature_names: Vec<String>,
     pub trained_device: Device,
+    /// Objective used to train this model (e.g. "squared_error", "binary_crossentropy").
+    /// Defaults to "squared_error" for backward compatibility with older artifacts.
+    pub objective: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -858,6 +1072,36 @@ pub fn validate_train_params(params: &TrainParams) -> CoreResult<()> {
         ));
     }
 
+    for &c in &params.monotone_constraints {
+        if c != -1 && c != 0 && c != 1 {
+            return Err(CoreError::InvalidConfig(
+                "monotone_constraints values must be -1, 0, or +1".to_string(),
+            ));
+        }
+    }
+
+    for &w in &params.feature_weights {
+        if !w.is_finite() || w < 0.0 {
+            return Err(CoreError::InvalidConfig(
+                "feature_weights values must be finite and >= 0".to_string(),
+            ));
+        }
+    }
+
+    if let Some(max_leaves) = params.max_leaves
+        && max_leaves < 2
+    {
+        return Err(CoreError::InvalidConfig(
+            "max_leaves must be >= 2 when set (a tree needs at least 2 leaves)".to_string(),
+        ));
+    }
+
+    if params.tree_growth == TreeGrowth::Leaf && params.max_leaves.is_none() {
+        return Err(CoreError::InvalidConfig(
+            "tree_growth='leaf' requires max_leaves to be set".to_string(),
+        ));
+    }
+
     Ok(())
 }
 
@@ -1023,19 +1267,35 @@ pub fn validate_binned_matrix(matrix: &BinnedMatrix) -> CoreResult<()> {
             "max_bin must be greater than 0".to_string(),
         ));
     }
-    if matrix.bins.len() != matrix.row_count * matrix.feature_count {
+    let expected_len = matrix.row_count * matrix.feature_count;
+    if matrix.bins_adaptive.len() != expected_len {
         return Err(CoreError::Validation(format!(
             "bins length {} does not match row_count * feature_count {}",
-            matrix.bins.len(),
-            matrix.row_count * matrix.feature_count
+            matrix.bins_adaptive.len(),
+            expected_len
         )));
     }
-    for &bin in &matrix.bins {
-        if u16::from(bin) > matrix.max_bin {
-            return Err(CoreError::Validation(format!(
-                "bin value {bin} exceeds max_bin {}",
-                matrix.max_bin
-            )));
+    // Validate that no bin exceeds max_bin using adaptive storage.
+    match &matrix.bins_adaptive {
+        BinStorage::U8(bins) => {
+            for &bin in bins {
+                if u16::from(bin) > matrix.max_bin {
+                    return Err(CoreError::Validation(format!(
+                        "bin value {bin} exceeds max_bin {}",
+                        matrix.max_bin
+                    )));
+                }
+            }
+        }
+        BinStorage::U16(bins) => {
+            for &bin in bins {
+                if bin > matrix.max_bin {
+                    return Err(CoreError::Validation(format!(
+                        "bin value {bin} exceeds max_bin {}",
+                        matrix.max_bin
+                    )));
+                }
+            }
         }
     }
     Ok(())
@@ -1115,10 +1375,11 @@ pub fn serialize_metadata_json(metadata: &ModelMetadata) -> String {
         .join(",");
 
     format!(
-        "{{\"format_version\":{},\"feature_names\":[{}],\"trained_device\":\"{}\"}}",
+        "{{\"format_version\":{},\"feature_names\":[{}],\"trained_device\":\"{}\",\"objective\":\"{}\"}}",
         metadata.format_version,
         feature_names,
-        metadata.trained_device.as_metadata_label()
+        metadata.trained_device.as_metadata_label(),
+        escape_json_string(&metadata.objective)
     )
 }
 
@@ -1138,6 +1399,16 @@ pub fn deserialize_metadata_json(input: &str) -> CoreResult<ModelMetadata> {
     let (trained_device_raw, next_index) = parse_quoted_string(&compact, index)?;
     index = next_index;
 
+    // Optional objective field — backward compatible with older artifacts.
+    let objective = if index < compact.len() && compact.as_bytes()[index] == b',' {
+        let next = consume_literal(&compact, index, ",\"objective\":")?;
+        let (objective_raw, next_index) = parse_quoted_string(&compact, next)?;
+        index = next_index;
+        objective_raw
+    } else {
+        "squared_error".to_string()
+    };
+
     index = consume_literal(&compact, index, "}")?;
     if index != compact.len() {
         return Err(CoreError::Serialization(
@@ -1149,6 +1420,7 @@ pub fn deserialize_metadata_json(input: &str) -> CoreResult<ModelMetadata> {
         format_version,
         feature_names,
         trained_device: Device::parse_metadata_label(&trained_device_raw)?,
+        objective,
     })
 }
 
@@ -1491,6 +1763,7 @@ mod tests {
             format_version: MODEL_FORMAT_V1,
             feature_names: vec!["feature_0".to_string(), "ticker\"id".to_string()],
             trained_device: Device::Cpu,
+            objective: "squared_error".to_string(),
         }
     }
 
@@ -1617,8 +1890,11 @@ mod tests {
             row_count: 1,
             feature_count: 2,
             max_bin: 7,
+            nan_bin_index: MISSING_BIN_U8 as u16,
             bins: vec![3, 8],
             bins_col: vec![3, 8],
+            bins_adaptive: BinStorage::U8(vec![3, 8]),
+            bins_col_adaptive: BinStorage::U8(vec![3, 8]),
         };
         assert!(matches!(
             validate_binned_matrix(&matrix),
@@ -1730,6 +2006,7 @@ mod tests {
                 format_version: MODEL_FORMAT_V1,
                 feature_names: vec!["f0".to_string()],
                 trained_device: Device::Cpu,
+                objective: "squared_error".to_string(),
             },
         };
         assert!(matches!(
@@ -1751,6 +2028,7 @@ mod tests {
                 format_version: MODEL_FORMAT_V1,
                 feature_names: vec!["f0".to_string()],
                 trained_device: Device::Cpu,
+                objective: "squared_error".to_string(),
             },
         };
 
@@ -1780,6 +2058,7 @@ mod tests {
                 format_version: MODEL_FORMAT_V1,
                 feature_names: vec!["f0".to_string()],
                 trained_device: Device::Cpu,
+                objective: "squared_error".to_string(),
             },
         };
 

@@ -1,0 +1,12 @@
+name: breast_cancer
+version: 1
+kind: sklearn_fetch
+task_type: classification
+description: Binary classification benchmark from sklearn's Breast Cancer Wisconsin dataset.
+source:
+  dataset: breast-cancer
+  url: https://scikit-learn.org/stable/datasets/toy_dataset.html
+prepared:
+  filename: prepared.csv
+  target: target
+  note: Binary classification (malignant=0, benign=1) with 30 numeric features, 569 samples.

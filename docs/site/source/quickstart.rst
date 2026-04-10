@@ -1,8 +1,8 @@
 Quickstart
 ==========
 
-Minimal regression example
---------------------------
+Regression
+----------
 
 .. code-block:: python
 
@@ -36,6 +36,55 @@ Minimal regression example
    print(predictions)
    print("rmse:", rmse(y_test, predictions))
 
+Binary classification
+---------------------
+
+.. code-block:: python
+
+   from alloygbm import GBMClassifier, accuracy, log_loss
+
+   model = GBMClassifier(
+       learning_rate=0.05,
+       max_depth=6,
+       n_estimators=500,
+       deterministic=True,
+       seed=7,
+   )
+   model.fit(X_train, y_train)  # y must be {0, 1}
+
+   labels = model.predict(X_test)            # [0, 1, 1, 0, ...]
+   probas = model.predict_proba(X_test)      # shape (n_samples, 2)
+
+   print("accuracy:", accuracy(y_test, labels))
+   print("log_loss:", log_loss(y_test, probas[:, 1]))
+
+``GBMClassifier`` uses binary cross-entropy loss internally and applies a
+sigmoid transform to produce probabilities. It inherits sklearn's
+``ClassifierMixin`` when sklearn is available.
+
+Learning-to-rank
+----------------
+
+.. code-block:: python
+
+   from alloygbm import GBMRanker, ndcg
+
+   model = GBMRanker(
+       ranking_objective="rank:ndcg",
+       learning_rate=0.05,
+       max_depth=6,
+       n_estimators=300,
+       deterministic=True,
+       seed=7,
+   )
+   model.fit(X_train, y_train, group=query_ids_train)
+
+   scores = model.predict(X_test)
+   print("NDCG@10:", ndcg(y_test, scores, group=query_ids_test, k=10))
+
+Supported ranking objectives: ``rank:pairwise``, ``rank:ndcg``,
+``rank:xendcg``, ``queryrmse``, ``yetirank``.
+
 Validation and early stopping
 -----------------------------
 
@@ -67,7 +116,26 @@ Validation and early stopping
    print("evals_result_ keys:", model.evals_result_.keys())
    print("fit_timing_:", model.fit_timing_)
 
-Use ``eval_set`` whenever you enable ``early_stopping_rounds``.
+Use ``eval_set`` whenever you enable ``early_stopping_rounds``. Early stopping
+monitors the objective-appropriate metric (RMSE for regression, log-loss for
+classification, NDCG for ranking).
+
+Model persistence
+-----------------
+
+.. code-block:: python
+
+   import pickle
+
+   # Pickle round-trip
+   with open("model.pkl", "wb") as f:
+       pickle.dump(model, f)
+   with open("model.pkl", "rb") as f:
+       model = pickle.load(f)
+
+   # Native save/load
+   model.save_model("model.agbm")
+   loaded = GBMRegressor.load_model("model.agbm")
 
 What happens during ``fit(...)``
 --------------------------------
@@ -77,29 +145,25 @@ At a high level, AlloyGBM:
 1. validates and normalizes the Python inputs
 2. chooses a dense native fast path when possible
 3. quantizes continuous features inside the native Rust training path
-4. trains a native Rust artifact
+4. trains a native Rust artifact using the appropriate objective
 5. stores the serialized artifact and a native predictor handle in the estimator
 
 After fitting, the estimator supports:
 
 - ``predict(...)``
+- ``predict_proba(...)`` (classifier only)
 - ``shap_values(...)``
 - ``feature_importances(...)``
 - artifact-backed prediction via ``predict_from_artifact(...)``
 - fitted training summaries via ``best_iteration_``, ``best_score_``,
   ``n_estimators_``, ``evals_result_``, and ``fit_timing_``
 
-Continuous features
--------------------
+NaN / missing values
+--------------------
 
-AlloyGBM currently supports three continuous binning strategies:
-
-- ``linear``
-- ``rank``
-- ``quantile``
-
-``linear`` is the default. ``quantile`` is often a better choice when feature
-distributions are strongly skewed.
+AlloyGBM handles NaN values natively. You do not need to impute missing values
+before training or prediction. The engine learns the optimal split direction for
+missing values at each node.
 
 Dense array-like inputs
 -----------------------

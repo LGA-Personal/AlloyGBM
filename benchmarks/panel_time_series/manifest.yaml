@@ -1,6 +1,7 @@
 name: panel_time_series
 version: 1
 kind: uci_download
+task_type: regression
 description: Time-series benchmark derived from UCI Air Quality.
 source:
   dataset: air-quality

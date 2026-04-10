@@ -1,6 +1,7 @@
 name: california_housing
 version: 1
 kind: sklearn_fetch
+task_type: regression
 description: Real-world regression benchmark from the California Housing dataset.
 source:
   dataset: california-housing

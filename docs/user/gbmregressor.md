@@ -1,6 +1,6 @@
 # GBMRegressor Parameters
 
-`GBMRegressor` is the main Python estimator in AlloyGBM.
+`GBMRegressor` is the main Python estimator for regression in AlloyGBM.
 
 ## Core Training Parameters
 
@@ -18,7 +18,7 @@
 ## Stopping And Training Policy
 
 - `early_stopping_rounds: int | None = None`
-  - Stops training early when validation RMSE progress stalls.
+  - Stops training early when validation metric progress stalls.
 - `min_validation_improvement: float = 0.0`
   - Minimum validation improvement treated as meaningful.
 - `training_policy: str = "auto"`
@@ -43,12 +43,30 @@ call `fit(..., eval_set=(X_valid, y_valid))`.
   - L2 regularization applied during split scoring.
 - `min_child_hessian: float = 0.0`
   - Minimum child Hessian required for a split candidate.
+- `min_split_gain: float = 0.0`
+  - Minimum gain required for a split to be made. The auto training policy may
+    set this adaptively; passing it explicitly overrides that.
 
-These controls are part of the stable estimator surface. They are validated in
-Python and plumbed through to the native trainer directly.
+## Tree Growth Strategy
 
-Current non-goal: AlloyGBM does not expose a `num_leaves` parameter yet. The
-trainer remains depth-oriented rather than leaf-budget-oriented.
+- `tree_growth: str = "level"`
+  - `level` grows trees level-by-level (depth-first). This is the default.
+  - `leaf` grows trees leaf-by-leaf (best-first), selecting the leaf with the
+    highest split gain at each step. This is similar to LightGBM's growth
+    strategy and is often more efficient for the same leaf budget.
+- `max_leaves: int | None = None`
+  - Maximum number of leaves when using `tree_growth="leaf"`. If not set,
+    defaults to `2^max_depth`.
+
+## Constraints
+
+- `monotone_constraints: list[int] | dict[int, int] | None = None`
+  - Constrains features to be monotonically increasing (+1), decreasing (-1),
+    or unconstrained (0). Pass a list with one entry per feature, or a dict
+    mapping feature indices to constraints.
+- `feature_weights: list[float] | dict[int, float] | None = None`
+  - Per-feature importance weights that influence split selection. Higher
+    weights make a feature more likely to be chosen as a split candidate.
 
 ## Reproducibility
 
@@ -62,7 +80,9 @@ trainer remains depth-oriented rather than leaf-budget-oriented.
 - `continuous_binning_strategy: str = "linear"`
   - One of `linear`, `rank`, or `quantile`.
 - `continuous_binning_max_bins: int = 256`
-  - Upper bound on bins used for continuous quantization.
+  - Upper bound on bins used for continuous quantization. Supports up to 65,535
+    bins. Higher bin counts may improve accuracy on high-cardinality features
+    at the cost of additional memory.
 
 Use `quantile` when you want more robust handling of skewed continuous feature
 distributions. Use `linear` when you want the simplest and usually fastest
@@ -71,7 +91,10 @@ default.
 ## Categorical Support
 
 - `categorical_feature_index: int | None = None`
-  - Optional single categorical feature column.
+  - Single categorical feature column (legacy interface, still supported).
+- `categorical_feature_indices: list[int] | None = None`
+  - Multiple categorical feature columns. Each listed column is treated as
+    categorical during training.
 - `categorical_smoothing: float = 20.0`
   - Smoothing strength for categorical target encoding.
 - `categorical_min_samples_leaf: int = 1`
@@ -79,8 +102,14 @@ default.
 - `categorical_time_aware: bool = False`
   - Enables time-aware categorical behavior when `time_index` is provided.
 
-Current limitation: AlloyGBM supports only one categorical feature column at a
-time.
+When both `categorical_feature_index` and `categorical_feature_indices` are
+provided, they are merged.
+
+## Warm-Starting
+
+- `warm_start: bool = False`
+  - When `True`, calling `fit()` continues training from the previously fitted
+    model instead of starting from scratch. This enables incremental training.
 
 ## Diagnostics
 
@@ -88,16 +117,17 @@ time.
   - Stores optional node-level training statistics in the model artifact for
     later analysis.
 
-This is useful for future diagnostics and introspection, but not required for
-normal prediction.
-
 ## Main Methods
 
-- `fit(X, y, *, eval_set=None, eval_time_index=None, categorical_feature_values=None, time_index=None)`
+- `fit(X, y, *, sample_weight=None, eval_set=None, eval_sample_weight=None, group=None, eval_group=None, eval_time_index=None, categorical_feature_values=None, time_index=None)`
 - `predict(X)`
 - `shap_values(X, *, include_expected_value=False)`
 - `feature_importances(X, *, method="shap")`
 - `predict_from_artifact(artifact_bytes, X)`
+- `save_model(path)`
+- `load_model(path)` (classmethod)
+- `artifact_bytes` -- property returning the raw artifact bytes
+- `score(X, y)` -- returns R-squared (sklearn `RegressorMixin` convention)
 
 Important `fit(...)` rules:
 
@@ -105,6 +135,7 @@ Important `fit(...)` rules:
 - If `eval_time_index` is passed, `eval_set` is required.
 - If `categorical_time_aware=True`, training requires `time_index`, and
   validation also requires `eval_time_index` when `eval_set` is used.
+- `sample_weight` applies per-sample weights to the training loss.
 
 ## Post-Fit Attributes
 
@@ -113,7 +144,7 @@ After `fit(...)`, `GBMRegressor` may expose:
 - `best_iteration_`
   - Best 0-based validation round, or `None` if no validation run happened.
 - `best_score_`
-  - Best validation RMSE, or `None` if no validation run happened.
+  - Best validation metric, or `None` if no validation run happened.
 - `n_estimators_`
   - Number of boosting rounds actually kept in the fitted model.
 - `evals_result_`
@@ -124,5 +155,8 @@ After `fit(...)`, `GBMRegressor` may expose:
     - `native_bridge_prepare_seconds`
     - `native_train_seconds`
     - `total_fit_seconds`
+- `feature_names_`
+  - Feature names captured from the training data (when available), or
+    auto-generated as `f0`, `f1`, etc.
 
 See [Quickstart](quickstart.md) for an end-to-end example.

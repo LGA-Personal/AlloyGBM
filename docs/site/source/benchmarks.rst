@@ -14,66 +14,53 @@ compares AlloyGBM against:
 - LightGBM
 - CatBoost
 
-The expanded public regression set currently includes:
+The suite spans three task types with the following scenarios:
 
-- ``dense_numeric``
-- ``california_housing``
-- ``bike_sharing``
-- ``panel_time_series``
-- ``dow_jones_financial``
+**Regression:** ``dense_numeric``, ``california_housing``, ``bike_sharing``,
+``panel_time_series``, ``dow_jones_financial``
+
+**Classification:** ``breast_cancer``, ``synthetic_classification``
+
+**Ranking:** ``synthetic_ranking``
 
 Profiles are evaluated across shallow, mid, and deep configurations so the
 comparison is not tied to a single parameter shape.
 
-Current public benchmark statement
-----------------------------------
+Current results
+---------------
 
-The narrow, defensible release claim is:
+**Regression:**
 
-- strong on ``panel_time_series``
-- strong on ``dow_jones_financial``
-- weaker on ``california_housing`` and ``bike_sharing``
-
-Additional nuance:
-
+- AlloyGBM is strongest on ``panel_time_series``
+- AlloyGBM is strong on ``dow_jones_financial``
 - AlloyGBM is competitive but not leading on ``dense_numeric``
-- in the latest recorded benchmark refresh, AlloyGBM was also the fastest
-  trainer on most scenario/profile rows
-- recent optimizations (zero-copy numpy float thresholding) delivered an immense
-  **prediction speedup (up to 75-105x)** on large validation sets
-- the latest benchmark refresh did not show a broad AlloyGBM RMSE regression
-  after the training-contract and native dense-preprocessing changes
+- AlloyGBM trails on ``california_housing`` and ``bike_sharing``
+- AlloyGBM is typically the fastest trainer on most scenario/profile rows
 
-Representative results
-----------------------
+**Classification:**
+
+- AlloyGBM is competitive with established libraries on accuracy, log-loss, and
+  AUC across ``breast_cancer`` and ``synthetic_classification``
+
+**Ranking:**
+
+- AlloyGBM competes on ``synthetic_ranking`` using native LambdaMART,
+  evaluated via NDCG@5, NDCG@10, and full NDCG
+
+Metrics by task type
+--------------------
 
 .. list-table::
    :header-rows: 1
 
-   * - Scenario
-     - Best model
-     - Profile
-     - Interpretation
-   * - ``panel_time_series``
-     - AlloyGBM
-     - ``shallow_high_lr``
-     - Clear AlloyGBM strength
-   * - ``dow_jones_financial``
-     - AlloyGBM
-     - ``deep_low_lr``
-     - Strong finance-style showing
-   * - ``dense_numeric``
-     - CatBoost / XGBoost
-     - ``deep_low_lr``
-     - AlloyGBM remains competitive but behind
-   * - ``california_housing``
-     - XGBoost
-     - ``deep_low_lr``
-     - Visible general-tabular performance gap
-   * - ``bike_sharing``
-     - CatBoost
-     - ``mid_balanced``
-     - AlloyGBM improves with depth but does not lead
+   * - Task type
+     - Metrics
+   * - Regression
+     - RMSE, MAE, R2
+   * - Classification
+     - Accuracy, Log-Loss, AUC
+   * - Ranking
+     - NDCG@5, NDCG@10, NDCG
 
 How to run the suite
 --------------------
@@ -82,20 +69,34 @@ How to run the suite
 
    python3 benchmarks/run_model_comparison.py --force-prepare
 
-Focused public regression comparison:
+Focused regression comparison:
 
 .. code-block:: console
 
    python3 benchmarks/run_model_comparison.py \
      --force-prepare \
-     --scenarios california_housing bike_sharing dense_numeric panel_time_series dow_jones_financial \
-     --profile-grid default \
-     --profile-seeds 7
+     --scenarios california_housing bike_sharing dense_numeric panel_time_series dow_jones_financial
+
+Classification only:
+
+.. code-block:: console
+
+   python3 benchmarks/run_model_comparison.py \
+     --force-prepare \
+     --scenarios breast_cancer synthetic_classification
+
+Ranking only:
+
+.. code-block:: console
+
+   python3 benchmarks/run_model_comparison.py \
+     --force-prepare \
+     --scenarios synthetic_ranking
 
 Stage timing output
 -------------------
 
-Per-record benchmark output now includes:
+Per-record benchmark output includes:
 
 - ``input_adaptation_seconds``
 - ``native_bridge_prepare_seconds``
@@ -104,8 +105,7 @@ Per-record benchmark output now includes:
 - ``predict_seconds``
 
 Use those timing columns to tell apart Python-side adaptation cost and native
-training cost. Recent zero-copy numpy optimizations target the prediction
-bottleneck specifically, drastically reducing ``predict_seconds``.
+training cost.
 
 Interpretation
 --------------

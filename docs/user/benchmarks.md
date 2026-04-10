@@ -7,13 +7,15 @@ say.
 
 The comparative benchmark runner lives in `benchmarks/run_model_comparison.py`.
 
-The suite currently compares AlloyGBM against:
+The suite compares AlloyGBM against:
 
 - XGBoost
 - LightGBM
 - CatBoost
 
-The expanded regression set currently includes:
+Benchmarks span three task types:
+
+### Regression
 
 - `dense_numeric`
 - `california_housing`
@@ -21,46 +23,50 @@ The expanded regression set currently includes:
 - `panel_time_series`
 - `dow_jones_financial`
 
+### Classification
+
+- `breast_cancer`
+- `synthetic_classification`
+
+### Ranking
+
+- `synthetic_ranking`
+
 Profiles are evaluated across shallow, mid, and deep configurations to show how
 each library behaves under different learning-rate / depth / round budgets.
 
 ## Current Results
 
-From the current expanded public regression suite:
+### Regression
 
 - AlloyGBM is strongest on `panel_time_series`.
-- AlloyGBM is strong on `dow_jones_financial`, especially under the deeper low-learning-rate profile.
+- AlloyGBM is strong on `dow_jones_financial`, especially under the deeper
+  low-learning-rate profile.
 - AlloyGBM is competitive but not leading on `dense_numeric`.
 - AlloyGBM currently trails on `california_housing` and `bike_sharing`.
-- In the latest recorded benchmark refresh, AlloyGBM was also the fastest trainer on most scenario/profile rows.
-- Recent 0.1.x optimizations (zero-copy numpy float thresholding) delivered an immense **prediction speedup (up to 75-105x)** on large validation sets, dramatically accelerating the end-to-end evaluation cycle.
+- AlloyGBM is typically the fastest trainer on most scenario/profile rows.
 
-The latest recorded benchmark refresh also verified that the new training
-contract and native dense preprocessing path did not collapse AlloyGBM quality:
+### Classification
 
-- RMSE stayed unchanged on most AlloyGBM benchmark rows.
-- The few changed rows were small and did not indicate a broad regression.
-- Fit time improved materially versus the prior stored benchmark artifact.
+- AlloyGBM is competitive with established libraries on accuracy, log-loss, and
+  AUC metrics across `breast_cancer` and `synthetic_classification`.
 
-The concise public summary should be:
+### Ranking
 
-- strong on `panel_time_series`
-- strong on `dow_jones_financial`
-- weaker on `california_housing` and `bike_sharing`
+- AlloyGBM competes on `synthetic_ranking` using its native LambdaMART
+  implementation, evaluated via NDCG@5, NDCG@10, and full NDCG.
 
-Representative best-RMSE results from the latest recorded comparison:
+## Metrics By Task Type
 
-| Scenario | Best Model | Profile | Notes |
-| --- | --- | --- | --- |
-| `panel_time_series` | AlloyGBM | `shallow_high_lr` | Best result in the suite for this dataset |
-| `dow_jones_financial` | AlloyGBM | `deep_low_lr` | Strongest finance-style showing |
-| `dense_numeric` | CatBoost / XGBoost | `deep_low_lr` | Alloy remains competitive but behind |
-| `california_housing` | XGBoost | `deep_low_lr` | Alloy still has a visible regression gap |
-| `bike_sharing` | CatBoost | `mid_balanced` | Alloy improves with depth but does not lead |
+| Task Type | Metrics |
+| --- | --- |
+| Regression | RMSE, MAE, R2 |
+| Classification | Accuracy, Log-Loss, AUC |
+| Ranking | NDCG@5, NDCG@10, NDCG |
 
 ## Stage Timing Output
 
-The benchmark runner now breaks AlloyGBM fit time into:
+The benchmark runner breaks AlloyGBM fit time into:
 
 - `input_adaptation_seconds`
 - `native_bridge_prepare_seconds`
@@ -69,18 +75,17 @@ The benchmark runner now breaks AlloyGBM fit time into:
 - `predict_seconds`
 
 Use those columns to distinguish preprocessing-heavy regressions from actual
-trainer regressions. Recent zero-copy numpy optimizations specifically target
-the prediction bottleneck, drastically reducing `predict_seconds`.
+trainer regressions.
 
 ## How To Run Them
 
-Basic run:
+Basic run (all scenarios):
 
 ```bash
 python3 benchmarks/run_model_comparison.py --force-prepare
 ```
 
-Expanded public regression set:
+Regression only:
 
 ```bash
 python3 benchmarks/run_model_comparison.py \
@@ -90,16 +95,27 @@ python3 benchmarks/run_model_comparison.py \
   --profile-seeds 7
 ```
 
-See the full runner guide in [benchmarks/README.md](../../benchmarks/README.md).
-
-To inspect the stage timing output from the current public suite:
+Classification only:
 
 ```bash
 python3 benchmarks/run_model_comparison.py \
-  --scenarios california_housing bike_sharing dense_numeric panel_time_series dow_jones_financial \
+  --force-prepare \
+  --scenarios breast_cancer synthetic_classification \
   --profile-grid default \
   --profile-seeds 7
 ```
+
+Ranking only:
+
+```bash
+python3 benchmarks/run_model_comparison.py \
+  --force-prepare \
+  --scenarios synthetic_ranking \
+  --profile-grid default \
+  --profile-seeds 7
+```
+
+See the full runner guide in [benchmarks/README.md](../../benchmarks/README.md).
 
 ## How To Interpret The Results
 
@@ -109,4 +125,4 @@ Use the benchmark suite to answer two different questions:
 - Where does it still lag established libraries?
 
 That second question matters. The current suite is intentionally honest about
-weak spots, especially on broader real-world regression datasets.
+weak spots, especially on broader real-world datasets.

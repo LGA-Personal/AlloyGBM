@@ -1,0 +1,11 @@
+name: synthetic_classification
+version: 1
+kind: synthetic
+task_type: classification
+description: Synthetic binary classification benchmark with nonlinear decision boundary.
+source:
+  generator: benchmarks/synthetic_classification/prepare.py
+prepared:
+  filename: prepared.csv
+  target: target
+  note: 50K rows, 32 features with quantized/skewed distributions, binary target from nonlinear boundary.

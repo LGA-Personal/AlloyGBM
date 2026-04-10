@@ -108,10 +108,12 @@ jobs:
         run: |
           python - <<'PY'
           import alloygbm
-          from alloygbm import GBMRegressor, purged_time_series_splits, rmse
+          from alloygbm import GBMRegressor, GBMClassifier, GBMRanker
+          from alloygbm import purged_time_series_splits, rmse, accuracy
 
           print(alloygbm.native_runtime_info())
 
+          # Regression smoke
           model = GBMRegressor(
               learning_rate=0.1,
               max_depth=4,
@@ -123,9 +125,38 @@ jobs:
           targets = [0.0, 1.0, 2.0, 3.0]
           model.fit(rows, targets)
           predictions = model.predict([[1.5, 0.0], [2.5, 0.0]])
-          print(predictions)
-          print(rmse([1.5, 2.5], predictions))
-          print(purged_time_series_splits([0, 0, 1, 1], n_splits=2))
+          print("regressor predictions:", predictions)
+          print("rmse:", rmse([1.5, 2.5], predictions))
+          print("splits:", purged_time_series_splits([0, 0, 1, 1], n_splits=2))
+
+          # Classification smoke
+          clf = GBMClassifier(
+              learning_rate=0.1,
+              max_depth=4,
+              n_estimators=20,
+              deterministic=True,
+              seed=7,
+          )
+          clf.fit(rows, [0, 0, 1, 1])
+          labels = clf.predict(rows)
+          probas = clf.predict_proba(rows)
+          print("classifier labels:", labels)
+          print("classifier probas shape:", probas.shape)
+
+          # Ranker smoke
+          rnk = GBMRanker(
+              ranking_objective="rank:ndcg",
+              learning_rate=0.1,
+              max_depth=4,
+              n_estimators=20,
+              deterministic=True,
+              seed=7,
+          )
+          rnk.fit(rows, [0, 1, 2, 3], group=[0, 0, 1, 1])
+          scores = rnk.predict(rows)
+          print("ranker scores:", scores)
+
+          print("All smoke tests passed")
           PY
 
   publish:

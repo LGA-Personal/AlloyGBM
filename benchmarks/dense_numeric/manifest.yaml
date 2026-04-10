@@ -1,6 +1,7 @@
 name: dense_numeric
 version: 1
 kind: uci_download
+task_type: regression
 description: Dense numeric regression benchmark derived from UCI Wine Quality (red wine).
 source:
   dataset: wine-quality

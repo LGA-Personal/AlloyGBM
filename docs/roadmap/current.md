@@ -2,27 +2,43 @@
 
 ## Direction
 
-AlloyGBM is a Rust-first gradient boosting system with Python bindings, aimed at strong practical performance on structured regression workloads, with a particular interest in financial and time-aware tabular problems.
+AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
-The current priorities are:
+The `0.2.0` release marks a major capability expansion from the regression-only `0.1.x` series.
 
-1. Keep the CPU training and inference path competitive on real-world tabular workloads.
-2. Improve benchmark coverage so comparative claims are easy to defend.
-3. Keep the Python API stable and low-friction while moving hot paths into native code.
-4. Build toward a clean long-term roadmap for ranking, richer constraints, and future accelerator backends.
+## What Shipped In 0.2.0
 
-## Near-Term Work
+- Binary classification (`GBMClassifier`) with log-loss objective
+- Learning-to-rank (`GBMRanker`) with 5 objectives (RankNet, LambdaMART, XE-NDCG, QueryRMSE, YetiRank)
+- NaN / missing value support across all crates
+- Sample weight and group ID support from Python
+- Model persistence (pickle, save/load, artifact export)
+- Feature name capture and sklearn compatibility (`BaseEstimator`, `RegressorMixin`, `ClassifierMixin`)
+- TreeSHAP (polynomial-time, replaces the old 25-feature-capped brute-force method)
+- Monotone constraints and feature importance weighting
+- Leaf-wise (best-first) tree growth strategy
+- Warm-starting / incremental training
+- Up to 65,535 bins per feature (up from 256)
+- Multiple categorical column support
+- Histogram buffer reuse
+- Objective-aware training metric tracking
+- Expanded benchmark suite (regression + classification + ranking)
 
-- Close the remaining performance gap on broad tabular regression datasets such as California Housing and Bike Sharing.
-- Continue tuning dataset-aware training policy without making the public API harder to reason about.
-- Improve benchmark reporting so AlloyGBM's strongest and weakest regimes are both easy to see.
-- Keep predictor, artifact, and explanation paths compatible as training internals evolve.
+## Current Priorities
+
+1. Close remaining performance gaps on broad tabular datasets.
+2. Multi-class classification support.
+3. Explore GPU/accelerator backend after the CPU baseline is solid enough to serve as reference.
+4. Continue expanding the benchmark suite with real-world classification and ranking datasets.
+5. Custom objective / custom metric callback support from Python.
 
 ## Longer-Term Themes
 
-- Ranking and finance-native evaluation support.
+- Multi-class classification and multi-label ranking.
+- Interaction constraints.
+- Dart / GOSS boosting modes.
+- GPU backend.
 - Better operational diagnostics and model introspection.
-- Accelerator roadmap work after the CPU baseline is solid enough to preserve as a reference implementation.
 
 ## Planning Style
 
@@ -33,4 +49,4 @@ Going forward:
 - current intent lives in `docs/roadmap/`
 - research notes live in `docs/ideas/`
 - benchmark framing lives in `docs/benchmarks/` and `benchmarks/`
-- older layered planning notes remain in `docs/architecture/` as archive material
+- implementation plans from the 0.1.x cycle are archived in `docs/archive/v0.1_plans/`

@@ -1,0 +1,12 @@
+name: synthetic_ranking
+version: 1
+kind: synthetic
+task_type: ranking
+description: Synthetic learning-to-rank benchmark with graded relevance labels.
+source:
+  generator: benchmarks/synthetic_ranking/prepare.py
+prepared:
+  filename: prepared.csv
+  target: relevance
+  group_column: query_id
+  note: 200 queries x 25 docs = 5000 rows, 16 features, 5-level relevance (0-4).

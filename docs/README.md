@@ -13,9 +13,11 @@ Start here if you want to install or use AlloyGBM:
 1. `docs/user/installation.md`
 2. `docs/user/quickstart.md`
 3. `docs/user/gbmregressor.md`
-4. `docs/user/validation.md`
-5. `docs/user/explanations.md`
-6. `docs/user/benchmarks.md`
+4. `docs/user/gbmclassifier.md`
+5. `docs/user/gbmranker.md`
+6. `docs/user/validation.md`
+7. `docs/user/explanations.md`
+8. `docs/user/benchmarks.md`
 
 ## Internal Docs
 
@@ -32,6 +34,7 @@ and repository evolution:
   - Stable pointers into the codebase and developer-facing entry points.
 - `archive/`
   - Legacy material from the previous planning/documentation system.
+  - Includes `v0.1_plans/` with pre-v0.2.0 limitation analysis and implementation plans.
 - `architecture/`
   - Transitional notes that have not yet been fully moved or retired.
 

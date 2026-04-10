@@ -179,10 +179,135 @@ def _direction(value: float, threshold: float) -> int:
     return 0
 
 
+def accuracy(y_true: object, y_pred: object) -> float:
+    """Compute classification accuracy (fraction of correct predictions)."""
+    true_values, pred_values = _validated_pair(y_true, y_pred)
+    correct = sum(
+        1 for true_value, pred_value in zip(true_values, pred_values)
+        if true_value == pred_value
+    )
+    return correct / len(true_values)
+
+
+def log_loss(y_true: object, y_prob: object) -> float:
+    """Compute binary cross-entropy (log-loss).
+
+    ``y_true`` should contain values in {0, 1} and ``y_prob`` should contain
+    predicted probabilities in (0, 1).
+    """
+    true_values, prob_values = _validated_pair(y_true, y_prob)
+    for i, y in enumerate(true_values):
+        if y != 0.0 and y != 1.0:
+            raise ValueError(
+                f"log_loss requires y_true values in {{0, 1}}, "
+                f"but found {y!r} at index {i}"
+            )
+    eps = 1e-15
+    total = 0.0
+    for y, p in zip(true_values, prob_values):
+        p_clamped = max(eps, min(1.0 - eps, p))
+        total += -(y * math.log(p_clamped) + (1.0 - y) * math.log(1.0 - p_clamped))
+    return total / len(true_values)
+
+
+def ndcg(
+    y_true: object,
+    y_pred: object,
+    *,
+    group: object,
+    k: int | None = None,
+) -> float:
+    """Compute mean NDCG (Normalized Discounted Cumulative Gain) across query groups.
+
+    Parameters
+    ----------
+    y_true : array-like
+        True relevance labels (higher = more relevant).
+    y_pred : array-like
+        Predicted scores (higher = more relevant).
+    group : array-like
+        Query group IDs. Rows with the same group ID form a single query.
+        Must be sorted so that all rows in a group are contiguous.
+    k : int or None
+        Truncation level. If ``None``, all documents in each group are used.
+
+    Returns
+    -------
+    float
+        Mean NDCG across all query groups, in [0, 1].
+    """
+    true_values = _coerce_numeric_sequence(y_true, "y_true")
+    pred_values = _coerce_numeric_sequence(y_pred, "y_pred")
+    if len(true_values) != len(pred_values):
+        raise ValueError("y_true and y_pred must contain the same number of values")
+
+    group_values = _coerce_sequence_like(group, "group")
+    if len(group_values) != len(true_values):
+        raise ValueError("group must contain the same number of values as y_true")
+
+    # Find contiguous group boundaries and validate contiguity.
+    seen_groups: set[object] = set()
+    boundaries = [0]
+    current_group = group_values[0] if group_values else None
+    seen_groups.add(current_group)
+    for i in range(1, len(group_values)):
+        if group_values[i] != group_values[i - 1]:
+            if group_values[i] in seen_groups:
+                raise ValueError(
+                    f"ndcg requires contiguous group IDs, but group "
+                    f"{group_values[i]!r} reappears at index {i} after a "
+                    f"different group. Sort your data by group before calling ndcg."
+                )
+            seen_groups.add(group_values[i])
+            boundaries.append(i)
+    boundaries.append(len(group_values))
+
+    num_groups = len(boundaries) - 1
+    if num_groups == 0:
+        return 1.0
+
+    ndcg_sum = 0.0
+    for g in range(num_groups):
+        start = boundaries[g]
+        end = boundaries[g + 1]
+        group_true = true_values[start:end]
+        group_pred = pred_values[start:end]
+        cutoff = len(group_true) if k is None else min(k, len(group_true))
+        ndcg_sum += _ndcg_single_group(group_true, group_pred, cutoff)
+
+    return ndcg_sum / num_groups
+
+
+def _ndcg_single_group(labels: list[float], scores: list[float], k: int) -> float:
+    """NDCG for a single query group."""
+    # DCG: sort by scores descending, compute discounted gains.
+    order = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
+    dcg = 0.0
+    for rank, idx in enumerate(order[:k]):
+        gain = (2.0 ** labels[idx]) - 1.0
+        discount = 1.0 / math.log2(rank + 2.0)
+        dcg += gain * discount
+
+    # Ideal DCG: sort by labels descending.
+    sorted_labels = sorted(labels, reverse=True)
+    idcg = 0.0
+    for rank, label in enumerate(sorted_labels[:k]):
+        gain = (2.0 ** label) - 1.0
+        discount = 1.0 / math.log2(rank + 2.0)
+        idcg += gain * discount
+
+    if idcg <= 0.0:
+        return 1.0  # degenerate: all labels identical or zero
+    return dcg / idcg
+
+
 __all__ = [
+    "accuracy",
     "hit_rate",
     "icir",
+    "log_loss",
     "mae",
+    "ndcg",
     "pearson_correlation",
     "r2_score",
     "rank_ic",

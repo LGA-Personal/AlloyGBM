@@ -1,6 +1,6 @@
 # Quickstart
 
-## Basic Regression
+## Regression
 
 ```python
 from alloygbm import GBMRegressor, rmse
@@ -34,6 +34,56 @@ print(predictions)
 print("rmse:", rmse(y_test, predictions))
 ```
 
+## Binary Classification
+
+```python
+from alloygbm import GBMClassifier, accuracy, log_loss
+
+model = GBMClassifier(
+    learning_rate=0.05,
+    max_depth=6,
+    n_estimators=500,
+    deterministic=True,
+    seed=7,
+)
+model.fit(X_train, y_train)  # y must be {0, 1}
+
+labels = model.predict(X_test)            # [0, 1, 1, 0, ...]
+probas = model.predict_proba(X_test)      # shape (n_samples, 2)
+
+print("accuracy:", accuracy(y_test, labels))
+print("log_loss:", log_loss(y_test, probas[:, 1]))
+```
+
+`GBMClassifier` uses binary cross-entropy loss internally and applies a sigmoid
+transform to produce probabilities. It inherits sklearn's `ClassifierMixin` when
+sklearn is available.
+
+## Learning-to-Rank
+
+```python
+from alloygbm import GBMRanker, ndcg
+
+model = GBMRanker(
+    ranking_objective="rank:ndcg",
+    learning_rate=0.05,
+    max_depth=6,
+    n_estimators=300,
+    deterministic=True,
+    seed=7,
+)
+model.fit(X_train, y_train, group=query_ids_train)
+
+scores = model.predict(X_test)
+print("NDCG@10:", ndcg(y_test, scores, group=query_ids_test, k=10))
+```
+
+`GBMRanker` requires `group` (query IDs) to be passed in `fit()`. The `group`
+parameter accepts per-row group identifiers; data is sorted by group internally.
+
+Supported ranking objectives: `rank:pairwise`, `rank:ndcg`, `rank:xendcg`,
+`queryrmse`, `yetirank`.
+
 ## Validation And Early Stopping
 
 ```python
@@ -64,11 +114,35 @@ print("evals_result_ keys:", model.evals_result_.keys())
 print("fit_timing_:", model.fit_timing_)
 ```
 
-Use `eval_set` whenever you enable `early_stopping_rounds`.
+Use `eval_set` whenever you enable `early_stopping_rounds`. Early stopping
+monitors the objective-appropriate metric (RMSE for regression, log-loss for
+classification, NDCG for ranking).
+
+## Model Persistence
+
+```python
+import pickle
+
+# Pickle round-trip
+with open("model.pkl", "wb") as f:
+    pickle.dump(model, f)
+with open("model.pkl", "rb") as f:
+    model = pickle.load(f)
+
+# Native save/load
+model.save_model("model.agbm")
+loaded = GBMRegressor.load_model("model.agbm")
+
+# Artifact bytes for deployment
+artifact_bytes = model.artifact_bytes
+```
+
+All three estimators (`GBMRegressor`, `GBMClassifier`, `GBMRanker`) support
+pickle, `save_model` / `load_model`, and artifact byte export.
 
 ## What The Model Stores
 
-After `fit(...)`, the regressor keeps a serialized native model artifact and a
+After `fit(...)`, the estimator keeps a serialized native model artifact and a
 native predictor handle. That means you can:
 
 - call `predict(...)`
@@ -82,16 +156,11 @@ native predictor handle. That means you can:
   - `evals_result_`
   - `fit_timing_`
 
-## Continuous Features
+## NaN / Missing Values
 
-If your inputs are continuous floats, AlloyGBM will quantize them inside the
-native Rust training path. Supported binning strategies are:
-
-- `linear`
-- `rank`
-- `quantile`
-
-The default strategy is `linear`.
+AlloyGBM handles NaN values natively. You do not need to impute missing values
+before training or prediction. The engine learns the optimal split direction for
+missing values at each node.
 
 ## Dense Array-Like Inputs
 

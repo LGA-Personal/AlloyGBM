@@ -4,8 +4,8 @@ build-backend = "maturin"
 
 [project]
 name = "alloygbm"
-version = "0.1.2"
-description = "Rust-first gradient boosting for structured regression with time-aware validation utilities and Python bindings"
+version = "0.2.0"
+description = "Rust-first gradient boosting for regression, classification, and ranking with time-aware validation and Python bindings"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["numpy>=1.24"]
@@ -21,6 +21,9 @@ keywords = [
     "tabular",
     "time series",
     "finance",
+    "classification",
+    "ranking",
+    "learning to rank",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
