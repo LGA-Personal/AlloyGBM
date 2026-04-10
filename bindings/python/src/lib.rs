@@ -514,7 +514,12 @@ fn quantize_rank_value(value: f32, sorted_values: &[f32]) -> u8 {
 }
 
 /// Parameterized linear quantization that supports arbitrary max_data_bin (u16).
-fn quantize_linear_value_wide(value: f32, min_value: f32, max_value: f32, max_data_bin: u16) -> u16 {
+fn quantize_linear_value_wide(
+    value: f32,
+    min_value: f32,
+    max_value: f32,
+    max_data_bin: u16,
+) -> u16 {
     if value <= min_value {
         return 0;
     }
@@ -536,8 +541,8 @@ fn quantize_rank_value_wide(value: f32, sorted_values: &[f32], max_data_bin: u16
     }
     let insertion = sorted_values.partition_point(|probe| *probe <= value);
     let rank = insertion.saturating_sub(1).min(sorted_values.len() - 1);
-    let scaled = (rank as f32 * max_data_bin as f32)
-        / (sorted_values.len().saturating_sub(1) as f32);
+    let scaled =
+        (rank as f32 * max_data_bin as f32) / (sorted_values.len().saturating_sub(1) as f32);
     round_half_away_from_zero(scaled).clamp(0, max_data_bin as i32) as u16
 }
 
@@ -565,8 +570,12 @@ fn quantize_dense_values_linear_inplace_wide(
                 let out_base = local_row * feature_count;
                 for fi in 0..feature_count {
                     let value = values[base + fi];
-                    out_chunk[out_base + fi] =
-                        quantize_linear_value_wide(value, feature_mins[fi], feature_maxs[fi], max_data_bin) as f32;
+                    out_chunk[out_base + fi] = quantize_linear_value_wide(
+                        value,
+                        feature_mins[fi],
+                        feature_maxs[fi],
+                        max_data_bin,
+                    ) as f32;
                 }
             }
         });
@@ -602,7 +611,12 @@ fn quantize_dense_values_linear_rank_inplace_wide(
                     let bin = if rank_flags[fi] {
                         quantize_rank_value_wide(value, &feature_sorted_values[fi], max_data_bin)
                     } else {
-                        quantize_linear_value_wide(value, feature_mins[fi], feature_maxs[fi], max_data_bin)
+                        quantize_linear_value_wide(
+                            value,
+                            feature_mins[fi],
+                            feature_maxs[fi],
+                            max_data_bin,
+                        )
                     };
                     out_chunk[out_base + fi] = bin as f32;
                 }
@@ -1075,7 +1089,11 @@ fn quantize_dense_values_with_metadata_wide(
                                 ContinuousBinningStrategy::Linear => {
                                     if rank_flags.is_some_and(|flags| flags[feature_index]) {
                                         let sv = sorted_ref.expect("sorted values validated");
-                                        quantize_rank_value_wide(value, &sv[feature_index], max_data_bin)
+                                        quantize_rank_value_wide(
+                                            value,
+                                            &sv[feature_index],
+                                            max_data_bin,
+                                        )
                                     } else {
                                         let mins = mins_ref.expect("mins validated");
                                         let maxs = maxs_ref.expect("maxs validated");
@@ -1089,7 +1107,11 @@ fn quantize_dense_values_with_metadata_wide(
                                 }
                                 ContinuousBinningStrategy::Rank => {
                                     let sv = sorted_ref.expect("sorted values validated");
-                                    quantize_rank_value_wide(value, &sv[feature_index], max_data_bin)
+                                    quantize_rank_value_wide(
+                                        value,
+                                        &sv[feature_index],
+                                        max_data_bin,
+                                    )
                                 }
                                 ContinuousBinningStrategy::Quantile => {
                                     let cuts = cuts_ref.expect("cuts validated");
@@ -1126,7 +1148,11 @@ fn quantize_dense_values_with_metadata_wide(
                                 ContinuousBinningStrategy::Linear => {
                                     if rank_flags.is_some_and(|flags| flags[feature_index]) {
                                         let sv = sorted_ref.expect("sorted values validated");
-                                        quantize_rank_value_wide(value, &sv[feature_index], max_data_bin)
+                                        quantize_rank_value_wide(
+                                            value,
+                                            &sv[feature_index],
+                                            max_data_bin,
+                                        )
                                     } else {
                                         let mins = mins_ref.expect("mins validated");
                                         let maxs = maxs_ref.expect("maxs validated");
@@ -1140,7 +1166,11 @@ fn quantize_dense_values_with_metadata_wide(
                                 }
                                 ContinuousBinningStrategy::Rank => {
                                     let sv = sorted_ref.expect("sorted values validated");
-                                    quantize_rank_value_wide(value, &sv[feature_index], max_data_bin)
+                                    quantize_rank_value_wide(
+                                        value,
+                                        &sv[feature_index],
+                                        max_data_bin,
+                                    )
                                 }
                                 ContinuousBinningStrategy::Quantile => {
                                     let cuts = cuts_ref.expect("cuts validated");
@@ -1661,7 +1691,8 @@ fn apply_categorical_encoding_to_training_matrices_multi(
         if spec.values.len() != row_count {
             return Err(EngineError::ContractViolation(format!(
                 "categorical values length {} does not match row_count {}",
-                spec.values.len(), row_count
+                spec.values.len(),
+                row_count
             )));
         }
         if spec.config.time_aware {
@@ -1702,12 +1733,7 @@ fn apply_categorical_encoding_to_training_matrices_multi(
                 time_index: prepared.dataset.time_index,
                 group_id: prepared.dataset.group_id,
             },
-            binned_matrix: BinnedMatrix::new(
-                row_count,
-                feature_count,
-                max_bin,
-                bins,
-            )?,
+            binned_matrix: BinnedMatrix::new(row_count, feature_count, max_bin, bins)?,
             metadata: prepared.metadata,
         },
         categorical_state,
@@ -1752,7 +1778,8 @@ fn apply_categorical_encoding_to_validation_matrices_multi(
         if validation_spec.values.len() != row_count {
             return Err(EngineError::ContractViolation(format!(
                 "categorical values length {} does not match row_count {}",
-                validation_spec.values.len(), row_count
+                validation_spec.values.len(),
+                row_count
             )));
         }
 
@@ -1783,12 +1810,7 @@ fn apply_categorical_encoding_to_validation_matrices_multi(
             time_index: prepared.dataset.time_index,
             group_id: prepared.dataset.group_id,
         },
-        binned_matrix: BinnedMatrix::new(
-            row_count,
-            feature_count,
-            max_bin,
-            bins,
-        )?,
+        binned_matrix: BinnedMatrix::new(row_count, feature_count, max_bin, bins)?,
         metadata: prepared.metadata,
     })
 }
@@ -2018,15 +2040,11 @@ fn train_regression_artifact_with_summary_dense_impl(
         "squared_error" => run_training!(&SquaredErrorObjective),
         "binary_crossentropy" => run_training!(&BinaryCrossEntropyObjective),
         "queryrmse" | "rank_pairwise" | "rank_ndcg" | "rank_xendcg" | "yetirank" => {
-            let group_id = prepared
-                .dataset
-                .group_id
-                .as_ref()
-                .ok_or_else(|| {
-                    EngineError::ContractViolation(format!(
-                        "objective '{objective}' requires group_id to be provided"
-                    ))
-                })?;
+            let group_id = prepared.dataset.group_id.as_ref().ok_or_else(|| {
+                EngineError::ContractViolation(format!(
+                    "objective '{objective}' requires group_id to be provided"
+                ))
+            })?;
             let val_group_id = validation_prepared
                 .as_ref()
                 .and_then(|vp| vp.dataset.group_id.as_ref());

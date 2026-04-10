@@ -642,10 +642,8 @@ fn ts_extend_path(
         pweight: if depth == 0 { 1.0 } else { 0.0 },
     };
     for i in (0..depth).rev() {
-        path[i + 1].pweight +=
-            one_fraction * path[i].pweight * (i + 1) as f64 / (depth + 1) as f64;
-        path[i].pweight =
-            zero_fraction * path[i].pweight * (depth - i) as f64 / (depth + 1) as f64;
+        path[i + 1].pweight += one_fraction * path[i].pweight * (i + 1) as f64 / (depth + 1) as f64;
+        path[i].pweight = zero_fraction * path[i].pweight * (depth - i) as f64 / (depth + 1) as f64;
     }
 }
 
@@ -661,8 +659,8 @@ fn ts_unextend_path(path: &mut [PathElement], depth: usize, path_index: usize) {
             let tmp = path[i].pweight;
             path[i].pweight =
                 next_one_portion * (depth + 1) as f64 / ((i + 1) as f64 * one_fraction);
-            next_one_portion = tmp
-                - path[i].pweight * zero_fraction * (depth - i) as f64 / (depth + 1) as f64;
+            next_one_portion =
+                tmp - path[i].pweight * zero_fraction * (depth - i) as f64 / (depth + 1) as f64;
         } else {
             path[i].pweight =
                 path[i].pweight * (depth + 1) as f64 / (zero_fraction * (depth - i) as f64);
@@ -685,11 +683,10 @@ fn ts_unwound_path_sum(path: &[PathElement], depth: usize, path_index: usize) ->
 
     for i in (0..depth).rev() {
         if one_fraction.abs() > 0.0 {
-            let tmp =
-                next_one_portion * (depth + 1) as f64 / ((i + 1) as f64 * one_fraction);
+            let tmp = next_one_portion * (depth + 1) as f64 / ((i + 1) as f64 * one_fraction);
             total += tmp;
-            next_one_portion = path[i].pweight
-                - tmp * zero_fraction * (depth - i) as f64 / (depth + 1) as f64;
+            next_one_portion =
+                path[i].pweight - tmp * zero_fraction * (depth - i) as f64 / (depth + 1) as f64;
         } else if zero_fraction.abs() > 0.0 {
             let ratio = (depth - i) as f64 / (depth + 1) as f64;
             total += path[i].pweight / (zero_fraction * ratio);
@@ -831,11 +828,7 @@ fn ts_recurse(
 }
 
 /// Compute SHAP values for a single row using pre-built standard trees.
-fn tree_shap_row(
-    trees: &[StdTreeNode],
-    row: &[f32],
-    feature_count: usize,
-) -> Vec<f64> {
+fn tree_shap_row(trees: &[StdTreeNode], row: &[f32], feature_count: usize) -> Vec<f64> {
     let mut phi = vec![0.0_f64; feature_count];
     for tree in trees {
         let mut path = Vec::with_capacity(32);
@@ -1382,8 +1375,11 @@ mod tests {
         let brute_force = explain_rows_brute_force(&model, &rows).expect("brute force works");
         let tree_shap = explain_rows_tree_shap(&model, &rows).expect("tree shap works");
 
-        for (row_idx, (bf_row, ts_row)) in
-            brute_force.values.iter().zip(tree_shap.values.iter()).enumerate()
+        for (row_idx, (bf_row, ts_row)) in brute_force
+            .values
+            .iter()
+            .zip(tree_shap.values.iter())
+            .enumerate()
         {
             for (feat_idx, (bf_val, ts_val)) in bf_row.iter().zip(ts_row.iter()).enumerate() {
                 assert!(
@@ -1437,8 +1433,11 @@ mod tests {
         let brute_force = explain_rows_brute_force(&model, &rows).expect("brute force works");
         let tree_shap = explain_rows_tree_shap(&model, &rows).expect("tree shap works");
 
-        for (row_idx, (bf_row, ts_row)) in
-            brute_force.values.iter().zip(tree_shap.values.iter()).enumerate()
+        for (row_idx, (bf_row, ts_row)) in brute_force
+            .values
+            .iter()
+            .zip(tree_shap.values.iter())
+            .enumerate()
         {
             for (feat_idx, (bf_val, ts_val)) in bf_row.iter().zip(ts_row.iter()).enumerate() {
                 assert!(

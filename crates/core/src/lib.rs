@@ -409,7 +409,11 @@ impl BinnedMatrix {
 }
 
 /// Transpose row-major bins to column-major for cache-friendly per-feature access.
-fn transpose_bins_to_column_major_u8(bins: &[u8], row_count: usize, feature_count: usize) -> Vec<u8> {
+fn transpose_bins_to_column_major_u8(
+    bins: &[u8],
+    row_count: usize,
+    feature_count: usize,
+) -> Vec<u8> {
     let total = row_count * feature_count;
     if total == 0 || bins.len() != total {
         return Vec::new();
@@ -424,7 +428,11 @@ fn transpose_bins_to_column_major_u8(bins: &[u8], row_count: usize, feature_coun
     col_major
 }
 
-fn transpose_bins_to_column_major_u16(bins: &[u16], row_count: usize, feature_count: usize) -> Vec<u16> {
+fn transpose_bins_to_column_major_u16(
+    bins: &[u16],
+    row_count: usize,
+    feature_count: usize,
+) -> Vec<u16> {
     let total = row_count * feature_count;
     if total == 0 || bins.len() != total {
         return Vec::new();

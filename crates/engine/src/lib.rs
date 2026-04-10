@@ -1,13 +1,13 @@
 use alloygbm_categorical::{TargetEncoderConfig, fit_transform_target_encoder};
 use alloygbm_core::{
-    BinnedMatrix, CategoricalStatePayloadV1, CoreError, DatasetMatrix, Device, FeatureTile, MISSING_BIN_U8,
-    GradientPair, HistogramBundle, MODEL_FORMAT_V1, ModelArtifactSection, ModelMetadata,
-    ModelSectionKind, NodeSlice, NodeStats, PartitionResult, SplitCandidate, TrainParams,
-    TreeGrowth, TrainingDataset, decode_optional_categorical_state_section_v1, deserialize_model_artifact_v1,
-    encode_categorical_state_payload_v1, format_required_section_auto_mode_error,
-    format_required_section_mode_error, required_section_compatibility_report,
-    serialize_model_artifact_v1, validate_binned_matrix, validate_categorical_state_payload_v1,
-    validate_train_params, validate_training_dataset,
+    BinnedMatrix, CategoricalStatePayloadV1, CoreError, DatasetMatrix, Device, FeatureTile,
+    GradientPair, HistogramBundle, MISSING_BIN_U8, MODEL_FORMAT_V1, ModelArtifactSection,
+    ModelMetadata, ModelSectionKind, NodeSlice, NodeStats, PartitionResult, SplitCandidate,
+    TrainParams, TrainingDataset, TreeGrowth, decode_optional_categorical_state_section_v1,
+    deserialize_model_artifact_v1, encode_categorical_state_payload_v1,
+    format_required_section_auto_mode_error, format_required_section_mode_error,
+    required_section_compatibility_report, serialize_model_artifact_v1, validate_binned_matrix,
+    validate_categorical_state_payload_v1, validate_train_params, validate_training_dataset,
 };
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
@@ -519,10 +519,7 @@ fn ndcg_for_group(labels: &[f32], scores: &[f32]) -> f32 {
 
 /// Numerically stable log-sum-exp for softmax computation.
 fn log_sum_exp(values: &[f32]) -> f32 {
-    let max_val = values
-        .iter()
-        .copied()
-        .fold(f32::NEG_INFINITY, f32::max);
+    let max_val = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     if !max_val.is_finite() {
         return 0.0;
     }
@@ -575,8 +572,7 @@ impl QueryRMSEObjective {
     }
 
     pub fn with_validation_group(mut self, validation_group_id: &[u32]) -> Self {
-        self.validation_group_boundaries =
-            Some(compute_group_boundaries(validation_group_id));
+        self.validation_group_boundaries = Some(compute_group_boundaries(validation_group_id));
         self
     }
 }
@@ -667,8 +663,7 @@ impl PairwiseRankingObjective {
     }
 
     pub fn with_validation_group(mut self, validation_group_id: &[u32]) -> Self {
-        self.validation_group_boundaries =
-            Some(compute_group_boundaries(validation_group_id));
+        self.validation_group_boundaries = Some(compute_group_boundaries(validation_group_id));
         self
     }
 
@@ -757,7 +752,10 @@ impl ObjectiveOps for PairwiseRankingObjective {
         }
         for i in 0..grads.len() {
             let hess = hesses[i].max(1e-7);
-            buffer.push(GradientPair { grad: grads[i], hess });
+            buffer.push(GradientPair {
+                grad: grads[i],
+                hess,
+            });
         }
         Ok(())
     }
@@ -836,8 +834,7 @@ impl LambdaMARTObjective {
     }
 
     pub fn with_validation_group(mut self, validation_group_id: &[u32]) -> Self {
-        self.validation_group_boundaries =
-            Some(compute_group_boundaries(validation_group_id));
+        self.validation_group_boundaries = Some(compute_group_boundaries(validation_group_id));
         self
     }
 }
@@ -1002,8 +999,7 @@ impl XeNDCGObjective {
     }
 
     pub fn with_validation_group(mut self, validation_group_id: &[u32]) -> Self {
-        self.validation_group_boundaries =
-            Some(compute_group_boundaries(validation_group_id));
+        self.validation_group_boundaries = Some(compute_group_boundaries(validation_group_id));
         self
     }
 }
@@ -1140,8 +1136,7 @@ impl YetiRankObjective {
     }
 
     pub fn with_validation_group(mut self, validation_group_id: &[u32]) -> Self {
-        self.validation_group_boundaries =
-            Some(compute_group_boundaries(validation_group_id));
+        self.validation_group_boundaries = Some(compute_group_boundaries(validation_group_id));
         self
     }
 
@@ -1155,7 +1150,6 @@ impl YetiRankObjective {
         z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
         z ^ (z >> 31)
     }
-
 }
 
 impl ObjectiveOps for YetiRankObjective {
@@ -1205,7 +1199,8 @@ impl ObjectiveOps for YetiRankObjective {
 
             for perm_idx in 0..self.num_permutations {
                 // Seed deterministically from group + permutation index.
-                let mut rng_state = self.seed
+                let mut rng_state = self
+                    .seed
                     .wrapping_add(g as u64 * 1_000_003)
                     .wrapping_add(perm_idx as u64 * 7);
 
@@ -1248,10 +1243,8 @@ impl ObjectiveOps for YetiRankObjective {
                         let gain_lo = (2.0_f32).powf(group_labels[lo]) - 1.0;
                         let discount_hi = 1.0 / ((perm_ranks[hi] as f32 + 2.0).log2());
                         let discount_lo = 1.0 / ((perm_ranks[lo] as f32 + 2.0).log2());
-                        let delta_ndcg = ((gain_hi - gain_lo)
-                            * (discount_hi - discount_lo))
-                        .abs()
-                            * inv_idcg;
+                        let delta_ndcg =
+                            ((gain_hi - gain_lo) * (discount_hi - discount_lo)).abs() * inv_idcg;
 
                         let lambda = -rho * delta_ndcg * inv_perms;
                         let hess_pair = rho * (1.0 - rho) * delta_ndcg * inv_perms;
@@ -1672,7 +1665,11 @@ impl TrainedModel {
             let feature_value = features[feature_index];
             let threshold = stump.split.threshold_bin as f32;
             prediction += if feature_value.is_nan() {
-                if stump.split.default_left { stump.left_leaf_value } else { stump.right_leaf_value }
+                if stump.split.default_left {
+                    stump.left_leaf_value
+                } else {
+                    stump.right_leaf_value
+                }
             } else if feature_value <= threshold {
                 stump.left_leaf_value
             } else {
@@ -1876,8 +1873,11 @@ impl Trainer {
             &root_node,
             &feature_tiles,
         )?;
-        let split_candidate =
-            backend.best_split_with_options(&histograms, split_options, &self.params.feature_weights)?;
+        let split_candidate = backend.best_split_with_options(
+            &histograms,
+            split_options,
+            &self.params.feature_weights,
+        )?;
         let root_stats = backend.reduce_sums(&fit_contract.gradients, &root_node.row_indices)?;
 
         let partition = if let Some(split) = &split_candidate {
@@ -2336,11 +2336,7 @@ impl Trainer {
             };
         let mut predictions = vec![baseline_prediction; dataset.row_count()];
         if !initial_stumps.is_empty() {
-            apply_tree_to_binned_predictions(
-                &mut predictions,
-                binned_matrix,
-                &initial_stumps,
-            )?;
+            apply_tree_to_binned_predictions(&mut predictions, binned_matrix, &initial_stumps)?;
         }
         let mut candidate_predictions = predictions.clone();
         let mut validation_predictions = if let Some(validation_ref) = validation {
@@ -2584,8 +2580,7 @@ impl Trainer {
                 controls.max_abs_leaf_value,
             )?;
 
-            let mut refined_predictions =
-                vec![baseline_prediction; dataset.row_count()];
+            let mut refined_predictions = vec![baseline_prediction; dataset.row_count()];
             apply_tree_to_binned_predictions(&mut refined_predictions, binned_matrix, &stumps)?;
             current_loss = objective.loss(
                 &refined_predictions,
@@ -3072,10 +3067,8 @@ fn build_tree_level_wise<B: BackendOps>(
                 ));
             }
 
-            let left_grad =
-                l1_threshold_gradient(left_stats.grad_sum, split_options.l1_alpha);
-            let right_grad =
-                l1_threshold_gradient(right_stats.grad_sum, split_options.l1_alpha);
+            let left_grad = l1_threshold_gradient(left_stats.grad_sum, split_options.l1_alpha);
+            let right_grad = l1_threshold_gradient(right_stats.grad_sum, split_options.l1_alpha);
             let raw_left_leaf_value = -params.learning_rate * left_grad
                 / (left_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
             let raw_right_leaf_value = -params.learning_rate * right_grad
@@ -3100,13 +3093,11 @@ fn build_tree_level_wise<B: BackendOps>(
                 if fi < params.monotone_constraints.len() {
                     let constraint = params.monotone_constraints[fi];
                     if constraint == 1 && left_leaf_absolute > right_leaf_absolute {
-                        round_rejection_reason =
-                            IterationStopReason::MonotoneConstraintViolation;
+                        round_rejection_reason = IterationStopReason::MonotoneConstraintViolation;
                         continue;
                     }
                     if constraint == -1 && left_leaf_absolute < right_leaf_absolute {
-                        round_rejection_reason =
-                            IterationStopReason::MonotoneConstraintViolation;
+                        round_rejection_reason = IterationStopReason::MonotoneConstraintViolation;
                         continue;
                     }
                 }
@@ -3149,11 +3140,8 @@ fn build_tree_level_wise<B: BackendOps>(
                         &left_node,
                         feature_tiles,
                     )?;
-                    let right_histograms = subtract_histogram_bundle(
-                        &histograms,
-                        &left_histograms,
-                        right_node_id,
-                    )?;
+                    let right_histograms =
+                        subtract_histogram_bundle(&histograms, &left_histograms, right_node_id)?;
                     next_nodes.push((
                         left_local_node_id,
                         left_node.row_indices,
@@ -3174,11 +3162,8 @@ fn build_tree_level_wise<B: BackendOps>(
                         &right_node,
                         feature_tiles,
                     )?;
-                    let left_histograms = subtract_histogram_bundle(
-                        &histograms,
-                        &right_histograms,
-                        left_node_id,
-                    )?;
+                    let left_histograms =
+                        subtract_histogram_bundle(&histograms, &right_histograms, left_node_id)?;
                     next_nodes.push((
                         left_local_node_id,
                         left_row_indices,
@@ -3207,7 +3192,10 @@ fn build_tree_level_wise<B: BackendOps>(
         return Ok((Vec::new(), round_rejection_reason));
     }
 
-    Ok((candidate_round_stumps, IterationStopReason::CompletedRequestedRounds))
+    Ok((
+        candidate_round_stumps,
+        IterationStopReason::CompletedRequestedRounds,
+    ))
 }
 
 /// A pending leaf split for the leaf-wise priority queue.
@@ -3274,7 +3262,8 @@ fn build_tree_leaf_wise<B: BackendOps>(
     let root_node = NodeSlice::new(root_node_id, root_row_indices)?;
     let root_histograms =
         backend.build_histograms(binned_matrix, gradients, &root_node, feature_tiles)?;
-    let root_split = backend.best_split_with_options(&root_histograms, split_options, feature_weights)?;
+    let root_split =
+        backend.best_split_with_options(&root_histograms, split_options, feature_weights)?;
 
     let Some(root_split) = root_split else {
         return Ok((Vec::new(), IterationStopReason::NoSplitCandidate));
@@ -3350,10 +3339,10 @@ fn build_tree_leaf_wise<B: BackendOps>(
         let raw_right_leaf_value = -params.learning_rate * right_grad
             / (right_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
 
-        let left_leaf_absolute = raw_left_leaf_value
-            .clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value);
-        let right_leaf_absolute = raw_right_leaf_value
-            .clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value);
+        let left_leaf_absolute =
+            raw_left_leaf_value.clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value);
+        let right_leaf_absolute =
+            raw_right_leaf_value.clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value);
         let left_leaf_value = left_leaf_absolute - pending.parent_leaf_value;
         let right_leaf_value = right_leaf_absolute - pending.parent_leaf_value;
 
@@ -3408,12 +3397,38 @@ fn build_tree_leaf_wise<B: BackendOps>(
             let right_node_id = encode_tree_node_id(round_index, right_local)?;
 
             // Subtraction trick: build smaller child, subtract from parent for larger.
-            let (smaller_indices, larger_indices, smaller_node_id, larger_node_id, smaller_local, larger_local, smaller_leaf_abs, larger_leaf_abs) =
-                if partition.left_row_indices.len() <= partition.right_row_indices.len() {
-                    (partition.left_row_indices, partition.right_row_indices, left_node_id, right_node_id, left_local, right_local, left_leaf_absolute, right_leaf_absolute)
-                } else {
-                    (partition.right_row_indices, partition.left_row_indices, right_node_id, left_node_id, right_local, left_local, right_leaf_absolute, left_leaf_absolute)
-                };
+            let (
+                smaller_indices,
+                larger_indices,
+                smaller_node_id,
+                larger_node_id,
+                smaller_local,
+                larger_local,
+                smaller_leaf_abs,
+                larger_leaf_abs,
+            ) = if partition.left_row_indices.len() <= partition.right_row_indices.len() {
+                (
+                    partition.left_row_indices,
+                    partition.right_row_indices,
+                    left_node_id,
+                    right_node_id,
+                    left_local,
+                    right_local,
+                    left_leaf_absolute,
+                    right_leaf_absolute,
+                )
+            } else {
+                (
+                    partition.right_row_indices,
+                    partition.left_row_indices,
+                    right_node_id,
+                    left_node_id,
+                    right_local,
+                    left_local,
+                    right_leaf_absolute,
+                    left_leaf_absolute,
+                )
+            };
 
             let smaller_node = NodeSlice::new(smaller_node_id, smaller_indices)?;
             let smaller_histograms =
@@ -3425,9 +3440,12 @@ fn build_tree_leaf_wise<B: BackendOps>(
             )?;
 
             // Find best split for each child and enqueue if valid.
-            if let Some(child_split) =
-                backend.best_split_with_options(&smaller_histograms, split_options, feature_weights)?
-                && child_split.gain.is_finite() && child_split.gain > controls.min_split_gain
+            if let Some(child_split) = backend.best_split_with_options(
+                &smaller_histograms,
+                split_options,
+                feature_weights,
+            )? && child_split.gain.is_finite()
+                && child_split.gain > controls.min_split_gain
             {
                 queue.push(PendingSplit {
                     local_node_id: smaller_local,
@@ -3439,9 +3457,12 @@ fn build_tree_leaf_wise<B: BackendOps>(
                 });
             }
 
-            if let Some(child_split) =
-                backend.best_split_with_options(&larger_histograms, split_options, feature_weights)?
-                && child_split.gain.is_finite() && child_split.gain > controls.min_split_gain
+            if let Some(child_split) = backend.best_split_with_options(
+                &larger_histograms,
+                split_options,
+                feature_weights,
+            )? && child_split.gain.is_finite()
+                && child_split.gain > controls.min_split_gain
             {
                 queue.push(PendingSplit {
                     local_node_id: larger_local,
@@ -5955,43 +5976,39 @@ mod tests {
     fn subtract_histogram_bundle_into_matches_allocating_variant() {
         let parent = HistogramBundle {
             node_id: 7,
-            feature_histograms: vec![
-                alloygbm_core::FeatureHistogram {
-                    feature_index: 0,
-                    bins: vec![
-                        alloygbm_core::HistogramBin {
-                            grad_sum: 3.0,
-                            hess_sum: 5.0,
-                            count: 4,
-                        },
-                        alloygbm_core::HistogramBin {
-                            grad_sum: -1.0,
-                            hess_sum: 2.0,
-                            count: 2,
-                        },
-                    ],
-                },
-            ],
+            feature_histograms: vec![alloygbm_core::FeatureHistogram {
+                feature_index: 0,
+                bins: vec![
+                    alloygbm_core::HistogramBin {
+                        grad_sum: 3.0,
+                        hess_sum: 5.0,
+                        count: 4,
+                    },
+                    alloygbm_core::HistogramBin {
+                        grad_sum: -1.0,
+                        hess_sum: 2.0,
+                        count: 2,
+                    },
+                ],
+            }],
         };
         let child = HistogramBundle {
             node_id: 15,
-            feature_histograms: vec![
-                alloygbm_core::FeatureHistogram {
-                    feature_index: 0,
-                    bins: vec![
-                        alloygbm_core::HistogramBin {
-                            grad_sum: 2.0,
-                            hess_sum: 3.0,
-                            count: 2,
-                        },
-                        alloygbm_core::HistogramBin {
-                            grad_sum: -0.25,
-                            hess_sum: 0.5,
-                            count: 1,
-                        },
-                    ],
-                },
-            ],
+            feature_histograms: vec![alloygbm_core::FeatureHistogram {
+                feature_index: 0,
+                bins: vec![
+                    alloygbm_core::HistogramBin {
+                        grad_sum: 2.0,
+                        hess_sum: 3.0,
+                        count: 2,
+                    },
+                    alloygbm_core::HistogramBin {
+                        grad_sum: -0.25,
+                        hess_sum: 0.5,
+                        count: 1,
+                    },
+                ],
+            }],
         };
 
         // Allocating variant
@@ -6004,8 +6021,15 @@ mod tests {
             .expect("in-place subtraction should succeed");
 
         assert_eq!(allocated.node_id, dest.node_id);
-        assert_eq!(allocated.feature_histograms.len(), dest.feature_histograms.len());
-        for (a, d) in allocated.feature_histograms.iter().zip(&dest.feature_histograms) {
+        assert_eq!(
+            allocated.feature_histograms.len(),
+            dest.feature_histograms.len()
+        );
+        for (a, d) in allocated
+            .feature_histograms
+            .iter()
+            .zip(&dest.feature_histograms)
+        {
             assert_eq!(a.feature_index, d.feature_index);
             for (ab, db) in a.bins.iter().zip(&d.bins) {
                 assert!((ab.grad_sum - db.grad_sum).abs() < 1e-6);

@@ -497,12 +497,7 @@ impl CpuBackend {
 
         // Scan only non-missing bins (0..min(num_bins-1, MISSING_BIN-1)).
         let scan_limit = feature_histogram.bins.len().min(missing_bin_idx);
-        for (threshold_bin, bin) in feature_histogram
-            .bins
-            .iter()
-            .enumerate()
-            .take(scan_limit)
-        {
+        for (threshold_bin, bin) in feature_histogram.bins.iter().enumerate().take(scan_limit) {
             left_grad += bin.grad_sum;
             left_hess += bin.hess_sum;
             left_count += bin.count;
