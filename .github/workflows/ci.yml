@@ -98,3 +98,52 @@ jobs:
 
           print("GBMRegressor contract smoke ok")
           PY
+
+      - name: Python classifier smoke
+        run: |
+          python - <<'PY'
+          from alloygbm import GBMClassifier, accuracy
+
+          model = GBMClassifier(
+              learning_rate=0.2,
+              max_depth=4,
+              n_estimators=20,
+              seed=1,
+              deterministic=True,
+          )
+          X = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]
+          y = [0, 0, 1, 1]
+          model.fit(X, y)
+
+          labels = model.predict(X)
+          assert all(l in (0, 1) for l in labels), f"unexpected labels: {labels}"
+
+          probas = model.predict_proba(X)
+          assert probas.shape == (4, 2), f"unexpected shape: {probas.shape}"
+
+          print("GBMClassifier smoke ok")
+          PY
+
+      - name: Python ranker smoke
+        run: |
+          python - <<'PY'
+          from alloygbm import GBMRanker
+
+          model = GBMRanker(
+              ranking_objective="rank:ndcg",
+              learning_rate=0.2,
+              max_depth=4,
+              n_estimators=20,
+              seed=1,
+              deterministic=True,
+          )
+          X = [[0.1], [0.2], [0.3], [0.4], [0.5], [0.6]]
+          y = [0, 1, 2, 0, 1, 2]
+          group = [0, 0, 0, 1, 1, 1]
+          model.fit(X, y, group=group)
+
+          scores = model.predict(X)
+          assert len(scores) == 6, f"unexpected length: {len(scores)}"
+
+          print("GBMRanker smoke ok")
+          PY
