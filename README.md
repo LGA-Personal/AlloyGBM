@@ -135,7 +135,7 @@ model.save_model("model.agbm")
 loaded = GBMRegressor.load_model("model.agbm")
 
 # Artifact export for deployment
-artifact_bytes = model.model_bytes()
+artifact_bytes = model.artifact_bytes
 ```
 
 ## Feature Summary

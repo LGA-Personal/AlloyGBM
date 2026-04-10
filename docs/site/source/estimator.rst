@@ -110,7 +110,7 @@ Main methods
 - ``predict_from_artifact(artifact_bytes, X)``
 - ``save_model(path)``
 - ``load_model(path)`` (classmethod)
-- ``model_bytes()`` -- returns the raw artifact bytes
+- ``artifact_bytes`` -- property returning the raw artifact bytes
 - ``score(X, y)``
 
 Important ``fit(...)`` rules:

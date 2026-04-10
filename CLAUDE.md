@@ -66,7 +66,7 @@ maturin develop --release      # Build and install Python extension
 - **Tree growth**: Level-wise (default) or leaf-wise (best-first) via `tree_growth` parameter.
 - **Histogram subtraction trick**: Used for child nodes within a level (smaller child built from scratch, larger = parent - smaller). Histogram buffers are reused across rounds.
 - **NaN handling**: Missing values get a dedicated bin; split finding learns the optimal direction for NaN.
-- **Model persistence**: Pickle support via `__getstate__`/`__setstate__`, `save_model`/`load_model`, and raw `model_bytes()` export.
+- **Model persistence**: Pickle support via `__getstate__`/`__setstate__`, `save_model`/`load_model`, and raw `artifact_bytes` property.
 
 ## When Implementing Changes
 

@@ -2948,8 +2948,18 @@ class GBMRegressor(_GBMRegressorBase):
 
         metadata = json.loads(metadata_json)
         params = metadata["params"]
-        # Filter to known params for forward compatibility
-        known = set(cls.__init__.__code__.co_varnames) - {"self"}
+        # Filter to known params for forward compatibility.
+        # Use get_params() keys from a default instance to correctly handle
+        # subclasses that use **kwargs (e.g. GBMRanker, GBMClassifier).
+        try:
+            # Build a temporary default instance to discover valid param names.
+            # This works even for subclasses with **kwargs forwarding.
+            _probe = cls.__new__(cls)
+            cls.__init__(_probe)
+            known = set(_probe.get_params().keys())
+        except Exception:
+            # Fallback: accept all saved params.
+            known = set(params.keys())
         model = cls(**{k: v for k, v in params.items() if k in known})
         model._artifact_bytes = artifact_bytes
         model._n_features_in = metadata["n_features_in"]
@@ -2978,6 +2988,14 @@ class GBMRegressor(_GBMRegressorBase):
             artifact_bytes
         )
         model._convert_predictor_thresholds_to_float()
+
+        # Restore subclass-specific fitted attributes.
+        from .classifier import GBMClassifier
+
+        if isinstance(model, GBMClassifier):
+            model.classes_ = [0, 1]
+            model.n_classes_ = 2
+
         return model
 
     def save_artifact(self, path: str) -> None:

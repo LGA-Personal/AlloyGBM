@@ -350,13 +350,17 @@ def _split_dataset(
         train_mask = frame[group_column].isin(train_groups)
         test_mask = ~train_mask
 
+        # Sort by group to ensure contiguous group IDs for ranking adapters.
+        train_frame = frame.loc[train_mask].sort_values(group_column)
+        test_frame = frame.loc[test_mask].sort_values(group_column)
+
         drop_cols = [target_column, group_column]
-        x_train = frame.loc[train_mask].drop(columns=drop_cols, errors="ignore")
-        x_test = frame.loc[test_mask].drop(columns=drop_cols, errors="ignore")
-        y_train = frame.loc[train_mask, target_column]
-        y_test = frame.loc[test_mask, target_column]
-        g_train = frame.loc[train_mask, group_column].to_numpy(dtype=np.uint32)
-        g_test = frame.loc[test_mask, group_column].to_numpy(dtype=np.uint32)
+        x_train = train_frame.drop(columns=drop_cols, errors="ignore")
+        x_test = test_frame.drop(columns=drop_cols, errors="ignore")
+        y_train = train_frame[target_column]
+        y_test = test_frame[target_column]
+        g_train = train_frame[group_column].to_numpy(dtype=np.uint32)
+        g_test = test_frame[group_column].to_numpy(dtype=np.uint32)
 
         x_train = x_train.apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan)
         x_test = x_test.apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan)

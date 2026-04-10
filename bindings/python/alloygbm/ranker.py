@@ -74,7 +74,9 @@ class GBMRanker(GBMRegressor):
         eval_group: object | None = None,
         eval_time_index: object | None = None,
         categorical_feature_values: object | None = None,
+        categorical_feature_values_list: object | None = None,
         time_index: object | None = None,
+        init_model: "GBMRegressor | None" = None,
     ) -> "GBMRanker":
         """Fit the ranker.
 
@@ -98,7 +100,7 @@ class GBMRanker(GBMRegressor):
         if group is None:
             raise ValueError("GBMRanker requires 'group' to be provided in fit()")
 
-        # Sort training data by group.
+        # Sort training data by group, preserving DataFrame metadata.
         X_sorted, y_sorted, group_sorted, sort_idx = self._sort_by_group(X, y, group)
 
         # Sort sample_weight to match if present.
@@ -112,6 +114,21 @@ class GBMRanker(GBMRegressor):
         if time_index is not None:
             ti_arr = np.asarray(time_index).ravel()
             sorted_time_index = ti_arr[sort_idx]
+
+        # Sort categorical_feature_values to match if present.
+        sorted_categorical_feature_values = categorical_feature_values
+        if categorical_feature_values is not None:
+            cfv_arr = np.asarray(categorical_feature_values)
+            sorted_categorical_feature_values = cfv_arr[sort_idx].tolist()
+
+        # Sort categorical_feature_values_list to match if present.
+        sorted_categorical_feature_values_list = categorical_feature_values_list
+        if categorical_feature_values_list is not None:
+            sorted_cfv_list = []
+            for cfv in categorical_feature_values_list:
+                cfv_arr = np.asarray(cfv)
+                sorted_cfv_list.append(cfv_arr[sort_idx].tolist())
+            sorted_categorical_feature_values_list = sorted_cfv_list
 
         # Sort eval data by group if provided.
         sorted_eval_set = eval_set
@@ -149,8 +166,10 @@ class GBMRanker(GBMRegressor):
             group=group_sorted,
             eval_group=sorted_eval_group,
             eval_time_index=sorted_eval_time_index,
-            categorical_feature_values=categorical_feature_values,
+            categorical_feature_values=sorted_categorical_feature_values,
+            categorical_feature_values_list=sorted_categorical_feature_values_list,
             time_index=sorted_time_index,
+            init_model=init_model,
         )
         return self
 
@@ -224,9 +243,23 @@ class GBMRanker(GBMRegressor):
     def _sort_by_group(
         X: object, y: object, group: object
     ) -> tuple:
-        """Sort X, y, and group by group ID. Returns (X, y, group, sort_indices)."""
+        """Sort X, y, and group by group ID. Returns (X, y, group, sort_indices).
+
+        Preserves DataFrame type for X when possible so that downstream code
+        (e.g. feature name capture, categorical auto-inference) works correctly.
+        """
         group_arr = np.asarray(group, dtype=np.uint32).ravel()
         sort_idx = np.argsort(group_arr, kind="stable")
+
+        # Preserve DataFrame metadata if X is a DataFrame.
+        try:
+            import pandas as pd
+
+            if isinstance(X, pd.DataFrame):
+                y_arr = np.asarray(y, dtype=np.float32).ravel()
+                return X.iloc[sort_idx], y_arr[sort_idx], group_arr[sort_idx], sort_idx
+        except ImportError:
+            pass
 
         X_arr = np.asarray(X, dtype=np.float32)
         if X_arr.ndim == 1:

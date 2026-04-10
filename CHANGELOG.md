@@ -19,7 +19,7 @@ Major capability expansion from the regression-only `0.1.x` series.
 - **NaN / missing value support** across all crates -- training and prediction handle NaN natively with learned split directions
 - **Sample weight support** via `fit(..., sample_weight=...)`
 - **Group ID support** via `fit(..., group=...)` for ranking objectives
-- **Model persistence** -- pickle round-trip, `save_model(path)` / `load_model(path)`, and `model_bytes()` for artifact export
+- **Model persistence** -- pickle round-trip, `save_model(path)` / `load_model(path)`, and `artifact_bytes` property for artifact export
 - **Feature name capture** from pandas DataFrames and other named inputs
 - **sklearn compatibility** -- `BaseEstimator`, `RegressorMixin`, `ClassifierMixin`, `get_params`, `set_params`, `score`, pipeline/cross-validation support
 - **`min_split_gain` exposed** as a user-facing parameter

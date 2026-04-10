@@ -134,7 +134,7 @@ model.save_model("model.agbm")
 loaded = GBMRegressor.load_model("model.agbm")
 
 # Artifact bytes for deployment
-artifact_bytes = model.model_bytes()
+artifact_bytes = model.artifact_bytes
 ```
 
 All three estimators (`GBMRegressor`, `GBMClassifier`, `GBMRanker`) support

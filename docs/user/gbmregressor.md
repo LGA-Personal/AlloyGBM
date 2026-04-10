@@ -126,8 +126,8 @@ provided, they are merged.
 - `predict_from_artifact(artifact_bytes, X)`
 - `save_model(path)`
 - `load_model(path)` (classmethod)
-- `model_bytes()` -- returns the raw artifact bytes
-- `score(X, y)` -- returns the negative RMSE (sklearn convention)
+- `artifact_bytes` -- property returning the raw artifact bytes
+- `score(X, y)` -- returns R-squared (sklearn `RegressorMixin` convention)
 
 Important `fit(...)` rules:
 

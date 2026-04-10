@@ -196,6 +196,12 @@ def log_loss(y_true: object, y_prob: object) -> float:
     predicted probabilities in (0, 1).
     """
     true_values, prob_values = _validated_pair(y_true, y_prob)
+    for i, y in enumerate(true_values):
+        if y != 0.0 and y != 1.0:
+            raise ValueError(
+                f"log_loss requires y_true values in {{0, 1}}, "
+                f"but found {y!r} at index {i}"
+            )
     eps = 1e-15
     total = 0.0
     for y, p in zip(true_values, prob_values):
@@ -239,10 +245,20 @@ def ndcg(
     if len(group_values) != len(true_values):
         raise ValueError("group must contain the same number of values as y_true")
 
-    # Find contiguous group boundaries.
+    # Find contiguous group boundaries and validate contiguity.
+    seen_groups: set[object] = set()
     boundaries = [0]
+    current_group = group_values[0] if group_values else None
+    seen_groups.add(current_group)
     for i in range(1, len(group_values)):
         if group_values[i] != group_values[i - 1]:
+            if group_values[i] in seen_groups:
+                raise ValueError(
+                    f"ndcg requires contiguous group IDs, but group "
+                    f"{group_values[i]!r} reappears at index {i} after a "
+                    f"different group. Sort your data by group before calling ndcg."
+                )
+            seen_groups.add(group_values[i])
             boundaries.append(i)
     boundaries.append(len(group_values))
 

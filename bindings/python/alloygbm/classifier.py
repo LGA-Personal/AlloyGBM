@@ -55,7 +55,9 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
         eval_group: object | None = None,
         eval_time_index: object | None = None,
         categorical_feature_values: object | None = None,
+        categorical_feature_values_list: object | None = None,
         time_index: object | None = None,
+        init_model: "GBMRegressor | None" = None,
     ) -> "GBMClassifier":
         """Fit the binary classifier.
 
@@ -85,7 +87,9 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
             eval_group=eval_group,
             eval_time_index=eval_time_index,
             categorical_feature_values=categorical_feature_values,
+            categorical_feature_values_list=categorical_feature_values_list,
             time_index=time_index,
+            init_model=init_model,
         )
         self.classes_ = [0, 1]
         self.n_classes_ = 2
@@ -127,6 +131,20 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
         proba = self.predict_proba(X)
         return np.log(np.clip(proba, 1e-15, None))
 
+    # -- score (accuracy, not R²) ---------------------------------------------
+
+    def score(self, X: object, y: object, sample_weight: object = None) -> float:
+        """Return accuracy score for the given test data and labels.
+
+        Overrides ``GBMRegressor.score()`` to use accuracy (the standard
+        sklearn classifier convention) instead of R-squared.
+        """
+        from .evaluation import accuracy
+
+        predictions = self.predict(X)
+        targets = self._validate_binary_targets(y)
+        return float(accuracy([int(t) for t in targets], predictions))
+
     # -- sklearn overrides ----------------------------------------------------
 
     def __repr__(self) -> str:
@@ -164,7 +182,9 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
         )
 
     def __sklearn_tags__(self):
-        if not hasattr(super(GBMRegressor, self), "__sklearn_tags__"):
+        try:
+            tags = super().__sklearn_tags__()
+        except AttributeError:
             return {
                 "non_deterministic": not self.deterministic,
                 "requires_y": True,
@@ -172,7 +192,6 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
                 "X_types": ["2darray"],
                 "binary_only": True,
             }
-        tags = super().__sklearn_tags__()
         if hasattr(tags, "non_deterministic"):
             tags.non_deterministic = not self.deterministic
         if hasattr(tags, "input_tags") and hasattr(tags.input_tags, "allow_nan"):
