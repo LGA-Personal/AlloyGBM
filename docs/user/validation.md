@@ -60,7 +60,7 @@ splits = purged_panel_splits(
 Panel behavior is still time-bucketed across all groups, which is usually the
 right default when leakage is primarily temporal.
 
-## Using Splits With GBMRegressor
+## Using Splits With AlloyGBM
 
 ```python
 from alloygbm import GBMRegressor, purged_time_series_splits, rmse
@@ -79,8 +79,8 @@ for train_idx, test_idx in purged_time_series_splits(time_index, n_splits=5):
 
 ## Explicit Validation With `fit(...)`
 
-Use `eval_set` when you want AlloyGBM to track validation RMSE during training
-or to enable early stopping:
+Use `eval_set` when you want AlloyGBM to track validation metrics during
+training or to enable early stopping:
 
 ```python
 from alloygbm import GBMRegressor
@@ -108,14 +108,16 @@ Rules:
 
 - `early_stopping_rounds` requires `eval_set`.
 - `eval_time_index` requires `eval_set`.
-- Validation early stopping always monitors validation RMSE derived from the
-  squared-error objective.
+- Validation early stopping monitors the objective-appropriate metric:
+  - RMSE for `GBMRegressor`
+  - Log-loss for `GBMClassifier`
+  - NDCG for `GBMRanker`
 
 ## When To Pass `time_index` Into `fit(...)`
 
-Pass `time_index=` to `GBMRegressor.fit(...)` when you are using:
+Pass `time_index=` to `fit(...)` when you are using:
 
-- `categorical_feature_index`
+- `categorical_feature_index` or `categorical_feature_indices`
 - `categorical_time_aware=True`
 
 That combination enables time-aware categorical handling during training.

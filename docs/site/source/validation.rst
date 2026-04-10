@@ -83,7 +83,7 @@ Using the splits with AlloyGBM
 Explicit validation with ``fit(...)``
 -------------------------------------
 
-Use ``eval_set`` when you want AlloyGBM to track validation RMSE during
+Use ``eval_set`` when you want AlloyGBM to track validation metrics during
 training or when you enable early stopping:
 
 .. code-block:: python
@@ -112,14 +112,17 @@ Rules:
 
 - ``early_stopping_rounds`` requires ``eval_set``
 - ``eval_time_index`` requires ``eval_set``
-- early stopping always monitors validation RMSE for the squared-error objective
+- Early stopping monitors the objective-appropriate metric:
+  - RMSE for ``GBMRegressor``
+  - Log-loss for ``GBMClassifier``
+  - NDCG for ``GBMRanker``
 
 Passing ``time_index`` into ``fit(...)``
 ----------------------------------------
 
-Pass ``time_index=`` to ``GBMRegressor.fit(...)`` when you are using:
+Pass ``time_index=`` to ``fit(...)`` when you are using:
 
-- ``categorical_feature_index``
+- ``categorical_feature_index`` or ``categorical_feature_indices``
 - ``categorical_time_aware=True``
 
 That enables time-aware categorical handling during training.

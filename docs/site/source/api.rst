@@ -11,10 +11,20 @@ Package root
    :undoc-members:
    :show-inheritance:
 
-Estimator
----------
+Estimators
+----------
 
 .. automodule:: alloygbm.regressor
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: alloygbm.classifier
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: alloygbm.ranker
    :members:
    :undoc-members:
    :show-inheritance:

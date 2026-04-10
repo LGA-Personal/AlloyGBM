@@ -1,6 +1,7 @@
 # Feature Importances And SHAP
 
-AlloyGBM exposes SHAP-based explanation methods from the Python API.
+AlloyGBM exposes SHAP-based explanation methods from the Python API, backed by
+a native Rust TreeSHAP implementation.
 
 ## Local Explanations
 
@@ -42,10 +43,25 @@ The current supported method is:
 
 - `shap_values(...)` returns one attribution per feature for each input row.
 - `feature_importances(...)` returns `(feature_name, importance)` tuples.
-- Feature names currently default to generated names such as `f0`, `f1`, and so on.
+- Feature names are captured from training data column names when available
+  (e.g. pandas DataFrames), or auto-generated as `f0`, `f1`, etc.
 
-## Current Scope
+## TreeSHAP Implementation
 
-AlloyGBM currently exposes SHAP for regression artifacts. This is part of the
-core public API and is backed by native Rust code, but the surrounding
-explainability surface is still intentionally narrow.
+AlloyGBM uses the polynomial-time TreeSHAP algorithm for computing exact
+Shapley values. This means:
+
+- There is no practical limit on the number of features.
+- Computation scales with tree complexity, not exponentially with feature count.
+- Results are exact (not approximate).
+
+The previous brute-force SHAP method (limited to 25 features) has been replaced
+by TreeSHAP in `v0.2.0`.
+
+## Supported Estimators
+
+SHAP explanations work with all three estimators:
+
+- `GBMRegressor.shap_values(...)`
+- `GBMClassifier.shap_values(...)`
+- `GBMRanker.shap_values(...)`

@@ -1,20 +1,21 @@
 AlloyGBM Documentation
 ======================
 
-**AlloyGBM** is a Rust-first gradient boosting library for structured
-regression, with a Python API oriented around native execution, deterministic
-training, explicit validation, time-aware validation, and zero-copy, 
-artifact-backed prediction.
+**AlloyGBM** is a Rust-first gradient boosting library supporting regression,
+binary classification, and learning-to-rank, with a Python API oriented around
+native execution, deterministic training, explicit validation, time-aware
+workflows, and zero-copy artifact-backed prediction.
 
-The project is currently strongest on panel-style and finance-style regression
-workloads, while remaining honest about weaker regimes such as broader
-real-world tabular benchmarks.
+The project is strongest on panel-style and finance-style workloads, with
+competitive performance on general tabular benchmarks across all three task
+types.
 
 .. note::
 
-   AlloyGBM `0.1.x` is an intentionally narrow first public release series.
-   Current release packaging focuses on macOS ``arm64``, Linux ``x86_64``
-   manylinux wheels, and source distributions.
+   AlloyGBM ``0.2.0`` is a major capability expansion from the regression-only
+   ``0.1.x`` series, adding classification, ranking, NaN support, model
+   persistence, TreeSHAP, and many more features. See :doc:`release` for
+   details.
 
 Getting started
 ---------------
@@ -28,6 +29,8 @@ If you are new to AlloyGBM, start in this order:
    installation
    quickstart
    estimator
+   classifier
+   ranker
    validation
    explanations
    benchmarks
