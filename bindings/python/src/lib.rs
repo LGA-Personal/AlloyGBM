@@ -10,7 +10,8 @@ use alloygbm_core::{
 };
 use alloygbm_engine::{
     ArtifactCompatibilityMode, BinaryCrossEntropyObjective, CategoricalTargetEncodingSpec,
-    EngineError, IterationRunSummary, LambdaMARTObjective, PairwiseRankingObjective,
+    EngineError, IterationRunSummary, LambdaMARTObjective, MultiClassIterationRunSummary,
+    MultiClassSoftmaxObjective, PairwiseRankingObjective,
     QueryRMSEObjective, SquaredErrorObjective, TrainedModel, Trainer, TrainingPolicyMode,
     WarmStartState, XeNDCGObjective, YetiRankObjective,
 };
@@ -327,6 +328,49 @@ impl NativePredictorHandle {
             &quantized,
         )
         .map_err(predictor_error_to_pyerr)
+    }
+
+    // -- Multi-class prediction -----------------------------------------------
+
+    fn is_multiclass(&self) -> bool {
+        self.predictor.is_multiclass()
+    }
+
+    fn num_classes(&self) -> Option<usize> {
+        self.predictor.num_classes()
+    }
+
+    /// Multi-class prediction returning flat Vec of length n_rows * K.
+    fn predict_multiclass(&self, rows: Vec<Vec<f32>>) -> PyResult<Vec<f32>> {
+        self.predictor
+            .predict_batch_multiclass(&rows)
+            .map_err(predictor_error_to_pyerr)
+    }
+
+    /// Multi-class prediction from dense flat array.
+    fn predict_dense_multiclass(
+        &self,
+        values: Vec<f32>,
+        row_count: usize,
+        feature_count: usize,
+    ) -> PyResult<Vec<f32>> {
+        self.predictor
+            .predict_batch_dense_multiclass(&values, row_count, feature_count)
+            .map_err(predictor_error_to_pyerr)
+    }
+
+    /// Multi-class prediction from a numpy array (zero-copy).
+    fn predict_numpy_multiclass(&self, array: PyReadonlyArray2<f32>) -> PyResult<Vec<f32>> {
+        let shape = array.shape();
+        let row_count = shape[0];
+        let feature_count = shape[1];
+        let array_view = array.as_array();
+        let values = array_view.as_slice().ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err("numpy array must be C-contiguous")
+        })?;
+        self.predictor
+            .predict_batch_dense_multiclass(values, row_count, feature_count)
+            .map_err(predictor_error_to_pyerr)
     }
 }
 
@@ -1815,6 +1859,38 @@ fn apply_categorical_encoding_to_validation_matrices_multi(
     })
 }
 
+fn build_native_training_summary_from_multiclass(
+    summary: &MultiClassIterationRunSummary,
+    bridge_prepare_seconds: f64,
+    native_train_seconds: f64,
+    objective: &str,
+) -> NativeTrainingSummary {
+    NativeTrainingSummary {
+        rounds_requested: summary.rounds_requested,
+        rounds_completed: summary.rounds_completed,
+        best_validation_round: summary
+            .best_validation_round
+            .and_then(|round| round.checked_sub(1)),
+        best_validation_loss: summary.best_validation_loss,
+        train_rmse: summary
+            .loss_per_completed_round
+            .iter()
+            .map(|loss| loss.max(0.0).sqrt())
+            .collect(),
+        validation_rmse: summary
+            .validation_loss_per_completed_round
+            .iter()
+            .map(|loss| loss.max(0.0).sqrt())
+            .collect(),
+        train_loss: summary.loss_per_completed_round.clone(),
+        validation_loss: summary.validation_loss_per_completed_round.clone(),
+        objective: objective.to_string(),
+        stop_reason: format!("{:?}", summary.stop_reason),
+        bridge_prepare_seconds,
+        native_train_seconds,
+    }
+}
+
 fn build_native_training_summary(
     summary: &IterationRunSummary,
     bridge_prepare_seconds: f64,
@@ -1872,6 +1948,7 @@ fn train_regression_artifact_with_summary_dense_impl(
     continuous_binning_max_bins: usize,
     objective: &str,
     init_artifact_bytes: Option<&[u8]>,
+    num_classes: Option<usize>,
 ) -> Result<NativeTrainingResult, EngineError> {
     let bridge_start = Instant::now();
     let need_dense_values = !categorical_specs.is_empty();
@@ -2087,11 +2164,68 @@ fn train_regression_artifact_with_summary_dense_impl(
                 _ => unreachable!(),
             }
         }
+        "multiclass_softmax" => {
+            let k = num_classes.ok_or_else(|| {
+                EngineError::InvalidConfig(
+                    "multiclass_softmax objective requires num_classes to be specified".to_string(),
+                )
+            })?;
+            if k < 2 {
+                return Err(EngineError::InvalidConfig(format!(
+                    "multiclass_softmax requires num_classes >= 2, got {k}"
+                )));
+            }
+            let mc_obj = MultiClassSoftmaxObjective::new(k)?;
+            let controls = trainer.iteration_controls_for_policy(
+                &prepared.dataset,
+                &prepared.binned_matrix,
+                rounds,
+                training_policy,
+            )?;
+            let mc_summary = if let Some(validation_prepared) = validation_prepared.as_ref() {
+                trainer.fit_multiclass_iterations_with_validation_summary(
+                    &prepared.dataset,
+                    &prepared.binned_matrix,
+                    alloygbm_engine::ValidationDatasetRef {
+                        dataset: &validation_prepared.dataset,
+                        binned_matrix: &validation_prepared.binned_matrix,
+                    },
+                    &backend,
+                    &mc_obj,
+                    controls,
+                )?
+            } else {
+                trainer.fit_multiclass_iterations_with_summary(
+                    &prepared.dataset,
+                    &prepared.binned_matrix,
+                    &backend,
+                    &mc_obj,
+                    controls,
+                )?
+            };
+            let native_train_seconds = native_start.elapsed().as_secs_f64();
+            let native_summary = build_native_training_summary_from_multiclass(
+                &mc_summary,
+                bridge_prepare_seconds,
+                native_train_seconds,
+                objective,
+            );
+            let mut mc_model = mc_summary.model;
+            if let Some(state) = categorical_state {
+                mc_model = mc_model.with_categorical_state(Some(state))?;
+            }
+            let artifact_bytes = mc_model.to_artifact_bytes()?;
+            return Ok(NativeTrainingResult {
+                artifact_bytes,
+                summary: native_summary,
+                continuous_binning_metadata: prepared.metadata.into(),
+            });
+        }
         other => {
             return Err(EngineError::InvalidConfig(format!(
                 "unknown objective '{other}', expected one of: squared_error, \
-                 binary_crossentropy, queryrmse, rank_pairwise, rank_ndcg, \
-                 rank_xendcg, yetirank"
+                 binary_crossentropy, multiclass_softmax, queryrmse, rank_pairwise, \
+                 rank_ndcg, rank_xendcg, yetirank"
             )));
         }
     };
@@ -2443,6 +2577,7 @@ fn train_regression_artifact(
         continuous_binning_max_bins,
         objective,
         None, // init_artifact_bytes
+        None, // num_classes
     )
     .map(|result| result.artifact_bytes)
     .map_err(engine_error_to_pyerr)
@@ -2561,6 +2696,7 @@ fn train_regression_artifact_dense(
         continuous_binning_max_bins,
         objective,
         None, // init_artifact_bytes
+        None, // num_classes
     )
     .map(|result| result.artifact_bytes)
     .map_err(engine_error_to_pyerr)
@@ -2609,7 +2745,8 @@ fn train_regression_artifact_dense(
     categorical_feature_indices=None,
     categorical_feature_values_list=None,
     validation_categorical_feature_values_list=None,
-    init_artifact_bytes=None
+    init_artifact_bytes=None,
+    num_classes=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_with_summary(
@@ -2656,6 +2793,7 @@ fn train_regression_artifact_with_summary(
     categorical_feature_values_list: Option<Vec<Vec<String>>>,
     validation_categorical_feature_values_list: Option<Vec<Vec<String>>>,
     init_artifact_bytes: Option<Vec<u8>>,
+    num_classes: Option<usize>,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -2742,6 +2880,7 @@ fn train_regression_artifact_with_summary(
         continuous_binning_max_bins,
         objective,
         init_artifact_bytes.as_deref(),
+        num_classes,
     )
     .map_err(engine_error_to_pyerr)
 }
@@ -2792,7 +2931,8 @@ fn train_regression_artifact_with_summary(
     categorical_feature_indices=None,
     categorical_feature_values_list=None,
     validation_categorical_feature_values_list=None,
-    init_artifact_bytes=None
+    init_artifact_bytes=None,
+    num_classes=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary(
@@ -2842,6 +2982,7 @@ fn train_regression_artifact_dense_with_summary(
     categorical_feature_values_list: Option<Vec<Vec<String>>>,
     validation_categorical_feature_values_list: Option<Vec<Vec<String>>>,
     init_artifact_bytes: Option<Vec<u8>>,
+    num_classes: Option<usize>,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -2909,6 +3050,7 @@ fn train_regression_artifact_dense_with_summary(
         continuous_binning_max_bins,
         objective,
         init_artifact_bytes.as_deref(),
+        num_classes,
     )
     .map_err(engine_error_to_pyerr)
 }
@@ -2974,7 +3116,8 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> PyResult<Vec<f32>> {
     categorical_feature_indices=None,
     categorical_feature_values_list=None,
     validation_categorical_feature_values_list=None,
-    init_artifact_bytes=None
+    init_artifact_bytes=None,
+    num_classes=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary_bytes(
@@ -3024,6 +3167,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
     categorical_feature_values_list: Option<Vec<Vec<String>>>,
     validation_categorical_feature_values_list: Option<Vec<Vec<String>>>,
     init_artifact_bytes: Option<Vec<u8>>,
+    num_classes: Option<usize>,
 ) -> PyResult<NativeTrainingResult> {
     let values = bytes_to_f32_vec(values_bytes)?;
     let targets = bytes_to_f32_vec(targets_bytes)?;
@@ -3095,6 +3239,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
         continuous_binning_max_bins,
         objective,
         init_artifact_bytes.as_deref(),
+        num_classes,
     )
     .map_err(engine_error_to_pyerr)
 }
@@ -3186,6 +3331,7 @@ mod tests {
             MAX_CONTINUOUS_QUANTIZED_BIN_U8 as usize + 1,
             "squared_error",
             None, // init_artifact_bytes
+            None, // num_classes
         )
         .map(|result| result.artifact_bytes)
     }

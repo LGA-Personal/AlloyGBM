@@ -162,6 +162,12 @@ fn load_artifact_context(artifact_bytes: &[u8]) -> ShapResult<ArtifactShapContex
     let parsed = deserialize_model_artifact_v1(artifact_bytes)
         .map_err(|error| ShapError::ContractViolation(error.to_string()))?;
 
+    if parsed.contract.metadata.num_classes.is_some() {
+        return Err(ShapError::ContractViolation(
+            "SHAP values are not yet supported for multi-class models".to_string(),
+        ));
+    }
+
     let compatibility_report = required_section_compatibility_report(&parsed.sections);
     if !compatibility_report.legacy_compatible {
         return Err(ShapError::ContractViolation(
@@ -914,6 +920,7 @@ mod tests {
                 .collect(),
             trained_device: Device::Cpu,
             objective: "squared_error".to_string(),
+            num_classes: None,
         }
     }
 

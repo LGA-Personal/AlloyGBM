@@ -1,0 +1,11 @@
+name: synthetic_multiclass
+version: 1
+kind: synthetic
+task_type: multiclass_classification
+description: Synthetic multi-class classification benchmark (5 classes, 20 features).
+source:
+  generator: benchmarks/synthetic_multiclass/prepare.py
+prepared:
+  filename: prepared.csv
+  target: target
+  note: 10K rows, 20 features, 5-class target from cluster-based decision boundaries.

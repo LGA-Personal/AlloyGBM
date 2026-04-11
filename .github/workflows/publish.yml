@@ -143,6 +143,17 @@ jobs:
           print("classifier labels:", labels)
           print("classifier probas shape:", probas.shape)
 
+          # Multi-class classification smoke
+          import numpy as np
+          X_mc = np.random.RandomState(42).randn(90, 3).astype(np.float32)
+          y_mc = np.repeat([0, 1, 2], 30).astype(np.float32)
+          mc_clf = GBMClassifier(n_estimators=20, seed=1, deterministic=True)
+          mc_clf.fit(X_mc, y_mc)
+          mc_probas = mc_clf.predict_proba(X_mc)
+          assert mc_probas.shape == (90, 3)
+          assert np.allclose(mc_probas.sum(axis=1), 1.0, atol=1e-5)
+          print("multiclass probas shape:", mc_probas.shape)
+
           # Ranker smoke
           rnk = GBMRanker(
               ranking_objective="rank:ndcg",

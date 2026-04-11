@@ -124,6 +124,31 @@ jobs:
           print("GBMClassifier smoke ok")
           PY
 
+      - name: Python multi-class classifier smoke
+        run: |
+          python - <<'PY'
+          import numpy as np
+          from alloygbm import GBMClassifier
+
+          X = np.random.RandomState(42).randn(150, 4).astype(np.float32)
+          y = np.repeat([0, 1, 2], 50).astype(np.float32)
+
+          model = GBMClassifier(n_estimators=20, seed=1)
+          model.fit(X, y)
+
+          assert model.n_classes_ == 3, f"expected 3 classes, got {model.n_classes_}"
+          assert model.classes_ == [0, 1, 2]
+
+          probas = model.predict_proba(X)
+          assert probas.shape == (150, 3), f"unexpected shape: {probas.shape}"
+          assert np.allclose(probas.sum(axis=1), 1.0, atol=1e-5), "probabilities don't sum to 1"
+
+          preds = model.predict(X)
+          assert all(p in (0, 1, 2) for p in preds), f"unexpected labels: {set(preds)}"
+
+          print("GBMClassifier multi-class smoke ok")
+          PY
+
       - name: Python ranker smoke
         run: |
           python - <<'PY'

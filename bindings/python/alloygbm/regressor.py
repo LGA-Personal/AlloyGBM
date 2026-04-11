@@ -1142,6 +1142,7 @@ class GBMRegressor(_GBMRegressorBase):
                     categorical_feature_values_list=categorical_values_list if has_categorical else None,
                     validation_categorical_feature_values_list=validation_categorical_values_list if has_categorical else None,
                     init_artifact_bytes=init_artifact_bytes,
+                    num_classes=getattr(self, '_num_classes_for_training', None),
                 )
                 return self._finalize_training_result(native_result, input_adaptation_seconds, feature_count=feature_count)
             except (ImportError, AttributeError):
@@ -1228,6 +1229,7 @@ class GBMRegressor(_GBMRegressorBase):
                 categorical_feature_values_list=categorical_values_list if has_categorical else None,
                 validation_categorical_feature_values_list=validation_categorical_values_list if has_categorical else None,
                 init_artifact_bytes=init_artifact_bytes,
+                num_classes=getattr(self, '_num_classes_for_training', None),
             )
         else:
             assert training_rows is not None
@@ -1275,6 +1277,7 @@ class GBMRegressor(_GBMRegressorBase):
                 categorical_feature_values_list=categorical_values_list if has_categorical else None,
                 validation_categorical_feature_values_list=validation_categorical_values_list if has_categorical else None,
                 init_artifact_bytes=init_artifact_bytes,
+                num_classes=getattr(self, '_num_classes_for_training', None),
             )
 
         self._apply_continuous_binning_metadata(native_result.continuous_binning_metadata)
@@ -2919,6 +2922,18 @@ class GBMRegressor(_GBMRegressorBase):
             "evals_result": self.evals_result_,
             "feature_names_in": self.feature_names_in_,
         }
+        # Classifier-specific metadata
+        from .classifier import GBMClassifier
+        if isinstance(self, GBMClassifier):
+            metadata["classifier_classes"] = getattr(self, "classes_", None)
+            metadata["classifier_n_classes"] = getattr(self, "n_classes_", None)
+            encoder = getattr(self, "_label_encoder", None)
+            metadata["classifier_label_encoder"] = (
+                {str(k): v for k, v in encoder.items()} if encoder is not None else None
+            )
+            metadata["classifier_num_classes_for_training"] = getattr(
+                self, "_num_classes_for_training", None
+            )
         metadata_json = json.dumps(metadata).encode("utf-8")
         metadata_len = len(metadata_json)
 
@@ -2993,8 +3008,23 @@ class GBMRegressor(_GBMRegressorBase):
         from .classifier import GBMClassifier
 
         if isinstance(model, GBMClassifier):
-            model.classes_ = [0, 1]
-            model.n_classes_ = 2
+            saved_classes = metadata.get("classifier_classes")
+            if saved_classes is not None:
+                model.classes_ = saved_classes
+                model.n_classes_ = metadata.get("classifier_n_classes", len(saved_classes))
+            else:
+                model.classes_ = [0, 1]
+                model.n_classes_ = 2
+            saved_encoder = metadata.get("classifier_label_encoder")
+            if saved_encoder is not None:
+                model._label_encoder = {int(k): v for k, v in saved_encoder.items()}
+                model._label_decoder = {v: int(k) for k, v in saved_encoder.items()}
+            else:
+                model._label_encoder = None
+                model._label_decoder = None
+            model._num_classes_for_training = metadata.get(
+                "classifier_num_classes_for_training"
+            )
 
         return model
 
@@ -3028,6 +3058,13 @@ class GBMRegressor(_GBMRegressorBase):
             return None
         try:
             return native_predictor_handle_class(artifact_bytes, strict=True)
+        except Exception:
+            pass
+        # Fallback: non-strict loading (required for multi-class models which
+        # use MultiClassTrees section instead of the dual Trees+PredictorLayout
+        # format that strict mode requires).
+        try:
+            return native_predictor_handle_class(artifact_bytes, strict=False)
         except Exception:
             return None
 

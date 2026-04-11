@@ -1699,6 +1699,7 @@ impl TrainedModel {
                 .collect(),
             trained_device: Device::Cpu,
             objective: self.objective.clone(),
+            num_classes: None,
         };
 
         let mut sections = vec![
@@ -2176,6 +2177,379 @@ impl Trainer {
                 warm_start: Some(warm_start),
             },
         )
+    }
+
+    // -- Multi-class training -------------------------------------------------
+
+    pub fn fit_multiclass_iterations_with_summary<B: BackendOps>(
+        &self,
+        dataset: &TrainingDataset,
+        binned_matrix: &BinnedMatrix,
+        backend: &B,
+        objective: &MultiClassSoftmaxObjective,
+        controls: IterationControls,
+    ) -> EngineResult<MultiClassIterationRunSummary> {
+        self.fit_multiclass_iterations_impl(
+            dataset,
+            binned_matrix,
+            None,
+            backend,
+            objective,
+            controls,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn fit_multiclass_iterations_with_validation_summary<B: BackendOps>(
+        &self,
+        dataset: &TrainingDataset,
+        binned_matrix: &BinnedMatrix,
+        validation: ValidationDatasetRef<'_>,
+        backend: &B,
+        objective: &MultiClassSoftmaxObjective,
+        controls: IterationControls,
+    ) -> EngineResult<MultiClassIterationRunSummary> {
+        self.fit_multiclass_iterations_impl(
+            dataset,
+            binned_matrix,
+            Some(validation),
+            backend,
+            objective,
+            controls,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn fit_multiclass_iterations_impl<B: BackendOps>(
+        &self,
+        dataset: &TrainingDataset,
+        binned_matrix: &BinnedMatrix,
+        validation: Option<ValidationDatasetRef<'_>>,
+        backend: &B,
+        objective: &MultiClassSoftmaxObjective,
+        controls: IterationControls,
+    ) -> EngineResult<MultiClassIterationRunSummary> {
+        let k = objective.num_classes;
+        validate_iteration_controls(controls)?;
+        if controls.early_stopping_rounds.is_some() && validation.is_none() {
+            return Err(EngineError::InvalidConfig(
+                "validation early stopping requires a validation dataset".to_string(),
+            ));
+        }
+        validate_training_alignment(dataset, binned_matrix)?;
+        if let Some(validation_ref) = validation {
+            validate_training_alignment(validation_ref.dataset, validation_ref.binned_matrix)?;
+            if validation_ref.dataset.matrix.feature_count != dataset.matrix.feature_count {
+                return Err(EngineError::ContractViolation(format!(
+                    "validation feature_count {} does not match training feature_count {}",
+                    validation_ref.dataset.matrix.feature_count, dataset.matrix.feature_count
+                )));
+            }
+        }
+
+        // Validate targets are valid class indices
+        for (i, &t) in dataset.targets.iter().enumerate() {
+            let class = t as usize;
+            if class >= k || t < 0.0 || t != t.floor() {
+                return Err(EngineError::ContractViolation(format!(
+                    "target at index {i} is {t}, expected integer in [0, {k})"
+                )));
+            }
+        }
+
+        let sampling_seed_base =
+            sampling_seed_base(self.params.seed, self.params.deterministic);
+        let split_options = split_selection_options_for_training(
+            &self.params,
+            None,
+            dataset,
+            binned_matrix,
+        )?;
+        let feature_count = binned_matrix.feature_count;
+
+        // Initialize K prediction arrays
+        let baselines = objective.initial_predictions();
+        let n = dataset.row_count();
+        let mut class_predictions: Vec<Vec<f32>> =
+            baselines.iter().map(|&b| vec![b; n]).collect();
+        let mut class_candidate_predictions: Vec<Vec<f32>> =
+            class_predictions.clone();
+        let mut class_stumps: Vec<Vec<TrainedStump>> = vec![Vec::new(); k];
+        // Track stump counts per class at each round boundary for truncation
+        let mut stumps_per_round_per_class: Vec<Vec<usize>> = Vec::new();
+
+        // Validation predictions
+        let mut validation_class_predictions: Option<Vec<Vec<f32>>> =
+            validation.map(|v| {
+                baselines
+                    .iter()
+                    .map(|&b| vec![b; v.dataset.row_count()])
+                    .collect()
+            });
+
+        let initial_loss = objective.loss(
+            &class_predictions,
+            &dataset.targets,
+            dataset.sample_weights.as_deref(),
+        )?;
+        let initial_validation_loss = if let Some(v) = validation {
+            let val_preds: Vec<Vec<f32>> = baselines
+                .iter()
+                .map(|&b| vec![b; v.dataset.row_count()])
+                .collect();
+            Some(objective.loss(
+                &val_preds,
+                &v.dataset.targets,
+                v.dataset.sample_weights.as_deref(),
+            )?)
+        } else {
+            None
+        };
+
+        let mut current_loss = initial_loss;
+        let mut rounds_completed = 0_usize;
+        let mut stop_reason = IterationStopReason::CompletedRequestedRounds;
+        let mut loss_per_completed_round = Vec::new();
+        let mut validation_loss_per_completed_round = Vec::new();
+        let mut sampled_rows_per_completed_round = Vec::new();
+        let mut sampled_features_per_completed_round = Vec::new();
+        let mut best_validation_loss = initial_validation_loss;
+        let mut best_validation_round = initial_validation_loss.map(|_| 0_usize);
+        let mut validation_no_improvement_rounds = 0_usize;
+        let mut weak_improvement_streak = 0_usize;
+        let mut weak_improvement_rounds_committed = 0_usize;
+        let mut current_validation_loss = initial_validation_loss;
+        let mut gradient_buffer: Vec<GradientPair> = Vec::with_capacity(n);
+
+        let effective_round_cap = controls.rounds;
+
+        for round_index in 0..effective_round_cap {
+            // Shared sampling for all K classes
+            let root_row_indices = sampled_row_indices(
+                n,
+                controls.row_subsample,
+                sampling_seed_base,
+                round_index as u64,
+            );
+            let (feature_tiles, sampled_feature_count) = sampled_feature_tiles(
+                feature_count,
+                controls.col_subsample,
+                sampling_seed_base,
+                round_index as u64,
+            )?;
+            let sampled_row_count = root_row_indices.len();
+
+            // Copy current predictions to candidates
+            for class_k in 0..k {
+                class_candidate_predictions[class_k]
+                    .copy_from_slice(&class_predictions[class_k]);
+            }
+
+            // Record stump counts before this round
+            let pre_round_counts: Vec<usize> =
+                class_stumps.iter().map(|s| s.len()).collect();
+
+            // Build K trees
+            let mut any_tree_produced = false;
+            for class_k in 0..k {
+                objective.compute_gradients_for_class(
+                    &class_predictions,
+                    &dataset.targets,
+                    dataset.sample_weights.as_deref(),
+                    class_k,
+                    &mut gradient_buffer,
+                )?;
+
+                let (round_stumps, _round_stop) =
+                    if self.params.tree_growth == TreeGrowth::Leaf {
+                        build_tree_leaf_wise(
+                            backend,
+                            binned_matrix,
+                            &gradient_buffer,
+                            root_row_indices.clone(),
+                            round_index,
+                            &feature_tiles,
+                            split_options,
+                            &self.params,
+                            &controls,
+                            &mut class_candidate_predictions[class_k],
+                            &self.params.feature_weights,
+                        )?
+                    } else {
+                        build_tree_level_wise(
+                            backend,
+                            binned_matrix,
+                            &gradient_buffer,
+                            root_row_indices.clone(),
+                            round_index,
+                            &feature_tiles,
+                            split_options,
+                            &self.params,
+                            &controls,
+                            &mut class_candidate_predictions[class_k],
+                            &self.params.feature_weights,
+                        )?
+                    };
+
+                if !round_stumps.is_empty() {
+                    any_tree_produced = true;
+                }
+                class_stumps[class_k].extend(round_stumps);
+            }
+
+            if !any_tree_produced {
+                // Revert stump counts
+                for class_k in 0..k {
+                    class_stumps[class_k].truncate(pre_round_counts[class_k]);
+                }
+                stop_reason = IterationStopReason::NoSplitCandidate;
+                break;
+            }
+
+            // Check loss improvement
+            let candidate_loss = objective.loss(
+                &class_candidate_predictions,
+                &dataset.targets,
+                dataset.sample_weights.as_deref(),
+            )?;
+            let loss_improvement = current_loss - candidate_loss;
+            if loss_improvement < 0.0 {
+                // Revert stump counts
+                for class_k in 0..k {
+                    class_stumps[class_k].truncate(pre_round_counts[class_k]);
+                }
+                stop_reason = IterationStopReason::LossImprovementBelowThreshold;
+                break;
+            }
+            if loss_improvement < controls.min_loss_improvement {
+                if weak_improvement_streak >= controls.max_consecutive_weak_improvements
+                {
+                    for class_k in 0..k {
+                        class_stumps[class_k].truncate(pre_round_counts[class_k]);
+                    }
+                    stop_reason = IterationStopReason::LossImprovementBelowThreshold;
+                    break;
+                }
+                weak_improvement_streak += 1;
+                weak_improvement_rounds_committed += 1;
+            } else {
+                weak_improvement_streak = 0;
+            }
+
+            // Validation early stopping
+            let mut stop_for_validation_plateau = false;
+            if let Some(validation_ref) = validation {
+                let val_preds = validation_class_predictions.as_mut().unwrap();
+                for class_k in 0..k {
+                    let round_stumps =
+                        &class_stumps[class_k][pre_round_counts[class_k]..];
+                    if !round_stumps.is_empty() {
+                        apply_round_stumps_tree_walk(
+                            &mut val_preds[class_k],
+                            validation_ref.binned_matrix,
+                            round_stumps,
+                        )?;
+                    }
+                }
+                let next_validation_loss = objective.loss(
+                    val_preds,
+                    &validation_ref.dataset.targets,
+                    validation_ref.dataset.sample_weights.as_deref(),
+                )?;
+
+                let improved = best_validation_loss
+                    .map(|best| {
+                        best - next_validation_loss
+                            > controls.min_validation_improvement
+                    })
+                    .unwrap_or(true);
+                if improved {
+                    best_validation_loss = Some(next_validation_loss);
+                    best_validation_round = Some(rounds_completed + 1);
+                    validation_no_improvement_rounds = 0;
+                } else if controls.early_stopping_rounds.is_some() {
+                    validation_no_improvement_rounds += 1;
+                }
+                if let Some(patience) = controls.early_stopping_rounds {
+                    if validation_no_improvement_rounds >= patience {
+                        stop_for_validation_plateau = true;
+                    }
+                }
+
+                current_validation_loss = Some(next_validation_loss);
+                validation_loss_per_completed_round.push(next_validation_loss);
+            }
+
+            // Accept round
+            for class_k in 0..k {
+                class_predictions[class_k]
+                    .copy_from_slice(&class_candidate_predictions[class_k]);
+            }
+            current_loss = candidate_loss;
+            loss_per_completed_round.push(candidate_loss);
+            sampled_rows_per_completed_round.push(sampled_row_count);
+            sampled_features_per_completed_round.push(sampled_feature_count);
+            stumps_per_round_per_class.push(
+                (0..k)
+                    .map(|c| {
+                        class_stumps[c].len() - pre_round_counts[c]
+                    })
+                    .collect(),
+            );
+            rounds_completed += 1;
+
+            if stop_for_validation_plateau {
+                stop_reason = IterationStopReason::ValidationLossPlateau;
+                break;
+            }
+        }
+
+        // Truncate to best validation round if early stopping triggered
+        if stop_reason == IterationStopReason::ValidationLossPlateau {
+            if let Some(best_round) = best_validation_round {
+                if best_round < rounds_completed {
+                    // Compute how many stumps to keep per class
+                    for class_k in 0..k {
+                        let mut keep_count = 0_usize;
+                        for round in 0..best_round {
+                            keep_count +=
+                                stumps_per_round_per_class[round][class_k];
+                        }
+                        class_stumps[class_k].truncate(keep_count);
+                    }
+                    rounds_completed = best_round;
+                }
+            }
+        }
+
+        let final_loss = current_loss;
+        let final_validation_loss = current_validation_loss;
+
+        Ok(MultiClassIterationRunSummary {
+            model: MultiClassTrainedModel {
+                num_classes: k,
+                baseline_predictions: baselines,
+                feature_count,
+                class_stumps,
+                categorical_state: None,
+                objective: objective.objective_name().to_string(),
+            },
+            rounds_requested: effective_round_cap,
+            effective_round_cap,
+            rounds_completed,
+            stop_reason,
+            initial_loss,
+            initial_validation_loss,
+            loss_per_completed_round,
+            validation_loss_per_completed_round,
+            sampled_rows_per_completed_round,
+            sampled_features_per_completed_round,
+            best_validation_loss,
+            best_validation_round,
+            weak_improvement_rounds_committed,
+            final_loss,
+            final_validation_loss,
+        })
     }
 
     fn default_iteration_controls(&self, rounds: usize) -> EngineResult<IterationControls> {
@@ -4739,6 +5113,407 @@ fn read_f32_le(bytes: &[u8], start: usize) -> EngineResult<f32> {
     ]))
 }
 
+// ---------------------------------------------------------------------------
+// Multi-class softmax classification
+// ---------------------------------------------------------------------------
+
+/// Softmax cross-entropy objective for K-class classification.
+///
+/// Does NOT implement [`ObjectiveOps`] because that trait is fundamentally
+/// single-output. Multi-class training requires K prediction arrays and K
+/// gradient arrays computed jointly (softmax couples all classes).
+pub struct MultiClassSoftmaxObjective {
+    pub num_classes: usize,
+}
+
+impl MultiClassSoftmaxObjective {
+    pub fn new(num_classes: usize) -> EngineResult<Self> {
+        if num_classes < 2 {
+            return Err(EngineError::InvalidConfig(format!(
+                "multiclass_softmax requires at least 2 classes, got {num_classes}"
+            )));
+        }
+        Ok(Self { num_classes })
+    }
+
+    pub fn objective_name(&self) -> &str {
+        "multiclass_softmax"
+    }
+
+    /// Returns K initial predictions (all zeros → uniform 1/K under softmax).
+    pub fn initial_predictions(&self) -> Vec<f32> {
+        vec![0.0; self.num_classes]
+    }
+
+    /// Compute gradients for a single class given all K prediction arrays.
+    ///
+    /// `class_predictions[k][i]` is the raw logit for class k, sample i.
+    pub fn compute_gradients_for_class(
+        &self,
+        class_predictions: &[Vec<f32>],
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+        class_k: usize,
+        buffer: &mut Vec<GradientPair>,
+    ) -> EngineResult<()> {
+        let k = self.num_classes;
+        if class_predictions.len() != k {
+            return Err(EngineError::ContractViolation(format!(
+                "expected {} class prediction arrays, got {}",
+                k,
+                class_predictions.len()
+            )));
+        }
+        let n = class_predictions[0].len();
+        if targets.len() != n {
+            return Err(EngineError::ContractViolation(format!(
+                "targets length {} does not match predictions length {n}",
+                targets.len()
+            )));
+        }
+        if let Some(w) = sample_weights {
+            if w.len() != n {
+                return Err(EngineError::ContractViolation(format!(
+                    "sample_weights length {} does not match predictions length {n}",
+                    w.len()
+                )));
+            }
+        }
+
+        buffer.clear();
+        buffer.reserve(n.saturating_sub(buffer.capacity()));
+
+        for i in 0..n {
+            // Numerically stable softmax: subtract max
+            let mut max_logit = f32::NEG_INFINITY;
+            for c in 0..k {
+                let v = class_predictions[c][i];
+                if v > max_logit {
+                    max_logit = v;
+                }
+            }
+            let mut sum_exp = 0.0_f32;
+            for c in 0..k {
+                sum_exp += (class_predictions[c][i] - max_logit).exp();
+            }
+            let p_k = (class_predictions[class_k][i] - max_logit).exp() / sum_exp;
+
+            let indicator = if (targets[i] as usize) == class_k {
+                1.0
+            } else {
+                0.0
+            };
+            let weight = sample_weights.map_or(1.0, |w| w[i]);
+            let grad = (p_k - indicator) * weight;
+            let hess = (p_k * (1.0 - p_k) * weight).max(1e-7);
+
+            buffer.push(GradientPair { grad, hess });
+        }
+
+        Ok(())
+    }
+
+    /// Multi-class cross-entropy loss.
+    pub fn loss(
+        &self,
+        class_predictions: &[Vec<f32>],
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+    ) -> EngineResult<f32> {
+        let k = self.num_classes;
+        if class_predictions.len() != k {
+            return Err(EngineError::ContractViolation(format!(
+                "expected {} class prediction arrays, got {}",
+                k,
+                class_predictions.len()
+            )));
+        }
+        let n = class_predictions[0].len();
+        if n == 0 {
+            return Ok(0.0);
+        }
+
+        let mut total_loss = 0.0_f64;
+        let mut total_weight = 0.0_f64;
+
+        for i in 0..n {
+            let target_class = targets[i] as usize;
+            let weight = sample_weights.map_or(1.0_f64, |w| w[i] as f64);
+
+            // log-sum-exp trick for numerical stability
+            let mut max_logit = f32::NEG_INFINITY;
+            for c in 0..k {
+                let v = class_predictions[c][i];
+                if v > max_logit {
+                    max_logit = v;
+                }
+            }
+            let mut sum_exp = 0.0_f64;
+            for c in 0..k {
+                sum_exp += ((class_predictions[c][i] - max_logit) as f64).exp();
+            }
+            let log_p = (class_predictions[target_class][i] - max_logit) as f64 - sum_exp.ln();
+
+            total_loss -= log_p * weight;
+            total_weight += weight;
+        }
+
+        if total_weight <= 0.0 {
+            return Ok(0.0);
+        }
+        Ok((total_loss / total_weight) as f32)
+    }
+}
+
+/// Trained multi-class model: K tree sequences (one per class).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MultiClassTrainedModel {
+    pub num_classes: usize,
+    pub baseline_predictions: Vec<f32>,
+    pub feature_count: usize,
+    pub class_stumps: Vec<Vec<TrainedStump>>,
+    pub categorical_state: Option<CategoricalStatePayloadV1>,
+    pub objective: String,
+}
+
+impl MultiClassTrainedModel {
+    pub fn rounds_completed(&self) -> usize {
+        if self.class_stumps.is_empty() || self.class_stumps[0].is_empty() {
+            return 0;
+        }
+        // Count unique tree IDs in class 0's stumps
+        let mut max_tree_id = 0_u32;
+        for stump in &self.class_stumps[0] {
+            let tree_id = stump.split.node_id / TREE_NODE_STRIDE;
+            if tree_id > max_tree_id {
+                max_tree_id = tree_id;
+            }
+        }
+        max_tree_id as usize + 1
+    }
+
+    pub fn with_categorical_state(
+        mut self,
+        state: Option<CategoricalStatePayloadV1>,
+    ) -> EngineResult<Self> {
+        if let Some(ref state) = state {
+            validate_categorical_state_payload_v1(state, Some(self.feature_count))?;
+        }
+        self.categorical_state = state;
+        Ok(self)
+    }
+
+    pub fn to_artifact_bytes(&self) -> EngineResult<Vec<u8>> {
+        let feature_count_u32 = u32::try_from(self.feature_count).map_err(|_| {
+            EngineError::ContractViolation("feature_count exceeds u32::MAX".to_string())
+        })?;
+        let num_classes_u32 = u32::try_from(self.num_classes).map_err(|_| {
+            EngineError::ContractViolation("num_classes exceeds u32::MAX".to_string())
+        })?;
+
+        // Build MultiClassTrees section payload
+        let mut mc_payload = Vec::new();
+        mc_payload.extend_from_slice(&MODEL_FORMAT_V1.to_le_bytes());
+        mc_payload.extend_from_slice(&num_classes_u32.to_le_bytes());
+        mc_payload.extend_from_slice(&feature_count_u32.to_le_bytes());
+
+        for baseline in &self.baseline_predictions {
+            mc_payload.extend_from_slice(&baseline.to_le_bytes());
+        }
+
+        for class_stumps in &self.class_stumps {
+            let count = u32::try_from(class_stumps.len()).map_err(|_| {
+                EngineError::ContractViolation("stump count exceeds u32::MAX".to_string())
+            })?;
+            mc_payload.extend_from_slice(&count.to_le_bytes());
+        }
+
+        for class_stumps in &self.class_stumps {
+            for stump in class_stumps {
+                mc_payload.extend_from_slice(&stump.split.node_id.to_le_bytes());
+                mc_payload.extend_from_slice(&stump.split.feature_index.to_le_bytes());
+                mc_payload.extend_from_slice(&stump.split.threshold_bin.to_le_bytes());
+                let flags: u16 = if stump.split.default_left { 1 } else { 0 };
+                mc_payload.extend_from_slice(&flags.to_le_bytes());
+                mc_payload.extend_from_slice(&stump.split.gain.to_le_bytes());
+                mc_payload.extend_from_slice(&stump.left_leaf_value.to_le_bytes());
+                mc_payload.extend_from_slice(&stump.right_leaf_value.to_le_bytes());
+                mc_payload
+                    .extend_from_slice(&stump.split.left_stats.row_count.to_le_bytes());
+                mc_payload
+                    .extend_from_slice(&stump.split.right_stats.row_count.to_le_bytes());
+            }
+        }
+
+        // Build PredictorLayout payload
+        let mut layout_payload = Vec::new();
+        const THRESHOLD_MODE_BIN_INDEX: u32 = 1;
+        layout_payload.extend_from_slice(&MODEL_FORMAT_V1.to_le_bytes());
+        layout_payload.extend_from_slice(&feature_count_u32.to_le_bytes());
+        layout_payload.extend_from_slice(&THRESHOLD_MODE_BIN_INDEX.to_le_bytes());
+
+        let metadata = ModelMetadata {
+            format_version: MODEL_FORMAT_V1,
+            feature_names: (0..self.feature_count)
+                .map(|index| format!("f{index}"))
+                .collect(),
+            trained_device: Device::Cpu,
+            objective: self.objective.clone(),
+            num_classes: Some(num_classes_u32),
+        };
+
+        let mut sections = vec![
+            (ModelSectionKind::MultiClassTrees, mc_payload),
+            (ModelSectionKind::PredictorLayout, layout_payload),
+        ];
+        if let Some(categorical_state) = self.categorical_state.as_ref() {
+            let categorical_payload = encode_categorical_state_payload_v1(categorical_state)?;
+            sections.push((ModelSectionKind::CategoricalState, categorical_payload));
+        }
+
+        serialize_model_artifact_v1(&metadata, &sections).map_err(EngineError::from)
+    }
+
+    pub fn from_artifact_bytes(bytes: &[u8]) -> EngineResult<Self> {
+        let parsed = deserialize_model_artifact_v1(bytes).map_err(EngineError::from)?;
+
+        let mc_section = required_single_section(
+            &parsed.sections,
+            ModelSectionKind::MultiClassTrees,
+        )?;
+
+        let payload = &mc_section.payload;
+        const MC_HEADER_SIZE: usize = 12; // format_version + num_classes + feature_count
+        if payload.len() < MC_HEADER_SIZE {
+            return Err(EngineError::ContractViolation(
+                "multiclass trees payload too small".to_string(),
+            ));
+        }
+
+        let format_version = read_u32_le(payload, 0)?;
+        if format_version != MODEL_FORMAT_V1 {
+            return Err(EngineError::ContractViolation(format!(
+                "unsupported multiclass trees format version {format_version}"
+            )));
+        }
+        let num_classes = read_u32_le(payload, 4)? as usize;
+        let feature_count = read_u32_le(payload, 8)? as usize;
+
+        let baselines_start = MC_HEADER_SIZE;
+        let baselines_end = baselines_start + num_classes * 4;
+        if payload.len() < baselines_end {
+            return Err(EngineError::ContractViolation(
+                "multiclass trees payload too small for baselines".to_string(),
+            ));
+        }
+        let mut baseline_predictions = Vec::with_capacity(num_classes);
+        for k in 0..num_classes {
+            baseline_predictions.push(read_f32_le(payload, baselines_start + k * 4)?);
+        }
+
+        let counts_start = baselines_end;
+        let counts_end = counts_start + num_classes * 4;
+        if payload.len() < counts_end {
+            return Err(EngineError::ContractViolation(
+                "multiclass trees payload too small for stump counts".to_string(),
+            ));
+        }
+        let mut stump_counts = Vec::with_capacity(num_classes);
+        for k in 0..num_classes {
+            stump_counts.push(read_u32_le(payload, counts_start + k * 4)? as usize);
+        }
+
+        const STUMP_SIZE: usize = 32;
+        let total_stumps: usize = stump_counts.iter().sum();
+        let stumps_start = counts_end;
+        let expected_len = stumps_start + total_stumps * STUMP_SIZE;
+        if payload.len() != expected_len {
+            return Err(EngineError::ContractViolation(format!(
+                "multiclass trees payload length {} does not match expected {expected_len}",
+                payload.len()
+            )));
+        }
+
+        let mut class_stumps = Vec::with_capacity(num_classes);
+        let mut offset = stumps_start;
+        for k in 0..num_classes {
+            let count = stump_counts[k];
+            let mut stumps = Vec::with_capacity(count);
+            for _ in 0..count {
+                let node_id = read_u32_le(payload, offset)?;
+                let feature_index = read_u32_le(payload, offset + 4)?;
+                let threshold_bin = read_u16_le(payload, offset + 8)?;
+                let flags = read_u16_le(payload, offset + 10)?;
+                let default_left = (flags & 1) != 0;
+                let gain = read_f32_le(payload, offset + 12)?;
+                let left_leaf_value = read_f32_le(payload, offset + 16)?;
+                let right_leaf_value = read_f32_le(payload, offset + 20)?;
+                let left_count = read_u32_le(payload, offset + 24)?;
+                let right_count = read_u32_le(payload, offset + 28)?;
+
+                stumps.push(TrainedStump {
+                    split: SplitCandidate {
+                        node_id,
+                        feature_index,
+                        threshold_bin,
+                        gain,
+                        default_left,
+                        left_stats: NodeStats {
+                            grad_sum: 0.0,
+                            hess_sum: left_count as f32,
+                            row_count: left_count,
+                        },
+                        right_stats: NodeStats {
+                            grad_sum: 0.0,
+                            hess_sum: right_count as f32,
+                            row_count: right_count,
+                        },
+                    },
+                    left_leaf_value,
+                    right_leaf_value,
+                });
+                offset += STUMP_SIZE;
+            }
+            class_stumps.push(stumps);
+        }
+
+        let categorical_state = decode_optional_categorical_state_section_v1(
+            &parsed.sections,
+            feature_count,
+        )?;
+
+        Ok(Self {
+            num_classes,
+            baseline_predictions,
+            feature_count,
+            class_stumps,
+            categorical_state,
+            objective: parsed.contract.metadata.objective.clone(),
+        })
+    }
+}
+
+/// Summary from a multi-class training run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MultiClassIterationRunSummary {
+    pub model: MultiClassTrainedModel,
+    pub rounds_requested: usize,
+    pub effective_round_cap: usize,
+    pub rounds_completed: usize,
+    pub stop_reason: IterationStopReason,
+    pub initial_loss: f32,
+    pub initial_validation_loss: Option<f32>,
+    pub loss_per_completed_round: Vec<f32>,
+    pub validation_loss_per_completed_round: Vec<f32>,
+    pub sampled_rows_per_completed_round: Vec<usize>,
+    pub sampled_features_per_completed_round: Vec<usize>,
+    pub best_validation_loss: Option<f32>,
+    pub best_validation_round: Option<usize>,
+    pub weak_improvement_rounds_committed: usize,
+    pub final_loss: f32,
+    pub final_validation_loss: Option<f32>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5786,6 +6561,7 @@ mod tests {
                 .collect(),
             trained_device: Device::Cpu,
             objective: "squared_error".to_string(),
+            num_classes: None,
         };
         let trees_payload = encode_trained_model_payload(&model).expect("trees encode");
 
@@ -5811,6 +6587,7 @@ mod tests {
                 .collect(),
             trained_device: Device::Cpu,
             objective: "squared_error".to_string(),
+            num_classes: None,
         };
         let trees_payload = encode_trained_model_payload(&model).expect("trees encode");
         let legacy_trees_only =
@@ -5868,6 +6645,7 @@ mod tests {
                 .collect(),
             trained_device: Device::Cpu,
             objective: "squared_error".to_string(),
+            num_classes: None,
         };
         let trees_payload = encode_trained_model_payload(&model).expect("trees encode");
         let legacy_trees_only =
@@ -6083,6 +6861,7 @@ mod tests {
                 .collect(),
             trained_device: Device::Cpu,
             objective: "squared_error".to_string(),
+            num_classes: None,
         };
         let trees_payload = encode_trained_model_payload(&model).expect("trees encode");
         let layout_payload =
@@ -6131,6 +6910,7 @@ mod tests {
                 .collect(),
             trained_device: Device::Cpu,
             objective: "squared_error".to_string(),
+            num_classes: None,
         };
         let trees_payload = encode_trained_model_payload(&model).expect("trees encode");
         let legacy_trees_only =
@@ -6160,6 +6940,7 @@ mod tests {
                 .collect(),
             trained_device: Device::Cpu,
             objective: "squared_error".to_string(),
+            num_classes: None,
         };
         let trees_payload = encode_trained_model_payload(&model).expect("trees encode");
         let layout_payload =
@@ -6200,6 +6981,7 @@ mod tests {
                 .collect(),
             trained_device: Device::Cpu,
             objective: "squared_error".to_string(),
+            num_classes: None,
         };
         let trees_payload = encode_trained_model_payload(&model).expect("trees encode");
         let layout_payload =
@@ -6239,6 +7021,7 @@ mod tests {
                 .collect(),
             trained_device: Device::Cpu,
             objective: "squared_error".to_string(),
+            num_classes: None,
         };
         let trees_payload = encode_trained_model_payload(&model).expect("trees encode");
         let layout_payload =
@@ -6269,5 +7052,230 @@ mod tests {
             }
             other => panic!("expected contract violation, got {other:?}"),
         }
+    }
+
+    // -- Multi-class tests ---------------------------------------------------
+
+    #[test]
+    fn test_multiclass_softmax_rejects_single_class() {
+        let result = MultiClassSoftmaxObjective::new(1);
+        assert!(result.is_err());
+        if let Err(EngineError::InvalidConfig(msg)) = result {
+            assert!(msg.contains("at least 2"), "unexpected error: {msg}");
+        } else {
+            panic!("expected InvalidConfig error");
+        }
+    }
+
+    #[test]
+    fn test_multiclass_softmax_rejects_zero_classes() {
+        let result = MultiClassSoftmaxObjective::new(0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_multiclass_softmax_creates_with_valid_k() {
+        let obj = MultiClassSoftmaxObjective::new(3).expect("k=3 should work");
+        assert_eq!(obj.num_classes, 3);
+        assert_eq!(obj.objective_name(), "multiclass_softmax");
+    }
+
+    #[test]
+    fn test_multiclass_softmax_initial_predictions() {
+        let obj = MultiClassSoftmaxObjective::new(4).unwrap();
+        let preds = obj.initial_predictions();
+        assert_eq!(preds.len(), 4);
+        for &p in &preds {
+            assert_eq!(p, 0.0);
+        }
+    }
+
+    #[test]
+    fn test_multiclass_softmax_gradients_basic() {
+        let obj = MultiClassSoftmaxObjective::new(3).unwrap();
+        // 3 samples with targets [0, 1, 2]
+        let targets = vec![0.0_f32, 1.0, 2.0];
+        // Initial predictions: all zeros -> uniform softmax: 1/3 each
+        let predictions: Vec<Vec<f32>> = vec![vec![0.0; 3]; 3];
+        let mut buffer = Vec::new();
+
+        // Gradients for class 0:
+        // Sample 0 (target=0): grad = p_0 - 1 = 1/3 - 1 = -2/3
+        // Sample 1 (target=1): grad = p_0 - 0 = 1/3
+        // Sample 2 (target=2): grad = p_0 - 0 = 1/3
+        obj.compute_gradients_for_class(&predictions, &targets, None, 0, &mut buffer);
+        assert_eq!(buffer.len(), 3);
+        // Sample 0: grad should be negative (correct class)
+        assert!(buffer[0].grad < 0.0, "grad for correct class should be negative");
+        // Sample 1: grad should be positive (wrong class)
+        assert!(buffer[1].grad > 0.0, "grad for wrong class should be positive");
+        // Sample 2: grad should be positive (wrong class)
+        assert!(buffer[2].grad > 0.0, "grad for wrong class should be positive");
+
+        // Hessians should all be positive
+        for gp in &buffer {
+            assert!(gp.hess > 0.0, "hessian must be positive");
+        }
+
+        // Verify approximate values: grad ≈ -2/3 for correct, 1/3 for wrong
+        assert!((buffer[0].grad - (-2.0 / 3.0)).abs() < 0.01);
+        assert!((buffer[1].grad - (1.0 / 3.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_multiclass_softmax_gradients_with_weights() {
+        let obj = MultiClassSoftmaxObjective::new(2).unwrap();
+        let targets = vec![0.0_f32, 1.0];
+        let predictions: Vec<Vec<f32>> = vec![vec![0.0; 2]; 2];
+        let weights = vec![2.0_f32, 0.5];
+        let mut buffer = Vec::new();
+
+        obj.compute_gradients_for_class(&predictions, &targets, Some(&weights), 0, &mut buffer);
+        // With uniform softmax (p=0.5): grad_0 = (0.5 - 1) * 2.0 = -1.0
+        assert!((buffer[0].grad - (-1.0)).abs() < 0.01);
+        // grad_1 = (0.5 - 0) * 0.5 = 0.25
+        assert!((buffer[1].grad - 0.25).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_multiclass_softmax_loss() {
+        let obj = MultiClassSoftmaxObjective::new(3).unwrap();
+        let targets = vec![0.0_f32, 1.0, 2.0];
+        // Uniform predictions: loss = -log(1/3) = log(3) ≈ 1.0986
+        let predictions: Vec<Vec<f32>> = vec![vec![0.0; 3]; 3];
+        let loss = obj.loss(&predictions, &targets, None).unwrap();
+        assert!(loss.is_finite());
+        assert!(loss > 0.0);
+        let expected = (3.0_f32).ln();
+        assert!((loss - expected).abs() < 0.01, "loss {loss} ≈ {expected}");
+    }
+
+    #[test]
+    fn test_multiclass_softmax_loss_perfect_predictions() {
+        let obj = MultiClassSoftmaxObjective::new(3).unwrap();
+        let targets = vec![0.0_f32, 1.0, 2.0];
+        // Strong predictions toward correct classes
+        let predictions: Vec<Vec<f32>> = vec![
+            vec![10.0, -10.0, -10.0], // strongly class 0
+            vec![-10.0, 10.0, -10.0], // strongly class 1
+            vec![-10.0, -10.0, 10.0], // strongly class 2
+        ];
+        let loss = obj.loss(&predictions, &targets, None).unwrap();
+        assert!(loss < 0.01, "loss should be near zero for perfect predictions, got {loss}");
+    }
+
+    #[test]
+    fn test_multiclass_trained_model_artifact_roundtrip() {
+        // Create a minimal model manually
+        let model = MultiClassTrainedModel {
+            num_classes: 3,
+            baseline_predictions: vec![0.0, 0.0, 0.0],
+            feature_count: 2,
+            class_stumps: vec![
+                vec![TrainedStump {
+                    split: SplitCandidate {
+                        node_id: 0,
+                        feature_index: 0,
+                        threshold_bin: 1,
+                        gain: 2.5,
+                        default_left: false,
+                        left_stats: NodeStats { grad_sum: -1.0, hess_sum: 2.0, row_count: 3 },
+                        right_stats: NodeStats { grad_sum: 1.0, hess_sum: 2.0, row_count: 3 },
+                    },
+                    left_leaf_value: -0.1,
+                    right_leaf_value: 0.1,
+                }],
+                vec![TrainedStump {
+                    split: SplitCandidate {
+                        node_id: 0,
+                        feature_index: 1,
+                        threshold_bin: 2,
+                        gain: 1.5,
+                        default_left: true,
+                        left_stats: NodeStats { grad_sum: 0.5, hess_sum: 1.0, row_count: 2 },
+                        right_stats: NodeStats { grad_sum: -0.5, hess_sum: 1.0, row_count: 4 },
+                    },
+                    left_leaf_value: 0.2,
+                    right_leaf_value: -0.05,
+                }],
+                vec![], // class 2 has no stumps
+            ],
+            categorical_state: None,
+            objective: "multiclass_softmax".to_string(),
+        };
+
+        let bytes = model.to_artifact_bytes().expect("serialize should succeed");
+        assert!(!bytes.is_empty());
+
+        // Deserialize
+        let restored = MultiClassTrainedModel::from_artifact_bytes(&bytes)
+            .expect("deserialize should succeed");
+        assert_eq!(restored.num_classes, 3);
+        assert_eq!(restored.feature_count, 2);
+        assert_eq!(restored.baseline_predictions, vec![0.0, 0.0, 0.0]);
+        assert_eq!(restored.class_stumps.len(), 3);
+        assert_eq!(restored.class_stumps[0].len(), 1);
+        assert_eq!(restored.class_stumps[1].len(), 1);
+        assert_eq!(restored.class_stumps[2].len(), 0);
+        assert_eq!(restored.objective, "multiclass_softmax");
+    }
+
+    #[test]
+    fn test_multiclass_trained_model_rounds_completed() {
+        let model = MultiClassTrainedModel {
+            num_classes: 2,
+            baseline_predictions: vec![0.0, 0.0],
+            feature_count: 1,
+            class_stumps: vec![
+                // Class 0: 2 trees (round 0 has 3 stumps, round 1 has 1 stump)
+                vec![
+                    TrainedStump {
+                        split: SplitCandidate {
+                            node_id: 0, // tree 0, node 0
+                            feature_index: 0,
+                            threshold_bin: 1,
+                            gain: 1.0,
+                            default_left: false,
+                            left_stats: NodeStats { grad_sum: 0.0, hess_sum: 1.0, row_count: 2 },
+                            right_stats: NodeStats { grad_sum: 0.0, hess_sum: 1.0, row_count: 2 },
+                        },
+                        left_leaf_value: -0.1,
+                        right_leaf_value: 0.1,
+                    },
+                    TrainedStump {
+                        split: SplitCandidate {
+                            node_id: TREE_NODE_STRIDE, // tree 1, node 0
+                            feature_index: 0,
+                            threshold_bin: 2,
+                            gain: 0.5,
+                            default_left: false,
+                            left_stats: NodeStats { grad_sum: 0.0, hess_sum: 1.0, row_count: 2 },
+                            right_stats: NodeStats { grad_sum: 0.0, hess_sum: 1.0, row_count: 2 },
+                        },
+                        left_leaf_value: -0.05,
+                        right_leaf_value: 0.05,
+                    },
+                ],
+                // Class 1: same structure
+                vec![
+                    TrainedStump {
+                        split: SplitCandidate {
+                            node_id: 0,
+                            feature_index: 0,
+                            threshold_bin: 1,
+                            gain: 1.0,
+                            default_left: false,
+                            left_stats: NodeStats { grad_sum: 0.0, hess_sum: 1.0, row_count: 2 },
+                            right_stats: NodeStats { grad_sum: 0.0, hess_sum: 1.0, row_count: 2 },
+                        },
+                        left_leaf_value: 0.1,
+                        right_leaf_value: -0.1,
+                    },
+                ],
+            ],
+            categorical_state: None,
+            objective: "multiclass_softmax".to_string(),
+        };
+        assert_eq!(model.rounds_completed(), 2);
     }
 }

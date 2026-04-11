@@ -76,6 +76,10 @@ pub struct Predictor {
     /// When true, `threshold_bin` fields contain float thresholds (not bin indices)
     /// and prediction uses `<` comparison instead of `<=`.
     use_float_thresholds: bool,
+    // Multi-class fields (None for single-output models)
+    num_classes: Option<usize>,
+    baseline_predictions: Option<Vec<f32>>,
+    class_trees: Option<Vec<Vec<PredictorTree>>>,
 }
 
 impl Predictor {
@@ -86,24 +90,68 @@ impl Predictor {
             baseline_prediction: 0.0,
             trees: Vec::new(),
             use_float_thresholds: false,
+            num_classes: None,
+            baseline_predictions: None,
+            class_trees: None,
         }
     }
 
     pub fn from_artifact_bytes(bytes: &[u8]) -> PredictorResult<Self> {
         let parsed = deserialize_model_artifact_v1(bytes).map_err(PredictorError::from)?;
+        let metadata = parsed.contract.metadata;
+        let metadata_feature_count = metadata.feature_names.len();
+        let categorical_state =
+            decode_optional_categorical_state_section_v1(&parsed.sections, metadata_feature_count)
+                .map_err(PredictorError::from)?;
+
+        // Check for multi-class trees section first
+        if let Some(mc_section) =
+            optional_single_section(&parsed.sections, ModelSectionKind::MultiClassTrees)?
+        {
+            let predictor_layout =
+                resolve_predictor_layout(&parsed.sections, metadata_feature_count)?;
+            let (num_classes, feature_count, baselines, per_class_stumps) =
+                decode_multiclass_trees_payload(&mc_section.payload)?;
+
+            if predictor_layout.feature_count != metadata_feature_count {
+                return Err(PredictorError::ContractViolation(format!(
+                    "predictor layout feature_count {} does not match metadata feature count {}",
+                    predictor_layout.feature_count, metadata_feature_count
+                )));
+            }
+            if feature_count != metadata_feature_count {
+                return Err(PredictorError::ContractViolation(format!(
+                    "multiclass trees feature_count {} does not match metadata feature count {}",
+                    feature_count, metadata_feature_count
+                )));
+            }
+
+            let mut class_trees = Vec::with_capacity(num_classes);
+            for stumps in &per_class_stumps {
+                class_trees.push(build_predictor_trees(stumps)?);
+            }
+
+            return Ok(Self {
+                metadata,
+                categorical_state,
+                baseline_prediction: 0.0,
+                trees: Vec::new(),
+                use_float_thresholds: false,
+                num_classes: Some(num_classes),
+                baseline_predictions: Some(baselines),
+                class_trees: Some(class_trees),
+            });
+        }
+
+        // Single-output path (existing behavior)
         let compatibility_report = required_section_compatibility_report(&parsed.sections);
         if !compatibility_report.legacy_compatible {
             return Err(PredictorError::ContractViolation(
                 format_required_section_mode_error(compatibility_report, true),
             ));
         }
-        let metadata = parsed.contract.metadata;
-        let metadata_feature_count = metadata.feature_names.len();
         let trees_section = required_single_section(&parsed.sections, ModelSectionKind::Trees)?;
         let predictor_layout = resolve_predictor_layout(&parsed.sections, metadata_feature_count)?;
-        let categorical_state =
-            decode_optional_categorical_state_section_v1(&parsed.sections, metadata_feature_count)
-                .map_err(PredictorError::from)?;
         let (payload_feature_count, baseline_prediction, stumps) =
             decode_trained_model_payload(&trees_section.payload)?;
         let trees = build_predictor_trees(&stumps)?;
@@ -133,6 +181,9 @@ impl Predictor {
             baseline_prediction,
             trees,
             use_float_thresholds: false,
+            num_classes: None,
+            baseline_predictions: None,
+            class_trees: None,
         })
     }
 
@@ -225,7 +276,20 @@ impl Predictor {
         Ok(())
     }
 
+    pub fn is_multiclass(&self) -> bool {
+        self.num_classes.is_some()
+    }
+
+    pub fn num_classes(&self) -> Option<usize> {
+        self.num_classes
+    }
+
     pub fn predict_row(&self, features: &[f32]) -> PredictorResult<f32> {
+        if self.is_multiclass() {
+            return Err(PredictorError::ContractViolation(
+                "use predict_batch_multiclass for multi-class models".to_string(),
+            ));
+        }
         let feature_count = self.metadata.feature_names.len();
         if features.len() != feature_count {
             return Err(PredictorError::InvalidInput(format!(
@@ -279,6 +343,11 @@ impl Predictor {
     }
 
     pub fn predict_batch(&self, rows: &[Vec<f32>]) -> PredictorResult<Vec<f32>> {
+        if self.is_multiclass() {
+            return Err(PredictorError::ContractViolation(
+                "use predict_batch_multiclass for multi-class models".to_string(),
+            ));
+        }
         if rows.is_empty() {
             return Err(PredictorError::InvalidInput(
                 "rows cannot be empty".to_string(),
@@ -319,6 +388,11 @@ impl Predictor {
         row_count: usize,
         feature_count: usize,
     ) -> PredictorResult<Vec<f32>> {
+        if self.is_multiclass() {
+            return Err(PredictorError::ContractViolation(
+                "use predict_batch_dense_multiclass for multi-class models".to_string(),
+            ));
+        }
         let model_feature_count = self.metadata.feature_names.len();
         if feature_count != model_feature_count {
             return Err(PredictorError::InvalidInput(format!(
@@ -408,6 +482,11 @@ impl Predictor {
         row_count: usize,
         feature_count: usize,
     ) -> PredictorResult<Vec<f32>> {
+        if self.is_multiclass() {
+            return Err(PredictorError::ContractViolation(
+                "use predict_batch_multiclass for multi-class models".to_string(),
+            ));
+        }
         let model_feature_count = self.metadata.feature_names.len();
         if feature_count != model_feature_count {
             return Err(PredictorError::InvalidInput(format!(
@@ -493,6 +572,127 @@ impl Predictor {
             )));
         }
         self.predict_row_with_feature_count(features, feature_count)
+    }
+
+    // -- Multi-class prediction ------------------------------------------------
+
+    /// Predict K probabilities per row (softmax-normalized).
+    /// Returns a flat `Vec<f32>` of length `n_rows * K` in row-major order:
+    /// `[row0_class0, row0_class1, ..., row0_classK-1, row1_class0, ...]`
+    pub fn predict_batch_multiclass(&self, rows: &[Vec<f32>]) -> PredictorResult<Vec<f32>> {
+        let k = self.num_classes.ok_or_else(|| {
+            PredictorError::ContractViolation(
+                "predict_batch_multiclass called on single-output model".to_string(),
+            )
+        })?;
+        if rows.is_empty() {
+            return Err(PredictorError::InvalidInput(
+                "rows cannot be empty".to_string(),
+            ));
+        }
+        let feature_count = self.metadata.feature_names.len();
+        for row in rows {
+            if row.len() != feature_count {
+                return Err(PredictorError::InvalidInput(format!(
+                    "feature length {} does not match model feature_count {}",
+                    row.len(),
+                    feature_count
+                )));
+            }
+        }
+        let baselines = self.baseline_predictions.as_ref().unwrap();
+        let class_trees = self.class_trees.as_ref().unwrap();
+
+        let predict_row = |features: &[f32]| -> PredictorResult<Vec<f32>> {
+            let mut logits = baselines.clone();
+            for (class_k, trees) in class_trees.iter().enumerate() {
+                for tree in trees {
+                    let mut local_node_id: usize = 0;
+                    while let Some(Some(node)) = tree.nodes_by_local_id.get(local_node_id) {
+                        if node.feature_index >= feature_count {
+                            return Err(PredictorError::ContractViolation(format!(
+                                "split feature_index {} exceeds feature length {}",
+                                node.feature_index, feature_count
+                            )));
+                        }
+                        let feature_value = features[node.feature_index];
+                        let went_left = if feature_value.is_nan() {
+                            node.default_left
+                        } else if self.use_float_thresholds {
+                            feature_value < node.threshold_bin
+                        } else {
+                            feature_value <= node.threshold_bin
+                        };
+                        logits[class_k] += if went_left {
+                            node.left_leaf_value
+                        } else {
+                            node.right_leaf_value
+                        };
+                        local_node_id = if went_left {
+                            local_node_id * 2 + 1
+                        } else {
+                            local_node_id * 2 + 2
+                        };
+                    }
+                }
+            }
+            softmax_in_place(&mut logits);
+            Ok(logits)
+        };
+
+        let mut output = Vec::with_capacity(rows.len() * k);
+        if should_parallel_predict_batch(rows.len(), class_trees.iter().map(|t| t.len()).sum()) {
+            let results: PredictorResult<Vec<Vec<f32>>> =
+                rows.par_iter().map(|row| predict_row(row)).collect();
+            for probs in results? {
+                output.extend_from_slice(&probs);
+            }
+        } else {
+            for row in rows {
+                let probs = predict_row(row)?;
+                output.extend_from_slice(&probs);
+            }
+        }
+        Ok(output)
+    }
+
+    /// Multi-class prediction from a flat row-major dense slice.
+    /// Returns a flat `Vec<f32>` of length `row_count * K`.
+    pub fn predict_batch_dense_multiclass(
+        &self,
+        values: &[f32],
+        row_count: usize,
+        feature_count: usize,
+    ) -> PredictorResult<Vec<f32>> {
+        if !self.is_multiclass() {
+            return Err(PredictorError::ContractViolation(
+                "predict_batch_dense_multiclass called on single-output model".to_string(),
+            ));
+        }
+        let model_feature_count = self.metadata.feature_names.len();
+        if feature_count != model_feature_count {
+            return Err(PredictorError::InvalidInput(format!(
+                "feature_count {} does not match model feature_count {}",
+                feature_count, model_feature_count
+            )));
+        }
+        if values.len() != row_count * feature_count {
+            return Err(PredictorError::InvalidInput(format!(
+                "values length {} does not match row_count * feature_count {}",
+                values.len(),
+                row_count * feature_count
+            )));
+        }
+        if row_count == 0 {
+            return Err(PredictorError::InvalidInput(
+                "row_count must be greater than 0".to_string(),
+            ));
+        }
+
+        let rows: Vec<Vec<f32>> = (0..row_count)
+            .map(|i| values[i * feature_count..(i + 1) * feature_count].to_vec())
+            .collect();
+        self.predict_batch_multiclass(&rows)
     }
 
     /// Predict raw logits in batch (before post-transform).
@@ -762,6 +962,108 @@ fn read_f32_le(bytes: &[u8], start: usize) -> PredictorResult<f32> {
     ]))
 }
 
+fn softmax_in_place(logits: &mut [f32]) {
+    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let mut sum = 0.0_f32;
+    for logit in logits.iter_mut() {
+        *logit = (*logit - max).exp();
+        sum += *logit;
+    }
+    if sum > 0.0 {
+        for logit in logits.iter_mut() {
+            *logit /= sum;
+        }
+    }
+}
+
+/// Decode a MultiClassTrees section payload.
+/// Returns `(num_classes, feature_count, baselines, per_class_stumps)`.
+fn decode_multiclass_trees_payload(
+    bytes: &[u8],
+) -> PredictorResult<(usize, usize, Vec<f32>, Vec<Vec<PredictorStump>>)> {
+    const MC_HEADER_SIZE: usize = 12;
+    const STUMP_SIZE: usize = 32;
+
+    if bytes.len() < MC_HEADER_SIZE {
+        return Err(PredictorError::ContractViolation(
+            "multiclass trees payload too small".to_string(),
+        ));
+    }
+
+    let format_version = read_u32_le(bytes, 0)?;
+    if format_version != MODEL_FORMAT_V1 {
+        return Err(PredictorError::ContractViolation(format!(
+            "unsupported multiclass trees format version {format_version}"
+        )));
+    }
+    let num_classes = read_u32_le(bytes, 4)? as usize;
+    let feature_count = read_u32_le(bytes, 8)? as usize;
+
+    let baselines_start = MC_HEADER_SIZE;
+    let baselines_end = baselines_start + num_classes * 4;
+    if bytes.len() < baselines_end {
+        return Err(PredictorError::ContractViolation(
+            "multiclass trees payload too small for baselines".to_string(),
+        ));
+    }
+    let mut baselines = Vec::with_capacity(num_classes);
+    for k in 0..num_classes {
+        baselines.push(read_f32_le(bytes, baselines_start + k * 4)?);
+    }
+
+    let counts_start = baselines_end;
+    let counts_end = counts_start + num_classes * 4;
+    if bytes.len() < counts_end {
+        return Err(PredictorError::ContractViolation(
+            "multiclass trees payload too small for stump counts".to_string(),
+        ));
+    }
+    let mut stump_counts = Vec::with_capacity(num_classes);
+    for k in 0..num_classes {
+        stump_counts.push(read_u32_le(bytes, counts_start + k * 4)? as usize);
+    }
+
+    let total_stumps: usize = stump_counts.iter().sum();
+    let stumps_start = counts_end;
+    let expected_len = stumps_start + total_stumps * STUMP_SIZE;
+    if bytes.len() != expected_len {
+        return Err(PredictorError::ContractViolation(format!(
+            "multiclass trees payload length {} does not match expected {expected_len}",
+            bytes.len()
+        )));
+    }
+
+    let mut per_class_stumps = Vec::with_capacity(num_classes);
+    let mut offset = stumps_start;
+    for k in 0..num_classes {
+        let count = stump_counts[k];
+        let mut stumps = Vec::with_capacity(count);
+        for _ in 0..count {
+            let node_id = read_u32_le(bytes, offset)?;
+            let feature_index = read_u32_le(bytes, offset + 4)?;
+            let threshold_bin = read_u16_le(bytes, offset + 8)?;
+            let flags = read_u16_le(bytes, offset + 10)?;
+            let default_left = (flags & 1) != 0;
+            let _gain = read_f32_le(bytes, offset + 12)?;
+            let left_leaf_value = read_f32_le(bytes, offset + 16)?;
+            let right_leaf_value = read_f32_le(bytes, offset + 20)?;
+
+            stumps.push(PredictorStump {
+                node_id,
+                feature_index,
+                threshold_bin,
+                default_left,
+                left_leaf_value,
+                right_leaf_value,
+            });
+            offset += STUMP_SIZE;
+        }
+        per_class_stumps.push(stumps);
+    }
+
+    Ok((num_classes, feature_count, baselines, per_class_stumps))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -779,6 +1081,7 @@ mod tests {
             feature_names: vec!["f0".to_string()],
             trained_device: Device::Cpu,
             objective: "squared_error".to_string(),
+            num_classes: None,
         };
         Predictor::new(metadata)
     }
@@ -1073,5 +1376,183 @@ mod tests {
         assert!(!should_parallel_predict_batch(PARALLEL_PREDICT_MIN_ROWS, 1));
         assert!(should_parallel_predict_batch(PARALLEL_PREDICT_MIN_ROWS, 64));
         assert!(should_parallel_predict_batch(4_096, 4));
+    }
+
+    // -- Multi-class tests ---------------------------------------------------
+
+    fn multiclass_fixture_dataset() -> TrainingDataset {
+        // 9 samples, 2 features, 3 classes (0, 1, 2)
+        // Class 0: feature[0] < 1
+        // Class 1: feature[0] in [1, 2)
+        // Class 2: feature[0] >= 2
+        TrainingDataset {
+            matrix: DatasetMatrix::new(
+                9,
+                2,
+                vec![
+                    0.0, 0.5, //
+                    0.3, 0.8, //
+                    0.5, 0.2, //
+                    1.0, 0.3, //
+                    1.3, 0.7, //
+                    1.7, 0.4, //
+                    2.0, 0.6, //
+                    2.5, 0.1, //
+                    2.8, 0.9, //
+                ],
+            )
+            .expect("matrix is valid"),
+            targets: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0],
+            sample_weights: None,
+            time_index: None,
+            group_id: None,
+        }
+    }
+
+    fn multiclass_fixture_binned_matrix() -> BinnedMatrix {
+        BinnedMatrix::new(
+            9,
+            2,
+            9,
+            vec![
+                0, 2, //
+                1, 4, //
+                2, 1, //
+                3, 1, //
+                4, 3, //
+                5, 2, //
+                6, 3, //
+                7, 0, //
+                8, 4, //
+            ],
+        )
+        .expect("binned matrix is valid")
+    }
+
+    fn train_multiclass_artifact() -> Vec<u8> {
+        use alloygbm_engine::{MultiClassSoftmaxObjective, Trainer};
+
+        let dataset = multiclass_fixture_dataset();
+        let binned_matrix = multiclass_fixture_binned_matrix();
+        let params = fixture_params();
+        let trainer = Trainer::new(params).unwrap();
+        let backend = CpuBackend;
+        let obj = MultiClassSoftmaxObjective::new(3).unwrap();
+
+        let controls = trainer
+            .iteration_controls_for_policy(
+                &dataset,
+                &binned_matrix,
+                5,
+                alloygbm_engine::TrainingPolicyMode::Manual,
+            )
+            .unwrap();
+
+        let summary = trainer
+            .fit_multiclass_iterations_with_summary(
+                &dataset,
+                &binned_matrix,
+                &backend,
+                &obj,
+                controls,
+            )
+            .unwrap();
+
+        summary.model.to_artifact_bytes().unwrap()
+    }
+
+    #[test]
+    fn test_multiclass_predictor_from_artifact() {
+        let artifact = train_multiclass_artifact();
+        let predictor = Predictor::from_artifact_bytes(&artifact).unwrap();
+        assert!(predictor.is_multiclass());
+        assert_eq!(predictor.num_classes(), Some(3));
+    }
+
+    #[test]
+    fn test_multiclass_predict_batch_shape() {
+        let artifact = train_multiclass_artifact();
+        let predictor = Predictor::from_artifact_bytes(&artifact).unwrap();
+        let rows = vec![
+            vec![0.2, 0.5],
+            vec![1.5, 0.3],
+            vec![2.7, 0.8],
+        ];
+        let result = predictor.predict_batch_multiclass(&rows).unwrap();
+        // 3 rows * 3 classes = 9 values
+        assert_eq!(result.len(), 9);
+    }
+
+    #[test]
+    fn test_multiclass_predict_softmax_sums_to_one() {
+        let artifact = train_multiclass_artifact();
+        let predictor = Predictor::from_artifact_bytes(&artifact).unwrap();
+        let rows = vec![
+            vec![0.0, 0.0],
+            vec![1.0, 0.5],
+            vec![2.0, 1.0],
+            vec![0.5, 0.3],
+            vec![1.5, 0.7],
+        ];
+        let result = predictor.predict_batch_multiclass(&rows).unwrap();
+        assert_eq!(result.len(), 15); // 5 * 3
+
+        for row_idx in 0..5 {
+            let start = row_idx * 3;
+            let row_sum: f32 = result[start..start + 3].iter().sum();
+            assert!(
+                (row_sum - 1.0).abs() < 1e-5,
+                "row {row_idx} probabilities sum to {row_sum}, expected 1.0"
+            );
+            // All probabilities should be in [0, 1]
+            for &p in &result[start..start + 3] {
+                assert!(p >= 0.0 && p <= 1.0, "probability {p} out of [0,1] range");
+            }
+        }
+    }
+
+    #[test]
+    fn test_multiclass_predict_dense_matches_batch() {
+        let artifact = train_multiclass_artifact();
+        let predictor = Predictor::from_artifact_bytes(&artifact).unwrap();
+        let rows = vec![
+            vec![0.2, 0.5],
+            vec![1.5, 0.3],
+            vec![2.7, 0.8],
+        ];
+        let batch_result = predictor.predict_batch_multiclass(&rows).unwrap();
+        let dense_values: Vec<f32> = rows.iter().flatten().copied().collect();
+        let dense_result = predictor
+            .predict_batch_dense_multiclass(&dense_values, 3, 2)
+            .unwrap();
+        assert_eq!(batch_result.len(), dense_result.len());
+        for (a, b) in batch_result.iter().zip(dense_result.iter()) {
+            assert!(
+                (a - b).abs() < 1e-6,
+                "batch {a} != dense {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_multiclass_predict_row_errors_on_multiclass() {
+        let artifact = train_multiclass_artifact();
+        let predictor = Predictor::from_artifact_bytes(&artifact).unwrap();
+        let result = predictor.predict_row(&[0.5, 0.3]);
+        assert!(result.is_err());
+        if let Err(PredictorError::ContractViolation(msg)) = result {
+            assert!(msg.contains("multiclass") || msg.contains("multi-class"),
+                "unexpected error: {msg}");
+        } else {
+            panic!("expected ContractViolation error for predict_row on multiclass, got {:?}", result);
+        }
+    }
+
+    #[test]
+    fn test_multiclass_predict_batch_errors_on_multiclass() {
+        let artifact = train_multiclass_artifact();
+        let predictor = Predictor::from_artifact_bytes(&artifact).unwrap();
+        let result = predictor.predict_batch(&[vec![0.5, 0.3]]);
+        assert!(result.is_err());
     }
 }

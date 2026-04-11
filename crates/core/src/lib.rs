@@ -612,6 +612,9 @@ pub struct ModelMetadata {
     /// Objective used to train this model (e.g. "squared_error", "binary_crossentropy").
     /// Defaults to "squared_error" for backward compatibility with older artifacts.
     pub objective: String,
+    /// Number of classes for multi-class classification models.
+    /// `None` for single-output models (regression, binary classification, ranking).
+    pub num_classes: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -676,6 +679,7 @@ pub enum ModelSectionKind {
     ShapAux,
     CategoricalState,
     NodeDebugStats,
+    MultiClassTrees,
     Unknown(u32),
 }
 
@@ -687,6 +691,7 @@ impl ModelSectionKind {
             Self::ShapAux => 3,
             Self::CategoricalState => 4,
             Self::NodeDebugStats => 5,
+            Self::MultiClassTrees => 6,
             Self::Unknown(value) => value,
         }
     }
@@ -698,6 +703,7 @@ impl ModelSectionKind {
             3 => Self::ShapAux,
             4 => Self::CategoricalState,
             5 => Self::NodeDebugStats,
+            6 => Self::MultiClassTrees,
             other => Self::Unknown(other),
         }
     }
@@ -1374,12 +1380,18 @@ pub fn serialize_metadata_json(metadata: &ModelMetadata) -> String {
         .collect::<Vec<_>>()
         .join(",");
 
+    let num_classes_fragment = match metadata.num_classes {
+        Some(k) => format!(",\"num_classes\":{k}"),
+        None => String::new(),
+    };
+
     format!(
-        "{{\"format_version\":{},\"feature_names\":[{}],\"trained_device\":\"{}\",\"objective\":\"{}\"}}",
+        "{{\"format_version\":{},\"feature_names\":[{}],\"trained_device\":\"{}\",\"objective\":\"{}\"{}}}",
         metadata.format_version,
         feature_names,
         metadata.trained_device.as_metadata_label(),
-        escape_json_string(&metadata.objective)
+        escape_json_string(&metadata.objective),
+        num_classes_fragment
     )
 }
 
@@ -1409,6 +1421,16 @@ pub fn deserialize_metadata_json(input: &str) -> CoreResult<ModelMetadata> {
         "squared_error".to_string()
     };
 
+    // Optional num_classes field — present only for multi-class models.
+    let num_classes = if index < compact.len() && compact.as_bytes()[index] == b',' {
+        let next = consume_literal(&compact, index, ",\"num_classes\":")?;
+        let (value, next_index) = parse_u32(&compact, next)?;
+        index = next_index;
+        Some(value)
+    } else {
+        None
+    };
+
     index = consume_literal(&compact, index, "}")?;
     if index != compact.len() {
         return Err(CoreError::Serialization(
@@ -1421,6 +1443,7 @@ pub fn deserialize_metadata_json(input: &str) -> CoreResult<ModelMetadata> {
         feature_names,
         trained_device: Device::parse_metadata_label(&trained_device_raw)?,
         objective,
+        num_classes,
     })
 }
 
@@ -1764,6 +1787,7 @@ mod tests {
             feature_names: vec!["feature_0".to_string(), "ticker\"id".to_string()],
             trained_device: Device::Cpu,
             objective: "squared_error".to_string(),
+            num_classes: None,
         }
     }
 
@@ -2007,6 +2031,7 @@ mod tests {
                 feature_names: vec!["f0".to_string()],
                 trained_device: Device::Cpu,
                 objective: "squared_error".to_string(),
+                num_classes: None,
             },
         };
         assert!(matches!(
@@ -2029,6 +2054,7 @@ mod tests {
                 feature_names: vec!["f0".to_string()],
                 trained_device: Device::Cpu,
                 objective: "squared_error".to_string(),
+                num_classes: None,
             },
         };
 
@@ -2059,6 +2085,7 @@ mod tests {
                 feature_names: vec!["f0".to_string()],
                 trained_device: Device::Cpu,
                 objective: "squared_error".to_string(),
+                num_classes: None,
             },
         };
 
@@ -2260,5 +2287,37 @@ mod tests {
         let parsed = deserialize_model_artifact_v1(&bytes).expect("artifact decodes");
         let report = required_section_compatibility_report(&parsed.sections);
         assert!(report.strict_compatible);
+    }
+
+    #[test]
+    fn test_metadata_json_num_classes_roundtrip() {
+        let metadata = ModelMetadata {
+            format_version: MODEL_FORMAT_V1,
+            feature_names: vec!["f0".to_string(), "f1".to_string()],
+            trained_device: Device::Cpu,
+            objective: "multiclass_softmax".to_string(),
+            num_classes: Some(5),
+        };
+        let json = serialize_metadata_json(&metadata);
+        let decoded = deserialize_metadata_json(&json).expect("metadata should decode");
+        assert_eq!(decoded, metadata);
+        assert_eq!(decoded.num_classes, Some(5));
+    }
+
+    #[test]
+    fn test_metadata_json_backward_compat_no_num_classes() {
+        let metadata = ModelMetadata {
+            format_version: MODEL_FORMAT_V1,
+            feature_names: vec!["f0".to_string()],
+            trained_device: Device::Cpu,
+            objective: "squared_error".to_string(),
+            num_classes: None,
+        };
+        let json = serialize_metadata_json(&metadata);
+        // Verify the JSON does not contain num_classes when None
+        assert!(!json.contains("num_classes"));
+        let decoded = deserialize_metadata_json(&json).expect("metadata should decode");
+        assert_eq!(decoded, metadata);
+        assert_eq!(decoded.num_classes, None);
     }
 }
