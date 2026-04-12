@@ -58,6 +58,11 @@ class GBMRanker(GBMRegressor):
         self.ranking_objective = ranking_objective
 
     def _objective_name(self) -> str:
+        # Custom callable objective takes priority.
+        if getattr(self, 'objective', None) is not None:
+            if callable(self.objective):
+                return "custom"
+            return str(self.objective)
         return _OBJECTIVE_NAME_MAP[self.ranking_objective]
 
     # -- fit ------------------------------------------------------------------
@@ -77,6 +82,7 @@ class GBMRanker(GBMRegressor):
         categorical_feature_values_list: object | None = None,
         time_index: object | None = None,
         init_model: "GBMRegressor | None" = None,
+        eval_metric: object | None = None,
     ) -> "GBMRanker":
         """Fit the ranker.
 
@@ -96,6 +102,8 @@ class GBMRanker(GBMRegressor):
         eval_group : array-like or None
             Query group IDs for the validation set. Required when
             ``eval_set`` is provided.
+        eval_metric : callable or None, optional
+            Custom evaluation metric. See :meth:`GBMRegressor.fit` for details.
         """
         if group is None:
             raise ValueError("GBMRanker requires 'group' to be provided in fit()")
@@ -170,6 +178,7 @@ class GBMRanker(GBMRegressor):
             categorical_feature_values_list=sorted_categorical_feature_values_list,
             time_index=sorted_time_index,
             init_model=init_model,
+            eval_metric=eval_metric,
         )
         return self
 
@@ -216,7 +225,8 @@ class GBMRanker(GBMRegressor):
             f"feature_weights={self.feature_weights}, "
             f"max_leaves={self.max_leaves}, "
             f"tree_growth='{self.tree_growth}', "
-            f"warm_start={self.warm_start}"
+            f"warm_start={self.warm_start}, "
+            f"objective={self.objective!r}"
             ")"
         )
 

@@ -241,6 +241,7 @@ class GBMRegressor(_GBMRegressorBase):
         max_leaves: int | None = None,
         tree_growth: str = "level",
         warm_start: bool = False,
+        objective: "str | None | object" = None,
     ) -> None:
         if not (0.0 < learning_rate <= 1.0):
             raise ValueError("learning_rate must be in (0.0, 1.0]")
@@ -345,6 +346,10 @@ class GBMRegressor(_GBMRegressorBase):
             raise ValueError(
                 "max_leaves must be set when tree_growth='leaf'"
             )
+        if objective is not None and not callable(objective) and not isinstance(objective, str):
+            raise TypeError(
+                "objective must be a string, a callable, or None"
+            )
 
         self.learning_rate = float(learning_rate)
         self.max_depth = int(max_depth)
@@ -390,6 +395,7 @@ class GBMRegressor(_GBMRegressorBase):
         self.max_leaves = int(max_leaves) if max_leaves is not None else None
         self.tree_growth = str(tree_growth)
         self.warm_start = bool(warm_start)
+        self.objective = objective
         self._is_fitted = False
         self._artifact_bytes: bytes | None = None
         self._native_predictor_handle: object | None = None
@@ -438,7 +444,8 @@ class GBMRegressor(_GBMRegressorBase):
             f"feature_weights={self.feature_weights}, "
             f"max_leaves={self.max_leaves}, "
             f"tree_growth='{self.tree_growth}', "
-            f"warm_start={self.warm_start}"
+            f"warm_start={self.warm_start}, "
+            f"objective={self.objective!r}"
             ")"
         )
 
@@ -474,6 +481,7 @@ class GBMRegressor(_GBMRegressorBase):
             "max_leaves": self.max_leaves,
             "tree_growth": self.tree_growth,
             "warm_start": self.warm_start,
+            "objective": self.objective,
         }
 
     def set_params(self, **params: float | int | bool | str | None) -> "GBMRegressor":
@@ -507,6 +515,7 @@ class GBMRegressor(_GBMRegressorBase):
             "max_leaves",
             "tree_growth",
             "warm_start",
+            "objective",
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
@@ -719,6 +728,12 @@ class GBMRegressor(_GBMRegressorBase):
         if "warm_start" in params:
             self.warm_start = bool(params["warm_start"])
 
+        if "objective" in params:
+            obj = params["objective"]
+            if obj is not None and not callable(obj) and not isinstance(obj, str):
+                raise TypeError("objective must be a string, a callable, or None")
+            self.objective = obj
+
         # Cross-field validation: leaf growth requires max_leaves
         if self.tree_growth == "leaf" and self.max_leaves is None:
             raise ValueError("max_leaves must be set when tree_growth='leaf'")
@@ -751,6 +766,10 @@ class GBMRegressor(_GBMRegressorBase):
 
     def _objective_name(self) -> str:
         """Return the objective function name passed to the native training bridge."""
+        if self.objective is not None:
+            if callable(self.objective):
+                return "custom"
+            return str(self.objective)
         return "squared_error"
 
     @staticmethod
@@ -762,6 +781,8 @@ class GBMRegressor(_GBMRegressorBase):
             return "ndcg"
         if objective == "queryrmse":
             return "queryrmse"
+        if objective == "custom":
+            return "loss"
         return "mse"
 
     def _loss_metric_name(self) -> str:
@@ -774,7 +795,9 @@ class GBMRegressor(_GBMRegressorBase):
 
         The result always contains a backward-compatible ``"rmse"`` key plus
         the objective-native loss metric (``"mse"`` for squared_error,
-        ``"logloss"`` for binary_crossentropy).
+        ``"logloss"`` for binary_crossentropy).  When a custom eval metric
+        was used during training, its per-round values are included under
+        the ``"validation"`` key with the metric's own name.
         """
         loss_metric = GBMRegressor._loss_metric_name_for(summary.objective)
         result: dict[str, dict[str, list[float]]] = {
@@ -788,6 +811,15 @@ class GBMRegressor(_GBMRegressorBase):
                 "rmse": [float(v) for v in summary.validation_rmse],
                 loss_metric: [float(v) for v in summary.validation_loss],
             }
+        # Include custom metric values when present.
+        custom_metric_values = getattr(summary, "custom_metric_values", None)
+        custom_metric_name = getattr(summary, "custom_metric_name", None)
+        if custom_metric_values and custom_metric_name:
+            if "validation" not in result:
+                result["validation"] = {}
+            result["validation"][custom_metric_name] = [
+                float(v) for v in custom_metric_values
+            ]
         return result
 
     def fit(
@@ -805,6 +837,7 @@ class GBMRegressor(_GBMRegressorBase):
         categorical_feature_values_list: object | None = None,
         time_index: object | None = None,
         init_model: "GBMRegressor | None" = None,
+        eval_metric: object | None = None,
     ) -> "GBMRegressor":
         """Fit native-backed regression model artifact state.
 
@@ -816,6 +849,13 @@ class GBMRegressor(_GBMRegressorBase):
             ``n_estimators`` additional rounds are trained. If ``warm_start=True``
             is set on the estimator, the model's own previous state is used
             instead. ``init_model`` takes priority over ``warm_start``.
+        eval_metric : callable or None, optional
+            Custom evaluation metric callable. The function signature must be
+            ``(y_true: np.ndarray, y_pred: np.ndarray) -> (name, value, higher_is_better)``
+            where *name* is a string, *value* is a float, and *higher_is_better*
+            is a bool.  When provided together with ``eval_set``, the metric is
+            evaluated after each boosting round and can drive early stopping
+            (instead of the built-in loss) when ``early_stopping_rounds`` is set.
         """
         fit_start = time.perf_counter()
         self._fit_start_time = fit_start
@@ -824,6 +864,10 @@ class GBMRegressor(_GBMRegressorBase):
             raise ValueError("early_stopping_rounds requires eval_set to be provided")
         if eval_time_index is not None and eval_set is None:
             raise ValueError("eval_time_index requires eval_set to be provided")
+        if eval_metric is not None and not callable(eval_metric):
+            raise TypeError("eval_metric must be a callable or None")
+        if eval_metric is not None and eval_set is None:
+            raise ValueError("eval_metric requires eval_set to be provided")
         if categorical_feature_values is not None and categorical_feature_values_list is not None:
             raise ValueError(
                 "categorical_feature_values and categorical_feature_values_list are "
@@ -1083,6 +1127,11 @@ class GBMRegressor(_GBMRegressorBase):
 
         input_adaptation_seconds = time.perf_counter() - fit_start
 
+        # Resolve custom objective / metric callables for the native bridge.
+        _custom_objective_fn = self.objective if callable(self.objective) else None
+        _custom_loss_fn = None  # reserved for future extension
+        _custom_metric_fn = eval_metric if callable(eval_metric) else None
+
         # Try bytes path first (avoids Python list→Vec<f32> conversion overhead)
         if dense_training_bytes_payload is not None:
             try:
@@ -1143,6 +1192,9 @@ class GBMRegressor(_GBMRegressorBase):
                     validation_categorical_feature_values_list=validation_categorical_values_list if has_categorical else None,
                     init_artifact_bytes=init_artifact_bytes,
                     num_classes=getattr(self, '_num_classes_for_training', None),
+                    custom_objective_fn=_custom_objective_fn,
+                    custom_loss_fn=_custom_loss_fn,
+                    custom_metric_fn=_custom_metric_fn,
                 )
                 return self._finalize_training_result(native_result, input_adaptation_seconds, feature_count=feature_count)
             except (ImportError, AttributeError):
@@ -1230,6 +1282,9 @@ class GBMRegressor(_GBMRegressorBase):
                 validation_categorical_feature_values_list=validation_categorical_values_list if has_categorical else None,
                 init_artifact_bytes=init_artifact_bytes,
                 num_classes=getattr(self, '_num_classes_for_training', None),
+                custom_objective_fn=_custom_objective_fn,
+                custom_loss_fn=_custom_loss_fn,
+                custom_metric_fn=_custom_metric_fn,
             )
         else:
             assert training_rows is not None
@@ -1278,6 +1333,9 @@ class GBMRegressor(_GBMRegressorBase):
                 validation_categorical_feature_values_list=validation_categorical_values_list if has_categorical else None,
                 init_artifact_bytes=init_artifact_bytes,
                 num_classes=getattr(self, '_num_classes_for_training', None),
+                custom_objective_fn=_custom_objective_fn,
+                custom_loss_fn=_custom_loss_fn,
+                custom_metric_fn=_custom_metric_fn,
             )
 
         self._apply_continuous_binning_metadata(native_result.continuous_binning_metadata)
@@ -2888,6 +2946,18 @@ class GBMRegressor(_GBMRegressorBase):
         # _native_predictor_handle is a PyO3 object and cannot be pickled.
         # It will be lazily reconstructed from _artifact_bytes on first predict().
         state.pop("_native_predictor_handle", None)
+        # Custom objective callables are not serializable.  Store None and let
+        # the user re-provide the callable if they need to re-train.
+        if callable(state.get("objective")):
+            import warnings
+            warnings.warn(
+                "Custom objective callable cannot be pickled. "
+                "The model artifact is preserved for prediction, but "
+                "re-training will require re-providing the objective callable.",
+                UserWarning,
+                stacklevel=2,
+            )
+            state["objective"] = None
         return state
 
     def __setstate__(self, state: dict) -> None:
@@ -2907,8 +2977,12 @@ class GBMRegressor(_GBMRegressorBase):
             raise ValueError("Model must be fitted before saving")
         import json
 
+        saved_params = self.get_params()
+        # Callable objectives are not JSON-serializable; store "custom" string.
+        if callable(saved_params.get("objective")):
+            saved_params["objective"] = None
         metadata = {
-            "params": self.get_params(),
+            "params": saved_params,
             "n_features_in": self._n_features_in,
             "uses_continuous_binning": self._uses_continuous_binning,
             "continuous_feature_mins": self._continuous_feature_mins,

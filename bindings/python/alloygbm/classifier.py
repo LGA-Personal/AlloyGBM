@@ -54,6 +54,11 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
     """Passed to Rust bridge for multiclass_softmax. None for binary."""
 
     def _objective_name(self) -> str:
+        # Custom callable objective takes priority over auto-detection.
+        if getattr(self, 'objective', None) is not None:
+            if callable(self.objective):
+                return "custom"
+            return str(self.objective)
         num_classes = getattr(self, '_num_classes_for_training', None)
         if num_classes is not None and num_classes > 2:
             return "multiclass_softmax"
@@ -80,12 +85,18 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
         categorical_feature_values_list: object | None = None,
         time_index: object | None = None,
         init_model: "GBMRegressor | None" = None,
+        eval_metric: object | None = None,
     ) -> "GBMClassifier":
         """Fit the classifier.
 
         Parameters are identical to :meth:`GBMRegressor.fit`. ``y`` must contain
         integer class labels. For binary classification, labels must be in {0, 1}.
         For multi-class, labels can be any set of integers with K >= 3 unique values.
+
+        Parameters
+        ----------
+        eval_metric : callable or None, optional
+            Custom evaluation metric. See :meth:`GBMRegressor.fit` for details.
 
         Returns
         -------
@@ -129,6 +140,7 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
             categorical_feature_values_list=categorical_feature_values_list,
             time_index=time_index,
             init_model=init_model,
+            eval_metric=eval_metric,
         )
         self.classes_ = sorted_classes
         self.n_classes_ = n_classes
