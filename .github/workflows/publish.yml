@@ -167,6 +167,41 @@ jobs:
           scores = rnk.predict(rows)
           print("ranker scores:", scores)
 
+          # Custom objective smoke
+          def custom_mse(y_true, y_pred):
+              grad = y_pred - y_true
+              hess = np.ones_like(y_true)
+              return grad, hess
+
+          custom_reg = GBMRegressor(
+              objective=custom_mse,
+              n_estimators=20,
+              seed=1,
+              deterministic=True,
+          )
+          custom_reg.fit(rows, targets)
+          custom_preds = custom_reg.predict([[1.5, 0.0], [2.5, 0.0]])
+          print("custom objective predictions:", custom_preds)
+
+          # Custom metric smoke
+          def custom_rmse_metric(y_true, y_pred):
+              return ("custom_rmse", float(np.sqrt(np.mean((y_true - y_pred) ** 2))), False)
+
+          metric_reg = GBMRegressor(
+              n_estimators=20,
+              early_stopping_rounds=5,
+              seed=1,
+              deterministic=True,
+          )
+          metric_reg.fit(
+              rows, targets,
+              eval_set=([[1.5, 0.0], [2.5, 0.0]], [1.5, 2.5]),
+              eval_metric=custom_rmse_metric,
+          )
+          assert metric_reg.evals_result_ is not None
+          assert "custom_rmse" in metric_reg.evals_result_["validation"]
+          print("custom metric values:", metric_reg.evals_result_["validation"]["custom_rmse"][:3])
+
           print("All smoke tests passed")
           PY
 

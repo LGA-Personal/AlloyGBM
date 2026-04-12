@@ -172,3 +172,45 @@ jobs:
 
           print("GBMRanker smoke ok")
           PY
+
+      - name: Python custom objective smoke
+        run: |
+          python - <<'PY'
+          import numpy as np
+          from alloygbm import GBMRegressor
+
+          def custom_mse(y_true, y_pred):
+              grad = y_pred - y_true
+              hess = np.ones_like(y_true)
+              return grad, hess
+
+          X = np.random.RandomState(42).randn(100, 5).astype(np.float32)
+          y = X[:, 0] * 2 + X[:, 1] + np.random.RandomState(42).randn(100).astype(np.float32) * 0.1
+
+          model = GBMRegressor(objective=custom_mse, n_estimators=20, seed=1, deterministic=True)
+          model.fit(X, y)
+          preds = model.predict(X)
+          assert len(preds) == 100
+          print("Custom objective smoke ok")
+          PY
+
+      - name: Python custom metric smoke
+        run: |
+          python - <<'PY'
+          import numpy as np
+          from alloygbm import GBMRegressor
+
+          def custom_rmse(y_true, y_pred):
+              return ("custom_rmse", float(np.sqrt(np.mean((y_true - y_pred) ** 2))), False)
+
+          X = np.random.RandomState(42).randn(100, 5).astype(np.float32)
+          y = X[:, 0] * 2 + np.random.RandomState(42).randn(100).astype(np.float32) * 0.1
+          X_val = np.random.RandomState(7).randn(50, 5).astype(np.float32)
+          y_val = X_val[:, 0] * 2 + np.random.RandomState(7).randn(50).astype(np.float32) * 0.1
+
+          model = GBMRegressor(n_estimators=50, early_stopping_rounds=5, seed=1, deterministic=True)
+          model.fit(X, y, eval_set=(X_val, y_val), eval_metric=custom_rmse)
+          assert model.evals_result_ is not None
+          assert "custom_rmse" in model.evals_result_["validation"]
+          print("Custom metric smoke ok")
+          PY
