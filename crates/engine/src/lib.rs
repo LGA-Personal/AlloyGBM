@@ -114,6 +114,29 @@ pub trait BackendOps {
     ) -> EngineResult<NodeStats>;
 }
 
+/// Callback invoked after each boosting round to evaluate a custom metric.
+///
+/// When provided alongside `early_stopping_rounds`, the custom metric value
+/// drives early stopping *instead of* the built-in objective loss.
+pub trait PerRoundMetricCallback {
+    /// Evaluate the metric on `predictions` vs `targets`.
+    ///
+    /// For single-output models, `predictions` contains the raw model outputs
+    /// (pre-sigmoid for binary, raw scores for regression/ranking).
+    fn evaluate(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+    ) -> EngineResult<f32>;
+
+    /// Whether higher metric values are better (`true`) or lower is better (`false`).
+    fn higher_is_better(&self) -> bool;
+
+    /// The name of this metric (e.g. `"custom_rmse"`).
+    fn metric_name(&self) -> &str;
+}
+
 pub trait ObjectiveOps {
     /// Canonical name for this objective (e.g. "squared_error", "binary_crossentropy").
     fn objective_name(&self) -> &str;
@@ -1384,6 +1407,7 @@ pub enum IterationStopReason {
     MonotoneConstraintViolation,
     MaxLeavesReached,
     ValidationLossPlateau,
+    CustomMetricPlateau,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1404,6 +1428,10 @@ pub struct IterationRunSummary {
     pub weak_improvement_rounds_committed: usize,
     pub final_loss: f32,
     pub final_validation_loss: Option<f32>,
+    /// Per-round custom metric values (empty when no custom metric callback is used).
+    pub custom_metric_per_round: Vec<f32>,
+    /// Name of the custom metric (None when no custom metric callback is used).
+    pub custom_metric_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1436,12 +1464,12 @@ pub struct WarmStartState {
     pub initial_rounds_completed: usize,
 }
 
-#[derive(Debug, Clone)]
 struct IterationExecutionContext<'a> {
     controls: IterationControls,
     validation: Option<ValidationDatasetRef<'a>>,
     policy_mode: Option<TrainingPolicyMode>,
     warm_start: Option<WarmStartState>,
+    custom_metric_callback: Option<&'a dyn PerRoundMetricCallback>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1985,6 +2013,7 @@ impl Trainer {
                 validation: None,
                 policy_mode: Some(request.policy_mode),
                 warm_start: None,
+                custom_metric_callback: None,
             },
         )?;
         let model = summary.model;
@@ -2102,6 +2131,7 @@ impl Trainer {
                 validation: None,
                 policy_mode: None,
                 warm_start: None,
+                custom_metric_callback: None,
             },
         )
     }
@@ -2125,6 +2155,7 @@ impl Trainer {
                 validation: Some(validation),
                 policy_mode: None,
                 warm_start: None,
+                custom_metric_callback: None,
             },
         )
     }
@@ -2149,6 +2180,7 @@ impl Trainer {
                 validation: None,
                 policy_mode: None,
                 warm_start: Some(warm_start),
+                custom_metric_callback: None,
             },
         )
     }
@@ -2175,6 +2207,64 @@ impl Trainer {
                 validation: Some(validation),
                 policy_mode: None,
                 warm_start: Some(warm_start),
+                custom_metric_callback: None,
+            },
+        )
+    }
+
+    // -- Methods that accept a custom metric callback -------------------------
+
+    /// Fit with validation and an optional custom metric callback for early stopping.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fit_iterations_with_validation_and_metric<B: BackendOps, O: ObjectiveOps>(
+        &self,
+        dataset: &TrainingDataset,
+        binned_matrix: &BinnedMatrix,
+        validation: ValidationDatasetRef<'_>,
+        backend: &B,
+        objective: &O,
+        controls: IterationControls,
+        custom_metric: Option<&dyn PerRoundMetricCallback>,
+    ) -> EngineResult<IterationRunSummary> {
+        self.fit_iterations_with_optional_validation_summary(
+            dataset,
+            binned_matrix,
+            backend,
+            objective,
+            IterationExecutionContext {
+                controls,
+                validation: Some(validation),
+                policy_mode: None,
+                warm_start: None,
+                custom_metric_callback: custom_metric,
+            },
+        )
+    }
+
+    /// Fit with warm start, validation, and an optional custom metric callback.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fit_iterations_warm_start_with_validation_and_metric<B: BackendOps, O: ObjectiveOps>(
+        &self,
+        dataset: &TrainingDataset,
+        binned_matrix: &BinnedMatrix,
+        validation: ValidationDatasetRef<'_>,
+        backend: &B,
+        objective: &O,
+        controls: IterationControls,
+        warm_start: WarmStartState,
+        custom_metric: Option<&dyn PerRoundMetricCallback>,
+    ) -> EngineResult<IterationRunSummary> {
+        self.fit_iterations_with_optional_validation_summary(
+            dataset,
+            binned_matrix,
+            backend,
+            objective,
+            IterationExecutionContext {
+                controls,
+                validation: Some(validation),
+                policy_mode: None,
+                warm_start: Some(warm_start),
+                custom_metric_callback: custom_metric,
             },
         )
     }
@@ -2257,35 +2347,27 @@ impl Trainer {
             }
         }
 
-        let sampling_seed_base =
-            sampling_seed_base(self.params.seed, self.params.deterministic);
-        let split_options = split_selection_options_for_training(
-            &self.params,
-            None,
-            dataset,
-            binned_matrix,
-        )?;
+        let sampling_seed_base = sampling_seed_base(self.params.seed, self.params.deterministic);
+        let split_options =
+            split_selection_options_for_training(&self.params, None, dataset, binned_matrix)?;
         let feature_count = binned_matrix.feature_count;
 
         // Initialize K prediction arrays
         let baselines = objective.initial_predictions();
         let n = dataset.row_count();
-        let mut class_predictions: Vec<Vec<f32>> =
-            baselines.iter().map(|&b| vec![b; n]).collect();
-        let mut class_candidate_predictions: Vec<Vec<f32>> =
-            class_predictions.clone();
+        let mut class_predictions: Vec<Vec<f32>> = baselines.iter().map(|&b| vec![b; n]).collect();
+        let mut class_candidate_predictions: Vec<Vec<f32>> = class_predictions.clone();
         let mut class_stumps: Vec<Vec<TrainedStump>> = vec![Vec::new(); k];
         // Track stump counts per class at each round boundary for truncation
         let mut stumps_per_round_per_class: Vec<Vec<usize>> = Vec::new();
 
         // Validation predictions
-        let mut validation_class_predictions: Option<Vec<Vec<f32>>> =
-            validation.map(|v| {
-                baselines
-                    .iter()
-                    .map(|&b| vec![b; v.dataset.row_count()])
-                    .collect()
-            });
+        let mut validation_class_predictions: Option<Vec<Vec<f32>>> = validation.map(|v| {
+            baselines
+                .iter()
+                .map(|&b| vec![b; v.dataset.row_count()])
+                .collect()
+        });
 
         let initial_loss = objective.loss(
             &class_predictions,
@@ -2341,13 +2423,11 @@ impl Trainer {
 
             // Copy current predictions to candidates
             for class_k in 0..k {
-                class_candidate_predictions[class_k]
-                    .copy_from_slice(&class_predictions[class_k]);
+                class_candidate_predictions[class_k].copy_from_slice(&class_predictions[class_k]);
             }
 
             // Record stump counts before this round
-            let pre_round_counts: Vec<usize> =
-                class_stumps.iter().map(|s| s.len()).collect();
+            let pre_round_counts: Vec<usize> = class_stumps.iter().map(|s| s.len()).collect();
 
             // Build K trees
             let mut any_tree_produced = false;
@@ -2360,36 +2440,35 @@ impl Trainer {
                     &mut gradient_buffer,
                 )?;
 
-                let (round_stumps, _round_stop) =
-                    if self.params.tree_growth == TreeGrowth::Leaf {
-                        build_tree_leaf_wise(
-                            backend,
-                            binned_matrix,
-                            &gradient_buffer,
-                            root_row_indices.clone(),
-                            round_index,
-                            &feature_tiles,
-                            split_options,
-                            &self.params,
-                            &controls,
-                            &mut class_candidate_predictions[class_k],
-                            &self.params.feature_weights,
-                        )?
-                    } else {
-                        build_tree_level_wise(
-                            backend,
-                            binned_matrix,
-                            &gradient_buffer,
-                            root_row_indices.clone(),
-                            round_index,
-                            &feature_tiles,
-                            split_options,
-                            &self.params,
-                            &controls,
-                            &mut class_candidate_predictions[class_k],
-                            &self.params.feature_weights,
-                        )?
-                    };
+                let (round_stumps, _round_stop) = if self.params.tree_growth == TreeGrowth::Leaf {
+                    build_tree_leaf_wise(
+                        backend,
+                        binned_matrix,
+                        &gradient_buffer,
+                        root_row_indices.clone(),
+                        round_index,
+                        &feature_tiles,
+                        split_options,
+                        &self.params,
+                        &controls,
+                        &mut class_candidate_predictions[class_k],
+                        &self.params.feature_weights,
+                    )?
+                } else {
+                    build_tree_level_wise(
+                        backend,
+                        binned_matrix,
+                        &gradient_buffer,
+                        root_row_indices.clone(),
+                        round_index,
+                        &feature_tiles,
+                        split_options,
+                        &self.params,
+                        &controls,
+                        &mut class_candidate_predictions[class_k],
+                        &self.params.feature_weights,
+                    )?
+                };
 
                 if !round_stumps.is_empty() {
                     any_tree_produced = true;
@@ -2422,8 +2501,7 @@ impl Trainer {
                 break;
             }
             if loss_improvement < controls.min_loss_improvement {
-                if weak_improvement_streak >= controls.max_consecutive_weak_improvements
-                {
+                if weak_improvement_streak >= controls.max_consecutive_weak_improvements {
                     for class_k in 0..k {
                         class_stumps[class_k].truncate(pre_round_counts[class_k]);
                     }
@@ -2441,8 +2519,7 @@ impl Trainer {
             if let Some(validation_ref) = validation {
                 let val_preds = validation_class_predictions.as_mut().unwrap();
                 for class_k in 0..k {
-                    let round_stumps =
-                        &class_stumps[class_k][pre_round_counts[class_k]..];
+                    let round_stumps = &class_stumps[class_k][pre_round_counts[class_k]..];
                     if !round_stumps.is_empty() {
                         apply_round_stumps_tree_walk(
                             &mut val_preds[class_k],
@@ -2458,10 +2535,7 @@ impl Trainer {
                 )?;
 
                 let improved = best_validation_loss
-                    .map(|best| {
-                        best - next_validation_loss
-                            > controls.min_validation_improvement
-                    })
+                    .map(|best| best - next_validation_loss > controls.min_validation_improvement)
                     .unwrap_or(true);
                 if improved {
                     best_validation_loss = Some(next_validation_loss);
@@ -2470,10 +2544,10 @@ impl Trainer {
                 } else if controls.early_stopping_rounds.is_some() {
                     validation_no_improvement_rounds += 1;
                 }
-                if let Some(patience) = controls.early_stopping_rounds {
-                    if validation_no_improvement_rounds >= patience {
-                        stop_for_validation_plateau = true;
-                    }
+                if let Some(patience) = controls.early_stopping_rounds
+                    && validation_no_improvement_rounds >= patience
+                {
+                    stop_for_validation_plateau = true;
                 }
 
                 current_validation_loss = Some(next_validation_loss);
@@ -2482,8 +2556,7 @@ impl Trainer {
 
             // Accept round
             for class_k in 0..k {
-                class_predictions[class_k]
-                    .copy_from_slice(&class_candidate_predictions[class_k]);
+                class_predictions[class_k].copy_from_slice(&class_candidate_predictions[class_k]);
             }
             current_loss = candidate_loss;
             loss_per_completed_round.push(candidate_loss);
@@ -2491,9 +2564,7 @@ impl Trainer {
             sampled_features_per_completed_round.push(sampled_feature_count);
             stumps_per_round_per_class.push(
                 (0..k)
-                    .map(|c| {
-                        class_stumps[c].len() - pre_round_counts[c]
-                    })
+                    .map(|c| class_stumps[c].len() - pre_round_counts[c])
                     .collect(),
             );
             rounds_completed += 1;
@@ -2505,21 +2576,20 @@ impl Trainer {
         }
 
         // Truncate to best validation round if early stopping triggered
-        if stop_reason == IterationStopReason::ValidationLossPlateau {
-            if let Some(best_round) = best_validation_round {
-                if best_round < rounds_completed {
-                    // Compute how many stumps to keep per class
-                    for class_k in 0..k {
-                        let mut keep_count = 0_usize;
-                        for round in 0..best_round {
-                            keep_count +=
-                                stumps_per_round_per_class[round][class_k];
-                        }
-                        class_stumps[class_k].truncate(keep_count);
-                    }
-                    rounds_completed = best_round;
-                }
+        if stop_reason == IterationStopReason::ValidationLossPlateau
+            && let Some(best_round) = best_validation_round
+            && best_round < rounds_completed
+        {
+            // Compute how many stumps to keep per class
+            for class_k in 0..k {
+                let keep_count: usize = stumps_per_round_per_class
+                    .iter()
+                    .take(best_round)
+                    .map(|r| r[class_k])
+                    .sum();
+                class_stumps[class_k].truncate(keep_count);
             }
+            rounds_completed = best_round;
         }
 
         let final_loss = current_loss;
@@ -2549,6 +2619,8 @@ impl Trainer {
             weak_improvement_rounds_committed,
             final_loss,
             final_validation_loss,
+            custom_metric_per_round: Vec::new(),
+            custom_metric_name: None,
         })
     }
 
@@ -2763,6 +2835,17 @@ impl Trainer {
         let mut weak_improvement_streak = 0_usize;
         let mut weak_improvement_rounds_committed = 0_usize;
 
+        // Custom metric tracking
+        let custom_metric_callback = execution.custom_metric_callback;
+        let mut custom_metric_per_round: Vec<f32> = Vec::new();
+        let custom_metric_name = custom_metric_callback.map(|cb| cb.metric_name().to_string());
+        let custom_metric_higher_is_better = custom_metric_callback
+            .map(|cb| cb.higher_is_better())
+            .unwrap_or(false);
+        let mut best_custom_metric: Option<f32> = None;
+        let mut best_custom_metric_round: Option<usize> = None;
+        let mut custom_metric_no_improvement_rounds = 0_usize;
+
         let mut gradient_buffer: Vec<GradientPair> = Vec::with_capacity(dataset.row_count());
 
         for round_index in 0..effective_round_cap {
@@ -2855,6 +2938,7 @@ impl Trainer {
             let mut candidate_validation_predictions = None;
             let mut candidate_validation_loss = None;
             let mut stop_for_validation_plateau = false;
+            let mut stop_for_custom_metric_plateau = false;
             if let Some(validation_ref) = validation {
                 let mut next_validation_predictions =
                     validation_predictions.take().ok_or_else(|| {
@@ -2873,20 +2957,73 @@ impl Trainer {
                     validation_ref.dataset.sample_weights.as_deref(),
                 )?;
 
-                let improved = best_validation_loss
-                    .map(|best| best - next_validation_loss > controls.min_validation_improvement)
-                    .unwrap_or(true);
-                if improved {
-                    best_validation_loss = Some(next_validation_loss);
-                    best_validation_round = Some(rounds_completed + 1);
-                    validation_no_improvement_rounds = 0;
-                } else if controls.early_stopping_rounds.is_some() {
-                    validation_no_improvement_rounds += 1;
+                // Custom metric callback: evaluate on validation predictions
+                if let Some(cb) = custom_metric_callback {
+                    let metric_value = cb.evaluate(
+                        &next_validation_predictions,
+                        &validation_ref.dataset.targets,
+                        validation_ref.dataset.sample_weights.as_deref(),
+                    )?;
+                    custom_metric_per_round.push(metric_value);
+
+                    // Custom metric drives early stopping when present
+                    let metric_improved = match best_custom_metric {
+                        Some(best) => {
+                            if custom_metric_higher_is_better {
+                                metric_value - best > controls.min_validation_improvement
+                            } else {
+                                best - metric_value > controls.min_validation_improvement
+                            }
+                        }
+                        None => true,
+                    };
+                    if metric_improved {
+                        best_custom_metric = Some(metric_value);
+                        best_custom_metric_round = Some(rounds_completed + 1);
+                        custom_metric_no_improvement_rounds = 0;
+                    } else if controls.early_stopping_rounds.is_some() {
+                        custom_metric_no_improvement_rounds += 1;
+                    }
+                    if let Some(patience) = controls.early_stopping_rounds
+                        && custom_metric_no_improvement_rounds >= patience
+                    {
+                        stop_for_custom_metric_plateau = true;
+                    }
                 }
-                if let Some(patience) = controls.early_stopping_rounds
-                    && validation_no_improvement_rounds >= patience
-                {
-                    stop_for_validation_plateau = true;
+
+                // When custom metric is NOT present, use built-in validation loss for early stopping
+                if custom_metric_callback.is_none() {
+                    let improved = best_validation_loss
+                        .map(|best| {
+                            best - next_validation_loss > controls.min_validation_improvement
+                        })
+                        .unwrap_or(true);
+                    if improved {
+                        best_validation_loss = Some(next_validation_loss);
+                        best_validation_round = Some(rounds_completed + 1);
+                        validation_no_improvement_rounds = 0;
+                    } else if controls.early_stopping_rounds.is_some() {
+                        validation_no_improvement_rounds += 1;
+                    }
+                    if let Some(patience) = controls.early_stopping_rounds
+                        && validation_no_improvement_rounds >= patience
+                    {
+                        stop_for_validation_plateau = true;
+                    }
+                } else {
+                    // Still track validation loss for reporting, but don't use it for stopping
+                    best_validation_loss = best_validation_loss
+                        .map(|best| {
+                            if next_validation_loss < best {
+                                next_validation_loss
+                            } else {
+                                best
+                            }
+                        })
+                        .or(Some(next_validation_loss));
+                    if best_validation_loss == Some(next_validation_loss) {
+                        best_validation_round = Some(rounds_completed + 1);
+                    }
                 }
 
                 candidate_validation_predictions = Some(next_validation_predictions);
@@ -2910,14 +3047,26 @@ impl Trainer {
             stumps.extend(candidate_round_stumps);
             rounds_completed += 1;
 
+            if stop_for_custom_metric_plateau {
+                stop_reason = IterationStopReason::CustomMetricPlateau;
+                break;
+            }
             if stop_for_validation_plateau {
                 stop_reason = IterationStopReason::ValidationLossPlateau;
                 break;
             }
         }
 
-        if stop_reason == IterationStopReason::ValidationLossPlateau
-            && let Some(best_round) = best_validation_round
+        // Determine the best round for truncation: custom metric takes priority
+        let truncation_round = if stop_reason == IterationStopReason::CustomMetricPlateau {
+            best_custom_metric_round
+        } else if stop_reason == IterationStopReason::ValidationLossPlateau {
+            best_validation_round
+        } else {
+            None
+        };
+
+        if let Some(best_round) = truncation_round
             && best_round < rounds_completed
         {
             let kept_stumps =
@@ -2926,6 +3075,7 @@ impl Trainer {
             stumps_per_completed_round.truncate(best_round);
             loss_per_completed_round.truncate(best_round);
             validation_loss_per_completed_round.truncate(best_round);
+            custom_metric_per_round.truncate(best_round);
             sampled_rows_per_completed_round.truncate(best_round);
             sampled_features_per_completed_round.truncate(best_round);
             rounds_completed = best_round;
@@ -3013,6 +3163,8 @@ impl Trainer {
             weak_improvement_rounds_committed,
             final_loss,
             final_validation_loss: current_validation_loss,
+            custom_metric_per_round,
+            custom_metric_name,
         })
     }
 
@@ -5171,13 +5323,13 @@ impl MultiClassSoftmaxObjective {
                 targets.len()
             )));
         }
-        if let Some(w) = sample_weights {
-            if w.len() != n {
-                return Err(EngineError::ContractViolation(format!(
-                    "sample_weights length {} does not match predictions length {n}",
-                    w.len()
-                )));
-            }
+        if let Some(w) = sample_weights
+            && w.len() != n
+        {
+            return Err(EngineError::ContractViolation(format!(
+                "sample_weights length {} does not match predictions length {n}",
+                w.len()
+            )));
         }
 
         buffer.clear();
@@ -5186,15 +5338,15 @@ impl MultiClassSoftmaxObjective {
         for i in 0..n {
             // Numerically stable softmax: subtract max
             let mut max_logit = f32::NEG_INFINITY;
-            for c in 0..k {
-                let v = class_predictions[c][i];
+            for class_preds in class_predictions.iter().take(k) {
+                let v = class_preds[i];
                 if v > max_logit {
                     max_logit = v;
                 }
             }
             let mut sum_exp = 0.0_f32;
-            for c in 0..k {
-                sum_exp += (class_predictions[c][i] - max_logit).exp();
+            for class_preds in class_predictions.iter().take(k) {
+                sum_exp += (class_preds[i] - max_logit).exp();
             }
             let p_k = (class_predictions[class_k][i] - max_logit).exp() / sum_exp;
 
@@ -5242,15 +5394,15 @@ impl MultiClassSoftmaxObjective {
 
             // log-sum-exp trick for numerical stability
             let mut max_logit = f32::NEG_INFINITY;
-            for c in 0..k {
-                let v = class_predictions[c][i];
+            for class_preds in class_predictions.iter().take(k) {
+                let v = class_preds[i];
                 if v > max_logit {
                     max_logit = v;
                 }
             }
             let mut sum_exp = 0.0_f64;
-            for c in 0..k {
-                sum_exp += ((class_predictions[c][i] - max_logit) as f64).exp();
+            for class_preds in class_predictions.iter().take(k) {
+                sum_exp += ((class_preds[i] - max_logit) as f64).exp();
             }
             let log_p = (class_predictions[target_class][i] - max_logit) as f64 - sum_exp.ln();
 
@@ -5338,10 +5490,8 @@ impl MultiClassTrainedModel {
                 mc_payload.extend_from_slice(&stump.split.gain.to_le_bytes());
                 mc_payload.extend_from_slice(&stump.left_leaf_value.to_le_bytes());
                 mc_payload.extend_from_slice(&stump.right_leaf_value.to_le_bytes());
-                mc_payload
-                    .extend_from_slice(&stump.split.left_stats.row_count.to_le_bytes());
-                mc_payload
-                    .extend_from_slice(&stump.split.right_stats.row_count.to_le_bytes());
+                mc_payload.extend_from_slice(&stump.split.left_stats.row_count.to_le_bytes());
+                mc_payload.extend_from_slice(&stump.split.right_stats.row_count.to_le_bytes());
             }
         }
 
@@ -5377,10 +5527,8 @@ impl MultiClassTrainedModel {
     pub fn from_artifact_bytes(bytes: &[u8]) -> EngineResult<Self> {
         let parsed = deserialize_model_artifact_v1(bytes).map_err(EngineError::from)?;
 
-        let mc_section = required_single_section(
-            &parsed.sections,
-            ModelSectionKind::MultiClassTrees,
-        )?;
+        let mc_section =
+            required_single_section(&parsed.sections, ModelSectionKind::MultiClassTrees)?;
 
         let payload = &mc_section.payload;
         const MC_HEADER_SIZE: usize = 12; // format_version + num_classes + feature_count
@@ -5436,8 +5584,7 @@ impl MultiClassTrainedModel {
 
         let mut class_stumps = Vec::with_capacity(num_classes);
         let mut offset = stumps_start;
-        for k in 0..num_classes {
-            let count = stump_counts[k];
+        for &count in stump_counts.iter().take(num_classes) {
             let mut stumps = Vec::with_capacity(count);
             for _ in 0..count {
                 let node_id = read_u32_le(payload, offset)?;
@@ -5477,10 +5624,8 @@ impl MultiClassTrainedModel {
             class_stumps.push(stumps);
         }
 
-        let categorical_state = decode_optional_categorical_state_section_v1(
-            &parsed.sections,
-            feature_count,
-        )?;
+        let categorical_state =
+            decode_optional_categorical_state_section_v1(&parsed.sections, feature_count)?;
 
         Ok(Self {
             num_classes,
@@ -5512,6 +5657,10 @@ pub struct MultiClassIterationRunSummary {
     pub weak_improvement_rounds_committed: usize,
     pub final_loss: f32,
     pub final_validation_loss: Option<f32>,
+    /// Per-round custom metric values (empty when no custom metric callback is used).
+    pub custom_metric_per_round: Vec<f32>,
+    /// Name of the custom metric (None when no custom metric callback is used).
+    pub custom_metric_name: Option<String>,
 }
 
 #[cfg(test)]
@@ -7103,14 +7252,23 @@ mod tests {
         // Sample 0 (target=0): grad = p_0 - 1 = 1/3 - 1 = -2/3
         // Sample 1 (target=1): grad = p_0 - 0 = 1/3
         // Sample 2 (target=2): grad = p_0 - 0 = 1/3
-        obj.compute_gradients_for_class(&predictions, &targets, None, 0, &mut buffer);
+        let _ = obj.compute_gradients_for_class(&predictions, &targets, None, 0, &mut buffer);
         assert_eq!(buffer.len(), 3);
         // Sample 0: grad should be negative (correct class)
-        assert!(buffer[0].grad < 0.0, "grad for correct class should be negative");
+        assert!(
+            buffer[0].grad < 0.0,
+            "grad for correct class should be negative"
+        );
         // Sample 1: grad should be positive (wrong class)
-        assert!(buffer[1].grad > 0.0, "grad for wrong class should be positive");
+        assert!(
+            buffer[1].grad > 0.0,
+            "grad for wrong class should be positive"
+        );
         // Sample 2: grad should be positive (wrong class)
-        assert!(buffer[2].grad > 0.0, "grad for wrong class should be positive");
+        assert!(
+            buffer[2].grad > 0.0,
+            "grad for wrong class should be positive"
+        );
 
         // Hessians should all be positive
         for gp in &buffer {
@@ -7130,7 +7288,8 @@ mod tests {
         let weights = vec![2.0_f32, 0.5];
         let mut buffer = Vec::new();
 
-        obj.compute_gradients_for_class(&predictions, &targets, Some(&weights), 0, &mut buffer);
+        let _ =
+            obj.compute_gradients_for_class(&predictions, &targets, Some(&weights), 0, &mut buffer);
         // With uniform softmax (p=0.5): grad_0 = (0.5 - 1) * 2.0 = -1.0
         assert!((buffer[0].grad - (-1.0)).abs() < 0.01);
         // grad_1 = (0.5 - 0) * 0.5 = 0.25
@@ -7161,7 +7320,10 @@ mod tests {
             vec![-10.0, -10.0, 10.0], // strongly class 2
         ];
         let loss = obj.loss(&predictions, &targets, None).unwrap();
-        assert!(loss < 0.01, "loss should be near zero for perfect predictions, got {loss}");
+        assert!(
+            loss < 0.01,
+            "loss should be near zero for perfect predictions, got {loss}"
+        );
     }
 
     #[test]
@@ -7179,8 +7341,16 @@ mod tests {
                         threshold_bin: 1,
                         gain: 2.5,
                         default_left: false,
-                        left_stats: NodeStats { grad_sum: -1.0, hess_sum: 2.0, row_count: 3 },
-                        right_stats: NodeStats { grad_sum: 1.0, hess_sum: 2.0, row_count: 3 },
+                        left_stats: NodeStats {
+                            grad_sum: -1.0,
+                            hess_sum: 2.0,
+                            row_count: 3,
+                        },
+                        right_stats: NodeStats {
+                            grad_sum: 1.0,
+                            hess_sum: 2.0,
+                            row_count: 3,
+                        },
                     },
                     left_leaf_value: -0.1,
                     right_leaf_value: 0.1,
@@ -7192,8 +7362,16 @@ mod tests {
                         threshold_bin: 2,
                         gain: 1.5,
                         default_left: true,
-                        left_stats: NodeStats { grad_sum: 0.5, hess_sum: 1.0, row_count: 2 },
-                        right_stats: NodeStats { grad_sum: -0.5, hess_sum: 1.0, row_count: 4 },
+                        left_stats: NodeStats {
+                            grad_sum: 0.5,
+                            hess_sum: 1.0,
+                            row_count: 2,
+                        },
+                        right_stats: NodeStats {
+                            grad_sum: -0.5,
+                            hess_sum: 1.0,
+                            row_count: 4,
+                        },
                     },
                     left_leaf_value: 0.2,
                     right_leaf_value: -0.05,
@@ -7236,8 +7414,16 @@ mod tests {
                             threshold_bin: 1,
                             gain: 1.0,
                             default_left: false,
-                            left_stats: NodeStats { grad_sum: 0.0, hess_sum: 1.0, row_count: 2 },
-                            right_stats: NodeStats { grad_sum: 0.0, hess_sum: 1.0, row_count: 2 },
+                            left_stats: NodeStats {
+                                grad_sum: 0.0,
+                                hess_sum: 1.0,
+                                row_count: 2,
+                            },
+                            right_stats: NodeStats {
+                                grad_sum: 0.0,
+                                hess_sum: 1.0,
+                                row_count: 2,
+                            },
                         },
                         left_leaf_value: -0.1,
                         right_leaf_value: 0.1,
@@ -7249,33 +7435,257 @@ mod tests {
                             threshold_bin: 2,
                             gain: 0.5,
                             default_left: false,
-                            left_stats: NodeStats { grad_sum: 0.0, hess_sum: 1.0, row_count: 2 },
-                            right_stats: NodeStats { grad_sum: 0.0, hess_sum: 1.0, row_count: 2 },
+                            left_stats: NodeStats {
+                                grad_sum: 0.0,
+                                hess_sum: 1.0,
+                                row_count: 2,
+                            },
+                            right_stats: NodeStats {
+                                grad_sum: 0.0,
+                                hess_sum: 1.0,
+                                row_count: 2,
+                            },
                         },
                         left_leaf_value: -0.05,
                         right_leaf_value: 0.05,
                     },
                 ],
                 // Class 1: same structure
-                vec![
-                    TrainedStump {
-                        split: SplitCandidate {
-                            node_id: 0,
-                            feature_index: 0,
-                            threshold_bin: 1,
-                            gain: 1.0,
-                            default_left: false,
-                            left_stats: NodeStats { grad_sum: 0.0, hess_sum: 1.0, row_count: 2 },
-                            right_stats: NodeStats { grad_sum: 0.0, hess_sum: 1.0, row_count: 2 },
+                vec![TrainedStump {
+                    split: SplitCandidate {
+                        node_id: 0,
+                        feature_index: 0,
+                        threshold_bin: 1,
+                        gain: 1.0,
+                        default_left: false,
+                        left_stats: NodeStats {
+                            grad_sum: 0.0,
+                            hess_sum: 1.0,
+                            row_count: 2,
                         },
-                        left_leaf_value: 0.1,
-                        right_leaf_value: -0.1,
+                        right_stats: NodeStats {
+                            grad_sum: 0.0,
+                            hess_sum: 1.0,
+                            row_count: 2,
+                        },
                     },
-                ],
+                    left_leaf_value: 0.1,
+                    right_leaf_value: -0.1,
+                }],
             ],
             categorical_state: None,
             objective: "multiclass_softmax".to_string(),
         };
         assert_eq!(model.rounds_completed(), 2);
+    }
+
+    // ── Per-round metric callback tests ─────────────────────────────────
+
+    /// A simple test callback that returns MSE as the metric value.
+    struct MseMetricCallback;
+
+    impl PerRoundMetricCallback for MseMetricCallback {
+        fn evaluate(
+            &self,
+            predictions: &[f32],
+            targets: &[f32],
+            _sample_weights: Option<&[f32]>,
+        ) -> EngineResult<f32> {
+            if predictions.len() != targets.len() {
+                return Err(EngineError::ContractViolation(
+                    "predictions and targets length mismatch".into(),
+                ));
+            }
+            let n = predictions.len() as f32;
+            let mse: f32 = predictions
+                .iter()
+                .zip(targets.iter())
+                .map(|(p, t)| (p - t).powi(2))
+                .sum::<f32>()
+                / n;
+            Ok(mse)
+        }
+        fn higher_is_better(&self) -> bool {
+            false
+        }
+        fn metric_name(&self) -> &str {
+            "test_mse"
+        }
+    }
+
+    /// A metric callback where higher values are better (e.g. R²-like).
+    struct HigherIsBetterCallback;
+
+    impl PerRoundMetricCallback for HigherIsBetterCallback {
+        fn evaluate(
+            &self,
+            predictions: &[f32],
+            targets: &[f32],
+            _sample_weights: Option<&[f32]>,
+        ) -> EngineResult<f32> {
+            // Return negative MSE so higher = better
+            let n = predictions.len() as f32;
+            let neg_mse: f32 = -(predictions
+                .iter()
+                .zip(targets.iter())
+                .map(|(p, t)| (p - t).powi(2))
+                .sum::<f32>()
+                / n);
+            Ok(neg_mse)
+        }
+        fn higher_is_better(&self) -> bool {
+            true
+        }
+        fn metric_name(&self) -> &str {
+            "neg_mse"
+        }
+    }
+
+    #[test]
+    fn test_per_round_callback_basic() {
+        let trainer = Trainer::new(TrainParams::default()).expect("valid params");
+        let controls = IterationControls::new(5, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
+            .expect("controls are valid");
+        let validation = ValidationDatasetRef {
+            dataset: &sample_dataset(),
+            binned_matrix: &sample_binned_matrix(),
+        };
+        let callback = MseMetricCallback;
+        let summary = trainer
+            .fit_iterations_with_validation_and_metric(
+                &sample_dataset(),
+                &sample_binned_matrix(),
+                validation,
+                &MockBackend,
+                &SquaredErrorObjective,
+                controls,
+                Some(&callback),
+            )
+            .expect("training with metric callback succeeds");
+
+        // Callback should have been invoked each round.
+        assert_eq!(
+            summary.custom_metric_per_round.len(),
+            summary.rounds_completed
+        );
+        assert_eq!(summary.custom_metric_name.as_deref(), Some("test_mse"));
+        // Metric values should be non-negative (MSE).
+        for v in &summary.custom_metric_per_round {
+            assert!(*v >= 0.0, "MSE metric should be non-negative");
+        }
+    }
+
+    #[test]
+    fn test_per_round_callback_early_stopping() {
+        let trainer = Trainer::new(TrainParams::default()).expect("valid params");
+        // Set early_stopping_rounds=1 with very high min_improvement so it
+        // stops almost immediately when the custom metric plateaus.
+        let controls = IterationControls::new(100, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
+            .expect("controls are valid")
+            .with_validation_early_stopping(1, 1000.0)
+            .expect("validation controls are valid");
+        let validation = ValidationDatasetRef {
+            dataset: &sample_dataset(),
+            binned_matrix: &sample_binned_matrix(),
+        };
+        let callback = MseMetricCallback;
+        let summary = trainer
+            .fit_iterations_with_validation_and_metric(
+                &sample_dataset(),
+                &sample_binned_matrix(),
+                validation,
+                &MockBackend,
+                &SquaredErrorObjective,
+                controls,
+                Some(&callback),
+            )
+            .expect("training with callback early stopping succeeds");
+
+        // Should have stopped early due to the custom metric plateau.
+        assert_eq!(
+            summary.stop_reason,
+            IterationStopReason::CustomMetricPlateau,
+            "expected custom metric plateau stop reason, got {:?}",
+            summary.stop_reason,
+        );
+        assert!(
+            summary.rounds_completed < 100,
+            "should have stopped before all 100 rounds"
+        );
+    }
+
+    #[test]
+    fn test_per_round_callback_higher_is_better() {
+        let trainer = Trainer::new(TrainParams::default()).expect("valid params");
+        let controls = IterationControls::new(100, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
+            .expect("controls are valid")
+            .with_validation_early_stopping(1, 1000.0)
+            .expect("validation controls are valid");
+        let validation = ValidationDatasetRef {
+            dataset: &sample_dataset(),
+            binned_matrix: &sample_binned_matrix(),
+        };
+        let callback = HigherIsBetterCallback;
+        let summary = trainer
+            .fit_iterations_with_validation_and_metric(
+                &sample_dataset(),
+                &sample_binned_matrix(),
+                validation,
+                &MockBackend,
+                &SquaredErrorObjective,
+                controls,
+                Some(&callback),
+            )
+            .expect("training with higher-is-better callback succeeds");
+
+        // Should also stop early.
+        assert_eq!(
+            summary.stop_reason,
+            IterationStopReason::CustomMetricPlateau,
+        );
+        assert_eq!(summary.custom_metric_name.as_deref(), Some("neg_mse"));
+    }
+
+    #[test]
+    fn test_per_round_callback_none_no_effect() {
+        let trainer = Trainer::new(TrainParams::default()).expect("valid params");
+        let controls = IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
+            .expect("controls are valid");
+        let validation = ValidationDatasetRef {
+            dataset: &sample_dataset(),
+            binned_matrix: &sample_binned_matrix(),
+        };
+        // Pass None — should behave identically to the non-metric path.
+        let summary = trainer
+            .fit_iterations_with_validation_and_metric(
+                &sample_dataset(),
+                &sample_binned_matrix(),
+                validation,
+                &MockBackend,
+                &SquaredErrorObjective,
+                controls,
+                None,
+            )
+            .expect("training without callback succeeds");
+
+        assert!(summary.custom_metric_per_round.is_empty());
+        assert!(summary.custom_metric_name.is_none());
+        assert_ne!(
+            summary.stop_reason,
+            IterationStopReason::CustomMetricPlateau,
+        );
+    }
+
+    #[test]
+    fn test_custom_metric_plateau_stop_reason() {
+        // Verify the CustomMetricPlateau variant is distinct from ValidationLossPlateau.
+        assert_ne!(
+            IterationStopReason::CustomMetricPlateau,
+            IterationStopReason::ValidationLossPlateau,
+        );
+        assert_ne!(
+            IterationStopReason::CustomMetricPlateau,
+            IterationStopReason::CompletedRequestedRounds,
+        );
     }
 }

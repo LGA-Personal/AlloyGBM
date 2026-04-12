@@ -38,6 +38,10 @@ impl From<CoreError> for PredictorError {
 
 pub type PredictorResult<T> = Result<T, PredictorError>;
 
+/// Return type for `decode_multiclass_trees_payload`:
+/// `(num_classes, feature_count, baselines, per_class_stumps)`.
+type MultiClassTreesPayload = (usize, usize, Vec<f32>, Vec<Vec<PredictorStump>>);
+
 #[derive(Debug, Clone, PartialEq)]
 struct PredictorStump {
     node_id: u32,
@@ -978,9 +982,7 @@ fn softmax_in_place(logits: &mut [f32]) {
 
 /// Decode a MultiClassTrees section payload.
 /// Returns `(num_classes, feature_count, baselines, per_class_stumps)`.
-fn decode_multiclass_trees_payload(
-    bytes: &[u8],
-) -> PredictorResult<(usize, usize, Vec<f32>, Vec<Vec<PredictorStump>>)> {
+fn decode_multiclass_trees_payload(bytes: &[u8]) -> PredictorResult<MultiClassTreesPayload> {
     const MC_HEADER_SIZE: usize = 12;
     const STUMP_SIZE: usize = 32;
 
@@ -1035,8 +1037,7 @@ fn decode_multiclass_trees_payload(
 
     let mut per_class_stumps = Vec::with_capacity(num_classes);
     let mut offset = stumps_start;
-    for k in 0..num_classes {
-        let count = stump_counts[k];
+    for &count in stump_counts.iter().take(num_classes) {
         let mut stumps = Vec::with_capacity(count);
         for _ in 0..count {
             let node_id = read_u32_le(bytes, offset)?;
@@ -1473,11 +1474,7 @@ mod tests {
     fn test_multiclass_predict_batch_shape() {
         let artifact = train_multiclass_artifact();
         let predictor = Predictor::from_artifact_bytes(&artifact).unwrap();
-        let rows = vec![
-            vec![0.2, 0.5],
-            vec![1.5, 0.3],
-            vec![2.7, 0.8],
-        ];
+        let rows = vec![vec![0.2, 0.5], vec![1.5, 0.3], vec![2.7, 0.8]];
         let result = predictor.predict_batch_multiclass(&rows).unwrap();
         // 3 rows * 3 classes = 9 values
         assert_eq!(result.len(), 9);
@@ -1506,7 +1503,10 @@ mod tests {
             );
             // All probabilities should be in [0, 1]
             for &p in &result[start..start + 3] {
-                assert!(p >= 0.0 && p <= 1.0, "probability {p} out of [0,1] range");
+                assert!(
+                    (0.0..=1.0).contains(&p),
+                    "probability {p} out of [0,1] range"
+                );
             }
         }
     }
@@ -1515,11 +1515,7 @@ mod tests {
     fn test_multiclass_predict_dense_matches_batch() {
         let artifact = train_multiclass_artifact();
         let predictor = Predictor::from_artifact_bytes(&artifact).unwrap();
-        let rows = vec![
-            vec![0.2, 0.5],
-            vec![1.5, 0.3],
-            vec![2.7, 0.8],
-        ];
+        let rows = vec![vec![0.2, 0.5], vec![1.5, 0.3], vec![2.7, 0.8]];
         let batch_result = predictor.predict_batch_multiclass(&rows).unwrap();
         let dense_values: Vec<f32> = rows.iter().flatten().copied().collect();
         let dense_result = predictor
@@ -1527,10 +1523,7 @@ mod tests {
             .unwrap();
         assert_eq!(batch_result.len(), dense_result.len());
         for (a, b) in batch_result.iter().zip(dense_result.iter()) {
-            assert!(
-                (a - b).abs() < 1e-6,
-                "batch {a} != dense {b}"
-            );
+            assert!((a - b).abs() < 1e-6, "batch {a} != dense {b}");
         }
     }
 
@@ -1541,10 +1534,15 @@ mod tests {
         let result = predictor.predict_row(&[0.5, 0.3]);
         assert!(result.is_err());
         if let Err(PredictorError::ContractViolation(msg)) = result {
-            assert!(msg.contains("multiclass") || msg.contains("multi-class"),
-                "unexpected error: {msg}");
+            assert!(
+                msg.contains("multiclass") || msg.contains("multi-class"),
+                "unexpected error: {msg}"
+            );
         } else {
-            panic!("expected ContractViolation error for predict_row on multiclass, got {:?}", result);
+            panic!(
+                "expected ContractViolation error for predict_row on multiclass, got {:?}",
+                result
+            );
         }
     }
 
