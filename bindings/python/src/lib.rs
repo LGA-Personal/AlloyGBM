@@ -6,12 +6,12 @@ use alloygbm_categorical::{
 };
 use alloygbm_core::{
     BinnedMatrix, CATEGORICAL_STATE_FORMAT_V1, CategoricalStatePayloadV1, DatasetMatrix,
-    DenseMatrixView, MISSING_BIN_U8, TrainParams, TrainingDataset, TreeGrowth,
+    DenseMatrixView, GradientPair, MISSING_BIN_U8, TrainParams, TrainingDataset, TreeGrowth,
 };
 use alloygbm_engine::{
     ArtifactCompatibilityMode, BinaryCrossEntropyObjective, CategoricalTargetEncodingSpec,
     EngineError, IterationRunSummary, LambdaMARTObjective, MultiClassIterationRunSummary,
-    MultiClassSoftmaxObjective, PairwiseRankingObjective,
+    MultiClassSoftmaxObjective, ObjectiveOps, PairwiseRankingObjective, PerRoundMetricCallback,
     QueryRMSEObjective, SquaredErrorObjective, TrainedModel, Trainer, TrainingPolicyMode,
     WarmStartState, XeNDCGObjective, YetiRankObjective,
 };
@@ -19,7 +19,7 @@ use alloygbm_predictor::{Predictor, PredictorError};
 use alloygbm_shap::{
     ShapError, explain_rows_from_artifact_bytes, global_importance_from_artifact_bytes,
 };
-use numpy::{PyReadonlyArray2, PyUntypedArrayMethods};
+use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use rayon::prelude::*;
@@ -34,6 +34,363 @@ const MIN_CONTINUOUS_QUANTIZED_BINS: usize = 2;
 const LINEAR_TAIL_RANK_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK";
 const LINEAR_TAIL_CORE_SPAN_RATIO_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_CORE_SPAN_RATIO";
 const DEFAULT_LINEAR_TAIL_CORE_SPAN_RATIO_THRESHOLD: f32 = 0.10;
+
+// ---------------------------------------------------------------------------
+// Shared helpers for fast Rust ↔ numpy data transfer
+// ---------------------------------------------------------------------------
+
+/// Extract a `Vec<f32>` from a Python object that is expected to be a numpy
+/// array.  Tries the zero-overhead path first (`PyReadonlyArray1<f32>` →
+/// `as_slice()` → single `memcpy`) and falls back to `PyReadonlyArray1<f64>`
+/// with a narrowing copy, then to generic PyO3 extraction (element-wise,
+/// slowest) for non-contiguous or exotic dtypes.
+fn extract_f32_array(_py: Python<'_>, obj: &Bound<'_, PyAny>) -> Result<Vec<f32>, EngineError> {
+    // Fast path: contiguous f32 numpy array — single memcpy via as_slice()
+    if let Ok(arr) = obj.downcast::<PyArray1<f32>>() {
+        let readonly = arr.readonly();
+        return Ok(readonly
+            .as_slice()
+            .map_err(|_| EngineError::ContractViolation("numpy array is not contiguous".into()))?
+            .to_vec());
+    }
+    // Medium path: contiguous f64 numpy array — common when user returns
+    // plain Python floats which numpy defaults to float64
+    if let Ok(arr) = obj.downcast::<PyArray1<f64>>() {
+        let readonly = arr.readonly();
+        let slice = readonly
+            .as_slice()
+            .map_err(|_| EngineError::ContractViolation("numpy array is not contiguous".into()))?;
+        return Ok(slice.iter().map(|&v| v as f32).collect());
+    }
+    // Slow fallback: generic extraction (handles lists, non-contiguous arrays, etc.)
+    obj.extract::<Vec<f32>>().map_err(|e| {
+        EngineError::ContractViolation(format!("failed to extract array as Vec<f32>: {e}"))
+    })
+}
+
+/// Create a pair of read-only numpy f32 arrays from Rust slices.
+/// Uses `PyArray1::from_slice` which does a single memcpy — much faster than
+/// going through `Vec → Python list → np.array() → .astype("float32")`.
+fn make_numpy_f32_pair<'py>(
+    py: Python<'py>,
+    a: &[f32],
+    b: &[f32],
+) -> (Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<f32>>) {
+    (PyArray1::from_slice(py, a), PyArray1::from_slice(py, b))
+}
+
+// ---------------------------------------------------------------------------
+// Custom Python Objective — wraps a Python callable implementing ObjectiveOps
+// ---------------------------------------------------------------------------
+
+/// A custom objective backed by a Python callable.
+///
+/// The callable must have the signature:
+///   `(y_true: np.ndarray, y_pred: np.ndarray) -> (grad: np.ndarray, hess: np.ndarray)`
+///
+/// An optional loss function can be provided with signature:
+///   `(y_true: np.ndarray, y_pred: np.ndarray) -> float`
+struct CustomPythonObjective {
+    grad_hess_fn: Py<PyAny>,
+    loss_fn: Option<Py<PyAny>>,
+}
+
+impl CustomPythonObjective {
+    fn new(grad_hess_fn: Py<PyAny>, loss_fn: Option<Py<PyAny>>) -> Self {
+        Self {
+            grad_hess_fn,
+            loss_fn,
+        }
+    }
+
+    fn call_python_grad_hess(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+    ) -> Result<(Vec<f32>, Vec<f32>), EngineError> {
+        Python::with_gil(|py| {
+            // Create numpy arrays directly from Rust slices — avoids creating a
+            // Python list and the redundant .astype("float32") call.  PyArray1::from_slice
+            // produces a contiguous f32 numpy array backed by a copy of the slice
+            // (one memcpy instead of element-by-element Python object creation).
+            let y_true = PyArray1::from_slice(py, targets);
+            let y_pred = PyArray1::from_slice(py, predictions);
+
+            let result = self.grad_hess_fn.call1(py, (y_true, y_pred)).map_err(|e| {
+                EngineError::ContractViolation(format!("custom objective callable failed: {e}"))
+            })?;
+
+            let tuple = result
+                .downcast_bound::<pyo3::types::PyTuple>(py)
+                .map_err(|_| {
+                    EngineError::ContractViolation(
+                        "custom objective must return a tuple of (gradient, hessian)".to_string(),
+                    )
+                })?;
+            if tuple.len() != 2 {
+                return Err(EngineError::ContractViolation(format!(
+                    "custom objective must return exactly 2 arrays, got {}",
+                    tuple.len()
+                )));
+            }
+
+            let grad_arr = tuple.get_item(0).map_err(|e| {
+                EngineError::ContractViolation(format!("failed to get gradient array: {e}"))
+            })?;
+            let hess_arr = tuple.get_item(1).map_err(|e| {
+                EngineError::ContractViolation(format!("failed to get hessian array: {e}"))
+            })?;
+
+            // Fast extraction: try to get a typed numpy array view (single memcpy
+            // from contiguous buffer) before falling back to generic element-wise
+            // extraction for non-contiguous or non-f32 arrays.
+            let grad_list = extract_f32_array(py, &grad_arr)?;
+            let hess_list = extract_f32_array(py, &hess_arr)?;
+
+            if grad_list.len() != targets.len() {
+                return Err(EngineError::ContractViolation(format!(
+                    "gradient array length {} does not match target length {}",
+                    grad_list.len(),
+                    targets.len()
+                )));
+            }
+            if hess_list.len() != targets.len() {
+                return Err(EngineError::ContractViolation(format!(
+                    "hessian array length {} does not match target length {}",
+                    hess_list.len(),
+                    targets.len()
+                )));
+            }
+
+            Ok((grad_list, hess_list))
+        })
+    }
+
+    fn call_python_loss(&self, predictions: &[f32], targets: &[f32]) -> Result<f32, EngineError> {
+        if let Some(ref loss_fn) = self.loss_fn {
+            Python::with_gil(|py| {
+                let (y_true, y_pred) = make_numpy_f32_pair(py, targets, predictions);
+                let result = loss_fn.call1(py, (y_true, y_pred)).map_err(|e| {
+                    EngineError::ContractViolation(format!("custom loss callable failed: {e}"))
+                })?;
+                let value: f64 = result.extract(py).map_err(|e| {
+                    EngineError::ContractViolation(format!(
+                        "custom loss must return a float, got: {e}"
+                    ))
+                })?;
+                Ok(value as f32)
+            })
+        } else {
+            // Fallback: use MSE as a loss proxy for monitoring/early stopping
+            let n = predictions.len();
+            if n == 0 {
+                return Ok(0.0);
+            }
+            let mse: f64 = predictions
+                .iter()
+                .zip(targets.iter())
+                .map(|(&p, &t)| {
+                    let diff = (p - t) as f64;
+                    diff * diff
+                })
+                .sum::<f64>()
+                / n as f64;
+            Ok(mse as f32)
+        }
+    }
+}
+
+impl ObjectiveOps for CustomPythonObjective {
+    fn objective_name(&self) -> &str {
+        "custom"
+    }
+
+    fn initial_prediction(
+        &self,
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+    ) -> alloygbm_engine::EngineResult<f32> {
+        // Weighted mean of targets (same as squared error)
+        if targets.is_empty() {
+            return Ok(0.0);
+        }
+        if let Some(weights) = sample_weights {
+            let total_weight: f64 = weights.iter().map(|&w| w as f64).sum();
+            if total_weight <= 0.0 {
+                return Ok(0.0);
+            }
+            let weighted_sum: f64 = targets
+                .iter()
+                .zip(weights.iter())
+                .map(|(&t, &w)| t as f64 * w as f64)
+                .sum();
+            Ok((weighted_sum / total_weight) as f32)
+        } else {
+            let sum: f64 = targets.iter().map(|&t| t as f64).sum();
+            Ok((sum / targets.len() as f64) as f32)
+        }
+    }
+
+    fn compute_gradients(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+    ) -> alloygbm_engine::EngineResult<Vec<GradientPair>> {
+        let (grads, hessians) = self.call_python_grad_hess(predictions, targets)?;
+        let n = grads.len();
+        let mut result = Vec::with_capacity(n);
+        if let Some(weights) = sample_weights {
+            for i in 0..n {
+                let w = weights[i];
+                result.push(GradientPair {
+                    grad: grads[i] * w,
+                    hess: hessians[i] * w,
+                });
+            }
+        } else {
+            for i in 0..n {
+                result.push(GradientPair {
+                    grad: grads[i],
+                    hess: hessians[i],
+                });
+            }
+        }
+        Ok(result)
+    }
+
+    fn loss(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        _sample_weights: Option<&[f32]>,
+    ) -> alloygbm_engine::EngineResult<f32> {
+        self.call_python_loss(predictions, targets)
+    }
+
+    fn requires_group_id(&self) -> bool {
+        false
+    }
+
+    fn supports_leaf_refinement(&self) -> bool {
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Custom Python Metric Callback
+// ---------------------------------------------------------------------------
+
+/// A custom evaluation metric backed by a Python callable.
+///
+/// The callable must have the signature:
+///   `(y_true: np.ndarray, y_pred: np.ndarray) -> (name: str, value: float, higher_is_better: bool)`
+struct CustomPythonMetricCallback {
+    metric_fn: Py<PyAny>,
+    /// Name discovered during probe, set before training starts
+    name: String,
+    /// Direction discovered during probe, set before training starts
+    higher_is_better_flag: bool,
+}
+
+impl CustomPythonMetricCallback {
+    /// Create a new callback by probing the Python callable with dummy data
+    /// to discover the metric name and direction.
+    fn new(metric_fn: Py<PyAny>) -> Result<Self, EngineError> {
+        let dummy_targets = vec![0.0_f32; 2];
+        let dummy_preds = vec![0.0_f32; 2];
+
+        let (name, _value, higher_is_better) =
+            Self::call_python_static(&metric_fn, &dummy_preds, &dummy_targets)?;
+
+        Ok(Self {
+            metric_fn,
+            name,
+            higher_is_better_flag: higher_is_better,
+        })
+    }
+
+    /// Call the Python metric function and extract (name, value, higher_is_better).
+    fn call_python_static(
+        metric_fn: &Py<PyAny>,
+        predictions: &[f32],
+        targets: &[f32],
+    ) -> Result<(String, f32, bool), EngineError> {
+        Python::with_gil(|py| {
+            let (y_true, y_pred) = make_numpy_f32_pair(py, targets, predictions);
+
+            let result = metric_fn.call1(py, (y_true, y_pred)).map_err(|e| {
+                EngineError::ContractViolation(format!("custom eval metric callable failed: {e}"))
+            })?;
+
+            let tuple = result
+                .downcast_bound::<pyo3::types::PyTuple>(py)
+                .map_err(|_| {
+                    EngineError::ContractViolation(
+                        "custom eval metric must return a tuple of (name, value, higher_is_better)"
+                            .to_string(),
+                    )
+                })?;
+            if tuple.len() != 3 {
+                return Err(EngineError::ContractViolation(format!(
+                    "custom eval metric must return exactly 3 values (name, value, higher_is_better), got {}",
+                    tuple.len()
+                )));
+            }
+
+            let name: String = tuple
+                .get_item(0)
+                .map_err(|e| {
+                    EngineError::ContractViolation(format!("failed to get metric name: {e}"))
+                })?
+                .extract()
+                .map_err(|e| {
+                    EngineError::ContractViolation(format!("metric name must be a string: {e}"))
+                })?;
+            let value: f64 = tuple
+                .get_item(1)
+                .map_err(|e| {
+                    EngineError::ContractViolation(format!("failed to get metric value: {e}"))
+                })?
+                .extract()
+                .map_err(|e| {
+                    EngineError::ContractViolation(format!("metric value must be a float: {e}"))
+                })?;
+            let higher_is_better: bool = tuple
+                .get_item(2)
+                .map_err(|e| {
+                    EngineError::ContractViolation(format!("failed to get higher_is_better: {e}"))
+                })?
+                .extract()
+                .map_err(|e| {
+                    EngineError::ContractViolation(format!("higher_is_better must be a bool: {e}"))
+                })?;
+
+            Ok((name, value as f32, higher_is_better))
+        })
+    }
+}
+
+impl PerRoundMetricCallback for CustomPythonMetricCallback {
+    fn evaluate(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        _sample_weights: Option<&[f32]>,
+    ) -> alloygbm_engine::EngineResult<f32> {
+        let (_name, value, _higher_is_better) =
+            Self::call_python_static(&self.metric_fn, predictions, targets)?;
+        Ok(value)
+    }
+
+    fn higher_is_better(&self) -> bool {
+        self.higher_is_better_flag
+    }
+
+    fn metric_name(&self) -> &str {
+        &self.name
+    }
+}
 
 fn is_pre_binned_integer_value(value: f32) -> bool {
     if value < 0.0 {
@@ -464,6 +821,12 @@ struct NativeTrainingSummary {
     bridge_prepare_seconds: f64,
     #[pyo3(get)]
     native_train_seconds: f64,
+    /// Custom eval metric values per completed round (empty when no custom metric).
+    #[pyo3(get)]
+    custom_metric_values: Vec<f32>,
+    /// Custom eval metric name (None when no custom metric).
+    #[pyo3(get)]
+    custom_metric_name: Option<String>,
 }
 
 #[pyclass]
@@ -1888,6 +2251,8 @@ fn build_native_training_summary_from_multiclass(
         stop_reason: format!("{:?}", summary.stop_reason),
         bridge_prepare_seconds,
         native_train_seconds,
+        custom_metric_values: summary.custom_metric_per_round.clone(),
+        custom_metric_name: summary.custom_metric_name.clone(),
     }
 }
 
@@ -1920,6 +2285,8 @@ fn build_native_training_summary(
         stop_reason: format!("{:?}", summary.stop_reason),
         bridge_prepare_seconds,
         native_train_seconds,
+        custom_metric_values: summary.custom_metric_per_round.clone(),
+        custom_metric_name: summary.custom_metric_name.clone(),
     }
 }
 
@@ -1949,6 +2316,9 @@ fn train_regression_artifact_with_summary_dense_impl(
     objective: &str,
     init_artifact_bytes: Option<&[u8]>,
     num_classes: Option<usize>,
+    custom_objective_fn: Option<Py<PyAny>>,
+    custom_loss_fn: Option<Py<PyAny>>,
+    custom_metric_fn: Option<Py<PyAny>>,
 ) -> Result<NativeTrainingResult, EngineError> {
     let bridge_start = Instant::now();
     let need_dense_values = !categorical_specs.is_empty();
@@ -2057,6 +2427,16 @@ fn train_regression_artifact_with_summary_dense_impl(
     let backend = CpuBackend;
     let native_start = Instant::now();
 
+    // Build the custom metric callback if provided
+    let custom_metric_cb = if let Some(metric_fn) = custom_metric_fn {
+        Some(CustomPythonMetricCallback::new(metric_fn)?)
+    } else {
+        None
+    };
+    let custom_metric_ref: Option<&dyn PerRoundMetricCallback> = custom_metric_cb
+        .as_ref()
+        .map(|cb| cb as &dyn PerRoundMetricCallback);
+
     macro_rules! run_training {
         ($obj:expr) => {{
             let controls = trainer.iteration_controls_for_policy(
@@ -2067,7 +2447,7 @@ fn train_regression_artifact_with_summary_dense_impl(
             )?;
             if let Some(warm_start) = warm_start_state.clone() {
                 if let Some(validation_prepared) = validation_prepared.as_ref() {
-                    trainer.fit_iterations_warm_start_with_validation(
+                    trainer.fit_iterations_warm_start_with_validation_and_metric(
                         &prepared.dataset,
                         &prepared.binned_matrix,
                         alloygbm_engine::ValidationDatasetRef {
@@ -2078,6 +2458,7 @@ fn train_regression_artifact_with_summary_dense_impl(
                         $obj,
                         controls,
                         warm_start,
+                        custom_metric_ref,
                     )?
                 } else {
                     trainer.fit_iterations_warm_start(
@@ -2090,7 +2471,7 @@ fn train_regression_artifact_with_summary_dense_impl(
                     )?
                 }
             } else if let Some(validation_prepared) = validation_prepared.as_ref() {
-                trainer.fit_iterations_with_validation_summary(
+                trainer.fit_iterations_with_validation_and_metric(
                     &prepared.dataset,
                     &prepared.binned_matrix,
                     alloygbm_engine::ValidationDatasetRef {
@@ -2100,6 +2481,7 @@ fn train_regression_artifact_with_summary_dense_impl(
                     &backend,
                     $obj,
                     controls,
+                    custom_metric_ref,
                 )?
             } else {
                 trainer.fit_iterations_with_summary(
@@ -2221,10 +2603,19 @@ fn train_regression_artifact_with_summary_dense_impl(
                 continuous_binning_metadata: prepared.metadata.into(),
             });
         }
+        "custom" => {
+            let grad_fn = custom_objective_fn.ok_or_else(|| {
+                EngineError::ContractViolation(
+                    "objective 'custom' requires a custom_objective_fn to be provided".to_string(),
+                )
+            })?;
+            let obj = CustomPythonObjective::new(grad_fn, custom_loss_fn);
+            run_training!(&obj)
+        }
         other => {
             return Err(EngineError::InvalidConfig(format!(
                 "unknown objective '{other}', expected one of: squared_error, \
-                 binary_crossentropy, multiclass_softmax, queryrmse, rank_pairwise, \
+                 binary_crossentropy, multiclass_softmax, custom, queryrmse, rank_pairwise, \
                  rank_ndcg, rank_xendcg, yetirank"
             )));
         }
@@ -2578,6 +2969,9 @@ fn train_regression_artifact(
         objective,
         None, // init_artifact_bytes
         None, // num_classes
+        None, // custom_objective_fn
+        None, // custom_loss_fn
+        None, // custom_metric_fn
     )
     .map(|result| result.artifact_bytes)
     .map_err(engine_error_to_pyerr)
@@ -2697,6 +3091,9 @@ fn train_regression_artifact_dense(
         objective,
         None, // init_artifact_bytes
         None, // num_classes
+        None, // custom_objective_fn
+        None, // custom_loss_fn
+        None, // custom_metric_fn
     )
     .map(|result| result.artifact_bytes)
     .map_err(engine_error_to_pyerr)
@@ -2746,7 +3143,10 @@ fn train_regression_artifact_dense(
     categorical_feature_values_list=None,
     validation_categorical_feature_values_list=None,
     init_artifact_bytes=None,
-    num_classes=None
+    num_classes=None,
+    custom_objective_fn=None,
+    custom_loss_fn=None,
+    custom_metric_fn=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_with_summary(
@@ -2794,6 +3194,9 @@ fn train_regression_artifact_with_summary(
     validation_categorical_feature_values_list: Option<Vec<Vec<String>>>,
     init_artifact_bytes: Option<Vec<u8>>,
     num_classes: Option<usize>,
+    custom_objective_fn: Option<Py<PyAny>>,
+    custom_loss_fn: Option<Py<PyAny>>,
+    custom_metric_fn: Option<Py<PyAny>>,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -2881,6 +3284,9 @@ fn train_regression_artifact_with_summary(
         objective,
         init_artifact_bytes.as_deref(),
         num_classes,
+        custom_objective_fn,
+        custom_loss_fn,
+        custom_metric_fn,
     )
     .map_err(engine_error_to_pyerr)
 }
@@ -2932,7 +3338,10 @@ fn train_regression_artifact_with_summary(
     categorical_feature_values_list=None,
     validation_categorical_feature_values_list=None,
     init_artifact_bytes=None,
-    num_classes=None
+    num_classes=None,
+    custom_objective_fn=None,
+    custom_loss_fn=None,
+    custom_metric_fn=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary(
@@ -2983,6 +3392,9 @@ fn train_regression_artifact_dense_with_summary(
     validation_categorical_feature_values_list: Option<Vec<Vec<String>>>,
     init_artifact_bytes: Option<Vec<u8>>,
     num_classes: Option<usize>,
+    custom_objective_fn: Option<Py<PyAny>>,
+    custom_loss_fn: Option<Py<PyAny>>,
+    custom_metric_fn: Option<Py<PyAny>>,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -3051,6 +3463,9 @@ fn train_regression_artifact_dense_with_summary(
         objective,
         init_artifact_bytes.as_deref(),
         num_classes,
+        custom_objective_fn,
+        custom_loss_fn,
+        custom_metric_fn,
     )
     .map_err(engine_error_to_pyerr)
 }
@@ -3117,7 +3532,10 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> PyResult<Vec<f32>> {
     categorical_feature_values_list=None,
     validation_categorical_feature_values_list=None,
     init_artifact_bytes=None,
-    num_classes=None
+    num_classes=None,
+    custom_objective_fn=None,
+    custom_loss_fn=None,
+    custom_metric_fn=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary_bytes(
@@ -3168,6 +3586,9 @@ fn train_regression_artifact_dense_with_summary_bytes(
     validation_categorical_feature_values_list: Option<Vec<Vec<String>>>,
     init_artifact_bytes: Option<Vec<u8>>,
     num_classes: Option<usize>,
+    custom_objective_fn: Option<Py<PyAny>>,
+    custom_loss_fn: Option<Py<PyAny>>,
+    custom_metric_fn: Option<Py<PyAny>>,
 ) -> PyResult<NativeTrainingResult> {
     let values = bytes_to_f32_vec(values_bytes)?;
     let targets = bytes_to_f32_vec(targets_bytes)?;
@@ -3240,6 +3661,9 @@ fn train_regression_artifact_dense_with_summary_bytes(
         objective,
         init_artifact_bytes.as_deref(),
         num_classes,
+        custom_objective_fn,
+        custom_loss_fn,
+        custom_metric_fn,
     )
     .map_err(engine_error_to_pyerr)
 }
@@ -3332,6 +3756,9 @@ mod tests {
             "squared_error",
             None, // init_artifact_bytes
             None, // num_classes
+            None, // custom_objective_fn
+            None, // custom_loss_fn
+            None, // custom_metric_fn
         )
         .map(|result| result.artifact_bytes)
     }
