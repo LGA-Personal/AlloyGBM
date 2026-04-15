@@ -2,7 +2,7 @@ use alloygbm_core::{
     BinnedMatrix, Device, FeatureHistogram, FeatureTile, GradientPair, HistogramBin,
     HistogramBundle, NodeSlice, NodeStats, PartitionResult, SplitCandidate,
 };
-use alloygbm_engine::{BackendOps, EngineError, EngineResult, SplitSelectionOptions};
+use alloygbm_engine::{BackendOps, CategoricalFeatureInfo, EngineError, EngineResult, SplitSelectionOptions};
 use rayon::prelude::*;
 use std::cell::RefCell;
 
@@ -571,6 +571,184 @@ impl CpuBackend {
                         threshold_bin: threshold_bin as u16,
                         gain,
                         default_left,
+                        is_categorical: false,
+                        categorical_bitset: None,
+                        left_stats: NodeStats {
+                            grad_sum: eff_lg,
+                            hess_sum: eff_lh,
+                            row_count: eff_lc,
+                        },
+                        right_stats: NodeStats {
+                            grad_sum: eff_rg,
+                            hess_sum: eff_rh,
+                            row_count: eff_rc,
+                        },
+                    });
+                }
+            }
+        }
+
+        best_candidate
+    }
+
+    /// Find the best categorical split for a feature using the Fisher-sort algorithm.
+    ///
+    /// Algorithm:
+    /// 1. Extract per-category stats from histogram bins (0..num_categories)
+    /// 2. Sort categories by `grad_sum / (hess_sum + l2_lambda + eps)` ascending
+    /// 3. Prefix scan over sorted order to find best binary partition
+    /// 4. Build bitset from the best partition
+    fn best_split_for_categorical_feature(
+        feature_histogram: &FeatureHistogram,
+        node_id: u32,
+        options: SplitSelectionOptions,
+        num_categories: usize,
+    ) -> Option<SplitCandidate> {
+        const EPSILON: f32 = 1e-6;
+
+        if num_categories < 2 {
+            return None;
+        }
+
+        // Extract missing-value stats.
+        let missing_bin_idx = options.missing_bin_index;
+        let (missing_grad, missing_hess, missing_count) =
+            if missing_bin_idx < feature_histogram.bins.len() {
+                let mb = &feature_histogram.bins[missing_bin_idx];
+                (mb.grad_sum, mb.hess_sum, mb.count)
+            } else {
+                (0.0, 0.0, 0)
+            };
+
+        // Collect populated categories (bins 0..num_categories).
+        let mut categories: Vec<(u16, f32, f32, u32)> = Vec::new(); // (bin_id, grad, hess, count)
+        let mut nm_total_grad = 0.0_f32;
+        let mut nm_total_hess = 0.0_f32;
+        let mut nm_total_count = 0_u32;
+
+        let scan_limit = num_categories.min(feature_histogram.bins.len()).min(missing_bin_idx);
+        for bin_id in 0..scan_limit {
+            let bin = &feature_histogram.bins[bin_id];
+            if bin.count > 0 {
+                categories.push((bin_id as u16, bin.grad_sum, bin.hess_sum, bin.count));
+            }
+            nm_total_grad += bin.grad_sum;
+            nm_total_hess += bin.hess_sum;
+            nm_total_count += bin.count;
+        }
+
+        if categories.len() < 2 {
+            return None;
+        }
+
+        let total_grad = nm_total_grad + missing_grad;
+        let total_hess = nm_total_hess + missing_hess;
+
+        if total_hess <= options.min_child_hessian {
+            return None;
+        }
+
+        let parent_denom = total_hess + options.l2_lambda + EPSILON;
+        let parent_grad_l1 = l1_threshold_gradient(total_grad, options.l1_alpha);
+        let parent_gain_term = (parent_grad_l1 * parent_grad_l1) / parent_denom;
+
+        // Sort categories by score: grad_sum / (hess_sum + l2_lambda + eps) ascending.
+        categories.sort_by(|a, b| {
+            let score_a = a.1 / (a.2 + options.l2_lambda + EPSILON);
+            let score_b = b.1 / (b.2 + options.l2_lambda + EPSILON);
+            score_a.partial_cmp(&score_b).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Prefix scan over sorted categories to find best partition.
+        let mut best_candidate: Option<SplitCandidate> = None;
+        let mut best_gain = 0.0_f32;
+        let mut left_grad = 0.0_f32;
+        let mut left_hess = 0.0_f32;
+        let mut left_count = 0_u32;
+
+        // Try splits: first k categories go left, rest go right (k = 1..len-1).
+        for k in 0..categories.len() - 1 {
+            let (_, g, h, c) = categories[k];
+            left_grad += g;
+            left_hess += h;
+            left_count += c;
+
+            let right_grad = nm_total_grad - left_grad;
+            let right_hess = nm_total_hess - left_hess;
+            let right_count = nm_total_count.saturating_sub(left_count);
+
+            // Try both NaN directions.
+            let candidates: [(f32, f32, u32, f32, f32, u32, bool); 2] = [
+                // NaN goes left
+                (
+                    left_grad + missing_grad,
+                    left_hess + missing_hess,
+                    left_count + missing_count,
+                    right_grad,
+                    right_hess,
+                    right_count,
+                    true,
+                ),
+                // NaN goes right
+                (
+                    left_grad,
+                    left_hess,
+                    left_count,
+                    right_grad + missing_grad,
+                    right_hess + missing_hess,
+                    right_count + missing_count,
+                    false,
+                ),
+            ];
+
+            for &(eff_lg, eff_lh, eff_lc, eff_rg, eff_rh, eff_rc, default_left) in &candidates {
+                if eff_lc == 0
+                    || eff_rc == 0
+                    || eff_lh <= options.min_child_hessian
+                    || eff_rh <= options.min_child_hessian
+                {
+                    continue;
+                }
+
+                let left_grad_for_gain = l1_threshold_gradient(eff_lg, options.l1_alpha);
+                let right_grad_for_gain = l1_threshold_gradient(eff_rg, options.l1_alpha);
+                let left_denom = eff_lh + options.l2_lambda + EPSILON;
+                let right_denom = eff_rh + options.l2_lambda + EPSILON;
+                if options.min_leaf_magnitude > 0.0 {
+                    let left_leaf_magnitude = left_grad_for_gain.abs() / left_denom;
+                    let right_leaf_magnitude = right_grad_for_gain.abs() / right_denom;
+                    if left_leaf_magnitude < options.min_leaf_magnitude
+                        && right_leaf_magnitude < options.min_leaf_magnitude
+                    {
+                        continue;
+                    }
+                }
+
+                let gain = (left_grad_for_gain * left_grad_for_gain) / left_denom
+                    + (right_grad_for_gain * right_grad_for_gain) / right_denom
+                    - parent_gain_term;
+
+                if gain > best_gain {
+                    // Build bitset: categories 0..=k in sorted order go left.
+                    let bitset_len = num_categories.div_ceil(8);
+                    let mut bitset = vec![0u8; bitset_len];
+                    for &(bin_id, _, _, _) in &categories[..=k] {
+                        let byte_idx = (bin_id / 8) as usize;
+                        let bit_idx = (bin_id % 8) as usize;
+                        if byte_idx < bitset.len() {
+                            bitset[byte_idx] |= 1 << bit_idx;
+                        }
+                    }
+
+                    best_gain = gain;
+                    best_candidate = Some(SplitCandidate {
+                        node_id,
+                        feature_index: feature_histogram.feature_index,
+                        threshold_bin: 0, // unused for categorical
+                        gain,
+                        default_left,
+                        is_categorical: true,
+                        categorical_bitset: Some(bitset),
                         left_stats: NodeStats {
                             grad_sum: eff_lg,
                             hess_sum: eff_lh,
@@ -595,6 +773,7 @@ impl CpuBackend {
         histograms: &HistogramBundle,
         options: SplitSelectionOptions,
         feature_weights: &[f32],
+        categorical_features: &[CategoricalFeatureInfo],
     ) -> Option<SplitCandidate> {
         // Apply per-feature weights when comparing splits across features.
         // The gain stored in SplitCandidate remains unweighted (the true gain);
@@ -608,11 +787,25 @@ impl CpuBackend {
             }
         };
 
+        let find_best = |fh: &FeatureHistogram| -> Option<SplitCandidate> {
+            let fi = fh.feature_index as usize;
+            if let Some(cat_info) = categorical_features.iter().find(|c| c.feature_index == fi) {
+                Self::best_split_for_categorical_feature(
+                    fh,
+                    histograms.node_id,
+                    options,
+                    cat_info.num_categories,
+                )
+            } else {
+                Self::best_split_for_feature(fh, histograms.node_id, options)
+            }
+        };
+
         if histograms.feature_histograms.len() >= Self::PARALLEL_SPLIT_FEATURE_THRESHOLD {
             histograms
                 .feature_histograms
                 .par_iter()
-                .filter_map(|fh| Self::best_split_for_feature(fh, histograms.node_id, options))
+                .filter_map(&find_best)
                 .reduce_with(|a, b| {
                     if weighted_gain(&b) > weighted_gain(&a) {
                         b
@@ -624,7 +817,7 @@ impl CpuBackend {
             histograms
                 .feature_histograms
                 .iter()
-                .filter_map(|fh| Self::best_split_for_feature(fh, histograms.node_id, options))
+                .filter_map(&find_best)
                 .reduce(|a, b| {
                     if weighted_gain(&b) > weighted_gain(&a) {
                         b
@@ -666,12 +859,7 @@ impl CpuBackend {
                         binned_matrix.row_bin(cell_index)
                     };
                     let gradient = gradients[row_index];
-                    let goes_left = if bin_val == missing {
-                        split.default_left
-                    } else {
-                        bin_val <= split.threshold_bin
-                    };
-                    if goes_left {
+                    if goes_left_for_split(bin_val, missing, split) {
                         left.push(row_index_u32);
                         lg += gradient.grad;
                         lh += gradient.hess;
@@ -736,6 +924,26 @@ fn l1_threshold_gradient(grad_sum: f32, l1_alpha: f32) -> f32 {
     }
 }
 
+/// Determine if a row goes to the left child for a given split.
+/// Handles both continuous (threshold comparison) and categorical (bitset membership) splits.
+#[inline]
+fn goes_left_for_split(bin_val: u16, missing: u16, split: &SplitCandidate) -> bool {
+    if bin_val == missing {
+        split.default_left
+    } else if split.is_categorical {
+        split
+            .categorical_bitset
+            .as_ref()
+            .map_or(split.default_left, |bs| {
+                let byte_idx = (bin_val / 8) as usize;
+                let bit_idx = (bin_val % 8) as usize;
+                byte_idx < bs.len() && (bs[byte_idx] & (1 << bit_idx)) != 0
+            })
+    } else {
+        bin_val <= split.threshold_bin
+    }
+}
+
 impl BackendOps for CpuBackend {
     fn build_histograms(
         &self,
@@ -767,6 +975,7 @@ impl BackendOps for CpuBackend {
             histograms,
             SplitSelectionOptions::default(),
             &[],
+            &[],
         ))
     }
 
@@ -775,11 +984,13 @@ impl BackendOps for CpuBackend {
         histograms: &HistogramBundle,
         options: SplitSelectionOptions,
         feature_weights: &[f32],
+        categorical_features: &[CategoricalFeatureInfo],
     ) -> EngineResult<Option<SplitCandidate>> {
         Ok(Self::best_split_with_options_internal(
             histograms,
             options,
             feature_weights,
+            categorical_features,
         ))
     }
 
@@ -811,12 +1022,7 @@ impl BackendOps for CpuBackend {
                 let cell_index = row_index * binned_matrix.feature_count + feature_index;
                 binned_matrix.row_bin(cell_index)
             };
-            let goes_left = if bin_val == missing {
-                split.default_left
-            } else {
-                bin_val <= split.threshold_bin
-            };
-            if goes_left {
+            if goes_left_for_split(bin_val, missing, split) {
                 left_row_indices.push(row_index as u32);
             } else {
                 right_row_indices.push(row_index as u32);
@@ -877,12 +1083,7 @@ impl BackendOps for CpuBackend {
                 binned_matrix.row_bin(cell_index)
             };
             let gradient = gradients[row_index];
-            let goes_left = if bin_val == missing {
-                split.default_left
-            } else {
-                bin_val <= split.threshold_bin
-            };
-            if goes_left {
+            if goes_left_for_split(bin_val, missing, split) {
                 left_row_indices.push(row_index_u32);
                 left_grad_sum += gradient.grad;
                 left_hess_sum += gradient.hess;
@@ -1325,6 +1526,7 @@ mod tests {
                     missing_bin_index: 255,
                 },
                 &[],
+                &[],
             )
             .expect("regularized split search should succeed")
             .expect("regularized split should exist");
@@ -1361,6 +1563,7 @@ mod tests {
                     missing_bin_index: 255,
                 },
                 &[],
+                &[],
             )
             .expect("regularized split search should succeed")
             .expect("regularized split should exist");
@@ -1392,6 +1595,7 @@ mod tests {
                     min_leaf_magnitude: 0.0,
                     missing_bin_index: 255,
                 },
+                &[],
                 &[],
             )
             .expect("split search should succeed");
@@ -1463,6 +1667,7 @@ mod tests {
                     missing_bin_index: 255,
                 },
                 &[],
+                &[],
             )
             .expect("magnitude-filtered split search should succeed")
             .expect("magnitude-filtered split should exist");
@@ -1481,6 +1686,8 @@ mod tests {
             threshold_bin: 1,
             gain: 1.0,
             default_left: false,
+            is_categorical: false,
+            categorical_bitset: None,
             left_stats: NodeStats {
                 grad_sum: 3.0,
                 hess_sum: 2.0,
@@ -1512,6 +1719,8 @@ mod tests {
             threshold_bin: 1,
             gain: 1.0,
             default_left: false,
+            is_categorical: false,
+            categorical_bitset: None,
             left_stats: NodeStats {
                 grad_sum: 0.0,
                 hess_sum: 0.0,
@@ -1597,5 +1806,159 @@ mod tests {
         let bytes_a = model_a.to_artifact_bytes().expect("artifact serializes");
         let bytes_b = model_b.to_artifact_bytes().expect("artifact serializes");
         assert_eq!(bytes_a, bytes_b);
+    }
+
+    // ── Native categorical split tests ──────────────────────────────────
+
+    #[test]
+    fn test_best_split_categorical_basic() {
+        // 3-category feature (bins 0,1,2) + NaN bin (bin 255)
+        // Category 0: positive grad, category 1: positive grad, category 2: negative grad
+        // Optimal split: categories 0,1 go left, category 2 goes right (or vice versa)
+        let num_cats = 3;
+        let nan_bin = 255usize;
+        let num_bins = nan_bin + 1;
+        let mut bins = vec![
+            HistogramBin {
+                grad_sum: 0.0,
+                hess_sum: 0.0,
+                count: 0,
+            };
+            num_bins
+        ];
+        // Category 0: grad=-2.0, hess=2.0 (score = -2/2 = -1.0)
+        bins[0] = HistogramBin {
+            grad_sum: -2.0,
+            hess_sum: 2.0,
+            count: 10,
+        };
+        // Category 1: grad=-1.5, hess=2.0 (score = -1.5/2 = -0.75)
+        bins[1] = HistogramBin {
+            grad_sum: -1.5,
+            hess_sum: 2.0,
+            count: 10,
+        };
+        // Category 2: grad=3.5, hess=2.0 (score = 3.5/2 = 1.75)
+        bins[2] = HistogramBin {
+            grad_sum: 3.5,
+            hess_sum: 2.0,
+            count: 10,
+        };
+        // NaN bin: no data
+        let fh = FeatureHistogram {
+            feature_index: 0,
+            bins,
+        };
+
+        let options = SplitSelectionOptions {
+            l2_lambda: 0.0,
+            l1_alpha: 0.0,
+            min_child_hessian: 0.0,
+            min_leaf_magnitude: 0.0,
+            missing_bin_index: nan_bin,
+        };
+
+        let result =
+            CpuBackend::best_split_for_categorical_feature(&fh, 0, options, num_cats);
+        assert!(result.is_some(), "should find a split");
+        let split = result.unwrap();
+        assert!(split.is_categorical);
+        assert!(split.categorical_bitset.is_some());
+        assert!(split.gain > 0.0, "gain should be positive");
+
+        // Verify bitset: categories 0 and 1 should be on one side, category 2 on the other
+        let bitset = split.categorical_bitset.as_ref().unwrap();
+        let cat0_left = bitset[0] & (1 << 0) != 0;
+        let cat1_left = bitset[0] & (1 << 1) != 0;
+        let cat2_left = bitset[0] & (1 << 2) != 0;
+        // Categories 0,1 have similar scores and should be grouped together
+        assert_eq!(cat0_left, cat1_left, "cats 0 and 1 should be on same side");
+        assert_ne!(cat0_left, cat2_left, "cat 2 should be on opposite side");
+    }
+
+    #[test]
+    fn test_best_split_categorical_single_populated() {
+        // Only 1 category has data -> no valid split possible
+        let num_cats = 3;
+        let nan_bin = 255usize;
+        let num_bins = nan_bin + 1;
+        let mut bins = vec![
+            HistogramBin {
+                grad_sum: 0.0,
+                hess_sum: 0.0,
+                count: 0,
+            };
+            num_bins
+        ];
+        bins[1] = HistogramBin {
+            grad_sum: 2.0,
+            hess_sum: 5.0,
+            count: 20,
+        };
+        let fh = FeatureHistogram {
+            feature_index: 0,
+            bins,
+        };
+
+        let options = SplitSelectionOptions::default();
+        let result =
+            CpuBackend::best_split_for_categorical_feature(&fh, 0, options, num_cats);
+        assert!(result.is_none(), "single populated category should not split");
+    }
+
+    #[test]
+    fn test_apply_split_categorical_bitset() {
+        // Create a BinnedMatrix with 6 rows, 1 feature.
+        // Category bin values: [0, 1, 2, 0, 1, 2]
+        // Bitset: category 0 and 1 go left (bits 0,1 set = 0b0000_0011 = 3)
+        let binned = BinnedMatrix::new(
+            6,
+            1,
+            2, // max_bin = 2
+            vec![0, 1, 2, 0, 1, 2],
+        )
+        .expect("valid matrix");
+
+        let split = SplitCandidate {
+            node_id: 0,
+            feature_index: 0,
+            threshold_bin: 0, // unused for categorical
+            gain: 1.0,
+            default_left: true,
+            is_categorical: true,
+            categorical_bitset: Some(vec![0b0000_0011]), // cats 0,1 go left
+            left_stats: NodeStats {
+                grad_sum: 0.0,
+                hess_sum: 0.0,
+                row_count: 0,
+            },
+            right_stats: NodeStats {
+                grad_sum: 0.0,
+                hess_sum: 0.0,
+                row_count: 0,
+            },
+        };
+
+        let node_slice = NodeSlice {
+            node_id: 0,
+            row_indices: (0..6).collect(),
+        };
+
+        let backend = CpuBackend;
+        let partition = backend
+            .apply_split(&binned, &node_slice, &split)
+            .expect("partition should succeed");
+        let left = &partition.left_row_indices;
+        let right = &partition.right_row_indices;
+        // Rows with bin 0 or 1 go left, rows with bin 2 go right
+        assert_eq!(left.len(), 4, "categories 0,1 should go left");
+        assert_eq!(right.len(), 2, "category 2 should go right");
+        // Verify specific rows
+        assert!(left.contains(&0)); // bin 0
+        assert!(left.contains(&1)); // bin 1
+        assert!(left.contains(&3)); // bin 0
+        assert!(left.contains(&4)); // bin 1
+        assert!(right.contains(&2)); // bin 2
+        assert!(right.contains(&5)); // bin 2
     }
 }

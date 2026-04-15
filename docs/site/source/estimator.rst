@@ -85,6 +85,12 @@ Categorical support
 - ``categorical_smoothing: float = 20.0``
 - ``categorical_min_samples_leaf: int = 1``
 - ``categorical_time_aware: bool = False``
+- ``max_cat_threshold: int = 0`` -- maximum category cardinality for native
+  categorical splits. When a categorical feature has at most this many
+  unique values, AlloyGBM uses the Fisher-sort algorithm for O(K log K)
+  optimal binary partition with O(1) bitset prediction. Features exceeding
+  the threshold fall back to target encoding. Default 0 disables native
+  splits.
 
 Warm-starting
 -------------

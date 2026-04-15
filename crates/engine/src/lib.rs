@@ -2,9 +2,11 @@ use alloygbm_categorical::{TargetEncoderConfig, fit_transform_target_encoder};
 use alloygbm_core::{
     BinnedMatrix, CategoricalStatePayloadV1, CoreError, DatasetMatrix, Device, FeatureTile,
     GradientPair, HistogramBundle, MISSING_BIN_U8, MODEL_FORMAT_V1, ModelArtifactSection,
-    ModelMetadata, ModelSectionKind, NodeSlice, NodeStats, PartitionResult, SplitCandidate,
-    TrainParams, TrainingDataset, TreeGrowth, decode_optional_categorical_state_section_v1,
-    deserialize_model_artifact_v1, encode_categorical_state_payload_v1,
+    ModelMetadata, ModelSectionKind, NativeCategoricalSplitsPayload, NodeSlice, NodeStats,
+    PartitionResult, SplitCandidate, TrainParams, TrainingDataset, TreeGrowth,
+    decode_optional_categorical_state_section_v1,
+    decode_optional_native_categorical_splits_section, deserialize_model_artifact_v1,
+    encode_categorical_state_payload_v1, encode_native_categorical_splits_payload,
     format_required_section_auto_mode_error, format_required_section_mode_error,
     required_section_compatibility_report, serialize_model_artifact_v1, validate_binned_matrix,
     validate_categorical_state_payload_v1, validate_train_params, validate_training_dataset,
@@ -60,6 +62,15 @@ pub struct SplitSelectionOptions {
     pub missing_bin_index: usize,
 }
 
+/// Metadata about a feature that uses native categorical splits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CategoricalFeatureInfo {
+    /// The feature index in the BinnedMatrix.
+    pub feature_index: usize,
+    /// Number of categories (valid bin IDs are 0..num_categories).
+    pub num_categories: usize,
+}
+
 impl Default for SplitSelectionOptions {
     fn default() -> Self {
         Self {
@@ -86,6 +97,7 @@ pub trait BackendOps {
         histograms: &HistogramBundle,
         _options: SplitSelectionOptions,
         _feature_weights: &[f32],
+        _categorical_features: &[CategoricalFeatureInfo],
     ) -> EngineResult<Option<SplitCandidate>> {
         self.best_split(histograms)
     }
@@ -1369,6 +1381,8 @@ pub struct TrainedModel {
     pub node_debug_stats: Option<Vec<NodeDebugStats>>,
     /// Objective name recorded in the model artifact metadata.
     pub objective: String,
+    /// Feature indices that use native categorical splits (empty if none).
+    pub native_categorical_feature_indices: Vec<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1470,6 +1484,8 @@ struct IterationExecutionContext<'a> {
     policy_mode: Option<TrainingPolicyMode>,
     warm_start: Option<WarmStartState>,
     custom_metric_callback: Option<&'a dyn PerRoundMetricCallback>,
+    /// Features that use native categorical splits (empty = all continuous).
+    categorical_features: Vec<CategoricalFeatureInfo>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1691,14 +1707,7 @@ impl TrainedModel {
             }
             let feature_index = stump.split.feature_index as usize;
             let feature_value = features[feature_index];
-            let threshold = stump.split.threshold_bin as f32;
-            prediction += if feature_value.is_nan() {
-                if stump.split.default_left {
-                    stump.left_leaf_value
-                } else {
-                    stump.right_leaf_value
-                }
-            } else if feature_value <= threshold {
+            prediction += if split_went_left(&stump.split, feature_value) {
                 stump.left_leaf_value
             } else {
                 stump.right_leaf_value
@@ -1741,6 +1750,35 @@ impl TrainedModel {
         if let Some(node_debug_stats) = self.node_debug_stats.as_ref() {
             let node_stats_payload = encode_node_debug_stats_payload(node_debug_stats)?;
             sections.push((ModelSectionKind::NodeDebugStats, node_stats_payload));
+        }
+        // Serialize native categorical splits if any stumps are categorical.
+        if self.stumps.iter().any(|s| s.split.is_categorical) {
+            let stump_bitsets: Vec<(u32, Vec<u8>)> = self
+                .stumps
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| s.split.is_categorical)
+                .map(|(i, s)| {
+                    (
+                        i as u32,
+                        s.split
+                            .categorical_bitset
+                            .clone()
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect();
+            let payload = NativeCategoricalSplitsPayload {
+                native_categorical_feature_indices: self
+                    .native_categorical_feature_indices
+                    .clone(),
+                stump_bitsets,
+            };
+            let cat_bytes = encode_native_categorical_splits_payload(&payload)?;
+            sections.push((
+                ModelSectionKind::NativeCategoricalSplits,
+                cat_bytes,
+            ));
         }
 
         serialize_model_artifact_v1(&metadata, &sections).map_err(EngineError::from)
@@ -1830,6 +1868,21 @@ impl TrainedModel {
         model.categorical_state =
             decode_optional_categorical_state_section_v1(&parsed.sections, metadata_feature_count)?;
         model.node_debug_stats = decode_optional_node_debug_stats_section(&parsed.sections)?;
+
+        // Decode optional native categorical splits section and populate stump bitsets.
+        if let Some(cat_payload) =
+            decode_optional_native_categorical_splits_section(&parsed.sections)?
+        {
+            model.native_categorical_feature_indices =
+                cat_payload.native_categorical_feature_indices;
+            for (stump_index, bitset) in cat_payload.stump_bitsets {
+                let idx = stump_index as usize;
+                if idx < model.stumps.len() {
+                    model.stumps[idx].split.categorical_bitset = Some(bitset);
+                }
+            }
+        }
+
         model.feature_count = metadata_feature_count;
         model.objective = parsed.contract.metadata.objective.clone();
         Ok(model)
@@ -1839,12 +1892,25 @@ impl TrainedModel {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Trainer {
     params: TrainParams,
+    categorical_features: Vec<CategoricalFeatureInfo>,
 }
 
 impl Trainer {
     pub fn new(params: TrainParams) -> EngineResult<Self> {
         validate_train_params(&params)?;
-        Ok(Self { params })
+        Ok(Self {
+            params,
+            categorical_features: Vec::new(),
+        })
+    }
+
+    /// Set the categorical feature metadata for native categorical splits.
+    pub fn with_categorical_features(
+        mut self,
+        features: Vec<CategoricalFeatureInfo>,
+    ) -> Self {
+        self.categorical_features = features;
+        self
     }
 
     pub fn params(&self) -> &TrainParams {
@@ -1906,6 +1972,7 @@ impl Trainer {
             &histograms,
             split_options,
             &self.params.feature_weights,
+            &[],
         )?;
         let root_stats = backend.reduce_sums(&fit_contract.gradients, &root_node.row_indices)?;
 
@@ -2014,6 +2081,7 @@ impl Trainer {
                 policy_mode: Some(request.policy_mode),
                 warm_start: None,
                 custom_metric_callback: None,
+                categorical_features: self.categorical_features.clone(),
             },
         )?;
         let model = summary.model;
@@ -2132,6 +2200,7 @@ impl Trainer {
                 policy_mode: None,
                 warm_start: None,
                 custom_metric_callback: None,
+                categorical_features: self.categorical_features.clone(),
             },
         )
     }
@@ -2156,6 +2225,7 @@ impl Trainer {
                 policy_mode: None,
                 warm_start: None,
                 custom_metric_callback: None,
+                categorical_features: self.categorical_features.clone(),
             },
         )
     }
@@ -2181,6 +2251,7 @@ impl Trainer {
                 policy_mode: None,
                 warm_start: Some(warm_start),
                 custom_metric_callback: None,
+                categorical_features: self.categorical_features.clone(),
             },
         )
     }
@@ -2208,6 +2279,7 @@ impl Trainer {
                 policy_mode: None,
                 warm_start: Some(warm_start),
                 custom_metric_callback: None,
+                categorical_features: self.categorical_features.clone(),
             },
         )
     }
@@ -2237,6 +2309,7 @@ impl Trainer {
                 policy_mode: None,
                 warm_start: None,
                 custom_metric_callback: custom_metric,
+                categorical_features: self.categorical_features.clone(),
             },
         )
     }
@@ -2265,6 +2338,7 @@ impl Trainer {
                 policy_mode: None,
                 warm_start: Some(warm_start),
                 custom_metric_callback: custom_metric,
+                categorical_features: self.categorical_features.clone(),
             },
         )
     }
@@ -2453,6 +2527,7 @@ impl Trainer {
                         &controls,
                         &mut class_candidate_predictions[class_k],
                         &self.params.feature_weights,
+                        &self.categorical_features,
                     )?
                 } else {
                     build_tree_level_wise(
@@ -2467,6 +2542,7 @@ impl Trainer {
                         &controls,
                         &mut class_candidate_predictions[class_k],
                         &self.params.feature_weights,
+                        &self.categorical_features,
                     )?
                 };
 
@@ -2892,6 +2968,7 @@ impl Trainer {
                         &controls,
                         &mut candidate_predictions,
                         &self.params.feature_weights,
+                        &execution.categorical_features,
                     )?
                 } else {
                     build_tree_level_wise(
@@ -2906,6 +2983,7 @@ impl Trainer {
                         &controls,
                         &mut candidate_predictions,
                         &self.params.feature_weights,
+                        &execution.categorical_features,
                     )?
                 };
 
@@ -3143,6 +3221,7 @@ impl Trainer {
             categorical_state: None,
             node_debug_stats: None,
             objective: objective.objective_name().to_string(),
+            native_categorical_feature_indices: Vec::new(),
         };
         let final_loss = current_loss;
 
@@ -3539,6 +3618,7 @@ fn build_tree_level_wise<B: BackendOps>(
     controls: &IterationControls,
     candidate_predictions: &mut [f32],
     feature_weights: &[f32],
+    categorical_features: &[CategoricalFeatureInfo],
 ) -> EngineResult<(Vec<TrainedStump>, IterationStopReason)> {
     let mut candidate_round_stumps = Vec::new();
     let mut round_rejection_reason = IterationStopReason::NoSplitCandidate;
@@ -3560,7 +3640,7 @@ fn build_tree_level_wise<B: BackendOps>(
             let node_id = encode_tree_node_id(round_index, local_node_id)?;
             let node = NodeSlice::new(node_id, node_rows)?;
             let Some(mut split) =
-                backend.best_split_with_options(&histograms, split_options, feature_weights)?
+                backend.best_split_with_options(&histograms, split_options, feature_weights, categorical_features)?
             else {
                 continue;
             };
@@ -3779,6 +3859,7 @@ fn build_tree_leaf_wise<B: BackendOps>(
     controls: &IterationControls,
     candidate_predictions: &mut [f32],
     feature_weights: &[f32],
+    categorical_features: &[CategoricalFeatureInfo],
 ) -> EngineResult<(Vec<TrainedStump>, IterationStopReason)> {
     let max_leaves = controls.max_leaves.unwrap_or(usize::MAX);
     let max_depth = params.max_depth as usize;
@@ -3789,7 +3870,7 @@ fn build_tree_leaf_wise<B: BackendOps>(
     let root_histograms =
         backend.build_histograms(binned_matrix, gradients, &root_node, feature_tiles)?;
     let root_split =
-        backend.best_split_with_options(&root_histograms, split_options, feature_weights)?;
+        backend.best_split_with_options(&root_histograms, split_options, feature_weights, categorical_features)?;
 
     let Some(root_split) = root_split else {
         return Ok((Vec::new(), IterationStopReason::NoSplitCandidate));
@@ -3970,6 +4051,7 @@ fn build_tree_leaf_wise<B: BackendOps>(
                 &smaller_histograms,
                 split_options,
                 feature_weights,
+                categorical_features,
             )? && child_split.gain.is_finite()
                 && child_split.gain > controls.min_split_gain
             {
@@ -3987,6 +4069,7 @@ fn build_tree_leaf_wise<B: BackendOps>(
                 &larger_histograms,
                 split_options,
                 feature_weights,
+                categorical_features,
             )? && child_split.gain.is_finite()
                 && child_split.gain > controls.min_split_gain
             {
@@ -4185,6 +4268,26 @@ fn retained_stump_count_for_rounds(
         .sum::<usize>()
 }
 
+/// Determine if a feature value goes left at a split, handling continuous, categorical, and NaN.
+#[inline]
+fn split_went_left(split: &SplitCandidate, feature_value: f32) -> bool {
+    if feature_value.is_nan() {
+        split.default_left
+    } else if split.is_categorical {
+        split
+            .categorical_bitset
+            .as_ref()
+            .map_or(split.default_left, |bs| {
+                let cat_id = feature_value as u16;
+                let byte_idx = (cat_id / 8) as usize;
+                let bit_idx = (cat_id % 8) as usize;
+                byte_idx < bs.len() && (bs[byte_idx] & (1 << bit_idx)) != 0
+            })
+    } else {
+        feature_value <= split.threshold_bin as f32
+    }
+}
+
 fn row_satisfies_stump_path_features(
     features: &[f32],
     stump: &TrainedStump,
@@ -4206,11 +4309,7 @@ fn row_satisfies_stump_path_features(
             )));
         }
         let feature_value = features[feature_index];
-        let went_left = if feature_value.is_nan() {
-            parent_stump.split.default_left
-        } else {
-            feature_value <= parent_stump.split.threshold_bin as f32
-        };
+        let went_left = split_went_left(&parent_stump.split, feature_value);
         let expected_left = local_node_id == parent_local * 2 + 1;
         if went_left != expected_left {
             return Ok(false);
@@ -5134,7 +5233,10 @@ fn encode_trained_model_payload(model: &TrainedModel) -> EngineResult<Vec<u8>> {
         bytes.extend_from_slice(&stump.split.node_id.to_le_bytes());
         bytes.extend_from_slice(&stump.split.feature_index.to_le_bytes());
         bytes.extend_from_slice(&stump.split.threshold_bin.to_le_bytes());
-        let stump_flags: u16 = if stump.split.default_left { 1 } else { 0 };
+        let mut stump_flags: u16 = if stump.split.default_left { 1 } else { 0 };
+        if stump.split.is_categorical {
+            stump_flags |= 2; // bit 1 = is_categorical
+        }
         bytes.extend_from_slice(&stump_flags.to_le_bytes());
         bytes.extend_from_slice(&stump.split.gain.to_le_bytes());
         bytes.extend_from_slice(&stump.left_leaf_value.to_le_bytes());
@@ -5186,6 +5288,7 @@ fn decode_trained_model_payload(bytes: &[u8]) -> EngineResult<TrainedModel> {
         let threshold_bin = read_u16_le(bytes, base + 8)?;
         let flags = read_u16_le(bytes, base + 10)?;
         let default_left = (flags & 1) != 0;
+        let is_categorical = (flags & 2) != 0;
         let gain = read_f32_le(bytes, base + 12)?;
         let left_leaf_value = read_f32_le(bytes, base + 16)?;
         let right_leaf_value = read_f32_le(bytes, base + 20)?;
@@ -5199,6 +5302,8 @@ fn decode_trained_model_payload(bytes: &[u8]) -> EngineResult<TrainedModel> {
                 threshold_bin,
                 gain,
                 default_left,
+                is_categorical,
+                categorical_bitset: None, // populated from NativeCategoricalSplits section
                 left_stats: NodeStats {
                     grad_sum: 0.0,
                     hess_sum: left_count as f32,
@@ -5222,6 +5327,7 @@ fn decode_trained_model_payload(bytes: &[u8]) -> EngineResult<TrainedModel> {
         categorical_state: None,
         node_debug_stats: None,
         objective: "squared_error".to_string(),
+        native_categorical_feature_indices: Vec::new(),
     })
 }
 
@@ -5485,7 +5591,10 @@ impl MultiClassTrainedModel {
                 mc_payload.extend_from_slice(&stump.split.node_id.to_le_bytes());
                 mc_payload.extend_from_slice(&stump.split.feature_index.to_le_bytes());
                 mc_payload.extend_from_slice(&stump.split.threshold_bin.to_le_bytes());
-                let flags: u16 = if stump.split.default_left { 1 } else { 0 };
+                let mut flags: u16 = if stump.split.default_left { 1 } else { 0 };
+                if stump.split.is_categorical {
+                    flags |= 2;
+                }
                 mc_payload.extend_from_slice(&flags.to_le_bytes());
                 mc_payload.extend_from_slice(&stump.split.gain.to_le_bytes());
                 mc_payload.extend_from_slice(&stump.left_leaf_value.to_le_bytes());
@@ -5592,6 +5701,7 @@ impl MultiClassTrainedModel {
                 let threshold_bin = read_u16_le(payload, offset + 8)?;
                 let flags = read_u16_le(payload, offset + 10)?;
                 let default_left = (flags & 1) != 0;
+                let is_categorical = (flags & 2) != 0;
                 let gain = read_f32_le(payload, offset + 12)?;
                 let left_leaf_value = read_f32_le(payload, offset + 16)?;
                 let right_leaf_value = read_f32_le(payload, offset + 20)?;
@@ -5605,6 +5715,8 @@ impl MultiClassTrainedModel {
                         threshold_bin,
                         gain,
                         default_left,
+                        is_categorical,
+                        categorical_bitset: None,
                         left_stats: NodeStats {
                             grad_sum: 0.0,
                             hess_sum: left_count as f32,
@@ -5801,6 +5913,8 @@ mod tests {
                 threshold_bin,
                 gain: 3.0,
                 default_left: false,
+                is_categorical: false,
+                categorical_bitset: None,
                 left_stats: NodeStats {
                     grad_sum: 0.0,
                     hess_sum: 0.0,
@@ -5988,6 +6102,8 @@ mod tests {
                 threshold_bin: 1,
                 gain: 1.0,
                 default_left: false,
+                is_categorical: false,
+                categorical_bitset: None,
                 left_stats: NodeStats {
                     grad_sum: 0.0,
                     hess_sum: 2.0,
@@ -6495,6 +6611,8 @@ mod tests {
                         threshold_bin: 0,
                         gain: 1.0,
                         default_left: false,
+                        is_categorical: false,
+                        categorical_bitset: None,
                         left_stats: NodeStats {
                             grad_sum: 0.0,
                             hess_sum: 1.0,
@@ -6516,6 +6634,8 @@ mod tests {
                         threshold_bin: 0,
                         gain: 1.0,
                         default_left: false,
+                        is_categorical: false,
+                        categorical_bitset: None,
                         left_stats: NodeStats {
                             grad_sum: 0.0,
                             hess_sum: 1.0,
@@ -6534,6 +6654,7 @@ mod tests {
             categorical_state: None,
             node_debug_stats: None,
             objective: "squared_error".to_string(),
+            native_categorical_feature_indices: Vec::new(),
         };
 
         let left = model.predict_row(&[0.0]).expect("left prediction succeeds");
@@ -7341,6 +7462,8 @@ mod tests {
                         threshold_bin: 1,
                         gain: 2.5,
                         default_left: false,
+                        is_categorical: false,
+                        categorical_bitset: None,
                         left_stats: NodeStats {
                             grad_sum: -1.0,
                             hess_sum: 2.0,
@@ -7362,6 +7485,8 @@ mod tests {
                         threshold_bin: 2,
                         gain: 1.5,
                         default_left: true,
+                        is_categorical: false,
+                        categorical_bitset: None,
                         left_stats: NodeStats {
                             grad_sum: 0.5,
                             hess_sum: 1.0,
@@ -7414,6 +7539,8 @@ mod tests {
                             threshold_bin: 1,
                             gain: 1.0,
                             default_left: false,
+                            is_categorical: false,
+                            categorical_bitset: None,
                             left_stats: NodeStats {
                                 grad_sum: 0.0,
                                 hess_sum: 1.0,
@@ -7435,6 +7562,8 @@ mod tests {
                             threshold_bin: 2,
                             gain: 0.5,
                             default_left: false,
+                            is_categorical: false,
+                            categorical_bitset: None,
                             left_stats: NodeStats {
                                 grad_sum: 0.0,
                                 hess_sum: 1.0,
@@ -7458,6 +7587,8 @@ mod tests {
                         threshold_bin: 1,
                         gain: 1.0,
                         default_left: false,
+                        is_categorical: false,
+                        categorical_bitset: None,
                         left_stats: NodeStats {
                             grad_sum: 0.0,
                             hess_sum: 1.0,
@@ -7687,5 +7818,137 @@ mod tests {
             IterationStopReason::CustomMetricPlateau,
             IterationStopReason::CompletedRequestedRounds,
         );
+    }
+
+    // ── Native categorical split tests ──────────────────────────────────
+
+    #[test]
+    fn test_trained_model_categorical_roundtrip() {
+        // Build a TrainedModel with one categorical stump and one continuous stump.
+        let model = TrainedModel {
+            baseline_prediction: 0.5,
+            feature_count: 2,
+            stumps: vec![
+                TrainedStump {
+                    split: SplitCandidate {
+                        node_id: 0,
+                        feature_index: 0,
+                        threshold_bin: 0,
+                        gain: 2.0,
+                        default_left: true,
+                        is_categorical: true,
+                        categorical_bitset: Some(vec![0b0000_0011]), // cats 0,1 left
+                        left_stats: NodeStats {
+                            grad_sum: -1.0,
+                            hess_sum: 2.0,
+                            row_count: 10,
+                        },
+                        right_stats: NodeStats {
+                            grad_sum: 1.0,
+                            hess_sum: 2.0,
+                            row_count: 10,
+                        },
+                    },
+                    left_leaf_value: -0.1,
+                    right_leaf_value: 0.1,
+                },
+                TrainedStump {
+                    split: SplitCandidate {
+                        node_id: 0,
+                        feature_index: 1,
+                        threshold_bin: 3,
+                        gain: 1.5,
+                        default_left: false,
+                        is_categorical: false,
+                        categorical_bitset: None,
+                        left_stats: NodeStats {
+                            grad_sum: 0.5,
+                            hess_sum: 1.0,
+                            row_count: 5,
+                        },
+                        right_stats: NodeStats {
+                            grad_sum: -0.5,
+                            hess_sum: 1.0,
+                            row_count: 5,
+                        },
+                    },
+                    left_leaf_value: 0.05,
+                    right_leaf_value: -0.05,
+                },
+            ],
+            categorical_state: None,
+            node_debug_stats: None,
+            objective: "squared_error".to_string(),
+            native_categorical_feature_indices: vec![0],
+        };
+
+        let bytes = model.to_artifact_bytes().expect("serialize should succeed");
+        assert!(!bytes.is_empty());
+
+        let restored = TrainedModel::from_artifact_bytes_with_mode(&bytes, ArtifactCompatibilityMode::AllowLegacyTreesOnly)
+            .expect("deserialize should succeed");
+
+        // Verify basic fields
+        assert_eq!(restored.feature_count, 2);
+        assert_eq!(restored.stumps.len(), 2);
+        assert_eq!(restored.native_categorical_feature_indices, vec![0]);
+
+        // Verify categorical stump
+        let stump0 = &restored.stumps[0];
+        assert!(stump0.split.is_categorical);
+        assert_eq!(stump0.split.categorical_bitset, Some(vec![0b0000_0011]));
+        assert_eq!(stump0.left_leaf_value, -0.1);
+        assert_eq!(stump0.right_leaf_value, 0.1);
+
+        // Verify continuous stump
+        let stump1 = &restored.stumps[1];
+        assert!(!stump1.split.is_categorical);
+        assert!(stump1.split.categorical_bitset.is_none());
+        assert_eq!(stump1.split.threshold_bin, 3);
+    }
+
+    #[test]
+    fn test_trained_model_categorical_backward_compat() {
+        // Build a model WITHOUT any categorical stumps (old-style).
+        let model = TrainedModel {
+            baseline_prediction: 1.0,
+            feature_count: 1,
+            stumps: vec![TrainedStump {
+                split: SplitCandidate {
+                    node_id: 0,
+                    feature_index: 0,
+                    threshold_bin: 2,
+                    gain: 1.0,
+                    default_left: false,
+                    is_categorical: false,
+                    categorical_bitset: None,
+                    left_stats: NodeStats {
+                        grad_sum: -0.5,
+                        hess_sum: 1.0,
+                        row_count: 3,
+                    },
+                    right_stats: NodeStats {
+                        grad_sum: 0.5,
+                        hess_sum: 1.0,
+                        row_count: 3,
+                    },
+                },
+                left_leaf_value: -0.2,
+                right_leaf_value: 0.2,
+            }],
+            categorical_state: None,
+            node_debug_stats: None,
+            objective: "squared_error".to_string(),
+            native_categorical_feature_indices: Vec::new(),
+        };
+
+        let bytes = model.to_artifact_bytes().expect("serialize should succeed");
+
+        // Deserialize — should work fine with no categorical section
+        let restored = TrainedModel::from_artifact_bytes_with_mode(&bytes, ArtifactCompatibilityMode::AllowLegacyTreesOnly)
+            .expect("deserialize should succeed");
+        assert_eq!(restored.stumps.len(), 1);
+        assert!(!restored.stumps[0].split.is_categorical);
+        assert!(restored.native_categorical_feature_indices.is_empty());
     }
 }

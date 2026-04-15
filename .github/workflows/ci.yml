@@ -214,3 +214,22 @@ jobs:
           assert "custom_rmse" in model.evals_result_["validation"]
           print("Custom metric smoke ok")
           PY
+
+      - name: Python native categorical split smoke
+        run: |
+          python - <<'PY'
+          import numpy as np
+          from alloygbm import GBMRegressor
+
+          X = np.column_stack([np.arange(100) % 5, np.random.RandomState(42).randn(100)]).astype(np.float32)
+          y = np.array([1.0 if i % 5 < 2 else 3.0 for i in range(100)], dtype=np.float32)
+          cats = [["cat_a", "cat_b", "cat_c", "cat_d", "cat_e"][i % 5] for i in range(100)]
+
+          model = GBMRegressor(n_estimators=10, max_cat_threshold=64, categorical_feature_indices=[0])
+          model.fit(X, y, categorical_feature_values_list=[cats])
+          preds = model.predict(X)
+          assert len(preds) == 100
+          assert model._native_cat_mappings_ is not None
+          assert 0 in model._native_cat_mappings_
+          print("Native categorical split smoke ok")
+          PY

@@ -9,11 +9,12 @@ use alloygbm_core::{
     DenseMatrixView, GradientPair, MISSING_BIN_U8, TrainParams, TrainingDataset, TreeGrowth,
 };
 use alloygbm_engine::{
-    ArtifactCompatibilityMode, BinaryCrossEntropyObjective, CategoricalTargetEncodingSpec,
-    EngineError, IterationRunSummary, LambdaMARTObjective, MultiClassIterationRunSummary,
-    MultiClassSoftmaxObjective, ObjectiveOps, PairwiseRankingObjective, PerRoundMetricCallback,
-    QueryRMSEObjective, SquaredErrorObjective, TrainedModel, Trainer, TrainingPolicyMode,
-    WarmStartState, XeNDCGObjective, YetiRankObjective,
+    ArtifactCompatibilityMode, BinaryCrossEntropyObjective, CategoricalFeatureInfo,
+    CategoricalTargetEncodingSpec, EngineError, IterationRunSummary, LambdaMARTObjective,
+    MultiClassIterationRunSummary, MultiClassSoftmaxObjective, ObjectiveOps,
+    PairwiseRankingObjective, PerRoundMetricCallback, QueryRMSEObjective, SquaredErrorObjective,
+    TrainedModel, Trainer, TrainingPolicyMode, WarmStartState, XeNDCGObjective,
+    YetiRankObjective,
 };
 use alloygbm_predictor::{Predictor, PredictorError};
 use alloygbm_shap::{
@@ -838,6 +839,10 @@ struct NativeTrainingResult {
     summary: NativeTrainingSummary,
     #[pyo3(get)]
     continuous_binning_metadata: NativeContinuousBinningMetadata,
+    /// Per-feature category→ID mappings for native categorical splits.
+    /// Keys are feature indices, values are dicts {category_name: integer_id}.
+    #[pyo3(get)]
+    native_cat_mappings: std::collections::HashMap<usize, std::collections::HashMap<String, u32>>,
 }
 
 #[derive(Debug, Clone)]
@@ -2319,6 +2324,7 @@ fn train_regression_artifact_with_summary_dense_impl(
     custom_objective_fn: Option<Py<PyAny>>,
     custom_loss_fn: Option<Py<PyAny>>,
     custom_metric_fn: Option<Py<PyAny>>,
+    max_cat_threshold: usize,
 ) -> Result<NativeTrainingResult, EngineError> {
     let bridge_start = Instant::now();
     let need_dense_values = !categorical_specs.is_empty();
@@ -2338,10 +2344,57 @@ fn train_regression_artifact_with_summary_dense_impl(
     let training_targets_for_validation = prepared.dataset.targets.clone();
     let training_time_index_for_validation = prepared.dataset.time_index.clone();
 
+    // Split categorical features into native (low cardinality) and target-encoded (high cardinality).
+    let mut native_cat_mappings: std::collections::HashMap<usize, std::collections::HashMap<String, u32>> =
+        std::collections::HashMap::new();
+    let mut native_cat_infos: Vec<CategoricalFeatureInfo> = Vec::new();
+    let mut target_encoding_specs: Vec<CategoricalTargetEncodingSpec> = Vec::new();
+
+    if !categorical_specs.is_empty() && max_cat_threshold > 0 {
+        for spec in &categorical_specs {
+            // Count unique categories for this feature.
+            let mut unique_cats: Vec<String> = spec.values.to_vec();
+            unique_cats.sort();
+            unique_cats.dedup();
+            let num_unique = unique_cats.len();
+
+            if num_unique <= max_cat_threshold && num_unique >= 2 {
+                // Native categorical split: map categories to integer IDs.
+                let cat_to_id: std::collections::HashMap<String, u32> = unique_cats
+                    .iter()
+                    .enumerate()
+                    .map(|(i, cat)| (cat.clone(), i as u32))
+                    .collect();
+
+                // Re-bin the column in the binned matrix: category name → integer bin ID.
+                let fi = spec.feature_index;
+                let missing = prepared.binned_matrix.missing_bin();
+                for (row_idx, cat_name) in spec.values.iter().enumerate() {
+                    let bin_val = cat_to_id
+                        .get(cat_name)
+                        .map(|&id| id as u16)
+                        .unwrap_or(missing);
+                    prepared.binned_matrix.set_bin(row_idx, fi, bin_val);
+                }
+
+                native_cat_infos.push(CategoricalFeatureInfo {
+                    feature_index: fi,
+                    num_categories: num_unique,
+                });
+                native_cat_mappings.insert(fi, cat_to_id);
+            } else {
+                // Falls back to target encoding.
+                target_encoding_specs.push(spec.clone());
+            }
+        }
+    } else {
+        target_encoding_specs = categorical_specs.clone();
+    }
+
     let mut categorical_state = None;
-    if !categorical_specs.is_empty() {
+    if !target_encoding_specs.is_empty() {
         let (encoded_prepared, state) =
-            apply_categorical_encoding_to_training_matrices_multi(prepared, &categorical_specs)?;
+            apply_categorical_encoding_to_training_matrices_multi(prepared, &target_encoding_specs)?;
         prepared = encoded_prepared;
         categorical_state = Some(state);
     }
@@ -2375,22 +2428,50 @@ fn train_regression_artifact_with_summary_dense_impl(
                         categorical_specs.len()
                     )));
                 }
-                let validation_specs: Vec<CategoricalTargetEncodingSpec> = categorical_specs
-                    .iter()
-                    .zip(validation_categorical_values_list)
-                    .map(|(spec, values)| CategoricalTargetEncodingSpec {
-                        feature_index: spec.feature_index,
-                        values,
-                        config: spec.config.clone(),
-                    })
-                    .collect();
-                prepared_validation = apply_categorical_encoding_to_validation_matrices_multi(
-                    prepared_validation,
-                    &categorical_specs,
-                    &validation_specs,
-                    &training_targets_for_validation,
-                    training_time_index_for_validation.as_deref(),
-                )?;
+
+                // Apply native categorical binning to validation for native-split features.
+                let val_row_count = prepared_validation.dataset.matrix.row_count;
+                for (spec, val_cats) in categorical_specs.iter().zip(&validation_categorical_values_list) {
+                    if let Some(cat_to_id) = native_cat_mappings.get(&spec.feature_index) {
+                        let fi = spec.feature_index;
+                        let missing = prepared_validation.binned_matrix.missing_bin();
+                        for (row_idx, cat_name) in val_cats.iter().enumerate() {
+                            if row_idx < val_row_count {
+                                let bin_val = cat_to_id
+                                    .get(cat_name)
+                                    .map(|&id| id as u16)
+                                    .unwrap_or(missing);
+                                prepared_validation.binned_matrix.set_bin(row_idx, fi, bin_val);
+                            }
+                        }
+                    }
+                }
+
+                // Apply target encoding only for features that weren't native-split.
+                if !target_encoding_specs.is_empty() {
+                    let validation_te_specs: Vec<CategoricalTargetEncodingSpec> = target_encoding_specs
+                        .iter()
+                        .map(|te_spec| {
+                            // Find the matching validation categorical values for this feature.
+                            let orig_idx = categorical_specs
+                                .iter()
+                                .position(|s| s.feature_index == te_spec.feature_index)
+                                .expect("target encoding spec must correspond to an original spec");
+                            CategoricalTargetEncodingSpec {
+                                feature_index: te_spec.feature_index,
+                                values: validation_categorical_values_list[orig_idx].clone(),
+                                config: te_spec.config.clone(),
+                            }
+                        })
+                        .collect();
+                    prepared_validation = apply_categorical_encoding_to_validation_matrices_multi(
+                        prepared_validation,
+                        &target_encoding_specs,
+                        &validation_te_specs,
+                        &training_targets_for_validation,
+                        training_time_index_for_validation.as_deref(),
+                    )?;
+                }
             }
             Some(prepared_validation)
         }
@@ -2423,7 +2504,7 @@ fn train_regression_artifact_with_summary_dense_impl(
 
     let bridge_prepare_seconds = bridge_start.elapsed().as_secs_f64();
     let user_seed = params.seed;
-    let trainer = Trainer::new(params)?;
+    let trainer = Trainer::new(params)?.with_categorical_features(native_cat_infos.clone());
     let backend = CpuBackend;
     let native_start = Instant::now();
 
@@ -2601,6 +2682,7 @@ fn train_regression_artifact_with_summary_dense_impl(
                 artifact_bytes,
                 summary: native_summary,
                 continuous_binning_metadata: prepared.metadata.into(),
+                native_cat_mappings: native_cat_mappings.clone(),
             });
         }
         "custom" => {
@@ -2629,6 +2711,11 @@ fn train_regression_artifact_with_summary_dense_impl(
     if let Some(state) = categorical_state {
         model = model.with_categorical_state(Some(state))?;
     }
+    // Store native categorical feature indices in the model for artifact serialization.
+    model.native_categorical_feature_indices = native_cat_infos
+        .iter()
+        .map(|c| c.feature_index as u32)
+        .collect();
     let artifact_bytes = model.to_artifact_bytes()?;
     summary.model = model;
 
@@ -2641,6 +2728,7 @@ fn train_regression_artifact_with_summary_dense_impl(
             objective,
         ),
         continuous_binning_metadata: prepared.metadata.into(),
+        native_cat_mappings,
     })
 }
 
@@ -2972,6 +3060,7 @@ fn train_regression_artifact(
         None, // custom_objective_fn
         None, // custom_loss_fn
         None, // custom_metric_fn
+        0,    // max_cat_threshold (disabled for non-summary paths)
     )
     .map(|result| result.artifact_bytes)
     .map_err(engine_error_to_pyerr)
@@ -3094,6 +3183,7 @@ fn train_regression_artifact_dense(
         None, // custom_objective_fn
         None, // custom_loss_fn
         None, // custom_metric_fn
+        0,    // max_cat_threshold (disabled for non-summary paths)
     )
     .map(|result| result.artifact_bytes)
     .map_err(engine_error_to_pyerr)
@@ -3146,7 +3236,8 @@ fn train_regression_artifact_dense(
     num_classes=None,
     custom_objective_fn=None,
     custom_loss_fn=None,
-    custom_metric_fn=None
+    custom_metric_fn=None,
+    max_cat_threshold=0
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_with_summary(
@@ -3197,6 +3288,7 @@ fn train_regression_artifact_with_summary(
     custom_objective_fn: Option<Py<PyAny>>,
     custom_loss_fn: Option<Py<PyAny>>,
     custom_metric_fn: Option<Py<PyAny>>,
+    max_cat_threshold: usize,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -3287,6 +3379,7 @@ fn train_regression_artifact_with_summary(
         custom_objective_fn,
         custom_loss_fn,
         custom_metric_fn,
+        max_cat_threshold,
     )
     .map_err(engine_error_to_pyerr)
 }
@@ -3341,7 +3434,8 @@ fn train_regression_artifact_with_summary(
     num_classes=None,
     custom_objective_fn=None,
     custom_loss_fn=None,
-    custom_metric_fn=None
+    custom_metric_fn=None,
+    max_cat_threshold=0
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary(
@@ -3395,6 +3489,7 @@ fn train_regression_artifact_dense_with_summary(
     custom_objective_fn: Option<Py<PyAny>>,
     custom_loss_fn: Option<Py<PyAny>>,
     custom_metric_fn: Option<Py<PyAny>>,
+    max_cat_threshold: usize,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -3466,6 +3561,7 @@ fn train_regression_artifact_dense_with_summary(
         custom_objective_fn,
         custom_loss_fn,
         custom_metric_fn,
+        max_cat_threshold,
     )
     .map_err(engine_error_to_pyerr)
 }
@@ -3535,7 +3631,8 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> PyResult<Vec<f32>> {
     num_classes=None,
     custom_objective_fn=None,
     custom_loss_fn=None,
-    custom_metric_fn=None
+    custom_metric_fn=None,
+    max_cat_threshold=0
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary_bytes(
@@ -3589,6 +3686,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
     custom_objective_fn: Option<Py<PyAny>>,
     custom_loss_fn: Option<Py<PyAny>>,
     custom_metric_fn: Option<Py<PyAny>>,
+    max_cat_threshold: usize,
 ) -> PyResult<NativeTrainingResult> {
     let values = bytes_to_f32_vec(values_bytes)?;
     let targets = bytes_to_f32_vec(targets_bytes)?;
@@ -3664,6 +3762,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
         custom_objective_fn,
         custom_loss_fn,
         custom_metric_fn,
+        max_cat_threshold,
     )
     .map_err(engine_error_to_pyerr)
 }
@@ -3759,6 +3858,7 @@ mod tests {
             None, // custom_objective_fn
             None, // custom_loss_fn
             None, // custom_metric_fn
+            0,    // max_cat_threshold
         )
         .map(|result| result.artifact_bytes)
     }

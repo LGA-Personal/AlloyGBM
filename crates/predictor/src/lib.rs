@@ -1,6 +1,7 @@
 use alloygbm_core::{
     CategoricalStatePayloadV1, CoreError, MODEL_FORMAT_V1, ModelArtifactSection, ModelMetadata,
-    ModelSectionKind, decode_optional_categorical_state_section_v1, deserialize_model_artifact_v1,
+    ModelSectionKind, decode_optional_categorical_state_section_v1,
+    decode_optional_native_categorical_splits_section, deserialize_model_artifact_v1,
     format_required_section_mode_error, required_section_compatibility_report,
 };
 use rayon::prelude::*;
@@ -48,6 +49,8 @@ struct PredictorStump {
     feature_index: u32,
     threshold_bin: u16,
     default_left: bool,
+    is_categorical: bool,
+    categorical_bitset: Option<Vec<u8>>,
     left_leaf_value: f32,
     right_leaf_value: f32,
 }
@@ -62,6 +65,8 @@ struct PredictorTreeNode {
     feature_index: usize,
     threshold_bin: f32,
     default_left: bool,
+    is_categorical: bool,
+    categorical_bitset: Option<Vec<u8>>,
     left_leaf_value: f32,
     right_leaf_value: f32,
 }
@@ -84,6 +89,28 @@ pub struct Predictor {
     num_classes: Option<usize>,
     baseline_predictions: Option<Vec<f32>>,
     class_trees: Option<Vec<Vec<PredictorTree>>>,
+}
+
+/// Determine if a prediction row goes left at a tree node.
+/// Handles continuous (threshold comparison) and categorical (bitset membership) splits.
+#[inline]
+fn predictor_went_left(node: &PredictorTreeNode, feature_value: f32, use_float: bool) -> bool {
+    if feature_value.is_nan() {
+        node.default_left
+    } else if node.is_categorical {
+        let cat_id = feature_value as u16;
+        node.categorical_bitset
+            .as_ref()
+            .map_or(node.default_left, |bs| {
+                let byte_idx = (cat_id / 8) as usize;
+                let bit_idx = (cat_id % 8) as usize;
+                byte_idx < bs.len() && (bs[byte_idx] & (1 << bit_idx)) != 0
+            })
+    } else if use_float {
+        feature_value < node.threshold_bin
+    } else {
+        feature_value <= node.threshold_bin
+    }
 }
 
 impl Predictor {
@@ -114,8 +141,27 @@ impl Predictor {
         {
             let predictor_layout =
                 resolve_predictor_layout(&parsed.sections, metadata_feature_count)?;
-            let (num_classes, feature_count, baselines, per_class_stumps) =
+            let (num_classes, feature_count, baselines, mut per_class_stumps) =
                 decode_multiclass_trees_payload(&mc_section.payload)?;
+
+            // Decode optional NativeCategoricalSplits section for multiclass.
+            if let Some(cat_payload) =
+                decode_optional_native_categorical_splits_section(&parsed.sections)
+                    .map_err(PredictorError::from)?
+            {
+                // Stump indices in the bitset section are global (flat) across all classes.
+                let mut global_idx = 0usize;
+                let stump_bitsets: std::collections::HashMap<u32, Vec<u8>> =
+                    cat_payload.stump_bitsets.into_iter().collect();
+                for class_stumps in &mut per_class_stumps {
+                    for stump in class_stumps.iter_mut() {
+                        if let Some(bitset) = stump_bitsets.get(&(global_idx as u32)) {
+                            stump.categorical_bitset = Some(bitset.clone());
+                        }
+                        global_idx += 1;
+                    }
+                }
+            }
 
             if predictor_layout.feature_count != metadata_feature_count {
                 return Err(PredictorError::ContractViolation(format!(
@@ -156,8 +202,22 @@ impl Predictor {
         }
         let trees_section = required_single_section(&parsed.sections, ModelSectionKind::Trees)?;
         let predictor_layout = resolve_predictor_layout(&parsed.sections, metadata_feature_count)?;
-        let (payload_feature_count, baseline_prediction, stumps) =
+        let (payload_feature_count, baseline_prediction, mut stumps) =
             decode_trained_model_payload(&trees_section.payload)?;
+
+        // Decode optional NativeCategoricalSplits section and populate stump bitsets.
+        if let Some(cat_payload) =
+            decode_optional_native_categorical_splits_section(&parsed.sections)
+                .map_err(PredictorError::from)?
+        {
+            for (stump_index, bitset) in cat_payload.stump_bitsets {
+                let idx = stump_index as usize;
+                if idx < stumps.len() {
+                    stumps[idx].categorical_bitset = Some(bitset);
+                }
+            }
+        }
+
         let trees = build_predictor_trees(&stumps)?;
 
         if predictor_layout.feature_count != metadata_feature_count {
@@ -323,13 +383,7 @@ impl Predictor {
                     )));
                 }
                 let feature_value = features[node.feature_index];
-                let went_left = if feature_value.is_nan() {
-                    node.default_left
-                } else if use_float {
-                    feature_value < node.threshold_bin
-                } else {
-                    feature_value <= node.threshold_bin
-                };
+                let went_left = predictor_went_left(node, feature_value, use_float);
                 prediction += if went_left {
                     node.left_leaf_value
                 } else {
@@ -455,13 +509,7 @@ impl Predictor {
                     )));
                 }
                 let feature_value = features[node.feature_index];
-                let went_left = if feature_value.is_nan() {
-                    node.default_left
-                } else if use_float {
-                    feature_value < node.threshold_bin
-                } else {
-                    feature_value <= node.threshold_bin
-                };
+                let went_left = predictor_went_left(node, feature_value, use_float);
                 prediction += if went_left {
                     node.left_leaf_value
                 } else {
@@ -620,13 +668,8 @@ impl Predictor {
                             )));
                         }
                         let feature_value = features[node.feature_index];
-                        let went_left = if feature_value.is_nan() {
-                            node.default_left
-                        } else if self.use_float_thresholds {
-                            feature_value < node.threshold_bin
-                        } else {
-                            feature_value <= node.threshold_bin
-                        };
+                        let went_left =
+                            predictor_went_left(node, feature_value, self.use_float_thresholds);
                         logits[class_k] += if went_left {
                             node.left_leaf_value
                         } else {
@@ -865,6 +908,7 @@ fn decode_trained_model_payload(
         let threshold_bin = read_u16_le(bytes, base + 8)?;
         let stump_flags = read_u16_le(bytes, base + 10)?;
         let default_left = (stump_flags & 1) != 0;
+        let is_categorical = (stump_flags & 2) != 0;
         let _gain = read_f32_le(bytes, base + 12)?;
         let left_leaf_value = read_f32_le(bytes, base + 16)?;
         let right_leaf_value = read_f32_le(bytes, base + 20)?;
@@ -873,6 +917,8 @@ fn decode_trained_model_payload(
             feature_index,
             threshold_bin,
             default_left,
+            is_categorical,
+            categorical_bitset: None, // populated from NativeCategoricalSplits section
             left_leaf_value,
             right_leaf_value,
         });
@@ -897,6 +943,8 @@ fn build_predictor_trees(stumps: &[PredictorStump]) -> PredictorResult<Vec<Predi
                 feature_index: stump.feature_index as usize,
                 threshold_bin: stump.threshold_bin as f32,
                 default_left: stump.default_left,
+                is_categorical: stump.is_categorical,
+                categorical_bitset: stump.categorical_bitset.clone(),
                 left_leaf_value: stump.left_leaf_value,
                 right_leaf_value: stump.right_leaf_value,
             },
@@ -1045,6 +1093,7 @@ fn decode_multiclass_trees_payload(bytes: &[u8]) -> PredictorResult<MultiClassTr
             let threshold_bin = read_u16_le(bytes, offset + 8)?;
             let flags = read_u16_le(bytes, offset + 10)?;
             let default_left = (flags & 1) != 0;
+            let is_categorical = (flags & 2) != 0;
             let _gain = read_f32_le(bytes, offset + 12)?;
             let left_leaf_value = read_f32_le(bytes, offset + 16)?;
             let right_leaf_value = read_f32_le(bytes, offset + 20)?;
@@ -1054,6 +1103,8 @@ fn decode_multiclass_trees_payload(bytes: &[u8]) -> PredictorResult<MultiClassTr
                 feature_index,
                 threshold_bin,
                 default_left,
+                is_categorical,
+                categorical_bitset: None,
                 left_leaf_value,
                 right_leaf_value,
             });
@@ -1074,7 +1125,8 @@ mod tests {
         Device, ModelSectionKind, TrainParams, TrainingDataset, TreeGrowth,
         serialize_model_artifact_v1,
     };
-    use alloygbm_engine::{SquaredErrorObjective, Trainer};
+    use alloygbm_engine::{SquaredErrorObjective, Trainer, TrainedModel, TrainedStump};
+    use alloygbm_core::{NodeStats, SplitCandidate};
 
     fn predictor_stub() -> Predictor {
         let metadata = ModelMetadata {
@@ -1552,5 +1604,167 @@ mod tests {
         let predictor = Predictor::from_artifact_bytes(&artifact).unwrap();
         let result = predictor.predict_batch(&[vec![0.5, 0.3]]);
         assert!(result.is_err());
+    }
+
+    /// Build an artifact with one categorical split (feature 0: cats 0,1 left → leaf -0.1,
+    /// cats 2,3 right → leaf 0.1) and baseline 0.5.
+    fn build_categorical_artifact() -> Vec<u8> {
+        let model = TrainedModel {
+            baseline_prediction: 0.5,
+            feature_count: 2,
+            stumps: vec![TrainedStump {
+                split: SplitCandidate {
+                    node_id: 0,
+                    feature_index: 0,
+                    threshold_bin: 0,
+                    gain: 2.0,
+                    default_left: true,
+                    is_categorical: true,
+                    categorical_bitset: Some(vec![0b0000_0011]), // cats 0,1 go left
+                    left_stats: NodeStats {
+                        grad_sum: -1.0,
+                        hess_sum: 2.0,
+                        row_count: 10,
+                    },
+                    right_stats: NodeStats {
+                        grad_sum: 1.0,
+                        hess_sum: 2.0,
+                        row_count: 10,
+                    },
+                },
+                left_leaf_value: -0.1,
+                right_leaf_value: 0.1,
+            }],
+            categorical_state: None,
+            node_debug_stats: None,
+            objective: "squared_error".to_string(),
+            native_categorical_feature_indices: vec![0],
+        };
+        model.to_artifact_bytes().expect("serialize should succeed")
+    }
+
+    #[test]
+    fn test_predict_categorical_split() {
+        let artifact = build_categorical_artifact();
+        let predictor = Predictor::from_artifact_bytes(&artifact).unwrap();
+
+        // Category 0 → left → baseline + left_leaf_value = 0.5 + (-0.1) = 0.4
+        let pred0 = predictor.predict_row(&[0.0, 99.0]).unwrap();
+        assert!((pred0 - 0.4).abs() < 1e-6, "cat 0 should go left: got {pred0}");
+
+        // Category 1 → left → 0.4
+        let pred1 = predictor.predict_row(&[1.0, 99.0]).unwrap();
+        assert!((pred1 - 0.4).abs() < 1e-6, "cat 1 should go left: got {pred1}");
+
+        // Category 2 → right → baseline + right_leaf_value = 0.5 + 0.1 = 0.6
+        let pred2 = predictor.predict_row(&[2.0, 99.0]).unwrap();
+        assert!((pred2 - 0.6).abs() < 1e-6, "cat 2 should go right: got {pred2}");
+
+        // Category 3 → right → 0.6
+        let pred3 = predictor.predict_row(&[3.0, 99.0]).unwrap();
+        assert!((pred3 - 0.6).abs() < 1e-6, "cat 3 should go right: got {pred3}");
+
+        // NaN → default_left (true) → 0.4
+        let pred_nan = predictor.predict_row(&[f32::NAN, 99.0]).unwrap();
+        assert!(
+            (pred_nan - 0.4).abs() < 1e-6,
+            "NaN should go default_left: got {pred_nan}"
+        );
+    }
+
+    #[test]
+    fn test_predict_categorical_and_continuous_mixed() {
+        // Build an artifact with one categorical stump (feature 0) and one continuous stump (feature 1).
+        let model = TrainedModel {
+            baseline_prediction: 0.0,
+            feature_count: 2,
+            stumps: vec![
+                // Categorical split on feature 0: cats 0,1 left (-0.2), cats 2+ right (+0.2)
+                TrainedStump {
+                    split: SplitCandidate {
+                        node_id: 0,
+                        feature_index: 0,
+                        threshold_bin: 0,
+                        gain: 2.0,
+                        default_left: true,
+                        is_categorical: true,
+                        categorical_bitset: Some(vec![0b0000_0011]),
+                        left_stats: NodeStats {
+                            grad_sum: -1.0,
+                            hess_sum: 2.0,
+                            row_count: 10,
+                        },
+                        right_stats: NodeStats {
+                            grad_sum: 1.0,
+                            hess_sum: 2.0,
+                            row_count: 10,
+                        },
+                    },
+                    left_leaf_value: -0.2,
+                    right_leaf_value: 0.2,
+                },
+                // Continuous split on feature 1: threshold_bin 3 (i.e. <=3 left, >3 right)
+                // node_id in tree 1 (tree_id=1, local=0 → 1 * 1048576 + 0)
+                TrainedStump {
+                    split: SplitCandidate {
+                        node_id: 1_048_576,
+                        feature_index: 1,
+                        threshold_bin: 3,
+                        gain: 1.5,
+                        default_left: false,
+                        is_categorical: false,
+                        categorical_bitset: None,
+                        left_stats: NodeStats {
+                            grad_sum: 0.5,
+                            hess_sum: 1.0,
+                            row_count: 5,
+                        },
+                        right_stats: NodeStats {
+                            grad_sum: -0.5,
+                            hess_sum: 1.0,
+                            row_count: 5,
+                        },
+                    },
+                    left_leaf_value: 0.1,
+                    right_leaf_value: -0.1,
+                },
+            ],
+            categorical_state: None,
+            node_debug_stats: None,
+            objective: "squared_error".to_string(),
+            native_categorical_feature_indices: vec![0],
+        };
+        let artifact = model.to_artifact_bytes().expect("serialize should succeed");
+        let predictor = Predictor::from_artifact_bytes(&artifact).unwrap();
+
+        // Cat 0 (left, -0.2) + continuous 2.0 (<=3, left, +0.1) = -0.1
+        let p1 = predictor.predict_row(&[0.0, 2.0]).unwrap();
+        assert!((p1 - (-0.1)).abs() < 1e-6, "cat0+cont_left: got {p1}");
+
+        // Cat 0 (left, -0.2) + continuous 5.0 (>3, right, -0.1) = -0.3
+        let p2 = predictor.predict_row(&[0.0, 5.0]).unwrap();
+        assert!((p2 - (-0.3)).abs() < 1e-6, "cat0+cont_right: got {p2}");
+
+        // Cat 2 (right, +0.2) + continuous 2.0 (left, +0.1) = 0.3
+        let p3 = predictor.predict_row(&[2.0, 2.0]).unwrap();
+        assert!((p3 - 0.3).abs() < 1e-6, "cat2+cont_left: got {p3}");
+
+        // Cat 2 (right, +0.2) + continuous 5.0 (right, -0.1) = 0.1
+        let p4 = predictor.predict_row(&[2.0, 5.0]).unwrap();
+        assert!((p4 - 0.1).abs() < 1e-6, "cat2+cont_right: got {p4}");
+
+        // Verify batch prediction matches individual predictions
+        let batch = predictor
+            .predict_batch(&[
+                vec![0.0, 2.0],
+                vec![0.0, 5.0],
+                vec![2.0, 2.0],
+                vec![2.0, 5.0],
+            ])
+            .unwrap();
+        assert!((batch[0] - p1).abs() < 1e-6);
+        assert!((batch[1] - p2).abs() < 1e-6);
+        assert!((batch[2] - p3).abs() < 1e-6);
+        assert!((batch[3] - p4).abs() < 1e-6);
     }
 }

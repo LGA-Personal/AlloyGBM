@@ -2,9 +2,17 @@
 
 ## Direction
 
-AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
+AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
-The `0.2.0` release marks a major capability expansion from the regression-only `0.1.x` series.
+The `0.3.0` release adds native categorical splits, multi-class classification, and custom objective/metric support.
+
+## What Shipped In 0.3.0
+
+- Native categorical splits with Fisher-sort algorithm and bitset-based O(1) prediction (`max_cat_threshold`)
+- Multi-class classification (`GBMClassifier` with softmax/multinomial for K > 2 classes)
+- Custom objective functions (`objective=callable`) with fast numpy I/O
+- Custom evaluation metric callbacks (`eval_metric=callable`) with early stopping support
+- Synthetic categorical and custom objective benchmark scenarios
 
 ## What Shipped In 0.2.0
 
@@ -27,14 +35,12 @@ The `0.2.0` release marks a major capability expansion from the regression-only 
 ## Current Priorities
 
 1. Close remaining performance gaps on broad tabular datasets.
-2. Multi-class classification support.
-3. Explore GPU/accelerator backend after the CPU baseline is solid enough to serve as reference.
-4. Continue expanding the benchmark suite with real-world classification and ranking datasets.
-5. Custom objective / custom metric callback support from Python.
+2. Explore GPU/accelerator backend after the CPU baseline is solid enough to serve as reference.
+3. Continue expanding the benchmark suite with real-world classification and ranking datasets.
 
 ## Longer-Term Themes
 
-- Multi-class classification and multi-label ranking.
+- Multi-label ranking.
 - Interaction constraints.
 - Dart / GOSS boosting modes.
 - GPU backend.

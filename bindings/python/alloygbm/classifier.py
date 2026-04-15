@@ -186,6 +186,9 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
         if self._artifact_bytes is None:
             raise RuntimeError("GBMClassifier native artifact is not available")
 
+        # Apply native categorical mappings (string -> float ID) before prediction
+        X = self._apply_native_cat_mappings_for_predict(X)
+
         # Lazily reconstruct the native predictor after pickle roundtrip
         if self._native_predictor_handle is None and getattr(
             self, "_predictor_needs_rebuild", False
@@ -305,7 +308,8 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
             f"feature_weights={self.feature_weights}, "
             f"max_leaves={self.max_leaves}, "
             f"tree_growth='{self.tree_growth}', "
-            f"warm_start={self.warm_start}"
+            f"warm_start={self.warm_start}, "
+            f"max_cat_threshold={self.max_cat_threshold}"
             ")"
         )
 

@@ -202,6 +202,18 @@ jobs:
           assert "custom_rmse" in metric_reg.evals_result_["validation"]
           print("custom metric values:", metric_reg.evals_result_["validation"]["custom_rmse"][:3])
 
+          # Native categorical split smoke
+          rng = np.random.RandomState(42)
+          cat_X = np.column_stack([np.arange(100) % 4, rng.randn(100)]).astype(np.float32)
+          cat_y = np.array([1.0 if i % 4 < 2 else 3.0 for i in range(100)], dtype=np.float32)
+          cats = [["a", "b", "c", "d"][i % 4] for i in range(100)]
+          cat_reg = GBMRegressor(n_estimators=10, max_cat_threshold=64, categorical_feature_indices=[0])
+          cat_reg.fit(cat_X, cat_y, categorical_feature_values_list=[cats])
+          cat_preds = cat_reg.predict(cat_X[:4])
+          assert len(cat_preds) == 4
+          assert cat_reg._native_cat_mappings_ is not None
+          print("native categorical split predictions:", cat_preds)
+
           print("All smoke tests passed")
           PY
 

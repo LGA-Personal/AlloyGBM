@@ -242,6 +242,7 @@ class GBMRegressor(_GBMRegressorBase):
         tree_growth: str = "level",
         warm_start: bool = False,
         objective: "str | None | object" = None,
+        max_cat_threshold: int = 0,
     ) -> None:
         if not (0.0 < learning_rate <= 1.0):
             raise ValueError("learning_rate must be in (0.0, 1.0]")
@@ -350,6 +351,8 @@ class GBMRegressor(_GBMRegressorBase):
             raise TypeError(
                 "objective must be a string, a callable, or None"
             )
+        if int(max_cat_threshold) < 0:
+            raise ValueError("max_cat_threshold must be >= 0")
 
         self.learning_rate = float(learning_rate)
         self.max_depth = int(max_depth)
@@ -396,6 +399,7 @@ class GBMRegressor(_GBMRegressorBase):
         self.tree_growth = str(tree_growth)
         self.warm_start = bool(warm_start)
         self.objective = objective
+        self.max_cat_threshold = int(max_cat_threshold)
         self._is_fitted = False
         self._artifact_bytes: bytes | None = None
         self._native_predictor_handle: object | None = None
@@ -408,6 +412,7 @@ class GBMRegressor(_GBMRegressorBase):
         self._continuous_feature_quantile_cuts: list[list[float]] | None = None
         self._continuous_feature_linear_rank_flags: list[bool] | None = None
         self.feature_names_in_: list[str] | None = None
+        self._native_cat_mappings_: dict[int, dict[str, int]] | None = None
         self.best_iteration_: int | None = None
         self.best_score_: float | None = None
         self.n_estimators_: int | None = None
@@ -445,7 +450,8 @@ class GBMRegressor(_GBMRegressorBase):
             f"max_leaves={self.max_leaves}, "
             f"tree_growth='{self.tree_growth}', "
             f"warm_start={self.warm_start}, "
-            f"objective={self.objective!r}"
+            f"objective={self.objective!r}, "
+            f"max_cat_threshold={self.max_cat_threshold}"
             ")"
         )
 
@@ -482,6 +488,7 @@ class GBMRegressor(_GBMRegressorBase):
             "tree_growth": self.tree_growth,
             "warm_start": self.warm_start,
             "objective": self.objective,
+            "max_cat_threshold": self.max_cat_threshold,
         }
 
     def set_params(self, **params: float | int | bool | str | None) -> "GBMRegressor":
@@ -516,6 +523,7 @@ class GBMRegressor(_GBMRegressorBase):
             "tree_growth",
             "warm_start",
             "objective",
+            "max_cat_threshold",
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
@@ -733,6 +741,12 @@ class GBMRegressor(_GBMRegressorBase):
             if obj is not None and not callable(obj) and not isinstance(obj, str):
                 raise TypeError("objective must be a string, a callable, or None")
             self.objective = obj
+
+        if "max_cat_threshold" in params:
+            mct = int(params["max_cat_threshold"])
+            if mct < 0:
+                raise ValueError("max_cat_threshold must be >= 0")
+            self.max_cat_threshold = mct
 
         # Cross-field validation: leaf growth requires max_leaves
         if self.tree_growth == "leaf" and self.max_leaves is None:
@@ -1195,6 +1209,7 @@ class GBMRegressor(_GBMRegressorBase):
                     custom_objective_fn=_custom_objective_fn,
                     custom_loss_fn=_custom_loss_fn,
                     custom_metric_fn=_custom_metric_fn,
+                    max_cat_threshold=self.max_cat_threshold,
                 )
                 return self._finalize_training_result(native_result, input_adaptation_seconds, feature_count=feature_count)
             except (ImportError, AttributeError):
@@ -1285,6 +1300,7 @@ class GBMRegressor(_GBMRegressorBase):
                 custom_objective_fn=_custom_objective_fn,
                 custom_loss_fn=_custom_loss_fn,
                 custom_metric_fn=_custom_metric_fn,
+                max_cat_threshold=self.max_cat_threshold,
             )
         else:
             assert training_rows is not None
@@ -1336,6 +1352,7 @@ class GBMRegressor(_GBMRegressorBase):
                 custom_objective_fn=_custom_objective_fn,
                 custom_loss_fn=_custom_loss_fn,
                 custom_metric_fn=_custom_metric_fn,
+                max_cat_threshold=self.max_cat_threshold,
             )
 
         self._apply_continuous_binning_metadata(native_result.continuous_binning_metadata)
@@ -1345,6 +1362,14 @@ class GBMRegressor(_GBMRegressorBase):
             self._artifact_bytes
         )
         self._convert_predictor_thresholds_to_float()
+        raw_mappings = getattr(native_result, "native_cat_mappings", None)
+        if raw_mappings:
+            self._native_cat_mappings_ = {
+                int(k): {str(ck): int(cv) for ck, cv in v.items()}
+                for k, v in raw_mappings.items()
+            }
+        else:
+            self._native_cat_mappings_ = None
         summary = native_result.summary
         self.best_iteration_ = summary.best_validation_round
         self.best_score_ = (
@@ -1378,6 +1403,14 @@ class GBMRegressor(_GBMRegressorBase):
             self._artifact_bytes
         )
         self._convert_predictor_thresholds_to_float()
+        raw_mappings = getattr(native_result, "native_cat_mappings", None)
+        if raw_mappings:
+            self._native_cat_mappings_ = {
+                int(k): {str(ck): int(cv) for ck, cv in v.items()}
+                for k, v in raw_mappings.items()
+            }
+        else:
+            self._native_cat_mappings_ = None
         summary = native_result.summary
         self.best_iteration_ = summary.best_validation_round
         self.best_score_ = (
@@ -1695,6 +1728,8 @@ class GBMRegressor(_GBMRegressorBase):
                 self._artifact_bytes
             )
             self._convert_predictor_thresholds_to_float()
+        # Convert native categorical columns to integer IDs before prediction.
+        X = self._apply_native_cat_mappings_for_predict(X)
         rows: object
         # Fast path: float thresholds + zero-copy numpy — no data copying
         if self._float_thresholds_converted:
@@ -2501,6 +2536,48 @@ class GBMRegressor(_GBMRegressorBase):
             raise TypeError("categorical_feature_values must be a sequence of strings")
         return [str(value) for value in values_like]
 
+    def _apply_native_cat_mappings_for_predict(self, X: object) -> object:
+        """Replace native-categorical columns with integer IDs for prediction.
+
+        If the model has native categorical mappings (from native categorical
+        splits), this converts the categorical column values in X to the
+        corresponding integer IDs. For DataFrame inputs, string columns are
+        looked up in the mapping. Unknown categories become NaN (will follow
+        the default_left direction in the tree).
+        """
+        mappings = getattr(self, "_native_cat_mappings_", None)
+        if not mappings:
+            return X
+        # DataFrame path: replace string columns with float IDs
+        if hasattr(X, "columns") and hasattr(X, "iloc"):
+            import numpy as np
+            X = X.copy()
+            for feat_idx, cat_map in mappings.items():
+                if feat_idx < len(X.columns):
+                    col = X.iloc[:, feat_idx]
+                    # Build a string-keyed float-valued dict for vectorized .map()
+                    float_map = {str(k): np.float32(v) for k, v in cat_map.items()}
+                    mapped = col.astype(str).map(float_map).astype(np.float32)
+                    X[X.columns[feat_idx]] = mapped
+            return X
+        # numpy array path: values are already float, return as-is
+        if hasattr(X, "dtype") and hasattr(X, "shape"):
+            return X
+        # List-of-lists path: convert string values to float IDs
+        if isinstance(X, (list, tuple)) and len(X) > 0:
+            first = X[0]
+            if isinstance(first, (list, tuple)):
+                result = []
+                for row in X:
+                    new_row = list(row)
+                    for feat_idx, cat_map in mappings.items():
+                        if feat_idx < len(new_row):
+                            val = str(new_row[feat_idx])
+                            new_row[feat_idx] = float(cat_map[val]) if val in cat_map else float("nan")
+                    result.append(new_row)
+                return result
+        return X
+
     @staticmethod
     def _extract_categorical_values_for_index(
         X: object, categorical_feature_index: int, row_count: int
@@ -2995,6 +3072,11 @@ class GBMRegressor(_GBMRegressorBase):
             "n_estimators_actual": self.n_estimators_,
             "evals_result": self.evals_result_,
             "feature_names_in": self.feature_names_in_,
+            "native_cat_mappings": (
+                {str(k): v for k, v in self._native_cat_mappings_.items()}
+                if self._native_cat_mappings_
+                else None
+            ),
         }
         # Classifier-specific metadata
         from .classifier import GBMClassifier
@@ -3069,6 +3151,13 @@ class GBMRegressor(_GBMRegressorBase):
         model.n_estimators_ = metadata.get("n_estimators_actual")
         model.evals_result_ = metadata.get("evals_result")
         model.feature_names_in_ = metadata.get("feature_names_in")
+        saved_cat_mappings = metadata.get("native_cat_mappings")
+        if saved_cat_mappings:
+            model._native_cat_mappings_ = {
+                int(k): v for k, v in saved_cat_mappings.items()
+            }
+        else:
+            model._native_cat_mappings_ = None
         model._is_fitted = True
         model._native_predictor_handle = None
         model._float_thresholds_converted = False

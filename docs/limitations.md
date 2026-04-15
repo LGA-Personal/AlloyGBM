@@ -1,47 +1,31 @@
 # AlloyGBM Current Limitations
 
-Last updated for v0.2.0.
+Last updated for v0.3.0.
 
 ## Remaining Limitations
 
-### 1. Binary Classification Only
-
-`GBMClassifier` supports binary classification (2 classes). Multi-class
-classification (softmax, one-vs-rest) is not yet implemented.
-
-### 2. CPU-Only Runtime
+### 1. CPU-Only Runtime
 
 The `BackendOps` trait is designed for hardware abstraction, but only
 `CpuBackend` exists. GPU/accelerator support is architecturally planned but
 not implemented.
 
-### 3. No Custom Objective / Custom Metric Callbacks
-
-The `ObjectiveOps` trait is not exposed to Python. Users cannot define custom
-loss functions or custom evaluation metrics from Python.
-
-### 4. No Interaction Constraints
+### 2. No Interaction Constraints
 
 There is no way to constrain which features can interact within the same tree.
 
-### 5. No Dart / GOSS Boosting Modes
+### 3. No Dart / GOSS Boosting Modes
 
 Only standard gradient boosting is supported. Dart (dropout) and GOSS
 (gradient-based one-side sampling) modes are not available.
 
-### 6. No Native Categorical Splits
-
-Categorical features are handled via target encoding (with optional time-aware
-leakage prevention). Native histogram-based categorical splits (like LightGBM's
-optimal split) are not implemented.
-
-### 7. No Multi-Label Ranking
+### 4. No Multi-Label Ranking
 
 `GBMRanker` supports single-label relevance only.
 
-## Resolved In 0.2.0 (Previously Limitations)
+## Resolved (Previously Limitations)
 
-The following were limitations in `0.1.x` and have been addressed:
+The following were limitations in prior versions and have been addressed:
 
 - Regression-only (now: classification + ranking)
 - Single categorical column only (now: multiple via `categorical_feature_indices`)
@@ -57,3 +41,6 @@ The following were limitations in `0.1.x` and have been addressed:
 - Level-wise growth only (now: leaf-wise available)
 - Bins capped at 256 (now: up to 65,535)
 - No histogram reuse (now: buffer reuse across rounds)
+- Binary classification only (now: multi-class softmax with K > 2 classes)
+- No native categorical splits (now: `max_cat_threshold` enables Fisher-sort optimal binary partitions with O(1) bitset prediction)
+- No custom objective/metric callbacks (now: `objective` callable and `eval_metric` callable)
