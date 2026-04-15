@@ -1761,24 +1761,16 @@ impl TrainedModel {
                 .map(|(i, s)| {
                     (
                         i as u32,
-                        s.split
-                            .categorical_bitset
-                            .clone()
-                            .unwrap_or_default(),
+                        s.split.categorical_bitset.clone().unwrap_or_default(),
                     )
                 })
                 .collect();
             let payload = NativeCategoricalSplitsPayload {
-                native_categorical_feature_indices: self
-                    .native_categorical_feature_indices
-                    .clone(),
+                native_categorical_feature_indices: self.native_categorical_feature_indices.clone(),
                 stump_bitsets,
             };
             let cat_bytes = encode_native_categorical_splits_payload(&payload)?;
-            sections.push((
-                ModelSectionKind::NativeCategoricalSplits,
-                cat_bytes,
-            ));
+            sections.push((ModelSectionKind::NativeCategoricalSplits, cat_bytes));
         }
 
         serialize_model_artifact_v1(&metadata, &sections).map_err(EngineError::from)
@@ -1905,10 +1897,7 @@ impl Trainer {
     }
 
     /// Set the categorical feature metadata for native categorical splits.
-    pub fn with_categorical_features(
-        mut self,
-        features: Vec<CategoricalFeatureInfo>,
-    ) -> Self {
+    pub fn with_categorical_features(mut self, features: Vec<CategoricalFeatureInfo>) -> Self {
         self.categorical_features = features;
         self
     }
@@ -3639,8 +3628,12 @@ fn build_tree_level_wise<B: BackendOps>(
         for (local_node_id, node_rows, histograms, parent_leaf_value) in active_nodes {
             let node_id = encode_tree_node_id(round_index, local_node_id)?;
             let node = NodeSlice::new(node_id, node_rows)?;
-            let Some(mut split) =
-                backend.best_split_with_options(&histograms, split_options, feature_weights, categorical_features)?
+            let Some(mut split) = backend.best_split_with_options(
+                &histograms,
+                split_options,
+                feature_weights,
+                categorical_features,
+            )?
             else {
                 continue;
             };
@@ -3869,8 +3862,12 @@ fn build_tree_leaf_wise<B: BackendOps>(
     let root_node = NodeSlice::new(root_node_id, root_row_indices)?;
     let root_histograms =
         backend.build_histograms(binned_matrix, gradients, &root_node, feature_tiles)?;
-    let root_split =
-        backend.best_split_with_options(&root_histograms, split_options, feature_weights, categorical_features)?;
+    let root_split = backend.best_split_with_options(
+        &root_histograms,
+        split_options,
+        feature_weights,
+        categorical_features,
+    )?;
 
     let Some(root_split) = root_split else {
         return Ok((Vec::new(), IterationStopReason::NoSplitCandidate));
@@ -7885,8 +7882,11 @@ mod tests {
         let bytes = model.to_artifact_bytes().expect("serialize should succeed");
         assert!(!bytes.is_empty());
 
-        let restored = TrainedModel::from_artifact_bytes_with_mode(&bytes, ArtifactCompatibilityMode::AllowLegacyTreesOnly)
-            .expect("deserialize should succeed");
+        let restored = TrainedModel::from_artifact_bytes_with_mode(
+            &bytes,
+            ArtifactCompatibilityMode::AllowLegacyTreesOnly,
+        )
+        .expect("deserialize should succeed");
 
         // Verify basic fields
         assert_eq!(restored.feature_count, 2);
@@ -7945,8 +7945,11 @@ mod tests {
         let bytes = model.to_artifact_bytes().expect("serialize should succeed");
 
         // Deserialize — should work fine with no categorical section
-        let restored = TrainedModel::from_artifact_bytes_with_mode(&bytes, ArtifactCompatibilityMode::AllowLegacyTreesOnly)
-            .expect("deserialize should succeed");
+        let restored = TrainedModel::from_artifact_bytes_with_mode(
+            &bytes,
+            ArtifactCompatibilityMode::AllowLegacyTreesOnly,
+        )
+        .expect("deserialize should succeed");
         assert_eq!(restored.stumps.len(), 1);
         assert!(!restored.stumps[0].split.is_categorical);
         assert!(restored.native_categorical_feature_indices.is_empty());

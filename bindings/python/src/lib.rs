@@ -13,8 +13,7 @@ use alloygbm_engine::{
     CategoricalTargetEncodingSpec, EngineError, IterationRunSummary, LambdaMARTObjective,
     MultiClassIterationRunSummary, MultiClassSoftmaxObjective, ObjectiveOps,
     PairwiseRankingObjective, PerRoundMetricCallback, QueryRMSEObjective, SquaredErrorObjective,
-    TrainedModel, Trainer, TrainingPolicyMode, WarmStartState, XeNDCGObjective,
-    YetiRankObjective,
+    TrainedModel, Trainer, TrainingPolicyMode, WarmStartState, XeNDCGObjective, YetiRankObjective,
 };
 use alloygbm_predictor::{Predictor, PredictorError};
 use alloygbm_shap::{
@@ -2345,8 +2344,10 @@ fn train_regression_artifact_with_summary_dense_impl(
     let training_time_index_for_validation = prepared.dataset.time_index.clone();
 
     // Split categorical features into native (low cardinality) and target-encoded (high cardinality).
-    let mut native_cat_mappings: std::collections::HashMap<usize, std::collections::HashMap<String, u32>> =
-        std::collections::HashMap::new();
+    let mut native_cat_mappings: std::collections::HashMap<
+        usize,
+        std::collections::HashMap<String, u32>,
+    > = std::collections::HashMap::new();
     let mut native_cat_infos: Vec<CategoricalFeatureInfo> = Vec::new();
     let mut target_encoding_specs: Vec<CategoricalTargetEncodingSpec> = Vec::new();
 
@@ -2393,8 +2394,10 @@ fn train_regression_artifact_with_summary_dense_impl(
 
     let mut categorical_state = None;
     if !target_encoding_specs.is_empty() {
-        let (encoded_prepared, state) =
-            apply_categorical_encoding_to_training_matrices_multi(prepared, &target_encoding_specs)?;
+        let (encoded_prepared, state) = apply_categorical_encoding_to_training_matrices_multi(
+            prepared,
+            &target_encoding_specs,
+        )?;
         prepared = encoded_prepared;
         categorical_state = Some(state);
     }
@@ -2431,7 +2434,10 @@ fn train_regression_artifact_with_summary_dense_impl(
 
                 // Apply native categorical binning to validation for native-split features.
                 let val_row_count = prepared_validation.dataset.matrix.row_count;
-                for (spec, val_cats) in categorical_specs.iter().zip(&validation_categorical_values_list) {
+                for (spec, val_cats) in categorical_specs
+                    .iter()
+                    .zip(&validation_categorical_values_list)
+                {
                     if let Some(cat_to_id) = native_cat_mappings.get(&spec.feature_index) {
                         let fi = spec.feature_index;
                         let missing = prepared_validation.binned_matrix.missing_bin();
@@ -2441,7 +2447,9 @@ fn train_regression_artifact_with_summary_dense_impl(
                                     .get(cat_name)
                                     .map(|&id| id as u16)
                                     .unwrap_or(missing);
-                                prepared_validation.binned_matrix.set_bin(row_idx, fi, bin_val);
+                                prepared_validation
+                                    .binned_matrix
+                                    .set_bin(row_idx, fi, bin_val);
                             }
                         }
                     }
@@ -2449,21 +2457,24 @@ fn train_regression_artifact_with_summary_dense_impl(
 
                 // Apply target encoding only for features that weren't native-split.
                 if !target_encoding_specs.is_empty() {
-                    let validation_te_specs: Vec<CategoricalTargetEncodingSpec> = target_encoding_specs
-                        .iter()
-                        .map(|te_spec| {
-                            // Find the matching validation categorical values for this feature.
-                            let orig_idx = categorical_specs
-                                .iter()
-                                .position(|s| s.feature_index == te_spec.feature_index)
-                                .expect("target encoding spec must correspond to an original spec");
-                            CategoricalTargetEncodingSpec {
-                                feature_index: te_spec.feature_index,
-                                values: validation_categorical_values_list[orig_idx].clone(),
-                                config: te_spec.config.clone(),
-                            }
-                        })
-                        .collect();
+                    let validation_te_specs: Vec<CategoricalTargetEncodingSpec> =
+                        target_encoding_specs
+                            .iter()
+                            .map(|te_spec| {
+                                // Find the matching validation categorical values for this feature.
+                                let orig_idx = categorical_specs
+                                    .iter()
+                                    .position(|s| s.feature_index == te_spec.feature_index)
+                                    .expect(
+                                        "target encoding spec must correspond to an original spec",
+                                    );
+                                CategoricalTargetEncodingSpec {
+                                    feature_index: te_spec.feature_index,
+                                    values: validation_categorical_values_list[orig_idx].clone(),
+                                    config: te_spec.config.clone(),
+                                }
+                            })
+                            .collect();
                     prepared_validation = apply_categorical_encoding_to_validation_matrices_multi(
                         prepared_validation,
                         &target_encoding_specs,

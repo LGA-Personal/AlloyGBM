@@ -1125,8 +1125,8 @@ mod tests {
         Device, ModelSectionKind, TrainParams, TrainingDataset, TreeGrowth,
         serialize_model_artifact_v1,
     };
-    use alloygbm_engine::{SquaredErrorObjective, Trainer, TrainedModel, TrainedStump};
     use alloygbm_core::{NodeStats, SplitCandidate};
+    use alloygbm_engine::{SquaredErrorObjective, TrainedModel, TrainedStump, Trainer};
 
     fn predictor_stub() -> Predictor {
         let metadata = ModelMetadata {
@@ -1650,19 +1650,31 @@ mod tests {
 
         // Category 0 → left → baseline + left_leaf_value = 0.5 + (-0.1) = 0.4
         let pred0 = predictor.predict_row(&[0.0, 99.0]).unwrap();
-        assert!((pred0 - 0.4).abs() < 1e-6, "cat 0 should go left: got {pred0}");
+        assert!(
+            (pred0 - 0.4).abs() < 1e-6,
+            "cat 0 should go left: got {pred0}"
+        );
 
         // Category 1 → left → 0.4
         let pred1 = predictor.predict_row(&[1.0, 99.0]).unwrap();
-        assert!((pred1 - 0.4).abs() < 1e-6, "cat 1 should go left: got {pred1}");
+        assert!(
+            (pred1 - 0.4).abs() < 1e-6,
+            "cat 1 should go left: got {pred1}"
+        );
 
         // Category 2 → right → baseline + right_leaf_value = 0.5 + 0.1 = 0.6
         let pred2 = predictor.predict_row(&[2.0, 99.0]).unwrap();
-        assert!((pred2 - 0.6).abs() < 1e-6, "cat 2 should go right: got {pred2}");
+        assert!(
+            (pred2 - 0.6).abs() < 1e-6,
+            "cat 2 should go right: got {pred2}"
+        );
 
         // Category 3 → right → 0.6
         let pred3 = predictor.predict_row(&[3.0, 99.0]).unwrap();
-        assert!((pred3 - 0.6).abs() < 1e-6, "cat 3 should go right: got {pred3}");
+        assert!(
+            (pred3 - 0.6).abs() < 1e-6,
+            "cat 3 should go right: got {pred3}"
+        );
 
         // NaN → default_left (true) → 0.4
         let pred_nan = predictor.predict_row(&[f32::NAN, 99.0]).unwrap();

@@ -1085,10 +1085,13 @@ pub fn decode_optional_categorical_state_section_v1(
 pub fn encode_native_categorical_splits_payload(
     payload: &NativeCategoricalSplitsPayload,
 ) -> CoreResult<Vec<u8>> {
-    let feature_count = u32::try_from(payload.native_categorical_feature_indices.len())
-        .map_err(|_| CoreError::Serialization("native cat feature count exceeds u32::MAX".to_string()))?;
-    let stump_count = u32::try_from(payload.stump_bitsets.len())
-        .map_err(|_| CoreError::Serialization("native cat stump count exceeds u32::MAX".to_string()))?;
+    let feature_count =
+        u32::try_from(payload.native_categorical_feature_indices.len()).map_err(|_| {
+            CoreError::Serialization("native cat feature count exceeds u32::MAX".to_string())
+        })?;
+    let stump_count = u32::try_from(payload.stump_bitsets.len()).map_err(|_| {
+        CoreError::Serialization("native cat stump count exceeds u32::MAX".to_string())
+    })?;
 
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&feature_count.to_le_bytes());
@@ -1167,7 +1170,8 @@ pub fn decode_native_categorical_splits_payload(
 pub fn decode_optional_native_categorical_splits_section(
     sections: &[ModelArtifactSection],
 ) -> CoreResult<Option<NativeCategoricalSplitsPayload>> {
-    let Some(section) = optional_single_section(sections, ModelSectionKind::NativeCategoricalSplits)?
+    let Some(section) =
+        optional_single_section(sections, ModelSectionKind::NativeCategoricalSplits)?
     else {
         return Ok(None);
     };

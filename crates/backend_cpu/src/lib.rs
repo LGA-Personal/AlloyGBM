@@ -2,7 +2,9 @@ use alloygbm_core::{
     BinnedMatrix, Device, FeatureHistogram, FeatureTile, GradientPair, HistogramBin,
     HistogramBundle, NodeSlice, NodeStats, PartitionResult, SplitCandidate,
 };
-use alloygbm_engine::{BackendOps, CategoricalFeatureInfo, EngineError, EngineResult, SplitSelectionOptions};
+use alloygbm_engine::{
+    BackendOps, CategoricalFeatureInfo, EngineError, EngineResult, SplitSelectionOptions,
+};
 use rayon::prelude::*;
 use std::cell::RefCell;
 
@@ -626,7 +628,9 @@ impl CpuBackend {
         let mut nm_total_hess = 0.0_f32;
         let mut nm_total_count = 0_u32;
 
-        let scan_limit = num_categories.min(feature_histogram.bins.len()).min(missing_bin_idx);
+        let scan_limit = num_categories
+            .min(feature_histogram.bins.len())
+            .min(missing_bin_idx);
         for bin_id in 0..scan_limit {
             let bin = &feature_histogram.bins[bin_id];
             if bin.count > 0 {
@@ -656,7 +660,9 @@ impl CpuBackend {
         categories.sort_by(|a, b| {
             let score_a = a.1 / (a.2 + options.l2_lambda + EPSILON);
             let score_b = b.1 / (b.2 + options.l2_lambda + EPSILON);
-            score_a.partial_cmp(&score_b).unwrap_or(std::cmp::Ordering::Equal)
+            score_a
+                .partial_cmp(&score_b)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         // Prefix scan over sorted categories to find best partition.
@@ -1858,8 +1864,7 @@ mod tests {
             missing_bin_index: nan_bin,
         };
 
-        let result =
-            CpuBackend::best_split_for_categorical_feature(&fh, 0, options, num_cats);
+        let result = CpuBackend::best_split_for_categorical_feature(&fh, 0, options, num_cats);
         assert!(result.is_some(), "should find a split");
         let split = result.unwrap();
         assert!(split.is_categorical);
@@ -1901,9 +1906,11 @@ mod tests {
         };
 
         let options = SplitSelectionOptions::default();
-        let result =
-            CpuBackend::best_split_for_categorical_feature(&fh, 0, options, num_cats);
-        assert!(result.is_none(), "single populated category should not split");
+        let result = CpuBackend::best_split_for_categorical_feature(&fh, 0, options, num_cats);
+        assert!(
+            result.is_none(),
+            "single populated category should not split"
+        );
     }
 
     #[test]
