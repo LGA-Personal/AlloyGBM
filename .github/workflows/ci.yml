@@ -24,19 +24,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Cargo check
-        run: cargo check --workspace
+        run: cargo check --workspace --exclude alloygbm-python
 
       - name: Cargo doc
-        run: cargo doc --workspace --no-deps
+        run: cargo doc --workspace --no-deps --exclude alloygbm-python
 
       - name: Cargo fmt
         run: cargo fmt -- --check
 
       - name: Cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --exclude alloygbm-python --all-targets -- -D warnings
 
       - name: Cargo test
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude alloygbm-python
 
   python-smoke:
     name: Python smoke (${{ matrix.os }} / py${{ matrix.python-version }})
