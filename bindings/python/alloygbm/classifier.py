@@ -118,6 +118,16 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
             self._label_decoder = {v: k for k, v in label_map.items()}
             self._num_classes_for_training = n_classes
 
+        # Reject custom callable objectives with multiclass labels — training produces
+        # a single-output model that is incompatible with multiclass prediction routing.
+        if self._is_multiclass and callable(getattr(self, 'objective', None)):
+            raise ValueError(
+                "GBMClassifier does not support custom callable objectives with "
+                f"multiclass labels (detected {self._num_classes_for_training} classes). "
+                "Custom objectives produce single-output models incompatible with "
+                "multiclass prediction. Use binary classification or a built-in objective."
+            )
+
         # Validate eval_set targets if provided
         if eval_set is not None:
             _eval_X, eval_y = eval_set
@@ -163,7 +173,10 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
             return [int(i) for i in indices]
         else:
             p1 = super().predict(X)
-            return [1 if p >= 0.5 else 0 for p in p1]
+            raw = [1 if p >= 0.5 else 0 for p in p1]
+            if self._label_decoder is not None:
+                return [self._label_decoder[v] for v in raw]
+            return raw
 
     # -- predict_proba --------------------------------------------------------
 

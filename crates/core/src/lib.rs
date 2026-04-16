@@ -1075,9 +1075,9 @@ pub fn decode_optional_categorical_state_section_v1(
 /// Encode native categorical splits payload for artifact serialization.
 ///
 /// Format:
-/// - [4 bytes] feature_count (u32 LE)
+/// - [4 bytes] num_native_categorical_features (u32 LE)
 /// - [4 bytes] stump_bitset_count (u32 LE)
-/// - [feature_count * 4 bytes] feature indices (u32 LE each)
+/// - [num_native_categorical_features * 4 bytes] feature indices (u32 LE each)
 /// - For each stump bitset:
 ///   - [4 bytes] stump_index (u32 LE)
 ///   - [2 bytes] bitset_len (u16 LE)

@@ -329,6 +329,9 @@ fn compute_subset_expectations(
 /// Uses bitset membership for categorical splits and threshold comparison
 /// for numeric splits.
 fn stump_goes_left(split: &alloygbm_core::SplitCandidate, feature_value: f32) -> bool {
+    if feature_value.is_nan() {
+        return split.default_left;
+    }
     if split.is_categorical {
         let cat_id = feature_value as u16;
         split

@@ -48,19 +48,19 @@ fn extract_f32_array(_py: Python<'_>, obj: &Bound<'_, PyAny>) -> Result<Vec<f32>
     // Fast path: contiguous f32 numpy array — single memcpy via as_slice()
     if let Ok(arr) = obj.downcast::<PyArray1<f32>>() {
         let readonly = arr.readonly();
-        return Ok(readonly
-            .as_slice()
-            .map_err(|_| EngineError::ContractViolation("numpy array is not contiguous".into()))?
-            .to_vec());
+        if let Ok(slice) = readonly.as_slice() {
+            return Ok(slice.to_vec());
+        }
+        // Non-contiguous — fall through to generic path
     }
     // Medium path: contiguous f64 numpy array — common when user returns
     // plain Python floats which numpy defaults to float64
     if let Ok(arr) = obj.downcast::<PyArray1<f64>>() {
         let readonly = arr.readonly();
-        let slice = readonly
-            .as_slice()
-            .map_err(|_| EngineError::ContractViolation("numpy array is not contiguous".into()))?;
-        return Ok(slice.iter().map(|&v| v as f32).collect());
+        if let Ok(slice) = readonly.as_slice() {
+            return Ok(slice.iter().map(|&v| v as f32).collect());
+        }
+        // Non-contiguous — fall through to generic path
     }
     // Slow fallback: generic extraction (handles lists, non-contiguous arrays, etc.)
     obj.extract::<Vec<f32>>().map_err(|e| {
@@ -2369,13 +2369,25 @@ fn train_regression_artifact_with_summary_dense_impl(
 
                 // Re-bin the column in the binned matrix: category name → integer bin ID.
                 let fi = spec.feature_index;
-                let missing = prepared.binned_matrix.missing_bin();
+                let missing_bin = prepared.binned_matrix.missing_bin();
+                // Guard: category IDs must not collide with the missing-value sentinel.
+                if (num_unique as u16) > missing_bin {
+                    return Err(EngineError::ContractViolation(format!(
+                        "Native categorical feature {} has {} categories which would collide with the missing-value sentinel (bin {}). Reduce max_cat_threshold or increase continuous_binning_max_bins.",
+                        fi, num_unique, missing_bin
+                    )));
+                }
                 for (row_idx, cat_name) in spec.values.iter().enumerate() {
                     let bin_val = cat_to_id
                         .get(cat_name)
                         .map(|&id| id as u16)
-                        .unwrap_or(missing);
+                        .unwrap_or(missing_bin);
                     prepared.binned_matrix.set_bin(row_idx, fi, bin_val);
+                }
+                // Update max_bin if categories exceed current max.
+                let cat_max_bin = (num_unique - 1) as u16;
+                if cat_max_bin > prepared.binned_matrix.max_bin {
+                    prepared.binned_matrix.max_bin = cat_max_bin;
                 }
 
                 native_cat_infos.push(CategoricalFeatureInfo {
@@ -2440,13 +2452,20 @@ fn train_regression_artifact_with_summary_dense_impl(
                 {
                     if let Some(cat_to_id) = native_cat_mappings.get(&spec.feature_index) {
                         let fi = spec.feature_index;
-                        let missing = prepared_validation.binned_matrix.missing_bin();
+                        let missing_bin = prepared_validation.binned_matrix.missing_bin();
+                        // Update max_bin to match training matrix for this native categorical feature.
+                        // (The sentinel collision was already validated on the training path.)
+                        let num_unique = cat_to_id.len();
+                        let cat_max_bin = (num_unique - 1) as u16;
+                        if cat_max_bin > prepared_validation.binned_matrix.max_bin {
+                            prepared_validation.binned_matrix.max_bin = cat_max_bin;
+                        }
                         for (row_idx, cat_name) in val_cats.iter().enumerate() {
                             if row_idx < val_row_count {
                                 let bin_val = cat_to_id
                                     .get(cat_name)
                                     .map(|&id| id as u16)
-                                    .unwrap_or(missing);
+                                    .unwrap_or(missing_bin);
                                 prepared_validation
                                     .binned_matrix
                                     .set_bin(row_idx, fi, bin_val);
