@@ -1478,6 +1478,13 @@ pub struct WarmStartState {
     pub initial_rounds_completed: usize,
 }
 
+/// State needed to continue multiclass training from a prior model.
+pub struct MultiClassWarmStartState {
+    pub baseline_predictions: Vec<f32>,
+    pub class_stumps: Vec<Vec<TrainedStump>>,
+    pub initial_rounds_completed: usize,
+}
+
 struct IterationExecutionContext<'a> {
     controls: IterationControls,
     validation: Option<ValidationDatasetRef<'a>>,
@@ -2349,6 +2356,7 @@ impl Trainer {
             backend,
             objective,
             controls,
+            None,
         )
     }
 
@@ -2369,6 +2377,50 @@ impl Trainer {
             backend,
             objective,
             controls,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn fit_multiclass_iterations_warm_start_with_summary<B: BackendOps>(
+        &self,
+        dataset: &TrainingDataset,
+        binned_matrix: &BinnedMatrix,
+        backend: &B,
+        objective: &MultiClassSoftmaxObjective,
+        controls: IterationControls,
+        warm_start: MultiClassWarmStartState,
+    ) -> EngineResult<MultiClassIterationRunSummary> {
+        self.fit_multiclass_iterations_impl(
+            dataset,
+            binned_matrix,
+            None,
+            backend,
+            objective,
+            controls,
+            Some(warm_start),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn fit_multiclass_iterations_warm_start_with_validation_summary<B: BackendOps>(
+        &self,
+        dataset: &TrainingDataset,
+        binned_matrix: &BinnedMatrix,
+        validation: ValidationDatasetRef<'_>,
+        backend: &B,
+        objective: &MultiClassSoftmaxObjective,
+        controls: IterationControls,
+        warm_start: MultiClassWarmStartState,
+    ) -> EngineResult<MultiClassIterationRunSummary> {
+        self.fit_multiclass_iterations_impl(
+            dataset,
+            binned_matrix,
+            Some(validation),
+            backend,
+            objective,
+            controls,
+            Some(warm_start),
         )
     }
 
@@ -2381,6 +2433,7 @@ impl Trainer {
         backend: &B,
         objective: &MultiClassSoftmaxObjective,
         controls: IterationControls,
+        warm_start: Option<MultiClassWarmStartState>,
     ) -> EngineResult<MultiClassIterationRunSummary> {
         let k = objective.num_classes;
         validate_iteration_controls(controls)?;
@@ -2415,12 +2468,51 @@ impl Trainer {
             split_selection_options_for_training(&self.params, None, dataset, binned_matrix)?;
         let feature_count = binned_matrix.feature_count;
 
-        // Initialize K prediction arrays
-        let baselines = objective.initial_predictions();
+        // Initialize K prediction arrays — from warm-start or fresh
+        let (baselines, mut class_stumps, round_index_offset, initial_stump_counts) =
+            if let Some(ws) = warm_start {
+                if ws.baseline_predictions.len() != k {
+                    return Err(EngineError::ContractViolation(format!(
+                        "warm-start baseline count {} != num_classes {k}",
+                        ws.baseline_predictions.len()
+                    )));
+                }
+                if ws.class_stumps.len() != k {
+                    return Err(EngineError::ContractViolation(format!(
+                        "warm-start class_stumps count {} != num_classes {k}",
+                        ws.class_stumps.len()
+                    )));
+                }
+                let offset = ws.initial_rounds_completed;
+                let initial_counts: Vec<usize> = ws.class_stumps.iter().map(|s| s.len()).collect();
+                (
+                    ws.baseline_predictions,
+                    ws.class_stumps,
+                    offset,
+                    initial_counts,
+                )
+            } else {
+                let baselines = objective.initial_predictions();
+                let class_stumps: Vec<Vec<TrainedStump>> = vec![Vec::new(); k];
+                (baselines, class_stumps, 0_usize, vec![0_usize; k])
+            };
+
         let n = dataset.row_count();
         let mut class_predictions: Vec<Vec<f32>> = baselines.iter().map(|&b| vec![b; n]).collect();
+
+        // If warm-starting, apply prior-model stumps to prediction arrays
+        if round_index_offset > 0 {
+            for class_k in 0..k {
+                if !class_stumps[class_k].is_empty() {
+                    apply_round_stumps_tree_walk(
+                        &mut class_predictions[class_k],
+                        binned_matrix,
+                        &class_stumps[class_k],
+                    )?;
+                }
+            }
+        }
         let mut class_candidate_predictions: Vec<Vec<f32>> = class_predictions.clone();
-        let mut class_stumps: Vec<Vec<TrainedStump>> = vec![Vec::new(); k];
         // Track stump counts per class at each round boundary for truncation
         let mut stumps_per_round_per_class: Vec<Vec<usize>> = Vec::new();
 
@@ -2431,6 +2523,21 @@ impl Trainer {
                 .map(|&b| vec![b; v.dataset.row_count()])
                 .collect()
         });
+        // Apply warm-start stumps to validation predictions too
+        if round_index_offset > 0
+            && let Some(validation_ref) = validation
+            && let Some(val_preds) = validation_class_predictions.as_mut()
+        {
+            for class_k in 0..k {
+                if !class_stumps[class_k].is_empty() {
+                    apply_round_stumps_tree_walk(
+                        &mut val_preds[class_k],
+                        validation_ref.binned_matrix,
+                        &class_stumps[class_k],
+                    )?;
+                }
+            }
+        }
 
         let initial_loss = objective.loss(
             &class_predictions,
@@ -2469,18 +2576,19 @@ impl Trainer {
         let effective_round_cap = controls.rounds;
 
         for round_index in 0..effective_round_cap {
+            let effective_round = round_index + round_index_offset;
             // Shared sampling for all K classes
             let root_row_indices = sampled_row_indices(
                 n,
                 controls.row_subsample,
                 sampling_seed_base,
-                round_index as u64,
+                effective_round as u64,
             );
             let (feature_tiles, sampled_feature_count) = sampled_feature_tiles(
                 feature_count,
                 controls.col_subsample,
                 sampling_seed_base,
-                round_index as u64,
+                effective_round as u64,
             )?;
             let sampled_row_count = root_row_indices.len();
 
@@ -2509,7 +2617,7 @@ impl Trainer {
                         binned_matrix,
                         &gradient_buffer,
                         root_row_indices.clone(),
-                        round_index,
+                        effective_round,
                         &feature_tiles,
                         split_options,
                         &self.params,
@@ -2524,7 +2632,7 @@ impl Trainer {
                         binned_matrix,
                         &gradient_buffer,
                         root_row_indices.clone(),
-                        round_index,
+                        effective_round,
                         &feature_tiles,
                         split_options,
                         &self.params,
@@ -2645,13 +2753,14 @@ impl Trainer {
             && let Some(best_round) = best_validation_round
             && best_round < rounds_completed
         {
-            // Compute how many stumps to keep per class
+            // Compute how many stumps to keep per class (inherited + best new rounds)
             for class_k in 0..k {
-                let keep_count: usize = stumps_per_round_per_class
-                    .iter()
-                    .take(best_round)
-                    .map(|r| r[class_k])
-                    .sum();
+                let keep_count: usize = initial_stump_counts[class_k]
+                    + stumps_per_round_per_class
+                        .iter()
+                        .take(best_round)
+                        .map(|r| r[class_k])
+                        .sum::<usize>();
                 class_stumps[class_k].truncate(keep_count);
             }
             rounds_completed = best_round;

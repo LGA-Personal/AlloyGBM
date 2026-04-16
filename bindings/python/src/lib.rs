@@ -11,9 +11,10 @@ use alloygbm_core::{
 use alloygbm_engine::{
     ArtifactCompatibilityMode, BinaryCrossEntropyObjective, CategoricalFeatureInfo,
     CategoricalTargetEncodingSpec, EngineError, IterationRunSummary, LambdaMARTObjective,
-    MultiClassIterationRunSummary, MultiClassSoftmaxObjective, ObjectiveOps,
-    PairwiseRankingObjective, PerRoundMetricCallback, QueryRMSEObjective, SquaredErrorObjective,
-    TrainedModel, Trainer, TrainingPolicyMode, WarmStartState, XeNDCGObjective, YetiRankObjective,
+    MultiClassIterationRunSummary, MultiClassSoftmaxObjective, MultiClassTrainedModel,
+    MultiClassWarmStartState, ObjectiveOps, PairwiseRankingObjective, PerRoundMetricCallback,
+    QueryRMSEObjective, SquaredErrorObjective, TrainedModel, Trainer, TrainingPolicyMode,
+    WarmStartState, XeNDCGObjective, YetiRankObjective,
 };
 use alloygbm_predictor::{Predictor, PredictorError};
 use alloygbm_shap::{
@@ -2513,21 +2514,27 @@ fn train_regression_artifact_with_summary_dense_impl(
         }
     };
 
-    // Warm-start: load existing model if init_artifact_bytes is provided
-    let warm_start_state = if let Some(init_bytes) = init_artifact_bytes {
-        let init_model = TrainedModel::from_artifact_bytes(init_bytes)?;
-        if init_model.feature_count != feature_count {
-            return Err(EngineError::ContractViolation(format!(
-                "init_model feature_count {} does not match training data feature_count {}",
-                init_model.feature_count, feature_count,
-            )));
+    // Warm-start: load existing single-output model if init_artifact_bytes is provided.
+    // Multiclass warm-start is handled separately in the multiclass_softmax branch
+    // because multiclass artifacts have a different format (MultiClassTrees section).
+    let warm_start_state = if objective != "multiclass_softmax" {
+        if let Some(init_bytes) = init_artifact_bytes {
+            let init_model = TrainedModel::from_artifact_bytes(init_bytes)?;
+            if init_model.feature_count != feature_count {
+                return Err(EngineError::ContractViolation(format!(
+                    "init_model feature_count {} does not match training data feature_count {}",
+                    init_model.feature_count, feature_count,
+                )));
+            }
+            let initial_rounds = init_model.rounds_completed();
+            Some(WarmStartState {
+                baseline_prediction: init_model.baseline_prediction,
+                stumps: init_model.stumps,
+                initial_rounds_completed: initial_rounds,
+            })
+        } else {
+            None
         }
-        let initial_rounds = init_model.rounds_completed();
-        Some(WarmStartState {
-            baseline_prediction: init_model.baseline_prediction,
-            stumps: init_model.stumps,
-            initial_rounds_completed: initial_rounds,
-        })
     } else {
         None
     };
@@ -2675,7 +2682,57 @@ fn train_regression_artifact_with_summary_dense_impl(
                 rounds,
                 training_policy,
             )?;
-            let mc_summary = if let Some(validation_prepared) = validation_prepared.as_ref() {
+
+            // Build multiclass warm-start state from init_artifact_bytes if available
+            let mc_warm_start = if let Some(init_bytes) = init_artifact_bytes {
+                let init_mc_model = MultiClassTrainedModel::from_artifact_bytes(init_bytes)?;
+                if init_mc_model.feature_count != feature_count {
+                    return Err(EngineError::ContractViolation(format!(
+                        "init_model feature_count {} does not match training data feature_count {}",
+                        init_mc_model.feature_count, feature_count,
+                    )));
+                }
+                if init_mc_model.num_classes != k {
+                    return Err(EngineError::ContractViolation(format!(
+                        "init_model num_classes {} does not match training num_classes {}",
+                        init_mc_model.num_classes, k,
+                    )));
+                }
+                let initial_rounds = init_mc_model.rounds_completed();
+                Some(MultiClassWarmStartState {
+                    baseline_predictions: init_mc_model.baseline_predictions,
+                    class_stumps: init_mc_model.class_stumps,
+                    initial_rounds_completed: initial_rounds,
+                })
+            } else {
+                None
+            };
+
+            let mc_summary = if let Some(ws) = mc_warm_start {
+                if let Some(validation_prepared) = validation_prepared.as_ref() {
+                    trainer.fit_multiclass_iterations_warm_start_with_validation_summary(
+                        &prepared.dataset,
+                        &prepared.binned_matrix,
+                        alloygbm_engine::ValidationDatasetRef {
+                            dataset: &validation_prepared.dataset,
+                            binned_matrix: &validation_prepared.binned_matrix,
+                        },
+                        &backend,
+                        &mc_obj,
+                        controls,
+                        ws,
+                    )?
+                } else {
+                    trainer.fit_multiclass_iterations_warm_start_with_summary(
+                        &prepared.dataset,
+                        &prepared.binned_matrix,
+                        &backend,
+                        &mc_obj,
+                        controls,
+                        ws,
+                    )?
+                }
+            } else if let Some(validation_prepared) = validation_prepared.as_ref() {
                 trainer.fit_multiclass_iterations_with_validation_summary(
                     &prepared.dataset,
                     &prepared.binned_matrix,

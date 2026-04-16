@@ -736,10 +736,63 @@ impl Predictor {
             ));
         }
 
-        let rows: Vec<Vec<f32>> = (0..row_count)
-            .map(|i| values[i * feature_count..(i + 1) * feature_count].to_vec())
-            .collect();
-        self.predict_batch_multiclass(&rows)
+        let k = self.num_classes.unwrap(); // already validated is_multiclass above
+        let baselines = self.baseline_predictions.as_ref().unwrap();
+        let class_trees = self.class_trees.as_ref().unwrap();
+        let use_float = self.use_float_thresholds;
+
+        let predict_row_from_slice = |features: &[f32]| -> PredictorResult<Vec<f32>> {
+            let mut logits = baselines.clone();
+            for (class_k, trees) in class_trees.iter().enumerate() {
+                for tree in trees {
+                    let mut local_node_id: usize = 0;
+                    while let Some(Some(node)) = tree.nodes_by_local_id.get(local_node_id) {
+                        if node.feature_index >= feature_count {
+                            return Err(PredictorError::ContractViolation(format!(
+                                "split feature_index {} exceeds feature length {}",
+                                node.feature_index, feature_count
+                            )));
+                        }
+                        let feature_value = features[node.feature_index];
+                        let went_left = predictor_went_left(node, feature_value, use_float);
+                        logits[class_k] += if went_left {
+                            node.left_leaf_value
+                        } else {
+                            node.right_leaf_value
+                        };
+                        local_node_id = if went_left {
+                            local_node_id * 2 + 1
+                        } else {
+                            local_node_id * 2 + 2
+                        };
+                    }
+                }
+            }
+            softmax_in_place(&mut logits);
+            Ok(logits)
+        };
+
+        let total_trees: usize = class_trees.iter().map(|t| t.len()).sum();
+        let mut output = Vec::with_capacity(row_count * k);
+        if should_parallel_predict_batch(row_count, total_trees) {
+            let results: PredictorResult<Vec<Vec<f32>>> = (0..row_count)
+                .into_par_iter()
+                .map(|i| {
+                    let row = &values[i * feature_count..(i + 1) * feature_count];
+                    predict_row_from_slice(row)
+                })
+                .collect();
+            for probs in results? {
+                output.extend_from_slice(&probs);
+            }
+        } else {
+            for i in 0..row_count {
+                let row = &values[i * feature_count..(i + 1) * feature_count];
+                let probs = predict_row_from_slice(row)?;
+                output.extend_from_slice(&probs);
+            }
+        }
+        Ok(output)
     }
 
     /// Predict raw logits in batch (before post-transform).

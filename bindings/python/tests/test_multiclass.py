@@ -345,5 +345,76 @@ class TestMulticlassLogLossErrorHandling(unittest.TestCase):
             multiclass_log_loss([0, 0], [[1.0], [1.0]])
 
 
+class TestMulticlassWarmStart(unittest.TestCase):
+    """Tests for warm-start support with multi-class classification."""
+
+    def test_warm_start_continues_training(self) -> None:
+        """warm_start=True with increased n_estimators should produce different predictions."""
+        X_train, y_train, X_val, y_val = _make_multiclass_dataset()
+
+        m = GBMClassifier(
+            n_estimators=5, seed=1, deterministic=True, warm_start=True
+        )
+        m.fit(X_train, y_train)
+        preds_5 = m.predict_proba(X_train).copy()
+        assert m.n_estimators_ == 5
+
+        # Continue training
+        m.n_estimators = 15
+        m.fit(X_train, y_train)
+        preds_15 = m.predict_proba(X_train)
+        assert m.n_estimators_ > 5, f"expected more rounds, got {m.n_estimators_}"
+        assert not np.allclose(
+            preds_5, preds_15, atol=1e-4
+        ), "predictions unchanged after warm-start"
+
+    def test_warm_start_with_early_stopping(self) -> None:
+        """warm_start=True should work alongside early stopping."""
+        X_train, y_train, X_val, y_val = _make_multiclass_dataset()
+
+        m = GBMClassifier(
+            n_estimators=10,
+            early_stopping_rounds=3,
+            seed=1,
+            deterministic=True,
+            warm_start=True,
+        )
+        m.fit(X_train, y_train, eval_set=(X_val, y_val))
+        first_rounds = m.n_estimators_
+
+        m.n_estimators = 30
+        m.fit(X_train, y_train, eval_set=(X_val, y_val))
+        # Should have trained more rounds (or same if already converged)
+        assert m.n_estimators_ >= first_rounds
+
+    def test_warm_start_preserves_classes(self) -> None:
+        """warm_start should preserve class metadata across fits."""
+        X_train, y_train, _, _ = _make_multiclass_dataset(n_classes=4)
+
+        m = GBMClassifier(n_estimators=5, seed=1, warm_start=True)
+        m.fit(X_train, y_train)
+        classes_first = m.classes_[:]
+        n_classes_first = m.n_classes_
+
+        m.n_estimators = 10
+        m.fit(X_train, y_train)
+        assert m.classes_ == classes_first
+        assert m.n_classes_ == n_classes_first
+
+    def test_warm_start_probas_sum_to_one(self) -> None:
+        """After warm-start, predict_proba should still produce valid probabilities."""
+        X_train, y_train, _, _ = _make_multiclass_dataset()
+
+        m = GBMClassifier(n_estimators=5, seed=1, warm_start=True)
+        m.fit(X_train, y_train)
+        m.n_estimators = 15
+        m.fit(X_train, y_train)
+
+        probas = m.predict_proba(X_train)
+        np.testing.assert_allclose(probas.sum(axis=1), 1.0, atol=1e-5)
+        assert (probas >= 0).all(), "negative probabilities"
+        assert probas.shape == (len(X_train), 3)
+
+
 if __name__ == "__main__":
     unittest.main()

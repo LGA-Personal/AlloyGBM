@@ -23,21 +23,6 @@ Only standard gradient boosting is supported. Dart (dropout) and GOSS
 
 `GBMRanker` supports single-label relevance only.
 
-### 5. Warm-Start Not Supported for Multi-Class
-
-`warm_start=True` and `init_model` are silently ignored when training
-`GBMClassifier` with more than two classes. The multiclass training path
-does not thread warm-start state into the per-class tree builder, so each
-`fit()` call retrains from scratch. Binary classification and all other
-estimators support warm-start correctly.
-
-### 6. Multi-Class Prediction Allocates Per-Row
-
-The native multiclass batch predictor copies each row into a temporary
-`Vec` before scoring, rather than operating directly over the dense input
-slice. This does not affect correctness but adds allocation overhead for
-large prediction batches.
-
 ## Resolved (Previously Limitations)
 
 The following were limitations in prior versions and have been addressed:
@@ -52,10 +37,12 @@ The following were limitations in prior versions and have been addressed:
 - Feature names auto-generated only (now: captured from DataFrames)
 - SHAP limited to 20 features (now: TreeSHAP with no practical limit)
 - Only RMSE tracked during training (now: objective-aware metric tracking)
-- No warm-starting (now: `warm_start=True`)
+- No warm-starting (now: `warm_start=True` for all estimators including multiclass)
 - Level-wise growth only (now: leaf-wise available)
 - Bins capped at 256 (now: up to 65,535)
 - No histogram reuse (now: buffer reuse across rounds)
 - Binary classification only (now: multi-class softmax with K > 2 classes)
 - No native categorical splits (now: `max_cat_threshold` enables Fisher-sort optimal binary partitions with O(1) bitset prediction)
 - No custom objective/metric callbacks (now: `objective` callable and `eval_metric` callable)
+- Multiclass warm-start unsupported (now: `warm_start=True` works for multiclass with round-offset continuity)
+- Multiclass prediction per-row allocation (now: zero-copy dense slice prediction)
