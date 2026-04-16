@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.3.0
+
+### Native Categorical Splits
+
+- **Fisher-sort categorical split-finding** -- optimal binary partition of categories in O(K log K) time via gradient-ordered category sorting with O(K) prefix-scan split evaluation
+- **Bitset-based O(1) prediction** -- compact `Vec<u8>` bitset encoding where bit K=1 means category K goes left; prediction is a single bit-test per tree node
+- **`max_cat_threshold` parameter** -- controls the maximum number of categories for native splits (default 0 = disabled, opt-in); features exceeding the threshold fall back to target encoding
+- **Backward-compatible artifact format** -- new `NativeCategoricalSplits` section (ID=7) with `stump_flags` bit 1 encoding; old artifacts load without changes
+- **Category-to-ID mapping** -- string categories are mapped to integer IDs at the Python layer; mappings are preserved through pickle, save/load, and get/set params
+- **Full estimator support** -- works with `GBMRegressor`, `GBMClassifier`, and `GBMRanker` (via inheritance)
+
+### Multi-Class Classification
+
+- **`GBMClassifier` multi-class support** -- softmax (multinomial cross-entropy) objective for K > 2 classes, auto-detected from training labels
+- **`predict_proba`** returns (n_samples, K) probability matrix with softmax normalization
+- **Label encoding** -- arbitrary integer labels are mapped to 0..K-1 internally
+
+### Custom Objectives and Metrics
+
+- **Custom objective functions** via `objective=callable` -- user-defined gradient/hessian computation with fast numpy I/O
+- **Custom evaluation metrics** via `eval_metric=callable` -- user-defined metric callbacks for early stopping and `evals_result_` tracking
+- **`higher_is_better` protocol** -- custom metrics declare optimization direction
+
+### Benchmarks
+
+- **`synthetic_categorical`** benchmark scenario for evaluating native categorical split performance
+- **`synthetic_custom_objective`** and **`synthetic_multiclass`** benchmark scenarios
+
 ## 0.2.0
 
 Major capability expansion from the regression-only `0.1.x` series.

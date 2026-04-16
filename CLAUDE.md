@@ -2,7 +2,7 @@
 
 ## What This Is
 
-AlloyGBM is a Rust-first Gradient Boosted Decision Tree (GBDT) library with Python bindings via PyO3. It supports regression, binary classification, and learning-to-rank. Published on PyPI as `alloygbm`.
+AlloyGBM is a Rust-first Gradient Boosted Decision Tree (GBDT) library with Python bindings via PyO3. It supports regression, binary/multi-class classification, and learning-to-rank. Published on PyPI as `alloygbm`.
 
 ## Project Structure
 
@@ -26,7 +26,7 @@ AlloyGBM/
       evaluation.py        # Metrics: rmse, mae, r2_score, accuracy, log_loss, ndcg, etc.
       validation.py        # Purged time-series and panel cross-validation splits
   docs/
-    limitations.md         # Current limitation analysis (v0.2.0)
+    limitations.md         # Current limitation analysis (v0.3.0)
     plans/                 # Implementation plans (historical, archived copy in docs/archive/v0.1_plans/)
   benchmarks/              # Cross-library comparison (regression, classification, ranking)
 ```
@@ -56,17 +56,19 @@ maturin develop --release      # Build and install Python extension
 - **Newton-Raphson leaf values**: `leaf = -lr * grad_sum / (hess_sum + lambda + eps)` -- general-purpose for any objective
 - **Hand-rolled JSON serde** for `ModelMetadata` in `core/src/lib.rs` -- positional parser, very brittle. Adding fields requires careful ordering.
 - **`BinnedMatrix`** uses adaptive `Vec<u8>` or `Vec<u16>` -- up to 65,535 bins, column-major duplicate for cache-friendly histograms
-- **Artifact format**: Binary with magic bytes `AGBM`, versioned sections (Trees, PredictorLayout, CategoricalState), JSON metadata header. Includes objective type for post-transform dispatch.
+- **Artifact format**: Binary with magic bytes `AGBM`, versioned sections (Trees, PredictorLayout, CategoricalState, NativeCategoricalSplits), JSON metadata header. Includes objective type for post-transform dispatch.
 
 ## Key Architectural Patterns
 
-- **ObjectiveOps trait** (`engine/src/lib.rs`): Generic trait with `initial_prediction`, `compute_gradients`, `compute_gradients_into`. Implementations: SquaredError, BinaryCrossEntropy, RankPairwise, RankNdcg, RankXendcg, QueryRmse, YetiRank.
+- **ObjectiveOps trait** (`engine/src/lib.rs`): Generic trait with `initial_prediction`, `compute_gradients`, `compute_gradients_into`. Implementations: SquaredError, BinaryCrossEntropy, MulticlassSoftmax, RankPairwise, RankNdcg, RankXendcg, QueryRmse, YetiRank.
 - **BackendOps trait** (`engine/src/lib.rs`): Abstraction over hardware. Only `CpuBackend` exists.
 - **Training policy**: Auto mode with dataset-aware heuristics for `min_split_gain`, `min_rows_per_leaf`, regularization. Manual mode uses raw user params.
 - **Tree growth**: Level-wise (default) or leaf-wise (best-first) via `tree_growth` parameter.
 - **Histogram subtraction trick**: Used for child nodes within a level (smaller child built from scratch, larger = parent - smaller). Histogram buffers are reused across rounds.
 - **NaN handling**: Missing values get a dedicated bin; split finding learns the optimal direction for NaN.
 - **Model persistence**: Pickle support via `__getstate__`/`__setstate__`, `save_model`/`load_model`, and raw `artifact_bytes` property.
+- **Native categorical splits**: Fisher-sort algorithm finds optimal binary partition in O(K log K); compact bitset encoding for O(1) prediction. Controlled by `max_cat_threshold` (default 0 = disabled). Category-to-ID mappings stored in Python model state.
+- **Custom objectives/metrics**: User-provided callable for gradient/hessian (`objective=`) and evaluation metric (`eval_metric=`) with fast numpy I/O.
 
 ## When Implementing Changes
 

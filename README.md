@@ -1,6 +1,6 @@
 # AlloyGBM
 
-AlloyGBM is a Rust-first gradient boosting library with Python bindings, supporting regression, binary classification, and learning-to-rank. It is built for fast native execution, deterministic training, and time-aware tabular workflows.
+AlloyGBM is a Rust-first gradient boosting library with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is built for fast native execution, deterministic training, and time-aware tabular workflows.
 
 AlloyGBM is strongest on panel and finance-style problems where leakage-aware validation and practical iteration speed matter. It also performs competitively on general tabular benchmarks and includes native artifact prediction, TreeSHAP explanations, and purged time-series split helpers.
 
@@ -34,7 +34,7 @@ maturin develop --manifest-path bindings/python/Cargo.toml --release
 
 AlloyGBM targets Python `3.11+` and uses a native Rust extension module.
 
-Wheel targets for `0.2.0`:
+Wheel targets for `0.3.0`:
 
 - macOS `arm64`
 - Linux `x86_64` (manylinux)

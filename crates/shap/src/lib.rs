@@ -162,6 +162,12 @@ fn load_artifact_context(artifact_bytes: &[u8]) -> ShapResult<ArtifactShapContex
     let parsed = deserialize_model_artifact_v1(artifact_bytes)
         .map_err(|error| ShapError::ContractViolation(error.to_string()))?;
 
+    if parsed.contract.metadata.num_classes.is_some() {
+        return Err(ShapError::ContractViolation(
+            "SHAP values are not yet supported for multi-class models".to_string(),
+        ));
+    }
+
     let compatibility_report = required_section_compatibility_report(&parsed.sections);
     if !compatibility_report.legacy_compatible {
         return Err(ShapError::ContractViolation(
@@ -319,6 +325,28 @@ fn compute_subset_expectations(
     Ok(values_by_subset)
 }
 
+/// Determine whether a feature value goes to the left child of a split.
+/// Uses bitset membership for categorical splits and threshold comparison
+/// for numeric splits.
+fn stump_goes_left(split: &alloygbm_core::SplitCandidate, feature_value: f32) -> bool {
+    if feature_value.is_nan() {
+        return split.default_left;
+    }
+    if split.is_categorical {
+        let cat_id = feature_value as u16;
+        split
+            .categorical_bitset
+            .as_ref()
+            .map_or(split.default_left, |bs| {
+                let byte_idx = (cat_id / 8) as usize;
+                let bit_idx = (cat_id % 8) as usize;
+                byte_idx < bs.len() && (bs[byte_idx] & (1 << bit_idx)) != 0
+            })
+    } else {
+        feature_value <= split.threshold_bin as f32
+    }
+}
+
 fn expected_prediction_for_subset(
     model: &TrainedModel,
     row: &[f32],
@@ -353,14 +381,13 @@ fn expected_subtree(
         )));
     }
 
-    let threshold = stump.split.threshold_bin as f32;
     let left_child_local = left_child_local_id(local_node_id)?;
     let right_child_local = right_child_local_id(local_node_id)?;
 
     if let Some(bit_position) = model_structure.split_feature_bit_positions[split_feature_index] {
         let is_known = (subset_mask & (1_u64 << bit_position)) != 0;
         if is_known {
-            let goes_left = row[split_feature_index] <= threshold;
+            let goes_left = stump_goes_left(&stump.split, row[split_feature_index]);
             if goes_left {
                 return Ok(stump.left_leaf_value
                     + expected_subtree(
@@ -553,6 +580,9 @@ enum StdTreeNode {
     Internal {
         feature_index: usize,
         threshold: f32,
+        default_left: bool,
+        is_categorical: bool,
+        categorical_bitset: Option<Vec<u8>>,
         left: Box<StdTreeNode>,
         right: Box<StdTreeNode>,
     },
@@ -608,6 +638,9 @@ fn build_std_tree(
             StdTreeNode::Internal {
                 feature_index: stump.split.feature_index as usize,
                 threshold: stump.split.threshold_bin as f32,
+                default_left: stump.split.default_left,
+                is_categorical: stump.split.is_categorical,
+                categorical_bitset: stump.split.categorical_bitset.clone(),
                 left: Box::new(build_std_tree(
                     tree_id,
                     2 * local_id + 1,
@@ -738,13 +771,27 @@ fn ts_recurse(
         StdTreeNode::Internal {
             feature_index: node_feature,
             threshold,
+            default_left,
+            is_categorical,
+            categorical_bitset,
             left,
             right,
         } => {
             let goes_left = row
                 .get(*node_feature)
-                .map(|v| *v <= *threshold)
-                .unwrap_or(true);
+                .map(|v| {
+                    if *is_categorical {
+                        let cat_id = *v as u16;
+                        categorical_bitset.as_ref().map_or(*default_left, |bs| {
+                            let byte_idx = (cat_id / 8) as usize;
+                            let bit_idx = (cat_id % 8) as usize;
+                            byte_idx < bs.len() && (bs[byte_idx] & (1 << bit_idx)) != 0
+                        })
+                    } else {
+                        *v <= *threshold
+                    }
+                })
+                .unwrap_or(*default_left);
             let (hot, cold) = if goes_left {
                 (left.as_ref(), right.as_ref())
             } else {
@@ -914,6 +961,7 @@ mod tests {
                 .collect(),
             trained_device: Device::Cpu,
             objective: "squared_error".to_string(),
+            num_classes: None,
         }
     }
 
@@ -924,6 +972,8 @@ mod tests {
             threshold_bin,
             gain: 1.0,
             default_left: false,
+            is_categorical: false,
+            categorical_bitset: None,
             left_stats: NodeStats {
                 grad_sum: 0.0,
                 hess_sum: 1.0,
@@ -950,6 +1000,8 @@ mod tests {
             threshold_bin,
             gain: 1.0,
             default_left: false,
+            is_categorical: false,
+            categorical_bitset: None,
             left_stats: NodeStats {
                 grad_sum: 0.0,
                 hess_sum: left_count as f32,
@@ -987,6 +1039,7 @@ mod tests {
             categorical_state: None,
             node_debug_stats: None,
             objective: "squared_error".to_string(),
+            native_categorical_feature_indices: Vec::new(),
         }
     }
 
@@ -998,6 +1051,7 @@ mod tests {
             categorical_state: None,
             node_debug_stats: None,
             objective: "squared_error".to_string(),
+            native_categorical_feature_indices: Vec::new(),
         }
     }
 
@@ -1325,6 +1379,7 @@ mod tests {
             categorical_state: None,
             node_debug_stats: None,
             objective: "squared_error".to_string(),
+            native_categorical_feature_indices: Vec::new(),
         };
 
         let rows = vec![vec![3.0, 0.0], vec![8.0, 0.0]];
@@ -1364,6 +1419,7 @@ mod tests {
             categorical_state: None,
             node_debug_stats: None,
             objective: "squared_error".to_string(),
+            native_categorical_feature_indices: Vec::new(),
         };
 
         let rows = vec![
@@ -1387,6 +1443,169 @@ mod tests {
                     "row {row_idx} feature {feat_idx}: brute force {bf_val} vs tree shap {ts_val}"
                 );
             }
+        }
+    }
+
+    /// Build a SplitCandidate with a categorical bitset.
+    fn categorical_split_with_counts(
+        node_id: u32,
+        feature_index: u32,
+        bitset: Vec<u8>,
+        left_count: u32,
+        right_count: u32,
+    ) -> SplitCandidate {
+        SplitCandidate {
+            node_id,
+            feature_index,
+            threshold_bin: 0,
+            gain: 1.0,
+            default_left: true,
+            is_categorical: true,
+            categorical_bitset: Some(bitset),
+            left_stats: NodeStats {
+                grad_sum: 0.0,
+                hess_sum: left_count as f32,
+                row_count: left_count,
+            },
+            right_stats: NodeStats {
+                grad_sum: 0.0,
+                hess_sum: right_count as f32,
+                row_count: right_count,
+            },
+        }
+    }
+
+    #[test]
+    fn brute_force_categorical_split_additivity() {
+        // Single tree with one categorical split on feature 0.
+        // Bitset 0b0000_0101 = categories {0, 2} go left; {1, 3} go right.
+        let model = TrainedModel {
+            baseline_prediction: 1.0,
+            feature_count: 2,
+            stumps: vec![TrainedStump {
+                split: categorical_split_with_counts(0, 0, vec![0b0000_0101], 4, 6),
+                left_leaf_value: -0.3,
+                right_leaf_value: 0.2,
+            }],
+            categorical_state: None,
+            node_debug_stats: None,
+            objective: "squared_error".to_string(),
+            native_categorical_feature_indices: vec![0],
+        };
+
+        // Feature 0 values: 0.0 (cat 0, left), 1.0 (cat 1, right),
+        //                    2.0 (cat 2, left), 3.0 (cat 3, right)
+        let rows = vec![
+            vec![0.0, 5.0], // cat 0 -> left
+            vec![1.0, 5.0], // cat 1 -> right
+            vec![2.0, 5.0], // cat 2 -> left
+            vec![3.0, 5.0], // cat 3 -> right
+        ];
+
+        let explanation = explain_rows_brute_force(&model, &rows).expect("brute force works");
+
+        // Verify additivity: sum of SHAP values + expected_value == prediction
+        for (row, values) in rows.iter().zip(explanation.values.iter()) {
+            let predicted = model.predict_row(row).expect("predicts");
+            let reconstructed = explanation.expected_value + values.iter().sum::<f32>();
+            assert_close(reconstructed, predicted);
+        }
+    }
+
+    #[test]
+    fn tree_shap_categorical_split_additivity() {
+        // Same model as brute_force_categorical_split_additivity.
+        let model = TrainedModel {
+            baseline_prediction: 1.0,
+            feature_count: 2,
+            stumps: vec![TrainedStump {
+                split: categorical_split_with_counts(0, 0, vec![0b0000_0101], 4, 6),
+                left_leaf_value: -0.3,
+                right_leaf_value: 0.2,
+            }],
+            categorical_state: None,
+            node_debug_stats: None,
+            objective: "squared_error".to_string(),
+            native_categorical_feature_indices: vec![0],
+        };
+
+        let rows = vec![
+            vec![0.0, 5.0],
+            vec![1.0, 5.0],
+            vec![2.0, 5.0],
+            vec![3.0, 5.0],
+        ];
+
+        let explanation = explain_rows_tree_shap(&model, &rows).expect("tree shap works");
+
+        for (row, values) in rows.iter().zip(explanation.values.iter()) {
+            let predicted = model.predict_row(row).expect("predicts");
+            let reconstructed = explanation.expected_value + values.iter().sum::<f32>();
+            assert_close(reconstructed, predicted);
+        }
+    }
+
+    #[test]
+    fn tree_shap_matches_brute_force_on_categorical_model() {
+        // Two trees: first uses a categorical split on feature 0, second
+        // uses a numeric split on feature 1. This exercises both split types
+        // in the same model and verifies the algorithms agree.
+        let stride = 1u32 << 20;
+        let model = TrainedModel {
+            baseline_prediction: 0.5,
+            feature_count: 2,
+            stumps: vec![
+                TrainedStump {
+                    // Tree 0: categorical split on feature 0
+                    // Bitset 0b0000_0011 = categories {0, 1} go left
+                    split: categorical_split_with_counts(0, 0, vec![0b0000_0011], 5, 5),
+                    left_leaf_value: -0.2,
+                    right_leaf_value: 0.3,
+                },
+                TrainedStump {
+                    // Tree 1: numeric split on feature 1 at threshold 3
+                    split: split_with_counts(stride, 1, 3, 4, 6),
+                    left_leaf_value: 0.1,
+                    right_leaf_value: -0.1,
+                },
+            ],
+            categorical_state: None,
+            node_debug_stats: None,
+            objective: "squared_error".to_string(),
+            native_categorical_feature_indices: vec![0],
+        };
+
+        let rows = vec![
+            vec![0.0, 1.0], // cat 0 left, numeric left
+            vec![1.0, 5.0], // cat 1 left, numeric right
+            vec![2.0, 1.0], // cat 2 right, numeric left
+            vec![3.0, 5.0], // cat 3 right, numeric right
+        ];
+
+        let brute_force = explain_rows_brute_force(&model, &rows).expect("brute force works");
+        let tree_shap = explain_rows_tree_shap(&model, &rows).expect("tree shap works");
+
+        assert_close(brute_force.expected_value, tree_shap.expected_value);
+
+        for (row_idx, (bf_row, ts_row)) in brute_force
+            .values
+            .iter()
+            .zip(tree_shap.values.iter())
+            .enumerate()
+        {
+            for (feat_idx, (bf_val, ts_val)) in bf_row.iter().zip(ts_row.iter()).enumerate() {
+                assert!(
+                    (bf_val - ts_val).abs() <= ADDITIVITY_TOLERANCE,
+                    "row {row_idx} feature {feat_idx}: brute force {bf_val} vs tree shap {ts_val}"
+                );
+            }
+        }
+
+        // Also verify additivity for both algorithms.
+        for (row, values) in rows.iter().zip(brute_force.values.iter()) {
+            let predicted = model.predict_row(row).expect("predicts");
+            let reconstructed = brute_force.expected_value + values.iter().sum::<f32>();
+            assert_close(reconstructed, predicted);
         }
     }
 
@@ -1419,6 +1638,7 @@ mod tests {
             categorical_state: None,
             node_debug_stats: None,
             objective: "squared_error".to_string(),
+            native_categorical_feature_indices: Vec::new(),
         };
 
         let rows = vec![

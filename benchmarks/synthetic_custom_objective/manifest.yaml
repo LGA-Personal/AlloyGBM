@@ -1,0 +1,14 @@
+name: synthetic_custom_objective
+version: 1
+kind: synthetic
+task_type: regression
+description: >
+  Benchmark custom Python objective overhead vs built-in squared_error.
+  Compares fit time and prediction equivalence for AlloyGBM with built-in
+  squared_error objective vs a custom MSE-equivalent Python callable.
+source:
+  generator: benchmarks/synthetic_custom_objective/prepare.py
+prepared:
+  filename: prepared.csv
+  target: target
+  note: 10K rows, 20 features, linear regression target with noise.

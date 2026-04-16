@@ -101,6 +101,13 @@ default.
   - Minimum support for categorical leaf statistics.
 - `categorical_time_aware: bool = False`
   - Enables time-aware categorical behavior when `time_index` is provided.
+- `max_cat_threshold: int = 0`
+  - Maximum number of categories for native categorical splits. When a
+    categorical feature has at most this many unique values, AlloyGBM uses the
+    Fisher-sort algorithm to find the optimal binary partition in O(K log K)
+    time and encodes it as a compact bitset for O(1) prediction. Features
+    exceeding this threshold fall back to target encoding. Default 0 disables
+    native categorical splits entirely (all categoricals use target encoding).
 
 When both `categorical_feature_index` and `categorical_feature_indices` are
 provided, they are merged.

@@ -210,6 +210,45 @@ def log_loss(y_true: object, y_prob: object) -> float:
     return total / len(true_values)
 
 
+def multiclass_log_loss(y_true: object, y_prob: object) -> float:
+    """Compute multi-class cross-entropy (log-loss).
+
+    Parameters
+    ----------
+    y_true : array-like of int
+        True class labels (integers in 0..K-1).
+    y_prob : array-like of shape (n_samples, K)
+        Predicted class probabilities. Each row should sum to ~1.0.
+
+    Returns
+    -------
+    float
+        Mean negative log-likelihood: ``-mean(log(p[y_i]))``.
+    """
+    import numpy as np
+
+    y_true_arr = np.asarray(y_true, dtype=int).ravel()
+    y_prob_arr = np.asarray(y_prob, dtype=float)
+    if y_prob_arr.ndim != 2:
+        raise ValueError(
+            f"y_prob must be 2-dimensional, got shape {y_prob_arr.shape}"
+        )
+    n_samples, n_classes = y_prob_arr.shape
+    if len(y_true_arr) != n_samples:
+        raise ValueError(
+            f"y_true length {len(y_true_arr)} does not match "
+            f"y_prob row count {n_samples}"
+        )
+    if n_classes < 2:
+        raise ValueError(f"y_prob must have at least 2 columns, got {n_classes}")
+    # Clip probabilities for numerical stability
+    eps = 1e-15
+    y_prob_clipped = np.clip(y_prob_arr, eps, 1.0 - eps)
+    # Extract the predicted probability for each sample's true class
+    log_probs = np.log(y_prob_clipped[np.arange(n_samples), y_true_arr])
+    return float(-np.mean(log_probs))
+
+
 def ndcg(
     y_true: object,
     y_pred: object,

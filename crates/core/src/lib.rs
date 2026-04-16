@@ -406,6 +406,45 @@ impl BinnedMatrix {
     pub fn has_col_major(&self) -> bool {
         !self.bins_col_adaptive.is_empty()
     }
+
+    /// Set the bin value at (row, feature) in all storage arrays.
+    /// Used for re-mapping native categorical feature columns after binning.
+    pub fn set_bin(&mut self, row: usize, feature: usize, value: u16) {
+        let row_idx = row * self.feature_count + feature;
+        let col_idx = feature * self.row_count + row;
+        let val_u8 = if value >= 255 { 255u8 } else { value as u8 };
+
+        if row_idx < self.bins.len() {
+            self.bins[row_idx] = val_u8;
+        }
+        if col_idx < self.bins_col.len() {
+            self.bins_col[col_idx] = val_u8;
+        }
+        match &mut self.bins_adaptive {
+            BinStorage::U8(v) => {
+                if row_idx < v.len() {
+                    v[row_idx] = val_u8;
+                }
+            }
+            BinStorage::U16(v) => {
+                if row_idx < v.len() {
+                    v[row_idx] = value;
+                }
+            }
+        }
+        match &mut self.bins_col_adaptive {
+            BinStorage::U8(v) => {
+                if col_idx < v.len() {
+                    v[col_idx] = val_u8;
+                }
+            }
+            BinStorage::U16(v) => {
+                if col_idx < v.len() {
+                    v[col_idx] = value;
+                }
+            }
+        }
+    }
 }
 
 /// Transpose row-major bins to column-major for cache-friendly per-feature access.
@@ -594,6 +633,11 @@ pub struct SplitCandidate {
     pub threshold_bin: u16,
     pub gain: f32,
     pub default_left: bool,
+    /// When true, this split uses a categorical bitset instead of `threshold_bin`.
+    pub is_categorical: bool,
+    /// Bitset of category IDs that go to the left child. Bit K = 1 means category K goes left.
+    /// Only populated when `is_categorical` is true.
+    pub categorical_bitset: Option<Vec<u8>>,
     pub left_stats: NodeStats,
     pub right_stats: NodeStats,
 }
@@ -612,6 +656,9 @@ pub struct ModelMetadata {
     /// Objective used to train this model (e.g. "squared_error", "binary_crossentropy").
     /// Defaults to "squared_error" for backward compatibility with older artifacts.
     pub objective: String,
+    /// Number of classes for multi-class classification models.
+    /// `None` for single-output models (regression, binary classification, ranking).
+    pub num_classes: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -676,6 +723,8 @@ pub enum ModelSectionKind {
     ShapAux,
     CategoricalState,
     NodeDebugStats,
+    MultiClassTrees,
+    NativeCategoricalSplits,
     Unknown(u32),
 }
 
@@ -687,6 +736,8 @@ impl ModelSectionKind {
             Self::ShapAux => 3,
             Self::CategoricalState => 4,
             Self::NodeDebugStats => 5,
+            Self::MultiClassTrees => 6,
+            Self::NativeCategoricalSplits => 7,
             Self::Unknown(value) => value,
         }
     }
@@ -698,6 +749,8 @@ impl ModelSectionKind {
             3 => Self::ShapAux,
             4 => Self::CategoricalState,
             5 => Self::NodeDebugStats,
+            6 => Self::MultiClassTrees,
+            7 => Self::NativeCategoricalSplits,
             other => Self::Unknown(other),
         }
     }
@@ -769,6 +822,16 @@ pub struct CategoricalStatePayloadV1 {
     pub format_version: u32,
     pub leakage_safe_target_encoding: bool,
     pub categorical_feature_indices: Vec<u32>,
+}
+
+/// Payload for the NativeCategoricalSplits artifact section.
+/// Stores which features use native categorical splits and the per-stump bitsets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeCategoricalSplitsPayload {
+    /// Feature indices that use native categorical splits (sorted ascending).
+    pub native_categorical_feature_indices: Vec<u32>,
+    /// Per-stump bitsets: (stump_index, bitset). Only categorical stumps appear here.
+    pub stump_bitsets: Vec<(u32, Vec<u8>)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1006,6 +1069,113 @@ pub fn decode_optional_categorical_state_section_v1(
 
     let payload = decode_categorical_state_payload_v1(&section.payload)?;
     validate_categorical_state_payload_v1(&payload, Some(model_feature_count))?;
+    Ok(Some(payload))
+}
+
+/// Encode native categorical splits payload for artifact serialization.
+///
+/// Format:
+/// - [4 bytes] num_native_categorical_features (u32 LE)
+/// - [4 bytes] stump_bitset_count (u32 LE)
+/// - [num_native_categorical_features * 4 bytes] feature indices (u32 LE each)
+/// - For each stump bitset:
+///   - [4 bytes] stump_index (u32 LE)
+///   - [2 bytes] bitset_len (u16 LE)
+///   - [bitset_len bytes] bitset data
+pub fn encode_native_categorical_splits_payload(
+    payload: &NativeCategoricalSplitsPayload,
+) -> CoreResult<Vec<u8>> {
+    let feature_count =
+        u32::try_from(payload.native_categorical_feature_indices.len()).map_err(|_| {
+            CoreError::Serialization("native cat feature count exceeds u32::MAX".to_string())
+        })?;
+    let stump_count = u32::try_from(payload.stump_bitsets.len()).map_err(|_| {
+        CoreError::Serialization("native cat stump count exceeds u32::MAX".to_string())
+    })?;
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&feature_count.to_le_bytes());
+    bytes.extend_from_slice(&stump_count.to_le_bytes());
+    for &fi in &payload.native_categorical_feature_indices {
+        bytes.extend_from_slice(&fi.to_le_bytes());
+    }
+    for (stump_index, bitset) in &payload.stump_bitsets {
+        let bitset_len = u16::try_from(bitset.len())
+            .map_err(|_| CoreError::Serialization("bitset length exceeds u16::MAX".to_string()))?;
+        bytes.extend_from_slice(&stump_index.to_le_bytes());
+        bytes.extend_from_slice(&bitset_len.to_le_bytes());
+        bytes.extend_from_slice(bitset);
+    }
+    Ok(bytes)
+}
+
+/// Decode native categorical splits payload from artifact bytes.
+pub fn decode_native_categorical_splits_payload(
+    bytes: &[u8],
+) -> CoreResult<NativeCategoricalSplitsPayload> {
+    const HEADER_SIZE: usize = 8; // feature_count(4) + stump_count(4)
+    if bytes.len() < HEADER_SIZE {
+        return Err(CoreError::Serialization(
+            "native categorical splits payload too small for header".to_string(),
+        ));
+    }
+
+    let feature_count = read_u32_le(bytes, 0)? as usize;
+    let stump_count = read_u32_le(bytes, 4)? as usize;
+
+    let feature_section_len = feature_count.checked_mul(4).ok_or_else(|| {
+        CoreError::Serialization("native cat feature section length overflow".to_string())
+    })?;
+    if bytes.len() < HEADER_SIZE + feature_section_len {
+        return Err(CoreError::Serialization(
+            "native categorical splits payload too small for feature indices".to_string(),
+        ));
+    }
+
+    let mut native_categorical_feature_indices = Vec::with_capacity(feature_count);
+    let mut cursor = HEADER_SIZE;
+    for _ in 0..feature_count {
+        native_categorical_feature_indices.push(read_u32_le(bytes, cursor)?);
+        cursor += 4;
+    }
+
+    let mut stump_bitsets = Vec::with_capacity(stump_count);
+    for _ in 0..stump_count {
+        if cursor + 6 > bytes.len() {
+            return Err(CoreError::Serialization(
+                "native categorical splits payload truncated in stump bitset header".to_string(),
+            ));
+        }
+        let stump_index = read_u32_le(bytes, cursor)?;
+        cursor += 4;
+        let bitset_len = u16::from_le_bytes([bytes[cursor], bytes[cursor + 1]]) as usize;
+        cursor += 2;
+        if cursor + bitset_len > bytes.len() {
+            return Err(CoreError::Serialization(
+                "native categorical splits payload truncated in bitset data".to_string(),
+            ));
+        }
+        let bitset = bytes[cursor..cursor + bitset_len].to_vec();
+        cursor += bitset_len;
+        stump_bitsets.push((stump_index, bitset));
+    }
+
+    Ok(NativeCategoricalSplitsPayload {
+        native_categorical_feature_indices,
+        stump_bitsets,
+    })
+}
+
+/// Decode optional NativeCategoricalSplits section from model artifact.
+pub fn decode_optional_native_categorical_splits_section(
+    sections: &[ModelArtifactSection],
+) -> CoreResult<Option<NativeCategoricalSplitsPayload>> {
+    let Some(section) =
+        optional_single_section(sections, ModelSectionKind::NativeCategoricalSplits)?
+    else {
+        return Ok(None);
+    };
+    let payload = decode_native_categorical_splits_payload(&section.payload)?;
     Ok(Some(payload))
 }
 
@@ -1276,10 +1446,13 @@ pub fn validate_binned_matrix(matrix: &BinnedMatrix) -> CoreResult<()> {
         )));
     }
     // Validate that no bin exceeds max_bin using adaptive storage.
+    // The NaN sentinel bin is also allowed (it may exceed max_bin).
+    let nan_bin = matrix.nan_bin_index;
     match &matrix.bins_adaptive {
         BinStorage::U8(bins) => {
             for &bin in bins {
-                if u16::from(bin) > matrix.max_bin {
+                let b = u16::from(bin);
+                if b > matrix.max_bin && b != nan_bin {
                     return Err(CoreError::Validation(format!(
                         "bin value {bin} exceeds max_bin {}",
                         matrix.max_bin
@@ -1289,7 +1462,7 @@ pub fn validate_binned_matrix(matrix: &BinnedMatrix) -> CoreResult<()> {
         }
         BinStorage::U16(bins) => {
             for &bin in bins {
-                if bin > matrix.max_bin {
+                if bin > matrix.max_bin && bin != nan_bin {
                     return Err(CoreError::Validation(format!(
                         "bin value {bin} exceeds max_bin {}",
                         matrix.max_bin
@@ -1374,12 +1547,18 @@ pub fn serialize_metadata_json(metadata: &ModelMetadata) -> String {
         .collect::<Vec<_>>()
         .join(",");
 
+    let num_classes_fragment = match metadata.num_classes {
+        Some(k) => format!(",\"num_classes\":{k}"),
+        None => String::new(),
+    };
+
     format!(
-        "{{\"format_version\":{},\"feature_names\":[{}],\"trained_device\":\"{}\",\"objective\":\"{}\"}}",
+        "{{\"format_version\":{},\"feature_names\":[{}],\"trained_device\":\"{}\",\"objective\":\"{}\"{}}}",
         metadata.format_version,
         feature_names,
         metadata.trained_device.as_metadata_label(),
-        escape_json_string(&metadata.objective)
+        escape_json_string(&metadata.objective),
+        num_classes_fragment
     )
 }
 
@@ -1409,6 +1588,16 @@ pub fn deserialize_metadata_json(input: &str) -> CoreResult<ModelMetadata> {
         "squared_error".to_string()
     };
 
+    // Optional num_classes field — present only for multi-class models.
+    let num_classes = if index < compact.len() && compact.as_bytes()[index] == b',' {
+        let next = consume_literal(&compact, index, ",\"num_classes\":")?;
+        let (value, next_index) = parse_u32(&compact, next)?;
+        index = next_index;
+        Some(value)
+    } else {
+        None
+    };
+
     index = consume_literal(&compact, index, "}")?;
     if index != compact.len() {
         return Err(CoreError::Serialization(
@@ -1421,6 +1610,7 @@ pub fn deserialize_metadata_json(input: &str) -> CoreResult<ModelMetadata> {
         feature_names,
         trained_device: Device::parse_metadata_label(&trained_device_raw)?,
         objective,
+        num_classes,
     })
 }
 
@@ -1764,6 +1954,7 @@ mod tests {
             feature_names: vec!["feature_0".to_string(), "ticker\"id".to_string()],
             trained_device: Device::Cpu,
             objective: "squared_error".to_string(),
+            num_classes: None,
         }
     }
 
@@ -2007,6 +2198,7 @@ mod tests {
                 feature_names: vec!["f0".to_string()],
                 trained_device: Device::Cpu,
                 objective: "squared_error".to_string(),
+                num_classes: None,
             },
         };
         assert!(matches!(
@@ -2029,6 +2221,7 @@ mod tests {
                 feature_names: vec!["f0".to_string()],
                 trained_device: Device::Cpu,
                 objective: "squared_error".to_string(),
+                num_classes: None,
             },
         };
 
@@ -2059,6 +2252,7 @@ mod tests {
                 feature_names: vec!["f0".to_string()],
                 trained_device: Device::Cpu,
                 objective: "squared_error".to_string(),
+                num_classes: None,
             },
         };
 
@@ -2260,5 +2454,37 @@ mod tests {
         let parsed = deserialize_model_artifact_v1(&bytes).expect("artifact decodes");
         let report = required_section_compatibility_report(&parsed.sections);
         assert!(report.strict_compatible);
+    }
+
+    #[test]
+    fn test_metadata_json_num_classes_roundtrip() {
+        let metadata = ModelMetadata {
+            format_version: MODEL_FORMAT_V1,
+            feature_names: vec!["f0".to_string(), "f1".to_string()],
+            trained_device: Device::Cpu,
+            objective: "multiclass_softmax".to_string(),
+            num_classes: Some(5),
+        };
+        let json = serialize_metadata_json(&metadata);
+        let decoded = deserialize_metadata_json(&json).expect("metadata should decode");
+        assert_eq!(decoded, metadata);
+        assert_eq!(decoded.num_classes, Some(5));
+    }
+
+    #[test]
+    fn test_metadata_json_backward_compat_no_num_classes() {
+        let metadata = ModelMetadata {
+            format_version: MODEL_FORMAT_V1,
+            feature_names: vec!["f0".to_string()],
+            trained_device: Device::Cpu,
+            objective: "squared_error".to_string(),
+            num_classes: None,
+        };
+        let json = serialize_metadata_json(&metadata);
+        // Verify the JSON does not contain num_classes when None
+        assert!(!json.contains("num_classes"));
+        let decoded = deserialize_metadata_json(&json).expect("metadata should decode");
+        assert_eq!(decoded, metadata);
+        assert_eq!(decoded.num_classes, None);
     }
 }

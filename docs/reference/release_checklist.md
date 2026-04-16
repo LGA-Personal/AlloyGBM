@@ -20,11 +20,11 @@ Current decision:
 
 ### Windows wheel policy
 
-Windows wheels are deferred until after `0.2.0`.
+Windows wheels are deferred until after `0.3.0`.
 
 Current decision:
 
-- `0.2.0` targets macOS and Linux first
+- `0.3.0` targets macOS and Linux first
 - Windows wheel support is a later packaging expansion, not a release blocker
 
 ## Verified Packaging Checks

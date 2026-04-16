@@ -143,6 +143,17 @@ jobs:
           print("classifier labels:", labels)
           print("classifier probas shape:", probas.shape)
 
+          # Multi-class classification smoke
+          import numpy as np
+          X_mc = np.random.RandomState(42).randn(90, 3).astype(np.float32)
+          y_mc = np.repeat([0, 1, 2], 30).astype(np.float32)
+          mc_clf = GBMClassifier(n_estimators=20, seed=1, deterministic=True)
+          mc_clf.fit(X_mc, y_mc)
+          mc_probas = mc_clf.predict_proba(X_mc)
+          assert mc_probas.shape == (90, 3)
+          assert np.allclose(mc_probas.sum(axis=1), 1.0, atol=1e-5)
+          print("multiclass probas shape:", mc_probas.shape)
+
           # Ranker smoke
           rnk = GBMRanker(
               ranking_objective="rank:ndcg",
@@ -155,6 +166,53 @@ jobs:
           rnk.fit(rows, [0, 1, 2, 3], group=[0, 0, 1, 1])
           scores = rnk.predict(rows)
           print("ranker scores:", scores)
+
+          # Custom objective smoke
+          def custom_mse(y_true, y_pred):
+              grad = y_pred - y_true
+              hess = np.ones_like(y_true)
+              return grad, hess
+
+          custom_reg = GBMRegressor(
+              objective=custom_mse,
+              n_estimators=20,
+              seed=1,
+              deterministic=True,
+          )
+          custom_reg.fit(rows, targets)
+          custom_preds = custom_reg.predict([[1.5, 0.0], [2.5, 0.0]])
+          print("custom objective predictions:", custom_preds)
+
+          # Custom metric smoke
+          def custom_rmse_metric(y_true, y_pred):
+              return ("custom_rmse", float(np.sqrt(np.mean((y_true - y_pred) ** 2))), False)
+
+          metric_reg = GBMRegressor(
+              n_estimators=20,
+              early_stopping_rounds=5,
+              seed=1,
+              deterministic=True,
+          )
+          metric_reg.fit(
+              rows, targets,
+              eval_set=([[1.5, 0.0], [2.5, 0.0]], [1.5, 2.5]),
+              eval_metric=custom_rmse_metric,
+          )
+          assert metric_reg.evals_result_ is not None
+          assert "custom_rmse" in metric_reg.evals_result_["validation"]
+          print("custom metric values:", metric_reg.evals_result_["validation"]["custom_rmse"][:3])
+
+          # Native categorical split smoke
+          rng = np.random.RandomState(42)
+          cat_X = np.column_stack([np.arange(100) % 4, rng.randn(100)]).astype(np.float32)
+          cat_y = np.array([1.0 if i % 4 < 2 else 3.0 for i in range(100)], dtype=np.float32)
+          cats = [["a", "b", "c", "d"][i % 4] for i in range(100)]
+          cat_reg = GBMRegressor(n_estimators=10, max_cat_threshold=64, categorical_feature_indices=[0])
+          cat_reg.fit(cat_X, cat_y, categorical_feature_values_list=[cats])
+          cat_preds = cat_reg.predict(cat_X[:4])
+          assert len(cat_preds) == 4
+          assert cat_reg._native_cat_mappings_ is not None
+          print("native categorical split predictions:", cat_preds)
 
           print("All smoke tests passed")
           PY

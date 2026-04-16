@@ -24,19 +24,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Cargo check
-        run: cargo check --workspace
+        run: cargo check --workspace --exclude alloygbm-python
 
       - name: Cargo doc
-        run: cargo doc --workspace --no-deps
+        run: cargo doc --workspace --no-deps --exclude alloygbm-python
 
       - name: Cargo fmt
         run: cargo fmt -- --check
 
       - name: Cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --exclude alloygbm-python --all-targets -- -D warnings
 
       - name: Cargo test
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude alloygbm-python
 
   python-smoke:
     name: Python smoke (${{ matrix.os }} / py${{ matrix.python-version }})
@@ -124,6 +124,31 @@ jobs:
           print("GBMClassifier smoke ok")
           PY
 
+      - name: Python multi-class classifier smoke
+        run: |
+          python - <<'PY'
+          import numpy as np
+          from alloygbm import GBMClassifier
+
+          X = np.random.RandomState(42).randn(150, 4).astype(np.float32)
+          y = np.repeat([0, 1, 2], 50).astype(np.float32)
+
+          model = GBMClassifier(n_estimators=20, seed=1)
+          model.fit(X, y)
+
+          assert model.n_classes_ == 3, f"expected 3 classes, got {model.n_classes_}"
+          assert model.classes_ == [0, 1, 2]
+
+          probas = model.predict_proba(X)
+          assert probas.shape == (150, 3), f"unexpected shape: {probas.shape}"
+          assert np.allclose(probas.sum(axis=1), 1.0, atol=1e-5), "probabilities don't sum to 1"
+
+          preds = model.predict(X)
+          assert all(p in (0, 1, 2) for p in preds), f"unexpected labels: {set(preds)}"
+
+          print("GBMClassifier multi-class smoke ok")
+          PY
+
       - name: Python ranker smoke
         run: |
           python - <<'PY'
@@ -146,4 +171,65 @@ jobs:
           assert len(scores) == 6, f"unexpected length: {len(scores)}"
 
           print("GBMRanker smoke ok")
+          PY
+
+      - name: Python custom objective smoke
+        run: |
+          python - <<'PY'
+          import numpy as np
+          from alloygbm import GBMRegressor
+
+          def custom_mse(y_true, y_pred):
+              grad = y_pred - y_true
+              hess = np.ones_like(y_true)
+              return grad, hess
+
+          X = np.random.RandomState(42).randn(100, 5).astype(np.float32)
+          y = X[:, 0] * 2 + X[:, 1] + np.random.RandomState(42).randn(100).astype(np.float32) * 0.1
+
+          model = GBMRegressor(objective=custom_mse, n_estimators=20, seed=1, deterministic=True)
+          model.fit(X, y)
+          preds = model.predict(X)
+          assert len(preds) == 100
+          print("Custom objective smoke ok")
+          PY
+
+      - name: Python custom metric smoke
+        run: |
+          python - <<'PY'
+          import numpy as np
+          from alloygbm import GBMRegressor
+
+          def custom_rmse(y_true, y_pred):
+              return ("custom_rmse", float(np.sqrt(np.mean((y_true - y_pred) ** 2))), False)
+
+          X = np.random.RandomState(42).randn(100, 5).astype(np.float32)
+          y = X[:, 0] * 2 + np.random.RandomState(42).randn(100).astype(np.float32) * 0.1
+          X_val = np.random.RandomState(7).randn(50, 5).astype(np.float32)
+          y_val = X_val[:, 0] * 2 + np.random.RandomState(7).randn(50).astype(np.float32) * 0.1
+
+          model = GBMRegressor(n_estimators=50, early_stopping_rounds=5, seed=1, deterministic=True)
+          model.fit(X, y, eval_set=(X_val, y_val), eval_metric=custom_rmse)
+          assert model.evals_result_ is not None
+          assert "custom_rmse" in model.evals_result_["validation"]
+          print("Custom metric smoke ok")
+          PY
+
+      - name: Python native categorical split smoke
+        run: |
+          python - <<'PY'
+          import numpy as np
+          from alloygbm import GBMRegressor
+
+          X = np.column_stack([np.arange(100) % 5, np.random.RandomState(42).randn(100)]).astype(np.float32)
+          y = np.array([1.0 if i % 5 < 2 else 3.0 for i in range(100)], dtype=np.float32)
+          cats = [["cat_a", "cat_b", "cat_c", "cat_d", "cat_e"][i % 5] for i in range(100)]
+
+          model = GBMRegressor(n_estimators=10, max_cat_threshold=64, categorical_feature_indices=[0])
+          model.fit(X, y, categorical_feature_values_list=[cats])
+          preds = model.predict(X)
+          assert len(preds) == 100
+          assert model._native_cat_mappings_ is not None
+          assert 0 in model._native_cat_mappings_
+          print("Native categorical split smoke ok")
           PY

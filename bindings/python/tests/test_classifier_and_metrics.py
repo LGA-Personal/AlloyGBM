@@ -61,16 +61,16 @@ class GBMClassifierTests(unittest.TestCase):
         self.assertEqual(clf.n_classes_, 2)
         self.assertIsNotNone(clf.n_estimators_)
 
-    def test_validates_binary_targets(self) -> None:
+    def test_validates_non_integer_targets(self) -> None:
         X = np.array([[1], [2], [3]], dtype=np.float32)
         clf = GBMClassifier(n_estimators=3, seed=42)
-        with self.assertRaisesRegex(ValueError, "binary targets"):
-            clf.fit(X, [0, 1, 2])
+        with self.assertRaisesRegex(ValueError, "integer class labels"):
+            clf.fit(X, [0.0, 0.5, 1.0])
 
-    def test_validates_both_classes_present(self) -> None:
+    def test_validates_at_least_two_classes_present(self) -> None:
         X = np.array([[1], [2], [3]], dtype=np.float32)
         clf = GBMClassifier(n_estimators=3, seed=42)
-        with self.assertRaisesRegex(ValueError, "both classes"):
+        with self.assertRaisesRegex(ValueError, "at least 2 classes"):
             clf.fit(X, [0, 0, 0])
 
     def test_early_stopping_with_eval_set(self) -> None:

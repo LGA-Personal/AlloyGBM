@@ -1,0 +1,14 @@
+name: synthetic_categorical
+version: 1
+kind: synthetic
+task_type: regression
+description: >
+  Compare native categorical splits vs target encoding on categorical-heavy
+  data.  Generates a dataset where the target depends strongly on categorical
+  interactions, favoring native splits over target encoding.
+source:
+  generator: benchmarks/synthetic_categorical/prepare.py
+prepared:
+  filename: prepared.csv
+  target: target
+  note: 10K rows, 10 continuous features, 5 categorical features (cardinalities 3, 8, 16, 32, 64).

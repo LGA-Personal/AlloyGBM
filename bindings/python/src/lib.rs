@@ -6,11 +6,13 @@ use alloygbm_categorical::{
 };
 use alloygbm_core::{
     BinnedMatrix, CATEGORICAL_STATE_FORMAT_V1, CategoricalStatePayloadV1, DatasetMatrix,
-    DenseMatrixView, MISSING_BIN_U8, TrainParams, TrainingDataset, TreeGrowth,
+    DenseMatrixView, GradientPair, MISSING_BIN_U8, TrainParams, TrainingDataset, TreeGrowth,
 };
 use alloygbm_engine::{
-    ArtifactCompatibilityMode, BinaryCrossEntropyObjective, CategoricalTargetEncodingSpec,
-    EngineError, IterationRunSummary, LambdaMARTObjective, PairwiseRankingObjective,
+    ArtifactCompatibilityMode, BinaryCrossEntropyObjective, CategoricalFeatureInfo,
+    CategoricalTargetEncodingSpec, EngineError, IterationRunSummary, LambdaMARTObjective,
+    MultiClassIterationRunSummary, MultiClassSoftmaxObjective, MultiClassTrainedModel,
+    MultiClassWarmStartState, ObjectiveOps, PairwiseRankingObjective, PerRoundMetricCallback,
     QueryRMSEObjective, SquaredErrorObjective, TrainedModel, Trainer, TrainingPolicyMode,
     WarmStartState, XeNDCGObjective, YetiRankObjective,
 };
@@ -18,7 +20,7 @@ use alloygbm_predictor::{Predictor, PredictorError};
 use alloygbm_shap::{
     ShapError, explain_rows_from_artifact_bytes, global_importance_from_artifact_bytes,
 };
-use numpy::{PyReadonlyArray2, PyUntypedArrayMethods};
+use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use rayon::prelude::*;
@@ -33,6 +35,363 @@ const MIN_CONTINUOUS_QUANTIZED_BINS: usize = 2;
 const LINEAR_TAIL_RANK_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK";
 const LINEAR_TAIL_CORE_SPAN_RATIO_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_CORE_SPAN_RATIO";
 const DEFAULT_LINEAR_TAIL_CORE_SPAN_RATIO_THRESHOLD: f32 = 0.10;
+
+// ---------------------------------------------------------------------------
+// Shared helpers for fast Rust ↔ numpy data transfer
+// ---------------------------------------------------------------------------
+
+/// Extract a `Vec<f32>` from a Python object that is expected to be a numpy
+/// array.  Tries the zero-overhead path first (`PyReadonlyArray1<f32>` →
+/// `as_slice()` → single `memcpy`) and falls back to `PyReadonlyArray1<f64>`
+/// with a narrowing copy, then to generic PyO3 extraction (element-wise,
+/// slowest) for non-contiguous or exotic dtypes.
+fn extract_f32_array(_py: Python<'_>, obj: &Bound<'_, PyAny>) -> Result<Vec<f32>, EngineError> {
+    // Fast path: contiguous f32 numpy array — single memcpy via as_slice()
+    if let Ok(arr) = obj.downcast::<PyArray1<f32>>() {
+        let readonly = arr.readonly();
+        if let Ok(slice) = readonly.as_slice() {
+            return Ok(slice.to_vec());
+        }
+        // Non-contiguous — fall through to generic path
+    }
+    // Medium path: contiguous f64 numpy array — common when user returns
+    // plain Python floats which numpy defaults to float64
+    if let Ok(arr) = obj.downcast::<PyArray1<f64>>() {
+        let readonly = arr.readonly();
+        if let Ok(slice) = readonly.as_slice() {
+            return Ok(slice.iter().map(|&v| v as f32).collect());
+        }
+        // Non-contiguous — fall through to generic path
+    }
+    // Slow fallback: generic extraction (handles lists, non-contiguous arrays, etc.)
+    obj.extract::<Vec<f32>>().map_err(|e| {
+        EngineError::ContractViolation(format!("failed to extract array as Vec<f32>: {e}"))
+    })
+}
+
+/// Create a pair of read-only numpy f32 arrays from Rust slices.
+/// Uses `PyArray1::from_slice` which does a single memcpy — much faster than
+/// going through `Vec → Python list → np.array() → .astype("float32")`.
+fn make_numpy_f32_pair<'py>(
+    py: Python<'py>,
+    a: &[f32],
+    b: &[f32],
+) -> (Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<f32>>) {
+    (PyArray1::from_slice(py, a), PyArray1::from_slice(py, b))
+}
+
+// ---------------------------------------------------------------------------
+// Custom Python Objective — wraps a Python callable implementing ObjectiveOps
+// ---------------------------------------------------------------------------
+
+/// A custom objective backed by a Python callable.
+///
+/// The callable must have the signature:
+///   `(y_true: np.ndarray, y_pred: np.ndarray) -> (grad: np.ndarray, hess: np.ndarray)`
+///
+/// An optional loss function can be provided with signature:
+///   `(y_true: np.ndarray, y_pred: np.ndarray) -> float`
+struct CustomPythonObjective {
+    grad_hess_fn: Py<PyAny>,
+    loss_fn: Option<Py<PyAny>>,
+}
+
+impl CustomPythonObjective {
+    fn new(grad_hess_fn: Py<PyAny>, loss_fn: Option<Py<PyAny>>) -> Self {
+        Self {
+            grad_hess_fn,
+            loss_fn,
+        }
+    }
+
+    fn call_python_grad_hess(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+    ) -> Result<(Vec<f32>, Vec<f32>), EngineError> {
+        Python::with_gil(|py| {
+            // Create numpy arrays directly from Rust slices — avoids creating a
+            // Python list and the redundant .astype("float32") call.  PyArray1::from_slice
+            // produces a contiguous f32 numpy array backed by a copy of the slice
+            // (one memcpy instead of element-by-element Python object creation).
+            let y_true = PyArray1::from_slice(py, targets);
+            let y_pred = PyArray1::from_slice(py, predictions);
+
+            let result = self.grad_hess_fn.call1(py, (y_true, y_pred)).map_err(|e| {
+                EngineError::ContractViolation(format!("custom objective callable failed: {e}"))
+            })?;
+
+            let tuple = result
+                .downcast_bound::<pyo3::types::PyTuple>(py)
+                .map_err(|_| {
+                    EngineError::ContractViolation(
+                        "custom objective must return a tuple of (gradient, hessian)".to_string(),
+                    )
+                })?;
+            if tuple.len() != 2 {
+                return Err(EngineError::ContractViolation(format!(
+                    "custom objective must return exactly 2 arrays, got {}",
+                    tuple.len()
+                )));
+            }
+
+            let grad_arr = tuple.get_item(0).map_err(|e| {
+                EngineError::ContractViolation(format!("failed to get gradient array: {e}"))
+            })?;
+            let hess_arr = tuple.get_item(1).map_err(|e| {
+                EngineError::ContractViolation(format!("failed to get hessian array: {e}"))
+            })?;
+
+            // Fast extraction: try to get a typed numpy array view (single memcpy
+            // from contiguous buffer) before falling back to generic element-wise
+            // extraction for non-contiguous or non-f32 arrays.
+            let grad_list = extract_f32_array(py, &grad_arr)?;
+            let hess_list = extract_f32_array(py, &hess_arr)?;
+
+            if grad_list.len() != targets.len() {
+                return Err(EngineError::ContractViolation(format!(
+                    "gradient array length {} does not match target length {}",
+                    grad_list.len(),
+                    targets.len()
+                )));
+            }
+            if hess_list.len() != targets.len() {
+                return Err(EngineError::ContractViolation(format!(
+                    "hessian array length {} does not match target length {}",
+                    hess_list.len(),
+                    targets.len()
+                )));
+            }
+
+            Ok((grad_list, hess_list))
+        })
+    }
+
+    fn call_python_loss(&self, predictions: &[f32], targets: &[f32]) -> Result<f32, EngineError> {
+        if let Some(ref loss_fn) = self.loss_fn {
+            Python::with_gil(|py| {
+                let (y_true, y_pred) = make_numpy_f32_pair(py, targets, predictions);
+                let result = loss_fn.call1(py, (y_true, y_pred)).map_err(|e| {
+                    EngineError::ContractViolation(format!("custom loss callable failed: {e}"))
+                })?;
+                let value: f64 = result.extract(py).map_err(|e| {
+                    EngineError::ContractViolation(format!(
+                        "custom loss must return a float, got: {e}"
+                    ))
+                })?;
+                Ok(value as f32)
+            })
+        } else {
+            // Fallback: use MSE as a loss proxy for monitoring/early stopping
+            let n = predictions.len();
+            if n == 0 {
+                return Ok(0.0);
+            }
+            let mse: f64 = predictions
+                .iter()
+                .zip(targets.iter())
+                .map(|(&p, &t)| {
+                    let diff = (p - t) as f64;
+                    diff * diff
+                })
+                .sum::<f64>()
+                / n as f64;
+            Ok(mse as f32)
+        }
+    }
+}
+
+impl ObjectiveOps for CustomPythonObjective {
+    fn objective_name(&self) -> &str {
+        "custom"
+    }
+
+    fn initial_prediction(
+        &self,
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+    ) -> alloygbm_engine::EngineResult<f32> {
+        // Weighted mean of targets (same as squared error)
+        if targets.is_empty() {
+            return Ok(0.0);
+        }
+        if let Some(weights) = sample_weights {
+            let total_weight: f64 = weights.iter().map(|&w| w as f64).sum();
+            if total_weight <= 0.0 {
+                return Ok(0.0);
+            }
+            let weighted_sum: f64 = targets
+                .iter()
+                .zip(weights.iter())
+                .map(|(&t, &w)| t as f64 * w as f64)
+                .sum();
+            Ok((weighted_sum / total_weight) as f32)
+        } else {
+            let sum: f64 = targets.iter().map(|&t| t as f64).sum();
+            Ok((sum / targets.len() as f64) as f32)
+        }
+    }
+
+    fn compute_gradients(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+    ) -> alloygbm_engine::EngineResult<Vec<GradientPair>> {
+        let (grads, hessians) = self.call_python_grad_hess(predictions, targets)?;
+        let n = grads.len();
+        let mut result = Vec::with_capacity(n);
+        if let Some(weights) = sample_weights {
+            for i in 0..n {
+                let w = weights[i];
+                result.push(GradientPair {
+                    grad: grads[i] * w,
+                    hess: hessians[i] * w,
+                });
+            }
+        } else {
+            for i in 0..n {
+                result.push(GradientPair {
+                    grad: grads[i],
+                    hess: hessians[i],
+                });
+            }
+        }
+        Ok(result)
+    }
+
+    fn loss(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        _sample_weights: Option<&[f32]>,
+    ) -> alloygbm_engine::EngineResult<f32> {
+        self.call_python_loss(predictions, targets)
+    }
+
+    fn requires_group_id(&self) -> bool {
+        false
+    }
+
+    fn supports_leaf_refinement(&self) -> bool {
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Custom Python Metric Callback
+// ---------------------------------------------------------------------------
+
+/// A custom evaluation metric backed by a Python callable.
+///
+/// The callable must have the signature:
+///   `(y_true: np.ndarray, y_pred: np.ndarray) -> (name: str, value: float, higher_is_better: bool)`
+struct CustomPythonMetricCallback {
+    metric_fn: Py<PyAny>,
+    /// Name discovered during probe, set before training starts
+    name: String,
+    /// Direction discovered during probe, set before training starts
+    higher_is_better_flag: bool,
+}
+
+impl CustomPythonMetricCallback {
+    /// Create a new callback by probing the Python callable with dummy data
+    /// to discover the metric name and direction.
+    fn new(metric_fn: Py<PyAny>) -> Result<Self, EngineError> {
+        let dummy_targets = vec![0.0_f32; 2];
+        let dummy_preds = vec![0.0_f32; 2];
+
+        let (name, _value, higher_is_better) =
+            Self::call_python_static(&metric_fn, &dummy_preds, &dummy_targets)?;
+
+        Ok(Self {
+            metric_fn,
+            name,
+            higher_is_better_flag: higher_is_better,
+        })
+    }
+
+    /// Call the Python metric function and extract (name, value, higher_is_better).
+    fn call_python_static(
+        metric_fn: &Py<PyAny>,
+        predictions: &[f32],
+        targets: &[f32],
+    ) -> Result<(String, f32, bool), EngineError> {
+        Python::with_gil(|py| {
+            let (y_true, y_pred) = make_numpy_f32_pair(py, targets, predictions);
+
+            let result = metric_fn.call1(py, (y_true, y_pred)).map_err(|e| {
+                EngineError::ContractViolation(format!("custom eval metric callable failed: {e}"))
+            })?;
+
+            let tuple = result
+                .downcast_bound::<pyo3::types::PyTuple>(py)
+                .map_err(|_| {
+                    EngineError::ContractViolation(
+                        "custom eval metric must return a tuple of (name, value, higher_is_better)"
+                            .to_string(),
+                    )
+                })?;
+            if tuple.len() != 3 {
+                return Err(EngineError::ContractViolation(format!(
+                    "custom eval metric must return exactly 3 values (name, value, higher_is_better), got {}",
+                    tuple.len()
+                )));
+            }
+
+            let name: String = tuple
+                .get_item(0)
+                .map_err(|e| {
+                    EngineError::ContractViolation(format!("failed to get metric name: {e}"))
+                })?
+                .extract()
+                .map_err(|e| {
+                    EngineError::ContractViolation(format!("metric name must be a string: {e}"))
+                })?;
+            let value: f64 = tuple
+                .get_item(1)
+                .map_err(|e| {
+                    EngineError::ContractViolation(format!("failed to get metric value: {e}"))
+                })?
+                .extract()
+                .map_err(|e| {
+                    EngineError::ContractViolation(format!("metric value must be a float: {e}"))
+                })?;
+            let higher_is_better: bool = tuple
+                .get_item(2)
+                .map_err(|e| {
+                    EngineError::ContractViolation(format!("failed to get higher_is_better: {e}"))
+                })?
+                .extract()
+                .map_err(|e| {
+                    EngineError::ContractViolation(format!("higher_is_better must be a bool: {e}"))
+                })?;
+
+            Ok((name, value as f32, higher_is_better))
+        })
+    }
+}
+
+impl PerRoundMetricCallback for CustomPythonMetricCallback {
+    fn evaluate(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        _sample_weights: Option<&[f32]>,
+    ) -> alloygbm_engine::EngineResult<f32> {
+        let (_name, value, _higher_is_better) =
+            Self::call_python_static(&self.metric_fn, predictions, targets)?;
+        Ok(value)
+    }
+
+    fn higher_is_better(&self) -> bool {
+        self.higher_is_better_flag
+    }
+
+    fn metric_name(&self) -> &str {
+        &self.name
+    }
+}
 
 fn is_pre_binned_integer_value(value: f32) -> bool {
     if value < 0.0 {
@@ -328,6 +687,49 @@ impl NativePredictorHandle {
         )
         .map_err(predictor_error_to_pyerr)
     }
+
+    // -- Multi-class prediction -----------------------------------------------
+
+    fn is_multiclass(&self) -> bool {
+        self.predictor.is_multiclass()
+    }
+
+    fn num_classes(&self) -> Option<usize> {
+        self.predictor.num_classes()
+    }
+
+    /// Multi-class prediction returning flat Vec of length n_rows * K.
+    fn predict_multiclass(&self, rows: Vec<Vec<f32>>) -> PyResult<Vec<f32>> {
+        self.predictor
+            .predict_batch_multiclass(&rows)
+            .map_err(predictor_error_to_pyerr)
+    }
+
+    /// Multi-class prediction from dense flat array.
+    fn predict_dense_multiclass(
+        &self,
+        values: Vec<f32>,
+        row_count: usize,
+        feature_count: usize,
+    ) -> PyResult<Vec<f32>> {
+        self.predictor
+            .predict_batch_dense_multiclass(&values, row_count, feature_count)
+            .map_err(predictor_error_to_pyerr)
+    }
+
+    /// Multi-class prediction from a numpy array (zero-copy).
+    fn predict_numpy_multiclass(&self, array: PyReadonlyArray2<f32>) -> PyResult<Vec<f32>> {
+        let shape = array.shape();
+        let row_count = shape[0];
+        let feature_count = shape[1];
+        let array_view = array.as_array();
+        let values = array_view.as_slice().ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err("numpy array must be C-contiguous")
+        })?;
+        self.predictor
+            .predict_batch_dense_multiclass(values, row_count, feature_count)
+            .map_err(predictor_error_to_pyerr)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -420,6 +822,12 @@ struct NativeTrainingSummary {
     bridge_prepare_seconds: f64,
     #[pyo3(get)]
     native_train_seconds: f64,
+    /// Custom eval metric values per completed round (empty when no custom metric).
+    #[pyo3(get)]
+    custom_metric_values: Vec<f32>,
+    /// Custom eval metric name (None when no custom metric).
+    #[pyo3(get)]
+    custom_metric_name: Option<String>,
 }
 
 #[pyclass]
@@ -431,6 +839,10 @@ struct NativeTrainingResult {
     summary: NativeTrainingSummary,
     #[pyo3(get)]
     continuous_binning_metadata: NativeContinuousBinningMetadata,
+    /// Per-feature category→ID mappings for native categorical splits.
+    /// Keys are feature indices, values are dicts {category_name: integer_id}.
+    #[pyo3(get)]
+    native_cat_mappings: std::collections::HashMap<usize, std::collections::HashMap<String, u32>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1815,6 +2227,40 @@ fn apply_categorical_encoding_to_validation_matrices_multi(
     })
 }
 
+fn build_native_training_summary_from_multiclass(
+    summary: &MultiClassIterationRunSummary,
+    bridge_prepare_seconds: f64,
+    native_train_seconds: f64,
+    objective: &str,
+) -> NativeTrainingSummary {
+    NativeTrainingSummary {
+        rounds_requested: summary.rounds_requested,
+        rounds_completed: summary.rounds_completed,
+        best_validation_round: summary
+            .best_validation_round
+            .and_then(|round| round.checked_sub(1)),
+        best_validation_loss: summary.best_validation_loss,
+        train_rmse: summary
+            .loss_per_completed_round
+            .iter()
+            .map(|loss| loss.max(0.0).sqrt())
+            .collect(),
+        validation_rmse: summary
+            .validation_loss_per_completed_round
+            .iter()
+            .map(|loss| loss.max(0.0).sqrt())
+            .collect(),
+        train_loss: summary.loss_per_completed_round.clone(),
+        validation_loss: summary.validation_loss_per_completed_round.clone(),
+        objective: objective.to_string(),
+        stop_reason: format!("{:?}", summary.stop_reason),
+        bridge_prepare_seconds,
+        native_train_seconds,
+        custom_metric_values: summary.custom_metric_per_round.clone(),
+        custom_metric_name: summary.custom_metric_name.clone(),
+    }
+}
+
 fn build_native_training_summary(
     summary: &IterationRunSummary,
     bridge_prepare_seconds: f64,
@@ -1844,6 +2290,8 @@ fn build_native_training_summary(
         stop_reason: format!("{:?}", summary.stop_reason),
         bridge_prepare_seconds,
         native_train_seconds,
+        custom_metric_values: summary.custom_metric_per_round.clone(),
+        custom_metric_name: summary.custom_metric_name.clone(),
     }
 }
 
@@ -1872,6 +2320,11 @@ fn train_regression_artifact_with_summary_dense_impl(
     continuous_binning_max_bins: usize,
     objective: &str,
     init_artifact_bytes: Option<&[u8]>,
+    num_classes: Option<usize>,
+    custom_objective_fn: Option<Py<PyAny>>,
+    custom_loss_fn: Option<Py<PyAny>>,
+    custom_metric_fn: Option<Py<PyAny>>,
+    max_cat_threshold: usize,
 ) -> Result<NativeTrainingResult, EngineError> {
     let bridge_start = Instant::now();
     let need_dense_values = !categorical_specs.is_empty();
@@ -1891,10 +2344,73 @@ fn train_regression_artifact_with_summary_dense_impl(
     let training_targets_for_validation = prepared.dataset.targets.clone();
     let training_time_index_for_validation = prepared.dataset.time_index.clone();
 
+    // Split categorical features into native (low cardinality) and target-encoded (high cardinality).
+    let mut native_cat_mappings: std::collections::HashMap<
+        usize,
+        std::collections::HashMap<String, u32>,
+    > = std::collections::HashMap::new();
+    let mut native_cat_infos: Vec<CategoricalFeatureInfo> = Vec::new();
+    let mut target_encoding_specs: Vec<CategoricalTargetEncodingSpec> = Vec::new();
+
+    if !categorical_specs.is_empty() && max_cat_threshold > 0 {
+        for spec in &categorical_specs {
+            // Count unique categories for this feature.
+            let mut unique_cats: Vec<String> = spec.values.to_vec();
+            unique_cats.sort();
+            unique_cats.dedup();
+            let num_unique = unique_cats.len();
+
+            if num_unique <= max_cat_threshold && num_unique >= 2 {
+                // Native categorical split: map categories to integer IDs.
+                let cat_to_id: std::collections::HashMap<String, u32> = unique_cats
+                    .iter()
+                    .enumerate()
+                    .map(|(i, cat)| (cat.clone(), i as u32))
+                    .collect();
+
+                // Re-bin the column in the binned matrix: category name → integer bin ID.
+                let fi = spec.feature_index;
+                let missing_bin = prepared.binned_matrix.missing_bin();
+                // Guard: category IDs must not collide with the missing-value sentinel.
+                if (num_unique as u16) > missing_bin {
+                    return Err(EngineError::ContractViolation(format!(
+                        "Native categorical feature {} has {} categories which would collide with the missing-value sentinel (bin {}). Reduce max_cat_threshold or increase continuous_binning_max_bins.",
+                        fi, num_unique, missing_bin
+                    )));
+                }
+                for (row_idx, cat_name) in spec.values.iter().enumerate() {
+                    let bin_val = cat_to_id
+                        .get(cat_name)
+                        .map(|&id| id as u16)
+                        .unwrap_or(missing_bin);
+                    prepared.binned_matrix.set_bin(row_idx, fi, bin_val);
+                }
+                // Update max_bin if categories exceed current max.
+                let cat_max_bin = (num_unique - 1) as u16;
+                if cat_max_bin > prepared.binned_matrix.max_bin {
+                    prepared.binned_matrix.max_bin = cat_max_bin;
+                }
+
+                native_cat_infos.push(CategoricalFeatureInfo {
+                    feature_index: fi,
+                    num_categories: num_unique,
+                });
+                native_cat_mappings.insert(fi, cat_to_id);
+            } else {
+                // Falls back to target encoding.
+                target_encoding_specs.push(spec.clone());
+            }
+        }
+    } else {
+        target_encoding_specs = categorical_specs.clone();
+    }
+
     let mut categorical_state = None;
-    if !categorical_specs.is_empty() {
-        let (encoded_prepared, state) =
-            apply_categorical_encoding_to_training_matrices_multi(prepared, &categorical_specs)?;
+    if !target_encoding_specs.is_empty() {
+        let (encoded_prepared, state) = apply_categorical_encoding_to_training_matrices_multi(
+            prepared,
+            &target_encoding_specs,
+        )?;
         prepared = encoded_prepared;
         categorical_state = Some(state);
     }
@@ -1928,22 +2444,65 @@ fn train_regression_artifact_with_summary_dense_impl(
                         categorical_specs.len()
                     )));
                 }
-                let validation_specs: Vec<CategoricalTargetEncodingSpec> = categorical_specs
+
+                // Apply native categorical binning to validation for native-split features.
+                let val_row_count = prepared_validation.dataset.matrix.row_count;
+                for (spec, val_cats) in categorical_specs
                     .iter()
-                    .zip(validation_categorical_values_list)
-                    .map(|(spec, values)| CategoricalTargetEncodingSpec {
-                        feature_index: spec.feature_index,
-                        values,
-                        config: spec.config.clone(),
-                    })
-                    .collect();
-                prepared_validation = apply_categorical_encoding_to_validation_matrices_multi(
-                    prepared_validation,
-                    &categorical_specs,
-                    &validation_specs,
-                    &training_targets_for_validation,
-                    training_time_index_for_validation.as_deref(),
-                )?;
+                    .zip(&validation_categorical_values_list)
+                {
+                    if let Some(cat_to_id) = native_cat_mappings.get(&spec.feature_index) {
+                        let fi = spec.feature_index;
+                        let missing_bin = prepared_validation.binned_matrix.missing_bin();
+                        // Update max_bin to match training matrix for this native categorical feature.
+                        // (The sentinel collision was already validated on the training path.)
+                        let num_unique = cat_to_id.len();
+                        let cat_max_bin = (num_unique - 1) as u16;
+                        if cat_max_bin > prepared_validation.binned_matrix.max_bin {
+                            prepared_validation.binned_matrix.max_bin = cat_max_bin;
+                        }
+                        for (row_idx, cat_name) in val_cats.iter().enumerate() {
+                            if row_idx < val_row_count {
+                                let bin_val = cat_to_id
+                                    .get(cat_name)
+                                    .map(|&id| id as u16)
+                                    .unwrap_or(missing_bin);
+                                prepared_validation
+                                    .binned_matrix
+                                    .set_bin(row_idx, fi, bin_val);
+                            }
+                        }
+                    }
+                }
+
+                // Apply target encoding only for features that weren't native-split.
+                if !target_encoding_specs.is_empty() {
+                    let validation_te_specs: Vec<CategoricalTargetEncodingSpec> =
+                        target_encoding_specs
+                            .iter()
+                            .map(|te_spec| {
+                                // Find the matching validation categorical values for this feature.
+                                let orig_idx = categorical_specs
+                                    .iter()
+                                    .position(|s| s.feature_index == te_spec.feature_index)
+                                    .expect(
+                                        "target encoding spec must correspond to an original spec",
+                                    );
+                                CategoricalTargetEncodingSpec {
+                                    feature_index: te_spec.feature_index,
+                                    values: validation_categorical_values_list[orig_idx].clone(),
+                                    config: te_spec.config.clone(),
+                                }
+                            })
+                            .collect();
+                    prepared_validation = apply_categorical_encoding_to_validation_matrices_multi(
+                        prepared_validation,
+                        &target_encoding_specs,
+                        &validation_te_specs,
+                        &training_targets_for_validation,
+                        training_time_index_for_validation.as_deref(),
+                    )?;
+                }
             }
             Some(prepared_validation)
         }
@@ -1955,30 +2514,46 @@ fn train_regression_artifact_with_summary_dense_impl(
         }
     };
 
-    // Warm-start: load existing model if init_artifact_bytes is provided
-    let warm_start_state = if let Some(init_bytes) = init_artifact_bytes {
-        let init_model = TrainedModel::from_artifact_bytes(init_bytes)?;
-        if init_model.feature_count != feature_count {
-            return Err(EngineError::ContractViolation(format!(
-                "init_model feature_count {} does not match training data feature_count {}",
-                init_model.feature_count, feature_count,
-            )));
+    // Warm-start: load existing single-output model if init_artifact_bytes is provided.
+    // Multiclass warm-start is handled separately in the multiclass_softmax branch
+    // because multiclass artifacts have a different format (MultiClassTrees section).
+    let warm_start_state = if objective != "multiclass_softmax" {
+        if let Some(init_bytes) = init_artifact_bytes {
+            let init_model = TrainedModel::from_artifact_bytes(init_bytes)?;
+            if init_model.feature_count != feature_count {
+                return Err(EngineError::ContractViolation(format!(
+                    "init_model feature_count {} does not match training data feature_count {}",
+                    init_model.feature_count, feature_count,
+                )));
+            }
+            let initial_rounds = init_model.rounds_completed();
+            Some(WarmStartState {
+                baseline_prediction: init_model.baseline_prediction,
+                stumps: init_model.stumps,
+                initial_rounds_completed: initial_rounds,
+            })
+        } else {
+            None
         }
-        let initial_rounds = init_model.rounds_completed();
-        Some(WarmStartState {
-            baseline_prediction: init_model.baseline_prediction,
-            stumps: init_model.stumps,
-            initial_rounds_completed: initial_rounds,
-        })
     } else {
         None
     };
 
     let bridge_prepare_seconds = bridge_start.elapsed().as_secs_f64();
     let user_seed = params.seed;
-    let trainer = Trainer::new(params)?;
+    let trainer = Trainer::new(params)?.with_categorical_features(native_cat_infos.clone());
     let backend = CpuBackend;
     let native_start = Instant::now();
+
+    // Build the custom metric callback if provided
+    let custom_metric_cb = if let Some(metric_fn) = custom_metric_fn {
+        Some(CustomPythonMetricCallback::new(metric_fn)?)
+    } else {
+        None
+    };
+    let custom_metric_ref: Option<&dyn PerRoundMetricCallback> = custom_metric_cb
+        .as_ref()
+        .map(|cb| cb as &dyn PerRoundMetricCallback);
 
     macro_rules! run_training {
         ($obj:expr) => {{
@@ -1990,7 +2565,7 @@ fn train_regression_artifact_with_summary_dense_impl(
             )?;
             if let Some(warm_start) = warm_start_state.clone() {
                 if let Some(validation_prepared) = validation_prepared.as_ref() {
-                    trainer.fit_iterations_warm_start_with_validation(
+                    trainer.fit_iterations_warm_start_with_validation_and_metric(
                         &prepared.dataset,
                         &prepared.binned_matrix,
                         alloygbm_engine::ValidationDatasetRef {
@@ -2001,6 +2576,7 @@ fn train_regression_artifact_with_summary_dense_impl(
                         $obj,
                         controls,
                         warm_start,
+                        custom_metric_ref,
                     )?
                 } else {
                     trainer.fit_iterations_warm_start(
@@ -2013,7 +2589,7 @@ fn train_regression_artifact_with_summary_dense_impl(
                     )?
                 }
             } else if let Some(validation_prepared) = validation_prepared.as_ref() {
-                trainer.fit_iterations_with_validation_summary(
+                trainer.fit_iterations_with_validation_and_metric(
                     &prepared.dataset,
                     &prepared.binned_matrix,
                     alloygbm_engine::ValidationDatasetRef {
@@ -2023,6 +2599,7 @@ fn train_regression_artifact_with_summary_dense_impl(
                     &backend,
                     $obj,
                     controls,
+                    custom_metric_ref,
                 )?
             } else {
                 trainer.fit_iterations_with_summary(
@@ -2087,11 +2664,128 @@ fn train_regression_artifact_with_summary_dense_impl(
                 _ => unreachable!(),
             }
         }
+        "multiclass_softmax" => {
+            let k = num_classes.ok_or_else(|| {
+                EngineError::InvalidConfig(
+                    "multiclass_softmax objective requires num_classes to be specified".to_string(),
+                )
+            })?;
+            if k < 2 {
+                return Err(EngineError::InvalidConfig(format!(
+                    "multiclass_softmax requires num_classes >= 2, got {k}"
+                )));
+            }
+            let mc_obj = MultiClassSoftmaxObjective::new(k)?;
+            let controls = trainer.iteration_controls_for_policy(
+                &prepared.dataset,
+                &prepared.binned_matrix,
+                rounds,
+                training_policy,
+            )?;
+
+            // Build multiclass warm-start state from init_artifact_bytes if available
+            let mc_warm_start = if let Some(init_bytes) = init_artifact_bytes {
+                let init_mc_model = MultiClassTrainedModel::from_artifact_bytes(init_bytes)?;
+                if init_mc_model.feature_count != feature_count {
+                    return Err(EngineError::ContractViolation(format!(
+                        "init_model feature_count {} does not match training data feature_count {}",
+                        init_mc_model.feature_count, feature_count,
+                    )));
+                }
+                if init_mc_model.num_classes != k {
+                    return Err(EngineError::ContractViolation(format!(
+                        "init_model num_classes {} does not match training num_classes {}",
+                        init_mc_model.num_classes, k,
+                    )));
+                }
+                let initial_rounds = init_mc_model.rounds_completed();
+                Some(MultiClassWarmStartState {
+                    baseline_predictions: init_mc_model.baseline_predictions,
+                    class_stumps: init_mc_model.class_stumps,
+                    initial_rounds_completed: initial_rounds,
+                })
+            } else {
+                None
+            };
+
+            let mc_summary = if let Some(ws) = mc_warm_start {
+                if let Some(validation_prepared) = validation_prepared.as_ref() {
+                    trainer.fit_multiclass_iterations_warm_start_with_validation_summary(
+                        &prepared.dataset,
+                        &prepared.binned_matrix,
+                        alloygbm_engine::ValidationDatasetRef {
+                            dataset: &validation_prepared.dataset,
+                            binned_matrix: &validation_prepared.binned_matrix,
+                        },
+                        &backend,
+                        &mc_obj,
+                        controls,
+                        ws,
+                    )?
+                } else {
+                    trainer.fit_multiclass_iterations_warm_start_with_summary(
+                        &prepared.dataset,
+                        &prepared.binned_matrix,
+                        &backend,
+                        &mc_obj,
+                        controls,
+                        ws,
+                    )?
+                }
+            } else if let Some(validation_prepared) = validation_prepared.as_ref() {
+                trainer.fit_multiclass_iterations_with_validation_summary(
+                    &prepared.dataset,
+                    &prepared.binned_matrix,
+                    alloygbm_engine::ValidationDatasetRef {
+                        dataset: &validation_prepared.dataset,
+                        binned_matrix: &validation_prepared.binned_matrix,
+                    },
+                    &backend,
+                    &mc_obj,
+                    controls,
+                )?
+            } else {
+                trainer.fit_multiclass_iterations_with_summary(
+                    &prepared.dataset,
+                    &prepared.binned_matrix,
+                    &backend,
+                    &mc_obj,
+                    controls,
+                )?
+            };
+            let native_train_seconds = native_start.elapsed().as_secs_f64();
+            let native_summary = build_native_training_summary_from_multiclass(
+                &mc_summary,
+                bridge_prepare_seconds,
+                native_train_seconds,
+                objective,
+            );
+            let mut mc_model = mc_summary.model;
+            if let Some(state) = categorical_state {
+                mc_model = mc_model.with_categorical_state(Some(state))?;
+            }
+            let artifact_bytes = mc_model.to_artifact_bytes()?;
+            return Ok(NativeTrainingResult {
+                artifact_bytes,
+                summary: native_summary,
+                continuous_binning_metadata: prepared.metadata.into(),
+                native_cat_mappings: native_cat_mappings.clone(),
+            });
+        }
+        "custom" => {
+            let grad_fn = custom_objective_fn.ok_or_else(|| {
+                EngineError::ContractViolation(
+                    "objective 'custom' requires a custom_objective_fn to be provided".to_string(),
+                )
+            })?;
+            let obj = CustomPythonObjective::new(grad_fn, custom_loss_fn);
+            run_training!(&obj)
+        }
         other => {
             return Err(EngineError::InvalidConfig(format!(
                 "unknown objective '{other}', expected one of: squared_error, \
-                 binary_crossentropy, queryrmse, rank_pairwise, rank_ndcg, \
-                 rank_xendcg, yetirank"
+                 binary_crossentropy, multiclass_softmax, custom, queryrmse, rank_pairwise, \
+                 rank_ndcg, rank_xendcg, yetirank"
             )));
         }
     };
@@ -2104,6 +2798,11 @@ fn train_regression_artifact_with_summary_dense_impl(
     if let Some(state) = categorical_state {
         model = model.with_categorical_state(Some(state))?;
     }
+    // Store native categorical feature indices in the model for artifact serialization.
+    model.native_categorical_feature_indices = native_cat_infos
+        .iter()
+        .map(|c| c.feature_index as u32)
+        .collect();
     let artifact_bytes = model.to_artifact_bytes()?;
     summary.model = model;
 
@@ -2116,6 +2815,7 @@ fn train_regression_artifact_with_summary_dense_impl(
             objective,
         ),
         continuous_binning_metadata: prepared.metadata.into(),
+        native_cat_mappings,
     })
 }
 
@@ -2443,6 +3143,11 @@ fn train_regression_artifact(
         continuous_binning_max_bins,
         objective,
         None, // init_artifact_bytes
+        None, // num_classes
+        None, // custom_objective_fn
+        None, // custom_loss_fn
+        None, // custom_metric_fn
+        0,    // max_cat_threshold (disabled for non-summary paths)
     )
     .map(|result| result.artifact_bytes)
     .map_err(engine_error_to_pyerr)
@@ -2561,6 +3266,11 @@ fn train_regression_artifact_dense(
         continuous_binning_max_bins,
         objective,
         None, // init_artifact_bytes
+        None, // num_classes
+        None, // custom_objective_fn
+        None, // custom_loss_fn
+        None, // custom_metric_fn
+        0,    // max_cat_threshold (disabled for non-summary paths)
     )
     .map(|result| result.artifact_bytes)
     .map_err(engine_error_to_pyerr)
@@ -2609,7 +3319,12 @@ fn train_regression_artifact_dense(
     categorical_feature_indices=None,
     categorical_feature_values_list=None,
     validation_categorical_feature_values_list=None,
-    init_artifact_bytes=None
+    init_artifact_bytes=None,
+    num_classes=None,
+    custom_objective_fn=None,
+    custom_loss_fn=None,
+    custom_metric_fn=None,
+    max_cat_threshold=0
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_with_summary(
@@ -2656,6 +3371,11 @@ fn train_regression_artifact_with_summary(
     categorical_feature_values_list: Option<Vec<Vec<String>>>,
     validation_categorical_feature_values_list: Option<Vec<Vec<String>>>,
     init_artifact_bytes: Option<Vec<u8>>,
+    num_classes: Option<usize>,
+    custom_objective_fn: Option<Py<PyAny>>,
+    custom_loss_fn: Option<Py<PyAny>>,
+    custom_metric_fn: Option<Py<PyAny>>,
+    max_cat_threshold: usize,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -2742,6 +3462,11 @@ fn train_regression_artifact_with_summary(
         continuous_binning_max_bins,
         objective,
         init_artifact_bytes.as_deref(),
+        num_classes,
+        custom_objective_fn,
+        custom_loss_fn,
+        custom_metric_fn,
+        max_cat_threshold,
     )
     .map_err(engine_error_to_pyerr)
 }
@@ -2792,7 +3517,12 @@ fn train_regression_artifact_with_summary(
     categorical_feature_indices=None,
     categorical_feature_values_list=None,
     validation_categorical_feature_values_list=None,
-    init_artifact_bytes=None
+    init_artifact_bytes=None,
+    num_classes=None,
+    custom_objective_fn=None,
+    custom_loss_fn=None,
+    custom_metric_fn=None,
+    max_cat_threshold=0
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary(
@@ -2842,6 +3572,11 @@ fn train_regression_artifact_dense_with_summary(
     categorical_feature_values_list: Option<Vec<Vec<String>>>,
     validation_categorical_feature_values_list: Option<Vec<Vec<String>>>,
     init_artifact_bytes: Option<Vec<u8>>,
+    num_classes: Option<usize>,
+    custom_objective_fn: Option<Py<PyAny>>,
+    custom_loss_fn: Option<Py<PyAny>>,
+    custom_metric_fn: Option<Py<PyAny>>,
+    max_cat_threshold: usize,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -2909,6 +3644,11 @@ fn train_regression_artifact_dense_with_summary(
         continuous_binning_max_bins,
         objective,
         init_artifact_bytes.as_deref(),
+        num_classes,
+        custom_objective_fn,
+        custom_loss_fn,
+        custom_metric_fn,
+        max_cat_threshold,
     )
     .map_err(engine_error_to_pyerr)
 }
@@ -2974,7 +3714,12 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> PyResult<Vec<f32>> {
     categorical_feature_indices=None,
     categorical_feature_values_list=None,
     validation_categorical_feature_values_list=None,
-    init_artifact_bytes=None
+    init_artifact_bytes=None,
+    num_classes=None,
+    custom_objective_fn=None,
+    custom_loss_fn=None,
+    custom_metric_fn=None,
+    max_cat_threshold=0
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary_bytes(
@@ -3024,6 +3769,11 @@ fn train_regression_artifact_dense_with_summary_bytes(
     categorical_feature_values_list: Option<Vec<Vec<String>>>,
     validation_categorical_feature_values_list: Option<Vec<Vec<String>>>,
     init_artifact_bytes: Option<Vec<u8>>,
+    num_classes: Option<usize>,
+    custom_objective_fn: Option<Py<PyAny>>,
+    custom_loss_fn: Option<Py<PyAny>>,
+    custom_metric_fn: Option<Py<PyAny>>,
+    max_cat_threshold: usize,
 ) -> PyResult<NativeTrainingResult> {
     let values = bytes_to_f32_vec(values_bytes)?;
     let targets = bytes_to_f32_vec(targets_bytes)?;
@@ -3095,6 +3845,11 @@ fn train_regression_artifact_dense_with_summary_bytes(
         continuous_binning_max_bins,
         objective,
         init_artifact_bytes.as_deref(),
+        num_classes,
+        custom_objective_fn,
+        custom_loss_fn,
+        custom_metric_fn,
+        max_cat_threshold,
     )
     .map_err(engine_error_to_pyerr)
 }
@@ -3186,6 +3941,11 @@ mod tests {
             MAX_CONTINUOUS_QUANTIZED_BIN_U8 as usize + 1,
             "squared_error",
             None, // init_artifact_bytes
+            None, // num_classes
+            None, // custom_objective_fn
+            None, // custom_loss_fn
+            None, // custom_metric_fn
+            0,    // max_cat_threshold
         )
         .map(|result| result.artifact_bytes)
     }

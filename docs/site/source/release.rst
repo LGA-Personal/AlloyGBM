@@ -1,12 +1,39 @@
 Release and platform policy
 ===========================
 
-AlloyGBM ``0.2.0`` release notes and platform policy.
+AlloyGBM ``0.3.0`` release notes and platform policy.
 
-What's new in 0.2.0
+What's new in 0.3.0
 --------------------
 
-``0.2.0`` is a major capability expansion from the regression-only ``0.1.x``
+``0.3.0`` adds native categorical splits, multi-class classification, and
+custom objective/metric support:
+
+**Native categorical splits:**
+
+- Fisher-sort categorical split-finding with O(K log K) optimal binary
+  partitions and O(1) bitset prediction
+- ``max_cat_threshold`` parameter controls the maximum category cardinality
+  for native splits (default 0 = disabled, opt-in)
+- Category-to-ID mappings preserved through pickle, save/load, and params
+- Full support across ``GBMRegressor``, ``GBMClassifier``, and ``GBMRanker``
+
+**Multi-class classification:**
+
+- ``GBMClassifier`` auto-detects K > 2 classes and uses softmax
+  (multinomial cross-entropy) objective with K trees per round
+- ``predict_proba`` returns (n_samples, K) probability matrix
+
+**Custom objectives and metrics:**
+
+- ``objective=callable`` for user-defined gradient/hessian computation
+- ``eval_metric=callable`` for custom evaluation metrics with early stopping
+- ``higher_is_better`` protocol for metric direction
+
+What was new in 0.2.0
+---------------------
+
+``0.2.0`` was a major capability expansion from the regression-only ``0.1.x``
 series:
 
 **New estimators:**
@@ -61,7 +88,7 @@ series:
 Validated release surface
 -------------------------
 
-For ``0.2.0``, the intended release surface is:
+For ``0.3.0``, the intended release surface is:
 
 - macOS ``arm64`` wheel
 - Linux ``x86_64`` manylinux wheel
