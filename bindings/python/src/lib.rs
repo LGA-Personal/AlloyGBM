@@ -1189,6 +1189,113 @@ fn prepare_validation_matrices_from_dense_values(
     }
     validate_dense_values_allow_nan(values, row_count, feature_count)?;
 
+    // When training took the pre-binned path (all-integer features, feature_mins = None),
+    // validation must also use the pre-binned path.  Non-integer values (e.g. 1.5, 2.5)
+    // are rounded to the nearest integer bin; NaN maps to the missing-bin sentinel.
+    if !training_metadata.uses_continuous_binning {
+        let use_wide = needs_wide_bins(max_bins);
+        if use_wide {
+            let max_data_bin = (max_bins - 2) as u16;
+            let nan_bin = max_data_bin + 1;
+            let mut bins_u16 = Vec::with_capacity(values.len());
+            let mut dense_values_out = if need_dense_values {
+                Vec::with_capacity(values.len())
+            } else {
+                Vec::new()
+            };
+            let mut max_bin_seen = 0_u16;
+            for (index, &value) in values.iter().enumerate() {
+                let bin = if value.is_nan() {
+                    nan_bin
+                } else {
+                    let rounded = value.round();
+                    if rounded > 65535.0 {
+                        return Err(EngineError::ContractViolation(format!(
+                            "validation value at index {index} exceeds max supported bin 65535"
+                        )));
+                    }
+                    rounded as u16
+                };
+                max_bin_seen = max_bin_seen.max(bin);
+                bins_u16.push(bin);
+                if need_dense_values {
+                    dense_values_out.push(bin as f32);
+                }
+            }
+            let dataset = TrainingDataset {
+                matrix: if need_dense_values {
+                    DatasetMatrix::new(row_count, feature_count, dense_values_out)?
+                } else {
+                    DatasetMatrix::new_metadata_only(row_count, feature_count)?
+                },
+                targets: targets.to_vec(),
+                sample_weights,
+                time_index,
+                group_id,
+            };
+            let binned_matrix = BinnedMatrix::new_u16(
+                row_count,
+                feature_count,
+                if max_bin_seen == 0 { 1 } else { max_bin_seen },
+                nan_bin,
+                bins_u16,
+            )?;
+            return Ok(PreparedTrainingMatrices {
+                dataset,
+                binned_matrix,
+                metadata: training_metadata.clone(),
+            });
+        } else {
+            let mut bins = Vec::with_capacity(values.len());
+            let mut dense_values_out = if need_dense_values {
+                Vec::with_capacity(values.len())
+            } else {
+                Vec::new()
+            };
+            let mut max_bin_seen = 0_u16;
+            for (index, &value) in values.iter().enumerate() {
+                let bin = if value.is_nan() {
+                    MISSING_BIN_U8
+                } else {
+                    let rounded = value.round();
+                    if rounded > 255.0 {
+                        return Err(EngineError::ContractViolation(format!(
+                            "validation value at index {index} exceeds max supported bin 255"
+                        )));
+                    }
+                    rounded as u8
+                };
+                max_bin_seen = max_bin_seen.max(u16::from(bin));
+                bins.push(bin);
+                if need_dense_values {
+                    dense_values_out.push(bin as f32);
+                }
+            }
+            let dataset = TrainingDataset {
+                matrix: if need_dense_values {
+                    DatasetMatrix::new(row_count, feature_count, dense_values_out)?
+                } else {
+                    DatasetMatrix::new_metadata_only(row_count, feature_count)?
+                },
+                targets: targets.to_vec(),
+                sample_weights,
+                time_index,
+                group_id,
+            };
+            let binned_matrix = BinnedMatrix::new(
+                row_count,
+                feature_count,
+                if max_bin_seen == 0 { 1 } else { max_bin_seen },
+                bins,
+            )?;
+            return Ok(PreparedTrainingMatrices {
+                dataset,
+                binned_matrix,
+                metadata: training_metadata.clone(),
+            });
+        }
+    }
+
     if needs_wide_bins(max_bins) {
         let max_data_bin = (max_bins - 2) as u16;
         let nan_bin = max_data_bin + 1;

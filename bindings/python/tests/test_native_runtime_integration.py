@@ -124,8 +124,9 @@ class NativeRuntimeIntegrationTests(unittest.TestCase):
         cls._install_path = str(install_target)
         sys.path.insert(0, cls._install_path)
 
-        for module_name in ("alloygbm", "alloygbm._alloygbm", "alloygbm.regressor"):
-            sys.modules.pop(module_name, None)
+        _module_names = ("alloygbm", "alloygbm._alloygbm", "alloygbm.regressor",
+                         "alloygbm.classifier", "alloygbm.ranker")
+        cls._saved_modules = {k: sys.modules.pop(k, None) for k in _module_names}
 
         import alloygbm
 
@@ -133,8 +134,16 @@ class NativeRuntimeIntegrationTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
-        for module_name in ("alloygbm", "alloygbm._alloygbm", "alloygbm.regressor"):
+        _module_names = ("alloygbm", "alloygbm._alloygbm", "alloygbm.regressor",
+                         "alloygbm.classifier", "alloygbm.ranker")
+        for module_name in _module_names:
             sys.modules.pop(module_name, None)
+
+        # Restore the pre-test module objects so subsequent test files that
+        # imported from `alloygbm` at collection time continue to work.
+        for module_name, module in getattr(cls, "_saved_modules", {}).items():
+            if module is not None:
+                sys.modules[module_name] = module
 
         if hasattr(cls, "_install_path") and cls._install_path in sys.path:
             sys.path.remove(cls._install_path)

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import unittest
 from array import array
 from pathlib import Path
+from unittest.mock import patch
 
 
 def load_regressor_module():
@@ -388,19 +389,24 @@ class GBMRegressorContractTests(unittest.TestCase):
         regressor_module._load_native_train_regression_artifact_dense_with_summary = (
             lambda: (lambda **_kwargs: result)
         )
+        # The bytes-path function (train_regression_artifact_dense_with_summary_bytes) is
+        # tried first and now succeeds on this all-integer training data.  Force it to
+        # raise AttributeError so the code falls through to the mocked list path.
+        bytes_patch = "alloygbm._alloygbm.train_regression_artifact_dense_with_summary_bytes"
         try:
-            model = GBMRegressor(
-                early_stopping_rounds=2,
-                min_data_in_leaf=4,
-                lambda_l1=0.1,
-                lambda_l2=0.2,
-                min_child_hessian=0.3,
-            )
-            fitted = model.fit(
-                _dense_memoryview([0.0, 1.0, 2.0], 3, 1),
-                [0.0, 1.0, 2.0],
-                eval_set=(_dense_memoryview([0.5, 1.5], 2, 1), [0.4, 1.4]),
-            )
+            with patch(bytes_patch, side_effect=AttributeError("mocked for test")):
+                model = GBMRegressor(
+                    early_stopping_rounds=2,
+                    min_data_in_leaf=4,
+                    lambda_l1=0.1,
+                    lambda_l2=0.2,
+                    min_child_hessian=0.3,
+                )
+                fitted = model.fit(
+                    _dense_memoryview([0.0, 1.0, 2.0], 3, 1),
+                    [0.0, 1.0, 2.0],
+                    eval_set=(_dense_memoryview([0.5, 1.5], 2, 1), [0.4, 1.4]),
+                )
         finally:
             regressor_module._load_native_train_regression_artifact_dense_with_summary = (
                 original_loader
