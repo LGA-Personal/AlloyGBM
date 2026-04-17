@@ -323,7 +323,11 @@ impl Predictor {
         let convert = |node: &mut PredictorTreeNode, fi: usize| {
             let cuts = &feature_cuts[fi];
             let bin = node.threshold_bin as usize;
-            node.threshold_bin = if bin < cuts.len() { cuts[bin] } else { f32::MAX };
+            node.threshold_bin = if bin < cuts.len() {
+                cuts[bin]
+            } else {
+                f32::MAX
+            };
         };
         for tree in &mut self.trees {
             for node in tree.nodes_by_local_id.iter_mut().flatten() {
