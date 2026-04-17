@@ -806,6 +806,67 @@ def _classifier_factories(
     return factories
 
 
+def _multiclass_classifier_factories(
+    gbm_classifier_cls: type,
+    catboost_classifier_cls: type | None,
+    n_classes: int,
+    seed: int,
+    learning_rate: float,
+    max_depth: int,
+    rounds: int,
+    alloy_continuous_binning_strategy: str,
+    alloy_continuous_binning_max_bins: int,
+) -> dict:
+    from lightgbm import LGBMClassifier
+    from xgboost import XGBClassifier
+
+    alloy_params = _build_alloy_params(
+        gbm_classifier_cls, seed, learning_rate, max_depth, rounds,
+        alloy_continuous_binning_strategy, alloy_continuous_binning_max_bins,
+    )
+    factories: dict[str, Callable[[], object]] = {
+        "alloygbm": lambda: gbm_classifier_cls(**alloy_params),
+        "lightgbm": lambda: LGBMClassifier(
+            objective="multiclass",
+            num_class=n_classes,
+            learning_rate=learning_rate,
+            max_depth=max_depth,
+            n_estimators=rounds,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=seed,
+            n_jobs=1,
+            verbose=-1,
+        ),
+        "xgboost": lambda: XGBClassifier(
+            objective="multi:softprob",
+            num_class=n_classes,
+            eval_metric="mlogloss",
+            learning_rate=learning_rate,
+            max_depth=max_depth,
+            n_estimators=rounds,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=seed,
+            n_jobs=1,
+            tree_method="hist",
+            verbosity=0,
+        ),
+    }
+    if catboost_classifier_cls is not None:
+        factories["catboost"] = lambda: catboost_classifier_cls(
+            loss_function="MultiClass",
+            learning_rate=learning_rate,
+            depth=max_depth,
+            iterations=rounds,
+            random_seed=seed,
+            verbose=False,
+            allow_writing_files=False,
+            thread_count=1,
+        )
+    return factories
+
+
 def _ranker_factories(
     gbm_ranker_cls: type,
     catboost_available: bool,
@@ -1357,10 +1418,21 @@ def main(argv: list[str]) -> int:
                     group_column = None
 
                 # Select factories for this task type.
-                if task_type in ("classification", "multiclass_classification"):
+                # For multiclass_classification, factories are deferred until
+                # after _split_dataset because n_classes requires y_train.
+                if task_type == "classification":
                     factories = _classifier_factories(
                         gbm_classifier_cls=gbm_classifier_cls,
                         catboost_classifier_cls=catboost_classifier_cls,
+                        **common_factory_args,
+                    )
+                elif task_type == "multiclass_classification":
+                    # Use a placeholder factory dict for error-record model names;
+                    # real factories are built after _split_dataset below.
+                    factories = _multiclass_classifier_factories(
+                        gbm_classifier_cls=gbm_classifier_cls,
+                        catboost_classifier_cls=catboost_classifier_cls,
+                        n_classes=2,  # placeholder; overwritten after split
                         **common_factory_args,
                     )
                 elif task_type == "ranking":
@@ -1399,6 +1471,16 @@ def main(argv: list[str]) -> int:
                             run_index, seed, model_name, error,
                         ))
                     continue
+
+                # Rebuild multiclass factories now that y_train is available.
+                if task_type == "multiclass_classification":
+                    n_classes = int(len(np.unique(y_train)))
+                    factories = _multiclass_classifier_factories(
+                        gbm_classifier_cls=gbm_classifier_cls,
+                        catboost_classifier_cls=catboost_classifier_cls,
+                        n_classes=n_classes,
+                        **common_factory_args,
+                    )
 
                 for model_name, factory in factories.items():
                     record = _run_model(
