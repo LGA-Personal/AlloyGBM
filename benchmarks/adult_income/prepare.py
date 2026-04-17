@@ -95,7 +95,12 @@ def _normalize(raw_path: Path, prepared_path: Path) -> None:
                 if col in CATEGORICAL_COLUMNS:
                     out[col] = encodings[col][raw_row[col]]
                 else:
-                    out[col] = float(raw_row[col])
+                    # Add 0.5 so integer-valued columns (e.g. capital_gain=99999) are not
+                    # misidentified as pre-binned bin IDs by AlloyGBM's training path, which
+                    # casts to f32 (tolerance 1e-6) before the integer check — 1e-8 is lost
+                    # at that scale. Adding 0.5 survives f32 cast at any scale and does not
+                    # affect GBDT split ordering (constant shift is irrelevant for thresholds).
+                    out[col] = float(raw_row[col]) + 0.5
             income_raw = raw_row["income"].rstrip(".")
             out["income"] = 1 if income_raw == ">50K" else 0
             writer.writerow(out)
