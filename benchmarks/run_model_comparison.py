@@ -523,7 +523,7 @@ def _run_model(
         multiclass_proba: np.ndarray | None = None
         if task_type in ("classification", "multiclass_classification") and hasattr(model, "predict_proba"):
             proba = np.array(model.predict_proba(x_test), dtype=float)
-            if task_type == "multiclass_classification" and proba.ndim == 2 and proba.shape[1] > 2:
+            if task_type == "multiclass_classification" and proba.ndim == 2:
                 multiclass_proba = proba
                 class_predictions = np.argmax(proba, axis=1)
                 predictions = class_predictions.astype(float)
@@ -1175,6 +1175,7 @@ def _render_results_markdown(
     # Best-metric sections by task type.
     reg_summary = summary[summary["task_type"] == "regression"] if "task_type" in summary.columns else summary
     clf_summary = summary[summary["task_type"] == "classification"] if "task_type" in summary.columns else pd.DataFrame()
+    multiclf_summary = summary[summary["task_type"] == "multiclass_classification"] if "task_type" in summary.columns else pd.DataFrame()
     rank_summary = summary[summary["task_type"] == "ranking"] if "task_type" in summary.columns else pd.DataFrame()
 
     best_rmse = _best_rows_by_scenario(reg_summary, metric="rmse_median", ascending=True)
@@ -1191,6 +1192,20 @@ def _render_results_markdown(
         lines.extend(["| scenario | profile | model | accuracy_median |", "| --- | --- | --- | ---: |"])
         for _, row in best_acc.iterrows():
             lines.append(f"| {row['scenario']} | {row['profile_name']} | {row['model']} | {row['accuracy_median']:.6f} |")
+        lines.append("")
+
+    best_accuracy_multiclass = _best_rows_by_scenario(multiclf_summary, metric="accuracy_median", ascending=False)
+    if not best_accuracy_multiclass.empty:
+        lines.extend(["#### Best Accuracy by Scenario (Multiclass Classification)", ""])
+        lines.extend([
+            "| scenario | model | profile | accuracy_median | log_loss_median |",
+            "| --- | --- | --- | ---: | ---: |",
+        ])
+        for _, row in best_accuracy_multiclass.iterrows():
+            lines.append(
+                f"| {row['scenario']} | {row['model']} | {row['profile_name']} "
+                f"| {row['accuracy_median']:.6f} | {row['log_loss_val_median']:.6f} |"
+            )
         lines.append("")
 
     best_ndcg = _best_rows_by_scenario(rank_summary, metric="ndcg_full_median", ascending=False)

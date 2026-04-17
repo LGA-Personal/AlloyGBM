@@ -28,7 +28,7 @@ CATEGORICAL_COLUMNS = [
     "relationship", "race", "sex", "native_country",
 ]
 
-FEATURE_COLUMNS = [c for c in COLUMNS if c != "income"]
+FEATURE_COLUMNS = [c for c in COLUMNS if c not in ("income", "fnlwgt")]
 
 
 def _download(url: str, destination: Path) -> None:
