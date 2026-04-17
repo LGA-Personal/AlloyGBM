@@ -1,0 +1,14 @@
+name: abalone_regression
+version: 1
+kind: uci_download
+task_type: regression
+description: Regression benchmark predicting abalone age (rings) from physical measurements.
+source:
+  dataset: abalone
+  url: https://archive.ics.uci.edu/ml/machine-learning-databases/abalone/abalone.data
+prepared:
+  filename: prepared.csv
+  target: rings
+  note: >
+    4177 rows, 8 features. Sex encoded as integer (F=0, I=1, M=2).
+    Target is rings count (age ≈ rings + 1.5). Dense numeric with one ordinal feature.

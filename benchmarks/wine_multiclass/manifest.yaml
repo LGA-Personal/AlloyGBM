@@ -1,0 +1,12 @@
+name: wine_multiclass
+version: 1
+kind: sklearn_fetch
+task_type: multiclass_classification
+description: Multi-class classification benchmark from sklearn's Wine dataset (wine cultivar).
+source:
+  dataset: wine
+  url: https://scikit-learn.org/stable/datasets/toy_dataset.html
+prepared:
+  filename: prepared.csv
+  target: target
+  note: 3-class classification (cultivar 0/1/2) with 13 numeric features, 178 samples.

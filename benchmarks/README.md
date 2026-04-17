@@ -1,50 +1,71 @@
 # Benchmark Dataset Workspace
 
-This directory organizes benchmark dataset preparation and cross-library comparison for AlloyGBM.
+This directory organizes benchmark dataset preparation and cross-library model comparison for AlloyGBM.
+
+## Scenario Overview
+
+| Scenario | Task | Source | Rows | Features | Notes |
+|---|---|---|---|---|---|
+| `california_housing` | regression | sklearn | 20640 | 8 | Geography-based price prediction |
+| `bike_sharing` | regression | UCI | ~17389 | 11 | Time-series with temporal split |
+| `dense_numeric` | regression | UCI (Wine Quality) | 1599 | 11 | Dense continuous, no categoricals |
+| `panel_time_series` | regression | UCI (Air Quality) | ~9471 | 11 | Panel with next-step target |
+| `histogram_stress` | regression | synthetic | 50000 | 32 | Skewed + quantized histogram pressure |
+| `dow_jones_financial` | regression | UCI | ~750 | 10 | Low-SNR financial, temporal split |
+| `abalone_regression` | regression | UCI | 4177 | 8 | Age prediction, 1 ordinal feature |
+| `synthetic_categorical` | regression | synthetic | 10000 | 15 | Categorical interaction target |
+| `breast_cancer` | classification | sklearn | 569 | 30 | Binary, Wisconsin diagnostic |
+| `adult_income` | classification | UCI | ~30000 | 13 | Binary income >50K, mixed features |
+| `synthetic_classification` | classification | synthetic | 50000 | 32 | Binary, weighted linear + nonlinear |
+| `wine_multiclass` | multiclass | sklearn | 178 | 13 | 3-class cultivar identification |
+| `digits_multiclass` | multiclass | sklearn | 1797 | 64 | 10-class digit recognition |
+| `synthetic_multiclass` | multiclass | synthetic | 10000 | 20 | 5-class cluster-based boundaries |
+| `synthetic_ranking` | ranking | synthetic | 5000 | 16 | 200 queries × 25 docs, 5-level relevance |
 
 ## Layout
 
-- `dense_numeric/`
-  - `manifest.yaml`
-  - `prepare.py`
-- `california_housing/`
-  - `manifest.yaml`
-  - `prepare.py`
-- `bike_sharing/`
-  - `manifest.yaml`
-  - `prepare.py`
-- `panel_time_series/`
-  - `manifest.yaml`
-  - `prepare.py`
-- `histogram_stress/`
-  - `manifest.yaml`
-  - `prepare.py`
-- `dow_jones_financial/`
-  - `manifest.yaml`
-  - `prepare.py`
+Each scenario is a directory containing:
 
-Generated data is written under `benchmarks/data/` (ignored by git).
+- `manifest.yaml` — metadata (name, task type, source, target column, optional group column)
+- `prepare.py` — standalone script that downloads (if needed) and writes `prepared.csv`
+
+Generated data is written under `benchmarks/data/` (git-ignored).
 
 ## Usage
 
-Examples:
+### Prepare individual scenarios
 
 ```bash
+# sklearn scenarios (no download needed)
+python3 benchmarks/breast_cancer/prepare.py
+python3 benchmarks/wine_multiclass/prepare.py
+python3 benchmarks/digits_multiclass/prepare.py
+
+# UCI download scenarios
+python3 benchmarks/adult_income/prepare.py
+python3 benchmarks/abalone_regression/prepare.py
 python3 benchmarks/dense_numeric/prepare.py
-python3 benchmarks/california_housing/prepare.py
 python3 benchmarks/bike_sharing/prepare.py
 python3 benchmarks/panel_time_series/prepare.py --max-rows 150000
-python3 benchmarks/histogram_stress/prepare.py --rows 100000 --features 48
 python3 benchmarks/dow_jones_financial/prepare.py --force-download
+
+# Synthetic scenarios
+python3 benchmarks/synthetic_classification/prepare.py
+python3 benchmarks/synthetic_multiclass/prepare.py
+python3 benchmarks/synthetic_categorical/prepare.py
+python3 benchmarks/synthetic_ranking/prepare.py
+python3 benchmarks/histogram_stress/prepare.py --rows 100000 --features 48
 ```
 
-Cross-package model comparison (speed + accuracy):
+### Cross-library model comparison
+
+Run all scenarios with default profiles and a single seed:
 
 ```bash
 python3 benchmarks/run_model_comparison.py --force-prepare
 ```
 
-Profile matrix comparisons (shallow/mid/deep):
+Profile matrix (shallow / mid / deep) with 3 seeds:
 
 ```bash
 python3 benchmarks/run_model_comparison.py \
@@ -53,17 +74,48 @@ python3 benchmarks/run_model_comparison.py \
   --profile-seeds 7,17,29
 ```
 
-Focused real-application comparison on the expanded public regression set:
+Focused multiclass run (demonstrates AlloyGBM's softmax classification):
 
 ```bash
 python3 benchmarks/run_model_comparison.py \
   --force-prepare \
-  --scenarios california_housing bike_sharing dense_numeric panel_time_series dow_jones_financial \
+  --scenarios wine_multiclass digits_multiclass synthetic_multiclass \
+  --profile-grid default \
+  --profile-seeds 7,17,29
+```
+
+Classification head-to-head (binary + multiclass):
+
+```bash
+python3 benchmarks/run_model_comparison.py \
+  --force-prepare \
+  --scenarios breast_cancer adult_income wine_multiclass digits_multiclass synthetic_multiclass \
+  --profile-grid default \
+  --profile-seeds 7,17,29
+```
+
+Ranking focused run:
+
+```bash
+python3 benchmarks/run_model_comparison.py \
+  --force-prepare \
+  --scenarios synthetic_ranking \
+  --profile-grid default \
+  --profile-seeds 7,17,29
+```
+
+Focused real UCI regression set:
+
+```bash
+python3 benchmarks/run_model_comparison.py \
+  --force-prepare \
+  --scenarios california_housing bike_sharing dense_numeric panel_time_series \
+              dow_jones_financial abalone_regression \
   --profile-grid default \
   --profile-seeds 7
 ```
 
-Alloy continuous-feature binning strategy A/B:
+Continuous-feature binning strategy A/B:
 
 ```bash
 python3 benchmarks/run_model_comparison.py \
@@ -76,14 +128,7 @@ python3 benchmarks/run_model_comparison.py \
 
 Supported values: `linear` (default), `rank`, `quantile`.
 
-The benchmark runner now validates the loaded `alloygbm` runtime contract before running:
-
-- `GBMRegressor` must expose benchmark training controls (`n_estimators`, subsampling knobs).
-- native extension must expose `train_regression_artifact`.
-
-If the runtime check fails, benchmarks stop early with an actionable error instead of silently benchmarking a stale baseline package.
-
-Optional ultra profile (`10000` rounds) on constrained scenarios:
+Ultra profile (10000 rounds) on constrained scenarios:
 
 ```bash
 python3 benchmarks/run_model_comparison.py \
@@ -93,40 +138,57 @@ python3 benchmarks/run_model_comparison.py \
   --scenarios dense_numeric dow_jones_financial
 ```
 
-Outputs are written to `benchmarks/results/`:
+## Outputs
 
-- `model_comparison_latest.csv`
-- `model_comparison_latest.json`
-- `model_comparison_latest.md`
-- `model_comparison_profile_summary_latest.csv`
-- `model_comparison_profile_summary_latest.json`
+Results are written to `benchmarks/results/`:
 
-Per-record timing output now includes:
+- `model_comparison_latest.csv` — per-record raw results
+- `model_comparison_latest.json` — raw results + run metadata
+- `model_comparison_latest.md` — formatted report with per-task-type tables
+- `model_comparison_profile_summary_latest.csv` — aggregated by (scenario, profile, model)
 
-- `input_adaptation_seconds`
-- `native_bridge_prepare_seconds`
-- `native_train_seconds`
-- `fit_seconds`
-- `predict_seconds`
+## Runtime Contract Validation
 
-Those stage timings are intended to separate Python-side adaptation cost from
-native trainer cost when AlloyGBM changes.
+The runner validates the loaded `alloygbm` runtime before any benchmarks run:
 
-Each `prepare.py` script is self-contained and uses:
+- `GBMRegressor` must expose `n_estimators`, `learning_rate`, `max_depth`, `row_subsample`, `col_subsample`.
+- The native extension must expose `train_regression_artifact`.
 
-- UCI direct URLs where applicable.
-- `scikit-learn` fetchers where the dataset is already a stable public benchmark fixture.
-- Python stdlib download flow with fallback to `curl`/`wget` when available.
-- Deterministic output conventions suitable for repeatable benchmark runs.
+If the check fails, benchmarks stop early with a descriptive error instead of silently benchmarking a stale build.
 
-Temporal leakage safeguards:
+## Per-record Timing
 
-- `panel_time_series` uses a next-timestep target (`target_co_gt`) rather than same-timestep target duplication.
-- `dow_jones_financial` excludes forward-looking `next_weeks_*` fields from model features and keeps only the target as future information.
-- `run_model_comparison.py` performs timestamp-boundary splits so a timestamp cannot appear in both train and test partitions.
+Each record captures:
 
-Continuous-feature training notes:
+| Field | Meaning |
+|---|---|
+| `input_adaptation_seconds` | Python-side data conversion to AlloyGBM format |
+| `native_bridge_prepare_seconds` | Rust bridge preparation before training |
+| `native_train_seconds` | Rust training loop |
+| `fit_seconds` | Total `model.fit()` wall time |
+| `predict_seconds` | Total `model.predict()` wall time |
 
-- Alloy native training now accepts continuous float features via deterministic native quantization inside the Rust training path.
-- Capacity/profile diagnostics should be interpreted from repeated profile runs (`--profile-grid default --profile-seeds 7,17,29`), not single-seed snapshots.
-- Low-SNR financial scenarios (for example `dow_jones_financial`) can show small RMSE spread across profiles even when predictions/artifact capacity differ materially.
+The split between `native_bridge_prepare_seconds` and `native_train_seconds` isolates AlloyGBM-specific overhead from the core gradient-boosting loop.
+
+## Split Strategies
+
+| Task type | Split strategy |
+|---|---|
+| `regression` | Random split |
+| `classification` | Stratified on class label |
+| `multiclass_classification` | Stratified on class label |
+| `ranking` | Group-aware (whole queries stay together) |
+| Time-series scenarios | Timestamp-boundary split (no timestamp appears in both train and test) |
+
+## Temporal Leakage Safeguards
+
+- `panel_time_series`: uses a next-timestep target (`target_co_gt`) rather than same-timestep duplication.
+- `dow_jones_financial`: excludes forward-looking `next_weeks_*` fields from features; only the target carries future information.
+- All time-series scenarios: `run_model_comparison.py` enforces timestamp-boundary splits.
+
+## Adding a New Scenario
+
+1. Create `benchmarks/<scenario_name>/manifest.yaml` following the schema in any existing manifest.
+2. Create `benchmarks/<scenario_name>/prepare.py` following the pattern in `breast_cancer/prepare.py` (sklearn) or `dense_numeric/prepare.py` (UCI download).
+3. Add `"<scenario_name>"` to `AVAILABLE_SCENARIOS` in `run_model_comparison.py`.
+4. Run `python3 benchmarks/run_model_comparison.py --force-prepare --scenarios <scenario_name>` to verify end-to-end.

@@ -28,15 +28,26 @@ from sklearn.metrics import (
 from sklearn.model_selection import train_test_split
 
 AVAILABLE_SCENARIOS = [
+    # Regression
     "california_housing",
     "bike_sharing",
     "dense_numeric",
     "panel_time_series",
     "histogram_stress",
     "dow_jones_financial",
+    "abalone_regression",
+    "synthetic_categorical",
+    # Binary classification
     "breast_cancer",
+    "adult_income",
     "synthetic_classification",
+    # Multiclass classification
+    "wine_multiclass",
+    "digits_multiclass",
+    "synthetic_multiclass",
+    # Ranking
     "synthetic_ranking",
+    # "news_ranking",  # Uncomment once prepare.py is implemented
 ]
 
 
@@ -379,8 +390,8 @@ def _split_dataset(
             g_test,
         )
 
-    # Classification: stratified split.
-    if task_type == "classification":
+    # Classification (binary and multiclass): stratified split.
+    if task_type in ("classification", "multiclass_classification"):
         feature_frame = frame.drop(
             columns=[target_column, "group_id", "timestamp"], errors="ignore"
         ).copy()
@@ -509,11 +520,19 @@ def _run_model(
 
         predict_start = time.perf_counter()
         class_predictions = None
-        if task_type == "classification" and hasattr(model, "predict_proba"):
+        multiclass_proba: np.ndarray | None = None
+        if task_type in ("classification", "multiclass_classification") and hasattr(model, "predict_proba"):
             proba = np.array(model.predict_proba(x_test), dtype=float)
-            prob_positive = proba[:, 1] if proba.ndim == 2 else proba
-            class_predictions = (prob_positive >= 0.5).astype(int)
-            predictions = prob_positive
+            if task_type == "multiclass_classification" and proba.ndim == 2:
+                multiclass_proba = proba
+                col_indices = np.argmax(proba, axis=1)
+                classes = getattr(model, "classes_", None)
+                class_predictions = np.asarray(classes)[col_indices] if classes is not None else col_indices
+                predictions = class_predictions.astype(float)
+            else:
+                prob_positive = proba[:, 1] if proba.ndim == 2 else proba
+                class_predictions = (prob_positive >= 0.5).astype(int)
+                predictions = prob_positive
         else:
             predictions = np.array(model.predict(x_test), dtype=float)
         predict_seconds = time.perf_counter() - predict_start
@@ -537,6 +556,13 @@ def _run_model(
                 auc_val = float(roc_auc_score(y_test, predictions))
             except ValueError:
                 auc_val = nan
+        elif task_type == "multiclass_classification":
+            if class_predictions is None:
+                class_predictions = predictions.astype(int)
+            accuracy_val = float(accuracy_score(y_test, class_predictions))
+            if multiclass_proba is not None:
+                log_loss_metric = float(sklearn_log_loss(y_test, multiclass_proba))
+            # auc_val stays nan for multiclass
         elif task_type == "ranking":
             from alloygbm.evaluation import ndcg as alloy_ndcg
             ndcg_5_val = float(
@@ -771,6 +797,67 @@ def _classifier_factories(
     if catboost_classifier_cls is not None:
         factories["catboost"] = lambda: catboost_classifier_cls(
             loss_function="Logloss",
+            learning_rate=learning_rate,
+            depth=max_depth,
+            iterations=rounds,
+            random_seed=seed,
+            verbose=False,
+            allow_writing_files=False,
+            thread_count=1,
+        )
+    return factories
+
+
+def _multiclass_classifier_factories(
+    gbm_classifier_cls: type,
+    catboost_classifier_cls: type | None,
+    n_classes: int,
+    seed: int,
+    learning_rate: float,
+    max_depth: int,
+    rounds: int,
+    alloy_continuous_binning_strategy: str,
+    alloy_continuous_binning_max_bins: int,
+) -> dict:
+    from lightgbm import LGBMClassifier
+    from xgboost import XGBClassifier
+
+    alloy_params = _build_alloy_params(
+        gbm_classifier_cls, seed, learning_rate, max_depth, rounds,
+        alloy_continuous_binning_strategy, alloy_continuous_binning_max_bins,
+    )
+    factories: dict[str, Callable[[], object]] = {
+        "alloygbm": lambda: gbm_classifier_cls(**alloy_params),
+        "lightgbm": lambda: LGBMClassifier(
+            objective="multiclass",
+            num_class=n_classes,
+            learning_rate=learning_rate,
+            max_depth=max_depth,
+            n_estimators=rounds,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=seed,
+            n_jobs=1,
+            verbose=-1,
+        ),
+        "xgboost": lambda: XGBClassifier(
+            objective="multi:softprob",
+            num_class=n_classes,
+            eval_metric="mlogloss",
+            learning_rate=learning_rate,
+            max_depth=max_depth,
+            n_estimators=rounds,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=seed,
+            n_jobs=1,
+            tree_method="hist",
+            verbosity=0,
+        ),
+    }
+    if catboost_classifier_cls is not None:
+        factories["catboost"] = lambda: catboost_classifier_cls(
+            loss_function="MultiClass",
             learning_rate=learning_rate,
             depth=max_depth,
             iterations=rounds,
@@ -1032,6 +1119,8 @@ def _render_results_markdown(
          lambda r: f"{r['rmse']:.6f} | {r['mae']:.6f} | {r['r2']:.6f}"),
         ("classification", "Classification", "accuracy | log_loss | auc", "---: | ---: | ---:",
          lambda r: f"{r['accuracy']:.6f} | {r['log_loss_val']:.6f} | {r['auc']:.6f}"),
+        ("multiclass_classification", "Multiclass Classification", "accuracy | log_loss", "---: | ---:",
+         lambda r: f"{r['accuracy']:.6f} | {r['log_loss_val']:.6f}"),
         ("ranking", "Ranking", "ndcg@5 | ndcg@10 | ndcg", "---: | ---: | ---:",
          lambda r: f"{r['ndcg_5']:.6f} | {r['ndcg_10']:.6f} | {r['ndcg_full']:.6f}"),
     ]:
@@ -1063,6 +1152,8 @@ def _render_results_markdown(
          lambda r: f"{r['rmse_median']:.6f} | {r['mae_median']:.6f} | {r['r2_median']:.6f}"),
         ("classification", "Classification", "accuracy_median | log_loss_median | auc_median", "---: | ---: | ---:",
          lambda r: f"{r['accuracy_median']:.6f} | {r['log_loss_val_median']:.6f} | {r['auc_median']:.6f}"),
+        ("multiclass_classification", "Multiclass Classification", "accuracy_median | log_loss_median", "---: | ---:",
+         lambda r: f"{r['accuracy_median']:.6f} | {r['log_loss_val_median']:.6f}"),
         ("ranking", "Ranking", "ndcg@5_median | ndcg@10_median | ndcg_median", "---: | ---: | ---:",
          lambda r: f"{r['ndcg_5_median']:.6f} | {r['ndcg_10_median']:.6f} | {r['ndcg_full_median']:.6f}"),
     ]:
@@ -1086,6 +1177,7 @@ def _render_results_markdown(
     # Best-metric sections by task type.
     reg_summary = summary[summary["task_type"] == "regression"] if "task_type" in summary.columns else summary
     clf_summary = summary[summary["task_type"] == "classification"] if "task_type" in summary.columns else pd.DataFrame()
+    multiclf_summary = summary[summary["task_type"] == "multiclass_classification"] if "task_type" in summary.columns else pd.DataFrame()
     rank_summary = summary[summary["task_type"] == "ranking"] if "task_type" in summary.columns else pd.DataFrame()
 
     best_rmse = _best_rows_by_scenario(reg_summary, metric="rmse_median", ascending=True)
@@ -1102,6 +1194,20 @@ def _render_results_markdown(
         lines.extend(["| scenario | profile | model | accuracy_median |", "| --- | --- | --- | ---: |"])
         for _, row in best_acc.iterrows():
             lines.append(f"| {row['scenario']} | {row['profile_name']} | {row['model']} | {row['accuracy_median']:.6f} |")
+        lines.append("")
+
+    best_accuracy_multiclass = _best_rows_by_scenario(multiclf_summary, metric="accuracy_median", ascending=False)
+    if not best_accuracy_multiclass.empty:
+        lines.extend(["#### Best Accuracy by Scenario (Multiclass Classification)", ""])
+        lines.extend([
+            "| scenario | model | profile | accuracy_median | log_loss_median |",
+            "| --- | --- | --- | ---: | ---: |",
+        ])
+        for _, row in best_accuracy_multiclass.iterrows():
+            lines.append(
+                f"| {row['scenario']} | {row['model']} | {row['profile_name']} "
+                f"| {row['accuracy_median']:.6f} | {row['log_loss_val_median']:.6f} |"
+            )
         lines.append("")
 
     best_ndcg = _best_rows_by_scenario(rank_summary, metric="ndcg_full_median", ascending=False)
@@ -1329,10 +1435,21 @@ def main(argv: list[str]) -> int:
                     group_column = None
 
                 # Select factories for this task type.
+                # For multiclass_classification, factories are deferred until
+                # after _split_dataset because n_classes requires y_train.
                 if task_type == "classification":
                     factories = _classifier_factories(
                         gbm_classifier_cls=gbm_classifier_cls,
                         catboost_classifier_cls=catboost_classifier_cls,
+                        **common_factory_args,
+                    )
+                elif task_type == "multiclass_classification":
+                    # Use a placeholder factory dict for error-record model names;
+                    # real factories are built after _split_dataset below.
+                    factories = _multiclass_classifier_factories(
+                        gbm_classifier_cls=gbm_classifier_cls,
+                        catboost_classifier_cls=catboost_classifier_cls,
+                        n_classes=2,  # placeholder; overwritten after split
                         **common_factory_args,
                     )
                 elif task_type == "ranking":
@@ -1372,6 +1489,16 @@ def main(argv: list[str]) -> int:
                         ))
                     continue
 
+                # Rebuild multiclass factories now that y_train is available.
+                if task_type == "multiclass_classification":
+                    n_classes = int(len(np.unique(y_train)))
+                    factories = _multiclass_classifier_factories(
+                        gbm_classifier_cls=gbm_classifier_cls,
+                        catboost_classifier_cls=catboost_classifier_cls,
+                        n_classes=n_classes,
+                        **common_factory_args,
+                    )
+
                 for model_name, factory in factories.items():
                     record = _run_model(
                         model_name=model_name,
@@ -1397,7 +1524,7 @@ def main(argv: list[str]) -> int:
                         f"native={record.native_train_seconds:.4f}s) "
                         f"pred={record.predict_seconds:.4f}s"
                     )
-                    if task_type == "classification":
+                    if task_type in ("classification", "multiclass_classification"):
                         metric_str = f"acc={record.accuracy:.4f} logloss={record.log_loss_val:.6f} auc={record.auc:.4f}"
                     elif task_type == "ranking":
                         metric_str = f"ndcg@5={record.ndcg_5:.4f} ndcg@10={record.ndcg_10:.4f} ndcg={record.ndcg_full:.4f}"

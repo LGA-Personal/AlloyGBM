@@ -274,20 +274,30 @@ impl Predictor {
             )));
         }
         let divisor = max_data_bin as f32;
+        let convert = |node: &mut PredictorTreeNode, fi: usize| {
+            let min_val = feature_mins[fi];
+            let max_val = feature_maxs[fi];
+            let span = max_val - min_val;
+            if span <= f32::EPSILON {
+                node.threshold_bin = min_val + f32::EPSILON;
+            } else {
+                let bin = node.threshold_bin;
+                node.threshold_bin = min_val + ((bin + 0.5) / divisor) * span;
+            }
+        };
         for tree in &mut self.trees {
             for node in tree.nodes_by_local_id.iter_mut().flatten() {
                 let fi = node.feature_index;
-                let min_val = feature_mins[fi];
-                let max_val = feature_maxs[fi];
-                let span = max_val - min_val;
-                if span <= f32::EPSILON {
-                    // Constant feature — any threshold works since all values are equal.
-                    node.threshold_bin = min_val + f32::EPSILON;
-                } else {
-                    // bin = round(((value - min) / span) * max_data_bin)
-                    // Split: bin <= threshold_bin  ↔  value < min + ((threshold_bin + 0.5) / max_data_bin) * span
-                    let bin = node.threshold_bin;
-                    node.threshold_bin = min_val + ((bin + 0.5) / divisor) * span;
+                convert(node, fi);
+            }
+        }
+        if let Some(class_trees) = &mut self.class_trees {
+            for trees in class_trees.iter_mut() {
+                for tree in trees.iter_mut() {
+                    for node in tree.nodes_by_local_id.iter_mut().flatten() {
+                        let fi = node.feature_index;
+                        convert(node, fi);
+                    }
                 }
             }
         }
@@ -310,16 +320,28 @@ impl Predictor {
                 feature_count
             )));
         }
+        let convert = |node: &mut PredictorTreeNode, fi: usize| {
+            let cuts = &feature_cuts[fi];
+            let bin = node.threshold_bin as usize;
+            node.threshold_bin = if bin < cuts.len() {
+                cuts[bin]
+            } else {
+                f32::MAX
+            };
+        };
         for tree in &mut self.trees {
             for node in tree.nodes_by_local_id.iter_mut().flatten() {
                 let fi = node.feature_index;
-                let cuts = &feature_cuts[fi];
-                let bin = node.threshold_bin as usize;
-                if bin < cuts.len() {
-                    node.threshold_bin = cuts[bin];
-                } else {
-                    // All values go left — set threshold beyond any possible value
-                    node.threshold_bin = f32::MAX;
+                convert(node, fi);
+            }
+        }
+        if let Some(class_trees) = &mut self.class_trees {
+            for trees in class_trees.iter_mut() {
+                for tree in trees.iter_mut() {
+                    for node in tree.nodes_by_local_id.iter_mut().flatten() {
+                        let fi = node.feature_index;
+                        convert(node, fi);
+                    }
                 }
             }
         }
@@ -334,6 +356,15 @@ impl Predictor {
         for tree in &mut self.trees {
             for node in tree.nodes_by_local_id.iter_mut().flatten() {
                 node.threshold_bin += 0.5;
+            }
+        }
+        if let Some(class_trees) = &mut self.class_trees {
+            for trees in class_trees.iter_mut() {
+                for tree in trees.iter_mut() {
+                    for node in tree.nodes_by_local_id.iter_mut().flatten() {
+                        node.threshold_bin += 0.5;
+                    }
+                }
             }
         }
         self.use_float_thresholds = true;

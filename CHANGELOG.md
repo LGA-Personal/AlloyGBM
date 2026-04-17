@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.1
+
+### Bug Fixes
+
+- **Multiclass predictor threshold conversion** -- `convert_bin_thresholds_to_float*` functions in `crates/predictor` now correctly convert `class_trees` in addition to `trees`; previously, multiclass models with continuous float features produced near-random predictions because `class_trees` bin-ID thresholds were never converted to float values
+- **Multiclass argmax label mapping** -- benchmark runner maps `np.argmax` column indices through `model.classes_` so accuracy is computed correctly when class labels are not exactly `0..K-1`
+
+### Benchmarks
+
+- **Real-dataset benchmark scenarios** -- added `wine_multiclass` (sklearn Wine, 3-class, 178 rows), `digits_multiclass` (sklearn Digits, 10-class, 1797 rows), `adult_income` (UCI Adult, binary classification, ~30K rows, mixed features), `abalone_regression` (UCI Abalone, regression, 4177 rows), and `news_ranking` (placeholder with setup instructions)
+- **Multiclass classification support** in `run_model_comparison.py` -- stratified split, argmax predictions with label mapping, multiclass log-loss, separate factory functions with correct per-library multiclass objectives
+- **Activated dormant scenarios** -- `synthetic_multiclass` and `synthetic_categorical` are now included in `AVAILABLE_SCENARIOS`
+- **Rewritten `benchmarks/README.md`** -- comprehensive scenario table, task-type split strategies, feature coverage table, per-record timing reference, recently-shipped feature coverage matrix
+
 ## 0.3.0
 
 ### Native Categorical Splits
