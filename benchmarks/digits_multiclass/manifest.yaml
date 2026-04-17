@@ -1,0 +1,12 @@
+name: digits_multiclass
+version: 1
+kind: sklearn_fetch
+task_type: multiclass_classification
+description: Multi-class classification benchmark from sklearn's Optical Recognition of Handwritten Digits.
+source:
+  dataset: digits
+  url: https://scikit-learn.org/stable/datasets/toy_dataset.html
+prepared:
+  filename: prepared.csv
+  target: target
+  note: 10-class digit classification (0-9) with 64 pixel features, 1797 samples.
