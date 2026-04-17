@@ -1,0 +1,25 @@
+name: news_ranking
+version: 1
+# PLACEHOLDER: Replace 'uci_download' with actual kind once source is confirmed.
+kind: uci_download
+task_type: ranking
+description: >
+  Learning-to-rank benchmark. PLACEHOLDER — dataset not yet downloaded.
+  Suitable source: UCI Online News Popularity (39644 articles, 58 features,
+  groups = news data channel, relevance = binned shares 0-4) or
+  MSLR-WEB10K (query-document features, 5-level relevance, standard LTR benchmark).
+source:
+  # PLACEHOLDER: Set to the direct CSV/ZIP URL of your chosen ranking dataset.
+  # Option A (UCI): https://archive.ics.uci.edu/ml/machine-learning-databases/00332/OnlineNewsPopularity.zip
+  # Option B (MSLR): https://www.microsoft.com/en-us/research/project/mslr/ (requires registration)
+  url: "PLACEHOLDER_URL"
+  dataset: "PLACEHOLDER_DATASET_NAME"
+prepared:
+  filename: prepared.csv
+  # PLACEHOLDER: Set to the relevance/score column name in the prepared CSV.
+  target: "PLACEHOLDER_TARGET_COLUMN"
+  # PLACEHOLDER: Set to the group/query ID column name.
+  group_column: "PLACEHOLDER_GROUP_COLUMN"
+  note: >
+    PLACEHOLDER — fill in actual row count, feature count, and group count
+    once the dataset is chosen and prepare.py is implemented.
