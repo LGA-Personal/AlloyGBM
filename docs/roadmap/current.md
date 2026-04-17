@@ -4,7 +4,16 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
-The `0.3.0` release adds native categorical splits, multi-class classification, and custom objective/metric support.
+The `0.3.1` release fixes multiclass prediction correctness and expands the benchmark suite with real-world datasets. The `0.3.0` release added native categorical splits, multi-class classification, and custom objective/metric support.
+
+## What Shipped In 0.3.1
+
+- Fixed multiclass predictor threshold conversion: `class_trees` are now converted in all three threshold-conversion paths (linear, quantile, pre-binned); continuous-feature multiclass models now produce correct predictions
+- Fixed multiclass benchmark argmax label mapping: `model.classes_` is now used so accuracy is correct for non-zero-indexed labels
+- Added real-dataset benchmark scenarios: `wine_multiclass`, `digits_multiclass`, `adult_income`, `abalone_regression`
+- Added `news_ranking` placeholder scenario with dataset selection instructions
+- Activated `synthetic_multiclass` and `synthetic_categorical` benchmark scenarios
+- Rewrote `benchmarks/README.md` with scenario table, feature coverage matrix, timing reference, and usage examples
 
 ## What Shipped In 0.3.0
 

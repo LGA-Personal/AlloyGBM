@@ -525,7 +525,9 @@ def _run_model(
             proba = np.array(model.predict_proba(x_test), dtype=float)
             if task_type == "multiclass_classification" and proba.ndim == 2:
                 multiclass_proba = proba
-                class_predictions = np.argmax(proba, axis=1)
+                col_indices = np.argmax(proba, axis=1)
+                classes = getattr(model, "classes_", None)
+                class_predictions = np.asarray(classes)[col_indices] if classes is not None else col_indices
                 predictions = class_predictions.astype(float)
             else:
                 prob_positive = proba[:, 1] if proba.ndim == 2 else proba

@@ -26,7 +26,7 @@ AlloyGBM/
       evaluation.py        # Metrics: rmse, mae, r2_score, accuracy, log_loss, ndcg, etc.
       validation.py        # Purged time-series and panel cross-validation splits
   docs/
-    limitations.md         # Current limitation analysis (v0.3.0)
+    limitations.md         # Current limitation analysis (v0.3.1)
     plans/                 # Implementation plans (historical, archived copy in docs/archive/v0.1_plans/)
   benchmarks/              # Cross-library comparison (regression, classification, ranking)
 ```
