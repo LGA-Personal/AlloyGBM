@@ -28,15 +28,26 @@ from sklearn.metrics import (
 from sklearn.model_selection import train_test_split
 
 AVAILABLE_SCENARIOS = [
+    # Regression
     "california_housing",
     "bike_sharing",
     "dense_numeric",
     "panel_time_series",
     "histogram_stress",
     "dow_jones_financial",
+    "abalone_regression",
+    "synthetic_categorical",
+    # Binary classification
     "breast_cancer",
+    "adult_income",
     "synthetic_classification",
+    # Multiclass classification
+    "wine_multiclass",
+    "digits_multiclass",
+    "synthetic_multiclass",
+    # Ranking
     "synthetic_ranking",
+    # "news_ranking",  # Uncomment once prepare.py is implemented
 ]
 
 
@@ -379,8 +390,8 @@ def _split_dataset(
             g_test,
         )
 
-    # Classification: stratified split.
-    if task_type == "classification":
+    # Classification (binary and multiclass): stratified split.
+    if task_type in ("classification", "multiclass_classification"):
         feature_frame = frame.drop(
             columns=[target_column, "group_id", "timestamp"], errors="ignore"
         ).copy()
@@ -509,11 +520,17 @@ def _run_model(
 
         predict_start = time.perf_counter()
         class_predictions = None
-        if task_type == "classification" and hasattr(model, "predict_proba"):
+        multiclass_proba: np.ndarray | None = None
+        if task_type in ("classification", "multiclass_classification") and hasattr(model, "predict_proba"):
             proba = np.array(model.predict_proba(x_test), dtype=float)
-            prob_positive = proba[:, 1] if proba.ndim == 2 else proba
-            class_predictions = (prob_positive >= 0.5).astype(int)
-            predictions = prob_positive
+            if task_type == "multiclass_classification" and proba.ndim == 2 and proba.shape[1] > 2:
+                multiclass_proba = proba
+                class_predictions = np.argmax(proba, axis=1)
+                predictions = class_predictions.astype(float)
+            else:
+                prob_positive = proba[:, 1] if proba.ndim == 2 else proba
+                class_predictions = (prob_positive >= 0.5).astype(int)
+                predictions = prob_positive
         else:
             predictions = np.array(model.predict(x_test), dtype=float)
         predict_seconds = time.perf_counter() - predict_start
@@ -537,6 +554,13 @@ def _run_model(
                 auc_val = float(roc_auc_score(y_test, predictions))
             except ValueError:
                 auc_val = nan
+        elif task_type == "multiclass_classification":
+            if class_predictions is None:
+                class_predictions = predictions.astype(int)
+            accuracy_val = float(accuracy_score(y_test, class_predictions))
+            if multiclass_proba is not None:
+                log_loss_metric = float(sklearn_log_loss(y_test, multiclass_proba))
+            # auc_val stays nan for multiclass
         elif task_type == "ranking":
             from alloygbm.evaluation import ndcg as alloy_ndcg
             ndcg_5_val = float(
@@ -1032,6 +1056,8 @@ def _render_results_markdown(
          lambda r: f"{r['rmse']:.6f} | {r['mae']:.6f} | {r['r2']:.6f}"),
         ("classification", "Classification", "accuracy | log_loss | auc", "---: | ---: | ---:",
          lambda r: f"{r['accuracy']:.6f} | {r['log_loss_val']:.6f} | {r['auc']:.6f}"),
+        ("multiclass_classification", "Multiclass Classification", "accuracy | log_loss", "---: | ---:",
+         lambda r: f"{r['accuracy']:.6f} | {r['log_loss_val']:.6f}"),
         ("ranking", "Ranking", "ndcg@5 | ndcg@10 | ndcg", "---: | ---: | ---:",
          lambda r: f"{r['ndcg_5']:.6f} | {r['ndcg_10']:.6f} | {r['ndcg_full']:.6f}"),
     ]:
@@ -1063,6 +1089,8 @@ def _render_results_markdown(
          lambda r: f"{r['rmse_median']:.6f} | {r['mae_median']:.6f} | {r['r2_median']:.6f}"),
         ("classification", "Classification", "accuracy_median | log_loss_median | auc_median", "---: | ---: | ---:",
          lambda r: f"{r['accuracy_median']:.6f} | {r['log_loss_val_median']:.6f} | {r['auc_median']:.6f}"),
+        ("multiclass_classification", "Multiclass Classification", "accuracy_median | log_loss_median", "---: | ---:",
+         lambda r: f"{r['accuracy_median']:.6f} | {r['log_loss_val_median']:.6f}"),
         ("ranking", "Ranking", "ndcg@5_median | ndcg@10_median | ndcg_median", "---: | ---: | ---:",
          lambda r: f"{r['ndcg_5_median']:.6f} | {r['ndcg_10_median']:.6f} | {r['ndcg_full_median']:.6f}"),
     ]:
@@ -1329,7 +1357,7 @@ def main(argv: list[str]) -> int:
                     group_column = None
 
                 # Select factories for this task type.
-                if task_type == "classification":
+                if task_type in ("classification", "multiclass_classification"):
                     factories = _classifier_factories(
                         gbm_classifier_cls=gbm_classifier_cls,
                         catboost_classifier_cls=catboost_classifier_cls,
@@ -1397,7 +1425,7 @@ def main(argv: list[str]) -> int:
                         f"native={record.native_train_seconds:.4f}s) "
                         f"pred={record.predict_seconds:.4f}s"
                     )
-                    if task_type == "classification":
+                    if task_type in ("classification", "multiclass_classification"):
                         metric_str = f"acc={record.accuracy:.4f} logloss={record.log_loss_val:.6f} auc={record.auc:.4f}"
                     elif task_type == "ranking":
                         metric_str = f"ndcg@5={record.ndcg_5:.4f} ndcg@10={record.ndcg_10:.4f} ndcg={record.ndcg_full:.4f}"
