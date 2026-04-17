@@ -1,0 +1,16 @@
+name: adult_income
+version: 1
+kind: uci_download
+task_type: classification
+description: Binary income classification from UCI Adult (Census Income) dataset.
+source:
+  dataset: adult
+  url: https://archive.ics.uci.edu/ml/machine-learning-databases/adult/adult.data
+prepared:
+  filename: prepared.csv
+  target: income
+  note: >
+    Binary classification (income >50K=1, <=50K=0). ~48842 rows, 13 features
+    including ordinal-encoded categoricals (workclass, education, marital_status,
+    occupation, relationship, race, sex, native_country) and numeric features.
+    Rows with missing values ("?") are dropped.
