@@ -21,7 +21,7 @@ The suite spans three task types with the following scenarios:
 
 **Classification:** ``breast_cancer``, ``synthetic_classification``
 
-**Ranking:** ``synthetic_ranking``
+**Ranking:** ``synthetic_ranking``, ``california_ranking``
 
 Profiles are evaluated across shallow, mid, and deep configurations so the
 comparison is not tied to a single parameter shape.
@@ -44,8 +44,8 @@ Current results
 
 **Ranking:**
 
-- AlloyGBM competes on ``synthetic_ranking`` using native LambdaMART,
-  evaluated via NDCG@5, NDCG@10, and full NDCG
+- AlloyGBM competes on ``synthetic_ranking`` and ``california_ranking`` using
+  native LambdaMART, evaluated via NDCG@5, NDCG@10, and full NDCG
 
 Metrics by task type
 --------------------
@@ -91,7 +91,7 @@ Ranking only:
 
    python3 benchmarks/run_model_comparison.py \
      --force-prepare \
-     --scenarios synthetic_ranking
+     --scenarios synthetic_ranking california_ranking
 
 Stage timing output
 -------------------

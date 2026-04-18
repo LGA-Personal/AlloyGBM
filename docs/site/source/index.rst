@@ -12,9 +12,10 @@ types.
 
 .. note::
 
-   AlloyGBM ``0.3.0`` adds native categorical splits (Fisher-sort with bitset
-   prediction), multi-class classification (softmax), and custom
-   objective/metric callbacks. See :doc:`release` for details.
+   AlloyGBM ``0.3.2`` fixes ``GBMRanker`` training (silent zero-tree training
+   on larger datasets), corrects signature introspection, adds training
+   diagnostics (``stop_reason_``, ``rounds_completed_``), and adds the
+   ``california_ranking`` benchmark. See :doc:`release` for details.
 
 Getting started
 ---------------

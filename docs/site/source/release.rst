@@ -1,10 +1,57 @@
 Release and platform policy
 ===========================
 
-AlloyGBM ``0.3.0`` release notes and platform policy.
+AlloyGBM ``0.3.2`` release notes and platform policy.
 
-What's new in 0.3.0
+What's new in 0.3.2
 --------------------
+
+``0.3.2`` fixes silent zero-tree training in ``GBMRanker``, corrects signature
+introspection, and adds a real-data ranking benchmark:
+
+**GBMRanker training fixes:**
+
+- The auto training policy's density-based ``min_split_gain`` and
+  ``min_loss_improvement`` floors are no longer applied to ranking objectives.
+  Ranking gradients are an order of magnitude smaller than
+  regression/classification gradients; on datasets where
+  ``row_count * feature_count >= 65 536`` these floors were causing training to
+  exit after round 1 with zero trees committed.
+- The main training loop's unconditional ``loss_improvement < 0`` early-exit no
+  longer fires for ranking objectives, where round-to-round loss oscillation is
+  expected behaviour.
+- ``inspect.signature(GBMRanker.__init__)`` now returns the full parameter set
+  (``ranking_objective`` plus all ``GBMRegressor`` parameters). Previously only
+  three parameters were visible, causing tools that build kwargs via signature
+  introspection to silently train with ``n_estimators=6``.
+
+**Diagnostics:**
+
+- ``stop_reason_`` and ``rounds_completed_`` attributes are now set on all
+  estimators after ``fit()`` to surface the engine's early-stop reason and
+  actual committed round count.
+
+**Benchmarks:**
+
+- Added ``california_ranking``: California Housing reframed as learning-to-rank
+  with geographic grid cells as queries and ``median_house_value`` bucketed into
+  5 graded relevance levels (~44 queries × 468 docs = ~20 595 rows).
+
+What was new in 0.3.1
+----------------------
+
+``0.3.1`` fixed multiclass prediction and expanded the benchmark suite:
+
+- Fixed ``class_trees`` threshold conversion so multiclass models predict
+  correctly with continuous float features
+- Fixed multiclass benchmark argmax label mapping with ``model.classes_``
+- Added ``wine_multiclass``, ``digits_multiclass``, ``adult_income``,
+  ``abalone_regression`` benchmark scenarios
+- Activated ``synthetic_multiclass`` and ``synthetic_categorical`` scenarios
+- Rewrote ``benchmarks/README.md``
+
+What was new in 0.3.0
+----------------------
 
 ``0.3.0`` adds native categorical splits, multi-class classification, and
 custom objective/metric support:
