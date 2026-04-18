@@ -2154,13 +2154,7 @@ impl Trainer {
         rounds: usize,
         policy_mode: TrainingPolicyMode,
     ) -> EngineResult<IterationControls> {
-        self.iteration_controls_for_policy_ext(
-            dataset,
-            binned_matrix,
-            rounds,
-            policy_mode,
-            false,
-        )
+        self.iteration_controls_for_policy_ext(dataset, binned_matrix, rounds, policy_mode, false)
     }
 
     /// Extended variant that accepts an `is_ranking` flag so auto-policy
