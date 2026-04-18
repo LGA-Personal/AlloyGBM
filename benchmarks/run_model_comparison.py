@@ -47,6 +47,7 @@ AVAILABLE_SCENARIOS = [
     "synthetic_multiclass",
     # Ranking
     "synthetic_ranking",
+    "california_ranking",
     # "news_ranking",  # Uncomment once prepare.py is implemented
 ]
 

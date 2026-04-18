@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.2
+
+### Bug Fixes
+
+- **GBMRanker silent zero-tree training** -- the auto training policy's density-based `min_split_gain` and `min_loss_improvement` floors were being applied to ranking objectives, whose gradient magnitudes are an order of magnitude smaller than regression/classification gradients; on datasets with `row_count * feature_count >= 65_536` no split cleared the floor and training exited after round 1. The auto policy is now objective-aware and skips those floors for all ranking objectives (`rank:pairwise`, `rank:ndcg`, `rank:xendcg`, `queryrmse`, `yetirank`).
+- **Training loop loss-regression break for ranking** -- the main training loop's unconditional `loss_improvement < 0` early-exit was firing on ranking objectives where round-to-round loss oscillation is expected; that guard is now skipped for objectives that require group IDs.
+- **`GBMRanker` signature introspection** -- `inspect.signature(GBMRanker.__init__)` previously returned only `(self, ranking_objective, **kwargs)`, causing tools that build parameters via signature inspection (sklearn clone, benchmark runners, IDEs) to silently use `n_estimators=6` default; `__init__.__signature__` is now set to the combined `GBMRegressor + ranking_objective` parameter list.
+
+### New Features
+
+- **`stop_reason_` and `rounds_completed_` attributes** on all estimators (`GBMRegressor`, `GBMClassifier`, `GBMRanker`) -- set after `fit()` to surface the engine's early-stop reason and actual round count for diagnostics and debugging.
+
+### Benchmarks
+
+- **`california_ranking` scenario** -- California Housing dataset reframed as learning-to-rank: 1-degree lat/lon grid cells act as query groups (~44 queries × 468 docs = ~20,595 rows), and `median_house_value` is bucketed into 5 quantile-based relevance levels; provides a real-data complement to `synthetic_ranking`.
+
 ## 0.3.1
 
 ### Bug Fixes

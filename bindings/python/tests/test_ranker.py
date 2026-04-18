@@ -191,6 +191,155 @@ class GBMRankerSerializationTests(unittest.TestCase):
         self.assertIn("ranking_objective='rank:ndcg'", r)
 
 
+class GBMRankerAutoPolicyRegressionTests(unittest.TestCase):
+    """Regression tests for the auto-policy ranking bug.
+
+    Before the fix, GBMRanker under the default ``training_policy="auto"``
+    exited after only 4 rounds with ``LossImprovementBelowThreshold`` for
+    ``rank:ndcg`` on a 5000-row ranking dataset (because the auto-policy's
+    ``min_loss_improvement`` threshold and the unconditional "training loss
+    went up" early-exit were tuned for regression losses, not
+    NDCG-normalized ranking losses). The result was bit-identical NDCG across
+    all seeds/profiles and ~15 ms fit times regardless of ``n_estimators``.
+    """
+
+    def _bench_shaped_dataset(self) -> tuple:
+        # Large enough to hit row_count >= 4096 auto-policy branches that
+        # set min_loss_improvement and max_consecutive_weak_improvements.
+        return _make_ranking_dataset(n_queries=200, docs_per_query=25, n_features=16, seed=7)
+
+    def test_ranker_auto_policy_commits_trees(self) -> None:
+        X, y, group = self._bench_shaped_dataset()
+        model = GBMRanker(
+            ranking_objective="rank:ndcg",
+            n_estimators=50,
+            learning_rate=0.05,
+            max_depth=6,
+            row_subsample=0.8,
+            col_subsample=0.8,
+            seed=7,
+        )
+        model.fit(X, y, group=group)
+        self.assertGreaterEqual(model.n_estimators_, 45)
+        self.assertEqual(model.stop_reason_, "CompletedRequestedRounds")
+
+    def test_ranker_predictions_not_constant(self) -> None:
+        X, y, group = self._bench_shaped_dataset()
+        model = GBMRanker(
+            ranking_objective="rank:ndcg",
+            n_estimators=50,
+            learning_rate=0.05,
+            max_depth=6,
+            row_subsample=0.8,
+            col_subsample=0.8,
+            seed=7,
+        )
+        model.fit(X, y, group=group)
+        preds = np.asarray(model.predict(X))
+        self.assertGreater(float(preds.std()), 0.0)
+        # Fewer than 5% unique values would suggest degenerate prediction.
+        self.assertGreater(int(np.unique(preds).size), len(preds) // 20)
+
+    def test_ranker_depth_matters(self) -> None:
+        X, y, group = self._bench_shaped_dataset()
+        shallow = GBMRanker(
+            ranking_objective="rank:ndcg",
+            n_estimators=30,
+            max_depth=2,
+            row_subsample=0.8,
+            col_subsample=0.8,
+            seed=7,
+        )
+        deep = GBMRanker(
+            ranking_objective="rank:ndcg",
+            n_estimators=30,
+            max_depth=8,
+            row_subsample=0.8,
+            col_subsample=0.8,
+            seed=7,
+        )
+        shallow.fit(X, y, group=group)
+        deep.fit(X, y, group=group)
+        shallow_preds = np.asarray(shallow.predict(X))
+        deep_preds = np.asarray(deep.predict(X))
+        # Depth must actually influence the predictions (not a zero-tree exit).
+        self.assertGreater(float(np.abs(shallow_preds - deep_preds).mean()), 0.0)
+
+    def test_ranker_rounds_matter(self) -> None:
+        X, y, group = self._bench_shaped_dataset()
+        short = GBMRanker(
+            ranking_objective="rank:ndcg",
+            n_estimators=10,
+            learning_rate=0.05,
+            max_depth=6,
+            row_subsample=0.8,
+            col_subsample=0.8,
+            seed=7,
+        )
+        long_ = GBMRanker(
+            ranking_objective="rank:ndcg",
+            n_estimators=200,
+            learning_rate=0.05,
+            max_depth=6,
+            row_subsample=0.8,
+            col_subsample=0.8,
+            seed=7,
+        )
+        short.fit(X, y, group=group)
+        long_.fit(X, y, group=group)
+        self.assertEqual(short.n_estimators_, 10)
+        self.assertEqual(long_.n_estimators_, 200)
+        short_preds = np.asarray(short.predict(X))
+        long_preds = np.asarray(long_.predict(X))
+        self.assertGreater(float(np.abs(short_preds - long_preds).mean()), 0.0)
+
+    def test_init_signature_exposes_regressor_params(self) -> None:
+        """inspect.signature(GBMRanker.__init__) must expose the full
+        GBMRegressor parameter surface — benchmarks and sklearn clone build
+        kwargs by introspecting the signature, and silently dropping
+        ``n_estimators`` / ``learning_rate`` is how the ranker ended up
+        training with default ``n_estimators=6`` on 4 profiles × 5 seeds.
+        """
+        import inspect
+        from alloygbm import GBMRegressor
+
+        ranker_sig = inspect.signature(GBMRanker.__init__)
+        regressor_sig = inspect.signature(GBMRegressor.__init__)
+        for required in (
+            "learning_rate",
+            "max_depth",
+            "n_estimators",
+            "row_subsample",
+            "col_subsample",
+            "seed",
+            "min_split_gain",
+            "lambda_l2",
+            "training_policy",
+        ):
+            self.assertIn(
+                required,
+                ranker_sig.parameters,
+                f"GBMRanker.__init__ signature must expose {required!r}",
+            )
+        # ranking_objective is ranker-only; every other GBMRegressor param
+        # should be surfaced identically.
+        self.assertIn("ranking_objective", ranker_sig.parameters)
+        for name, param in regressor_sig.parameters.items():
+            if name in ("self",) or param.kind == inspect.Parameter.VAR_KEYWORD:
+                continue
+            self.assertIn(name, ranker_sig.parameters, f"missing {name}")
+
+    def test_ranker_stop_reason_exposed(self) -> None:
+        X, y, group = _make_ranking_dataset(n_queries=5, docs_per_query=5, seed=7)
+        model = GBMRanker(n_estimators=5, seed=7)
+        model.fit(X, y, group=group)
+        self.assertTrue(hasattr(model, "stop_reason_"))
+        self.assertIsInstance(model.stop_reason_, str)
+        self.assertGreater(len(model.stop_reason_), 0)
+        self.assertTrue(hasattr(model, "rounds_completed_"))
+        self.assertIsInstance(model.rounds_completed_, int)
+
+
 class NDCGMetricTests(unittest.TestCase):
     """Test the ndcg evaluation metric."""
 

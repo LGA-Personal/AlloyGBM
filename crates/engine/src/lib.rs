@@ -2060,11 +2060,12 @@ impl Trainer {
         objective: &O,
         request: PolicyFitRequest,
     ) -> EngineResult<TrainedModel> {
-        let controls = self.iteration_controls_for_policy(
+        let controls = self.iteration_controls_for_policy_ext(
             dataset,
             binned_matrix,
             request.rounds,
             request.policy_mode,
+            objective.requires_group_id(),
         )?;
         let summary = self.fit_iterations_with_optional_validation_summary(
             dataset,
@@ -2153,13 +2154,27 @@ impl Trainer {
         rounds: usize,
         policy_mode: TrainingPolicyMode,
     ) -> EngineResult<IterationControls> {
+        self.iteration_controls_for_policy_ext(dataset, binned_matrix, rounds, policy_mode, false)
+    }
+
+    /// Extended variant that accepts an `is_ranking` flag so auto-policy
+    /// can skip regularization guards that are too aggressive for ranking
+    /// objectives (pairwise/LambdaMART/XeNDCG/YetiRank/QueryRMSE).
+    pub fn iteration_controls_for_policy_ext(
+        &self,
+        dataset: &TrainingDataset,
+        binned_matrix: &BinnedMatrix,
+        rounds: usize,
+        policy_mode: TrainingPolicyMode,
+        is_ranking: bool,
+    ) -> EngineResult<IterationControls> {
         if experiment_force_manual_policy_enabled() {
             return self.default_iteration_controls(rounds);
         }
         match policy_mode {
             TrainingPolicyMode::Manual => self.default_iteration_controls(rounds),
             TrainingPolicyMode::Auto => {
-                self.auto_iteration_controls(dataset, binned_matrix, rounds)
+                self.auto_iteration_controls(dataset, binned_matrix, rounds, is_ranking)
             }
         }
     }
@@ -2824,6 +2839,7 @@ impl Trainer {
         dataset: &TrainingDataset,
         binned_matrix: &BinnedMatrix,
         rounds: usize,
+        is_ranking: bool,
     ) -> EngineResult<IterationControls> {
         validate_training_alignment(dataset, binned_matrix)?;
         let mut controls = self.default_iteration_controls(rounds)?;
@@ -2859,7 +2875,19 @@ impl Trainer {
         controls.min_rows_per_leaf = suggested_min_rows
             .max(user_min)
             .min(row_count.saturating_div(2).max(1));
-        let auto_min_split_gain: f32 = if binned_density < 0.10 {
+
+        // Ranking objectives produce gradients and round-to-round loss deltas
+        // that are orders of magnitude smaller than regression/classification,
+        // because the loss is bounded by NDCG normalization and pairwise
+        // weighting. The density-based min_split_gain floor and the
+        // target-variance-scaled min_loss_improvement threshold were tuned for
+        // regression losses and cause ranking training to exit after only a
+        // handful of rounds with LossImprovementBelowThreshold. Disable both
+        // guards for ranking so the user-supplied min_split_gain (default 0.0)
+        // and n_estimators are honored.
+        let auto_min_split_gain: f32 = if is_ranking {
+            0.0
+        } else if binned_density < 0.10 {
             0.001
         } else if row_count.saturating_mul(feature_count) >= 65_536 {
             0.0001
@@ -2867,12 +2895,12 @@ impl Trainer {
             0.0
         };
         controls.min_split_gain = auto_min_split_gain.max(self.params.min_split_gain);
-        controls.min_loss_improvement = if row_count < 4_096 {
+        controls.min_loss_improvement = if is_ranking || row_count < 4_096 {
             0.0
         } else {
             (target_variance.max(1e-6) * 1e-5).min(0.01)
         };
-        controls.max_consecutive_weak_improvements = if row_count < 4_096 {
+        controls.max_consecutive_weak_improvements = if is_ranking || row_count < 4_096 {
             0
         } else if rounds <= 64 {
             1
@@ -3096,11 +3124,19 @@ impl Trainer {
                 dataset.sample_weights.as_deref(),
             )?;
             let loss_improvement = current_loss - candidate_loss;
-            if loss_improvement < 0.0 {
+            // Ranking objectives (LambdaMART, pairwise, XeNDCG, YetiRank,
+            // QueryRMSE) have bounded, NDCG-weighted losses whose round-to-
+            // round training delta is often negative under row_subsample —
+            // this does not reflect real ranking quality regression and the
+            // boosting loop recovers on subsequent rounds. Skip the hard
+            // "loss went up" early-exit for ranking objectives; rely on
+            // validation early stopping (if configured) and the round cap.
+            let objective_is_ranking = objective.requires_group_id();
+            if !objective_is_ranking && loss_improvement < 0.0 {
                 stop_reason = IterationStopReason::LossImprovementBelowThreshold;
                 break;
             }
-            if loss_improvement < controls.min_loss_improvement {
+            if !objective_is_ranking && loss_improvement < controls.min_loss_improvement {
                 if weak_improvement_streak >= controls.max_consecutive_weak_improvements {
                     stop_reason = IterationStopReason::LossImprovementBelowThreshold;
                     break;
@@ -6292,6 +6328,97 @@ mod tests {
         );
         assert_eq!(auto.row_subsample, manual.row_subsample);
         assert_eq!(auto.col_subsample, manual.col_subsample);
+    }
+
+    fn large_ranking_shaped_dataset() -> TrainingDataset {
+        // 5000 rows × 16 features, targets are graded 0-4 relevance labels.
+        let row_count = 5000usize;
+        let feature_count = 16usize;
+        let mut values = Vec::with_capacity(row_count * feature_count);
+        let mut targets = Vec::with_capacity(row_count);
+        for row in 0..row_count {
+            for col in 0..feature_count {
+                values.push(((row + col) % 32) as f32);
+            }
+            targets.push((row % 5) as f32);
+        }
+        TrainingDataset {
+            matrix: alloygbm_core::DatasetMatrix::new(row_count, feature_count, values)
+                .expect("matrix is valid"),
+            targets,
+            sample_weights: None,
+            time_index: None,
+            group_id: None,
+        }
+    }
+
+    fn large_ranking_shaped_binned_matrix() -> BinnedMatrix {
+        let row_count = 5000usize;
+        let feature_count = 16usize;
+        let num_bins = 32u16;
+        let mut codes = Vec::with_capacity(row_count * feature_count);
+        for row in 0..row_count {
+            for col in 0..feature_count {
+                codes.push(((row + col) % num_bins as usize) as u8);
+            }
+        }
+        BinnedMatrix::new(row_count, feature_count, num_bins, codes)
+            .expect("binned matrix is valid")
+    }
+
+    #[test]
+    fn auto_policy_disables_regression_only_guards_for_ranking_objectives() {
+        let trainer = Trainer::new(TrainParams::default()).expect("valid default params");
+        let dataset = large_ranking_shaped_dataset();
+        let binned = large_ranking_shaped_binned_matrix();
+
+        // Non-ranking (regression-style) path applies the density floor and
+        // variance-scaled min_loss_improvement on a 5000×16 dataset.
+        let regression_controls = trainer
+            .iteration_controls_for_policy_ext(
+                &dataset,
+                &binned,
+                1_200,
+                TrainingPolicyMode::Auto,
+                /* is_ranking */ false,
+            )
+            .expect("auto controls should build for regression");
+        assert!(
+            regression_controls.min_loss_improvement > 0.0,
+            "regression auto-policy must keep the min_loss_improvement guard"
+        );
+        assert!(
+            regression_controls.max_consecutive_weak_improvements >= 1,
+            "regression auto-policy must keep weak-improvement cutoff"
+        );
+        assert!(
+            regression_controls.min_split_gain > 0.0,
+            "regression auto-policy must keep density-based min_split_gain floor \
+             on 5000x16"
+        );
+
+        // Ranking path disables all three regression-tuned guards.
+        let ranking_controls = trainer
+            .iteration_controls_for_policy_ext(
+                &dataset,
+                &binned,
+                1_200,
+                TrainingPolicyMode::Auto,
+                /* is_ranking */ true,
+            )
+            .expect("auto controls should build for ranking");
+        assert_eq!(
+            ranking_controls.min_split_gain, 0.0,
+            "ranking auto-policy must not impose a density-based min_split_gain floor"
+        );
+        assert_eq!(
+            ranking_controls.min_loss_improvement, 0.0,
+            "ranking auto-policy must not impose a variance-scaled min_loss_improvement"
+        );
+        assert_eq!(
+            ranking_controls.max_consecutive_weak_improvements, 0,
+            "ranking auto-policy must not impose max_consecutive_weak_improvements"
+        );
     }
 
     #[test]

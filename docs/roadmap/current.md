@@ -4,7 +4,15 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
-The `0.3.1` release fixes multiclass prediction correctness and expands the benchmark suite with real-world datasets. The `0.3.0` release added native categorical splits, multi-class classification, and custom objective/metric support.
+The `0.3.2` release fixes GBMRanker training (silent zero-tree training on larger datasets) and adds a real-data ranking benchmark. The `0.3.1` release fixed multiclass prediction and expanded the benchmark suite. The `0.3.0` release added native categorical splits, multi-class classification, and custom objective/metric support.
+
+## What Shipped In 0.3.2
+
+- Fixed GBMRanker silent zero-tree training: the auto training policy's density-based `min_split_gain` floor and `min_loss_improvement` floor were being applied to ranking objectives, which have gradient magnitudes an order of magnitude smaller than regression/classification — no split cleared the floor and training exited on round 1. The auto policy is now objective-aware and skips those floors for all ranking objectives.
+- Fixed training loop loss-regression early break firing on ranking objectives where round-to-round loss oscillation is expected and benign
+- Fixed `inspect.signature(GBMRanker.__init__)` returning only 3 parameters (`self`, `ranking_objective`, `**kwargs`) — parameter-building tools (sklearn clone, benchmarks, IDEs) using signature introspection silently trained with `n_estimators=6` default; now exposes the full parameter set
+- Added `stop_reason_` and `rounds_completed_` attributes on all estimators (`GBMRegressor`, `GBMClassifier`, `GBMRanker`) for training diagnostics
+- Added `california_ranking` benchmark scenario: California Housing reframed as learning-to-rank with geographic grid cells as queries and median house value bucketed into 5 graded relevance levels (~44 queries × 468 docs)
 
 ## What Shipped In 0.3.1
 

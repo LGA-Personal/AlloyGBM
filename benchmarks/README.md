@@ -21,6 +21,7 @@ This directory organizes benchmark dataset preparation and cross-library model c
 | `digits_multiclass` | multiclass | sklearn | 1797 | 64 | 10-class digit recognition |
 | `synthetic_multiclass` | multiclass | synthetic | 10000 | 20 | 5-class cluster-based boundaries |
 | `synthetic_ranking` | ranking | synthetic | 5000 | 16 | 200 queries × 25 docs, 5-level relevance |
+| `california_ranking` | ranking | sklearn | ~20595 | 8 | California Housing: ~44 geographic queries × ~468 docs, 5-level relevance |
 
 ## Layout
 
@@ -54,6 +55,7 @@ python3 benchmarks/synthetic_classification/prepare.py
 python3 benchmarks/synthetic_multiclass/prepare.py
 python3 benchmarks/synthetic_categorical/prepare.py
 python3 benchmarks/synthetic_ranking/prepare.py
+python3 benchmarks/california_ranking/prepare.py
 python3 benchmarks/histogram_stress/prepare.py --rows 100000 --features 48
 ```
 
@@ -99,7 +101,7 @@ Ranking focused run:
 ```bash
 python3 benchmarks/run_model_comparison.py \
   --force-prepare \
-  --scenarios synthetic_ranking \
+  --scenarios synthetic_ranking california_ranking \
   --profile-grid default \
   --profile-seeds 7,17,29
 ```
