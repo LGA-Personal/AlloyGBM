@@ -1,0 +1,13 @@
+name: california_ranking
+version: 1
+kind: sklearn_fetch
+task_type: ranking
+description: California Housing dataset reframed as learning-to-rank. Geographic grid cells are queries; houses ranked by median value using 5-level graded relevance.
+source:
+  dataset: california-housing
+  url: https://scikit-learn.org/stable/datasets/real_world.html
+prepared:
+  filename: prepared.csv
+  target: relevance
+  group_column: query_id
+  note: ~20k rows, 8 real-valued features, ~40 geographic grid queries (1-degree lat/lon cells); relevance=median_house_value bucketed into 5 quantile levels (0-4).
