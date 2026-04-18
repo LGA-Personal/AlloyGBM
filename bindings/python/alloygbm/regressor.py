@@ -1378,6 +1378,10 @@ class GBMRegressor(_GBMRegressorBase):
             else None
         )
         self.n_estimators_ = int(summary.rounds_completed)
+        self.rounds_completed_ = int(summary.rounds_completed)
+        self.stop_reason_ = (
+            str(summary.stop_reason) if summary.stop_reason is not None else None
+        )
         self.evals_result_ = self._build_evals_result(summary)
         total_fit_seconds = time.perf_counter() - fit_start
         self.fit_timing_ = {
@@ -1419,6 +1423,10 @@ class GBMRegressor(_GBMRegressorBase):
             else None
         )
         self.n_estimators_ = int(summary.rounds_completed)
+        self.rounds_completed_ = int(summary.rounds_completed)
+        self.stop_reason_ = (
+            str(summary.stop_reason) if summary.stop_reason is not None else None
+        )
         self.evals_result_ = self._build_evals_result(summary)
         total_fit_seconds = time.perf_counter() - self._fit_start_time
         self.fit_timing_ = {
@@ -3013,6 +3021,8 @@ class GBMRegressor(_GBMRegressorBase):
         self.best_iteration_ = None
         self.best_score_ = None
         self.n_estimators_ = None
+        self.rounds_completed_ = None
+        self.stop_reason_ = None
         self.evals_result_ = None
         self.fit_timing_ = None
 

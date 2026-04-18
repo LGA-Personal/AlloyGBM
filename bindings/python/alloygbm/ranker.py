@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect as _inspect
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -56,6 +57,30 @@ class GBMRanker(GBMRegressor):
             )
         super().__init__(**kwargs)
         self.ranking_objective = ranking_objective
+
+    # Expose the combined GBMRegressor + ranking_objective signature so tools
+    # that introspect via ``inspect.signature`` (sklearn clone, benchmarks,
+    # IDEs) see every keyword argument. Without this override only
+    # ``ranking_objective`` and ``**kwargs`` are visible because the real
+    # GBMRegressor params are forwarded through **kwargs — that silently
+    # drops params like ``n_estimators`` and ``learning_rate`` for callers
+    # that build kwargs from signature introspection.
+    _base_sig = _inspect.signature(GBMRegressor.__init__)
+    _base_params = list(_base_sig.parameters.values())
+    _ranker_params = [_base_params[0]]  # self
+    _ranker_params.append(
+        _inspect.Parameter(
+            "ranking_objective",
+            _inspect.Parameter.KEYWORD_ONLY,
+            default="rank:ndcg",
+            annotation=str,
+        )
+    )
+    _ranker_params.extend(
+        p for p in _base_params[1:] if p.kind != _inspect.Parameter.VAR_KEYWORD
+    )
+    __init__.__signature__ = _inspect.Signature(_ranker_params)  # type: ignore[attr-defined]
+    del _base_sig, _base_params, _ranker_params
 
     def _objective_name(self) -> str:
         # Custom callable objective takes priority.

@@ -2664,11 +2664,12 @@ fn train_regression_artifact_with_summary_dense_impl(
 
     macro_rules! run_training {
         ($obj:expr) => {{
-            let controls = trainer.iteration_controls_for_policy(
+            let controls = trainer.iteration_controls_for_policy_ext(
                 &prepared.dataset,
                 &prepared.binned_matrix,
                 rounds,
                 training_policy,
+                $obj.requires_group_id(),
             )?;
             if let Some(warm_start) = warm_start_state.clone() {
                 if let Some(validation_prepared) = validation_prepared.as_ref() {
