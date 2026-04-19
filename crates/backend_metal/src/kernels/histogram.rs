@@ -16,7 +16,7 @@ use alloygbm_engine::{EngineError, EngineResult};
 #[cfg(target_os = "macos")]
 use crate::device::MetalDevice;
 #[cfg(target_os = "macos")]
-use crate::pipelines::build_histogram_pipelines;
+use crate::pipelines::HistogramPipelineCache;
 
 /// Embedded MSL source for the two-pass histogram build.
 ///
@@ -52,6 +52,7 @@ pub const ROWS_PER_CHUNK_DEFAULT: u32 = 8_192;
 #[allow(unsafe_code)]
 pub fn dispatch_histograms(
     metal_device: &MetalDevice,
+    pipeline_cache: &HistogramPipelineCache,
     binned_matrix: &BinnedMatrix,
     gradients: &[GradientPair],
     node: &NodeSlice,
@@ -111,8 +112,9 @@ pub fn dispatch_histograms(
         .collect();
     let total_selected = selected_features.len() as u32;
 
-    // --- Build pipelines (caching arrives in S1.5) ---
-    let pipelines = build_histogram_pipelines(&metal_device.device, bin_count, use_u16)
+    // --- Pipelines (cached across dispatches per S1.5) ---
+    let pipelines = pipeline_cache
+        .get_or_build(bin_count, use_u16)
         .map_err(EngineError::BackendUnavailable)?;
 
     let device = &metal_device.device;

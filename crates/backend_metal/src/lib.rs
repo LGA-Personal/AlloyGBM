@@ -30,6 +30,11 @@ use alloygbm_engine::{BackendOps, CategoricalFeatureInfo, EngineResult, SplitSel
 #[cfg(target_os = "macos")]
 pub struct MetalBackend {
     pub metal_device: MetalDevice,
+    /// Compiled-once + pipeline-cached histogram kernels (S1.5). The
+    /// cache is wrapped in `Arc` so it is cheap to clone a handle into
+    /// `dispatch_histograms` without holding a borrow on `self` across
+    /// the call.
+    pipeline_cache: std::sync::Arc<pipelines::HistogramPipelineCache>,
     /// CPU backend embedded as the fallback for every `BackendOps`
     /// method except `build_histograms` (S1.6 promise realised in S1.4).
     cpu: CpuBackend,
@@ -49,8 +54,13 @@ impl MetalBackend {
                 metal_device.capabilities.device_name
             ));
         }
+        let pipeline_cache = std::sync::Arc::new(pipelines::HistogramPipelineCache::new(
+            metal_device.device.clone(),
+            &metal_device.capabilities,
+        )?);
         Ok(Self {
             metal_device,
+            pipeline_cache,
             cpu: CpuBackend,
         })
     }
@@ -72,6 +82,7 @@ impl BackendOps for MetalBackend {
     ) -> EngineResult<HistogramBundle> {
         kernels::histogram::dispatch_histograms(
             &self.metal_device,
+            &self.pipeline_cache,
             binned_matrix,
             gradients,
             node,
@@ -338,5 +349,38 @@ mod tests {
                 assert_eq!(cpu_bin.hess_sum.to_bits(), metal_bin.hess_sum.to_bits());
             }
         }
+    }
+
+    /// S1.5: two successive `get_or_build` calls with the same key
+    /// must return the exact same `Arc`. This guards against the
+    /// pipeline cache being bypassed (e.g. if a refactor accidentally
+    /// reintroduces per-dispatch compilation).
+    #[test]
+    fn pipeline_cache_returns_identical_arc_on_second_call() {
+        let Ok(backend) = MetalBackend::new() else {
+            return;
+        };
+
+        let first = backend
+            .pipeline_cache
+            .get_or_build(8, false)
+            .expect("first build");
+        let second = backend
+            .pipeline_cache
+            .get_or_build(8, false)
+            .expect("second build");
+
+        // Same allocation ⇒ same pipelines ⇒ no recompilation.
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &second),
+            "pipeline cache must return the same Arc on hit"
+        );
+
+        // Different key ⇒ distinct Arc.
+        let wide = backend
+            .pipeline_cache
+            .get_or_build(8, true)
+            .expect("u16 variant build");
+        assert!(!std::sync::Arc::ptr_eq(&first, &wide));
     }
 }

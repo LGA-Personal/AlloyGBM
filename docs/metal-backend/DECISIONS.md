@@ -169,3 +169,59 @@ parallel `uint counts` in tgmem (rejected — blows the Apple7 tgmem
 cliff at MAX_BIN_COUNT=4096, would require shrinking the bin ceiling);
 separate Metal count kernel (rejected for S1.4 — doubles kernel
 surface area for no correctness gain; deferred to Stage 2).
+
+---
+
+## D-009: Archive serialization is drop-time only, atomic rename
+
+Date: 2026-04-19
+Stage: S1.5
+Decision: `HistogramPipelineCache` writes its `MTLBinaryArchive` to
+disk exactly once — in `Drop::drop` — by first writing to
+`<path>.metalarchive.tmp` and then calling `std::fs::rename` into
+place. An in-memory `dirty: Mutex<bool>` flag skips the write when
+no new pipelines were added this session. Failure to add, serialize,
+or rename is logged with `eprintln!` and swallowed; Metal simply
+compiles on the next run.
+Why: Apple's `MTLBinaryArchive` documentation warns that "updating a
+MTLBinaryArchive at runtime in a shipping app configuration is not
+recommended; such a scenario requires corruption resiliency".
+Writing on every `get_or_build` would give both worst-case overhead
+and worst-case corruption risk. Deferring to `Drop` means at most
+one write per training session, and the temp-path + rename pattern
+ensures a crash mid-write leaves the previous archive intact.
+Skipping when `!dirty` avoids pointless rewrites on cache-hit-only
+sessions (every subsequent run after the first).
+Alternatives considered: serialize after each successful `add`
+(rejected — corruption risk, per Apple); never serialize, treat as
+in-process cache only (rejected — defeats the whole point of cross-
+run persistence); background thread flushing periodically (rejected
+— unnecessary complexity for a single-writer lifecycle).
+
+---
+
+## D-010: Mark `HistogramPipelineCache` `unsafe impl Send + Sync`
+
+Date: 2026-04-19
+Stage: S1.5
+Decision: Add `unsafe impl Send for HistogramPipelineCache {}` and
+`unsafe impl Sync for HistogramPipelineCache {}` inside the crate so
+`MetalBackend` can store it behind `Arc` and participate in any
+Rayon-driven engine calls.
+Why: `objc2-metal` does not auto-derive `Send`/`Sync` for Metal
+protocol objects, but Apple documents `MTLDevice`, `MTLLibrary`, and
+`MTLComputePipelineState` as thread-safe for concurrent use: any
+thread may query pipelines or submit commands without external
+synchronization. The one mutation point we introduce —
+`MTLBinaryArchive::addComputePipelineFunctions...` — is ordered by
+our own `entries: Mutex<HashMap>`, which serializes slow-path
+pipeline builds so no two threads touch the archive simultaneously.
+The `dirty` flag is also behind a `Mutex`. With those invariants the
+struct is safe to share across threads.
+Alternatives considered: use `Rc` instead of `Arc` (rejected — breaks
+any future `BackendOps: Send` bound and forces single-thread usage);
+wrap the whole cache in a single `Mutex` (rejected — serialises
+every cache-hit fast path that should be lock-free after `entries`
+read-lock returns an `Arc`); require callers to clone pipelines on
+demand (rejected — reintroduces the per-dispatch compile cost we
+just eliminated).

@@ -5,6 +5,119 @@ First thing a new session reads, alongside `STATUS.md`.
 
 ---
 
+## 2026-04-19 — S1.5 Pipeline compilation + `MTLBinaryArchive` cache
+
+**Branch:** `claude/charming-carson-d08c9a` (worktree)
+
+**What moved:**
+- `src/pipelines.rs` — rewritten. The one-shot
+  `build_histogram_pipelines(device, bin_count, use_u16_bins)`
+  factory is replaced by a long-lived `HistogramPipelineCache` owned
+  by `MetalBackend`:
+  - Compiles the MSL library exactly once per process at
+    `HistogramPipelineCache::new`, holding the `Retained<MTLLibrary>`
+    for the lifetime of the backend.
+  - Attempts to open (or create fresh) a per-device
+    `MTLBinaryArchive` at
+    `~/Library/Caches/com.alloygbm/pipelines-<family>-<device>.metalarchive`.
+    Family is `"metal4"` when Metal 4 is supported, else `"apple7"`;
+    device is a lowercase-ascii-slug of `MTLDevice::name`
+    (e.g. `"apple-m4"`, `"apple-m2-pro"`). Opening failure is
+    logged and degrades gracefully to no-persistence mode.
+  - `get_or_build(bin_count, use_u16)` returns an
+    `Arc<HistogramPipelines>` from a `Mutex<HashMap<(u32, bool),
+    Arc<…>>>`. Fast path is a single `Mutex::lock` + clone. Slow
+    path specialises both MSL functions with
+    `MTLFunctionConstantValues` (BIN_COUNT/USE_U16_BINS, indices
+    0/1), builds `MTLComputePipelineDescriptor`s with
+    `setBinaryArchives([archive])` so the driver can source
+    precompiled pipelines from disk, and calls
+    `newComputePipelineStateWithDescriptor:options:reflection:error:`.
+    Freshly-compiled functions are added back to the archive via
+    `addComputePipelineFunctionsWithDescriptor:error:` and a
+    `dirty: Mutex<bool>` flag is set.
+  - `Drop` flushes the archive exactly once per session, writing to
+    `<path>.metalarchive.tmp` and then `std::fs::rename` into place
+    so a mid-write crash preserves the previous archive — per
+    Apple's corruption-resiliency guidance in the `MTLBinaryArchive`
+    docs. Skipped if `dirty == false`.
+  - `unsafe impl Send`/`Sync` added with a documented SAFETY note:
+    Metal protocol objects (device, library, pipeline state) are
+    thread-safe per Apple docs; archive mutation points are guarded
+    by the cache's own mutexes.
+- `src/lib.rs` — `MetalBackend` grows a
+  `pipeline_cache: Arc<HistogramPipelineCache>` field. The cache is
+  constructed in `MetalBackend::new()` after the device probe and
+  passed by reference into each `dispatch_histograms` call.
+- `src/kernels/histogram.rs` — `dispatch_histograms` takes a
+  `&HistogramPipelineCache` and calls `get_or_build(bin_count,
+  use_u16)` instead of the old per-dispatch
+  `build_histogram_pipelines`. The rest of the dispatch body is
+  byte-identical.
+- New tests:
+  - `pipelines::tests::slugify_handles_common_device_names` +
+    `archive_filename_encodes_family_and_device` — pure-Rust tests
+    for the cache-path construction; run on every target.
+  - `tests::pipeline_cache_returns_identical_arc_on_second_call` —
+    macOS-only; calls `get_or_build(8, false)` twice, asserts
+    `Arc::ptr_eq`, then `get_or_build(8, true)` and asserts
+    non-equality. Guards against a future refactor accidentally
+    reintroducing per-dispatch compilation.
+- `docs/metal-backend/DECISIONS.md` — logged **D-009** (archive
+  serialization is drop-time only via atomic rename) and **D-010**
+  (`unsafe impl Send + Sync` with documented invariants).
+
+**Commits shipped:** pending — to be committed after this entry.
+
+**Verification:**
+- `cargo check --workspace`: green.
+- `cargo test -p alloygbm-backend-metal`: **7 passed** (probe +
+  shader-compile + 2 bit-exact correctness + 2 cache-path unit
+  tests + 1 cache-hit test).
+- `cargo test --workspace --exclude alloygbm-python`: 23+7+10+32+69+19+23
+  = **183 passed**, 0 failed (+3 over S1.4 baseline of 180: two
+  pipelines-module unit tests + the cache-hit test).
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean.
+- `cargo fmt --all --check`: clean.
+- **On-disk archive verification:** after running the Metal tests,
+  `ls ~/Library/Caches/com.alloygbm/` showed a ~60KB
+  `pipelines-apple7-apple-m4.metalarchive` file — confirming the
+  scatter + reduce pipelines were successfully added and serialized.
+
+**Debug notes:**
+- First clippy hit: `clippy::arc_with_non_send_sync` on
+  `Arc::new(HistogramPipelineCache::new(…)?)` — objc2-metal doesn't
+  auto-derive Send/Sync for Metal protocol objects. Added explicit
+  `unsafe impl` with SAFETY comment pointing to Apple's
+  thread-safety docs for `MTLDevice`/`MTLLibrary`/
+  `MTLComputePipelineState` and noting our internal mutex-guarded
+  archive mutation. See D-010.
+- rustfmt collapses two multi-line let-chains (the `if added_any &&
+  let Ok(mut dirty) = self.dirty.lock()`) onto a single line — fine,
+  applied.
+- Archive opening uses a two-shot approach: try once with
+  `descriptor.url = existing path`; on error (corrupt file, schema
+  bump across OS upgrade) delete the file and retry with an empty
+  descriptor. Only if *that* fails do we drop to no-persistence
+  mode. Keeps us robust against the exact scenario Apple warns
+  about ("software updates of the OS or device drivers may cause
+  the archive to become outdated").
+- `MetalBackend.pipeline_cache` is `Arc<…>` rather than direct
+  ownership so future code (Stage 2 best-split kernel, Stage 3 ICB
+  chaining) that wants to share the library/archive across multiple
+  kernel dispatches can `Arc::clone` instead of re-opening.
+
+**Next session should:**
+- Start **S1.7**: add `RuntimeBackend` enum in
+  `bindings/python/src/lib.rs`, thread `device: &str` through every
+  `train_*` pyfunction, keep static dispatch via monomorphization
+  on `RuntimeBackend`.
+- Then **S1.8** on the Python side (`GBMRegressor` / `GBMClassifier`
+  / `GBMRanker` `device` parameter — follow the existing
+  `_params_order` + `__repr__` + pickle state conventions).
+
+---
+
 ## 2026-04-19 — S1.4 Rust-side histogram dispatch orchestration
 
 **Branch:** `claude/charming-carson-d08c9a` (worktree)
