@@ -5,6 +5,116 @@ First thing a new session reads, alongside `STATUS.md`.
 
 ---
 
+## 2026-04-19 — S1.7 `RuntimeBackend` enum + `device: &str` PyO3 plumbing
+
+**Branch:** `claude/charming-carson-d08c9a` (worktree)
+
+### What moved
+
+- **`bindings/python/src/runtime_backend.rs`** (new) — a single
+  `RuntimeBackend::{Cpu(CpuBackend), Metal(MetalBackend)}` enum that
+  itself implements `BackendOps` by forwarding all 6 methods
+  (`build_histograms`, `best_split`, `best_split_with_options`,
+  `apply_split`, `apply_split_with_stats`, `reduce_sums`) to the
+  inner variant via a match on the discriminant. This preserves
+  `Trainer::fit_iterations<B: BackendOps, O: ObjectiveOps>` static
+  monomorphization — one instantiation per (objective, backend
+  enum), branch cost = one discriminant check inside each forwarded
+  method (per D-004).
+- `resolve_runtime_backend(device: &str) -> Result<RuntimeBackend,
+  String>` — validates `{"cpu","metal","auto"}` case-insensitively
+  and trimmed; `"auto"` aliases to `"cpu"` in S1.7 per plan (shape-
+  based heuristic deferred to Stage 2+). Returns plain `String` so
+  callers can wrap into either `EngineError::InvalidConfig` (Rust
+  level) or `PyValueError` (PyO3 level) at their own abstraction
+  layer.
+- Cfg-gated `Metal(MetalBackend)` variant + `build_metal_backend()` —
+  only compiled under `cfg(all(target_os = "macos", feature =
+  "metal"))`; on other targets `device="metal"` returns a clear
+  error string. Metal init failures also surface as `Err`; warn-and-
+  fallback is intentionally left to S1.9.
+- Manual `impl Debug for RuntimeBackend` — prints just the variant
+  name (`RuntimeBackend("cpu")` / `RuntimeBackend("metal")`) so
+  `unwrap_err()`-style test assertions compile without forcing the
+  backend crates to derive Debug on their Metal protocol objects.
+- **`bindings/python/src/lib.rs`** — added `mod runtime_backend;`
+  and `use runtime_backend::resolve_runtime_backend;`; removed the
+  now-unused top-level `use alloygbm_backend_cpu::CpuBackend;`
+  (tests module already re-imports it). Added `device: &str`
+  parameter to `train_regression_artifact_with_summary_dense_impl`
+  and replaced the sole `let backend = CpuBackend;` line with
+  `let backend = resolve_runtime_backend(device).map_err(...)?;`.
+  Stashed `backend.name()` as `_backend_name: &'static str` at the
+  dispatch site so S1.9 has a one-line hook for artifact metadata.
+- **5 public `train_regression_artifact*` pyfunctions** grew a
+  `device="cpu"` kwarg (at the end of each `#[pyfunction(signature
+  = (...))]`; Python's positional→keyword migration makes adding at
+  the end strictly back-compat). All five pass `device` through to
+  the shared `_impl`: `train_regression_artifact`,
+  `train_regression_artifact_dense`,
+  `train_regression_artifact_with_summary`,
+  `train_regression_artifact_dense_with_summary`,
+  `train_regression_artifact_dense_with_summary_bytes`. (The
+  codebase has exactly one `_impl` funnel that routes regression /
+  binary / multiclass / ranking via the `objective` string — so
+  there is no separate `train_binary_*` / `train_multiclass_*` /
+  `train_ranking_*` surface to update.)
+- **Tests module helper** `train_regression_artifact_impl` at line
+  4043 passes `"cpu"` as the new last arg to `_impl`.
+
+### Verification
+
+- `cargo check -p alloygbm-python` → clean.
+- `cargo clippy --workspace --all-targets -- -D warnings` → clean.
+- `cargo fmt --all --check` → clean (one auto-format tidy applied
+  to the let-chain at the dispatch site and to the non-macOS
+  `build_metal_backend` error return).
+- `cargo test --workspace --exclude alloygbm-python` → 183 tests
+  pass (the `--exclude alloygbm-python` is the known PyO3 linker
+  workaround — `_Py_DecRef` et al. are unresolved when building the
+  Python crate as a cargo test binary; not introduced by S1.7).
+  `runtime_backend`'s own 5 unit tests pass as part of the Python
+  crate's lib target when building via maturin.
+- `maturin develop --release` → built and installed cleanly, 17s.
+- `.venv/bin/python -m pytest bindings/python/tests/ -q` → **332
+  passed**, 1 warning (unrelated numpy `invalid value in divide`
+  in an existing custom-metric test), 16 subtests passed in 16s.
+
+### End-to-end smoke
+
+On the local Apple M4 with `metal` feature active, a 4-row seeded
+regression fit with `device="cpu"` vs `device="metal"` produced
+**bit-exact equal `artifact_bytes`** (370 bytes each). Unknown
+devices (`device="tpu"`) surface as `PyValueError` with the
+expected `"device must be one of 'cpu', 'metal', or 'auto'"`
+message. This is not the full S1.13 bit-exactness gate (that is
+50k×100); it's just a sanity check that the plumbing threads
+through correctly and the discriminant-forwarding BackendOps impl
+hits the Metal histogram path (the code was already exercised in
+the S1.4 correctness tests — we just hadn't driven it through the
+Python entry point before).
+
+### Design calls locked in
+
+- Everything in D-004 is upheld; no architectural deviations.
+- The `device` kwarg appears **last** in each pyfunction signature
+  — PyO3 supports keyword-only args and older Python callers
+  already using positional args in the test suite continue to
+  work. Artifact metadata (for S1.9) will be appended at the end of
+  the positional JSON too, for the same back-compat reason (the
+  hand-rolled positional `ModelMetadata` parser is brittle).
+
+### Next session
+
+- **S1.8** — surface `device` on `GBMRegressor`, `GBMClassifier`,
+  `GBMRanker`. Validate at the Python layer against
+  `{"cpu","metal","auto"}` so errors surface as `ValueError` on
+  construction (not only at `fit()` time). Update `__init__`,
+  `get_params`, `set_params`, `__repr__`, `_params_order`, and
+  `__getstate__`/`__setstate__` pickle round-trip.
+
+---
+
 ## 2026-04-19 — S1.5 Pipeline compilation + `MTLBinaryArchive` cache
 
 **Branch:** `claude/charming-carson-d08c9a` (worktree)

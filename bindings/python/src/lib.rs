@@ -1,6 +1,7 @@
 #![allow(clippy::too_many_arguments)]
 
-use alloygbm_backend_cpu::CpuBackend;
+mod runtime_backend;
+
 use alloygbm_categorical::{
     TargetEncoderConfig, fit_target_encoder, fit_transform_target_encoder, transform_target_encoder,
 };
@@ -24,6 +25,7 @@ use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use rayon::prelude::*;
+use runtime_backend::resolve_runtime_backend;
 use std::time::Instant;
 
 const DEFAULT_TRAIN_ROUNDS: usize = 6;
@@ -2432,6 +2434,7 @@ fn train_regression_artifact_with_summary_dense_impl(
     custom_loss_fn: Option<Py<PyAny>>,
     custom_metric_fn: Option<Py<PyAny>>,
     max_cat_threshold: usize,
+    device: &str,
 ) -> Result<NativeTrainingResult, EngineError> {
     let bridge_start = Instant::now();
     let need_dense_values = !categorical_specs.is_empty();
@@ -2649,7 +2652,14 @@ fn train_regression_artifact_with_summary_dense_impl(
     let bridge_prepare_seconds = bridge_start.elapsed().as_secs_f64();
     let user_seed = params.seed;
     let trainer = Trainer::new(params)?.with_categorical_features(native_cat_infos.clone());
-    let backend = CpuBackend;
+    // Resolve the user-requested device into a concrete
+    // `RuntimeBackend`. `EngineError::InvalidConfig` is the right
+    // channel since device selection is a user-facing config option;
+    // PyO3-layer callers already validate the string up front but
+    // direct Rust-level callers (tests) rely on this re-check.
+    let backend = resolve_runtime_backend(device)
+        .map_err(|err| EngineError::InvalidConfig(format!("invalid device '{device}': {err}")))?;
+    let _backend_name: &'static str = backend.name(); // used by S1.9 for artifact metadata
     let native_start = Instant::now();
 
     // Build the custom metric callback if provided
@@ -3160,7 +3170,8 @@ fn shap_global_importance_dense(
     time_index=None,
     continuous_binning_strategy="linear",
     continuous_binning_max_bins=255,
-    objective="squared_error"
+    objective="squared_error",
+    device="cpu"
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact(
@@ -3186,6 +3197,7 @@ fn train_regression_artifact(
     continuous_binning_strategy: &str,
     continuous_binning_max_bins: usize,
     objective: &str,
+    device: &str,
 ) -> PyResult<Vec<u8>> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -3256,6 +3268,7 @@ fn train_regression_artifact(
         None, // custom_loss_fn
         None, // custom_metric_fn
         0,    // max_cat_threshold (disabled for non-summary paths)
+        device,
     )
     .map(|result| result.artifact_bytes)
     .map_err(engine_error_to_pyerr)
@@ -3285,7 +3298,8 @@ fn train_regression_artifact(
     time_index=None,
     continuous_binning_strategy="linear",
     continuous_binning_max_bins=255,
-    objective="squared_error"
+    objective="squared_error",
+    device="cpu"
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense(
@@ -3313,6 +3327,7 @@ fn train_regression_artifact_dense(
     continuous_binning_strategy: &str,
     continuous_binning_max_bins: usize,
     objective: &str,
+    device: &str,
 ) -> PyResult<Vec<u8>> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -3379,6 +3394,7 @@ fn train_regression_artifact_dense(
         None, // custom_loss_fn
         None, // custom_metric_fn
         0,    // max_cat_threshold (disabled for non-summary paths)
+        device,
     )
     .map(|result| result.artifact_bytes)
     .map_err(engine_error_to_pyerr)
@@ -3432,7 +3448,8 @@ fn train_regression_artifact_dense(
     custom_objective_fn=None,
     custom_loss_fn=None,
     custom_metric_fn=None,
-    max_cat_threshold=0
+    max_cat_threshold=0,
+    device="cpu"
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_with_summary(
@@ -3484,6 +3501,7 @@ fn train_regression_artifact_with_summary(
     custom_loss_fn: Option<Py<PyAny>>,
     custom_metric_fn: Option<Py<PyAny>>,
     max_cat_threshold: usize,
+    device: &str,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -3575,6 +3593,7 @@ fn train_regression_artifact_with_summary(
         custom_loss_fn,
         custom_metric_fn,
         max_cat_threshold,
+        device,
     )
     .map_err(engine_error_to_pyerr)
 }
@@ -3630,7 +3649,8 @@ fn train_regression_artifact_with_summary(
     custom_objective_fn=None,
     custom_loss_fn=None,
     custom_metric_fn=None,
-    max_cat_threshold=0
+    max_cat_threshold=0,
+    device="cpu"
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary(
@@ -3685,6 +3705,7 @@ fn train_regression_artifact_dense_with_summary(
     custom_loss_fn: Option<Py<PyAny>>,
     custom_metric_fn: Option<Py<PyAny>>,
     max_cat_threshold: usize,
+    device: &str,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -3757,6 +3778,7 @@ fn train_regression_artifact_dense_with_summary(
         custom_loss_fn,
         custom_metric_fn,
         max_cat_threshold,
+        device,
     )
     .map_err(engine_error_to_pyerr)
 }
@@ -3827,7 +3849,8 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> PyResult<Vec<f32>> {
     custom_objective_fn=None,
     custom_loss_fn=None,
     custom_metric_fn=None,
-    max_cat_threshold=0
+    max_cat_threshold=0,
+    device="cpu"
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary_bytes(
@@ -3882,6 +3905,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
     custom_loss_fn: Option<Py<PyAny>>,
     custom_metric_fn: Option<Py<PyAny>>,
     max_cat_threshold: usize,
+    device: &str,
 ) -> PyResult<NativeTrainingResult> {
     let values = bytes_to_f32_vec(values_bytes)?;
     let targets = bytes_to_f32_vec(targets_bytes)?;
@@ -3958,6 +3982,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
         custom_loss_fn,
         custom_metric_fn,
         max_cat_threshold,
+        device,
     )
     .map_err(engine_error_to_pyerr)
 }
@@ -4054,6 +4079,7 @@ mod tests {
             None, // custom_loss_fn
             None, // custom_metric_fn
             0,    // max_cat_threshold
+            "cpu",
         )
         .map(|result| result.artifact_bytes)
     }

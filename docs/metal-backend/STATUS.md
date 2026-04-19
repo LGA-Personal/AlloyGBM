@@ -1,8 +1,8 @@
 # Metal Backend — Current Status
 
-**Last updated:** 2026-04-19 (S1.5 landed)
+**Last updated:** 2026-04-19 (S1.7 landed)
 **Active stage:** Stage 1 — Histogram build on Metal
-**Active sub-task:** S1.7 — `RuntimeBackend` enum + `device: &str` PyO3 plumbing (next)
+**Active sub-task:** S1.8 — thread `device="cpu"|"metal"|"auto"` through Python estimators (next)
 
 ---
 
@@ -17,7 +17,7 @@ Order matches the approved plan in
 - [x] **S1.4** Rust-side orchestration (`kernels/histogram.rs` + `pipelines.rs`) — buffer wrapping, encoding, submit, readback; `impl BackendOps for MetalBackend` (histogram on Metal, rest delegated to embedded `CpuBackend`)
 - [x] **S1.5** Pipeline compilation + `MTLBinaryArchive` cache at `~/Library/Caches/com.alloygbm/` — `HistogramPipelineCache` with in-process `Mutex<HashMap<(bin_count, use_u16_bins), Arc<HistogramPipelines>>>` + on-disk archive persisted atomically at Drop
 - [x] **S1.6** `MetalBackend` delegates non-histogram `BackendOps` methods to embedded `CpuBackend` *(delivered in S1.4)*
-- [ ] **S1.7** `RuntimeBackend` enum in `bindings/python/src/lib.rs`; `device: &str` on every `train_*` pyfunction
+- [x] **S1.7** `RuntimeBackend` enum in `bindings/python/src/runtime_backend.rs`; `device: &str` on every `train_*` pyfunction (5 pyfunctions + `_impl` + test helper)
 - [ ] **S1.8** Python `device="cpu"|"metal"|"auto"` parameter across `GBMRegressor`, `GBMClassifier`, `GBMRanker`
 - [ ] **S1.9** Warn-and-fallback on Metal init failure; store resolved device in artifact metadata JSON
 - [ ] **S1.10** Extend `native_runtime_info()` with `metal_available`, `metal4_available`, `gpu_family`
@@ -32,33 +32,23 @@ Order matches the approved plan in
 
 ## Next Up
 
-1. **S1.7** — PyO3 plumbing. Today `bindings/python/src/lib.rs:3`
-   hard-codes `CpuBackend` and every `train_*` pyfunction takes
-   `backend: &CpuBackend` implicitly. The approved plan (and
-   **D-004**) says:
-   - Add a `RuntimeBackend::{Cpu(CpuBackend), Metal(MetalBackend)}`
-     enum inside `bindings/python/src/lib.rs` that implements
-     `BackendOps` by forwarding each method.
-   - Every `train_*` pyfunction (regression, binary, multiclass,
-     ranking; sparse + dense variants — count them all in
-     `bindings/python/src/lib.rs`) grows a `device: &str` parameter
-     resolved to one of `{"cpu","metal","auto"}`, producing the enum
-     and passing it through to `trainer.fit_iterations`.
-   - `device = "auto"` for S1.7 just means "cpu" (per plan — the
-     shape-based heuristic is deferred to Stage 2+).
-   - Preserve static monomorphization: the enum itself is the type
-     the trainer sees, so `Trainer::fit_iterations<RuntimeBackend,
-     ObjectiveOps>` monomorphizes once per objective, branch cost =
-     one discriminant check inside each forwarded method.
-2. **S1.8** then threads `device` through the Python estimators:
-   `GBMRegressor`, `GBMClassifier`, `GBMRanker` — `__init__`,
-   `get_params`, `set_params`, `__repr__`, `_params_order`, pickle
-   state. Validate against `{"cpu","metal","auto"}`.
-3. **S1.9** layers a `try { MetalBackend::new() } catch { warn; use
+1. **S1.8** — Python estimator plumbing. `GBMRegressor`,
+   `GBMClassifier`, `GBMRanker` all need a `device: str = "cpu"`
+   constructor parameter, validated against `{"cpu","metal","auto"}`,
+   and wired through to `train_regression_artifact*` keyword. Touches
+   `__init__`, `get_params`, `set_params`, `__repr__`,
+   `_params_order`, and pickle state on each estimator. The native
+   entry points are already ready — they accept `device` as the last
+   kwarg with default `"cpu"`, and reject unknown values with
+   `EngineError::InvalidConfig` (surfaces as `PyValueError`).
+2. **S1.9** layers a `try { MetalBackend::new() } catch { warn; use
    CpuBackend }` fallback on the PyO3 side, and stores the
    `resolved_device` in artifact metadata (append-only field, so the
-   hand-rolled positional parser stays back-compat).
-4. **S1.10** is a cheap PyO3 + Python extension to
+   hand-rolled positional parser stays back-compat). The S1.7 landing
+   already stores `backend.name()` in a local
+   (`let _backend_name: &'static str = backend.name();`) at the
+   dispatch site — wire it into `ModelMetadata` when S1.9 lands.
+3. **S1.10** is a cheap PyO3 + Python extension to
    `native_runtime_info()` exposing `metal_available: bool`,
    `metal4_available: bool`, `gpu_family: Optional[str]`. Relies on
    `MetalDevice::probe()` → `MetalCapabilities`.
