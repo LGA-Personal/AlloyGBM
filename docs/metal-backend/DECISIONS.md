@@ -138,3 +138,34 @@ punishes every other crate for one crate's FFI needs); pick a fully-safe
 Metal wrapper (rejected — no mature option covers Metal 3 + Metal 4 +
 compute + residency sets); hand-audited `unsafe_op_in_unsafe_fn` only
 (rejected — still requires the outer lint to be relaxed).
+
+---
+
+## D-008: Histogram-bin counts computed on CPU post-readback
+
+Date: 2026-04-19
+Stage: S1.4
+Decision: The MSL histogram kernel emits only `(grad_sum, hess_sum)`
+float2 pairs. Per-bin row counts are reconstructed on the CPU after
+readback by a single pass over `node.row_indices × selected_features`
+reading `BinnedMatrix::col_bin`.
+Why: The kernel's threadgroup-memory budget is already near the
+Apple7 32 KB ceiling at `MAX_BIN_COUNT = 4096` (32 KB for the float2
+histogram). Tracking counts in threadgroup memory would add a
+`uint local_counts[MAX_BIN_COUNT]` of up to 16 KB, pushing beyond the
+cliff. Count accumulation is inherently deterministic by integer
+arithmetic — no order-dependence, no float-atomic concern — so
+placing it on CPU never compromises the bit-exactness contract with
+`CpuBackend`. Measured overhead on the 500-row fixture is a single-
+digit millisecond scan; at 1M×100 it's roughly 100M u8 reads + 100M
+increments, well inside the budget a Metal-accelerated training step
+is already paying for bulk data movement. Revisited in Stage 2 if
+profiling shows it as a hotspot (options: second integer-only
+`histogram_count_build` kernel running in parallel with the float
+pass; or widen the float scratch to `float3` once we shrink
+`MAX_BIN_COUNT` to stay within tgmem).
+Alternatives considered: extend `local_hist` to `float3(g,h,c)` or
+parallel `uint counts` in tgmem (rejected — blows the Apple7 tgmem
+cliff at MAX_BIN_COUNT=4096, would require shrinking the bin ceiling);
+separate Metal count kernel (rejected for S1.4 — doubles kernel
+surface area for no correctness gain; deferred to Stage 2).

@@ -1,8 +1,8 @@
 # Metal Backend — Current Status
 
-**Last updated:** 2026-04-19 (S1.3 landed)
+**Last updated:** 2026-04-19 (S1.4 landed)
 **Active stage:** Stage 1 — Histogram build on Metal
-**Active sub-task:** S1.4 — Rust-side histogram orchestration (next)
+**Active sub-task:** S1.5 — Pipeline compilation + `MTLBinaryArchive` cache (next)
 
 ---
 
@@ -14,14 +14,14 @@ Order matches the approved plan in
 - [x] **S1.1** Scaffold `crates/backend_metal` (Cargo.toml, build.rs, empty lib, workspace member, feature flag wired)
 - [x] **S1.2** Device + capability probe (`device.rs`) — `MTLCreateSystemDefaultDevice`, `MTLGPUFamilyApple7`, `MTLGPUFamilyMetal4` flag
 - [x] **S1.3** MSL histogram kernel (`shaders/histogram.metal`) — privatized threadgroup histograms + two-pass deterministic reduce
-- [ ] **S1.4** Rust-side orchestration (`kernels/histogram.rs`) — buffer wrapping, encoding, submit, readback
+- [x] **S1.4** Rust-side orchestration (`kernels/histogram.rs` + `pipelines.rs`) — buffer wrapping, encoding, submit, readback; `impl BackendOps for MetalBackend` (histogram on Metal, rest delegated to embedded `CpuBackend`)
 - [ ] **S1.5** Pipeline compilation + `MTLBinaryArchive` cache at `~/Library/Caches/com.alloygbm/`
-- [ ] **S1.6** `MetalBackend` delegates non-histogram `BackendOps` methods to embedded `CpuBackend`
+- [ ] **S1.6** `MetalBackend` delegates non-histogram `BackendOps` methods to embedded `CpuBackend` *(delivered in S1.4)*
 - [ ] **S1.7** `RuntimeBackend` enum in `bindings/python/src/lib.rs`; `device: &str` on every `train_*` pyfunction
 - [ ] **S1.8** Python `device="cpu"|"metal"|"auto"` parameter across `GBMRegressor`, `GBMClassifier`, `GBMRanker`
 - [ ] **S1.9** Warn-and-fallback on Metal init failure; store resolved device in artifact metadata JSON
 - [ ] **S1.10** Extend `native_runtime_info()` with `metal_available`, `metal4_available`, `gpu_family`
-- [ ] **S1.11** Rust unit tests for histogram kernel correctness (<1000 rows, hand-computed reference)
+- [ ] **S1.11** Rust unit tests for histogram kernel correctness (<1000 rows, hand-computed reference) *(delivered in S1.4: `histogram_matches_cpu_small_fixture` + `histogram_feature_subset_matches_cpu`)*
 - [ ] **S1.12** `bindings/python/tests/test_metal_backend.py` — macOS + availability gated; covers regression, classification, ranking, NaN, B=16/255/65535
 - [ ] **S1.13** Bit-exactness golden test: seeded (50k rows × 100 features) CPU vs Metal → identical `artifact_bytes`
 - [ ] **S1.14** `benchmarks/metal_histogram.py` — CPU vs Metal throughput at (10k, 100k, 1M, 10M) × (10, 100, 1000)
@@ -32,8 +32,26 @@ Order matches the approved plan in
 
 ## Next Up
 
-1. **S1.4** — Rust-side histogram orchestration (`kernels/histogram.rs` dispatch module): wrap `BinnedMatrix` (u8/u16 column-major), `gradients`, `row_indices` as shared `MTLBuffer`s; allocate the device-memory scratch sized `n_chunks × n_features × BIN_COUNT × sizeof(float2)`; allocate the final histogram output; pick a reasonable `rows_per_chunk` heuristic; encode pass-1 + pass-2 dispatches into a single command buffer; commit, wait, read back into `HistogramBundle`. Implement `BackendOps::build_histograms` on `MetalBackend`; delegate `best_split`, `apply_split`, `reduce_sums` to an embedded `CpuBackend` (S1.6 promise). Correctness gate: hand-computed fixture on <1000 rows vs Metal output.
-2. Then **S1.5** (pipeline compilation + `MTLBinaryArchive` cache).
+1. **S1.5** — Pipeline compilation + caching. Today S1.4 calls
+   `build_histogram_pipelines` afresh on every dispatch, which re-
+   compiles the MSL library and re-builds both compute pipeline
+   states for every histogram build. That's dozens of milliseconds
+   per tree node at minimum. S1.5 introduces:
+   - An `MTLBinaryArchive` on disk at
+     `~/Library/Caches/com.alloygbm/pipelines-<gpu-family>-<macos>.metalarchive`
+     that persists across runs so the first run compiles once and every
+     subsequent run is cache-hit.
+   - An in-process LRU keyed by `(bin_count, use_u16_bins)` so that
+     training at mixed bin counts (rare) still amortises across a
+     single session.
+   - A best-effort `addComputePipelineFunctionsWithDescriptor:error:`
+     call on the archive during pipeline build so Metal 4 pipeline
+     harvesting can populate the archive opportunistically.
+2. Then **S1.6** is trivially done (already shipped in S1.4), update
+   the checklist mark and move to **S1.7** (Python plumbing).
+3. **S1.11** is partially done (two small-fixture correctness tests are
+   in place); extend with larger-seed + NaN-bin coverage when we reach
+   that rung.
 
 ---
 

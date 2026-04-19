@@ -5,6 +5,101 @@ First thing a new session reads, alongside `STATUS.md`.
 
 ---
 
+## 2026-04-19 — S1.4 Rust-side histogram dispatch orchestration
+
+**Branch:** `claude/charming-carson-d08c9a` (worktree)
+
+**What moved:**
+- `src/pipelines.rs` — new module. `build_histogram_pipelines(device,
+  bin_count, use_u16_bins)` compiles the MSL library, constructs an
+  `MTLFunctionConstantValues` with `BIN_COUNT` (uint, index 0) and
+  `USE_U16_BINS` (bool, index 1), specializes both entry points via
+  `newFunctionWithName:constantValues:error:`, and builds the
+  `MTLComputePipelineState` pair. Caching is S1.5; here we rebuild
+  fresh every dispatch for correctness focus.
+- `src/kernels/histogram.rs` — new `dispatch_histograms` function.
+  Wraps `BinnedMatrix::bins_col_adaptive` (u8 or u16) as a single
+  shared `MTLBuffer`; packs `&[GradientPair]` into an `[f32; 2]` layout
+  buffer (`GradientPair` is not `#[repr(C)]`); wraps `node.row_indices`
+  as a u32 buffer. Per tile: allocates a fresh scratch buffer sized
+  `n_chunks × tile_n_features × bin_count × sizeof(float2)`; binds the
+  binned matrix with `setBuffer:offset:atIndex:` at
+  `start_feature * row_count * sizeof_bin`; binds a 1-byte dummy into
+  the unused `binned_u8`/`binned_u16` slot (the kernel's function-
+  constant branch dead-code-eliminates the access); encodes the
+  scatter pass (`(tile_n_features, n_chunks, 1)` threadgroups, 32
+  threads), then the reduce pass (`(tile_n_features, ceil(B/32), 1)`
+  threadgroups). Commits once, waits once. Reads back the final
+  `float2*` output buffer, reconstructs counts on CPU
+  (see D-008), and assembles `HistogramBundle`. `rows_per_chunk`
+  default = 8192.
+- `src/lib.rs` — `MetalBackend` grows a `cpu: CpuBackend` field.
+  `impl BackendOps for MetalBackend` routes `build_histograms` to
+  Metal and delegates the other five methods (`best_split`,
+  `best_split_with_options`, `apply_split`, `apply_split_with_stats`,
+  `reduce_sums`) to the embedded `CpuBackend`. This folds the S1.6
+  "non-histogram ops fall back to CPU" promise into S1.4 — clean
+  because the delegation is mechanical.
+- Two new correctness tests, both bit-exact vs `CpuBackend` via
+  `to_bits()` comparison:
+  - `histogram_matches_cpu_small_fixture`: 500 rows × 6 features ×
+    8 bins, deterministic bin/gradient pattern, full-node slice, single
+    tile covering all features. Verifies `grad_sum`, `hess_sum`, and
+    `count` per bin match exactly. Gradients chosen from
+    `{1.0, -2.0, 4.0}` × `{1.0, 2.0}` so float addition is associative
+    in the exact-integer range — any accumulation order lands on the
+    same bit pattern.
+  - `histogram_feature_subset_matches_cpu`: 200 rows × 6 features × 4
+    bins, tile = features 2..5 only. Verifies the per-tile
+    binned-buffer offset arithmetic and output-region offset
+    arithmetic is correct.
+- `docs/metal-backend/DECISIONS.md` — logged **D-008** (CPU-side count
+  accumulation for S1.4; revisited in Stage 2 if profiling hotspot).
+
+**Commits shipped:** see git log
+
+**Verification:**
+- `cargo check --workspace`: green.
+- `cargo test -p alloygbm-backend-metal`: 4 passed (probe + compile +
+  two correctness gates).
+- `cargo test --workspace --exclude alloygbm-python`: **180 passed**, 0
+  failed (+3 over the S1.3 baseline of 177 — the two new correctness
+  tests + 1 other — let me double check… yes: 23 + 4 + 10 + 32 + 69 +
+  19 + 23 = 180; no regressions).
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean.
+- `cargo fmt --all --check`: clean.
+
+**Debug notes:**
+- `GradientPair` is not `#[repr(C)]`, so `&[GradientPair]` can't safely
+  be reinterpreted as `&[f32]` / `&[[f32; 2]]`. The dispatch copies
+  into an owned `Vec<[f32; 2]>` before buffer creation. This is one
+  `O(n_rows)` copy per node — the only unavoidable extra work S1.4
+  introduces. Could be eliminated later by pushing `#[repr(C)]` into
+  `core`, but that touches a public type and has no upside for S1.
+- MSL's `USE_U16_BINS` function-constant branch compiles away the
+  unused binned-pointer access, but the kernel signature still carries
+  both `binned_u8` and `binned_u16` arguments — Metal refuses to
+  dispatch with a null buffer at a referenced slot. We bind a 1-byte
+  `MTLResourceOptions::StorageModeShared` dummy at whichever slot the
+  kernel ignores. Zero correctness impact.
+- clippy flagged `for bin_idx in 0..bin_count { ... counts[bin_idx] }`
+  as `needless_range_loop`; rewrote to
+  `for (bin_idx, &count) in counts.iter().enumerate() { ... }`.
+
+**Blockers:** none.
+
+**Next session should:** start **S1.5** (pipeline compilation + disk
+cache). Add `MTLBinaryArchive` at
+`~/Library/Caches/com.alloygbm/pipelines-<gpu-family>-<macos>.metalarchive`
+so the first run pays the MSL compile cost and every subsequent run is
+cache-hit. Also add an in-process cache keyed by
+`(bin_count, use_u16_bins)` — right now S1.4 rebuilds pipelines on
+every dispatch, which is wasteful. Keep the pipeline archive's
+`addComputePipelineFunctionsWithDescriptor:error:` call behind a Metal
+4 guard; the `MTLBinaryArchive` itself is Metal 3.
+
+---
+
 ## 2026-04-19 — S1.3 MSL histogram kernel source + compile test
 
 **Branch:** `claude/charming-carson-d08c9a` (worktree)
