@@ -77,3 +77,18 @@ maturin develop --release      # Build and install Python extension
 3. **When adding fields to structs** (TrainParams, IterationControls, etc.) -- add at the end, add a default, add validation
 4. **When adding Python parameters** -- update `__init__`, `get_params()`, `set_params()`, `__repr__`, and `_params_order` together
 5. **When adding a new objective** -- implement `ObjectiveOps`, add a variant to the objective dispatch in `engine`, update the predictor post-transform table, and add Python-side estimator support
+
+## Metal Backend (work-in-progress)
+
+A multi-stage MLX/Metal GPU backend for Apple Silicon lives under `docs/metal-backend/`. If you're continuing that work, use these files:
+
+- [docs/metal-backend/STATUS.md](docs/metal-backend/STATUS.md) -- always-current state: active stage, sub-task checklist, next-up items
+- [docs/metal-backend/SESSIONS.md](docs/metal-backend/SESSIONS.md) -- append-only session log (newest on top); read the latest entry first
+- [docs/metal-backend/BUGS.md](docs/metal-backend/BUGS.md) -- open + resolved issues with severity and repro
+- [docs/metal-backend/DECISIONS.md](docs/metal-backend/DECISIONS.md) -- append-only ADR-lite for design calls made during implementation
+- Approved full plan: `/Users/lashby/.claude/plans/okay-add-this-notebook-structured-star.md`
+
+**Workflow:**
+- **Session start:** read `STATUS.md` + the latest `SESSIONS.md` entry + open items in `BUGS.md`. That's the complete working-set.
+- **During work:** log bugs and deferrals to `BUGS.md` immediately; log any design pivot to `DECISIONS.md` immediately. Do not batch.
+- **Session end (before compacting memory):** overwrite `STATUS.md` with current-state + next-up; append one `SESSIONS.md` entry with commits shipped, what moved, and blockers.

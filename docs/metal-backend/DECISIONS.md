@@ -1,0 +1,117 @@
+# Metal Backend — Decision Log
+
+Append-only. One short entry per architectural call made during implementation
+that deviates from or refines the approved plan. Newest at the bottom so the
+history reads chronologically top-to-bottom.
+
+Entry format:
+```
+## D-NNN: Short title
+Date: YYYY-MM-DD
+Stage: <stage>
+Decision: <one sentence>
+Why: <one paragraph>
+Alternatives considered: <one line each>
+```
+
+---
+
+## D-001: Raw Metal over MLX
+
+Date: 2026-04-18
+Stage: planning
+Decision: Build the GPU backend on raw Metal (objc2-metal + hand-written MSL),
+not MLX.
+Why: MLX's `scatter_add` is explicitly non-deterministic on f32, which
+violates our reproducibility requirement. MLX restricts distribution to
+macOS 14+ and Apple-Silicon-only wheels, blocking Intel-Mac/Linux fallback.
+Custom MSL is required regardless for deterministic histograms — adding MLX
+on top of that is pure dependency overhead.
+Alternatives considered: MLX end-to-end (rejected — determinism + distribution);
+hybrid MLX-for-tensor-ops + raw-Metal-for-scatter (rejected — MLX buys us
+nothing for ops we don't have).
+
+---
+
+## D-002: Hybrid Metal 3 baseline + Metal 4 fast path
+
+Date: 2026-04-18
+Stage: planning
+Decision: Target Metal 3 (macOS 13+) as the baseline; detect
+`MTLGPUFamilyMetal4` at runtime and opt into Metal 4 enhancements
+(pipeline harvesting, ICBs, `MTLResidencySet`) only where available.
+Why: Metal 4 requires macOS 26 Tahoe which has a narrow install base. Metal 3
+has every API needed for Stage 1 (compute encoders, argument buffers, atomics,
+`MTLHeap`). Hybrid path widens reach ~dramatically for ~20% extra engineering
+behind a single runtime capability flag.
+Alternatives considered: Metal 4 only (rejected — excludes macOS 14/15);
+Metal 3 only (rejected — forfeits ICB + pipeline harvesting gains in Stage 3).
+
+---
+
+## D-003: No float atomics anywhere
+
+Date: 2026-04-18
+Stage: planning
+Decision: Histogram accumulation scatters into per-threadgroup private
+histograms in threadgroup memory, then a deterministic two-pass tree reduce
+through a device-memory scratch buffer. No `atomic_fetch_add_explicit` on
+floats at any memory level.
+Why: Float addition is non-associative; atomic order is non-deterministic.
+Bit-exact reproducibility is a stated hard constraint. Two-pass reduction
+guarantees deterministic reduction order at the cost of a small scratch
+buffer (`num_threadgroups × F × B × 2 × sizeof(f32)`).
+Alternatives considered: Native float atomics with epsilon-tolerance asserts
+(rejected — would mask edge-case tree-split divergence); CAS-loop
+deterministic atomics (rejected — more complex than a clean two-pass reduce).
+
+---
+
+## D-004: `RuntimeBackend` enum wrapper at the PyO3 boundary
+
+Date: 2026-04-18
+Stage: planning
+Decision: Do not rewrite the engine to use `Box<dyn BackendOps>`. Keep
+`Trainer::fit_iterations<B: BackendOps, O: ObjectiveOps>` generic. At the
+PyO3 boundary add one `RuntimeBackend::{Cpu, Metal}` enum that implements
+`BackendOps` by forwarding each method.
+Why: Preserves static dispatch and monomorphization for both backends. Keeps
+the engine ignorant of runtime device selection. Branch cost is one enum
+discriminant at each method call — negligible vs. the compute inside.
+Alternatives considered: `Box<dyn BackendOps>` end-to-end (rejected — loses
+monomorphization, touches every engine generic bound);
+generic-over-two-types (rejected — combinatorial explosion across objectives).
+
+---
+
+## D-005: `metal` feature default-on for macOS
+
+Date: 2026-04-18
+Stage: planning
+Decision: Gate `backend_metal` behind a cargo feature `metal` on
+`bindings/python`. Feature default-on via
+`[target.'cfg(target_os = "macos")'.dependencies]`. Off on Linux/Windows/Intel.
+Why: macOS users get GPU acceleration with no opt-in. Non-macOS and
+Intel-Mac wheels build cleanly without Metal linkage. Source users can
+`--no-default-features` to disable.
+Alternatives considered: Always compiled on macOS (rejected — forces Metal
+linkage even for source users who don't want it); opt-in only (rejected —
+wheel users wouldn't benefit unless we ship separate wheels).
+
+---
+
+## D-006: Ship MSL source, compile at runtime, cache harvested pipelines
+
+Date: 2026-04-18
+Stage: planning
+Decision: Embed `.metal` source via `include_str!`, compile at
+`MetalBackend::new()` asynchronously, and cache the serialized pipeline
+state in `~/Library/Caches/com.alloygbm/pipelines-<gpu>-<arch>.metallib`
+(via `MTLBinaryArchive`).
+Why: Avoids maturin-wheel-build-time dependency on `xcrun metal`. Forward-
+compatible across macOS 14/15/16+/26 and M1–M4. First-run compile stutter
+is amortized by the disk cache. Pipeline harvesting is a Metal 4 fast path
+on top.
+Alternatives considered: Precompiled `.metallib` in the wheel (rejected —
+cross-OS/arch compile matrix pain in CI); AOT at build time via build.rs
+(rejected — same CI pain plus brittle).
