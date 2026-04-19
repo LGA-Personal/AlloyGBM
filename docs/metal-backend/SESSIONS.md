@@ -5,6 +5,66 @@ First thing a new session reads, alongside `STATUS.md`.
 
 ---
 
+## 2026-04-19 — S1.3 MSL histogram kernel source + compile test
+
+**Branch:** `claude/charming-carson-d08c9a` (worktree)
+
+**What moved:**
+- `src/shaders/histogram.metal` — two-pass MSL compute kernel:
+  - `histogram_build_scatter`: per-threadgroup scatter. One threadgroup
+    per (feature, row-chunk). 32 threads (one SIMD group). Single shared
+    `threadgroup float2 local_hist[MAX_BIN_COUNT]` with per-bin
+    **single-writer discipline**: lane `k` is the exclusive writer for
+    bins where `bin % 32 == k`. 32 lanes read rows in parallel, then
+    serialise an inner `for src_lane in 0..32` loop using `simd_shuffle`
+    to hand each lane's `(bin, grad, hess)` across the SIMD group.
+    Every write destination is deterministic by construction; no float
+    atomics needed. Writes the threadgroup histogram to a device-memory
+    scratch buffer indexed by `(chunk, feature, bin)`.
+  - `histogram_reduce`: cross-chunk ascending reduce. One thread per
+    `(feature, bin)`, walks chunks `0..n_chunks` in order, writes the
+    final `float2`. Deterministic by single-threaded accumulation.
+  - Function constants: `BIN_COUNT` (0), `USE_U16_BINS` (1). Fallback
+    defaults via `is_function_constant_defined` let `newLibraryWithSource`
+    compile cleanly ahead of pipeline creation. Threadgroup-memory array
+    size is bounded by `MAX_BIN_COUNT = 4096`.
+- `src/kernels/{mod.rs,histogram.rs}` — Rust holders. `HISTOGRAM_SHADER_SOURCE`
+  embeds the `.metal` file via `include_str!`; `KERNEL_NAME_SCATTER` and
+  `KERNEL_NAME_REDUCE` identify the two entry points.
+- `src/lib.rs` — exposes `kernels` module; adds `tests::histogram_shader_compiles`
+  which feeds the source to `MTLDevice::newLibraryWithSource_options_error`
+  on macOS and panics on any MSL diagnostic.
+
+**Commits shipped:** see git log
+
+**Verification:**
+- `cargo test -p alloygbm-backend-metal`: 2 passed (probe + shader compile).
+- `cargo clippy -p alloygbm-backend-metal --all-targets -- -D warnings`: clean.
+- `cargo fmt --all --check`: clean.
+
+**Debug notes:**
+- First compile pass tripped on "expecting input declarations with
+  either all scalar types or all vector types" — MSL requires all
+  position-attribute inputs to share dimensionality. Fixed by using
+  `uint3` for both `thread_position_in_threadgroup` and
+  `threadgroup_position_in_grid`, then projecting to the scalars /
+  pair we actually use.
+- `newLibraryWithSource_options_error` is safe in `objc2-metal` 0.3 —
+  dropped the `unsafe` block once clippy flagged it as unused.
+
+**Blockers:** none.
+
+**Next session should:** start **S1.4** (Rust-side histogram dispatch
+orchestration). Wrap `BinnedMatrix` + `gradients` + `row_indices` as
+shared `MTLBuffer`s, allocate scratch + output, encode the two passes
+into one command buffer, read back into `HistogramBundle`, wire
+`impl BackendOps for MetalBackend::build_histograms`, delegate the
+remaining 5 `BackendOps` methods to an embedded `CpuBackend`. First
+correctness gate: hand-computed fixture (<1000 rows) vs Metal output.
+Pipeline compilation + caching stays scoped to S1.5.
+
+---
+
 ## 2026-04-18 — S1.2 device + capability probe
 
 **Branch:** `claude/charming-carson-d08c9a` (worktree)

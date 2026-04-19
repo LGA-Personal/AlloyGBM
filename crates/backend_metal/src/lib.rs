@@ -12,6 +12,8 @@ mod device;
 #[cfg(target_os = "macos")]
 pub use device::{MetalCapabilities, MetalDevice};
 
+pub mod kernels;
+
 #[cfg(target_os = "macos")]
 pub struct MetalBackend {
     pub metal_device: MetalDevice,
@@ -52,7 +54,11 @@ impl MetalBackend {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
+    #![allow(unsafe_code)]
+
     use super::*;
+    use objc2_foundation::NSString;
+    use objc2_metal::MTLDevice;
 
     #[test]
     fn probe_default_device() {
@@ -65,6 +71,26 @@ mod tests {
             Err(_) => {
                 // Headless runner without a Metal device — not a failure.
             }
+        }
+    }
+
+    #[test]
+    fn histogram_shader_compiles() {
+        let Ok(backend) = MetalBackend::new() else {
+            return; // no Metal device available — skip.
+        };
+
+        let source = NSString::from_str(kernels::histogram::HISTOGRAM_SHADER_SOURCE);
+        let result = backend
+            .metal_device
+            .device
+            .newLibraryWithSource_options_error(&source, None);
+        match result {
+            Ok(_library) => {}
+            Err(err) => panic!(
+                "histogram.metal failed to compile: {}",
+                err.localizedDescription()
+            ),
         }
     }
 }
