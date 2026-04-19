@@ -1,8 +1,8 @@
 # Metal Backend — Current Status
 
-**Last updated:** 2026-04-18 (planning session)
+**Last updated:** 2026-04-18 (S1.1 landed)
 **Active stage:** Stage 1 — Histogram build on Metal
-**Active sub-task:** Not yet started (scaffolding next)
+**Active sub-task:** S1.2 — device + capability probe (next)
 
 ---
 
@@ -11,7 +11,7 @@
 Order matches the approved plan in
 [/Users/lashby/.claude/plans/okay-add-this-notebook-structured-star.md](../../.claude/plans/okay-add-this-notebook-structured-star.md).
 
-- [ ] **S1.1** Scaffold `crates/backend_metal` (Cargo.toml, build.rs, empty lib, workspace member, feature flag wired)
+- [x] **S1.1** Scaffold `crates/backend_metal` (Cargo.toml, build.rs, empty lib, workspace member, feature flag wired)
 - [ ] **S1.2** Device + capability probe (`device.rs`) — `MTLCreateSystemDefaultDevice`, `MTLGPUFamilyApple7`, `MTLGPUFamilyMetal4` flag
 - [ ] **S1.3** MSL histogram kernel (`shaders/histogram.metal`) — privatized threadgroup histograms + two-pass deterministic reduce
 - [ ] **S1.4** Rust-side orchestration (`kernels/histogram.rs`) — buffer wrapping, encoding, submit, readback
@@ -32,8 +32,8 @@ Order matches the approved plan in
 
 ## Next Up
 
-1. Start with **S1.1** — scaffold crate, update workspace `Cargo.toml`, `cargo check --workspace` green. Then checkpoint.
-2. Move to **S1.2** (device probe) as a separate commit.
+1. **S1.2** — device + capability probe (`device.rs`): add `objc2`/`objc2-metal` deps, wire `build.rs` framework linking, implement `MTLCreateSystemDefaultDevice`, probe `MTLGPUFamilyApple7` + `MTLGPUFamilyMetal4`, store device + command queue + Metal 4 capability flag on `MetalBackend`.
+2. Then **S1.3** (MSL histogram kernel) as a separate commit.
 
 ---
 

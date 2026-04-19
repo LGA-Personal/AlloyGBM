@@ -1,0 +1,18 @@
+[package]
+name = "alloygbm-backend-metal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Metal GPU backend for AlloyGBM on Apple Silicon"
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[dependencies]
+alloygbm-core = { path = "../core" }
+alloygbm-engine = { path = "../engine" }
+alloygbm-backend-cpu = { path = "../backend_cpu" }
+
+[lints]
+workspace = true

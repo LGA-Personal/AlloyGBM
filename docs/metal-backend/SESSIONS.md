@@ -5,6 +5,36 @@ First thing a new session reads, alongside `STATUS.md`.
 
 ---
 
+## 2026-04-18 — S1.1 scaffold
+
+**Branch:** `claude/charming-carson-d08c9a` (worktree)
+
+**What moved:**
+- Created `crates/backend_metal` crate: `Cargo.toml` (workspace-inherited
+  metadata; deps on `alloygbm-core`, `alloygbm-engine`, `alloygbm-backend-cpu`),
+  minimal `build.rs` (no-op; framework linking lands in S1.2),
+  `src/lib.rs` with a stub `MetalBackend` unit struct.
+- Added `crates/backend_metal` to workspace `members` in root `Cargo.toml`.
+- Wired `bindings/python/Cargo.toml`: optional `alloygbm-backend-metal`
+  under `[target.'cfg(target_os = "macos")'.dependencies]`, `metal` feature
+  default-on via `dep:alloygbm-backend-metal`.
+- Verification: `cargo check --workspace` green in 5.79s. `cargo clippy
+  -p alloygbm-backend-metal --all-targets -- -D warnings` clean.
+  `cargo fmt --all --check` clean.
+
+**Commits shipped:** (committed at session end — see git log for SHA)
+
+**Blockers:** none.
+
+**Next session should:** start **S1.2** (device probe). Add `objc2` +
+`objc2-metal` deps, extend `build.rs` with framework linking, create
+`src/device.rs` that probes `MTLCreateSystemDefaultDevice` and family
+flags (`MTLGPUFamilyApple7`, `MTLGPUFamilyMetal4`), and thread device +
+command queue + capability flags onto `MetalBackend`. Keep `MetalBackend`
+still not implementing `BackendOps` — that arrives in S1.4.
+
+---
+
 ## 2026-04-18 — Planning session
 
 **Branch:** `claude/charming-carson-d08c9a` (worktree)

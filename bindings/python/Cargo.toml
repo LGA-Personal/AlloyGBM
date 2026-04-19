@@ -24,6 +24,13 @@ alloygbm-engine = { path = "../../crates/engine" }
 alloygbm-predictor = { path = "../../crates/predictor" }
 alloygbm-shap = { path = "../../crates/shap" }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+alloygbm-backend-metal = { path = "../../crates/backend_metal", optional = true }
+
+[features]
+default = ["metal"]
+metal = ["dep:alloygbm-backend-metal"]
+
 [package.metadata.maturin]
 python-source = "."
 module-name = "alloygbm._alloygbm"

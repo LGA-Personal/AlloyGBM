@@ -3,6 +3,7 @@ members = [
     "crates/core",
     "crates/engine",
     "crates/backend_cpu",
+    "crates/backend_metal",
     "crates/predictor",
     "crates/shap",
     "crates/categorical",
