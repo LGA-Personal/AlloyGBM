@@ -1,8 +1,8 @@
 # Metal Backend — Current Status
 
-**Last updated:** 2026-04-19 (S1.7 landed)
+**Last updated:** 2026-04-19 (S1.8 landed)
 **Active stage:** Stage 1 — Histogram build on Metal
-**Active sub-task:** S1.8 — thread `device="cpu"|"metal"|"auto"` through Python estimators (next)
+**Active sub-task:** S1.9 — warn-and-fallback on Metal init failure + resolved-device in artifact metadata (next)
 
 ---
 
@@ -18,7 +18,7 @@ Order matches the approved plan in
 - [x] **S1.5** Pipeline compilation + `MTLBinaryArchive` cache at `~/Library/Caches/com.alloygbm/` — `HistogramPipelineCache` with in-process `Mutex<HashMap<(bin_count, use_u16_bins), Arc<HistogramPipelines>>>` + on-disk archive persisted atomically at Drop
 - [x] **S1.6** `MetalBackend` delegates non-histogram `BackendOps` methods to embedded `CpuBackend` *(delivered in S1.4)*
 - [x] **S1.7** `RuntimeBackend` enum in `bindings/python/src/runtime_backend.rs`; `device: &str` on every `train_*` pyfunction (5 pyfunctions + `_impl` + test helper)
-- [ ] **S1.8** Python `device="cpu"|"metal"|"auto"` parameter across `GBMRegressor`, `GBMClassifier`, `GBMRanker`
+- [x] **S1.8** Python `device="cpu"|"metal"|"auto"` parameter across `GBMRegressor`, `GBMClassifier`, `GBMRanker` — `__init__` + validation + `get_params`/`set_params` + `__repr__` + 5 native call sites on Regressor; Classifier and Ranker `__repr__` extended (pickle/save-load round-trip via existing `__dict__` plumbing)
 - [ ] **S1.9** Warn-and-fallback on Metal init failure; store resolved device in artifact metadata JSON
 - [ ] **S1.10** Extend `native_runtime_info()` with `metal_available`, `metal4_available`, `gpu_family`
 - [ ] **S1.11** Rust unit tests for histogram kernel correctness (<1000 rows, hand-computed reference) *(delivered in S1.4: `histogram_matches_cpu_small_fixture` + `histogram_feature_subset_matches_cpu`; S1.5 adds `pipeline_cache_returns_identical_arc_on_second_call`)*
@@ -32,26 +32,24 @@ Order matches the approved plan in
 
 ## Next Up
 
-1. **S1.8** — Python estimator plumbing. `GBMRegressor`,
-   `GBMClassifier`, `GBMRanker` all need a `device: str = "cpu"`
-   constructor parameter, validated against `{"cpu","metal","auto"}`,
-   and wired through to `train_regression_artifact*` keyword. Touches
-   `__init__`, `get_params`, `set_params`, `__repr__`,
-   `_params_order`, and pickle state on each estimator. The native
-   entry points are already ready — they accept `device` as the last
-   kwarg with default `"cpu"`, and reject unknown values with
-   `EngineError::InvalidConfig` (surfaces as `PyValueError`).
-2. **S1.9** layers a `try { MetalBackend::new() } catch { warn; use
+1. **S1.9** layers a `try { MetalBackend::new() } catch { warn; use
    CpuBackend }` fallback on the PyO3 side, and stores the
    `resolved_device` in artifact metadata (append-only field, so the
    hand-rolled positional parser stays back-compat). The S1.7 landing
    already stores `backend.name()` in a local
    (`let _backend_name: &'static str = backend.name();`) at the
    dispatch site — wire it into `ModelMetadata` when S1.9 lands.
-3. **S1.10** is a cheap PyO3 + Python extension to
+   Needs a Python-visible `RuntimeWarning` emission path on fallback
+   (use `pyo3::exceptions::PyRuntimeWarning` via `PyErr::warn_bound`
+   at the `_impl` entry before `resolve_runtime_backend` so the warn
+   happens exactly once per train call).
+2. **S1.10** is a cheap PyO3 + Python extension to
    `native_runtime_info()` exposing `metal_available: bool`,
    `metal4_available: bool`, `gpu_family: Optional[str]`. Relies on
    `MetalDevice::probe()` → `MetalCapabilities`.
+3. **S1.11–S1.12** Python-side Metal backend tests
+   (`bindings/python/tests/test_metal_backend.py`) + Rust histogram
+   correctness tests. Gate on `native_runtime_info().metal_available`.
 
 ---
 

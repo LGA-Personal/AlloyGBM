@@ -344,6 +344,7 @@ class GBMRegressorContractTests(unittest.TestCase):
                         "continuous_binning_strategy": "linear",
                         "continuous_binning_max_bins": 256,
                         "objective": "squared_error",
+                        "device": "cpu",
                     }
                 ],
             )

@@ -5,6 +5,114 @@ First thing a new session reads, alongside `STATUS.md`.
 
 ---
 
+## 2026-04-19 — S1.8 Python `device="cpu"|"metal"|"auto"` on all three estimators
+
+**Branch:** `claude/charming-carson-d08c9a` (worktree)
+
+### What moved
+
+- **`bindings/python/alloygbm/regressor.py`** — added module-level
+  `_VALID_DEVICES = {"cpu","metal","auto"}`; `device: str = "cpu"`
+  keyword at the end of `__init__`; validation block in `__init__`
+  mirroring the `training_policy` / `tree_growth` pattern; attribute
+  assignment `self.device = str(device)`; appended `device=` to
+  `__repr__`; added `"device": self.device` to `get_params()`;
+  extended the `set_params` `allowed` set and added a mirrored
+  validation block; threaded `device=self.device` through all 5
+  native call sites (bytes-path, dense-with-summary, rows-with-summary,
+  dense legacy bridge, rows legacy bridge). Pickle state
+  (`__getstate__`/`__setstate__`) and `save_model`/`load_model` need
+  no changes — the former uses `self.__dict__.copy()` and the latter
+  round-trips through `get_params()` + `known`-filtered rehydration,
+  both of which pick up `device` automatically.
+- **`bindings/python/alloygbm/classifier.py`** — no `__init__` change
+  needed (inherits via `**kwargs`), but the custom `__repr__` at
+  lines 294-327 does *not* call `super().__repr__()` and explicitly
+  enumerates fields, so `device='…'` was appended there. Pickle
+  hooks are pure `super()` delegation → auto-covered.
+- **`bindings/python/alloygbm/ranker.py`** — same pattern: `__init__`
+  forwards via `super().__init__(**kwargs)` so `device` flows
+  through the `__signature__` override too. Custom `__repr__` at
+  lines 222-257 got an appended `device='…'`. `get_params` /
+  `set_params` delegate to super, so no changes needed there.
+- **`bindings/python/tests/test_regressor_contract.py`** — one
+  contract test (`test_fit_and_predict_use_native_bridges`) asserts
+  the exact kwargs recorded by the fake native bridge; appended
+  `"device": "cpu"` to match the new call shape.
+
+### Verification
+
+- `cargo check -p alloygbm-python` clean.
+- `cargo clippy --workspace --all-targets -- -D warnings` clean.
+- `cargo fmt --all --check` clean.
+- `maturin develop --release` rebuilds cleanly (still ~0s — no Rust
+  changes this session, just Python).
+- **Python test suite: 332 passed, 16 subtests passed** (was 332 pre-
+  S1.8; the patched contract test keeps the count steady).
+- Estimator smoke: all three estimators (`GBMRegressor`,
+  `GBMClassifier`, `GBMRanker`) with `device="cpu" | "metal" | "auto"`
+  fit + predict successfully on a 3-4 row fixture. `set_params`
+  round-trip, `pickle.{dumps,loads}` round-trip, and
+  `save_model`/`load_model` round-trip all preserve `device`.
+  Invalid `device="tpu"` raises `ValueError` in both `__init__` and
+  `set_params`. Metal device end-to-end trains and predicts
+  identically (`[1.9999998807907104]` vs the CPU path on the
+  smoke fixture).
+
+### Design calls
+
+- **`device` is the last kwarg** in every estimator's `__init__`
+  (after `max_cat_threshold`). Back-compat for positional-kwarg
+  callers and for `load_model` consumers: the new field is filtered
+  through `known = set(_probe.get_params().keys())` on load, so
+  older artifacts (missing `"device"`) just rehydrate with the
+  default. Newer artifacts trained with `device="metal"` loaded on
+  the same build retain the original device in `get_params()`, but
+  inference never consults it (inference goes through
+  `NativePredictorHandle`, which is device-agnostic).
+- **`_params_order` from the plan is a red herring** — grep shows no
+  such symbol anywhere in `bindings/python/alloygbm/`. Both
+  `get_params` and `set_params` are dict-based, so the plan's list
+  of touch points collapses to: `__init__` sig + validation +
+  `__repr__` + `get_params` dict + `set_params` allowed-set +
+  `set_params` validation + native call sites.
+- **Classifier/Ranker validation lives in the Regressor base class.**
+  Both subclasses forward to `super().__init__(**kwargs)` with no
+  further filtering, so the same `_VALID_DEVICES` check runs for
+  every estimator. No duplication of the validation block.
+- **Ranker's `__signature__` override** (lines 68-82 of ranker.py)
+  introspects `GBMRegressor.__init__` at class-body time and
+  recomposes the signature with `ranking_objective` prepended. This
+  inherits the new `device` parameter automatically — verified by
+  `inspect.signature(GBMRanker.__init__)` showing `device='cpu'` at
+  the tail.
+
+### Next session handoff
+
+- **S1.9 — warn-and-fallback on Metal init failure + resolved
+  device in artifact metadata.** Two pieces: (a) at each PyO3
+  `train_*_impl` entry, wrap `resolve_runtime_backend(device)` such
+  that `device ∈ {"metal","auto"}` falling back to CPU emits a
+  `PyRuntimeWarning` via `PyErr::warn_bound(py, …)` and returns
+  `RuntimeBackend::Cpu(CpuBackend)`; the `"cpu"` case never warns.
+  (b) stash `backend.name()` (already captured as
+  `_backend_name: &'static str` at each dispatch site) into
+  `ModelMetadata` as a new append-only field. The hand-rolled
+  positional JSON parser in `crates/core/src/lib.rs` means the
+  field *must* go at the end of `ModelMetadata` serialization with
+  a default for back-compat — same pattern as
+  `uses_continuous_binning` and friends.
+- **Behavioural gotcha for S1.9:** `resolve_runtime_backend("auto")`
+  currently maps to CPU unconditionally. If S1.9 upgrades `"auto"`
+  to "try Metal first, fall back to CPU", the warn-and-fallback
+  path needs to treat `"auto"` and `"metal"` asymmetrically:
+  `"auto" → Metal-failure` should NOT warn (it's the heuristic
+  doing its job), whereas `"metal" → Metal-failure` SHOULD warn
+  (user explicitly asked for Metal). Easiest: keep `"auto" = CPU`
+  for S1.9 too, and defer the real heuristic to Stage 2.
+
+---
+
 ## 2026-04-19 — S1.7 `RuntimeBackend` enum + `device: &str` PyO3 plumbing
 
 **Branch:** `claude/charming-carson-d08c9a` (worktree)

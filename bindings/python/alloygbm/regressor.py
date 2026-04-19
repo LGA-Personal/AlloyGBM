@@ -29,6 +29,7 @@ def _nan_bin_for_max_bins(max_bins):
     return max_bins - 1
 _MIN_CONTINUOUS_QUANTIZED_BINS = 2
 _VALID_CONTINUOUS_BINNING_STRATEGIES = {"linear", "rank", "quantile"}
+_VALID_DEVICES = {"cpu", "metal", "auto"}
 _LINEAR_TAIL_RANK_ENV_VAR = "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK"
 _LINEAR_TAIL_CORE_SPAN_RATIO_ENV_VAR = "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_CORE_SPAN_RATIO"
 _DEFAULT_LINEAR_TAIL_CORE_SPAN_RATIO_THRESHOLD = 0.10
@@ -243,6 +244,7 @@ class GBMRegressor(_GBMRegressorBase):
         warm_start: bool = False,
         objective: "str | None | object" = None,
         max_cat_threshold: int = 0,
+        device: str = "cpu",
     ) -> None:
         if not (0.0 < learning_rate <= 1.0):
             raise ValueError("learning_rate must be in (0.0, 1.0]")
@@ -353,6 +355,10 @@ class GBMRegressor(_GBMRegressorBase):
             )
         if int(max_cat_threshold) < 0:
             raise ValueError("max_cat_threshold must be >= 0")
+        if device not in _VALID_DEVICES:
+            raise ValueError(
+                "device must be one of: " + ", ".join(sorted(_VALID_DEVICES))
+            )
 
         self.learning_rate = float(learning_rate)
         self.max_depth = int(max_depth)
@@ -400,6 +406,7 @@ class GBMRegressor(_GBMRegressorBase):
         self.warm_start = bool(warm_start)
         self.objective = objective
         self.max_cat_threshold = int(max_cat_threshold)
+        self.device = str(device)
         self._is_fitted = False
         self._artifact_bytes: bytes | None = None
         self._native_predictor_handle: object | None = None
@@ -451,7 +458,8 @@ class GBMRegressor(_GBMRegressorBase):
             f"tree_growth='{self.tree_growth}', "
             f"warm_start={self.warm_start}, "
             f"objective={self.objective!r}, "
-            f"max_cat_threshold={self.max_cat_threshold}"
+            f"max_cat_threshold={self.max_cat_threshold}, "
+            f"device='{self.device}'"
             ")"
         )
 
@@ -489,6 +497,7 @@ class GBMRegressor(_GBMRegressorBase):
             "warm_start": self.warm_start,
             "objective": self.objective,
             "max_cat_threshold": self.max_cat_threshold,
+            "device": self.device,
         }
 
     def set_params(self, **params: float | int | bool | str | None) -> "GBMRegressor":
@@ -524,6 +533,7 @@ class GBMRegressor(_GBMRegressorBase):
             "warm_start",
             "objective",
             "max_cat_threshold",
+            "device",
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
@@ -747,6 +757,14 @@ class GBMRegressor(_GBMRegressorBase):
             if mct < 0:
                 raise ValueError("max_cat_threshold must be >= 0")
             self.max_cat_threshold = mct
+
+        if "device" in params:
+            dev = str(params["device"])
+            if dev not in _VALID_DEVICES:
+                raise ValueError(
+                    "device must be one of: " + ", ".join(sorted(_VALID_DEVICES))
+                )
+            self.device = dev
 
         # Cross-field validation: leaf growth requires max_leaves
         if self.tree_growth == "leaf" and self.max_leaves is None:
@@ -1210,6 +1228,7 @@ class GBMRegressor(_GBMRegressorBase):
                     custom_loss_fn=_custom_loss_fn,
                     custom_metric_fn=_custom_metric_fn,
                     max_cat_threshold=self.max_cat_threshold,
+                    device=self.device,
                 )
                 return self._finalize_training_result(native_result, input_adaptation_seconds, feature_count=feature_count)
             except (ImportError, AttributeError):
@@ -1301,6 +1320,7 @@ class GBMRegressor(_GBMRegressorBase):
                 custom_loss_fn=_custom_loss_fn,
                 custom_metric_fn=_custom_metric_fn,
                 max_cat_threshold=self.max_cat_threshold,
+                device=self.device,
             )
         else:
             assert training_rows is not None
@@ -1353,6 +1373,7 @@ class GBMRegressor(_GBMRegressorBase):
                 custom_loss_fn=_custom_loss_fn,
                 custom_metric_fn=_custom_metric_fn,
                 max_cat_threshold=self.max_cat_threshold,
+                device=self.device,
             )
 
         self._apply_continuous_binning_metadata(native_result.continuous_binning_metadata)
@@ -1672,6 +1693,7 @@ class GBMRegressor(_GBMRegressorBase):
                 continuous_binning_strategy=self.continuous_binning_strategy,
                 continuous_binning_max_bins=self.continuous_binning_max_bins,
                 objective=self._objective_name(),
+                device=self.device,
             )
         else:
             train_regression_artifact = _load_native_train_regression_artifact()
@@ -1698,6 +1720,7 @@ class GBMRegressor(_GBMRegressorBase):
                 continuous_binning_strategy=self.continuous_binning_strategy,
                 continuous_binning_max_bins=self.continuous_binning_max_bins,
                 objective=self._objective_name(),
+                device=self.device,
             )
 
         self._n_features_in = feature_count

@@ -322,7 +322,8 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
             f"max_leaves={self.max_leaves}, "
             f"tree_growth='{self.tree_growth}', "
             f"warm_start={self.warm_start}, "
-            f"max_cat_threshold={self.max_cat_threshold}"
+            f"max_cat_threshold={self.max_cat_threshold}, "
+            f"device='{self.device}'"
             ")"
         )
 

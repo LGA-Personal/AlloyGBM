@@ -252,7 +252,8 @@ class GBMRanker(GBMRegressor):
             f"tree_growth='{self.tree_growth}', "
             f"warm_start={self.warm_start}, "
             f"objective={self.objective!r}, "
-            f"max_cat_threshold={self.max_cat_threshold}"
+            f"max_cat_threshold={self.max_cat_threshold}, "
+            f"device='{self.device}'"
             ")"
         )
 
