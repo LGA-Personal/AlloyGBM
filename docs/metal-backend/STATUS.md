@@ -1,8 +1,8 @@
 # Metal Backend — Current Status
 
-**Last updated:** 2026-04-18 (S1.1 landed)
+**Last updated:** 2026-04-18 (S1.2 landed)
 **Active stage:** Stage 1 — Histogram build on Metal
-**Active sub-task:** S1.2 — device + capability probe (next)
+**Active sub-task:** S1.3 — MSL histogram kernel (next)
 
 ---
 
@@ -12,7 +12,7 @@ Order matches the approved plan in
 [/Users/lashby/.claude/plans/okay-add-this-notebook-structured-star.md](../../.claude/plans/okay-add-this-notebook-structured-star.md).
 
 - [x] **S1.1** Scaffold `crates/backend_metal` (Cargo.toml, build.rs, empty lib, workspace member, feature flag wired)
-- [ ] **S1.2** Device + capability probe (`device.rs`) — `MTLCreateSystemDefaultDevice`, `MTLGPUFamilyApple7`, `MTLGPUFamilyMetal4` flag
+- [x] **S1.2** Device + capability probe (`device.rs`) — `MTLCreateSystemDefaultDevice`, `MTLGPUFamilyApple7`, `MTLGPUFamilyMetal4` flag
 - [ ] **S1.3** MSL histogram kernel (`shaders/histogram.metal`) — privatized threadgroup histograms + two-pass deterministic reduce
 - [ ] **S1.4** Rust-side orchestration (`kernels/histogram.rs`) — buffer wrapping, encoding, submit, readback
 - [ ] **S1.5** Pipeline compilation + `MTLBinaryArchive` cache at `~/Library/Caches/com.alloygbm/`
@@ -32,8 +32,8 @@ Order matches the approved plan in
 
 ## Next Up
 
-1. **S1.2** — device + capability probe (`device.rs`): add `objc2`/`objc2-metal` deps, wire `build.rs` framework linking, implement `MTLCreateSystemDefaultDevice`, probe `MTLGPUFamilyApple7` + `MTLGPUFamilyMetal4`, store device + command queue + Metal 4 capability flag on `MetalBackend`.
-2. Then **S1.3** (MSL histogram kernel) as a separate commit.
+1. **S1.3** — MSL histogram kernel (`shaders/histogram.metal`): write MSL for privatized per-threadgroup histograms in threadgroup memory (`F_TILE × B × 2` f32s), then a deterministic tree-reduce through a device-memory scratch buffer. Two compute passes, no float atomics. Embed via `include_str!` from `src/kernels/histogram.rs`. Compilation + dispatch wiring land in S1.4/S1.5 — S1.3 ships just the `.metal` source and a Rust module declaring `shader_source()`.
+2. Then **S1.4** (Rust-side orchestration of the histogram dispatch).
 
 ---
 

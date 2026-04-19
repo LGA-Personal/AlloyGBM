@@ -115,3 +115,26 @@ on top.
 Alternatives considered: Precompiled `.metallib` in the wheel (rejected —
 cross-OS/arch compile matrix pain in CI); AOT at build time via build.rs
 (rejected — same CI pain plus brittle).
+
+---
+
+## D-007: Relax `unsafe_code = "forbid"` to `deny` in `backend_metal` only
+
+Date: 2026-04-18
+Stage: S1.2
+Decision: `crates/backend_metal/Cargo.toml` does not inherit workspace
+lints. It declares its own `[lints.rust]` with `unsafe_code = "deny"`,
+so FFI call sites must opt in per-site via `#[allow(unsafe_code)]` +
+`unsafe { ... }`. Every other workspace crate still inherits
+`unsafe_code = "forbid"`.
+Why: `objc2-metal` surfaces most Metal APIs (command encoding, buffer
+creation, selector calls to cover Metal 4 gaps) as `unsafe fn`. The
+workspace-wide `forbid` is unsatisfiable for any real Metal wrapper.
+`deny`-at-crate + `allow`-at-site keeps unsafe visible, auditable, and
+narrowly scoped — every `unsafe` block remains a review point — while
+preserving the workspace invariant everywhere else.
+Alternatives considered: relax the workspace lint globally (rejected —
+punishes every other crate for one crate's FFI needs); pick a fully-safe
+Metal wrapper (rejected — no mature option covers Metal 3 + Metal 4 +
+compute + residency sets); hand-audited `unsafe_op_in_unsafe_fn` only
+(rejected — still requires the outer lint to be relaxed).

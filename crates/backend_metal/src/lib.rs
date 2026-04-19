@@ -1,13 +1,70 @@
 //! Metal GPU backend for AlloyGBM on Apple Silicon.
 //!
-//! Scaffolded in S1.1. Real implementation arrives incrementally across
-//! Stage 1 sub-tasks — see `docs/metal-backend/STATUS.md`.
+//! The crate compiles as a stub on non-macOS targets so `cargo check
+//! --workspace` stays green cross-platform; the real implementation is
+//! gated by `cfg(target_os = "macos")`.
+//!
+//! Stage 1 scope is tracked in `docs/metal-backend/STATUS.md`.
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[cfg(target_os = "macos")]
+mod device;
+
+#[cfg(target_os = "macos")]
+pub use device::{MetalCapabilities, MetalDevice};
+
+#[cfg(target_os = "macos")]
+pub struct MetalBackend {
+    pub metal_device: MetalDevice,
+}
+
+#[cfg(target_os = "macos")]
+impl MetalBackend {
+    /// Probe the system Metal device and build a backend handle. Returns
+    /// an error when Metal is unavailable — callers (the PyO3 layer) are
+    /// expected to warn-and-fall-back to `CpuBackend`.
+    pub fn new() -> Result<Self, String> {
+        let metal_device = MetalDevice::probe()?;
+        if !metal_device.capabilities.apple7 {
+            return Err(format!(
+                "Metal backend requires GPU family Apple7 or later; \
+                 device '{}' does not support it",
+                metal_device.capabilities.device_name
+            ));
+        }
+        Ok(Self { metal_device })
+    }
+
+    /// Read-only capability snapshot.
+    pub fn capabilities(&self) -> &MetalCapabilities {
+        &self.metal_device.capabilities
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
 pub struct MetalBackend;
 
+#[cfg(not(target_os = "macos"))]
 impl MetalBackend {
-    pub fn new() -> Self {
-        Self
+    pub fn new() -> Result<Self, String> {
+        Err("Metal backend is only available on macOS".to_string())
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn probe_default_device() {
+        match MetalBackend::new() {
+            Ok(backend) => {
+                let caps = backend.capabilities();
+                assert!(caps.apple7, "expected Apple7+ on the CI/dev machine");
+                assert!(!caps.device_name.is_empty());
+            }
+            Err(_) => {
+                // Headless runner without a Metal device — not a failure.
+            }
+        }
     }
 }

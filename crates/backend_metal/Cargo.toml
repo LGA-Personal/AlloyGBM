@@ -14,5 +14,14 @@ alloygbm-core = { path = "../core" }
 alloygbm-engine = { path = "../engine" }
 alloygbm-backend-cpu = { path = "../backend_cpu" }
 
-[lints]
-workspace = true
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-metal = "0.3"
+
+# Workspace lints set `unsafe_code = "forbid"`. This crate is the sole
+# exception — see `docs/metal-backend/DECISIONS.md` D-007. We drop the
+# workspace inheritance and declare a local `deny` so FFI call sites opt
+# in per-site with `#[allow(unsafe_code)]`.
+[lints.rust]
+unsafe_code = "deny"
