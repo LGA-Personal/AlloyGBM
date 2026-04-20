@@ -5,6 +5,81 @@ First thing a new session reads, alongside `STATUS.md`.
 
 ---
 
+## 2026-04-20 — S1.13 Bit-exactness golden test at scale
+
+**Branch:** `claude/charming-carson-d08c9a` (worktree)
+
+### What moved
+
+- **`bindings/python/tests/test_metal_backend.py`** — new class
+  `MetalGoldenTests` (3 cases) with the S1.12 `@unittest.skipUnless(
+  _METAL.metal_available, _SKIP_REASON)` gate at class level.
+  - `setUpClass` generates a seeded (50k × 100) training matrix
+    plus a held-out 5k-row eval matrix, then fits one CPU and one
+    Metal `GBMRegressor` at `n_estimators=20, seed=7,
+    deterministic=True, continuous_binning_max_bins=255`. Fitting
+    happens once per class (Metal fit is ~5s; per-test fits would
+    have tripled the cost for no signal).
+  - `test_golden_bitexact_predictions_on_training_set` —
+    `assert_array_equal` across all 50k training rows.
+  - `test_golden_bitexact_predictions_on_heldout_set` —
+    `assert_array_equal` on the 5k held-out rows, exercising
+    tree traversal on previously-unseen data.
+  - `test_golden_trained_device_recorded_in_artifact` — asserts
+    the metadata JSON correctly round-trips `"trained_device":"cpu"`
+    and `"trained_device":"metal"` respectively.
+- **`docs/metal-backend/STATUS.md`** — checked S1.13 off, promoted
+  S1.14 to the "Next Up" spot.
+
+### Verification
+
+- `pytest bindings/python/tests/test_metal_backend.py::MetalGoldenTests
+  -v` — 3 passed in 5.49s.
+- `pytest bindings/python/tests/test_metal_backend.py -v` — 21
+  passed in 8.51s (was 18; +3 new).
+- `pytest bindings/python/tests/ -q` — **353 passed, 16 subtests
+  passed** (was 350 pre-S1.13; zero regressions).
+
+### Design calls
+
+- **Scope adjusted from the plan's original "identical
+  `artifact_bytes`" gate.** S1.12 had already proved that contract
+  is unreachable: the metadata JSON encodes `trained_device` and
+  its length prefix, so Metal vs CPU artifacts legitimately differ
+  by a handful of bytes in the header. Prediction bit-exactness
+  over every training row — plus the held-out eval rows — is the
+  stronger observable contract and is what this test asserts.
+- **Shared `setUpClass` rather than per-test fit.** The fit pair
+  costs ~5.5s total (CPU 0.3s + Metal 5.2s). Three tests each
+  re-fitting would have cost ~16s and produced identical models
+  by construction; one fit feeding three assertions keeps the
+  signal intact while respecting the default pytest budget.
+- **Held-out eval set comes from a distinct RNG draw, not a
+  distinct seed.** Using the same `RandomState` instance for both
+  train and eval means the eval rows are genuinely independent
+  draws in the same distribution — which is what you want to
+  stress float-ordering variance during predict-time traversal.
+- **No slow-gate marker.** 5.5s is well under the implicit pytest
+  budget for the Metal module (the warn-and-fallback subprocess
+  tests already cost ~5s each). Adding `ALLOYGBM_SLOW` plumbing
+  for a single 5s test would have been premature.
+
+### Handoff notes
+
+- S1.14 is next: `benchmarks/metal_histogram.py` for throughput
+  characterisation. The golden test at (50k × 100, 20 estimators)
+  saw CPU 0.27s vs Metal 5.28s wall-clock for the full training
+  loop, which matches the expert prediction that the CPU wins
+  below ~250k rows. The benchmark should confirm the crossover
+  and produce the numbers that feed into S1.15's
+  `docs/limitations.md` note.
+- The `MetalGoldenTests` shape (50k × 100) is the shape agreed
+  with the expert sessions as the smallest "stage-realistic"
+  workload; when S1.14 lands, add its smallest-to-largest grid
+  around that anchor.
+
+---
+
 ## 2026-04-20 — S1.12 Python Metal backend test module
 
 **Branch:** `claude/charming-carson-d08c9a` (worktree)

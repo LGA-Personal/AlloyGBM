@@ -1,8 +1,8 @@
 # Metal Backend — Current Status
 
-**Last updated:** 2026-04-20 (S1.12 landed)
+**Last updated:** 2026-04-20 (S1.13 landed)
 **Active stage:** Stage 1 — Histogram build on Metal
-**Active sub-task:** S1.13 — bit-exactness golden artifact test at scale (next)
+**Active sub-task:** S1.14 — `benchmarks/metal_histogram.py` throughput harness (next)
 
 ---
 
@@ -23,7 +23,7 @@ Order matches the approved plan in
 - [x] **S1.10** Extend `native_runtime_info()` with `metal_available`, `metal4_available`, `gpu_family` — `probe_capabilities()` added to backend_metal for queue-free probing; `NativeRuntimeInfo` pyclass grew three new getters; graceful collapse to `False`/`None` on non-macOS and `--no-default-features` builds
 - [ ] **S1.11** Rust unit tests for histogram kernel correctness (<1000 rows, hand-computed reference) *(delivered in S1.4: `histogram_matches_cpu_small_fixture` + `histogram_feature_subset_matches_cpu`; S1.5 adds `pipeline_cache_returns_identical_arc_on_second_call`)*
 - [x] **S1.12** `bindings/python/tests/test_metal_backend.py` — macOS + `native_runtime_info().metal_available` gated; 18 cases covering availability probe, regression/classification/ranking bit-exactness vs CPU, NaN handling, single-row, single-feature, bin counts 16/255/1024, warn-and-fallback via `ALLOYGBM_METAL_DISABLE=1` (subprocess-isolated), and device-string validation (`auto` aliasing, unknown values raising `ValueError`)
-- [ ] **S1.13** Bit-exactness golden test: seeded (50k rows × 100 features) CPU vs Metal → identical `artifact_bytes`
+- [x] **S1.13** Bit-exactness golden test at scale: `MetalGoldenTests` class in `test_metal_backend.py` — seeded (50k rows × 100 features, 255 bins, 20 estimators) fit pair, shared `setUpClass` so Metal fit runs once (~5s); three assertions: prediction bit-exactness over the full training set, prediction bit-exactness over a held-out 5k-row eval set, and `trained_device` correctly recorded in both artifacts. Scope adjusted from plan's original `artifact_bytes` contract to prediction equality — see "Next Up" note on why (metadata length prefix differs legitimately)
 - [ ] **S1.14** `benchmarks/metal_histogram.py` — CPU vs Metal throughput at (10k, 100k, 1M, 10M) × (10, 100, 1000)
 - [ ] **S1.15** `docs/limitations.md` note on breakeven + availability
 - [ ] **S1.16** Full verification sweep (cargo check/test/clippy/fmt, maturin develop, pytest)
@@ -32,21 +32,20 @@ Order matches the approved plan in
 
 ## Next Up
 
-1. **S1.13** bit-exactness golden test at scale: seeded fit at
-   (50k × 100, 255 bins) under CPU and Metal → identical
-   prediction stream over the full training set. Uses the same
-   `native_runtime_info().metal_available` skip guard as S1.12 so
-   the test is a no-op on non-Metal runners. Scope note: the plan
-   originally called for identical `artifact_bytes`, but S1.12
-   proved that is not achievable as-written because the artifact
-   metadata JSON encodes `trained_device` and its length prefix
-   (Metal vs CPU legitimately differ by a few bytes there);
-   prediction bit-exactness over the full training set is the
-   stronger observable contract and is what S1.13 should assert.
-2. **S1.14** `benchmarks/metal_histogram.py` throughput harness.
-3. **S1.15** `docs/limitations.md` breakeven + availability note.
-4. **S1.16** Full verification sweep before declaring Stage 1
-   complete.
+1. **S1.14** `benchmarks/metal_histogram.py` — CPU vs Metal
+   throughput at (10k, 100k, 1M, 10M) × (10, 100, 1000). Should
+   be a standalone script under `benchmarks/`, emit a short
+   markdown/CSV summary, and skip gracefully when Metal isn't
+   available (mirror the `native_runtime_info().metal_available`
+   gate used by `test_metal_backend.py`).
+2. **S1.15** `docs/limitations.md` breakeven + availability note:
+   point at the benchmark numbers from S1.14 plus the
+   ~250k-row expert guidance and document the `device="auto"`
+   (currently aliased to CPU) vs `device="metal"` recommendation.
+3. **S1.16** Full verification sweep before declaring Stage 1
+   complete: `cargo check/test/clippy/fmt` across the workspace
+   (with and without `--no-default-features`), `maturin develop
+   --release`, and the full Python pytest run.
 
 ---
 

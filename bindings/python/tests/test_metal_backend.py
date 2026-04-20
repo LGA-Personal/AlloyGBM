@@ -262,6 +262,74 @@ class MetalEdgeCases(unittest.TestCase):
         np.testing.assert_array_equal(cpu.predict(X), metal.predict(X))
 
 
+@unittest.skipUnless(_METAL.metal_available, _SKIP_REASON)
+class MetalGoldenTests(unittest.TestCase):
+    """S1.13 — bit-exactness golden test at scale.
+
+    The plan originally called for identical `artifact_bytes` at
+    (50k rows × 100 features, 255 bins), but S1.12 proved that is
+    not achievable as-written: the artifact metadata JSON encodes
+    `trained_device` and its length prefix (Metal vs CPU legitimately
+    differ by a few bytes there). Prediction bit-exactness over the
+    full training set is the stronger observable contract, and we
+    additionally assert equality over a held-out eval set to stress
+    robustness under float-ordering variance.
+
+    Runtime: CPU ~0.3s + Metal ~5s + eval ~0s ≈ 6s, well within
+    the default pytest budget — no slow-gate marker needed.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        rng = np.random.RandomState(42)
+        cls.X_train = rng.randn(50_000, 100).astype(np.float32)
+        cls.y_train = (
+            2.0 * cls.X_train[:, 0]
+            - cls.X_train[:, 1]
+            + 0.5 * cls.X_train[:, 2]
+            + rng.randn(50_000) * 0.1
+        ).astype(np.float32)
+        # Held-out eval set from a distinct draw so we exercise
+        # predict() on rows the tree never saw during fit.
+        cls.X_eval = rng.randn(5_000, 100).astype(np.float32)
+
+        # Fit once per class to keep the total runtime bounded (Metal
+        # fit at this shape is ~5s; three tests × fresh fits would
+        # needlessly triple the cost).
+        cls.cpu_model = GBMRegressor(
+            n_estimators=20,
+            seed=7,
+            deterministic=True,
+            continuous_binning_max_bins=255,
+            device="cpu",
+        )
+        cls.metal_model = GBMRegressor(
+            n_estimators=20,
+            seed=7,
+            deterministic=True,
+            continuous_binning_max_bins=255,
+            device="metal",
+        )
+        cls.cpu_model.fit(cls.X_train, cls.y_train)
+        cls.metal_model.fit(cls.X_train, cls.y_train)
+
+    def test_golden_bitexact_predictions_on_training_set(self) -> None:
+        np.testing.assert_array_equal(
+            self.cpu_model.predict(self.X_train),
+            self.metal_model.predict(self.X_train),
+        )
+
+    def test_golden_bitexact_predictions_on_heldout_set(self) -> None:
+        np.testing.assert_array_equal(
+            self.cpu_model.predict(self.X_eval),
+            self.metal_model.predict(self.X_eval),
+        )
+
+    def test_golden_trained_device_recorded_in_artifact(self) -> None:
+        self.assertIn(b'"trained_device":"cpu"', self.cpu_model.artifact_bytes)
+        self.assertIn(b'"trained_device":"metal"', self.metal_model.artifact_bytes)
+
+
 class MetalFallbackTests(unittest.TestCase):
     """The warn-and-fallback path uses the S1.9 `ALLOYGBM_METAL_DISABLE=1`
     escape hatch so it's testable on *any* runner regardless of
