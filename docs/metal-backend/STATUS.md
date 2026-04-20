@@ -1,8 +1,8 @@
 # Metal Backend — Current Status
 
-**Last updated:** 2026-04-20 (S1.13 landed)
+**Last updated:** 2026-04-20 (S1.14 landed)
 **Active stage:** Stage 1 — Histogram build on Metal
-**Active sub-task:** S1.14 — `benchmarks/metal_histogram.py` throughput harness (next)
+**Active sub-task:** S1.15 — `docs/limitations.md` breakeven + availability note (next)
 
 ---
 
@@ -24,7 +24,7 @@ Order matches the approved plan in
 - [ ] **S1.11** Rust unit tests for histogram kernel correctness (<1000 rows, hand-computed reference) *(delivered in S1.4: `histogram_matches_cpu_small_fixture` + `histogram_feature_subset_matches_cpu`; S1.5 adds `pipeline_cache_returns_identical_arc_on_second_call`)*
 - [x] **S1.12** `bindings/python/tests/test_metal_backend.py` — macOS + `native_runtime_info().metal_available` gated; 18 cases covering availability probe, regression/classification/ranking bit-exactness vs CPU, NaN handling, single-row, single-feature, bin counts 16/255/1024, warn-and-fallback via `ALLOYGBM_METAL_DISABLE=1` (subprocess-isolated), and device-string validation (`auto` aliasing, unknown values raising `ValueError`)
 - [x] **S1.13** Bit-exactness golden test at scale: `MetalGoldenTests` class in `test_metal_backend.py` — seeded (50k rows × 100 features, 255 bins, 20 estimators) fit pair, shared `setUpClass` so Metal fit runs once (~5s); three assertions: prediction bit-exactness over the full training set, prediction bit-exactness over a held-out 5k-row eval set, and `trained_device` correctly recorded in both artifacts. Scope adjusted from plan's original `artifact_bytes` contract to prediction equality — see "Next Up" note on why (metadata length prefix differs legitimately)
-- [ ] **S1.14** `benchmarks/metal_histogram.py` — CPU vs Metal throughput at (10k, 100k, 1M, 10M) × (10, 100, 1000)
+- [x] **S1.14** `benchmarks/metal_histogram.py` — standalone throughput harness: argparse grid selector (`--rows`, `--features`, `--full`, `--estimators`, `--bins`); `--memory-budget-gb` default 8 GB skips the 10M × 1000 (~40 GB) corner unless explicitly raised; Metal pipeline warmup fit amortises first-compile cost; markdown table on stdout + optional `--json-out`; reference numbers captured in `docs/metal-backend/BENCHMARKS.md` for Apple M4. Stage 1 whole-fit wall-clock is uniformly slower on Metal across the (10k/100k/1M) × (10/100/1000) grid — expected, and motivates Stage 2 as described in that doc
 - [ ] **S1.15** `docs/limitations.md` note on breakeven + availability
 - [ ] **S1.16** Full verification sweep (cargo check/test/clippy/fmt, maturin develop, pytest)
 
@@ -32,17 +32,17 @@ Order matches the approved plan in
 
 ## Next Up
 
-1. **S1.14** `benchmarks/metal_histogram.py` — CPU vs Metal
-   throughput at (10k, 100k, 1M, 10M) × (10, 100, 1000). Should
-   be a standalone script under `benchmarks/`, emit a short
-   markdown/CSV summary, and skip gracefully when Metal isn't
-   available (mirror the `native_runtime_info().metal_available`
-   gate used by `test_metal_backend.py`).
-2. **S1.15** `docs/limitations.md` breakeven + availability note:
-   point at the benchmark numbers from S1.14 plus the
-   ~250k-row expert guidance and document the `device="auto"`
-   (currently aliased to CPU) vs `device="metal"` recommendation.
-3. **S1.16** Full verification sweep before declaring Stage 1
+1. **S1.15** `docs/limitations.md` breakeven + availability note.
+   Cite the Apple M4 numbers in `docs/metal-backend/BENCHMARKS.md`;
+   state the current recommendation: `device="cpu"` is the default
+   and recommended for every shape in the Stage 1 grid;
+   `device="metal"` is currently infrastructural (Stage 1 proves
+   the plumbing) and the decisive win arrives with Stages 2+3.
+   Include the `ALLOYGBM_METAL_DISABLE=1` escape hatch and the
+   `native_runtime_info()` fields (`metal_available`,
+   `metal4_available`, `gpu_family`) in the "how to detect the
+   backend" subsection.
+2. **S1.16** Full verification sweep before declaring Stage 1
    complete: `cargo check/test/clippy/fmt` across the workspace
    (with and without `--no-default-features`), `maturin develop
    --release`, and the full Python pytest run.

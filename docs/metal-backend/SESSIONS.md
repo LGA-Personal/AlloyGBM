@@ -5,6 +5,100 @@ First thing a new session reads, alongside `STATUS.md`.
 
 ---
 
+## 2026-04-20 — S1.14 `metal_histogram.py` throughput harness
+
+**Branch:** `claude/charming-carson-d08c9a` (worktree)
+
+### What moved
+
+- **`benchmarks/metal_histogram.py`** (new, standalone CLI).
+  - Argparse grid selector: `--rows`, `--features`, `--full` (adds
+    the plan-spec 10M row tier), `--estimators` (default 5),
+    `--bins` (default 255 → u8 bin path), `--seed` (default 7).
+  - `--memory-budget-gb` (default 8 GB) skips any shape whose
+    float32 input exceeds the budget. Default grid's largest
+    cell is 1M × 1000 = 3.8 GiB, which fits; 10M × 1000 is
+    ~40 GB, which does not.
+  - Pipeline warmup fit at (1024, 4) so the first real cell
+    doesn't absorb Metal's one-time pipeline-compilation cost.
+    `--no-warmup` toggles it off for debugging.
+  - Output: markdown table on stdout + optional `--json-out`
+    mirror with full float-precision timings and metadata
+    (`gpu_family`, `metal_available`, `metal4_available`,
+    `estimators`, `bins`, `seed`, `memory_budget_gb`).
+  - `--skip-metal` runs only the CPU leg (for harness debugging).
+- **`docs/metal-backend/BENCHMARKS.md`** (new). Reference numbers
+  captured on Apple M4 for the default grid, with interpretation
+  for S1.15 to cite.
+- **`docs/metal-backend/STATUS.md`** — S1.14 checked off;
+  promoted S1.15 to "Next Up".
+
+### Verification
+
+- Two smoke runs:
+  - `--rows 5000 20000 --features 10 50 --estimators 3 --no-warmup`
+    — confirms the full pipeline runs end-to-end in ~1s.
+  - `--rows 100000 1000000 --features 100 --memory-budget-gb 0.1
+    --no-warmup` — confirms the budget-skip path marks the
+    1M-row cell as skipped with a "0.4 GB exceeds" note.
+- Full default grid run: completed in ~2m20s on Apple M4.
+  Results captured in `BENCHMARKS.md`.
+
+### Findings
+
+- Stage 1 whole-fit wall-clock is **uniformly slower** on Metal
+  across (10k, 100k, 1M) × (10, 100, 1000) × 5 estimators. Ratio
+  ranges from 0.03× (worst: 10k × 1000) to 0.25× (best: 1M × 10).
+- Matches the expert-session expectation: histogram acceleration
+  alone doesn't pay off until the histogram phase dominates the
+  inner loop, which it doesn't when each boosting round still
+  round-trips through the CPU for split finding + partitioning.
+- Not a regression — it's the architectural reality of Stage 1
+  and is exactly why Stage 2 (GPU best-split) and Stage 3 (GPU
+  partitioning + ICBs) are the next stages in the roadmap.
+
+### Design calls
+
+- **Whole-fit wall-clock, not histogram-only.** AlloyGBM doesn't
+  expose a histogram-only entry point to Python, so we'd have
+  had to plumb one through PyO3 purely for this benchmark.
+  Whole-fit is also what the user actually observes when they
+  flip the `device=` flag; reporting the synthetic histogram-only
+  number would have been misleading.
+- **Memory budget rather than automatic dtype shrinkage.** The
+  clean way to scale to 10M × 1000 is a 64 GB host, not quantising
+  the fixture to float16 — that would change the cache behaviour
+  and stop being comparable to the default `device="cpu"` path
+  that users actually run.
+- **Default estimators=5, not 20 or 100.** At 5 rounds we surface
+  the per-round dispatch overhead cleanly; at 100 rounds the
+  grid would have taken 40 minutes. Users who want a more
+  realistic fit-time comparison can pass `--estimators 100`.
+- **Warmup fit is separate from the grid.** Metal's first fit
+  pays a pipeline-compile cost (~0.5-1s on Apple M4). Including
+  it in the grid's first cell would have reported a 3× worse
+  number for that cell and given users the wrong mental model.
+
+### Handoff notes
+
+- S1.15 is next: `docs/limitations.md` breakeven + availability
+  note. The `BENCHMARKS.md` numbers are the citation source.
+  Recommendation to document: `device="cpu"` is the default and
+  stays recommended for every shape in the Stage 1 grid;
+  `device="metal"` is infrastructural in Stage 1 (proves
+  plumbing, unblocks Stages 2+3) and becomes advantageous after
+  Stage 2 + Stage 3 land.
+- `native_runtime_info()` fields (`metal_available`,
+  `metal4_available`, `gpu_family`) are the supported way for
+  user code to detect the backend — include that in S1.15's
+  "how to detect" section.
+- `ALLOYGBM_METAL_DISABLE=1` is an *internal* escape hatch for
+  testing. It's fine to mention in user docs as a "force CPU"
+  override, but the sanctioned user-facing control is
+  `device="cpu"`.
+
+---
+
 ## 2026-04-20 — S1.13 Bit-exactness golden test at scale
 
 **Branch:** `claude/charming-carson-d08c9a` (worktree)
