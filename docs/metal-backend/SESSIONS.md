@@ -5,6 +5,134 @@ First thing a new session reads, alongside `STATUS.md`.
 
 ---
 
+## 2026-04-20 — S1.15 `BufferCache` wired + benchmarks re-run
+
+**Branch:** `claude/charming-carson-d08c9a` (worktree)
+
+### What moved
+
+- **`crates/backend_metal/src/buffers.rs`** (new). Persistent Metal
+  buffer pool for the histogram dispatch path:
+  - Binned matrix is keyed by `(ptr, len_bytes, is_wide)` and reused
+    zero-copy across all `build_histograms` calls within a fit
+    (~63 calls per depth-6 tree × N trees). Safe because the binned
+    matrix is immutable for the lifetime of the fit.
+  - Gradients + row-indices slots hold a reusable `MTLBuffer`
+    allocation and memcpy fresh bytes into it per call. Slots grow
+    monotonically — smaller subsequent requests reuse the existing
+    allocation.
+  - `#![allow(unsafe_code)]` at the top to opt out of the crate-local
+    `deny`, matching the pattern in `pipelines.rs`.
+- **`crates/backend_metal/src/lib.rs`** — registers `mod buffers`,
+  owns `buffer_cache: Arc<BufferCache>` on `MetalBackend`, threads
+  `&self.buffer_cache` into the `dispatch_histograms` call.
+- **`crates/backend_metal/src/kernels/histogram.rs`** —
+  `dispatch_histograms` signature gains a `buffer_cache: &BufferCache`
+  parameter, visibility tightened to `pub(crate)`; three
+  `newBufferWithBytes` sites (binned matrix, gradients, row indices)
+  replaced with cache-backed variants; orphaned
+  `make_buffer_from_slice` helper removed.
+- **`benchmarks/metal_histogram.py`** — the S1.14 shape-only grid
+  became a named-scenario harness: `shape_grid`, `depth_sweep`,
+  `bins_sweep`, `estimator_sweep`, `task_mix`, `metal_friendly`,
+  `all`. The `metal_friendly` scenario is the direct test of the
+  "Stage 1 wins somewhere" hypothesis (deep trees up to depth 10,
+  1024 bins, multiclass K=10 — configs theoretically best for
+  histogram-heavy work).
+- **`docs/metal-backend/BENCHMARKS.md`** — full rewrite against
+  post-cache numbers. Two tables (`shape_grid` + `metal_friendly`),
+  reproduction commands now cite `--scenario`, interpretation section
+  explains why Stage 1 loses on `metal_friendly` too.
+- **`docs/metal-backend/metal_histogram_shape_grid_m4.json`** and
+  **`docs/metal-backend/metal_histogram_metal_friendly_m4.json`** —
+  raw benchmark output archived alongside the markdown.
+- **`docs/limitations.md`** — "Metal Backend is Infrastructural
+  (Stage 1)" section updated to cite both scenarios; speedup
+  range moved from "0.03×–0.25×" to "0.03×–0.28× (shape grid),
+  0.06×–0.09× (metal_friendly)".
+- **`docs/metal-backend/STATUS.md`** — S1.15 bullet expanded to
+  describe the full scope (buffer cache + harness + docs); Next
+  Up now points only to S1.16.
+
+### Verification
+
+- `cargo test -p alloygbm-backend-metal` — all 7 tests pass,
+  including the `histogram_matches_cpu_small_fixture`,
+  `histogram_feature_subset_matches_cpu`, and
+  `pipeline_cache_returns_identical_arc_on_second_call` cases.
+- `/Users/lashby/Projects/AlloyGBM/.venv/bin/maturin develop --release
+  --manifest-path bindings/python/Cargo.toml` — clean build.
+- `.venv/bin/python -m pytest bindings/python/tests/test_metal_backend.py
+  -q` — all 21 cases pass, including the `MetalGoldenTests`
+  50k-row × 100-feature × 20-estimator bit-exactness golden test
+  on both the training set and the held-out eval set.
+- Benchmark runs: `shape_grid` scenario (~4m) and `metal_friendly`
+  scenario (~2m) on Apple M4. JSONs archived in
+  `docs/metal-backend/`.
+
+### Findings
+
+- Buffer-cache wall-clock win is **real but modest**: 5–20%
+  improvement on Metal times vs the S1.14 pre-cache baseline.
+  Largest absolute saving: 1M × 1000 dropped from 86.8s → 70.7s
+  (~16 s recovered). Largest ratio shift: that same cell moved
+  0.17× → 0.20×. Overall the speedup band moved from 0.03×–0.25×
+  to 0.03×–0.28× across the shape grid.
+- **`metal_friendly` decisively rules out a Stage 1 sweet spot.**
+  Deep trees (depth 10), wide bins (1024), and 10-way multiclass
+  (K histograms per round) all keep Metal at 0.06×–0.09× CPU.
+  This is the strongest evidence yet that the CPU round-trip per
+  level (split finding + partitioning) — not the binned-matrix
+  memcpy — is the Stage 1 bottleneck, and that Stages 2+3 are
+  structurally required for the decisive win.
+- Bit-exactness survives the cache cleanly: no behavioural change
+  to the kernel itself, only the buffer lifetime changed.
+
+### Design calls
+
+- **Cache keyed by `(ptr, len, is_wide)`, not by a logical fit ID.**
+  The engine hands the backend the same `BinnedMatrix` reference
+  on every call within a fit, so the pointer is stable. Key-based
+  reuse means `MetalBackend` needs no "fit start / fit end"
+  lifecycle hook from the engine — a zero-change contract for
+  the caller.
+- **Gradients + row-indices re-use allocation but not content.**
+  These buffers' bytes change every boosting round (and every
+  node within a level for row indices), so caching by pointer
+  would be wrong. Keeping the `MTLBuffer` handle and rewriting
+  its contents is the right middle ground — avoids the
+  `newBufferWithLength` cost without correctness risk.
+- **Benchmark scope: `metal_friendly` rather than more points on
+  `shape_grid`.** The question "does Stage 1 ever win?" is
+  better answered by five carefully-chosen adverse configs than
+  by filling in more cells of the original grid. If those five
+  configs all lose, the hypothesis is dead and we don't need
+  more evidence.
+- **Docs cite both scenarios.** `limitations.md` names
+  `metal_friendly` explicitly so a reader who goes looking for
+  "the corner where Metal wins" sees the scenario that was
+  designed to find it — and sees that it didn't.
+
+### Handoff notes
+
+- **S1.16 is the last Stage 1 gate.** Required checks:
+  `cargo check --workspace` and `cargo check --workspace
+  --no-default-features`; `cargo test --workspace` both with and
+  without default features; `cargo clippy --workspace --all-targets
+  -- -D warnings`; `cargo fmt --all --check`; `maturin develop
+  --release` (default features + `--no-default-features`); full
+  `.venv/bin/python -m pytest bindings/python/tests/ -q`.
+- On S1.16 success, Stage 1 closes. The next `ExitPlanMode` round
+  opens Stage 2 (GPU best-split + histogram subtraction). Stage 2
+  is the first stage where the `metal_friendly` configurations
+  become the *positive* case — the break-even point should move
+  materially once per-level CPU round-trips are eliminated.
+- No open BUGS.md entries from this session. The `make_buffer_from_slice`
+  helper that was removed was only used by the old
+  `dispatch_histograms` path; no other references in the crate.
+
+---
+
 ## 2026-04-20 — S1.14 `metal_histogram.py` throughput harness
 
 **Branch:** `claude/charming-carson-d08c9a` (worktree)

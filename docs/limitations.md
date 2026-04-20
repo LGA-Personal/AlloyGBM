@@ -4,11 +4,64 @@ Last updated for v0.3.2.
 
 ## Remaining Limitations
 
-### 1. CPU-Only Runtime
+### 1. Metal Backend is Infrastructural (Stage 1)
 
-The `BackendOps` trait is designed for hardware abstraction, but only
-`CpuBackend` exists. GPU/accelerator support is architecturally planned but
-not implemented.
+The `BackendOps` trait is designed for hardware abstraction. Two backends
+now exist: the default `CpuBackend` and an Apple-Silicon `MetalBackend`
+(macOS only, `device="metal"`). **At v0.3.2 the Metal backend is Stage 1:
+only histogram construction runs on the GPU; split finding, row
+partitioning, and prediction all still execute on the CPU backend.**
+
+**Recommendation:** leave `device="cpu"` (the default) for every real
+workload. The Stage 1 Metal path is slower end-to-end than CPU across
+every benchmarked configuration — see the M4 numbers in
+[docs/metal-backend/BENCHMARKS.md](metal-backend/BENCHMARKS.md):
+
+- On the shape grid (regression, depth 6, 255 bins, 5 estimators),
+  whole-fit wall-clock runs **0.03× to 0.28× CPU speed** across
+  (10k, 100k, 1M) rows × (10, 100, 1000) features.
+- On the `metal_friendly` scenario (deep trees up to depth 10, up
+  to 1024 bins, multiclass with K=10 histograms per round —
+  configurations theoretically most favourable to Metal), wall-clock
+  still runs **0.06× to 0.09× CPU**. This confirms Stage 1 cannot
+  cross break-even on any realistic shape.
+
+This is expected: histogram acceleration alone only pays off once
+the histogram phase dominates the inner loop, and every boosting
+round currently round-trips through the CPU path for split finding
+and partitioning. Dispatch + per-level readback latency dominates
+at every shape tested.
+
+The decisive win arrives with Stage 2 (GPU best-split + histogram
+subtraction) and Stage 3 (GPU row partitioning + Metal 4 Indirect
+Command Buffers), which eliminate the per-level CPU round-trip. Until
+those land, `device="metal"` exists to prove the plumbing (bit-exact
+histograms vs CPU, warn-and-fallback, capability probe, pipeline
+caching) and to unblock the remaining stages — not to deliver
+throughput.
+
+**How to detect the backend.** `alloygbm.native_runtime_info()` exposes
+three fields for programmatic checks:
+
+- `metal_available: bool` — `True` when a Metal device can be created
+  (macOS, `MTLGPUFamilyApple7` or better, default build).
+- `metal4_available: bool` — `True` when `MTLGPUFamilyMetal4` is
+  supported (Stage 3 fast path; M4 and newer).
+- `gpu_family: Optional[str]` — the detected GPU family name, e.g.
+  `"Apple7"`, `"Apple8"`, `"Metal4"`, or `None` on non-macOS /
+  Metal-disabled builds.
+
+Fitted models record the resolved device in their artifact metadata
+(`TrainedModel.trained_device` / `MultiClassTrainedModel.trained_device`)
+so the choice round-trips through `save_model`/`load_model`.
+
+**Escape hatch.** Set `ALLOYGBM_METAL_DISABLE=1` in the environment to
+force every `device="metal"` / `device="auto"` call to fall back to CPU
+with a `RuntimeWarning`. This is how the Metal-init fallback path is
+exercised on Metal-capable hardware in the test suite.
+
+Support beyond Apple Silicon (CUDA, ROCm, generic compute) is not
+planned.
 
 ### 2. No Interaction Constraints
 

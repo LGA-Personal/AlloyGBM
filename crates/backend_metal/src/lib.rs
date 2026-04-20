@@ -7,6 +7,8 @@
 //! Stage 1 scope is tracked in `docs/metal-backend/STATUS.md`.
 
 #[cfg(target_os = "macos")]
+mod buffers;
+#[cfg(target_os = "macos")]
 mod device;
 
 #[cfg(target_os = "macos")]
@@ -35,6 +37,14 @@ pub struct MetalBackend {
     /// `dispatch_histograms` without holding a borrow on `self` across
     /// the call.
     pipeline_cache: std::sync::Arc<pipelines::HistogramPipelineCache>,
+    /// Persistent Metal buffer pool for the histogram dispatch path.
+    /// Caches the binned matrix (immutable per fit) and reuses the
+    /// allocations for gradients + row indices across the ~63
+    /// `build_histograms` calls a depth-6 tree makes. Without this,
+    /// each call was doing a fresh `newBufferWithBytes` for the
+    /// whole column-major binned matrix — tens of GiB of memcpy per
+    /// fit at realistic scales.
+    buffer_cache: std::sync::Arc<buffers::BufferCache>,
     /// CPU backend embedded as the fallback for every `BackendOps`
     /// method except `build_histograms` (S1.6 promise realised in S1.4).
     cpu: CpuBackend,
@@ -58,9 +68,11 @@ impl MetalBackend {
             metal_device.device.clone(),
             &metal_device.capabilities,
         )?);
+        let buffer_cache = std::sync::Arc::new(buffers::BufferCache::new());
         Ok(Self {
             metal_device,
             pipeline_cache,
+            buffer_cache,
             cpu: CpuBackend,
         })
     }
@@ -83,6 +95,7 @@ impl BackendOps for MetalBackend {
         kernels::histogram::dispatch_histograms(
             &self.metal_device,
             &self.pipeline_cache,
+            &self.buffer_cache,
             binned_matrix,
             gradients,
             node,

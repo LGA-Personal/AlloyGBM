@@ -1,8 +1,8 @@
 # Metal Backend — Current Status
 
-**Last updated:** 2026-04-20 (S1.14 landed)
+**Last updated:** 2026-04-20 (S1.15 landed)
 **Active stage:** Stage 1 — Histogram build on Metal
-**Active sub-task:** S1.15 — `docs/limitations.md` breakeven + availability note (next)
+**Active sub-task:** S1.16 — full verification sweep (next)
 
 ---
 
@@ -25,27 +25,24 @@ Order matches the approved plan in
 - [x] **S1.12** `bindings/python/tests/test_metal_backend.py` — macOS + `native_runtime_info().metal_available` gated; 18 cases covering availability probe, regression/classification/ranking bit-exactness vs CPU, NaN handling, single-row, single-feature, bin counts 16/255/1024, warn-and-fallback via `ALLOYGBM_METAL_DISABLE=1` (subprocess-isolated), and device-string validation (`auto` aliasing, unknown values raising `ValueError`)
 - [x] **S1.13** Bit-exactness golden test at scale: `MetalGoldenTests` class in `test_metal_backend.py` — seeded (50k rows × 100 features, 255 bins, 20 estimators) fit pair, shared `setUpClass` so Metal fit runs once (~5s); three assertions: prediction bit-exactness over the full training set, prediction bit-exactness over a held-out 5k-row eval set, and `trained_device` correctly recorded in both artifacts. Scope adjusted from plan's original `artifact_bytes` contract to prediction equality — see "Next Up" note on why (metadata length prefix differs legitimately)
 - [x] **S1.14** `benchmarks/metal_histogram.py` — standalone throughput harness: argparse grid selector (`--rows`, `--features`, `--full`, `--estimators`, `--bins`); `--memory-budget-gb` default 8 GB skips the 10M × 1000 (~40 GB) corner unless explicitly raised; Metal pipeline warmup fit amortises first-compile cost; markdown table on stdout + optional `--json-out`; reference numbers captured in `docs/metal-backend/BENCHMARKS.md` for Apple M4. Stage 1 whole-fit wall-clock is uniformly slower on Metal across the (10k/100k/1M) × (10/100/1000) grid — expected, and motivates Stage 2 as described in that doc
-- [ ] **S1.15** `docs/limitations.md` note on breakeven + availability
+- [x] **S1.15** `docs/limitations.md` note on breakeven + availability + `BufferCache` — folded together because the limitations note citing the benchmarks would have been misleading without the buffer-cache optimisation landing first. Work:
+  - **`crates/backend_metal/src/buffers.rs`** — persistent Metal buffer pool. Keys the binned matrix by `(ptr, len, is_wide)` for zero-copy reuse across the ~63 `build_histograms` calls per tree and across all trees in a fit; keeps reusable allocations for gradients + row-indices with fresh per-call memcpy. Wired into `MetalBackend` via `mod buffers; buffer_cache: Arc<BufferCache>`; `dispatch_histograms` replaces three `newBufferWithBytes` calls with cache-backed variants.
+  - **`benchmarks/metal_histogram.py`** — expanded from the S1.14 shape-only grid into a named-scenario harness: `shape_grid`, `depth_sweep`, `bins_sweep`, `estimator_sweep`, `task_mix`, `metal_friendly`, `all`. The `metal_friendly` scenario explicitly tests the configurations theoretically most favourable to Stage 1 Metal (deep trees, 1024 bins, multiclass K=10) so we can disprove the "maybe Stage 1 wins somewhere" hypothesis directly.
+  - **`docs/metal-backend/BENCHMARKS.md`** — rewritten against post-cache numbers. Shape-grid speedups moved from 0.03×–0.25× to 0.03×–0.28× (largest absolute win: 1M × 1000 dropped 86.8s → 70.7s). `metal_friendly` stays at 0.06×–0.09× across every config, proving Stage 1 cannot cross break-even on realistic shapes.
+  - **`docs/limitations.md`** — replaced the "CPU-Only Runtime" section with "Metal Backend is Infrastructural (Stage 1)": cites both BENCHMARKS.md scenarios, states `device="cpu"` as the recommended default for every Stage 1 shape, explains the Stage 2+3 path to the decisive win, documents `native_runtime_info()` fields (`metal_available`, `metal4_available`, `gpu_family`) under "How to detect the backend", and the `ALLOYGBM_METAL_DISABLE=1` escape hatch.
+  - Bit-exactness: all 21 `test_metal_backend.py` cases (including the 50k × 100 × 20-estimator golden test on train + held-out eval) pass with the cache wired in.
 - [ ] **S1.16** Full verification sweep (cargo check/test/clippy/fmt, maturin develop, pytest)
 
 ---
 
 ## Next Up
 
-1. **S1.15** `docs/limitations.md` breakeven + availability note.
-   Cite the Apple M4 numbers in `docs/metal-backend/BENCHMARKS.md`;
-   state the current recommendation: `device="cpu"` is the default
-   and recommended for every shape in the Stage 1 grid;
-   `device="metal"` is currently infrastructural (Stage 1 proves
-   the plumbing) and the decisive win arrives with Stages 2+3.
-   Include the `ALLOYGBM_METAL_DISABLE=1` escape hatch and the
-   `native_runtime_info()` fields (`metal_available`,
-   `metal4_available`, `gpu_family`) in the "how to detect the
-   backend" subsection.
-2. **S1.16** Full verification sweep before declaring Stage 1
+1. **S1.16** Full verification sweep before declaring Stage 1
    complete: `cargo check/test/clippy/fmt` across the workspace
    (with and without `--no-default-features`), `maturin develop
-   --release`, and the full Python pytest run.
+   --release`, and the full Python pytest run. This is the last
+   Stage 1 item — on success, Stage 1 closes and the next
+   `ExitPlanMode` round opens Stage 2 (GPU best-split).
 
 ---
 

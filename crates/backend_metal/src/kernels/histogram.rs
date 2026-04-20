@@ -14,6 +14,8 @@ use alloygbm_core::{
 use alloygbm_engine::{EngineError, EngineResult};
 
 #[cfg(target_os = "macos")]
+use crate::buffers::BufferCache;
+#[cfg(target_os = "macos")]
 use crate::device::MetalDevice;
 #[cfg(target_os = "macos")]
 use crate::pipelines::HistogramPipelineCache;
@@ -50,9 +52,10 @@ pub const ROWS_PER_CHUNK_DEFAULT: u32 = 8_192;
 
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
-pub fn dispatch_histograms(
+pub(crate) fn dispatch_histograms(
     metal_device: &MetalDevice,
     pipeline_cache: &HistogramPipelineCache,
+    buffer_cache: &BufferCache,
     binned_matrix: &BinnedMatrix,
     gradients: &[GradientPair],
     node: &NodeSlice,
@@ -128,9 +131,20 @@ pub fn dispatch_histograms(
     // two pointer branches; we still bind a 1-byte dummy into the
     // unused slot because Metal requires a valid buffer for every
     // argument slot referenced in the kernel signature.
+    //
+    // `buffer_cache` persists buffers across dispatches within a fit:
+    //   * The binned matrix is keyed by `(ptr, len_bytes, is_wide)` and
+    //     re-used zero-copy across the ~63 `build_histograms` calls a
+    //     depth-6 tree makes (and across all trees within a fit).
+    //   * The gradients slot is allocation-reused; contents are copied
+    //     fresh every call because the engine rewrites the gradient
+    //     buffer once per boosting round via
+    //     `objective.compute_gradients_into`.
+    //   * The row-indices slot is allocation-reused; contents change
+    //     per node (every call passes a different row subset).
     let binned_buffer = match &binned_matrix.bins_col_adaptive {
-        BinStorage::U8(v) => make_buffer_from_slice(device, v, options)?,
-        BinStorage::U16(v) => make_buffer_from_slice(device, v, options)?,
+        BinStorage::U8(v) => buffer_cache.get_or_upload_binned(device, v, false)?,
+        BinStorage::U16(v) => buffer_cache.get_or_upload_binned(device, v, true)?,
     };
     let dummy_buffer = device
         .newBufferWithLength_options(1, options)
@@ -140,11 +154,11 @@ pub fn dispatch_histograms(
 
     // `GradientPair` is not `#[repr(C)]`, so explicitly repack to an
     // `[f32; 2]` layout that matches MSL `float2` (8 bytes, 4-byte
-    // aligned per component). This is the one real copy the CPU pays
-    // per node — row_indices are also copied below.
+    // aligned per component). The repack itself is unavoidable; the
+    // buffer allocation behind it is cache-backed.
     let gradients_raw: Vec<[f32; 2]> = gradients.iter().map(|g| [g.grad, g.hess]).collect();
-    let gradients_buffer = make_buffer_from_slice(device, &gradients_raw, options)?;
-    let row_indices_buffer = make_buffer_from_slice(device, &node.row_indices, options)?;
+    let gradients_buffer = buffer_cache.write_gradients(device, &gradients_raw)?;
+    let row_indices_buffer = buffer_cache.write_row_indices(device, &node.row_indices)?;
 
     let pair_bytes = std::mem::size_of::<[f32; 2]>();
     let output_elems = total_selected as usize * bin_count as usize;
@@ -308,41 +322,6 @@ pub fn dispatch_histograms(
 }
 
 // -------- Helpers (macOS only) -------------------------------------
-
-#[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
-fn make_buffer_from_slice<T: Copy>(
-    device: &objc2::runtime::ProtocolObject<dyn objc2_metal::MTLDevice>,
-    data: &[T],
-    options: objc2_metal::MTLResourceOptions,
-) -> EngineResult<objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLBuffer>>> {
-    use objc2_metal::MTLDevice;
-    use std::ffi::c_void;
-    use std::ptr::NonNull;
-
-    let len_bytes = std::mem::size_of_val(data);
-    if len_bytes == 0 {
-        return device
-            .newBufferWithLength_options(1, options)
-            .ok_or_else(|| {
-                EngineError::BackendUnavailable(
-                    "could not allocate empty placeholder buffer".to_string(),
-                )
-            });
-    }
-    let ptr = data.as_ptr() as *mut c_void;
-    // SAFETY: `ptr` is non-null (data.len() > 0) and valid for
-    // `len_bytes` bytes. Metal copies the bytes into a new
-    // `StorageModeShared` buffer synchronously; the original slice is
-    // not aliased past this call.
-    let buffer = unsafe {
-        device.newBufferWithBytes_length_options(NonNull::new_unchecked(ptr), len_bytes, options)
-    }
-    .ok_or_else(|| {
-        EngineError::BackendUnavailable("could not allocate Metal buffer".to_string())
-    })?;
-    Ok(buffer)
-}
 
 /// SAFETY: caller holds `value` live for the duration of the
 /// `setBytes` call; Metal copies the bytes synchronously.
