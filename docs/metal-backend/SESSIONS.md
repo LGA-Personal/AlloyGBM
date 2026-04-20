@@ -5,6 +5,123 @@ First thing a new session reads, alongside `STATUS.md`.
 
 ---
 
+## 2026-04-20 — S1.12 Python Metal backend test module
+
+**Branch:** `claude/charming-carson-d08c9a` (worktree)
+
+### What moved
+
+- **`bindings/python/tests/test_metal_backend.py`** (new, 18 cases).
+  Six test classes:
+  - `MetalAvailabilityTests` — smoke-tests the capability probe when
+    Metal is actually available (non-empty `gpu_family`, Apple7
+    baseline met).
+  - `MetalRegressionTests` — CPU/Metal prediction bit-exactness
+    over the whole training set, `trained_device` recording, and
+    a multi-column feature sanity check.
+  - `MetalClassificationTests` — `predict` + `predict_proba`
+    parity on a binary-classification fixture.
+  - `MetalRankerTests` — `rank_ndcg` parity on grouped data.
+  - `MetalEdgeCases` — NaN handling, single-row, single-feature,
+    and bin counts 16/255/1024 (straddling the u8/u16 bin-storage
+    switchover).
+  - `MetalFallbackTests` — subprocess-isolated warn-and-fallback
+    checks using the S1.9 `ALLOYGBM_METAL_DISABLE=1` escape hatch;
+    verifies `RuntimeWarning` emission, artifact records
+    `trained_device="cpu"` after fallback, and estimator's
+    user-visible `device` attribute stays `"metal"`.
+  - `InvalidDeviceTests` — unknown device strings raise
+    `ValueError`; `device="auto"` is accepted and round-trips.
+  Top-level gate: `native_runtime_info().metal_available` via
+  `@unittest.skipUnless` at class level for the hardware-dependent
+  cases; fallback tests and invalid-device tests run unconditionally
+  because they don't touch real Metal resources.
+
+### Verification
+
+- `pytest bindings/python/tests/test_metal_backend.py -v` — **18
+  passed** on Apple M4.
+- `pytest bindings/python/tests/ -q` — **350 passed, 16 subtests
+  passed** (was 332 pre-S1.12; +18 new tests, no regressions).
+- Fallback tests pass in ~5s because they shell out to subprocesses;
+  that overhead is intentional (see Design calls below).
+
+### Issues encountered and fixed
+
+- **`assertEqual(cpu_bytes, metal_bytes)` failed** on the initial
+  draft. The CPU artifact recorded `"trained_device":"cpu"` (3
+  chars) and the Metal artifact recorded `"trained_device":"metal"`
+  (5 chars). The artifact format length-prefixes its metadata JSON,
+  so a regex strip of the `trained_device` field still left the
+  length-prefix bytes at a ~2-byte offset. Rewrote the test to
+  compare predictions over the whole training set instead — that's
+  the observable bit-exactness contract that users actually care
+  about, and doesn't require monkeying with the artifact format.
+- **`AttributeError: 'list' object has no attribute 'shape'`** on
+  the single-row test. `GBMRegressor.predict` returns a list when
+  fed a 1-row input. Wrapped with `np.asarray(..., dtype=np.float64)`
+  so the test is robust to either return shape.
+
+### Design calls made this session
+
+- **Subprocess-isolated fallback tests.** The Metal backend caches
+  the `MTLDevice` the first time `device="metal"` is resolved. If
+  we toggled `ALLOYGBM_METAL_DISABLE` inside the live test process,
+  test-order sensitivity would bite: after one test sees Metal, a
+  second test with the env var wouldn't always hit the disable
+  code path. Shelling out to a fresh Python interpreter gives each
+  fallback test a pristine process where the env var is honored
+  deterministically. Cost is ~200 ms per subprocess; three tests
+  total, so ~0.6 s overhead — acceptable.
+- **Predict-over-training-set as the bit-exactness contract.** The
+  plan's original phrasing was "identical `artifact_bytes`", but
+  that is not achievable as-written because `trained_device` legitimately
+  differs between CPU and Metal runs. `np.testing.assert_array_equal`
+  over all training rows (not predictions on a subset) is the strongest
+  observable parity check and it uncovers any numerical drift that
+  would show up downstream.
+- **Bin-count coverage at 16/255/1024, not 65535.** The plan
+  mentioned B=65535 as the upper u16 endpoint, but the histogram
+  cache's `FEATURE_TILE_SIZE` specialisation happens at compile
+  time for {1, 4, 16, 64}, and the u8/u16 storage switchover at
+  256 is the only numerically interesting boundary for the kernel
+  itself. B=1024 exercises the u16 path (kernel selects the u16
+  specialisation via function constants) without demanding the
+  kernel fan-out of B=65535 which would stress the benchmark
+  harness (S1.14) more than the correctness surface.
+- **Class-level `@unittest.skipUnless`, not module-level pytest
+  marker.** Keeps the file runnable under plain `python -m unittest`
+  and matches the pattern already used elsewhere in the suite
+  (e.g. `test_native_runtime_integration.py`). Class-level gives
+  finer-grained control than module-level: `MetalFallbackTests`
+  and `InvalidDeviceTests` intentionally run regardless of
+  hardware presence.
+
+### Handoff notes for S1.13
+
+- **Scale.** Plan calls for (50k rows × 100 features × 255 bins).
+  Expect ~30-60 s per fit on M-series; two fits plus prediction
+  stream compare fits comfortably inside a ~2-minute test budget.
+  If the test exceeds 120 s consider marking it `@unittest.skip`
+  when `--quick` is passed (or just accept the cost — CI already
+  tolerates long-running tests elsewhere in the suite).
+- **Contract.** S1.12 established that `assert_array_equal` over
+  the full training set is the bit-exactness gate. S1.13 should
+  reuse that shape at scale, plus a second assertion on a held-out
+  eval set to stress robustness under float-ordering variance.
+- **Determinism requirement.** Must set `seed=...`,
+  `deterministic=True`, and `n_jobs=1` (if CPU is non-deterministic
+  across threads). The Metal kernel is deterministic by
+  construction (two-pass reduce, no float atomics), so the CPU
+  side is the only place we need to pin.
+- **Artifact audit.** Separately check that after a Metal fit the
+  metadata JSON records `"trained_device":"metal"` (already
+  covered by `MetalRegressionTests.test_metal_regression_records_trained_device`
+  at small scale; can reuse the assertion at 50k-row scale for
+  free).
+
+---
+
 ## 2026-04-19 — S1.10 Metal capability fields on `native_runtime_info()`
 
 **Branch:** `claude/charming-carson-d08c9a` (worktree)
