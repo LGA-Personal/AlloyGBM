@@ -19,10 +19,12 @@
 
 use alloygbm_backend_cpu::CpuBackend;
 use alloygbm_core::{
-    BinnedMatrix, FeatureTile, GradientPair, HistogramBundle, NodeSlice, NodeStats,
+    BinnedMatrix, Device, FeatureTile, GradientPair, HistogramBundle, NodeSlice, NodeStats,
     PartitionResult, SplitCandidate,
 };
 use alloygbm_engine::{BackendOps, CategoricalFeatureInfo, EngineResult, SplitSelectionOptions};
+use pyo3::exceptions::PyRuntimeWarning;
+use pyo3::prelude::*;
 
 #[cfg(all(target_os = "macos", feature = "metal"))]
 use alloygbm_backend_metal::MetalBackend;
@@ -41,12 +43,25 @@ pub enum RuntimeBackend {
 
 impl RuntimeBackend {
     /// Canonical lowercase name of the active backend. Used for
-    /// logging and (eventually in S1.9) artifact-metadata recording.
+    /// logging and artifact-metadata recording.
     pub fn name(&self) -> &'static str {
         match self {
             RuntimeBackend::Cpu(_) => "cpu",
             #[cfg(all(target_os = "macos", feature = "metal"))]
             RuntimeBackend::Metal(_) => "metal",
+        }
+    }
+
+    /// Matching [`Device`] for the active backend. Callers stash this
+    /// into [`alloygbm_engine::TrainedModel::trained_device`] before
+    /// serializing the artifact so the `trained_device` field in the
+    /// artifact's metadata JSON reflects the resolved backend (per
+    /// S1.9 handoff).
+    pub fn device(&self) -> Device {
+        match self {
+            RuntimeBackend::Cpu(_) => Device::Cpu,
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            RuntimeBackend::Metal(_) => Device::Metal,
         }
     }
 }
@@ -176,6 +191,7 @@ impl BackendOps for RuntimeBackend {
 /// The error string is plain so callers can wrap it into either
 /// `EngineError::InvalidConfig` (for Rust-level failures) or
 /// `PyValueError` (for PyO3-level).
+#[allow(dead_code)] // retained as a pure (no-warn) companion to `resolve_runtime_backend_with_fallback`; used by unit tests.
 pub fn resolve_runtime_backend(device: &str) -> Result<RuntimeBackend, String> {
     let normalized = device.trim().to_ascii_lowercase();
     match normalized.as_str() {
@@ -189,6 +205,19 @@ pub fn resolve_runtime_backend(device: &str) -> Result<RuntimeBackend, String> {
 
 #[cfg(all(target_os = "macos", feature = "metal"))]
 fn build_metal_backend() -> Result<RuntimeBackend, String> {
+    // Test/ops escape hatch: setting `ALLOYGBM_METAL_DISABLE=1` forces
+    // the Metal constructor to report a synthetic failure so the
+    // warn-and-fallback path is exercisable from Python tests and from
+    // users reproducing issues on machines that *do* have Metal. The
+    // message is intentionally unique so tests can assert against it.
+    if std::env::var_os("ALLOYGBM_METAL_DISABLE")
+        .map(|value| value == "1")
+        .unwrap_or(false)
+    {
+        return Err(
+            "Metal backend disabled via ALLOYGBM_METAL_DISABLE=1 (test escape hatch)".to_string(),
+        );
+    }
     MetalBackend::new()
         .map(RuntimeBackend::Metal)
         .map_err(|msg| format!("could not initialise Metal backend: {msg}"))
@@ -201,6 +230,68 @@ fn build_metal_backend() -> Result<RuntimeBackend, String> {
          this build does not include the Metal backend"
             .to_string(),
     )
+}
+
+/// PyO3-layer companion to [`resolve_runtime_backend`] that applies
+/// the S1.9 warn-and-fallback policy:
+///
+/// - `"cpu"` → always returns [`RuntimeBackend::Cpu`], no warning.
+/// - `"auto"` → aliases to `"cpu"` in Stage 1, no warning. The real
+///   shape-based heuristic (pick Metal when rows × features ×
+///   bin-count crosses the break-even shape) is deferred to Stage 2+.
+/// - `"metal"` → try [`MetalBackend::new()`]; on success returns
+///   [`RuntimeBackend::Metal`]. On failure (headless CI, Intel Mac,
+///   MetalBackend constructor error, or non-macOS build) emits a
+///   Python [`RuntimeWarning`] explaining the fallback and returns
+///   [`RuntimeBackend::Cpu`]. Unlike [`resolve_runtime_backend`],
+///   this never propagates the Metal-init error as a hard failure —
+///   per the plan, the user experience of `device="metal"` on a
+///   machine without Metal is "fall back transparently, warn once."
+/// - Anything else → `PyValueError` listing the accepted options.
+///
+/// `warn_source` is prepended to the warning text so the message
+/// makes sense in context (e.g. `"GBMRegressor.fit"` or
+/// `"GBMClassifier.fit"`); pass `"train"` if unsure.
+pub fn resolve_runtime_backend_with_fallback(
+    py: Python<'_>,
+    device: &str,
+    warn_source: &str,
+) -> Result<RuntimeBackend, String> {
+    let normalized = device.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "cpu" | "auto" => Ok(RuntimeBackend::Cpu(CpuBackend)),
+        "metal" => match build_metal_backend() {
+            Ok(backend) => Ok(backend),
+            Err(err) => {
+                emit_metal_fallback_warning(py, warn_source, &err)?;
+                Ok(RuntimeBackend::Cpu(CpuBackend))
+            }
+        },
+        other => Err(format!(
+            "device must be one of 'cpu', 'metal', or 'auto'; got '{other}'"
+        )),
+    }
+}
+
+/// Emit `RuntimeWarning` for the Metal-init fallback path. Swallowed
+/// errors would be a UX regression (the user would see a silent
+/// fallback), so any failure to construct or raise the warning is
+/// propagated up as a plain String — callers wrap that into
+/// `EngineError::InvalidConfig` which surfaces as `PyValueError` at
+/// the Python boundary.
+fn emit_metal_fallback_warning(
+    py: Python<'_>,
+    warn_source: &str,
+    reason: &str,
+) -> Result<(), String> {
+    let warning_type = py.get_type::<PyRuntimeWarning>();
+    let message = std::ffi::CString::new(format!(
+        "{warn_source}: device='metal' requested but Metal backend is unavailable \
+         ({reason}); falling back to CPU. Set device='cpu' to silence this warning."
+    ))
+    .map_err(|err| format!("internal: Metal fallback warning contained a null byte: {err}"))?;
+    PyErr::warn(py, &warning_type, &message, 1)
+        .map_err(|err| format!("failed to emit Metal fallback RuntimeWarning: {err}"))
 }
 
 #[cfg(test)]

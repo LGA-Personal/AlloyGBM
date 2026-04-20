@@ -1723,6 +1723,7 @@ mod tests {
             node_debug_stats: None,
             objective: "squared_error".to_string(),
             native_categorical_feature_indices: vec![0],
+            trained_device: Device::Cpu,
         };
         model.to_artifact_bytes().expect("serialize should succeed")
     }
@@ -1829,6 +1830,7 @@ mod tests {
             node_debug_stats: None,
             objective: "squared_error".to_string(),
             native_categorical_feature_indices: vec![0],
+            trained_device: Device::Cpu,
         };
         let artifact = model.to_artifact_bytes().expect("serialize should succeed");
         let predictor = Predictor::from_artifact_bytes(&artifact).unwrap();

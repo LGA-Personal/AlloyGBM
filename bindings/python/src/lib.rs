@@ -25,7 +25,7 @@ use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use rayon::prelude::*;
-use runtime_backend::resolve_runtime_backend;
+use runtime_backend::resolve_runtime_backend_with_fallback;
 use std::time::Instant;
 
 const DEFAULT_TRAIN_ROUNDS: usize = 6;
@@ -2406,6 +2406,7 @@ fn build_native_training_summary(
 
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_with_summary_dense_impl(
+    py: Python<'_>,
     values: &[f32],
     row_count: usize,
     feature_count: usize,
@@ -2436,6 +2437,14 @@ fn train_regression_artifact_with_summary_dense_impl(
     max_cat_threshold: usize,
     device: &str,
 ) -> Result<NativeTrainingResult, EngineError> {
+    // S1.9: resolve device + warn-and-fallback BEFORE any engine work
+    // so that a user-facing misconfiguration (or a Metal init failure)
+    // surfaces as a Python-level warning/error instead of being
+    // funnelled through EngineError string formatting.
+    let backend = resolve_runtime_backend_with_fallback(py, device, "train").map_err(|err| {
+        EngineError::InvalidConfig(format!("device='{device}' could not be resolved: {}", err))
+    })?;
+    let resolved_device = backend.device();
     let bridge_start = Instant::now();
     let need_dense_values = !categorical_specs.is_empty();
     let mut prepared = prepare_training_matrices_from_dense_values(
@@ -2652,14 +2661,11 @@ fn train_regression_artifact_with_summary_dense_impl(
     let bridge_prepare_seconds = bridge_start.elapsed().as_secs_f64();
     let user_seed = params.seed;
     let trainer = Trainer::new(params)?.with_categorical_features(native_cat_infos.clone());
-    // Resolve the user-requested device into a concrete
-    // `RuntimeBackend`. `EngineError::InvalidConfig` is the right
-    // channel since device selection is a user-facing config option;
-    // PyO3-layer callers already validate the string up front but
-    // direct Rust-level callers (tests) rely on this re-check.
-    let backend = resolve_runtime_backend(device)
-        .map_err(|err| EngineError::InvalidConfig(format!("invalid device '{device}': {err}")))?;
-    let _backend_name: &'static str = backend.name(); // used by S1.9 for artifact metadata
+    // `backend` + `resolved_device` were resolved at the top of this
+    // function (S1.9) — see `resolve_runtime_backend_with_fallback`.
+    // The resolved device is stamped into `TrainedModel::trained_device`
+    // right before serialization so the artifact metadata records
+    // which backend actually produced the model.
     let native_start = Instant::now();
 
     // Build the custom metric callback if provided
@@ -2882,6 +2888,7 @@ fn train_regression_artifact_with_summary_dense_impl(
             if let Some(state) = categorical_state {
                 mc_model = mc_model.with_categorical_state(Some(state))?;
             }
+            mc_model.trained_device = resolved_device;
             let artifact_bytes = mc_model.to_artifact_bytes()?;
             return Ok(NativeTrainingResult {
                 artifact_bytes,
@@ -2921,6 +2928,7 @@ fn train_regression_artifact_with_summary_dense_impl(
         .iter()
         .map(|c| c.feature_index as u32)
         .collect();
+    model.trained_device = resolved_device;
     let artifact_bytes = model.to_artifact_bytes()?;
     summary.model = model;
 
@@ -3175,6 +3183,7 @@ fn shap_global_importance_dense(
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact(
+    py: Python<'_>,
     rows: Vec<Vec<f32>>,
     targets: Vec<f32>,
     learning_rate: f32,
@@ -3240,6 +3249,7 @@ fn train_regression_artifact(
     let (dense_values, row_count, feature_count) =
         flatten_rows(&rows).map_err(engine_error_to_pyerr)?;
     train_regression_artifact_with_summary_dense_impl(
+        py,
         &dense_values,
         row_count,
         feature_count,
@@ -3303,6 +3313,7 @@ fn train_regression_artifact(
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense(
+    py: Python<'_>,
     values: Vec<f32>,
     row_count: usize,
     feature_count: usize,
@@ -3366,6 +3377,7 @@ fn train_regression_artifact_dense(
     )
     .map_err(engine_error_to_pyerr)?;
     train_regression_artifact_with_summary_dense_impl(
+        py,
         &values,
         row_count,
         feature_count,
@@ -3453,6 +3465,7 @@ fn train_regression_artifact_dense(
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_with_summary(
+    py: Python<'_>,
     rows: Vec<Vec<f32>>,
     targets: Vec<f32>,
     learning_rate: f32,
@@ -3563,6 +3576,7 @@ fn train_regression_artifact_with_summary(
     }
 
     train_regression_artifact_with_summary_dense_impl(
+        py,
         &dense_values,
         row_count,
         feature_count,
@@ -3654,6 +3668,7 @@ fn train_regression_artifact_with_summary(
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary(
+    py: Python<'_>,
     values: Vec<f32>,
     row_count: usize,
     feature_count: usize,
@@ -3750,6 +3765,7 @@ fn train_regression_artifact_dense_with_summary(
         )
         .map_err(engine_error_to_pyerr)?;
     train_regression_artifact_with_summary_dense_impl(
+        py,
         &values,
         row_count,
         feature_count,
@@ -3854,6 +3870,7 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> PyResult<Vec<f32>> {
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary_bytes(
+    py: Python<'_>,
     values_bytes: &[u8],
     row_count: usize,
     feature_count: usize,
@@ -3954,6 +3971,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
         )
         .map_err(engine_error_to_pyerr)?;
     train_regression_artifact_with_summary_dense_impl(
+        py,
         &values,
         row_count,
         feature_count,
@@ -4038,6 +4056,7 @@ mod tests {
         CategoricalTargetEncodingSpec, EngineError, SquaredErrorObjective, Trainer,
         TrainingPolicyMode,
     };
+    use pyo3::Python;
 
     fn train_regression_artifact_impl(
         rows: &[Vec<f32>],
@@ -4050,38 +4069,41 @@ mod tests {
         store_node_debug_stats: bool,
     ) -> Result<Vec<u8>, EngineError> {
         let (dense_values, row_count, feature_count) = flatten_rows(rows)?;
-        train_regression_artifact_with_summary_dense_impl(
-            &dense_values,
-            row_count,
-            feature_count,
-            targets,
-            None, // sample_weights
-            None, // group_id
-            None,
-            None,
-            None,
-            None, // validation_sample_weights
-            None, // validation_group_id
-            params,
-            rounds,
-            time_index,
-            None,
-            categorical_spec.into_iter().collect(),
-            Vec::new(),
-            training_policy,
-            store_node_debug_stats,
-            ContinuousBinningStrategy::Linear,
-            MAX_CONTINUOUS_QUANTIZED_BIN_U8 as usize + 1,
-            "squared_error",
-            None, // init_artifact_bytes
-            None, // num_classes
-            None, // custom_objective_fn
-            None, // custom_loss_fn
-            None, // custom_metric_fn
-            0,    // max_cat_threshold
-            "cpu",
-        )
-        .map(|result| result.artifact_bytes)
+        Python::with_gil(|py| {
+            train_regression_artifact_with_summary_dense_impl(
+                py,
+                &dense_values,
+                row_count,
+                feature_count,
+                targets,
+                None, // sample_weights
+                None, // group_id
+                None,
+                None,
+                None,
+                None, // validation_sample_weights
+                None, // validation_group_id
+                params,
+                rounds,
+                time_index,
+                None,
+                categorical_spec.into_iter().collect(),
+                Vec::new(),
+                training_policy,
+                store_node_debug_stats,
+                ContinuousBinningStrategy::Linear,
+                MAX_CONTINUOUS_QUANTIZED_BIN_U8 as usize + 1,
+                "squared_error",
+                None, // init_artifact_bytes
+                None, // num_classes
+                None, // custom_objective_fn
+                None, // custom_loss_fn
+                None, // custom_metric_fn
+                0,    // max_cat_threshold
+                "cpu",
+            )
+            .map(|result| result.artifact_bytes)
+        })
     }
 
     fn quality_fixture_dataset() -> TrainingDataset {

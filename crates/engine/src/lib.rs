@@ -1383,6 +1383,13 @@ pub struct TrainedModel {
     pub objective: String,
     /// Feature indices that use native categorical splits (empty if none).
     pub native_categorical_feature_indices: Vec<u32>,
+    /// Device (backend) that produced this model. Recorded into the
+    /// artifact's `trained_device` metadata field so callers can audit
+    /// which backend actually ran — e.g. tell CPU-trained models apart
+    /// from Metal-trained models for bit-exactness investigations.
+    /// Defaults to [`Device::Cpu`]; the PyO3 layer overrides it based
+    /// on the resolved [`RuntimeBackend`] variant.
+    pub trained_device: Device,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1741,7 +1748,7 @@ impl TrainedModel {
             feature_names: (0..self.feature_count)
                 .map(|index| format!("f{index}"))
                 .collect(),
-            trained_device: Device::Cpu,
+            trained_device: self.trained_device,
             objective: self.objective.clone(),
             num_classes: None,
         };
@@ -1884,6 +1891,7 @@ impl TrainedModel {
 
         model.feature_count = metadata_feature_count;
         model.objective = parsed.contract.metadata.objective.clone();
+        model.trained_device = parsed.contract.metadata.trained_device;
         Ok(model)
     }
 }
@@ -2792,6 +2800,7 @@ impl Trainer {
                 class_stumps,
                 categorical_state: None,
                 objective: objective.objective_name().to_string(),
+                trained_device: Device::Cpu,
             },
             rounds_requested: effective_round_cap,
             effective_round_cap,
@@ -3356,6 +3365,7 @@ impl Trainer {
             node_debug_stats: None,
             objective: objective.objective_name().to_string(),
             native_categorical_feature_indices: Vec::new(),
+            trained_device: Device::Cpu,
         };
         let final_loss = current_loss;
 
@@ -5470,6 +5480,7 @@ fn decode_trained_model_payload(bytes: &[u8]) -> EngineResult<TrainedModel> {
         node_debug_stats: None,
         objective: "squared_error".to_string(),
         native_categorical_feature_indices: Vec::new(),
+        trained_device: Device::Cpu,
     })
 }
 
@@ -5674,6 +5685,10 @@ pub struct MultiClassTrainedModel {
     pub class_stumps: Vec<Vec<TrainedStump>>,
     pub categorical_state: Option<CategoricalStatePayloadV1>,
     pub objective: String,
+    /// Device (backend) that produced this model. Same semantics as
+    /// [`TrainedModel::trained_device`] — recorded into artifact
+    /// metadata so callers can audit backend provenance.
+    pub trained_device: Device,
 }
 
 impl MultiClassTrainedModel {
@@ -5758,7 +5773,7 @@ impl MultiClassTrainedModel {
             feature_names: (0..self.feature_count)
                 .map(|index| format!("f{index}"))
                 .collect(),
-            trained_device: Device::Cpu,
+            trained_device: self.trained_device,
             objective: self.objective.clone(),
             num_classes: Some(num_classes_u32),
         };
@@ -5888,6 +5903,7 @@ impl MultiClassTrainedModel {
             class_stumps,
             categorical_state,
             objective: parsed.contract.metadata.objective.clone(),
+            trained_device: parsed.contract.metadata.trained_device,
         })
     }
 }
@@ -6888,6 +6904,7 @@ mod tests {
             node_debug_stats: None,
             objective: "squared_error".to_string(),
             native_categorical_feature_indices: Vec::new(),
+            trained_device: Device::Cpu,
         };
 
         let left = model.predict_row(&[0.0]).expect("left prediction succeeds");
@@ -7738,6 +7755,7 @@ mod tests {
             ],
             categorical_state: None,
             objective: "multiclass_softmax".to_string(),
+            trained_device: Device::Cpu,
         };
 
         let bytes = model.to_artifact_bytes().expect("serialize should succeed");
@@ -7839,6 +7857,7 @@ mod tests {
             ],
             categorical_state: None,
             objective: "multiclass_softmax".to_string(),
+            trained_device: Device::Cpu,
         };
         assert_eq!(model.rounds_completed(), 2);
     }
@@ -8113,6 +8132,7 @@ mod tests {
             node_debug_stats: None,
             objective: "squared_error".to_string(),
             native_categorical_feature_indices: vec![0],
+            trained_device: Device::Cpu,
         };
 
         let bytes = model.to_artifact_bytes().expect("serialize should succeed");
@@ -8176,6 +8196,7 @@ mod tests {
             node_debug_stats: None,
             objective: "squared_error".to_string(),
             native_categorical_feature_indices: Vec::new(),
+            trained_device: Device::Cpu,
         };
 
         let bytes = model.to_artifact_bytes().expect("serialize should succeed");

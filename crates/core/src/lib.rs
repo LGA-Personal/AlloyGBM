@@ -20,21 +20,27 @@ pub enum TreeGrowth {
     Leaf,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum Device {
+    #[default]
     Cpu,
+    /// Apple Silicon Metal GPU. Reserved for the Stage 1+ Metal backend
+    /// so artifact metadata can record which backend actually ran.
+    Metal,
 }
 
 impl Device {
     pub fn as_metadata_label(self) -> &'static str {
         match self {
             Self::Cpu => "cpu",
+            Self::Metal => "metal",
         }
     }
 
     pub fn parse_metadata_label(value: &str) -> CoreResult<Self> {
         match value {
             "cpu" => Ok(Self::Cpu),
+            "metal" => Ok(Self::Metal),
             other => Err(CoreError::Validation(format!(
                 "unsupported trained_device '{other}'"
             ))),

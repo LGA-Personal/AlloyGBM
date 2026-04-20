@@ -5,6 +5,141 @@ First thing a new session reads, alongside `STATUS.md`.
 
 ---
 
+## 2026-04-19 — S1.9 Warn-and-fallback + resolved-device in artifact metadata
+
+**Branch:** `claude/charming-carson-d08c9a` (worktree)
+
+### What moved
+
+- **`crates/core/src/lib.rs`** — `Device` enum grew a `Metal` variant
+  with a derived `#[default] Cpu` (clippy's `derivable_impls` flagged
+  the hand-rolled `impl Default`, so it's now a `#[derive(Default)]`
+  with `#[default]` on the variant). `as_metadata_label` /
+  `parse_metadata_label` extended to serialize/parse `"metal"`. The
+  hand-rolled positional JSON parser in `ModelMetadata` stays
+  back-compat because `trained_device` is already on the tail of the
+  field list and accepts `"cpu"` without change.
+- **`crates/engine/src/lib.rs`** — `TrainedModel.trained_device:
+  Device` and `MultiClassTrainedModel.trained_device: Device` fields
+  added (default `Device::Cpu`). Every struct-literal construction
+  site (16 total, incl. a slew of test fixtures) now initialises
+  `trained_device`. `to_artifact_bytes` on both types now reads
+  `self.trained_device` instead of the old hardcoded `Device::Cpu`;
+  `from_artifact_bytes_with_mode` / `from_artifact_bytes` now restore
+  the field from the parsed metadata so round-trips preserve the
+  recorded device.
+- **`crates/shap/src/lib.rs`, `crates/predictor/src/lib.rs`** —
+  `TrainedModel { ... }` test-fixture literals updated with
+  `trained_device: Device::Cpu`. A Python-driven bulk-patch script
+  falsely patched two shap fixtures (fixture_model,
+  fixture_model_with_unused_feature) by inserting the field *outside*
+  the struct literal; those were corrected by hand.
+- **`bindings/python/src/runtime_backend.rs`** — added
+  `RuntimeBackend::device(&self) -> Device` companion to `name()`.
+  New `pub fn resolve_runtime_backend_with_fallback(py, device,
+  warn_source)` is the PyO3-side entry: on `device="metal"` with a
+  Metal init failure it calls `PyErr::warn(py,
+  &py.get_type::<PyRuntimeWarning>(), &msg, 1)` and returns the CPU
+  backend. The pure (non-warning) `resolve_runtime_backend` is
+  retained as a unit-test helper with `#[allow(dead_code)]` +
+  explanatory comment. The Metal-specific `build_metal_backend` now
+  honours `ALLOYGBM_METAL_DISABLE=1` as a deterministic failure
+  injection (useful for S1.12 tests on Metal-capable CI).
+- **`bindings/python/src/lib.rs`** —
+  `train_regression_artifact_with_summary_dense_impl` now takes `py:
+  Python<'_>` as its first arg and resolves the backend via
+  `resolve_runtime_backend_with_fallback` *before* any engine work,
+  wrapping the String error into `EngineError::InvalidConfig` so
+  unknown devices still surface as `PyValueError`. Sets
+  `model.trained_device = resolved_device` (single-output path) and
+  `mc_model.trained_device = resolved_device` (multiclass path)
+  immediately before `to_artifact_bytes`. All 5 pyfunctions that call
+  `_impl` got a `py: Python<'_>` first argument; the in-module test
+  helper wraps its call in `Python::with_gil(|py| ...)`.
+
+### Verification
+
+- `cargo check --workspace` clean.
+- `cargo clippy --workspace --all-targets -- -D warnings` clean.
+- `cargo fmt --all --check` clean.
+- `cargo test --workspace --exclude alloygbm-python` — **all Rust
+  tests green**. `alloygbm-python`'s unit tests still fail to
+  *link* (pre-existing — they need Python symbols at link time; same
+  behaviour as pre-S1.9).
+- `maturin develop --release` — clean release build.
+- `pytest bindings/python/tests/ -q` — **332 passed, 16 subtests
+  passed**. No regressions.
+- **End-to-end smokes (worktree-installed wheel):**
+  - `GBMRegressor(device="metal").fit(...)` → artifact JSON contains
+    `"trained_device":"metal"`.
+  - `ALLOYGBM_METAL_DISABLE=1 GBMRegressor(device="metal").fit(...)`
+    → single `RuntimeWarning` emitted with the expected text
+    (`train: device='metal' requested but Metal backend is
+    unavailable (... test escape hatch); falling back to CPU. Set
+    device='cpu' to silence this warning.`) and artifact records
+    `"trained_device":"cpu"` (the actual backend that ran).
+  - `pickle.dumps` / `pickle.loads` on a Metal-trained regressor
+    preserves `device="metal"` on the rehydrated object and the
+    artifact's recorded `trained_device`.
+
+### Design calls made this session
+
+- **Enum `Default` derived, not hand-rolled.** Clippy's
+  `derivable_impls` fires on `impl Default for Device { fn
+  default() -> Self { Self::Cpu } }`; replaced with
+  `#[derive(Default)]` on the enum + `#[default]` on the `Cpu`
+  variant. No behaviour change.
+- **Two resolve functions kept.** The pure `resolve_runtime_backend`
+  returns a `Result<_, String>` with no Python dependency — it's
+  what the unit tests use. `resolve_runtime_backend_with_fallback`
+  is the Python-aware variant that emits the warning. Kept both so
+  tests don't have to acquire a GIL, and so the pure variant is
+  reusable if we ever add a CLI entry point.
+- **`ALLOYGBM_METAL_DISABLE=1` escape hatch.** The S1.12 Python
+  tests need a way to exercise the fallback path on Metal-capable
+  CI, otherwise `device="metal"` just silently succeeds and the
+  warn-path goes untested. An env-var gate inside
+  `build_metal_backend` gives us deterministic failure injection
+  with zero production surface area (the check is `O(1)` per
+  resolve). Message is intentionally unique (`"test escape
+  hatch"`) so tests can assert against it.
+- **Return type of `_impl` kept as `Result<_, EngineError>`.**
+  Briefly experimented with converting to `PyResult` so we could
+  use `PyErr::warn` directly without the String hop, but every `?`
+  inside the function currently bubbles `EngineError`, and
+  rewriting all of them to `.map_err(engine_error_to_pyerr)`
+  would've doubled the line count of the fix. The `String` ->
+  `EngineError::InvalidConfig` -> `PyValueError` chain works and
+  keeps the blast radius tight.
+- **`Python::with_gil` only in the test helper.** The production
+  pyfunctions already hold the GIL (they're called by the Python
+  interpreter), so threading `py` is a plain parameter pass. The
+  `#[cfg(test)]` helper runs outside a PyO3 entrypoint, so it
+  acquires the GIL via `Python::with_gil` locally. Both paths end
+  up calling the same `_impl`.
+
+### Handoff notes for S1.10
+
+- **Capability probe already exists.** `MetalBackend::capabilities()`
+  and the underlying `MetalDevice::probe()` (crates/backend_metal)
+  return a `MetalCapabilities` struct with `gpu_family`, `metal4`,
+  etc. S1.10 is mostly Python plumbing: a new PyO3 pyfunction that
+  returns a `dict` with `metal_available: bool`, `metal4_available:
+  bool`, `gpu_family: Option<String>`, plus a two-line extension of
+  `native_runtime_info()` in
+  `bindings/python/alloygbm/__init__.py`. No engine or artifact
+  changes needed.
+- **Fallback path now reusable.** `resolve_runtime_backend_with_fallback`
+  is the one chokepoint where Metal init is attempted in the
+  PyO3-facing code; S1.10's probe can short-circuit by calling the
+  same builder (if we end up needing to surface Metal availability
+  to users, the fallback path is already there).
+- **Artifact round-trip is stable.** `trained_device` is
+  bit-identical on re-save, so S1.13's bit-exactness golden test
+  can rely on the field persisting through CPU↔Metal training runs.
+
+---
+
 ## 2026-04-19 — S1.8 Python `device="cpu"|"metal"|"auto"` on all three estimators
 
 **Branch:** `claude/charming-carson-d08c9a` (worktree)

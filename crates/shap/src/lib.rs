@@ -1040,6 +1040,7 @@ mod tests {
             node_debug_stats: None,
             objective: "squared_error".to_string(),
             native_categorical_feature_indices: Vec::new(),
+            trained_device: Device::Cpu,
         }
     }
 
@@ -1052,6 +1053,7 @@ mod tests {
             node_debug_stats: None,
             objective: "squared_error".to_string(),
             native_categorical_feature_indices: Vec::new(),
+            trained_device: Device::Cpu,
         }
     }
 
@@ -1380,6 +1382,7 @@ mod tests {
             node_debug_stats: None,
             objective: "squared_error".to_string(),
             native_categorical_feature_indices: Vec::new(),
+            trained_device: Device::Cpu,
         };
 
         let rows = vec![vec![3.0, 0.0], vec![8.0, 0.0]];
@@ -1420,6 +1423,7 @@ mod tests {
             node_debug_stats: None,
             objective: "squared_error".to_string(),
             native_categorical_feature_indices: Vec::new(),
+            trained_device: Device::Cpu,
         };
 
         let rows = vec![
@@ -1491,6 +1495,7 @@ mod tests {
             node_debug_stats: None,
             objective: "squared_error".to_string(),
             native_categorical_feature_indices: vec![0],
+            trained_device: Device::Cpu,
         };
 
         // Feature 0 values: 0.0 (cat 0, left), 1.0 (cat 1, right),
@@ -1527,6 +1532,7 @@ mod tests {
             node_debug_stats: None,
             objective: "squared_error".to_string(),
             native_categorical_feature_indices: vec![0],
+            trained_device: Device::Cpu,
         };
 
         let rows = vec![
@@ -1573,6 +1579,7 @@ mod tests {
             node_debug_stats: None,
             objective: "squared_error".to_string(),
             native_categorical_feature_indices: vec![0],
+            trained_device: Device::Cpu,
         };
 
         let rows = vec![
@@ -1639,6 +1646,7 @@ mod tests {
             node_debug_stats: None,
             objective: "squared_error".to_string(),
             native_categorical_feature_indices: Vec::new(),
+            trained_device: Device::Cpu,
         };
 
         let rows = vec![
