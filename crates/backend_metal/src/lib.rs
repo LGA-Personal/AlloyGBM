@@ -10,7 +10,7 @@
 mod device;
 
 #[cfg(target_os = "macos")]
-pub use device::{MetalCapabilities, MetalDevice};
+pub use device::{MetalCapabilities, MetalDevice, probe_capabilities};
 
 pub mod kernels;
 

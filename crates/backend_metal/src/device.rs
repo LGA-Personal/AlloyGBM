@@ -35,6 +35,29 @@ pub struct MetalDevice {
     pub capabilities: MetalCapabilities,
 }
 
+/// Probe capability flags without holding on to the device or opening
+/// a command queue. Used by `native_runtime_info()` (S1.10) so a
+/// harmless introspection call does not keep a Metal device resident
+/// for the process lifetime.
+///
+/// Returns `None` on systems without a Metal device (headless VMs,
+/// pre-Apple-Silicon Macs) — callers should treat that as
+/// "metal_available = false".
+pub fn probe_capabilities() -> Option<MetalCapabilities> {
+    let device = MTLCreateSystemDefaultDevice()?;
+    let apple7 = device.supportsFamily(MTLGPUFamily::Apple7);
+    // SAFETY: `supportsFamily:` is read-only on the device, safe to
+    // invoke from any thread, and returns `NO` for unknown family
+    // values. See `MetalDevice::probe` for the same pattern.
+    let metal4: bool = unsafe { msg_send![&*device, supportsFamily: 5002_isize] };
+    let device_name = device.name().to_string();
+    Some(MetalCapabilities {
+        apple7,
+        metal4,
+        device_name,
+    })
+}
+
 impl MetalDevice {
     /// Locate the default Metal device, open a command queue, read
     /// capability flags. Returns an error when Metal is unavailable

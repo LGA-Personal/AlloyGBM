@@ -442,16 +442,73 @@ struct NativeRuntimeInfo {
     name: String,
     #[pyo3(get)]
     version: String,
+    /// `True` when the current build and current hardware both support
+    /// the Metal backend. `False` on non-macOS builds, on builds with
+    /// `--no-default-features` (i.e. `metal` feature off), on Intel
+    /// Macs, and in headless VMs without a Metal device. Users can
+    /// branch on this before setting `device="metal"`.
+    #[pyo3(get)]
+    metal_available: bool,
+    /// `True` when the current hardware advertises
+    /// `MTLGPUFamilyMetal4` (macOS 26 Tahoe+). Gates the Stage 3+ fast
+    /// path (indirect command buffers, residency sets). Always
+    /// `False` when `metal_available` is `False`.
+    #[pyo3(get)]
+    metal4_available: bool,
+    /// GPU marketing name (e.g. `"Apple M2 Pro"`) when a Metal device
+    /// is present, otherwise `None`. Populated regardless of whether
+    /// the `apple7` baseline is met so users can see why
+    /// `metal_available` is `False`.
+    #[pyo3(get)]
+    gpu_family: Option<String>,
 }
 
 #[pymethods]
 impl NativeRuntimeInfo {
     #[new]
     fn new() -> Self {
-        Self {
-            name: "alloygbm".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-        }
+        build_native_runtime_info()
+    }
+}
+
+/// Assemble a [`NativeRuntimeInfo`] by probing current-build and
+/// current-hardware Metal capabilities.
+///
+/// On non-macOS builds and on macOS builds with the `metal` feature
+/// disabled, all Metal fields collapse to `false` / `None`. On macOS
+/// builds with the `metal` feature the probe uses
+/// [`alloygbm_backend_metal::probe_capabilities`], which does **not**
+/// hold a command queue resident — it is safe to call from
+/// `native_runtime_info()` on every import.
+#[cfg(all(target_os = "macos", feature = "metal"))]
+fn build_native_runtime_info() -> NativeRuntimeInfo {
+    use alloygbm_backend_metal::probe_capabilities;
+    let caps = probe_capabilities();
+    let (metal_available, metal4_available, gpu_family) = match caps {
+        // `metal_available` is the *usable* baseline: we need
+        // `apple7`, because the Stage 1 kernels reject anything
+        // older. But `gpu_family` is populated unconditionally so
+        // users on sub-baseline hardware can still see why.
+        Some(c) => (c.apple7, c.metal4, Some(c.device_name)),
+        None => (false, false, None),
+    };
+    NativeRuntimeInfo {
+        name: "alloygbm".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        metal_available,
+        metal4_available,
+        gpu_family,
+    }
+}
+
+#[cfg(not(all(target_os = "macos", feature = "metal")))]
+fn build_native_runtime_info() -> NativeRuntimeInfo {
+    NativeRuntimeInfo {
+        name: "alloygbm".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        metal_available: false,
+        metal4_available: false,
+        gpu_family: None,
     }
 }
 

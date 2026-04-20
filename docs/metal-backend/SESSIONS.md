@@ -5,6 +5,118 @@ First thing a new session reads, alongside `STATUS.md`.
 
 ---
 
+## 2026-04-19 — S1.10 Metal capability fields on `native_runtime_info()`
+
+**Branch:** `claude/charming-carson-d08c9a` (worktree)
+
+### What moved
+
+- **`crates/backend_metal/src/device.rs`** — new module-level
+  `probe_capabilities() -> Option<MetalCapabilities>` that performs
+  the same capability read as `MetalDevice::probe()` but *without*
+  opening a command queue or holding the device. Used by
+  `native_runtime_info()` so a harmless introspection call doesn't
+  keep Metal resources resident for the process lifetime. Returns
+  `None` on headless VMs / non-Metal Macs.
+- **`crates/backend_metal/src/lib.rs`** — re-exports the new
+  `probe_capabilities` alongside `MetalCapabilities` / `MetalDevice`.
+- **`bindings/python/src/lib.rs`** — `NativeRuntimeInfo` pyclass
+  grew three new `#[pyo3(get)]` fields: `metal_available: bool`,
+  `metal4_available: bool`, `gpu_family: Option<String>`. The
+  struct is now populated by `build_native_runtime_info()` which
+  has two cfg-gated arms:
+  - `cfg(all(target_os = "macos", feature = "metal"))` calls
+    `probe_capabilities()` and derives
+    `metal_available = caps.apple7` (the Stage 1 baseline), while
+    `gpu_family` is populated unconditionally so users on
+    sub-baseline hardware can see *why* `metal_available` is false.
+  - The fallback arm (non-macOS, or `metal` feature off) returns
+    `metal_available=false, metal4_available=false, gpu_family=None`.
+- **`bindings/python/tests/test_native_runtime_integration.py`** —
+  extended `test_runtime_import_exposes_native_runtime_info` with
+  platform-agnostic shape checks + a coherence invariant
+  (`metal_available=False` implies `metal4_available=False`). No
+  hardware-specific assertions so the suite stays stable across
+  Apple Silicon, Intel Mac, and Linux CI.
+
+### Verification
+
+- `cargo check --workspace` clean.
+- `cargo clippy --workspace --all-targets -- -D warnings` clean.
+- `cargo fmt --all --check` clean.
+- `maturin develop --release` clean.
+- `pytest bindings/python/tests/ -q` — **332 passed, 16 subtests
+  passed**. No regressions.
+- **Smoke (Apple M4):** `native_runtime_info()` returns
+  `metal_available=True, metal4_available=False, gpu_family="Apple
+  M4"`. Confirms the probe reads the expected values on this box:
+  Apple7 baseline is met (M4 advertises it), Metal 4 family flag
+  is not yet set under this macOS version (macOS 26 Tahoe will
+  flip it), and the marketing name round-trips intact through the
+  Objective-C bridge.
+
+### Design calls made this session
+
+- **Queue-free `probe_capabilities()`, not a reuse of
+  `MetalDevice::probe()`.** The existing `probe()` opens a command
+  queue so the returned `MetalDevice` is immediately usable for
+  dispatch. For `native_runtime_info()` — a pure introspection
+  call that may run on every `import alloygbm` — we don't want to
+  hold a queue resident. The light probe is ~40 lines and reuses
+  the same capability-read selectors, so there's no drift risk;
+  full probe stays the one-shot path for `MetalBackend::new()`.
+- **`metal_available` = `caps.apple7`, not `caps.is_some()`.** The
+  Stage 1 kernels *require* `MTLGPUFamilyApple7`. Reporting
+  `metal_available=True` on a sub-baseline GPU would mislead users
+  into requesting `device="metal"` and catching an error. Exposing
+  `gpu_family` unconditionally gives them a cheap way to see why.
+- **No `ALLOYGBM_METAL_DISABLE` influence on
+  `native_runtime_info()`.** The env var is a *PyO3 resolve-time*
+  test hook — it exists to exercise the warn-and-fallback code
+  path. `native_runtime_info()` should report hardware facts. Mixing
+  the two would make the escape hatch surprising ("why does
+  capability detection respect a test flag?"). Kept them decoupled.
+- **Fields are `#[pyo3(get)]`, not dict entries.** A pyclass with
+  attribute-style access matches the pre-S1.10 shape (`info.name`,
+  `info.version`) so existing user code stays a drop-in. A dict
+  return would've broken backwards compatibility.
+- **Python test is shape-only, not capability-asserting.** The
+  suite runs on macOS + Linux CI; hardware facts differ. Asserting
+  `isinstance(info.metal_available, bool)` + the
+  `not-available => not-metal4` coherence invariant gives us
+  regression coverage without flakiness.
+
+### Handoff notes for S1.11/S1.12
+
+- **Availability gate shape.** S1.12 tests can write:
+  ```python
+  import pytest
+  from alloygbm import native_runtime_info
+  pytestmark = pytest.mark.skipif(
+      not native_runtime_info().metal_available,
+      reason="Metal backend unavailable on this runner",
+  )
+  ```
+  That plus `sys.platform == "darwin"` handles every combination
+  of hardware / build / OS without per-test plumbing.
+- **Warn-and-fallback is now testable on any runner.**
+  `ALLOYGBM_METAL_DISABLE=1` forces a Metal init failure so the
+  fallback path is exercisable from Python tests even on a real
+  Apple Silicon CI runner (where `device="metal"` would otherwise
+  succeed silently). Expected warning substring is
+  `"falling back to CPU. Set device='cpu' to silence"`.
+- **Rust-side histogram correctness tests (S1.11) already live in
+  `crates/backend_metal/src/kernels/histogram.rs`
+  (`histogram_matches_cpu_small_fixture`,
+  `histogram_feature_subset_matches_cpu`) and in
+  `crates/backend_metal/src/pipelines.rs`
+  (`pipeline_cache_returns_identical_arc_on_second_call`). The S1.10
+  `probe_capabilities()` has no behavior worth testing that isn't
+  already covered by `MetalDevice::probe()` — skipping a redundant
+  unit test keeps signal up.
+
+---
+
 ## 2026-04-19 — S1.9 Warn-and-fallback + resolved-device in artifact metadata
 
 **Branch:** `claude/charming-carson-d08c9a` (worktree)

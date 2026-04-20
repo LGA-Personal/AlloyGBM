@@ -155,6 +155,20 @@ class NativeRuntimeIntegrationTests(unittest.TestCase):
         info = self.alloygbm.native_runtime_info()
         self.assertEqual(info.name, "alloygbm")
         self.assertRegex(info.version, re.compile(r"^\d+\.\d+\.\d+"))
+        # S1.10: Metal capability fields are always present on the
+        # struct — they just collapse to False/None on non-macOS or on
+        # builds with the `metal` feature disabled. This assertion is
+        # platform-agnostic on purpose: it pins the shape without
+        # making the test flaky across CI runners.
+        self.assertIsInstance(info.metal_available, bool)
+        self.assertIsInstance(info.metal4_available, bool)
+        self.assertTrue(info.gpu_family is None or isinstance(info.gpu_family, str))
+        # Invariant: if the baseline (metal_available) is False, the
+        # Metal 4 fast path is necessarily also False. The reverse is
+        # not guaranteed (metal4 implies apple7 in Apple's hierarchy,
+        # but we still want the bool combination to be coherent).
+        if not info.metal_available:
+            self.assertFalse(info.metal4_available)
 
     def test_runtime_import_exposes_metric_helpers(self) -> None:
         self.assertTrue(callable(self.alloygbm.rmse))
