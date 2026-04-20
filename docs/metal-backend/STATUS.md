@@ -1,8 +1,8 @@
 # Metal Backend — Current Status
 
-**Last updated:** 2026-04-20 (S1.15 landed)
-**Active stage:** Stage 1 — Histogram build on Metal
-**Active sub-task:** S1.16 — full verification sweep (next)
+**Last updated:** 2026-04-20 (S1.16 landed — Stage 1 complete)
+**Active stage:** Stage 1 — Histogram build on Metal — **CLOSED**
+**Active sub-task:** *(none — Stage 2 opens via next `ExitPlanMode`)*
 
 ---
 
@@ -31,18 +31,36 @@ Order matches the approved plan in
   - **`docs/metal-backend/BENCHMARKS.md`** — rewritten against post-cache numbers. Shape-grid speedups moved from 0.03×–0.25× to 0.03×–0.28× (largest absolute win: 1M × 1000 dropped 86.8s → 70.7s). `metal_friendly` stays at 0.06×–0.09× across every config, proving Stage 1 cannot cross break-even on realistic shapes.
   - **`docs/limitations.md`** — replaced the "CPU-Only Runtime" section with "Metal Backend is Infrastructural (Stage 1)": cites both BENCHMARKS.md scenarios, states `device="cpu"` as the recommended default for every Stage 1 shape, explains the Stage 2+3 path to the decisive win, documents `native_runtime_info()` fields (`metal_available`, `metal4_available`, `gpu_family`) under "How to detect the backend", and the `ALLOYGBM_METAL_DISABLE=1` escape hatch.
   - Bit-exactness: all 21 `test_metal_backend.py` cases (including the 50k × 100 × 20-estimator golden test on train + held-out eval) pass with the cache wired in.
-- [ ] **S1.16** Full verification sweep (cargo check/test/clippy/fmt, maturin develop, pytest)
+- [x] **S1.16** Full verification sweep:
+  - `cargo check --workspace` green; `cargo check --workspace --no-default-features` green.
+  - `cargo clippy --workspace --all-targets -- -D warnings` and `cargo clippy --workspace --all-targets --no-default-features -- -D warnings` both clean.
+  - `cargo fmt --all --check` clean.
+  - `cargo test --workspace --exclude alloygbm-python` (both with and without `--no-default-features`): **183 tests pass** (23 core + 7 backend_metal + 10 backend_cpu + 32 categorical + 69 engine + 19 predictor + 23 shap). The `alloygbm-python` crate is tested via pytest, not `cargo test`, because PyO3 extension modules can't produce a standalone test binary on macOS without the python framework linker dance — consistent with prior Stage 1 verification practice.
+  - `maturin develop --release --manifest-path bindings/python/Cargo.toml` (default features) → **353/353 Python tests pass** (21 Metal-backend cases, including the 50k × 100 × 20-estimator golden bit-exactness test, plus the 332 pre-existing cases).
+  - `maturin develop --release --manifest-path bindings/python/Cargo.toml --no-default-features` → **334 pass + 19 skipped** (Metal-gated cases correctly skip; the new `MetalFallbackTests` gate was added this sub-task — see below).
+  - **Test fix landed during S1.16**: `MetalFallbackTests` in `test_metal_backend.py` now probes whether the `metal` crate feature is compiled in (via a one-shot `ALLOYGBM_METAL_DISABLE=1` subprocess warning probe) and `@unittest.skipUnless`-gates the class on that. Without this gate, no-default-features builds failed `test_fallback_emits_runtime_warning` because the escape-hatch warning text only exists when the feature is compiled in.
+
+---
+
+## Stage 1 — Complete
+
+Stage 1 is closed as of 2026-04-20. Summary of what shipped:
+
+- `crates/backend_metal` — full crate with device probe, MSL histogram kernel (privatised threadgroup + two-pass deterministic reduce, no float atomics), pipeline cache with `MTLBinaryArchive`, persistent `BufferCache` for binned-matrix / gradients / row-indices reuse.
+- `bindings/python` — `device="cpu"|"metal"|"auto"` on all three estimators, `RuntimeBackend` enum, warn-and-fallback on Metal init failure, `ALLOYGBM_METAL_DISABLE=1` escape hatch, `trained_device` in artifact metadata, `native_runtime_info()` extended with `metal_available` / `metal4_available` / `gpu_family`.
+- `benchmarks/metal_histogram.py` — named-scenario harness (`shape_grid`, `depth_sweep`, `bins_sweep`, `estimator_sweep`, `task_mix`, `metal_friendly`, `all`); M4 reference numbers archived as JSON.
+- `docs/metal-backend/{BENCHMARKS,STATUS,SESSIONS,DECISIONS,BUGS}.md` — the working-set and rationale.
+- `docs/limitations.md` — "Metal Backend is Infrastructural (Stage 1)" section with recommended-default `device="cpu"`.
+
+**Throughput finding (expected):** Stage 1 Metal is uniformly slower than CPU across every shape in `shape_grid` (0.03×–0.28× CPU) and every config in `metal_friendly` (0.06×–0.09× CPU). This is architectural — the per-level CPU round-trip for split finding and row partitioning dominates latency; histogram acceleration alone cannot close the gap. Stages 2+3 eliminate that round-trip and are where the decisive 4-5× win lands.
+
+**Bit-exactness contract held:** every Metal-trained model's predictions match its CPU-trained counterpart exactly, verified by the S1.13 50k-row × 100-feature × 20-estimator golden test on both the training set and a held-out 5k-row eval set.
 
 ---
 
 ## Next Up
 
-1. **S1.16** Full verification sweep before declaring Stage 1
-   complete: `cargo check/test/clippy/fmt` across the workspace
-   (with and without `--no-default-features`), `maturin develop
-   --release`, and the full Python pytest run. This is the last
-   Stage 1 item — on success, Stage 1 closes and the next
-   `ExitPlanMode` round opens Stage 2 (GPU best-split).
+1. Open Stage 2 via `ExitPlanMode`: GPU best-split + histogram subtraction on Metal (prefix-scan + argmax kernel; level-parallel dispatch; single compute pass per tree level). Keep Stage 1's infrastructure (BufferCache, pipeline cache, warn-and-fallback, device plumbing) as-is — Stage 2 rides on top of it.
 
 ---
 

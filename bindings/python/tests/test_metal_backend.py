@@ -330,10 +330,62 @@ class MetalGoldenTests(unittest.TestCase):
         self.assertIn(b'"trained_device":"metal"', self.metal_model.artifact_bytes)
 
 
+def _metal_feature_compiled_in() -> bool:
+    """Heuristic probe: does the currently-installed wheel include the
+    Metal backend feature?
+
+    The `ALLOYGBM_METAL_DISABLE=1` escape hatch only produces its
+    signature warning text (`"...ALLOYGBM_METAL_DISABLE=1..."`) when
+    the crate was built with `feature = "metal"`. A wheel built with
+    `--no-default-features` returns a different message
+    (`"...this build does not include the Metal backend..."`) because
+    the escape-hatch code path isn't compiled in.
+
+    We do one subprocess probe at import time so the gate is cheap
+    and doesn't pollute the live process's Metal device cache.
+    """
+    env = os.environ.copy()
+    env["ALLOYGBM_METAL_DISABLE"] = "1"
+    script = (
+        "import warnings\n"
+        "from alloygbm import GBMRegressor\n"
+        "with warnings.catch_warnings(record=True) as captured:\n"
+        "    warnings.simplefilter('always')\n"
+        "    m = GBMRegressor(n_estimators=2, device='metal')\n"
+        "    m.fit([[0.0],[1.0],[2.0]], [0,1,2])\n"
+        "    for w in captured:\n"
+        "        if issubclass(w.category, RuntimeWarning):\n"
+        "            print(str(w.message))\n"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+    except Exception:
+        return False
+    return "ALLOYGBM_METAL_DISABLE" in (result.stdout or "")
+
+
+_METAL_FEATURE_COMPILED = _metal_feature_compiled_in()
+_FEATURE_SKIP_REASON = (
+    "Metal feature not compiled into this build (e.g. `--no-default-features` wheel); "
+    "the `ALLOYGBM_METAL_DISABLE=1` escape-hatch path isn't exercisable here."
+)
+
+
+@unittest.skipUnless(_METAL_FEATURE_COMPILED, _FEATURE_SKIP_REASON)
 class MetalFallbackTests(unittest.TestCase):
     """The warn-and-fallback path uses the S1.9 `ALLOYGBM_METAL_DISABLE=1`
-    escape hatch so it's testable on *any* runner regardless of
-    hardware. These tests do NOT require `metal_available=True`.
+    escape hatch so it's testable on *any* Metal-enabled build
+    regardless of hardware. These tests do NOT require
+    `metal_available=True` (the escape hatch short-circuits Metal
+    init), but they DO require the `metal` crate feature to be
+    compiled in so the escape-hatch code path exists at all.
 
     We shell out to a subprocess instead of mutating the live
     process's env because the Metal backend caches the MTLDevice

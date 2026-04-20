@@ -5,6 +5,89 @@ First thing a new session reads, alongside `STATUS.md`.
 
 ---
 
+## 2026-04-20 — S1.16 full verification sweep → Stage 1 closed
+
+**Branch:** `claude/charming-carson-d08c9a` (worktree)
+
+### What moved
+
+- Full cargo/clippy/fmt/test sweep across the workspace, both with
+  default features and `--no-default-features`. All green. Test
+  counts: 183 Rust tests (including 7 in `backend_metal`).
+- `.venv/bin/maturin develop --release --manifest-path
+  bindings/python/Cargo.toml` under both feature configurations.
+- Full pytest run:
+  - Default features: **353/353 pass** (21 Metal cases + 332
+    pre-existing).
+  - `--no-default-features`: **334 pass + 19 skipped** (Metal-gated
+    cases correctly skip).
+- **`bindings/python/tests/test_metal_backend.py`** — added
+  `_metal_feature_compiled_in()` probe (one subprocess run with
+  `ALLOYGBM_METAL_DISABLE=1`) and an `@unittest.skipUnless` on
+  `MetalFallbackTests`. Without this gate, a `--no-default-features`
+  build failed `test_fallback_emits_runtime_warning` because the
+  escape-hatch warning text only exists when the Metal feature is
+  compiled in — the no-feature build emits a different, correct
+  warning ("this build does not include the Metal backend") but
+  doesn't name the env var.
+- **`docs/metal-backend/STATUS.md`** — S1.16 ticked; Stage 1 marked
+  CLOSED; new "Stage 1 — Complete" section summarises what shipped;
+  Next Up now points to Stage 2 `ExitPlanMode`.
+
+### Verification
+
+All of the above is the verification — no code paths added, only
+the test-suite gate needed to make `--no-default-features` honest.
+
+### Findings
+
+- **PyO3 extension-module crates don't `cargo test` standalone on
+  macOS.** Expected — the test binary can't link without the Python
+  framework dance. We validate that crate via pytest (which loads
+  the extension the normal way). This is consistent with how every
+  prior Stage 1 sub-task verified the binding layer.
+- **The `metal_feature_compiled_in()` probe is the cleanest gate we
+  have** given that `native_runtime_info()` can't distinguish
+  "feature off" from "feature on, no hardware" — both surface as
+  `metal_available=False, gpu_family=None`. Adding a
+  `metal_feature_enabled` field to `NativeRuntimeInfo` would have
+  been the more principled path but would have expanded scope into
+  a new public API at the final gate; the probe is test-local,
+  costs one subprocess, and doesn't leak into the user-facing
+  runtime info surface.
+
+### Design calls
+
+- **S1.16 fix stayed in the test module, not in `NativeRuntimeInfo`.**
+  Reasoning above. If Stage 2 needs programmatic feature-vs-hardware
+  detection for something else, revisiting the API is fair game
+  then; right now it's YAGNI.
+- **`cargo test --workspace --exclude alloygbm-python` rather than
+  fixing the linker dance.** The Python crate is exercised via
+  pytest; duplicating the coverage through `cargo test` wasn't in
+  scope for S1.16 and would have added CI complexity for zero
+  incremental coverage.
+
+### Handoff notes
+
+- **Stage 1 is closed.** The next session should open Stage 2 via a
+  fresh `ExitPlanMode` round. Stage 2's scope is already sketched
+  in the approved plan: MSL prefix-scan + argmax kernel, elementwise
+  subtract for `subtract_histogram_bundle`, level-parallel dispatch
+  (threadgroup.y = sibling node). Expected incremental gain: 2-3×.
+- **Everything Stage 1 shipped stays in place.** BufferCache,
+  pipeline cache, warn-and-fallback, `device=` plumbing,
+  `native_runtime_info()` fields, `trained_device` metadata, and
+  the bit-exactness golden test all continue to apply.
+- **No open `BUGS.md` items from this session.**
+- **Key working-set files for the Stage 2 session-start:**
+  `STATUS.md` (now reflects closed Stage 1), this `SESSIONS.md`
+  (top entry summarises what Stage 1 delivered), `DECISIONS.md`
+  (design calls made along the way), the plan at
+  `/Users/lashby/.claude/plans/okay-add-this-notebook-structured-star.md`.
+
+---
+
 ## 2026-04-20 — S1.15 `BufferCache` wired + benchmarks re-run
 
 **Branch:** `claude/charming-carson-d08c9a` (worktree)
