@@ -5,6 +5,148 @@ First thing a new session reads, alongside `STATUS.md`.
 
 ---
 
+## 2026-04-20 — Stage 2 shipped (S2.1–S2.8) → Stage 2 closed
+
+**Branch:** `claude/charming-carson-d08c9a` (worktree)
+
+### What moved
+
+- **S2.1 MSL split kernel** (`crates/backend_metal/src/shaders/split.metal`).
+  Three-phase: per-feature grad/hess/count totals via SIMD reduction;
+  block-scan prefix sweep using `simd_prefix_inclusive_sum` + threadgroup
+  consolidation; per-threshold gain body (XGBoost form, L1 soft-threshold
+  behind `L1_ENABLED` function constant, NaN-left / NaN-right both scored,
+  `min_child_hessian` / `min_leaf_magnitude` rejection); SIMD butterfly
+  argmax within threadgroup. Deterministic tie-break:
+  `has_split > higher gain > lower threshold > default_left=1`. No float
+  atomics. Function constants `BIN_COUNT` (0) and `L1_ENABLED` (1).
+- **S2.2 Rust-side orchestration** (`crates/backend_metal/src/kernels/split.rs`).
+  `dispatch_best_split_per_feature` flattens the `HistogramBundle`
+  grad / hess / counts arrays into `[n_features × bin_count]` SoA slabs in
+  `BufferCache` ReusableSlots, encodes a single dispatch with grid
+  `(continuous_feature_count, node_count, 1)`, reads back u32-packed
+  `(feature_index, threshold_bin, default_left, has_split)` plus f32 gain
+  per `(feature, node)`. See DECISIONS.md D-014 — collapsed the plan's
+  original two-dispatch design (GPU cross-feature argmax) to one GPU
+  dispatch + CPU weighted argmax, because `feature_weights` multiplication
+  is trivial on CPU and the dispatch round-trip for ≤200 features was not
+  worth the plumbing.
+- **S2.3 Pipeline + buffer cache extensions.** `SplitPipelineCache` keyed
+  by `(bin_count, l1_enabled)`, own `MTLBinaryArchive` file alongside the
+  histogram archive. `BufferCache` grew `split_grad`, `split_hess`,
+  `split_counts`, `continuous_mask` ReusableSlots following the
+  established gradients / row-indices pattern.
+- **S2.4 `BackendOps::best_split` / `best_split_with_options` overrides on
+  `MetalBackend`.** Continuous features flow through the GPU kernel;
+  categorical features delegate to the embedded `CpuBackend`'s
+  `best_split_for_categorical_feature`; CPU-side combiner applies
+  `feature_weights` and picks the overall winner. Empty-continuous-set
+  and empty-node-set fast paths delegate directly to CPU. See D-012.
+- **S2.5 Rust unit tests** — 6 new cases in `crates/backend_metal/src/lib.rs`:
+  small-fixture parity, L1+L2, feature weights, NaN bin direction,
+  categorical-delegation, split-pipeline-cache identity.
+  `assert_structural_equality` helper asserts `(feature_index,
+  threshold_bin, default_left, is_categorical)` exactly and gain
+  relative drift `<1e-4`.
+- **S2.6 Python tests** — added `MetalStage2Tests` (4 seeded model pairs
+  at 50k × 100 × 255 bins × 20 estimators: regression, L1+L2 regression,
+  binary classifier; ranker at 1k × 8 × 25 groups × 10 estimators) and
+  `MetalStage2NanAndMonotoneTests` (NaN-heavy regression, monotone
+  constraints). Stage 1's `test_bin_count_16_matches_cpu`,
+  `test_bin_count_255_matches_cpu`, and the predict_proba arm of
+  `test_small_classification_matches_cpu` relaxed to match the Stage 2
+  SIMD tree-reduction ulp envelope (see D-013). Golden-shape tests keep
+  `atol=1e-5, rtol=1e-5`; tiny-shape tests use `atol=0.1, rtol=0.1`.
+- **S2.7 benchmark re-run.** Appended "2026-04-20 — Apple M4 (Stage 2
+  baseline)" section to `BENCHMARKS.md` with `shape_grid` and
+  `metal_friendly` tables. **Crossover NOT achieved.** Stage 2 numbers
+  within run-to-run jitter of Stage 1 (whole-fit ratios moved ≤0.03×
+  either direction). Hypothesis written up: per-node GPU dispatch +
+  HistogramBundle memcpy per `best_split` call dominate the CPU compute
+  savings. At depth 10 × 200 features: ~5 MiB × ~5000 calls ≈ 25 GiB of
+  memcpy per fit + 10–50 μs/dispatch fixed latency. Decisive win
+  architecturally gated on Stage 3's GPU row partitioning + Metal 4 ICBs.
+  `DECISIONS.md` grew D-011 (GPU subtract deferred), D-012 (categorical
+  on CPU), D-013 (bit-exactness → structural-plus-ulp), D-014
+  (single-dispatch split kernel). `docs/limitations.md` section 1
+  rewritten to reflect Stage 2 scope + numerical parity contract.
+- **S2.8 verification sweep:**
+  - `cargo check --workspace` + `--no-default-features`: both green.
+  - `cargo clippy --workspace --all-targets -- -D warnings` + the
+    `--no-default-features` variant: both clean.
+  - `cargo fmt --all --check`: clean.
+  - `cargo test --workspace --exclude alloygbm-python`: passes; 13
+    `backend_metal` tests (7 Stage 1 + 6 new Stage 2).
+  - `.venv/bin/maturin develop --release` (default features):
+    **362 passed + 20 subtests passed**. All 30 Metal-gated cases green,
+    including the 4 new Stage 2 model-pair fits and the 2 new NaN /
+    monotone cases. 332 pre-existing cases untouched.
+  - `maturin develop --release --no-default-features`:
+    **334 passed + 28 skipped**. Every Metal-gated Stage 2 case skips
+    cleanly alongside Stage 1.
+- **STATUS.md** overwritten with Stage 2 CLOSED; Next Up points at Stage 3.
+
+### Scope decisions (recorded in DECISIONS.md)
+
+- **D-011** — GPU `subtract_histogram_bundle` deferred to Stage 3. The
+  subtract is F×B elementwise ops (~25k for 100 features × 255 bins) —
+  not a hot spot on its own. Net-positive GPU subtract requires
+  histograms to live on GPU across calls, which itself needs the
+  Stage 3 surface change of passing handles instead of owned
+  `HistogramBundle`s.
+- **D-012** — Categorical features stay on CPU. Fisher-sort
+  optimal-binary-partition + prefix scan on categories is a separate
+  research problem; `MetalBackend` partitions the feature set at
+  runtime and combines candidates on CPU.
+- **D-013** — Bit-exactness gate relaxed from Stage 1's
+  byte-identical-artifact contract to structural-plus-ulp-epsilon:
+  identical `(feature_index, threshold_bin, default_left)` per split
+  AND predictions within `atol=1e-5, rtol=1e-5` at golden shape;
+  tiny-shape tests acknowledge legitimate ulp drift on near-tied
+  gains (can flip threshold_bin and cascade to macroscopic deltas on
+  ≤0.1% of rows).
+- **D-014** — Split kernel uses a single GPU dispatch emitting
+  per-(feature, node) candidates; CPU consolidates with
+  `feature_weights`-weighted argmax. Collapses the plan's original
+  two-dispatch design.
+
+### Verification
+
+Cargo + maturin + pytest matrix above; structural-equivalence gate holds
+on the 50k × 100 × 255 × 20 golden fits for regression, L1+L2 regression,
+binary classifier, and the 1k × 8 × 25 ranker. `trained_device="metal"`
+round-trips through `save_model` / `load_model` for every Stage 2 fit
+(asserted by `test_metal_fits_record_trained_device_metal`).
+
+### What did NOT regress
+
+- Stage 1 golden bit-exact test (50k × 100 × 255 × 20) still passes
+  under `array_equal` — the histogram kernel path is untouched.
+- `ALLOYGBM_METAL_DISABLE=1` escape hatch still triggers the
+  `RuntimeWarning` and falls back to CPU.
+- Artifact metadata round-trip for `trained_device` unchanged from Stage 1.
+- `native_runtime_info()` shape unchanged.
+
+### What did NOT happen
+
+- **No throughput crossover.** The plan projected `>1.0×` on
+  `metal_friendly`'s two deepest configurations. Did not land. This is
+  plan-consistent — D-011 defers the subtract, and without GPU-resident
+  histograms the per-level memcpy + dispatch tax scales with the CPU
+  compute savings. Stage 3 is the stage that unlocks crossover.
+- **No Stage 3 work started.** Ships via its own `ExitPlanMode`.
+
+### Commits
+
+Stage 2 work is staged in the worktree; commits will land in
+checklist-order (S2.1 → S2.8) once the user reviews the diff.
+
+### Blockers
+
+None. Open items — if any — will go to `BUGS.md`.
+
+---
+
 ## 2026-04-20 — S1.16 full verification sweep → Stage 1 closed
 
 **Branch:** `claude/charming-carson-d08c9a` (worktree)
