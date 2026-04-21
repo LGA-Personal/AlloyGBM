@@ -553,6 +553,17 @@ impl FeatureTile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RowIndexStorage {
     Cpu(Vec<u32>),
+    /// Accelerator-resident row indices. The handle is an opaque
+    /// token minted by the backend that produced the indices —
+    /// `backend_metal` maintains a `RowIndexResidencyPool`
+    /// mapping handles back to `MTLBuffer`s. The `row_count`
+    /// payload is carried here so row-count queries (for grid
+    /// sizing, sanity checks, etc.) don't have to round-trip
+    /// through the backend.
+    Gpu {
+        handle: GpuRowIndexHandle,
+        row_count: u32,
+    },
 }
 
 impl RowIndexStorage {
@@ -561,6 +572,7 @@ impl RowIndexStorage {
     pub fn cpu(&self) -> Option<&[u32]> {
         match self {
             RowIndexStorage::Cpu(rows) => Some(rows),
+            RowIndexStorage::Gpu { .. } => None,
         }
     }
 
@@ -570,6 +582,7 @@ impl RowIndexStorage {
     pub fn cpu_mut(&mut self) -> Option<&mut Vec<u32>> {
         match self {
             RowIndexStorage::Cpu(rows) => Some(rows),
+            RowIndexStorage::Gpu { .. } => None,
         }
     }
 
@@ -578,6 +591,16 @@ impl RowIndexStorage {
     pub fn into_cpu(self) -> Option<Vec<u32>> {
         match self {
             RowIndexStorage::Cpu(rows) => Some(rows),
+            RowIndexStorage::Gpu { .. } => None,
+        }
+    }
+
+    /// Borrow the GPU handle + row count on accelerator-resident
+    /// variants. Returns `None` for CPU-resident storage.
+    pub fn gpu(&self) -> Option<(GpuRowIndexHandle, u32)> {
+        match self {
+            RowIndexStorage::Cpu(_) => None,
+            RowIndexStorage::Gpu { handle, row_count } => Some((*handle, *row_count)),
         }
     }
 
@@ -586,6 +609,7 @@ impl RowIndexStorage {
     pub fn len(&self) -> usize {
         match self {
             RowIndexStorage::Cpu(rows) => rows.len(),
+            RowIndexStorage::Gpu { row_count, .. } => *row_count as usize,
         }
     }
 
@@ -593,6 +617,30 @@ impl RowIndexStorage {
         self.len() == 0
     }
 }
+
+/// Opaque handle minted by a backend for an accelerator-resident
+/// row-index buffer.
+///
+/// Handles are scalar tokens — they carry no pointer, no lifetime,
+/// and no direct reference to the underlying buffer. The backend
+/// that minted the handle owns a residency pool that maps the
+/// token back to the live `MTLBuffer` (or equivalent). This keeps
+/// `core` — which does not depend on any accelerator runtime —
+/// free of Metal/CUDA/Vulkan types while still letting GPU-resident
+/// storage flow through the engine.
+///
+/// The numeric value is **backend-defined** (typically a monotonic
+/// counter). Engine code may only compare handles for equality and
+/// hash them; it must never synthesise handles or interpret the
+/// numeric value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GpuRowIndexHandle(pub u64);
+
+/// Opaque handle minted by a backend for an accelerator-resident
+/// histogram buffer. See [`GpuRowIndexHandle`] for the contract —
+/// this is the histogram counterpart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GpuHistogramHandle(pub u64);
 
 impl From<Vec<u32>> for RowIndexStorage {
     fn from(rows: Vec<u32>) -> Self {
@@ -718,6 +766,17 @@ pub struct FeatureHistogram {
 #[derive(Debug, Clone, PartialEq)]
 pub enum HistogramStorage {
     Cpu(Vec<FeatureHistogram>),
+    /// Accelerator-resident histogram buffers. The handle is an
+    /// opaque token minted by the backend that built the
+    /// histograms; the backend's residency pool owns the underlying
+    /// GPU buffers. `feature_count` and `bin_count` are carried
+    /// so engine code can size grids and perform sanity checks
+    /// without a handle round-trip.
+    Gpu {
+        handle: GpuHistogramHandle,
+        feature_count: u32,
+        bin_count: u32,
+    },
 }
 
 impl HistogramStorage {
@@ -726,6 +785,7 @@ impl HistogramStorage {
     pub fn cpu(&self) -> Option<&[FeatureHistogram]> {
         match self {
             HistogramStorage::Cpu(fhs) => Some(fhs),
+            HistogramStorage::Gpu { .. } => None,
         }
     }
 
@@ -735,6 +795,7 @@ impl HistogramStorage {
     pub fn cpu_mut(&mut self) -> Option<&mut Vec<FeatureHistogram>> {
         match self {
             HistogramStorage::Cpu(fhs) => Some(fhs),
+            HistogramStorage::Gpu { .. } => None,
         }
     }
 
@@ -742,6 +803,20 @@ impl HistogramStorage {
     pub fn into_cpu(self) -> Option<Vec<FeatureHistogram>> {
         match self {
             HistogramStorage::Cpu(fhs) => Some(fhs),
+            HistogramStorage::Gpu { .. } => None,
+        }
+    }
+
+    /// Borrow the GPU handle + shape on accelerator-resident
+    /// variants. Returns `None` for CPU-resident storage.
+    pub fn gpu(&self) -> Option<(GpuHistogramHandle, u32, u32)> {
+        match self {
+            HistogramStorage::Cpu(_) => None,
+            HistogramStorage::Gpu {
+                handle,
+                feature_count,
+                bin_count,
+            } => Some((*handle, *feature_count, *bin_count)),
         }
     }
 }
@@ -2782,5 +2857,111 @@ mod tests {
         let decoded = deserialize_metadata_json(&json).expect("metadata should decode");
         assert_eq!(decoded, metadata);
         assert_eq!(decoded.num_classes, None);
+    }
+
+    // --- S3.7a — GPU-resident storage enum variants -----------------
+
+    #[test]
+    fn row_index_storage_gpu_variant_reports_shape_without_cpu_access() {
+        let storage = RowIndexStorage::Gpu {
+            handle: GpuRowIndexHandle(42),
+            row_count: 128,
+        };
+        assert!(storage.cpu().is_none());
+        assert!(storage.into_cpu().is_none());
+        let gpu = RowIndexStorage::Gpu {
+            handle: GpuRowIndexHandle(42),
+            row_count: 128,
+        };
+        assert_eq!(gpu.len(), 128);
+        assert!(!gpu.is_empty());
+        let (handle, count) = gpu.gpu().expect("gpu variant has a handle");
+        assert_eq!(handle, GpuRowIndexHandle(42));
+        assert_eq!(count, 128);
+    }
+
+    #[test]
+    fn row_index_storage_cpu_variant_reports_no_gpu_handle() {
+        let cpu = RowIndexStorage::Cpu(vec![1, 2, 3]);
+        assert_eq!(cpu.len(), 3);
+        assert!(cpu.gpu().is_none());
+        assert!(cpu.cpu().is_some());
+    }
+
+    #[test]
+    fn histogram_storage_gpu_variant_reports_shape_without_cpu_access() {
+        let storage = HistogramStorage::Gpu {
+            handle: GpuHistogramHandle(7),
+            feature_count: 100,
+            bin_count: 255,
+        };
+        assert!(storage.cpu().is_none());
+        // Also exercise cpu_mut on the Gpu arm — it must likewise report None
+        // without touching any CPU-side allocation.
+        let mut storage_mut = HistogramStorage::Gpu {
+            handle: GpuHistogramHandle(7),
+            feature_count: 100,
+            bin_count: 255,
+        };
+        assert!(storage_mut.cpu_mut().is_none());
+        let storage_move = HistogramStorage::Gpu {
+            handle: GpuHistogramHandle(7),
+            feature_count: 100,
+            bin_count: 255,
+        };
+        assert!(storage_move.into_cpu().is_none());
+
+        let storage2 = HistogramStorage::Gpu {
+            handle: GpuHistogramHandle(7),
+            feature_count: 100,
+            bin_count: 255,
+        };
+        let (handle, f, b) = storage2.gpu().expect("gpu variant has a handle");
+        assert_eq!(handle, GpuHistogramHandle(7));
+        assert_eq!(f, 100);
+        assert_eq!(b, 255);
+    }
+
+    #[test]
+    fn histogram_bundle_cpu_feature_histograms_none_on_gpu_variant() {
+        let bundle = HistogramBundle {
+            node_id: 0,
+            storage: HistogramStorage::Gpu {
+                handle: GpuHistogramHandle(1),
+                feature_count: 4,
+                bin_count: 16,
+            },
+        };
+        assert!(bundle.cpu_feature_histograms().is_none());
+    }
+
+    #[test]
+    fn gpu_handles_are_hashable_and_equal_on_same_token() {
+        use std::collections::HashSet;
+        let mut set: HashSet<GpuHistogramHandle> = HashSet::new();
+        set.insert(GpuHistogramHandle(1));
+        set.insert(GpuHistogramHandle(2));
+        assert!(set.contains(&GpuHistogramHandle(1)));
+        assert_eq!(set.len(), 2);
+
+        let row_handle_a = GpuRowIndexHandle(99);
+        let row_handle_b = GpuRowIndexHandle(99);
+        assert_eq!(row_handle_a, row_handle_b);
+    }
+
+    #[test]
+    #[should_panic(expected = "feature_histograms called on non-CPU variant")]
+    fn histogram_bundle_feature_histograms_shim_panics_on_gpu() {
+        let bundle = HistogramBundle {
+            node_id: 0,
+            storage: HistogramStorage::Gpu {
+                handle: GpuHistogramHandle(1),
+                feature_count: 4,
+                bin_count: 16,
+            },
+        };
+        // Compat shim — panics per its doc contract; engine code must
+        // route GPU-resident bundles through BackendOps instead.
+        let _ = bundle.feature_histograms();
     }
 }
