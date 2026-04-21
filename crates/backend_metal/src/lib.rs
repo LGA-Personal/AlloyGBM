@@ -7,6 +7,8 @@
 //! Stage 1 scope is tracked in `docs/metal-backend/STATUS.md`.
 
 #[cfg(target_os = "macos")]
+mod budget;
+#[cfg(target_os = "macos")]
 mod buffers;
 #[cfg(target_os = "macos")]
 mod device;
@@ -78,6 +80,16 @@ pub struct MetalBackend {
     /// and the categorical half of `best_split` (Stage 2 — see
     /// DECISIONS: Fisher-sort is a separate research problem on GPU).
     cpu: CpuBackend,
+    /// S3.9 — GPU working-set budget snapshot. Captured once at
+    /// construction; used by `check_histogram_budget` at fit start
+    /// to refuse pathological shapes (leaf-wise + huge leaf count +
+    /// wide feature set + wide bin grid) before they cause
+    /// GPU-side residency thrash. Consumer is S3.3 (trainer-loop
+    /// refactor) and S3.7 (residency wiring); the tracker ships
+    /// in isolation so it can be unit-tested without those
+    /// refactors in place.
+    #[allow(dead_code)]
+    budget: budget::BudgetTracker,
 }
 
 #[cfg(target_os = "macos")]
@@ -111,6 +123,7 @@ impl MetalBackend {
             &metal_device.capabilities,
         )?);
         let buffer_cache = std::sync::Arc::new(buffers::BufferCache::new());
+        let budget = budget::BudgetTracker::new(&metal_device.device);
         Ok(Self {
             metal_device,
             pipeline_cache,
@@ -119,12 +132,47 @@ impl MetalBackend {
             subtract_pipeline_cache,
             buffer_cache,
             cpu: CpuBackend,
+            budget,
         })
     }
 
     /// Read-only capability snapshot.
     pub fn capabilities(&self) -> &MetalCapabilities {
         &self.metal_device.capabilities
+    }
+
+    /// Pre-fit GPU working-set budget check. Returns `Ok(())` when the
+    /// projected peak histogram residency (F × B × L × 12 bytes) is
+    /// below 80 % of `MTLDevice.recommendedMaxWorkingSetSize`;
+    /// otherwise returns `EngineError::BackendUnavailable` with an
+    /// actionable diagnostic (device="cpu" fallback + M3 roadmap
+    /// pointer).
+    ///
+    /// Call once at fit start. The trainer threads `(n_features,
+    /// bin_count, max_level_width)` into this guard before building
+    /// the root histograms so the refusal fires before any GPU
+    /// allocation happens. `max_level_width` is the widest count
+    /// of live sibling nodes the trainer will reach — for level-wise
+    /// growth this is `2.pow(max_depth - 1)`; for leaf-wise growth
+    /// it is bounded by `num_leaves`.
+    ///
+    /// See `budget.rs` for the rationale, including the M2
+    /// pathological-case risk note.
+    pub fn check_histogram_budget(
+        &self,
+        n_features: u32,
+        bin_count: u32,
+        max_level_width: u32,
+    ) -> EngineResult<()> {
+        self.budget
+            .check_projected_peak(n_features, bin_count, max_level_width)
+    }
+
+    /// Diagnostic accessor: Apple's `recommendedMaxWorkingSetSize`
+    /// for this device. Used by tests + potential future
+    /// `native_runtime_info` extension.
+    pub fn recommended_max_working_set_size(&self) -> u64 {
+        self.budget.recommended_max_working_set_size()
     }
 }
 
@@ -1178,6 +1226,75 @@ mod tests {
                 assert_eq!(mb.count, cb.count);
             }
         }
+    }
+
+    // ---------------------------------------------------------------
+    // S3.9 — GPU working-set budget checks.
+    // ---------------------------------------------------------------
+
+    /// A realistic fit shape should fit comfortably under the
+    /// budget ceiling on every modern Apple-Silicon Mac.
+    #[test]
+    fn check_histogram_budget_accepts_realistic_shape() {
+        let Ok(backend) = MetalBackend::new() else {
+            return;
+        };
+        // 100 features × 256 bins × 64 live nodes × 12 bytes = ~19 MiB.
+        // Sub-1-GiB fit shapes should always pass.
+        assert!(
+            backend.check_histogram_budget(100, 256, 64).is_ok(),
+            "realistic shape should fit under the working-set budget"
+        );
+    }
+
+    /// The plan's M2 pathological shape: leaf-wise + max_leaves=1024 +
+    /// 1000 features + 1024 bins. Projects to ~12 GiB, which exceeds
+    /// the 80 %-of-recommended ceiling on every sub-M3-Ultra chip.
+    ///
+    /// On a hypothetical 256+ GiB UMA machine this would actually
+    /// fit, so the assertion is shaped as "either reject with a
+    /// clear diagnostic, OR accept on a huge-UMA machine". Both are
+    /// correct; the test lives to catch silent wrapping / misconfig.
+    #[test]
+    fn check_histogram_budget_rejects_pathological_shape() {
+        let Ok(backend) = MetalBackend::new() else {
+            return;
+        };
+        let recommended = backend.recommended_max_working_set_size();
+        let ceiling_bytes = recommended * 8 / 10;
+        // 12 GiB projection per the M2 risk note.
+        let projected_bytes: u64 = 1000 * 1024 * 1024 * 12;
+        match backend.check_histogram_budget(1000, 1024, 1024) {
+            Ok(()) => {
+                // Must only be possible on machines whose ceiling
+                // exceeds 12 GiB — sanity-check that assumption.
+                assert!(
+                    projected_bytes <= ceiling_bytes,
+                    "unexpected OK with ceiling {ceiling_bytes} < projected {projected_bytes}"
+                );
+            }
+            Err(alloygbm_engine::EngineError::BackendUnavailable(msg)) => {
+                assert!(
+                    msg.contains("exceeds the working-set budget"),
+                    "diagnostic missing budget phrase: {msg}"
+                );
+                assert!(
+                    msg.contains("device=\"cpu\""),
+                    "diagnostic missing cpu-fallback guidance: {msg}"
+                );
+            }
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    /// Every Apple-Silicon device reports a non-zero recommended
+    /// working-set size; a zero would be a Metal-binding regression.
+    #[test]
+    fn recommended_working_set_size_is_positive() {
+        let Ok(backend) = MetalBackend::new() else {
+            return;
+        };
+        assert!(backend.recommended_max_working_set_size() > 0);
     }
 
     /// Pipeline cache must return the same Arc on repeated lookups,
