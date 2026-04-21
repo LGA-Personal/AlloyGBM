@@ -84,7 +84,7 @@ pub(crate) fn dispatch_histograms(
     node.validate_bounds(binned_matrix.row_count)?;
 
     let n_rows_total = binned_matrix.row_count as u32;
-    let node_row_count = node.row_indices.len() as u32;
+    let node_row_count = node.row_count() as u32;
     if node_row_count == 0 {
         return Err(EngineError::ContractViolation(
             "node row_indices cannot be empty".to_string(),
@@ -158,7 +158,7 @@ pub(crate) fn dispatch_histograms(
     // buffer allocation behind it is cache-backed.
     let gradients_raw: Vec<[f32; 2]> = gradients.iter().map(|g| [g.grad, g.hess]).collect();
     let gradients_buffer = buffer_cache.write_gradients(device, &gradients_raw)?;
-    let row_indices_buffer = buffer_cache.write_row_indices(device, &node.row_indices)?;
+    let row_indices_buffer = buffer_cache.write_row_indices(device, node.row_indices())?;
 
     let pair_bytes = std::mem::size_of::<[f32; 2]>();
     let output_elems = total_selected as usize * bin_count as usize;
@@ -292,7 +292,12 @@ pub(crate) fn dispatch_histograms(
 
     for (local_f, &feature_index) in selected_features.iter().enumerate() {
         let mut counts = vec![0u32; bin_count as usize];
-        accumulate_counts(binned_matrix, &node.row_indices, feature_index, &mut counts);
+        accumulate_counts(
+            binned_matrix,
+            node.row_indices(),
+            feature_index,
+            &mut counts,
+        );
 
         let base = local_f * bin_count as usize;
         let mut bins = Vec::with_capacity(bin_count as usize);
@@ -315,10 +320,7 @@ pub(crate) fn dispatch_histograms(
     // Keep scratch alive until after readback — see macro tricks below.
     drop(scratch_keepalive);
 
-    Ok(HistogramBundle {
-        node_id: node.node_id,
-        feature_histograms,
-    })
+    Ok(HistogramBundle::from_cpu(node.node_id, feature_histograms))
 }
 
 // -------- Helpers (macOS only) -------------------------------------

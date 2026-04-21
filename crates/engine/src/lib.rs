@@ -3,7 +3,7 @@ use alloygbm_core::{
     BinnedMatrix, CategoricalStatePayloadV1, CoreError, DatasetMatrix, Device, FeatureTile,
     GradientPair, HistogramBundle, MISSING_BIN_U8, MODEL_FORMAT_V1, ModelArtifactSection,
     ModelMetadata, ModelSectionKind, NativeCategoricalSplitsPayload, NodeSlice, NodeStats,
-    PartitionResult, SplitCandidate, TrainParams, TrainingDataset, TreeGrowth,
+    PartitionResult, RowIndexStorage, SplitCandidate, TrainParams, TrainingDataset, TreeGrowth,
     decode_optional_categorical_state_section_v1,
     decode_optional_native_categorical_splits_section, deserialize_model_artifact_v1,
     encode_categorical_state_payload_v1, encode_native_categorical_splits_payload,
@@ -115,15 +115,33 @@ pub trait BackendOps {
         split: &SplitCandidate,
     ) -> EngineResult<(PartitionResult, NodeStats, NodeStats)> {
         let partition = self.apply_split(binned_matrix, node, split)?;
-        let left_stats = self.reduce_sums(gradients, &partition.left_row_indices)?;
-        let right_stats = self.reduce_sums(gradients, &partition.right_row_indices)?;
+        let left_stats = self.reduce_sums(gradients, &partition.left)?;
+        let right_stats = self.reduce_sums(gradients, &partition.right)?;
         Ok((partition, left_stats, right_stats))
     }
+    /// Reduce gradients over a node's row-index storage. Accepts
+    /// `&RowIndexStorage` (S3.2 promotion) so GPU-resident backends
+    /// can read directly from device buffers; the CPU impl pattern-
+    /// matches on the `Cpu(..)` arm.
     fn reduce_sums(
         &self,
         gradients: &[GradientPair],
-        row_indices: &[u32],
+        rows: &RowIndexStorage,
     ) -> EngineResult<NodeStats>;
+
+    /// Compute `parent - child` elementwise over the three
+    /// `HistogramBundle` channels. Default impl calls the engine's
+    /// CPU-side subtract; backends with GPU-resident histograms
+    /// (Stage 3, S3.7+) override to dispatch the subtract kernel
+    /// directly and avoid the round-trip.
+    fn subtract_histogram_bundle(
+        &self,
+        parent: &HistogramBundle,
+        child: &HistogramBundle,
+        node_id: u32,
+    ) -> EngineResult<HistogramBundle> {
+        subtract_histogram_bundle(parent, child, node_id)
+    }
 }
 
 /// Callback invoked after each boosting round to evaluate a custom metric.
@@ -1978,7 +1996,7 @@ impl Trainer {
             &self.params.feature_weights,
             &[],
         )?;
-        let root_stats = backend.reduce_sums(&fit_contract.gradients, &root_node.row_indices)?;
+        let root_stats = backend.reduce_sums(&fit_contract.gradients, &root_node.rows)?;
 
         let partition = if let Some(split) = &split_candidate {
             let partition = backend.apply_split(binned_matrix, &root_node, split)?;
@@ -3674,12 +3692,12 @@ fn validate_training_alignment(
 }
 
 fn validate_partition_cover(row_count: usize, partition: &PartitionResult) -> EngineResult<()> {
-    if partition.left_row_indices.is_empty() || partition.right_row_indices.is_empty() {
+    if partition.left.is_empty() || partition.right.is_empty() {
         return Err(EngineError::ContractViolation(
             "split partition produced empty branch".to_string(),
         ));
     }
-    if partition.left_row_indices.len() + partition.right_row_indices.len() != row_count {
+    if partition.left.len() + partition.right.len() != row_count {
         return Err(EngineError::ContractViolation(
             "split partition does not cover all rows".to_string(),
         ));
@@ -3772,7 +3790,12 @@ fn build_tree_level_wise<B: BackendOps>(
         backend.build_histograms(binned_matrix, gradients, &root_node, feature_tiles)?;
     // Maintain each active node's absolute leaf output so child updates
     // can replace parent contribution via deltas (tree semantics).
-    let mut active_nodes = vec![(0_u32, root_node.row_indices, root_histograms, 0.0_f32)];
+    let mut active_nodes = vec![(
+        0_u32,
+        root_node.into_row_indices(),
+        root_histograms,
+        0.0_f32,
+    )];
 
     for depth in 0..(params.max_depth as usize) {
         if active_nodes.is_empty() {
@@ -3799,17 +3822,15 @@ fn build_tree_level_wise<B: BackendOps>(
 
             let (partition, left_stats, right_stats) =
                 backend.apply_split_with_stats(binned_matrix, gradients, &node, &split)?;
-            if partition.left_row_indices.len() + partition.right_row_indices.len()
-                != node.row_indices.len()
-            {
+            if partition.left.len() + partition.right.len() != node.row_count() {
                 return Err(EngineError::ContractViolation(
                     "split partition does not cover all node rows".to_string(),
                 ));
             }
-            if partition.left_row_indices.is_empty()
-                || partition.right_row_indices.is_empty()
-                || partition.left_row_indices.len() < controls.min_rows_per_leaf
-                || partition.right_row_indices.len() < controls.min_rows_per_leaf
+            if partition.left.is_empty()
+                || partition.right.is_empty()
+                || partition.left.len() < controls.min_rows_per_leaf
+                || partition.right.len() < controls.min_rows_per_leaf
             {
                 round_rejection_reason = IterationStopReason::LeafRowsBelowThreshold;
                 continue;
@@ -3876,10 +3897,7 @@ fn build_tree_level_wise<B: BackendOps>(
             split.left_stats = left_stats;
             split.right_stats = right_stats;
 
-            let PartitionResult {
-                left_row_indices,
-                right_row_indices,
-            } = partition;
+            let (left_row_indices, right_row_indices) = partition.into_cpu_parts();
             if depth + 1 < params.max_depth as usize {
                 let left_local_node_id = left_child_node_id(local_node_id)?;
                 let right_local_node_id = right_child_node_id(local_node_id)?;
@@ -3894,11 +3912,14 @@ fn build_tree_level_wise<B: BackendOps>(
                         &left_node,
                         feature_tiles,
                     )?;
-                    let right_histograms =
-                        subtract_histogram_bundle(&histograms, &left_histograms, right_node_id)?;
+                    let right_histograms = backend.subtract_histogram_bundle(
+                        &histograms,
+                        &left_histograms,
+                        right_node_id,
+                    )?;
                     next_nodes.push((
                         left_local_node_id,
-                        left_node.row_indices,
+                        left_node.into_row_indices(),
                         left_histograms,
                         left_leaf_absolute,
                     ));
@@ -3916,8 +3937,11 @@ fn build_tree_level_wise<B: BackendOps>(
                         &right_node,
                         feature_tiles,
                     )?;
-                    let left_histograms =
-                        subtract_histogram_bundle(&histograms, &right_histograms, left_node_id)?;
+                    let left_histograms = backend.subtract_histogram_bundle(
+                        &histograms,
+                        &right_histograms,
+                        left_node_id,
+                    )?;
                     next_nodes.push((
                         left_local_node_id,
                         left_row_indices,
@@ -3926,7 +3950,7 @@ fn build_tree_level_wise<B: BackendOps>(
                     ));
                     next_nodes.push((
                         right_local_node_id,
-                        right_node.row_indices,
+                        right_node.into_row_indices(),
                         right_histograms,
                         right_leaf_absolute,
                     ));
@@ -4034,7 +4058,7 @@ fn build_tree_leaf_wise<B: BackendOps>(
     let mut queue = BinaryHeap::new();
     queue.push(PendingSplit {
         local_node_id: 0,
-        row_indices: root_node.row_indices,
+        row_indices: root_node.into_row_indices(),
         split_candidate: root_split,
         histograms: root_histograms,
         parent_leaf_value: 0.0,
@@ -4068,17 +4092,15 @@ fn build_tree_leaf_wise<B: BackendOps>(
         let (partition, left_stats, right_stats) =
             backend.apply_split_with_stats(binned_matrix, gradients, &node, &split)?;
 
-        if partition.left_row_indices.len() + partition.right_row_indices.len()
-            != node.row_indices.len()
-        {
+        if partition.left.len() + partition.right.len() != node.row_count() {
             return Err(EngineError::ContractViolation(
                 "split partition does not cover all node rows".to_string(),
             ));
         }
-        if partition.left_row_indices.is_empty()
-            || partition.right_row_indices.is_empty()
-            || partition.left_row_indices.len() < controls.min_rows_per_leaf
-            || partition.right_row_indices.len() < controls.min_rows_per_leaf
+        if partition.left.is_empty()
+            || partition.right.is_empty()
+            || partition.left.len() < controls.min_rows_per_leaf
+            || partition.right.len() < controls.min_rows_per_leaf
         {
             last_rejection = IterationStopReason::LeafRowsBelowThreshold;
             continue;
@@ -4165,34 +4187,38 @@ fn build_tree_leaf_wise<B: BackendOps>(
                 larger_local,
                 smaller_leaf_abs,
                 larger_leaf_abs,
-            ) = if partition.left_row_indices.len() <= partition.right_row_indices.len() {
-                (
-                    partition.left_row_indices,
-                    partition.right_row_indices,
-                    left_node_id,
-                    right_node_id,
-                    left_local,
-                    right_local,
-                    left_leaf_absolute,
-                    right_leaf_absolute,
-                )
-            } else {
-                (
-                    partition.right_row_indices,
-                    partition.left_row_indices,
-                    right_node_id,
-                    left_node_id,
-                    right_local,
-                    left_local,
-                    right_leaf_absolute,
-                    left_leaf_absolute,
-                )
+            ) = {
+                let left_first = partition.left.len() <= partition.right.len();
+                let (left_vec, right_vec) = partition.into_cpu_parts();
+                if left_first {
+                    (
+                        left_vec,
+                        right_vec,
+                        left_node_id,
+                        right_node_id,
+                        left_local,
+                        right_local,
+                        left_leaf_absolute,
+                        right_leaf_absolute,
+                    )
+                } else {
+                    (
+                        right_vec,
+                        left_vec,
+                        right_node_id,
+                        left_node_id,
+                        right_local,
+                        left_local,
+                        right_leaf_absolute,
+                        left_leaf_absolute,
+                    )
+                }
             };
 
             let smaller_node = NodeSlice::new(smaller_node_id, smaller_indices)?;
             let smaller_histograms =
                 backend.build_histograms(binned_matrix, gradients, &smaller_node, feature_tiles)?;
-            let larger_histograms = subtract_histogram_bundle(
+            let larger_histograms = backend.subtract_histogram_bundle(
                 &pending.histograms,
                 &smaller_histograms,
                 larger_node_id,
@@ -4209,7 +4235,7 @@ fn build_tree_leaf_wise<B: BackendOps>(
             {
                 queue.push(PendingSplit {
                     local_node_id: smaller_local,
-                    row_indices: smaller_node.row_indices,
+                    row_indices: smaller_node.into_row_indices(),
                     split_candidate: child_split,
                     histograms: smaller_histograms,
                     parent_leaf_value: smaller_leaf_abs,
@@ -4254,19 +4280,21 @@ fn subtract_histogram_bundle_into(
     node_id: u32,
     dest: &mut HistogramBundle,
 ) -> EngineResult<()> {
-    if parent.feature_histograms.len() != child.feature_histograms.len() {
+    let parent_fhs = parent.feature_histograms();
+    let child_fhs = child.feature_histograms();
+    if parent_fhs.len() != child_fhs.len() {
         return Err(EngineError::ContractViolation(format!(
             "parent histogram feature count {} does not match child histogram feature count {}",
-            parent.feature_histograms.len(),
-            child.feature_histograms.len()
+            parent_fhs.len(),
+            child_fhs.len()
         )));
     }
     dest.node_id = node_id;
     for ((dest_fh, parent_fh), child_fh) in dest
-        .feature_histograms
+        .feature_histograms_mut()
         .iter_mut()
-        .zip(&parent.feature_histograms)
-        .zip(&child.feature_histograms)
+        .zip(parent_fhs)
+        .zip(child_fhs)
     {
         dest_fh.feature_index = parent_fh.feature_index;
         for ((dest_bin, parent_bin), child_bin) in dest_fh
@@ -4289,15 +4317,9 @@ fn subtract_histogram_bundle(
     node_id: u32,
 ) -> EngineResult<HistogramBundle> {
     // Pre-allocate a dest with the same structure, then delegate to the in-place variant.
-    let feature_indices: Vec<u32> = parent
-        .feature_histograms
-        .iter()
-        .map(|fh| fh.feature_index)
-        .collect();
-    let bin_count = parent
-        .feature_histograms
-        .first()
-        .map_or(0, |fh| fh.bins.len());
+    let parent_fhs = parent.feature_histograms();
+    let feature_indices: Vec<u32> = parent_fhs.iter().map(|fh| fh.feature_index).collect();
+    let bin_count = parent_fhs.first().map_or(0, |fh| fh.bins.len());
     let mut dest = HistogramBundle::new_zeroed(&feature_indices, bin_count);
     subtract_histogram_bundle_into(parent, child, node_id, &mut dest)?;
     Ok(dest)
@@ -4589,7 +4611,7 @@ fn apply_partition_leaf_updates(
     right_leaf_value: f32,
 ) -> EngineResult<()> {
     let prediction_len = predictions.len();
-    for &row_index in &partition.left_row_indices {
+    for &row_index in partition.left_row_indices() {
         let row_index = row_index as usize;
         if row_index >= prediction_len {
             return Err(EngineError::ContractViolation(format!(
@@ -4598,7 +4620,7 @@ fn apply_partition_leaf_updates(
         }
         predictions[row_index] += left_leaf_value;
     }
-    for &row_index in &partition.right_row_indices {
+    for &row_index in partition.right_row_indices() {
         let row_index = row_index as usize;
         if row_index >= prediction_len {
             return Err(EngineError::ContractViolation(format!(
@@ -6051,10 +6073,7 @@ mod tests {
             node: &NodeSlice,
             _feature_tiles: &[FeatureTile],
         ) -> EngineResult<HistogramBundle> {
-            Ok(HistogramBundle {
-                node_id: node.node_id,
-                feature_histograms: Vec::new(),
-            })
+            Ok(HistogramBundle::from_cpu(node.node_id, Vec::new()))
         }
 
         fn best_split(&self, histograms: &HistogramBundle) -> EngineResult<Option<SplitCandidate>> {
@@ -6096,7 +6115,7 @@ mod tests {
 
             let mut left_row_indices = Vec::new();
             let mut right_row_indices = Vec::new();
-            for &row_index in &node.row_indices {
+            for &row_index in node.row_indices() {
                 let row_index = row_index as usize;
                 let cell_index =
                     row_index * binned_matrix.feature_count + split.feature_index as usize;
@@ -6107,17 +6126,22 @@ mod tests {
                     right_row_indices.push(row_index as u32);
                 }
             }
-            Ok(PartitionResult {
+            Ok(PartitionResult::from_cpu(
                 left_row_indices,
                 right_row_indices,
-            })
+            ))
         }
 
         fn reduce_sums(
             &self,
             gradients: &[GradientPair],
-            row_indices: &[u32],
+            rows: &RowIndexStorage,
         ) -> EngineResult<NodeStats> {
+            let row_indices = rows.cpu().ok_or_else(|| {
+                EngineError::ContractViolation(
+                    "mock reduction only supports CPU-resident row indices".to_string(),
+                )
+            })?;
             let mut grad_sum = 0.0_f32;
             let mut hess_sum = 0.0_f32;
             for &row_index in row_indices {
@@ -7187,9 +7211,9 @@ mod tests {
 
     #[test]
     fn subtract_histogram_bundle_derives_complementary_child() {
-        let parent = HistogramBundle {
-            node_id: 7,
-            feature_histograms: vec![
+        let parent = HistogramBundle::from_cpu(
+            7,
+            vec![
                 alloygbm_core::FeatureHistogram {
                     feature_index: 0,
                     bins: vec![
@@ -7221,10 +7245,10 @@ mod tests {
                     ],
                 },
             ],
-        };
-        let child = HistogramBundle {
-            node_id: 15,
-            feature_histograms: vec![
+        );
+        let child = HistogramBundle::from_cpu(
+            15,
+            vec![
                 alloygbm_core::FeatureHistogram {
                     feature_index: 0,
                     bins: vec![
@@ -7256,25 +7280,26 @@ mod tests {
                     ],
                 },
             ],
-        };
+        );
 
         let complement =
             subtract_histogram_bundle(&parent, &child, 16).expect("subtraction should succeed");
         assert_eq!(complement.node_id, 16);
-        assert_eq!(complement.feature_histograms.len(), 2);
-        assert_eq!(complement.feature_histograms[0].bins[0].count, 2);
-        assert_eq!(complement.feature_histograms[0].bins[1].count, 1);
-        assert!((complement.feature_histograms[0].bins[0].grad_sum - 1.0).abs() < 1e-6);
-        assert!((complement.feature_histograms[0].bins[1].grad_sum + 0.75).abs() < 1e-6);
-        assert!((complement.feature_histograms[1].bins[0].hess_sum - 1.5).abs() < 1e-6);
-        assert!((complement.feature_histograms[1].bins[1].hess_sum - 0.75).abs() < 1e-6);
+        let complement_fhs = complement.feature_histograms();
+        assert_eq!(complement_fhs.len(), 2);
+        assert_eq!(complement_fhs[0].bins[0].count, 2);
+        assert_eq!(complement_fhs[0].bins[1].count, 1);
+        assert!((complement_fhs[0].bins[0].grad_sum - 1.0).abs() < 1e-6);
+        assert!((complement_fhs[0].bins[1].grad_sum + 0.75).abs() < 1e-6);
+        assert!((complement_fhs[1].bins[0].hess_sum - 1.5).abs() < 1e-6);
+        assert!((complement_fhs[1].bins[1].hess_sum - 0.75).abs() < 1e-6);
     }
 
     #[test]
     fn subtract_histogram_bundle_into_matches_allocating_variant() {
-        let parent = HistogramBundle {
-            node_id: 7,
-            feature_histograms: vec![alloygbm_core::FeatureHistogram {
+        let parent = HistogramBundle::from_cpu(
+            7,
+            vec![alloygbm_core::FeatureHistogram {
                 feature_index: 0,
                 bins: vec![
                     alloygbm_core::HistogramBin {
@@ -7289,10 +7314,10 @@ mod tests {
                     },
                 ],
             }],
-        };
-        let child = HistogramBundle {
-            node_id: 15,
-            feature_histograms: vec![alloygbm_core::FeatureHistogram {
+        );
+        let child = HistogramBundle::from_cpu(
+            15,
+            vec![alloygbm_core::FeatureHistogram {
                 feature_index: 0,
                 bins: vec![
                     alloygbm_core::HistogramBin {
@@ -7307,7 +7332,7 @@ mod tests {
                     },
                 ],
             }],
-        };
+        );
 
         // Allocating variant
         let allocated =
@@ -7319,15 +7344,10 @@ mod tests {
             .expect("in-place subtraction should succeed");
 
         assert_eq!(allocated.node_id, dest.node_id);
-        assert_eq!(
-            allocated.feature_histograms.len(),
-            dest.feature_histograms.len()
-        );
-        for (a, d) in allocated
-            .feature_histograms
-            .iter()
-            .zip(&dest.feature_histograms)
-        {
+        let allocated_fhs = allocated.feature_histograms();
+        let dest_fhs = dest.feature_histograms();
+        assert_eq!(allocated_fhs.len(), dest_fhs.len());
+        for (a, d) in allocated_fhs.iter().zip(dest_fhs) {
             assert_eq!(a.feature_index, d.feature_index);
             for (ab, db) in a.bins.iter().zip(&d.bins) {
                 assert!((ab.grad_sum - db.grad_sum).abs() < 1e-6);
@@ -7341,15 +7361,18 @@ mod tests {
     fn histogram_bundle_reset_zeros_all_bins() {
         let mut bundle = HistogramBundle::new_zeroed(&[0, 1], 3);
         // Set some values
-        bundle.feature_histograms[0].bins[0].grad_sum = 5.0;
-        bundle.feature_histograms[0].bins[0].hess_sum = 3.0;
-        bundle.feature_histograms[0].bins[0].count = 10;
-        bundle.feature_histograms[1].bins[2].grad_sum = -2.5;
-        bundle.feature_histograms[1].bins[2].count = 7;
+        {
+            let fhs = bundle.feature_histograms_mut();
+            fhs[0].bins[0].grad_sum = 5.0;
+            fhs[0].bins[0].hess_sum = 3.0;
+            fhs[0].bins[0].count = 10;
+            fhs[1].bins[2].grad_sum = -2.5;
+            fhs[1].bins[2].count = 7;
+        }
 
         bundle.reset(42);
         assert_eq!(bundle.node_id, 42);
-        for fh in &bundle.feature_histograms {
+        for fh in bundle.feature_histograms() {
             for bin in &fh.bins {
                 assert_eq!(bin.grad_sum, 0.0);
                 assert_eq!(bin.hess_sum, 0.0);
@@ -7362,11 +7385,12 @@ mod tests {
     fn histogram_bundle_new_zeroed_creates_correct_structure() {
         let features = [0, 3, 7];
         let bundle = HistogramBundle::new_zeroed(&features, 5);
-        assert_eq!(bundle.feature_histograms.len(), 3);
-        assert_eq!(bundle.feature_histograms[0].feature_index, 0);
-        assert_eq!(bundle.feature_histograms[1].feature_index, 3);
-        assert_eq!(bundle.feature_histograms[2].feature_index, 7);
-        for fh in &bundle.feature_histograms {
+        let fhs = bundle.feature_histograms();
+        assert_eq!(fhs.len(), 3);
+        assert_eq!(fhs[0].feature_index, 0);
+        assert_eq!(fhs[1].feature_index, 3);
+        assert_eq!(fhs[2].feature_index, 7);
+        for fh in fhs {
             assert_eq!(fh.bins.len(), 5);
         }
     }

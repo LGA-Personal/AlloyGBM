@@ -534,10 +534,76 @@ impl FeatureTile {
     }
 }
 
+/// Storage backing for a list of row indices belonging to a tree node.
+///
+/// Introduced in Stage 3 of the Metal backend work (see
+/// `docs/metal-backend/DECISIONS.md` D-015). Before Stage 3 every
+/// `NodeSlice` carried a `Vec<u32>` directly. Stage 3 shifts row
+/// ownership to a variant so GPU-resident row indices can flow
+/// through the Trainer without a CPU round-trip — the `Gpu(..)`
+/// variant is added by `backend_metal` in a follow-up commit once
+/// the handle type exists.
+///
+/// Code that needs raw CPU access calls [`RowIndexStorage::cpu`],
+/// which returns `Some(&[u32])` for the `Cpu(..)` variant and
+/// `None` otherwise. Backend trait methods are the correct place
+/// to dispatch on the variant; engine code should never pattern-
+/// match directly because the GPU branch requires backend-specific
+/// context that `core` does not have access to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowIndexStorage {
+    Cpu(Vec<u32>),
+}
+
+impl RowIndexStorage {
+    /// Borrow the underlying CPU-side indices, or `None` if the
+    /// storage lives on an accelerator.
+    pub fn cpu(&self) -> Option<&[u32]> {
+        match self {
+            RowIndexStorage::Cpu(rows) => Some(rows),
+        }
+    }
+
+    /// Mutable-borrow the CPU-side indices, or `None` on non-CPU
+    /// variants. Used by the engine test stubs and CPU-only code
+    /// paths (e.g. `sampled_row_indices`).
+    pub fn cpu_mut(&mut self) -> Option<&mut Vec<u32>> {
+        match self {
+            RowIndexStorage::Cpu(rows) => Some(rows),
+        }
+    }
+
+    /// Consume and return the CPU-side indices, or `None` for
+    /// non-CPU variants.
+    pub fn into_cpu(self) -> Option<Vec<u32>> {
+        match self {
+            RowIndexStorage::Cpu(rows) => Some(rows),
+        }
+    }
+
+    /// Row count without materialising the indices. Every backend
+    /// knows its row count without a round-trip.
+    pub fn len(&self) -> usize {
+        match self {
+            RowIndexStorage::Cpu(rows) => rows.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl From<Vec<u32>> for RowIndexStorage {
+    fn from(rows: Vec<u32>) -> Self {
+        RowIndexStorage::Cpu(rows)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeSlice {
     pub node_id: u32,
-    pub row_indices: Vec<u32>,
+    pub rows: RowIndexStorage,
 }
 
 impl NodeSlice {
@@ -549,17 +615,66 @@ impl NodeSlice {
         }
         Ok(Self {
             node_id,
-            row_indices,
+            rows: RowIndexStorage::Cpu(row_indices),
         })
     }
 
+    /// Build a `NodeSlice` from pre-wrapped storage. Used by the
+    /// Trainer when the Metal backend returns GPU-resident indices
+    /// from `apply_split`.
+    pub fn from_storage(node_id: u32, rows: RowIndexStorage) -> CoreResult<Self> {
+        if rows.is_empty() {
+            return Err(CoreError::Validation(
+                "node rows cannot be empty".to_string(),
+            ));
+        }
+        Ok(Self { node_id, rows })
+    }
+
+    /// Convenience for CPU-only call sites that still want to see
+    /// `&[u32]`. Returns `None` on GPU-resident nodes.
+    pub fn cpu_row_indices(&self) -> Option<&[u32]> {
+        self.rows.cpu()
+    }
+
+    /// Compat shim that panics on a non-CPU variant. Used by engine
+    /// code paths that still materialise row indices on the CPU side
+    /// (leaf prediction updates, validation). GPU-aware callers go
+    /// through `BackendOps` instead.
+    pub fn row_indices(&self) -> &[u32] {
+        self.rows
+            .cpu()
+            .expect("NodeSlice::row_indices called on non-CPU variant")
+    }
+
+    /// Consume the slice, returning CPU-resident indices. Panics on a
+    /// non-CPU variant.
+    pub fn into_row_indices(self) -> Vec<u32> {
+        self.rows
+            .into_cpu()
+            .expect("NodeSlice::into_row_indices called on non-CPU variant")
+    }
+
+    /// Row count without materialising the indices.
+    pub fn row_count(&self) -> usize {
+        self.rows.len()
+    }
+
     pub fn validate_bounds(&self, row_count: usize) -> CoreResult<()> {
-        for &row_index in &self.row_indices {
-            let row_index = row_index as usize;
-            if row_index >= row_count {
-                return Err(CoreError::Validation(format!(
-                    "row index {row_index} is out of bounds for row_count {row_count}"
-                )));
+        // Bounds-check is only meaningful when we can actually see
+        // the indices. GPU-resident indices are produced by the
+        // Metal backend from an already-validated input, so callers
+        // on that path can skip validation; we express that here by
+        // returning `Ok(())` on non-CPU variants rather than erroring
+        // out.
+        if let Some(rows) = self.rows.cpu() {
+            for &row_index in rows {
+                let row_index = row_index as usize;
+                if row_index >= row_count {
+                    return Err(CoreError::Validation(format!(
+                        "row index {row_index} is out of bounds for row_count {row_count}"
+                    )));
+                }
             }
         }
         Ok(())
@@ -586,21 +701,87 @@ pub struct FeatureHistogram {
     pub bins: Vec<HistogramBin>,
 }
 
+/// Storage backing for a `HistogramBundle`.
+///
+/// Stage 3 of the Metal backend work (see `DECISIONS.md` D-015)
+/// introduced this enum to let the Metal backend return
+/// GPU-resident histograms across levels without a CPU round-trip.
+/// Before Stage 3 every bundle held `Vec<FeatureHistogram>`
+/// directly. The `Gpu(..)` variant is added by `backend_metal` in a
+/// follow-up commit once the handle type exists.
+///
+/// Engine code should not pattern-match on this enum directly —
+/// histogram-consuming operations (`best_split`,
+/// `subtract_histogram_bundle`, histogram-level reads) live behind
+/// `BackendOps` so each backend can dispatch on its own variant
+/// without exposing the GPU handle shape to generic engine code.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HistogramStorage {
+    Cpu(Vec<FeatureHistogram>),
+}
+
+impl HistogramStorage {
+    /// Borrow the underlying CPU histograms, or `None` on
+    /// accelerator-resident variants.
+    pub fn cpu(&self) -> Option<&[FeatureHistogram]> {
+        match self {
+            HistogramStorage::Cpu(fhs) => Some(fhs),
+        }
+    }
+
+    /// Mutable-borrow for in-place resets. Returns `None` on
+    /// non-CPU variants (GPU residency uses a backend-specific
+    /// reset path, not this accessor).
+    pub fn cpu_mut(&mut self) -> Option<&mut Vec<FeatureHistogram>> {
+        match self {
+            HistogramStorage::Cpu(fhs) => Some(fhs),
+        }
+    }
+
+    /// Consume and return the CPU histograms, or `None` otherwise.
+    pub fn into_cpu(self) -> Option<Vec<FeatureHistogram>> {
+        match self {
+            HistogramStorage::Cpu(fhs) => Some(fhs),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct HistogramBundle {
     pub node_id: u32,
-    pub feature_histograms: Vec<FeatureHistogram>,
+    pub storage: HistogramStorage,
 }
 
 impl HistogramBundle {
-    /// Zero all bin values in-place without deallocating.
+    /// Borrow the CPU-side feature histograms. Returns `None` for
+    /// GPU-resident bundles — those must be consumed via
+    /// `BackendOps::best_split` /
+    /// `BackendOps::subtract_histogram_bundle` on the owning
+    /// backend instead of reading bins directly.
+    pub fn cpu_feature_histograms(&self) -> Option<&[FeatureHistogram]> {
+        self.storage.cpu()
+    }
+
+    /// Mutable-borrow for CPU-side histograms. `None` on non-CPU
+    /// variants.
+    pub fn cpu_feature_histograms_mut(&mut self) -> Option<&mut Vec<FeatureHistogram>> {
+        self.storage.cpu_mut()
+    }
+
+    /// Zero all bin values in-place without deallocating on the
+    /// CPU variant. Panics on non-CPU variants — those backends
+    /// own their own reset path.
     ///
-    /// This resets gradient sums, hessian sums, and counts to zero for every
-    /// bin in every feature histogram, allowing the bundle to be reused for a
-    /// new node without re-allocating.
+    /// This resets gradient sums, hessian sums, and counts to zero
+    /// for every bin in every feature histogram, allowing the
+    /// bundle to be reused for a new node without re-allocating.
     pub fn reset(&mut self, node_id: u32) {
         self.node_id = node_id;
-        for fh in &mut self.feature_histograms {
+        let fhs = self.storage.cpu_mut().expect(
+            "HistogramBundle::reset called on non-CPU variant; \
+             GPU-resident bundles are reset via their owning backend",
+        );
+        for fh in fhs.iter_mut() {
             for bin in &mut fh.bins {
                 bin.grad_sum = 0.0;
                 bin.hess_sum = 0.0;
@@ -609,7 +790,8 @@ impl HistogramBundle {
         }
     }
 
-    /// Create a pre-allocated, zeroed histogram bundle for the given features and bin count.
+    /// Create a pre-allocated, zeroed CPU histogram bundle for the
+    /// given features and bin count.
     pub fn new_zeroed(feature_indices: &[u32], bin_count: usize) -> Self {
         let feature_histograms = feature_indices
             .iter()
@@ -627,8 +809,51 @@ impl HistogramBundle {
             .collect();
         Self {
             node_id: 0,
-            feature_histograms,
+            storage: HistogramStorage::Cpu(feature_histograms),
         }
+    }
+
+    /// Construct a CPU-resident bundle from already-materialised
+    /// feature histograms.
+    pub fn from_cpu(node_id: u32, feature_histograms: Vec<FeatureHistogram>) -> Self {
+        Self {
+            node_id,
+            storage: HistogramStorage::Cpu(feature_histograms),
+        }
+    }
+
+    // --- Compat shims for CPU-only call sites ------------------------
+    //
+    // Same rationale as `PartitionResult` / `NodeSlice`: CPU-pinned
+    // engine code (tests, debug paths, benches) keeps the Stage-2 API
+    // via a panicking accessor; GPU-aware paths go through
+    // `BackendOps` methods. When `backend_metal` adds the `Gpu(..)`
+    // variant in S3.7, histogram reads on the hot path route through
+    // `BackendOps::best_split` / `BackendOps::subtract_histogram_bundle`
+    // and never touch these shims.
+
+    /// Borrow CPU-resident feature histograms. Panics on a non-CPU
+    /// variant.
+    pub fn feature_histograms(&self) -> &[FeatureHistogram] {
+        self.storage
+            .cpu()
+            .expect("HistogramBundle::feature_histograms called on non-CPU variant")
+    }
+
+    /// Mutable-borrow CPU-resident feature histograms. Panics on a
+    /// non-CPU variant.
+    pub fn feature_histograms_mut(&mut self) -> &mut Vec<FeatureHistogram> {
+        self.storage
+            .cpu_mut()
+            .expect("HistogramBundle::feature_histograms_mut called on non-CPU variant")
+    }
+
+    /// Consume the bundle, returning the owned feature histograms.
+    /// Panics on a non-CPU variant.
+    pub fn into_feature_histograms(self) -> Vec<FeatureHistogram> {
+        self.storage
+            .into_cpu()
+            .expect("HistogramBundle::into_feature_histograms called on non-CPU variant")
     }
 }
 
@@ -650,8 +875,73 @@ pub struct SplitCandidate {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionResult {
-    pub left_row_indices: Vec<u32>,
-    pub right_row_indices: Vec<u32>,
+    pub left: RowIndexStorage,
+    pub right: RowIndexStorage,
+}
+
+impl PartitionResult {
+    /// Construct a CPU-resident partition result. Convenience for
+    /// callers that still have raw `Vec<u32>` indices.
+    pub fn from_cpu(left: Vec<u32>, right: Vec<u32>) -> Self {
+        Self {
+            left: RowIndexStorage::Cpu(left),
+            right: RowIndexStorage::Cpu(right),
+        }
+    }
+
+    /// Backwards-compatible accessor preserving the old
+    /// `left_row_indices` naming for call sites that can still
+    /// operate on CPU-resident indices. Returns `None` if the
+    /// result lives on an accelerator.
+    pub fn cpu_left(&self) -> Option<&[u32]> {
+        self.left.cpu()
+    }
+
+    /// See [`cpu_left`].
+    pub fn cpu_right(&self) -> Option<&[u32]> {
+        self.right.cpu()
+    }
+
+    // --- Compat shims for CPU-only call sites ------------------------
+    //
+    // These collapse the `Option` to a borrow and panic on the `Gpu`
+    // arm. Engine code that genuinely must consume CPU-resident indices
+    // (leaf prediction updates, row-direction inspection) uses these;
+    // GPU-aware code paths go through `BackendOps` methods instead and
+    // never touch these shims. Once the `Gpu(..)` variant lands the
+    // engine's hot path will route around these via a trait method,
+    // leaving the shims only for CPU-resident fallback.
+
+    /// Borrow CPU-resident left indices. Panics on a non-CPU variant.
+    pub fn left_row_indices(&self) -> &[u32] {
+        self.left
+            .cpu()
+            .expect("PartitionResult::left_row_indices called on non-CPU variant")
+    }
+
+    /// Borrow CPU-resident right indices. Panics on a non-CPU variant.
+    pub fn right_row_indices(&self) -> &[u32] {
+        self.right
+            .cpu()
+            .expect("PartitionResult::right_row_indices called on non-CPU variant")
+    }
+
+    /// Consume the partition, returning `(left, right)` CPU indices.
+    /// Panics on a non-CPU variant — the engine level-wise / leaf-wise
+    /// loops call this to preserve the Stage-2 move semantics; the
+    /// Metal backend will move them through `BackendOps` instead once
+    /// GPU partition ships.
+    pub fn into_cpu_parts(self) -> (Vec<u32>, Vec<u32>) {
+        let left = self
+            .left
+            .into_cpu()
+            .expect("PartitionResult::into_cpu_parts called on non-CPU left variant");
+        let right = self
+            .right
+            .into_cpu()
+            .expect("PartitionResult::into_cpu_parts called on non-CPU right variant");
+        (left, right)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

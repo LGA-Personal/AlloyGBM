@@ -5,4 +5,6 @@
 //! dispatch orchestration lives alongside each source module.
 
 pub mod histogram;
+pub mod partition;
 pub mod split;
+pub mod subtract;

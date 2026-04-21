@@ -20,7 +20,7 @@
 use alloygbm_backend_cpu::CpuBackend;
 use alloygbm_core::{
     BinnedMatrix, Device, FeatureTile, GradientPair, HistogramBundle, NodeSlice, NodeStats,
-    PartitionResult, SplitCandidate,
+    PartitionResult, RowIndexStorage, SplitCandidate,
 };
 use alloygbm_engine::{BackendOps, CategoricalFeatureInfo, EngineResult, SplitSelectionOptions};
 use pyo3::exceptions::PyRuntimeWarning;
@@ -162,12 +162,12 @@ impl BackendOps for RuntimeBackend {
     fn reduce_sums(
         &self,
         gradients: &[GradientPair],
-        row_indices: &[u32],
+        rows: &RowIndexStorage,
     ) -> EngineResult<NodeStats> {
         match self {
-            RuntimeBackend::Cpu(b) => b.reduce_sums(gradients, row_indices),
+            RuntimeBackend::Cpu(b) => b.reduce_sums(gradients, rows),
             #[cfg(all(target_os = "macos", feature = "metal"))]
-            RuntimeBackend::Metal(b) => b.reduce_sums(gradients, row_indices),
+            RuntimeBackend::Metal(b) => b.reduce_sums(gradients, rows),
         }
     }
 }

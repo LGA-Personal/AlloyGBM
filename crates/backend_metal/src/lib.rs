@@ -10,6 +10,8 @@
 mod buffers;
 #[cfg(target_os = "macos")]
 mod device;
+#[cfg(target_os = "macos")]
+mod residency;
 
 #[cfg(target_os = "macos")]
 pub use device::{MetalCapabilities, MetalDevice, probe_capabilities};
@@ -41,6 +43,25 @@ pub struct MetalBackend {
     /// Specialized on `(bin_count, l1_enabled)`; typical fits hit a
     /// single key and every call past the first is an `Arc::clone`.
     split_pipeline_cache: std::sync::Arc<pipelines::SplitPipelineCache>,
+    /// S3.5 — compiled-once + pipeline-cached row-partition kernel.
+    /// Specialized on `(block_size, split_kind, bin_is_u16)`; the
+    /// hot path through a training run hits two keys (continuous +
+    /// categorical if any) so every call past compilation is an
+    /// `Arc::clone`.
+    partition_pipeline_cache: std::sync::Arc<pipelines::PartitionPipelineCache>,
+    /// S3.6 — compiled-once + pipeline-cached elementwise subtract
+    /// kernel. Single function constant (`BLOCK_SIZE`); effectively a
+    /// one-entry cache under the current architecture. Retained as a
+    /// cache for parity with the other kernels and for forward
+    /// compatibility once S3.7 introduces GPU-resident histograms
+    /// that will call this kernel once per non-smaller-sibling node.
+    ///
+    /// `dead_code` allow: the consumer is S3.7 (BackendOps trait
+    /// promotion of `subtract_histogram_bundle` + MetalBackend GPU
+    /// implementation). Until then the field is exercised by unit
+    /// tests but not by the release-library surface.
+    #[allow(dead_code)]
+    subtract_pipeline_cache: std::sync::Arc<pipelines::SubtractPipelineCache>,
     /// Persistent Metal buffer pool for the histogram dispatch path.
     /// Caches the binned matrix (immutable per fit) and reuses the
     /// allocations for gradients + row indices across the ~63
@@ -81,11 +102,21 @@ impl MetalBackend {
             metal_device.device.clone(),
             &metal_device.capabilities,
         )?);
+        let partition_pipeline_cache = std::sync::Arc::new(pipelines::PartitionPipelineCache::new(
+            metal_device.device.clone(),
+            &metal_device.capabilities,
+        )?);
+        let subtract_pipeline_cache = std::sync::Arc::new(pipelines::SubtractPipelineCache::new(
+            metal_device.device.clone(),
+            &metal_device.capabilities,
+        )?);
         let buffer_cache = std::sync::Arc::new(buffers::BufferCache::new());
         Ok(Self {
             metal_device,
             pipeline_cache,
             split_pipeline_cache,
+            partition_pipeline_cache,
+            subtract_pipeline_cache,
             buffer_cache,
             cpu: CpuBackend,
         })
@@ -157,26 +188,50 @@ impl BackendOps for MetalBackend {
         node: &NodeSlice,
         split: &SplitCandidate,
     ) -> EngineResult<PartitionResult> {
-        self.cpu.apply_split(binned_matrix, node, split)
+        // S3.5 — try the GPU partition kernel first. It falls back to
+        // CPU on two conditions:
+        //   * Node exceeds the single-threadgroup scan cap
+        //     (`MAX_BLOCKS_SINGLE_SCAN`). A future hierarchical scan
+        //     would lift this.
+        //   * Any other Metal-side failure (buffer alloc, pipeline
+        //     build, command-buffer encode). The CPU path is always
+        //     correct, so the backend never fails a fit because of a
+        //     Metal hiccup.
+        match kernels::partition::dispatch_partition(
+            &self.metal_device,
+            &self.partition_pipeline_cache,
+            &self.buffer_cache,
+            binned_matrix,
+            node,
+            split,
+        ) {
+            Ok(result) => Ok(result),
+            Err(alloygbm_engine::EngineError::BackendUnavailable(_)) => {
+                // Scan-cap overflow or transient Metal failure. CPU
+                // path is always correct.
+                self.cpu.apply_split(binned_matrix, node, split)
+            }
+            Err(err) => Err(err),
+        }
     }
-
-    fn apply_split_with_stats(
-        &self,
-        binned_matrix: &BinnedMatrix,
-        gradients: &[GradientPair],
-        node: &NodeSlice,
-        split: &SplitCandidate,
-    ) -> EngineResult<(PartitionResult, NodeStats, NodeStats)> {
-        self.cpu
-            .apply_split_with_stats(binned_matrix, gradients, node, split)
-    }
+    // `apply_split_with_stats` uses the default trait impl — it calls
+    // our GPU-accelerated `apply_split` above and then runs
+    // `reduce_sums` on both halves. `reduce_sums` is still CPU-side
+    // (Stage 3's scope doesn't include a GPU reduce); the round-trip
+    // is the cost of producing stats without GPU residency.
 
     fn reduce_sums(
         &self,
         gradients: &[GradientPair],
-        row_indices: &[u32],
+        rows: &alloygbm_core::RowIndexStorage,
     ) -> EngineResult<NodeStats> {
-        self.cpu.reduce_sums(gradients, row_indices)
+        // S3.2 — trait surface now accepts `&RowIndexStorage`. Until
+        // S3.7 ships GPU residency, every call we see is `Cpu(..)` —
+        // delegate to the embedded CpuBackend. When MetalBackend
+        // starts producing `Gpu(..)` variants, this override will
+        // read directly from the GPU-resident buffer without a
+        // CPU round-trip.
+        self.cpu.reduce_sums(gradients, rows)
     }
 }
 
@@ -296,15 +351,10 @@ mod tests {
             .expect("metal histogram");
 
         assert_eq!(cpu_hist.node_id, metal_hist.node_id);
-        assert_eq!(
-            cpu_hist.feature_histograms.len(),
-            metal_hist.feature_histograms.len()
-        );
-        for (cpu_fh, metal_fh) in cpu_hist
-            .feature_histograms
-            .iter()
-            .zip(metal_hist.feature_histograms.iter())
-        {
+        let cpu_fhs = cpu_hist.feature_histograms();
+        let metal_fhs = metal_hist.feature_histograms();
+        assert_eq!(cpu_fhs.len(), metal_fhs.len());
+        for (cpu_fh, metal_fh) in cpu_fhs.iter().zip(metal_fhs.iter()) {
             assert_eq!(cpu_fh.feature_index, metal_fh.feature_index);
             assert_eq!(
                 cpu_fh.bins.len(),
@@ -381,13 +431,11 @@ mod tests {
             .build_histograms(&binned_matrix, &gradients, &node, &tiles)
             .expect("metal histogram");
 
-        assert_eq!(cpu_hist.feature_histograms.len(), 3);
-        assert_eq!(metal_hist.feature_histograms.len(), 3);
-        for (cpu_fh, metal_fh) in cpu_hist
-            .feature_histograms
-            .iter()
-            .zip(metal_hist.feature_histograms.iter())
-        {
+        let cpu_fhs = cpu_hist.feature_histograms();
+        let metal_fhs = metal_hist.feature_histograms();
+        assert_eq!(cpu_fhs.len(), 3);
+        assert_eq!(metal_fhs.len(), 3);
+        for (cpu_fh, metal_fh) in cpu_fhs.iter().zip(metal_fhs.iter()) {
             assert_eq!(cpu_fh.feature_index, metal_fh.feature_index);
             for (cpu_bin, metal_bin) in cpu_fh.bins.iter().zip(metal_fh.bins.iter()) {
                 assert_eq!(cpu_bin.count, metal_bin.count);
@@ -801,5 +849,356 @@ mod tests {
             .get_or_build(16, true)
             .expect("l1 variant build");
         assert!(!std::sync::Arc::ptr_eq(&first, &with_l1));
+    }
+
+    /// Smoke test: compile the partition MSL library without
+    /// specialization. Any MSL syntax error surfaces here before the
+    /// more expensive pipeline-build path runs.
+    #[test]
+    fn partition_shader_compiles() {
+        let Ok(backend) = MetalBackend::new() else {
+            return;
+        };
+
+        let source = NSString::from_str(kernels::partition::PARTITION_SHADER_SOURCE);
+        let result = backend
+            .metal_device
+            .device
+            .newLibraryWithSource_options_error(&source, None);
+        if let Err(err) = result {
+            panic!(
+                "partition.metal failed to compile: {}",
+                err.localizedDescription()
+            );
+        }
+    }
+
+    /// S3.5 — GPU partition must produce bit-identical output (in
+    /// identical order) to `CpuBackend::apply_split` on a small,
+    /// deterministic fixture. Covers continuous threshold, NaN
+    /// default-left/right, and both u8 / u16 bin storage.
+    #[test]
+    fn partition_matches_cpu_small_fixture() {
+        use alloygbm_backend_cpu::CpuBackend;
+        use alloygbm_engine::BackendOps;
+
+        let Ok(backend) = MetalBackend::new() else {
+            return;
+        };
+
+        let row_count = 2_000usize;
+        let feature_count = 3usize;
+        let max_bin: u16 = 7;
+
+        let mut bins_row_major = Vec::with_capacity(row_count * feature_count);
+        for row in 0..row_count {
+            for feat in 0..feature_count {
+                let bin = ((row.wrapping_mul(31) ^ feat.wrapping_mul(17)) & 7) as u8;
+                bins_row_major.push(bin);
+            }
+        }
+        let binned_matrix =
+            BinnedMatrix::new(row_count, feature_count, max_bin, bins_row_major).unwrap();
+
+        let row_indices: Vec<u32> = (0..row_count as u32).collect();
+        let node = NodeSlice::new(0, row_indices).unwrap();
+
+        // Try multiple splits — default_left true/false, several
+        // threshold bins, each combined with each feature — and
+        // assert equality with CPU for all of them.
+        for feature_index in 0..feature_count as u32 {
+            for threshold_bin in [0u16, 2, 4, 6] {
+                for default_left in [false, true] {
+                    let split = SplitCandidate {
+                        node_id: 0,
+                        feature_index,
+                        threshold_bin,
+                        gain: 1.0,
+                        default_left,
+                        is_categorical: false,
+                        categorical_bitset: None,
+                        left_stats: NodeStats {
+                            grad_sum: 0.0,
+                            hess_sum: 0.0,
+                            row_count: 0,
+                        },
+                        right_stats: NodeStats {
+                            grad_sum: 0.0,
+                            hess_sum: 0.0,
+                            row_count: 0,
+                        },
+                    };
+
+                    let cpu = CpuBackend;
+                    let cpu_result = cpu.apply_split(&binned_matrix, &node, &split).unwrap();
+                    let metal_result = backend.apply_split(&binned_matrix, &node, &split).unwrap();
+
+                    assert_eq!(
+                        cpu_result.left_row_indices(),
+                        metal_result.left_row_indices(),
+                        "left-partition mismatch for feature={feature_index} threshold={threshold_bin} default_left={default_left}"
+                    );
+                    assert_eq!(
+                        cpu_result.right_row_indices(),
+                        metal_result.right_row_indices(),
+                        "right-partition mismatch for feature={feature_index} threshold={threshold_bin} default_left={default_left}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Categorical bitset split must produce bit-identical rows to
+    /// the CPU path. Exercises `SPLIT_KIND = 1`.
+    #[test]
+    fn partition_categorical_matches_cpu() {
+        use alloygbm_backend_cpu::CpuBackend;
+        use alloygbm_engine::BackendOps;
+
+        let Ok(backend) = MetalBackend::new() else {
+            return;
+        };
+
+        let row_count = 1_500usize;
+        let feature_count = 2usize;
+        let max_bin: u16 = 7;
+
+        let mut bins_row_major = Vec::with_capacity(row_count * feature_count);
+        for row in 0..row_count {
+            for feat in 0..feature_count {
+                let bin = ((row.wrapping_mul(11) ^ feat.wrapping_mul(13)) & 7) as u8;
+                bins_row_major.push(bin);
+            }
+        }
+        let binned_matrix =
+            BinnedMatrix::new(row_count, feature_count, max_bin, bins_row_major).unwrap();
+
+        let row_indices: Vec<u32> = (0..row_count as u32).collect();
+        let node = NodeSlice::new(0, row_indices).unwrap();
+
+        // Bitset: bins 1, 3, 5 go left (bit set). Needs 1 byte for
+        // max_bin=7 since all bins fit in 8 bits.
+        let bitset: Vec<u8> = vec![0b0010_1010];
+
+        let split = SplitCandidate {
+            node_id: 0,
+            feature_index: 0,
+            threshold_bin: 0,
+            gain: 1.0,
+            default_left: true,
+            is_categorical: true,
+            categorical_bitset: Some(bitset),
+            left_stats: NodeStats {
+                grad_sum: 0.0,
+                hess_sum: 0.0,
+                row_count: 0,
+            },
+            right_stats: NodeStats {
+                grad_sum: 0.0,
+                hess_sum: 0.0,
+                row_count: 0,
+            },
+        };
+
+        let cpu = CpuBackend;
+        let cpu_result = cpu.apply_split(&binned_matrix, &node, &split).unwrap();
+        let metal_result = backend.apply_split(&binned_matrix, &node, &split).unwrap();
+
+        assert_eq!(
+            cpu_result.left_row_indices(),
+            metal_result.left_row_indices()
+        );
+        assert_eq!(
+            cpu_result.right_row_indices(),
+            metal_result.right_row_indices()
+        );
+    }
+
+    /// Pipeline cache must return the same Arc on repeated lookups
+    /// of the same key, and distinct Arcs across different keys
+    /// (matches the pattern used by the histogram + split caches).
+    #[test]
+    fn partition_pipeline_cache_returns_identical_arc_on_second_call() {
+        let Ok(backend) = MetalBackend::new() else {
+            return;
+        };
+
+        let spec_a = kernels::partition::PartitionSpecKey {
+            block_size: kernels::partition::BLOCK_SIZE,
+            split_kind: 0,
+            bin_is_u16: false,
+        };
+        let first = backend
+            .partition_pipeline_cache
+            .get_or_build(spec_a)
+            .expect("first build");
+        let second = backend
+            .partition_pipeline_cache
+            .get_or_build(spec_a)
+            .expect("second build");
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+
+        let spec_b = kernels::partition::PartitionSpecKey {
+            block_size: kernels::partition::BLOCK_SIZE,
+            split_kind: 1, // categorical variant
+            bin_is_u16: false,
+        };
+        let categorical = backend
+            .partition_pipeline_cache
+            .get_or_build(spec_b)
+            .expect("categorical variant build");
+        assert!(!std::sync::Arc::ptr_eq(&first, &categorical));
+    }
+
+    // -------- S3.6 — subtract kernel ---------------------------
+
+    /// Bare-library compile smoke test for `subtract.metal`. Mirrors
+    /// `partition_shader_compiles` — on some objc2-metal versions a
+    /// kernel source with an unused function constant can slip past
+    /// the cache build if that specialization is never requested, so
+    /// we compile the library directly from source to catch syntax or
+    /// type errors up front.
+    #[test]
+    fn subtract_shader_compiles() {
+        let Some(device) = objc2_metal::MTLCreateSystemDefaultDevice() else {
+            return;
+        };
+        let source = NSString::from_str(kernels::subtract::SUBTRACT_SHADER_SOURCE);
+        device
+            .newLibraryWithSource_options_error(&source, None)
+            .expect("subtract.metal should compile without errors");
+    }
+
+    /// Elementwise subtract must match `subtract_histogram_bundle` on
+    /// the CPU bit-for-bit. Float32 / float32 subtraction of exactly-
+    /// the-same inputs is deterministic on every known GPU, so we
+    /// demand byte equality rather than an epsilon.
+    #[test]
+    fn subtract_matches_cpu_small_fixture() {
+        use alloygbm_core::{FeatureHistogram, HistogramBin, HistogramBundle};
+
+        let Ok(backend) = MetalBackend::new() else {
+            return;
+        };
+
+        // 5 features × 12 bins fixture. Deterministic content that
+        // leaves a non-trivial delta in every (feature, bin).
+        let feature_count = 5;
+        let bin_count = 12;
+        let make_bundle = |seed: u32, node_id: u32| -> HistogramBundle {
+            let mut fhs = Vec::with_capacity(feature_count);
+            for f in 0..feature_count {
+                let mut bins = Vec::with_capacity(bin_count);
+                for b in 0..bin_count {
+                    let n = (seed + f as u32 * 97 + b as u32 * 13) as f32;
+                    bins.push(HistogramBin {
+                        grad_sum: n * 0.5 + seed as f32 * 0.125,
+                        hess_sum: (n + 1.0) * 0.25,
+                        count: (seed + f as u32 * 3 + b as u32) * 4,
+                    });
+                }
+                fhs.push(FeatureHistogram {
+                    feature_index: f as u32,
+                    bins,
+                });
+            }
+            HistogramBundle::from_cpu(node_id, fhs)
+        };
+
+        // Construct a proper parent ⊇ child relationship: we build
+        // the child first, then derive the parent by adding known
+        // deltas. This guarantees `parent_counts >= child_counts`
+        // pointwise (the MSL kernel relies on this invariant for the
+        // u32 subtraction).
+        let child = make_bundle(7, 2);
+        let mut parent_fhs = Vec::with_capacity(feature_count);
+        for (f, cfh) in child.feature_histograms().iter().enumerate() {
+            let mut bins = Vec::with_capacity(bin_count);
+            for (b, cb) in cfh.bins.iter().enumerate() {
+                bins.push(HistogramBin {
+                    grad_sum: cb.grad_sum + 0.75 + (b as f32) * 0.01,
+                    hess_sum: cb.hess_sum + 0.5 + (f as f32) * 0.02,
+                    count: cb.count + 5 + (b as u32) + (f as u32) * 3,
+                });
+            }
+            parent_fhs.push(FeatureHistogram {
+                feature_index: f as u32,
+                bins,
+            });
+        }
+        let parent = HistogramBundle::from_cpu(1, parent_fhs);
+
+        let out_node_id = 99;
+        let metal_result = kernels::subtract::dispatch_subtract(
+            &backend.metal_device,
+            &backend.subtract_pipeline_cache,
+            &parent,
+            &child,
+            out_node_id,
+        )
+        .expect("metal subtract should succeed");
+
+        // CPU reference via the same elementwise loop the engine
+        // uses. Hand-inlined to avoid a cross-crate dependency on
+        // the engine's private `subtract_histogram_bundle_into`.
+        let mut cpu_fhs = Vec::with_capacity(feature_count);
+        for (pfh, cfh) in parent
+            .feature_histograms()
+            .iter()
+            .zip(child.feature_histograms())
+        {
+            let mut bins = Vec::with_capacity(bin_count);
+            for (pb, cb) in pfh.bins.iter().zip(&cfh.bins) {
+                bins.push(HistogramBin {
+                    grad_sum: pb.grad_sum - cb.grad_sum,
+                    hess_sum: pb.hess_sum - cb.hess_sum,
+                    count: pb.count - cb.count,
+                });
+            }
+            cpu_fhs.push(FeatureHistogram {
+                feature_index: pfh.feature_index,
+                bins,
+            });
+        }
+        let cpu_result = HistogramBundle::from_cpu(out_node_id, cpu_fhs);
+
+        // Structural equality.
+        assert_eq!(metal_result.node_id, out_node_id);
+        let metal_fhs = metal_result.feature_histograms();
+        let cpu_fhs = cpu_result.feature_histograms();
+        assert_eq!(metal_fhs.len(), cpu_fhs.len());
+        for (mfh, cfh) in metal_fhs.iter().zip(cpu_fhs) {
+            assert_eq!(mfh.feature_index, cfh.feature_index);
+            assert_eq!(mfh.bins.len(), cfh.bins.len());
+            for (mb, cb) in mfh.bins.iter().zip(&cfh.bins) {
+                // Bit-exact: f32 subtract of identical inputs is
+                // deterministic across CPU and GPU (IEEE 754 §5.4).
+                assert_eq!(mb.grad_sum.to_bits(), cb.grad_sum.to_bits());
+                assert_eq!(mb.hess_sum.to_bits(), cb.hess_sum.to_bits());
+                assert_eq!(mb.count, cb.count);
+            }
+        }
+    }
+
+    /// Pipeline cache must return the same Arc on repeated lookups,
+    /// mirroring the histogram / split / partition cache contracts.
+    #[test]
+    fn subtract_pipeline_cache_returns_identical_arc_on_second_call() {
+        let Ok(backend) = MetalBackend::new() else {
+            return;
+        };
+
+        let spec = kernels::subtract::SubtractSpecKey {
+            block_size: kernels::subtract::BLOCK_SIZE,
+        };
+        let first = backend
+            .subtract_pipeline_cache
+            .get_or_build(spec)
+            .expect("first build");
+        let second = backend
+            .subtract_pipeline_cache
+            .get_or_build(spec)
+            .expect("second build");
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
     }
 }

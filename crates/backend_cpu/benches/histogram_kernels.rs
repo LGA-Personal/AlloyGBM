@@ -115,7 +115,7 @@ fn build_histograms_baseline_reference(
                 binned_matrix.max_bin as usize + 1
             ];
 
-            for &row_index in &node.row_indices {
+            for &row_index in node.row_indices() {
                 let row_index = row_index as usize;
                 let cell_index = row_index * binned_matrix.feature_count + feature_index as usize;
                 let bin_index = binned_matrix.bins[cell_index] as usize;
@@ -133,10 +133,7 @@ fn build_histograms_baseline_reference(
         }
     }
 
-    HistogramBundle {
-        node_id: node.node_id,
-        feature_histograms,
-    }
+    HistogramBundle::from_cpu(node.node_id, feature_histograms)
 }
 
 fn main() {

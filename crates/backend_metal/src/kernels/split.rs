@@ -91,7 +91,8 @@ pub(crate) fn dispatch_best_split(
         MTLDevice, MTLResourceOptions, MTLSize,
     };
 
-    if histograms.feature_histograms.is_empty() {
+    let fhs = histograms.feature_histograms();
+    if fhs.is_empty() {
         return Ok(None);
     }
 
@@ -99,7 +100,7 @@ pub(crate) fn dispatch_best_split(
     // have the same number of bins by construction, but assert it
     // defensively — the kernel assumes a flat `[n_features × BIN_COUNT]`
     // layout.
-    let bin_count = histograms.feature_histograms[0].bins.len();
+    let bin_count = fhs[0].bins.len();
     if bin_count == 0 {
         return Ok(None);
     }
@@ -112,7 +113,7 @@ pub(crate) fn dispatch_best_split(
             categorical_features,
         );
     }
-    for fh in &histograms.feature_histograms {
+    for fh in fhs {
         if fh.bins.len() != bin_count {
             return Err(EngineError::ContractViolation(format!(
                 "Metal best_split requires uniform bin count across features; \
@@ -131,21 +132,16 @@ pub(crate) fn dispatch_best_split(
             .any(|c| c.feature_index == feature_index as usize)
     };
 
-    let (cont_histograms, cat_histograms): (Vec<FeatureHistogram>, Vec<FeatureHistogram>) =
-        histograms
-            .feature_histograms
-            .iter()
-            .cloned()
-            .partition(|fh| !is_categorical(fh.feature_index));
+    let (cont_histograms, cat_histograms): (Vec<FeatureHistogram>, Vec<FeatureHistogram>) = fhs
+        .iter()
+        .cloned()
+        .partition(|fh| !is_categorical(fh.feature_index));
 
     // --- Categorical features (if any) go through the CPU backend ---
     let cat_candidate: Option<SplitCandidate> = if cat_histograms.is_empty() {
         None
     } else {
-        let cat_bundle = HistogramBundle {
-            node_id: histograms.node_id,
-            feature_histograms: cat_histograms,
-        };
+        let cat_bundle = HistogramBundle::from_cpu(histograms.node_id, cat_histograms);
         cpu.best_split_with_options(&cat_bundle, options, feature_weights, categorical_features)?
     };
 

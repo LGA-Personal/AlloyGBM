@@ -58,7 +58,12 @@ use std::ptr::NonNull;
 
 use crate::device::MetalCapabilities;
 use crate::kernels::histogram::{HISTOGRAM_SHADER_SOURCE, KERNEL_NAME_REDUCE, KERNEL_NAME_SCATTER};
+use crate::kernels::partition::{
+    KERNEL_NAME_PARTITION_FLAG_AND_COUNT, KERNEL_NAME_PARTITION_SCAN_BLOCKS,
+    KERNEL_NAME_PARTITION_SCATTER, PARTITION_SHADER_SOURCE, PartitionSpecKey,
+};
 use crate::kernels::split::{KERNEL_NAME_BEST_SPLIT_PER_FEATURE, SPLIT_SHADER_SOURCE};
+use crate::kernels::subtract::{KERNEL_NAME_SUBTRACT, SUBTRACT_SHADER_SOURCE, SubtractSpecKey};
 
 /// A pair of compute pipelines specialized for a given `(bin_count,
 /// use_u16_bins)` pair. Both pipelines share the same underlying
@@ -712,6 +717,537 @@ fn slugify_device_name(name: &str) -> String {
         "unknown".to_string()
     } else {
         out
+    }
+}
+
+// ---------------------------------------------------------------------
+// S3.5 — PartitionPipelineCache
+// ---------------------------------------------------------------------
+//
+// Mirrors `HistogramPipelineCache` / `SplitPipelineCache` but compiles
+// `shaders/partition.metal` and specializes on
+// `(block_size, split_kind, bin_is_u16)`. Binary archive lives in its
+// own file. Three pipeline-state objects per key — one per pass — all
+// bundled in `PartitionPipelines` so a single `Arc` clone returns the
+// whole set.
+
+pub struct PartitionPipelines {
+    pub flag_and_count: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    pub scan_blocks: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    pub scatter: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    pub spec: PartitionSpecKey,
+}
+
+// SAFETY: Metal protocol objects held here are thread-safe per Apple's
+// documentation; mutable cache state is `Mutex`-guarded.
+unsafe impl Send for PartitionPipelineCache {}
+// SAFETY: See Send impl.
+unsafe impl Sync for PartitionPipelineCache {}
+
+pub struct PartitionPipelineCache {
+    device: Retained<ProtocolObject<dyn MTLDevice>>,
+    library: Retained<ProtocolObject<dyn MTLLibrary>>,
+    archive: Option<Retained<ProtocolObject<dyn MTLBinaryArchive>>>,
+    archive_path: Option<PathBuf>,
+    dirty: Mutex<bool>,
+    entries: Mutex<HashMap<PartitionSpecKey, Arc<PartitionPipelines>>>,
+}
+
+impl PartitionPipelineCache {
+    pub fn new(
+        device: Retained<ProtocolObject<dyn MTLDevice>>,
+        capabilities: &MetalCapabilities,
+    ) -> Result<Self, String> {
+        let source = NSString::from_str(PARTITION_SHADER_SOURCE);
+        let library = device
+            .newLibraryWithSource_options_error(&source, None)
+            .map_err(|err| {
+                format!(
+                    "partition.metal library compile failed: {}",
+                    err.localizedDescription()
+                )
+            })?;
+
+        let (archive, archive_path) = open_or_create_partition_archive(&device, capabilities);
+
+        Ok(Self {
+            device,
+            library,
+            archive,
+            archive_path,
+            dirty: Mutex::new(false),
+            entries: Mutex::new(HashMap::new()),
+        })
+    }
+
+    pub fn get_or_build(&self, spec: PartitionSpecKey) -> Result<Arc<PartitionPipelines>, String> {
+        {
+            let entries = self
+                .entries
+                .lock()
+                .map_err(|_| "partition pipeline cache mutex poisoned".to_string())?;
+            if let Some(cached) = entries.get(&spec) {
+                return Ok(Arc::clone(cached));
+            }
+        }
+
+        let pipelines = self.build(spec)?;
+        let arc = Arc::new(pipelines);
+
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| "partition pipeline cache mutex poisoned".to_string())?;
+        let stored = entries.entry(spec).or_insert_with(|| Arc::clone(&arc));
+        Ok(Arc::clone(stored))
+    }
+
+    fn build(&self, spec: PartitionSpecKey) -> Result<PartitionPipelines, String> {
+        let constants = MTLFunctionConstantValues::new();
+        let block_size_cell: u32 = spec.block_size;
+        let split_kind_cell: u32 = spec.split_kind;
+        let bin_is_u16_cell: u8 = u8::from(spec.bin_is_u16);
+
+        // SAFETY: pointers are to live stack slots; indices 0/1/2
+        // match the `[[function_constant(N)]]` declarations in
+        // `shaders/partition.metal`.
+        unsafe {
+            constants.setConstantValue_type_atIndex(
+                NonNull::new_unchecked((&raw const block_size_cell) as *mut c_void),
+                MTLDataType::UInt,
+                0,
+            );
+            constants.setConstantValue_type_atIndex(
+                NonNull::new_unchecked((&raw const split_kind_cell) as *mut c_void),
+                MTLDataType::UInt,
+                1,
+            );
+            constants.setConstantValue_type_atIndex(
+                NonNull::new_unchecked((&raw const bin_is_u16_cell) as *mut c_void),
+                MTLDataType::Bool,
+                2,
+            );
+        }
+
+        let make_fn = |name: &str| -> Result<_, String> {
+            let ns_name = NSString::from_str(name);
+            self.library
+                .newFunctionWithName_constantValues_error(&ns_name, &constants)
+                .map_err(|err| {
+                    format!(
+                        "could not specialize `{name}`: {}",
+                        err.localizedDescription()
+                    )
+                })
+        };
+
+        let flag_fn = make_fn(KERNEL_NAME_PARTITION_FLAG_AND_COUNT)?;
+        let scan_fn = make_fn(KERNEL_NAME_PARTITION_SCAN_BLOCKS)?;
+        let scatter_fn = make_fn(KERNEL_NAME_PARTITION_SCATTER)?;
+
+        let mut descs: Vec<Retained<MTLComputePipelineDescriptor>> = Vec::new();
+        for f in [&flag_fn, &scan_fn, &scatter_fn] {
+            let d = MTLComputePipelineDescriptor::new();
+            d.setComputeFunction(Some(f));
+            if let Some(archive) = &self.archive {
+                let archive_obj: &ProtocolObject<dyn MTLBinaryArchive> = archive;
+                let archive_array = NSArray::from_slice(&[archive_obj]);
+                d.setBinaryArchives(Some(&archive_array));
+            }
+            descs.push(d);
+        }
+
+        let make_state = |idx: usize, label: &str| -> Result<_, String> {
+            self.device
+                .newComputePipelineStateWithDescriptor_options_reflection_error(
+                    &descs[idx],
+                    MTLPipelineOption::empty(),
+                    None,
+                )
+                .map_err(|err| {
+                    format!(
+                        "partition {label} pipeline creation failed: {}",
+                        err.localizedDescription()
+                    )
+                })
+        };
+
+        let flag_and_count = make_state(0, "flag_and_count")?;
+        let scan_blocks = make_state(1, "scan_blocks")?;
+        let scatter = make_state(2, "scatter")?;
+
+        if let Some(archive) = &self.archive {
+            let mut added_any = false;
+            for (idx, label) in [(0, "flag_and_count"), (1, "scan_blocks"), (2, "scatter")] {
+                match archive.addComputePipelineFunctionsWithDescriptor_error(&descs[idx]) {
+                    Ok(_) => added_any = true,
+                    Err(err) => eprintln!(
+                        "[alloygbm metal] warning: could not add partition {label} pipeline to archive: {}",
+                        err.localizedDescription()
+                    ),
+                }
+            }
+            if added_any && let Ok(mut dirty) = self.dirty.lock() {
+                *dirty = true;
+            }
+        }
+
+        Ok(PartitionPipelines {
+            flag_and_count,
+            scan_blocks,
+            scatter,
+            spec,
+        })
+    }
+}
+
+impl Drop for PartitionPipelineCache {
+    fn drop(&mut self) {
+        let (archive, path) = match (&self.archive, &self.archive_path) {
+            (Some(a), Some(p)) => (a, p),
+            _ => return,
+        };
+
+        let dirty = self.dirty.lock().map(|g| *g).unwrap_or(false);
+        if !dirty {
+            return;
+        }
+
+        let tmp_path = path.with_extension("metalarchive.tmp");
+        let tmp_nsstring = NSString::from_str(&tmp_path.to_string_lossy());
+        let tmp_url = NSURL::fileURLWithPath(&tmp_nsstring);
+
+        if let Err(err) = archive.serializeToURL_error(&tmp_url) {
+            eprintln!(
+                "[alloygbm metal] warning: could not serialize partition binary archive to {}: {}",
+                tmp_path.display(),
+                err.localizedDescription()
+            );
+            return;
+        }
+
+        if let Err(err) = std::fs::rename(&tmp_path, path) {
+            eprintln!(
+                "[alloygbm metal] warning: could not rename partition archive {} -> {}: {err}",
+                tmp_path.display(),
+                path.display()
+            );
+            let _ = std::fs::remove_file(&tmp_path);
+        }
+    }
+}
+
+fn partition_archive_filename(capabilities: &MetalCapabilities) -> String {
+    let family = if capabilities.metal4 {
+        "metal4"
+    } else if capabilities.apple7 {
+        "apple7"
+    } else {
+        "generic"
+    };
+    let device_slug = slugify_device_name(&capabilities.device_name);
+    format!("partition-pipelines-{family}-{device_slug}.metalarchive")
+}
+
+fn open_or_create_partition_archive(
+    device: &ProtocolObject<dyn MTLDevice>,
+    capabilities: &MetalCapabilities,
+) -> (
+    Option<Retained<ProtocolObject<dyn MTLBinaryArchive>>>,
+    Option<PathBuf>,
+) {
+    let Some(cache_dir) = user_cache_dir() else {
+        return (None, None);
+    };
+    if let Err(err) = std::fs::create_dir_all(&cache_dir) {
+        eprintln!(
+            "[alloygbm metal] warning: could not create cache dir {}: {err}",
+            cache_dir.display()
+        );
+        return (None, None);
+    }
+
+    let filename = partition_archive_filename(capabilities);
+    let archive_path = cache_dir.join(filename);
+
+    let descriptor = MTLBinaryArchiveDescriptor::new();
+    if archive_path.exists() {
+        let ns = NSString::from_str(&archive_path.to_string_lossy());
+        let url = NSURL::fileURLWithPath(&ns);
+        descriptor.setUrl(Some(&url));
+    }
+
+    match device.newBinaryArchiveWithDescriptor_error(&descriptor) {
+        Ok(archive) => (Some(archive), Some(archive_path)),
+        Err(err) => {
+            eprintln!(
+                "[alloygbm metal] warning: could not open partition binary archive at {}: {}. \
+                 Continuing without pipeline persistence.",
+                archive_path.display(),
+                err.localizedDescription()
+            );
+            if archive_path.exists() {
+                let _ = std::fs::remove_file(&archive_path);
+            }
+            let fresh_descriptor = MTLBinaryArchiveDescriptor::new();
+            match device.newBinaryArchiveWithDescriptor_error(&fresh_descriptor) {
+                Ok(archive) => (Some(archive), Some(archive_path)),
+                Err(err2) => {
+                    eprintln!(
+                        "[alloygbm metal] warning: could not create empty partition binary archive: {}",
+                        err2.localizedDescription()
+                    );
+                    (None, None)
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// S3.6 — SubtractPipelineCache
+// ---------------------------------------------------------------------
+//
+// Mirrors `HistogramPipelineCache` / `SplitPipelineCache` /
+// `PartitionPipelineCache` but compiles `shaders/subtract.metal` and
+// specializes on a single function constant (`BLOCK_SIZE`). Separate
+// on-disk archive file so the four caches never contend on the same
+// `MTLBinaryArchive` object.
+
+pub struct SubtractPipelines {
+    pub subtract: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    pub spec: SubtractSpecKey,
+}
+
+// SAFETY: Metal protocol objects held here are thread-safe per Apple's
+// documentation; mutable cache state is `Mutex`-guarded.
+unsafe impl Send for SubtractPipelineCache {}
+// SAFETY: See Send impl.
+unsafe impl Sync for SubtractPipelineCache {}
+
+pub struct SubtractPipelineCache {
+    device: Retained<ProtocolObject<dyn MTLDevice>>,
+    library: Retained<ProtocolObject<dyn MTLLibrary>>,
+    archive: Option<Retained<ProtocolObject<dyn MTLBinaryArchive>>>,
+    archive_path: Option<PathBuf>,
+    dirty: Mutex<bool>,
+    entries: Mutex<HashMap<SubtractSpecKey, Arc<SubtractPipelines>>>,
+}
+
+impl SubtractPipelineCache {
+    pub fn new(
+        device: Retained<ProtocolObject<dyn MTLDevice>>,
+        capabilities: &MetalCapabilities,
+    ) -> Result<Self, String> {
+        let source = NSString::from_str(SUBTRACT_SHADER_SOURCE);
+        let library = device
+            .newLibraryWithSource_options_error(&source, None)
+            .map_err(|err| {
+                format!(
+                    "subtract.metal library compile failed: {}",
+                    err.localizedDescription()
+                )
+            })?;
+
+        let (archive, archive_path) = open_or_create_subtract_archive(&device, capabilities);
+
+        Ok(Self {
+            device,
+            library,
+            archive,
+            archive_path,
+            dirty: Mutex::new(false),
+            entries: Mutex::new(HashMap::new()),
+        })
+    }
+
+    pub fn get_or_build(&self, spec: SubtractSpecKey) -> Result<Arc<SubtractPipelines>, String> {
+        {
+            let entries = self
+                .entries
+                .lock()
+                .map_err(|_| "subtract pipeline cache mutex poisoned".to_string())?;
+            if let Some(cached) = entries.get(&spec) {
+                return Ok(Arc::clone(cached));
+            }
+        }
+
+        let pipelines = self.build(spec)?;
+        let arc = Arc::new(pipelines);
+
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| "subtract pipeline cache mutex poisoned".to_string())?;
+        let stored = entries.entry(spec).or_insert_with(|| Arc::clone(&arc));
+        Ok(Arc::clone(stored))
+    }
+
+    fn build(&self, spec: SubtractSpecKey) -> Result<SubtractPipelines, String> {
+        let constants = MTLFunctionConstantValues::new();
+        let block_size_cell: u32 = spec.block_size;
+
+        // SAFETY: `block_size_cell` is a live stack slot whose size and
+        // alignment match `MTLDataType::UInt`; index 0 matches the
+        // `[[function_constant(0)]]` declaration in
+        // `shaders/subtract.metal`.
+        unsafe {
+            constants.setConstantValue_type_atIndex(
+                NonNull::new_unchecked((&raw const block_size_cell) as *mut c_void),
+                MTLDataType::UInt,
+                0,
+            );
+        }
+
+        let fn_name = NSString::from_str(KERNEL_NAME_SUBTRACT);
+        let subtract_fn = self
+            .library
+            .newFunctionWithName_constantValues_error(&fn_name, &constants)
+            .map_err(|err| {
+                format!(
+                    "could not specialize `{KERNEL_NAME_SUBTRACT}`: {}",
+                    err.localizedDescription()
+                )
+            })?;
+
+        let desc = MTLComputePipelineDescriptor::new();
+        desc.setComputeFunction(Some(&subtract_fn));
+
+        if let Some(archive) = &self.archive {
+            let archive_obj: &ProtocolObject<dyn MTLBinaryArchive> = archive;
+            let archive_array = NSArray::from_slice(&[archive_obj]);
+            desc.setBinaryArchives(Some(&archive_array));
+        }
+
+        let subtract = self
+            .device
+            .newComputePipelineStateWithDescriptor_options_reflection_error(
+                &desc,
+                MTLPipelineOption::empty(),
+                None,
+            )
+            .map_err(|err| {
+                format!(
+                    "subtract pipeline creation failed: {}",
+                    err.localizedDescription()
+                )
+            })?;
+
+        if let Some(archive) = &self.archive {
+            if let Err(err) = archive.addComputePipelineFunctionsWithDescriptor_error(&desc) {
+                eprintln!(
+                    "[alloygbm metal] warning: could not add subtract pipeline to archive: {}",
+                    err.localizedDescription()
+                );
+            } else if let Ok(mut dirty) = self.dirty.lock() {
+                *dirty = true;
+            }
+        }
+
+        Ok(SubtractPipelines { subtract, spec })
+    }
+}
+
+impl Drop for SubtractPipelineCache {
+    fn drop(&mut self) {
+        let (archive, path) = match (&self.archive, &self.archive_path) {
+            (Some(a), Some(p)) => (a, p),
+            _ => return,
+        };
+
+        let dirty = self.dirty.lock().map(|g| *g).unwrap_or(false);
+        if !dirty {
+            return;
+        }
+
+        let tmp_path = path.with_extension("metalarchive.tmp");
+        let tmp_nsstring = NSString::from_str(&tmp_path.to_string_lossy());
+        let tmp_url = NSURL::fileURLWithPath(&tmp_nsstring);
+
+        if let Err(err) = archive.serializeToURL_error(&tmp_url) {
+            eprintln!(
+                "[alloygbm metal] warning: could not serialize subtract binary archive to {}: {}",
+                tmp_path.display(),
+                err.localizedDescription()
+            );
+            return;
+        }
+
+        if let Err(err) = std::fs::rename(&tmp_path, path) {
+            eprintln!(
+                "[alloygbm metal] warning: could not rename subtract archive {} -> {}: {err}",
+                tmp_path.display(),
+                path.display()
+            );
+            let _ = std::fs::remove_file(&tmp_path);
+        }
+    }
+}
+
+fn subtract_archive_filename(capabilities: &MetalCapabilities) -> String {
+    let family = if capabilities.metal4 {
+        "metal4"
+    } else if capabilities.apple7 {
+        "apple7"
+    } else {
+        "generic"
+    };
+    let device_slug = slugify_device_name(&capabilities.device_name);
+    format!("subtract-pipelines-{family}-{device_slug}.metalarchive")
+}
+
+fn open_or_create_subtract_archive(
+    device: &ProtocolObject<dyn MTLDevice>,
+    capabilities: &MetalCapabilities,
+) -> (
+    Option<Retained<ProtocolObject<dyn MTLBinaryArchive>>>,
+    Option<PathBuf>,
+) {
+    let Some(cache_dir) = user_cache_dir() else {
+        return (None, None);
+    };
+    if let Err(err) = std::fs::create_dir_all(&cache_dir) {
+        eprintln!(
+            "[alloygbm metal] warning: could not create cache dir {}: {err}",
+            cache_dir.display()
+        );
+        return (None, None);
+    }
+
+    let filename = subtract_archive_filename(capabilities);
+    let archive_path = cache_dir.join(filename);
+
+    let descriptor = MTLBinaryArchiveDescriptor::new();
+    if archive_path.exists() {
+        let ns = NSString::from_str(&archive_path.to_string_lossy());
+        let url = NSURL::fileURLWithPath(&ns);
+        descriptor.setUrl(Some(&url));
+    }
+
+    match device.newBinaryArchiveWithDescriptor_error(&descriptor) {
+        Ok(archive) => (Some(archive), Some(archive_path)),
+        Err(err) => {
+            eprintln!(
+                "[alloygbm metal] warning: could not open subtract binary archive at {}: {}. \
+                 Continuing without pipeline persistence.",
+                archive_path.display(),
+                err.localizedDescription()
+            );
+            if archive_path.exists() {
+                let _ = std::fs::remove_file(&archive_path);
+            }
+            let fresh_descriptor = MTLBinaryArchiveDescriptor::new();
+            match device.newBinaryArchiveWithDescriptor_error(&fresh_descriptor) {
+                Ok(archive) => (Some(archive), Some(archive_path)),
+                Err(err2) => {
+                    eprintln!(
+                        "[alloygbm metal] warning: could not create empty subtract binary archive: {}",
+                        err2.localizedDescription()
+                    );
+                    (None, None)
+                }
+            }
+        }
     }
 }
 

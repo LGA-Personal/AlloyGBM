@@ -1,6 +1,6 @@
 use alloygbm_core::{
     BinnedMatrix, Device, FeatureHistogram, FeatureTile, GradientPair, HistogramBin,
-    HistogramBundle, NodeSlice, NodeStats, PartitionResult, SplitCandidate,
+    HistogramBundle, NodeSlice, NodeStats, PartitionResult, RowIndexStorage, SplitCandidate,
 };
 use alloygbm_engine::{
     BackendOps, CategoricalFeatureInfo, EngineError, EngineResult, SplitSelectionOptions,
@@ -154,7 +154,7 @@ impl CpuBackend {
             if use_col_major {
                 // Column-major: sequential bin reads — cache-friendly
                 let col_base = feature_index * row_count;
-                for &row_index in &node.row_indices {
+                for &row_index in node.row_indices() {
                     let row_index = row_index as usize;
                     let bin_index = binned_matrix.col_bin(col_base + row_index) as usize;
                     let gradient = gradients[row_index];
@@ -164,7 +164,7 @@ impl CpuBackend {
                     target_bin.count += 1;
                 }
             } else {
-                for &row_index in &node.row_indices {
+                for &row_index in node.row_indices() {
                     let row_index = row_index as usize;
                     let cell_index = row_index * binned_matrix.feature_count + feature_index;
                     let bin_index = binned_matrix.row_bin(cell_index) as usize;
@@ -194,7 +194,7 @@ impl CpuBackend {
     ) {
         let tile_feature_count = end_feature - start_feature;
 
-        for &row_index in &node.row_indices {
+        for &row_index in node.row_indices() {
             let row_index = row_index as usize;
             let row_base = row_index * binned_matrix.feature_count + start_feature;
             let gradient = gradients[row_index];
@@ -236,10 +236,10 @@ impl CpuBackend {
         let start_feature = tile.start_feature as usize;
         let end_feature = tile.end_feature as usize;
         let tile_feature_count = end_feature - start_feature;
-        let tile_workload = node.row_indices.len().saturating_mul(tile_feature_count);
+        let tile_workload = node.row_count().saturating_mul(tile_feature_count);
         let mut feature_histograms = Vec::with_capacity(tile_feature_count);
 
-        match Self::select_histogram_kernel_path(node.row_indices.len(), tile_workload, bin_count) {
+        match Self::select_histogram_kernel_path(node.row_count(), tile_workload, bin_count) {
             HistogramKernelPath::TinyNodeScalar | HistogramKernelPath::BinHeavyPerFeatureScalar => {
                 Self::build_tile_histograms_per_feature(
                     binned_matrix,
@@ -341,10 +341,7 @@ impl CpuBackend {
             }
         }
 
-        Ok(HistogramBundle {
-            node_id: node.node_id,
-            feature_histograms,
-        })
+        Ok(HistogramBundle::from_cpu(node.node_id, feature_histograms))
     }
 
     fn build_tile_histograms_row_first_unrolled(
@@ -359,7 +356,7 @@ impl CpuBackend {
         let feature_count = binned_matrix.feature_count;
 
         // Process rows in 8-wide chunks to improve instruction-level parallelism.
-        let mut row_chunks = node.row_indices.chunks_exact(8);
+        let mut row_chunks = node.row_indices().chunks_exact(8);
         for row_chunk in &mut row_chunks {
             let row0 = row_chunk[0] as usize;
             let row1 = row_chunk[1] as usize;
@@ -807,30 +804,23 @@ impl CpuBackend {
             }
         };
 
-        if histograms.feature_histograms.len() >= Self::PARALLEL_SPLIT_FEATURE_THRESHOLD {
-            histograms
-                .feature_histograms
-                .par_iter()
-                .filter_map(&find_best)
-                .reduce_with(|a, b| {
-                    if weighted_gain(&b) > weighted_gain(&a) {
-                        b
-                    } else {
-                        a
-                    }
-                })
+        let fhs = histograms.feature_histograms();
+        if fhs.len() >= Self::PARALLEL_SPLIT_FEATURE_THRESHOLD {
+            fhs.par_iter().filter_map(&find_best).reduce_with(|a, b| {
+                if weighted_gain(&b) > weighted_gain(&a) {
+                    b
+                } else {
+                    a
+                }
+            })
         } else {
-            histograms
-                .feature_histograms
-                .iter()
-                .filter_map(&find_best)
-                .reduce(|a, b| {
-                    if weighted_gain(&b) > weighted_gain(&a) {
-                        b
-                    } else {
-                        a
-                    }
-                })
+            fhs.iter().filter_map(&find_best).reduce(|a, b| {
+                if weighted_gain(&b) > weighted_gain(&a) {
+                    b
+                } else {
+                    a
+                }
+            })
         }
     }
 
@@ -841,9 +831,9 @@ impl CpuBackend {
         split: &SplitCandidate,
     ) -> EngineResult<(PartitionResult, NodeStats, NodeStats)> {
         type ChunkResult = (Vec<u32>, Vec<u32>, f32, f32, f32, f32);
-        let chunk_size = (node.row_indices.len() / rayon::current_num_threads().max(1)).max(4096);
+        let chunk_size = (node.row_count() / rayon::current_num_threads().max(1)).max(4096);
         let chunk_results: Vec<ChunkResult> = node
-            .row_indices
+            .row_indices()
             .par_chunks(chunk_size)
             .map(|chunk| {
                 let mut left = Vec::new();
@@ -879,7 +869,7 @@ impl CpuBackend {
             })
             .collect();
 
-        let total_rows = node.row_indices.len();
+        let total_rows = node.row_count();
         let mut left_row_indices = Vec::with_capacity(total_rows / 2);
         let mut right_row_indices = Vec::with_capacity(total_rows / 2);
         let mut left_grad_sum = 0.0_f32;
@@ -899,10 +889,7 @@ impl CpuBackend {
         let left_count = left_row_indices.len() as u32;
         let right_count = right_row_indices.len() as u32;
         Ok((
-            PartitionResult {
-                left_row_indices,
-                right_row_indices,
-            },
+            PartitionResult::from_cpu(left_row_indices, right_row_indices),
             NodeStats {
                 grad_sum: left_grad_sum,
                 hess_sum: left_hess_sum,
@@ -964,7 +951,7 @@ impl BackendOps for CpuBackend {
             .sum();
         let parallel_tiles = Self::should_parallelize_tiles(
             feature_tiles.len(),
-            node.row_indices.len(),
+            node.row_count(),
             selected_feature_count,
         );
         Self::build_histograms_internal(
@@ -1020,7 +1007,7 @@ impl BackendOps for CpuBackend {
         let use_col_major = binned_matrix.has_col_major();
         let col_base = feature_index * binned_matrix.row_count;
         let missing = binned_matrix.missing_bin();
-        for &row_index in &node.row_indices {
+        for &row_index in node.row_indices() {
             let row_index = row_index as usize;
             let bin_val = if use_col_major {
                 binned_matrix.col_bin(col_base + row_index)
@@ -1035,10 +1022,10 @@ impl BackendOps for CpuBackend {
             }
         }
 
-        Ok(PartitionResult {
+        Ok(PartitionResult::from_cpu(
             left_row_indices,
             right_row_indices,
-        })
+        ))
     }
 
     fn apply_split_with_stats(
@@ -1065,12 +1052,12 @@ impl BackendOps for CpuBackend {
 
         const PARALLEL_PARTITION_THRESHOLD: usize = 50_000;
 
-        if node.row_indices.len() >= PARALLEL_PARTITION_THRESHOLD {
+        if node.row_count() >= PARALLEL_PARTITION_THRESHOLD {
             return Self::apply_split_with_stats_parallel(binned_matrix, gradients, node, split);
         }
 
-        let mut left_row_indices = Vec::with_capacity(node.row_indices.len() / 2);
-        let mut right_row_indices = Vec::with_capacity(node.row_indices.len() / 2);
+        let mut left_row_indices = Vec::with_capacity(node.row_count() / 2);
+        let mut right_row_indices = Vec::with_capacity(node.row_count() / 2);
         let mut left_grad_sum = 0.0_f32;
         let mut left_hess_sum = 0.0_f32;
         let mut right_grad_sum = 0.0_f32;
@@ -1080,7 +1067,7 @@ impl BackendOps for CpuBackend {
         let use_col_major = binned_matrix.has_col_major();
         let col_base = feature_index * binned_matrix.row_count;
         let missing = binned_matrix.missing_bin();
-        for &row_index_u32 in &node.row_indices {
+        for &row_index_u32 in node.row_indices() {
             let row_index = row_index_u32 as usize;
             let bin_val = if use_col_major {
                 binned_matrix.col_bin(col_base + row_index)
@@ -1100,19 +1087,16 @@ impl BackendOps for CpuBackend {
             }
         }
 
-        let partition = PartitionResult {
-            left_row_indices,
-            right_row_indices,
-        };
+        let partition = PartitionResult::from_cpu(left_row_indices, right_row_indices);
         let left_stats = NodeStats {
             grad_sum: left_grad_sum,
             hess_sum: left_hess_sum,
-            row_count: partition.left_row_indices.len() as u32,
+            row_count: partition.left.len() as u32,
         };
         let right_stats = NodeStats {
             grad_sum: right_grad_sum,
             hess_sum: right_hess_sum,
-            row_count: partition.right_row_indices.len() as u32,
+            row_count: partition.right.len() as u32,
         };
 
         Ok((partition, left_stats, right_stats))
@@ -1121,8 +1105,17 @@ impl BackendOps for CpuBackend {
     fn reduce_sums(
         &self,
         gradients: &[GradientPair],
-        row_indices: &[u32],
+        rows: &RowIndexStorage,
     ) -> EngineResult<NodeStats> {
+        // S3.2 — accept `&RowIndexStorage`. CpuBackend only handles the
+        // `Cpu(..)` arm; a `Gpu(..)` variant reaching this method is a
+        // contract violation (MetalBackend overrides reduce_sums before
+        // it ever produces a GPU-resident arm, as of S3.7).
+        let row_indices = rows.cpu().ok_or_else(|| {
+            EngineError::ContractViolation(
+                "CpuBackend::reduce_sums requires CPU-resident row indices".to_string(),
+            )
+        })?;
         if row_indices.is_empty() {
             return Err(EngineError::ContractViolation(
                 "row_indices cannot be empty".to_string(),
@@ -1294,8 +1287,9 @@ mod tests {
             )
             .expect("histograms should build");
 
-        assert_eq!(histograms.feature_histograms.len(), 2);
-        let feature0 = &histograms.feature_histograms[0];
+        let fhs = histograms.feature_histograms();
+        assert_eq!(fhs.len(), 2);
+        let feature0 = &fhs[0];
         assert_eq!(feature0.feature_index, 0);
         assert_eq!(feature0.bins.len(), 4);
         assert_eq!(feature0.bins[0].count, 1);
@@ -1612,9 +1606,9 @@ mod tests {
     #[test]
     fn best_split_with_min_leaf_magnitude_skips_weak_leaf_updates() {
         let backend = CpuBackend;
-        let histograms = HistogramBundle {
-            node_id: 0,
-            feature_histograms: vec![
+        let histograms = HistogramBundle::from_cpu(
+            0,
+            vec![
                 FeatureHistogram {
                     feature_index: 0,
                     bins: vec![
@@ -1656,7 +1650,7 @@ mod tests {
                     ],
                 },
             ],
-        };
+        );
 
         let unfiltered = backend
             .best_split(&histograms)
@@ -1709,8 +1703,8 @@ mod tests {
             .apply_split(&sample_binned_matrix(), &sample_node(), &split)
             .expect("partition should succeed");
 
-        assert_eq!(partition.left_row_indices, vec![0, 1]);
-        assert_eq!(partition.right_row_indices, vec![2, 3]);
+        assert_eq!(partition.left_row_indices(), &[0, 1]);
+        assert_eq!(partition.right_row_indices(), &[2, 3]);
     }
 
     #[test]
@@ -1746,10 +1740,10 @@ mod tests {
             .apply_split(&matrix, &node, &split)
             .expect("reference split should succeed");
         let reference_left = backend
-            .reduce_sums(&gradients, &reference_partition.left_row_indices)
+            .reduce_sums(&gradients, &reference_partition.left)
             .expect("reference left reduction should succeed");
         let reference_right = backend
-            .reduce_sums(&gradients, &reference_partition.right_row_indices)
+            .reduce_sums(&gradients, &reference_partition.right)
             .expect("reference right reduction should succeed");
 
         assert_eq!(partition, reference_partition);
@@ -1761,7 +1755,7 @@ mod tests {
     fn reduce_sums_aggregates_requested_rows() {
         let backend = CpuBackend;
         let stats = backend
-            .reduce_sums(&sample_gradients(), &[0, 3])
+            .reduce_sums(&sample_gradients(), &RowIndexStorage::Cpu(vec![0, 3]))
             .expect("reductions should succeed");
         assert_eq!(stats.row_count, 2);
         assert!(stats.grad_sum.abs() < 1e-6);
@@ -1946,17 +1940,14 @@ mod tests {
             },
         };
 
-        let node_slice = NodeSlice {
-            node_id: 0,
-            row_indices: (0..6).collect(),
-        };
+        let node_slice = NodeSlice::new(0, (0..6).collect()).expect("node slice is valid");
 
         let backend = CpuBackend;
         let partition = backend
             .apply_split(&binned, &node_slice, &split)
             .expect("partition should succeed");
-        let left = &partition.left_row_indices;
-        let right = &partition.right_row_indices;
+        let left = partition.left_row_indices();
+        let right = partition.right_row_indices();
         // Rows with bin 0 or 1 go left, rows with bin 2 go right
         assert_eq!(left.len(), 4, "categories 0,1 should go left");
         assert_eq!(right.len(), 2, "category 2 should go right");
