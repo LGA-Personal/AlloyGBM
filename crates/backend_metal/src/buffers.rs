@@ -59,6 +59,15 @@ pub(crate) struct BufferCache {
     binned: Mutex<Option<CachedBinned>>,
     gradients: Mutex<Option<ReusableSlot>>,
     row_indices: Mutex<Option<ReusableSlot>>,
+    // S2.3 — persistent input slots for the split kernel. Grad / hess /
+    // counts here hold the flattened `[n_features × bin_count]` SoA
+    // view of the HistogramBundle. Because the bundle is fresh per
+    // node, we only reuse the allocation (not the contents); the
+    // write happens per-call.
+    split_grad: Mutex<Option<ReusableSlot>>,
+    split_hess: Mutex<Option<ReusableSlot>>,
+    split_counts: Mutex<Option<ReusableSlot>>,
+    continuous_mask: Mutex<Option<ReusableSlot>>,
 }
 
 // SAFETY: all mutable state is behind Mutex. The Retained<ProtocolObject>
@@ -73,6 +82,10 @@ impl BufferCache {
             binned: Mutex::new(None),
             gradients: Mutex::new(None),
             row_indices: Mutex::new(None),
+            split_grad: Mutex::new(None),
+            split_hess: Mutex::new(None),
+            split_counts: Mutex::new(None),
+            continuous_mask: Mutex::new(None),
         }
     }
 
@@ -143,6 +156,58 @@ impl BufferCache {
     ) -> EngineResult<Retained<ProtocolObject<dyn MTLBuffer>>> {
         let mut guard = self.row_indices.lock().map_err(|e| {
             EngineError::BackendUnavailable(format!("row-indices slot cache poisoned: {e}"))
+        })?;
+        write_into_slot(device, &mut guard, data)
+    }
+
+    /// Split-kernel grad-sum input slot (f32, [n_features × bin_count]).
+    #[allow(unsafe_code)]
+    pub(crate) fn write_split_grad<T: Copy>(
+        &self,
+        device: &ProtocolObject<dyn MTLDevice>,
+        data: &[T],
+    ) -> EngineResult<Retained<ProtocolObject<dyn MTLBuffer>>> {
+        let mut guard = self.split_grad.lock().map_err(|e| {
+            EngineError::BackendUnavailable(format!("split_grad slot cache poisoned: {e}"))
+        })?;
+        write_into_slot(device, &mut guard, data)
+    }
+
+    /// Split-kernel hess-sum input slot (f32, [n_features × bin_count]).
+    #[allow(unsafe_code)]
+    pub(crate) fn write_split_hess<T: Copy>(
+        &self,
+        device: &ProtocolObject<dyn MTLDevice>,
+        data: &[T],
+    ) -> EngineResult<Retained<ProtocolObject<dyn MTLBuffer>>> {
+        let mut guard = self.split_hess.lock().map_err(|e| {
+            EngineError::BackendUnavailable(format!("split_hess slot cache poisoned: {e}"))
+        })?;
+        write_into_slot(device, &mut guard, data)
+    }
+
+    /// Split-kernel counts input slot (u32, [n_features × bin_count]).
+    #[allow(unsafe_code)]
+    pub(crate) fn write_split_counts<T: Copy>(
+        &self,
+        device: &ProtocolObject<dyn MTLDevice>,
+        data: &[T],
+    ) -> EngineResult<Retained<ProtocolObject<dyn MTLBuffer>>> {
+        let mut guard = self.split_counts.lock().map_err(|e| {
+            EngineError::BackendUnavailable(format!("split_counts slot cache poisoned: {e}"))
+        })?;
+        write_into_slot(device, &mut guard, data)
+    }
+
+    /// Continuous-feature-mask slot (u8, [n_features]; 1 = continuous).
+    #[allow(unsafe_code)]
+    pub(crate) fn write_continuous_mask<T: Copy>(
+        &self,
+        device: &ProtocolObject<dyn MTLDevice>,
+        data: &[T],
+    ) -> EngineResult<Retained<ProtocolObject<dyn MTLBuffer>>> {
+        let mut guard = self.continuous_mask.lock().map_err(|e| {
+            EngineError::BackendUnavailable(format!("continuous_mask slot cache poisoned: {e}"))
         })?;
         write_into_slot(device, &mut guard, data)
     }
