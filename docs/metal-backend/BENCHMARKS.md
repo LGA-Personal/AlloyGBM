@@ -127,3 +127,96 @@ corner alone is ~40 GB of float32 storage, above the default
 on a 64 GB host to fill in that corner. Expect the crossover still
 not to happen in Stage 1 — that would contradict the `metal_friendly`
 result and deserve investigation.
+
+## 2026-04-20 — Apple M4 (Stage 2 baseline)
+
+- Host: Apple M4 (Apple7 baseline only; no Metal 4)
+- `AlloyGBM` build: `charming-carson-d08c9a` with the Stage 1
+  histogram kernel **plus** the Stage 2 `best_split_per_feature`
+  kernel (S2.1–S2.6 shipped). The split kernel runs once per
+  node per level; cross-feature argmax lives on the CPU with
+  `feature_weights` weighting.
+- Otherwise identical to the Stage 1 run above (same defaults,
+  same Metal 3 baseline path, same `BufferCache` reuse).
+- All 30 Metal-gated Python tests (including 8 new Stage 2
+  cases) pass; Stage 1's golden 50k × 100 × 255 × 20 test
+  retains bit-exact prediction equality to CPU at that shape.
+
+### `shape_grid` — regression, (rows × features)
+
+| rows      | features | input MiB |   cpu   |  metal  | speedup |
+|----------:|---------:|----------:|--------:|--------:|--------:|
+|    10,000 |       10 |         0 |     7ms |   150ms |   0.05x |
+|    10,000 |      100 |         4 |    37ms |   556ms |   0.07x |
+|    10,000 |    1,000 |        38 |   143ms |   4.47s |   0.03x |
+|   100,000 |       10 |         4 |    39ms |   265ms |   0.15x |
+|   100,000 |      100 |        38 |   132ms |   2.11s |   0.06x |
+|   100,000 |    1,000 |       381 |   876ms |   17.8s |   0.05x |
+| 1,000,000 |       10 |        38 |   364ms |   1.46s |   0.25x |
+| 1,000,000 |      100 |       381 |   1.20s |   9.60s |   0.12x |
+| 1,000,000 |    1,000 |     3,815 |   13.6s |   82.7s |   0.16x |
+
+### `metal_friendly`
+
+| task         |    rows | features | depth |  bins |   cpu   |  metal  | speedup |
+|:-------------|--------:|---------:|------:|------:|--------:|--------:|--------:|
+| regression   | 200,000 |      200 |     8 |   255 |   646ms |   10.5s |   0.06x |
+| regression   | 200,000 |      200 |    10 |   255 |   1.15s |   19.0s |   0.06x |
+| regression   | 200,000 |      200 |     6 | 1,024 |   502ms |   7.42s |   0.07x |
+| multiclass_3 | 100,000 |      100 |     8 |   255 |   726ms |   9.18s |   0.08x |
+| multiclass_10| 100,000 |      100 |     8 |   255 |   1.83s |   29.5s |   0.06x |
+
+### Interpretation — crossover not yet achieved
+
+The plan projected Stage 2 crossing `>1.0×` on
+`metal_friendly`'s two deepest configurations (depth-10 regression,
+K=10 multiclass). It did not. Stage 2 numbers are within noise of
+Stage 1 — the whole-fit ratios moved by at most 0.01–0.03× either
+direction across the grid, inside the run-to-run jitter.
+
+Hypothesis (consistent with the Stage 2 scope decisions documented
+in `DECISIONS.md`): **per-node GPU dispatch overhead plus
+HistogramBundle memcpy to GPU per `best_split` call now dominate
+the CPU savings**. At `max_depth=10` with `n_features=200`, each
+tree fires up to `2^10 = 1024` per-node dispatches, each of which
+memcpys the `[n_features × n_bins]` grad / hess / count flat
+arrays onto the shared buffer. That alone is ~5 MiB × ~5000 calls
+≈ 25 GiB of memcpy per fit at the depth-10 × 200-feature shape;
+on top of the ~10–50 μs/dispatch fixed latency.
+
+Stage 2 shipped its scope decisions (§DECISIONS.md D-013 + D-014)
+that explicitly deferred the two biggest levers toward crossover:
+
+- **`subtract_histogram_bundle` stays on CPU.** A Stage 2 GPU
+  subtract would have required histograms to live on GPU across
+  calls — which itself requires the Stage 3 surface change of
+  passing handles instead of owned `HistogramBundle`s.
+- **Row partitioning stays on CPU.** Stage 3's GPU-side
+  stream-compaction is what makes GPU-resident histograms
+  pay off at all.
+
+Taken together, Stage 2 moved one of the per-level CPU operations
+(split finding) onto GPU without being able to *eliminate* the
+per-level CPU round-trip. The memcpy + dispatch tax grew by the
+same fraction that the compute saved. Net ≈ wash.
+
+**Conclusion for this stage:** Stage 2 is infrastructural value
+only, same as Stage 1. The decisive win is now architecturally
+gated on **Stage 3's GPU row partitioning + Metal 4 ICBs**, which
+together let the whole per-level loop stay GPU-resident between
+round boundaries. `device="cpu"` remains the correct default for
+every shape in this grid.
+
+### What did *not* regress
+
+- Correctness: 30/30 Metal-gated Python tests pass, including
+  Stage 1's golden 50k × 100 × 255 × 20 bit-exact prediction test
+  and Stage 2's new regression / binary / ranker / NaN / L1+L2 /
+  monotone parity cases.
+- Stage 1's warn-and-fallback path (`ALLOYGBM_METAL_DISABLE=1`)
+  still triggers cleanly; the estimator's `device` attribute is
+  still preserved through pickle.
+- The `BufferCache` extension to cover the four new Stage 2 slots
+  (`split_grad`, `split_hess`, `split_counts`, `continuous_mask`)
+  inherits the same zero-reallocation pattern: the allocations
+  grow once and get memcpy'd on subsequent calls.

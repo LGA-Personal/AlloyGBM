@@ -4,41 +4,59 @@ Last updated for v0.3.2.
 
 ## Remaining Limitations
 
-### 1. Metal Backend is Infrastructural (Stage 1)
+### 1. Metal Backend is Infrastructural (through Stage 2)
 
 The `BackendOps` trait is designed for hardware abstraction. Two backends
 now exist: the default `CpuBackend` and an Apple-Silicon `MetalBackend`
-(macOS only, `device="metal"`). **At v0.3.2 the Metal backend is Stage 1:
-only histogram construction runs on the GPU; split finding, row
-partitioning, and prediction all still execute on the CPU backend.**
+(macOS only, `device="metal"`). **As of v0.3.2 the Metal backend is
+Stage 2: histogram construction *and* the per-node best-split finder
+run on the GPU; row partitioning, histogram subtraction, and prediction
+still execute on the CPU backend.** Categorical splits (Fisher-sort
+path) also stay on CPU — mixed continuous + categorical fits delegate
+the categorical features and combine candidates on the CPU side.
 
 **Recommendation:** leave `device="cpu"` (the default) for every real
-workload. The Stage 1 Metal path is slower end-to-end than CPU across
-every benchmarked configuration — see the M4 numbers in
+workload. Stage 2 did *not* achieve throughput crossover — the Metal
+path is still slower end-to-end than CPU across every benchmarked
+configuration. See the M4 numbers in
 [docs/metal-backend/BENCHMARKS.md](metal-backend/BENCHMARKS.md):
 
 - On the shape grid (regression, depth 6, 255 bins, 5 estimators),
-  whole-fit wall-clock runs **0.03× to 0.28× CPU speed** across
-  (10k, 100k, 1M) rows × (10, 100, 1000) features.
-- On the `metal_friendly` scenario (deep trees up to depth 10, up
-  to 1024 bins, multiclass with K=10 histograms per round —
-  configurations theoretically most favourable to Metal), wall-clock
-  still runs **0.06× to 0.09× CPU**. This confirms Stage 1 cannot
-  cross break-even on any realistic shape.
+  Stage 2 whole-fit wall-clock runs **0.03× to 0.25× CPU speed**
+  across (10k, 100k, 1M) rows × (10, 100, 1000) features.
+- On `metal_friendly` (deep trees up to depth 10, up to 1024 bins,
+  multiclass with K=10 histograms per round), Stage 2 still runs
+  **0.06× to 0.08× CPU**.
 
-This is expected: histogram acceleration alone only pays off once
-the histogram phase dominates the inner loop, and every boosting
-round currently round-trips through the CPU path for split finding
-and partitioning. Dispatch + per-level readback latency dominates
-at every shape tested.
+The Stage 2 numbers are within run-to-run jitter of the Stage 1
+baseline. The interpretation (see BENCHMARKS.md Stage 2 section):
+moving `best_split` onto the GPU without also moving the row
+partitioner and histogram residency means every per-node call still
+memcpys the `HistogramBundle` to the GPU and reads back a candidate.
+At depth 10 with 200 features this is on the order of 25 GiB of
+memcpy per fit, plus ~5000 dispatches of ~10–50 μs fixed latency.
+The CPU time saved on the split-finder compute is absorbed by the
+new dispatch-plus-memcpy tax.
 
-The decisive win arrives with Stage 2 (GPU best-split + histogram
-subtraction) and Stage 3 (GPU row partitioning + Metal 4 Indirect
-Command Buffers), which eliminate the per-level CPU round-trip. Until
-those land, `device="metal"` exists to prove the plumbing (bit-exact
-histograms vs CPU, warn-and-fallback, capability probe, pipeline
-caching) and to unblock the remaining stages — not to deliver
-throughput.
+The decisive throughput win is now architecturally gated on
+**Stage 3 (GPU row partitioning + Metal 4 Indirect Command Buffers)**,
+which keeps histograms resident on-device across levels and
+collapses the per-level CPU round-trip that Stage 2 on its own
+cannot close. Until Stage 3 lands, `device="metal"` exists to prove
+the plumbing (structural-plus-ulp-epsilon parity vs CPU on every
+objective, warn-and-fallback, capability probe, pipeline caching,
+per-call buffer reuse) and to unblock the remaining stages — not to
+deliver throughput.
+
+**Numerical parity.** Stage 2's split kernel uses SIMD
+`simd_prefix_inclusive_sum` + block-scan for gain accumulation,
+which is a tree reduction (not order-identical to the CPU's
+strict-ascending serial sweep). Predictions on the 50k × 100 × 255
+× 20 golden test still match CPU bit-exactly, but on tiny shapes
+(≤1024 rows) near-tied root-split gains can flip under the ulp
+drift — producing macroscopic prediction deltas (~0.1) on ≤0.1% of
+rows. See `docs/metal-backend/DECISIONS.md` D-013 for the gate
+relaxation details.
 
 **How to detect the backend.** `alloygbm.native_runtime_info()` exposes
 three fields for programmatic checks:

@@ -225,3 +225,142 @@ every cache-hit fast path that should be lock-free after `entries`
 read-lock returns an `Arc`); require callers to clone pipelines on
 demand (rejected — reintroduces the per-dispatch compile cost we
 just eliminated).
+
+---
+
+## D-011: Stage 2 defers GPU `subtract_histogram_bundle` to Stage 3
+
+Date: 2026-04-20
+Stage: S2 plan
+Decision: Keep `subtract_histogram_bundle` on the CPU in Stage 2.
+The Stage 2 plan had originally sketched GPU subtract as part of the
+incremental win; this ADR records the explicit deferral.
+
+Why: GPU subtract only becomes net-positive if the histograms stay
+GPU-resident across calls — otherwise the CPU→GPU memcpy + GPU→CPU
+readback of ~F×B floats per call dwarfs the F×B subtract it
+replaces. Passing histogram *handles* (not owned `HistogramBundle`
+values) across the `BackendOps` boundary is a surface change that
+naturally belongs with Stage 3, where Metal 4 ICBs and GPU row
+partitioning also require histograms to live on-device across
+levels. Shipping it in Stage 2 would either (a) force the engine
+refactor prematurely or (b) do the memcpy anyway and lose on every
+call.
+
+Alternatives considered: engine refactor to pass handles now
+(rejected — rushes the Stage 3 surface change without its
+correlated Stage 3 benefits); do GPU subtract with per-call
+memcpy (rejected — pessimises the common path); leave Stage 2
+incremental expectation at plan-original 2–3× (rejected — the
+deferral genuinely moves the ceiling down; the plan was updated
+to 1.5–2.5× to reflect reality).
+
+Consequence: Stage 2 captures GPU speedup on `best_split` only.
+See BENCHMARKS.md §"2026-04-20 — Apple M4 (Stage 2 baseline)" for
+the measured outcome — the deferral was a non-trivial ingredient
+in the Stage 2 crossover miss.
+
+---
+
+## D-012: Categorical features stay on CPU in Stage 2
+
+Date: 2026-04-20
+Stage: S2 plan
+Decision: `MetalBackend::best_split_with_options` partitions the
+feature set at call time — continuous features flow through the
+GPU split kernel; categorical features are delegated to the
+embedded `CpuBackend`'s Fisher-sort path
+(`best_split_for_categorical_feature`). Per-feature candidates are
+combined with `feature_weights` on the CPU at the end.
+
+Why: the categorical split-finder sorts categories by per-class
+score, then prefix-scans over sorted order to find the optimal
+binary partition (Fisher 1958). Sorting on-GPU with stable
+deterministic ordering, then doing a bin-conditional prefix scan,
+is a genuinely harder GPU problem than the continuous-scan split
+kernel — closer in shape to GPU radix-sort-then-scan primitives
+than to the simple SIMD block-scan the continuous kernel uses.
+The Fisher-sort variant ships in production at roughly the
+frequency categorical splits appear in real fits — which is to
+say, rarely enough that the CPU path handles it comfortably.
+
+Alternatives considered: GPU categorical kernel now (rejected —
+separate research problem, CPU path is adequate, Stage 2 is
+already scope-heavy); disable categorical splits when
+`device="metal"` (rejected — semantic break from the CPU path,
+user-visible regression); require users to move categoricals
+to `device="cpu"` manually (rejected — no-op of same cost
+compared to the in-process delegation we already have).
+
+Consequence: Stage 2 correctness test
+`best_split_with_categorical_feature_delegates_to_cpu` exercises
+the mixed-feature path. Pure-categorical models take the CPU
+fast path entirely; the GPU dispatch is skipped.
+
+---
+
+## D-013: Stage 2 relaxes the bit-exactness gate to structural-plus-ulp-epsilon
+
+Date: 2026-04-20
+Stage: S2.6
+Decision: Stage 2 replaces Stage 1's byte-identical-artifact gate
+with a two-layer gate:
+  (a) structural equivalence — same `(feature_index, threshold_bin,
+      default_left)` per split, enforced in Rust unit tests on
+      small well-conditioned fixtures (see `best_split_matches_cpu_*`
+      in `crates/backend_metal/src/lib.rs`);
+  (b) prediction equality within `atol=1e-5, rtol=1e-5` on the
+      50k × 100 × 255 × 20 golden shape, and within
+      `atol=0.1, rtol=0.1` on tiny shapes (≤1024 rows) where
+      near-tied root splits can flip winner under SIMD block-scan
+      reduction vs CPU serial sweep.
+
+Why: the split kernel accumulates `left_grad`, `left_hess`,
+`parent_gain_term` via SIMD `simd_prefix_inclusive_sum` + block-
+scan, which is a tree reduction — not order-identical to the
+CPU's strict left-to-right serial sum. At typical f32
+magnitudes this drifts by a few ulps; at tiny shapes the drift is
+enough to flip near-tied winners, which cascades into macroscopic
+prediction deltas (~0.1) in ≤0.10f rows. The full 50k × 100
+golden test still passes bit-exact `array_equal` predictions,
+confirming the kernel is correct where gains are comfortably
+separated — the structural-ulp gate catches the genuinely
+different regimes.
+
+Alternatives considered: lane-serial Phase 1 + Phase 2 in the
+kernel for exact CPU-match (rejected — defeats the GPU
+parallelism; single-lane walks of 256 bins × 200 features per
+dispatch are ~5× slower than the current block-scan); loosen the
+golden-shape tolerance to `1e-3` (rejected — masks genuine
+regressions; the empirical result is tighter and should be held
+to it); drop the Python parity tests entirely and rely on Rust
+unit tests (rejected — the Stage 1 golden framing
+(artifact-level + prediction-level) is user-observable and
+should remain a regression gate).
+
+---
+
+## D-014: Stage 2 split kernel uses a single dispatch with CPU cross-feature argmax
+
+Date: 2026-04-20
+Stage: S2.1/S2.2
+Decision: The approved plan sketched a two-dispatch design —
+Dispatch 1 computed per-feature candidates, Dispatch 2 ran a
+cross-feature argmax. The shipped implementation collapses this
+into a single kernel + CPU-side argmax.
+
+Why: `n_features` per call is at most a few thousand in
+realistic fits; the per-feature `FeatureSplitCandidate` is 40
+bytes; the readback is ~40 KiB per call, negligible next to the
+much-bigger `HistogramBundle` memcpy. A second dispatch costs
+~10–50 μs of fixed latency on M4 — the same order as the argmax
+it saves. The CPU-side argmax also lets us apply
+`feature_weights` (`weighted_gain = gain * weight`) in the place
+where the weights are already owned; a GPU version would need a
+third buffer slot.
+
+Alternatives considered: follow the plan's two-dispatch design
+(rejected — measurably slower at realistic `n_features`;
+refactor surface kept for Stage 3 if residency justifies it);
+do argmax on-CPU but keep a second dispatch for the
+feature-weight multiply (rejected — pure overhead).
