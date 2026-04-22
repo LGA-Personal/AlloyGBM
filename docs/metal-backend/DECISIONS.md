@@ -364,3 +364,174 @@ Alternatives considered: follow the plan's two-dispatch design
 refactor surface kept for Stage 3 if residency justifies it);
 do argmax on-CPU but keep a second dispatch for the
 feature-weight multiply (rejected — pure overhead).
+
+---
+
+## D-015: Enum-variant storage API for GPU residency (`HistogramStorage`, `RowIndexStorage`)
+
+Date: 2026-04-21
+Stage: S3 plan / S3.1
+Decision: `HistogramBundle` and row-index carriers gain a
+`storage: HistogramStorage` / `rows: RowIndexStorage` field whose
+variants are `Cpu(...)` (today's owned `Vec<...>` payload) and
+`Gpu { handle, shape }` (opaque `u64` newtype handle plus the
+shape metadata the engine needs for pattern-matching on the
+variant). Every engine field-read pattern-matches on the variant;
+the CPU backend only ever populates `Cpu(..)`; the Metal backend
+returns `Gpu(..)` once residency is wired (S3.7c+d).
+
+Why: the competing design (β) added a *parallel* `GpuHandle`
+type alongside existing owned types with an `.as_cpu()` escape
+hatch. That escape hatch silently re-introduces the GPU→CPU
+memcpy that Stage 3 exists to eliminate — any trainer site that
+reaches for `.as_cpu()` unknowingly defeats the whole
+architectural change. Enum variants put the type system in
+charge of that invariant: a `Gpu(..)` arm cannot be read as a
+Cpu payload without explicit pattern matching, so every new
+call site visibly declares whether it expects on-device data.
+The CPU backend path remains semantically identical (it always
+constructs `Cpu(..)`), preserving the full existing test suite
+as a regression gate.
+
+Alternatives considered: parallel handle-type-with-fallback
+design β (rejected — `.as_cpu()` silently reintroduces the
+memcpy; type system can't enforce "no accidental readback");
+engine-level `dyn BackendStorage` trait objects (rejected —
+loses monomorphization, touches every generic bound, and
+Stage 3's code audit shows only ≤10 `feature_histograms()`
+call sites so a full trait-object rewrite is overkill);
+keep owned `Vec` payloads and add a side-channel `Option<GpuHandle>`
+(rejected — invariant "exactly one of these is authoritative"
+can't be encoded in the type system; code review burden
+forever).
+
+---
+
+## D-016: M2 free-on-consume residency budget with pathological-shape risk note
+
+Date: 2026-04-21
+Stage: S3 plan / S3.9
+Decision: GPU histogram residency follows the M2 free-on-consume
+policy: histograms live for exactly one level (level-wise) or
+until the corresponding `PendingSplit` pops (leaf-wise), then
+drop immediately. At fit start, `MetalBackend::check_histogram_budget(F, B, L)`
+refuses the fit with `EngineError::BackendUnavailable` (containing
+a `device="cpu"` fallback hint) when the projected peak
+`F × B × L × 12` bytes exceeds 80 % of
+`MTLDevice.recommendedMaxWorkingSetSize`. No LRU spill layer
+at this stage.
+
+Why: the histogram working set grows as one level width ×
+`feature_count × bin_count × 12 bytes` (grad f32 + hess f32 +
+counts u32). Free-on-consume bounds peak residency to that one
+level — strictly smaller than today's CPU path, which keeps
+histograms alive across the full level-wise sweep anyway.
+The 80 % ceiling leaves headroom for kernel scratch, pipeline
+state, buffer-cache slots, and the OS graphics stack sharing the
+unified memory pool. `recommendedMaxWorkingSetSize` (not raw
+`MTLDevice.maxBufferLength`) is the right budget question because
+Apple's driver penalises working sets above it with paging-like
+behaviour that spikes latency by orders of magnitude.
+
+Pathological risk carried forward to M3 as a documented followup:
+leaf-wise + `max_leaves=1024` + 1000 features + 1024 bins
+projects to roughly 12 GiB of histogram residency, which
+exceeds the 80 % ceiling on M1/M2/M3 8-16 GiB machines (passes
+on M3/M4 Max 36 GiB+). These configs will hit the budget
+refusal cleanly and fall back to CPU. M3 (probe-detected LRU
+spill with a `ALLOYGBM_METAL_HISTOGRAM_BUDGET_GIB` env-var knob)
+is the planned follow-up if a user reports a real fit blocked
+by this ceiling. The risk note lives at the top of
+`backend_metal/src/budget.rs` so the next reader of the code
+sees it before modifying the policy.
+
+Alternatives considered: unconditional fit with OS-level paging
+(rejected — Apple's unified-memory paging behavior is not a
+latency you want inside a training loop); LRU spill to CPU as
+part of M2 (rejected — Stage 3 ships without that complexity,
+M3 owns it); 50 % ceiling for safety (rejected — too
+conservative, refuses fits that would complete cleanly;
+80 % matches what WebGPU's working-set heuristic settled on);
+arithmetic budget of `F × B × L × 8` ignoring the counts u32
+(rejected — under-counts and admits fits that then OOM).
+
+---
+
+## D-017: Categorical features — partition on GPU, split on CPU (extends D-012)
+
+Date: 2026-04-21
+Stage: S3 plan / S3.5
+Decision: the Stage 3 GPU row-partition kernel handles *both*
+continuous and categorical splits via a `SPLIT_KIND` function
+constant (0 = threshold compare on `binned_matrix[row, feat]`;
+1 = bitset membership test against the categorical split's
+encoded bitset). Categorical *split finding* (Fisher-sort
+optimal-binary-partition) stays on the CPU, extending D-012.
+
+Why: row partitioning is a uniform per-row operation trivially
+suited to GPU parallelism — each row independently reads its
+own feature value and emits a left/right flag, then a
+stream-compaction phase produces the contiguous left/right row
+buffers. The bitset-membership variant costs one additional
+`(bin >> 5) & 31`-style bit test per row and no new data-
+movement pattern. By contrast, optimal-binary-partition over
+categories requires sort-by-per-class-score + prefix-scan-over-
+sorted-order, which is a genuinely hard GPU problem (closer in
+shape to radix-sort-then-scan primitives than to the simple
+bin-scan we already have). The shape of categorical vs.
+continuous splits on the partition side is nearly identical
+on-GPU; on the split-finding side it's starkly different.
+Bundling them on the partition side costs ~10 extra lines in
+the kernel; unbundling on the split side saves an unbounded
+research detour.
+
+Alternatives considered: CPU row partitioning for categorical
+splits too (rejected — forces a CPU round-trip for any fit
+using mixed feature types, breaking Stage 3's residency
+invariant); full GPU categorical split-finder in Stage 3
+(rejected — research problem, orthogonal to Stage 3's
+residency thesis, belongs in its own stage); encode
+categorical splits as dense one-hot bins so the continuous
+kernel handles them (rejected — inflates bin counts
+unboundedly, defeats the compact bitset representation
+already shipped in D-012 for prediction).
+
+---
+
+## D-018: `subtract_histogram_bundle`, `apply_split`, `reduce_sums` promoted to `BackendOps`
+
+Date: 2026-04-21
+Stage: S3 plan / S3.2
+Decision: three operations that were previously engine-owned
+free functions (`subtract_histogram_bundle`) or were already
+trait methods but took CPU-owned `Vec`s (`apply_split`,
+`reduce_sums`) become first-class `BackendOps` methods whose
+signatures consume / produce `HistogramStorage` / `RowIndexStorage`
+variants. CPU backend implementations are the existing
+elementwise logic on the `Cpu(..)` arm; Metal overrides
+dispatch kernels when both operands are `Gpu(..)`.
+
+Why: with D-015's enum-variant storage API landing, the engine
+no longer knows whether it's holding CPU or GPU data at the
+time it wants to subtract one histogram from another or
+partition rows by a split. The natural dispatch point is the
+backend — exactly where we already pattern-match on the rest
+of per-device behaviour. Keeping these as engine free functions
+would require the engine to sniff the storage variant and
+branch manually at every call site, duplicating trait-dispatch
+logic. `subtract_histogram_bundle` in particular is called at
+three trainer sites (level-wise smaller-first left/right;
+leaf-wise larger-derivation) so the duplication cost is real.
+
+Alternatives considered: leave `subtract_histogram_bundle` as
+a free function and inside it branch on storage variant
+(rejected — hides a backend dispatch inside an engine utility
+function, making the Metal override invisible to trait-aware
+readers); add a separate `GpuHistogramOps` trait with the
+GPU-only operations (rejected — splits behaviour across two
+traits for no benefit; the engine always has a `BackendOps`
+in hand already); keep `reduce_sums` taking `&[u32]` and
+extract-CPU-rows in the trainer (rejected — exactly the
+memcpy pattern Stage 3 exists to eliminate, even though
+`reduce_sums` only runs once per tree).
+
