@@ -13,6 +13,8 @@ mod buffers;
 #[cfg(target_os = "macos")]
 mod device;
 #[cfg(target_os = "macos")]
+mod histogram_residency;
+#[cfg(target_os = "macos")]
 mod residency;
 
 #[cfg(target_os = "macos")]
@@ -90,6 +92,23 @@ pub struct MetalBackend {
     /// refactors in place.
     #[allow(dead_code)]
     budget: budget::BudgetTracker,
+    /// S3.8 — `MTLResidencySet` wrapper (macOS 15+) with
+    /// `PassThrough` fallback. Pins GPU-resident histogram + row
+    /// index buffers to the working set for the lifetime of the
+    /// backend; attached to `metal_device.queue` at construction.
+    /// `dead_code` allow: S3.7c is the first live consumer
+    /// (feeds `HistogramResidencyPool` allocations through
+    /// `add_buffer`).
+    #[allow(dead_code)]
+    residency: residency::ResidencyPool,
+    /// S3.7b — skeleton GPU-resident histogram pool. Handed into
+    /// `build_histograms` once S3.7c wires the kernel output to
+    /// land in pool-owned buffers instead of the Stage-1
+    /// read-back-to-CPU path. Stored under an `Arc` so kernel
+    /// dispatchers can clone a handle without holding a borrow
+    /// across the call.
+    #[allow(dead_code)]
+    histogram_residency: std::sync::Arc<histogram_residency::HistogramResidencyPool>,
 }
 
 #[cfg(target_os = "macos")]
@@ -124,6 +143,17 @@ impl MetalBackend {
         )?);
         let buffer_cache = std::sync::Arc::new(buffers::BufferCache::new());
         let budget = budget::BudgetTracker::new(&metal_device.device);
+        // S3.8: attach a residency set to the command queue. Creation
+        // failures degrade to a pass-through no-op (documented in
+        // `residency.rs`), so `new` is infallible from the user's
+        // perspective.
+        let residency = residency::ResidencyPool::new(
+            &metal_device.device,
+            metal_device.queue.clone(),
+            "alloygbm::metal-backend::residency",
+        );
+        let histogram_residency =
+            std::sync::Arc::new(histogram_residency::HistogramResidencyPool::new());
         Ok(Self {
             metal_device,
             pipeline_cache,
@@ -133,6 +163,8 @@ impl MetalBackend {
             buffer_cache,
             cpu: CpuBackend,
             budget,
+            residency,
+            histogram_residency,
         })
     }
 
