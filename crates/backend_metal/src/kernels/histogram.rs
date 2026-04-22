@@ -161,12 +161,24 @@ pub(crate) fn dispatch_histograms(
     let row_indices_buffer = buffer_cache.write_row_indices(device, node.row_indices())?;
 
     let pair_bytes = std::mem::size_of::<[f32; 2]>();
+    let f32_bytes = std::mem::size_of::<f32>();
     let output_elems = total_selected as usize * bin_count as usize;
-    let output_bytes = output_elems * pair_bytes;
-    let output_buffer = device
-        .newBufferWithLength_options(output_bytes, options)
+    // SoA output buffers (D-019): two parallel planes sized
+    // [n_features × bin_count]. The scatter pass's internal scratch
+    // stays AoS (`float2`) because the per-bin single-writer
+    // discipline benefits from `(grad, hess)` coresidency in
+    // threadgroup memory; only the reduce pass's final write splits
+    // the planes.
+    let plane_bytes = output_elems * f32_bytes;
+    let grad_out_buffer = device
+        .newBufferWithLength_options(plane_bytes.max(1), options)
         .ok_or_else(|| {
-            EngineError::BackendUnavailable("could not allocate output buffer".to_string())
+            EngineError::BackendUnavailable("could not allocate grad output buffer".to_string())
+        })?;
+    let hess_out_buffer = device
+        .newBufferWithLength_options(plane_bytes.max(1), options)
+        .ok_or_else(|| {
+            EngineError::BackendUnavailable("could not allocate hess output buffer".to_string())
         })?;
 
     // --- Encode the command buffer ---
@@ -193,7 +205,7 @@ pub(crate) fn dispatch_histograms(
             })?;
 
         let binned_offset = (tile.start_feature as usize) * (n_rows_total as usize) * bin_sz;
-        let output_offset = (cumulative_features as usize) * (bin_count as usize) * pair_bytes;
+        let output_offset = (cumulative_features as usize) * (bin_count as usize) * f32_bytes;
 
         // --------- Pass 1: scatter ---------
         let encoder = command_buffer.computeCommandEncoder().ok_or_else(|| {
@@ -247,12 +259,17 @@ pub(crate) fn dispatch_histograms(
         encoder.setComputePipelineState(&pipelines.reduce);
         unsafe {
             encoder.setBuffer_offset_atIndex(Some(&scratch_buffer), 0, 0);
-            encoder.setBuffer_offset_atIndex(Some(&output_buffer), output_offset, 1);
+            // SoA outputs (D-019): grad plane at buffer(1),
+            // hess plane at buffer(2). Each tile writes into its own
+            // `[tile_n_features × bin_count]` slice via a shared
+            // `output_offset` (measured in f32s) across both planes.
+            encoder.setBuffer_offset_atIndex(Some(&grad_out_buffer), output_offset, 1);
+            encoder.setBuffer_offset_atIndex(Some(&hess_out_buffer), output_offset, 2);
 
             let n_chunks_cell: u32 = n_chunks;
             let tile_n_features_cell: u32 = tile_n_features;
-            set_u32_bytes(&encoder, &n_chunks_cell, 2);
-            set_u32_bytes(&encoder, &tile_n_features_cell, 3);
+            set_u32_bytes(&encoder, &n_chunks_cell, 3);
+            set_u32_bytes(&encoder, &tile_n_features_cell, 4);
 
             let bin_tg_count = bin_count.div_ceil(32) as usize;
             let threadgroups = MTLSize {
@@ -284,11 +301,12 @@ pub(crate) fn dispatch_histograms(
     // is trivially deterministic.
     let mut feature_histograms = Vec::with_capacity(total_selected as usize);
 
-    // SAFETY: `output_buffer` is `StorageModeShared`, fully written by
-    // the reduce pass above, and we've waited for completion. The
-    // pointer is valid for `output_elems` consecutive `[f32; 2]`
-    // values.
-    let output_ptr: *const [f32; 2] = output_buffer.contents().as_ptr() as *const [f32; 2];
+    // SAFETY: both output planes are `StorageModeShared`, fully
+    // written by the reduce pass above, and we've waited for
+    // completion. Each pointer is valid for `output_elems`
+    // consecutive `f32` values (D-019 SoA layout).
+    let grad_ptr: *const f32 = grad_out_buffer.contents().as_ptr() as *const f32;
+    let hess_ptr: *const f32 = hess_out_buffer.contents().as_ptr() as *const f32;
 
     for (local_f, &feature_index) in selected_features.iter().enumerate() {
         let mut counts = vec![0u32; bin_count as usize];
@@ -304,10 +322,11 @@ pub(crate) fn dispatch_histograms(
         for (bin_idx, &count) in counts.iter().enumerate() {
             // SAFETY: `base + bin_idx < output_elems` by construction
             // (`local_f < total_selected` and `bin_idx < bin_count`).
-            let gh = unsafe { *output_ptr.add(base + bin_idx) };
+            let grad_sum = unsafe { *grad_ptr.add(base + bin_idx) };
+            let hess_sum = unsafe { *hess_ptr.add(base + bin_idx) };
             bins.push(HistogramBin {
-                grad_sum: gh[0],
-                hess_sum: gh[1],
+                grad_sum,
+                hess_sum,
                 count,
             });
         }

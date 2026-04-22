@@ -35,8 +35,18 @@
 //   -------------------------------------------------------
 //   Grid: (n_features, ceil(BIN_COUNT / 32), 1). Each thread computes one
 //   (feature, bin) pair's final float2 by walking every chunk's scratch
-//   entry in strict ascending chunk order. Single-threaded per output
-//   slot — deterministic by construction.
+//   entry in strict ascending chunk order, then scatters the accumulated
+//   values into two SoA output planes (grad_out, hess_out).
+//   Single-threaded per output slot — deterministic by construction.
+//
+//   The SoA output format (D-019) matches `HistogramResidencyPool`'s
+//   three-buffer storage layout and `split.metal`'s three-buffer input
+//   contract, letting the reduce output land directly in pool-owned
+//   buffers that the split kernel reads without any reshape. The
+//   scatter pass (pass 1) still uses an internal `float2 local_hist`
+//   because the per-bin single-writer discipline benefits from keeping
+//   `(grad, hess)` coresident in threadgroup memory; only the final
+//   device-memory write splits the planes.
 //
 // Function constants (bound at pipeline create in S1.5):
 //   0: BIN_COUNT    — number of bins per feature (1..=MAX_BIN_COUNT)
@@ -55,9 +65,10 @@
 //     buffer(8) const uint&     n_features
 //   Pass 2:
 //     buffer(0) const float2*   scratch     (same as pass 1)
-//     buffer(1) float2*         output      ([n_features × BIN_COUNT])
-//     buffer(2) const uint&     n_chunks
-//     buffer(3) const uint&     n_features
+//     buffer(1) float*          grad_out    ([n_features × BIN_COUNT])
+//     buffer(2) float*          hess_out    ([n_features × BIN_COUNT])
+//     buffer(3) const uint&     n_chunks
+//     buffer(4) const uint&     n_features
 
 #include <metal_stdlib>
 
@@ -157,9 +168,10 @@ kernel void histogram_build_scatter(
 
 kernel void histogram_reduce(
     device const float2* scratch      [[buffer(0)]],
-    device float2*       output       [[buffer(1)]],
-    constant uint&       n_chunks     [[buffer(2)]],
-    constant uint&       n_features   [[buffer(3)]],
+    device float*        grad_out     [[buffer(1)]],
+    device float*        hess_out     [[buffer(2)]],
+    constant uint&       n_chunks     [[buffer(3)]],
+    constant uint&       n_features   [[buffer(4)]],
     uint3                thread_in_tg3 [[thread_position_in_threadgroup]],
     uint3                tg_id3        [[threadgroup_position_in_grid]]
 ) {
@@ -175,5 +187,7 @@ kernel void histogram_reduce(
         accum += scratch[(c * n_features + feature) * EFFECTIVE_BIN_COUNT + bin];
     }
 
-    output[feature * EFFECTIVE_BIN_COUNT + bin] = accum;
+    const uint out_index = feature * EFFECTIVE_BIN_COUNT + bin;
+    grad_out[out_index] = accum.x;
+    hess_out[out_index] = accum.y;
 }

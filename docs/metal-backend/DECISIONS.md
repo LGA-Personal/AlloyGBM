@@ -535,3 +535,40 @@ extract-CPU-rows in the trainer (rejected — exactly the
 memcpy pattern Stage 3 exists to eliminate, even though
 `reduce_sums` only runs once per tree).
 
+---
+
+## D-019: Histogram kernel emits SoA output (separate `grad_out` + `hess_out`)
+
+Date: 2026-04-21
+Stage: 3 (S3.7c)
+Decision: Change `histogram.metal`'s reduce-pass output from a single
+AoS `device float2* output` buffer to two separate SoA buffers
+`device float* grad_out` and `device float* hess_out`, each sized
+`[n_features × BIN_COUNT]`. The scatter pass still uses an internal
+`float2 local_hist[...]` for threadgroup memory density; only the
+reduce pass's final write splits into two planes.
+Why: `HistogramResidencyPool` (D-015, S3.7b) stores each histogram
+as three SoA buffers — `grad`, `hess`, `counts` — so the buffers
+can be wired directly into `split.metal`, whose input contract
+(D-014) is also three SoA buffers: `grad_sums`, `hess_sums`,
+`counts`. The AoS output from the Stage 1 histogram kernel was
+internally consistent but misaligned with both neighbours, forcing
+a CPU re-plane copy between `build_histograms` and `best_split`.
+That copy is exactly the round-trip Stage 3 exists to eliminate.
+Flipping the reduce pass to SoA lets the kernel output land
+directly in pool-owned buffers that the split kernel reads
+without any reshape. Counts stay on CPU per D-008 — they're
+accumulated post-dispatch and written directly into the pool's
+counts buffer via `contents()`. The scatter pass's internal
+`float2` threadgroup layout is unchanged because the per-bin
+single-writer discipline benefits from keeping `(grad, hess)`
+coresident in one cache line.
+Alternatives considered: keep AoS output and store an
+interleaved `grad_hess` buffer in the pool (rejected — forces a
+reshape before split reads it, defeating the zero-copy goal);
+keep AoS and copy to SoA on the Rust side before split
+(rejected — that's the round-trip we're eliminating); add a
+dedicated AoS→SoA GPU kernel (rejected — one extra dispatch
+for zero end-user value when the reduce kernel can emit SoA
+directly at the same cost).
+
