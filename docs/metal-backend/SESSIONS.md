@@ -5,6 +5,104 @@ First thing a new session reads, alongside `STATUS.md`.
 
 ---
 
+## 2026-04-21 — Stage 3 continuation: S3.7a + S3.7b
+
+**Branch:** `claude/charming-carson-d08c9a` (worktree)
+
+### What moved
+
+- **S3.7a — Gpu variants on storage enums + handle newtypes**
+  (commit `1b5e511`). Extended Stage 3's existing `HistogramStorage` /
+  `RowIndexStorage` scaffolding with the GPU-resident arms that the
+  residency-pool wiring needs. Added `GpuHistogramHandle(u64)` and
+  `GpuRowIndexHandle(u64)` newtype structs plus the matching `Gpu {
+  handle, feature_count, bin_count }` / `Gpu { handle, row_count }`
+  variants. All accessor methods (`cpu`, `cpu_mut`, `into_cpu`,
+  `len`) now return None/0 on the Gpu arm — the engine asks the pool
+  for the bytes, not the storage enum directly. The legacy
+  `feature_histograms()` shim on `HistogramBundle` panics on the Gpu
+  arm; that's deliberate (any caller still reaching for that shim
+  in a GPU-residency context is a latent bug, not a fallback case).
+  Six new core unit tests cover Gpu-arm handle round-trip, cpu/
+  cpu_mut/into_cpu refusal, and legacy-shim panic behavior.
+
+- **S3.7b — HistogramResidencyPool skeleton + wiring**
+  (commit `ab3671f`). New `crates/backend_metal/src/histogram_residency.rs`
+  with `HistogramResidencyPool` (Mutex-guarded `u64 → HistogramEntry`
+  map), `HistogramEntry` (cloned `Retained<Buffer>` handles for
+  grad / hess / counts + shape), and the `mint` / `get` / `release`
+  lifecycle surface. `mint` allocates three `StorageModeShared`
+  buffers (grad = f32, hess = f32, counts = u32 — all 4 bytes per
+  cell), registers them with the backend's `ResidencyPool` so the
+  working set keeps them pinned, and hands back an opaque
+  `GpuHistogramHandle(u64)`. `release` detaches from residency and
+  drops the buffers. Monotonic u64 token counter starting at 1
+  (reserving 0 as a "no handle" sentinel) — wrap at > 500 years of
+  fit lifetime isn't a practical concern.
+
+  `MetalBackend` gained two new fields: `residency: ResidencyPool`
+  (this also closes the S3.8 integration — the wrapper shipped in
+  isolation in commit `281ae1a` with unit tests; this is the first
+  wiring of it into the backend struct) and an
+  `Arc<HistogramResidencyPool>`. Both are `#[allow(dead_code)]`-gated
+  pending the S3.7c live consumer. Four new pool unit tests exercise
+  mint/get/release round-trip, distinct token minting, unknown-handle
+  release no-op, and shape-overflow rejection. The overflow test
+  caught a real bug during development: the first version checked
+  `feature × bin` but not `cells × 4 bytes`, so `u32::MAX × u32::MAX`
+  slipped through the cell-count guard and wrapped during the
+  per-plane byte calculation. Fixed by checking the full
+  `feature × bin × BYTES_PER_CELL` chain.
+
+- **Engine audit for S3.3 scope**. Surveyed the engine's uses of
+  `feature_histograms()` and `row_indices()` to size the trainer-
+  loop refactor. Found 8 `feature_histograms()` call sites total
+  — 4 in the free-function subtract helpers, 4 in unit tests — and
+  1 `.row_indices()` method reference (vs ~30 uses of the
+  storage-aware `row.cpu()` / `partition.into_cpu_parts()` pattern
+  that's already in place). The engine is already largely
+  storage-enum-aware in Cpu mode; adding the Gpu arm is additive
+  next to existing Cpu arm code, not a rewrite. This lets S3.3
+  bundle cleanly with S3.7c/d as a single atomic refactor in the
+  next session.
+
+### What did not move (and why)
+
+- **S3.7c+d + S3.3 (bundled)**. The three sub-tasks are tightly
+  coupled: flipping `build_histograms` to return `Gpu(..)` is
+  observable from the engine the moment it lands; without the
+  trainer refactor in the same commit every call site that
+  currently reads `bundle.feature_histograms()` crashes. Decision:
+  ship it as one atomic commit in the next session rather than
+  add a transitional dual-method path that would need to be
+  deleted later. STATUS.md captures the next-session scope in
+  detail. The audit above shows the engine is already mostly
+  ready for the flip.
+
+### Verification
+
+- `cargo check --workspace` green on both feature configs.
+- `cargo clippy --workspace --all-targets -- -D warnings` clean on
+  both feature configs.
+- `cargo fmt --all --check` clean.
+- `cargo test --workspace --exclude alloygbm-python` — 218 tests
+  pass (up from Stage 2 close's 200-odd): 38 core (+6 Gpu-arm),
+  69 engine, 36 backend_metal (+4 residency-pool), 23 backend_cpu,
+  19 categorical, 10 predictor, 23 shap.
+- Full Python pytest sweep deferred to S3.15 (the Python surface
+  did not change this session).
+
+### Commits
+
+- `1b5e511` — feat(core): Gpu variants on storage enums + handle newtypes (S3.7a)
+- `ab3671f` — feat(backend_metal): HistogramResidencyPool skeleton + wiring (S3.7b)
+
+### Blockers
+
+None. S3.7c/d + S3.3 bundled atomic commit is the next sub-task.
+
+---
+
 ## 2026-04-20 — Stage 2 shipped (S2.1–S2.8) → Stage 2 closed
 
 **Branch:** `claude/charming-carson-d08c9a` (worktree)
