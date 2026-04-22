@@ -1,6 +1,6 @@
 # Metal Backend — Current Status
 
-**Last updated:** 2026-04-21 (Stage 3 in-flight — S3.1/S3.2/S3.4–S3.9/S3.7a/S3.7b landed)
+**Last updated:** 2026-04-21 (Stage 3 in-flight — S3.1/S3.2/S3.4–S3.9/S3.7a/S3.7b/S3.13 landed)
 **Active stage:** Stage 3 — GPU residency (row partitioning + histograms + subtract)
 **Active sub-task:** S3.3 (trainer-loop refactor threading `HistogramStorage` + `RowIndexStorage` through active-node tuples and PendingSplit) + S3.7c/d (bundled: `build_histograms` produces `Gpu(..)`, `best_split`/`subtract`/`apply_split` read pool buffers, Stage-2 ReusableSlots retired)
 
@@ -24,7 +24,7 @@ Order matches the approved plan in
 - [ ] **S3.10** Rust unit tests — residency round-trip (`build_histograms` → `best_split` → `subtract` → `best_split` on child, all values bit-exact after a single CPU read-back). Partition + subtract correctness tests already landed with S3.5 / S3.6.
 - [ ] **S3.11** Python `MetalStage3Tests` — golden 50k × 100 × 255 × 20 fit pair with structural-plus-ulp gate, dedicated NaN-heavy / monotone-constraint / mixed-categorical (D-017 coverage) / memory-pressure (M2 budget guard fires cleanly) cases.
 - [ ] **S3.12** Benchmark re-run on Apple M4 + new dated section in `BENCHMARKS.md`. Kill criterion: `metal_friendly` depth 8 + depth 10 + K=10 multiclass must all cross >1.0× CPU. Blocks stage close if it doesn't.
-- [ ] **S3.13** `DECISIONS.md` entries — D-015 (enum-variant storage API), D-016 (M2 residency budget), D-017 (categorical partition on GPU, split on CPU), D-018 (subtract / apply_split / reduce_sums promoted to `BackendOps`). Some are partially captured inline in commit messages (281ae1a, 495eefa, ab3671f); canonical ADR entries land at S3.13.
+- [x] **S3.13** `DECISIONS.md` entries — D-015 (enum-variant storage API), D-016 (M2 residency budget), D-017 (categorical partition on GPU, split on CPU), D-018 (subtract / apply_split / reduce_sums promoted to `BackendOps`). Commit: `883d9ae`.
 - [ ] **S3.14** `docs/limitations.md` Section 1 rewrite based on the S3.12 benchmark outcome.
 - [ ] **S3.15** Full verification sweep + `STATUS.md` overwrite + `SESSIONS.md` Stage 3 close entry.
 
@@ -55,6 +55,8 @@ What is left for the next session:
 
 - `1b5e511` — feat(core): Gpu variants on storage enums + handle newtypes (S3.7a)
 - `ab3671f` — feat(backend_metal): HistogramResidencyPool skeleton + wiring (S3.7b)
+- `0d23c66` — docs(metal-backend): STATUS + SESSIONS updated for S3.7a + S3.7b
+- `883d9ae` — docs(metal-backend): DECISIONS D-015..D-018 for Stage 3 (S3.13)
 
 Verification at end of session: workspace cargo check / clippy / fmt / test all green on both feature configs; 218 Rust tests pass (38 core + 69 engine + 36 backend_metal + 23 backend_cpu + 19 categorical + 10 predictor + 23 shap). Python tests are expected-green by construction (no CPU-path changes landed this session); full pytest sweep runs at S3.15.
 
