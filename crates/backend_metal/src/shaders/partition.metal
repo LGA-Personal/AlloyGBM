@@ -161,12 +161,13 @@ static inline uint direction_for_bin(
     return (bin_val <= u.threshold_bin) ? 0u : 1u;
 }
 
-// Threadgroup-shared buffers; separate instances per kernel because
-// Metal shares only within a single dispatch.
-threadgroup uint tg_pass1_partials[MAX_SIMD_GROUPS];
-threadgroup uint tg_pass2_scan[1024];
-threadgroup uint tg_pass3_partials[MAX_SIMD_GROUPS];
-threadgroup uint tg_pass3_bases[MAX_SIMD_GROUPS];
+// Threadgroup-shared buffers live inside each kernel body rather
+// than at file scope — MSL rejects file-scope `threadgroup`
+// declarations ("program scope variable must reside in constant
+// address space") under the dylib-loaded Metal compiler path that
+// `maturin develop --release` uses to load the Python extension
+// (see B-001). Scoping them per-kernel is semantically identical
+// because threadgroup memory is not shared across kernels anyway.
 
 /// Pass 1: per-row direction flag + per-block left count.
 kernel void partition_flag_and_count(
@@ -182,6 +183,9 @@ kernel void partition_flag_and_count(
     uint  simd_lane     [[thread_index_in_simdgroup]],
     uint  simd_group    [[simdgroup_index_in_threadgroup]]
 ) {
+    // Threadgroup-local SIMD-group partial reductions (see file header).
+    threadgroup uint tg_pass1_partials[MAX_SIMD_GROUPS];
+
     const uint tid         = thread_in_tg3.x;
     const uint block_id    = tg_id3.x;
     const uint block_start = block_id * EFFECTIVE_BLOCK_SIZE;
@@ -234,6 +238,11 @@ kernel void partition_scan_blocks(
     constant uint&      num_blocks        [[buffer(2)]],
     uint3 thread_in_tg3 [[thread_position_in_threadgroup]]
 ) {
+    // Threadgroup-local Hillis–Steele scan buffer. Sized to the
+    // worst-case BLOCK_SIZE so the kernel compiles before a
+    // function-constant specialisation is known.
+    threadgroup uint tg_pass2_scan[1024];
+
     const uint tid = thread_in_tg3.x;
 
     uint v = 0u;
@@ -282,6 +291,11 @@ kernel void partition_scatter(
     uint  simd_lane      [[thread_index_in_simdgroup]],
     uint  simd_group     [[simdgroup_index_in_threadgroup]]
 ) {
+    // Threadgroup-local partials + SIMD-group bases for pass-3 prefix
+    // scan (see file header).
+    threadgroup uint tg_pass3_partials[MAX_SIMD_GROUPS];
+    threadgroup uint tg_pass3_bases[MAX_SIMD_GROUPS];
+
     const uint tid         = thread_in_tg3.x;
     const uint block_id    = tg_id3.x;
     const uint block_start = block_id * EFFECTIVE_BLOCK_SIZE;
