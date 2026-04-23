@@ -142,6 +142,61 @@ pub trait BackendOps {
     ) -> EngineResult<HistogramBundle> {
         subtract_histogram_bundle(parent, child, node_id)
     }
+
+    /// Release backend-specific resources tied to `bundle` (S3.7d).
+    ///
+    /// Semantics: the caller still owns `bundle`, but any accelerator-
+    /// side residency (GPU pool entries, working-set pinnings) is
+    /// detached and released **now** rather than at bundle drop. The
+    /// CPU-side `Vec<FeatureHistogram>` payload on `HistogramStorage::
+    /// Cpu(..)` is unaffected.
+    ///
+    /// The trainer calls this at known consumption points (end of a
+    /// level-wise inner-loop iteration; end of a leaf-wise pop) so
+    /// GPU-resident histograms don't accumulate across the full fit
+    /// — that matters for the M2 free-on-consume budget projection
+    /// in `backend_metal::budget`, which assumes peak residency is
+    /// one level wide, not cumulative.
+    ///
+    /// Default impl is a no-op: CPU backends have no residency to
+    /// release. Accelerator backends override to dispatch their
+    /// pool's release path.
+    ///
+    /// Failures here are **non-fatal** to training: the worst case is
+    /// a leaked GPU buffer for this fit's lifetime (end-of-fit
+    /// `Drop` cleans up), and mid-training aborts are a worse
+    /// outcome than a transient leak. Callers may choose to ignore
+    /// the returned `Err` (e.g. in a `Drop`-based guard).
+    fn release_histograms(&self, _bundle: &HistogramBundle) -> EngineResult<()> {
+        Ok(())
+    }
+}
+
+/// RAII guard that releases backend-side histogram residency on drop.
+///
+/// Used by the trainer hot loops (level-wise + leaf-wise) so every
+/// `continue` / `break` / normal-exit path releases parent histograms
+/// deterministically. Without the guard, a mid-loop `continue` on
+/// (say) `LeafRowsBelowThreshold` would leak the parent bundle's GPU
+/// pool entry for the rest of the fit.
+///
+/// Errors from `release_histograms` are swallowed inside `Drop` —
+/// see the trait method's docstring for why that's the right call.
+pub(crate) struct HistogramReleaseGuard<'a, B: BackendOps> {
+    backend: &'a B,
+    bundle: &'a HistogramBundle,
+}
+
+impl<'a, B: BackendOps> HistogramReleaseGuard<'a, B> {
+    pub(crate) fn new(backend: &'a B, bundle: &'a HistogramBundle) -> Self {
+        Self { backend, bundle }
+    }
+}
+
+impl<B: BackendOps> Drop for HistogramReleaseGuard<'_, B> {
+    fn drop(&mut self) {
+        let _ = self.backend.release_histograms(self.bundle);
+    }
 }
 
 /// Callback invoked after each boosting round to evaluate a custom metric.
@@ -3804,6 +3859,14 @@ fn build_tree_level_wise<B: BackendOps>(
 
         let mut next_nodes = Vec::new();
         for (local_node_id, node_rows, histograms, parent_leaf_value) in active_nodes {
+            // S3.7d — parent histograms drop at end of this iteration.
+            // The guard releases any backend-resident (GPU pool) entry
+            // regardless of how the body exits: `continue` on any
+            // rejection path, fall-through after `next_nodes.push`,
+            // or a hard error via `?`. Keep this binding named so the
+            // borrow-checker knows `histograms` outlives it.
+            let _release_guard = HistogramReleaseGuard::new(backend, &histograms);
+
             let node_id = encode_tree_node_id(round_index, local_node_id)?;
             let node = NodeSlice::new(node_id, node_rows)?;
             let Some(mut split) = backend.best_split_with_options(
@@ -4071,6 +4134,14 @@ fn build_tree_leaf_wise<B: BackendOps>(
     let mut last_rejection = IterationStopReason::NoSplitCandidate;
 
     while let Some(pending) = queue.pop() {
+        // S3.7d — parent histograms are consumed by this iteration
+        // (via `subtract_histogram_bundle` below, or on a pre-commit
+        // `continue` if depth/leaf checks reject the split). The
+        // guard releases any backend-resident GPU pool entry
+        // regardless of which exit path runs. Declared before any
+        // `break`/`continue` so every exit is covered.
+        let _release_guard = HistogramReleaseGuard::new(backend, &pending.histograms);
+
         // Check max_leaves: splitting adds 1 net leaf.
         if leaves_used + 1 > max_leaves {
             last_rejection = IterationStopReason::MaxLeavesReached;
@@ -4261,6 +4332,17 @@ fn build_tree_leaf_wise<B: BackendOps>(
                 });
             }
         }
+    }
+
+    // S3.7d — drain any PendingSplits still in the queue. The loop
+    // above can exit early via `break` on `MaxLeavesReached`; those
+    // pendings still hold GPU-resident histogram pool handles. Drop
+    // alone would leak the pool entry until the `MetalBackend`
+    // itself drops (end-of-fit) — release eagerly here so the
+    // budget projection in `backend_metal::budget` (which assumes
+    // one-level-wide peak) stays accurate.
+    for remaining in queue.into_iter() {
+        let _ = backend.release_histograms(&remaining.histograms);
     }
 
     if stumps.is_empty() {

@@ -358,12 +358,52 @@ impl BackendOps for MetalBackend {
         rows: &alloygbm_core::RowIndexStorage,
     ) -> EngineResult<NodeStats> {
         // S3.2 — trait surface now accepts `&RowIndexStorage`. Until
-        // S3.7 ships GPU residency, every call we see is `Cpu(..)` —
-        // delegate to the embedded CpuBackend. When MetalBackend
-        // starts producing `Gpu(..)` variants, this override will
-        // read directly from the GPU-resident buffer without a
-        // CPU round-trip.
+        // S3.7e ships a GPU row-index pool (deferred from S3.7d —
+        // engine-side `PartitionResult` is still CPU-resident), every
+        // call we see is `Cpu(..)` — delegate to the embedded
+        // CpuBackend. When MetalBackend starts producing `Gpu(..)`
+        // row-index variants, this override will read directly from
+        // the GPU-resident buffer without a CPU round-trip.
         self.cpu.reduce_sums(gradients, rows)
+    }
+
+    /// Release the GPU-resident histogram pool entry backing this
+    /// bundle, if any.
+    ///
+    /// Called by the trainer hot loops (via `HistogramReleaseGuard`)
+    /// at the moment each parent histogram is no longer needed —
+    /// level-wise that's end-of-inner-loop-iteration; leaf-wise
+    /// that's end-of-pop-iteration plus queue-drain on early break.
+    /// Without this, pool entries would accumulate across the full
+    /// fit and `budget::BudgetTracker`'s one-level-wide peak
+    /// projection would under-count by a factor of ~tree-size,
+    /// silently breaking the M2 free-on-consume guarantee (D-016).
+    ///
+    /// Pattern-matches on storage:
+    /// * `Gpu { handle, .. }` — dispatches `histogram_residency
+    ///   .release(handle)`, which also detaches the three backing
+    ///   buffers from the `MTLResidencySet`.
+    /// * `Cpu(..)` — no-op (no residency to detach).
+    ///
+    /// Errors from the pool mutex are **swallowed** via the trait's
+    /// `EngineResult<()>` surface returning `Ok(())`: a use-after-
+    /// release or poisoned-mutex failure here is not worth aborting
+    /// the fit for, and the trainer's `HistogramReleaseGuard`
+    /// ignores the return value via `Drop` anyway. The worst
+    /// observable consequence is one leaked GPU buffer for this
+    /// fit's lifetime.
+    fn release_histograms(&self, bundle: &alloygbm_core::HistogramBundle) -> EngineResult<()> {
+        match &bundle.storage {
+            HistogramStorage::Gpu { handle, .. } => {
+                self.histogram_residency.release(*handle, &self.residency);
+            }
+            HistogramStorage::Cpu(_) => {
+                // CPU-resident histograms are plain `Vec<_>`s —
+                // nothing to detach, the caller's `Drop` on the
+                // bundle will free the memory.
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1446,5 +1486,147 @@ mod tests {
             .get_or_build(spec)
             .expect("second build");
         assert!(std::sync::Arc::ptr_eq(&first, &second));
+    }
+
+    /// S3.7d — `release_histograms` must decrement the residency
+    /// pool's live-entry count on a Gpu bundle and no-op on a Cpu
+    /// bundle. Without this, trainer hot loops would leak pool
+    /// entries for the full fit duration — silently breaking
+    /// `budget::BudgetTracker`'s one-level-wide peak projection.
+    #[test]
+    fn release_histograms_frees_gpu_pool_entry() {
+        use alloygbm_backend_cpu::CpuBackend;
+        use alloygbm_engine::BackendOps;
+
+        let Ok(backend) = MetalBackend::new() else {
+            return; // no Metal device — skip.
+        };
+
+        // Tiny fixture: enough to make `build_histograms` actually
+        // mint a pool entry. Shape doesn't matter beyond being legal.
+        let row_count = 32usize;
+        let feature_count = 2usize;
+        let max_bin: u16 = 3;
+
+        let mut bins_row_major = Vec::with_capacity(row_count * feature_count);
+        for row in 0..row_count {
+            for feat in 0..feature_count {
+                bins_row_major.push(((row + feat) & 3) as u8);
+            }
+        }
+        let binned_matrix =
+            BinnedMatrix::new(row_count, feature_count, max_bin, bins_row_major).unwrap();
+        let gradients: Vec<GradientPair> = (0..row_count)
+            .map(|_| GradientPair::new(1.0, 1.0).unwrap())
+            .collect();
+        let row_indices: Vec<u32> = (0..row_count as u32).collect();
+        let node = NodeSlice::new(0, row_indices).unwrap();
+        let tiles = vec![FeatureTile::new(0, feature_count as u32).unwrap()];
+
+        // Baseline: pool empty before any build.
+        assert_eq!(backend.histogram_residency.live_count(), 0);
+
+        // Build two bundles; pool should grow to 2.
+        let bundle_a = backend
+            .build_histograms(&binned_matrix, &gradients, &node, &tiles)
+            .expect("metal histogram A");
+        let bundle_b = backend
+            .build_histograms(&binned_matrix, &gradients, &node, &tiles)
+            .expect("metal histogram B");
+        assert_eq!(
+            backend.histogram_residency.live_count(),
+            2,
+            "two build_histograms calls must mint two pool entries"
+        );
+
+        // Release A; pool should drop to 1. B still live.
+        backend
+            .release_histograms(&bundle_a)
+            .expect("release bundle A");
+        assert_eq!(
+            backend.histogram_residency.live_count(),
+            1,
+            "release_histograms on Gpu bundle must decrement live_count"
+        );
+
+        // Release B; pool should drop to 0.
+        backend
+            .release_histograms(&bundle_b)
+            .expect("release bundle B");
+        assert_eq!(
+            backend.histogram_residency.live_count(),
+            0,
+            "second release must decrement live_count to 0"
+        );
+
+        // A Cpu-variant bundle must be a no-op: doesn't try to
+        // look up a pool handle, doesn't error. This matters when
+        // the trainer processes a Cpu fallback path within a
+        // Metal fit (doesn't happen today but the contract needs
+        // to hold).
+        let cpu = CpuBackend;
+        let cpu_bundle = cpu
+            .build_histograms(&binned_matrix, &gradients, &node, &tiles)
+            .expect("cpu bundle");
+        backend
+            .release_histograms(&cpu_bundle)
+            .expect("cpu bundle release must be a no-op, not an error");
+        assert_eq!(
+            backend.histogram_residency.live_count(),
+            0,
+            "releasing a Cpu bundle must not touch the Gpu pool"
+        );
+
+        // Keep bundles alive to here so Drop order doesn't surprise
+        // the test — the release calls above are the semantic gate.
+        drop(bundle_a);
+        drop(bundle_b);
+        drop(cpu_bundle);
+    }
+
+    /// S3.7d — double-release of the same handle must be a no-op
+    /// (matches `HistogramResidencyPool::release`'s HashMap::remove
+    /// semantics). The `HistogramReleaseGuard` in the trainer may
+    /// hand the backend the same `&HistogramBundle` twice in
+    /// pathological cases (e.g. a future refactor that adds a
+    /// redundant guard); the contract is: idempotent release,
+    /// never panic, never corrupt pool state.
+    #[test]
+    fn release_histograms_is_idempotent_on_gpu_bundle() {
+        use alloygbm_engine::BackendOps;
+
+        let Ok(backend) = MetalBackend::new() else {
+            return;
+        };
+
+        let row_count = 16usize;
+        let feature_count = 2usize;
+        let max_bin: u16 = 3;
+        let bins_row_major: Vec<u8> = (0..row_count * feature_count)
+            .map(|i| (i & 3) as u8)
+            .collect();
+        let binned_matrix =
+            BinnedMatrix::new(row_count, feature_count, max_bin, bins_row_major).unwrap();
+        let gradients: Vec<GradientPair> = (0..row_count)
+            .map(|_| GradientPair::new(1.0, 1.0).unwrap())
+            .collect();
+        let row_indices: Vec<u32> = (0..row_count as u32).collect();
+        let node = NodeSlice::new(0, row_indices).unwrap();
+        let tiles = vec![FeatureTile::new(0, feature_count as u32).unwrap()];
+
+        let bundle = backend
+            .build_histograms(&binned_matrix, &gradients, &node, &tiles)
+            .expect("metal histogram");
+        assert_eq!(backend.histogram_residency.live_count(), 1);
+
+        backend.release_histograms(&bundle).expect("first release");
+        assert_eq!(backend.histogram_residency.live_count(), 0);
+
+        // Second release on the same (now-dead) handle must not
+        // panic or error; pool treats unknown handles as no-ops.
+        backend
+            .release_histograms(&bundle)
+            .expect("idempotent release");
+        assert_eq!(backend.histogram_residency.live_count(), 0);
     }
 }

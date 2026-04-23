@@ -190,6 +190,21 @@ impl BackendOps for RuntimeBackend {
             RuntimeBackend::Metal(b) => b.subtract_histogram_bundle(parent, child, node_id),
         }
     }
+
+    /// Forward `release_histograms` to whichever variant is active
+    /// (S3.7d). Same rationale as the `subtract_histogram_bundle`
+    /// forward above: the default trait impl is a no-op, which would
+    /// silently swallow `MetalBackend`'s pool-release dispatch. The
+    /// RuntimeBackend boundary must forward explicitly so the
+    /// engine's `HistogramReleaseGuard` actually frees GPU-resident
+    /// pool entries at the advertised consumption points.
+    fn release_histograms(&self, bundle: &HistogramBundle) -> EngineResult<()> {
+        match self {
+            RuntimeBackend::Cpu(b) => b.release_histograms(bundle),
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            RuntimeBackend::Metal(b) => b.release_histograms(bundle),
+        }
+    }
 }
 
 /// Validate a user-supplied `device` string and build the matching
