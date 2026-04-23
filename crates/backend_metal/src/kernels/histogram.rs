@@ -8,8 +8,7 @@
 //! in S1.5) is delegated to `crate::pipelines::build_histogram_pipelines`.
 
 use alloygbm_core::{
-    BinStorage, BinnedMatrix, FeatureHistogram, FeatureTile, GradientPair, HistogramBin,
-    HistogramBundle, NodeSlice,
+    BinStorage, BinnedMatrix, FeatureTile, GradientPair, HistogramBundle, NodeSlice,
 };
 use alloygbm_engine::{EngineError, EngineResult};
 
@@ -18,7 +17,11 @@ use crate::buffers::BufferCache;
 #[cfg(target_os = "macos")]
 use crate::device::MetalDevice;
 #[cfg(target_os = "macos")]
+use crate::histogram_residency::HistogramResidencyPool;
+#[cfg(target_os = "macos")]
 use crate::pipelines::HistogramPipelineCache;
+#[cfg(target_os = "macos")]
+use crate::residency::ResidencyPool;
 
 /// Embedded MSL source for the two-pass histogram build.
 ///
@@ -51,11 +54,13 @@ pub const ROWS_PER_CHUNK_DEFAULT: u32 = 8_192;
 // -------- macOS-only dispatch path ---------------------------------
 
 #[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
+#[allow(unsafe_code, clippy::too_many_arguments)]
 pub(crate) fn dispatch_histograms(
     metal_device: &MetalDevice,
     pipeline_cache: &HistogramPipelineCache,
     buffer_cache: &BufferCache,
+    histogram_residency: &HistogramResidencyPool,
+    residency: &ResidencyPool,
     binned_matrix: &BinnedMatrix,
     gradients: &[GradientPair],
     node: &NodeSlice,
@@ -162,24 +167,28 @@ pub(crate) fn dispatch_histograms(
 
     let pair_bytes = std::mem::size_of::<[f32; 2]>();
     let f32_bytes = std::mem::size_of::<f32>();
-    let output_elems = total_selected as usize * bin_count as usize;
     // SoA output buffers (D-019): two parallel planes sized
     // [n_features × bin_count]. The scatter pass's internal scratch
     // stays AoS (`float2`) because the per-bin single-writer
     // discipline benefits from `(grad, hess)` coresidency in
     // threadgroup memory; only the reduce pass's final write splits
     // the planes.
-    let plane_bytes = output_elems * f32_bytes;
-    let grad_out_buffer = device
-        .newBufferWithLength_options(plane_bytes.max(1), options)
-        .ok_or_else(|| {
-            EngineError::BackendUnavailable("could not allocate grad output buffer".to_string())
-        })?;
-    let hess_out_buffer = device
-        .newBufferWithLength_options(plane_bytes.max(1), options)
-        .ok_or_else(|| {
-            EngineError::BackendUnavailable("could not allocate hess output buffer".to_string())
-        })?;
+    //
+    // S3.7c.2: mint a pool entry for this bundle so the kernel's
+    // reduce pass writes directly into GPU-resident pool buffers.
+    // The pool also owns the counts buffer (written on the CPU via
+    // `write_counts` below — counts are computed CPU-side per D-008
+    // and memcpied into pool storage so downstream GPU consumers —
+    // subtract, residency-warm split — can read them without a
+    // round-trip).
+    let pool_handle = histogram_residency.mint(device, residency, &selected_features, bin_count)?;
+    let pool_entry = histogram_residency.get(pool_handle).ok_or_else(|| {
+        EngineError::BackendUnavailable(
+            "histogram residency pool: freshly minted handle lost".to_string(),
+        )
+    })?;
+    let grad_out_buffer = pool_entry.grad.clone();
+    let hess_out_buffer = pool_entry.hess.clone();
 
     // --- Encode the command buffer ---
     let command_buffer = metal_device
@@ -293,53 +302,43 @@ pub(crate) fn dispatch_histograms(
     command_buffer.commit();
     command_buffer.waitUntilCompleted();
 
-    // --- Readback: materialize HistogramBundle ---
+    // --- CPU-computed counts → GPU-resident pool buffer (D-008) ---
     //
-    // Counts-per-bin are computed on CPU (see D-008). The GPU kernel
-    // emits only `(grad_sum, hess_sum)` float2 pairs; reconstructing
-    // counts is a single u8/u16 bin-read + uint increment per row and
-    // is trivially deterministic.
-    let mut feature_histograms = Vec::with_capacity(total_selected as usize);
-
-    // SAFETY: both output planes are `StorageModeShared`, fully
-    // written by the reduce pass above, and we've waited for
-    // completion. Each pointer is valid for `output_elems`
-    // consecutive `f32` values (D-019 SoA layout).
-    let grad_ptr: *const f32 = grad_out_buffer.contents().as_ptr() as *const f32;
-    let hess_ptr: *const f32 = hess_out_buffer.contents().as_ptr() as *const f32;
-
+    // The GPU kernel emits only `(grad_sum, hess_sum)` via the reduce
+    // pass; counts are computed CPU-side (single u8/u16 bin-read +
+    // uint increment per row — trivially deterministic) and memcpied
+    // into the pool's counts buffer via `write_counts`. Downstream
+    // GPU consumers (`subtract`, any future residency-warm reducer)
+    // read counts directly from the pool buffer without a host
+    // round-trip.
+    let counts_total = (total_selected as usize) * (bin_count as usize);
+    let mut counts_flat = vec![0u32; counts_total];
     for (local_f, &feature_index) in selected_features.iter().enumerate() {
-        let mut counts = vec![0u32; bin_count as usize];
+        let base = local_f * bin_count as usize;
         accumulate_counts(
             binned_matrix,
             node.row_indices(),
             feature_index,
-            &mut counts,
+            &mut counts_flat[base..base + bin_count as usize],
         );
-
-        let base = local_f * bin_count as usize;
-        let mut bins = Vec::with_capacity(bin_count as usize);
-        for (bin_idx, &count) in counts.iter().enumerate() {
-            // SAFETY: `base + bin_idx < output_elems` by construction
-            // (`local_f < total_selected` and `bin_idx < bin_count`).
-            let grad_sum = unsafe { *grad_ptr.add(base + bin_idx) };
-            let hess_sum = unsafe { *hess_ptr.add(base + bin_idx) };
-            bins.push(HistogramBin {
-                grad_sum,
-                hess_sum,
-                count,
-            });
-        }
-        feature_histograms.push(FeatureHistogram {
-            feature_index,
-            bins,
-        });
     }
+    histogram_residency.write_counts(pool_handle, &counts_flat)?;
 
     // Keep scratch alive until after readback — see macro tricks below.
     drop(scratch_keepalive);
+    // Keep `pool_entry`'s cloned buffer handles alive until here; the
+    // real buffers stay live via the pool itself (`pool_handle` is
+    // still registered). Drop locally to avoid a redundant refcount.
+    drop(pool_entry);
+    drop(grad_out_buffer);
+    drop(hess_out_buffer);
 
-    Ok(HistogramBundle::from_cpu(node.node_id, feature_histograms))
+    Ok(HistogramBundle::from_gpu(
+        node.node_id,
+        pool_handle,
+        total_selected,
+        bin_count,
+    ))
 }
 
 // -------- Helpers (macOS only) -------------------------------------

@@ -17,13 +17,17 @@
 //! Pipeline compilation is delegated to
 //! [`crate::pipelines::SubtractPipelineCache`].
 
-use alloygbm_core::{FeatureHistogram, HistogramBin, HistogramBundle};
+use alloygbm_core::{FeatureHistogram, GpuHistogramHandle, HistogramBin, HistogramBundle};
 use alloygbm_engine::{EngineError, EngineResult};
 
 #[cfg(target_os = "macos")]
 use crate::device::MetalDevice;
 #[cfg(target_os = "macos")]
+use crate::histogram_residency::HistogramResidencyPool;
+#[cfg(target_os = "macos")]
 use crate::pipelines::SubtractPipelineCache;
+#[cfg(target_os = "macos")]
+use crate::residency::ResidencyPool;
 
 /// Embedded MSL source for the elementwise subtract kernel.
 pub const SUBTRACT_SHADER_SOURCE: &str = include_str!("../shaders/subtract.metal");
@@ -277,6 +281,187 @@ pub(crate) fn dispatch_subtract(
     }
 
     Ok(HistogramBundle::from_cpu(node_id, feature_histograms))
+}
+
+// -------- Pool-direct dispatch (S3.7c.3) ---------------------------
+//
+// Stage-3 hot path for `MetalBackend::subtract_histogram_bundle` when
+// both inputs are already GPU-resident. Zero CPU-side flatten / upload
+// / readback / repack: the kernel reads parent+child from pool-owned
+// buffers and writes into a freshly-minted pool output entry.
+//
+// The returned `HistogramBundle` wraps a `HistogramStorage::Gpu(..)`
+// handle — the engine's sibling operations (`best_split` on the new
+// bundle, a subsequent subtract) will read from it pool-directly
+// without any round-trip.
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+pub(crate) fn dispatch_subtract_pool(
+    metal_device: &MetalDevice,
+    pipeline_cache: &SubtractPipelineCache,
+    histogram_residency: &HistogramResidencyPool,
+    residency: &ResidencyPool,
+    parent_handle: GpuHistogramHandle,
+    child_handle: GpuHistogramHandle,
+    node_id: u32,
+) -> EngineResult<HistogramBundle> {
+    use objc2_metal::{
+        MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder,
+        MTLDevice, MTLResourceOptions, MTLSize,
+    };
+
+    // --- Resolve pool entries and validate shape parity --------------
+    let parent_entry = histogram_residency.get(parent_handle).ok_or_else(|| {
+        EngineError::BackendUnavailable(format!(
+            "subtract pool: parent handle {:?} not live in residency pool",
+            parent_handle.0
+        ))
+    })?;
+    let child_entry = histogram_residency.get(child_handle).ok_or_else(|| {
+        EngineError::BackendUnavailable(format!(
+            "subtract pool: child handle {:?} not live in residency pool",
+            child_handle.0
+        ))
+    })?;
+
+    if parent_entry.shape.feature_count != child_entry.shape.feature_count
+        || parent_entry.shape.bin_count != child_entry.shape.bin_count
+    {
+        return Err(EngineError::ContractViolation(format!(
+            "subtract pool: shape mismatch — parent {}×{} vs child {}×{}",
+            parent_entry.shape.feature_count,
+            parent_entry.shape.bin_count,
+            child_entry.shape.feature_count,
+            child_entry.shape.bin_count,
+        )));
+    }
+    if parent_entry.feature_indices != child_entry.feature_indices {
+        return Err(EngineError::ContractViolation(
+            "subtract pool: parent and child feature_indices differ".to_string(),
+        ));
+    }
+
+    let feature_count = parent_entry.shape.feature_count;
+    let bin_count = parent_entry.shape.bin_count;
+    let total_elems_usize = (feature_count as usize) * (bin_count as usize);
+
+    // Degenerate shape (feature_count = 0): mint an empty entry so
+    // callers still get a valid Gpu bundle they can release.
+    if total_elems_usize == 0 {
+        let empty = histogram_residency.mint(
+            &metal_device.device,
+            residency,
+            &parent_entry.feature_indices,
+            bin_count,
+        )?;
+        return Ok(HistogramBundle::from_gpu(
+            node_id,
+            empty,
+            feature_count,
+            bin_count,
+        ));
+    }
+
+    let total_elems = u32::try_from(total_elems_usize).map_err(|_| {
+        EngineError::BackendUnavailable(
+            "subtract pool: F*B exceeds u32 range (unsupported at this stage)".to_string(),
+        )
+    })?;
+
+    // --- Mint the output pool entry ---------------------------------
+    let out_handle = histogram_residency.mint(
+        &metal_device.device,
+        residency,
+        &parent_entry.feature_indices,
+        bin_count,
+    )?;
+    let out_entry = histogram_residency.get(out_handle).ok_or_else(|| {
+        EngineError::BackendUnavailable(
+            "subtract pool: freshly-minted output handle not findable".to_string(),
+        )
+    })?;
+
+    // --- Pipeline ----------------------------------------------------
+    let spec = SubtractSpecKey {
+        block_size: BLOCK_SIZE,
+    };
+    let pipelines = pipeline_cache
+        .get_or_build(spec)
+        .map_err(EngineError::BackendUnavailable)?;
+    let pipeline = &pipelines.subtract;
+
+    // --- Uniform buffer (tiny, per-call allocation) -----------------
+    let device = &metal_device.device;
+    let res_opts = MTLResourceOptions::StorageModeShared;
+    let uniform_pod = SubtractUniformPod {
+        total_elems,
+        _pad0: 0,
+        _pad1: 0,
+        _pad2: 0,
+    };
+    let uniform_bytes = unsafe {
+        std::slice::from_raw_parts(
+            std::ptr::from_ref(&uniform_pod).cast::<u8>(),
+            std::mem::size_of::<SubtractUniformPod>(),
+        )
+    };
+    let uniform_buf = device
+        .newBufferWithLength_options(uniform_bytes.len(), res_opts)
+        .ok_or_else(|| {
+            EngineError::BackendUnavailable("subtract pool: uniform buffer alloc".to_string())
+        })?;
+    // SAFETY: shared-mode buffer just allocated; we write exactly its size.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            uniform_bytes.as_ptr(),
+            uniform_buf.contents().as_ptr().cast::<u8>(),
+            uniform_bytes.len(),
+        );
+    }
+
+    // --- Dispatch ----------------------------------------------------
+    let command_buffer = metal_device.queue.commandBuffer().ok_or_else(|| {
+        EngineError::BackendUnavailable("subtract pool: command buffer".to_string())
+    })?;
+    let encoder = command_buffer.computeCommandEncoder().ok_or_else(|| {
+        EngineError::BackendUnavailable("subtract pool: compute encoder".to_string())
+    })?;
+    encoder.setComputePipelineState(pipeline);
+    unsafe {
+        encoder.setBuffer_offset_atIndex(Some(&parent_entry.grad), 0, 0);
+        encoder.setBuffer_offset_atIndex(Some(&parent_entry.hess), 0, 1);
+        encoder.setBuffer_offset_atIndex(Some(&parent_entry.counts), 0, 2);
+        encoder.setBuffer_offset_atIndex(Some(&child_entry.grad), 0, 3);
+        encoder.setBuffer_offset_atIndex(Some(&child_entry.hess), 0, 4);
+        encoder.setBuffer_offset_atIndex(Some(&child_entry.counts), 0, 5);
+        encoder.setBuffer_offset_atIndex(Some(&out_entry.grad), 0, 6);
+        encoder.setBuffer_offset_atIndex(Some(&out_entry.hess), 0, 7);
+        encoder.setBuffer_offset_atIndex(Some(&out_entry.counts), 0, 8);
+        encoder.setBuffer_offset_atIndex(Some(&uniform_buf), 0, 9);
+    }
+    let num_blocks = total_elems.div_ceil(BLOCK_SIZE);
+    let grid = MTLSize {
+        width: num_blocks as usize,
+        height: 1,
+        depth: 1,
+    };
+    let tg = MTLSize {
+        width: BLOCK_SIZE as usize,
+        height: 1,
+        depth: 1,
+    };
+    encoder.dispatchThreadgroups_threadsPerThreadgroup(grid, tg);
+    encoder.endEncoding();
+    command_buffer.commit();
+    command_buffer.waitUntilCompleted();
+
+    Ok(HistogramBundle::from_gpu(
+        node_id,
+        out_handle,
+        feature_count,
+        bin_count,
+    ))
 }
 
 // -------- Non-macOS stub -------------------------------------------

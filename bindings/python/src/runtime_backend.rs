@@ -170,6 +170,26 @@ impl BackendOps for RuntimeBackend {
             RuntimeBackend::Metal(b) => b.reduce_sums(gradients, rows),
         }
     }
+
+    /// Forward to the underlying backend's (possibly-overridden)
+    /// `subtract_histogram_bundle`. Without this arm the default trait
+    /// impl kicks in and calls the engine's free-function
+    /// `subtract_histogram_bundle(..)` — which in turn calls
+    /// `.feature_histograms()` and panics on a `HistogramStorage::Gpu`
+    /// bundle. Forwarding preserves MetalBackend's Gpu+Gpu pool-direct
+    /// dispatch (S3.7c.3) instead.
+    fn subtract_histogram_bundle(
+        &self,
+        parent: &HistogramBundle,
+        child: &HistogramBundle,
+        node_id: u32,
+    ) -> EngineResult<HistogramBundle> {
+        match self {
+            RuntimeBackend::Cpu(b) => b.subtract_histogram_bundle(parent, child, node_id),
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            RuntimeBackend::Metal(b) => b.subtract_histogram_bundle(parent, child, node_id),
+        }
+    }
 }
 
 /// Validate a user-supplied `device` string and build the matching

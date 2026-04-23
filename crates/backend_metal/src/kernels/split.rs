@@ -14,11 +14,13 @@
 //! Pipeline compilation is delegated to
 //! [`crate::pipelines::SplitPipelineCache`].
 
-use alloygbm_core::{FeatureHistogram, HistogramBundle, NodeStats, SplitCandidate};
+use alloygbm_core::{FeatureHistogram, HistogramBin, HistogramBundle, NodeStats, SplitCandidate};
 use alloygbm_engine::{CategoricalFeatureInfo, EngineError, EngineResult, SplitSelectionOptions};
 
 #[cfg(target_os = "macos")]
 use alloygbm_backend_cpu::CpuBackend;
+#[cfg(target_os = "macos")]
+use alloygbm_core::HistogramStorage;
 #[cfg(target_os = "macos")]
 use alloygbm_engine::BackendOps;
 
@@ -26,6 +28,8 @@ use alloygbm_engine::BackendOps;
 use crate::buffers::BufferCache;
 #[cfg(target_os = "macos")]
 use crate::device::MetalDevice;
+#[cfg(target_os = "macos")]
+use crate::histogram_residency::HistogramResidencyPool;
 #[cfg(target_os = "macos")]
 use crate::pipelines::SplitPipelineCache;
 
@@ -80,6 +84,7 @@ pub(crate) fn dispatch_best_split(
     metal_device: &MetalDevice,
     pipeline_cache: &SplitPipelineCache,
     buffer_cache: &BufferCache,
+    histogram_residency: &HistogramResidencyPool,
     cpu: &CpuBackend,
     histograms: &HistogramBundle,
     options: SplitSelectionOptions,
@@ -91,21 +96,61 @@ pub(crate) fn dispatch_best_split(
         MTLDevice, MTLResourceOptions, MTLSize,
     };
 
-    let fhs = histograms.feature_histograms();
-    if fhs.is_empty() {
-        return Ok(None);
-    }
-
-    // Uniform bin-count check: every FeatureHistogram in a bundle must
-    // have the same number of bins by construction, but assert it
-    // defensively — the kernel assumes a flat `[n_features × BIN_COUNT]`
-    // layout.
-    let bin_count = fhs[0].bins.len();
-    if bin_count == 0 {
-        return Ok(None);
-    }
+    // Split dispatch must handle both Cpu and Gpu storage (D-015).
+    // Rather than forking the whole kernel dispatch path, we first
+    // canonicalise the bundle to a `(feature_indices, bin_count,
+    // input_source)` triple. The kernel path then dispatches over
+    // the FULL feature set (continuous + categorical) with a mask
+    // that zeroes categorical slots — the MSL `split.metal` kernel
+    // honours `continuous_mask[feature] == 0` by emitting a blank
+    // candidate, so binding pool buffers that hold categorical rows
+    // too is harmless. This keeps the Gpu arm pool-direct without a
+    // CPU round-trip on the hot path.
+    let (feature_indices, bin_count): (Vec<u32>, usize) = match &histograms.storage {
+        HistogramStorage::Cpu(fhs) => {
+            if fhs.is_empty() {
+                return Ok(None);
+            }
+            let bc = fhs[0].bins.len();
+            if bc == 0 {
+                return Ok(None);
+            }
+            for fh in fhs {
+                if fh.bins.len() != bc {
+                    return Err(EngineError::ContractViolation(format!(
+                        "Metal best_split requires uniform bin count across features; \
+                         expected {}, got {} for feature {}",
+                        bc,
+                        fh.bins.len(),
+                        fh.feature_index
+                    )));
+                }
+            }
+            (fhs.iter().map(|fh| fh.feature_index).collect(), bc)
+        }
+        HistogramStorage::Gpu {
+            handle,
+            feature_count: _,
+            bin_count,
+        } => {
+            let entry = histogram_residency.get(*handle).ok_or_else(|| {
+                EngineError::BackendUnavailable(format!(
+                    "Metal best_split: histogram handle {:?} missing from residency pool",
+                    handle.0
+                ))
+            })?;
+            if entry.feature_indices.is_empty() || *bin_count == 0 {
+                return Ok(None);
+            }
+            (entry.feature_indices.clone(), *bin_count as usize)
+        }
+    };
+    let n_features = feature_indices.len();
     if (bin_count as u32) > MAX_BIN_COUNT {
-        // Out-of-range bin count — fall back to CPU.
+        // Out-of-range bin count — fall back to CPU. Only reachable on
+        // CPU-origin bundles because the histogram pipeline caps
+        // pool-owned bin counts at MAX_BIN_COUNT. The Gpu arm cannot
+        // reach this branch, so the unwrap below is safe.
         return cpu.best_split_with_options(
             histograms,
             options,
@@ -113,60 +158,56 @@ pub(crate) fn dispatch_best_split(
             categorical_features,
         );
     }
-    for fh in fhs {
-        if fh.bins.len() != bin_count {
-            return Err(EngineError::ContractViolation(format!(
-                "Metal best_split requires uniform bin count across features; \
-                 expected {}, got {} for feature {}",
-                bin_count,
-                fh.bins.len(),
-                fh.feature_index
-            )));
-        }
-    }
 
-    // --- Partition features into continuous vs categorical ---
-    let is_categorical = |feature_index: u32| -> bool {
-        categorical_features
-            .iter()
-            .any(|c| c.feature_index == feature_index as usize)
+    // --- Build continuous-mask over the FULL feature list ---
+    let is_categorical_at_pos = |local_f: usize| -> bool {
+        let fi = feature_indices[local_f] as usize;
+        categorical_features.iter().any(|c| c.feature_index == fi)
     };
+    let continuous_mask: Vec<u8> = (0..n_features)
+        .map(|i| if is_categorical_at_pos(i) { 0u8 } else { 1u8 })
+        .collect();
+    let any_continuous = continuous_mask.contains(&1);
+    let any_categorical = continuous_mask.contains(&0);
 
-    let (cont_histograms, cat_histograms): (Vec<FeatureHistogram>, Vec<FeatureHistogram>) = fhs
-        .iter()
-        .cloned()
-        .partition(|fh| !is_categorical(fh.feature_index));
-
-    // --- Categorical features (if any) go through the CPU backend ---
-    let cat_candidate: Option<SplitCandidate> = if cat_histograms.is_empty() {
-        None
-    } else {
-        let cat_bundle = HistogramBundle::from_cpu(histograms.node_id, cat_histograms);
-        cpu.best_split_with_options(&cat_bundle, options, feature_weights, categorical_features)?
-    };
-
-    // --- Continuous features (if any) go through the GPU kernel ---
-    let cont_candidate: Option<SplitCandidate> = if cont_histograms.is_empty() {
-        None
-    } else {
-        // Flatten histograms to SoA layout expected by the kernel:
-        //   grad[n_features × bin_count], hess[...], counts[...].
-        let n_features = cont_histograms.len();
-        let mut grad_sums = Vec::with_capacity(n_features * bin_count);
-        let mut hess_sums = Vec::with_capacity(n_features * bin_count);
-        let mut counts = Vec::with_capacity(n_features * bin_count);
-        // All continuous after the partition — but still build the mask
-        // for kernel robustness.
-        let mut continuous_mask = Vec::with_capacity(n_features);
-        for fh in &cont_histograms {
-            for bin in &fh.bins {
-                grad_sums.push(bin.grad_sum);
-                hess_sums.push(bin.hess_sum);
-                counts.push(bin.count);
+    // --- Categorical features (if any) delegate to CPU per D-012 ---
+    let cat_candidate: Option<SplitCandidate> = if any_categorical {
+        // Build a CPU sub-bundle containing only the categorical rows.
+        let cat_indices: Vec<usize> = (0..n_features)
+            .filter(|&i| is_categorical_at_pos(i))
+            .collect();
+        let cat_fhs: Vec<FeatureHistogram> = match &histograms.storage {
+            HistogramStorage::Cpu(fhs) => cat_indices.iter().map(|&i| fhs[i].clone()).collect(),
+            HistogramStorage::Gpu { handle, .. } => {
+                let planes = histogram_residency.read_planes(*handle)?;
+                let bc = planes.bin_count as usize;
+                cat_indices
+                    .iter()
+                    .map(|&i| {
+                        let base = i * bc;
+                        let bins = (0..bc)
+                            .map(|b| HistogramBin {
+                                grad_sum: planes.grad[base + b],
+                                hess_sum: planes.hess[base + b],
+                                count: planes.counts[base + b],
+                            })
+                            .collect();
+                        FeatureHistogram {
+                            feature_index: feature_indices[i],
+                            bins,
+                        }
+                    })
+                    .collect()
             }
-            continuous_mask.push(1u8);
-        }
+        };
+        let cat_bundle = HistogramBundle::from_cpu(histograms.node_id, cat_fhs);
+        cpu.best_split_with_options(&cat_bundle, options, feature_weights, categorical_features)?
+    } else {
+        None
+    };
 
+    // --- Continuous features → GPU kernel, full-width dispatch ---
+    let cont_candidate: Option<SplitCandidate> = if any_continuous {
         // --- Options uniform ---
         let opts_pod = SplitOptionsPod {
             missing_bin_index: options.missing_bin_index as u32,
@@ -185,10 +226,41 @@ pub(crate) fn dispatch_best_split(
         let device = &metal_device.device;
         let res_options = MTLResourceOptions::StorageModeShared;
 
-        // --- Inputs: reuse slots in BufferCache ---
-        let grad_buffer = buffer_cache.write_split_grad(device, &grad_sums)?;
-        let hess_buffer = buffer_cache.write_split_hess(device, &hess_sums)?;
-        let counts_buffer = buffer_cache.write_split_counts(device, &counts)?;
+        // --- Inputs: either pool-direct (Gpu) or flatten-and-upload (Cpu) ---
+        //
+        // The `_keepalive` Retained<> clones below pin pool buffers
+        // to the lifetime of the dispatch. On the Cpu arm they're
+        // the buffer-cache slots; on the Gpu arm they're the pool
+        // entry's grad/hess/counts buffers, which stay live through
+        // the pool as long as the handle isn't released.
+        let (grad_buffer, hess_buffer, counts_buffer) = match &histograms.storage {
+            HistogramStorage::Cpu(fhs) => {
+                let mut grad_sums = Vec::with_capacity(n_features * bin_count);
+                let mut hess_sums = Vec::with_capacity(n_features * bin_count);
+                let mut counts_vec = Vec::with_capacity(n_features * bin_count);
+                for fh in fhs.iter() {
+                    for bin in &fh.bins {
+                        grad_sums.push(bin.grad_sum);
+                        hess_sums.push(bin.hess_sum);
+                        counts_vec.push(bin.count);
+                    }
+                }
+                (
+                    buffer_cache.write_split_grad(device, &grad_sums)?,
+                    buffer_cache.write_split_hess(device, &hess_sums)?,
+                    buffer_cache.write_split_counts(device, &counts_vec)?,
+                )
+            }
+            HistogramStorage::Gpu { handle, .. } => {
+                let entry = histogram_residency.get(*handle).ok_or_else(|| {
+                    EngineError::BackendUnavailable(format!(
+                        "Metal best_split: histogram handle {:?} missing from residency pool",
+                        handle.0
+                    ))
+                })?;
+                (entry.grad.clone(), entry.hess.clone(), entry.counts.clone())
+            }
+        };
         let mask_buffer = buffer_cache.write_continuous_mask(device, &continuous_mask)?;
 
         // --- Output: fresh per-call since n_features can change ---
@@ -245,8 +317,6 @@ pub(crate) fn dispatch_best_split(
 
         // --- Readback + cross-feature argmax on CPU ---
         //
-        // `feature_weights` may be empty — match CPU semantics (unit
-        // weight when out of range).
         // SAFETY: `out_buffer` is StorageModeShared, fully written by
         // the dispatched kernel (which we waited on), and holds
         // `n_features` consecutive `FeatureSplitCandidatePod` values.
@@ -263,14 +333,21 @@ pub(crate) fn dispatch_best_split(
 
         let mut best: Option<SplitCandidate> = None;
         let mut best_weighted: f32 = 0.0;
-        for (local_f, fh) in cont_histograms.iter().enumerate() {
+        for local_f in 0..n_features {
+            // Categorical slots emit blank candidates per the kernel
+            // contract (`has_split=0` when `continuous_mask=0`). The
+            // has_split check below also covers them, but skip
+            // explicitly to keep intent clear.
+            if continuous_mask[local_f] == 0 {
+                continue;
+            }
             // SAFETY: `local_f < n_features` by construction.
             let pod = unsafe { *out_ptr.add(local_f) };
             if pod.has_split == 0 {
                 continue;
             }
-            let feature_index = fh.feature_index as usize;
-            let this_weighted = weighted_gain(feature_index, pod.gain);
+            let feature_index = feature_indices[local_f];
+            let this_weighted = weighted_gain(feature_index as usize, pod.gain);
 
             let take = match best {
                 None => true,
@@ -280,7 +357,7 @@ pub(crate) fn dispatch_best_split(
                 best_weighted = this_weighted;
                 best = Some(SplitCandidate {
                     node_id: histograms.node_id,
-                    feature_index: fh.feature_index,
+                    feature_index,
                     threshold_bin: pod.threshold_bin as u16,
                     gain: pod.gain,
                     default_left: pod.default_left != 0,
@@ -302,6 +379,8 @@ pub(crate) fn dispatch_best_split(
         // Keep out_buffer alive until readback completed above.
         drop(out_buffer);
         best
+    } else {
+        None
     };
 
     // --- Combine continuous + categorical winners via feature_weights ---

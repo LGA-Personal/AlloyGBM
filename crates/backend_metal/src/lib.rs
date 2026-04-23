@@ -29,8 +29,8 @@ pub mod pipelines;
 use alloygbm_backend_cpu::CpuBackend;
 #[cfg(target_os = "macos")]
 use alloygbm_core::{
-    BinnedMatrix, FeatureTile, GradientPair, HistogramBundle, NodeSlice, NodeStats,
-    PartitionResult, SplitCandidate,
+    BinnedMatrix, FeatureTile, GradientPair, HistogramBundle, HistogramStorage, NodeSlice,
+    NodeStats, PartitionResult, SplitCandidate,
 };
 #[cfg(target_os = "macos")]
 use alloygbm_engine::{BackendOps, CategoricalFeatureInfo, EngineResult, SplitSelectionOptions};
@@ -221,6 +221,8 @@ impl BackendOps for MetalBackend {
             &self.metal_device,
             &self.pipeline_cache,
             &self.buffer_cache,
+            &self.histogram_residency,
+            &self.residency,
             binned_matrix,
             gradients,
             node,
@@ -235,6 +237,7 @@ impl BackendOps for MetalBackend {
             &self.metal_device,
             &self.split_pipeline_cache,
             &self.buffer_cache,
+            &self.histogram_residency,
             &self.cpu,
             histograms,
             SplitSelectionOptions::default(),
@@ -254,12 +257,61 @@ impl BackendOps for MetalBackend {
             &self.metal_device,
             &self.split_pipeline_cache,
             &self.buffer_cache,
+            &self.histogram_residency,
             &self.cpu,
             histograms,
             options,
             feature_weights,
             categorical_features,
         )
+    }
+
+    /// S3.7c.3 — override the engine's default CPU subtract with a
+    /// pool-direct GPU dispatch when both inputs are already
+    /// GPU-resident. This is the Stage-3 hot path: the CPU round-trip
+    /// (flatten → upload → dispatch → readback → repack) that the
+    /// standalone `dispatch_subtract` incurs collapses to a single
+    /// kernel launch against pool-owned buffers.
+    ///
+    /// Dispatch matrix:
+    /// * **Gpu + Gpu** → pool-direct kernel dispatch; returns a
+    ///   freshly-minted `HistogramStorage::Gpu` bundle. Zero memcpy.
+    /// * **Cpu + Cpu** → delegate to the embedded `CpuBackend`, which
+    ///   uses the engine's default free-function (elementwise CPU
+    ///   loop). Bit-exact with the pre-Stage-3 behaviour.
+    /// * **Mixed** → contract violation. The trainer produces sibling
+    ///   histograms from a single `build_histograms` call, so both
+    ///   bundles at a given level are always the same storage
+    ///   variant. A mixed pair here means a bug upstream; fail loudly
+    ///   rather than silently re-materialising.
+    fn subtract_histogram_bundle(
+        &self,
+        parent: &HistogramBundle,
+        child: &HistogramBundle,
+        node_id: u32,
+    ) -> EngineResult<HistogramBundle> {
+        match (&parent.storage, &child.storage) {
+            (
+                HistogramStorage::Gpu { handle: ph, .. },
+                HistogramStorage::Gpu { handle: ch, .. },
+            ) => kernels::subtract::dispatch_subtract_pool(
+                &self.metal_device,
+                &self.subtract_pipeline_cache,
+                &self.histogram_residency,
+                &self.residency,
+                *ph,
+                *ch,
+                node_id,
+            ),
+            (HistogramStorage::Cpu(_), HistogramStorage::Cpu(_)) => {
+                self.cpu.subtract_histogram_bundle(parent, child, node_id)
+            }
+            _ => Err(alloygbm_engine::EngineError::ContractViolation(
+                "MetalBackend::subtract_histogram_bundle: mixed Cpu/Gpu storage variants \
+                 — sibling histograms must share the same storage variant"
+                    .to_string(),
+            )),
+        }
     }
 
     fn apply_split(
@@ -330,9 +382,54 @@ mod tests {
     #![allow(unsafe_code)]
 
     use super::*;
-    use alloygbm_core::{FeatureTile, GradientPair, NodeSlice};
+    use alloygbm_core::{FeatureHistogram, FeatureTile, GradientPair, HistogramBin, NodeSlice};
     use objc2_foundation::NSString;
     use objc2_metal::MTLDevice;
+
+    /// Materialise a `HistogramBundle` into a CPU-side
+    /// `Vec<FeatureHistogram>` for test assertions. Post-S3.7c.2,
+    /// `MetalBackend::build_histograms` returns `HistogramStorage::Gpu`;
+    /// tests that want to compare bin-by-bin against a `CpuBackend`
+    /// result go through this helper rather than calling
+    /// `.feature_histograms()` directly (which panics on Gpu).
+    ///
+    /// Test-only — the production hot paths (`best_split`,
+    /// `subtract_histogram_bundle`) read pool buffers directly without
+    /// this round-trip.
+    fn materialize_bundle_for_test(
+        backend: &MetalBackend,
+        bundle: &HistogramBundle,
+    ) -> Vec<FeatureHistogram> {
+        match &bundle.storage {
+            alloygbm_core::HistogramStorage::Cpu(fhs) => fhs.clone(),
+            alloygbm_core::HistogramStorage::Gpu { handle, .. } => {
+                let planes = backend
+                    .histogram_residency
+                    .read_planes(*handle)
+                    .expect("pool readback");
+                let bc = planes.bin_count as usize;
+                planes
+                    .feature_indices
+                    .iter()
+                    .enumerate()
+                    .map(|(local_f, &feature_index)| {
+                        let base = local_f * bc;
+                        let bins = (0..bc)
+                            .map(|b| HistogramBin {
+                                grad_sum: planes.grad[base + b],
+                                hess_sum: planes.hess[base + b],
+                                count: planes.counts[base + b],
+                            })
+                            .collect();
+                        FeatureHistogram {
+                            feature_index,
+                            bins,
+                        }
+                    })
+                    .collect()
+            }
+        }
+    }
 
     #[test]
     fn probe_default_device() {
@@ -432,7 +529,7 @@ mod tests {
 
         assert_eq!(cpu_hist.node_id, metal_hist.node_id);
         let cpu_fhs = cpu_hist.feature_histograms();
-        let metal_fhs = metal_hist.feature_histograms();
+        let metal_fhs = materialize_bundle_for_test(&backend, &metal_hist);
         assert_eq!(cpu_fhs.len(), metal_fhs.len());
         for (cpu_fh, metal_fh) in cpu_fhs.iter().zip(metal_fhs.iter()) {
             assert_eq!(cpu_fh.feature_index, metal_fh.feature_index);
@@ -512,7 +609,7 @@ mod tests {
             .expect("metal histogram");
 
         let cpu_fhs = cpu_hist.feature_histograms();
-        let metal_fhs = metal_hist.feature_histograms();
+        let metal_fhs = materialize_bundle_for_test(&backend, &metal_hist);
         assert_eq!(cpu_fhs.len(), 3);
         assert_eq!(metal_fhs.len(), 3);
         for (cpu_fh, metal_fh) in cpu_fhs.iter().zip(metal_fhs.iter()) {
