@@ -16,6 +16,8 @@ mod device;
 mod histogram_residency;
 #[cfg(target_os = "macos")]
 mod residency;
+#[cfg(target_os = "macos")]
+mod row_index_residency;
 
 #[cfg(target_os = "macos")]
 pub use device::{MetalCapabilities, MetalDevice, probe_capabilities};
@@ -109,6 +111,14 @@ pub struct MetalBackend {
     /// across the call.
     #[allow(dead_code)]
     histogram_residency: std::sync::Arc<histogram_residency::HistogramResidencyPool>,
+    /// S3.7e.2a — skeleton GPU-resident row-index pool. Handed into
+    /// `apply_split` in S3.7e.2b to take ownership of the partition
+    /// kernel's `out_left_buf` / `out_right_buf` shared-mode buffers
+    /// so row indices live on the GPU across levels. Stored under an
+    /// `Arc` so kernel dispatchers can clone a handle without holding
+    /// a borrow across the call.
+    #[allow(dead_code)]
+    row_index_residency: std::sync::Arc<row_index_residency::RowIndexResidencyPool>,
 }
 
 #[cfg(target_os = "macos")]
@@ -154,6 +164,8 @@ impl MetalBackend {
         );
         let histogram_residency =
             std::sync::Arc::new(histogram_residency::HistogramResidencyPool::new());
+        let row_index_residency =
+            std::sync::Arc::new(row_index_residency::RowIndexResidencyPool::new());
         Ok(Self {
             metal_device,
             pipeline_cache,
@@ -165,6 +177,7 @@ impl MetalBackend {
             budget,
             residency,
             histogram_residency,
+            row_index_residency,
         })
     }
 
@@ -401,6 +414,44 @@ impl BackendOps for MetalBackend {
                 // CPU-resident histograms are plain `Vec<_>`s —
                 // nothing to detach, the caller's `Drop` on the
                 // bundle will free the memory.
+            }
+        }
+        Ok(())
+    }
+
+    /// Release the GPU-resident row-index pool entry backing this
+    /// storage, if any.
+    ///
+    /// Parallel to `release_histograms`: called by the trainer hot
+    /// loops via `RowIndexReleaseGuard` / `PartitionReleaseGuard` at
+    /// the moment a set of row indices is no longer needed. Without
+    /// this, row-index pool entries would accumulate across the full
+    /// fit and silently break the M2 free-on-consume guarantee
+    /// (D-016), leaking ~4 bytes per row per tree level to the end of
+    /// the fit.
+    ///
+    /// Pattern-matches on storage:
+    /// * `Gpu { handle, .. }` — dispatches `row_index_residency
+    ///   .release(handle)`, which also detaches the backing buffer
+    ///   from the `MTLResidencySet`.
+    /// * `Cpu(..)` — no-op (no residency to detach; the `Vec<u32>`
+    ///   drops with its owning `RowIndexStorage`).
+    ///
+    /// Errors from the pool mutex are **swallowed** via the trait's
+    /// `EngineResult<()>` surface returning `Ok(())`: a use-after-
+    /// release or poisoned-mutex failure here is not worth aborting
+    /// the fit for, and the trainer's guards ignore the return value
+    /// via `Drop` anyway. The worst observable consequence is one
+    /// leaked GPU buffer for this fit's lifetime.
+    fn release_row_indices(&self, rows: &alloygbm_core::RowIndexStorage) -> EngineResult<()> {
+        match rows {
+            alloygbm_core::RowIndexStorage::Gpu { handle, .. } => {
+                self.row_index_residency.release(*handle, &self.residency);
+            }
+            alloygbm_core::RowIndexStorage::Cpu(_) => {
+                // CPU-resident row indices are plain `Vec<u32>` —
+                // nothing to detach; the caller's owner drops the
+                // allocation.
             }
         }
         Ok(())
