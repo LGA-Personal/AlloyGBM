@@ -170,6 +170,38 @@ pub trait BackendOps {
     fn release_histograms(&self, _bundle: &HistogramBundle) -> EngineResult<()> {
         Ok(())
     }
+
+    /// Release backend-specific resources tied to `rows` (S3.7e).
+    ///
+    /// Same lifecycle contract as [`release_histograms`], for
+    /// `RowIndexStorage` rather than `HistogramBundle`. Accelerator
+    /// backends that produce `RowIndexStorage::Gpu(..)` from
+    /// [`apply_split`](BackendOps::apply_split) override this to route
+    /// to their row-index residency pool. CPU default is a no-op.
+    fn release_row_indices(&self, _rows: &RowIndexStorage) -> EngineResult<()> {
+        Ok(())
+    }
+
+    /// Apply per-leaf delta updates to `predictions` for a completed
+    /// split partition (S3.7e).
+    ///
+    /// Default impl calls the engine's CPU-side per-row loop, which
+    /// requires CPU-resident row indices (panics on a `Gpu(..)`
+    /// `PartitionResult`). Accelerator backends that produce
+    /// `Gpu(..)` partitions override this to either (a) read the GPU
+    /// row-index buffer back once and run the CPU loop, or (b)
+    /// dispatch a GPU scatter kernel. The per-node cost is O(rows)
+    /// and this runs once per split — a single readback per split is
+    /// cheap relative to the kernel dispatches that already happened.
+    fn apply_partition_leaf_updates(
+        &self,
+        predictions: &mut [f32],
+        partition: &PartitionResult,
+        left_leaf_value: f32,
+        right_leaf_value: f32,
+    ) -> EngineResult<()> {
+        apply_partition_leaf_updates_cpu(predictions, partition, left_leaf_value, right_leaf_value)
+    }
 }
 
 /// RAII guard that releases backend-side histogram residency on drop.
@@ -196,6 +228,75 @@ impl<'a, B: BackendOps> HistogramReleaseGuard<'a, B> {
 impl<B: BackendOps> Drop for HistogramReleaseGuard<'_, B> {
     fn drop(&mut self) {
         let _ = self.backend.release_histograms(self.bundle);
+    }
+}
+
+/// RAII guard that releases backend-side row-index residency on drop
+/// (S3.7e mirror of [`HistogramReleaseGuard`]).
+///
+/// The trainer hot loops snapshot a borrow of the live
+/// `RowIndexStorage` (e.g. `&node.rows` after the `NodeSlice` is
+/// constructed for the iteration) and hold the guard across the
+/// iteration body. On drop — `continue`, `break`, `?`, or
+/// fall-through — the backend releases any GPU pool entry for that
+/// row-index buffer. CPU backends' release is a no-op.
+pub(crate) struct RowIndexReleaseGuard<'a, B: BackendOps> {
+    backend: &'a B,
+    rows: &'a RowIndexStorage,
+}
+
+impl<'a, B: BackendOps> RowIndexReleaseGuard<'a, B> {
+    pub(crate) fn new(backend: &'a B, rows: &'a RowIndexStorage) -> Self {
+        Self { backend, rows }
+    }
+}
+
+impl<B: BackendOps> Drop for RowIndexReleaseGuard<'_, B> {
+    fn drop(&mut self) {
+        let _ = self.backend.release_row_indices(self.rows);
+    }
+}
+
+/// RAII guard covering a `PartitionResult`'s left + right row indices
+/// (S3.7e).
+///
+/// Used by the trainer hot loops to cover every `continue` / `break` /
+/// `?` path between `apply_split_with_stats` and the point at which
+/// `partition` is destructured into child storage. On drop, both halves
+/// are released via `backend.release_row_indices`. At the destructure
+/// site, the caller invokes [`defuse`] to transfer ownership of the
+/// indices to the children — the guard then becomes inert and the
+/// borrow ends, so `partition` can be moved.
+///
+/// [`defuse`]: PartitionReleaseGuard::defuse
+pub(crate) struct PartitionReleaseGuard<'a, B: BackendOps> {
+    backend: Option<&'a B>,
+    partition: &'a PartitionResult,
+}
+
+impl<'a, B: BackendOps> PartitionReleaseGuard<'a, B> {
+    pub(crate) fn new(backend: &'a B, partition: &'a PartitionResult) -> Self {
+        Self {
+            backend: Some(backend),
+            partition,
+        }
+    }
+
+    /// Defuse the guard — the caller is taking ownership of the row
+    /// indices and will thread them into the next level. Consumes the
+    /// guard so the `&partition` borrow ends; the underlying
+    /// `PartitionResult` can then be move-destructured.
+    pub(crate) fn defuse(mut self) {
+        self.backend = None;
+    }
+}
+
+impl<B: BackendOps> Drop for PartitionReleaseGuard<'_, B> {
+    fn drop(&mut self) {
+        if let Some(backend) = self.backend {
+            let _ = backend.release_row_indices(&self.partition.left);
+            let _ = backend.release_row_indices(&self.partition.right);
+        }
     }
 }
 
@@ -3845,19 +3946,18 @@ fn build_tree_level_wise<B: BackendOps>(
         backend.build_histograms(binned_matrix, gradients, &root_node, feature_tiles)?;
     // Maintain each active node's absolute leaf output so child updates
     // can replace parent contribution via deltas (tree semantics).
-    let mut active_nodes = vec![(
-        0_u32,
-        root_node.into_row_indices(),
-        root_histograms,
-        0.0_f32,
-    )];
+    // Active-node tuple holds `RowIndexStorage` rather than `Vec<u32>`
+    // so GPU-resident row indices (S3.7e) flow through level handoffs
+    // without a CPU readback. CPU backends still see `Cpu(..)` end-to-end.
+    let mut active_nodes: Vec<(u32, RowIndexStorage, HistogramBundle, f32)> =
+        vec![(0_u32, root_node.into_rows(), root_histograms, 0.0_f32)];
 
     for depth in 0..(params.max_depth as usize) {
         if active_nodes.is_empty() {
             break;
         }
 
-        let mut next_nodes = Vec::new();
+        let mut next_nodes: Vec<(u32, RowIndexStorage, HistogramBundle, f32)> = Vec::new();
         for (local_node_id, node_rows, histograms, parent_leaf_value) in active_nodes {
             // S3.7d — parent histograms drop at end of this iteration.
             // The guard releases any backend-resident (GPU pool) entry
@@ -3868,7 +3968,11 @@ fn build_tree_level_wise<B: BackendOps>(
             let _release_guard = HistogramReleaseGuard::new(backend, &histograms);
 
             let node_id = encode_tree_node_id(round_index, local_node_id)?;
-            let node = NodeSlice::new(node_id, node_rows)?;
+            let node = NodeSlice::from_storage(node_id, node_rows)?;
+            // S3.7e — parent row indices drop with the NodeSlice at end
+            // of this iteration. Guard mirrors the histogram release
+            // guard for GPU-resident partitions.
+            let _rows_release_guard = RowIndexReleaseGuard::new(backend, &node.rows);
             let Some(mut split) = backend.best_split_with_options(
                 &histograms,
                 split_options,
@@ -3885,6 +3989,13 @@ fn build_tree_level_wise<B: BackendOps>(
 
             let (partition, left_stats, right_stats) =
                 backend.apply_split_with_stats(binned_matrix, gradients, &node, &split)?;
+            // S3.7e — any `continue` / error-return after this point
+            // that doesn't commit the split must release both halves
+            // of the partition's row indices (GPU pool entries). The
+            // guard covers every such path; at the commit site we
+            // `defuse()` so the children take ownership.
+            let partition_guard = PartitionReleaseGuard::new(backend, &partition);
+
             if partition.left.len() + partition.right.len() != node.row_count() {
                 return Err(EngineError::ContractViolation(
                     "split partition does not cover all node rows".to_string(),
@@ -3950,7 +4061,7 @@ fn build_tree_level_wise<B: BackendOps>(
                 }
             }
 
-            apply_partition_leaf_updates(
+            backend.apply_partition_leaf_updates(
                 candidate_predictions,
                 &partition,
                 left_leaf_value,
@@ -3960,15 +4071,24 @@ fn build_tree_level_wise<B: BackendOps>(
             split.left_stats = left_stats;
             split.right_stats = right_stats;
 
-            let (left_row_indices, right_row_indices) = partition.into_cpu_parts();
+            // S3.7e — split is committed; children take ownership of
+            // the row indices below. Defuse the guard so the borrow
+            // ends and `partition` becomes movable, without releasing.
+            partition_guard.defuse();
+            // Destructure storage variants directly; no forced CPU
+            // readback. Length checks already passed above.
+            let PartitionResult {
+                left: left_rows,
+                right: right_rows,
+            } = partition;
             if depth + 1 < params.max_depth as usize {
                 let left_local_node_id = left_child_node_id(local_node_id)?;
                 let right_local_node_id = right_child_node_id(local_node_id)?;
                 let left_node_id = encode_tree_node_id(round_index, left_local_node_id)?;
                 let right_node_id = encode_tree_node_id(round_index, right_local_node_id)?;
 
-                if left_row_indices.len() <= right_row_indices.len() {
-                    let left_node = NodeSlice::new(left_node_id, left_row_indices)?;
+                if left_rows.len() <= right_rows.len() {
+                    let left_node = NodeSlice::from_storage(left_node_id, left_rows)?;
                     let left_histograms = backend.build_histograms(
                         binned_matrix,
                         gradients,
@@ -3982,18 +4102,18 @@ fn build_tree_level_wise<B: BackendOps>(
                     )?;
                     next_nodes.push((
                         left_local_node_id,
-                        left_node.into_row_indices(),
+                        left_node.into_rows(),
                         left_histograms,
                         left_leaf_absolute,
                     ));
                     next_nodes.push((
                         right_local_node_id,
-                        right_row_indices,
+                        right_rows,
                         right_histograms,
                         right_leaf_absolute,
                     ));
                 } else {
-                    let right_node = NodeSlice::new(right_node_id, right_row_indices)?;
+                    let right_node = NodeSlice::from_storage(right_node_id, right_rows)?;
                     let right_histograms = backend.build_histograms(
                         binned_matrix,
                         gradients,
@@ -4007,17 +4127,23 @@ fn build_tree_level_wise<B: BackendOps>(
                     )?;
                     next_nodes.push((
                         left_local_node_id,
-                        left_row_indices,
+                        left_rows,
                         left_histograms,
                         left_leaf_absolute,
                     ));
                     next_nodes.push((
                         right_local_node_id,
-                        right_node.into_row_indices(),
+                        right_node.into_rows(),
                         right_histograms,
                         right_leaf_absolute,
                     ));
                 }
+            } else {
+                // S3.7e — at max depth, the child row indices are not
+                // pushed to next_nodes. Release any backend-side
+                // residency eagerly so the pool projection holds.
+                let _ = backend.release_row_indices(&left_rows);
+                let _ = backend.release_row_indices(&right_rows);
             }
 
             candidate_round_stumps.push(TrainedStump {
@@ -4043,7 +4169,10 @@ fn build_tree_level_wise<B: BackendOps>(
 /// Ordered by gain (highest gain = highest priority).
 struct PendingSplit {
     local_node_id: u32,
-    row_indices: Vec<u32>,
+    // S3.7e — `RowIndexStorage` instead of `Vec<u32>` so GPU-resident
+    // partitions flow through the leaf-wise queue without a forced
+    // CPU readback. CPU backends continue to populate `Cpu(..)`.
+    rows: RowIndexStorage,
     split_candidate: SplitCandidate,
     histograms: HistogramBundle,
     parent_leaf_value: f32,
@@ -4121,7 +4250,7 @@ fn build_tree_leaf_wise<B: BackendOps>(
     let mut queue = BinaryHeap::new();
     queue.push(PendingSplit {
         local_node_id: 0,
-        row_indices: root_node.into_row_indices(),
+        rows: root_node.into_rows(),
         split_candidate: root_split,
         histograms: root_histograms,
         parent_leaf_value: 0.0,
@@ -4156,12 +4285,19 @@ fn build_tree_leaf_wise<B: BackendOps>(
 
         let local_node_id = pending.local_node_id;
         let node_id = encode_tree_node_id(round_index, local_node_id)?;
-        let node = NodeSlice::new(node_id, pending.row_indices)?;
+        let node = NodeSlice::from_storage(node_id, pending.rows)?;
+        // S3.7e — parent row indices drop with the NodeSlice at end
+        // of this pop. Guard covers every `continue` / `break` / `?`
+        // exit path.
+        let _rows_release_guard = RowIndexReleaseGuard::new(backend, &node.rows);
         let split = pending.split_candidate;
 
         // Apply the split: partition rows and get stats.
         let (partition, left_stats, right_stats) =
             backend.apply_split_with_stats(binned_matrix, gradients, &node, &split)?;
+        // S3.7e — cover the continues/returns between partition
+        // creation and the commit point. Defused at commit.
+        let partition_guard = PartitionReleaseGuard::new(backend, &partition);
 
         if partition.left.len() + partition.right.len() != node.row_count() {
             return Err(EngineError::ContractViolation(
@@ -4222,7 +4358,7 @@ fn build_tree_leaf_wise<B: BackendOps>(
         }
 
         // Commit the split: update predictions and record stump.
-        apply_partition_leaf_updates(
+        backend.apply_partition_leaf_updates(
             candidate_predictions,
             &partition,
             left_leaf_value,
@@ -4248,10 +4384,14 @@ fn build_tree_leaf_wise<B: BackendOps>(
             let left_node_id = encode_tree_node_id(round_index, left_local)?;
             let right_node_id = encode_tree_node_id(round_index, right_local)?;
 
+            // S3.7e — split committed; children take ownership of
+            // the row indices. Defuse guard so `partition` is movable.
+            partition_guard.defuse();
+
             // Subtraction trick: build smaller child, subtract from parent for larger.
             let (
-                smaller_indices,
-                larger_indices,
+                smaller_rows,
+                larger_rows,
                 smaller_node_id,
                 larger_node_id,
                 smaller_local,
@@ -4260,11 +4400,14 @@ fn build_tree_leaf_wise<B: BackendOps>(
                 larger_leaf_abs,
             ) = {
                 let left_first = partition.left.len() <= partition.right.len();
-                let (left_vec, right_vec) = partition.into_cpu_parts();
+                let PartitionResult {
+                    left: left_rows,
+                    right: right_rows,
+                } = partition;
                 if left_first {
                     (
-                        left_vec,
-                        right_vec,
+                        left_rows,
+                        right_rows,
                         left_node_id,
                         right_node_id,
                         left_local,
@@ -4274,8 +4417,8 @@ fn build_tree_leaf_wise<B: BackendOps>(
                     )
                 } else {
                     (
-                        right_vec,
-                        left_vec,
+                        right_rows,
+                        left_rows,
                         right_node_id,
                         left_node_id,
                         right_local,
@@ -4286,7 +4429,7 @@ fn build_tree_leaf_wise<B: BackendOps>(
                 }
             };
 
-            let smaller_node = NodeSlice::new(smaller_node_id, smaller_indices)?;
+            let smaller_node = NodeSlice::from_storage(smaller_node_id, smaller_rows)?;
             let smaller_histograms =
                 backend.build_histograms(binned_matrix, gradients, &smaller_node, feature_tiles)?;
             let larger_histograms = backend.subtract_histogram_bundle(
@@ -4296,41 +4439,72 @@ fn build_tree_leaf_wise<B: BackendOps>(
             )?;
 
             // Find best split for each child and enqueue if valid.
-            if let Some(child_split) = backend.best_split_with_options(
+            // Non-enqueued children release their GPU row/histogram
+            // residency eagerly so the pool stays bounded under
+            // rejections (S3.7e — matches the policy in the level-wise
+            // loop).
+            let smaller_child_split = backend.best_split_with_options(
                 &smaller_histograms,
                 split_options,
                 feature_weights,
                 categorical_features,
-            )? && child_split.gain.is_finite()
-                && child_split.gain > controls.min_split_gain
-            {
-                queue.push(PendingSplit {
-                    local_node_id: smaller_local,
-                    row_indices: smaller_node.into_row_indices(),
-                    split_candidate: child_split,
-                    histograms: smaller_histograms,
-                    parent_leaf_value: smaller_leaf_abs,
-                    depth: child_depth,
-                });
+            )?;
+            let smaller_rows_for_queue = smaller_node.into_rows();
+            match smaller_child_split {
+                Some(child_split)
+                    if child_split.gain.is_finite()
+                        && child_split.gain > controls.min_split_gain =>
+                {
+                    queue.push(PendingSplit {
+                        local_node_id: smaller_local,
+                        rows: smaller_rows_for_queue,
+                        split_candidate: child_split,
+                        histograms: smaller_histograms,
+                        parent_leaf_value: smaller_leaf_abs,
+                        depth: child_depth,
+                    });
+                }
+                _ => {
+                    let _ = backend.release_row_indices(&smaller_rows_for_queue);
+                    let _ = backend.release_histograms(&smaller_histograms);
+                }
             }
 
-            if let Some(child_split) = backend.best_split_with_options(
+            let larger_child_split = backend.best_split_with_options(
                 &larger_histograms,
                 split_options,
                 feature_weights,
                 categorical_features,
-            )? && child_split.gain.is_finite()
-                && child_split.gain > controls.min_split_gain
-            {
-                queue.push(PendingSplit {
-                    local_node_id: larger_local,
-                    row_indices: larger_indices,
-                    split_candidate: child_split,
-                    histograms: larger_histograms,
-                    parent_leaf_value: larger_leaf_abs,
-                    depth: child_depth,
-                });
+            )?;
+            match larger_child_split {
+                Some(child_split)
+                    if child_split.gain.is_finite()
+                        && child_split.gain > controls.min_split_gain =>
+                {
+                    queue.push(PendingSplit {
+                        local_node_id: larger_local,
+                        rows: larger_rows,
+                        split_candidate: child_split,
+                        histograms: larger_histograms,
+                        parent_leaf_value: larger_leaf_abs,
+                        depth: child_depth,
+                    });
+                }
+                _ => {
+                    let _ = backend.release_row_indices(&larger_rows);
+                    let _ = backend.release_histograms(&larger_histograms);
+                }
             }
+        } else {
+            // S3.7e — child_depth >= max_depth: no children enqueued,
+            // so release the committed partition's row indices eagerly.
+            partition_guard.defuse();
+            let PartitionResult {
+                left: left_rows,
+                right: right_rows,
+            } = partition;
+            let _ = backend.release_row_indices(&left_rows);
+            let _ = backend.release_row_indices(&right_rows);
         }
     }
 
@@ -4343,6 +4517,7 @@ fn build_tree_leaf_wise<B: BackendOps>(
     // one-level-wide peak) stays accurate.
     for remaining in queue.into_iter() {
         let _ = backend.release_histograms(&remaining.histograms);
+        let _ = backend.release_row_indices(&remaining.rows);
     }
 
     if stumps.is_empty() {
@@ -4686,7 +4861,13 @@ fn sampled_feature_tiles(
     Ok((tiles, coverage_count))
 }
 
-fn apply_partition_leaf_updates(
+/// CPU-side implementation of `BackendOps::apply_partition_leaf_updates`.
+///
+/// Reachable from the default trait impl (CpuBackend path) and from
+/// accelerator overrides that prefer a single readback + CPU loop over
+/// a GPU scatter kernel. Panics if the partition's row indices are not
+/// CPU-resident — the caller must materialise them first.
+pub fn apply_partition_leaf_updates_cpu(
     predictions: &mut [f32],
     partition: &PartitionResult,
     left_leaf_value: f32,

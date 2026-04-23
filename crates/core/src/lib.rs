@@ -703,6 +703,14 @@ impl NodeSlice {
             .expect("NodeSlice::into_row_indices called on non-CPU variant")
     }
 
+    /// Consume the slice, returning the underlying storage variant
+    /// unchanged. Used by the trainer hot loops (S3.7e) when a node
+    /// is about to be absorbed into a new `NodeSlice` for the next
+    /// level — preserves GPU residency through the handoff.
+    pub fn into_rows(self) -> RowIndexStorage {
+        self.rows
+    }
+
     /// Row count without materialising the indices.
     pub fn row_count(&self) -> usize {
         self.rows.len()

@@ -205,6 +205,46 @@ impl BackendOps for RuntimeBackend {
             RuntimeBackend::Metal(b) => b.release_histograms(bundle),
         }
     }
+
+    /// Forward `release_row_indices` to the active variant (S3.7e).
+    /// Same rationale as `release_histograms`: the default trait impl
+    /// is a no-op, so without forwarding the `RowIndexReleaseGuard` /
+    /// `PartitionReleaseGuard` drops in the engine would silently skip
+    /// MetalBackend's pool-release for GPU-resident partitions.
+    fn release_row_indices(&self, rows: &RowIndexStorage) -> EngineResult<()> {
+        match self {
+            RuntimeBackend::Cpu(b) => b.release_row_indices(rows),
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            RuntimeBackend::Metal(b) => b.release_row_indices(rows),
+        }
+    }
+
+    /// Forward `apply_partition_leaf_updates` to the active variant
+    /// (S3.7e). CPU default is a read-row-indices-and-loop; accelerator
+    /// backends override when their `apply_split` produces `Gpu(..)`.
+    fn apply_partition_leaf_updates(
+        &self,
+        predictions: &mut [f32],
+        partition: &PartitionResult,
+        left_leaf_value: f32,
+        right_leaf_value: f32,
+    ) -> EngineResult<()> {
+        match self {
+            RuntimeBackend::Cpu(b) => b.apply_partition_leaf_updates(
+                predictions,
+                partition,
+                left_leaf_value,
+                right_leaf_value,
+            ),
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            RuntimeBackend::Metal(b) => b.apply_partition_leaf_updates(
+                predictions,
+                partition,
+                left_leaf_value,
+                right_leaf_value,
+            ),
+        }
+    }
 }
 
 /// Validate a user-supplied `device` string and build the matching
