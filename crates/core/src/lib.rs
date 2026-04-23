@@ -897,6 +897,30 @@ impl HistogramBundle {
         }
     }
 
+    /// Construct a GPU-resident bundle referencing a handle minted by
+    /// an accelerator backend's residency pool. `feature_count` and
+    /// `bin_count` are stamped on the bundle so engine code can size
+    /// sibling operations without a handle round-trip. See
+    /// `HistogramStorage::Gpu` docs for the lifecycle contract —
+    /// callers must release the handle via
+    /// `BackendOps::release_histograms` when the bundle is no longer
+    /// needed (free-on-consume per DECISIONS D-016).
+    pub fn from_gpu(
+        node_id: u32,
+        handle: GpuHistogramHandle,
+        feature_count: u32,
+        bin_count: u32,
+    ) -> Self {
+        Self {
+            node_id,
+            storage: HistogramStorage::Gpu {
+                handle,
+                feature_count,
+                bin_count,
+            },
+        }
+    }
+
     // --- Compat shims for CPU-only call sites ------------------------
     //
     // Same rationale as `PartitionResult` / `NodeSlice`: CPU-pinned

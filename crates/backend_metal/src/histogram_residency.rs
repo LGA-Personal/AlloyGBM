@@ -81,9 +81,28 @@ pub(crate) struct HistogramShape {
     pub bin_count: u32,
 }
 
+/// Materialised readback of one pool entry. Used by test helpers and
+/// by kernels that need to rebuild CPU-side `FeatureHistogram` values
+/// (e.g. the categorical half of `best_split` per D-012).
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub(crate) struct HistogramPlanes {
+    pub grad: Vec<f32>,
+    pub hess: Vec<f32>,
+    pub counts: Vec<u32>,
+    pub feature_indices: Vec<u32>,
+    pub bin_count: u32,
+}
+
 /// Borrowed view of one live pool entry. Cloned `Retained` handles
 /// remain live until the `HistogramEntry` is dropped; the caller can
 /// hand them to a kernel dispatch without holding the pool mutex.
+///
+/// `feature_indices` carries the original feature IDs in the same
+/// order the kernel's flat `[feature × bin]` layout uses. Downstream
+/// consumers (`split`, `subtract`, readback for tests) need the IDs
+/// to reconstruct `FeatureHistogram { feature_index, .. }` entries
+/// or build per-feature `SplitCandidate`s without a separate lookup.
 #[derive(Clone)]
 #[allow(dead_code)]
 pub(crate) struct HistogramEntry {
@@ -91,6 +110,7 @@ pub(crate) struct HistogramEntry {
     pub hess: Retained<ProtocolObject<dyn MTLBuffer>>,
     pub counts: Retained<ProtocolObject<dyn MTLBuffer>>,
     pub shape: HistogramShape,
+    pub feature_indices: Vec<u32>,
 }
 
 struct PoolState {
@@ -144,9 +164,10 @@ impl HistogramResidencyPool {
         &self,
         device: &ProtocolObject<dyn MTLDevice>,
         residency: &ResidencyPool,
-        feature_count: u32,
+        feature_indices: &[u32],
         bin_count: u32,
     ) -> EngineResult<GpuHistogramHandle> {
+        let feature_count = feature_indices.len() as u32;
         // Overflow-check the whole byte-budget chain: each plane is
         // `feature_count × bin_count × 4`. Checking only the cell
         // count isn't enough — `cells * 4` can still wrap after a
@@ -181,6 +202,7 @@ impl HistogramResidencyPool {
                 feature_count,
                 bin_count,
             },
+            feature_indices: feature_indices.to_vec(),
         };
 
         let mut state = self.state.lock().map_err(|e| {
@@ -190,6 +212,94 @@ impl HistogramResidencyPool {
         state.next_token = state.next_token.wrapping_add(1);
         state.live.insert(token, entry);
         Ok(GpuHistogramHandle(token))
+    }
+
+    /// Write `counts` into the pool entry's counts buffer. The kernel
+    /// emits only `(grad, hess)` via the reduce pass (D-008); counts
+    /// are computed CPU-side and memcpied into GPU-resident storage
+    /// here so downstream GPU consumers (subtract kernel) can read
+    /// them without a CPU round-trip.
+    ///
+    /// Returns `EngineError::BackendUnavailable` on an unknown handle
+    /// or a length mismatch against the entry's declared shape.
+    pub(crate) fn write_counts(
+        &self,
+        handle: GpuHistogramHandle,
+        counts: &[u32],
+    ) -> EngineResult<()> {
+        let state = self.state.lock().map_err(|e| {
+            EngineError::BackendUnavailable(format!("histogram residency pool poisoned: {e}"))
+        })?;
+        let entry = state.live.get(&handle.0).ok_or_else(|| {
+            EngineError::BackendUnavailable(format!(
+                "histogram residency pool: write_counts called on unknown handle {:?}",
+                handle.0
+            ))
+        })?;
+        let expected = (entry.shape.feature_count as usize) * (entry.shape.bin_count as usize);
+        if counts.len() != expected {
+            return Err(EngineError::BackendUnavailable(format!(
+                "histogram residency pool: write_counts expected {expected} u32 values \
+                 ({fc} × {bc}), got {got}",
+                fc = entry.shape.feature_count,
+                bc = entry.shape.bin_count,
+                got = counts.len()
+            )));
+        }
+        if expected == 0 {
+            return Ok(());
+        }
+        // SAFETY: the counts buffer is StorageModeShared with
+        // `expected × 4` bytes (allocated in `mint`). We write
+        // exactly that many `u32`s from a slice whose length we
+        // checked above. Metal guarantees the `contents()` pointer
+        // is valid and writable for shared-mode buffers.
+        let dst_ptr = entry.counts.contents().as_ptr().cast::<u32>();
+        unsafe {
+            std::ptr::copy_nonoverlapping(counts.as_ptr(), dst_ptr, expected);
+        }
+        Ok(())
+    }
+
+    /// Read back the full histogram contents for a live handle. Used
+    /// by test harnesses and by Metal-backend kernels that need to
+    /// materialise a CPU sub-bundle (e.g. the categorical half of
+    /// `best_split`, which still runs Fisher-sort on CPU per D-012).
+    ///
+    /// Returns `(grad, hess, counts)` each of length
+    /// `feature_count × bin_count` in row-major (feature, bin) order.
+    pub(crate) fn read_planes(&self, handle: GpuHistogramHandle) -> EngineResult<HistogramPlanes> {
+        let state = self.state.lock().map_err(|e| {
+            EngineError::BackendUnavailable(format!("histogram residency pool poisoned: {e}"))
+        })?;
+        let entry = state.live.get(&handle.0).ok_or_else(|| {
+            EngineError::BackendUnavailable(format!(
+                "histogram residency pool: read_planes called on unknown handle {:?}",
+                handle.0
+            ))
+        })?;
+        let total = (entry.shape.feature_count as usize) * (entry.shape.bin_count as usize);
+        // SAFETY: each plane is StorageModeShared with `total × 4`
+        // bytes of valid, kernel-written data after the caller has
+        // waited on the producing command buffer. We read exactly
+        // `total` elements of the appropriate scalar type.
+        let grad: Vec<f32> = unsafe {
+            std::slice::from_raw_parts(entry.grad.contents().as_ptr().cast::<f32>(), total).to_vec()
+        };
+        let hess: Vec<f32> = unsafe {
+            std::slice::from_raw_parts(entry.hess.contents().as_ptr().cast::<f32>(), total).to_vec()
+        };
+        let counts: Vec<u32> = unsafe {
+            std::slice::from_raw_parts(entry.counts.contents().as_ptr().cast::<u32>(), total)
+                .to_vec()
+        };
+        Ok(HistogramPlanes {
+            grad,
+            hess,
+            counts,
+            feature_indices: entry.feature_indices.clone(),
+            bin_count: entry.shape.bin_count,
+        })
     }
 
     /// Look up the entry for `handle`. Returns a cloned `HistogramEntry`
@@ -298,14 +408,16 @@ mod tests {
         );
         let pool = HistogramResidencyPool::new();
 
+        let feature_indices: Vec<u32> = (0..16).collect();
         let handle = pool
-            .mint(&metal_device.device, &residency, 16, 255)
+            .mint(&metal_device.device, &residency, &feature_indices, 255)
             .expect("mint should succeed on a realistic shape");
         assert_eq!(pool.live_count(), 1);
 
         let entry = pool.get(handle).expect("handle should resolve");
         assert_eq!(entry.shape.feature_count, 16);
         assert_eq!(entry.shape.bin_count, 255);
+        assert_eq!(entry.feature_indices, feature_indices);
 
         pool.release(handle, &residency);
         assert_eq!(pool.live_count(), 0);
@@ -324,11 +436,12 @@ mod tests {
         let residency = ResidencyPool::disabled(metal_device.queue.clone());
         let pool = HistogramResidencyPool::new();
 
+        let features: Vec<u32> = (0..4).collect();
         let h1 = pool
-            .mint(&metal_device.device, &residency, 4, 16)
+            .mint(&metal_device.device, &residency, &features, 16)
             .expect("first mint");
         let h2 = pool
-            .mint(&metal_device.device, &residency, 4, 16)
+            .mint(&metal_device.device, &residency, &features, 16)
             .expect("second mint");
         assert_ne!(h1, h2, "two mints must produce different handles");
         assert_eq!(pool.live_count(), 2);
@@ -363,9 +476,17 @@ mod tests {
 
         // u32::MAX × u32::MAX overflows a usize even on 64-bit —
         // the guard should catch it and return an error rather
-        // than silently allocating a wrapped-around size.
+        // than silently allocating a wrapped-around size. We can't
+        // actually fabricate a u32::MAX-length feature_indices Vec
+        // (>16 GiB), so we fabricate an uninhabited view via
+        // `from_raw_parts` against a dangling pointer — the pool
+        // only reads the length to check overflow, never the
+        // contents.
+        let feature_indices: &[u32] = unsafe {
+            std::slice::from_raw_parts(std::ptr::NonNull::dangling().as_ptr(), u32::MAX as usize)
+        };
         let err = pool
-            .mint(&metal_device.device, &residency, u32::MAX, u32::MAX)
+            .mint(&metal_device.device, &residency, feature_indices, u32::MAX)
             .expect_err("shape overflow must be rejected");
         assert!(
             matches!(err, EngineError::BackendUnavailable(ref msg) if msg.contains("overflowed")),
