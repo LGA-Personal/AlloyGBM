@@ -1,8 +1,8 @@
 # Metal Backend — Current Status
 
-**Last updated:** 2026-04-21 (Stage 3 in-flight — S3.1/S3.2/S3.4–S3.9/S3.7a/S3.7b/S3.13 landed)
+**Last updated:** 2026-04-23 (Stage 3 in-flight — S3.7c bundle + S3.7d lifecycle landed)
 **Active stage:** Stage 3 — GPU residency (row partitioning + histograms + subtract)
-**Active sub-task:** S3.3 (trainer-loop refactor threading `HistogramStorage` + `RowIndexStorage` through active-node tuples and PendingSplit) + S3.7c/d (bundled: `build_histograms` produces `Gpu(..)`, `best_split`/`subtract`/`apply_split` read pool buffers, Stage-2 ReusableSlots retired)
+**Active sub-task:** S3.3 (trainer-loop audit) → S3.7e (row-index residency pool + reduce_sums GPU arm + engine Gpu PartitionResult refactor)
 
 ---
 
@@ -17,11 +17,14 @@ Order matches the approved plan in
 - [x] **S3.5** `shaders/partition.metal` — two-phase direction-flag + stream-compaction kernel. `SPLIT_KIND` function constant (0 = continuous threshold, 1 = categorical bitset). Deterministic stable compaction preserves original row order. Cache-hit check + pipeline Arc sharing via `PartitionPipelineCache`.
 - [x] **S3.6** `shaders/subtract.metal` — elementwise parent − child over flattened `[F × B × (grad, hess, counts)]`. Bit-exact with CPU (IEEE 754 §5.4 deterministic subtract of identical inputs). `SubtractPipelineCache` mirrors the other kernel caches.
 - [x] **S3.7a** (decomposed from S3.7) — `GpuHistogramHandle(u64)` / `GpuRowIndexHandle(u64)` newtypes + `Gpu { handle, feature_count, bin_count }` / `Gpu { handle, row_count }` variants on the storage enums. Six new unit tests on core cover len / handle / gpu-accessor round-trip and legacy-shim panic on Gpu arm. Commit: `1b5e511`.
-- [x] **S3.7b** (decomposed from S3.7) — `HistogramResidencyPool` skeleton in `backend_metal` with `mint` / `get` / `release` surface, overflow-checked shape math, integration with `ResidencyPool`. `MetalBackend` now carries a `residency: ResidencyPool` field + an `Arc<HistogramResidencyPool>` field; both are `#[allow(dead_code)]`-gated pending S3.7c. Four new unit tests cover round-trip, distinct handles, unknown-release no-op, and u32-squared-bytes overflow rejection. Commit: `ab3671f`.
-- [ ] **S3.7c+d + S3.3 (bundled)** — `build_histograms` writes kernel output straight into pool-owned buffers and returns `HistogramStorage::Gpu(..)`; `best_split` reads pool entries directly (Stage-2 `split_grad`/`split_hess`/`split_counts` ReusableSlots are retired); `subtract_histogram_bundle` override dispatches the GPU subtract kernel when parent + child are both `Gpu(..)`; `apply_split` override returns `RowIndexStorage::Gpu(..)`. Trainer refactor flips every active-node tuple / PendingSplit field read to pattern-match on the storage variant; Cpu path remains semantically identical. These three sub-tasks are tightly coupled (handles must be live in the engine loop for the kernel reads to be meaningful) and ship as one atomic commit.
+- [x] **S3.7b** (decomposed from S3.7) — `HistogramResidencyPool` skeleton in `backend_metal` with `mint` / `get` / `release` surface, overflow-checked shape math, integration with `ResidencyPool`. Commit: `ab3671f`.
+- [x] **S3.7c** (bundled c.1/c.2/c.3) — `build_histograms` writes kernel output straight into pool-owned SoA buffers and returns `HistogramStorage::Gpu(..)`; `best_split` + `subtract` read pool buffers directly; Stage-2 ReusableSlots retired. Commits: `1199546` (c.1 SoA reduce), `c2886af` (c.2 pool API), `1f3c0b7` (c.3 end-to-end).
+- [x] **S3.7d** (narrowed scope — histogram lifecycle only) — `BackendOps::release_histograms` trait method (default no-op) + `HistogramReleaseGuard` RAII helper. Level-wise + leaf-wise trainer loops wrap every per-node iteration in the guard so every continue/break/return path fires release deterministically. Leaf-wise queue-drain releases `PendingSplit`s that were never popped (e.g. early `break` on MaxLeavesReached). `MetalBackend::release_histograms` pattern-matches on storage variant → pool `release` on Gpu, no-op on Cpu. `RuntimeBackend` forwards the override. Closes the residency-pool leak hazard so the M2 budget projection in `backend_metal::budget` actually holds at runtime. Commit: `a81a863`.
 - [x] **S3.8** `MTLResidencySet` wrapper in `residency.rs` with `PassThrough` fallback for macOS 13/14 + no-Metal builds. Attach-on-construct / detach-on-drop lifecycle; 3 unit tests. Wired into `MetalBackend` as of S3.7b.
 - [x] **S3.9** `BudgetTracker` in `budget.rs` enforcing the M2 free-on-consume policy: refuses the fit when projected peak (`F × B × L × 12`) exceeds 80 % of `MTLDevice.recommendedMaxWorkingSetSize`. Returns `EngineError::BackendUnavailable` with `device="cpu"` fallback guidance in the error message. 6 unit tests on the tracker + 3 integration tests exercising `MetalBackend::check_histogram_budget` on a real device. Pathological-shape risk note lives at the top of `budget.rs`. Commit: `495eefa`.
-- [ ] **S3.10** Rust unit tests — residency round-trip (`build_histograms` → `best_split` → `subtract` → `best_split` on child, all values bit-exact after a single CPU read-back). Partition + subtract correctness tests already landed with S3.5 / S3.6.
+- [ ] **S3.7e** (new — deferred from S3.7d) — Row-index residency pool + `reduce_sums` GPU arm + engine-side `Gpu PartitionResult` refactor. The engine's `apply_partition_leaf_updates`, `validate_partition_cover`, and `into_cpu_parts` all currently call `.left_row_indices()` / `.right_row_indices()` which panic on the Gpu arm — GPU row storage requires rewriting each of those helpers to dispatch on the variant. Substantially larger change than the histogram path; ships as its own sub-task. `reduce_sums` Gpu arm currently dead code (no producer) — wiring up a `RowIndexResidencyPool` + `MetalBackend::apply_split` producing `Gpu(..)` is what activates it.
+- [ ] **S3.3** Trainer-loop audit — very thin as of today (engine already calls `BackendOps::subtract_histogram_bundle` through the trait, so the trainer hot loop is storage-variant-agnostic in Cpu mode). Concrete audit task: walk every `.feature_histograms()` / `.left_row_indices()` / `.right_row_indices()` call site in `crates/engine/src/lib.rs` and confirm each either (a) is Cpu-only by construction, or (b) pattern-matches on the variant. Blocks S3.7e pre-flight.
+- [ ] **S3.10** Rust unit tests — residency round-trip (`build_histograms` → `best_split` → `subtract` → `best_split` on child, all values bit-exact after a single CPU read-back). Partition + subtract correctness tests already landed with S3.5 / S3.6. Histogram lifecycle tests landed with S3.7d.
 - [ ] **S3.11** Python `MetalStage3Tests` — golden 50k × 100 × 255 × 20 fit pair with structural-plus-ulp gate, dedicated NaN-heavy / monotone-constraint / mixed-categorical (D-017 coverage) / memory-pressure (M2 budget guard fires cleanly) cases.
 - [ ] **S3.12** Benchmark re-run on Apple M4 + new dated section in `BENCHMARKS.md`. Kill criterion: `metal_friendly` depth 8 + depth 10 + K=10 multiclass must all cross >1.0× CPU. Blocks stage close if it doesn't.
 - [x] **S3.13** `DECISIONS.md` entries — D-015 (enum-variant storage API), D-016 (M2 residency budget), D-017 (categorical partition on GPU, split on CPU), D-018 (subtract / apply_split / reduce_sums promoted to `BackendOps`). Commit: `883d9ae`.
@@ -32,53 +35,50 @@ Order matches the approved plan in
 
 ## Stage 3 — In Flight
 
-What has shipped (counting everything on `claude/charming-carson-d08c9a` through `ab3671f`):
+What has shipped (counting everything on `claude/charming-carson-d08c9a` through `a81a863`):
 
 - Core storage enums (`HistogramStorage` / `RowIndexStorage`) with both `Cpu` and `Gpu` variants + opaque `u64` handle newtypes.
 - `BackendOps` trait has `subtract_histogram_bundle` as a default method; trainer call sites call through the backend rather than the free function.
-- `shaders/partition.metal` + `kernels/partition.rs` — row partitioning on GPU for both continuous and categorical splits. Live behind `MetalBackend::apply_split`; falls back to CPU on scan-cap overflow.
-- `shaders/subtract.metal` + `kernels/subtract.rs` — elementwise subtract on GPU. `dispatch_subtract` is unit-test-reachable; the `BackendOps` override lands with S3.7c/d when parent + child are both `Gpu(..)`.
+- `BackendOps::release_histograms` trait method (default no-op) + `HistogramReleaseGuard` RAII helper wired into both level-wise and leaf-wise trainer loops. Queue-drain on leaf-wise early break covers `PendingSplit`s never popped.
+- `shaders/partition.metal` + `kernels/partition.rs` — row partitioning on GPU for both continuous and categorical splits. Live behind `MetalBackend::apply_split`; falls back to CPU on scan-cap overflow. **Still produces `RowIndexStorage::Cpu(..)`** today — GPU row residency is S3.7e.
+- `shaders/subtract.metal` + `kernels/subtract.rs` — elementwise subtract on GPU. Live behind `MetalBackend::subtract_histogram_bundle` when parent + child are both `Gpu(..)`.
 - `residency.rs` — `MTLResidencySet` wrapper + `PassThrough` fallback. Wired into `MetalBackend::new`.
-- `budget.rs` — M2 free-on-consume working-set tracker. Wired into `MetalBackend::new`. `MetalBackend::check_histogram_budget(f, b, L)` is the public surface the trainer will call at fit start.
-- `histogram_residency.rs` — GPU-resident histogram pool skeleton. Wired into `MetalBackend::new` behind `#[allow(dead_code)]`; S3.7c/d activates it.
+- `budget.rs` — M2 free-on-consume working-set tracker. Wired into `MetalBackend::new`. Now actually correct at runtime — S3.7d closed the residency-pool leak that previously broke the one-level-wide peak projection.
+- `histogram_residency.rs` — GPU-resident histogram pool. Active end-to-end: build → split → subtract → release via engine-side RAII guard.
+- `MetalBackend::build_histograms` returns `HistogramStorage::Gpu { handle, feature_count, bin_count }`; `best_split` / `subtract` consume handles directly; Stage-2 `split_grad`/`split_hess`/`split_counts` ReusableSlots retired.
 
 What is left for the next session:
 
-- **S3.7c+d + S3.3 (bundled)** — the next commit is the decisive one. It reroutes `build_histograms` output into pool-owned buffers, produces `HistogramStorage::Gpu(..)`, wires `best_split` / `subtract` / `apply_split` to consume handles, and threads the storage variants through the trainer loops. The audit shows that the engine is already largely storage-enum-aware in Cpu mode (≤10 `feature_histograms()` call sites; most are in subtract helpers + tests). The refactor is therefore mostly additive — add the Gpu arm handling next to the existing Cpu arm handling, with `CpuBackend` untouched.
-- **S3.10 / S3.11** — kernel round-trip tests + Python golden pair. Both land after S3.7c/d so the Gpu path is actually exercised.
-- **S3.12** — benchmark (kill criterion at this point). Stage 3 stands or falls by whether `metal_friendly` deep-tree configs cross >1.0× CPU; if they don't, dig in before declaring Stage 3 shipped.
-- **S3.13 / S3.14 / S3.15** — docs + final verification sweep.
+- **S3.3 audit (fast)** — walk `crates/engine/src/lib.rs` for remaining `.feature_histograms()` / `.left_row_indices()` / `.right_row_indices()` call sites; document which are Cpu-only by construction vs. which will need variant dispatch when S3.7e lands. Pre-flight for S3.7e; should take under an hour.
+- **S3.7e** — row-index residency pool + `MetalBackend::apply_split` producing `RowIndexStorage::Gpu(..)` + `MetalBackend::reduce_sums` Gpu arm + engine-side refactor of `apply_partition_leaf_updates` / `validate_partition_cover` / `into_cpu_parts` to dispatch on the storage variant. The engine refactor is the bulk of the work; the Metal pool is straight-line copy of `HistogramResidencyPool`.
+- **S3.10 / S3.11** — residency round-trip Rust tests + Python golden pair. Both land after S3.7e so the Gpu path is end-to-end resident.
+- **S3.12** — benchmark (kill criterion). Stage 3 stands or falls by whether `metal_friendly` deep-tree configs cross >1.0× CPU; if they don't, dig in before declaring Stage 3 shipped.
+- **S3.14 / S3.15** — docs + final verification sweep.
 
 ---
 
-## Current Session Commits
+## Current Session Commits (2026-04-23)
 
-- `1b5e511` — feat(core): Gpu variants on storage enums + handle newtypes (S3.7a)
-- `ab3671f` — feat(backend_metal): HistogramResidencyPool skeleton + wiring (S3.7b)
-- `0d23c66` — docs(metal-backend): STATUS + SESSIONS updated for S3.7a + S3.7b
-- `883d9ae` — docs(metal-backend): DECISIONS D-015..D-018 for Stage 3 (S3.13)
+- `1199546` — feat(backend_metal): histogram reduce pass emits SoA (S3.7c.1, D-019)
+- `c2886af` — feat(backend_metal): residency pool API for GPU histograms (S3.7c.2)
+- `1f3c0b7` — feat(backend_metal): pool-resident GPU histograms end-to-end (S3.7c.3, D-008, D-012, D-019)
+- `a81a863` — feat(backend_metal): histogram handle lifecycle cleanup (S3.7d)
 
-Verification at end of session: workspace cargo check / clippy / fmt / test all green on both feature configs; 218 Rust tests pass (38 core + 69 engine + 36 backend_metal + 23 backend_cpu + 19 categorical + 10 predictor + 23 shap). Python tests are expected-green by construction (no CPU-path changes landed this session); full pytest sweep runs at S3.15.
+**Verification at end of session:**
+- `cargo check --workspace` + `--no-default-features` — clean
+- `cargo clippy --workspace --all-targets -- -D warnings` + `--no-default-features` — clean
+- `cargo fmt --all --check` — clean
+- `cargo test --workspace --exclude alloygbm-python` — 220 tests pass (38 core + 69 engine + 38 backend_metal (+2 release_histograms tests) + 23 backend_cpu + 19 categorical + 10 predictor + 23 shap)
+- `maturin develop --release` with default features — `pytest bindings/python/tests -q` green (362 passed, 20 subtests passed)
+- `maturin develop --release --no-default-features` — `pytest` green (334 passed, 28 Metal-gated skipped, 16 subtests passed)
 
 ---
 
 ## Blockers / Open Questions
 
-- **S3.7c+d + S3.3 is a single-atomic-commit refactor** rather than three independent sub-tasks. The public-API surface flip (`build_histograms` returning `Gpu(..)`) is observable from the engine the moment it lands; there's no benign-no-op intermediate state unless we add a transitional `build_histograms_into_pool` dual method, which adds code to delete later. Decision for next session: ship it as one commit, with the commit message breaking out the three logical pieces for the archaeologist.
+- **S3.7e engine surface is the real work.** The histogram side was forgiving because it flowed through `BackendOps` methods — the trainer never touched `.feature_histograms()` directly on a Gpu arm. The row-index side is not — `apply_partition_leaf_updates` + `validate_partition_cover` + `into_cpu_parts` read row indices eagerly. Each has to be rewritten to dispatch on the variant or to take a `&dyn BackendOps` and delegate. S3.3 audit documents the call sites; S3.7e does the refactor. No API contract changes required on core (variants already exist as of S3.7a) — the work is all in engine + backend_metal.
 
-- **Refined scope audit (2026-04-21 follow-up):** S3.3 is far thinner than the initial estimate. The engine's trainer hot loop *never* calls `.feature_histograms()` directly on a backend-produced bundle — it flows through `BackendOps::best_split`, `BackendOps::apply_split`, `BackendOps::subtract_histogram_bundle`, `BackendOps::reduce_sums`. The only three non-test `.feature_histograms()` call sites in `crates/engine/src/lib.rs` are all inside the CPU-side free functions `subtract_histogram_bundle` (line 4320) and `subtract_histogram_bundle_into` (lines 4283, 4284, 4294 for the `_mut` variant). Those free functions are only reached via `BackendOps::subtract_histogram_bundle`'s default impl — which `MetalBackend` will override in S3.7d to dispatch the GPU kernel. Conclusion: **S3.3 is close to a no-op for the engine; nearly all the work is in `backend_metal`.**
-
-  Concretely, the next-session changes are:
-    - **S3.7c** (2 files: `kernels/histogram.rs` + `kernels/split.rs`): histogram kernel writes kernel output into pool-owned SoA buffers (grad / hess / counts); `dispatch_histograms` returns `HistogramStorage::Gpu { handle, feature_count, bin_count }` keyed in `HistogramResidencyPool`. `dispatch_best_split` pattern-matches on `histograms.storage`: `Cpu(..)` keeps today's code path; `Gpu(..)` reads the three pool buffers directly (the four Stage-2 ReusableSlots `split_grad`/`split_hess`/`split_counts`/`continuous_mask` for grad/hess/counts are then retired — `continuous_mask` stays because categorical features still take the CPU branch of the partition).
-    - **S3.7d** (4 files: `kernels/subtract.rs` activation + `kernels/partition.rs` residency wiring + `lib.rs` trait overrides + new `row_index_residency.rs`): `MetalBackend::subtract_histogram_bundle` override mints a new histogram pool handle, dispatches `subtract.metal`, returns `Gpu(..)`. A new `RowIndexResidencyPool` (structurally identical to `HistogramResidencyPool` — just one buffer per handle, not three) owns the partition kernel's output buffers; `dispatch_partition` returns `PartitionResult { left: Gpu(..), right: Gpu(..) }`. `MetalBackend::reduce_sums` adds a `Gpu(..)` arm that reads the row-index buffer back once via the pool (this readback is cheap — O(rows) per new node, happens ~n_leaves times per tree).
-    - **S3.3** (1-2 files: `engine/src/lib.rs` — *very small*): audit `subtract_histogram_bundle_into` + `subtract_histogram_bundle` + the CpuBackend default trait impls to make sure the `Cpu(..)` arm still works (unchanged behaviour). The trainer loops at lines 3915, 3940, 4221 already call `backend.subtract_histogram_bundle(...)` through the trait — no pattern-match needed.
-
-  Handle-lifecycle policy for the next session to decide: the pool tracks live handles; free-on-consume needs a release trigger. Three options, in rough order of engineering cost vs. correctness:
-    1. **Leak-and-bulk-reset** — pool grows during the fit, `MetalBackend` exposes `fit_reset()` called at fit-end. Simplest but defeats M2 budget guarantees (peak residency ≈ *cumulative* histograms, not one level's worth).
-    2. **Free-list reuse** — pool doesn't actually free on release; keeps buffers on a free-list keyed by (f, b) shape. Mint hits free-list before allocating. Preserves M2 guarantee *if* caller invokes `pool.release(handle)` at known trainer consumption points. Minimal new infrastructure but requires engine-visible release points.
-    3. **RAII via `Arc<dyn ResidencyHandle>` on the core::Gpu variant** — cleanest lifecycle but requires modifying `HistogramStorage::Gpu` / `RowIndexStorage::Gpu` in `core` to carry a `Arc<dyn ResidencyHandle + Send + Sync>`, and decorating all pattern-matches to ignore that field. Cascades into core's PartialEq / Debug derives. Most invasive API change.
-
-  Recommended: start with option 2 (free-list reuse) + explicit `pool.release()` from inside the Metal override methods themselves (not from the engine). The override knows when parent + child are consumed (right after the GPU kernel returns a new handle for the result); it can release both inputs before returning. No engine changes needed beyond what S3.7c/d already requires.
+- **Handle-lifecycle policy (carried forward, resolved for histograms; pending for row indices).** Histograms now use engine-side RAII drop guards (`HistogramReleaseGuard`) which call `BackendOps::release_histograms`. Row indices will need the same pattern — either a `BackendOps::release_row_indices(&PartitionResult)` + `PartitionReleaseGuard` following the same shape, or a lifetime-tracked `Arc<dyn ResidencyHandle>` on the Gpu variant. Recommend the former: it matches the already-shipped histogram pattern and doesn't cascade into core's `PartialEq` / `Debug` derives.
 
 ---
 
@@ -86,6 +86,6 @@ Verification at end of session: workspace cargo check / clippy / fmt / test all 
 
 - ~~**Stage 1** — GPU histogram build~~ *(shipped 2026-04-20)*
 - ~~**Stage 2** — GPU best-split finder~~ *(shipped 2026-04-20)*
-- **Stage 3** — GPU residency (row partitioning + histograms + subtract) **(in flight — S3.1/S3.2/S3.4–S3.9 + S3.7a/b done)**
+- **Stage 3** — GPU residency (row partitioning + histograms + subtract) **(in flight — everything but S3.7e/S3.3/S3.10/S3.11/S3.12/S3.14/S3.15 done)**
 - **Stage 4** — Metal 4 Indirect Command Buffer chaining (planned, not scoped)
 - **Stage 5** — GPU inference tree traversal (planned, not scoped)
