@@ -23,7 +23,7 @@ Order matches the approved plan in
 - [x] **S3.8** `MTLResidencySet` wrapper in `residency.rs` with `PassThrough` fallback for macOS 13/14 + no-Metal builds. Attach-on-construct / detach-on-drop lifecycle; 3 unit tests. Wired into `MetalBackend` as of S3.7b.
 - [x] **S3.9** `BudgetTracker` in `budget.rs` enforcing the M2 free-on-consume policy: refuses the fit when projected peak (`F × B × L × 12`) exceeds 80 % of `MTLDevice.recommendedMaxWorkingSetSize`. Returns `EngineError::BackendUnavailable` with `device="cpu"` fallback guidance in the error message. 6 unit tests on the tracker + 3 integration tests exercising `MetalBackend::check_histogram_budget` on a real device. Pathological-shape risk note lives at the top of `budget.rs`. Commit: `495eefa`.
 - [ ] **S3.7e** (new — deferred from S3.7d) — Row-index residency pool + `reduce_sums` GPU arm + engine-side `Gpu PartitionResult` refactor. The engine's `apply_partition_leaf_updates`, `validate_partition_cover`, and `into_cpu_parts` all currently call `.left_row_indices()` / `.right_row_indices()` which panic on the Gpu arm — GPU row storage requires rewriting each of those helpers to dispatch on the variant. Substantially larger change than the histogram path; ships as its own sub-task. `reduce_sums` Gpu arm currently dead code (no producer) — wiring up a `RowIndexResidencyPool` + `MetalBackend::apply_split` producing `Gpu(..)` is what activates it.
-- [ ] **S3.3** Trainer-loop audit — very thin as of today (engine already calls `BackendOps::subtract_histogram_bundle` through the trait, so the trainer hot loop is storage-variant-agnostic in Cpu mode). Concrete audit task: walk every `.feature_histograms()` / `.left_row_indices()` / `.right_row_indices()` call site in `crates/engine/src/lib.rs` and confirm each either (a) is Cpu-only by construction, or (b) pattern-matches on the variant. Blocks S3.7e pre-flight.
+- [x] **S3.3** Trainer-loop audit complete (2026-04-23). See "S3.3 Audit Findings" section below for the full enumeration. Short form: two S3.7e refactor targets in production code (`apply_partition_leaf_updates` + both trainer loops' `partition.into_cpu_parts()` at 3963 / 4263); everything else is either variant-agnostic already (`validate_partition_cover` uses `.len()` / `.is_empty()`), or Cpu-only by construction (engine's `subtract_histogram_bundle` free function stays as the CpuBackend default-trait-impl path, bypassed by the MetalBackend override), or already variant-aware (mock trait impl at 6222, test stubs).
 - [ ] **S3.10** Rust unit tests — residency round-trip (`build_histograms` → `best_split` → `subtract` → `best_split` on child, all values bit-exact after a single CPU read-back). Partition + subtract correctness tests already landed with S3.5 / S3.6. Histogram lifecycle tests landed with S3.7d.
 - [ ] **S3.11** Python `MetalStage3Tests` — golden 50k × 100 × 255 × 20 fit pair with structural-plus-ulp gate, dedicated NaN-heavy / monotone-constraint / mixed-categorical (D-017 coverage) / memory-pressure (M2 budget guard fires cleanly) cases.
 - [ ] **S3.12** Benchmark re-run on Apple M4 + new dated section in `BENCHMARKS.md`. Kill criterion: `metal_friendly` depth 8 + depth 10 + K=10 multiclass must all cross >1.0× CPU. Blocks stage close if it doesn't.
@@ -79,6 +79,34 @@ What is left for the next session:
 - **S3.7e engine surface is the real work.** The histogram side was forgiving because it flowed through `BackendOps` methods — the trainer never touched `.feature_histograms()` directly on a Gpu arm. The row-index side is not — `apply_partition_leaf_updates` + `validate_partition_cover` + `into_cpu_parts` read row indices eagerly. Each has to be rewritten to dispatch on the variant or to take a `&dyn BackendOps` and delegate. S3.3 audit documents the call sites; S3.7e does the refactor. No API contract changes required on core (variants already exist as of S3.7a) — the work is all in engine + backend_metal.
 
 - **Handle-lifecycle policy (carried forward, resolved for histograms; pending for row indices).** Histograms now use engine-side RAII drop guards (`HistogramReleaseGuard`) which call `BackendOps::release_histograms`. Row indices will need the same pattern — either a `BackendOps::release_row_indices(&PartitionResult)` + `PartitionReleaseGuard` following the same shape, or a lifetime-tracked `Arc<dyn ResidencyHandle>` on the Gpu variant. Recommend the former: it matches the already-shipped histogram pattern and doesn't cascade into core's `PartialEq` / `Debug` derives.
+
+---
+
+## S3.3 Audit Findings (2026-04-23)
+
+Full enumeration of `.feature_histograms()` / `.left_row_indices()` /
+`.right_row_indices()` / `.into_cpu_parts()` / `.cpu()` call sites in
+`crates/engine/src/lib.rs`:
+
+| Line | Call | Classification | Action for S3.7e |
+| --- | --- | --- | --- |
+| 3963 | `partition.into_cpu_parts()` in `build_tree_level_wise` | **Hot path, eager CPU consumer.** Takes partition result, owns `Vec<u32>` into `NodeSlice::new` for the next level's histograms. | **Refactor:** either thread `RowIndexStorage` through the active-node tuple (preserves GPU residency), or force a CPU readback here via a `BackendOps::materialize_row_indices` helper. D-015 prefers the first. |
+| 4263 | `partition.into_cpu_parts()` in `build_tree_leaf_wise` | **Hot path, eager CPU consumer.** Same shape as 3963 but for leaf-wise; feeds `PendingSplit.row_indices`. | **Refactor:** same as 3963. PendingSplit field becomes `RowIndexStorage` instead of `Vec<u32>`. |
+| 4365, 4366, 4402 | `parent.feature_histograms()` / `child.feature_histograms()` in engine's free `subtract_histogram_bundle` / `subtract_histogram_bundle_into` | **CPU default-impl path.** Called via `BackendOps::subtract_histogram_bundle`'s default, which `MetalBackend` overrides for `Gpu(..)` bundles. Never reached on a GPU histogram bundle. | **No action.** Stays CPU-only. |
+| 4696, 4705 | `partition.left_row_indices()` / `.right_row_indices()` in `apply_partition_leaf_updates` | **Hot path, eager CPU consumer.** Panics on Gpu arm today. Sums leaf values into `predictions: &mut [f32]` per row. | **Refactor:** take `&dyn BackendOps` + `&PartitionResult`, dispatch on storage variant; for Gpu arm, delegate to a new `BackendOps::apply_partition_leaf_updates(predictions, partition, left, right)` that the Metal backend implements via either a cheap readback (O(rows), one memcpy per leaf) or a GPU scatter kernel. Readback is probably fine — this runs once per tree node, not per level. |
+| 6222 | `rows.cpu().ok_or_else(...)` in mock test trait impl | **Test stub.** Returns `ContractViolation` on non-CPU variant. Already variant-aware. | **No action.** |
+| 7370, 7429, 7430, 7457, 7470 | `.feature_histograms()` in various test fixtures | **Test-only.** Cpu-produced bundles. | **No action.** |
+| 3749 | `validate_partition_cover` | Uses `.left.len()` / `.right.len()` / `.is_empty()` — these are variant-agnostic methods on `RowIndexStorage`. | **No action.** Already variant-safe. |
+
+**Three production-code refactor targets for S3.7e:**
+
+1. **`apply_partition_leaf_updates` (line 4689)** — lift onto `BackendOps`; CPU impl keeps today's eager-indexing loop; Metal impl reads the GPU row-index buffer back once per call and runs the same loop. Readback cost is minimal — one memcpy per apply call, happens O(tree_nodes) times per tree, not O(rows × depth).
+
+2. **`build_tree_level_wise` at 3963 — `partition.into_cpu_parts()`** — replace with a move of the whole `PartitionResult` into the two child active-node tuples. Active-node tuple's row-indices field becomes `RowIndexStorage` instead of `Vec<u32>`. Downstream calls to `NodeSlice::new` accept the storage variant unchanged (`NodeSlice` already holds `RowIndexStorage`).
+
+3. **`build_tree_leaf_wise` at 4263 — `partition.into_cpu_parts()`** — same treatment as 3963. `PendingSplit.row_indices` field flips from `Vec<u32>` to `RowIndexStorage`.
+
+**Zero engine changes needed outside those three sites.** `validate_partition_cover` + `NodeSlice` + mock trait impl + CPU-default `subtract_histogram_bundle` already handle the storage variants correctly (or are Cpu-only by construction and bypassed by the Metal override path). S3.7e's engine-side footprint is smaller than the S3.7c audit suggested — the work is concentrated in one new `BackendOps` method + two field-type flips + a `RowIndexReleaseGuard` mirror of `HistogramReleaseGuard`.
 
 ---
 
