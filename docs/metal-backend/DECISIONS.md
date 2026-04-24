@@ -652,3 +652,30 @@ hypothesis); spawn finer probes via Instruments.app GPU trace
 localise the cause inside `.gpu_dispatch` without adding an
 external-tool dependency; can be added if finer probes don't
 converge).
+
+Second pass (finer sub-probes inside `.gpu_dispatch`, depth=8
+`metal_friendly` regression):
+
+  build_histograms                            10.47s   90.2% of total
+    .gpu_dispatch                              9.23s   88% of build_histograms
+      ..scratch_alloc (528 calls)              0.12s    1.3%
+      ..encode        (528 calls)              0.06s    0.7%
+      ..commit_wait   (528 calls)              9.04s   97.9%
+
+`.commit_wait` (the `command_buffer.commit()` +
+`waitUntilCompleted()` block) averages **17ms per call**.
+Scratch allocation and encoding are microscopic. The GPU work
+itself dominates — the bottleneck is the kernel, not the
+dispatch overhead.
+
+Root cause in `shaders/histogram.metal`: `SIMD_WIDTH = 32`
+threads per threadgroup (1 simdgroup), inner loop at line 148
+serialises over 32 source lanes via `simd_shuffle` with a
+per-bin ownership check (line 154: `(src_bin % SIMD_WIDTH) ==
+thread_in_tg`). For uniformly-distributed bins, ~1 in 32 lanes
+commits a write per shuffle step; the rest idle. Effective
+arithmetic throughput is ~1/32 of theoretical peak. This is a
+determinism workaround for the "no float atomics at any memory
+level" constraint (D-003), and it pays a ~30× compute cost.
+Under-occupancy compounds the problem: M4 cores can host many
+more simdgroups per core but the kernel only ships 1.

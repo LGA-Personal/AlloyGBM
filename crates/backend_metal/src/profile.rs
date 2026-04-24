@@ -105,6 +105,13 @@ pub(crate) static BH_ROW_READBACK: Counter = Counter::new();
 pub(crate) static BH_COUNT_ACCUMULATE: Counter = Counter::new();
 pub(crate) static BH_BUFFER_SETUP: Counter = Counter::new();
 
+// Finer sub-probes inside BH_GPU_DISPATCH (D-021 second pass).
+// These overlap with BH_GPU_DISPATCH; reported as a second-level
+// indent in dump_if_enabled.
+pub(crate) static BH_SCRATCH_ALLOC: Counter = Counter::new();
+pub(crate) static BH_ENCODE: Counter = Counter::new();
+pub(crate) static BH_COMMIT_WAIT: Counter = Counter::new();
+
 // ---- apply_split sub-phases ---------------------------------------
 
 pub(crate) static AS_GPU_DISPATCH: Counter = Counter::new();
@@ -151,6 +158,21 @@ pub(crate) fn dump_if_enabled() {
         Site {
             name: "  .gpu_dispatch",
             counter: &BH_GPU_DISPATCH,
+            indented: true,
+        },
+        Site {
+            name: "    ..scratch_alloc",
+            counter: &BH_SCRATCH_ALLOC,
+            indented: true,
+        },
+        Site {
+            name: "    ..encode",
+            counter: &BH_ENCODE,
+            indented: true,
+        },
+        Site {
+            name: "    ..commit_wait",
+            counter: &BH_COMMIT_WAIT,
             indented: true,
         },
         Site {

@@ -224,10 +224,12 @@ pub(crate) fn dispatch_histograms(
     let p_dispatch = profile::ScopedProbe::new(&profile::BH_GPU_DISPATCH);
 
     // --- Encode the command buffer ---
+    let p_encode_cb = profile::ScopedProbe::new(&profile::BH_ENCODE);
     let command_buffer = metal_device
         .queue
         .commandBuffer()
         .ok_or_else(|| EngineError::BackendUnavailable("no command buffer".to_string()))?;
+    drop(p_encode_cb);
 
     let bin_sz = if use_u16 { 2usize } else { 1usize };
     let mut cumulative_features: u32 = 0;
@@ -240,12 +242,16 @@ pub(crate) fn dispatch_histograms(
         let tile_n_features = tile.end_feature - tile.start_feature;
         let tile_scratch_elems = n_chunks as usize * tile_n_features as usize * bin_count as usize;
         let tile_scratch_bytes = tile_scratch_elems * pair_bytes;
-        let scratch_buffer = device
-            .newBufferWithLength_options(tile_scratch_bytes.max(1), options)
-            .ok_or_else(|| {
-                EngineError::BackendUnavailable("could not allocate scratch buffer".to_string())
-            })?;
+        let scratch_buffer = {
+            let _p = profile::ScopedProbe::new(&profile::BH_SCRATCH_ALLOC);
+            device
+                .newBufferWithLength_options(tile_scratch_bytes.max(1), options)
+                .ok_or_else(|| {
+                    EngineError::BackendUnavailable("could not allocate scratch buffer".to_string())
+                })?
+        };
 
+        let p_encode = profile::ScopedProbe::new(&profile::BH_ENCODE);
         let binned_offset = (tile.start_feature as usize) * (n_rows_total as usize) * bin_sz;
         let output_offset = (cumulative_features as usize) * (bin_count as usize) * f32_bytes;
 
@@ -330,10 +336,14 @@ pub(crate) fn dispatch_histograms(
 
         scratch_keepalive.push(scratch_buffer);
         cumulative_features += tile_n_features;
+        drop(p_encode);
     }
 
-    command_buffer.commit();
-    command_buffer.waitUntilCompleted();
+    {
+        let _p = profile::ScopedProbe::new(&profile::BH_COMMIT_WAIT);
+        command_buffer.commit();
+        command_buffer.waitUntilCompleted();
+    }
     drop(p_dispatch);
 
     // --- CPU-computed counts → GPU-resident pool buffer (D-008) ---
