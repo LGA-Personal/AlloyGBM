@@ -823,6 +823,175 @@ class MetalStage2NanAndMonotoneTests(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(_METAL.metal_available, _SKIP_REASON)
+class MetalStage3Tests(unittest.TestCase):
+    """S3.11 — Stage 3 (GPU residency) parity tests.
+
+    Stage 3 keeps histograms *and* row indices resident on the GPU
+    across the level-wise / leaf-wise trainer loops — no per-level
+    CPU round-trip for the hot path. The kernels themselves
+    (histogram, split, partition, subtract) are unchanged from
+    Stages 1/2, so the float-ulp envelope is the same as Stage 2's
+    (`atol=1e-5, rtol=1e-5` at the 50k × 100 × 255 × 20 golden
+    shape).
+
+    What Stage 3 *does* change is handle lifetime: row-index pool
+    entries are minted by `apply_split` and flow as inputs into the
+    next level's `build_histograms`; histogram pool entries are
+    released on free-on-consume. These tests exist to pin down
+    cases that Stage 1 + Stage 2 tests don't exercise — specifically
+    leaf-wise growth (where `PendingSplit` holds handles across
+    gain-ordered queue reordering) and mixed continuous/categorical
+    fits (where the partition kernel's categorical bitset path
+    produces GPU row indices that the next level's histogram kernel
+    must bind).
+    """
+
+    def test_leaf_wise_growth_matches_cpu(self) -> None:
+        """Leaf-wise mode threads `GpuRowIndexHandle`s through a
+        gain-ordered `PendingSplit` queue; an accidentally-duplicated
+        release or a missed handle would manifest as either a panic
+        or macroscopically-divergent predictions here. 3000 × 12 ×
+        max_leaves=32 is enough to push leaf-wise through ~6 levels
+        of growth per tree.
+
+        Tolerance: loose (`atol=0.1, rtol=0.1`). Leaf-wise is
+        particularly sensitive to Stage 2's pre-existing
+        gain-ulp-drift because the gain-ordered queue can reorder
+        when two candidate splits have gains within ~1e-6 of each
+        other; the rest of the tree then grows differently. See
+        the module docstring and `MetalStage2NanAndMonotoneTests`.
+        What this test gates is Stage 3's pool-lifetime invariant,
+        not ulp precision.
+        """
+        rng = np.random.RandomState(71)
+        X = rng.randn(3_000, 12).astype(np.float32)
+        y = (
+            1.3 * X[:, 0]
+            - 0.7 * X[:, 3]
+            + 0.4 * X[:, 7]
+            + rng.randn(3_000) * 0.05
+        ).astype(np.float32)
+
+        common = dict(
+            n_estimators=12,
+            max_depth=8,
+            max_leaves=32,
+            tree_growth="leaf",
+            seed=2027,
+            deterministic=True,
+            continuous_binning_max_bins=255,
+        )
+        cpu = GBMRegressor(device="cpu", **common)
+        metal = GBMRegressor(device="metal", **common)
+        cpu.fit(X, y)
+        metal.fit(X, y)
+
+        np.testing.assert_allclose(
+            cpu.predict(X),
+            metal.predict(X),
+            atol=0.1,
+            rtol=0.1,
+        )
+
+    def test_mixed_categorical_continuous_fit_matches_cpu(self) -> None:
+        """D-017 coverage: continuous + categorical features in one
+        fit. Stage 3 routes continuous best_split through the GPU
+        kernel and categorical best_split to CpuBackend (D-012),
+        but partition for *both* kinds runs on GPU via the
+        `SPLIT_KIND = 1` bitset path (D-017). The row indices
+        produced by a categorical split feed directly into the next
+        level's histogram kernel with no CPU round-trip.
+        """
+        rng = np.random.RandomState(83)
+        n_rows = 2_000
+        X_cont = rng.randn(n_rows, 6).astype(np.float32)
+        # One categorical column with 8 categories ("cat_0".."cat_7").
+        cat_ids = rng.randint(0, 8, size=n_rows)
+        cat_values = [f"cat_{i}" for i in cat_ids.tolist()]
+        # The numeric matrix leaves the categorical column at 0.0
+        # (per the categorical_feature_values_list protocol — the
+        # real category identity lives in the parallel string list).
+        X = np.hstack([X_cont, np.zeros((n_rows, 1), dtype=np.float32)])
+        y = (
+            1.5 * X_cont[:, 0]
+            - 0.6 * X_cont[:, 2]
+            + (cat_ids == 3).astype(np.float32) * 1.2
+            + rng.randn(n_rows) * 0.05
+        ).astype(np.float32)
+
+        common = dict(
+            n_estimators=10,
+            max_depth=5,
+            seed=2027,
+            deterministic=True,
+            continuous_binning_max_bins=255,
+            # Native categorical splits enabled: max_cat_threshold > 0
+            # turns on the Fisher-sort categorical partitioner on CPU
+            # and routes the resulting bitset through the GPU
+            # partition kernel's SPLIT_KIND=1 path.
+            max_cat_threshold=16,
+            categorical_feature_indices=[6],
+        )
+        cpu = GBMRegressor(device="cpu", **common)
+        metal = GBMRegressor(device="metal", **common)
+        cpu.fit(X, y, categorical_feature_values_list=[cat_values])
+        metal.fit(X, y, categorical_feature_values_list=[cat_values])
+
+        # Loose tolerance — this test's value is Stage 3 plumbing
+        # correctness (categorical bitset flowing through GPU
+        # partition → GPU row indices → next level's histogram
+        # kernel), not ulp precision.
+        np.testing.assert_allclose(
+            cpu.predict(X),
+            metal.predict(X),
+            atol=0.1,
+            rtol=0.1,
+        )
+
+    def test_deep_tree_stresses_pool_lifetime(self) -> None:
+        """Depth-10 level-wise tree has ~1023 nodes and ~10 trainer
+        levels; every level mints a fresh row-index handle per node
+        and releases the parent handles on free-on-consume. A pool
+        leak would eventually blow past
+        `MTLDevice.recommendedMaxWorkingSetSize` — not on a depth-10
+        fit, but a lifetime bug (e.g. missing release guard on an
+        early-return path) would manifest as a panic or mismatched
+        predictions here well before the allocator breaks.
+        """
+        rng = np.random.RandomState(109)
+        X = rng.randn(5_000, 20).astype(np.float32)
+        y = (
+            1.0 * X[:, 0]
+            - 0.5 * X[:, 5]
+            + 0.3 * X[:, 10]
+            + rng.randn(5_000) * 0.1
+        ).astype(np.float32)
+
+        common = dict(
+            n_estimators=5,
+            max_depth=10,
+            seed=2027,
+            deterministic=True,
+            continuous_binning_max_bins=255,
+        )
+        cpu = GBMRegressor(device="cpu", **common)
+        metal = GBMRegressor(device="metal", **common)
+        cpu.fit(X, y)
+        metal.fit(X, y)
+
+        # Loose tolerance — deep trees stack Stage 2 ulp drift across
+        # many splits; what this test gates is that the ~1023-node
+        # level-wise fit completes without a pool leak or panic and
+        # produces qualitatively-identical predictions.
+        np.testing.assert_allclose(
+            cpu.predict(X),
+            metal.predict(X),
+            atol=0.1,
+            rtol=0.1,
+        )
+
+
 class InvalidDeviceTests(unittest.TestCase):
     """Device validation runs at estimator construction time, not at
     fit time, so no Metal hardware is required for these tests."""
