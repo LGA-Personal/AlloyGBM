@@ -17,7 +17,7 @@
 //! Pipeline compilation is delegated to
 //! [`crate::pipelines::PartitionPipelineCache`].
 
-use alloygbm_core::{BinnedMatrix, NodeSlice, PartitionResult, SplitCandidate};
+use alloygbm_core::{BinnedMatrix, NodeSlice, PartitionResult, RowIndexStorage, SplitCandidate};
 use alloygbm_engine::{EngineError, EngineResult};
 
 #[cfg(target_os = "macos")]
@@ -26,6 +26,10 @@ use crate::buffers::BufferCache;
 use crate::device::MetalDevice;
 #[cfg(target_os = "macos")]
 use crate::pipelines::PartitionPipelineCache;
+#[cfg(target_os = "macos")]
+use crate::residency::ResidencyPool;
+#[cfg(target_os = "macos")]
+use crate::row_index_residency::RowIndexResidencyPool;
 
 /// Embedded MSL source for the partition kernel.
 ///
@@ -87,6 +91,8 @@ pub(crate) fn dispatch_partition(
     metal_device: &MetalDevice,
     pipeline_cache: &PartitionPipelineCache,
     buffer_cache: &BufferCache,
+    row_index_pool: &RowIndexResidencyPool,
+    residency: &ResidencyPool,
     binned_matrix: &BinnedMatrix,
     node: &NodeSlice,
     split: &SplitCandidate,
@@ -127,9 +133,32 @@ pub(crate) fn dispatch_partition(
     let (bins_buffer, bin_is_u16) =
         upload_binned_column(buffer_cache, metal_device, binned_matrix)?;
 
-    // --- Row indices (reused slot; content fresh per call) ---
-    let row_indices_buffer =
-        buffer_cache.write_row_indices(&metal_device.device, node.row_indices())?;
+    // --- Row indices: upload from Cpu variant or bind the GPU-
+    //     resident buffer from the row-index pool for Gpu variants.
+    //     Cpu variant uses the shared BufferCache slot (reallocated-
+    //     as-needed); Gpu variant is zero-copy — we take a cloned
+    //     `Retained` handle to the pool-owned buffer.
+    let row_indices_buffer: objc2::rc::Retained<
+        objc2::runtime::ProtocolObject<dyn objc2_metal::MTLBuffer>,
+    > = match &node.rows {
+        RowIndexStorage::Cpu(rows) => {
+            buffer_cache.write_row_indices(&metal_device.device, rows.as_slice())?
+        }
+        RowIndexStorage::Gpu { handle, .. } => {
+            // Pool lookup — must be alive. Engine-side
+            // `RowIndexReleaseGuard` keeps the handle alive for the
+            // duration of `apply_split`. An unknown handle here
+            // means the trainer's lifetime discipline has drifted;
+            // report loudly so the bug is traceable.
+            let entry = row_index_pool.get(*handle).ok_or_else(|| {
+                EngineError::ContractViolation(format!(
+                    "partition: row-index pool lookup failed for handle {}",
+                    handle.0
+                ))
+            })?;
+            entry.buffer
+        }
+    };
 
     // --- Uniform ---
     let feature_col_base = split.feature_index as usize * binned_matrix.row_count;
@@ -352,25 +381,30 @@ pub(crate) fn dispatch_partition(
     }
     let total_right = num_rows - total_left;
 
-    let mut left_vec = vec![0u32; total_left as usize];
-    let mut right_vec = vec![0u32; total_right as usize];
+    // Transfer ownership of the scatter buffers to the row-index
+    // residency pool. `row_count` is the *logical* valid prefix —
+    // the full buffer was allocated to the worst case
+    // `num_rows * 4` bytes, but downstream consumers only look at
+    // the first `row_count` elements. Subsequent partition calls
+    // on the child bind the same buffer via
+    // `RowIndexStorage::Gpu { handle, .. }` and the kernel's grid
+    // sizing drives the valid prefix.
+    let left_handle = row_index_pool.mint(residency, out_left_buf, total_left)?;
+    let right_handle = row_index_pool.mint(residency, out_right_buf, total_right)?;
+    let result = PartitionResult {
+        left: RowIndexStorage::Gpu {
+            handle: left_handle,
+            row_count: total_left,
+        },
+        right: RowIndexStorage::Gpu {
+            handle: right_handle,
+            row_count: total_right,
+        },
+    };
 
-    // SAFETY: the kernel populated `out_left[0..total_left]` and
-    // `out_right[0..total_right]` with u32 row indices.
-    unsafe {
-        if total_left > 0 {
-            let src = out_left_buf.contents().as_ptr() as *const u32;
-            std::ptr::copy_nonoverlapping(src, left_vec.as_mut_ptr(), total_left as usize);
-        }
-        if total_right > 0 {
-            let src = out_right_buf.contents().as_ptr() as *const u32;
-            std::ptr::copy_nonoverlapping(src, right_vec.as_mut_ptr(), total_right as usize);
-        }
-    }
-
-    // Keep temporaries alive until after readback.
-    drop(out_left_buf);
-    drop(out_right_buf);
+    // Partition-local scratch — free here. The scatter buffers
+    // (`out_left_buf` / `out_right_buf`) have been moved into the
+    // pool, which owns them now, so they are not dropped here.
     drop(direction_flags_buf);
     drop(block_totals_buf);
     drop(block_bases_buf);
@@ -379,7 +413,7 @@ pub(crate) fn dispatch_partition(
     drop(bind_u8);
     drop(bind_u16);
 
-    Ok(PartitionResult::from_cpu(left_vec, right_vec))
+    Ok(result)
 }
 
 /// Upload the column-major bin column for the kernel's feature. Reuses

@@ -219,6 +219,97 @@ impl MetalBackend {
     pub fn recommended_max_working_set_size(&self) -> u64 {
         self.budget.recommended_max_working_set_size()
     }
+
+    /// Readback a GPU-resident row-index pool entry into a
+    /// `Vec<u32>`. Used by Gpu-aware trait overrides (`reduce_sums`,
+    /// `apply_partition_leaf_updates`) and by the CPU fallback
+    /// wrapper when the GPU partition kernel can't run.
+    ///
+    /// Returns the exact `row_count` prefix of the pool buffer —
+    /// the underlying `MTLBuffer` is sized to the parent node's
+    /// worst case, but only the valid prefix is consumed.
+    #[allow(unsafe_code)]
+    fn readback_row_indices(
+        &self,
+        handle: alloygbm_core::GpuRowIndexHandle,
+        row_count: u32,
+    ) -> EngineResult<Vec<u32>> {
+        use objc2_metal::MTLBuffer;
+        let entry = self.row_index_residency.get(handle).ok_or_else(|| {
+            alloygbm_engine::EngineError::ContractViolation(format!(
+                "MetalBackend::readback_row_indices: pool lookup failed for handle {}",
+                handle.0
+            ))
+        })?;
+        if row_count != entry.row_count {
+            return Err(alloygbm_engine::EngineError::ContractViolation(format!(
+                "MetalBackend::readback_row_indices: handle {} row_count mismatch \
+                 (storage={}, pool={})",
+                handle.0, row_count, entry.row_count
+            )));
+        }
+        let mut out = vec![0u32; row_count as usize];
+        if row_count > 0 {
+            // SAFETY: the buffer is StorageModeShared and holds at
+            // least `row_count * 4` valid bytes by pool contract
+            // (allocated by the partition kernel with worst-case
+            // sizing >= row_count).
+            unsafe {
+                let src = entry.buffer.contents().as_ptr() as *const u32;
+                std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), row_count as usize);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Lift a [`RowIndexStorage`] to CPU-resident form. `Cpu(..)`
+    /// variants clone; `Gpu(..)` variants readback via the pool.
+    fn materialize_rows_to_cpu(
+        &self,
+        rows: &alloygbm_core::RowIndexStorage,
+    ) -> EngineResult<Vec<u32>> {
+        match rows {
+            alloygbm_core::RowIndexStorage::Cpu(v) => Ok(v.clone()),
+            alloygbm_core::RowIndexStorage::Gpu { handle, row_count } => {
+                self.readback_row_indices(*handle, *row_count)
+            }
+        }
+    }
+
+    /// CPU-fallback path for `apply_split` when the GPU partition
+    /// kernel can't run (scan-cap overflow or transient Metal
+    /// failure). Materialises Gpu-variant input to Cpu first so
+    /// `CpuBackend::apply_split` can consume it; returns a
+    /// `PartitionResult` with Cpu variants on both sides.
+    fn apply_split_cpu_fallback(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        node: &NodeSlice,
+        split: &SplitCandidate,
+    ) -> EngineResult<PartitionResult> {
+        match &node.rows {
+            alloygbm_core::RowIndexStorage::Cpu(_) => {
+                // Happy path for the CPU fallback — no
+                // materialisation needed.
+                self.cpu.apply_split(binned_matrix, node, split)
+            }
+            alloygbm_core::RowIndexStorage::Gpu { handle, row_count } => {
+                let row_indices = self.readback_row_indices(*handle, *row_count)?;
+                let cpu_node = NodeSlice::from_storage(
+                    node.node_id,
+                    alloygbm_core::RowIndexStorage::Cpu(row_indices),
+                )
+                .map_err(|e| {
+                    alloygbm_engine::EngineError::ContractViolation(format!(
+                        "MetalBackend::apply_split_cpu_fallback: failed to rewrap \
+                         node {}: {e}",
+                        node.node_id
+                    ))
+                })?;
+                self.cpu.apply_split(binned_matrix, &cpu_node, split)
+            }
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -235,6 +326,7 @@ impl BackendOps for MetalBackend {
             &self.pipeline_cache,
             &self.buffer_cache,
             &self.histogram_residency,
+            &self.row_index_residency,
             &self.residency,
             binned_matrix,
             gradients,
@@ -333,51 +425,102 @@ impl BackendOps for MetalBackend {
         node: &NodeSlice,
         split: &SplitCandidate,
     ) -> EngineResult<PartitionResult> {
-        // S3.5 — try the GPU partition kernel first. It falls back to
-        // CPU on two conditions:
-        //   * Node exceeds the single-threadgroup scan cap
-        //     (`MAX_BLOCKS_SINGLE_SCAN`). A future hierarchical scan
-        //     would lift this.
-        //   * Any other Metal-side failure (buffer alloc, pipeline
-        //     build, command-buffer encode). The CPU path is always
-        //     correct, so the backend never fails a fit because of a
-        //     Metal hiccup.
+        // S3.7e.2b — produce GPU-resident partition output. Row
+        // indices land in the `row_index_residency` pool; the
+        // returned `PartitionResult` carries `RowIndexStorage::Gpu`
+        // on both sides so the next level's `build_histograms` reads
+        // directly from the pool without a CPU round-trip.
+        //
+        // Fallback paths:
+        //   * Scan-cap overflow (>1M rows per single node) — rare;
+        //     the partition kernel's single-threadgroup block scan
+        //     can't cover it. A future hierarchical scan would lift
+        //     this; today we materialise the input (if Gpu) to Cpu
+        //     and run the CPU partition.
+        //   * Other Metal-side failure (buffer alloc, pipeline build,
+        //     command-buffer encode). Same materialise-and-fall-back
+        //     shape.
         match kernels::partition::dispatch_partition(
             &self.metal_device,
             &self.partition_pipeline_cache,
             &self.buffer_cache,
+            &self.row_index_residency,
+            &self.residency,
             binned_matrix,
             node,
             split,
         ) {
             Ok(result) => Ok(result),
             Err(alloygbm_engine::EngineError::BackendUnavailable(_)) => {
-                // Scan-cap overflow or transient Metal failure. CPU
-                // path is always correct.
-                self.cpu.apply_split(binned_matrix, node, split)
+                // Scan-cap overflow or transient Metal failure. The
+                // CPU path requires Cpu-variant input; materialise
+                // via pool readback if the input is Gpu.
+                self.apply_split_cpu_fallback(binned_matrix, node, split)
             }
             Err(err) => Err(err),
         }
     }
+
     // `apply_split_with_stats` uses the default trait impl — it calls
     // our GPU-accelerated `apply_split` above and then runs
-    // `reduce_sums` on both halves. `reduce_sums` is still CPU-side
-    // (Stage 3's scope doesn't include a GPU reduce); the round-trip
-    // is the cost of producing stats without GPU residency.
+    // `reduce_sums` on both halves via our Gpu-aware override below.
 
     fn reduce_sums(
         &self,
         gradients: &[GradientPair],
         rows: &alloygbm_core::RowIndexStorage,
     ) -> EngineResult<NodeStats> {
-        // S3.2 — trait surface now accepts `&RowIndexStorage`. Until
-        // S3.7e ships a GPU row-index pool (deferred from S3.7d —
-        // engine-side `PartitionResult` is still CPU-resident), every
-        // call we see is `Cpu(..)` — delegate to the embedded
-        // CpuBackend. When MetalBackend starts producing `Gpu(..)`
-        // row-index variants, this override will read directly from
-        // the GPU-resident buffer without a CPU round-trip.
-        self.cpu.reduce_sums(gradients, rows)
+        // S3.7e.2b — accept both storage variants.
+        //
+        // Cpu(..): delegate to CpuBackend — same path as pre-Stage-3.
+        //
+        // Gpu(..): readback the row indices from the pool, wrap in a
+        // temporary `Cpu(..)` and delegate to CpuBackend. This is a
+        // one-off readback per node per level and the reduce itself
+        // (gradients lookup + sum) is bandwidth-bound on CPU anyway —
+        // a future GPU reduce would only help when combined with
+        // GPU-resident gradients (out of Stage 3 scope).
+        match rows {
+            alloygbm_core::RowIndexStorage::Cpu(_) => self.cpu.reduce_sums(gradients, rows),
+            alloygbm_core::RowIndexStorage::Gpu { handle, row_count } => {
+                let row_indices = self.readback_row_indices(*handle, *row_count)?;
+                let cpu_rows = alloygbm_core::RowIndexStorage::Cpu(row_indices);
+                self.cpu.reduce_sums(gradients, &cpu_rows)
+            }
+        }
+    }
+
+    fn apply_partition_leaf_updates(
+        &self,
+        predictions: &mut [f32],
+        partition: &PartitionResult,
+        left_leaf_value: f32,
+        right_leaf_value: f32,
+    ) -> EngineResult<()> {
+        // S3.7e.2b — accept Gpu(..) variants via pool readback.
+        //
+        // The engine's `apply_partition_leaf_updates_cpu` reads
+        // `partition.left_row_indices()` / `partition.right_row_indices()`,
+        // both of which panic on Gpu variants. Materialise both sides
+        // up-front if either is Gpu, then delegate to the CPU loop.
+        let materialized;
+        let partition_ref = match (&partition.left, &partition.right) {
+            (alloygbm_core::RowIndexStorage::Cpu(_), alloygbm_core::RowIndexStorage::Cpu(_)) => {
+                partition
+            }
+            _ => {
+                let left_cpu = self.materialize_rows_to_cpu(&partition.left)?;
+                let right_cpu = self.materialize_rows_to_cpu(&partition.right)?;
+                materialized = PartitionResult::from_cpu(left_cpu, right_cpu);
+                &materialized
+            }
+        };
+        alloygbm_engine::apply_partition_leaf_updates_cpu(
+            predictions,
+            partition_ref,
+            left_leaf_value,
+            right_leaf_value,
+        )
     }
 
     /// Release the GPU-resident histogram pool entry backing this
@@ -520,6 +663,26 @@ mod tests {
                     .collect()
             }
         }
+    }
+
+    /// Materialise a `PartitionResult` into CPU-side row-index vectors
+    /// for test assertions. Post-S3.7e.2b, `MetalBackend::apply_split`
+    /// returns `RowIndexStorage::Gpu { .. }` on both sides; tests that
+    /// want to compare against the CPU path go through this helper
+    /// (which handles Cpu and Gpu variants symmetrically) rather than
+    /// calling `.left_row_indices()` / `.right_row_indices()` directly
+    /// (which panics on the Gpu variant).
+    fn materialize_partition_for_test(
+        backend: &MetalBackend,
+        partition: &PartitionResult,
+    ) -> (Vec<u32>, Vec<u32>) {
+        let left = backend
+            .materialize_rows_to_cpu(&partition.left)
+            .expect("readback left");
+        let right = backend
+            .materialize_rows_to_cpu(&partition.right)
+            .expect("readback right");
+        (left, right)
     }
 
     #[test]
@@ -1201,16 +1364,25 @@ mod tests {
                     let cpu_result = cpu.apply_split(&binned_matrix, &node, &split).unwrap();
                     let metal_result = backend.apply_split(&binned_matrix, &node, &split).unwrap();
 
+                    let (metal_left, metal_right) =
+                        materialize_partition_for_test(&backend, &metal_result);
+
                     assert_eq!(
                         cpu_result.left_row_indices(),
-                        metal_result.left_row_indices(),
+                        metal_left.as_slice(),
                         "left-partition mismatch for feature={feature_index} threshold={threshold_bin} default_left={default_left}"
                     );
                     assert_eq!(
                         cpu_result.right_row_indices(),
-                        metal_result.right_row_indices(),
+                        metal_right.as_slice(),
                         "right-partition mismatch for feature={feature_index} threshold={threshold_bin} default_left={default_left}"
                     );
+
+                    // Release the Gpu-variant partition output so the
+                    // row-index pool doesn't accumulate handles across
+                    // iterations.
+                    backend.release_row_indices(&metal_result.left).unwrap();
+                    backend.release_row_indices(&metal_result.right).unwrap();
                 }
             }
         }
@@ -1272,14 +1444,13 @@ mod tests {
         let cpu_result = cpu.apply_split(&binned_matrix, &node, &split).unwrap();
         let metal_result = backend.apply_split(&binned_matrix, &node, &split).unwrap();
 
-        assert_eq!(
-            cpu_result.left_row_indices(),
-            metal_result.left_row_indices()
-        );
-        assert_eq!(
-            cpu_result.right_row_indices(),
-            metal_result.right_row_indices()
-        );
+        let (metal_left, metal_right) = materialize_partition_for_test(&backend, &metal_result);
+
+        assert_eq!(cpu_result.left_row_indices(), metal_left.as_slice());
+        assert_eq!(cpu_result.right_row_indices(), metal_right.as_slice());
+
+        backend.release_row_indices(&metal_result.left).unwrap();
+        backend.release_row_indices(&metal_result.right).unwrap();
     }
 
     /// Pipeline cache must return the same Arc on repeated lookups

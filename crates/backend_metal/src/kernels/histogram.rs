@@ -22,6 +22,8 @@ use crate::histogram_residency::HistogramResidencyPool;
 use crate::pipelines::HistogramPipelineCache;
 #[cfg(target_os = "macos")]
 use crate::residency::ResidencyPool;
+#[cfg(target_os = "macos")]
+use crate::row_index_residency::RowIndexResidencyPool;
 
 /// Embedded MSL source for the two-pass histogram build.
 ///
@@ -60,6 +62,7 @@ pub(crate) fn dispatch_histograms(
     pipeline_cache: &HistogramPipelineCache,
     buffer_cache: &BufferCache,
     histogram_residency: &HistogramResidencyPool,
+    row_index_pool: &RowIndexResidencyPool,
     residency: &ResidencyPool,
     binned_matrix: &BinnedMatrix,
     gradients: &[GradientPair],
@@ -163,7 +166,30 @@ pub(crate) fn dispatch_histograms(
     // buffer allocation behind it is cache-backed.
     let gradients_raw: Vec<[f32; 2]> = gradients.iter().map(|g| [g.grad, g.hess]).collect();
     let gradients_buffer = buffer_cache.write_gradients(device, &gradients_raw)?;
-    let row_indices_buffer = buffer_cache.write_row_indices(device, node.row_indices())?;
+    // S3.7e.2b — accept both row-index storage variants. Cpu goes
+    // through the buffer_cache upload path (as before); Gpu clones the
+    // already-resident pool buffer (zero-copy). The buffer length may
+    // be larger than `node_row_count * 4` for Gpu variants (the
+    // partition kernel's output buffers are sized to the parent's row
+    // count); only the `node_row_count` prefix is read by the kernel,
+    // which is exactly what `validate_bounds` + `node_row_count` above
+    // pins down.
+    let row_indices_buffer = match &node.rows {
+        alloygbm_core::RowIndexStorage::Cpu(v) => {
+            buffer_cache.write_row_indices(device, v.as_slice())?
+        }
+        alloygbm_core::RowIndexStorage::Gpu { handle, .. } => {
+            row_index_pool
+                .get(*handle)
+                .ok_or_else(|| {
+                    EngineError::BackendUnavailable(format!(
+                        "build_histograms: row-index handle {} not in residency pool",
+                        handle.0
+                    ))
+                })?
+                .buffer
+        }
+    };
 
     let pair_bytes = std::mem::size_of::<[f32; 2]>();
     let f32_bytes = std::mem::size_of::<f32>();
@@ -313,11 +339,36 @@ pub(crate) fn dispatch_histograms(
     // round-trip.
     let counts_total = (total_selected as usize) * (bin_count as usize);
     let mut counts_flat = vec![0u32; counts_total];
+    // CPU-side count accumulation wants a &[u32]. Cpu variants loan
+    // their existing slice; Gpu variants read the row-index prefix
+    // out of the pool buffer as `[u32; node_row_count]`. The readback
+    // is a single unavoidable host-visible copy per call — a future
+    // GPU counts kernel (deferred) would remove it.
+    let gpu_rows_cache: Vec<u32>;
+    let row_indices_slice: &[u32] = match &node.rows {
+        alloygbm_core::RowIndexStorage::Cpu(v) => v.as_slice(),
+        alloygbm_core::RowIndexStorage::Gpu { handle, row_count } => {
+            let entry = row_index_pool.get(*handle).ok_or_else(|| {
+                EngineError::BackendUnavailable(format!(
+                    "build_histograms: row-index handle {} not in residency pool (count path)",
+                    handle.0
+                ))
+            })?;
+            let ptr = entry.buffer.contents().as_ptr() as *const u32;
+            // SAFETY: shared-mode MTLBuffer contents() yields a live
+            // CPU-visible pointer; the first `row_count * 4` bytes are
+            // the valid prefix (see RowIndexEntry::row_count docs).
+            let slice =
+                unsafe { std::slice::from_raw_parts(ptr, *row_count as usize) };
+            gpu_rows_cache = slice.to_vec();
+            gpu_rows_cache.as_slice()
+        }
+    };
     for (local_f, &feature_index) in selected_features.iter().enumerate() {
         let base = local_f * bin_count as usize;
         accumulate_counts(
             binned_matrix,
-            node.row_indices(),
+            row_indices_slice,
             feature_index,
             &mut counts_flat[base..base + bin_count as usize],
         );
