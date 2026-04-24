@@ -1851,4 +1851,302 @@ mod tests {
             .expect("idempotent release");
         assert_eq!(backend.histogram_residency.live_count(), 0);
     }
+
+    /// S3.10 — full Stage 3 hot-path round trip on a small fixture.
+    ///
+    /// Exercises the GPU-resident data-flow end-to-end:
+    ///   1. `build_histograms` on the root node → `HistogramStorage::Gpu`.
+    ///   2. `best_split` reads from the pool (no CPU round-trip).
+    ///   3. `apply_split` → two children, both `RowIndexStorage::Gpu`.
+    ///   4. `build_histograms` on the smaller child, reading its
+    ///      Gpu-variant row indices directly from the row-index pool.
+    ///   5. `subtract_histogram_bundle` derives the larger child from
+    ///      `parent − smaller` (both pool-resident).
+    ///   6. `best_split` on each child reads its histograms from the
+    ///      pool.
+    ///   7. All pool entries are explicitly released; both pools must
+    ///      return to `live_count() == 0`.
+    ///
+    /// Correctness gate: every histogram bundle materialised via the
+    /// test helper must be bit-exact against a `CpuBackend` equivalent
+    /// run over the same inputs. Split choices must be structurally
+    /// identical (same feature_index + threshold_bin + default_left).
+    ///
+    /// Gradients use small integer f32 values (1.0, 2.0, 4.0) so
+    /// accumulation is associative in the f32 integer range — any
+    /// kernel-side chunk/lane ordering produces the same bit pattern.
+    #[test]
+    fn histogram_residency_round_trip() {
+        use alloygbm_backend_cpu::CpuBackend;
+        use alloygbm_engine::BackendOps;
+
+        let Ok(backend) = MetalBackend::new() else {
+            return;
+        };
+        let cpu = CpuBackend;
+
+        // Small deterministic fixture. 4 features, max_bin=7
+        // (bin_count=8), 512 rows — large enough to exercise the
+        // partition kernel's block-scan path without inflating test
+        // time.
+        let row_count = 512usize;
+        let feature_count = 4usize;
+        let max_bin: u16 = 7;
+
+        let mut bins_row_major = Vec::with_capacity(row_count * feature_count);
+        for row in 0..row_count {
+            for feat in 0..feature_count {
+                // Spread bins across 0..=7 deterministically. Mod 8
+                // keeps every bin represented.
+                let bin = ((row.wrapping_mul(37) ^ feat.wrapping_mul(19)) & 7) as u8;
+                bins_row_major.push(bin);
+            }
+        }
+        let binned_matrix =
+            BinnedMatrix::new(row_count, feature_count, max_bin, bins_row_major).unwrap();
+
+        // Gradients: small integer f32s so per-bin sums are
+        // associative under any kernel-side chunk/lane ordering.
+        // Hessian is constant at 1.0 (also exact). Gradient varies
+        // with bin-of-feature-0 so the best_split finder actually
+        // finds signal — a uniform `grad == hess` fixture produces
+        // zero gain under `l2_lambda = 0.0` defaults, which this
+        // fixture needs to avoid.
+        let gradients: Vec<GradientPair> = (0..row_count)
+            .map(|i| {
+                let bin_f0 = ((i.wrapping_mul(37) ^ 0usize.wrapping_mul(19)) & 7) as i32;
+                let g = (bin_f0 - 4) as f32; // ∈ { -4, -3, …, 3 } — integer f32
+                GradientPair::new(g, 1.0).unwrap()
+            })
+            .collect();
+
+        let root_row_indices: Vec<u32> = (0..row_count as u32).collect();
+        let cpu_root_node = NodeSlice::new(0, root_row_indices.clone()).unwrap();
+        let metal_root_node = NodeSlice::new(0, root_row_indices).unwrap();
+        let tiles = vec![FeatureTile::new(0, feature_count as u32).unwrap()];
+
+        // ---- Parent histograms -------------------------------------------------
+        let cpu_parent = cpu
+            .build_histograms(&binned_matrix, &gradients, &cpu_root_node, &tiles)
+            .expect("cpu parent build");
+        let metal_parent = backend
+            .build_histograms(&binned_matrix, &gradients, &metal_root_node, &tiles)
+            .expect("metal parent build");
+        assert_eq!(
+            backend.histogram_residency.live_count(),
+            1,
+            "parent must be in the pool"
+        );
+        let metal_parent_fhs = materialize_bundle_for_test(&backend, &metal_parent);
+        assert_histograms_bit_exact(cpu_parent.feature_histograms(), &metal_parent_fhs, "parent");
+
+        // ---- best_split on parent ----------------------------------------------
+        let cpu_parent_split = cpu.best_split(&cpu_parent).expect("cpu parent split");
+        let metal_parent_split = backend
+            .best_split(&metal_parent)
+            .expect("metal parent split");
+        let cpu_parent_split = cpu_parent_split.expect("parent must find a split");
+        let metal_parent_split = metal_parent_split.expect("metal parent split");
+        assert_split_structural(&cpu_parent_split, &metal_parent_split, "parent");
+
+        // ---- apply_split: Cpu side returns Cpu; Metal side returns Gpu ---------
+        let cpu_partition = cpu
+            .apply_split(&binned_matrix, &cpu_root_node, &cpu_parent_split)
+            .expect("cpu partition");
+        let metal_partition = backend
+            .apply_split(&binned_matrix, &metal_root_node, &metal_parent_split)
+            .expect("metal partition");
+        // Two row-index pool entries after apply_split (left + right).
+        assert_eq!(
+            backend.row_index_residency.live_count(),
+            2,
+            "apply_split should mint 2 row-index handles"
+        );
+        let (metal_left_rows, metal_right_rows) =
+            materialize_partition_for_test(&backend, &metal_partition);
+        assert_eq!(cpu_partition.left_row_indices(), metal_left_rows.as_slice());
+        assert_eq!(
+            cpu_partition.right_row_indices(),
+            metal_right_rows.as_slice()
+        );
+
+        // ---- Build smaller-child histograms (the "costly" child, per
+        //      the engine's left-right choice — doesn't matter here,
+        //      we just pick left as the smaller for the subtract
+        //      direction and let CpuBackend do the same).
+        let smaller_cpu_rows: Vec<u32> =
+            if cpu_partition.left_row_indices().len() <= cpu_partition.right_row_indices().len() {
+                cpu_partition.left_row_indices().to_vec()
+            } else {
+                cpu_partition.right_row_indices().to_vec()
+            };
+        let (smaller_rows_storage, larger_rows_storage) =
+            if metal_left_rows.len() <= metal_right_rows.len() {
+                (&metal_partition.left, &metal_partition.right)
+            } else {
+                (&metal_partition.right, &metal_partition.left)
+            };
+        let cpu_smaller_node = NodeSlice::new(1, smaller_cpu_rows).unwrap();
+        let metal_smaller_node = NodeSlice::from_storage(1, smaller_rows_storage.clone()).unwrap();
+
+        let cpu_smaller_hist = cpu
+            .build_histograms(&binned_matrix, &gradients, &cpu_smaller_node, &tiles)
+            .expect("cpu smaller build");
+        let metal_smaller_hist = backend
+            .build_histograms(&binned_matrix, &gradients, &metal_smaller_node, &tiles)
+            .expect("metal smaller build (Gpu row-index input path)");
+        assert_eq!(
+            backend.histogram_residency.live_count(),
+            2,
+            "parent + smaller child should both be in pool"
+        );
+        let metal_smaller_fhs = materialize_bundle_for_test(&backend, &metal_smaller_hist);
+        assert_histograms_bit_exact(
+            cpu_smaller_hist.feature_histograms(),
+            &metal_smaller_fhs,
+            "smaller child",
+        );
+
+        // ---- Subtract to derive the larger child -------------------------------
+        let sibling_node_id: u32 = 2;
+        let cpu_larger_hist = cpu
+            .subtract_histogram_bundle(&cpu_parent, &cpu_smaller_hist, sibling_node_id)
+            .expect("cpu subtract");
+        let metal_larger_hist = backend
+            .subtract_histogram_bundle(&metal_parent, &metal_smaller_hist, sibling_node_id)
+            .expect("metal subtract");
+        let metal_larger_fhs = materialize_bundle_for_test(&backend, &metal_larger_hist);
+        assert_histograms_bit_exact(
+            cpu_larger_hist.feature_histograms(),
+            &metal_larger_fhs,
+            "larger child (subtract-derived)",
+        );
+
+        // ---- best_split on each child ------------------------------------------
+        let cpu_smaller_split = cpu
+            .best_split(&cpu_smaller_hist)
+            .expect("cpu smaller split");
+        let metal_smaller_split = backend
+            .best_split(&metal_smaller_hist)
+            .expect("metal smaller split");
+        match (cpu_smaller_split, metal_smaller_split) {
+            (Some(c), Some(m)) => assert_split_structural(&c, &m, "smaller child"),
+            (None, None) => {}
+            (c, m) => panic!("smaller-child split presence mismatch: cpu={c:?}, metal={m:?}"),
+        }
+        let cpu_larger_split = cpu.best_split(&cpu_larger_hist).expect("cpu larger split");
+        let metal_larger_split = backend
+            .best_split(&metal_larger_hist)
+            .expect("metal larger split");
+        match (cpu_larger_split, metal_larger_split) {
+            (Some(c), Some(m)) => assert_split_structural(&c, &m, "larger child"),
+            (None, None) => {}
+            (c, m) => panic!("larger-child split presence mismatch: cpu={c:?}, metal={m:?}"),
+        }
+
+        // ---- Release everything; both pools should drain to zero ---------------
+        backend
+            .release_histograms(&metal_parent)
+            .expect("release parent");
+        backend
+            .release_histograms(&metal_smaller_hist)
+            .expect("release smaller");
+        backend
+            .release_histograms(&metal_larger_hist)
+            .expect("release larger");
+        backend
+            .release_row_indices(&metal_partition.left)
+            .expect("release left rows");
+        backend
+            .release_row_indices(&metal_partition.right)
+            .expect("release right rows");
+        // Note: `larger_rows_storage` is one of left/right; already
+        // released above. The match-and-reference dance just prevents
+        // the compiler from complaining if we don't use it.
+        let _ = larger_rows_storage;
+        assert_eq!(
+            backend.histogram_residency.live_count(),
+            0,
+            "histogram pool must drain after round trip"
+        );
+        assert_eq!(
+            backend.row_index_residency.live_count(),
+            0,
+            "row-index pool must drain after round trip"
+        );
+    }
+
+    /// Assert two sequences of `FeatureHistogram` agree bit-exactly on
+    /// `grad_sum`, `hess_sum`, and `count`. The f32 bit-pattern compare
+    /// (`to_bits`) distinguishes ±0 and catches any cross-backend
+    /// accumulation-order drift — which the test's gradient fixture
+    /// is specifically constructed to avoid.
+    fn assert_histograms_bit_exact(
+        cpu_fhs: &[FeatureHistogram],
+        metal_fhs: &[FeatureHistogram],
+        label: &str,
+    ) {
+        assert_eq!(
+            cpu_fhs.len(),
+            metal_fhs.len(),
+            "{label}: feature count mismatch"
+        );
+        for (cfh, mfh) in cpu_fhs.iter().zip(metal_fhs) {
+            assert_eq!(
+                cfh.feature_index, mfh.feature_index,
+                "{label}: feature_index mismatch"
+            );
+            assert_eq!(
+                cfh.bins.len(),
+                mfh.bins.len(),
+                "{label}: bin-count mismatch"
+            );
+            for (b, (cb, mb)) in cfh.bins.iter().zip(&mfh.bins).enumerate() {
+                assert_eq!(
+                    cb.grad_sum.to_bits(),
+                    mb.grad_sum.to_bits(),
+                    "{label}: feature={} bin={} grad_sum drift (cpu={}, metal={})",
+                    cfh.feature_index,
+                    b,
+                    cb.grad_sum,
+                    mb.grad_sum
+                );
+                assert_eq!(
+                    cb.hess_sum.to_bits(),
+                    mb.hess_sum.to_bits(),
+                    "{label}: feature={} bin={} hess_sum drift",
+                    cfh.feature_index,
+                    b
+                );
+                assert_eq!(
+                    cb.count, mb.count,
+                    "{label}: feature={} bin={} count mismatch",
+                    cfh.feature_index, b
+                );
+            }
+        }
+    }
+
+    /// Structural equivalence of two `SplitCandidate`s: same feature,
+    /// same threshold, same default direction. Gain is float — allowed
+    /// to differ by a handful of ulps (the Metal path's block-scan
+    /// order differs from CPU's serial sweep) so we don't compare it.
+    fn assert_split_structural(cpu: &SplitCandidate, metal: &SplitCandidate, label: &str) {
+        assert_eq!(
+            cpu.feature_index, metal.feature_index,
+            "{label}: feature_index mismatch"
+        );
+        assert_eq!(
+            cpu.threshold_bin, metal.threshold_bin,
+            "{label}: threshold_bin mismatch"
+        );
+        assert_eq!(
+            cpu.default_left, metal.default_left,
+            "{label}: default_left mismatch"
+        );
+        assert_eq!(
+            cpu.is_categorical, metal.is_categorical,
+            "{label}: categorical flag mismatch"
+        );
+    }
 }

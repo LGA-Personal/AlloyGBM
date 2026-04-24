@@ -358,8 +358,7 @@ pub(crate) fn dispatch_histograms(
             // SAFETY: shared-mode MTLBuffer contents() yields a live
             // CPU-visible pointer; the first `row_count * 4` bytes are
             // the valid prefix (see RowIndexEntry::row_count docs).
-            let slice =
-                unsafe { std::slice::from_raw_parts(ptr, *row_count as usize) };
+            let slice = unsafe { std::slice::from_raw_parts(ptr, *row_count as usize) };
             gpu_rows_cache = slice.to_vec();
             gpu_rows_cache.as_slice()
         }
