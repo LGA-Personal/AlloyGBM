@@ -1,0 +1,98 @@
+{
+  "generated_utc": "2026-04-24T01:50:33+00:00",
+  "gpu_family": "Apple M4",
+  "metal_available": true,
+  "metal4_available": true,
+  "seed": 7,
+  "memory_budget_gb": 8.0,
+  "scenarios": [
+    {
+      "name": "metal_friendly",
+      "description": "configurations theoretically most favourable to Stage 1 Metal: many rows \u00d7 many features \u00d7 deep trees \u00d7 many bins \u00d7 multiclass",
+      "column_order": [
+        "task",
+        "rows",
+        "features",
+        "max_depth",
+        "bins"
+      ],
+      "cells": [
+        {
+          "params": {
+            "task": "regression",
+            "rows": 200000,
+            "features": 200,
+            "estimators": 5,
+            "max_depth": 8,
+            "bins": 255
+          },
+          "bytes_input": 160000000,
+          "cpu_seconds": 0.5331220829975791,
+          "metal_seconds": 10.738342499971623,
+          "speedup": 0.04964658959229397,
+          "note": ""
+        },
+        {
+          "params": {
+            "task": "regression",
+            "rows": 200000,
+            "features": 200,
+            "estimators": 5,
+            "max_depth": 10,
+            "bins": 255
+          },
+          "bytes_input": 160000000,
+          "cpu_seconds": 1.0345352079893928,
+          "metal_seconds": 22.792056667007273,
+          "speedup": 0.045390164788723875,
+          "note": ""
+        },
+        {
+          "params": {
+            "task": "regression",
+            "rows": 200000,
+            "features": 200,
+            "estimators": 5,
+            "max_depth": 6,
+            "bins": 1024
+          },
+          "bytes_input": 160000000,
+          "cpu_seconds": 0.40518600001814775,
+          "metal_seconds": 6.559875874983845,
+          "speedup": 0.0617673272696102,
+          "note": ""
+        },
+        {
+          "params": {
+            "task": "multiclass_3",
+            "rows": 100000,
+            "features": 100,
+            "estimators": 5,
+            "max_depth": 8,
+            "bins": 255
+          },
+          "bytes_input": 40000000,
+          "cpu_seconds": 0.658594374981476,
+          "metal_seconds": 10.234484209009679,
+          "speedup": 0.06435051943328013,
+          "note": ""
+        },
+        {
+          "params": {
+            "task": "multiclass_10",
+            "rows": 100000,
+            "features": 100,
+            "estimators": 5,
+            "max_depth": 8,
+            "bins": 255
+          },
+          "bytes_input": 40000000,
+          "cpu_seconds": 1.6494324160157703,
+          "metal_seconds": 27.731926291016862,
+          "speedup": 0.05947774412447025,
+          "note": ""
+        }
+      ]
+    }
+  ]
+}

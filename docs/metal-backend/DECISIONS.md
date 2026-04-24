@@ -572,3 +572,37 @@ dedicated AoS→SoA GPU kernel (rejected — one extra dispatch
 for zero end-user value when the reduce kernel can emit SoA
 directly at the same cost).
 
+
+---
+
+## D-020: Stage 3 kill criterion not met — three readback paths remain
+
+Date: 2026-04-24
+Stage: 3 (S3.12)
+Decision: Stage 3 as currently shipped (S3.1–S3.11) does NOT cross
+the approved `metal_friendly` >1.0× CPU bar. All deep-tree configs
+land at 0.05×–0.06× CPU, within jitter of Stage 1 and Stage 2
+baselines. Do not advance to Stage 4 / mark Stage 3 COMPLETE; the
+residency infrastructure shipped correctly but the crossover
+thesis is unmet because three of five overridden `BackendOps`
+methods still do full CPU readbacks per call.
+Why: `build_histograms` CPU count accumulation (D-008) reads back
+the full row-index buffer via `slice::from_raw_parts(..).to_vec()`
+on every call; `reduce_sums` reads back the full row-index buffer;
+`apply_partition_leaf_updates` reads back both sides. The
+per-level round-trip moved from "HistogramBundle flat-copy" to
+"row-index full-copy × 3 sites" — roughly the same bandwidth at
+`metal_friendly` shape and strictly more at 1M-row shapes.
+Consistent with the measured numbers. See the Stage 3 section in
+`BENCHMARKS.md` for the full diagnosis and the three candidate
+follow-ups (GPU count accumulation in the histogram kernel; GPU
+reduce_sums requiring a gradient pool; GPU apply_partition_leaf_
+updates requiring a prediction pool).
+Alternatives considered: ship Stage 3 as infrastructural and
+advance to Stage 4 (rejected — the approved plan's kill criterion
+is explicit: "we stop to debug rather than ship a second
+infrastructure-only stage"; ICBs are marginal on top of a loop
+that's still round-tripping); revert Stage 3 pool work (rejected —
+the pools and variants are correct and the subtract path is
+net-positive; the right next step is to close the three readback
+paths, not revert).

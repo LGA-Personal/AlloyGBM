@@ -1,0 +1,155 @@
+{
+  "generated_utc": "2026-04-24T01:53:29+00:00",
+  "gpu_family": "Apple M4",
+  "metal_available": true,
+  "metal4_available": true,
+  "seed": 7,
+  "memory_budget_gb": 8.0,
+  "scenarios": [
+    {
+      "name": "shape_grid",
+      "description": "task=regression depth=6 est=5 bins=255 across rows \u00d7 features",
+      "column_order": [
+        "rows",
+        "features"
+      ],
+      "cells": [
+        {
+          "params": {
+            "task": "regression",
+            "rows": 10000,
+            "features": 10,
+            "estimators": 5,
+            "max_depth": 6,
+            "bins": 255
+          },
+          "bytes_input": 400000,
+          "cpu_seconds": 0.007420584006467834,
+          "metal_seconds": 0.41779370899894275,
+          "speedup": 0.01776135888749491,
+          "note": ""
+        },
+        {
+          "params": {
+            "task": "regression",
+            "rows": 10000,
+            "features": 100,
+            "estimators": 5,
+            "max_depth": 6,
+            "bins": 255
+          },
+          "bytes_input": 4000000,
+          "cpu_seconds": 0.03546191600617021,
+          "metal_seconds": 0.5766925830102991,
+          "speedup": 0.061491888487729865,
+          "note": ""
+        },
+        {
+          "params": {
+            "task": "regression",
+            "rows": 10000,
+            "features": 1000,
+            "estimators": 5,
+            "max_depth": 6,
+            "bins": 255
+          },
+          "bytes_input": 40000000,
+          "cpu_seconds": 0.12170662498101592,
+          "metal_seconds": 4.451421000005212,
+          "speedup": 0.027341072655422488,
+          "note": ""
+        },
+        {
+          "params": {
+            "task": "regression",
+            "rows": 100000,
+            "features": 10,
+            "estimators": 5,
+            "max_depth": 6,
+            "bins": 255
+          },
+          "bytes_input": 4000000,
+          "cpu_seconds": 0.04996787500567734,
+          "metal_seconds": 0.3715187500056345,
+          "speedup": 0.13449624010879538,
+          "note": ""
+        },
+        {
+          "params": {
+            "task": "regression",
+            "rows": 100000,
+            "features": 100,
+            "estimators": 5,
+            "max_depth": 6,
+            "bins": 255
+          },
+          "bytes_input": 40000000,
+          "cpu_seconds": 0.14004925001063384,
+          "metal_seconds": 2.0546666249865666,
+          "speedup": 0.06816154421720336,
+          "note": ""
+        },
+        {
+          "params": {
+            "task": "regression",
+            "rows": 100000,
+            "features": 1000,
+            "estimators": 5,
+            "max_depth": 6,
+            "bins": 255
+          },
+          "bytes_input": 400000000,
+          "cpu_seconds": 0.661129041982349,
+          "metal_seconds": 17.289637083013076,
+          "speedup": 0.03823845687495099,
+          "note": ""
+        },
+        {
+          "params": {
+            "task": "regression",
+            "rows": 1000000,
+            "features": 10,
+            "estimators": 5,
+            "max_depth": 6,
+            "bins": 255
+          },
+          "bytes_input": 40000000,
+          "cpu_seconds": 0.3316249999916181,
+          "metal_seconds": 1.6173134580021724,
+          "speedup": 0.20504683142949068,
+          "note": ""
+        },
+        {
+          "params": {
+            "task": "regression",
+            "rows": 1000000,
+            "features": 100,
+            "estimators": 5,
+            "max_depth": 6,
+            "bins": 255
+          },
+          "bytes_input": 400000000,
+          "cpu_seconds": 1.0667663750064094,
+          "metal_seconds": 8.8808779999963,
+          "speedup": 0.12011947185929744,
+          "note": ""
+        },
+        {
+          "params": {
+            "task": "regression",
+            "rows": 1000000,
+            "features": 1000,
+            "estimators": 5,
+            "max_depth": 6,
+            "bins": 255
+          },
+          "bytes_input": 4000000000,
+          "cpu_seconds": 16.93688608298544,
+          "metal_seconds": 69.25284254201688,
+          "speedup": 0.24456593348799424,
+          "note": ""
+        }
+      ]
+    }
+  ]
+}

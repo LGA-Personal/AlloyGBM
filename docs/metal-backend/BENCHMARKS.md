@@ -220,3 +220,155 @@ every shape in this grid.
   (`split_grad`, `split_hess`, `split_counts`, `continuous_mask`)
   inherits the same zero-reallocation pattern: the allocations
   grow once and get memcpy'd on subsequent calls.
+
+## 2026-04-24 — Apple M4 (Stage 3, kill-criterion FAILED)
+
+- Host: Apple M4 (Apple7 baseline only; no Metal 4)
+- `AlloyGBM` build: `charming-carson-d08c9a` with Stage 1 (histogram
+  build), Stage 2 (split kernel), **and** Stage 3 (S3.1 through
+  S3.11 — enum-variant `HistogramStorage` / `RowIndexStorage`,
+  `HistogramResidencyPool`, `RowIndexResidencyPool`, partition
+  kernel, subtract kernel, apply_split Gpu flip, pool-direct
+  subtract, full RAII release guards on every hot-path escape).
+- 365/365 pytest pass (default features), 334/334 + 31 skipped
+  (`--no-default-features`). All 33 Metal-gated Python tests
+  (including 3 new `MetalStage3Tests` cases) pass on this build.
+
+### `shape_grid` — regression, (rows × features)
+
+Reference JSON: [`metal_histogram_shape_grid_stage3_m4.json`](metal_histogram_shape_grid_stage3_m4.json)
+
+| rows      | features | input MiB |   cpu   |  metal  | speedup |
+|----------:|---------:|----------:|--------:|--------:|--------:|
+|    10,000 |       10 |         0 |     7ms |   418ms |   0.02x |
+|    10,000 |      100 |         4 |    35ms |   577ms |   0.06x |
+|    10,000 |    1,000 |        38 |   122ms |   4.45s |   0.03x |
+|   100,000 |       10 |         4 |    50ms |   372ms |   0.13x |
+|   100,000 |      100 |        38 |   140ms |   2.05s |   0.07x |
+|   100,000 |    1,000 |       381 |   661ms |   17.3s |   0.04x |
+| 1,000,000 |       10 |        38 |   332ms |   1.62s |   0.21x |
+| 1,000,000 |      100 |       381 |   1.07s |   8.88s |   0.12x |
+| 1,000,000 |    1,000 |     3,815 |   16.9s |   69.3s |   0.24x |
+
+### `metal_friendly`
+
+Reference JSON: [`metal_histogram_metal_friendly_stage3_m4.json`](metal_histogram_metal_friendly_stage3_m4.json)
+
+| task         |    rows | features | depth |  bins |   cpu   |  metal  | speedup |
+|:-------------|--------:|---------:|------:|------:|--------:|--------:|--------:|
+| regression   | 200,000 |      200 |     8 |   255 |   533ms |   10.7s |   0.05x |
+| regression   | 200,000 |      200 |    10 |   255 |   1.03s |   22.8s |   0.05x |
+| regression   | 200,000 |      200 |     6 | 1,024 |   405ms |   6.56s |   0.06x |
+| multiclass_3 | 100,000 |      100 |     8 |   255 |   659ms |   10.2s |   0.06x |
+| multiclass_10| 100,000 |      100 |     8 |   255 |   1.65s |   27.7s |   0.06x |
+
+### Interpretation — kill criterion not met
+
+The plan's approved `S3.12` kill criterion requires the
+`metal_friendly` deep-tree configs (depth 8, depth 10, and K=10
+multiclass at depth 8) to cross **>1.0× CPU**. Stage 3 lands at
+**0.05×–0.06×** on those rows — within run-to-run jitter of the
+Stage 2 and Stage 1 baselines. Per the plan: *"If they don't,
+that refutes the Stage 3 thesis and we stop to debug rather than
+ship a second infrastructure-only stage."*
+
+**Root cause — the pools exist but the consumers still readback.**
+Stage 3 introduced `HistogramResidencyPool` and
+`RowIndexResidencyPool`, both correctly populated and drained by
+the partition / subtract / apply_split machinery. The `apply_split`
+→ `build_histograms` (row-index buffer bind) handoff and the
+`build_histograms` → `subtract_histogram_bundle` (pool-direct)
+handoff are both zero-memcpy. But three of the five overridden
+`BackendOps` methods still do a full readback per call:
+
+- **`build_histograms` CPU count path.** The histogram kernel
+  produces `grad_sum` / `hess_sum` on GPU, but bin-counts are
+  still accumulated on CPU (see D-008). That accumulation needs
+  `&[u32]` of row indices; the Gpu arm materialises via
+  `slice::from_raw_parts(..).to_vec()` on the pool buffer every
+  call. At depth 10 × 200 features × 5 estimators, that's ~5,000
+  readbacks per fit; each one touches up to `row_count × 4` bytes
+  of shared-mode buffer contents.
+- **`reduce_sums`.** Full row-index readback, every call, to
+  reach the CPU reduce over gradients.
+- **`apply_partition_leaf_updates`.** Readback of both left and
+  right row-index buffers, every call, to reach the CPU
+  prediction-update loop.
+
+In aggregate, Stage 3 moved the per-level CPU round-trip from
+"HistogramBundle flat-copy (`F × B × 12` bytes per node)" to
+"row-index full-copy (`row_count × 4` bytes per node × 3 call
+sites)". That is roughly the same bandwidth at `metal_friendly`
+shape and strictly more at 1M-row `shape_grid` shapes — consistent
+with the measured ratios.
+
+### What Stage 3 *did* land correctly
+
+- **API surface (D-015).** `HistogramStorage::{Cpu, Gpu}` and
+  `RowIndexStorage::{Cpu, Gpu}` enums thread cleanly through the
+  engine; `HistogramBundle` and `NodeSlice` carry storage
+  variants; the trainer loops pattern-match on each variant at
+  every field-read site.
+- **Residency pools.** Both pools correctly mint / get / release
+  handles with `HashMap<u64, Entry>` under a `Mutex`; the M2
+  free-on-consume discipline (D-016) is enforced by
+  `HistogramReleaseGuard` / `RowIndexReleaseGuard` / a paired
+  `PartitionReleaseGuard` on every hot-path escape (early break,
+  continue, error-`?`, drop).
+- **Partition kernel.** GPU-resident stream-compaction, both
+  continuous-threshold and categorical-bitset paths (D-017 →
+  D-017); parity tests pass on both. Output lands in the
+  row-index pool; the next level's histogram kernel binds the
+  pool buffer directly.
+- **Subtract kernel.** Pool-direct when both inputs are Gpu
+  (S3.7c.3); single kernel launch against pool-owned buffers,
+  zero flat-copy. Net-positive in isolation — just dwarfed by
+  the other three readback paths above.
+- **Correctness envelope.** Stage 2's structural-plus-ulp gate
+  holds; all 33 Metal-gated Python tests pass including three
+  new Stage 3 cases (leaf-wise handle threading, mixed
+  categorical/continuous, deep-tree pool-lifetime stress).
+
+### What it would take to cross
+
+To meet the S3.12 kill criterion without regressing correctness,
+the per-level round-trip has to *actually* go away — which means
+closing all three of the readback paths above:
+
+1. **GPU count accumulation.** Move the bin-count accumulation
+   into the histogram kernel (one extra atomic-free path doing
+   `counts[feature][bin]++` via threadgroup privatisation +
+   two-pass reduce, same pattern as the grad/hess reduce).
+   Eliminates the histogram-side readback.
+2. **GPU reduce_sums.** A small kernel that reads
+   `gradients[row_indices[i]]` on GPU and reduces via block-scan;
+   feasible only if gradients themselves become GPU-resident
+   across the fit. That's a further surface change (gradient
+   pool).
+3. **GPU apply_partition_leaf_updates.** Trivial kernel if
+   predictions are GPU-resident. Same "gradient pool → prediction
+   pool" surface change.
+
+(1) alone would close the largest of the three and might be enough
+on `metal_friendly` depth 10. (2) and (3) together are the full
+fix but require a gradient + prediction pool — a Stage 3.5 scope
+extension.
+
+**Recommendation:** treat Stage 3 as landed-but-not-crossed. Don't
+advance to Stage 4 (ICB dispatch optimisation) until S3.12 is met,
+because ICBs are a marginal optimisation on top of a GPU-resident
+per-level loop — they don't help if the loop is still round-tripping
+through CPU. `device="cpu"` remains the default and the correct
+choice for every shape in the grid above.
+
+### What did *not* regress vs Stage 2
+
+- Correctness: the same 30 Metal-gated tests from Stage 2 still
+  pass, plus three new `MetalStage3Tests` cases exercising leaf-wise
+  handle threading, D-017 mixed categorical/continuous fits, and
+  deep-tree pool-lifetime stress at max_depth=10.
+- Stage 1's warn-and-fallback path (`ALLOYGBM_METAL_DISABLE=1`)
+  still triggers cleanly; the Gpu variants never appear in the
+  fallback code path.
+- Memory discipline: neither residency pool leaks — all three
+  Stage 3 tests assert `live_count() == 0` at end of fit.
