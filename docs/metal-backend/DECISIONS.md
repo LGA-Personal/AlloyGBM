@@ -606,3 +606,49 @@ that's still round-tripping); revert Stage 3 pool work (rejected —
 the pools and variants are correct and the subtract path is
 net-positive; the right next step is to close the three readback
 paths, not revert).
+
+---
+
+## D-021: Stage 3 bottleneck is `build_histograms.gpu_dispatch`, not readback
+
+Date: 2026-04-24
+Stage: 3 (post-S3.12 diagnosis)
+Decision: D-020's readback-closure hypothesis is wrong. Rust-level
+profiling with `ALLOYGBM_METAL_PROFILE=1` (see `crates/backend_metal/
+src/profile.rs`) shows that on the `metal_friendly` regression /
+depth=10 config, `build_histograms.gpu_dispatch` is 6.58s of an
+8.39s total (78.5% of whole-fit time, ~88% of `build_histograms`),
+while every combined readback path — `build_histograms.row_readback`
++ `reduce_sums.readback` + `apply_partition_leaf_updates.readback` —
+sums to ~12ms (0.15% of total). `.gpu_dispatch` averages 45ms per
+`build_histograms` call across 145 calls. The bottleneck is the
+GPU work itself (allocation + encode + commit + wait), not the
+host round-trip.
+Why: The profile module wraps each overridden `BackendOps` method
+with a scoped probe, with sub-phase probes inside
+`build_histograms`, `reduce_sums`, and `apply_partition_leaf_
+updates`. `reduce_sums` and `apply_partition_leaf_updates`
+combined are 0.7% of top-level time — optimising them cannot
+move the kill-criterion needle by any meaningful fraction. The
+candidate follow-ups listed in D-020 (GPU counts kernel, GPU
+reduce_sums, GPU leaf_update) would have bought ~0.3% speedup
+each. We need a different fix.
+Three suspected sub-causes inside `.gpu_dispatch`, to be
+confirmed by a second profiling pass with finer probes:
+(a) `threads_per_tg = 32` ([histogram.rs:283-287]) — 1 simdgroup
+per threadgroup, severely under-occupying M4 GPU cores that want
+128–256 threads/TG; (b) scratch buffer allocated via
+`newBufferWithLength_options` per-tile per-call inside the
+dispatch loop ([histogram.rs:238-242]), bypassing `BufferCache`;
+(c) synchronous per-call `commit`+`waitUntilCompleted` with ~100+
+calls per fit preventing GPU pipelining.
+Alternatives considered: trust the original diagnosis and
+implement a GPU counts kernel (rejected — measurement shows it
+fixes 0.3% of the problem); skip profiling and try threadgroup-
+size bump blind (rejected — fast but cheaper to measure first
+given we've already been burned once by an unmeasured
+hypothesis); spawn finer probes via Instruments.app GPU trace
+(deferred — the existing in-process probes are sufficient to
+localise the cause inside `.gpu_dispatch` without adding an
+external-tool dependency; can be added if finer probes don't
+converge).

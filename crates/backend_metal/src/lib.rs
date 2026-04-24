@@ -20,6 +20,9 @@ mod residency;
 mod row_index_residency;
 
 #[cfg(target_os = "macos")]
+mod profile;
+
+#[cfg(target_os = "macos")]
 pub use device::{MetalCapabilities, MetalDevice, probe_capabilities};
 
 pub mod kernels;
@@ -321,6 +324,7 @@ impl BackendOps for MetalBackend {
         node: &NodeSlice,
         feature_tiles: &[FeatureTile],
     ) -> EngineResult<HistogramBundle> {
+        let _probe = profile::ScopedProbe::new(&profile::BUILD_HISTOGRAMS);
         kernels::histogram::dispatch_histograms(
             &self.metal_device,
             &self.pipeline_cache,
@@ -336,6 +340,7 @@ impl BackendOps for MetalBackend {
     }
 
     fn best_split(&self, histograms: &HistogramBundle) -> EngineResult<Option<SplitCandidate>> {
+        let _probe = profile::ScopedProbe::new(&profile::BEST_SPLIT);
         // Default options + no feature weights + no categoricals: this
         // is the hot path for continuous-only, unregularised splits.
         kernels::split::dispatch_best_split(
@@ -358,6 +363,7 @@ impl BackendOps for MetalBackend {
         feature_weights: &[f32],
         categorical_features: &[CategoricalFeatureInfo],
     ) -> EngineResult<Option<SplitCandidate>> {
+        let _probe = profile::ScopedProbe::new(&profile::BEST_SPLIT_WITH_OPTIONS);
         kernels::split::dispatch_best_split(
             &self.metal_device,
             &self.split_pipeline_cache,
@@ -395,6 +401,7 @@ impl BackendOps for MetalBackend {
         child: &HistogramBundle,
         node_id: u32,
     ) -> EngineResult<HistogramBundle> {
+        let _probe = profile::ScopedProbe::new(&profile::SUBTRACT);
         match (&parent.storage, &child.storage) {
             (
                 HistogramStorage::Gpu { handle: ph, .. },
@@ -425,6 +432,7 @@ impl BackendOps for MetalBackend {
         node: &NodeSlice,
         split: &SplitCandidate,
     ) -> EngineResult<PartitionResult> {
+        let _probe = profile::ScopedProbe::new(&profile::APPLY_SPLIT);
         // S3.7e.2b — produce GPU-resident partition output. Row
         // indices land in the `row_index_residency` pool; the
         // returned `PartitionResult` carries `RowIndexStorage::Gpu`
@@ -470,6 +478,7 @@ impl BackendOps for MetalBackend {
         gradients: &[GradientPair],
         rows: &alloygbm_core::RowIndexStorage,
     ) -> EngineResult<NodeStats> {
+        let _probe = profile::ScopedProbe::new(&profile::REDUCE_SUMS);
         // S3.7e.2b — accept both storage variants.
         //
         // Cpu(..): delegate to CpuBackend — same path as pre-Stage-3.
@@ -481,10 +490,17 @@ impl BackendOps for MetalBackend {
         // a future GPU reduce would only help when combined with
         // GPU-resident gradients (out of Stage 3 scope).
         match rows {
-            alloygbm_core::RowIndexStorage::Cpu(_) => self.cpu.reduce_sums(gradients, rows),
+            alloygbm_core::RowIndexStorage::Cpu(_) => {
+                let _p = profile::ScopedProbe::new(&profile::RS_CPU_REDUCE);
+                self.cpu.reduce_sums(gradients, rows)
+            }
             alloygbm_core::RowIndexStorage::Gpu { handle, row_count } => {
-                let row_indices = self.readback_row_indices(*handle, *row_count)?;
+                let row_indices = {
+                    let _p = profile::ScopedProbe::new(&profile::RS_READBACK);
+                    self.readback_row_indices(*handle, *row_count)?
+                };
                 let cpu_rows = alloygbm_core::RowIndexStorage::Cpu(row_indices);
+                let _p = profile::ScopedProbe::new(&profile::RS_CPU_REDUCE);
                 self.cpu.reduce_sums(gradients, &cpu_rows)
             }
         }
@@ -497,6 +513,7 @@ impl BackendOps for MetalBackend {
         left_leaf_value: f32,
         right_leaf_value: f32,
     ) -> EngineResult<()> {
+        let _probe = profile::ScopedProbe::new(&profile::APPLY_PARTITION_LEAF_UPDATES);
         // S3.7e.2b — accept Gpu(..) variants via pool readback.
         //
         // The engine's `apply_partition_leaf_updates_cpu` reads
@@ -509,12 +526,17 @@ impl BackendOps for MetalBackend {
                 partition
             }
             _ => {
-                let left_cpu = self.materialize_rows_to_cpu(&partition.left)?;
-                let right_cpu = self.materialize_rows_to_cpu(&partition.right)?;
+                let (left_cpu, right_cpu) = {
+                    let _p = profile::ScopedProbe::new(&profile::PLU_READBACK);
+                    let l = self.materialize_rows_to_cpu(&partition.left)?;
+                    let r = self.materialize_rows_to_cpu(&partition.right)?;
+                    (l, r)
+                };
                 materialized = PartitionResult::from_cpu(left_cpu, right_cpu);
                 &materialized
             }
         };
+        let _p = profile::ScopedProbe::new(&profile::PLU_CPU_UPDATE);
         alloygbm_engine::apply_partition_leaf_updates_cpu(
             predictions,
             partition_ref,
@@ -549,6 +571,7 @@ impl BackendOps for MetalBackend {
     /// observable consequence is one leaked GPU buffer for this
     /// fit's lifetime.
     fn release_histograms(&self, bundle: &alloygbm_core::HistogramBundle) -> EngineResult<()> {
+        let _probe = profile::ScopedProbe::new(&profile::RELEASE_HISTOGRAMS);
         match &bundle.storage {
             HistogramStorage::Gpu { handle, .. } => {
                 self.histogram_residency.release(*handle, &self.residency);
@@ -587,6 +610,7 @@ impl BackendOps for MetalBackend {
     /// via `Drop` anyway. The worst observable consequence is one
     /// leaked GPU buffer for this fit's lifetime.
     fn release_row_indices(&self, rows: &alloygbm_core::RowIndexStorage) -> EngineResult<()> {
+        let _probe = profile::ScopedProbe::new(&profile::RELEASE_ROW_INDICES);
         match rows {
             alloygbm_core::RowIndexStorage::Gpu { handle, .. } => {
                 self.row_index_residency.release(*handle, &self.residency);
@@ -598,6 +622,17 @@ impl BackendOps for MetalBackend {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for MetalBackend {
+    fn drop(&mut self) {
+        // One-shot profile dump at end-of-fit, gated by
+        // `ALLOYGBM_METAL_PROFILE=1`. The Python estimator
+        // constructs a fresh backend per fit, so Drop is the
+        // natural fit-close boundary.
+        profile::dump_if_enabled();
     }
 }
 

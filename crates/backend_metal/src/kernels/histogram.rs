@@ -21,6 +21,8 @@ use crate::histogram_residency::HistogramResidencyPool;
 #[cfg(target_os = "macos")]
 use crate::pipelines::HistogramPipelineCache;
 #[cfg(target_os = "macos")]
+use crate::profile;
+#[cfg(target_os = "macos")]
 use crate::residency::ResidencyPool;
 #[cfg(target_os = "macos")]
 use crate::row_index_residency::RowIndexResidencyPool;
@@ -90,6 +92,8 @@ pub(crate) fn dispatch_histograms(
         ));
     }
     node.validate_bounds(binned_matrix.row_count)?;
+
+    let p_setup = profile::ScopedProbe::new(&profile::BH_BUFFER_SETUP);
 
     let n_rows_total = binned_matrix.row_count as u32;
     let node_row_count = node.row_count() as u32;
@@ -216,6 +220,9 @@ pub(crate) fn dispatch_histograms(
     let grad_out_buffer = pool_entry.grad.clone();
     let hess_out_buffer = pool_entry.hess.clone();
 
+    drop(p_setup);
+    let p_dispatch = profile::ScopedProbe::new(&profile::BH_GPU_DISPATCH);
+
     // --- Encode the command buffer ---
     let command_buffer = metal_device
         .queue
@@ -327,6 +334,7 @@ pub(crate) fn dispatch_histograms(
 
     command_buffer.commit();
     command_buffer.waitUntilCompleted();
+    drop(p_dispatch);
 
     // --- CPU-computed counts → GPU-resident pool buffer (D-008) ---
     //
@@ -348,6 +356,7 @@ pub(crate) fn dispatch_histograms(
     let row_indices_slice: &[u32] = match &node.rows {
         alloygbm_core::RowIndexStorage::Cpu(v) => v.as_slice(),
         alloygbm_core::RowIndexStorage::Gpu { handle, row_count } => {
+            let _p = profile::ScopedProbe::new(&profile::BH_ROW_READBACK);
             let entry = row_index_pool.get(*handle).ok_or_else(|| {
                 EngineError::BackendUnavailable(format!(
                     "build_histograms: row-index handle {} not in residency pool (count path)",
@@ -363,16 +372,19 @@ pub(crate) fn dispatch_histograms(
             gpu_rows_cache.as_slice()
         }
     };
-    for (local_f, &feature_index) in selected_features.iter().enumerate() {
-        let base = local_f * bin_count as usize;
-        accumulate_counts(
-            binned_matrix,
-            row_indices_slice,
-            feature_index,
-            &mut counts_flat[base..base + bin_count as usize],
-        );
+    {
+        let _p = profile::ScopedProbe::new(&profile::BH_COUNT_ACCUMULATE);
+        for (local_f, &feature_index) in selected_features.iter().enumerate() {
+            let base = local_f * bin_count as usize;
+            accumulate_counts(
+                binned_matrix,
+                row_indices_slice,
+                feature_index,
+                &mut counts_flat[base..base + bin_count as usize],
+            );
+        }
+        histogram_residency.write_counts(pool_handle, &counts_flat)?;
     }
-    histogram_residency.write_counts(pool_handle, &counts_flat)?;
 
     // Keep scratch alive until after readback — see macro tricks below.
     drop(scratch_keepalive);
