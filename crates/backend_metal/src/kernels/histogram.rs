@@ -36,17 +36,30 @@ use crate::row_index_residency::RowIndexResidencyPool;
 /// specification.
 pub const HISTOGRAM_SHADER_SOURCE: &str = include_str!("../shaders/histogram.metal");
 
-/// Entry-point name for pass 1. Matched against `newFunctionWithName:`
-/// when building the pipeline state in S1.5.
+/// Entry-point name for pass 1 (narrow path, 1 simdgroup / 32 threads).
 pub const KERNEL_NAME_SCATTER: &str = "histogram_build_scatter";
+
+/// Entry-point name for the wide pass 1 (4 simdgroups / 128 threads,
+/// per-simdgroup private histograms; D-021). Valid only when
+/// `bin_count <= MAX_BIN_COUNT_WIDE`.
+pub const KERNEL_NAME_SCATTER_WIDE: &str = "histogram_build_scatter_wide";
 
 /// Entry-point name for pass 2.
 pub const KERNEL_NAME_REDUCE: &str = "histogram_reduce";
 
-/// Upper bound on the number of bins that fit inside the kernel's
-/// threadgroup-memory `local_hist[MAX_BIN_COUNT]` array. Must match the
-/// `MAX_BIN_COUNT` constant in `shaders/histogram.metal`.
+/// Upper bound on the number of bins that fit inside the narrow
+/// kernel's threadgroup-memory `local_hist[MAX_BIN_COUNT]` array. Must
+/// match the `MAX_BIN_COUNT` constant in `shaders/histogram.metal`.
 pub const MAX_BIN_COUNT: u32 = 4096;
+
+/// Upper bound on bin count for the wide kernel. Four private
+/// histograms of this size fit in 32 KB of threadgroup memory
+/// (4 * MAX_BIN_COUNT_WIDE * 8 bytes). Must match
+/// `MAX_BIN_COUNT_WIDE` in `shaders/histogram.metal`.
+pub const MAX_BIN_COUNT_WIDE: u32 = 1024;
+
+/// Threads per threadgroup for the wide kernel (4 simdgroups * 32).
+pub const THREADS_PER_TG_WIDE: usize = 128;
 
 /// Default chunk size (rows per threadgroup) for pass 1. Small enough
 /// that the per-chunk scratch stays modest for large nodes; large
@@ -256,10 +269,24 @@ pub(crate) fn dispatch_histograms(
         let output_offset = (cumulative_features as usize) * (bin_count as usize) * f32_bytes;
 
         // --------- Pass 1: scatter ---------
+        //
+        // D-021 wide path: when `bin_count <= MAX_BIN_COUNT_WIDE` the
+        // pipeline cache has compiled `histogram_build_scatter_wide`
+        // (4 simdgroups / 128 threads) and we dispatch it instead of
+        // the narrow kernel. Grid dimensions are unchanged — only the
+        // `threads_per_tg.width` differs.
+        let (scatter_pipeline, scatter_threads_per_tg): (
+            &ProtocolObject<dyn objc2_metal::MTLComputePipelineState>,
+            usize,
+        ) = if let Some(wide) = &pipelines.scatter_wide {
+            (wide, THREADS_PER_TG_WIDE)
+        } else {
+            (&pipelines.scatter, 32usize)
+        };
         let encoder = command_buffer.computeCommandEncoder().ok_or_else(|| {
             EngineError::BackendUnavailable("no compute command encoder".to_string())
         })?;
-        encoder.setComputePipelineState(&pipelines.scatter);
+        encoder.setComputePipelineState(scatter_pipeline);
         // SAFETY: every pointer below either refers to a live stack slot
         // whose bytes `setBytes` copies synchronously, or a
         // `MTLBuffer` that outlives the encoder through `Retained`.
@@ -292,7 +319,7 @@ pub(crate) fn dispatch_histograms(
                 depth: 1,
             };
             let threads_per_tg = MTLSize {
-                width: 32,
+                width: scatter_threads_per_tg,
                 height: 1,
                 depth: 1,
             };

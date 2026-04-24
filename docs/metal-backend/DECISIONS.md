@@ -679,3 +679,77 @@ determinism workaround for the "no float atomics at any memory
 level" constraint (D-003), and it pays a ~30× compute cost.
 Under-occupancy compounds the problem: M4 cores can host many
 more simdgroups per core but the kernel only ships 1.
+
+## D-022: Wide scatter kernel recovers ~5× of histogram cost, exposes secondary bottlenecks
+
+Date: 2026-04-24
+Stage: 3 (post-D-021 fix)
+Decision: Added `histogram_build_scatter_wide` in
+`shaders/histogram.metal` (4 simdgroups × 32 threads = 128
+threads/TG, per-simdgroup private histograms, deterministic
+fixed-order tree reduction). `pipelines.rs` compiles the wide
+pipeline whenever `bin_count ≤ MAX_BIN_COUNT_WIDE (1024)` and
+`kernels/histogram.rs` dispatches it with
+`threads_per_tg.width = 128`; narrow path remains for
+`bin_count > 1024`. Correctness: all 42 Rust backend_metal
+tests + all 365 Python tests pass. Determinism preserved: the
+tree reduction is a fixed in-order sum
+`(((h[0] + h[1]) + h[2]) + h[3])` per bin, identical every run.
+Why: The narrow kernel's per-bin single-writer discipline used
+`bin % SIMD_WIDTH == thread_in_tg`, which meant 31/32 lanes
+idled per shuffle step (D-021). Widening to 4 simdgroups lets
+each simdgroup run its own independent 32-lane scatter at full
+width in parallel, then merge with a cheap tree reduction
+(bounded by `EFFECTIVE_BIN_COUNT / SIMD_WIDTH` bin slots). The
+reduction itself is latency-free compared to the row loop it
+replaces. Threadgroup memory: 4 × 1024 × 8 B = 32 KB, exactly
+the Apple-Silicon cap.
+
+Post-fix measurement (same harness,
+`ALLOYGBM_METAL_PROFILE=1 metal_friendly`):
+
+  | scenario | `.commit_wait` avg | pre-D-022 | speedup |
+  | --- | --- | --- | --- |
+  | regression d=8 bins=255 | ~2.5 ms | 17 ms | ~6.8× |
+  | regression d=10 bins=255 | 3.95 ms | ~17 ms | ~4.3× |
+  | regression d=6 bins=1024 | 11.7 ms | — (narrow path) | n/a |
+  | multiclass_3 d=8 | 2.51 ms | — | — |
+  | multiclass_10 d=8 | 1.79 ms | — | — |
+
+`build_histograms` dropped from 90% of total to 60–68% of
+total. That's real — inside the kernel we recovered most of
+the 32× arithmetic waste identified in D-021.
+
+Kill criterion still not met. Speedup vs CPU on
+`metal_friendly` moved from ~0.05× (pre-D-022) to 0.06–0.17×.
+The profile now shows `build_histograms` + `apply_split` +
+`subtract_histogram_bundle` + `best_split_with_options` each
+contributing 9–15% of total on multiclass; their sum stays
+wall-clock-heavier than the entire CPU fit. Per-call numbers
+are low (`apply_split` 264–443 µs, `subtract` 327–592 µs,
+`best_split` 256–438 µs) but every one of them is a synchronous
+per-node GPU dispatch — with 1800–4700 `build_histograms` calls
+per fit, even sub-millisecond ops compound into seconds of
+wait time.
+Root cause of the residual gap: per-call
+`commandBuffer.commit() + waitUntilCompleted()` on every
+non-trivial op, not the kernels themselves. The fix is an
+order-of-magnitude refactor (batch all level-N nodes into a
+single command buffer, overlap encode of level-N+1 with wait
+of level-N, or move the entire level loop GPU-resident).
+That's scope beyond a single kernel fix.
+Alternatives considered: widen further to 8 simdgroups
+(rejected — threadgroup memory cap already at 32 KB; 8
+histograms at 512 bins could fit but would constrain
+`MAX_BIN_COUNT_WIDE` to 512 and break the Metal-unfriendly
+large-bin case); remove the per-bin ownership check and use
+device-memory atomics (rejected — D-003 forbids float atomics
+for determinism); try wave-level reduction instead of tree
+reduction (rejected — `simd_shuffle` is intra-simdgroup only,
+so cross-simdgroup reduction needs threadgroup memory anyway,
+and the tree reduction on 4 groups is already O(log 4) = 2
+passes).
+Outcome: ship the wide kernel as a clear improvement; record
+the residual gap (command-buffer batching) as the Stage-3
+follow-up that would close the kill criterion. See
+`STATUS.md` for the work-queue entry.

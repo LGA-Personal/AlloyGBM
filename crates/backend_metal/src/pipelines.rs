@@ -57,7 +57,10 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 
 use crate::device::MetalCapabilities;
-use crate::kernels::histogram::{HISTOGRAM_SHADER_SOURCE, KERNEL_NAME_REDUCE, KERNEL_NAME_SCATTER};
+use crate::kernels::histogram::{
+    HISTOGRAM_SHADER_SOURCE, KERNEL_NAME_REDUCE, KERNEL_NAME_SCATTER, KERNEL_NAME_SCATTER_WIDE,
+    MAX_BIN_COUNT_WIDE,
+};
 use crate::kernels::partition::{
     KERNEL_NAME_PARTITION_FLAG_AND_COUNT, KERNEL_NAME_PARTITION_SCAN_BLOCKS,
     KERNEL_NAME_PARTITION_SCATTER, PARTITION_SHADER_SOURCE, PartitionSpecKey,
@@ -71,6 +74,12 @@ use crate::kernels::subtract::{KERNEL_NAME_SUBTRACT, SUBTRACT_SHADER_SOURCE, Sub
 /// drive the kernel's internal branches and buffer layout.
 pub struct HistogramPipelines {
     pub scatter: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    /// Wide-path scatter (4 simdgroups / 128 threads, per-simdgroup
+    /// private histograms; D-021). `None` when `bin_count >
+    /// MAX_BIN_COUNT_WIDE` — the wide kernel's threadgroup memory
+    /// array is sized for the wide cap, so it can't be instantiated
+    /// for wider bin counts.
+    pub scatter_wide: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
     pub reduce: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     pub bin_count: u32,
     pub use_u16_bins: bool,
@@ -205,6 +214,7 @@ impl HistogramPipelineCache {
         }
 
         let scatter_name = NSString::from_str(KERNEL_NAME_SCATTER);
+        let scatter_wide_name = NSString::from_str(KERNEL_NAME_SCATTER_WIDE);
         let reduce_name = NSString::from_str(KERNEL_NAME_REDUCE);
 
         let scatter_fn = self
@@ -268,6 +278,44 @@ impl HistogramPipelineCache {
                 )
             })?;
 
+        // Wide scatter is only valid when the per-simdgroup private
+        // histograms fit in threadgroup memory (D-021). For wider bin
+        // counts we dispatch the narrow path.
+        let (scatter_wide, scatter_wide_desc) = if bin_count <= MAX_BIN_COUNT_WIDE {
+            let scatter_wide_fn = self
+                .library
+                .newFunctionWithName_constantValues_error(&scatter_wide_name, &constants)
+                .map_err(|err| {
+                    format!(
+                        "could not specialize `{KERNEL_NAME_SCATTER_WIDE}`: {}",
+                        err.localizedDescription()
+                    )
+                })?;
+            let desc = MTLComputePipelineDescriptor::new();
+            desc.setComputeFunction(Some(&scatter_wide_fn));
+            if let Some(archive) = &self.archive {
+                let archive_obj: &ProtocolObject<dyn MTLBinaryArchive> = archive;
+                let archive_array = NSArray::from_slice(&[archive_obj]);
+                desc.setBinaryArchives(Some(&archive_array));
+            }
+            let pipeline = self
+                .device
+                .newComputePipelineStateWithDescriptor_options_reflection_error(
+                    &desc,
+                    MTLPipelineOption::empty(),
+                    None,
+                )
+                .map_err(|err| {
+                    format!(
+                        "scatter_wide pipeline creation failed: {}",
+                        err.localizedDescription()
+                    )
+                })?;
+            (Some(pipeline), Some(desc))
+        } else {
+            (None, None)
+        };
+
         // If we have an archive, opportunistically persist the
         // freshly-compiled pipeline functions so the next run can
         // skip compilation. This is strictly best-effort: a failure
@@ -282,6 +330,16 @@ impl HistogramPipelineCache {
                 );
             } else {
                 added_any = true;
+            }
+            if let Some(desc) = &scatter_wide_desc {
+                if let Err(err) = archive.addComputePipelineFunctionsWithDescriptor_error(desc) {
+                    eprintln!(
+                        "[alloygbm metal] warning: could not add scatter_wide pipeline to archive: {}",
+                        err.localizedDescription()
+                    );
+                } else {
+                    added_any = true;
+                }
             }
             if let Err(err) = archive.addComputePipelineFunctionsWithDescriptor_error(&reduce_desc)
             {
@@ -299,6 +357,7 @@ impl HistogramPipelineCache {
 
         Ok(HistogramPipelines {
             scatter,
+            scatter_wide,
             reduce,
             bin_count,
             use_u16_bins,

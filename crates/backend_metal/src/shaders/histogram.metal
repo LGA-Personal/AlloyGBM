@@ -166,6 +166,121 @@ kernel void histogram_build_scatter(
     }
 }
 
+// -----------------------------------------------------------------
+// Wide scatter — D-021 follow-up.
+//
+// Same deterministic discipline as `histogram_build_scatter` (no
+// float atomics, per-bin single-writer within a simdgroup), but
+// widens the threadgroup from 1 simdgroup (32 threads) to 4
+// simdgroups (128 threads) by giving each simdgroup its own
+// private histogram in threadgroup memory. A final tree reduction
+// (simdgroup 0 sums in fixed order 0 += 1 += 2 += 3) merges them
+// before publishing to `scratch`. Valid only when
+// EFFECTIVE_BIN_COUNT <= MAX_BIN_COUNT_WIDE (caller enforces);
+// threadgroup allocation is always the 32 KB maximum.
+//
+// Rationale: the narrow kernel pays ~30x arithmetic overhead per
+// row because 31/32 lanes idle during the `src_lane` serialisation.
+// Four simdgroups process 4x disjoint rows in parallel while
+// keeping the same per-simdgroup discipline, and the end-of-kernel
+// tree reduction over 4 histograms is cheap compared to the row
+// loop.
+// -----------------------------------------------------------------
+
+constant uint SIMDGROUPS_WIDE     = 4u;
+constant uint THREADS_WIDE        = SIMD_WIDTH * SIMDGROUPS_WIDE; // 128
+constant uint MAX_BIN_COUNT_WIDE  = 1024u;
+
+kernel void histogram_build_scatter_wide(
+    device const uint8_t*  binned_u8      [[buffer(0)]],
+    device const uint16_t* binned_u16     [[buffer(1)]],
+    device const float2*   gradients      [[buffer(2)]],
+    device const uint*     row_indices    [[buffer(3)]],
+    device float2*         scratch        [[buffer(4)]],
+    constant uint&         n_rows_total   [[buffer(5)]],
+    constant uint&         node_row_count [[buffer(6)]],
+    constant uint&         rows_per_chunk [[buffer(7)]],
+    constant uint&         n_features     [[buffer(8)]],
+    uint3                  thread_in_tg3  [[thread_position_in_threadgroup]],
+    uint3                  tg_id3         [[threadgroup_position_in_grid]]
+) {
+    const uint thread_in_tg  = thread_in_tg3.x;
+    const uint simdgroup_id  = thread_in_tg / SIMD_WIDTH;
+    const uint lane_in_sg    = thread_in_tg % SIMD_WIDTH;
+    const uint feature       = tg_id3.x;
+    const uint chunk         = tg_id3.y;
+
+    const uint chunk_start = chunk * rows_per_chunk;
+    const uint chunk_end   = min(chunk_start + rows_per_chunk, node_row_count);
+
+    // SIMDGROUPS_WIDE private histograms. All four are zero-initialised
+    // collaboratively across the 128 threads.
+    threadgroup float2 local_hist[SIMDGROUPS_WIDE][MAX_BIN_COUNT_WIDE];
+    for (uint sg = 0u; sg < SIMDGROUPS_WIDE; ++sg) {
+        for (uint i = thread_in_tg; i < EFFECTIVE_BIN_COUNT; i += THREADS_WIDE) {
+            local_hist[sg][i] = float2(0.0f, 0.0f);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Each simdgroup handles a disjoint stride of rows. Stride =
+    // THREADS_WIDE = SIMDGROUPS_WIDE * SIMD_WIDTH. Simdgroup `s`
+    // starts at `chunk_start + s * SIMD_WIDTH`.
+    for (uint row_cursor = chunk_start + simdgroup_id * SIMD_WIDTH;
+         row_cursor < chunk_end;
+         row_cursor += THREADS_WIDE) {
+        const uint my_offset = row_cursor + lane_in_sg;
+        const bool my_active = my_offset < chunk_end;
+
+        uint   my_bin = 0u;
+        float2 my_gh  = float2(0.0f, 0.0f);
+        if (my_active) {
+            const uint row = row_indices[my_offset];
+            my_bin = load_bin(binned_u8, binned_u16, row, feature, n_rows_total);
+            my_gh  = gradients[row];
+        }
+
+        // Same intra-simdgroup shuffle + per-bin ownership as the
+        // narrow path, applied independently per simdgroup into that
+        // simdgroup's private histogram. simd_shuffle is
+        // intra-simdgroup, so cross-simdgroup state never mixes here.
+        for (uint src_lane = 0u; src_lane < SIMD_WIDTH; ++src_lane) {
+            const uint   src_bin    = simd_shuffle(my_bin,  src_lane);
+            const float  src_grad   = simd_shuffle(my_gh.x, src_lane);
+            const float  src_hess   = simd_shuffle(my_gh.y, src_lane);
+            const uint   src_active = simd_shuffle(uint(my_active ? 1u : 0u), src_lane);
+
+            const bool owns_bin = ((src_bin % SIMD_WIDTH) == lane_in_sg);
+            if (src_active != 0u && owns_bin && src_bin < EFFECTIVE_BIN_COUNT) {
+                local_hist[simdgroup_id][src_bin] += float2(src_grad, src_hess);
+            }
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Tree-reduce the four private histograms into local_hist[0].
+    // Fixed order `(((local_hist[0] + local_hist[1]) + local_hist[2]) + local_hist[3])`
+    // makes the floating-point result bit-reproducible across runs.
+    // Simdgroup 0's 32 lanes share the reduction work across bin slots.
+    if (simdgroup_id == 0u) {
+        for (uint i = lane_in_sg; i < EFFECTIVE_BIN_COUNT; i += SIMD_WIDTH) {
+            float2 sum = local_hist[0][i];
+            for (uint sg = 1u; sg < SIMDGROUPS_WIDE; ++sg) {
+                sum += local_hist[sg][i];
+            }
+            local_hist[0][i] = sum;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Publish to device scratch — same layout as the narrow kernel,
+    // so `histogram_reduce` is unchanged.
+    const uint scratch_base = (chunk * n_features + feature) * EFFECTIVE_BIN_COUNT;
+    for (uint i = thread_in_tg; i < EFFECTIVE_BIN_COUNT; i += THREADS_WIDE) {
+        scratch[scratch_base + i] = local_hist[0][i];
+    }
+}
+
 kernel void histogram_reduce(
     device const float2* scratch      [[buffer(0)]],
     device float*        grad_out     [[buffer(1)]],
