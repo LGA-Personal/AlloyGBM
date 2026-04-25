@@ -5,6 +5,77 @@ First thing a new session reads, alongside `STATUS.md`.
 
 ---
 
+## 2026-04-25 — RuntimeBackend forwarding gap fix + re-bench
+
+**Branch:** `claude/charming-carson-d08c9a` (worktree)
+
+### Problem
+
+Task 8's benchmark (prior entry this date) confirmed via profiling that
+`BUILD_HISTOGRAMS_BATCH` and `SUBTRACT_BATCH` counters showed 0 calls during
+Python-driven fits. Root cause: `RuntimeBackend` in
+`bindings/python/src/runtime_backend.rs` did not forward
+`build_histograms_batch` or `subtract_histogram_bundle_batch`. The trait
+defaults fired instead, routing all Python fits through the scalar per-node path.
+
+### Fix
+
+Added two forwarding method overrides to `impl BackendOps for RuntimeBackend`:
+
+- `build_histograms_batch` — identical `match self { Cpu(b) => ..., Metal(b) => ... }` pattern.
+- `subtract_histogram_bundle_batch` — same pattern.
+
+Also updated the import line to include `HistogramBuildRequest` and `SubtractRequest`.
+
+File changed: `bindings/python/src/runtime_backend.rs`.
+
+### Shipped commits
+
+- Fix commit (see below for SHA).
+
+### Re-benchmark results (`metal_friendly`, Apple M4, 2026-04-25 post-fix)
+
+| Config | CPU (s) | Metal (s) | ratio |
+|---|---|---|---|
+| regression d=8 bins=255 200k×200 | 0.544 | 4.17 | 0.13× |
+| regression d=10 bins=255 200k×200 | 1.07 | 6.59 | 0.16× |
+| regression d=6 bins=1024 200k×200 | 0.429 | 2.63 | 0.16× |
+| multiclass_3 d=8 bins=255 100k×100 | 0.601 | 4.74 | 0.13× |
+| multiclass_10 d=8 bins=255 100k×100 | 1.60 | 14.8 | 0.11× |
+
+### Profile (depth=8 regression, key sites)
+
+- `build_histograms_batch`: 40 calls, 2997 ms, 75.6% of total (was 0 calls)
+- `subtract_histogram_bundle_batch`: 40 calls, 54 ms, 1.4% (was 0 calls)
+- `commit_wait`: 40 calls, 2634 ms (was 528 calls × ~5 ms = ~2640 ms — similar total, fewer stalls)
+- `count_accumulate`: 528 calls, 492 ms (host-side post-process, unchanged)
+- `best_split_with_options`: 1051 calls, 268 ms, 6.8%
+- `apply_split`: 1051 calls, 281 ms, 7.1%
+
+### Kill criterion verdict
+
+NOT MET. All five `metal_friendly` configs remain 0.11×–0.16× CPU. The batch
+path is now active and correct (`commit_wait` dropped from O(nodes) to O(levels)
+per estimator), but `commit_wait` still consumes 66% of Metal wall time because
+the CPU must synchronously wait for each level's GPU work before proceeding to
+split selection. Approach A is fully exhausted.
+
+### Tests
+
+- `cargo test -p alloygbm-backend-metal` — 47/47 pass.
+- `pytest bindings/python/tests/ -q` — 365/365 pass.
+- `maturin develop --release` — clean build.
+
+### Stage 3 status: CLOSED — kill criterion NOT MET, Approach A exhausted
+
+**Next-up:** Stage 4 — Metal 4 ICB chaining to eliminate `waitUntilCompleted`
+stall between levels. Requires GPU-side split finding and a Stage 4 plan document
+before implementation.
+
+See STATUS.md and D-023 amendment in DECISIONS.md for full analysis.
+
+---
+
 ## 2026-04-25 — Build/subtract command-buffer batching (Approach A)
 
 **Branch:** `claude/charming-carson-d08c9a` (worktree)

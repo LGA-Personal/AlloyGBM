@@ -22,7 +22,7 @@ use alloygbm_core::{
     BinnedMatrix, Device, FeatureTile, GradientPair, HistogramBundle, NodeSlice, NodeStats,
     PartitionResult, RowIndexStorage, SplitCandidate,
 };
-use alloygbm_engine::{BackendOps, CategoricalFeatureInfo, EngineResult, SplitSelectionOptions};
+use alloygbm_engine::{BackendOps, CategoricalFeatureInfo, EngineResult, HistogramBuildRequest, SplitSelectionOptions, SubtractRequest};
 use pyo3::exceptions::PyRuntimeWarning;
 use pyo3::prelude::*;
 
@@ -92,6 +92,24 @@ impl BackendOps for RuntimeBackend {
             #[cfg(all(target_os = "macos", feature = "metal"))]
             RuntimeBackend::Metal(b) => {
                 b.build_histograms(binned_matrix, gradients, node, feature_tiles)
+            }
+        }
+    }
+
+    fn build_histograms_batch(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        feature_tiles: &[FeatureTile],
+        requests: &[HistogramBuildRequest<'_>],
+    ) -> EngineResult<Vec<HistogramBundle>> {
+        match self {
+            RuntimeBackend::Cpu(b) => {
+                b.build_histograms_batch(binned_matrix, gradients, feature_tiles, requests)
+            }
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            RuntimeBackend::Metal(b) => {
+                b.build_histograms_batch(binned_matrix, gradients, feature_tiles, requests)
             }
         }
     }
@@ -188,6 +206,22 @@ impl BackendOps for RuntimeBackend {
             RuntimeBackend::Cpu(b) => b.subtract_histogram_bundle(parent, child, node_id),
             #[cfg(all(target_os = "macos", feature = "metal"))]
             RuntimeBackend::Metal(b) => b.subtract_histogram_bundle(parent, child, node_id),
+        }
+    }
+
+    /// Forward `subtract_histogram_bundle_batch` to the active variant.
+    /// Without this the trait default fires, which iterates and calls
+    /// `self.subtract_histogram_bundle(...)` — correct in principle but
+    /// misses MetalBackend's single-command-buffer ICB dispatch that
+    /// Approach A's Task 7 shipped. Same pattern as the scalar forward above.
+    fn subtract_histogram_bundle_batch(
+        &self,
+        requests: &[SubtractRequest<'_>],
+    ) -> EngineResult<Vec<HistogramBundle>> {
+        match self {
+            RuntimeBackend::Cpu(b) => b.subtract_histogram_bundle_batch(requests),
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            RuntimeBackend::Metal(b) => b.subtract_histogram_bundle_batch(requests),
         }
     }
 

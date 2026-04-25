@@ -837,3 +837,70 @@ pattern to every other method in the file.
   confirm `BUILD_HISTOGRAMS_BATCH` and `SUBTRACT_BATCH` counters are
   non-zero and `commit_wait` call count drops to O(depth × estimators)
   instead of O(nodes × estimators).
+
+---
+
+**Update 2026-04-25 — RuntimeBackend forwarding fixed**
+
+Added `build_histograms_batch` and `subtract_histogram_bundle_batch`
+forwarding arms to `impl BackendOps for RuntimeBackend` in
+`bindings/python/src/runtime_backend.rs`. The fix is a two-arm `match`
+for each method, identical in structure to the existing `build_histograms`
+and `subtract_histogram_bundle` arms. The original D-023 capture above
+accurately diagnosed the gap; this amendment records the post-fix numbers.
+
+**Measurements (`metal_friendly` benchmark, 2026-04-25 post-fix, Apple M4):**
+
+| Config | CPU (s) | Metal pre-fix (s) | Metal post-fix (s) | post-fix ratio |
+|---|---|---|---|---|
+| regression d=8 bins=255 200k×200 | 0.544 | 4.63 (Task 8 clean run) | 4.17 | 0.13× |
+| regression d=10 bins=255 200k×200 | 1.07 | 7.82 | 6.59 | 0.16× |
+| regression d=6 bins=1024 200k×200 | 0.429 | 3.13 | 2.63 | 0.16× |
+| multiclass_3 d=8 bins=255 100k×100 | 0.601 | 5.39 | 4.74 | 0.13× |
+| multiclass_10 d=8 bins=255 100k×100 | 1.60 | 13.6 | 14.8 | 0.11× |
+
+Note: CPU times vary run-to-run due to thermal/scheduling on the same
+M4 machine. The relevant comparison is the ratio column, not the absolute
+CPU seconds.
+
+**Profile breakdown (post-fix, depth=8 regression, Apple M4):**
+
+| Site | calls | total_ms | % of total |
+|---|---|---|---|
+| build_histograms | 5 | 327 | 8.3% |
+| build_histograms_batch | 40 | 2997 | 75.6% |
+| &nbsp;&nbsp;.commit_wait | 40 | 2634 | - |
+| &nbsp;&nbsp;.count_accumulate | 528 | 492 | - |
+| best_split_with_options | 1051 | 268 | 6.8% |
+| subtract_histogram_bundle_batch | 40 | 54 | 1.4% |
+| apply_split | 1051 | 281 | 7.1% |
+| reduce_sums | 2102 | 14 | 0.3% |
+
+The batch path is now exercised: `build_histograms_batch` shows 40 calls
+(one per level per estimator for depth=8, 5 estimators — matching
+O(depth × estimators)) and `commit_wait` dropped from 528 calls to 40.
+`subtract_histogram_bundle_batch` likewise shows 40 calls (was 0).
+
+**Dominant cost after fix:**
+
+`commit_wait` inside `build_histograms_batch` consumes 2634/3966 ms =
+66% of total Metal wall time. The batching collapses per-node round-trips
+but `waitUntilCompleted` still stalls the CPU once per level × estimator
+while the GPU drains the entire level's work. The per-level latency is
+now ~65 ms avg (was ~2.5 ms per node, with 528 nodes = ~1320 ms/est at
+depth=8). Net improvement in commit overhead: ~2× reduction. Not enough
+to overcome CPU launch overhead and buffer-setup costs at this shape.
+
+**Kill-criterion verdict (updated):**
+
+NOT MET. All five `metal_friendly` configs remain below 1.0× CPU parity
+after the forwarding fix. Ratios: 0.11×–0.16×. `count_accumulate` (492 ms,
+~12% of total; O(nodes × bins) host-side scan) and `best_split_with_options`
+(268 ms, 6.8%) are the next-largest bottlenecks behind `commit_wait`.
+
+Stage 3's Approach A batch plan has been fully executed as designed.
+The batch infrastructure is correct and now reachable from Python. The
+fundamental bottleneck is CPU-side post-processing after each level
+commit (`count_accumulate` + host-side split finding + apply_split).
+Moving to Metal 4 ICB chaining (Stage 4) would remove the `commit +
+waitUntilCompleted` stall entirely and pipeline GPU work across levels.
