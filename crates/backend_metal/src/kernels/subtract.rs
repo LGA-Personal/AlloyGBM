@@ -464,6 +464,212 @@ pub(crate) fn dispatch_subtract_pool(
     ))
 }
 
+// -------- Batched pool-direct dispatch (Task 4) --------------------
+//
+// Encodes N pool-direct subtract dispatches into a single Metal
+// command buffer with one commit + waitUntilCompleted. Same
+// determinism guarantees as the scalar `dispatch_subtract_pool`.
+
+/// Batched pool-direct subtract: encodes one dispatch per request
+/// into a single command buffer, commits and waits once. Same
+/// determinism guarantees as the scalar `dispatch_subtract_pool`.
+///
+/// Each request must satisfy the same Gpu+Gpu invariants as the
+/// scalar path: the trainer never produces sibling histograms with
+/// mixed storage variants, so a mixed-variant request here is
+/// upstream bug. Caller (`MetalBackend::subtract_histogram_bundle_batch`)
+/// pre-checks variants and falls back to per-request scalar dispatch
+/// for any non-Gpu+Gpu request.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+pub(crate) fn dispatch_subtract_batch_pool(
+    metal_device: &MetalDevice,
+    pipeline_cache: &SubtractPipelineCache,
+    histogram_residency: &HistogramResidencyPool,
+    residency: &ResidencyPool,
+    requests: &[(GpuHistogramHandle, GpuHistogramHandle, u32)],
+) -> EngineResult<Vec<HistogramBundle>> {
+    use objc2_metal::{
+        MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder,
+        MTLDevice, MTLResourceOptions, MTLSize,
+    };
+
+    if requests.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Resolve all entries and mint outputs up front so we can hold the
+    // shared pipeline once across the whole batch.
+    let spec = SubtractSpecKey {
+        block_size: BLOCK_SIZE,
+    };
+    let pipelines = pipeline_cache
+        .get_or_build(spec)
+        .map_err(EngineError::BackendUnavailable)?;
+    let pipeline = &pipelines.subtract;
+
+    let device = &metal_device.device;
+    let res_opts = MTLResourceOptions::StorageModeShared;
+
+    struct Encoded {
+        out_handle: GpuHistogramHandle,
+        node_id: u32,
+        feature_count: u32,
+        bin_count: u32,
+    }
+    let mut encoded: Vec<Encoded> = Vec::with_capacity(requests.len());
+    // Keep uniform buffers + pool-entry refs alive for the duration of
+    // the batch — Metal needs them resident until waitUntilCompleted.
+    let mut uniform_keepalive: Vec<objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn MTLBuffer>>> =
+        Vec::with_capacity(requests.len());
+
+    let command_buffer = metal_device.queue.commandBuffer().ok_or_else(|| {
+        EngineError::BackendUnavailable("subtract batch: command buffer".to_string())
+    })?;
+
+    for (parent_handle, child_handle, node_id) in requests.iter().copied() {
+        let parent_entry = histogram_residency.get(parent_handle).ok_or_else(|| {
+            EngineError::BackendUnavailable(format!(
+                "subtract batch: parent handle {:?} not live in residency pool",
+                parent_handle.0
+            ))
+        })?;
+        let child_entry = histogram_residency.get(child_handle).ok_or_else(|| {
+            EngineError::BackendUnavailable(format!(
+                "subtract batch: child handle {:?} not live in residency pool",
+                child_handle.0
+            ))
+        })?;
+        if parent_entry.shape.feature_count != child_entry.shape.feature_count
+            || parent_entry.shape.bin_count != child_entry.shape.bin_count
+        {
+            return Err(EngineError::ContractViolation(format!(
+                "subtract batch: shape mismatch — parent {}×{} vs child {}×{}",
+                parent_entry.shape.feature_count,
+                parent_entry.shape.bin_count,
+                child_entry.shape.feature_count,
+                child_entry.shape.bin_count,
+            )));
+        }
+        if parent_entry.feature_indices != child_entry.feature_indices {
+            return Err(EngineError::ContractViolation(
+                "subtract batch: parent and child feature_indices differ".to_string(),
+            ));
+        }
+
+        let feature_count = parent_entry.shape.feature_count;
+        let bin_count = parent_entry.shape.bin_count;
+        let total_elems_usize = (feature_count as usize) * (bin_count as usize);
+
+        if total_elems_usize == 0 {
+            // Degenerate shape — mint empty entry and skip dispatch.
+            let empty = histogram_residency.mint(
+                &metal_device.device,
+                residency,
+                &parent_entry.feature_indices,
+                bin_count,
+            )?;
+            encoded.push(Encoded {
+                out_handle: empty,
+                node_id,
+                feature_count,
+                bin_count,
+            });
+            continue;
+        }
+
+        let total_elems = u32::try_from(total_elems_usize).map_err(|_| {
+            EngineError::BackendUnavailable(
+                "subtract batch: F*B exceeds u32 range".to_string(),
+            )
+        })?;
+
+        let out_handle = histogram_residency.mint(
+            &metal_device.device,
+            residency,
+            &parent_entry.feature_indices,
+            bin_count,
+        )?;
+        let out_entry = histogram_residency.get(out_handle).ok_or_else(|| {
+            EngineError::BackendUnavailable(
+                "subtract batch: freshly-minted output handle not findable".to_string(),
+            )
+        })?;
+
+        let uniform_pod = SubtractUniformPod {
+            total_elems,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+        };
+        let uniform_bytes = unsafe {
+            std::slice::from_raw_parts(
+                std::ptr::from_ref(&uniform_pod).cast::<u8>(),
+                std::mem::size_of::<SubtractUniformPod>(),
+            )
+        };
+        let uniform_buf = device
+            .newBufferWithLength_options(uniform_bytes.len(), res_opts)
+            .ok_or_else(|| {
+                EngineError::BackendUnavailable("subtract batch: uniform buffer alloc".to_string())
+            })?;
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                uniform_bytes.as_ptr(),
+                uniform_buf.contents().as_ptr().cast::<u8>(),
+                uniform_bytes.len(),
+            );
+        }
+
+        let encoder = command_buffer.computeCommandEncoder().ok_or_else(|| {
+            EngineError::BackendUnavailable("subtract batch: compute encoder".to_string())
+        })?;
+        encoder.setComputePipelineState(pipeline);
+        unsafe {
+            encoder.setBuffer_offset_atIndex(Some(&parent_entry.grad), 0, 0);
+            encoder.setBuffer_offset_atIndex(Some(&parent_entry.hess), 0, 1);
+            encoder.setBuffer_offset_atIndex(Some(&parent_entry.counts), 0, 2);
+            encoder.setBuffer_offset_atIndex(Some(&child_entry.grad), 0, 3);
+            encoder.setBuffer_offset_atIndex(Some(&child_entry.hess), 0, 4);
+            encoder.setBuffer_offset_atIndex(Some(&child_entry.counts), 0, 5);
+            encoder.setBuffer_offset_atIndex(Some(&out_entry.grad), 0, 6);
+            encoder.setBuffer_offset_atIndex(Some(&out_entry.hess), 0, 7);
+            encoder.setBuffer_offset_atIndex(Some(&out_entry.counts), 0, 8);
+            encoder.setBuffer_offset_atIndex(Some(&uniform_buf), 0, 9);
+        }
+        let num_blocks = total_elems.div_ceil(BLOCK_SIZE);
+        let grid = MTLSize {
+            width: num_blocks as usize,
+            height: 1,
+            depth: 1,
+        };
+        let tg = MTLSize {
+            width: BLOCK_SIZE as usize,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatchThreadgroups_threadsPerThreadgroup(grid, tg);
+        encoder.endEncoding();
+
+        uniform_keepalive.push(uniform_buf);
+        encoded.push(Encoded {
+            out_handle,
+            node_id,
+            feature_count,
+            bin_count,
+        });
+    }
+
+    command_buffer.commit();
+    command_buffer.waitUntilCompleted();
+    drop(uniform_keepalive);
+
+    Ok(encoded
+        .into_iter()
+        .map(|e| HistogramBundle::from_gpu(e.node_id, e.out_handle, e.feature_count, e.bin_count))
+        .collect())
+}
+
 // -------- Non-macOS stub -------------------------------------------
 
 #[cfg(not(target_os = "macos"))]
