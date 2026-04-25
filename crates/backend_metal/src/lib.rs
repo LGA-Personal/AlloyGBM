@@ -339,6 +339,34 @@ impl BackendOps for MetalBackend {
         )
     }
 
+    fn build_histograms_batch(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        feature_tiles: &[FeatureTile],
+        requests: &[alloygbm_engine::HistogramBuildRequest<'_>],
+    ) -> EngineResult<Vec<HistogramBundle>> {
+        let _probe = profile::ScopedProbe::new(&profile::BUILD_HISTOGRAMS_BATCH);
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+        let kernel_requests: Vec<(&NodeSlice, &[FeatureTile])> = requests
+            .iter()
+            .map(|r| (r.node, feature_tiles))
+            .collect();
+        kernels::histogram::dispatch_histograms_batch(
+            &self.metal_device,
+            &self.pipeline_cache,
+            &self.buffer_cache,
+            &self.histogram_residency,
+            &self.row_index_residency,
+            &self.residency,
+            binned_matrix,
+            gradients,
+            &kernel_requests,
+        )
+    }
+
     fn best_split(&self, histograms: &HistogramBundle) -> EngineResult<Option<SplitCandidate>> {
         let _probe = profile::ScopedProbe::new(&profile::BEST_SPLIT);
         // Default options + no feature weights + no categoricals: this
@@ -2343,6 +2371,109 @@ mod tests {
         };
         let requests: Vec<SubtractRequest<'_>> = Vec::new();
         let result = backend.subtract_histogram_bundle_batch(&requests).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn build_histograms_batch_matches_scalar_per_call() {
+        use alloygbm_engine::{BackendOps, HistogramBuildRequest};
+
+        let Ok(backend) = MetalBackend::new() else {
+            return;
+        };
+
+        let row_count = 512usize;
+        let feature_count = 6usize;
+        let max_bin: u16 = 7;
+        let bins: Vec<u8> = (0..(row_count * feature_count))
+            .map(|i| ((i.wrapping_mul(31)) & 7) as u8)
+            .collect();
+        let bm = BinnedMatrix::new(row_count, feature_count, max_bin, bins).unwrap();
+        let grads: Vec<GradientPair> = (0..row_count)
+            .map(|i| GradientPair {
+                grad: (i & 7) as f32,
+                hess: 1.0,
+            })
+            .collect();
+        let tiles = vec![FeatureTile {
+            start_feature: 0,
+            end_feature: feature_count as u32,
+        }];
+
+        let nodes: Vec<NodeSlice> = vec![
+            NodeSlice::new(0, (0..256u32).collect()).unwrap(),
+            NodeSlice::new(1, (256..512u32).collect()).unwrap(),
+            NodeSlice::new(2, (0..200u32).collect()).unwrap(),
+        ];
+
+        // Scalar baseline.
+        let scalar: Vec<_> = nodes
+            .iter()
+            .map(|n| backend.build_histograms(&bm, &grads, n, &tiles).unwrap())
+            .collect();
+
+        // Batch run.
+        let requests: Vec<_> = nodes.iter().map(|n| HistogramBuildRequest { node: n }).collect();
+        let batched = backend
+            .build_histograms_batch(&bm, &grads, &tiles, &requests)
+            .unwrap();
+        assert_eq!(batched.len(), scalar.len());
+        for (b, s) in batched.iter().zip(scalar.iter()) {
+            let b_cpu = materialize_bundle_for_test(&backend, b);
+            let s_cpu = materialize_bundle_for_test(&backend, s);
+            assert_eq!(b_cpu, s_cpu, "batched build diverged from scalar");
+        }
+    }
+
+    #[test]
+    fn build_histograms_batch_single_request_matches_scalar() {
+        use alloygbm_engine::{BackendOps, HistogramBuildRequest};
+        let Ok(backend) = MetalBackend::new() else {
+            return;
+        };
+        let row_count = 128usize;
+        let feature_count = 3usize;
+        let max_bin: u16 = 7;
+        let bins: Vec<u8> = (0..(row_count * feature_count))
+            .map(|i| ((i * 13) & 7) as u8)
+            .collect();
+        let bm = BinnedMatrix::new(row_count, feature_count, max_bin, bins).unwrap();
+        let grads: Vec<GradientPair> = (0..row_count)
+            .map(|_| GradientPair { grad: 1.0, hess: 1.0 })
+            .collect();
+        let tiles = vec![FeatureTile {
+            start_feature: 0,
+            end_feature: feature_count as u32,
+        }];
+        let node = NodeSlice::new(0, (0..128u32).collect()).unwrap();
+        let scalar = backend.build_histograms(&bm, &grads, &node, &tiles).unwrap();
+        let requests = vec![HistogramBuildRequest { node: &node }];
+        let batched = backend
+            .build_histograms_batch(&bm, &grads, &tiles, &requests)
+            .unwrap();
+        assert_eq!(batched.len(), 1);
+        assert_eq!(
+            materialize_bundle_for_test(&backend, &batched[0]),
+            materialize_bundle_for_test(&backend, &scalar)
+        );
+    }
+
+    #[test]
+    fn build_histograms_batch_empty_is_noop() {
+        use alloygbm_engine::{BackendOps, HistogramBuildRequest};
+        let Ok(backend) = MetalBackend::new() else {
+            return;
+        };
+        let bm = BinnedMatrix::new(1, 1, 1, vec![0u8]).unwrap();
+        let grads = vec![GradientPair { grad: 1.0, hess: 1.0 }];
+        let tiles = vec![FeatureTile {
+            start_feature: 0,
+            end_feature: 1,
+        }];
+        let requests: Vec<HistogramBuildRequest<'_>> = Vec::new();
+        let result = backend
+            .build_histograms_batch(&bm, &grads, &tiles, &requests)
+            .unwrap();
         assert!(result.is_empty());
     }
 }

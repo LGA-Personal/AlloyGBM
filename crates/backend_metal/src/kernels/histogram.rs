@@ -516,7 +516,7 @@ pub(crate) fn dispatch_histograms(
 /// disjoint freshly-minted pool entry, and within one command buffer
 /// Metal does not reorder writes that target the same buffer.
 #[cfg(target_os = "macos")]
-#[allow(unsafe_code, dead_code)]
+#[allow(unsafe_code)]
 pub(crate) fn dispatch_histograms_batch(
     metal_device: &MetalDevice,
     pipeline_cache: &HistogramPipelineCache,
