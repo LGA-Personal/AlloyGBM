@@ -4007,6 +4007,25 @@ fn build_tree_level_wise<B: BackendOps>(
     let mut active_nodes: Vec<(u32, RowIndexStorage, HistogramBundle, f32)> =
         vec![(0_u32, root_node.into_rows(), root_histograms, 0.0_f32)];
 
+    // Carries the deferred build/subtract work for the next level.
+    // Declared here (function scope) so its type is visible throughout
+    // the depth loop without re-declaring it on every iteration.
+    struct PendingChildren {
+        left_local_id: u32,
+        right_local_id: u32,
+        left_rows: RowIndexStorage,
+        right_rows: RowIndexStorage,
+        left_leaf_absolute: f32,
+        right_leaf_absolute: f32,
+        // The parent histograms must outlive Pass 3 (the subtract
+        // input). Held here, dropped after Pass 3 finishes.
+        parent_histograms: HistogramBundle,
+        // True when the smaller-or-equal-sized child is the LEFT
+        // sibling. Drives which row indices we hand to the build
+        // phase and which we subtract for.
+        smaller_is_left: bool,
+    }
+
     for depth in 0..(params.max_depth as usize) {
         if active_nodes.is_empty() {
             break;
@@ -4015,21 +4034,6 @@ fn build_tree_level_wise<B: BackendOps>(
         // ----- Pass 1: per-node serial work (best_split, apply_split,
         // rejection checks, leaf updates, stump commit). Defers the
         // build/subtract for the next level into `pending_children`.
-        struct PendingChildren {
-            left_local_id: u32,
-            right_local_id: u32,
-            left_rows: RowIndexStorage,
-            right_rows: RowIndexStorage,
-            left_leaf_absolute: f32,
-            right_leaf_absolute: f32,
-            // The parent histograms must outlive Pass 3 (the subtract
-            // input). Held here, dropped after Pass 3 finishes.
-            parent_histograms: HistogramBundle,
-            // True when the smaller-or-equal-sized child is the LEFT
-            // sibling. Drives which row indices we hand to the build
-            // phase and which we subtract for.
-            smaller_is_left: bool,
-        }
         let mut pending_children: Vec<PendingChildren> = Vec::new();
 
         for (local_node_id, node_rows, histograms, parent_leaf_value) in active_nodes {
@@ -4139,6 +4143,8 @@ fn build_tree_level_wise<B: BackendOps>(
             split.left_stats = left_stats;
             split.right_stats = right_stats;
 
+            // S3.7e — split committed; children take ownership of
+            // the row indices. Defuse guard so `partition` is movable.
             partition_guard.defuse();
             let PartitionResult {
                 left: left_rows,

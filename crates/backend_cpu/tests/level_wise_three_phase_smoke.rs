@@ -7,7 +7,7 @@
 //! Metal-specific issue.
 
 use alloygbm_backend_cpu::CpuBackend;
-use alloygbm_core::{BinnedMatrix, DatasetMatrix, TrainParams, TrainingDataset};
+use alloygbm_core::{BinnedMatrix, DatasetMatrix, TrainParams, TrainingDataset, TreeGrowth};
 use alloygbm_engine::{SquaredErrorObjective, Trainer};
 
 fn make_dataset(n: usize) -> (TrainingDataset, BinnedMatrix) {
@@ -40,9 +40,12 @@ fn make_dataset(n: usize) -> (TrainingDataset, BinnedMatrix) {
 fn level_wise_two_round_fit_is_finite_and_stable() {
     let (dataset, bm) = make_dataset(200);
 
-    let mut params = TrainParams::default();
-    params.max_depth = 3;
-    params.learning_rate = 0.1;
+    let params = TrainParams {
+        tree_growth: TreeGrowth::Level,
+        max_depth: 3,
+        learning_rate: 0.1,
+        ..TrainParams::default()
+    };
 
     let trainer = Trainer::new(params).expect("valid params");
     let backend = CpuBackend;
@@ -50,6 +53,13 @@ fn level_wise_two_round_fit_is_finite_and_stable() {
     let model = trainer
         .fit_iterations(&dataset, &bm, &backend, &SquaredErrorObjective, 2)
         .expect("2-round fit must succeed");
+
+    // At least one split must have committed — if stumps is empty the
+    // new Pass 2/3 code paths were never exercised.
+    assert!(
+        !model.stumps.is_empty(),
+        "expected at least one committed split; got 0 — Pass 2/3 were not exercised"
+    );
 
     // Smoke assertions: every stump leaf value is finite
     for stump in &model.stumps {
