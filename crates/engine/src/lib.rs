@@ -83,6 +83,24 @@ impl Default for SplitSelectionOptions {
     }
 }
 
+/// One node's input for a batched histogram build. The shared
+/// `binned_matrix`, `gradients`, and `feature_tiles` are passed
+/// alongside `&[HistogramBuildRequest]` to
+/// [`BackendOps::build_histograms_batch`].
+#[derive(Debug)]
+pub struct HistogramBuildRequest<'a> {
+    pub node: &'a NodeSlice,
+}
+
+/// One node's input for a batched parent-minus-sibling subtract.
+/// `output_node_id` becomes the `node_id` of the resulting bundle.
+#[derive(Debug)]
+pub struct SubtractRequest<'a> {
+    pub parent: &'a HistogramBundle,
+    pub sibling: &'a HistogramBundle,
+    pub output_node_id: u32,
+}
+
 pub trait BackendOps {
     fn build_histograms(
         &self,
@@ -141,6 +159,43 @@ pub trait BackendOps {
         node_id: u32,
     ) -> EngineResult<HistogramBundle> {
         subtract_histogram_bundle(parent, child, node_id)
+    }
+
+    /// Batched histogram build. Default impl iterates and calls
+    /// [`build_histograms`](BackendOps::build_histograms); accelerator
+    /// backends override to encode all dispatches into a single
+    /// command buffer and amortise the host↔device round-trip.
+    ///
+    /// The returned vector aligns with `requests`: `result[i]` is the
+    /// histogram for `requests[i].node`. On any backend error, the
+    /// whole call returns `Err` and any partially-built bundles
+    /// included in earlier indices are dropped (caller must not
+    /// depend on partial results).
+    fn build_histograms_batch(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        feature_tiles: &[FeatureTile],
+        requests: &[HistogramBuildRequest<'_>],
+    ) -> EngineResult<Vec<HistogramBundle>> {
+        requests
+            .iter()
+            .map(|r| self.build_histograms(binned_matrix, gradients, r.node, feature_tiles))
+            .collect()
+    }
+
+    /// Batched parent-minus-sibling subtract. Default impl iterates
+    /// and calls [`subtract_histogram_bundle`](BackendOps::subtract_histogram_bundle);
+    /// accelerator backends override to encode all dispatches into a
+    /// single command buffer.
+    fn subtract_histogram_bundle_batch(
+        &self,
+        requests: &[SubtractRequest<'_>],
+    ) -> EngineResult<Vec<HistogramBundle>> {
+        requests
+            .iter()
+            .map(|r| self.subtract_histogram_bundle(r.parent, r.sibling, r.output_node_id))
+            .collect()
     }
 
     /// Release backend-specific resources tied to `bundle` (S3.7d).
