@@ -98,6 +98,16 @@ pub(crate) static APPLY_PARTITION_LEAF_UPDATES: Counter = Counter::new();
 pub(crate) static RELEASE_HISTOGRAMS: Counter = Counter::new();
 pub(crate) static RELEASE_ROW_INDICES: Counter = Counter::new();
 
+// ---- Batched call-site probes (D-023) -----------------------------
+//
+// `BUILD_HISTOGRAMS_BATCH` wraps the whole batched call (encoding +
+// commit + waitUntilCompleted + count finalisation). Per-request
+// sub-phase work continues to record into the existing `BH_*`
+// counters; in the batched path those represent aggregated work
+// across the whole batch rather than one per call.
+pub(crate) static BUILD_HISTOGRAMS_BATCH: Counter = Counter::new();
+pub(crate) static SUBTRACT_BATCH: Counter = Counter::new();
+
 // ---- build_histograms sub-phases (the suspected cost) -------------
 
 pub(crate) static BH_GPU_DISPATCH: Counter = Counter::new();
@@ -151,6 +161,11 @@ pub(crate) fn dump_if_enabled() {
             indented: false,
         },
         Site {
+            name: "build_histograms_batch",
+            counter: &BUILD_HISTOGRAMS_BATCH,
+            indented: false,
+        },
+        Site {
             name: "  .buffer_setup",
             counter: &BH_BUFFER_SETUP,
             indented: true,
@@ -198,6 +213,11 @@ pub(crate) fn dump_if_enabled() {
         Site {
             name: "subtract_histogram_bundle",
             counter: &SUBTRACT,
+            indented: false,
+        },
+        Site {
+            name: "subtract_histogram_bundle_batch",
+            counter: &SUBTRACT_BATCH,
             indented: false,
         },
         Site {
