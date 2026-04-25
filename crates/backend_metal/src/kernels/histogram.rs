@@ -70,9 +70,31 @@ pub const ROWS_PER_CHUNK_DEFAULT: u32 = 8_192;
 
 // -------- macOS-only dispatch path ---------------------------------
 
+/// Per-request output state captured after `encode_one_histogram_request`
+/// and consumed by `finalize_one_histogram_request` + the caller's
+/// `HistogramBundle::from_gpu` call. The `scratch_keepalive` vec holds
+/// all per-tile scratch buffers alive until after `waitUntilCompleted`.
+#[cfg(target_os = "macos")]
+struct EncodedHistogramRequest {
+    pool_handle: alloygbm_core::GpuHistogramHandle,
+    bin_count: u32,
+    total_selected: u32,
+    selected_features: Vec<u32>,
+    /// Owned scratch buffers must outlive `waitUntilCompleted`.
+    scratch_keepalive:
+        Vec<objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLBuffer>>>,
+}
+
+/// Encodes scatter+reduce passes for one request into `command_buffer`
+/// without committing. The caller is responsible for
+/// `command_buffer.commit()` + `command_buffer.waitUntilCompleted()`.
+///
+/// After the wait, call `finalize_one_histogram_request` to populate
+/// the CPU-side counts buffer, then drop `EncodedHistogramRequest`.
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code, clippy::too_many_arguments)]
-pub(crate) fn dispatch_histograms(
+fn encode_one_histogram_request(
+    command_buffer: &objc2::runtime::ProtocolObject<dyn objc2_metal::MTLCommandBuffer>,
     metal_device: &MetalDevice,
     pipeline_cache: &HistogramPipelineCache,
     buffer_cache: &BufferCache,
@@ -83,12 +105,12 @@ pub(crate) fn dispatch_histograms(
     gradients: &[GradientPair],
     node: &NodeSlice,
     feature_tiles: &[FeatureTile],
-) -> EngineResult<HistogramBundle> {
+) -> EngineResult<EncodedHistogramRequest> {
     use objc2::rc::Retained;
     use objc2::runtime::ProtocolObject;
     use objc2_metal::{
-        MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder,
-        MTLDevice, MTLResourceOptions, MTLSize,
+        MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLComputeCommandEncoder, MTLDevice,
+        MTLResourceOptions, MTLSize,
     };
 
     // --- Contract checks (mirror CpuBackend) ---
@@ -234,14 +256,10 @@ pub(crate) fn dispatch_histograms(
     let hess_out_buffer = pool_entry.hess.clone();
 
     drop(p_setup);
-    let p_dispatch = profile::ScopedProbe::new(&profile::BH_GPU_DISPATCH);
+    let _p_dispatch = profile::ScopedProbe::new(&profile::BH_GPU_DISPATCH);
 
-    // --- Encode the command buffer ---
+    // --- Encode into the provided command buffer ---
     let p_encode_cb = profile::ScopedProbe::new(&profile::BH_ENCODE);
-    let command_buffer = metal_device
-        .queue
-        .commandBuffer()
-        .ok_or_else(|| EngineError::BackendUnavailable("no command buffer".to_string()))?;
     drop(p_encode_cb);
 
     let bin_sz = if use_u16 { 2usize } else { 1usize };
@@ -366,23 +384,36 @@ pub(crate) fn dispatch_histograms(
         drop(p_encode);
     }
 
-    {
-        let _p = profile::ScopedProbe::new(&profile::BH_COMMIT_WAIT);
-        command_buffer.commit();
-        command_buffer.waitUntilCompleted();
-    }
-    drop(p_dispatch);
+    // Drop locally-cloned buffer handles; the real buffers stay live
+    // via the pool itself (`pool_handle` is still registered).
+    drop(pool_entry);
+    drop(grad_out_buffer);
+    drop(hess_out_buffer);
 
-    // --- CPU-computed counts → GPU-resident pool buffer (D-008) ---
-    //
-    // The GPU kernel emits only `(grad_sum, hess_sum)` via the reduce
-    // pass; counts are computed CPU-side (single u8/u16 bin-read +
-    // uint increment per row — trivially deterministic) and memcpied
-    // into the pool's counts buffer via `write_counts`. Downstream
-    // GPU consumers (`subtract`, any future residency-warm reducer)
-    // read counts directly from the pool buffer without a host
-    // round-trip.
-    let counts_total = (total_selected as usize) * (bin_count as usize);
+    Ok(EncodedHistogramRequest {
+        pool_handle,
+        bin_count,
+        total_selected,
+        selected_features,
+        scratch_keepalive,
+    })
+}
+
+/// CPU-side count accumulation and pool write after
+/// `waitUntilCompleted`. This is the "finalize" half that was
+/// previously inlined at lines 376–424 of `dispatch_histograms`.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn finalize_one_histogram_request(
+    binned_matrix: &BinnedMatrix,
+    row_index_pool: &RowIndexResidencyPool,
+    histogram_residency: &HistogramResidencyPool,
+    node: &NodeSlice,
+    encoded: &EncodedHistogramRequest,
+) -> EngineResult<()> {
+    use objc2_metal::MTLBuffer;
+
+    let counts_total = (encoded.total_selected as usize) * (encoded.bin_count as usize);
     let mut counts_flat = vec![0u32; counts_total];
     // CPU-side count accumulation wants a &[u32]. Cpu variants loan
     // their existing slice; Gpu variants read the row-index prefix
@@ -396,7 +427,7 @@ pub(crate) fn dispatch_histograms(
             let _p = profile::ScopedProbe::new(&profile::BH_ROW_READBACK);
             let entry = row_index_pool.get(*handle).ok_or_else(|| {
                 EngineError::BackendUnavailable(format!(
-                    "build_histograms: row-index handle {} not in residency pool (count path)",
+                    "histograms finalize: row-index handle {} not in residency pool",
                     handle.0
                 ))
             })?;
@@ -411,32 +442,71 @@ pub(crate) fn dispatch_histograms(
     };
     {
         let _p = profile::ScopedProbe::new(&profile::BH_COUNT_ACCUMULATE);
-        for (local_f, &feature_index) in selected_features.iter().enumerate() {
-            let base = local_f * bin_count as usize;
+        for (local_f, &feature_index) in encoded.selected_features.iter().enumerate() {
+            let base = local_f * encoded.bin_count as usize;
             accumulate_counts(
                 binned_matrix,
                 row_indices_slice,
                 feature_index,
-                &mut counts_flat[base..base + bin_count as usize],
+                &mut counts_flat[base..base + encoded.bin_count as usize],
             );
         }
-        histogram_residency.write_counts(pool_handle, &counts_flat)?;
+        histogram_residency.write_counts(encoded.pool_handle, &counts_flat)?;
     }
+    Ok(())
+}
 
-    // Keep scratch alive until after readback — see macro tricks below.
-    drop(scratch_keepalive);
-    // Keep `pool_entry`'s cloned buffer handles alive until here; the
-    // real buffers stay live via the pool itself (`pool_handle` is
-    // still registered). Drop locally to avoid a redundant refcount.
-    drop(pool_entry);
-    drop(grad_out_buffer);
-    drop(hess_out_buffer);
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code, clippy::too_many_arguments)]
+pub(crate) fn dispatch_histograms(
+    metal_device: &MetalDevice,
+    pipeline_cache: &HistogramPipelineCache,
+    buffer_cache: &BufferCache,
+    histogram_residency: &HistogramResidencyPool,
+    row_index_pool: &RowIndexResidencyPool,
+    residency: &ResidencyPool,
+    binned_matrix: &BinnedMatrix,
+    gradients: &[GradientPair],
+    node: &NodeSlice,
+    feature_tiles: &[FeatureTile],
+) -> EngineResult<HistogramBundle> {
+    use objc2_metal::{MTLCommandBuffer, MTLCommandQueue};
 
+    let command_buffer = metal_device
+        .queue
+        .commandBuffer()
+        .ok_or_else(|| EngineError::BackendUnavailable("no command buffer".to_string()))?;
+    let encoded = encode_one_histogram_request(
+        &command_buffer,
+        metal_device,
+        pipeline_cache,
+        buffer_cache,
+        histogram_residency,
+        row_index_pool,
+        residency,
+        binned_matrix,
+        gradients,
+        node,
+        feature_tiles,
+    )?;
+    {
+        let _p = profile::ScopedProbe::new(&profile::BH_COMMIT_WAIT);
+        command_buffer.commit();
+        command_buffer.waitUntilCompleted();
+    }
+    finalize_one_histogram_request(
+        binned_matrix,
+        row_index_pool,
+        histogram_residency,
+        node,
+        &encoded,
+    )?;
+    drop(encoded.scratch_keepalive);
     Ok(HistogramBundle::from_gpu(
         node.node_id,
-        pool_handle,
-        total_selected,
-        bin_count,
+        encoded.pool_handle,
+        encoded.total_selected,
+        encoded.bin_count,
     ))
 }
 
