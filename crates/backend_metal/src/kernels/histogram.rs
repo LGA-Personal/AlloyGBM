@@ -510,6 +510,83 @@ pub(crate) fn dispatch_histograms(
     ))
 }
 
+/// Batched histogram build: encodes scatter+reduce passes for every
+/// request into a single Metal command buffer, commits and waits
+/// once, then runs CPU-side count finalisation per request.
+///
+/// Determinism is preserved by construction: the wide and narrow
+/// scatter kernels are unchanged, each request writes into a
+/// disjoint freshly-minted pool entry, and within one command buffer
+/// Metal does not reorder writes that target the same buffer.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code, dead_code)]
+pub(crate) fn dispatch_histograms_batch(
+    metal_device: &MetalDevice,
+    pipeline_cache: &HistogramPipelineCache,
+    buffer_cache: &BufferCache,
+    histogram_residency: &HistogramResidencyPool,
+    row_index_pool: &RowIndexResidencyPool,
+    residency: &ResidencyPool,
+    binned_matrix: &BinnedMatrix,
+    gradients: &[GradientPair],
+    requests: &[(&NodeSlice, &[FeatureTile])],
+) -> EngineResult<Vec<HistogramBundle>> {
+    use objc2_metal::{MTLCommandBuffer, MTLCommandQueue};
+
+    if requests.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let command_buffer = metal_device.queue.commandBuffer().ok_or_else(|| {
+        EngineError::BackendUnavailable("histogram batch: no command buffer".to_string())
+    })?;
+
+    let mut encoded: Vec<(EncodedHistogramRequest, &NodeSlice)> =
+        Vec::with_capacity(requests.len());
+    for (node, feature_tiles) in requests.iter().copied() {
+        let one = encode_one_histogram_request(
+            &command_buffer,
+            metal_device,
+            pipeline_cache,
+            buffer_cache,
+            histogram_residency,
+            row_index_pool,
+            residency,
+            binned_matrix,
+            gradients,
+            node,
+            feature_tiles,
+        )?;
+        encoded.push((one, node));
+    }
+
+    {
+        let _p = profile::ScopedProbe::new(&profile::BH_COMMIT_WAIT);
+        command_buffer.commit();
+        command_buffer.waitUntilCompleted();
+    }
+
+    let mut bundles: Vec<HistogramBundle> = Vec::with_capacity(encoded.len());
+    for (one, node) in encoded {
+        finalize_one_histogram_request(
+            binned_matrix,
+            row_index_pool,
+            histogram_residency,
+            node,
+            &one,
+        )?;
+        bundles.push(HistogramBundle::from_gpu(
+            node.node_id,
+            one.pool_handle,
+            one.total_selected,
+            one.bin_count,
+        ));
+        drop(one.scratch_keepalive);
+    }
+
+    Ok(bundles)
+}
+
 // -------- Helpers (macOS only) -------------------------------------
 
 /// SAFETY: caller holds `value` live for the duration of the
