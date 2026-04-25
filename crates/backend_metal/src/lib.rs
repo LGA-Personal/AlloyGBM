@@ -426,6 +426,60 @@ impl BackendOps for MetalBackend {
         }
     }
 
+    /// S5 — batched parent-minus-sibling subtract. Encodes all Gpu+Gpu
+    /// requests into a single Metal command buffer (one commit +
+    /// waitUntilCompleted for N subtracts). Mixed-variant batches fall
+    /// back to per-request scalar dispatch to preserve the existing
+    /// `subtract_histogram_bundle` contract.
+    ///
+    /// Dispatch matrix:
+    /// * **All Gpu+Gpu** → pool-direct batch dispatch via
+    ///   `dispatch_subtract_batch_pool`; one MTLCommandBuffer for N
+    ///   kernel launches.
+    /// * **Any non-Gpu+Gpu** → per-request scalar fallback to
+    ///   `subtract_histogram_bundle`; preserves correctness at the
+    ///   cost of N separate command buffers.
+    fn subtract_histogram_bundle_batch(
+        &self,
+        requests: &[alloygbm_engine::SubtractRequest<'_>],
+    ) -> EngineResult<Vec<HistogramBundle>> {
+        let _probe = profile::ScopedProbe::new(&profile::SUBTRACT_BATCH);
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+        let all_gpu_pairs = requests.iter().all(|r| {
+            matches!(
+                (&r.parent.storage, &r.sibling.storage),
+                (HistogramStorage::Gpu { .. }, HistogramStorage::Gpu { .. })
+            )
+        });
+        if !all_gpu_pairs {
+            return requests
+                .iter()
+                .map(|r| self.subtract_histogram_bundle(r.parent, r.sibling, r.output_node_id))
+                .collect();
+        }
+        let pool_requests: Vec<(alloygbm_core::GpuHistogramHandle, alloygbm_core::GpuHistogramHandle, u32)> = requests
+            .iter()
+            .map(|r| {
+                let HistogramStorage::Gpu { handle: ph, .. } = &r.parent.storage else {
+                    unreachable!("guarded by all_gpu_pairs check")
+                };
+                let HistogramStorage::Gpu { handle: ch, .. } = &r.sibling.storage else {
+                    unreachable!("guarded by all_gpu_pairs check")
+                };
+                (*ph, *ch, r.output_node_id)
+            })
+            .collect();
+        kernels::subtract::dispatch_subtract_batch_pool(
+            &self.metal_device,
+            &self.subtract_pipeline_cache,
+            &self.histogram_residency,
+            &self.residency,
+            &pool_requests,
+        )
+    }
+
     fn apply_split(
         &self,
         binned_matrix: &BinnedMatrix,
@@ -2183,5 +2237,112 @@ mod tests {
             cpu.is_categorical, metal.is_categorical,
             "{label}: categorical flag mismatch"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // Task 5 — subtract_histogram_bundle_batch override
+    // ---------------------------------------------------------------
+
+    /// Build 3 parent/smaller pairs, compute scalar baseline and batched
+    /// result, assert materialised histograms are byte-equal. Exercises
+    /// the Gpu+Gpu hot path through `dispatch_subtract_batch_pool`.
+    #[test]
+    fn subtract_histogram_bundle_batch_matches_scalar_per_call() {
+        use alloygbm_engine::{BackendOps, SubtractRequest};
+
+        let Ok(backend) = MetalBackend::new() else {
+            return;
+        };
+
+        let row_count = 256usize;
+        let feature_count = 4usize;
+        let max_bin: u16 = 7;
+        let bins: Vec<u8> = (0..(row_count * feature_count))
+            .map(|i| ((i.wrapping_mul(31)) & 7) as u8)
+            .collect();
+        let bm = BinnedMatrix::new(row_count, feature_count, max_bin, bins).unwrap();
+        let grads: Vec<GradientPair> = (0..row_count)
+            .map(|i| GradientPair {
+                grad: (i & 3) as f32,
+                hess: 1.0,
+            })
+            .collect();
+        let tiles = vec![FeatureTile {
+            start_feature: 0,
+            end_feature: feature_count as u32,
+        }];
+
+        // Build three parent / smaller-child pairs of varied sizes.
+        let pairs: Vec<(NodeSlice, NodeSlice, u32)> = vec![
+            (
+                NodeSlice::new(0, (0..256u32).collect()).unwrap(),
+                NodeSlice::new(1, (0..64u32).collect()).unwrap(),
+                2,
+            ),
+            (
+                NodeSlice::new(3, (0..256u32).collect()).unwrap(),
+                NodeSlice::new(4, (0..128u32).collect()).unwrap(),
+                5,
+            ),
+            (
+                NodeSlice::new(6, (0..256u32).collect()).unwrap(),
+                NodeSlice::new(7, (0..200u32).collect()).unwrap(),
+                8,
+            ),
+        ];
+        let parents: Vec<_> = pairs
+            .iter()
+            .map(|(p, _, _)| backend.build_histograms(&bm, &grads, p, &tiles).unwrap())
+            .collect();
+        let smallers: Vec<_> = pairs
+            .iter()
+            .map(|(_, s, _)| backend.build_histograms(&bm, &grads, s, &tiles).unwrap())
+            .collect();
+
+        // Scalar baseline.
+        let scalar: Vec<_> = pairs
+            .iter()
+            .zip(parents.iter())
+            .zip(smallers.iter())
+            .map(|(((_, _, out_id), parent), smaller)| {
+                backend
+                    .subtract_histogram_bundle(parent, smaller, *out_id)
+                    .unwrap()
+            })
+            .collect();
+
+        // Batch run.
+        let requests: Vec<_> = pairs
+            .iter()
+            .zip(parents.iter())
+            .zip(smallers.iter())
+            .map(|(((_, _, out_id), parent), smaller)| SubtractRequest {
+                parent,
+                sibling: smaller,
+                output_node_id: *out_id,
+            })
+            .collect();
+        let batched = backend.subtract_histogram_bundle_batch(&requests).unwrap();
+        assert_eq!(batched.len(), scalar.len());
+        for (b, s) in batched.iter().zip(scalar.iter()) {
+            // Compare the materialised histograms — pool entry ids
+            // differ but the (grad, hess, count) bytes must match.
+            let b_cpu = materialize_bundle_for_test(&backend, b);
+            let s_cpu = materialize_bundle_for_test(&backend, s);
+            assert_eq!(b_cpu, s_cpu, "batched subtract diverged from scalar");
+        }
+    }
+
+    /// Empty request slice must return `Ok(Vec::new())` immediately
+    /// without touching the GPU.
+    #[test]
+    fn subtract_histogram_bundle_batch_empty_is_noop() {
+        use alloygbm_engine::{BackendOps, SubtractRequest};
+        let Ok(backend) = MetalBackend::new() else {
+            return;
+        };
+        let requests: Vec<SubtractRequest<'_>> = Vec::new();
+        let result = backend.subtract_histogram_bundle_batch(&requests).unwrap();
+        assert!(result.is_empty());
     }
 }
