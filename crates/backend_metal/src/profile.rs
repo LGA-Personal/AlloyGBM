@@ -110,6 +110,14 @@ pub(crate) static SUBTRACT_BATCH: Counter = Counter::new();
 
 // ---- build_histograms sub-phases (the suspected cost) -------------
 
+/// Per-request encode phase: scratch-buffer allocation + per-tile
+/// scatter+reduce command encoding into the caller-supplied command buffer.
+///
+/// **Post-refactor semantics (after `encode_one_histogram_request` extraction):**
+/// This counter covers the encode phase only. `commandBuffer()` allocation,
+/// `commit`, and `waitUntilCompleted` have moved to the caller and are now
+/// captured by `BH_COMMIT_WAIT`. Pre-refactor dumps will show higher
+/// `BH_GPU_DISPATCH` times because those costs were formerly included here.
 pub(crate) static BH_GPU_DISPATCH: Counter = Counter::new();
 pub(crate) static BH_ROW_READBACK: Counter = Counter::new();
 pub(crate) static BH_COUNT_ACCUMULATE: Counter = Counter::new();

@@ -259,9 +259,6 @@ fn encode_one_histogram_request(
     let _p_dispatch = profile::ScopedProbe::new(&profile::BH_GPU_DISPATCH);
 
     // --- Encode into the provided command buffer ---
-    let p_encode_cb = profile::ScopedProbe::new(&profile::BH_ENCODE);
-    drop(p_encode_cb);
-
     let bin_sz = if use_u16 { 2usize } else { 1usize };
     let mut cumulative_features: u32 = 0;
 
