@@ -4012,21 +4012,34 @@ fn build_tree_level_wise<B: BackendOps>(
             break;
         }
 
-        let mut next_nodes: Vec<(u32, RowIndexStorage, HistogramBundle, f32)> = Vec::new();
-        for (local_node_id, node_rows, histograms, parent_leaf_value) in active_nodes {
-            // S3.7d — parent histograms drop at end of this iteration.
-            // The guard releases any backend-resident (GPU pool) entry
-            // regardless of how the body exits: `continue` on any
-            // rejection path, fall-through after `next_nodes.push`,
-            // or a hard error via `?`. Keep this binding named so the
-            // borrow-checker knows `histograms` outlives it.
-            let _release_guard = HistogramReleaseGuard::new(backend, &histograms);
+        // ----- Pass 1: per-node serial work (best_split, apply_split,
+        // rejection checks, leaf updates, stump commit). Defers the
+        // build/subtract for the next level into `pending_children`.
+        struct PendingChildren {
+            left_local_id: u32,
+            right_local_id: u32,
+            left_rows: RowIndexStorage,
+            right_rows: RowIndexStorage,
+            left_leaf_absolute: f32,
+            right_leaf_absolute: f32,
+            // The parent histograms must outlive Pass 3 (the subtract
+            // input). Held here, dropped after Pass 3 finishes.
+            parent_histograms: HistogramBundle,
+            // True when the smaller-or-equal-sized child is the LEFT
+            // sibling. Drives which row indices we hand to the build
+            // phase and which we subtract for.
+            smaller_is_left: bool,
+        }
+        let mut pending_children: Vec<PendingChildren> = Vec::new();
 
+        for (local_node_id, node_rows, histograms, parent_leaf_value) in active_nodes {
+            // Parent histograms guard runs at end of this block. The
+            // commit path below moves `histograms` into pending_children
+            // (which extends its lifetime through Pass 3); we only
+            // construct the guard on rejection paths so the success
+            // path doesn't double-release.
             let node_id = encode_tree_node_id(round_index, local_node_id)?;
             let node = NodeSlice::from_storage(node_id, node_rows)?;
-            // S3.7e — parent row indices drop with the NodeSlice at end
-            // of this iteration. Guard mirrors the histogram release
-            // guard for GPU-resident partitions.
             let _rows_release_guard = RowIndexReleaseGuard::new(backend, &node.rows);
             let Some(mut split) = backend.best_split_with_options(
                 &histograms,
@@ -4035,20 +4048,17 @@ fn build_tree_level_wise<B: BackendOps>(
                 categorical_features,
             )?
             else {
+                let _release_guard = HistogramReleaseGuard::new(backend, &histograms);
                 continue;
             };
             if !split.gain.is_finite() || split.gain <= controls.min_split_gain {
+                let _release_guard = HistogramReleaseGuard::new(backend, &histograms);
                 round_rejection_reason = IterationStopReason::GainBelowThreshold;
                 continue;
             }
 
             let (partition, left_stats, right_stats) =
                 backend.apply_split_with_stats(binned_matrix, gradients, &node, &split)?;
-            // S3.7e — any `continue` / error-return after this point
-            // that doesn't commit the split must release both halves
-            // of the partition's row indices (GPU pool entries). The
-            // guard covers every such path; at the commit site we
-            // `defuse()` so the children take ownership.
             let partition_guard = PartitionReleaseGuard::new(backend, &partition);
 
             if partition.left.len() + partition.right.len() != node.row_count() {
@@ -4061,6 +4071,7 @@ fn build_tree_level_wise<B: BackendOps>(
                 || partition.left.len() < controls.min_rows_per_leaf
                 || partition.right.len() < controls.min_rows_per_leaf
             {
+                let _release_guard = HistogramReleaseGuard::new(backend, &histograms);
                 round_rejection_reason = IterationStopReason::LeafRowsBelowThreshold;
                 continue;
             }
@@ -4087,30 +4098,32 @@ fn build_tree_level_wise<B: BackendOps>(
             if left_leaf_value.abs() < controls.min_abs_leaf_value
                 && right_leaf_value.abs() < controls.min_abs_leaf_value
             {
+                let _release_guard = HistogramReleaseGuard::new(backend, &histograms);
                 round_rejection_reason = IterationStopReason::LeafMagnitudeBelowThreshold;
                 continue;
             }
 
-            // Monotone constraint enforcement.
             if !params.monotone_constraints.is_empty() {
                 let fi = split.feature_index as usize;
                 if fi < params.monotone_constraints.len() {
                     let constraint = params.monotone_constraints[fi];
                     if constraint == 1 && left_leaf_absolute > right_leaf_absolute {
+                        let _release_guard = HistogramReleaseGuard::new(backend, &histograms);
                         round_rejection_reason = IterationStopReason::MonotoneConstraintViolation;
                         continue;
                     }
                     if constraint == -1 && left_leaf_absolute < right_leaf_absolute {
+                        let _release_guard = HistogramReleaseGuard::new(backend, &histograms);
                         round_rejection_reason = IterationStopReason::MonotoneConstraintViolation;
                         continue;
                     }
                 }
             }
 
-            // max_leaves enforcement.
             if let Some(max_leaves) = controls.max_leaves {
                 let leaves_after_split = candidate_round_stumps.len() + 2;
                 if leaves_after_split > max_leaves {
+                    let _release_guard = HistogramReleaseGuard::new(backend, &histograms);
                     round_rejection_reason = IterationStopReason::MaxLeavesReached;
                     continue;
                 }
@@ -4126,79 +4139,35 @@ fn build_tree_level_wise<B: BackendOps>(
             split.left_stats = left_stats;
             split.right_stats = right_stats;
 
-            // S3.7e — split is committed; children take ownership of
-            // the row indices below. Defuse the guard so the borrow
-            // ends and `partition` becomes movable, without releasing.
             partition_guard.defuse();
-            // Destructure storage variants directly; no forced CPU
-            // readback. Length checks already passed above.
             let PartitionResult {
                 left: left_rows,
                 right: right_rows,
             } = partition;
-            if depth + 1 < params.max_depth as usize {
-                let left_local_node_id = left_child_node_id(local_node_id)?;
-                let right_local_node_id = right_child_node_id(local_node_id)?;
-                let left_node_id = encode_tree_node_id(round_index, left_local_node_id)?;
-                let right_node_id = encode_tree_node_id(round_index, right_local_node_id)?;
 
-                if left_rows.len() <= right_rows.len() {
-                    let left_node = NodeSlice::from_storage(left_node_id, left_rows)?;
-                    let left_histograms = backend.build_histograms(
-                        binned_matrix,
-                        gradients,
-                        &left_node,
-                        feature_tiles,
-                    )?;
-                    let right_histograms = backend.subtract_histogram_bundle(
-                        &histograms,
-                        &left_histograms,
-                        right_node_id,
-                    )?;
-                    next_nodes.push((
-                        left_local_node_id,
-                        left_node.into_rows(),
-                        left_histograms,
-                        left_leaf_absolute,
-                    ));
-                    next_nodes.push((
-                        right_local_node_id,
-                        right_rows,
-                        right_histograms,
-                        right_leaf_absolute,
-                    ));
-                } else {
-                    let right_node = NodeSlice::from_storage(right_node_id, right_rows)?;
-                    let right_histograms = backend.build_histograms(
-                        binned_matrix,
-                        gradients,
-                        &right_node,
-                        feature_tiles,
-                    )?;
-                    let left_histograms = backend.subtract_histogram_bundle(
-                        &histograms,
-                        &right_histograms,
-                        left_node_id,
-                    )?;
-                    next_nodes.push((
-                        left_local_node_id,
-                        left_rows,
-                        left_histograms,
-                        left_leaf_absolute,
-                    ));
-                    next_nodes.push((
-                        right_local_node_id,
-                        right_node.into_rows(),
-                        right_histograms,
-                        right_leaf_absolute,
-                    ));
-                }
+            if depth + 1 < params.max_depth as usize {
+                let left_local_id = left_child_node_id(local_node_id)?;
+                let right_local_id = right_child_node_id(local_node_id)?;
+                let smaller_is_left = left_rows.len() <= right_rows.len();
+                pending_children.push(PendingChildren {
+                    left_local_id,
+                    right_local_id,
+                    left_rows,
+                    right_rows,
+                    left_leaf_absolute,
+                    right_leaf_absolute,
+                    parent_histograms: histograms,
+                    smaller_is_left,
+                });
             } else {
                 // S3.7e — at max depth, the child row indices are not
                 // pushed to next_nodes. Release any backend-side
                 // residency eagerly so the pool projection holds.
                 let _ = backend.release_row_indices(&left_rows);
                 let _ = backend.release_row_indices(&right_rows);
+                // No more children for this parent; release its
+                // histograms now (we won't need them in Pass 3).
+                let _release_guard = HistogramReleaseGuard::new(backend, &histograms);
             }
 
             candidate_round_stumps.push(TrainedStump {
@@ -4207,6 +4176,90 @@ fn build_tree_level_wise<B: BackendOps>(
                 right_leaf_value,
             });
         }
+
+        // ----- Pass 2: batched build of every smaller-child histogram.
+        // Build NodeSlices for each pending entry's smaller child, then
+        // hand them to backend.build_histograms_batch. The order of
+        // returned bundles aligns with the order of pending_children.
+        let smaller_nodes: Vec<NodeSlice> = pending_children
+            .iter()
+            .map(|p| {
+                let (rows_ref, local_id) = if p.smaller_is_left {
+                    (&p.left_rows, p.left_local_id)
+                } else {
+                    (&p.right_rows, p.right_local_id)
+                };
+                let node_id = encode_tree_node_id(round_index, local_id)?;
+                NodeSlice::from_storage(node_id, rows_ref.clone())
+                    .map_err(EngineError::from)
+            })
+            .collect::<EngineResult<Vec<_>>>()?;
+        let build_requests: Vec<HistogramBuildRequest<'_>> = smaller_nodes
+            .iter()
+            .map(|n| HistogramBuildRequest { node: n })
+            .collect();
+        let smaller_histograms =
+            backend.build_histograms_batch(binned_matrix, gradients, feature_tiles, &build_requests)?;
+
+        // ----- Pass 3: batched subtract of every larger-child histogram.
+        let subtract_requests: Vec<SubtractRequest<'_>> = pending_children
+            .iter()
+            .zip(smaller_histograms.iter())
+            .map(|(p, smaller_h)| {
+                let larger_node_id = if p.smaller_is_left {
+                    encode_tree_node_id(round_index, p.right_local_id)
+                } else {
+                    encode_tree_node_id(round_index, p.left_local_id)
+                };
+                Ok(SubtractRequest {
+                    parent: &p.parent_histograms,
+                    sibling: smaller_h,
+                    output_node_id: larger_node_id?,
+                })
+            })
+            .collect::<EngineResult<Vec<_>>>()?;
+        let larger_histograms =
+            backend.subtract_histogram_bundle_batch(&subtract_requests)?;
+
+        // ----- Assembly: build next_nodes and release parent histograms.
+        let mut next_nodes: Vec<(u32, RowIndexStorage, HistogramBundle, f32)> =
+            Vec::with_capacity(pending_children.len() * 2);
+        for ((p, smaller_h), larger_h) in pending_children
+            .into_iter()
+            .zip(smaller_histograms.into_iter())
+            .zip(larger_histograms.into_iter())
+        {
+            let _release_parent =
+                HistogramReleaseGuard::new(backend, &p.parent_histograms);
+            if p.smaller_is_left {
+                next_nodes.push((
+                    p.left_local_id,
+                    p.left_rows,
+                    smaller_h,
+                    p.left_leaf_absolute,
+                ));
+                next_nodes.push((
+                    p.right_local_id,
+                    p.right_rows,
+                    larger_h,
+                    p.right_leaf_absolute,
+                ));
+            } else {
+                next_nodes.push((
+                    p.left_local_id,
+                    p.left_rows,
+                    larger_h,
+                    p.left_leaf_absolute,
+                ));
+                next_nodes.push((
+                    p.right_local_id,
+                    p.right_rows,
+                    smaller_h,
+                    p.right_leaf_absolute,
+                ));
+            }
+        }
+
         active_nodes = next_nodes;
     }
 
