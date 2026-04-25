@@ -753,3 +753,87 @@ Outcome: ship the wide kernel as a clear improvement; record
 the residual gap (command-buffer batching) as the Stage-3
 follow-up that would close the kill criterion. See
 `STATUS.md` for the work-queue entry.
+
+---
+
+## D-023 — Build/subtract command-buffer batching: kill-criterion outcome
+
+**Date:** 2026-04-25
+**Status:** NOT MET — `RuntimeBackend` forwarding gap silently bypassed the batch path.
+
+After landing the wide scatter kernel (D-022), per-call GPU work
+dropped to 2–4 ms but ~1620 per-node `commit + waitUntilCompleted`
+round-trips per fit still dominated wall time. Tasks 1–7 of the
+batching plan collapsed those into one commit per phase per level
+by adding `BackendOps::build_histograms_batch` /
+`subtract_histogram_bundle_batch` with `MetalBackend` overrides
+(`dispatch_histograms_batch` / `dispatch_subtract_batch_pool`).
+
+However, the `RuntimeBackend` enum in `bindings/python/src/runtime_backend.rs`
+does not forward `build_histograms_batch` or
+`subtract_histogram_bundle_batch`. The trait default therefore
+applies: it calls `self.build_histograms(...)` per-request, which
+routes through `RuntimeBackend::build_histograms` → `MetalBackend::build_histograms`
+(scalar path) instead of `MetalBackend::build_histograms_batch`
+(batched path). The profile confirms this: all five `metal_friendly`
+configs show per-node call counts identical to the pre-batch baseline
+(e.g., 528 `build_histograms` calls / 528 `commit_wait` calls for
+depth=8 regression), and the batch counters `BUILD_HISTOGRAMS_BATCH`
+/ `SUBTRACT_BATCH` record zero calls.
+
+**Measurements (`metal_friendly` benchmark, 2026-04-25, Apple M4):**
+
+| Config | CPU (s) | Metal pre-D-023 (s) | Metal post-D-023 (s) | post-D-023 ratio |
+|---|---|---|---|---|
+| regression d=8 bins=255 200k×200 | 1.52 | pre-D-023 not directly comparable — see note | 8.16 | 0.19× |
+| regression d=10 bins=255 200k×200 | 2.91 | pre-D-023 not directly comparable | 11.6 | 0.25× |
+| regression d=6 bins=1024 200k×200 | 0.645 | pre-D-023 not directly comparable | 2.71 | 0.24× |
+| multiclass_3 d=8 bins=255 100k×100 | 0.927 | pre-D-023 not directly comparable | 7.28 | 0.13× |
+| multiclass_10 d=8 bins=255 100k×100 | 2.34 | pre-D-023 not directly comparable | 19.8 | 0.12× |
+
+Note on pre-D-023 comparability: the D-022 entry records commit_wait
+avg per call (~2.5 ms d=8, ~4 ms d=10), not whole-fit times for the
+same run. The post-D-023 Metal fit times above are measured under
+`ALLOYGBM_METAL_PROFILE=0` (clean run); the profiling run (same
+session, second invocation) produced slightly different absolute times
+due to thermal/scheduling variance but identical ratios.
+
+**Profile breakdown (post-D-023, depth=8 regression, from profiling run):**
+
+| Site | calls | total_ms | % of total |
+|---|---|---|---|
+| build_histograms | 528 | 3370 | 83.9% |
+| &nbsp;&nbsp;.commit_wait | 528 | 2701 | - |
+| &nbsp;&nbsp;.count_accumulate | 528 | 442 | - |
+| best_split_with_options | 1051 | 221 | 5.5% |
+| subtract_histogram_bundle | 523 | 166 | 4.1% |
+| apply_split | 1051 | 226 | 5.6% |
+| reduce_sums | 2102 | 12 | 0.3% |
+| apply_partition_leaf_updates | 955 | 8 | 0.2% |
+| build_histograms_batch | 0 | — | — |
+| subtract_histogram_bundle_batch | 0 | — | — |
+
+`build_histograms_batch` and `subtract_histogram_bundle_batch` show
+zero calls, confirming the batch path is not reached through the
+`RuntimeBackend` wrapper.
+
+**Root cause:** `bindings/python/src/runtime_backend.rs` explicitly
+implements every `BackendOps` method that `MetalBackend` overrides,
+but `build_histograms_batch` and `subtract_histogram_bundle_batch`
+were not added when those methods landed in Tasks 1–7. The trait
+default therefore fires instead of the Metal override. Fix is a
+two-arm `match self { ... }` forward for each method — identical
+pattern to every other method in the file.
+
+**Outcome:**
+
+- Stage 3 kill criterion (`metal_friendly >1.0× CPU` on at least one
+  config): NOT MET.
+- The batch infrastructure is correct and the engine calls the batch
+  methods, but the `RuntimeBackend` forwarding gap silently routes all
+  Python-driven fits through the scalar path. Fixing the forward is
+  the immediate next step before re-running the benchmark.
+- After the forward fix, re-run `metal_friendly` with profiling to
+  confirm `BUILD_HISTOGRAMS_BATCH` and `SUBTRACT_BATCH` counters are
+  non-zero and `commit_wait` call count drops to O(depth × estimators)
+  instead of O(nodes × estimators).

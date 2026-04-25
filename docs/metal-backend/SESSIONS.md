@@ -5,6 +5,67 @@ First thing a new session reads, alongside `STATUS.md`.
 
 ---
 
+## 2026-04-25 — Build/subtract command-buffer batching (Approach A)
+
+**Branch:** `claude/charming-carson-d08c9a` (worktree)
+
+### Shipped
+
+- `BackendOps::build_histograms_batch` and `subtract_histogram_bundle_batch`
+  with scalar default impls (Task 1, commit `fe9bbd0`).
+- `build_tree_level_wise` refactored into per-node serial → batched build →
+  batched subtract three-phase shape (Task 2, commits `91d23b4`, `57c9ab4`).
+- `dispatch_subtract_batch_pool` — N subtracts in one MTLCommandBuffer per phase
+  per level (Task 3, commit `13339e7`).
+- `MetalBackend::subtract_histogram_bundle_batch` override routing to
+  `dispatch_subtract_batch_pool` (Task 4, commit `8ea3445`).
+- Profile counters `BUILD_HISTOGRAMS_BATCH` / `SUBTRACT_BATCH` added to
+  `profile.rs` with updated `dump_if_enabled` table (Task 5, commit `46e65bf`).
+- `dispatch_histograms_batch` — N builds in one MTLCommandBuffer; per-request
+  helpers extracted from `dispatch_histograms` (Task 6, commits `09fefab`,
+  `1b49c96`).
+- `MetalBackend::build_histograms_batch` override routing to
+  `dispatch_histograms_batch` (Task 7, commits `f51f2ca`, `79e2bff`, `acdc8c2`).
+- Profile probes tightened post-refactor so `BH_COMMIT_WAIT` reflects the
+  batch commit (not per-node) when the batch path is active (commit `99d8554`).
+- `DECISIONS.md` D-023 with kill-criterion outcome (this session).
+
+### Tests
+
+- `cargo test -p alloygbm-backend-metal` — 47/47 green (per Task 7 commit).
+- `pytest bindings/python/tests/ -q` — 365/365 green (verified Task 8).
+
+### Stage 3 status: STILL OPEN — kill criterion NOT MET
+
+**Reason (D-023):** The `RuntimeBackend` enum in
+`bindings/python/src/runtime_backend.rs` does not forward
+`build_histograms_batch` or `subtract_histogram_bundle_batch`. The Python-driven
+fit path therefore takes the `BackendOps` trait default (per-node scalar loop)
+instead of the Metal batch override. The batch infrastructure is correct; the
+gap is two missing `match self { ... }` arms at the Python wrapper layer.
+
+**Confirmed by profiling:** `metal_friendly` benchmark run with
+`ALLOYGBM_METAL_PROFILE=1` shows `BUILD_HISTOGRAMS_BATCH = 0 calls` and
+`SUBTRACT_BATCH = 0 calls` across all five configs. `build_histograms` shows
+per-node counts (528 calls for depth=8 regression, 1620 for depth=10), identical
+to the pre-batch baseline. Speedup ratios are 0.12×–0.25× CPU — same order as
+D-022 post-wide-kernel baseline.
+
+### Next
+
+Fix `RuntimeBackend` forwarding for the two batch methods (two-arm match,
+same pattern as every existing method in the file). Re-run `metal_friendly`
+with profiling to confirm batch counters fire and `commit_wait` drops from
+O(nodes) to O(levels). Evaluate kill criterion with the corrected path active.
+See STATUS.md for the full next-session checklist.
+
+### Open issues filed
+
+- B-002 (mid-batch orphan pool entries) — medium, defer.
+- B-003 (batch test path coverage gap) — low, defer.
+
+---
+
 ## 2026-04-23 — Stage 3 continuation: S3.7c bundle + S3.7d lifecycle
 
 **Branch:** `claude/charming-carson-d08c9a` (worktree)
