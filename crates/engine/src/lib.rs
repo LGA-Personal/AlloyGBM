@@ -4084,7 +4084,7 @@ fn build_tree_level_wise<B: BackendOps>(
             .iter()
             .map(|(_, _, histograms, _)| SplitFindRequest { histograms })
             .collect();
-        let level_splits: Vec<Option<SplitCandidate>> = backend.find_best_splits_batch(
+        let mut level_splits: Vec<Option<SplitCandidate>> = backend.find_best_splits_batch(
             &split_requests,
             split_options,
             feature_weights,
@@ -4102,7 +4102,7 @@ fn build_tree_level_wise<B: BackendOps>(
             let node_id = encode_tree_node_id(round_index, local_node_id)?;
             let node = NodeSlice::from_storage(node_id, node_rows)?;
             let _rows_release_guard = RowIndexReleaseGuard::new(backend, &node.rows);
-            let Some(mut split) = level_splits[node_index].clone()
+            let Some(mut split) = level_splits[node_index].take()
             else {
                 let _release_guard = HistogramReleaseGuard::new(backend, &histograms);
                 continue;
