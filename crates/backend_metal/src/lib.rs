@@ -18,6 +18,8 @@ mod histogram_residency;
 mod residency;
 #[cfg(target_os = "macos")]
 mod row_index_residency;
+#[cfg(target_os = "macos")]
+mod split_decision_residency;
 
 #[cfg(target_os = "macos")]
 mod profile;
