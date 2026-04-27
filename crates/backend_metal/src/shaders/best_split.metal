@@ -268,6 +268,23 @@ void best_split_per_feature(
     // bin).
     const uint scan_limit = min(bin_count, params.missing_bin_index);
 
+    // Guard: if missing_bin_index == 0, there are no non-missing bins
+    // to evaluate. Write INVALID explicitly so downstream reduce sees a
+    // clean sentinel rather than relying on zero-initialized pool memory.
+    if (scan_limit == 0u) {
+        if (bin == 0u) {
+            const uint out_idx = node_idx * params.numeric_feature_count + feature_slot;
+            scratch[out_idx].gain = -INFINITY;
+            scratch[out_idx].weighted_gain = -INFINITY;
+            scratch[out_idx].feature_idx = feature_indices[feature_slot];
+            scratch[out_idx].bin_threshold = 0u;
+            scratch[out_idx].grad_left = 0.0f;
+            scratch[out_idx].hess_left = 0.0f;
+            scratch[out_idx].flags = 0x2u;  // INVALID
+        }
+        return;
+    }
+
     float best_gain = 0.0f;
     uint best_threshold = 0u;
     float best_grad_left = 0.0f;
