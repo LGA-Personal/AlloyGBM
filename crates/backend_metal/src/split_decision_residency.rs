@@ -47,7 +47,9 @@ const SPLIT_DECISION_BYTES: usize = std::mem::size_of::<SplitDecisionGpu>();
 
 const _: () = assert!(SPLIT_DECISION_BYTES == 24);
 
+#[allow(dead_code)]
 pub(crate) const SPLIT_FLAG_MISSING_GOES_RIGHT: u32 = 1 << 0;
+#[allow(dead_code)]
 pub(crate) const SPLIT_FLAG_INVALID: u32 = 1 << 1;
 
 struct SplitDecisionEntry {
@@ -56,6 +58,11 @@ struct SplitDecisionEntry {
 }
 
 struct PoolState {
+    /// Monotonic token counter. `u64` gives > 500 years of fit lifetime
+    /// at 1 million mints / second, so wrap-through-zero is not a
+    /// practical concern; if it did wrap, the next mint would emit the
+    /// reserved-zero sentinel and the next `read_decisions` would fail
+    /// with "unknown handle".
     next_token: u64,
     live: HashMap<u64, SplitDecisionEntry>,
 }
@@ -104,6 +111,13 @@ impl SplitDecisionPool {
         // valid memory; we write exactly that many zero bytes so
         // unused slots read as feature_idx = 0, flags = 0 (the
         // kernel must explicitly set flags |= INVALID for "no split").
+        // `buffer.contents()` returns `NonNull<c_void>` (non-null by
+        // type); Metal allocates `StorageModeShared` buffers at page
+        // granularity so the pointer is well-aligned for byte writes.
+        // Explicit zero-init is retained for portability; Apple-Silicon
+        // Metal already zero-fills new allocations but the explicit
+        // `write_bytes` makes the contract independent of platform
+        // behaviour.
         unsafe {
             std::ptr::write_bytes(
                 buffer.contents().as_ptr() as *mut u8,
@@ -165,16 +179,29 @@ impl SplitDecisionPool {
         }
         // SAFETY: buffer is StorageModeShared with `n × 24` valid
         // bytes; caller must have waited on the producing CB.
+        // `buffer.contents()` returns `NonNull<c_void>` (non-null by
+        // type); Metal's page-aligned allocation guarantees alignment
+        // ≥ `align_of::<SplitDecisionGpu>()` (4 bytes — all fields are
+        // 4-byte primitives).
         let ptr = entry.buffer.contents().as_ptr() as *const SplitDecisionGpu;
         let slice = unsafe { std::slice::from_raw_parts(ptr, n) };
         Ok(slice.to_vec())
     }
 
-    pub(crate) fn release(&self, handle: SplitDecisionHandle) -> EngineResult<()> {
+    pub(crate) fn release(
+        &self,
+        residency: &ResidencyPool,
+        handle: SplitDecisionHandle,
+    ) -> EngineResult<()> {
         let mut state = self.state.lock().map_err(|e| {
             EngineError::BackendUnavailable(format!("split decision pool poisoned: {e}"))
         })?;
-        state.live.remove(&handle.0);
+        if let Some(entry) = state.live.remove(&handle.0) {
+            residency.remove_buffer(&entry.buffer);
+            residency.commit();
+            // `entry` drops here — the Retained<> refcount decrements
+            // and the backing allocation returns to Metal's pool.
+        }
         Ok(())
     }
 }
@@ -188,19 +215,24 @@ unsafe impl Sync for SplitDecisionPool {}
 
 pub(crate) struct SplitDecisionReleaseGuard<'a> {
     pool: &'a SplitDecisionPool,
+    residency: &'a ResidencyPool,
     handle: SplitDecisionHandle,
 }
 
 #[allow(dead_code)]
 impl<'a> SplitDecisionReleaseGuard<'a> {
-    pub(crate) fn new(pool: &'a SplitDecisionPool, handle: SplitDecisionHandle) -> Self {
-        Self { pool, handle }
+    pub(crate) fn new(
+        pool: &'a SplitDecisionPool,
+        residency: &'a ResidencyPool,
+        handle: SplitDecisionHandle,
+    ) -> Self {
+        Self { pool, residency, handle }
     }
 }
 
 impl Drop for SplitDecisionReleaseGuard<'_> {
     fn drop(&mut self) {
-        let _ = self.pool.release(self.handle);
+        let _ = self.pool.release(self.residency, self.handle);
     }
 }
 
@@ -232,9 +264,9 @@ mod tests {
             assert_eq!(d.feature_idx, 0);
             assert_eq!(d.flags, 0);
         }
-        pool.release(handle).unwrap();
+        pool.release(&residency, handle).unwrap();
         // double-release is a no-op
-        pool.release(handle).unwrap();
+        pool.release(&residency, handle).unwrap();
     }
 
     #[test]
@@ -252,6 +284,6 @@ mod tests {
         let handle = pool.mint(&metal_device.device, &residency, 0).unwrap();
         let decisions = pool.read_decisions(handle).unwrap();
         assert!(decisions.is_empty());
-        pool.release(handle).unwrap();
+        pool.release(&residency, handle).unwrap();
     }
 }
