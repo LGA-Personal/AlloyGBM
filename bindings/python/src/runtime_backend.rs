@@ -22,7 +22,10 @@ use alloygbm_core::{
     BinnedMatrix, Device, FeatureTile, GradientPair, HistogramBundle, NodeSlice, NodeStats,
     PartitionResult, RowIndexStorage, SplitCandidate,
 };
-use alloygbm_engine::{BackendOps, CategoricalFeatureInfo, EngineResult, HistogramBuildRequest, SplitSelectionOptions, SubtractRequest};
+use alloygbm_engine::{
+    BackendOps, CategoricalFeatureInfo, EngineResult, HistogramBuildRequest,
+    SplitFindRequest, SplitSelectionOptions, SubtractRequest,
+};
 use pyo3::exceptions::PyRuntimeWarning;
 use pyo3::prelude::*;
 
@@ -222,6 +225,24 @@ impl BackendOps for RuntimeBackend {
             RuntimeBackend::Cpu(b) => b.subtract_histogram_bundle_batch(requests),
             #[cfg(all(target_os = "macos", feature = "metal"))]
             RuntimeBackend::Metal(b) => b.subtract_histogram_bundle_batch(requests),
+        }
+    }
+
+    fn find_best_splits_batch(
+        &self,
+        requests: &[SplitFindRequest<'_>],
+        options: SplitSelectionOptions,
+        feature_weights: &[f32],
+        categorical_features: &[CategoricalFeatureInfo],
+    ) -> EngineResult<Vec<Option<SplitCandidate>>> {
+        match self {
+            RuntimeBackend::Cpu(b) => {
+                b.find_best_splits_batch(requests, options, feature_weights, categorical_features)
+            }
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            RuntimeBackend::Metal(b) => {
+                b.find_best_splits_batch(requests, options, feature_weights, categorical_features)
+            }
         }
     }
 
