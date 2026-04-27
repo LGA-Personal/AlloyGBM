@@ -101,6 +101,15 @@ pub struct SubtractRequest<'a> {
     pub output_node_id: u32,
 }
 
+/// One node's input for a batched best-split search. The shared
+/// `options`, `feature_weights`, and `categorical_features` are passed
+/// alongside `&[SplitFindRequest]` to
+/// [`BackendOps::find_best_splits_batch`].
+#[derive(Debug)]
+pub struct SplitFindRequest<'a> {
+    pub histograms: &'a HistogramBundle,
+}
+
 pub trait BackendOps {
     fn build_histograms(
         &self,
@@ -195,6 +204,38 @@ pub trait BackendOps {
         requests
             .iter()
             .map(|r| self.subtract_histogram_bundle(r.parent, r.sibling, r.output_node_id))
+            .collect()
+    }
+
+    /// Batched best-split search across multiple histogram bundles.
+    /// Default impl iterates and calls
+    /// [`best_split_with_options`](BackendOps::best_split_with_options);
+    /// accelerator backends override to encode all per-node split
+    /// dispatches into a single command buffer and amortise the
+    /// host↔device round-trip.
+    ///
+    /// The returned vector aligns with `requests`: `result[i]` is the
+    /// best split for `requests[i].histograms` (or `None` if no split
+    /// satisfied the constraints). On any backend error, the whole
+    /// call returns `Err` and any partially-computed splits at lower
+    /// indices are dropped.
+    fn find_best_splits_batch(
+        &self,
+        requests: &[SplitFindRequest<'_>],
+        options: SplitSelectionOptions,
+        feature_weights: &[f32],
+        categorical_features: &[CategoricalFeatureInfo],
+    ) -> EngineResult<Vec<Option<SplitCandidate>>> {
+        requests
+            .iter()
+            .map(|r| {
+                self.best_split_with_options(
+                    r.histograms,
+                    options,
+                    feature_weights,
+                    categorical_features,
+                )
+            })
             .collect()
     }
 
