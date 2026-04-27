@@ -4077,7 +4077,23 @@ fn build_tree_level_wise<B: BackendOps>(
         // build/subtract for the next level into `pending_children`.
         let mut pending_children: Vec<PendingChildren> = Vec::new();
 
-        for (local_node_id, node_rows, histograms, parent_leaf_value) in active_nodes {
+        // Stage 4a: batched per-level split finding.
+        // Collect all current-level histogram bundles into one batched
+        // request. The result vector aligns with active_nodes.
+        let split_requests: Vec<SplitFindRequest<'_>> = active_nodes
+            .iter()
+            .map(|(_, _, histograms, _)| SplitFindRequest { histograms })
+            .collect();
+        let level_splits: Vec<Option<SplitCandidate>> = backend.find_best_splits_batch(
+            &split_requests,
+            split_options,
+            feature_weights,
+            categorical_features,
+        )?;
+
+        for (node_index, (local_node_id, node_rows, histograms, parent_leaf_value)) in
+            active_nodes.into_iter().enumerate()
+        {
             // Parent histograms guard runs at end of this block. The
             // commit path below moves `histograms` into pending_children
             // (which extends its lifetime through Pass 3); we only
@@ -4086,12 +4102,7 @@ fn build_tree_level_wise<B: BackendOps>(
             let node_id = encode_tree_node_id(round_index, local_node_id)?;
             let node = NodeSlice::from_storage(node_id, node_rows)?;
             let _rows_release_guard = RowIndexReleaseGuard::new(backend, &node.rows);
-            let Some(mut split) = backend.best_split_with_options(
-                &histograms,
-                split_options,
-                feature_weights,
-                categorical_features,
-            )?
+            let Some(mut split) = level_splits[node_index].clone()
             else {
                 let _release_guard = HistogramReleaseGuard::new(backend, &histograms);
                 continue;
