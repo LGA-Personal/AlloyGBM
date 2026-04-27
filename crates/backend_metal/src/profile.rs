@@ -108,6 +108,23 @@ pub(crate) static RELEASE_ROW_INDICES: Counter = Counter::new();
 pub(crate) static BUILD_HISTOGRAMS_BATCH: Counter = Counter::new();
 pub(crate) static SUBTRACT_BATCH: Counter = Counter::new();
 
+/// Wraps the entire `find_best_splits_batch` call (probe → empty
+/// short-circuit → translate request → kernel dispatch → readback →
+/// categorical merge).
+pub(crate) static FIND_BEST_SPLITS_BATCH: Counter = Counter::new();
+/// Per-feature kernel dispatch + cross-feature reduce kernel
+/// dispatch encoding work, before commit.
+pub(crate) static BS_DISPATCH: Counter = Counter::new();
+/// `commit()` + `waitUntilCompleted()` for the split-find command
+/// buffer.
+pub(crate) static BS_COMMIT_WAIT: Counter = Counter::new();
+/// Host-side readback of the per-node `SplitDecision` array.
+pub(crate) static BS_DECISION_READBACK: Counter = Counter::new();
+/// Per-node merge step that compares the GPU-numeric best against
+/// the host-categorical best (skipped when the model has no
+/// categorical features).
+pub(crate) static BS_CATEGORICAL_HOST_MERGE: Counter = Counter::new();
+
 // ---- build_histograms sub-phases (the suspected cost) -------------
 
 /// Per-request encode phase: scratch-buffer allocation + per-tile
@@ -227,6 +244,31 @@ pub(crate) fn dump_if_enabled() {
             name: "subtract_histogram_bundle_batch",
             counter: &SUBTRACT_BATCH,
             indented: false,
+        },
+        Site {
+            name: "find_best_splits_batch",
+            counter: &FIND_BEST_SPLITS_BATCH,
+            indented: false,
+        },
+        Site {
+            name: "  .dispatch",
+            counter: &BS_DISPATCH,
+            indented: true,
+        },
+        Site {
+            name: "  .commit_wait",
+            counter: &BS_COMMIT_WAIT,
+            indented: true,
+        },
+        Site {
+            name: "  .decision_readback",
+            counter: &BS_DECISION_READBACK,
+            indented: true,
+        },
+        Site {
+            name: "  .categorical_host_merge",
+            counter: &BS_CATEGORICAL_HOST_MERGE,
+            indented: true,
         },
         Site {
             name: "apply_split",
