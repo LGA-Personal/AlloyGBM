@@ -310,6 +310,7 @@ pub trait BackendOps {
     /// existing level-wise loop. Categorical models, leaf-wise growth, and
     /// backends without ICB support all use the default.
     #[allow(clippy::too_many_arguments)]
+    #[inline]
     fn try_build_tree_level_wise(
         &self,
         _binned_matrix: &BinnedMatrix,
@@ -6433,6 +6434,7 @@ pub struct MultiClassIterationRunSummary {
 
 /// Public test helper: call the level-wise tree builder with any backend.
 /// Used by backend parity tests to get a reference CPU-path result.
+#[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn build_tree_level_wise_for_test<B: BackendOps>(
     backend: &B,
