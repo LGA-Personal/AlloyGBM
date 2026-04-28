@@ -17,7 +17,10 @@ alloygbm-backend-cpu = { path = "../backend_cpu" }
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = "0.3"
-objc2-metal = "0.3"
+objc2-metal = { version = "0.3", features = [
+    "MTLIndirectCommandBuffer",
+    "MTLHeap",
+] }
 
 # Workspace lints set `unsafe_code = "forbid"`. This crate is the sole
 # exception — see `docs/metal-backend/DECISIONS.md` D-007. We drop the
