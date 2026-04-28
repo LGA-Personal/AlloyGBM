@@ -991,3 +991,20 @@ pre-committed ICB, submitted once per estimator. Requires:
 - Compile-time or runtime dispatch count upper-bound (worst-case depth).
 
 Stage 4b design: open (requires fresh brainstorm + spec).
+
+---
+
+## D-025 — Stage 4b `icb_histogram` uses float atomics (D-003 exception)
+
+**Date:** 2026-04-28
+**Status:** DECIDED
+
+**Decision:** `icb_histogram` in `shaders/icb_tree.metal` uses `atomic_fetch_add_explicit` on `device atomic_float*` to scatter-accumulate grad/hess into the shared histogram buffer. This is an intentional, scoped exception to the project-wide constraint established in D-003 ("no `atomic_fetch_add_explicit` on floats at any memory level").
+
+**Why D-003 existed:** The Stage 1 histogram kernel used a two-pass reduction (first pass: per-row scatter into per-thread private accumulators in threadgroup memory; second pass: threadgroup reduce → device write). This avoided float-atomic contention at the cost of extra register pressure and a more complex kernel.
+
+**Why ICB makes two-pass infeasible here:** In the Stage 4b ICB encoding, each level's three phases (histogram, split-find, partition) are encoded as distinct `MTLIndirectComputeCommand` entries. Adding an intra-level second-dispatch reduction would require a fourth ICB command per level (histogram-scatter → histogram-reduce → split-find → partition), plus an extra barrier. The extra command increases ICB encoding overhead and reintroduces the per-level CPU round-trip to rebind the intermediate buffer. The float-atomic path is a net win at 1M+ rows because GPU memory bandwidth dominates at that scale, and modern Apple Silicon GPUs handle float atomics via hardware-assisted ordered merging with low latency.
+
+**Scope:** Exception applies only to `icb_histogram`. All other histogram kernels (Stage 1 `histogram.metal`, Stage 2 `best_split.metal`) retain the D-003 two-pass approach unchanged.
+
+**Monitoring:** If float-atomic contention becomes measurable (profiled via ICB_ENCODE counter relative to ICB_SUBMIT), revisit with a two-ICB-command-per-level split in a future stage.
