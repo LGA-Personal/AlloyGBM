@@ -1310,6 +1310,58 @@ fn open_or_create_subtract_archive(
     }
 }
 
+// ---------------------------------------------------------------------
+// Stage 4a — BestSplitPipelineCache
+// ---------------------------------------------------------------------
+//
+// Unlike the histogram/split/partition/subtract caches this is NOT
+// parameterized on function constants. `best_split.metal` accepts all
+// tunable parameters via a `BestSplitParams` constant buffer at
+// dispatch time, so both entry points compile exactly once and live as
+// plain `Retained` handles — no inner `HashMap`, no `Arc` wrapping.
+
+/// Compile-once pipeline cache for `best_split.metal`.
+/// Holds both entry points: `best_split_per_feature` (sweeps bins
+/// per feature per node) and `best_split_reduce_features` (picks the
+/// single best feature per node).
+pub(crate) struct BestSplitPipelineCache {
+    pub(crate) per_feature: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    pub(crate) reduce_features: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+}
+
+// SAFETY: Metal protocol objects are thread-safe per Apple's docs.
+unsafe impl Send for BestSplitPipelineCache {}
+// SAFETY: see Send impl.
+unsafe impl Sync for BestSplitPipelineCache {}
+
+impl BestSplitPipelineCache {
+    pub(crate) fn new(
+        device: &ProtocolObject<dyn MTLDevice>,
+    ) -> Result<Self, String> {
+        let source = include_str!("shaders/best_split.metal");
+        let nss = NSString::from_str(source);
+        let library = device
+            .newLibraryWithSource_options_error(&nss, None)
+            .map_err(|e| format!("best_split.metal compile failed: {}", e.localizedDescription()))?;
+
+        let per_feature_fn = library
+            .newFunctionWithName(&NSString::from_str("best_split_per_feature"))
+            .ok_or_else(|| "best_split.metal: missing best_split_per_feature".to_string())?;
+        let reduce_fn = library
+            .newFunctionWithName(&NSString::from_str("best_split_reduce_features"))
+            .ok_or_else(|| "best_split.metal: missing best_split_reduce_features".to_string())?;
+
+        let per_feature = device
+            .newComputePipelineStateWithFunction_error(&per_feature_fn)
+            .map_err(|e| format!("best_split_per_feature pipeline failed: {}", e.localizedDescription()))?;
+        let reduce_features = device
+            .newComputePipelineStateWithFunction_error(&reduce_fn)
+            .map_err(|e| format!("best_split_reduce_features pipeline failed: {}", e.localizedDescription()))?;
+
+        Ok(Self { per_feature, reduce_features })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

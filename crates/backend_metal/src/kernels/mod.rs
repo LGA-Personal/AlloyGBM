@@ -4,6 +4,7 @@
 //! compilation + pipeline-caching plumbing lives in `pipelines.rs`; the
 //! dispatch orchestration lives alongside each source module.
 
+pub mod best_split;
 pub mod histogram;
 pub mod partition;
 pub mod split;

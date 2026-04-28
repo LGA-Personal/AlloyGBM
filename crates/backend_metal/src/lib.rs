@@ -124,6 +124,14 @@ pub struct MetalBackend {
     /// a borrow across the call.
     #[allow(dead_code)]
     row_index_residency: std::sync::Arc<row_index_residency::RowIndexResidencyPool>,
+    /// Stage 4a — compiled-once GPU split-finding pipeline cache.
+    /// Not wrapped in `Arc` since both entry points are compile-once
+    /// and the cache carries no per-call mutable state.
+    best_split_pipeline_cache: pipelines::BestSplitPipelineCache,
+    /// Stage 4a — per-call output buffer pool for GPU split decisions.
+    /// Mints a single `node_count × 24`-byte shared-mode buffer per
+    /// `find_best_splits_batch` call; released via RAII guard.
+    split_decision_residency: split_decision_residency::SplitDecisionPool,
 }
 
 #[cfg(target_os = "macos")]
@@ -171,6 +179,10 @@ impl MetalBackend {
             std::sync::Arc::new(histogram_residency::HistogramResidencyPool::new());
         let row_index_residency =
             std::sync::Arc::new(row_index_residency::RowIndexResidencyPool::new());
+        let best_split_pipeline_cache =
+            pipelines::BestSplitPipelineCache::new(&metal_device.device)
+                .map_err(|e| e)?;
+        let split_decision_residency = split_decision_residency::SplitDecisionPool::new();
         Ok(Self {
             metal_device,
             pipeline_cache,
@@ -183,6 +195,8 @@ impl MetalBackend {
             residency,
             histogram_residency,
             row_index_residency,
+            best_split_pipeline_cache,
+            split_decision_residency,
         })
     }
 
@@ -707,6 +721,169 @@ impl BackendOps for MetalBackend {
         }
         Ok(())
     }
+
+    /// Stage 4a — batched GPU split finding.
+    ///
+    /// Fast path: when all histograms are GPU-resident and
+    /// `bin_count <= 1024` (the GPU threadgroup array limit), dispatch
+    /// the two-phase `best_split.metal` kernel batch (per-feature scan
+    /// then cross-feature reduce) in a single `MTLCommandBuffer`.
+    ///
+    /// Fallback paths (all delegate to per-request `best_split_with_options`):
+    /// * `categorical_features` is non-empty — mixed numeric + categorical
+    ///   merge (Task 8).
+    /// * First histogram is `Cpu`-variant — histograms not GPU-resident.
+    /// * `bin_count > 1024` — GPU threadgroup arrays can't cover.
+    /// * Any GPU dispatch error — graceful degredation.
+    fn find_best_splits_batch(
+        &self,
+        requests: &[alloygbm_engine::SplitFindRequest<'_>],
+        options: alloygbm_engine::SplitSelectionOptions,
+        feature_weights: &[f32],
+        categorical_features: &[alloygbm_engine::CategoricalFeatureInfo],
+    ) -> alloygbm_engine::EngineResult<Vec<Option<alloygbm_core::SplitCandidate>>> {
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Categorical fallback — Task 8 implements the merge.
+        if !categorical_features.is_empty() {
+            return requests
+                .iter()
+                .map(|r| {
+                    self.best_split_with_options(
+                        r.histograms,
+                        options,
+                        feature_weights,
+                        categorical_features,
+                    )
+                })
+                .collect();
+        }
+
+        // Verify GPU residency.
+        let first = requests[0].histograms;
+        let pool_handle = match &first.storage {
+            HistogramStorage::Gpu { handle, .. } => *handle,
+            HistogramStorage::Cpu(_) => {
+                return requests
+                    .iter()
+                    .map(|r| {
+                        self.best_split_with_options(
+                            r.histograms,
+                            options,
+                            feature_weights,
+                            categorical_features,
+                        )
+                    })
+                    .collect();
+            }
+        };
+
+        // Gate: GPU kernel threadgroup arrays are MAX_BINS = 1024 entries.
+        let bin_count = match self.histogram_residency.get(pool_handle) {
+            Some(e) => e.shape.bin_count,
+            None => {
+                return requests
+                    .iter()
+                    .map(|r| {
+                        self.best_split_with_options(
+                            r.histograms,
+                            options,
+                            feature_weights,
+                            categorical_features,
+                        )
+                    })
+                    .collect();
+            }
+        };
+        if bin_count > 1024 {
+            return requests
+                .iter()
+                .map(|r| {
+                    self.best_split_with_options(
+                        r.histograms,
+                        options,
+                        feature_weights,
+                        categorical_features,
+                    )
+                })
+                .collect();
+        }
+
+        let gpu_decisions = match kernels::best_split::dispatch_find_best_splits_batch(
+            &self.metal_device,
+            &self.best_split_pipeline_cache,
+            &self.histogram_residency,
+            &self.split_decision_residency,
+            &self.residency,
+            requests,
+            options,
+            feature_weights,
+        ) {
+            Ok(d) => d,
+            Err(_) => {
+                return requests
+                    .iter()
+                    .map(|r| {
+                        self.best_split_with_options(
+                            r.histograms,
+                            options,
+                            feature_weights,
+                            categorical_features,
+                        )
+                    })
+                    .collect();
+            }
+        };
+
+        // Convert GPU decisions → Option<SplitCandidate>.
+        let out = requests
+            .iter()
+            .zip(gpu_decisions.iter())
+            .map(|(req, d)| gpu_decision_to_split_candidate(req.histograms.node_id, d))
+            .collect();
+        Ok(out)
+    }
+}
+
+/// Convert a raw GPU split decision to `Option<SplitCandidate>`.
+///
+/// `right_stats` and `row_count` are left at zero: the engine's
+/// level-wise trainer calls `reduce_sums` immediately after applying
+/// the split (which overwrites both stats with accurate values from the
+/// partition). The `min_rows_per_leaf` check in the engine uses
+/// `partition.left.len()` / `partition.right.len()`, not
+/// `split.left_stats.row_count`, so zeroes here are safe.
+#[cfg(target_os = "macos")]
+fn gpu_decision_to_split_candidate(
+    node_id: u32,
+    decision: &split_decision_residency::SplitDecisionGpu,
+) -> Option<alloygbm_core::SplitCandidate> {
+    use split_decision_residency::{SPLIT_FLAG_INVALID, SPLIT_FLAG_MISSING_GOES_RIGHT};
+
+    if (decision.flags & SPLIT_FLAG_INVALID) != 0 || decision.feature_idx == u32::MAX {
+        return None;
+    }
+    Some(alloygbm_core::SplitCandidate {
+        node_id,
+        feature_index: decision.feature_idx,
+        threshold_bin: decision.bin_threshold as u16,
+        gain: decision.gain,
+        default_left: (decision.flags & SPLIT_FLAG_MISSING_GOES_RIGHT) == 0,
+        is_categorical: false,
+        categorical_bitset: None,
+        left_stats: alloygbm_core::NodeStats {
+            grad_sum: decision.grad_left,
+            hess_sum: decision.hess_left,
+            row_count: 0,
+        },
+        right_stats: alloygbm_core::NodeStats {
+            grad_sum: 0.0,
+            hess_sum: 0.0,
+            row_count: 0,
+        },
+    })
 }
 
 #[cfg(target_os = "macos")]
