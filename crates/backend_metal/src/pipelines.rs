@@ -1362,6 +1362,63 @@ impl BestSplitPipelineCache {
     }
 }
 
+// ---------------------------------------------------------------------
+// Stage 4b — IcbPipelineCache
+// ---------------------------------------------------------------------
+//
+// Compiles `shaders/icb_tree.metal` once and builds three pipeline
+// states: `icb_histogram`, `icb_split_find`, `icb_partition`.  Unlike
+// the earlier parameterized caches these kernels take all tunable
+// parameters via a constant buffer bound at encode time, so no
+// function constants and no per-key HashMap — just three plain
+// `Retained` handles compiled once at construction.
+
+/// Compiled-once compute pipeline states for Stage 4b ICB tree kernels.
+pub(crate) struct IcbPipelineCache {
+    pub(crate) histogram:   Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    pub(crate) split_find:  Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    pub(crate) partition:   Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+}
+
+// SAFETY: Metal protocol objects are thread-safe per Apple's docs.
+unsafe impl Send for IcbPipelineCache {}
+// SAFETY: see Send impl.
+unsafe impl Sync for IcbPipelineCache {}
+
+impl IcbPipelineCache {
+    pub(crate) fn new(
+        device: &ProtocolObject<dyn MTLDevice>,
+    ) -> Result<Self, String> {
+        let source = include_str!("shaders/icb_tree.metal");
+        let nss    = NSString::from_str(source);
+        let library = device
+            .newLibraryWithSource_options_error(&nss, None)
+            .map_err(|e| format!("icb_tree.metal compile failed: {}", e.localizedDescription()))?;
+
+        let histogram_fn = library
+            .newFunctionWithName(&NSString::from_str("icb_histogram"))
+            .ok_or_else(|| "icb_tree.metal: missing icb_histogram".to_string())?;
+        let split_find_fn = library
+            .newFunctionWithName(&NSString::from_str("icb_split_find"))
+            .ok_or_else(|| "icb_tree.metal: missing icb_split_find".to_string())?;
+        let partition_fn = library
+            .newFunctionWithName(&NSString::from_str("icb_partition"))
+            .ok_or_else(|| "icb_tree.metal: missing icb_partition".to_string())?;
+
+        let histogram  = device
+            .newComputePipelineStateWithFunction_error(&histogram_fn)
+            .map_err(|e| format!("icb_histogram pipeline failed: {}", e.localizedDescription()))?;
+        let split_find = device
+            .newComputePipelineStateWithFunction_error(&split_find_fn)
+            .map_err(|e| format!("icb_split_find pipeline failed: {}", e.localizedDescription()))?;
+        let partition  = device
+            .newComputePipelineStateWithFunction_error(&partition_fn)
+            .map_err(|e| format!("icb_partition pipeline failed: {}", e.localizedDescription()))?;
+
+        Ok(Self { histogram, split_find, partition })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
