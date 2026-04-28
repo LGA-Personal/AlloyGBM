@@ -457,6 +457,36 @@ def scenario_metal_friendly(
     return result
 
 
+def scenario_metal_friendly_large(
+    *, seed: int, memory_budget_bytes: int,
+    metal_available: bool, skip_metal: bool,
+) -> ScenarioResult:
+    """Kill-criterion fixture added for Stage 4a: the MLX-expert prediction
+    was a decisive 4-5× win at ≥1M rows × 100 features × bins=255.  This
+    scenario verifies (or refutes) that prediction after GPU split finding
+    is online.
+    """
+    result = ScenarioResult(
+        name="metal_friendly_large",
+        description=(
+            "Stage 4a kill-criterion: 1M × 100, regression, depth 8, bins=255"
+        ),
+        column_order=["task", "rows", "features", "max_depth", "bins"],
+    )
+    candidates = [
+        # (task, rows, features, estimators, depth, bins)
+        ("regression", 1_000_000, 100, 5, 8, 255),
+    ]
+    for task, rows, features, estimators, depth, bins in candidates:
+        result.cells.append(_run_cell(
+            task=task, rows=rows, features=features,
+            estimators=estimators, max_depth=depth, bins=bins,
+            seed=seed, memory_budget_bytes=memory_budget_bytes,
+            metal_available=metal_available, skip_metal=skip_metal,
+        ))
+    return result
+
+
 # ---------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------
@@ -520,6 +550,7 @@ SCENARIO_CHOICES = (
     "estimator_sweep",
     "task_mix",
     "metal_friendly",
+    "metal_friendly_large",
     "all",
 )
 
@@ -597,6 +628,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         scenarios_to_run = [
             "shape_grid", "depth_sweep", "bins_sweep",
             "estimator_sweep", "task_mix", "metal_friendly",
+            "metal_friendly_large",
         ]
     else:
         scenarios_to_run = [args.scenario]
@@ -648,6 +680,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
         elif name == "metal_friendly":
             result = scenario_metal_friendly(
+                seed=args.seed, memory_budget_bytes=budget_bytes,
+                metal_available=metal_available, skip_metal=args.skip_metal,
+            )
+        elif name == "metal_friendly_large":
+            result = scenario_metal_friendly_large(
                 seed=args.seed, memory_budget_bytes=budget_bytes,
                 metal_available=metal_available, skip_metal=args.skip_metal,
             )

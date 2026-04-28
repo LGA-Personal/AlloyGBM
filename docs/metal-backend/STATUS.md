@@ -1,111 +1,93 @@
 # Metal Backend — Current Status
 
-**Last updated:** 2026-04-25 (Stage 3 complete — RuntimeBackend forwarding fixed, kill criterion NOT MET, Stage 3 closed)
-**Active stage:** Stage 4 — Metal 4 Indirect Command Buffer chaining (next-up)
+**Last updated:** 2026-04-28 (Stage 4a complete — GPU split finding shipped, kill criterion NOT MET, Stage 4b required)
+**Active stage:** Stage 4b — Metal 4 ICB chaining (design not yet started)
 
 ---
 
-## Stage 3 Checklist
+## Stage 4a Checklist
 
 Order matches the approved plan in
-[/Users/lashby/.claude/plans/okay-add-this-notebook-structured-star.md](../../.claude/plans/okay-add-this-notebook-structured-star.md).
+`docs/superpowers/plans/2026-04-26-stage-4a-gpu-split-finding.md`.
 
-- [x] **S3.1** `HistogramStorage::{Cpu, Gpu}` and `RowIndexStorage::{Cpu, Gpu}` core enums.
-- [x] **S3.2** `BackendOps` trait promotions — `subtract_histogram_bundle`, `apply_split`, `reduce_sums`.
-- [x] **S3.4** CpuBackend wires all call sites on the `Cpu(..)` arm; CPU regression gate passed.
-- [x] **S3.5** `shaders/partition.metal` — two-phase direction-flag + stream-compaction kernel.
-- [x] **S3.6** `shaders/subtract.metal` — elementwise parent − child GPU kernel.
-- [x] **S3.7a** `GpuHistogramHandle`/`GpuRowIndexHandle` newtypes + Gpu variants on storage enums.
-- [x] **S3.7b** `HistogramResidencyPool` skeleton with `mint`/`get`/`release` surface.
-- [x] **S3.7c** (bundled c.1/c.2/c.3) — GPU-resident histogram build/split/subtract end-to-end.
-- [x] **S3.7d** `BackendOps::release_histograms` + `HistogramReleaseGuard` RAII helper.
-- [x] **S3.7e** Row-index residency pool + `MetalBackend::apply_split` producing `Gpu(..)` + engine refactor. Commits: `07e0bd1` (S3.7e.2a), `f0eaf4f` (S3.7e.2b).
-- [x] **S3.8** `MTLResidencySet` wrapper with PassThrough fallback.
-- [x] **S3.9** `BudgetTracker` enforcing M2 free-on-consume policy.
-- [x] **S3.3** Trainer-loop audit complete. See "S3.3 Audit Findings" in previous STATUS snapshot.
-- [x] **S3.10** Rust unit tests — residency round-trip. Commit: `a1eceb3`.
-- [x] **S3.11** Python `MetalStage3Tests`. Commit: `8de177b`.
-- [x] **S3.12** Benchmark re-run. Kill criterion `metal_friendly >1.0× CPU` NOT MET (D-023 + amendment). Best ratio: 0.16× (regression d=10 / d=6 bins=1024). Batch path confirmed active post-fix. Stage 3 closed on NOT MET — Approach A exhausted.
-- [x] **S3.13** `DECISIONS.md` entries D-015 through D-018. Commit: `883d9ae`.
-- [x] **S3.14** Deferred — Stage 3 did not meet kill criterion; `docs/limitations.md` Section 1 rewrite deferred to Stage 4 outcome.
-- [x] **S3.15** STATUS overwrite + SESSIONS Stage 3 close entry (this file).
+- [x] **Task 1** `BackendOps::find_best_splits_batch` trait method + scalar default + test.
+- [x] **Task 2** `RuntimeBackend` forwarding for `find_best_splits_batch` (Python bridge).
+- [x] **Task 3** `build_tree_level_wise` refactored to use `find_best_splits_batch` (batched call per level).
+- [x] **Task 4** Metal profile counters: `FIND_BEST_SPLITS_BATCH` + `BS_DISPATCH` / `BS_COMMIT_WAIT` / `BS_DECISION_READBACK` / `BS_CATEGORICAL_HOST_MERGE`.
+- [x] **Task 5** `SplitDecisionPool` (sibling to `HistogramResidencyPool`): `mint` / `buffer_for` / `read_decisions` / `release` + `SplitDecisionReleaseGuard`.
+- [x] **Task 6** `shaders/best_split.metal` — `best_split_per_feature` (threadgroup-per-(node,feature), simdgroup prefix scan, NaN-left/right, Newton gain) + `best_split_reduce_features` (per-node cross-feature weighted-gain reduce).
+- [x] **Task 7** Rust dispatch wrapper (`kernels/best_split.rs`) + `BestSplitPipelineCache` + `MetalBackend::find_best_splits_batch` numeric-only override + parity tests (3/3 pass).
+- [x] **Task 8** Mixed-mode merge: GPU handles numerics, host runs Fisher-sort for categoricals, per-node merge picks winner. Added mixed-mode parity test (4/4 pass).
+- [x] **Task 9** `metal_friendly_large` benchmark (1M×100, regression d=8) + D-024 entry + STATUS + SESSIONS.
 
-**Batch infrastructure sub-tasks (Approach A, Tasks 1–7 + forward fix):**
-- [x] Task 1 — `BackendOps::build_histograms_batch` / `subtract_histogram_bundle_batch` scalar defaults in engine.
-- [x] Task 2 — `build_tree_level_wise` refactored into three-phase shape (per-node prep → batched build → batched subtract).
-- [x] Task 3 — `dispatch_subtract_batch_pool` kernel function (N subtracts in one MTLCommandBuffer).
-- [x] Task 4 — `MetalBackend::subtract_histogram_bundle_batch` override.
-- [x] Task 5 — Profile counters `BUILD_HISTOGRAMS_BATCH` / `SUBTRACT_BATCH` added.
-- [x] Task 6 — `dispatch_histograms_batch` kernel function (N builds in one MTLCommandBuffer, extract helpers).
-- [x] Task 7 — `MetalBackend::build_histograms_batch` override.
-- [x] **Task 8 / D-023 gap fix** — `RuntimeBackend` forwarding arms for `build_histograms_batch` and `subtract_histogram_bundle_batch` added to `bindings/python/src/runtime_backend.rs`. Batch counters now fire (`build_histograms_batch`: 40 calls for depth=8 regression; `subtract_histogram_bundle_batch`: 40 calls). `commit_wait` dropped from 528 → 40 calls for that config.
+**Verification (2026-04-28):**
+- `cargo test -p alloygbm-backend-metal` — 53/53 pass (49 unit + 4 parity).
+- `pytest bindings/python/tests/ -q` — 365/365 pass.
+- `maturin develop --release` — clean build, no warnings.
 
 ---
 
-## Stage 3 — Closed (2026-04-25)
+## Stage 4a — Closed (2026-04-28)
 
 **What shipped:**
 
-- Full GPU-resident histogram pipeline: build → best_split → subtract, all pool-direct.
-- Row-index residency pool + GPU `apply_split` + engine refactor (S3.7e).
-- Histogram and row-index RAII release guards in both trainer loops.
-- `BackendOps::build_histograms_batch` / `subtract_histogram_bundle_batch` with scalar defaults (engine) and Metal overrides (single MTLCommandBuffer per phase per level).
-- `build_tree_level_wise` three-phase restructure (per-node prep → batched build → batched subtract).
-- `RuntimeBackend` forwarding arms for both batch methods (Task 8 gap fix — this session).
+- GPU split-finding kernel (`best_split.metal`): two-pass per-feature prefix scan + cross-feature weighted-gain reduction. Handles NaN-left/NaN-right paths; Fisher-sort stays on CPU for categoricals.
+- Rust dispatch wrapper with buffer-offset pattern (one `MTLCommandBuffer` per batch, one encoder per pass, scratch buffer indexed by node slot).
+- `SplitDecisionPool` RAII pool for device-side output buffers (24 bytes / node).
+- `MetalBackend::find_best_splits_batch` override: eligibility gate (GPU-resident, bin_count ≤ 1024), pure-numeric fast path, mixed-mode merge for numeric+categorical models.
+- `BackendOps::find_best_splits_batch` trait default + engine refactor: `build_tree_level_wise` now calls the batched method; one level → one GPU split-finding dispatch.
+- `RuntimeBackend` forwarding (Python bridge).
 
 **Kill-criterion result:**
 
-NOT MET. Best ratio post-fix: 0.16× CPU parity (regression d=10 and d=6 bins=1024). All five
-`metal_friendly` configs are below parity. Approach A's batching plan has been fully executed.
+NOT MET. Best ratio post-Stage-4a:
+- `metal_friendly` best: **0.17×** (regression d=6, bins=1024, 200k×200).
+- `metal_friendly_large` (1M×100, regression d=8): **0.24×**.
 
-**Post-fix bottleneck breakdown (depth=8 regression, Apple M4):**
+All configs remain well below 1.0× CPU parity.
+
+**Post-Stage-4a bottleneck breakdown (regression d=8 bins=255, 1M×100, Apple M4):**
 
 | Site | calls | total_ms | % total |
 |---|---|---|---|
-| build_histograms_batch | 40 | 2997 | 75.6% |
-| &nbsp;&nbsp;.commit_wait | 40 | 2634 | — |
-| &nbsp;&nbsp;.count_accumulate | 528 | 492 | — |
-| best_split_with_options | 1051 | 268 | 6.8% |
-| apply_split | 1051 | 281 | 7.1% |
-| subtract_histogram_bundle_batch | 40 | 54 | 1.4% |
+| build_histograms_batch  | 40   | 5192 | 74.8% |
+| ..commit_wait           | 40   | 4626 | —     |
+| ..count_accumulate      | 640  | 1137 | —     |
+| find_best_splits_batch  | 40   |   45 |  0.7% |
+| ..commit_wait           | 40   |   44 | —     |
+| subtract_histogram_bundle_batch | 40 |  69 | 1.0% |
+| apply_split             | 1275 |  580 |  8.4% |
 
-`commit_wait` (2634 ms, 66% of total) dominates even after batching
-because each level still requires one synchronous CPU stall while the
-GPU drains the entire level's histogram work. `count_accumulate` (492 ms)
-is the next largest host-side cost.
+Stage 4a successfully eliminated `best_split_with_options` as a bottleneck
+(was 6.8% in Stage 3; now 0.7% via GPU kernel). The dominant cost is still
+`build_histograms_batch.commit_wait` at 66.7% of total — each level requires
+one synchronous CPU stall. `count_accumulate` is 16.4% and also CPU-bound.
 
-**Residual gap analysis:**
+**Residual gap:**
 
-The `waitUntilCompleted` stall is architectural: the CPU must see
-histogram results to select splits and decide how to partition the next
-level. Eliminating it requires either:
-1. Keeping split-finding on the GPU (Metal 4 ICB — Stage 4), or
-2. Async overlap of level N GPU work with level N−1 CPU work (requires
-   two-level pipeline, not currently architected).
-
----
-
-## Stage 4 — Next-Up: Metal 4 ICB Chaining
-
-**Goal:** remove `waitUntilCompleted` between levels by encoding the
-histogram build + split find + partition for all levels of a tree into
-a single Indirect Command Buffer, committed once per estimator.
-
-**Prerequisites not yet scoped:**
-- GPU-side split finding (currently host-side in `best_split_with_options`).
-- ICB residency for variable-depth trees (level width varies by split outcome — needs conditional dispatch or pre-allocated worst-case buffers).
-- Metal 4 availability check (M4 on macOS 26+; fallback to Stage 3 path on older hardware).
-
-**Next action:** write a Stage 4 plan document before starting implementation.
+Eliminating `waitUntilCompleted` requires Stage 4b's ICB chaining: encode the
+entire tree's histogram build + split-find + partition into a single
+pre-committed Indirect Command Buffer per estimator, submitted once without
+per-level CPU sync. `count_accumulate` and `apply_split` also benefit from
+this architecture (GPU-side node selection, no per-level readback).
 
 ---
 
-## Verification (end of 2026-04-25 session)
+## Stage 4b — Next-Up: Metal 4 ICB Chaining
 
-- `cargo test -p alloygbm-backend-metal` — 47/47 pass.
-- `pytest bindings/python/tests/ -q` — 365/365 pass.
-- `maturin develop --release` — clean build, no warnings.
-- `build_histograms_batch` calls in profiling run: 40 (depth=8), 50 (depth=10), 30 (depth=6 bins=1024), 120 (multiclass_3), 400 (multiclass_10) — all non-zero.
+**Goal:** Remove `waitUntilCompleted` between levels by encoding one ICB per
+tree (histogram build → GPU split-find → partition for all levels), committed
+once per estimator. Expected to eliminate `build_histograms_batch.commit_wait`
+(66.7% of total time).
+
+**Prerequisites:**
+- GPU-side node selection (which nodes are active at each level? — needs GPU
+  tree-state buffer updated by the partition kernel).
+- Per-tree pre-allocated worst-case buffers (depth × 2^depth nodes).
+- Metal 4 availability check (M4 on macOS 26+; fallback to Stage 4a path on
+  older hardware).
+
+**Next action:** fresh brainstorm + spec document before starting implementation.
 
 ---
 
@@ -113,6 +95,7 @@ a single Indirect Command Buffer, committed once per estimator.
 
 - ~~**Stage 1** — GPU histogram build~~ *(shipped 2026-04-20)*
 - ~~**Stage 2** — GPU best-split finder~~ *(shipped 2026-04-20)*
-- ~~**Stage 3** — GPU residency (row partitioning + histograms + subtract)~~ *(closed 2026-04-25 — NOT MET, Approach A exhausted)*
-- **Stage 4** — Metal 4 Indirect Command Buffer chaining **(next-up — not yet scoped)**
+- ~~**Stage 3** — GPU residency (row partitioning + histograms + subtract)~~ *(closed 2026-04-25 — NOT MET)*
+- ~~**Stage 4a** — GPU split finding (batched find_best_splits_batch)~~ *(closed 2026-04-28 — NOT MET)*
+- **Stage 4b** — Metal 4 ICB chaining **(next-up — design not started)**
 - **Stage 5** — GPU inference tree traversal (planned, not scoped)

@@ -904,3 +904,90 @@ fundamental bottleneck is CPU-side post-processing after each level
 commit (`count_accumulate` + host-side split finding + apply_split).
 Moving to Metal 4 ICB chaining (Stage 4) would remove the `commit +
 waitUntilCompleted` stall entirely and pipeline GPU work across levels.
+
+---
+
+## D-024 — Stage 4a GPU split finding: kill-criterion outcome
+
+**Date:** 2026-04-28
+**Status:** NOT MET — Stage 4b (ICB chaining) kicks off.
+
+Stage 4a moves `best_split_with_options` onto the GPU (per-feature
+prefix-scan + cross-feature reduction kernels in `best_split.metal`).
+Mixed-mode: GPU handles the numeric subset; host runs Fisher-sort for
+any categorical features and the per-node merge picks the winner
+(weighted-gain comparison, lower feature_index breaks ties). This
+removes the per-level histogram readback and the serialised host-side
+split scan entirely; `find_best_splits_batch` now accounts for <1% of
+total Metal time.
+
+**Measurements (`metal_friendly` + `metal_friendly_large`, Apple M4):**
+
+Pre-D-024 column = D-023 amendment (Stage 3 close, 2026-04-25).
+
+| Config | CPU (s) | Metal pre-D-024 (s) | Metal post-D-024 (s) | post-D-024 ratio |
+|---|---|---|---|---|
+| regression d=8 bins=255 200k×200   | 0.577 | 4.17 | 4.06 | 0.14× |
+| regression d=10 bins=255 200k×200  | 1.05  | 6.59 | 6.70 | 0.16× |
+| regression d=6 bins=1024 200k×200  | 0.427 | 2.63 | 2.55 | 0.17× |
+| multiclass_3 d=8 bins=255 100k×100 | 0.590 | 4.74 | 4.72 | 0.12× |
+| multiclass_10 d=8 bins=255 100k×100| 1.57  | n/a  | 12.6 | 0.13× |
+| **regression d=8 bins=255 1M×100** | 1.78  | n/a  | 7.51 | **0.24×** |
+
+Stage 4a improved the large config (1M×100) to 0.24× — the best ratio
+seen so far — but all configs remain far below 1.0× CPU parity.  The
+change to `metal_friendly` (200k×200) is within run-to-run noise (±0.02×).
+
+**Profile breakdown (post-D-024, regression d=8 bins=255, 1M×100, Apple M4):**
+
+| Site | calls | total_ms | % of total |
+|---|---|---|---|
+| build_histograms_batch  | 40   | 5192 | 74.8% |
+| ..commit_wait           | 40   | 4626 | —     |
+| ..count_accumulate      | 640  | 1137 | —     |
+| find_best_splits_batch  | 40   |   45 |  0.7% |
+| ..commit_wait           | 40   |   44 | —     |
+| ..decision_readback     | 40   |    0 | —     |
+| subtract_histogram_bundle_batch | 40 |  69 | 1.0% |
+| apply_split             | 1275 |  580 |  8.4% |
+| reduce_sums             | 2550 |   78 |  1.1% |
+
+Stage 4a result: `find_best_splits_batch` is now 0.7% of total — the GPU
+kernel overhead is negligible.  The dominant cost is `build_histograms_batch`
+at 74.8% (of which `commit_wait` = 4626ms, 66.7%; `count_accumulate` =
+1137ms, 16.4%).
+
+**Outcome:**
+
+- Stage 3 kill criterion (`metal_friendly >1.0× CPU`): NOT MET (unchanged).
+- Stage 4 kill criterion (`metal_friendly_large >1.0× CPU`): NOT MET.
+  Best ratio: 0.24× (regression d=8, 1M×100).
+
+**Residual gap analysis:**
+
+Stage 4a eliminated the host-side split-finding bottleneck (was 6.8% in
+Stage 3; now <1% via GPU kernel).  The surviving cost breakdown is:
+
+1. `build_histograms_batch.commit_wait` — 66.7% of total. Each level
+   requires one synchronous CPU stall while the GPU drains the histogram
+   build. Eliminating this requires Stage 4b's ICB chaining: encode the
+   entire tree's histogram builds as a single pre-committed command buffer
+   and let GPU execute all levels without per-level CPU sync.
+
+2. `count_accumulate` — 16.4% of total. After each level, host accumulates
+   per-node row counts from GPU histogram outputs.  This is O(nodes × features
+   × bins) work on host.  ICB chaining's async GPU-side split finding would
+   also eliminate this readback.
+
+3. `apply_split` — 8.4%. The row-partition kernel is fast per-call but runs
+   once per node (1275 calls at depth 8, 5 estimators, 1M rows). This is
+   already GPU-resident; may benefit from batching at ICB granularity.
+
+**Stage 4b scope:** Metal 4 ICB chaining. Encode histogram build + (future)
+GPU split-find + partition for all nodes of a tree into a single
+pre-committed ICB, submitted once per estimator. Requires:
+- GPU-side split-node selection (tree topology encoded in GPU buffers).
+- Per-tree rather than per-level dispatch granularity.
+- Compile-time or runtime dispatch count upper-bound (worst-case depth).
+
+Stage 4b design: open (requires fresh brainstorm + spec).
