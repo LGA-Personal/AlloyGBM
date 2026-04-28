@@ -158,6 +158,17 @@ pub(crate) static RS_CPU_REDUCE: Counter = Counter::new();
 pub(crate) static PLU_READBACK: Counter = Counter::new();
 pub(crate) static PLU_CPU_UPDATE: Counter = Counter::new();
 
+// ---- Stage 4b ICB chaining counters -------------------------------
+
+/// Outer wrapper for the entire ICB tree build (encode + submit + readback).
+pub(crate) static ICB_TREE: Counter = Counter::new();
+/// CPU time to build the per-level ICB commands + outer command buffer.
+pub(crate) static ICB_ENCODE: Counter = Counter::new();
+/// Wall time from commit() to waitUntilCompleted() returning (GPU exec).
+pub(crate) static ICB_SUBMIT: Counter = Counter::new();
+/// CPU time to read split decisions + leaf values + reconstruct stumps.
+pub(crate) static ICB_READBACK: Counter = Counter::new();
+
 /// Environment gate. When `ALLOYGBM_METAL_PROFILE=1` is set at
 /// the time of `MetalBackend::drop`, this module emits a
 /// per-call-site breakdown on stderr.
@@ -324,6 +335,26 @@ pub(crate) fn dump_if_enabled() {
             name: "release_row_indices",
             counter: &RELEASE_ROW_INDICES,
             indented: false,
+        },
+        Site {
+            name: "icb_tree",
+            counter: &ICB_TREE,
+            indented: false,
+        },
+        Site {
+            name: "  .encode",
+            counter: &ICB_ENCODE,
+            indented: true,
+        },
+        Site {
+            name: "  .submit",
+            counter: &ICB_SUBMIT,
+            indented: true,
+        },
+        Site {
+            name: "  .readback",
+            counter: &ICB_READBACK,
+            indented: true,
         },
     ];
 
