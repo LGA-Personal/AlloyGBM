@@ -298,6 +298,34 @@ pub trait BackendOps {
     ) -> EngineResult<()> {
         apply_partition_leaf_updates_cpu(predictions, partition, left_leaf_value, right_leaf_value)
     }
+
+    /// Optional accelerator override for full level-wise tree construction.
+    ///
+    /// If the backend can build the entire tree without the CPU-sync loop
+    /// (e.g. via Metal 4 ICB chaining), it overrides this method and returns
+    /// `Ok(Some(result))`. The free function `build_tree_level_wise` calls this
+    /// first and short-circuits if `Some` is returned.
+    ///
+    /// Default implementation returns `Ok(None)`, falling through to the
+    /// existing level-wise loop. Categorical models, leaf-wise growth, and
+    /// backends without ICB support all use the default.
+    #[allow(clippy::too_many_arguments)]
+    fn try_build_tree_level_wise(
+        &self,
+        _binned_matrix: &BinnedMatrix,
+        _gradients: &[GradientPair],
+        _root_row_indices: &[u32],
+        _round_index: usize,
+        _feature_tiles: &[FeatureTile],
+        _split_options: SplitSelectionOptions,
+        _params: &TrainParams,
+        _controls: &IterationControls,
+        _candidate_predictions: &mut [f32],
+        _feature_weights: &[f32],
+        _categorical_features: &[CategoricalFeatureInfo],
+    ) -> EngineResult<Option<(Vec<TrainedStump>, IterationStopReason)>> {
+        Ok(None)
+    }
 }
 
 /// RAII guard that releases backend-side histogram residency on drop.
@@ -4036,6 +4064,25 @@ fn build_tree_level_wise<B: BackendOps>(
 ) -> EngineResult<(Vec<TrainedStump>, IterationStopReason)> {
     let mut candidate_round_stumps = Vec::new();
     let mut round_rejection_reason = IterationStopReason::NoSplitCandidate;
+
+    // Fast path: if the backend implements full-tree GPU encoding
+    // (Stage 4b ICB), delegate entirely and skip the CPU-sync loop.
+    if let Some(result) = backend.try_build_tree_level_wise(
+        binned_matrix,
+        gradients,
+        &root_row_indices,
+        round_index,
+        feature_tiles,
+        split_options,
+        params,
+        controls,
+        candidate_predictions,
+        feature_weights,
+        categorical_features,
+    )? {
+        return Ok(result);
+    }
+
     let root_node_id = encode_tree_node_id(round_index, 0)?;
     let root_node = NodeSlice::new(root_node_id, root_row_indices)?;
     let root_histograms =
@@ -6382,6 +6429,39 @@ pub struct MultiClassIterationRunSummary {
     pub custom_metric_per_round: Vec<f32>,
     /// Name of the custom metric (None when no custom metric callback is used).
     pub custom_metric_name: Option<String>,
+}
+
+/// Public test helper: call the level-wise tree builder with any backend.
+/// Used by backend parity tests to get a reference CPU-path result.
+#[allow(clippy::too_many_arguments)]
+pub fn build_tree_level_wise_for_test<B: BackendOps>(
+    backend: &B,
+    binned_matrix: &BinnedMatrix,
+    gradients: &[GradientPair],
+    root_row_indices: Vec<u32>,
+    round_index: usize,
+    feature_tiles: &[FeatureTile],
+    split_options: SplitSelectionOptions,
+    params: &TrainParams,
+    controls: &IterationControls,
+    candidate_predictions: &mut [f32],
+    feature_weights: &[f32],
+    categorical_features: &[CategoricalFeatureInfo],
+) -> EngineResult<(Vec<TrainedStump>, IterationStopReason)> {
+    build_tree_level_wise(
+        backend,
+        binned_matrix,
+        gradients,
+        root_row_indices,
+        round_index,
+        feature_tiles,
+        split_options,
+        params,
+        controls,
+        candidate_predictions,
+        feature_weights,
+        categorical_features,
+    )
 }
 
 #[cfg(test)]
