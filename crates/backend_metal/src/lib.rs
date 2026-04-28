@@ -20,6 +20,8 @@ mod residency;
 mod row_index_residency;
 #[cfg(target_os = "macos")]
 mod split_decision_residency;
+#[cfg(target_os = "macos")]
+mod icb_buffer_pool;
 
 #[cfg(target_os = "macos")]
 mod profile;
