@@ -158,4 +158,70 @@ mod tests {
             .unwrap();
         assert_eq!(result.len(), 1);
     }
+
+    /// Mixed-mode parity: GPU numeric + host categorical merge agrees with the
+    /// all-host scalar baseline on a 4-feature bundle where one feature is
+    /// categorical.  Feature 0 (stride-1 monotone, highest numeric gain) should
+    /// win outright; the merge must not corrupt the result.
+    #[test]
+    fn find_best_splits_batch_mixed_numeric_categorical_matches_scalar() {
+        let Ok(metal) = MetalBackend::new() else {
+            return;
+        };
+        let cpu = CpuBackend;
+
+        let (bm, grads) = make_fixture(256, 4, 8);
+        let tiles = vec![FeatureTile {
+            start_feature: 0,
+            end_feature: 4,
+        }];
+        let node = NodeSlice::new(0, (0..256u32).collect()).unwrap();
+
+        let cpu_h = cpu.build_histograms(&bm, &grads, &node, &tiles).unwrap();
+        let metal_h = metal.build_histograms(&bm, &grads, &node, &tiles).unwrap();
+
+        let options = SplitSelectionOptions::default();
+        let feature_weights: Vec<f32> = vec![1.0; 4];
+        // Feature 2 is categorical; features 0, 1, 3 are numeric.
+        let cats = vec![CategoricalFeatureInfo {
+            feature_index: 2,
+            num_categories: 8,
+        }];
+
+        let cpu_split = cpu
+            .best_split_with_options(&cpu_h, options, &feature_weights, &cats)
+            .unwrap();
+        let requests = vec![SplitFindRequest { histograms: &metal_h }];
+        let metal_splits = metal
+            .find_best_splits_batch(&requests, options, &feature_weights, &cats)
+            .unwrap();
+
+        assert_eq!(metal_splits.len(), 1);
+        match (&metal_splits[0], &cpu_split) {
+            (None, None) => {}
+            (Some(m), Some(c)) => {
+                assert_eq!(
+                    m.feature_index, c.feature_index,
+                    "mixed-mode winning feature mismatch: metal={} cpu={}",
+                    m.feature_index, c.feature_index,
+                );
+                assert_eq!(
+                    m.is_categorical, c.is_categorical,
+                    "is_categorical mismatch",
+                );
+                // GPU parallel scan accumulates f32 rounding differently from
+                // the CPU sequential scan; allow up to 0.1 absolute error.
+                assert!(
+                    (m.gain - c.gain).abs() < 0.1,
+                    "mixed-mode gain mismatch: metal={} cpu={}",
+                    m.gain,
+                    c.gain,
+                );
+            }
+            _ => panic!(
+                "mixed-mode split existence mismatch: metal={:?} cpu={:?}",
+                metal_splits[0], cpu_split
+            ),
+        }
+    }
 }

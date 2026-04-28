@@ -730,11 +730,17 @@ impl BackendOps for MetalBackend {
     /// then cross-feature reduce) in a single `MTLCommandBuffer`.
     ///
     /// Fallback paths (all delegate to per-request `best_split_with_options`):
-    /// * `categorical_features` is non-empty — mixed numeric + categorical
-    ///   merge (Task 8).
+    /// * All features are categorical — nothing for the GPU kernel to do.
     /// * First histogram is `Cpu`-variant — histograms not GPU-resident.
     /// * `bin_count > 1024` — GPU threadgroup arrays can't cover.
-    /// * Any GPU dispatch error — graceful degredation.
+    /// * Any GPU dispatch error — graceful degradation.
+    ///
+    /// Mixed numeric+categorical models use a per-node merge: the GPU kernel
+    /// runs over all features (numerics and categoricals), but its result is
+    /// only trusted when it picks a numeric feature (the gain formula is wrong
+    /// for categoricals). The host runs `best_split_with_options` on the full
+    /// bundle; its result is only kept when it picks a categorical feature (via
+    /// Fisher-sort). The winner is the higher weighted gain of the two.
     fn find_best_splits_batch(
         &self,
         requests: &[alloygbm_engine::SplitFindRequest<'_>],
@@ -746,22 +752,13 @@ impl BackendOps for MetalBackend {
             return Ok(Vec::new());
         }
 
-        // Categorical fallback — Task 8 implements the merge.
-        if !categorical_features.is_empty() {
-            return requests
-                .iter()
-                .map(|r| {
-                    self.best_split_with_options(
-                        r.histograms,
-                        options,
-                        feature_weights,
-                        categorical_features,
-                    )
-                })
-                .collect();
-        }
+        // Build categorical feature index set for post-dispatch filtering.
+        let categorical_feature_set: std::collections::HashSet<u32> = categorical_features
+            .iter()
+            .map(|c| c.feature_index as u32)
+            .collect();
 
-        // Verify GPU residency.
+        // Verify GPU residency (needed before any pool lookup).
         let first = requests[0].histograms;
         let pool_handle = match &first.storage {
             HistogramStorage::Gpu { handle, .. } => *handle,
@@ -780,9 +777,9 @@ impl BackendOps for MetalBackend {
             }
         };
 
-        // Gate: GPU kernel threadgroup arrays are MAX_BINS = 1024 entries.
-        let bin_count = match self.histogram_residency.get(pool_handle) {
-            Some(e) => e.shape.bin_count,
+        // Fetch pool entry: needed for bin_count and feature_indices.
+        let pool_entry = match self.histogram_residency.get(pool_handle) {
+            Some(e) => e,
             None => {
                 return requests
                     .iter()
@@ -797,7 +794,14 @@ impl BackendOps for MetalBackend {
                     .collect();
             }
         };
-        if bin_count > 1024 {
+
+        // If ALL features in the bundle are categorical the GPU has nothing
+        // to do — delegate entirely to the host.
+        let all_categorical = pool_entry
+            .feature_indices
+            .iter()
+            .all(|fi| categorical_feature_set.contains(fi));
+        if all_categorical {
             return requests
                 .iter()
                 .map(|r| {
@@ -811,6 +815,25 @@ impl BackendOps for MetalBackend {
                 .collect();
         }
 
+        // Gate: GPU kernel threadgroup arrays are MAX_BINS = 1024 entries.
+        if pool_entry.shape.bin_count > 1024 {
+            return requests
+                .iter()
+                .map(|r| {
+                    self.best_split_with_options(
+                        r.histograms,
+                        options,
+                        feature_weights,
+                        categorical_features,
+                    )
+                })
+                .collect();
+        }
+
+        // Run GPU kernel on all features (including categoricals). The GPU uses
+        // the numeric gain formula for every feature slot; categorical gains are
+        // therefore incorrect, but we discard any GPU decision that landed on a
+        // categorical feature in the merge step below.
         let gpu_decisions = match kernels::best_split::dispatch_find_best_splits_batch(
             &self.metal_device,
             &self.best_split_pipeline_cache,
@@ -838,12 +861,65 @@ impl BackendOps for MetalBackend {
         };
 
         // Convert GPU decisions → Option<SplitCandidate>.
-        let out = requests
+        let gpu_splits: Vec<_> = requests
             .iter()
             .zip(gpu_decisions.iter())
             .map(|(req, d)| gpu_decision_to_split_candidate(req.histograms.node_id, d))
             .collect();
-        Ok(out)
+
+        // Pure-numeric fast path: no merge needed.
+        if categorical_features.is_empty() {
+            return Ok(gpu_splits);
+        }
+
+        // Mixed-mode merge: for each node, take the better of:
+        //   • GPU result — only trusted if the GPU picked a numeric feature.
+        //   • Host result — run `best_split_with_options` over the full bundle;
+        //     keep only if the host picked a categorical feature (Fisher-sort).
+        //
+        // The host call scans all features (wasteful for numerics, which the GPU
+        // already handles), but keeps the BackendOps surface unchanged and is
+        // correct.  If the categorical-merge cost dominates in benchmarks we can
+        // add a feature-restricted host helper in a follow-up.
+        let _p = profile::ScopedProbe::new(&profile::BS_CATEGORICAL_HOST_MERGE);
+        let mut merged: Vec<Option<alloygbm_core::SplitCandidate>> =
+            Vec::with_capacity(requests.len());
+        for (req, gpu_split) in requests.iter().zip(gpu_splits.into_iter()) {
+            // Keep GPU result only when it picked a numeric feature.
+            let gpu_numeric = match gpu_split {
+                Some(s) if !categorical_feature_set.contains(&s.feature_index) => Some(s),
+                _ => None,
+            };
+            // Host result: keep only when it picked a categorical feature.
+            let host_full = self.best_split_with_options(
+                req.histograms,
+                options,
+                feature_weights,
+                categorical_features,
+            )?;
+            let host_cat = match host_full {
+                Some(s) if categorical_feature_set.contains(&s.feature_index) => Some(s),
+                _ => None,
+            };
+            // Per-node winner: higher weighted gain wins; lower feature_index
+            // breaks ties (mirrors the all-host comparator in `CpuBackend`).
+            let winner = match (gpu_numeric, host_cat) {
+                (None, None) => None,
+                (Some(g), None) => Some(g),
+                (None, Some(h)) => Some(h),
+                (Some(g), Some(h)) => {
+                    let gw = weighted_gain(&g, feature_weights);
+                    let hw = weighted_gain(&h, feature_weights);
+                    if gw > hw || (gw == hw && g.feature_index < h.feature_index) {
+                        Some(g)
+                    } else {
+                        Some(h)
+                    }
+                }
+            };
+            merged.push(winner);
+        }
+        Ok(merged)
     }
 }
 
@@ -884,6 +960,20 @@ fn gpu_decision_to_split_candidate(
             row_count: 0,
         },
     })
+}
+
+/// Weighted gain for a split candidate: `gain × feature_weight[feature_index]`.
+/// Used by the mixed-mode merge to compare GPU-numeric vs host-categorical
+/// winners with the same comparator the all-host `CpuBackend` uses.
+#[cfg(target_os = "macos")]
+fn weighted_gain(c: &alloygbm_core::SplitCandidate, feature_weights: &[f32]) -> f32 {
+    let fi = c.feature_index as usize;
+    let w = if fi < feature_weights.len() {
+        feature_weights[fi]
+    } else {
+        1.0
+    };
+    c.gain * w
 }
 
 #[cfg(target_os = "macos")]
