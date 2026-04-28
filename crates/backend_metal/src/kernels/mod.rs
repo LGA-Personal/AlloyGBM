@@ -9,3 +9,6 @@ pub mod histogram;
 pub mod partition;
 pub mod split;
 pub mod subtract;
+
+#[cfg(target_os = "macos")]
+pub mod icb_tree;

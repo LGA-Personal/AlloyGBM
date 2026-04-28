@@ -74,6 +74,9 @@ pub(crate) struct IcbBufferPool {
     pub gradients:        Retained<ProtocolObject<dyn MTLBuffer>>,
     /// Per-row hessians (f32). Uploaded once per tree.
     pub hessians:         Retained<ProtocolObject<dyn MTLBuffer>>,
+    /// Per-level push constants. `depth_max` entries of `IcbConstantsGpu` (48 B each).
+    /// The encoder writes each level's constants before encoding, then binds by offset.
+    pub constants:        Retained<ProtocolObject<dyn MTLBuffer>>,
     /// The heap from which all buffers above are sub-allocated.
     pub heap:             Retained<ProtocolObject<dyn MTLHeap>>,
     /// Snapshot of construction parameters.
@@ -81,6 +84,7 @@ pub(crate) struct IcbBufferPool {
     pub feature_count:    usize,
     pub bin_count:        usize,
     pub max_nodes:        usize,  // 2^depth_max total nodes (root to leaves)
+    pub depth_max:        usize,
 }
 
 // SAFETY: MTLHeap and MTLBuffer protocol objects are thread-safe per Apple docs.
@@ -109,6 +113,7 @@ impl IcbBufferPool {
         let histograms_bytes     = max_level_nodes  * feature_count * bin_count * 2 * size_of::<f32>();
         let gradients_bytes      = row_count        * size_of::<f32>();
         let hessians_bytes       = row_count        * size_of::<f32>();
+        let constants_bytes      = max_depth        * size_of::<IcbConstantsGpu>();
 
         // Align each allocation to 256 bytes (Metal heap alignment requirement).
         fn align256(n: usize) -> usize { (n + 255) & !255 }
@@ -119,6 +124,7 @@ impl IcbBufferPool {
             + align256(histograms_bytes)
             + align256(gradients_bytes)
             + align256(hessians_bytes)
+            + align256(constants_bytes)
             + 4096; // guard headroom
 
         let heap_desc = MTLHeapDescriptor::new();
@@ -144,6 +150,7 @@ impl IcbBufferPool {
         let histograms      = alloc(histograms_bytes.max(256), "histograms")?;
         let gradients       = alloc(gradients_bytes,       "gradients")?;
         let hessians        = alloc(hessians_bytes,        "hessians")?;
+        let constants       = alloc(constants_bytes.max(256), "constants")?;
 
         Ok(Self {
             row_node_id,
@@ -153,11 +160,13 @@ impl IcbBufferPool {
             histograms,
             gradients,
             hessians,
+            constants,
             heap,
             row_count,
             feature_count,
             bin_count,
             max_nodes,
+            depth_max: max_depth,
         })
     }
 
@@ -252,6 +261,17 @@ impl IcbBufferPool {
         unsafe {
             let ptr = self.row_node_id.contents().as_ptr() as *const u16;
             std::slice::from_raw_parts(ptr, self.row_count).to_vec()
+        }
+    }
+
+    /// Write all per-level IcbConstantsGpu entries into the constants buffer.
+    /// Must be called before encoding ICB commands for each tree (the same
+    /// level geometry is used every tree, but split_options.l2_lambda may vary).
+    pub(crate) fn upload_constants(&self, consts: &[IcbConstantsGpu]) {
+        // SAFETY: StorageModeShared; called before GPU work begins.
+        unsafe {
+            let ptr = self.constants.contents().as_ptr() as *mut IcbConstantsGpu;
+            std::ptr::copy_nonoverlapping(consts.as_ptr(), ptr, consts.len());
         }
     }
 }
