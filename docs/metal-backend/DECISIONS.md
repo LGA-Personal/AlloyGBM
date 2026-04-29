@@ -1008,3 +1008,19 @@ Stage 4b design: open (requires fresh brainstorm + spec).
 **Scope:** Exception applies only to `icb_histogram`. All other histogram kernels (Stage 1 `histogram.metal`, Stage 2 `best_split.metal`) retain the D-003 two-pass approach unchanged.
 
 **Monitoring:** If float-atomic contention becomes measurable (profiled via ICB_ENCODE counter relative to ICB_SUBMIT), revisit with a two-ICB-command-per-level split in a future stage.
+
+## D-026 — Per-level histogram regions eliminate GPU zero-kernel
+
+Date: 2026-04-29
+Stage: S4b
+Decision: Size the ICB histogram buffer for all tree levels combined and bind each level at a pre-computed byte offset, rather than using a GPU zero-kernel between levels.
+Why: Between-level zeroing would require a fourth ICB command per level (histogram, split-find, partition, zero), adding an extra barrier and growing the command buffer by 33%. Instead, we size the histogram buffer as `(2^depth - 1) × F × B × 2` floats — one non-overlapping region per level — and zero the entire buffer once on the CPU before the GPU command buffer is committed. Level L binds at byte offset `(2^L - 1) × F × B × 2 × 4`. The pool is pre-allocated with the pool's capacity dims (not the actual dataset dims), so the buffer is larger than strictly needed but requires no resize per tree.
+Alternatives considered: GPU zero-kernel as a 4th ICB command per level (rejected — extra barrier + 33% more commands); per-level CPU memset before commit (functionally identical to single full zero, but adds a loop; rejected for simplicity).
+
+## D-027 — Last-level partition skipped; CPU resolves left/right from bin data
+
+Date: 2026-04-29
+Stage: S4b
+Decision: Keep the last-level partition as a no-op (zero-width dispatch) and resolve left/right child leaf values on the CPU in `update_candidate_predictions` using the column-major bin data.
+Why: Running partition at the last level would move rows to level-(depth) nodes, which exceed the `max_nodes = 2^depth` buffer bounds. Doubling the buffer capacity to `2^(depth+1) - 1` would accommodate those nodes, but the extra memory (up to 64 MB for depth=8) buys nothing: the only use of level-(depth) data is computing leaf values, which can be done from the parent's split decision without touching the GPU again. The CPU readback loop is O(active_rows) and branch-free; the extra cost is negligible compared to the GPU execution time.
+Alternatives considered: Run partition at all levels + expand buffers to 2^(depth+1)−1 nodes (rejected — double buffer cost for no throughput gain); add a GPU leaf-value-compute kernel for level depth (rejected — requires 4th kernel + PSO + extra ICB command type).

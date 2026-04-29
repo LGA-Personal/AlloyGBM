@@ -1,29 +1,44 @@
 # Metal Backend — Current Status
 
-**Last updated:** 2026-04-28 (Stage 4a complete — GPU split finding shipped, kill criterion NOT MET, Stage 4b required)
-**Active stage:** Stage 4b — Metal 4 ICB chaining (design not yet started)
+**Last updated:** 2026-04-29 (Stage 4b — all 9 implementation tasks complete, pending Task 10 benchmark)
+**Active stage:** Stage 4b — Metal 4 ICB chaining
 
 ---
 
-## Stage 4a Checklist
+## Stage 4b Checklist
 
 Order matches the approved plan in
-`docs/superpowers/plans/2026-04-26-stage-4a-gpu-split-finding.md`.
+`docs/superpowers/plans/2026-04-29-stage-4b-icb-chaining.md`.
 
-- [x] **Task 1** `BackendOps::find_best_splits_batch` trait method + scalar default + test.
-- [x] **Task 2** `RuntimeBackend` forwarding for `find_best_splits_batch` (Python bridge).
-- [x] **Task 3** `build_tree_level_wise` refactored to use `find_best_splits_batch` (batched call per level).
-- [x] **Task 4** Metal profile counters: `FIND_BEST_SPLITS_BATCH` + `BS_DISPATCH` / `BS_COMMIT_WAIT` / `BS_DECISION_READBACK` / `BS_CATEGORICAL_HOST_MERGE`.
-- [x] **Task 5** `SplitDecisionPool` (sibling to `HistogramResidencyPool`): `mint` / `buffer_for` / `read_decisions` / `release` + `SplitDecisionReleaseGuard`.
-- [x] **Task 6** `shaders/best_split.metal` — `best_split_per_feature` (threadgroup-per-(node,feature), simdgroup prefix scan, NaN-left/right, Newton gain) + `best_split_reduce_features` (per-node cross-feature weighted-gain reduce).
-- [x] **Task 7** Rust dispatch wrapper (`kernels/best_split.rs`) + `BestSplitPipelineCache` + `MetalBackend::find_best_splits_batch` numeric-only override + parity tests (3/3 pass).
-- [x] **Task 8** Mixed-mode merge: GPU handles numerics, host runs Fisher-sort for categoricals, per-node merge picks winner. Added mixed-mode parity test (4/4 pass).
-- [x] **Task 9** `metal_friendly_large` benchmark (1M×100, regression d=8) + D-024 entry + STATUS + SESSIONS.
+- [x] **Task 1** `BackendOps::try_build_tree_level_wise` hook + engine free-function intercept.
+- [x] **Task 2** Profile counters: `ICB_TREE`, `ICB_ENCODE`, `ICB_SUBMIT`, `ICB_READBACK`.
+- [x] **Task 3** Cargo.toml features for `MTLIndirectCommandBuffer` + `MTLHeap`.
+- [x] **Task 4** ICB Metal shaders (`icb_tree.metal`): three kernels — `icb_histogram`, `icb_split_find`, `icb_partition`. Column-major bin access; per-level histogram regions; atomic float accumulation; NaN-left/NaN-right paths.
+- [x] **Task 5** `IcbPipelineCache` in `pipelines.rs` — PSOs built with `MTLComputePipelineDescriptor` + `setSupportIndirectCommandBuffers(true)`.
+- [x] **Task 6** `IcbBufferPool` + `IcbSplitDecisionGpu` + `IcbConstantsGpu` in `icb_buffer_pool.rs`.
+- [x] **Task 7** `IcbTreeEncoder::encode_and_run` in `kernels/icb_tree.rs` — encodes depth×3 ICB commands, submits one `MTLCommandBuffer`, waits once, reads back decisions + leaf values + row_node_ids, reconstructs stumps + updates predictions.
+- [x] **Task 8** `MetalBackend::try_build_tree_level_wise` override in `lib.rs` + eligibility gate (Metal 4, ≤14 depth, ≤1024 bins, no categoricals, dataset within pool dims).
+- [x] **Task 9** Parity integration tests (`tests/icb_tree_parity.rs`): 4 tests vs `CpuBackend` — small/d=4, deep/d=8, prune/high-gain, multi-estimator/5-rounds. All pass on Metal 4 (macOS 26.4.1); silently skip on earlier hardware.
+- [ ] **Task 10** `metal_friendly_large_icb` benchmark + STATUS/SESSIONS update.
 
-**Verification (2026-04-28):**
-- `cargo test -p alloygbm-backend-metal` — 53/53 pass (49 unit + 4 parity).
-- `pytest bindings/python/tests/ -q` — 365/365 pass.
-- `maturin develop --release` — clean build, no warnings.
+**Verification (2026-04-29):**
+- `cargo test --test icb_tree_parity -- --test-threads=1` — 4/4 pass on macOS 26.4.1 (Metal 4).
+- `cargo test --workspace --exclude alloygbm-python -- --test-threads=1` — 244/244 pass.
+
+**Next action:** Task 10 — run `metal_friendly_large_icb` benchmark, record performance ratio, update STATUS + SESSIONS.
+
+---
+
+## Stage 4b — Bugs fixed in Task 9
+
+Four blockers discovered and resolved during parity testing (see BUGS.md for details):
+
+| ID | Symptom | Fix |
+|----|---------|-----|
+| B-003 (ICB PSO) | SIGSEGV in `setComputePipelineState` inside ICB | `MTLComputePipelineDescriptor` + `setSupportIndirectCommandBuffers(true)` |
+| B-004 (histogram layout) | Level N accumulated on level N-1 data | Per-level histogram regions; single CPU zero before commit |
+| B-005 (bin layout) | Row-major bin access in column-major buffer | Changed to `bin_data[f * row_count + gid]` |
+| B-006 (last-level leaf values) | Rows at split nodes got wrong average leaf value | CPU left/right resolution from bin data in `update_candidate_predictions` |
 
 ---
 
@@ -58,37 +73,6 @@ All configs remain well below 1.0× CPU parity.
 | subtract_histogram_bundle_batch | 40 |  69 | 1.0% |
 | apply_split             | 1275 |  580 |  8.4% |
 
-Stage 4a successfully eliminated `best_split_with_options` as a bottleneck
-(was 6.8% in Stage 3; now 0.7% via GPU kernel). The dominant cost is still
-`build_histograms_batch.commit_wait` at 66.7% of total — each level requires
-one synchronous CPU stall. `count_accumulate` is 16.4% and also CPU-bound.
-
-**Residual gap:**
-
-Eliminating `waitUntilCompleted` requires Stage 4b's ICB chaining: encode the
-entire tree's histogram build + split-find + partition into a single
-pre-committed Indirect Command Buffer per estimator, submitted once without
-per-level CPU sync. `count_accumulate` and `apply_split` also benefit from
-this architecture (GPU-side node selection, no per-level readback).
-
----
-
-## Stage 4b — Next-Up: Metal 4 ICB Chaining
-
-**Goal:** Remove `waitUntilCompleted` between levels by encoding one ICB per
-tree (histogram build → GPU split-find → partition for all levels), committed
-once per estimator. Expected to eliminate `build_histograms_batch.commit_wait`
-(66.7% of total time).
-
-**Prerequisites:**
-- GPU-side node selection (which nodes are active at each level? — needs GPU
-  tree-state buffer updated by the partition kernel).
-- Per-tree pre-allocated worst-case buffers (depth × 2^depth nodes).
-- Metal 4 availability check (M4 on macOS 26+; fallback to Stage 4a path on
-  older hardware).
-
-**Next action:** fresh brainstorm + spec document before starting implementation.
-
 ---
 
 ## Cross-Stage Roadmap (reference only)
@@ -97,5 +81,5 @@ once per estimator. Expected to eliminate `build_histograms_batch.commit_wait`
 - ~~**Stage 2** — GPU best-split finder~~ *(shipped 2026-04-20)*
 - ~~**Stage 3** — GPU residency (row partitioning + histograms + subtract)~~ *(closed 2026-04-25 — NOT MET)*
 - ~~**Stage 4a** — GPU split finding (batched find_best_splits_batch)~~ *(closed 2026-04-28 — NOT MET)*
-- **Stage 4b** — Metal 4 ICB chaining **(next-up — design not started)**
+- **Stage 4b** — Metal 4 ICB chaining **(implementation complete — Task 10 benchmark pending)**
 - **Stage 5** — GPU inference tree traversal (planned, not scoped)

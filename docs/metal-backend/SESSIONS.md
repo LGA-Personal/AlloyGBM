@@ -5,6 +5,28 @@ First thing a new session reads, alongside `STATUS.md`.
 
 ---
 
+## 2026-04-29 — Stage 4b ICB tree: parity test bugs fixed (Task 9 complete)
+
+**Shipped (commit de2b9d3):**
+
+- Four blocker bugs fixed in the ICB tree path (all found via parity tests):
+  - **B-003 (ICB PSO):** `IcbPipelineCache` used `newComputePipelineStateWithFunction_error` which creates PSOs without `supportIndirectCommandBuffers=true`, causing SIGSEGV. Fixed with `MTLComputePipelineDescriptor` + `setSupportIndirectCommandBuffers(true)` for all three ICB kernels.
+  - **B-004 (histogram layout):** All levels shared histogram offset 0, so each level accumulated on top of the previous. Fixed with per-level regions (`(2^L - 1) × F × B × 2 × 4` byte offset per level, single CPU zero before GPU commit).
+  - **B-005 (bin layout):** `icb_histogram` and `icb_partition` kernels used row-major bin access; `BinnedMatrix::bins_col_adaptive` is column-major. Fixed to `bin_data[f * row_count + gid]`.
+  - **B-006 (last-level leaf values):** Last-level partition is a no-op (zero-width dispatch), so rows stay at split nodes. `update_candidate_predictions` computed `grad_total / hess_total` instead of the correct left/right child value. Fixed by passing column-major bin data to the CPU readback function and routing rows via bin ≤ threshold comparison.
+- Also: ICB `min_split_gain` now uses `controls.min_split_gain` (matching the CPU fallback path) rather than `params.min_split_gain`.
+- Four parity integration tests (`icb_tree_parity.rs`) — all pass on Metal 4 (macOS 26.4.1), silent skip on older hardware.
+- BUGS.md: entries B-003 through B-006 moved to Resolved.
+- DECISIONS.md: D-026 (per-level histogram regions), D-027 (CPU left/right resolution for last-level nodes).
+
+**What moved:**
+- Task 9 ✅ (parity tests written, bugs fixed, all 4 tests green).
+
+**Blockers / next-up:**
+- Task 10: `metal_friendly_large_icb` benchmark + final STATUS/SESSIONS update.
+
+---
+
 ## 2026-04-28 — Stage 4a GPU split finding (complete)
 
 **Shipped (commits eb348e0, ce2605c):**
