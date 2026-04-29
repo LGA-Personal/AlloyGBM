@@ -487,6 +487,38 @@ def scenario_metal_friendly_large(
     return result
 
 
+def scenario_metal_friendly_large_icb(
+    *, seed: int, memory_budget_bytes: int,
+    metal_available: bool, skip_metal: bool,
+) -> ScenarioResult:
+    """Stage 4b kill-criterion fixture: same shape as metal_friendly_large but
+    labelled for ICB chaining.  On Metal 4 the backend automatically routes
+    through try_build_tree_level_wise (ICB path), eliminating per-level
+    waitUntilCompleted stalls.  Speedup vs Stage 4a is expected to be large
+    because all levels now run in a single MTLCommandBuffer.
+    """
+    result = ScenarioResult(
+        name="metal_friendly_large_icb",
+        description=(
+            "Stage 4b kill-criterion: 1M × 100, regression, depth 8, bins=255 "
+            "(ICB path auto-selected on Metal 4)"
+        ),
+        column_order=["task", "rows", "features", "max_depth", "bins"],
+    )
+    candidates = [
+        # (task, rows, features, estimators, depth, bins)
+        ("regression", 1_000_000, 100, 5, 8, 255),
+    ]
+    for task, rows, features, estimators, depth, bins in candidates:
+        result.cells.append(_run_cell(
+            task=task, rows=rows, features=features,
+            estimators=estimators, max_depth=depth, bins=bins,
+            seed=seed, memory_budget_bytes=memory_budget_bytes,
+            metal_available=metal_available, skip_metal=skip_metal,
+        ))
+    return result
+
+
 # ---------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------
@@ -551,6 +583,7 @@ SCENARIO_CHOICES = (
     "task_mix",
     "metal_friendly",
     "metal_friendly_large",
+    "metal_friendly_large_icb",
     "all",
 )
 
@@ -628,7 +661,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         scenarios_to_run = [
             "shape_grid", "depth_sweep", "bins_sweep",
             "estimator_sweep", "task_mix", "metal_friendly",
-            "metal_friendly_large",
+            "metal_friendly_large", "metal_friendly_large_icb",
         ]
     else:
         scenarios_to_run = [args.scenario]
@@ -685,6 +718,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
         elif name == "metal_friendly_large":
             result = scenario_metal_friendly_large(
+                seed=args.seed, memory_budget_bytes=budget_bytes,
+                metal_available=metal_available, skip_metal=args.skip_metal,
+            )
+        elif name == "metal_friendly_large_icb":
+            result = scenario_metal_friendly_large_icb(
                 seed=args.seed, memory_budget_bytes=budget_bytes,
                 metal_available=metal_available, skip_metal=args.skip_metal,
             )
