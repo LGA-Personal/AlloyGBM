@@ -281,6 +281,154 @@ kernel void histogram_build_scatter_wide(
     }
 }
 
+// -----------------------------------------------------------------
+// Threadgroup-atomic scatter — Stage 5.
+//
+// Replaces the simd_shuffle serialisation (32× inner loop, 31/32
+// lanes idle per iteration) with threadgroup-local atomic<float>
+// accumulation.  Each threadgroup handles one (feature, chunk) pair,
+// exactly as the wide kernel, and writes to the SAME scratch layout —
+// the existing `histogram_reduce` pass is unchanged.
+//
+// Requires Metal GPU Family 7+ (A15 / M1 and later) for
+// `atomic<float>` in threadgroup address space.  MetalBackend::new()
+// already gates on `apple7`, so no additional runtime check is needed.
+//
+// Non-determinism: `memory_order_relaxed` threadgroup float atomics do
+// not guarantee accumulation order, so results may differ by a few ULP
+// from the simd_shuffle kernel.  Parity tests use atol ≥ 0.05, which
+// covers any such rounding differences.
+//
+// Threadgroup-memory budget: 2 × MAX_BIN_COUNT_TGA × 4 bytes = 8 KB,
+// allowing up to 4 concurrent threadgroups per CU (vs 1 for the wide
+// kernel's 32 KB budget).  Valid only when bin_count ≤ MAX_BIN_COUNT_TGA;
+// the pipeline-selection logic in Rust enforces this.
+// -----------------------------------------------------------------
+
+constant uint MAX_BIN_COUNT_TGA = 1024u;
+constant uint THREADS_PER_TG_TGA = 128u;
+
+kernel void histogram_tg_atomic_scatter(
+    device const uint8_t*  binned_u8      [[buffer(0)]],
+    device const uint16_t* binned_u16     [[buffer(1)]],
+    device const float2*   gradients      [[buffer(2)]],
+    device const uint*     row_indices    [[buffer(3)]],
+    device float2*         scratch        [[buffer(4)]],
+    constant uint&         n_rows_total   [[buffer(5)]],
+    constant uint&         node_row_count [[buffer(6)]],
+    constant uint&         rows_per_chunk [[buffer(7)]],
+    constant uint&         n_features     [[buffer(8)]],
+    uint3                  thread_in_tg3  [[thread_position_in_threadgroup]],
+    uint3                  tg_id3         [[threadgroup_position_in_grid]]
+) {
+    const uint tid     = thread_in_tg3.x;
+    const uint feature = tg_id3.x;
+    const uint chunk   = tg_id3.y;
+
+    const uint chunk_start = chunk * rows_per_chunk;
+    const uint chunk_end   = min(chunk_start + rows_per_chunk, node_row_count);
+
+    // Per-bin threadgroup accumulators. Physical size MAX_BIN_COUNT_TGA;
+    // only [:EFFECTIVE_BIN_COUNT] is accessed.
+    threadgroup atomic<float> local_grad[MAX_BIN_COUNT_TGA];
+    threadgroup atomic<float> local_hess[MAX_BIN_COUNT_TGA];
+
+    // Zero-initialise collaboratively across all threads.
+    for (uint b = tid; b < EFFECTIVE_BIN_COUNT; b += THREADS_PER_TG_TGA) {
+        atomic_store_explicit(&local_grad[b], 0.0f, memory_order_relaxed);
+        atomic_store_explicit(&local_hess[b], 0.0f, memory_order_relaxed);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Each thread strides over its rows and atomically accumulates.
+    // No 32× inner serialisation — one threadgroup atomic per row.
+    for (uint i = chunk_start + tid; i < chunk_end; i += THREADS_PER_TG_TGA) {
+        const uint   row = row_indices[i];
+        const uint   bin = load_bin(binned_u8, binned_u16, row, feature, n_rows_total);
+        const float2 gh  = gradients[row];
+        atomic_fetch_add_explicit(&local_grad[bin], gh.x, memory_order_relaxed);
+        atomic_fetch_add_explicit(&local_hess[bin], gh.y, memory_order_relaxed);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Publish to device scratch — identical layout to histogram_build_scatter,
+    // so `histogram_reduce` is reused unchanged.
+    const uint scratch_base = (chunk * n_features + feature) * EFFECTIVE_BIN_COUNT;
+    for (uint b = tid; b < EFFECTIVE_BIN_COUNT; b += THREADS_PER_TG_TGA) {
+        scratch[scratch_base + b] = float2(
+            atomic_load_explicit(&local_grad[b], memory_order_relaxed),
+            atomic_load_explicit(&local_hess[b], memory_order_relaxed)
+        );
+    }
+}
+
+// -----------------------------------------------------------------
+// GPU count accumulation — Stage 5.
+//
+// Replaces the sequential CPU `accumulate_counts` post-step
+// (~1137 ms / 640 calls for the large benchmark).  One threadgroup
+// per (feature, chunk); uses threadgroup atomic_uint to count
+// per-bin row frequencies, then atomically adds chunk contributions
+// to the global count buffer.
+//
+// Global atomic pressure: n_chunks × bin_count × n_features atomics
+// ≈ 122 × 256 × 100 = 3.1 M for the large benchmark (vs 100 M for a
+// naive per-row global approach).
+//
+// Buffer layout:
+//   buffer(0) binned_u8   — column-major u8 bins
+//   buffer(1) binned_u16  — column-major u16 bins (dummy when u8)
+//   buffer(2) row_indices — [node_row_count]
+//   buffer(3) counts_out  — device atomic_uint [n_features × BIN_COUNT]
+//   buffer(4) n_rows_total
+//   buffer(5) node_row_count
+//   buffer(6) rows_per_chunk
+//   buffer(7) n_features
+// -----------------------------------------------------------------
+
+kernel void histogram_count_accumulate(
+    device const uint8_t*  binned_u8      [[buffer(0)]],
+    device const uint16_t* binned_u16     [[buffer(1)]],
+    device const uint*     row_indices    [[buffer(2)]],
+    device atomic_uint*    counts_out     [[buffer(3)]],
+    constant uint&         n_rows_total   [[buffer(4)]],
+    constant uint&         node_row_count [[buffer(5)]],
+    constant uint&         rows_per_chunk [[buffer(6)]],
+    constant uint&         n_features     [[buffer(7)]],
+    uint3                  thread_in_tg3  [[thread_position_in_threadgroup]],
+    uint3                  tg_id3         [[threadgroup_position_in_grid]]
+) {
+    const uint tid     = thread_in_tg3.x;
+    const uint feature = tg_id3.x;
+    const uint chunk   = tg_id3.y;
+
+    const uint chunk_start = chunk * rows_per_chunk;
+    const uint chunk_end   = min(chunk_start + rows_per_chunk, node_row_count);
+
+    // Threadgroup-local uint count (no float precision issues).
+    threadgroup atomic_uint local_counts[MAX_BIN_COUNT_TGA];
+    for (uint b = tid; b < EFFECTIVE_BIN_COUNT; b += THREADS_PER_TG_TGA) {
+        atomic_store_explicit(&local_counts[b], 0u, memory_order_relaxed);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint i = chunk_start + tid; i < chunk_end; i += THREADS_PER_TG_TGA) {
+        const uint row = row_indices[i];
+        const uint bin = load_bin(binned_u8, binned_u16, row, feature, n_rows_total);
+        atomic_fetch_add_explicit(&local_counts[bin], 1u, memory_order_relaxed);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // One global atomic_uint per (feature, bin) per chunk — low contention.
+    const uint out_base = feature * EFFECTIVE_BIN_COUNT;
+    for (uint b = tid; b < EFFECTIVE_BIN_COUNT; b += THREADS_PER_TG_TGA) {
+        const uint c = atomic_load_explicit(&local_counts[b], memory_order_relaxed);
+        if (c > 0u) {
+            atomic_fetch_add_explicit(&counts_out[out_base + b], c, memory_order_relaxed);
+        }
+    }
+}
+
 kernel void histogram_reduce(
     device const float2* scratch      [[buffer(0)]],
     device float*        grad_out     [[buffer(1)]],

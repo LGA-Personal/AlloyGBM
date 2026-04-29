@@ -58,8 +58,9 @@ use std::ptr::NonNull;
 
 use crate::device::MetalCapabilities;
 use crate::kernels::histogram::{
-    HISTOGRAM_SHADER_SOURCE, KERNEL_NAME_REDUCE, KERNEL_NAME_SCATTER, KERNEL_NAME_SCATTER_WIDE,
-    MAX_BIN_COUNT_WIDE,
+    HISTOGRAM_SHADER_SOURCE, KERNEL_NAME_COUNT_ACCUMULATE, KERNEL_NAME_REDUCE,
+    KERNEL_NAME_SCATTER, KERNEL_NAME_SCATTER_WIDE, KERNEL_NAME_TG_ATOMIC_SCATTER,
+    MAX_BIN_COUNT_TGA, MAX_BIN_COUNT_WIDE,
 };
 use crate::kernels::partition::{
     KERNEL_NAME_PARTITION_FLAG_AND_COUNT, KERNEL_NAME_PARTITION_SCAN_BLOCKS,
@@ -81,6 +82,15 @@ pub struct HistogramPipelines {
     /// for wider bin counts.
     pub scatter_wide: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
     pub reduce: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    /// Threadgroup-atomic scatter (Stage 5; apple7+). Replaces the 32×
+    /// simd_shuffle serialisation with threadgroup `atomic<float>`
+    /// accumulation. `None` when `bin_count > MAX_BIN_COUNT_TGA` or on
+    /// pre-apple7 devices (handled in `build()`).
+    pub tg_atomic_scatter: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
+    /// GPU count accumulation (Stage 5; apple7+). Replaces the CPU-side
+    /// `accumulate_counts` post-step. `None` on the same conditions as
+    /// `tg_atomic_scatter`.
+    pub count_accumulate: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
     pub bin_count: u32,
     pub use_u16_bins: bool,
 }
@@ -278,6 +288,85 @@ impl HistogramPipelineCache {
                 )
             })?;
 
+        // Stage 5: threadgroup-atomic scatter + GPU count accumulation.
+        // Valid when bin_count <= MAX_BIN_COUNT_TGA (8 KB threadgroup
+        // memory for two 1024-float arrays, allowing 4× more concurrent
+        // threadgroups per CU than the wide kernel's 32 KB budget).
+        let (tg_atomic_scatter, count_accumulate) = if bin_count <= MAX_BIN_COUNT_TGA {
+            let tga_name = NSString::from_str(KERNEL_NAME_TG_ATOMIC_SCATTER);
+            let cnt_name = NSString::from_str(KERNEL_NAME_COUNT_ACCUMULATE);
+            let tga_fn = self
+                .library
+                .newFunctionWithName_constantValues_error(&tga_name, &constants)
+                .map_err(|err| {
+                    format!(
+                        "could not specialize `{KERNEL_NAME_TG_ATOMIC_SCATTER}`: {}",
+                        err.localizedDescription()
+                    )
+                })?;
+            let cnt_fn = self
+                .library
+                .newFunctionWithName_constantValues_error(&cnt_name, &constants)
+                .map_err(|err| {
+                    format!(
+                        "could not specialize `{KERNEL_NAME_COUNT_ACCUMULATE}`: {}",
+                        err.localizedDescription()
+                    )
+                })?;
+            let tga_desc = MTLComputePipelineDescriptor::new();
+            tga_desc.setComputeFunction(Some(&tga_fn));
+            let cnt_desc = MTLComputePipelineDescriptor::new();
+            cnt_desc.setComputeFunction(Some(&cnt_fn));
+            if let Some(archive) = &self.archive {
+                let archive_obj: &ProtocolObject<dyn MTLBinaryArchive> = archive;
+                let archive_array = NSArray::from_slice(&[archive_obj]);
+                tga_desc.setBinaryArchives(Some(&archive_array));
+                cnt_desc.setBinaryArchives(Some(&archive_array));
+            }
+            let tga_pso = self
+                .device
+                .newComputePipelineStateWithDescriptor_options_reflection_error(
+                    &tga_desc,
+                    MTLPipelineOption::empty(),
+                    None,
+                )
+                .map_err(|err| {
+                    format!(
+                        "tg_atomic_scatter pipeline creation failed: {}",
+                        err.localizedDescription()
+                    )
+                })?;
+            let cnt_pso = self
+                .device
+                .newComputePipelineStateWithDescriptor_options_reflection_error(
+                    &cnt_desc,
+                    MTLPipelineOption::empty(),
+                    None,
+                )
+                .map_err(|err| {
+                    format!(
+                        "count_accumulate pipeline creation failed: {}",
+                        err.localizedDescription()
+                    )
+                })?;
+            // Persist to archive.
+            if let Some(archive) = &self.archive {
+                for (desc, label) in [(&tga_desc, "tg_atomic_scatter"), (&cnt_desc, "count_accumulate")] {
+                    if let Err(err) = archive.addComputePipelineFunctionsWithDescriptor_error(desc) {
+                        eprintln!(
+                            "[alloygbm metal] warning: could not add {label} pipeline to archive: {}",
+                            err.localizedDescription()
+                        );
+                    } else if let Ok(mut dirty) = self.dirty.lock() {
+                        *dirty = true;
+                    }
+                }
+            }
+            (Some(tga_pso), Some(cnt_pso))
+        } else {
+            (None, None)
+        };
+
         // Wide scatter is only valid when the per-simdgroup private
         // histograms fit in threadgroup memory (D-021). For wider bin
         // counts we dispatch the narrow path.
@@ -359,6 +448,8 @@ impl HistogramPipelineCache {
             scatter,
             scatter_wide,
             reduce,
+            tg_atomic_scatter,
+            count_accumulate,
             bin_count,
             use_u16_bins,
         })

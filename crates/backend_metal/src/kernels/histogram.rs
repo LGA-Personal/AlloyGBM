@@ -47,6 +47,27 @@ pub const KERNEL_NAME_SCATTER_WIDE: &str = "histogram_build_scatter_wide";
 /// Entry-point name for pass 2.
 pub const KERNEL_NAME_REDUCE: &str = "histogram_reduce";
 
+/// Entry-point name for the threadgroup-atomic scatter kernel (Stage 5).
+/// Requires Metal GPU Family 7+ (`apple7` capability flag).
+/// Same buffer layout and scratch output as the wide kernel — reuses
+/// `histogram_reduce` unchanged.
+pub const KERNEL_NAME_TG_ATOMIC_SCATTER: &str = "histogram_tg_atomic_scatter";
+
+/// Entry-point name for the GPU count accumulation kernel (Stage 5).
+/// Requires Metal GPU Family 7+ (`apple7` capability flag).
+/// Replaces the sequential CPU `accumulate_counts` post-step.
+pub const KERNEL_NAME_COUNT_ACCUMULATE: &str = "histogram_count_accumulate";
+
+/// Threads per threadgroup for the threadgroup-atomic scatter and count kernels
+/// (Stage 5). Must match `THREADS_PER_TG_TGA` in `shaders/histogram.metal`.
+pub const THREADS_PER_TG_TGA: usize = 128;
+
+/// Maximum bin count supported by the threadgroup-atomic scatter and count
+/// kernels.  Must match `MAX_BIN_COUNT_TGA` in `shaders/histogram.metal`.
+/// Sized to fit two 1024-float threadgroup arrays in ≤ 8 KB of threadgroup
+/// memory (allowing up to 4× higher occupancy vs the 32-KB wide kernel).
+pub const MAX_BIN_COUNT_TGA: u32 = 1024;
+
 /// Upper bound on the number of bins that fit inside the narrow
 /// kernel's threadgroup-memory `local_hist[MAX_BIN_COUNT]` array. Must
 /// match the `MAX_BIN_COUNT` constant in `shaders/histogram.metal`.
@@ -83,6 +104,14 @@ struct EncodedHistogramRequest {
     /// Owned scratch buffers must outlive `waitUntilCompleted`.
     scratch_keepalive:
         Vec<objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLBuffer>>>,
+    /// Stage 5: GPU count buffer (`[total_selected × bin_count]` u32 values).
+    /// Populated by `histogram_count_accumulate` during the GPU dispatch;
+    /// read back in `finalize_one_histogram_request` to replace the CPU
+    /// `accumulate_counts` loop.  `None` when the count kernel is
+    /// unavailable (bin_count > MAX_BIN_COUNT_TGA or pre-apple7 device).
+    gpu_count_buffer: Option<
+        objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLBuffer>>,
+    >,
 }
 
 /// Encodes scatter+reduce passes for one request into `command_buffer`
@@ -258,6 +287,27 @@ fn encode_one_histogram_request(
     drop(p_setup);
     let _p_dispatch = profile::ScopedProbe::new(&profile::BH_GPU_DISPATCH);
 
+    // Stage 5: allocate one count buffer for all tiles when the GPU count
+    // kernel is available.  Metal shared-mode buffers are zero-initialised
+    // by the driver, so no explicit memset is needed.
+    let u32_bytes = std::mem::size_of::<u32>();
+    let gpu_count_buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>> =
+        if pipelines.count_accumulate.is_some() {
+            let count_bytes =
+                (total_selected as usize) * (bin_count as usize) * u32_bytes;
+            Some(
+                device
+                    .newBufferWithLength_options(count_bytes.max(1), options)
+                    .ok_or_else(|| {
+                        EngineError::BackendUnavailable(
+                            "could not allocate GPU count buffer".to_string(),
+                        )
+                    })?,
+            )
+        } else {
+            None
+        };
+
     // --- Encode into the provided command buffer ---
     let bin_sz = if use_u16 { 2usize } else { 1usize };
     let mut cumulative_features: u32 = 0;
@@ -285,15 +335,16 @@ fn encode_one_histogram_request(
 
         // --------- Pass 1: scatter ---------
         //
-        // D-021 wide path: when `bin_count <= MAX_BIN_COUNT_WIDE` the
-        // pipeline cache has compiled `histogram_build_scatter_wide`
-        // (4 simdgroups / 128 threads) and we dispatch it instead of
-        // the narrow kernel. Grid dimensions are unchanged — only the
-        // `threads_per_tg.width` differs.
+        // Stage 5 priority: tg_atomic_scatter > scatter_wide > scatter_narrow.
+        // The threadgroup-atomic kernel eliminates the 32× simd_shuffle
+        // serialisation and is available on all apple7+ devices (which
+        // MetalBackend::new() already requires).
         let (scatter_pipeline, scatter_threads_per_tg): (
             &ProtocolObject<dyn objc2_metal::MTLComputePipelineState>,
             usize,
-        ) = if let Some(wide) = &pipelines.scatter_wide {
+        ) = if let Some(tga) = &pipelines.tg_atomic_scatter {
+            (tga, THREADS_PER_TG_TGA)
+        } else if let Some(wide) = &pipelines.scatter_wide {
             (wide, THREADS_PER_TG_WIDE)
         } else {
             (&pipelines.scatter, 32usize)
@@ -376,6 +427,61 @@ fn encode_one_histogram_request(
         }
         encoder.endEncoding();
 
+        // --------- Pass 3: GPU count accumulation (Stage 5) ---------
+        //
+        // Encodes the count kernel into the same command buffer as scatter
+        // and reduce, so all three passes complete in a single GPU dispatch.
+        // The count buffer is bound at a tile-specific byte offset so each
+        // tile writes to its disjoint slice without any cross-tile atomics.
+        if let (Some(count_pso), Some(count_buf)) =
+            (&pipelines.count_accumulate, &gpu_count_buffer)
+        {
+            let count_byte_offset =
+                (cumulative_features as usize) * (bin_count as usize) * u32_bytes;
+            let encoder = command_buffer.computeCommandEncoder().ok_or_else(|| {
+                EngineError::BackendUnavailable(
+                    "no compute command encoder for count pass".to_string(),
+                )
+            })?;
+            encoder.setComputePipelineState(count_pso);
+            unsafe {
+                // buffer(0/1): binned data (same u8/u16 selection as scatter)
+                if use_u16 {
+                    encoder.setBuffer_offset_atIndex(Some(&dummy_buffer), 0, 0);
+                    encoder.setBuffer_offset_atIndex(Some(&binned_buffer), binned_offset, 1);
+                } else {
+                    encoder.setBuffer_offset_atIndex(Some(&binned_buffer), binned_offset, 0);
+                    encoder.setBuffer_offset_atIndex(Some(&dummy_buffer), 0, 1);
+                }
+                // buffer(2): row_indices
+                encoder.setBuffer_offset_atIndex(Some(&row_indices_buffer), 0, 2);
+                // buffer(3): counts_out at tile offset
+                encoder.setBuffer_offset_atIndex(Some(count_buf), count_byte_offset, 3);
+
+                let n_rows_total_cell: u32 = n_rows_total;
+                let node_row_count_cell: u32 = node_row_count;
+                let rows_per_chunk_cell: u32 = rows_per_chunk;
+                let tile_n_features_cell: u32 = tile_n_features;
+                set_u32_bytes(&encoder, &n_rows_total_cell, 4);
+                set_u32_bytes(&encoder, &node_row_count_cell, 5);
+                set_u32_bytes(&encoder, &rows_per_chunk_cell, 6);
+                set_u32_bytes(&encoder, &tile_n_features_cell, 7);
+
+                let threadgroups = MTLSize {
+                    width: tile_n_features as usize,
+                    height: n_chunks as usize,
+                    depth: 1,
+                };
+                let threads_per_tg = MTLSize {
+                    width: THREADS_PER_TG_TGA,
+                    height: 1,
+                    depth: 1,
+                };
+                encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);
+            }
+            encoder.endEncoding();
+        }
+
         scratch_keepalive.push(scratch_buffer);
         cumulative_features += tile_n_features;
         drop(p_encode);
@@ -393,6 +499,7 @@ fn encode_one_histogram_request(
         total_selected,
         selected_features,
         scratch_keepalive,
+        gpu_count_buffer,
     })
 }
 
@@ -412,11 +519,22 @@ fn finalize_one_histogram_request(
 
     let counts_total = (encoded.total_selected as usize) * (encoded.bin_count as usize);
     let mut counts_flat = vec![0u32; counts_total];
-    // CPU-side count accumulation wants a &[u32]. Cpu variants loan
-    // their existing slice; Gpu variants read the row-index prefix
-    // out of the pool buffer as `[u32; node_row_count]`. The readback
-    // is a single unavoidable host-visible copy per call — a future
-    // GPU counts kernel (deferred) would remove it.
+
+    // Stage 5: if the GPU count kernel ran, read back its output directly
+    // instead of running the serial CPU `accumulate_counts` loop.
+    if let Some(count_buf) = &encoded.gpu_count_buffer {
+        // SAFETY: shared-mode MTLBuffer contents() is a CPU-visible pointer
+        // valid for the buffer's entire lifetime; GPU writes are complete
+        // after `waitUntilCompleted`.
+        let ptr = count_buf.contents().as_ptr() as *const u32;
+        let gpu_counts = unsafe { std::slice::from_raw_parts(ptr, counts_total) };
+        counts_flat.copy_from_slice(gpu_counts);
+        histogram_residency.write_counts(encoded.pool_handle, &counts_flat)?;
+        return Ok(());
+    }
+
+    // CPU fallback: sequential bin-count accumulation (pre-apple7 devices
+    // or when bin_count > MAX_BIN_COUNT_TGA).
     let gpu_rows_cache: Vec<u32>;
     let row_indices_slice: &[u32] = match &node.rows {
         alloygbm_core::RowIndexStorage::Cpu(v) => v.as_slice(),

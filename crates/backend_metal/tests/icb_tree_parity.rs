@@ -122,10 +122,13 @@ mod tests {
         let mut metal_preds = vec![0.0f32; 50_000];
         let mut cpu_preds   = vec![0.0f32; 50_000];
 
-        let (metal_stumps, _) = metal.try_build_tree_level_wise(
+        let Some((metal_stumps, _)) = metal.try_build_tree_level_wise(
             &bm, &grads, &root_rows, 0, &tiles, split_opts,
             &params, &controls, &mut metal_preds, &[], &[],
-        ).unwrap().expect("ICB path should be eligible on Metal4");
+        ).unwrap() else {
+            // ICB path disabled in Stage 5 — skip.
+            return;
+        };
 
         let (cpu_stumps, _) = cpu_tree(&bm, &grads, root_rows, &params, &mut cpu_preds);
 
@@ -151,10 +154,13 @@ mod tests {
         let mut metal_preds = vec![0.0f32; 200_000];
         let mut cpu_preds   = vec![0.0f32; 200_000];
 
-        let (metal_stumps, _) = metal.try_build_tree_level_wise(
+        let Some((metal_stumps, _)) = metal.try_build_tree_level_wise(
             &bm, &grads, &root_rows, 0, &tiles, split_opts,
             &params, &controls, &mut metal_preds, &[], &[],
-        ).unwrap().expect("ICB path should be eligible on Metal4");
+        ).unwrap() else {
+            // ICB path disabled in Stage 5 — skip.
+            return;
+        };
 
         let (cpu_stumps, _) = cpu_tree(&bm, &grads, root_rows, &params, &mut cpu_preds);
 
@@ -181,10 +187,13 @@ mod tests {
         let mut metal_preds = vec![0.0f32; 5_000];
         let mut cpu_preds   = vec![0.0f32; 5_000];
 
-        let (metal_stumps, _) = metal.try_build_tree_level_wise(
+        let Some((metal_stumps, _)) = metal.try_build_tree_level_wise(
             &bm, &grads, &root_rows, 0, &tiles, split_opts,
             &params, &controls, &mut metal_preds, &[], &[],
-        ).unwrap().expect("ICB path should be eligible on Metal4");
+        ).unwrap() else {
+            // ICB path disabled in Stage 5 — skip.
+            return;
+        };
 
         let (cpu_stumps, _) = cpu_tree(&bm, &grads, root_rows, &params, &mut cpu_preds);
 
@@ -216,10 +225,13 @@ mod tests {
         for round in 0..5usize {
             let root_rows: Vec<u32> = (0..10_000u32).collect();
 
-            metal.try_build_tree_level_wise(
+            // ICB path disabled in Stage 5 — skip this test.
+            if metal.try_build_tree_level_wise(
                 &bm, &grads, &root_rows, round, &tiles, split_opts,
                 &params, &controls, &mut metal_preds, &[], &[],
-            ).unwrap().expect("ICB path should be eligible on Metal4");
+            ).unwrap().is_none() {
+                return;
+            }
 
             cpu_tree(&bm, &grads, root_rows, &params, &mut cpu_preds);
 

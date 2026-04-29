@@ -975,80 +975,32 @@ impl BackendOps for MetalBackend {
 
     fn try_build_tree_level_wise(
         &self,
-        binned_matrix:         &BinnedMatrix,
-        gradients:             &[GradientPair],
-        root_row_indices:      &[u32],
+        _binned_matrix:        &BinnedMatrix,
+        _gradients:            &[GradientPair],
+        _root_row_indices:     &[u32],
         _round_index:          usize,
         _feature_tiles:        &[FeatureTile],
-        split_options:         SplitSelectionOptions,
-        params:                &TrainParams,
-        controls:              &IterationControls,
-        candidate_predictions: &mut [f32],
+        _split_options:        SplitSelectionOptions,
+        _params:               &TrainParams,
+        _controls:             &IterationControls,
+        _candidate_predictions: &mut [f32],
         _feature_weights:      &[f32],
-        categorical_features:  &[CategoricalFeatureInfo],
+        _categorical_features: &[CategoricalFeatureInfo],
     ) -> EngineResult<Option<(Vec<TrainedStump>, IterationStopReason)>> {
-        // ICB eligibility gate (AND of all conditions):
-        let encoder = match &self.icb_encoder {
-            Some(e) => e,
-            None    => return Ok(None),
-        };
-        if !categorical_features.is_empty() { return Ok(None); }
-        let bin_count = binned_matrix.max_bin as u32 + 1;
-        if bin_count > 1024 { return Ok(None); }
-        if params.lambda_l1 != 0.0 { return Ok(None); }
-        if !params.monotone_constraints.is_empty() { return Ok(None); }
-        // B-004: icb_partition casts node IDs to u16; depth ≥ 15 can overflow.
-        if params.max_depth > 14 { return Ok(None); }
-
-        let pool_mutex = self.icb_pool.as_ref().unwrap(); // always Some when icb_encoder is Some
-        let pool = pool_mutex.lock().map_err(|e| {
-            alloygbm_engine::EngineError::BackendUnavailable(
-                format!("icb_pool mutex poisoned: {e}"))
-        })?;
-
-        // Fall back if the dataset exceeds the pre-allocated pool dimensions.
-        if binned_matrix.row_count > pool.row_count
-            || binned_matrix.feature_count > pool.feature_count
-            || bin_count as usize > pool.bin_count
-        {
-            return Ok(None);
-        }
-
-        // Upload binned matrix — zero-copy cache hit on subsequent trees.
-        let bin_data_buf = match &binned_matrix.bins_col_adaptive {
-            BinStorage::U8(v)  => self.buffer_cache.get_or_upload_binned(
-                &self.metal_device.device, v, false)?,
-            BinStorage::U16(v) => self.buffer_cache.get_or_upload_binned(
-                &self.metal_device.device, v, true)?,
-        };
-
-        let grads: Vec<f32> = gradients.iter().map(|gp| gp.grad).collect();
-        let hess:  Vec<f32> = gradients.iter().map(|gp| gp.hess).collect();
-
-        pool.reset_for_tree(root_row_indices);
-        pool.upload_gradients(&grads, &hess);
-
-        let icb_params = IcbTreeParams::from_train_params(
-            params, binned_matrix, controls.min_split_gain);
-
-        // Column-major u8 bin data for CPU-side left/right child resolution
-        // of last-level split nodes (partition is a no-op at max depth).
-        let bin_col_u8: &[u8] = match &binned_matrix.bins_col_adaptive {
-            alloygbm_core::BinStorage::U8(v) => v,
-            alloygbm_core::BinStorage::U16(_) => &binned_matrix.bins_col,
-        };
-
-        let (stumps, stop_reason) = encoder.encode_and_run(
-            &pool,
-            &icb_params,
-            &bin_data_buf,
-            bin_col_u8,
-            root_row_indices,
-            candidate_predictions,
-            split_options,
-        )?;
-
-        Ok(Some((stumps, stop_reason)))
+        // Stage 5: ICB histogram path disabled.
+        //
+        // Stage 4b's `icb_histogram` issues one global float atomic per
+        // (row × feature) — 100M atomics per level-0 dispatch — with no
+        // histogram subtraction trick.  Stage 5's `histogram_tg_atomic_scatter`
+        // uses threadgroup-local atomic<float> accumulation (one TG atomic per
+        // row) and then a single global atomic per (feature, bin, chunk) flush,
+        // reducing global atomic pressure by ~32×.  The Stage 4a per-level
+        // batch path also restores histogram subtraction, halving histogram
+        // work vs ICB.
+        //
+        // Re-enable when Stage 4b's icb_histogram is ported to the
+        // threadgroup-atomic approach.
+        Ok(None)
     }
 }
 
