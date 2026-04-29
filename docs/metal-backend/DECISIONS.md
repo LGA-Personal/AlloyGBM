@@ -1024,3 +1024,11 @@ Stage: S4b
 Decision: Keep the last-level partition as a no-op (zero-width dispatch) and resolve left/right child leaf values on the CPU in `update_candidate_predictions` using the column-major bin data.
 Why: Running partition at the last level would move rows to level-(depth) nodes, which exceed the `max_nodes = 2^depth` buffer bounds. Doubling the buffer capacity to `2^(depth+1) - 1` would accommodate those nodes, but the extra memory (up to 64 MB for depth=8) buys nothing: the only use of level-(depth) data is computing leaf values, which can be done from the parent's split decision without touching the GPU again. The CPU readback loop is O(active_rows) and branch-free; the extra cost is negligible compared to the GPU execution time.
 Alternatives considered: Run partition at all levels + expand buffers to 2^(depth+1)−1 nodes (rejected — double buffer cost for no throughput gain); add a GPU leaf-value-compute kernel for level depth (rejected — requires 4th kernel + PSO + extra ICB command type).
+
+## D-028 — Stage 4b kill-criterion outcome: ICB does not improve throughput
+
+Date: 2026-04-29
+Stage: S4b
+Decision: Stage 4b ICB chaining closed as NOT MET (0.24×). Proceeding to Stage 5 to address GPU histogram kernel throughput.
+Why: The Stage 4a profiling showed `commit_wait = 4626ms / 40 dispatches = ~115ms/level`, which we attributed to CPU stall overhead. In fact that time was actual GPU histogram compute — 800M float atomics at ~1ns each ≈ 800ms × 5 estimators ≈ 4s, which matches. Eliminating per-level `waitUntilCompleted` via ICB saves only the inter-level CPU overhead, which was <<115ms per level and thus negligible relative to GPU work. Additionally, the ICB path does not implement histogram subtraction (Stage 4a does), which partially offsets any sync savings. The two effects cancel and the benchmark is flat at 0.24×.
+Alternatives considered: Continue ICB optimisation (rejected — diminishing returns; the bottleneck is GPU histogram throughput, not sync overhead); implement GPU histogram subtraction within ICB (deferred to Stage 5 — requires GPU-side tracking of smaller child, significant added complexity).

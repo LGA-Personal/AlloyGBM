@@ -5,25 +5,28 @@ First thing a new session reads, alongside `STATUS.md`.
 
 ---
 
-## 2026-04-29 — Stage 4b ICB tree: parity test bugs fixed (Task 9 complete)
+## 2026-04-29 — Stage 4b complete: parity tests + benchmark (Tasks 9–10)
 
-**Shipped (commit de2b9d3):**
+**Shipped (commits de2b9d3, fe82c53, a10974e):**
 
 - Four blocker bugs fixed in the ICB tree path (all found via parity tests):
-  - **B-003 (ICB PSO):** `IcbPipelineCache` used `newComputePipelineStateWithFunction_error` which creates PSOs without `supportIndirectCommandBuffers=true`, causing SIGSEGV. Fixed with `MTLComputePipelineDescriptor` + `setSupportIndirectCommandBuffers(true)` for all three ICB kernels.
-  - **B-004 (histogram layout):** All levels shared histogram offset 0, so each level accumulated on top of the previous. Fixed with per-level regions (`(2^L - 1) × F × B × 2 × 4` byte offset per level, single CPU zero before GPU commit).
-  - **B-005 (bin layout):** `icb_histogram` and `icb_partition` kernels used row-major bin access; `BinnedMatrix::bins_col_adaptive` is column-major. Fixed to `bin_data[f * row_count + gid]`.
-  - **B-006 (last-level leaf values):** Last-level partition is a no-op (zero-width dispatch), so rows stay at split nodes. `update_candidate_predictions` computed `grad_total / hess_total` instead of the correct left/right child value. Fixed by passing column-major bin data to the CPU readback function and routing rows via bin ≤ threshold comparison.
-- Also: ICB `min_split_gain` now uses `controls.min_split_gain` (matching the CPU fallback path) rather than `params.min_split_gain`.
-- Four parity integration tests (`icb_tree_parity.rs`) — all pass on Metal 4 (macOS 26.4.1), silent skip on older hardware.
-- BUGS.md: entries B-003 through B-006 moved to Resolved.
-- DECISIONS.md: D-026 (per-level histogram regions), D-027 (CPU left/right resolution for last-level nodes).
+  - **B-003 (ICB PSO):** `IcbPipelineCache` used `newComputePipelineStateWithFunction_error` which creates PSOs without `supportIndirectCommandBuffers=true`, causing SIGSEGV. Fixed with `MTLComputePipelineDescriptor` + `setSupportIndirectCommandBuffers(true)`.
+  - **B-004 (histogram layout):** All levels shared histogram offset 0. Fixed with per-level regions (`(2^L - 1) × F × B × 2 × 4` byte offset per level).
+  - **B-005 (bin layout):** `icb_histogram` and `icb_partition` used row-major bin access; `BinnedMatrix::bins_col_adaptive` is column-major. Fixed to `bin_data[f * row_count + gid]`.
+  - **B-006 (last-level leaf values):** Last-level partition was a no-op; rows stayed at split nodes and got wrong average leaf value. Fixed: CPU resolves left/right from column-major bin data in `update_candidate_predictions`.
+- ICB `min_split_gain` now uses `controls.min_split_gain` (matching the CPU fallback path).
+- Four parity integration tests (`icb_tree_parity.rs`) — all 4 pass on Metal 4 (macOS 26.4.1).
+- `metal_friendly_large_icb` benchmark scenario added.
+- BUGS.md: B-003–B-006 resolved. DECISIONS.md: D-026, D-027.
 
-**What moved:**
-- Task 9 ✅ (parity tests written, bugs fixed, all 4 tests green).
+**Kill-criterion result: NOT MET.**
+
+`metal_friendly_large_icb` (1M × 100, regression d=8, bins=255, 5 est., Apple M4): **0.24×** (CPU 1.53s, Metal 6.44s). Identical to Stage 4a (0.24×).
+
+Root cause: `commit_wait` in Stage 4a was dominated by GPU histogram compute (800M float atomics ≈ 4.5s), not by CPU idle time between levels. Eliminating per-level sync overhead via ICB saves negligible time. Additionally, ICB does not use histogram subtraction, while Stage 4a does. These effects cancel, giving the same overall throughput.
 
 **Blockers / next-up:**
-- Task 10: `metal_friendly_large_icb` benchmark + final STATUS/SESSIONS update.
+- Stage 5 design: need to address GPU histogram kernel throughput. Options: (a) two-pass reduction (shared memory → single accumulate), (b) GPU histogram subtraction to halve atomic work at each level.
 
 ---
 
