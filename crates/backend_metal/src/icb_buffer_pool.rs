@@ -94,8 +94,12 @@ unsafe impl Sync for IcbBufferPool {}
 impl IcbBufferPool {
     /// Allocate all buffers for the given training shape.
     ///
-    /// `max_depth` is `TrainParams::max_depth` (e.g. 8). The worst-case
-    /// histogram level needs `2^(max_depth-1)` nodes × F × B × 2 f32 slots.
+    /// `max_depth` is `TrainParams::max_depth` (e.g. 8). The histogram buffer
+    /// holds one region per level: level L gets `(2^L)` nodes × F × B × 2 f32
+    /// slots at byte offset `(2^L - 1) × F × B × 2 × sizeof(f32)`. Total
+    /// regions = `(2^depth_max - 1)` nodes. This eliminates the need for
+    /// GPU-side zeroing between levels; the buffer is zeroed once on the CPU
+    /// before each tree (`zero_all_histograms`).
     pub(crate) fn new(
         device: &ProtocolObject<dyn MTLDevice>,
         row_count: usize,
@@ -103,17 +107,19 @@ impl IcbBufferPool {
         bin_count: usize,
         max_depth: usize,
     ) -> EngineResult<Self> {
-        let max_nodes     = 1usize << max_depth;          // 2^depth total addressable nodes
-        let max_level_nodes = max_nodes / 2;              // largest level = 2^(depth-1) nodes
+        let max_nodes    = 1usize << max_depth;   // 2^depth total addressable nodes
+        let total_hist_nodes = max_nodes - 1;     // sum(2^L, L=0..depth_max-1) = 2^depth - 1
 
-        let row_node_id_bytes    = row_count        * size_of::<u16>();
-        let node_active_bytes    = max_nodes        * size_of::<u8>();
-        let split_decisions_bytes= max_nodes        * size_of::<IcbSplitDecisionGpu>();
-        let leaf_values_bytes    = max_nodes        * size_of::<f32>();
-        let histograms_bytes     = max_level_nodes  * feature_count * bin_count * 2 * size_of::<f32>();
-        let gradients_bytes      = row_count        * size_of::<f32>();
-        let hessians_bytes       = row_count        * size_of::<f32>();
-        let constants_bytes      = max_depth        * size_of::<IcbConstantsGpu>();
+        let row_node_id_bytes    = row_count          * size_of::<u16>();
+        let node_active_bytes    = max_nodes           * size_of::<u8>();
+        let split_decisions_bytes= max_nodes           * size_of::<IcbSplitDecisionGpu>();
+        let leaf_values_bytes    = max_nodes           * size_of::<f32>();
+        // Each level L occupies a separate region of `2^L × F × B × 2` f32 slots
+        // at byte offset `(2^L - 1) × F × B × 2 × 4`.
+        let histograms_bytes     = total_hist_nodes   * feature_count * bin_count * 2 * size_of::<f32>();
+        let gradients_bytes      = row_count           * size_of::<f32>();
+        let hessians_bytes       = row_count           * size_of::<f32>();
+        let constants_bytes      = max_depth           * size_of::<IcbConstantsGpu>();
 
         // Align each allocation to 256 bytes (Metal heap alignment requirement).
         fn align256(n: usize) -> usize { (n + 255) & !255 }
@@ -225,18 +231,31 @@ impl IcbBufferPool {
         }
     }
 
-    /// Zero the histogram buffer for the current level (called by the
-    /// encoder before binding the histogram buffer to a new level's commands).
-    pub(crate) fn zero_histograms(&self, level_node_count: usize) {
-        let bytes = level_node_count * self.feature_count * self.bin_count * 2 * size_of::<f32>();
-        // SAFETY: StorageModeShared, buffer was allocated for this size.
+    /// Zero the ENTIRE histogram buffer before each tree.
+    ///
+    /// Because the histogram buffer uses per-level regions (level L at byte
+    /// offset `(2^L-1) × F × B × 2 × 4`), a single zero here covers all
+    /// levels and resets stale data from the previous round.  Must be called
+    /// before the GPU command buffer is committed for each tree.
+    pub(crate) fn zero_all_histograms(&self) {
+        let total_bytes = self.histograms.length() as usize;
+        // SAFETY: StorageModeShared, buffer has CPU-writable contents().
         unsafe {
             std::ptr::write_bytes(
                 self.histograms.contents().as_ptr() as *mut u8,
                 0u8,
-                bytes,
+                total_bytes,
             );
         }
+    }
+
+    /// Byte offset into the histogram buffer where level `L` starts.
+    ///
+    /// Level L has `2^L` nodes; its region begins at byte
+    /// `(2^L - 1) × feature_count × bin_count × 2 × 4`.
+    pub(crate) fn hist_level_byte_offset(&self, level: usize) -> usize {
+        let node_offset = (1usize << level) - 1; // = level_node_offset
+        node_offset * self.feature_count * self.bin_count * 2 * size_of::<f32>()
     }
 
     /// Read back `split_decisions` and `leaf_values` from the GPU buffer.

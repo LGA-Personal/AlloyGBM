@@ -982,7 +982,7 @@ impl BackendOps for MetalBackend {
         _feature_tiles:        &[FeatureTile],
         split_options:         SplitSelectionOptions,
         params:                &TrainParams,
-        _controls:             &IterationControls,
+        controls:              &IterationControls,
         candidate_predictions: &mut [f32],
         _feature_weights:      &[f32],
         categorical_features:  &[CategoricalFeatureInfo],
@@ -1028,12 +1028,21 @@ impl BackendOps for MetalBackend {
         pool.reset_for_tree(root_row_indices);
         pool.upload_gradients(&grads, &hess);
 
-        let icb_params = IcbTreeParams::from_train_params(params, binned_matrix);
+        let icb_params = IcbTreeParams::from_train_params(
+            params, binned_matrix, controls.min_split_gain);
+
+        // Column-major u8 bin data for CPU-side left/right child resolution
+        // of last-level split nodes (partition is a no-op at max depth).
+        let bin_col_u8: &[u8] = match &binned_matrix.bins_col_adaptive {
+            alloygbm_core::BinStorage::U8(v) => v,
+            alloygbm_core::BinStorage::U16(_) => &binned_matrix.bins_col,
+        };
 
         let (stumps, stop_reason) = encoder.encode_and_run(
             &pool,
             &icb_params,
             &bin_data_buf,
+            bin_col_u8,
             root_row_indices,
             candidate_predictions,
             split_options,

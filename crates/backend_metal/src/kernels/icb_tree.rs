@@ -26,13 +26,16 @@ use crate::icb_buffer_pool::{IcbBufferPool, IcbConstantsGpu, IcbSplitDecisionGpu
 use crate::pipelines::IcbPipelineCache;
 use crate::profile;
 
-/// Parameters extracted from `TrainParams` for ICB encoding.
+/// Parameters extracted from `TrainParams` + `IterationControls` for ICB encoding.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct IcbTreeParams {
     pub depth:             u8,
     pub feature_count:     u32,
     pub bin_count:         u32,
     pub row_count:         u32,
+    /// Effective minimum split gain — from `IterationControls::min_split_gain`,
+    /// which matches what `build_tree_level_wise` uses for the CPU fallback path.
+    /// In production this equals `max(auto_policy_floor, params.min_split_gain)`.
     pub min_split_gain:    f32,
     pub lambda:            f32,
     pub learning_rate:     f32,
@@ -40,13 +43,17 @@ pub(crate) struct IcbTreeParams {
 }
 
 impl IcbTreeParams {
-    pub(crate) fn from_train_params(p: &TrainParams, bm: &BinnedMatrix) -> Self {
+    pub(crate) fn from_train_params(
+        p:                    &TrainParams,
+        bm:                   &BinnedMatrix,
+        controls_min_split_gain: f32,
+    ) -> Self {
         Self {
             depth:             p.max_depth as u8,
             feature_count:     bm.feature_count as u32,
             bin_count:         bm.max_bin as u32 + 1,
             row_count:         bm.row_count as u32,
-            min_split_gain:    p.min_split_gain,
+            min_split_gain:    controls_min_split_gain,
             lambda:            p.lambda_l2,
             learning_rate:     p.learning_rate,
             min_rows_per_leaf: p.min_data_in_leaf,
@@ -110,6 +117,9 @@ impl IcbTreeEncoder {
         pool:                  &IcbBufferPool,
         params:                &IcbTreeParams,
         bin_data_buf:          &ProtocolObject<dyn MTLBuffer>,
+        // Column-major u8 bin data `bins_col[feature * row_count + row]`.
+        // Used to determine left/right child assignment for last-level split nodes.
+        bin_col_data:          &[u8],
         root_row_indices:      &[u32],
         candidate_predictions: &mut [f32],
         split_options:         SplitSelectionOptions,
@@ -123,7 +133,7 @@ impl IcbTreeEncoder {
         {
             let _p_enc = profile::ScopedProbe::new(&profile::ICB_ENCODE);
 
-            // ── 0. Upload per-level constants to shared buffer ────────────────
+            // ── 0. Upload per-level constants + zero histogram buffer ─────────
             let mut all_consts: Vec<IcbConstantsGpu> = Vec::with_capacity(depth);
             for level in 0..depth {
                 let node_offset = (1u32 << level) - 1;
@@ -137,7 +147,7 @@ impl IcbTreeEncoder {
                     level_node_end:    node_end,
                     level_node_count:  node_count,
                     min_rows_per_leaf: params.min_rows_per_leaf,
-                    min_split_gain:    split_options.l2_lambda.max(params.min_split_gain),
+                    min_split_gain:    params.min_split_gain,
                     lambda:            split_options.l2_lambda,
                     learning_rate:     params.learning_rate,
                     _pad0:             0,
@@ -146,15 +156,18 @@ impl IcbTreeEncoder {
             }
             pool.upload_constants(&all_consts);
 
+            // Zero the entire histogram buffer once before GPU execution.
+            // Each level L writes to a distinct region at byte offset
+            // (2^L - 1) × F × B × 2 × 4, so no per-level zeroing is needed;
+            // a single pre-zero here covers all levels for this round.
+            pool.zero_all_histograms();
+
             // ── 1. Encode ICB commands ────────────────────────────────────────
             for level in 0..depth {
                 let node_count    = 1u32 << level;
                 let consts_offset = level * size_of::<IcbConstantsGpu>();
-
-                // Zero histogram buffer for this level before encoding.
-                pool.zero_histograms(node_count as usize);
-
-                let base_cmd = level * 3;
+                let hist_offset   = pool.hist_level_byte_offset(level);
+                let base_cmd      = level * 3;
 
                 // Command 0: icb_histogram
                 // SAFETY: indirectComputeCommandAtIndex is documented safe for
@@ -169,7 +182,8 @@ impl IcbTreeEncoder {
                     hist_cmd.setKernelBuffer_offset_atIndex(&pool.gradients,    0,             2);
                     hist_cmd.setKernelBuffer_offset_atIndex(&pool.hessians,     0,             3);
                     hist_cmd.setKernelBuffer_offset_atIndex(bin_data_buf,       0,             4);
-                    hist_cmd.setKernelBuffer_offset_atIndex(&pool.histograms,   0,             5);
+                    // Bind histogram at this level's region offset (not 0).
+                    hist_cmd.setKernelBuffer_offset_atIndex(&pool.histograms,   hist_offset,   5);
                     hist_cmd.setKernelBuffer_offset_atIndex(&pool.constants,    consts_offset, 6);
                 }
                 let rows_tg_count = (params.row_count as usize + tg_rows - 1) / tg_rows;
@@ -182,7 +196,8 @@ impl IcbTreeEncoder {
                 let sf_cmd = unsafe { self.icb.indirectComputeCommandAtIndex(base_cmd + 1) };
                 unsafe {
                     sf_cmd.setComputePipelineState(&self.pipeline_cache.split_find);
-                    sf_cmd.setKernelBuffer_offset_atIndex(&pool.histograms,      0,             0);
+                    // Same per-level histogram offset as the histogram command.
+                    sf_cmd.setKernelBuffer_offset_atIndex(&pool.histograms,      hist_offset,   0);
                     sf_cmd.setKernelBuffer_offset_atIndex(&pool.split_decisions, 0,             1);
                     sf_cmd.setKernelBuffer_offset_atIndex(&pool.node_active,     0,             2);
                     sf_cmd.setKernelBuffer_offset_atIndex(&pool.leaf_values,     0,             3);
@@ -194,7 +209,10 @@ impl IcbTreeEncoder {
                     MTLSize { width: tg_nodes, height: 1, depth: 1 },
                 );
 
-                // Command 2: icb_partition (last level = no-op zero-width dispatch)
+                // Command 2: icb_partition.
+                // Last level is a no-op (zero-width dispatch): rows stay in their
+                // level-(depth-1) nodes so that update_candidate_predictions can
+                // determine left/right child assignment via the bin data on the CPU.
                 let part_cmd = unsafe { self.icb.indirectComputeCommandAtIndex(base_cmd + 2) };
                 unsafe {
                     part_cmd.setComputePipelineState(&self.pipeline_cache.partition);
@@ -239,7 +257,6 @@ impl IcbTreeEncoder {
             use objc2_foundation::NSRange;
             for level in 0..depth {
                 let base_cmd = level * 3;
-
                 unsafe {
                     // Histogram
                     encoder.executeCommandsInBuffer_withRange(
@@ -255,7 +272,7 @@ impl IcbTreeEncoder {
                     );
                     encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
 
-                    // Partition (may be zero-dispatch on last level)
+                    // Partition (zero-dispatch on last level)
                     encoder.executeCommandsInBuffer_withRange(
                         &self.icb,
                         NSRange { location: base_cmd + 2, length: 1 },
@@ -293,6 +310,7 @@ impl IcbTreeEncoder {
             &row_node_ids,
             &decisions,
             &leaf_values,
+            bin_col_data,
             params,
             split_options,
         );
@@ -391,28 +409,59 @@ fn leaf_from_parent(
 }
 
 /// Apply the ICB tree's leaf deltas to `candidate_predictions`.
+///
+/// Rows end up in one of three states after GPU execution:
+///
+/// 1. **True leaf** (`feature_idx == sentinel`): `leaf_values[n]` was written
+///    by `icb_split_find` when no gain exceeded `min_split_gain`.
+///
+/// 2. **Last-level split node** (`feature_idx != sentinel`): the last-level
+///    partition is a no-op, so this row stayed at its level-(depth-1) node.
+///    We look up the row's bin value in `bin_col_data` and compute the correct
+///    left or right child leaf value from the split decision.
 fn update_candidate_predictions(
     candidate_predictions: &mut [f32],
     root_row_indices:      &[u32],
     row_node_ids:          &[u16],
     decisions:             &[IcbSplitDecisionGpu],
     leaf_values:           &[f32],
+    // Column-major u8 bin data: `bin_col_data[feature * row_count + row]`.
+    bin_col_data:          &[u8],
     params:                &IcbTreeParams,
     options:               SplitSelectionOptions,
 ) {
-    let lambda = options.l2_lambda;
-    let lr     = params.learning_rate;
+    let lambda    = options.l2_lambda;
+    let lr        = params.learning_rate;
+    let row_count = params.row_count as usize;
+    let nan_bin   = (params.bin_count - 1) as u8;
 
     for &r in root_row_indices {
         let n = row_node_ids[r as usize] as usize;
         if n >= decisions.len() { continue; }
         let d = &decisions[n];
         let delta = if d.feature_idx == 0xFFFF_FFFFu32 {
+            // Leaf node: leaf value was written by icb_split_find.
             leaf_values[n]
         } else {
-            let g = d.grad_total;
-            let h = d.hess_total;
-            -lr * g / (h + lambda + 1e-9)
+            // Last-level split node: partition was skipped, so this row stayed
+            // at its parent split node.  Determine left/right via the bin value.
+            let feat = d.feature_idx as usize;
+            let row  = r as usize;
+            let bin  = bin_col_data[feat * row_count + row];
+            let nan_goes_right = (d.flags & 1u32) != 0;
+            let is_missing = bin == nan_bin;
+            let goes_left = if is_missing {
+                !nan_goes_right
+            } else {
+                (bin as u32) <= d.threshold_bin
+            };
+            if goes_left {
+                -lr * d.grad_left / (d.hess_left + lambda + 1e-9)
+            } else {
+                let g_right = d.grad_total - d.grad_left;
+                let h_right = d.hess_total - d.hess_left;
+                -lr * g_right / (h_right + lambda + 1e-9)
+            }
         };
         candidate_predictions[r as usize] += delta;
     }

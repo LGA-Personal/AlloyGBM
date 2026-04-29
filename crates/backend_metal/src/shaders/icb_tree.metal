@@ -70,7 +70,8 @@ kernel void icb_histogram(
     float h = hessians[gid];
 
     for (uint f = 0; f < c.feature_count; f++) {
-        uint bin = bin_data[gid * c.feature_count + f];
+        // BinnedMatrix is column-major: bins[feature * row_count + row].
+        uint bin = bin_data[f * c.row_count + gid];
         uint base = (local_node * c.feature_count + f) * c.bin_count * 2;
         atomic_fetch_add_explicit(
             &histograms[base + bin * 2],     g, memory_order_relaxed);
@@ -237,7 +238,8 @@ kernel void icb_partition(
     // Sentinel: this node has no valid split, row stays here (it is a leaf).
     if (d.feature_idx == 0xFFFFFFFF) return;
 
-    uint bin = bin_data[gid * c.feature_count + d.feature_idx];
+    // BinnedMatrix is column-major: bins[feature * row_count + row].
+    uint bin = bin_data[d.feature_idx * c.row_count + gid];
     bool nan_goes_right = (d.flags & 1u) != 0u;
     bool is_missing     = (bin == (c.bin_count - 1));
     bool goes_left;

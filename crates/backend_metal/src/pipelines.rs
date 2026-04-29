@@ -1405,15 +1405,27 @@ impl IcbPipelineCache {
             .newFunctionWithName(&NSString::from_str("icb_partition"))
             .ok_or_else(|| "icb_tree.metal: missing icb_partition".to_string())?;
 
-        let histogram  = device
-            .newComputePipelineStateWithFunction_error(&histogram_fn)
-            .map_err(|e| format!("icb_histogram pipeline failed: {}", e.localizedDescription()))?;
-        let split_find = device
-            .newComputePipelineStateWithFunction_error(&split_find_fn)
-            .map_err(|e| format!("icb_split_find pipeline failed: {}", e.localizedDescription()))?;
-        let partition  = device
-            .newComputePipelineStateWithFunction_error(&partition_fn)
-            .map_err(|e| format!("icb_partition pipeline failed: {}", e.localizedDescription()))?;
+        // ICB kernels require PSOs created with `supportIndirectCommandBuffers = true`.
+        // The simple `newComputePipelineStateWithFunction` API produces PSOs that
+        // cannot be bound to ICB commands; Metal validation crashes on `setComputePipelineState`.
+        let make_icb_pso = |func: &ProtocolObject<dyn objc2_metal::MTLFunction>, name: &str|
+            -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, String>
+        {
+            let desc = MTLComputePipelineDescriptor::new();
+            desc.setComputeFunction(Some(func));
+            desc.setSupportIndirectCommandBuffers(true);
+            device
+                .newComputePipelineStateWithDescriptor_options_reflection_error(
+                    &desc,
+                    MTLPipelineOption::empty(),
+                    None,
+                )
+                .map_err(|e| format!("{name} ICB pipeline failed: {}", e.localizedDescription()))
+        };
+
+        let histogram  = make_icb_pso(&histogram_fn,  "icb_histogram")?;
+        let split_find = make_icb_pso(&split_find_fn, "icb_split_find")?;
+        let partition  = make_icb_pso(&partition_fn,  "icb_partition")?;
 
         Ok(Self { histogram, split_find, partition })
     }
