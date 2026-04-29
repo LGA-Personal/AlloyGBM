@@ -43,6 +43,14 @@ use alloygbm_core::{
 };
 #[cfg(target_os = "macos")]
 use alloygbm_engine::{BackendOps, CategoricalFeatureInfo, EngineResult, SplitSelectionOptions};
+#[cfg(target_os = "macos")]
+use alloygbm_core::{BinStorage, TrainParams};
+#[cfg(target_os = "macos")]
+use alloygbm_engine::{IterationControls, IterationStopReason, TrainedStump};
+#[cfg(target_os = "macos")]
+use crate::icb_buffer_pool::IcbBufferPool;
+#[cfg(target_os = "macos")]
+use crate::kernels::icb_tree::{IcbTreeEncoder, IcbTreeParams};
 
 #[cfg(target_os = "macos")]
 pub struct MetalBackend {
@@ -134,6 +142,13 @@ pub struct MetalBackend {
     /// Mints a single `node_count × 24`-byte shared-mode buffer per
     /// `find_best_splits_batch` call; released via RAII guard.
     split_decision_residency: split_decision_residency::SplitDecisionPool,
+    /// Stage 4b — ICB tree encoder (Metal 4 only; `None` on Metal 3 and below).
+    /// Owns the compiled PSOs + pre-allocated ICB handle (`depth_max × 3` commands).
+    icb_encoder: Option<IcbTreeEncoder>,
+    /// Stage 4b — pre-allocated ICB buffer pool (Metal 4 only; `None` on Metal 3).
+    /// Wrapped in `Mutex` so the immutable `&self` `BackendOps` API can reset
+    /// pool state before each tree without requiring `&mut self`.
+    icb_pool: Option<std::sync::Mutex<IcbBufferPool>>,
 }
 
 #[cfg(target_os = "macos")]
@@ -185,6 +200,38 @@ impl MetalBackend {
             pipelines::BestSplitPipelineCache::new(&metal_device.device)
                 .map_err(|e| e)?;
         let split_decision_residency = split_decision_residency::SplitDecisionPool::new();
+
+        // Stage 4b: ICB chaining — Metal 4 devices only.
+        // Pool pre-allocated for up to 1.1 M rows × 128 features × 255 bins × depth 8.
+        // Shapes beyond these limits fall back silently to Stage 4a.
+        let (icb_encoder, icb_pool) = if metal_device.capabilities.metal4 {
+            let depth_max: u8 = 8;
+            let row_cap    = 1_100_000usize;
+            let feat_cap   = 128usize;
+            let bin_cap    = 256usize;
+            let enc  = IcbTreeEncoder::new(
+                &metal_device.device,
+                metal_device.queue.clone(),
+                depth_max,
+            );
+            let pool = IcbBufferPool::new(
+                &metal_device.device,
+                row_cap,
+                feat_cap,
+                bin_cap,
+                depth_max as usize,
+            );
+            match (enc, pool) {
+                (Ok(e), Ok(p)) => (Some(e), Some(std::sync::Mutex::new(p))),
+                (Err(e), _) | (_, Err(e)) => {
+                    eprintln!("[alloygbm metal] Stage 4b ICB init failed ({e}); using Stage 4a");
+                    (None, None)
+                }
+            }
+        } else {
+            (None, None)
+        };
+
         Ok(Self {
             metal_device,
             pipeline_cache,
@@ -199,6 +246,8 @@ impl MetalBackend {
             row_index_residency,
             best_split_pipeline_cache,
             split_decision_residency,
+            icb_encoder,
+            icb_pool,
         })
     }
 
@@ -922,6 +971,75 @@ impl BackendOps for MetalBackend {
             merged.push(winner);
         }
         Ok(merged)
+    }
+
+    fn try_build_tree_level_wise(
+        &self,
+        binned_matrix:         &BinnedMatrix,
+        gradients:             &[GradientPair],
+        root_row_indices:      &[u32],
+        _round_index:          usize,
+        _feature_tiles:        &[FeatureTile],
+        split_options:         SplitSelectionOptions,
+        params:                &TrainParams,
+        _controls:             &IterationControls,
+        candidate_predictions: &mut [f32],
+        _feature_weights:      &[f32],
+        categorical_features:  &[CategoricalFeatureInfo],
+    ) -> EngineResult<Option<(Vec<TrainedStump>, IterationStopReason)>> {
+        // ICB eligibility gate (AND of all conditions):
+        let encoder = match &self.icb_encoder {
+            Some(e) => e,
+            None    => return Ok(None),
+        };
+        if !categorical_features.is_empty() { return Ok(None); }
+        let bin_count = binned_matrix.max_bin as u32 + 1;
+        if bin_count > 1024 { return Ok(None); }
+        if params.lambda_l1 != 0.0 { return Ok(None); }
+        if !params.monotone_constraints.is_empty() { return Ok(None); }
+        // B-004: icb_partition casts node IDs to u16; depth ≥ 15 can overflow.
+        if params.max_depth > 14 { return Ok(None); }
+
+        let pool_mutex = self.icb_pool.as_ref().unwrap(); // always Some when icb_encoder is Some
+        let pool = pool_mutex.lock().map_err(|e| {
+            alloygbm_engine::EngineError::BackendUnavailable(
+                format!("icb_pool mutex poisoned: {e}"))
+        })?;
+
+        // Fall back if the dataset exceeds the pre-allocated pool dimensions.
+        if binned_matrix.row_count > pool.row_count
+            || binned_matrix.feature_count > pool.feature_count
+            || bin_count as usize > pool.bin_count
+        {
+            return Ok(None);
+        }
+
+        // Upload binned matrix — zero-copy cache hit on subsequent trees.
+        let bin_data_buf = match &binned_matrix.bins_col_adaptive {
+            BinStorage::U8(v)  => self.buffer_cache.get_or_upload_binned(
+                &self.metal_device.device, v, false)?,
+            BinStorage::U16(v) => self.buffer_cache.get_or_upload_binned(
+                &self.metal_device.device, v, true)?,
+        };
+
+        let grads: Vec<f32> = gradients.iter().map(|gp| gp.grad).collect();
+        let hess:  Vec<f32> = gradients.iter().map(|gp| gp.hess).collect();
+
+        pool.reset_for_tree(root_row_indices);
+        pool.upload_gradients(&grads, &hess);
+
+        let icb_params = IcbTreeParams::from_train_params(params, binned_matrix);
+
+        let (stumps, stop_reason) = encoder.encode_and_run(
+            &pool,
+            &icb_params,
+            &bin_data_buf,
+            root_row_indices,
+            candidate_predictions,
+            split_options,
+        )?;
+
+        Ok(Some((stumps, stop_reason)))
     }
 }
 
