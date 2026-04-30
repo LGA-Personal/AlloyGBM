@@ -5,6 +5,44 @@ First thing a new session reads, alongside `STATUS.md`.
 
 ---
 
+## 2026-04-30 — Stage 6: CPU row-sort before histogram dispatch
+
+**Shipped (commit 105995a):**
+
+- `encode_one_histogram_request` now sorts each node's row-index buffer
+  **in-place** (ascending) before binding it to the scatter kernel.
+- For GPU-resident nodes the pool buffer itself is sorted via raw pointer
+  (`from_raw_parts_mut` + `sort_unstable`).  In-place sort is safe for all
+  downstream consumers (reduce_sums, apply_partition_leaf_updates,
+  next-level partition) because they care only about which rows are present,
+  not their order.
+- CPU-resident root node (always `[0..N]`, already sorted) passes through
+  unchanged.
+- **Bug identified and fixed during implementation**: the original S6 draft
+  used `buffer_cache.write_row_indices` (a shared reusable slot) for all
+  nodes in a batch. Each call for node N+1 overwrote the slot's underlying
+  buffer in-place, corrupting the already-encoded node N dispatch. Fix: use
+  the unique per-node pool buffer directly (in-place sort).
+
+**Benchmark result (1M × 100, regression d=8, bins=255, 5 rounds, M4 — 3 runs):**
+
+| Stage | Metal median | CPU median | speedup |
+|---|---|---|---|
+| Stage 5 baseline (tiled kernel, ~90ms/level) | ~4.5 s | ~1.5 s | 0.28–0.30× |
+| Stage 6 (row sort, ~53ms/level) | 3.04 s | 1.00 s | **0.33×** |
+
+Batch histogram commit_wait: ~90 ms/level → ~53 ms/level (−41%).
+Largest gains at shallow levels (dense partitions, cache-line reuse);
+deep levels with sparse partitions (depth 8: ~3 906 rows, avg gap ≈ 256)
+see less benefit since gap > cache-line size.
+
+**Kill-criterion NOT MET (0.33× vs ≥1.0× required).**
+
+**Next-up:** batch `apply_split` per level (1 275 commits → 40, saves ~300 ms)
+or revisit ICB path which avoids random-access histogramming entirely.
+
+---
+
 ## 2026-04-30 — Stage 5 closed: kernel optimizations + root-cause analysis
 
 **Shipped (commits b3a3a27, d26a889):**
