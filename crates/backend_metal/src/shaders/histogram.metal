@@ -282,33 +282,202 @@ kernel void histogram_build_scatter_wide(
 }
 
 // -----------------------------------------------------------------
-// Threadgroup-atomic scatter — Stage 5.
+// Dynamic-threadgroup wide scatter — Stage 5 occupancy fix +
+// gradient pre-gather (Stage 5 bandwidth fix).
 //
-// Replaces the simd_shuffle serialisation (32× inner loop, 31/32
-// lanes idle per iteration) with threadgroup-local atomic<float>
-// accumulation.  Each threadgroup handles one (feature, chunk) pair,
-// exactly as the wide kernel, and writes to the SAME scratch layout —
-// the existing `histogram_reduce` pass is unchanged.
+// Buffer(2) is `gathered_grads`: the caller pre-scatters gradient
+// data via `histogram_gather_grads` so that:
+//   gathered_grads[i] == gradients[row_indices[i]]  for i in 0..node_row_count
 //
-// Requires Metal GPU Family 7+ (A15 / M1 and later) for
-// `atomic<float>` in threadgroup address space.  MetalBackend::new()
-// already gates on `apple7`, so no additional runtime check is needed.
+// This converts the dominant hot-path memory access from random
+// (gradients[row]) to sequential (gathered_grads[chunk_start+tid]),
+// reducing gradient DRAM reads from 100× per level to 1× per level:
 //
-// Non-determinism: `memory_order_relaxed` threadgroup float atomics do
-// not guarantee accumulation order, so results may differ by a few ULP
-// from the simd_shuffle kernel.  Parity tests use atol ≥ 0.05, which
-// covers any such rounding differences.
+//   Before gather: every one of the 100 features re-reads the 8 MB
+//     gradient buffer by random row index → 100× random-access cost.
+//   After gather:  the 100 feature TGs all read sequentially from
+//     an 8 MB gathered buffer that stays warm in GPU L2 cache → 1×
+//     random-access cost (paid by the gather kernel) + near-peak
+//     sequential bandwidth for all 100 feature passes.
 //
-// Threadgroup-memory budget: 2 × MAX_BIN_COUNT_TGA × 4 bytes = 8 KB,
-// allowing up to 4 concurrent threadgroups per CU (vs 1 for the wide
-// kernel's 32 KB budget).  Valid only when bin_count ≤ MAX_BIN_COUNT_TGA;
-// the pipeline-selection logic in Rust enforces this.
+// The bin lookup still uses row_indices → random access into the
+// column-major bins buffer, but uint8 elements have 8× better cache-
+// line utilization than float2, and the bins buffer column for a
+// given feature is 1 MB (fits in L2 after a few chunks).
+//
+// Occupancy:
+//   SIMDGROUPS_WIDE × EFFECTIVE_BIN_COUNT × 8 bytes threadgroup memory
+//   = 4 × 256 × 8 = 8 KB for 256 bins → 4 concurrent TGs per CU.
+//
+// Caller sets threadgroup(0) = SIMDGROUPS_WIDE * bin_count * sizeof(float2).
+// Valid when bin_count <= MAX_BIN_COUNT_WIDE.
 // -----------------------------------------------------------------
 
-constant uint MAX_BIN_COUNT_TGA = 1024u;
-constant uint THREADS_PER_TG_TGA = 128u;
+kernel void histogram_build_wide_dyn(
+    device const uint8_t*  binned_u8      [[buffer(0)]],
+    device const uint16_t* binned_u16     [[buffer(1)]],
+    device const float2*   gathered_grads [[buffer(2)]],  // pre-gathered, position-indexed
+    device const uint*     row_indices    [[buffer(3)]],  // for bin lookup only
+    device float2*         scratch        [[buffer(4)]],
+    constant uint&         n_rows_total   [[buffer(5)]],
+    constant uint&         node_row_count [[buffer(6)]],
+    constant uint&         rows_per_chunk [[buffer(7)]],
+    constant uint&         n_features     [[buffer(8)]],
+    threadgroup float2*    local_hist     [[threadgroup(0)]],
+    uint3                  thread_in_tg3  [[thread_position_in_threadgroup]],
+    uint3                  tg_id3         [[threadgroup_position_in_grid]]
+) {
+    const uint thread_in_tg  = thread_in_tg3.x;
+    const uint simdgroup_id  = thread_in_tg / SIMD_WIDTH;
+    const uint lane_in_sg    = thread_in_tg % SIMD_WIDTH;
+    const uint feature       = tg_id3.x;
+    const uint chunk         = tg_id3.y;
 
-kernel void histogram_tg_atomic_scatter(
+    const uint chunk_start = chunk * rows_per_chunk;
+    const uint chunk_end   = min(chunk_start + rows_per_chunk, node_row_count);
+
+    // Zero-initialise only this simdgroup's private histogram slice.
+    // All THREADS_WIDE threads work in parallel across their respective slices.
+    const uint sg_base = simdgroup_id * EFFECTIVE_BIN_COUNT;
+    for (uint i = lane_in_sg; i < EFFECTIVE_BIN_COUNT; i += SIMD_WIDTH) {
+        local_hist[sg_base + i] = float2(0.0f, 0.0f);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Each simdgroup handles a disjoint stride of rows.
+    // Simdgroup `s` starts at chunk_start + s * SIMD_WIDTH, stride = THREADS_WIDE.
+    for (uint row_cursor = chunk_start + simdgroup_id * SIMD_WIDTH;
+         row_cursor < chunk_end;
+         row_cursor += THREADS_WIDE) {
+        const uint my_offset = row_cursor + lane_in_sg;
+        const bool my_active = my_offset < chunk_end;
+
+        uint   my_bin = 0u;
+        float2 my_gh  = float2(0.0f, 0.0f);
+        if (my_active) {
+            // Bin lookup: still uses row_indices → random access into bins buffer.
+            // uint8 elements have 64× better cache-line utilization than float2,
+            // so this remains much cheaper than the old gradient random access.
+            const uint row = row_indices[my_offset];
+            my_bin = load_bin(binned_u8, binned_u16, row, feature, n_rows_total);
+            // Gradient read: sequential — gathered_grads[my_offset] was written
+            // by histogram_gather_grads in node-position order.
+            my_gh  = gathered_grads[my_offset];
+        }
+
+        // Intra-simdgroup shuffle: lane `k` is sole writer for bins where
+        // `bin % SIMD_WIDTH == k` within this simdgroup's private histogram.
+        for (uint src_lane = 0u; src_lane < SIMD_WIDTH; ++src_lane) {
+            const uint   src_bin    = simd_shuffle(my_bin,  src_lane);
+            const float  src_grad   = simd_shuffle(my_gh.x, src_lane);
+            const float  src_hess   = simd_shuffle(my_gh.y, src_lane);
+            const uint   src_active = simd_shuffle(uint(my_active ? 1u : 0u), src_lane);
+
+            const bool owns_bin = ((src_bin % SIMD_WIDTH) == lane_in_sg);
+            if (src_active != 0u && owns_bin && src_bin < EFFECTIVE_BIN_COUNT) {
+                local_hist[sg_base + src_bin] += float2(src_grad, src_hess);
+            }
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Tree-reduce the SIMDGROUPS_WIDE private histograms into
+    // local_hist[0..EFFECTIVE_BIN_COUNT).
+    // Fixed accumulation order (0 += 1 += 2 += 3) guarantees
+    // bit-identical results across runs.
+    if (simdgroup_id == 0u) {
+        for (uint i = lane_in_sg; i < EFFECTIVE_BIN_COUNT; i += SIMD_WIDTH) {
+            float2 sum = local_hist[i];  // sg 0's contribution
+            for (uint sg = 1u; sg < SIMDGROUPS_WIDE; ++sg) {
+                sum += local_hist[sg * EFFECTIVE_BIN_COUNT + i];
+            }
+            local_hist[i] = sum;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Publish to device scratch — same (chunk, feature, bin) layout as all
+    // other scatter kernels, so `histogram_reduce` is unchanged.
+    const uint scratch_base = (chunk * n_features + feature) * EFFECTIVE_BIN_COUNT;
+    for (uint i = thread_in_tg; i < EFFECTIVE_BIN_COUNT; i += THREADS_WIDE) {
+        scratch[scratch_base + i] = local_hist[i];
+    }
+}
+
+// -----------------------------------------------------------------
+// Gradient pre-gather — Stage 5 bandwidth fix.
+//
+// Scatters gradient data from the original row-indexed buffer into
+// a compact node-position-indexed buffer:
+//   gathered_out[i] = gradients[row_indices[i]]  for i in 0..node_row_count
+//
+// This is a simple 1:1 gather — one thread per row, no reduction.
+// Grid: (node_row_count, 1, 1) — dispatched as 1-D.
+//
+// After this pass, `histogram_build_wide_dyn` reads `gathered_out[i]`
+// (sequential, hardware-prefetchable) instead of `gradients[row_indices[i]]`
+// (random, cache-unfriendly), reducing gradient DRAM reads from
+// n_features × node_row_count to 1 × node_row_count.
+//
+// Determinism: the gather is a pure permutation — no floating-point
+// arithmetic — so results are bit-identical across runs.
+// -----------------------------------------------------------------
+
+kernel void histogram_gather_grads(
+    device const float2* gradients   [[buffer(0)]],
+    device const uint*   row_indices [[buffer(1)]],
+    device float2*       gathered    [[buffer(2)]],
+    uint                 gid         [[thread_position_in_grid]]
+) {
+    gathered[gid] = gradients[row_indices[gid]];
+}
+
+// -----------------------------------------------------------------
+// Tiled private-register scatter — Stage 5.
+//
+// Replaces the simd_shuffle serialisation (32× inner loop, 31/32
+// lanes idle per iteration) with per-thread private-register
+// accumulation over TILE_BIN_COUNT bins at a time, followed by a
+// two-level tree reduction (simd_sum + inter-simdgroup merge via
+// threadgroup memory).  No float atomics anywhere — compiles on
+// all MSL versions.
+//
+// Grid: (n_features, n_chunks, 1) — same as scatter/wide kernels.
+// Scratch output: identical layout — `histogram_reduce` unchanged.
+//
+// Algorithm (one (feature, chunk) threadgroup, iterating tiles):
+//   For each 32-bin tile t:
+//     1. Each thread strides through its rows, accumulating only
+//        those whose bin falls in [tile_start, tile_start+32) into
+//        private float registers grad_tile[32] / hess_tile[32].
+//        No inter-thread communication, no atomics.
+//     2. simd_sum collapses per-lane partials to a per-simdgroup
+//        value (identical in all lanes on Apple Silicon).
+//     3. Lane 0 of each simdgroup writes 32 floats to threadgroup
+//        staging: tg_grad[N_SIMDGROUPS_T][32] + tg_hess[...].
+//     4. Simdgroup 0's 32 lanes each own one bin, sum N_SIMDGROUPS_T
+//        contributions, and write float2 to scratch.
+//
+// Memory:
+//   Threadgroup: 4 × 32 × 2 × 4 bytes = 1 KB  (32× smaller than
+//   the wide kernel's 32 KB — up to 32× more concurrent threadgroups
+//   per shader core, hiding memory latency).
+//   Registers:   32 floats × 2 planes = 64 floats per thread.
+//
+// Tile passes: 8 for 256 bins, 32 for 1024 bins.  Chunk data
+// (~96 KB for 8192 rows) fits in Apple M-series L1 cache (384 KB),
+// so tile passes 2+ are mostly cache hits.
+//
+// Valid when bin_count ≤ MAX_BIN_COUNT_TILED; the pipeline-selection
+// logic in Rust enforces this.
+// -----------------------------------------------------------------
+
+constant uint MAX_BIN_COUNT_TILED = 1024u;
+constant uint TILE_BIN_COUNT      = 32u;   // equals SIMD_WIDTH
+constant uint N_SIMDGROUPS_T      = 4u;
+constant uint THREADS_TILED       = N_SIMDGROUPS_T * SIMD_WIDTH; // 128
+
+kernel void histogram_build_tiled(
     device const uint8_t*  binned_u8      [[buffer(0)]],
     device const uint16_t* binned_u16     [[buffer(1)]],
     device const float2*   gradients      [[buffer(2)]],
@@ -321,44 +490,73 @@ kernel void histogram_tg_atomic_scatter(
     uint3                  thread_in_tg3  [[thread_position_in_threadgroup]],
     uint3                  tg_id3         [[threadgroup_position_in_grid]]
 ) {
-    const uint tid     = thread_in_tg3.x;
-    const uint feature = tg_id3.x;
-    const uint chunk   = tg_id3.y;
-
+    const uint tid         = thread_in_tg3.x;
+    const uint sg_id       = tid / SIMD_WIDTH;  // simdgroup [0..N_SIMDGROUPS_T)
+    const uint lane        = tid % SIMD_WIDTH;  // lane [0..32)
+    const uint feature     = tg_id3.x;
+    const uint chunk       = tg_id3.y;
     const uint chunk_start = chunk * rows_per_chunk;
     const uint chunk_end   = min(chunk_start + rows_per_chunk, node_row_count);
 
-    // Per-bin threadgroup accumulators. Physical size MAX_BIN_COUNT_TGA;
-    // only [:EFFECTIVE_BIN_COUNT] is accessed.
-    threadgroup atomic<float> local_grad[MAX_BIN_COUNT_TGA];
-    threadgroup atomic<float> local_hess[MAX_BIN_COUNT_TGA];
+    // Threadgroup staging: 4 × 32 × 8 bytes = 1 KB total.
+    threadgroup float tg_grad[N_SIMDGROUPS_T][TILE_BIN_COUNT];
+    threadgroup float tg_hess[N_SIMDGROUPS_T][TILE_BIN_COUNT];
 
-    // Zero-initialise collaboratively across all threads.
-    for (uint b = tid; b < EFFECTIVE_BIN_COUNT; b += THREADS_PER_TG_TGA) {
-        atomic_store_explicit(&local_grad[b], 0.0f, memory_order_relaxed);
-        atomic_store_explicit(&local_hess[b], 0.0f, memory_order_relaxed);
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    // Each thread strides over its rows and atomically accumulates.
-    // No 32× inner serialisation — one threadgroup atomic per row.
-    for (uint i = chunk_start + tid; i < chunk_end; i += THREADS_PER_TG_TGA) {
-        const uint   row = row_indices[i];
-        const uint   bin = load_bin(binned_u8, binned_u16, row, feature, n_rows_total);
-        const float2 gh  = gradients[row];
-        atomic_fetch_add_explicit(&local_grad[bin], gh.x, memory_order_relaxed);
-        atomic_fetch_add_explicit(&local_hess[bin], gh.y, memory_order_relaxed);
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    // Publish to device scratch — identical layout to histogram_build_scatter,
-    // so `histogram_reduce` is reused unchanged.
     const uint scratch_base = (chunk * n_features + feature) * EFFECTIVE_BIN_COUNT;
-    for (uint b = tid; b < EFFECTIVE_BIN_COUNT; b += THREADS_PER_TG_TGA) {
-        scratch[scratch_base + b] = float2(
-            atomic_load_explicit(&local_grad[b], memory_order_relaxed),
-            atomic_load_explicit(&local_hess[b], memory_order_relaxed)
-        );
+    const uint n_tiles = (EFFECTIVE_BIN_COUNT + TILE_BIN_COUNT - 1u) / TILE_BIN_COUNT;
+
+    for (uint t = 0u; t < n_tiles; ++t) {
+        const uint tile_start = t * TILE_BIN_COUNT;
+        const uint tile_end   = min(tile_start + TILE_BIN_COUNT, EFFECTIVE_BIN_COUNT);
+        const uint tile_width = tile_end - tile_start;
+
+        // Private accumulators for this tile. Constant array size
+        // lets the compiler allocate these in ALU registers.
+        float grad_tile[TILE_BIN_COUNT];
+        float hess_tile[TILE_BIN_COUNT];
+        for (uint b = 0u; b < TILE_BIN_COUNT; ++b) {
+            grad_tile[b] = 0.0f;
+            hess_tile[b] = 0.0f;
+        }
+
+        // Thread `tid` owns rows: chunk_start+tid, +THREADS_TILED, …
+        // Accumulate only rows whose bin lands in this tile.
+        for (uint i = chunk_start + tid; i < chunk_end; i += THREADS_TILED) {
+            const uint   row = row_indices[i];
+            const uint   bin = load_bin(binned_u8, binned_u16, row, feature, n_rows_total);
+            const float2 gh  = gradients[row];
+            if (bin >= tile_start && bin < tile_end) {
+                const uint local_b = bin - tile_start;
+                grad_tile[local_b] += gh.x;
+                hess_tile[local_b] += gh.y;
+            }
+        }
+
+        // Phase 1: simd_sum collapses per-lane partials to a
+        // per-simdgroup sum.  Lane 0 of each simdgroup writes
+        // to threadgroup staging.
+        for (uint b = 0u; b < tile_width; ++b) {
+            const float sg_g = simd_sum(grad_tile[b]);
+            const float sg_h = simd_sum(hess_tile[b]);
+            if (lane == 0u) {
+                tg_grad[sg_id][b] = sg_g;
+                tg_hess[sg_id][b] = sg_h;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Phase 2: simdgroup 0's lanes 0..tile_width-1 each own one
+        // bin.  Sum the N_SIMDGROUPS_T contributions and write to scratch.
+        if (sg_id == 0u && lane < tile_width) {
+            float tot_g = 0.0f;
+            float tot_h = 0.0f;
+            for (uint sg = 0u; sg < N_SIMDGROUPS_T; ++sg) {
+                tot_g += tg_grad[sg][lane];
+                tot_h += tg_hess[sg][lane];
+            }
+            scratch[scratch_base + tile_start + lane] = float2(tot_g, tot_h);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 }
 
@@ -406,13 +604,15 @@ kernel void histogram_count_accumulate(
     const uint chunk_end   = min(chunk_start + rows_per_chunk, node_row_count);
 
     // Threadgroup-local uint count (no float precision issues).
-    threadgroup atomic_uint local_counts[MAX_BIN_COUNT_TGA];
-    for (uint b = tid; b < EFFECTIVE_BIN_COUNT; b += THREADS_PER_TG_TGA) {
+    // Array size matches MAX_BIN_COUNT_TILED (same 1024-entry cap as the
+    // tiled scatter kernel); caller enforces bin_count ≤ MAX_BIN_COUNT_TILED.
+    threadgroup atomic_uint local_counts[MAX_BIN_COUNT_TILED];
+    for (uint b = tid; b < EFFECTIVE_BIN_COUNT; b += THREADS_TILED) {
         atomic_store_explicit(&local_counts[b], 0u, memory_order_relaxed);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    for (uint i = chunk_start + tid; i < chunk_end; i += THREADS_PER_TG_TGA) {
+    for (uint i = chunk_start + tid; i < chunk_end; i += THREADS_TILED) {
         const uint row = row_indices[i];
         const uint bin = load_bin(binned_u8, binned_u16, row, feature, n_rows_total);
         atomic_fetch_add_explicit(&local_counts[bin], 1u, memory_order_relaxed);
@@ -421,7 +621,7 @@ kernel void histogram_count_accumulate(
 
     // One global atomic_uint per (feature, bin) per chunk — low contention.
     const uint out_base = feature * EFFECTIVE_BIN_COUNT;
-    for (uint b = tid; b < EFFECTIVE_BIN_COUNT; b += THREADS_PER_TG_TGA) {
+    for (uint b = tid; b < EFFECTIVE_BIN_COUNT; b += THREADS_TILED) {
         const uint c = atomic_load_explicit(&local_counts[b], memory_order_relaxed);
         if (c > 0u) {
             atomic_fetch_add_explicit(&counts_out[out_base + b], c, memory_order_relaxed);

@@ -58,9 +58,10 @@ use std::ptr::NonNull;
 
 use crate::device::MetalCapabilities;
 use crate::kernels::histogram::{
-    HISTOGRAM_SHADER_SOURCE, KERNEL_NAME_COUNT_ACCUMULATE, KERNEL_NAME_REDUCE,
-    KERNEL_NAME_SCATTER, KERNEL_NAME_SCATTER_WIDE, KERNEL_NAME_TG_ATOMIC_SCATTER,
-    MAX_BIN_COUNT_TGA, MAX_BIN_COUNT_WIDE,
+    HISTOGRAM_SHADER_SOURCE, KERNEL_NAME_COUNT_ACCUMULATE, KERNEL_NAME_GATHER_GRADS,
+    KERNEL_NAME_REDUCE, KERNEL_NAME_SCATTER, KERNEL_NAME_SCATTER_WIDE,
+    KERNEL_NAME_SCATTER_WIDE_DYN, KERNEL_NAME_TG_ATOMIC_SCATTER, MAX_BIN_COUNT_TGA,
+    MAX_BIN_COUNT_WIDE,
 };
 use crate::kernels::partition::{
     KERNEL_NAME_PARTITION_FLAG_AND_COUNT, KERNEL_NAME_PARTITION_SCAN_BLOCKS,
@@ -81,11 +82,22 @@ pub struct HistogramPipelines {
     /// array is sized for the wide cap, so it can't be instantiated
     /// for wider bin counts.
     pub scatter_wide: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
+    /// Dynamic-threadgroup wide scatter (Stage 5 occupancy fix).
+    /// Same algorithm as `scatter_wide` but threadgroup memory is sized at
+    /// dispatch time via `setThreadgroupMemoryLength_atIndex`.  For 256 bins:
+    /// 8 KB vs 32 KB → 4× more concurrent threadgroups per shader core.
+    /// `None` when `bin_count > MAX_BIN_COUNT_WIDE` (same constraint).
+    pub scatter_wide_dyn: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
+    /// Gradient pre-gather (Stage 5 bandwidth fix). Writes
+    /// `gathered[i] = gradients[row_indices[i]]` for i in 0..node_row_count,
+    /// converting the scatter kernel's dominant random read into a sequential one.
+    /// Built unconditionally (no bin-count gate).
+    pub gather_grads: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
     pub reduce: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
-    /// Threadgroup-atomic scatter (Stage 5; apple7+). Replaces the 32×
-    /// simd_shuffle serialisation with threadgroup `atomic<float>`
-    /// accumulation. `None` when `bin_count > MAX_BIN_COUNT_TGA` or on
-    /// pre-apple7 devices (handled in `build()`).
+    /// Tiled private-register scatter (Stage 5; apple7+). Replaces the 32×
+    /// simd_shuffle serialisation with per-thread private-register
+    /// accumulation + simd_sum reduction. No float atomics. `None` when
+    /// `bin_count > MAX_BIN_COUNT_TGA` (handled in `build()`).
     pub tg_atomic_scatter: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
     /// GPU count accumulation (Stage 5; apple7+). Replaces the CPU-side
     /// `accumulate_counts` post-step. `None` on the same conditions as
@@ -288,10 +300,10 @@ impl HistogramPipelineCache {
                 )
             })?;
 
-        // Stage 5: threadgroup-atomic scatter + GPU count accumulation.
-        // Valid when bin_count <= MAX_BIN_COUNT_TGA (8 KB threadgroup
-        // memory for two 1024-float arrays, allowing 4× more concurrent
-        // threadgroups per CU than the wide kernel's 32 KB budget).
+        // Stage 5: tiled private-register scatter + GPU count accumulation.
+        // Valid when bin_count <= MAX_BIN_COUNT_TGA. The tiled kernel uses
+        // 1 KB threadgroup memory (32× less than the wide kernel's 32 KB),
+        // allowing up to 32× more concurrent threadgroups per CU.
         let (tg_atomic_scatter, count_accumulate) = if bin_count <= MAX_BIN_COUNT_TGA {
             let tga_name = NSString::from_str(KERNEL_NAME_TG_ATOMIC_SCATTER);
             let cnt_name = NSString::from_str(KERNEL_NAME_COUNT_ACCUMULATE);
@@ -367,43 +379,114 @@ impl HistogramPipelineCache {
             (None, None)
         };
 
-        // Wide scatter is only valid when the per-simdgroup private
-        // histograms fit in threadgroup memory (D-021). For wider bin
-        // counts we dispatch the narrow path.
-        let (scatter_wide, scatter_wide_desc) = if bin_count <= MAX_BIN_COUNT_WIDE {
-            let scatter_wide_fn = self
-                .library
-                .newFunctionWithName_constantValues_error(&scatter_wide_name, &constants)
-                .map_err(|err| {
-                    format!(
-                        "could not specialize `{KERNEL_NAME_SCATTER_WIDE}`: {}",
-                        err.localizedDescription()
+        // Wide scatter and dynamic-threadgroup wide scatter are only valid
+        // when bin_count <= MAX_BIN_COUNT_WIDE (D-021). The dynamic variant
+        // uses the same algorithm but lets the Rust dispatcher set the actual
+        // threadgroup memory size, enabling better occupancy for small bin counts.
+        let (scatter_wide, scatter_wide_desc, scatter_wide_dyn, scatter_wide_dyn_desc) =
+            if bin_count <= MAX_BIN_COUNT_WIDE {
+                let scatter_wide_fn = self
+                    .library
+                    .newFunctionWithName_constantValues_error(&scatter_wide_name, &constants)
+                    .map_err(|err| {
+                        format!(
+                            "could not specialize `{KERNEL_NAME_SCATTER_WIDE}`: {}",
+                            err.localizedDescription()
+                        )
+                    })?;
+                let wide_desc = MTLComputePipelineDescriptor::new();
+                wide_desc.setComputeFunction(Some(&scatter_wide_fn));
+                if let Some(archive) = &self.archive {
+                    let archive_obj: &ProtocolObject<dyn MTLBinaryArchive> = archive;
+                    let archive_array = NSArray::from_slice(&[archive_obj]);
+                    wide_desc.setBinaryArchives(Some(&archive_array));
+                }
+                let wide_pipeline = self
+                    .device
+                    .newComputePipelineStateWithDescriptor_options_reflection_error(
+                        &wide_desc,
+                        MTLPipelineOption::empty(),
+                        None,
                     )
-                })?;
-            let desc = MTLComputePipelineDescriptor::new();
-            desc.setComputeFunction(Some(&scatter_wide_fn));
-            if let Some(archive) = &self.archive {
-                let archive_obj: &ProtocolObject<dyn MTLBinaryArchive> = archive;
-                let archive_array = NSArray::from_slice(&[archive_obj]);
-                desc.setBinaryArchives(Some(&archive_array));
-            }
-            let pipeline = self
-                .device
-                .newComputePipelineStateWithDescriptor_options_reflection_error(
-                    &desc,
-                    MTLPipelineOption::empty(),
-                    None,
+                    .map_err(|err| {
+                        format!(
+                            "scatter_wide pipeline creation failed: {}",
+                            err.localizedDescription()
+                        )
+                    })?;
+
+                // Dynamic-threadgroup variant: same function constants, different entry point.
+                let scatter_wide_dyn_name = NSString::from_str(KERNEL_NAME_SCATTER_WIDE_DYN);
+                let scatter_wide_dyn_fn = self
+                    .library
+                    .newFunctionWithName_constantValues_error(&scatter_wide_dyn_name, &constants)
+                    .map_err(|err| {
+                        format!(
+                            "could not specialize `{KERNEL_NAME_SCATTER_WIDE_DYN}`: {}",
+                            err.localizedDescription()
+                        )
+                    })?;
+                let dyn_desc = MTLComputePipelineDescriptor::new();
+                dyn_desc.setComputeFunction(Some(&scatter_wide_dyn_fn));
+                if let Some(archive) = &self.archive {
+                    let archive_obj: &ProtocolObject<dyn MTLBinaryArchive> = archive;
+                    let archive_array = NSArray::from_slice(&[archive_obj]);
+                    dyn_desc.setBinaryArchives(Some(&archive_array));
+                }
+                let dyn_pipeline = self
+                    .device
+                    .newComputePipelineStateWithDescriptor_options_reflection_error(
+                        &dyn_desc,
+                        MTLPipelineOption::empty(),
+                        None,
+                    )
+                    .map_err(|err| {
+                        format!(
+                            "scatter_wide_dyn pipeline creation failed: {}",
+                            err.localizedDescription()
+                        )
+                    })?;
+
+                (Some(wide_pipeline), Some(wide_desc), Some(dyn_pipeline), Some(dyn_desc))
+            } else {
+                (None, None, None, None)
+            };
+
+        // Gradient pre-gather kernel: no bin-count gate, always built.
+        // Function constants are still passed so the kernel specialises correctly
+        // (even though it doesn't use BIN_COUNT or USE_U16_BINS directly, passing
+        // them is harmless and consistent with the other kernels).
+        let gather_grads_name = NSString::from_str(KERNEL_NAME_GATHER_GRADS);
+        let gather_grads_fn = self
+            .library
+            .newFunctionWithName_constantValues_error(&gather_grads_name, &constants)
+            .map_err(|err| {
+                format!(
+                    "could not specialize `{KERNEL_NAME_GATHER_GRADS}`: {}",
+                    err.localizedDescription()
                 )
-                .map_err(|err| {
-                    format!(
-                        "scatter_wide pipeline creation failed: {}",
-                        err.localizedDescription()
-                    )
-                })?;
-            (Some(pipeline), Some(desc))
-        } else {
-            (None, None)
-        };
+            })?;
+        let gather_grads_desc = MTLComputePipelineDescriptor::new();
+        gather_grads_desc.setComputeFunction(Some(&gather_grads_fn));
+        if let Some(archive) = &self.archive {
+            let archive_obj: &ProtocolObject<dyn MTLBinaryArchive> = archive;
+            let archive_array = NSArray::from_slice(&[archive_obj]);
+            gather_grads_desc.setBinaryArchives(Some(&archive_array));
+        }
+        let gather_grads_pso = self
+            .device
+            .newComputePipelineStateWithDescriptor_options_reflection_error(
+                &gather_grads_desc,
+                MTLPipelineOption::empty(),
+                None,
+            )
+            .map_err(|err| {
+                format!(
+                    "gather_grads pipeline creation failed: {}",
+                    err.localizedDescription()
+                )
+            })?;
+        let gather_grads = Some(gather_grads_pso);
 
         // If we have an archive, opportunistically persist the
         // freshly-compiled pipeline functions so the next run can
@@ -430,10 +513,30 @@ impl HistogramPipelineCache {
                     added_any = true;
                 }
             }
+            if let Some(desc) = &scatter_wide_dyn_desc {
+                if let Err(err) = archive.addComputePipelineFunctionsWithDescriptor_error(desc) {
+                    eprintln!(
+                        "[alloygbm metal] warning: could not add scatter_wide_dyn pipeline to archive: {}",
+                        err.localizedDescription()
+                    );
+                } else {
+                    added_any = true;
+                }
+            }
             if let Err(err) = archive.addComputePipelineFunctionsWithDescriptor_error(&reduce_desc)
             {
                 eprintln!(
                     "[alloygbm metal] warning: could not add reduce pipeline to archive: {}",
+                    err.localizedDescription()
+                );
+            } else {
+                added_any = true;
+            }
+            if let Err(err) =
+                archive.addComputePipelineFunctionsWithDescriptor_error(&gather_grads_desc)
+            {
+                eprintln!(
+                    "[alloygbm metal] warning: could not add gather_grads pipeline to archive: {}",
                     err.localizedDescription()
                 );
             } else {
@@ -447,9 +550,11 @@ impl HistogramPipelineCache {
         Ok(HistogramPipelines {
             scatter,
             scatter_wide,
+            scatter_wide_dyn,
             reduce,
             tg_atomic_scatter,
             count_accumulate,
+            gather_grads,
             bin_count,
             use_u16_bins,
         })

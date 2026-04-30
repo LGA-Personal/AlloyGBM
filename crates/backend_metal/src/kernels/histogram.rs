@@ -47,25 +47,40 @@ pub const KERNEL_NAME_SCATTER_WIDE: &str = "histogram_build_scatter_wide";
 /// Entry-point name for pass 2.
 pub const KERNEL_NAME_REDUCE: &str = "histogram_reduce";
 
-/// Entry-point name for the threadgroup-atomic scatter kernel (Stage 5).
-/// Requires Metal GPU Family 7+ (`apple7` capability flag).
+/// Entry-point name for the dynamic-threadgroup wide scatter kernel (Stage 5 occupancy fix).
+/// Same algorithm as `histogram_build_scatter_wide` but with runtime-sized
+/// threadgroup memory via `[[threadgroup(0)]]`.  For 256 bins this reduces
+/// threadgroup allocation from 32 KB to 8 KB, enabling 4× more concurrent
+/// threadgroups per shader core and better gradient-read latency hiding.
+/// Caller must call `setThreadgroupMemoryLength_atIndex` before dispatch.
+pub const KERNEL_NAME_SCATTER_WIDE_DYN: &str = "histogram_build_wide_dyn";
+
+/// Entry-point name for the tiled private-register scatter kernel (Stage 5).
+/// No float atomics — works on all MSL compiler versions.
 /// Same buffer layout and scratch output as the wide kernel — reuses
 /// `histogram_reduce` unchanged.
-pub const KERNEL_NAME_TG_ATOMIC_SCATTER: &str = "histogram_tg_atomic_scatter";
+pub const KERNEL_NAME_TG_ATOMIC_SCATTER: &str = "histogram_build_tiled";
 
 /// Entry-point name for the GPU count accumulation kernel (Stage 5).
-/// Requires Metal GPU Family 7+ (`apple7` capability flag).
+/// Uses `threadgroup atomic_uint` (supported on all Metal versions).
 /// Replaces the sequential CPU `accumulate_counts` post-step.
 pub const KERNEL_NAME_COUNT_ACCUMULATE: &str = "histogram_count_accumulate";
 
-/// Threads per threadgroup for the threadgroup-atomic scatter and count kernels
-/// (Stage 5). Must match `THREADS_PER_TG_TGA` in `shaders/histogram.metal`.
+/// Entry-point name for the gradient pre-gather kernel (Stage 5 bandwidth fix).
+/// Writes `gathered[i] = gradients[row_indices[i]]` for i in 0..node_row_count.
+/// One thread per node row; dispatched as a 1-D grid before the scatter pass.
+/// Converts random gradient reads in the scatter kernel to sequential reads.
+pub const KERNEL_NAME_GATHER_GRADS: &str = "histogram_gather_grads";
+
+/// Threads per threadgroup for the tiled scatter and count kernels (Stage 5).
+/// Must match `THREADS_TILED` in `shaders/histogram.metal` (= N_SIMDGROUPS_T × 32).
 pub const THREADS_PER_TG_TGA: usize = 128;
 
-/// Maximum bin count supported by the threadgroup-atomic scatter and count
-/// kernels.  Must match `MAX_BIN_COUNT_TGA` in `shaders/histogram.metal`.
-/// Sized to fit two 1024-float threadgroup arrays in ≤ 8 KB of threadgroup
-/// memory (allowing up to 4× higher occupancy vs the 32-KB wide kernel).
+/// Maximum bin count supported by the tiled scatter and count kernels.
+/// Must match `MAX_BIN_COUNT_TILED` in `shaders/histogram.metal`.
+/// The count kernel declares `threadgroup atomic_uint[1024]` = 4 KB;
+/// the tiled scatter kernel uses only 1 KB threadgroup memory for any
+/// bin count, but we cap both at 1024 for uniformity.
 pub const MAX_BIN_COUNT_TGA: u32 = 1024;
 
 /// Upper bound on the number of bins that fit inside the narrow
@@ -79,14 +94,25 @@ pub const MAX_BIN_COUNT: u32 = 4096;
 /// `MAX_BIN_COUNT_WIDE` in `shaders/histogram.metal`.
 pub const MAX_BIN_COUNT_WIDE: u32 = 1024;
 
-/// Threads per threadgroup for the wide kernel (4 simdgroups * 32).
+/// Number of simdgroups per threadgroup for the wide and wide-dyn scatter kernels.
+/// Must match `SIMDGROUPS_WIDE` in `shaders/histogram.metal`.
+/// Used by the dynamic kernel to compute threadgroup memory size at dispatch time:
+///   `SIMDGROUPS_WIDE * bin_count * size_of::<[f32; 2]>()`
+pub const SIMDGROUPS_WIDE: usize = 4;
+
+/// Threads per threadgroup for the wide kernel (SIMDGROUPS_WIDE * 32).
 pub const THREADS_PER_TG_WIDE: usize = 128;
 
-/// Default chunk size (rows per threadgroup) for pass 1. Small enough
-/// that the per-chunk scratch stays modest for large nodes; large
-/// enough that per-chunk fixed overhead amortizes. Tuning is deferred
-/// to the benchmark phase (S1.14) — this value was chosen to match the
-/// CPU backend's `SMALL_TILE_WORKLOAD_THRESHOLD` order of magnitude.
+/// Default chunk size (rows per threadgroup) for pass 1.
+///
+/// Smaller chunks → more threadgroups → better GPU latency-hiding (more TGs
+/// to switch to while one awaits memory).  On Apple M4 the tiled kernel
+/// processes `ROWS_PER_CHUNK_DEFAULT / THREADS_TILED` rows per thread, so
+/// keeping chunks moderate prevents long sequential dependency chains that
+/// prevent the GPU from hiding memory latency.
+///
+/// 8,192 rows × 8 B/row = 64 KB gradient data per TG — fits comfortably in
+/// the GPU L2 cache for tile-pass reuse (Apple M4 L2 ≈ 4 MB / 10 CUs).
 pub const ROWS_PER_CHUNK_DEFAULT: u32 = 8_192;
 
 // -------- macOS-only dispatch path ---------------------------------
@@ -316,6 +342,61 @@ fn encode_one_histogram_request(
     let mut scratch_keepalive: Vec<Retained<ProtocolObject<dyn MTLBuffer>>> =
         Vec::with_capacity(feature_tiles.len());
 
+    // --------- Pre-pass: gradient gather (Stage 5 bandwidth fix) ---------
+    //
+    // When `scatter_wide_dyn` is active (and tiled kernel is unavailable),
+    // a one-time gather kernel converts random gradient reads (100× per level)
+    // to sequential reads (1× amortised).
+    // `gathered_grads[i] = gradients[row_indices[i]]` for i in 0..node_row_count.
+    // The gather buffer is shared across all feature tiles; each tile's scatter
+    // pass binds it in place of the original gradients buffer.
+    //
+    // Gather is NOT used with the tiled kernel: the tiled kernel reads
+    // `gradients[row_indices[i]]` directly (random access), but its tile passes
+    // reuse gradient data from GPU L2 cache, so gradient bandwidth is amortised
+    // without an explicit gather pre-pass.
+    let use_gather = pipelines.gather_grads.is_some()
+        && pipelines.scatter_wide_dyn.is_some()
+        && pipelines.tg_atomic_scatter.is_none(); // tiled takes priority; no gather needed
+    let gathered_grads_buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>> = if use_gather {
+        let gathered_bytes = node_row_count as usize * pair_bytes;
+        let buf = device
+            .newBufferWithLength_options(gathered_bytes.max(1), options)
+            .ok_or_else(|| {
+                EngineError::BackendUnavailable(
+                    "could not allocate gathered_grads buffer".to_string(),
+                )
+            })?;
+        // Encode gather pass: grid = (node_row_count, 1, 1), 1 thread per row.
+        let gather_pso = pipelines.gather_grads.as_ref().unwrap();
+        let encoder = command_buffer.computeCommandEncoder().ok_or_else(|| {
+            EngineError::BackendUnavailable("no compute encoder for gather pass".to_string())
+        })?;
+        encoder.setComputePipelineState(gather_pso);
+        unsafe {
+            encoder.setBuffer_offset_atIndex(Some(&gradients_buffer), 0, 0);
+            encoder.setBuffer_offset_atIndex(Some(&row_indices_buffer), 0, 1);
+            encoder.setBuffer_offset_atIndex(Some(&buf), 0, 2);
+            // Use dispatchThreads (non-threadgroup-aligned) to avoid a
+            // tail-padding guard in the kernel — every gid is a valid row.
+            let threads = MTLSize {
+                width: node_row_count as usize,
+                height: 1,
+                depth: 1,
+            };
+            let tg_size = MTLSize {
+                width: 64,
+                height: 1,
+                depth: 1,
+            };
+            encoder.dispatchThreads_threadsPerThreadgroup(threads, tg_size);
+        }
+        encoder.endEncoding();
+        Some(buf)
+    } else {
+        None
+    };
+
     for tile in feature_tiles {
         let tile_n_features = tile.end_feature - tile.start_feature;
         let tile_scratch_elems = n_chunks as usize * tile_n_features as usize * bin_count as usize;
@@ -335,19 +416,29 @@ fn encode_one_histogram_request(
 
         // --------- Pass 1: scatter ---------
         //
-        // Stage 5 priority: tg_atomic_scatter > scatter_wide > scatter_narrow.
-        // The threadgroup-atomic kernel eliminates the 32× simd_shuffle
-        // serialisation and is available on all apple7+ devices (which
-        // MetalBackend::new() already requires).
-        let (scatter_pipeline, scatter_threads_per_tg): (
+        // Priority (best → fallback):
+        //   1. tg_atomic_scatter (tiled) — 1 KB threadgroup, 8 tile passes,
+        //      NO simd_shuffle serialisation overhead (32× less wasted compute
+        //      vs scatter/wide kernels).  Up to 32× better TG occupancy →
+        //      superior GPU latency hiding.  Enabled ≤ MAX_BIN_COUNT_TGA.
+        //   2. scatter_wide_dyn — 8 KB threadgroup (runtime-sized), simd_shuffle
+        //      serialisation, 4 concurrent TGs/CU.  Enabled ≤ MAX_BIN_COUNT_WIDE.
+        //   3. scatter_wide (static 32 KB) — single-pass, 1 TG/CU occupancy.
+        //   4. scatter_narrow — 1-simdgroup fallback for any bin count.
+        let (scatter_pipeline, scatter_threads_per_tg, scatter_tg_mem_bytes): (
             &ProtocolObject<dyn objc2_metal::MTLComputePipelineState>,
             usize,
+            Option<usize>,
         ) = if let Some(tga) = &pipelines.tg_atomic_scatter {
-            (tga, THREADS_PER_TG_TGA)
+            (tga, THREADS_PER_TG_TGA, None)
+        } else if let Some(dyn_wide) = &pipelines.scatter_wide_dyn {
+            // Threadgroup(0) memory = SIMDGROUPS_WIDE × bin_count × sizeof(float2).
+            let tg_mem = SIMDGROUPS_WIDE * bin_count as usize * std::mem::size_of::<[f32; 2]>();
+            (dyn_wide, THREADS_PER_TG_WIDE, Some(tg_mem))
         } else if let Some(wide) = &pipelines.scatter_wide {
-            (wide, THREADS_PER_TG_WIDE)
+            (wide, THREADS_PER_TG_WIDE, None)
         } else {
-            (&pipelines.scatter, 32usize)
+            (&pipelines.scatter, 32usize, None)
         };
         let encoder = command_buffer.computeCommandEncoder().ok_or_else(|| {
             EngineError::BackendUnavailable("no compute command encoder".to_string())
@@ -358,6 +449,16 @@ fn encode_one_histogram_request(
         // `MTLBuffer` that outlives the encoder through `Retained`.
         // Buffer-argument indices (0..=8) match the MSL kernel header
         // in `shaders/histogram.metal`.
+        //
+        // For `histogram_build_wide_dyn` (use_gather=true): buffer(2) is the
+        // pre-gathered gradient buffer (position-indexed, sequential access).
+        // For all other kernels: buffer(2) is the original gradients buffer
+        // (row-indexed, random access — legacy behaviour).
+        let grad_buf_for_scatter = if use_gather {
+            gathered_grads_buffer.as_ref().unwrap()
+        } else {
+            &gradients_buffer
+        };
         unsafe {
             if use_u16 {
                 encoder.setBuffer_offset_atIndex(Some(&dummy_buffer), 0, 0);
@@ -366,7 +467,7 @@ fn encode_one_histogram_request(
                 encoder.setBuffer_offset_atIndex(Some(&binned_buffer), binned_offset, 0);
                 encoder.setBuffer_offset_atIndex(Some(&dummy_buffer), 0, 1);
             }
-            encoder.setBuffer_offset_atIndex(Some(&gradients_buffer), 0, 2);
+            encoder.setBuffer_offset_atIndex(Some(grad_buf_for_scatter), 0, 2);
             encoder.setBuffer_offset_atIndex(Some(&row_indices_buffer), 0, 3);
             encoder.setBuffer_offset_atIndex(Some(&scratch_buffer), 0, 4);
 
@@ -378,6 +479,14 @@ fn encode_one_histogram_request(
             set_u32_bytes(&encoder, &node_row_count_cell, 6);
             set_u32_bytes(&encoder, &rows_per_chunk_cell, 7);
             set_u32_bytes(&encoder, &tile_n_features_cell, 8);
+
+            // For the dynamic-threadgroup kernel, set runtime threadgroup
+            // memory length before dispatch.  Metal requires this to be
+            // called before dispatchThreadgroups — passing None skips the
+            // call for the static-memory kernels.
+            if let Some(tg_mem) = scatter_tg_mem_bytes {
+                encoder.setThreadgroupMemoryLength_atIndex(tg_mem, 0);
+            }
 
             let threadgroups = MTLSize {
                 width: tile_n_features as usize,
