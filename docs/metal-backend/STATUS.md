@@ -1,89 +1,144 @@
 # Metal Backend — Current Status
 
-**Last updated:** 2026-04-29 (Stage 4b complete — kill criterion NOT MET, 0.24×)
-**Active stage:** Stage 5 planning — GPU histogram throughput
+**Last updated:** 2026-04-30 (Stage 5 complete — kill criterion NOT MET, 0.28–0.30×)
+**Active stage:** Stage 5 CLOSED — root cause identified, next step is GPU row-sort
 
 ---
 
-## Stage 4b Checklist
+## Stage 5 — Closed (2026-04-30)
 
-Order matches the approved plan in
-`docs/superpowers/plans/2026-04-29-stage-4b-icb-chaining.md`.
+### What shipped
+
+Stage 5 replaced the `build_histograms_batch` scatter kernel chain with a
+priority-based selection of the best available kernel for the device:
+
+1. **`histogram_build_tiled`** (tiled private-register, 1 KB TG mem) — first priority.
+   No `simd_shuffle` serialisation; each thread accumulates into 32-bin-tile private
+   registers, then `simd_sum` + threadgroup staging merges contributions.
+   Up to 32× more concurrent threadgroups/CU vs the 32 KB wide kernel.
+
+2. **`histogram_build_wide_dyn`** (runtime-sized TG mem, 8 KB at 256 bins) — second priority.
+   Same simd-shuffle algorithm as `scatter_wide` but uses `[[threadgroup(0)]]` so the
+   caller sets threadgroup length at dispatch; 4 concurrent TGs/CU vs 1 for static 32 KB.
+   A gradient pre-gather pass (`histogram_gather_grads`) converts random gradient reads
+   to sequential reads. **Use-gather is suppressed when the tiled kernel is selected.**
+
+3. **`histogram_build_scatter_wide`** (static 32 KB) — third priority.
+4. **`histogram_build_scatter`** (1-simdgroup, any bin count) — final fallback.
+
+Also shipped: `histogram_count_accumulate` GPU count pass (eliminates CPU
+`accumulate_counts` loop previously at 1137 ms/640 calls).
+
+### Benchmark results — `metal_friendly_large_icb`
+
+1M × 100 features, regression, depth=8, bins=255, 5 rounds, Apple M4:
+
+| Kernel / optimization | commit_wait/level | speedup |
+|---|---|---|
+| `scatter_wide` (Stage 4a baseline) | ~115 ms | 0.24× |
+| `scatter_wide_dyn` | ~90 ms | 0.28× |
+| `scatter_wide_dyn` + gradient pre-gather | ~90 ms | 0.30× |
+| `histogram_build_tiled` (first priority) | ~90 ms | 0.28–0.30× |
+
+**Kill criterion NOT MET (≥1.0× required). Best observed: 0.30×.**
+
+### Root cause of performance ceiling
+
+**Profile summary (tiled kernel, 5 rounds, depth=8, 1M×100):**
+
+| Site | calls | total_ms | % total |
+|---|---|---|---|
+| build_histograms (root, sequential) | 5 | 303 | 6.7% |
+| build_histograms_batch | 40 | 3662 | 80.8% |
+| ..commit_wait (GPU exec) | 40 | 3585 | — |
+| apply_split | 1275 | 345 | 7.6% |
+| reduce_sums | 2550 | 72 | 1.6% |
+| apply_partition_leaf_updates | 1261 | 59 | 1.3% |
+| **TOTAL** | — | **4530** | — |
+
+**The bottleneck is random memory access to the 100 MB `binned_u8` buffer.**
+
+Root-node histogram (`row_indices = [0..N]`, sequential scan):
+- **60 ms for 1 M × 100 features** = 6.3 ns/feature-row
+
+Batch-level histograms (`row_indices` = arbitrary node partition, random access):
+- **90 ms for ~500 K × 100 features** = 18 ns/feature-row → **3× slower per row**
+
+The 3× gap arises because:
+- The GPU L2 cache is ≈ 400 KB/CU. The bin column for one feature is 1 MB;
+  for 100 features, 100 MB total. Neither fits.
+- The CPU benefits from the shared 16 MB SLC (which CAN cache 10 features
+  per core with Rayon's 10-core parallelism — 10 MB fits in SLC).
+- Sorting strategies (`scatter_wide_dyn`, tiled, gather) don't change the
+  access pattern; all hit the same memory-latency wall.
+
+**Experiments ruled out:**
+
+| Experiment | Result |
+|---|---|
+| `ROWS_PER_CHUNK_DEFAULT` 8192 → 65536 | 0.19× (**WORSE** — long per-thread chains impede latency hiding) |
+| Gradient pre-gather (wide_dyn) | +7% at most; SLC already caches 8 MB gradient buffer |
+| `histogram_build_wide_dyn` vs `histogram_build_tiled` | Within noise (0.28–0.30×); same memory wall |
+| Wave-scheduling overhead hypothesis | Falsified by chunk=65536 result (fewer waves → slower, not faster) |
+
+### Path to ≥1.0× (next session)
+
+The critical insight: **if `row_indices` were sorted before dispatch**, bin
+lookups become ascending-stride reads in the feature column, enabling the
+GPU hardware prefetcher.  Estimated improvement:
+
+| Optimization | Estimated speedup | Complexity |
+|---|---|---|
+| GPU radix sort of node `row_indices` | batch histogram 90 ms → 30 ms/level → overall **~0.65×** | Medium (new sort kernel) |
+| Batch `apply_split` per level (40 commits vs 1275) | +8% | Medium (engine API change) |
+| Both combined | **~0.75×** | High |
+
+Even with both, 1.0× requires further work (device float atomics or ICB).
+The ICB path (Stage 4b) avoids random-access histogramming entirely by
+processing all nodes in one chained GPU dispatch — it is the more promising
+path to ≥1.0×.
+
+---
+
+## Next-up items
+
+1. **GPU radix sort of `row_indices` per node** — implement a 4-pass
+   GPU radix sort kernel (`partition_sort.metal`). Sort is applied per
+   node after `apply_split`, before `build_histograms`. Estimated cost:
+   ~15 ms/round (negligible vs 2400 ms savings). Requires new kernel +
+   integration with `RowIndexResidencyPool`.
+
+2. **Batch `apply_split` per level** — add `apply_split_batch` to
+   `BackendOps` and engine; encode all level-N partitions in one
+   `MTLCommandBuffer`. Saves ~300 ms (1275 commits → 40 commits).
+
+3. **Revisit ICB path (Stage 4b)** — the ICB histogrammer uses float
+   atomics which ARE sequential for a given node (no subtraction trick),
+   but avoids the scatter+reduce round-trip overhead.  With the
+   subtraction trick added to ICB, it could outperform the batch path.
+
+---
+
+## Stage 4b Checklist (reference)
 
 - [x] **Task 1** `BackendOps::try_build_tree_level_wise` hook + engine free-function intercept.
 - [x] **Task 2** Profile counters: `ICB_TREE`, `ICB_ENCODE`, `ICB_SUBMIT`, `ICB_READBACK`.
 - [x] **Task 3** Cargo.toml features for `MTLIndirectCommandBuffer` + `MTLHeap`.
-- [x] **Task 4** ICB Metal shaders (`icb_tree.metal`): three kernels — `icb_histogram`, `icb_split_find`, `icb_partition`. Column-major bin access; per-level histogram regions; atomic float accumulation; NaN-left/NaN-right paths.
-- [x] **Task 5** `IcbPipelineCache` in `pipelines.rs` — PSOs built with `MTLComputePipelineDescriptor` + `setSupportIndirectCommandBuffers(true)`.
+- [x] **Task 4** ICB Metal shaders (`icb_tree.metal`): three kernels — `icb_histogram`, `icb_split_find`, `icb_partition`.
+- [x] **Task 5** `IcbPipelineCache` in `pipelines.rs`.
 - [x] **Task 6** `IcbBufferPool` + `IcbSplitDecisionGpu` + `IcbConstantsGpu` in `icb_buffer_pool.rs`.
-- [x] **Task 7** `IcbTreeEncoder::encode_and_run` in `kernels/icb_tree.rs` — encodes depth×3 ICB commands, submits one `MTLCommandBuffer`, waits once, reads back decisions + leaf values + row_node_ids, reconstructs stumps + updates predictions.
-- [x] **Task 8** `MetalBackend::try_build_tree_level_wise` override in `lib.rs` + eligibility gate (Metal 4, ≤14 depth, ≤1024 bins, no categoricals, dataset within pool dims).
-- [x] **Task 9** Parity integration tests (`tests/icb_tree_parity.rs`): 4 tests vs `CpuBackend` — small/d=4, deep/d=8, prune/high-gain, multi-estimator/5-rounds. All pass on Metal 4 (macOS 26.4.1); silently skip on earlier hardware.
+- [x] **Task 7** `IcbTreeEncoder::encode_and_run` in `kernels/icb_tree.rs`.
+- [x] **Task 8** `MetalBackend::try_build_tree_level_wise` override in `lib.rs`.
+- [x] **Task 9** Parity integration tests (`tests/icb_tree_parity.rs`): 4 tests — all pass on Metal 4.
 - [x] **Task 10** `metal_friendly_large_icb` benchmark (0.24×, kill criterion NOT MET) + STATUS/SESSIONS update.
 
-**Verification (2026-04-29):**
-- `cargo test --test icb_tree_parity -- --test-threads=1` — 4/4 pass on macOS 26.4.1 (Metal 4).
-- `cargo test --workspace --exclude alloygbm-python -- --test-threads=1` — 244/244 pass.
-- `metal_friendly_large_icb` benchmark: **0.24×** (CPU 1.53s, GPU 6.44s). Kill criterion NOT MET.
-
-**Kill-criterion result: NOT MET.**
-
-`metal_friendly_large_icb` benchmark (1M × 100, regression d=8, bins=255, 5 estimators, Apple M4):
-- CPU: 1.53s — Metal (ICB): 6.44s — Ratio: **0.24×**
-
-Post-Stage-4b bottleneck analysis:
-
-The `commit_wait` time in Stage 4a (4626ms / 40 dispatches = ~115ms each) was dominated by actual GPU histogram compute (800M float atomic adds for 1M × 100 rows), not by CPU idle waiting. Eliminating per-level stalls via ICB removed the inter-level sync overhead, but that overhead was already ≪ GPU compute time. Additionally, the ICB path does not use the histogram subtraction trick (it builds full histograms for ALL nodes at each level), while Stage 4a used subtraction to skip the larger-child histogram. These effects roughly cancel.
-
-**Root cause of remaining gap:** GPU histogram kernel throughput. On Apple M4 (unordered float atomics), 800M atomic adds take ~4.5s vs. the CPU Rayon loop at ~1.5s. Competitive throughput would require either: (a) a two-pass deterministic reduction (reduce to shared memory, then accumulate once), or (b) exploiting the histogram subtraction trick on the GPU to halve the atomic work at each level.
-
-**Next action:** Stage 5 design — evaluate GPU histogram reduction approach to close the remaining 4× gap.
+**Kill-criterion result: NOT MET (0.24×).**
 
 ---
 
-## Stage 4b — Bugs fixed in Task 9
+## Stage 4a — Closed (2026-04-28, NOT MET: best 0.24×)
 
-Four blockers discovered and resolved during parity testing (see BUGS.md for details):
-
-| ID | Symptom | Fix |
-|----|---------|-----|
-| B-003 (ICB PSO) | SIGSEGV in `setComputePipelineState` inside ICB | `MTLComputePipelineDescriptor` + `setSupportIndirectCommandBuffers(true)` |
-| B-004 (histogram layout) | Level N accumulated on level N-1 data | Per-level histogram regions; single CPU zero before commit |
-| B-005 (bin layout) | Row-major bin access in column-major buffer | Changed to `bin_data[f * row_count + gid]` |
-| B-006 (last-level leaf values) | Rows at split nodes got wrong average leaf value | CPU left/right resolution from bin data in `update_candidate_predictions` |
-
----
-
-## Stage 4a — Closed (2026-04-28)
-
-**What shipped:**
-
-- GPU split-finding kernel (`best_split.metal`): two-pass per-feature prefix scan + cross-feature weighted-gain reduction. Handles NaN-left/NaN-right paths; Fisher-sort stays on CPU for categoricals.
-- Rust dispatch wrapper with buffer-offset pattern (one `MTLCommandBuffer` per batch, one encoder per pass, scratch buffer indexed by node slot).
-- `SplitDecisionPool` RAII pool for device-side output buffers (24 bytes / node).
-- `MetalBackend::find_best_splits_batch` override: eligibility gate (GPU-resident, bin_count ≤ 1024), pure-numeric fast path, mixed-mode merge for numeric+categorical models.
-- `BackendOps::find_best_splits_batch` trait default + engine refactor: `build_tree_level_wise` now calls the batched method; one level → one GPU split-finding dispatch.
-- `RuntimeBackend` forwarding (Python bridge).
-
-**Kill-criterion result:**
-
-NOT MET. Best ratio post-Stage-4a:
-- `metal_friendly` best: **0.17×** (regression d=6, bins=1024, 200k×200).
-- `metal_friendly_large` (1M×100, regression d=8): **0.24×**.
-
-All configs remain well below 1.0× CPU parity.
-
-**Post-Stage-4a bottleneck breakdown (regression d=8 bins=255, 1M×100, Apple M4):**
-
-| Site | calls | total_ms | % total |
-|---|---|---|---|
-| build_histograms_batch  | 40   | 5192 | 74.8% |
-| ..commit_wait           | 40   | 4626 | —     |
-| ..count_accumulate      | 640  | 1137 | —     |
-| find_best_splits_batch  | 40   |   45 |  0.7% |
-| ..commit_wait           | 40   |   44 | —     |
-| subtract_histogram_bundle_batch | 40 |  69 | 1.0% |
-| apply_split             | 1275 |  580 |  8.4% |
+Shipped GPU split-finding batch kernel, `find_best_splits_batch`, `SplitDecisionPool`.
 
 ---
 
@@ -94,4 +149,5 @@ All configs remain well below 1.0× CPU parity.
 - ~~**Stage 3** — GPU residency (row partitioning + histograms + subtract)~~ *(closed 2026-04-25 — NOT MET)*
 - ~~**Stage 4a** — GPU split finding (batched find_best_splits_batch)~~ *(closed 2026-04-28 — NOT MET)*
 - ~~**Stage 4b** — Metal 4 ICB chaining~~ *(closed 2026-04-29 — NOT MET: 0.24×)*
-- **Stage 5** — GPU inference tree traversal (planned, not scoped)
+- ~~**Stage 5** — GPU histogram kernel optimization~~ *(closed 2026-04-30 — NOT MET: 0.30×)*
+- **Stage 6** — GPU radix sort of row_indices (next)

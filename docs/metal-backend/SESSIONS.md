@@ -5,6 +5,53 @@ First thing a new session reads, alongside `STATUS.md`.
 
 ---
 
+## 2026-04-30 — Stage 5 closed: kernel optimizations + root-cause analysis
+
+**Shipped (commits b3a3a27, d26a889):**
+
+- `histogram_build_tiled` (tiled private-register kernel, 1 KB TG mem, no simd_shuffle
+  serialisation) added to histogram.metal and promoted to first dispatch priority.
+- `histogram_build_wide_dyn` (dynamic threadgroup memory via `[[threadgroup(0)]]`,
+  8 KB at 256 bins, 4 concurrent TGs/CU) added as second priority.
+- `histogram_gather_grads` gradient pre-gather pass: converts random gradient reads
+  to sequential. Suppressed when tiled kernel is selected (SLC caches gradient buffer).
+- `ROWS_PER_CHUNK_DEFAULT` reverted to 8 192 (65 536 was 1.77× slower — longer
+  per-thread chains impede latency hiding; wave scheduling was NOT the bottleneck).
+- Dispatch priority chain: tiled > scatter_wide_dyn > scatter_wide > scatter_narrow.
+- `use_gather` gated on tiled being unavailable (tiled reads gradients directly).
+- SESSIONS/STATUS updated with full root-cause analysis and next-step plan.
+
+**Kernel progression (1M × 100, regression d=8, bins=255, 5 rounds, M4):**
+
+| Kernel | commit_wait/level | speedup |
+|---|---|---|
+| `scatter_wide` (prior) | ~115 ms | 0.24× |
+| `scatter_wide_dyn` | ~90 ms | 0.28× |
+| `scatter_wide_dyn` + gather | ~90 ms | 0.30× |
+| `histogram_build_tiled` (first) | ~90 ms | 0.28–0.30× |
+
+**Kill-criterion result: NOT MET (best 0.30×).**
+
+**Root cause identified:**
+
+Random access to the 100 MB `binned_u8` buffer overwhelms GPU L2 (≈ 400 KB/CU).
+Root-node histogram (sequential `row_indices`) runs at 6.3 ns/feature-row;
+batch-level histograms (random `row_indices` after partition) run at 18 ns/feature-row
+— 3× slower per row.  The CPU avoids this via 16 MB shared SLC caching 10 MB
+of per-core bin data (Rayon, 10 P-cores × 10 features = 10 MB/core).
+
+No scatter-kernel change closes this gap because all kernels hit the same memory wall.
+
+**Next-up:**
+
+Stage 6: GPU radix sort of `row_indices` per node.  Sorted row indices make bin
+lookups ascending-stride within the feature column, enabling hardware prefetching.
+Estimated: batch histograms drop from 90 ms → 30 ms/level; overall speedup ~0.65×.
+
+Also worth: batch `apply_split` per level (1275 commits → 40 commits, saves ~300 ms).
+
+---
+
 ## 2026-04-29 — Stage 4b complete: parity tests + benchmark (Tasks 9–10)
 
 **Shipped (commits de2b9d3, fe82c53, a10974e):**
