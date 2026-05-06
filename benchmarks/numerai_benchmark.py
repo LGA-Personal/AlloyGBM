@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).parent.parent
 DATA_DIR = Path(__file__).parent / "data" / "numerai"
-ALL_ARMS = ["alloygbm", "lightgbm", "xgboost", "catboost"]
+ALL_ARMS = ["alloygbm", "alloygbm_morph", "alloygbm_morph_cosine", "lightgbm", "xgboost", "catboost"]
 
 NUMERAI_DATASET_FILES = {
     "train": "v5.2/train.parquet",
@@ -273,8 +273,18 @@ def fit_model(
 ) -> tuple[object, dict[str, float]]:
     """Train a model and return (model_object, fit_timing_dict)."""
 
-    if arm == "alloygbm":
+    if arm in ("alloygbm", "alloygbm_morph", "alloygbm_morph_cosine"):
         from alloygbm import GBMRegressor
+
+        morph_kwargs: dict = {}
+        if arm == "alloygbm_morph":
+            morph_kwargs = {"training_mode": "morph"}
+        elif arm == "alloygbm_morph_cosine":
+            morph_kwargs = {
+                "training_mode": "morph",
+                "lr_schedule": "warmup_cosine",
+                "lr_warmup_frac": 0.1,
+            }
 
         model = GBMRegressor(
             learning_rate=learning_rate,
@@ -289,6 +299,7 @@ def fit_model(
             deterministic=True,
             continuous_binning_strategy=binning_strategy,
             continuous_binning_max_bins=256,
+            **morph_kwargs,
         )
         model.fit(X_train, y_train)
         timing = {k: float(v) for k, v in getattr(model, "fit_timing_", {}).items()}
@@ -368,7 +379,7 @@ def fit_model(
 
 def predict_model(arm: str, model: object, X_predict: np.ndarray) -> np.ndarray:
     """Predict using a fitted model."""
-    if arm == "alloygbm":
+    if arm in ("alloygbm", "alloygbm_morph", "alloygbm_morph_cosine"):
         preds = model.predict(X_predict)
     elif arm == "lightgbm":
         preds = model.predict(X_predict)
@@ -701,9 +712,10 @@ def main() -> None:
     try:
         from alloygbm import GBMRegressor  # noqa: F401
     except ImportError:
-        if "alloygbm" in requested:
-            logger.warning("alloygbm not installed — skipping")
-            requested.remove("alloygbm")
+        alloy_arms = [a for a in requested if a.startswith("alloygbm")]
+        if alloy_arms:
+            logger.warning("alloygbm not installed — skipping %s", alloy_arms)
+            requested = [a for a in requested if not a.startswith("alloygbm")]
     args.resolved_arms = requested
 
     if not args.resolved_arms:
