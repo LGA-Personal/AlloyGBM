@@ -9,5 +9,8 @@ homepage.workspace = true
 repository.workspace = true
 documentation.workspace = true
 
+[dependencies]
+wide = "0.7"
+
 [lints]
 workspace = true

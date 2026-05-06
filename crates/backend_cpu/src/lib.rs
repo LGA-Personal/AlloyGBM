@@ -12,6 +12,8 @@ use std::cell::RefCell;
 mod morph;
 pub use morph::{compute_morph_gain, MorphGainInputs, SplitSideStats};
 
+pub use alloygbm_core::simd;
+
 thread_local! {
     /// Per-thread reusable histogram arena to avoid repeated allocation.
     static THREAD_ARENA: RefCell<HistogramArena> = RefCell::new(HistogramArena::new(0, 0));
@@ -479,12 +481,291 @@ impl CpuBackend {
         node_id: u32,
         options: SplitSelectionOptions,
     ) -> Option<SplitCandidate> {
-        Self::best_split_for_feature_inner(
-            feature_histogram,
+        // Standard-path bin-scan goes through the SIMD-vectorized fast path.
+        // The morph path retains the scalar implementation because its gain
+        // formula calls `tanh`/`ln`/`exp`, which are not safely vectorizable
+        // through the `wide` crate.
+        Self::best_split_for_feature_standard_simd(feature_histogram, node_id, options)
+    }
+
+    /// SIMD-vectorized standard-gain bin-scan for a single numeric feature.
+    ///
+    /// This is the fast path used by `best_split_for_feature` when the gain
+    /// strategy is `GainStrategy::Standard`. Cumulative left-side stats are
+    /// computed scalar-sequentially (the prefix scan is inherently serial),
+    /// then per-bin gain candidates are evaluated 8-wide with `f32x8`.
+    ///
+    /// Output is byte-identical to `best_split_for_feature_inner(_, _, _,
+    /// GainStrategy::Standard)` within float-rounding tolerance (verified by
+    /// the parity tests in this module).
+    fn best_split_for_feature_standard_simd(
+        feature_histogram: &FeatureHistogram,
+        node_id: u32,
+        options: SplitSelectionOptions,
+    ) -> Option<SplitCandidate> {
+        use crate::simd::{f32x8, l1_threshold_f32x8};
+        use wide::{CmpGe, CmpGt};
+
+        const EPSILON: f32 = 1e-6;
+
+        if feature_histogram.bins.len() < 2 {
+            return None;
+        }
+
+        // Extract missing-value stats if the histogram covers the NaN bin.
+        let missing_bin_idx = options.missing_bin_index;
+        let (missing_grad, missing_hess, missing_count) =
+            if missing_bin_idx < feature_histogram.bins.len() {
+                let mb = &feature_histogram.bins[missing_bin_idx];
+                (mb.grad_sum, mb.hess_sum, mb.count)
+            } else {
+                (0.0_f32, 0.0_f32, 0_u32)
+            };
+
+        let mut total_grad = 0.0_f32;
+        let mut total_hess = 0.0_f32;
+        let mut total_count = 0_u32;
+        for bin in &feature_histogram.bins {
+            total_grad += bin.grad_sum;
+            total_hess += bin.hess_sum;
+            total_count += bin.count;
+        }
+
+        if total_hess <= options.min_child_hessian {
+            return None;
+        }
+
+        let nm_total_grad = total_grad - missing_grad;
+        let nm_total_hess = total_hess - missing_hess;
+        let nm_total_count = total_count.saturating_sub(missing_count);
+
+        let parent_denom = total_hess + options.l2_lambda + EPSILON;
+        let parent_grad = l1_threshold_gradient(total_grad, options.l1_alpha);
+        let parent_gain_term = (parent_grad * parent_grad) / parent_denom;
+
+        let scan_limit = feature_histogram.bins.len().min(missing_bin_idx);
+        if scan_limit == 0 {
+            return None;
+        }
+
+        // Pre-compute scalar cumulative left-side stats. The prefix scan is
+        // inherently sequential, so we keep it in scalar code.
+        let mut cum_left_grad = vec![0.0_f32; scan_limit];
+        let mut cum_left_hess = vec![0.0_f32; scan_limit];
+        let mut cum_left_count = vec![0_u32; scan_limit];
+        {
+            let mut g = 0.0_f32;
+            let mut h = 0.0_f32;
+            let mut c = 0_u32;
+            for (i, bin) in feature_histogram.bins.iter().enumerate().take(scan_limit) {
+                g += bin.grad_sum;
+                h += bin.hess_sum;
+                c += bin.count;
+                cum_left_grad[i] = g;
+                cum_left_hess[i] = h;
+                cum_left_count[i] = c;
+            }
+        }
+
+        // Per-NaN-direction broadcast values.
+        let l1_alpha = options.l1_alpha;
+        let l2_lambda = options.l2_lambda;
+        let min_child_hessian = options.min_child_hessian;
+        let min_leaf_mag = options.min_leaf_magnitude;
+        let nm_total_grad_v = f32x8::splat(nm_total_grad);
+        let nm_total_hess_v = f32x8::splat(nm_total_hess);
+        let nm_total_count_f = nm_total_count as f32;
+        let nm_total_count_v = f32x8::splat(nm_total_count_f);
+        let missing_grad_v = f32x8::splat(missing_grad);
+        let missing_hess_v = f32x8::splat(missing_hess);
+        let missing_count_f = missing_count as f32;
+        let missing_count_v = f32x8::splat(missing_count_f);
+        let l2_lambda_v = f32x8::splat(l2_lambda);
+        let eps_v = f32x8::splat(EPSILON);
+        let min_child_hess_v = f32x8::splat(min_child_hessian);
+        let min_leaf_mag_v = f32x8::splat(min_leaf_mag);
+        let parent_gain_term_v = f32x8::splat(parent_gain_term);
+        let neg_inf_v = f32x8::splat(f32::NEG_INFINITY);
+
+        // Best result tracking — store as (gain, threshold_bin, default_left).
+        // Final SplitCandidate is built once at the end from the cumulative arrays.
+        let mut best_gain = 0.0_f32;
+        let mut best_threshold: usize = usize::MAX;
+        let mut best_default_left = false;
+
+        // For each NaN direction, evaluate gain across all bins in 8-wide chunks.
+        for &default_left in &[true, false] {
+            let nan_left_mask = default_left;
+            // For each chunk-of-8 starting at `chunk_start`:
+            let mut chunk_start = 0usize;
+            while chunk_start < scan_limit {
+                let chunk_end = (chunk_start + 8).min(scan_limit);
+                let chunk_len = chunk_end - chunk_start;
+
+                // Load 8 lanes of cumulative left stats (zero-pad the tail).
+                let mut lg_arr = [0.0_f32; 8];
+                let mut lh_arr = [0.0_f32; 8];
+                let mut lc_arr = [0.0_f32; 8];
+                for j in 0..chunk_len {
+                    lg_arr[j] = cum_left_grad[chunk_start + j];
+                    lh_arr[j] = cum_left_hess[chunk_start + j];
+                    lc_arr[j] = cum_left_count[chunk_start + j] as f32;
+                }
+                let lg_v = f32x8::from(lg_arr);
+                let lh_v = f32x8::from(lh_arr);
+                let lc_v = f32x8::from(lc_arr);
+
+                // Right-side stats (before NaN routing).
+                let rg_v = nm_total_grad_v - lg_v;
+                let rh_v = nm_total_hess_v - lh_v;
+                let rc_v = nm_total_count_v - lc_v;
+
+                // Apply NaN-direction routing.
+                let (eff_lg, eff_lh, eff_lc, eff_rg, eff_rh, eff_rc) = if nan_left_mask {
+                    (
+                        lg_v + missing_grad_v,
+                        lh_v + missing_hess_v,
+                        lc_v + missing_count_v,
+                        rg_v,
+                        rh_v,
+                        rc_v,
+                    )
+                } else {
+                    (
+                        lg_v,
+                        lh_v,
+                        lc_v,
+                        rg_v + missing_grad_v,
+                        rh_v + missing_hess_v,
+                        rc_v + missing_count_v,
+                    )
+                };
+
+                // L1-thresholded gradient sums.
+                let lg_l1 = l1_threshold_f32x8(eff_lg, l1_alpha);
+                let rg_l1 = l1_threshold_f32x8(eff_rg, l1_alpha);
+
+                // Denominators.
+                let l_denom = eff_lh + l2_lambda_v + eps_v;
+                let r_denom = eff_rh + l2_lambda_v + eps_v;
+
+                // Gain.
+                let gain_v =
+                    (lg_l1 * lg_l1) / l_denom + (rg_l1 * rg_l1) / r_denom - parent_gain_term_v;
+
+                // Validity mask:
+                //   eff_lc != 0 (lc > 0)
+                //   eff_rc != 0 (rc > 0)
+                //   eff_lh > min_child_hessian
+                //   eff_rh > min_child_hessian
+                let zero_v = f32x8::ZERO;
+                let lc_pos = eff_lc.cmp_gt(zero_v);
+                let rc_pos = eff_rc.cmp_gt(zero_v);
+                let lh_ok = eff_lh.cmp_gt(min_child_hess_v);
+                let rh_ok = eff_rh.cmp_gt(min_child_hess_v);
+                // Combine via bitwise AND on the float-mask representation.
+                let valid_mask = lc_pos & rc_pos & lh_ok & rh_ok;
+
+                // min_leaf_magnitude filter: candidate is rejected when BOTH
+                // sides' leaf magnitudes are below the threshold.
+                let final_gain = if min_leaf_mag > 0.0 {
+                    let l_leaf_mag = lg_l1.abs() / l_denom;
+                    let r_leaf_mag = rg_l1.abs() / r_denom;
+                    // pass if either side >= min_leaf_mag (i.e. NOT both below).
+                    let l_passes = l_leaf_mag.cmp_ge(min_leaf_mag_v);
+                    let r_passes = r_leaf_mag.cmp_ge(min_leaf_mag_v);
+                    let leaf_mag_ok = l_passes | r_passes;
+                    let combined = valid_mask & leaf_mag_ok;
+                    // If combined-mask is all-ones (lane valid), keep gain;
+                    // else replace with -inf.
+                    combined.blend(gain_v, neg_inf_v)
+                } else {
+                    valid_mask.blend(gain_v, neg_inf_v)
+                };
+
+                // Extract gain to scalar for tail-masking, edge-threshold
+                // rejection, and horizontal argmax. The lane-extract overhead
+                // is small (8 floats) compared to the vectorized gain math.
+                let mut g_arr = final_gain.to_array();
+                // Mask out tail-padded lanes.
+                for slot in g_arr.iter_mut().skip(chunk_len) {
+                    *slot = f32::NEG_INFINITY;
+                }
+                // Skip "edge" thresholds where left covers all non-missing bins.
+                // Replicates the scalar check:
+                //   if threshold_bin + 1 >= scan_limit && nm_total_count == left_count { skip }
+                for (j, slot) in g_arr.iter_mut().take(chunk_len).enumerate() {
+                    let threshold_bin = chunk_start + j;
+                    let left_count = cum_left_count[threshold_bin];
+                    if threshold_bin + 1 >= scan_limit && nm_total_count == left_count {
+                        *slot = f32::NEG_INFINITY;
+                    }
+                }
+                // Horizontal argmax for this chunk against the running best.
+                for (j, &g) in g_arr.iter().take(chunk_len).enumerate() {
+                    if g > best_gain {
+                        best_gain = g;
+                        best_threshold = chunk_start + j;
+                        best_default_left = default_left;
+                    }
+                }
+
+                chunk_start = chunk_end;
+            }
+        }
+
+        if best_threshold == usize::MAX {
+            return None;
+        }
+
+        // Reconstruct the chosen candidate's stats from the cumulative arrays.
+        let threshold_bin = best_threshold;
+        let left_grad = cum_left_grad[threshold_bin];
+        let left_hess = cum_left_hess[threshold_bin];
+        let left_count = cum_left_count[threshold_bin];
+        let right_grad = nm_total_grad - left_grad;
+        let right_hess = nm_total_hess - left_hess;
+        let right_count = nm_total_count.saturating_sub(left_count);
+
+        let (eff_lg, eff_lh, eff_lc, eff_rg, eff_rh, eff_rc) = if best_default_left {
+            (
+                left_grad + missing_grad,
+                left_hess + missing_hess,
+                left_count + missing_count,
+                right_grad,
+                right_hess,
+                right_count,
+            )
+        } else {
+            (
+                left_grad,
+                left_hess,
+                left_count,
+                right_grad + missing_grad,
+                right_hess + missing_hess,
+                right_count + missing_count,
+            )
+        };
+
+        Some(SplitCandidate {
             node_id,
-            options,
-            GainStrategy::Standard,
-        )
+            feature_index: feature_histogram.feature_index,
+            threshold_bin: threshold_bin as u16,
+            gain: best_gain,
+            default_left: best_default_left,
+            is_categorical: false,
+            categorical_bitset: None,
+            left_stats: NodeStats {
+                grad_sum: eff_lg,
+                hess_sum: eff_lh,
+                row_count: eff_lc,
+            },
+            right_stats: NodeStats {
+                grad_sum: eff_rg,
+                hess_sum: eff_rh,
+                row_count: eff_rc,
+            },
+        })
     }
 
     /// Shared scaffold for numeric split finding, parameterised by gain strategy.
@@ -2430,5 +2711,151 @@ mod tests {
             a.gain,
             b.gain
         );
+    }
+
+    fn make_options(
+        l1_alpha: f32,
+        l2_lambda: f32,
+        min_child_hessian: f32,
+        min_leaf_magnitude: f32,
+        missing_bin_index: usize,
+    ) -> SplitSelectionOptions {
+        SplitSelectionOptions {
+            l1_alpha,
+            l2_lambda,
+            min_child_hessian,
+            min_leaf_magnitude,
+            missing_bin_index,
+        }
+    }
+
+    #[test]
+    fn simd_standard_bin_scan_matches_scalar() {
+        let bins: Vec<HistogramBin> = (0..32)
+            .map(|i| HistogramBin {
+                grad_sum: ((i as f32 - 15.5) * 0.1).sin(),
+                hess_sum: 0.5 + (i as f32 * 0.05).cos().abs(),
+                count: 10 + (i as u32 % 7),
+            })
+            .collect();
+        let fh = FeatureHistogram {
+            feature_index: 0,
+            bins,
+        };
+        let options = make_options(0.05, 0.1, 1.0, 0.0, 31);
+        let scalar =
+            CpuBackend::best_split_for_feature_inner(&fh, 0, options, GainStrategy::Standard);
+        let simd = CpuBackend::best_split_for_feature_standard_simd(&fh, 0, options);
+        match (scalar, simd) {
+            (Some(s), Some(v)) => {
+                assert_eq!(s.threshold_bin, v.threshold_bin, "threshold_bin mismatch");
+                assert!(
+                    (s.gain - v.gain).abs() < 1e-4,
+                    "gain drift: scalar={} simd={}",
+                    s.gain,
+                    v.gain
+                );
+                assert_eq!(s.default_left, v.default_left);
+            }
+            (None, None) => {}
+            (a, b) => panic!(
+                "scalar/simd disagree on Some-ness: scalar={}, simd={}",
+                a.is_some(),
+                b.is_some()
+            ),
+        }
+    }
+
+    #[test]
+    fn simd_standard_bin_scan_matches_scalar_with_l1() {
+        let bins: Vec<HistogramBin> = (0..16)
+            .map(|i| HistogramBin {
+                grad_sum: (i as f32 - 7.5) * 0.02,
+                hess_sum: 1.0,
+                count: 20,
+            })
+            .collect();
+        let fh = FeatureHistogram {
+            feature_index: 0,
+            bins,
+        };
+        let options = make_options(0.10, 0.1, 0.5, 0.0, 15);
+        let scalar =
+            CpuBackend::best_split_for_feature_inner(&fh, 0, options, GainStrategy::Standard);
+        let simd = CpuBackend::best_split_for_feature_standard_simd(&fh, 0, options);
+        match (scalar, simd) {
+            (Some(s), Some(v)) => {
+                assert_eq!(s.threshold_bin, v.threshold_bin);
+                assert!((s.gain - v.gain).abs() < 1e-4);
+            }
+            (None, None) => {}
+            _ => panic!("scalar/simd disagreement"),
+        }
+    }
+
+    #[test]
+    fn simd_standard_bin_scan_matches_scalar_with_min_leaf_magnitude() {
+        // Exercise the min_leaf_magnitude rejection branch.
+        let bins: Vec<HistogramBin> = (0..16)
+            .map(|i| HistogramBin {
+                grad_sum: ((i as f32 - 7.5) * 0.05).sin(),
+                hess_sum: 1.0 + (i as f32 * 0.1).cos().abs(),
+                count: 12 + (i as u32 % 5),
+            })
+            .collect();
+        let fh = FeatureHistogram {
+            feature_index: 0,
+            bins,
+        };
+        let options = make_options(0.0, 0.1, 0.0, 0.05, 15);
+        let scalar =
+            CpuBackend::best_split_for_feature_inner(&fh, 0, options, GainStrategy::Standard);
+        let simd = CpuBackend::best_split_for_feature_standard_simd(&fh, 0, options);
+        match (scalar, simd) {
+            (Some(s), Some(v)) => {
+                assert_eq!(s.threshold_bin, v.threshold_bin);
+                assert!((s.gain - v.gain).abs() < 1e-4);
+                assert_eq!(s.default_left, v.default_left);
+            }
+            (None, None) => {}
+            _ => panic!("scalar/simd disagreement on min_leaf_magnitude path"),
+        }
+    }
+
+    #[test]
+    fn simd_standard_bin_scan_matches_scalar_with_missing_bin() {
+        // Real missing-bin contribution exercises the NaN-direction routing.
+        let mut bins: Vec<HistogramBin> = (0..16)
+            .map(|i| HistogramBin {
+                grad_sum: ((i as f32 - 7.5) * 0.1).sin(),
+                hess_sum: 1.0 + (i as f32 * 0.05).cos().abs(),
+                count: 8 + (i as u32 % 4),
+            })
+            .collect();
+        // Simulate non-trivial missing bin at index 15.
+        bins[15] = HistogramBin {
+            grad_sum: 0.4,
+            hess_sum: 1.5,
+            count: 7,
+        };
+        let fh = FeatureHistogram {
+            feature_index: 0,
+            bins,
+        };
+        let options = make_options(0.0, 0.1, 0.5, 0.0, 15);
+        let scalar =
+            CpuBackend::best_split_for_feature_inner(&fh, 0, options, GainStrategy::Standard);
+        let simd = CpuBackend::best_split_for_feature_standard_simd(&fh, 0, options);
+        match (scalar, simd) {
+            (Some(s), Some(v)) => {
+                assert_eq!(s.threshold_bin, v.threshold_bin);
+                assert!((s.gain - v.gain).abs() < 1e-4);
+                assert_eq!(s.default_left, v.default_left);
+                assert_eq!(s.left_stats.row_count, v.left_stats.row_count);
+                assert_eq!(s.right_stats.row_count, v.right_stats.row_count);
+            }
+            (None, None) => {}
+            _ => panic!("scalar/simd disagreement on missing-bin path"),
+        }
     }
 }

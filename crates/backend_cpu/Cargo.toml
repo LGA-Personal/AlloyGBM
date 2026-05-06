@@ -13,6 +13,7 @@ documentation.workspace = true
 alloygbm-core = { path = "../core" }
 alloygbm-engine = { path = "../engine" }
 rayon = "1.11"
+wide = "0.7"
 
 [[bench]]
 name = "histogram_kernels"

@@ -1,0 +1,23 @@
+# Phase B SIMD Optimization Results — peer comparison
+# Medium scale: 200K rows × 400 features × 500 estimators (320 MB float32)
+# Same kwargs across libraries: lr=0.05, depth=6, subsample=0.8,
+# col_subsample=0.3, min_data_in_leaf=5000, lambda_l2=1.0
+
+## Wall-clock fit time
+
+  lightgbm:               8.78s   (1.00× baseline)
+  alloygbm (auto):       12.14s   (1.38× lightgbm)
+  alloygbm (morph):      12.50s   (1.42× lightgbm, 1.03× alloygbm auto)
+  alloygbm (morph+cos):  14.83s   (1.69× lightgbm, 1.22× alloygbm auto)
+  xgboost:               22.61s   (2.57× lightgbm)
+
+## Key wins from Phase B SIMD work (Tasks 7-9):
+
+  Morph overhead vs auto: 1.6× → 1.03× (≈40% reduction in morph cost)
+  AlloyGBM vs xgboost:    AlloyGBM is now FASTER than xgboost at scale
+
+## Comparison to overnight benchmark (pre-SIMD, smaller scenarios)
+
+The overnight comparison showed alloygbm_morph at ~1.6× alloygbm auto on
+deep_low_lr/ultra_low_lr profiles. After Tasks 7-9 (SIMD EMA + SIMD bin-scan),
+morph overhead is now within 3% of auto — effectively eliminated at scale.

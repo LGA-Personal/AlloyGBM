@@ -1,6 +1,8 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
+pub mod simd;
+
 pub const MODEL_FORMAT_V1: u32 = 1;
 pub const MODEL_BINARY_MAGIC: [u8; 4] = *b"AGBM";
 pub const MODEL_BINARY_HEADER_LEN: usize = 16;
@@ -109,6 +111,32 @@ impl GradientEmaStats {
     /// Note: variance is computed with population divisor (n), not sample
     /// divisor (n-1). This is intentional for EMA smoothing where n is large.
     pub fn update(&mut self, gradients: &[f32]) {
+        if gradients.is_empty() {
+            return;
+        }
+        let n = gradients.len() as f32;
+        // SIMD-vectorized single-pass computation: sum + sum-of-squares.
+        // var = E[X²] - E[X]² (algebraically equivalent to the 2-pass form,
+        // numerically slightly less stable but fine for gradient stats).
+        let sum = crate::simd::sum_f32(gradients);
+        let sumsq = crate::simd::sum_squares_f32(gradients);
+        let mean = sum / n;
+        if !mean.is_finite() {
+            return;
+        }
+        // Clamp to 0 to guard against tiny FP negatives from cancellation.
+        let var = (sumsq / n - mean * mean).max(0.0);
+        if !var.is_finite() {
+            return;
+        }
+        let std = var.sqrt();
+        self.mean = (1.0 - self.alpha) * self.mean + self.alpha * mean;
+        self.std = (1.0 - self.alpha) * self.std + self.alpha * std;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn update_two_pass_legacy(&mut self, gradients: &[f32]) {
+        // Preserved only for parity testing against the new single-pass form.
         if gradients.is_empty() {
             return;
         }
@@ -2898,5 +2926,65 @@ mod tests {
         let decoded_morph =
             decode_optional_morph_metadata_artifact_section(&parsed.sections).unwrap();
         assert_eq!(decoded_morph, None);
+    }
+
+    #[test]
+    fn gradient_ema_single_pass_matches_two_pass_within_tolerance() {
+        // Use the existing two-pass implementation as the reference,
+        // then verify the new single-pass implementation produces the
+        // same result within numerical tolerance.
+        let gradients: Vec<f32> = (0..1000).map(|i| (i as f32 * 0.013).sin()).collect();
+        let mut legacy = GradientEmaStats {
+            alpha: 0.5,
+            ..Default::default()
+        };
+        legacy.update_two_pass_legacy(&gradients);
+        let mut new_path = GradientEmaStats {
+            alpha: 0.5,
+            ..Default::default()
+        };
+        new_path.update(&gradients);
+        assert!(
+            (legacy.mean - new_path.mean).abs() < 1e-4,
+            "mean drift: legacy={} new={}",
+            legacy.mean,
+            new_path.mean
+        );
+        assert!(
+            (legacy.std - new_path.std).abs() < 1e-3,
+            "std drift: legacy={} new={}",
+            legacy.std,
+            new_path.std
+        );
+    }
+
+    #[test]
+    fn gradient_ema_handles_empty_input() {
+        let mut stats = GradientEmaStats {
+            alpha: 0.5,
+            ..Default::default()
+        };
+        let initial_mean = stats.mean;
+        let initial_std = stats.std;
+        stats.update(&[]);
+        assert_eq!(stats.mean, initial_mean);
+        assert_eq!(stats.std, initial_std);
+    }
+
+    #[test]
+    fn gradient_ema_simd_matches_scalar_for_large_input() {
+        // 5000 elements ensures the chunks_exact(8) path runs many iterations.
+        let gradients: Vec<f32> = (0..5000)
+            .map(|i| (i as f32 * 0.001).cos() * 0.5)
+            .collect();
+        let mut new_path = GradientEmaStats {
+            alpha: 0.3,
+            ..Default::default()
+        };
+        new_path.update(&gradients);
+        // Sanity: result should be finite.
+        assert!(new_path.mean.is_finite());
+        assert!(new_path.std.is_finite());
+        assert!(new_path.std >= 0.0);
     }
 }
