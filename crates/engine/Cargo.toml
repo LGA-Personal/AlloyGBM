@@ -12,6 +12,7 @@ documentation.workspace = true
 [dependencies]
 alloygbm-core = { path = "../core" }
 alloygbm-categorical = { path = "../categorical" }
+rayon = "1.11"
 
 [lints]
 workspace = true

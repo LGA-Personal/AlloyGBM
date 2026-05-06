@@ -923,7 +923,7 @@ impl CpuBackend {
                             grad_std: morph.grad_std,
                             lambda_l2: options.l2_lambda,
                         };
-                        compute_morph_gain(inputs, &morph.config)
+                        compute_morph_gain(inputs, &morph.config, &morph.precomputed)
                     }
                 };
 
@@ -1171,7 +1171,7 @@ impl CpuBackend {
                             grad_std: morph.grad_std,
                             lambda_l2: options.l2_lambda,
                         };
-                        compute_morph_gain(inputs, &morph.config)
+                        compute_morph_gain(inputs, &morph.config, &morph.precomputed)
                     }
                 };
 
@@ -2471,7 +2471,7 @@ mod tests {
 
     #[test]
     fn best_split_morph_at_warmup_matches_best_split_with_options() {
-        use alloygbm_core::MorphConfig;
+        use alloygbm_core::{MorphConfig, MorphPrecomputed};
         use alloygbm_engine::MorphContext;
 
         let backend = CpuBackend;
@@ -2492,15 +2492,17 @@ mod tests {
             missing_bin_index: 255,
         };
 
+        let cfg = MorphConfig {
+            balance_penalty: false,
+            ..MorphConfig::default()
+        };
         let morph = MorphContext {
             iteration: 0,
             total_iterations: 100,
             grad_mean: 0.0,
             grad_std: 1.0,
-            config: MorphConfig {
-                balance_penalty: false,
-                ..MorphConfig::default()
-            },
+            config: cfg,
+            precomputed: MorphPrecomputed::for_iteration(0, &cfg),
         };
 
         let standard = backend
@@ -2536,7 +2538,7 @@ mod tests {
     /// - `min_leaf_magnitude` was not checked in the morph path (Issue 3)
     #[test]
     fn best_split_morph_at_warmup_matches_with_l1_l2_regularization() {
-        use alloygbm_core::MorphConfig;
+        use alloygbm_core::{MorphConfig, MorphPrecomputed};
         use alloygbm_engine::MorphContext;
 
         let backend = CpuBackend;
@@ -2557,15 +2559,17 @@ mod tests {
             missing_bin_index: 255,
         };
 
+        let cfg = MorphConfig {
+            balance_penalty: false,
+            ..MorphConfig::default()
+        };
         let morph = MorphContext {
             iteration: 0,
             total_iterations: 100,
             grad_mean: 0.0,
             grad_std: 1.0,
-            config: MorphConfig {
-                balance_penalty: false,
-                ..MorphConfig::default()
-            },
+            config: cfg,
+            precomputed: MorphPrecomputed::for_iteration(0, &cfg),
         };
 
         let standard = backend
@@ -2599,7 +2603,7 @@ mod tests {
     /// unambiguous regardless of the gain formula used.
     #[test]
     fn best_split_morph_at_warmup_matches_categorical_split() {
-        use alloygbm_core::MorphConfig;
+        use alloygbm_core::{MorphConfig, MorphPrecomputed};
         use alloygbm_engine::{CategoricalFeatureInfo, MorphContext};
 
         // Build a HistogramBundle with one categorical feature (4 categories).
@@ -2664,15 +2668,17 @@ mod tests {
             num_categories: num_cats,
         }];
 
+        let cfg = MorphConfig {
+            balance_penalty: false,
+            ..MorphConfig::default()
+        };
         let morph = MorphContext {
             iteration: 0,
             total_iterations: 100,
             grad_mean: 0.0,
             grad_std: 1.0,
-            config: MorphConfig {
-                balance_penalty: false,
-                ..MorphConfig::default()
-            },
+            config: cfg,
+            precomputed: MorphPrecomputed::for_iteration(0, &cfg),
         };
 
         let backend = CpuBackend;

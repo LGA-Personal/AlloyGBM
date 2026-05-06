@@ -69,6 +69,50 @@ impl Default for MorphConfig {
     }
 }
 
+/// Per-round constants for morph gain computation. Compute once per round (not per bin).
+/// Eliminates redundant `tanh`, `(1.0 - info_score_weight)`, and warmup-branch
+/// computation in the inner per-bin gain loop.
+#[derive(Debug, Clone, Copy)]
+pub struct MorphPrecomputed {
+    pub in_warmup: bool,
+    /// `tanh(iteration / 20)` — only meaningful post-warmup
+    pub morph_weight: f32,
+    /// `1.0 - info_score_weight` (post-warmup; 1.0 in warmup)
+    pub gradient_score_coeff: f32,
+    /// `info_score_weight * morph_weight` (post-warmup; 0.0 in warmup)
+    pub info_score_coeff: f32,
+    /// Mirrors `cfg.balance_penalty` for fast access without dereferencing config
+    pub balance_penalty: bool,
+    /// True if `info_score_coeff` is below an epsilon — skip `info_gain` entirely
+    pub info_score_negligible: bool,
+}
+
+impl MorphPrecomputed {
+    pub fn for_iteration(iteration: u32, cfg: &MorphConfig) -> Self {
+        let in_warmup = iteration < cfg.morph_warmup_iters;
+        if in_warmup {
+            return Self {
+                in_warmup: true,
+                morph_weight: 0.0,
+                gradient_score_coeff: 1.0,
+                info_score_coeff: 0.0,
+                balance_penalty: cfg.balance_penalty,
+                info_score_negligible: true,
+            };
+        }
+        let morph_weight = (iteration as f32 / 20.0).tanh();
+        let info_score_coeff = cfg.info_score_weight * morph_weight;
+        Self {
+            in_warmup: false,
+            morph_weight,
+            gradient_score_coeff: 1.0 - cfg.info_score_weight,
+            info_score_coeff,
+            balance_penalty: cfg.balance_penalty,
+            info_score_negligible: info_score_coeff.abs() < 1e-6,
+        }
+    }
+}
+
 /// Top-level training profile selector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TrainingMode {

@@ -4,7 +4,7 @@
 //! Pre-warmup, this returns the standard XGBoost-style gain. Post-warmup, it
 //! blends gradient-based scoring with normalized information-theoretic terms.
 
-use alloygbm_core::MorphConfig;
+use alloygbm_core::{MorphConfig, MorphPrecomputed};
 
 /// Statistics for one side of a split (left, right, or parent).
 #[derive(Debug, Clone, Copy)]
@@ -37,19 +37,24 @@ const GAIN_EPSILON: f32 = 1e-6;
 ///
 /// At `iteration < morph_warmup_iters`, returns the standard XGBoost gain
 /// to allow byte-equivalence with the non-morph path during warmup.
-pub fn compute_morph_gain(inputs: MorphGainInputs, config: &MorphConfig) -> f32 {
+///
+/// `pre` carries per-round constants (`tanh(iter/20)`, `1 - info_score_weight`,
+/// the warmup-branch flag) so the inner per-bin loop avoids recomputing them.
+pub fn compute_morph_gain(
+    inputs: MorphGainInputs,
+    config: &MorphConfig,
+    pre: &MorphPrecomputed,
+) -> f32 {
     let gradient_score = gradient_gain(&inputs);
 
-    let mut gain = if inputs.iteration < config.morph_warmup_iters {
+    let mut gain = if pre.in_warmup || pre.info_score_negligible {
         gradient_score
     } else {
         let info_score = info_gain(&inputs, config);
-        let morph_weight = (inputs.iteration as f32 / 20.0).tanh();
-        (1.0 - config.info_score_weight) * gradient_score
-            + config.info_score_weight * info_score * morph_weight
+        pre.gradient_score_coeff * gradient_score + pre.info_score_coeff * info_score
     };
 
-    if config.balance_penalty {
+    if pre.balance_penalty {
         gain += balance_adjustment(&inputs);
     }
 
@@ -143,7 +148,8 @@ mod tests {
             balance_penalty: false,
             ..config()
         };
-        let gain = compute_morph_gain(inputs, &cfg);
+        let pre = MorphPrecomputed::for_iteration(inputs.iteration, &cfg);
+        let gain = compute_morph_gain(inputs, &cfg, &pre);
         let expected = gradient_gain(&inputs);
         assert!((gain - expected).abs() < 1e-6);
     }
@@ -156,7 +162,8 @@ mod tests {
             balance_penalty: false,
             ..cfg
         };
-        let gain = compute_morph_gain(inputs, &cfg_no_balance);
+        let pre = MorphPrecomputed::for_iteration(inputs.iteration, &cfg_no_balance);
+        let gain = compute_morph_gain(inputs, &cfg_no_balance, &pre);
         let expected = gradient_gain(&inputs);
         assert!((gain - expected).abs() < 1e-6);
     }
@@ -168,7 +175,8 @@ mod tests {
             ..config()
         };
         let inputs = balanced_inputs(cfg.morph_warmup_iters);
-        let gain = compute_morph_gain(inputs, &cfg);
+        let pre = MorphPrecomputed::for_iteration(inputs.iteration, &cfg);
+        let gain = compute_morph_gain(inputs, &cfg, &pre);
         let pure_gradient = gradient_gain(&inputs);
         // After warmup, gain should differ from pure gradient.
         assert!((gain - pure_gradient).abs() > 1e-9);
@@ -182,8 +190,10 @@ mod tests {
         };
         let early = balanced_inputs(cfg.morph_warmup_iters);
         let late = balanced_inputs(50);
-        let gain_early = compute_morph_gain(early, &cfg);
-        let gain_late = compute_morph_gain(late, &cfg);
+        let pre_early = MorphPrecomputed::for_iteration(early.iteration, &cfg);
+        let pre_late = MorphPrecomputed::for_iteration(late.iteration, &cfg);
+        let gain_early = compute_morph_gain(early, &cfg, &pre_early);
+        let gain_late = compute_morph_gain(late, &cfg, &pre_late);
         // Different iterations produce different gains.
         assert!((gain_early - gain_late).abs() > 1e-9);
     }
@@ -215,8 +225,10 @@ mod tests {
             balance_penalty: true,
             ..config()
         };
-        let gain_off = compute_morph_gain(unbalanced, &cfg_off);
-        let gain_on = compute_morph_gain(unbalanced, &cfg_on);
+        let pre_off = MorphPrecomputed::for_iteration(unbalanced.iteration, &cfg_off);
+        let pre_on = MorphPrecomputed::for_iteration(unbalanced.iteration, &cfg_on);
+        let gain_off = compute_morph_gain(unbalanced, &cfg_off, &pre_off);
+        let gain_on = compute_morph_gain(unbalanced, &cfg_on, &pre_on);
         assert!(gain_on < gain_off);
     }
 
@@ -228,8 +240,10 @@ mod tests {
             balance_penalty: false,
             ..cfg
         };
-        let with_pen = compute_morph_gain(balanced, &cfg);
-        let no_pen = compute_morph_gain(balanced, &cfg_no_balance);
+        let pre = MorphPrecomputed::for_iteration(balanced.iteration, &cfg);
+        let pre_nb = MorphPrecomputed::for_iteration(balanced.iteration, &cfg_no_balance);
+        let with_pen = compute_morph_gain(balanced, &cfg, &pre);
+        let no_pen = compute_morph_gain(balanced, &cfg_no_balance, &pre_nb);
         assert!((with_pen - no_pen).abs() < 1e-6);
     }
 
@@ -242,8 +256,63 @@ mod tests {
             ..config()
         };
         let inputs = balanced_inputs(0);
-        let gain = compute_morph_gain(inputs, &cfg);
+        let pre = MorphPrecomputed::for_iteration(inputs.iteration, &cfg);
+        let gain = compute_morph_gain(inputs, &cfg, &pre);
         let expected = gradient_gain(&inputs);
         assert!((gain - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn precomputed_warmup_branch() {
+        let cfg = MorphConfig {
+            morph_warmup_iters: 5,
+            info_score_weight: 0.3,
+            depth_penalty_base: 0.9,
+            balance_penalty: false,
+            morph_rate: 0.1,
+            evolution_pressure: 0.2,
+            lr_schedule: LrSchedule::Constant,
+        };
+        let pre = MorphPrecomputed::for_iteration(2, &cfg);
+        assert!(pre.in_warmup);
+        assert!(pre.info_score_negligible);
+        assert_eq!(pre.gradient_score_coeff, 1.0);
+    }
+
+    #[test]
+    fn precomputed_post_warmup_branch() {
+        let cfg = MorphConfig {
+            morph_warmup_iters: 5,
+            info_score_weight: 0.3,
+            depth_penalty_base: 0.9,
+            balance_penalty: true,
+            morph_rate: 0.1,
+            evolution_pressure: 0.2,
+            lr_schedule: LrSchedule::Constant,
+        };
+        let pre = MorphPrecomputed::for_iteration(20, &cfg);
+        assert!(!pre.in_warmup);
+        let expected_weight = (20.0_f32 / 20.0).tanh();
+        assert!((pre.morph_weight - expected_weight).abs() < 1e-6);
+        assert!((pre.gradient_score_coeff - 0.7).abs() < 1e-6);
+        assert!((pre.info_score_coeff - 0.3 * expected_weight).abs() < 1e-6);
+        assert!(pre.balance_penalty);
+        assert!(!pre.info_score_negligible);
+    }
+
+    #[test]
+    fn precomputed_negligible_when_info_weight_zero() {
+        let cfg = MorphConfig {
+            morph_warmup_iters: 5,
+            info_score_weight: 0.0,
+            depth_penalty_base: 0.9,
+            balance_penalty: false,
+            morph_rate: 0.1,
+            evolution_pressure: 0.2,
+            lr_schedule: LrSchedule::Constant,
+        };
+        let pre = MorphPrecomputed::for_iteration(20, &cfg);
+        assert!(!pre.in_warmup);
+        assert!(pre.info_score_negligible);
     }
 }

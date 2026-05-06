@@ -3,8 +3,9 @@ use alloygbm_core::{
     BinnedMatrix, CategoricalStatePayloadV1, CoreError, DatasetMatrix, Device, FeatureTile,
     GradientEmaStats, GradientPair, HistogramBundle, LrSchedule, MISSING_BIN_U8, MODEL_FORMAT_V1,
     ModelArtifactSection, ModelMetadata, ModelSectionKind, MorphConfig, MorphMetadataPayload,
-    NativeCategoricalSplitsPayload, NodeSlice, NodeStats, PartitionResult, SplitCandidate,
-    TrainParams, TrainingDataset, TreeGrowth, decode_optional_categorical_state_section_v1,
+    MorphPrecomputed, NativeCategoricalSplitsPayload, NodeSlice, NodeStats, PartitionResult,
+    SplitCandidate, TrainParams, TrainingDataset, TreeGrowth,
+    decode_optional_categorical_state_section_v1,
     decode_optional_morph_metadata_artifact_section,
     decode_optional_native_categorical_splits_section, deserialize_model_artifact_v1,
     encode_categorical_state_payload_v1, encode_morph_metadata_payload,
@@ -94,6 +95,10 @@ pub struct MorphContext {
     pub grad_mean: f32,
     pub grad_std: f32,
     pub config: MorphConfig,
+    /// Per-round constants (`tanh(iter/20)`, blend coefficients, warmup branch)
+    /// hoisted out of the per-bin gain inner loop. Computed once via
+    /// [`MorphPrecomputed::for_iteration`] when the context is built.
+    pub precomputed: MorphPrecomputed,
 }
 
 /// Trainer-resident state for morph-mode training.
@@ -135,6 +140,7 @@ impl MorphState {
             grad_mean: stats.mean,
             grad_std: stats.std,
             config: self.config,
+            precomputed: MorphPrecomputed::for_iteration(iteration, &self.config),
         }
     }
 
@@ -4802,6 +4808,19 @@ fn sampled_row_indices(
 /// tiles for rayon to parallelize across cores.
 const MAX_TILE_FEATURE_WIDTH: usize = 64;
 
+/// Compute a tile size that keeps each thread busy with enough work but
+/// produces enough tiles to amortize parallelism overhead. Aim for roughly
+/// 2 tiles per thread so straggling threads can steal work. Falls back to
+/// `MAX_TILE_FEATURE_WIDTH` for low-feature workloads.
+fn compute_optimal_tile_size(feature_count: usize, n_threads: usize) -> usize {
+    if n_threads <= 1 || feature_count <= 16 {
+        return feature_count.clamp(1, MAX_TILE_FEATURE_WIDTH);
+    }
+    let target_tiles = n_threads.saturating_mul(2);
+    let raw_tile = feature_count.div_ceil(target_tiles);
+    raw_tile.clamp(16, MAX_TILE_FEATURE_WIDTH)
+}
+
 fn feature_tiles_from_sorted_indices(indices: &[usize]) -> EngineResult<Vec<FeatureTile>> {
     if indices.is_empty() {
         return Err(EngineError::ContractViolation(
@@ -4809,11 +4828,14 @@ fn feature_tiles_from_sorted_indices(indices: &[usize]) -> EngineResult<Vec<Feat
         ));
     }
 
+    let n_threads = rayon::current_num_threads();
+    let tile_width = compute_optimal_tile_size(indices.len(), n_threads);
+
     let mut tiles = Vec::new();
     let mut run_start = indices[0];
     let mut previous = indices[0];
     for &current in indices.iter().skip(1) {
-        if current == previous + 1 && (current - run_start) < MAX_TILE_FEATURE_WIDTH {
+        if current == previous + 1 && (current - run_start) < tile_width {
             previous = current;
             continue;
         }
@@ -6972,6 +6994,41 @@ mod tests {
         let selected_repeat = expand(&tiles_repeat);
         assert_eq!(selected, selected_repeat);
         assert_ne!(selected, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn auto_tile_size_targets_features_per_thread() {
+        // 780 features, 16 threads → expect ~24 (ceil(780/32)), clamped to [16,64]
+        let tile = compute_optimal_tile_size(780, 16);
+        assert!(
+            (16..=64).contains(&tile),
+            "expected tile in [16,64] for 780f/16t, got {}",
+            tile
+        );
+        // ceil(780/32) = 25, in range
+        assert_eq!(tile, 25);
+    }
+
+    #[test]
+    fn auto_tile_size_falls_back_for_low_feature_count() {
+        // 10 features, 16 threads → return feature_count itself (10), capped at MAX
+        let tile = compute_optimal_tile_size(10, 16);
+        assert_eq!(tile, 10);
+    }
+
+    #[test]
+    fn auto_tile_size_single_thread_returns_feature_count() {
+        let tile = compute_optimal_tile_size(100, 1);
+        assert_eq!(tile, MAX_TILE_FEATURE_WIDTH); // capped at the constant
+        let tile_small = compute_optimal_tile_size(40, 1);
+        assert_eq!(tile_small, 40);
+    }
+
+    #[test]
+    fn auto_tile_size_clamps_above_max() {
+        // 100K features, 16 threads → ceil(100000/32) = 3125, clamp to MAX_TILE_FEATURE_WIDTH (64)
+        let tile = compute_optimal_tile_size(100_000, 16);
+        assert_eq!(tile, MAX_TILE_FEATURE_WIDTH);
     }
 
     #[test]

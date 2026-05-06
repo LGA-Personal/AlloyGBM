@@ -1,0 +1,6 @@
+Scale: medium ({'n_rows': 200000, 'n_features': 400, 'n_estimators': 500})
+Dataset: (200000, 400) float32 (320 MB)
+
+            auto: fit=  12.06s  native=  11.71s  adapt= 0.029s  bridge= 0.294s
+           morph: fit=  11.99s  native=  11.68s  adapt= 0.035s  bridge= 0.261s
+    morph_cosine: fit=  12.64s  native=  12.36s  adapt= 0.013s  bridge= 0.253s
