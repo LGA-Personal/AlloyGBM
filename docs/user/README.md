@@ -9,9 +9,10 @@ Recommended order:
 3. [GBMRegressor Parameters](gbmregressor.md)
 4. [GBMClassifier](gbmclassifier.md)
 5. [GBMRanker](gbmranker.md)
-6. [Time-Aware Validation](validation.md)
-7. [Feature Importances And SHAP](explanations.md)
-8. [Benchmarks](benchmarks.md)
+6. [MorphBoost (Adaptive Split Criterion)](morphboost.md)
+7. [Time-Aware Validation](validation.md)
+8. [Feature Importances And SHAP](explanations.md)
+9. [Benchmarks](benchmarks.md)
 
 This section is intentionally user-facing. For project planning, research notes,
 and historical material, go back to [docs/README.md](../README.md).

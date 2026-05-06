@@ -4,7 +4,17 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
-The `0.3.2` release fixes GBMRanker training (silent zero-tree training on larger datasets) and adds a real-data ranking benchmark. The `0.3.1` release fixed multiclass prediction and expanded the benchmark suite. The `0.3.0` release added native categorical splits, multi-class classification, and custom objective/metric support.
+The `0.4.0` release introduces the opt-in MorphBoost adaptive split criterion, per-iteration learning-rate schedules, and SIMD-accelerated histogram and EMA kernels. The `0.3.2` release fixed GBMRanker training and added a real-data ranking benchmark. The `0.3.1` release fixed multiclass prediction and expanded the benchmark suite.
+
+## What Shipped In 0.4.0
+
+- **MorphBoost adaptive training mode** (`training_mode="morph"`) on `GBMRegressor`, `GBMClassifier`, and `GBMRanker`. Implements the criterion from [Kriuk (2025)](https://arxiv.org/pdf/2511.13234) with EMA-driven gain shaping, depth/iteration leaf penalties, balance penalty, and an information-theoretic blend term ramped in via `tanh(iter/20)` warmup
+- **Per-iteration learning-rate schedules** via the new `lr_schedule` parameter (`"constant"` default or `"warmup_cosine"`); schedule-aware auto early-stopping logic so warmup-phase rounds aren't classified as stalled
+- **MorphBoost configuration persisted in artifacts** as an optional section so loaded models predict consistently
+- **SIMD acceleration** via the `wide` crate (safe API, AVX2/NEON internally, scalar fallback): histogram bin-scan and EMA mean+variance pass are vectorized
+- **Tile-size auto-tuning** for histogram parallelism on high-feature workloads (~2 tiles per thread, clamped to `[16, 64]`)
+- **`alloygbm_morph` / `alloygbm_morph_cosine` benchmark arms** in `run_model_comparison.py`; new `--models` filter; new `morph_report.py`, `morph_ablation.py`, and updated `numerai_benchmark.py` harnesses (with build-freshness self-check at startup)
+- **Dedicated MorphBoost user guide** at `docs/user/morphboost.md` (and Sphinx mirror) plus cross-references across all estimator docs and READMEs
 
 ## What Shipped In 0.3.2
 

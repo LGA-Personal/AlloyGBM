@@ -92,6 +92,26 @@ Categorical support
   the threshold fall back to target encoding. Default 0 disables native
   splits.
 
+MorphBoost (Adaptive Split Criterion)
+-------------------------------------
+
+GBMRegressor (and the classifier / ranker subclasses) support an opt-in
+MorphBoost training mode. See :doc:`morphboost` for the full guide.
+
+- ``training_mode: str = "auto"`` -- one of ``"auto"`` (default), ``"manual"``,
+  or ``"morph"``.
+- ``morph_rate: float = 0.1`` -- per-iteration leaf shrinkage rate.
+- ``evolution_pressure: float = 0.2`` -- EMA-driven gain shaping strength.
+- ``morph_warmup_iters: int = 5`` -- rounds before the morph blend engages.
+- ``info_score_weight: float = 0.3`` -- mixing weight for the
+  information-theoretic gain term.
+- ``depth_penalty_base: float = 0.9`` -- depth-based leaf penalty base.
+- ``balance_penalty: bool = True`` -- whether to penalize imbalanced splits.
+- ``lr_schedule: str = "constant"`` -- per-iteration LR schedule
+  (``"constant"`` or ``"warmup_cosine"``); independent of ``training_mode``.
+- ``lr_warmup_frac: float = 0.1`` -- linear-warmup fraction when
+  ``lr_schedule="warmup_cosine"``.
+
 Warm-starting
 -------------
 

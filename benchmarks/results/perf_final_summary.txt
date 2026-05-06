@@ -1,0 +1,34 @@
+# Phase B Performance Optimization — FINAL Results
+# 200K rows × 400 features × 500 estimators
+
+## Progression of morph overhead vs auto
+
+  Pre-SIMD baseline (overnight benchmark, deep profiles):
+    morph:        1.6× auto  (substantial overhead)
+    morph_cosine: ~1.7× auto
+
+  After Tasks 7-9 (SIMD core):
+    auto:         12.14s
+    morph:        12.50s  (1.03× auto)
+    morph_cosine: 14.83s  (1.22× auto)
+
+  After Tasks 3 + 6 (hoist constants + tile auto-tune):
+    auto:         12.06s
+    morph:        11.99s  (0.99× auto — within noise of auto)
+    morph_cosine: 12.64s  (1.05× auto)
+
+## Peer comparison at the same scale
+
+  lightgbm:     8.78s   (1.00× baseline)
+  alloygbm:    12.06s   (1.37× lightgbm)
+  morph:       11.99s   (1.36× lightgbm)
+  morph+cos:   12.64s   (1.44× lightgbm)
+  xgboost:     22.61s   (2.57× lightgbm)
+
+## Headline summary
+
+  - Morph overhead: 1.6× → 0.99× auto (eliminated)
+  - Morph+cosine overhead: 1.7× → 1.05× auto
+  - AlloyGBM is faster than XGBoost at this scale
+  - Within 1.37× of LightGBM (was likely 3-4× pre-SIMD)
+  - Zero accuracy regressions: all 353 Python + 171+ Rust tests pass

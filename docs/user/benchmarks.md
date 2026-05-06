@@ -13,6 +13,15 @@ The suite compares AlloyGBM against:
 - LightGBM
 - CatBoost
 
+It also includes two MorphBoost variants of AlloyGBM as separate arms:
+
+- `alloygbm_morph` -- `training_mode="morph"` with the default constant LR schedule
+- `alloygbm_morph_cosine` -- `training_mode="morph"` with `lr_schedule="warmup_cosine"`
+
+A focused MorphBoost-vs-peers comparison script is also provided at
+`benchmarks/morph_report.py`, with a Numerai-specific harness at
+`benchmarks/numerai_benchmark.py`.
+
 Benchmarks span three task types:
 
 ### Regression
@@ -55,6 +64,16 @@ each library behaves under different learning-rate / depth / round budgets.
 
 - AlloyGBM competes on `synthetic_ranking` using its native LambdaMART
   implementation, evaluated via NDCG@5, NDCG@10, and full NDCG.
+
+### MorphBoost Variants
+
+- On Numerai-style residualized regression at scale (~2.7M rows, 42 features,
+  5000 rounds), AlloyGBM's MorphBoost variants lead all peer libraries on
+  validation MMC (Meta-Model Contribution) and Sharpe, while Numerai-corr
+  trails the peers by a small margin (~0.0006-0.0009).
+- `alloygbm_morph` is typically the fastest of the three AlloyGBM variants
+  on this workload due to faster convergence under the EMA-shaped gain.
+- See `benchmarks/numerai_benchmark.py` for the reproducer.
 
 ## Metrics By Task Type
 

@@ -3,10 +3,16 @@ use alloygbm_core::{
     HistogramBundle, NodeSlice, NodeStats, PartitionResult, SplitCandidate,
 };
 use alloygbm_engine::{
-    BackendOps, CategoricalFeatureInfo, EngineError, EngineResult, SplitSelectionOptions,
+    BackendOps, CategoricalFeatureInfo, EngineError, EngineResult, MorphContext,
+    SplitSelectionOptions,
 };
 use rayon::prelude::*;
 use std::cell::RefCell;
+
+mod morph;
+pub use morph::{MorphGainInputs, SplitSideStats, compute_morph_gain};
+
+pub use alloygbm_core::simd;
 
 thread_local! {
     /// Per-thread reusable histogram arena to avoid repeated allocation.
@@ -20,6 +26,15 @@ const SMALL_TILE_WORKLOAD_THRESHOLD: usize = 16_384;
 const PARALLEL_TILE_WORKLOAD_THRESHOLD: usize = 131_072;
 const TINY_NODE_ROW_THRESHOLD: usize = 32;
 const BIN_HEAVY_THRESHOLD: usize = 512;
+
+/// Controls which gain formula is used inside `best_split_for_feature_inner`.
+///
+/// `Standard` uses the XGBoost gain formula.
+/// `Morph` delegates to `compute_morph_gain` from the morph module.
+enum GainStrategy<'a> {
+    Standard,
+    Morph(&'a MorphContext),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HistogramKernelPath {
@@ -80,6 +95,19 @@ impl HistogramArena {
             &self.counts,
             feature_histograms,
         );
+    }
+}
+
+/// Apply a per-feature weight to a split candidate's gain for cross-feature comparison.
+///
+/// The gain stored in `SplitCandidate` remains unweighted (the true gain);
+/// the weighted gain is only used when comparing splits across features.
+fn apply_feature_weight(candidate: &SplitCandidate, feature_weights: &[f32]) -> f32 {
+    let fi = candidate.feature_index as usize;
+    if fi < feature_weights.len() {
+        candidate.gain * feature_weights[fi]
+    } else {
+        candidate.gain
     }
 }
 
@@ -453,6 +481,312 @@ impl CpuBackend {
         node_id: u32,
         options: SplitSelectionOptions,
     ) -> Option<SplitCandidate> {
+        // Standard-path bin-scan goes through the SIMD-vectorized fast path.
+        // The morph path retains the scalar implementation because its gain
+        // formula calls `tanh`/`ln`/`exp`, which are not safely vectorizable
+        // through the `wide` crate.
+        Self::best_split_for_feature_standard_simd(feature_histogram, node_id, options)
+    }
+
+    /// SIMD-vectorized standard-gain bin-scan for a single numeric feature.
+    ///
+    /// This is the fast path used by `best_split_for_feature` when the gain
+    /// strategy is `GainStrategy::Standard`. Cumulative left-side stats are
+    /// computed scalar-sequentially (the prefix scan is inherently serial),
+    /// then per-bin gain candidates are evaluated 8-wide with `f32x8`.
+    ///
+    /// Output is byte-identical to `best_split_for_feature_inner(_, _, _,
+    /// GainStrategy::Standard)` within float-rounding tolerance (verified by
+    /// the parity tests in this module).
+    fn best_split_for_feature_standard_simd(
+        feature_histogram: &FeatureHistogram,
+        node_id: u32,
+        options: SplitSelectionOptions,
+    ) -> Option<SplitCandidate> {
+        use crate::simd::{f32x8, l1_threshold_f32x8};
+        use wide::{CmpGe, CmpGt};
+
+        const EPSILON: f32 = 1e-6;
+
+        if feature_histogram.bins.len() < 2 {
+            return None;
+        }
+
+        // Extract missing-value stats if the histogram covers the NaN bin.
+        let missing_bin_idx = options.missing_bin_index;
+        let (missing_grad, missing_hess, missing_count) =
+            if missing_bin_idx < feature_histogram.bins.len() {
+                let mb = &feature_histogram.bins[missing_bin_idx];
+                (mb.grad_sum, mb.hess_sum, mb.count)
+            } else {
+                (0.0_f32, 0.0_f32, 0_u32)
+            };
+
+        let mut total_grad = 0.0_f32;
+        let mut total_hess = 0.0_f32;
+        let mut total_count = 0_u32;
+        for bin in &feature_histogram.bins {
+            total_grad += bin.grad_sum;
+            total_hess += bin.hess_sum;
+            total_count += bin.count;
+        }
+
+        if total_hess <= options.min_child_hessian {
+            return None;
+        }
+
+        let nm_total_grad = total_grad - missing_grad;
+        let nm_total_hess = total_hess - missing_hess;
+        let nm_total_count = total_count.saturating_sub(missing_count);
+
+        let parent_denom = total_hess + options.l2_lambda + EPSILON;
+        let parent_grad = l1_threshold_gradient(total_grad, options.l1_alpha);
+        let parent_gain_term = (parent_grad * parent_grad) / parent_denom;
+
+        let scan_limit = feature_histogram.bins.len().min(missing_bin_idx);
+        if scan_limit == 0 {
+            return None;
+        }
+
+        // Pre-compute scalar cumulative left-side stats. The prefix scan is
+        // inherently sequential, so we keep it in scalar code.
+        let mut cum_left_grad = vec![0.0_f32; scan_limit];
+        let mut cum_left_hess = vec![0.0_f32; scan_limit];
+        let mut cum_left_count = vec![0_u32; scan_limit];
+        {
+            let mut g = 0.0_f32;
+            let mut h = 0.0_f32;
+            let mut c = 0_u32;
+            for (i, bin) in feature_histogram.bins.iter().enumerate().take(scan_limit) {
+                g += bin.grad_sum;
+                h += bin.hess_sum;
+                c += bin.count;
+                cum_left_grad[i] = g;
+                cum_left_hess[i] = h;
+                cum_left_count[i] = c;
+            }
+        }
+
+        // Per-NaN-direction broadcast values.
+        let l1_alpha = options.l1_alpha;
+        let l2_lambda = options.l2_lambda;
+        let min_child_hessian = options.min_child_hessian;
+        let min_leaf_mag = options.min_leaf_magnitude;
+        let nm_total_grad_v = f32x8::splat(nm_total_grad);
+        let nm_total_hess_v = f32x8::splat(nm_total_hess);
+        let nm_total_count_f = nm_total_count as f32;
+        let nm_total_count_v = f32x8::splat(nm_total_count_f);
+        let missing_grad_v = f32x8::splat(missing_grad);
+        let missing_hess_v = f32x8::splat(missing_hess);
+        let missing_count_f = missing_count as f32;
+        let missing_count_v = f32x8::splat(missing_count_f);
+        let l2_lambda_v = f32x8::splat(l2_lambda);
+        let eps_v = f32x8::splat(EPSILON);
+        let min_child_hess_v = f32x8::splat(min_child_hessian);
+        let min_leaf_mag_v = f32x8::splat(min_leaf_mag);
+        let parent_gain_term_v = f32x8::splat(parent_gain_term);
+        let neg_inf_v = f32x8::splat(f32::NEG_INFINITY);
+
+        // Best result tracking — store as (gain, threshold_bin, default_left).
+        // Final SplitCandidate is built once at the end from the cumulative arrays.
+        let mut best_gain = 0.0_f32;
+        let mut best_threshold: usize = usize::MAX;
+        let mut best_default_left = false;
+
+        // For each NaN direction, evaluate gain across all bins in 8-wide chunks.
+        for &default_left in &[true, false] {
+            let nan_left_mask = default_left;
+            // For each chunk-of-8 starting at `chunk_start`:
+            let mut chunk_start = 0usize;
+            while chunk_start < scan_limit {
+                let chunk_end = (chunk_start + 8).min(scan_limit);
+                let chunk_len = chunk_end - chunk_start;
+
+                // Load 8 lanes of cumulative left stats (zero-pad the tail).
+                let mut lg_arr = [0.0_f32; 8];
+                let mut lh_arr = [0.0_f32; 8];
+                let mut lc_arr = [0.0_f32; 8];
+                for j in 0..chunk_len {
+                    lg_arr[j] = cum_left_grad[chunk_start + j];
+                    lh_arr[j] = cum_left_hess[chunk_start + j];
+                    lc_arr[j] = cum_left_count[chunk_start + j] as f32;
+                }
+                let lg_v = f32x8::from(lg_arr);
+                let lh_v = f32x8::from(lh_arr);
+                let lc_v = f32x8::from(lc_arr);
+
+                // Right-side stats (before NaN routing).
+                let rg_v = nm_total_grad_v - lg_v;
+                let rh_v = nm_total_hess_v - lh_v;
+                let rc_v = nm_total_count_v - lc_v;
+
+                // Apply NaN-direction routing.
+                let (eff_lg, eff_lh, eff_lc, eff_rg, eff_rh, eff_rc) = if nan_left_mask {
+                    (
+                        lg_v + missing_grad_v,
+                        lh_v + missing_hess_v,
+                        lc_v + missing_count_v,
+                        rg_v,
+                        rh_v,
+                        rc_v,
+                    )
+                } else {
+                    (
+                        lg_v,
+                        lh_v,
+                        lc_v,
+                        rg_v + missing_grad_v,
+                        rh_v + missing_hess_v,
+                        rc_v + missing_count_v,
+                    )
+                };
+
+                // L1-thresholded gradient sums.
+                let lg_l1 = l1_threshold_f32x8(eff_lg, l1_alpha);
+                let rg_l1 = l1_threshold_f32x8(eff_rg, l1_alpha);
+
+                // Denominators.
+                let l_denom = eff_lh + l2_lambda_v + eps_v;
+                let r_denom = eff_rh + l2_lambda_v + eps_v;
+
+                // Gain.
+                let gain_v =
+                    (lg_l1 * lg_l1) / l_denom + (rg_l1 * rg_l1) / r_denom - parent_gain_term_v;
+
+                // Validity mask:
+                //   eff_lc != 0 (lc > 0)
+                //   eff_rc != 0 (rc > 0)
+                //   eff_lh > min_child_hessian
+                //   eff_rh > min_child_hessian
+                let zero_v = f32x8::ZERO;
+                let lc_pos = eff_lc.cmp_gt(zero_v);
+                let rc_pos = eff_rc.cmp_gt(zero_v);
+                let lh_ok = eff_lh.cmp_gt(min_child_hess_v);
+                let rh_ok = eff_rh.cmp_gt(min_child_hess_v);
+                // Combine via bitwise AND on the float-mask representation.
+                let valid_mask = lc_pos & rc_pos & lh_ok & rh_ok;
+
+                // min_leaf_magnitude filter: candidate is rejected when BOTH
+                // sides' leaf magnitudes are below the threshold.
+                let final_gain = if min_leaf_mag > 0.0 {
+                    let l_leaf_mag = lg_l1.abs() / l_denom;
+                    let r_leaf_mag = rg_l1.abs() / r_denom;
+                    // pass if either side >= min_leaf_mag (i.e. NOT both below).
+                    let l_passes = l_leaf_mag.cmp_ge(min_leaf_mag_v);
+                    let r_passes = r_leaf_mag.cmp_ge(min_leaf_mag_v);
+                    let leaf_mag_ok = l_passes | r_passes;
+                    let combined = valid_mask & leaf_mag_ok;
+                    // If combined-mask is all-ones (lane valid), keep gain;
+                    // else replace with -inf.
+                    combined.blend(gain_v, neg_inf_v)
+                } else {
+                    valid_mask.blend(gain_v, neg_inf_v)
+                };
+
+                // Extract gain to scalar for tail-masking, edge-threshold
+                // rejection, and horizontal argmax. The lane-extract overhead
+                // is small (8 floats) compared to the vectorized gain math.
+                let mut g_arr = final_gain.to_array();
+                // Mask out tail-padded lanes.
+                for slot in g_arr.iter_mut().skip(chunk_len) {
+                    *slot = f32::NEG_INFINITY;
+                }
+                // Skip "edge" thresholds where left covers all non-missing bins.
+                // Replicates the scalar check:
+                //   if threshold_bin + 1 >= scan_limit && nm_total_count == left_count { skip }
+                for (j, slot) in g_arr.iter_mut().take(chunk_len).enumerate() {
+                    let threshold_bin = chunk_start + j;
+                    let left_count = cum_left_count[threshold_bin];
+                    if threshold_bin + 1 >= scan_limit && nm_total_count == left_count {
+                        *slot = f32::NEG_INFINITY;
+                    }
+                }
+                // Horizontal argmax for this chunk against the running best.
+                for (j, &g) in g_arr.iter().take(chunk_len).enumerate() {
+                    if g > best_gain {
+                        best_gain = g;
+                        best_threshold = chunk_start + j;
+                        best_default_left = default_left;
+                    }
+                }
+
+                chunk_start = chunk_end;
+            }
+        }
+
+        if best_threshold == usize::MAX {
+            return None;
+        }
+
+        // Reconstruct the chosen candidate's stats from the cumulative arrays.
+        let threshold_bin = best_threshold;
+        let left_grad = cum_left_grad[threshold_bin];
+        let left_hess = cum_left_hess[threshold_bin];
+        let left_count = cum_left_count[threshold_bin];
+        let right_grad = nm_total_grad - left_grad;
+        let right_hess = nm_total_hess - left_hess;
+        let right_count = nm_total_count.saturating_sub(left_count);
+
+        let (eff_lg, eff_lh, eff_lc, eff_rg, eff_rh, eff_rc) = if best_default_left {
+            (
+                left_grad + missing_grad,
+                left_hess + missing_hess,
+                left_count + missing_count,
+                right_grad,
+                right_hess,
+                right_count,
+            )
+        } else {
+            (
+                left_grad,
+                left_hess,
+                left_count,
+                right_grad + missing_grad,
+                right_hess + missing_hess,
+                right_count + missing_count,
+            )
+        };
+
+        Some(SplitCandidate {
+            node_id,
+            feature_index: feature_histogram.feature_index,
+            threshold_bin: threshold_bin as u16,
+            gain: best_gain,
+            default_left: best_default_left,
+            is_categorical: false,
+            categorical_bitset: None,
+            left_stats: NodeStats {
+                grad_sum: eff_lg,
+                hess_sum: eff_lh,
+                row_count: eff_lc,
+            },
+            right_stats: NodeStats {
+                grad_sum: eff_rg,
+                hess_sum: eff_rh,
+                row_count: eff_rc,
+            },
+        })
+    }
+
+    /// Shared scaffold for numeric split finding, parameterised by gain strategy.
+    ///
+    /// This is the single source of truth for:
+    /// - Missing-bin extraction
+    /// - Total-hessian guard
+    /// - Forward-scan accumulation
+    /// - NaN-direction candidate generation
+    /// - L1 thresholding (applied to both left and right gradient sums)
+    /// - EPSILON denominators (1e-6)
+    /// - `min_leaf_magnitude` filtering
+    /// - `SplitCandidate` construction
+    ///
+    /// The ONLY divergence point is the gain formula, controlled by `GainStrategy`.
+    fn best_split_for_feature_inner(
+        feature_histogram: &FeatureHistogram,
+        node_id: u32,
+        options: SplitSelectionOptions,
+        strategy: GainStrategy<'_>,
+    ) -> Option<SplitCandidate> {
         const EPSILON: f32 = 1e-6;
 
         if feature_histogram.bins.len() < 2 {
@@ -547,10 +881,13 @@ impl CpuBackend {
                     continue;
                 }
 
+                // Apply L1 thresholding uniformly before gain computation.
                 let left_grad_for_gain = l1_threshold_gradient(eff_lg, options.l1_alpha);
                 let right_grad_for_gain = l1_threshold_gradient(eff_rg, options.l1_alpha);
                 let left_denom = eff_lh + options.l2_lambda + EPSILON;
                 let right_denom = eff_rh + options.l2_lambda + EPSILON;
+
+                // Apply min_leaf_magnitude filter uniformly.
                 if options.min_leaf_magnitude > 0.0 {
                     let left_leaf_magnitude = left_grad_for_gain.abs() / left_denom;
                     let right_leaf_magnitude = right_grad_for_gain.abs() / right_denom;
@@ -561,9 +898,34 @@ impl CpuBackend {
                     }
                 }
 
-                let gain = (left_grad_for_gain * left_grad_for_gain) / left_denom
-                    + (right_grad_for_gain * right_grad_for_gain) / right_denom
-                    - parent_gain_term;
+                let gain = match &strategy {
+                    GainStrategy::Standard => {
+                        (left_grad_for_gain * left_grad_for_gain) / left_denom
+                            + (right_grad_for_gain * right_grad_for_gain) / right_denom
+                            - parent_gain_term
+                    }
+                    GainStrategy::Morph(morph) => {
+                        use crate::morph::{MorphGainInputs, SplitSideStats, compute_morph_gain};
+                        let inputs = MorphGainInputs {
+                            left: SplitSideStats {
+                                gradient_sum: left_grad_for_gain,
+                                hessian_sum: eff_lh,
+                                count: eff_lc,
+                            },
+                            right: SplitSideStats {
+                                gradient_sum: right_grad_for_gain,
+                                hessian_sum: eff_rh,
+                                count: eff_rc,
+                            },
+                            iteration: morph.iteration,
+                            total_iterations: morph.total_iterations.max(1),
+                            grad_mean: morph.grad_mean,
+                            grad_std: morph.grad_std,
+                            lambda_l2: options.l2_lambda,
+                        };
+                        compute_morph_gain(inputs, &morph.config, &morph.precomputed)
+                    }
+                };
 
                 if gain > best_gain {
                     best_gain = gain;
@@ -605,6 +967,57 @@ impl CpuBackend {
         node_id: u32,
         options: SplitSelectionOptions,
         num_categories: usize,
+    ) -> Option<SplitCandidate> {
+        Self::best_split_for_categorical_feature_inner(
+            feature_histogram,
+            node_id,
+            options,
+            num_categories,
+            GainStrategy::Standard,
+        )
+    }
+
+    /// Morph-mode best split for a single categorical feature.
+    ///
+    /// Thin wrapper around `best_split_for_categorical_feature_inner` with
+    /// `GainStrategy::Morph`.
+    fn best_split_morph_categorical_feature(
+        feature_histogram: &FeatureHistogram,
+        node_id: u32,
+        options: &SplitSelectionOptions,
+        num_categories: usize,
+        morph: &MorphContext,
+    ) -> Option<SplitCandidate> {
+        Self::best_split_for_categorical_feature_inner(
+            feature_histogram,
+            node_id,
+            *options,
+            num_categories,
+            GainStrategy::Morph(morph),
+        )
+    }
+
+    /// Shared scaffold for categorical split finding, parameterised by gain strategy.
+    ///
+    /// This is the single source of truth for:
+    /// - Missing-bin extraction
+    /// - Total-hessian guard
+    /// - Fisher-sort ordering (by `grad_sum / (hess_sum + l2_lambda + eps)`)
+    /// - Prefix-scan candidate generation
+    /// - NaN-direction candidate generation
+    /// - L1 thresholding (applied to both left and right gradient sums)
+    /// - EPSILON denominators (1e-6)
+    /// - `min_leaf_magnitude` filtering
+    /// - Bitset construction
+    /// - `SplitCandidate` construction
+    ///
+    /// The ONLY divergence point is the gain formula, controlled by `GainStrategy`.
+    fn best_split_for_categorical_feature_inner(
+        feature_histogram: &FeatureHistogram,
+        node_id: u32,
+        options: SplitSelectionOptions,
+        num_categories: usize,
+        strategy: GainStrategy<'_>,
     ) -> Option<SplitCandidate> {
         const EPSILON: f32 = 1e-6;
 
@@ -716,10 +1129,13 @@ impl CpuBackend {
                     continue;
                 }
 
+                // Apply L1 thresholding uniformly before gain computation.
                 let left_grad_for_gain = l1_threshold_gradient(eff_lg, options.l1_alpha);
                 let right_grad_for_gain = l1_threshold_gradient(eff_rg, options.l1_alpha);
                 let left_denom = eff_lh + options.l2_lambda + EPSILON;
                 let right_denom = eff_rh + options.l2_lambda + EPSILON;
+
+                // Apply min_leaf_magnitude filter uniformly.
                 if options.min_leaf_magnitude > 0.0 {
                     let left_leaf_magnitude = left_grad_for_gain.abs() / left_denom;
                     let right_leaf_magnitude = right_grad_for_gain.abs() / right_denom;
@@ -730,9 +1146,34 @@ impl CpuBackend {
                     }
                 }
 
-                let gain = (left_grad_for_gain * left_grad_for_gain) / left_denom
-                    + (right_grad_for_gain * right_grad_for_gain) / right_denom
-                    - parent_gain_term;
+                let gain = match &strategy {
+                    GainStrategy::Standard => {
+                        (left_grad_for_gain * left_grad_for_gain) / left_denom
+                            + (right_grad_for_gain * right_grad_for_gain) / right_denom
+                            - parent_gain_term
+                    }
+                    GainStrategy::Morph(morph) => {
+                        use crate::morph::{MorphGainInputs, SplitSideStats, compute_morph_gain};
+                        let inputs = MorphGainInputs {
+                            left: SplitSideStats {
+                                gradient_sum: left_grad_for_gain,
+                                hessian_sum: eff_lh,
+                                count: eff_lc,
+                            },
+                            right: SplitSideStats {
+                                gradient_sum: right_grad_for_gain,
+                                hessian_sum: eff_rh,
+                                count: eff_rc,
+                            },
+                            iteration: morph.iteration,
+                            total_iterations: morph.total_iterations.max(1),
+                            grad_mean: morph.grad_mean,
+                            grad_std: morph.grad_std,
+                            lambda_l2: options.l2_lambda,
+                        };
+                        compute_morph_gain(inputs, &morph.config, &morph.precomputed)
+                    }
+                };
 
                 if gain > best_gain {
                     // Build bitset: categories 0..=k in sorted order go left.
@@ -781,18 +1222,6 @@ impl CpuBackend {
         feature_weights: &[f32],
         categorical_features: &[CategoricalFeatureInfo],
     ) -> Option<SplitCandidate> {
-        // Apply per-feature weights when comparing splits across features.
-        // The gain stored in SplitCandidate remains unweighted (the true gain);
-        // the weighted gain is only used for the cross-feature comparison.
-        let weighted_gain = |candidate: &SplitCandidate| -> f32 {
-            let fi = candidate.feature_index as usize;
-            if fi < feature_weights.len() {
-                candidate.gain * feature_weights[fi]
-            } else {
-                candidate.gain
-            }
-        };
-
         let find_best = |fh: &FeatureHistogram| -> Option<SplitCandidate> {
             let fi = fh.feature_index as usize;
             if let Some(cat_info) = categorical_features.iter().find(|c| c.feature_index == fi) {
@@ -813,7 +1242,9 @@ impl CpuBackend {
                 .par_iter()
                 .filter_map(&find_best)
                 .reduce_with(|a, b| {
-                    if weighted_gain(&b) > weighted_gain(&a) {
+                    if apply_feature_weight(&b, feature_weights)
+                        > apply_feature_weight(&a, feature_weights)
+                    {
                         b
                     } else {
                         a
@@ -825,13 +1256,32 @@ impl CpuBackend {
                 .iter()
                 .filter_map(&find_best)
                 .reduce(|a, b| {
-                    if weighted_gain(&b) > weighted_gain(&a) {
+                    if apply_feature_weight(&b, feature_weights)
+                        > apply_feature_weight(&a, feature_weights)
+                    {
                         b
                     } else {
                         a
                     }
                 })
         }
+    }
+
+    /// Morph-mode best split for a single numeric feature.
+    ///
+    /// Thin wrapper around `best_split_for_feature_inner` with `GainStrategy::Morph`.
+    fn best_split_morph_numeric_feature(
+        feature_histogram: &FeatureHistogram,
+        node_id: u32,
+        options: &SplitSelectionOptions,
+        morph: &MorphContext,
+    ) -> Option<SplitCandidate> {
+        Self::best_split_for_feature_inner(
+            feature_histogram,
+            node_id,
+            *options,
+            GainStrategy::Morph(morph),
+        )
     }
 
     fn apply_split_with_stats_parallel(
@@ -998,6 +1448,63 @@ impl BackendOps for CpuBackend {
             feature_weights,
             categorical_features,
         ))
+    }
+
+    fn best_split_morph(
+        &self,
+        histograms: &HistogramBundle,
+        options: SplitSelectionOptions,
+        feature_weights: &[f32],
+        categorical_features: &[CategoricalFeatureInfo],
+        morph: &MorphContext,
+    ) -> EngineResult<Option<SplitCandidate>> {
+        let find_best = |fh: &FeatureHistogram| -> Option<SplitCandidate> {
+            let fi = fh.feature_index as usize;
+            if let Some(cat_info) = categorical_features.iter().find(|c| c.feature_index == fi) {
+                Self::best_split_morph_categorical_feature(
+                    fh,
+                    histograms.node_id,
+                    &options,
+                    cat_info.num_categories,
+                    morph,
+                )
+            } else {
+                Self::best_split_morph_numeric_feature(fh, histograms.node_id, &options, morph)
+            }
+        };
+
+        let result =
+            if histograms.feature_histograms.len() >= Self::PARALLEL_SPLIT_FEATURE_THRESHOLD {
+                histograms
+                    .feature_histograms
+                    .par_iter()
+                    .filter_map(find_best)
+                    .reduce_with(|a, b| {
+                        if apply_feature_weight(&b, feature_weights)
+                            > apply_feature_weight(&a, feature_weights)
+                        {
+                            b
+                        } else {
+                            a
+                        }
+                    })
+            } else {
+                histograms
+                    .feature_histograms
+                    .iter()
+                    .filter_map(find_best)
+                    .reduce(|a, b| {
+                        if apply_feature_weight(&b, feature_weights)
+                            > apply_feature_weight(&a, feature_weights)
+                        {
+                            b
+                        } else {
+                            a
+                        }
+                    })
+            };
+
+        Ok(result)
     }
 
     fn apply_split(
@@ -1254,6 +1761,7 @@ mod tests {
             feature_weights: Vec::new(),
             max_leaves: None,
             tree_growth: TreeGrowth::Level,
+            morph_config: None,
         }
     }
 
@@ -1967,5 +2475,401 @@ mod tests {
         assert!(left.contains(&4)); // bin 1
         assert!(right.contains(&2)); // bin 2
         assert!(right.contains(&5)); // bin 2
+    }
+
+    #[test]
+    fn best_split_morph_at_warmup_matches_best_split_with_options() {
+        use alloygbm_core::{MorphConfig, MorphPrecomputed};
+        use alloygbm_engine::MorphContext;
+
+        let backend = CpuBackend;
+        let histograms = backend
+            .build_histograms(
+                &sample_binned_matrix(),
+                &sample_gradients(),
+                &sample_node(),
+                &[FeatureTile::new(0, 2).expect("feature tile is valid")],
+            )
+            .expect("histograms should build");
+
+        let options = SplitSelectionOptions {
+            l2_lambda: 0.0,
+            l1_alpha: 0.0,
+            min_child_hessian: 0.0,
+            min_leaf_magnitude: 0.0,
+            missing_bin_index: 255,
+        };
+
+        let cfg = MorphConfig {
+            balance_penalty: false,
+            ..MorphConfig::default()
+        };
+        let morph = MorphContext {
+            iteration: 0,
+            total_iterations: 100,
+            grad_mean: 0.0,
+            grad_std: 1.0,
+            config: cfg,
+            precomputed: MorphPrecomputed::for_iteration(0, &cfg),
+        };
+
+        let standard = backend
+            .best_split_with_options(&histograms, options, &[], &[])
+            .expect("standard split search should succeed");
+        let morph_result = backend
+            .best_split_morph(&histograms, options, &[], &[], &morph)
+            .expect("morph split search should succeed");
+
+        // At iteration < warmup with balance penalty off, compute_morph_gain returns
+        // exactly the standard XGBoost gain, so both paths must select the same split.
+        assert!(
+            standard.is_some(),
+            "test fixture must produce a non-trivial split (standard path returned None)"
+        );
+        match (standard, morph_result) {
+            (Some(a), Some(b)) => {
+                assert_eq!(a.feature_index, b.feature_index, "feature_index disagreed");
+                assert_eq!(a.threshold_bin, b.threshold_bin, "threshold_bin disagreed");
+            }
+            (None, None) => {}
+            (a, b) => panic!(
+                "split selection presence disagreed: standard={:?}, morph={:?}",
+                a, b
+            ),
+        }
+    }
+
+    /// Regression test: warmup byte-equivalence must hold even with non-zero L1
+    /// and L2 regularisation. This specifically guards against the bugs where:
+    /// - EPSILON was missing from `gradient_gain` denominators (Issue 1)
+    /// - L1 thresholding was not applied in the morph path (Issue 2)
+    /// - `min_leaf_magnitude` was not checked in the morph path (Issue 3)
+    #[test]
+    fn best_split_morph_at_warmup_matches_with_l1_l2_regularization() {
+        use alloygbm_core::{MorphConfig, MorphPrecomputed};
+        use alloygbm_engine::MorphContext;
+
+        let backend = CpuBackend;
+        let histograms = backend
+            .build_histograms(
+                &sample_binned_matrix(),
+                &sample_gradients(),
+                &sample_node(),
+                &[FeatureTile::new(0, 2).expect("feature tile is valid")],
+            )
+            .expect("histograms should build");
+
+        let options = SplitSelectionOptions {
+            l2_lambda: 1.0,
+            l1_alpha: 0.5,
+            min_child_hessian: 0.0,
+            min_leaf_magnitude: 0.0,
+            missing_bin_index: 255,
+        };
+
+        let cfg = MorphConfig {
+            balance_penalty: false,
+            ..MorphConfig::default()
+        };
+        let morph = MorphContext {
+            iteration: 0,
+            total_iterations: 100,
+            grad_mean: 0.0,
+            grad_std: 1.0,
+            config: cfg,
+            precomputed: MorphPrecomputed::for_iteration(0, &cfg),
+        };
+
+        let standard = backend
+            .best_split_with_options(&histograms, options, &[], &[])
+            .expect("standard split search should succeed");
+        let morph_result = backend
+            .best_split_morph(&histograms, options, &[], &[], &morph)
+            .expect("morph split search should succeed");
+
+        assert!(
+            standard.is_some(),
+            "test fixture must produce a non-trivial split (standard path returned None)"
+        );
+        let a = standard.unwrap();
+        let b = morph_result.unwrap();
+        assert_eq!(
+            a.feature_index, b.feature_index,
+            "feature_index disagreed under L1/L2 regularization"
+        );
+        assert_eq!(
+            a.threshold_bin, b.threshold_bin,
+            "threshold_bin disagreed under L1/L2 regularization"
+        );
+    }
+
+    /// Regression test: at `iteration < morph_warmup_iters` with `balance_penalty=false`,
+    /// the morph categorical path must select the same partition as the standard path.
+    ///
+    /// Uses a 4-category bundle where categories 0,1 have strongly negative gradients
+    /// and categories 2,3 have strongly positive gradients, making the best split
+    /// unambiguous regardless of the gain formula used.
+    #[test]
+    fn best_split_morph_at_warmup_matches_categorical_split() {
+        use alloygbm_core::{MorphConfig, MorphPrecomputed};
+        use alloygbm_engine::{CategoricalFeatureInfo, MorphContext};
+
+        // Build a HistogramBundle with one categorical feature (4 categories).
+        // Categories 0,1: negative gradient (score < 0)
+        // Categories 2,3: positive gradient (score > 0)
+        // Fisher-sort will place cats 0,1 on the left side, cats 2,3 on the right.
+        let num_cats = 4usize;
+        let nan_bin = 255usize;
+        let num_bins = nan_bin + 1;
+        let mut bins = vec![
+            HistogramBin {
+                grad_sum: 0.0,
+                hess_sum: 0.0,
+                count: 0,
+            };
+            num_bins
+        ];
+        // Category 0: strongly negative gradient
+        bins[0] = HistogramBin {
+            grad_sum: -4.0,
+            hess_sum: 2.0,
+            count: 20,
+        };
+        // Category 1: negative gradient
+        bins[1] = HistogramBin {
+            grad_sum: -3.0,
+            hess_sum: 2.0,
+            count: 20,
+        };
+        // Category 2: positive gradient
+        bins[2] = HistogramBin {
+            grad_sum: 3.0,
+            hess_sum: 2.0,
+            count: 20,
+        };
+        // Category 3: strongly positive gradient
+        bins[3] = HistogramBin {
+            grad_sum: 4.0,
+            hess_sum: 2.0,
+            count: 20,
+        };
+
+        let feature_histogram = FeatureHistogram {
+            feature_index: 0,
+            bins,
+        };
+        let histograms = HistogramBundle {
+            node_id: 0,
+            feature_histograms: vec![feature_histogram],
+        };
+
+        let options = SplitSelectionOptions {
+            l2_lambda: 0.0,
+            l1_alpha: 0.0,
+            min_child_hessian: 0.0,
+            min_leaf_magnitude: 0.0,
+            missing_bin_index: nan_bin,
+        };
+
+        let cat_features = vec![CategoricalFeatureInfo {
+            feature_index: 0,
+            num_categories: num_cats,
+        }];
+
+        let cfg = MorphConfig {
+            balance_penalty: false,
+            ..MorphConfig::default()
+        };
+        let morph = MorphContext {
+            iteration: 0,
+            total_iterations: 100,
+            grad_mean: 0.0,
+            grad_std: 1.0,
+            config: cfg,
+            precomputed: MorphPrecomputed::for_iteration(0, &cfg),
+        };
+
+        let backend = CpuBackend;
+        let standard = backend
+            .best_split_with_options(&histograms, options, &[], &cat_features)
+            .expect("standard split search should succeed");
+        let morph_result = backend
+            .best_split_morph(&histograms, options, &[], &cat_features, &morph)
+            .expect("morph split search should succeed");
+
+        assert!(
+            standard.is_some(),
+            "test fixture must produce a non-trivial split (standard path returned None)"
+        );
+        let a = standard.unwrap();
+        let b = morph_result.unwrap();
+
+        assert!(a.is_categorical, "standard split should be categorical");
+        assert!(b.is_categorical, "morph split should be categorical");
+        assert_eq!(
+            a.feature_index, b.feature_index,
+            "feature_index disagreed for categorical morph at warmup"
+        );
+        // Both paths must select the same bitset partition.
+        assert_eq!(
+            a.categorical_bitset, b.categorical_bitset,
+            "categorical_bitset disagreed for morph at warmup"
+        );
+        assert_eq!(
+            a.default_left, b.default_left,
+            "default_left (NaN direction) disagreed for morph at warmup"
+        );
+        assert!(
+            (a.gain - b.gain).abs() < 1e-5,
+            "gain diverged at warmup: standard={}, morph={}",
+            a.gain,
+            b.gain
+        );
+    }
+
+    fn make_options(
+        l1_alpha: f32,
+        l2_lambda: f32,
+        min_child_hessian: f32,
+        min_leaf_magnitude: f32,
+        missing_bin_index: usize,
+    ) -> SplitSelectionOptions {
+        SplitSelectionOptions {
+            l1_alpha,
+            l2_lambda,
+            min_child_hessian,
+            min_leaf_magnitude,
+            missing_bin_index,
+        }
+    }
+
+    #[test]
+    fn simd_standard_bin_scan_matches_scalar() {
+        let bins: Vec<HistogramBin> = (0..32)
+            .map(|i| HistogramBin {
+                grad_sum: ((i as f32 - 15.5) * 0.1).sin(),
+                hess_sum: 0.5 + (i as f32 * 0.05).cos().abs(),
+                count: 10 + (i as u32 % 7),
+            })
+            .collect();
+        let fh = FeatureHistogram {
+            feature_index: 0,
+            bins,
+        };
+        let options = make_options(0.05, 0.1, 1.0, 0.0, 31);
+        let scalar =
+            CpuBackend::best_split_for_feature_inner(&fh, 0, options, GainStrategy::Standard);
+        let simd = CpuBackend::best_split_for_feature_standard_simd(&fh, 0, options);
+        match (scalar, simd) {
+            (Some(s), Some(v)) => {
+                assert_eq!(s.threshold_bin, v.threshold_bin, "threshold_bin mismatch");
+                assert!(
+                    (s.gain - v.gain).abs() < 1e-4,
+                    "gain drift: scalar={} simd={}",
+                    s.gain,
+                    v.gain
+                );
+                assert_eq!(s.default_left, v.default_left);
+            }
+            (None, None) => {}
+            (a, b) => panic!(
+                "scalar/simd disagree on Some-ness: scalar={}, simd={}",
+                a.is_some(),
+                b.is_some()
+            ),
+        }
+    }
+
+    #[test]
+    fn simd_standard_bin_scan_matches_scalar_with_l1() {
+        let bins: Vec<HistogramBin> = (0..16)
+            .map(|i| HistogramBin {
+                grad_sum: (i as f32 - 7.5) * 0.02,
+                hess_sum: 1.0,
+                count: 20,
+            })
+            .collect();
+        let fh = FeatureHistogram {
+            feature_index: 0,
+            bins,
+        };
+        let options = make_options(0.10, 0.1, 0.5, 0.0, 15);
+        let scalar =
+            CpuBackend::best_split_for_feature_inner(&fh, 0, options, GainStrategy::Standard);
+        let simd = CpuBackend::best_split_for_feature_standard_simd(&fh, 0, options);
+        match (scalar, simd) {
+            (Some(s), Some(v)) => {
+                assert_eq!(s.threshold_bin, v.threshold_bin);
+                assert!((s.gain - v.gain).abs() < 1e-4);
+            }
+            (None, None) => {}
+            _ => panic!("scalar/simd disagreement"),
+        }
+    }
+
+    #[test]
+    fn simd_standard_bin_scan_matches_scalar_with_min_leaf_magnitude() {
+        // Exercise the min_leaf_magnitude rejection branch.
+        let bins: Vec<HistogramBin> = (0..16)
+            .map(|i| HistogramBin {
+                grad_sum: ((i as f32 - 7.5) * 0.05).sin(),
+                hess_sum: 1.0 + (i as f32 * 0.1).cos().abs(),
+                count: 12 + (i as u32 % 5),
+            })
+            .collect();
+        let fh = FeatureHistogram {
+            feature_index: 0,
+            bins,
+        };
+        let options = make_options(0.0, 0.1, 0.0, 0.05, 15);
+        let scalar =
+            CpuBackend::best_split_for_feature_inner(&fh, 0, options, GainStrategy::Standard);
+        let simd = CpuBackend::best_split_for_feature_standard_simd(&fh, 0, options);
+        match (scalar, simd) {
+            (Some(s), Some(v)) => {
+                assert_eq!(s.threshold_bin, v.threshold_bin);
+                assert!((s.gain - v.gain).abs() < 1e-4);
+                assert_eq!(s.default_left, v.default_left);
+            }
+            (None, None) => {}
+            _ => panic!("scalar/simd disagreement on min_leaf_magnitude path"),
+        }
+    }
+
+    #[test]
+    fn simd_standard_bin_scan_matches_scalar_with_missing_bin() {
+        // Real missing-bin contribution exercises the NaN-direction routing.
+        let mut bins: Vec<HistogramBin> = (0..16)
+            .map(|i| HistogramBin {
+                grad_sum: ((i as f32 - 7.5) * 0.1).sin(),
+                hess_sum: 1.0 + (i as f32 * 0.05).cos().abs(),
+                count: 8 + (i as u32 % 4),
+            })
+            .collect();
+        // Simulate non-trivial missing bin at index 15.
+        bins[15] = HistogramBin {
+            grad_sum: 0.4,
+            hess_sum: 1.5,
+            count: 7,
+        };
+        let fh = FeatureHistogram {
+            feature_index: 0,
+            bins,
+        };
+        let options = make_options(0.0, 0.1, 0.5, 0.0, 15);
+        let scalar =
+            CpuBackend::best_split_for_feature_inner(&fh, 0, options, GainStrategy::Standard);
+        let simd = CpuBackend::best_split_for_feature_standard_simd(&fh, 0, options);
+        match (scalar, simd) {
+            (Some(s), Some(v)) => {
+                assert_eq!(s.threshold_bin, v.threshold_bin);
+                assert!((s.gain - v.gain).abs() < 1e-4);
+                assert_eq!(s.default_left, v.default_left);
+                assert_eq!(s.left_stats.row_count, v.left_stats.row_count);
+                assert_eq!(s.right_stats.row_count, v.right_stats.row_count);
+            }
+            (None, None) => {}
+            _ => panic!("scalar/simd disagreement on missing-bin path"),
+        }
     }
 }

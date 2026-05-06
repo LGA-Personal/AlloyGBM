@@ -252,7 +252,13 @@ class GBMRanker(GBMRegressor):
             f"tree_growth='{self.tree_growth}', "
             f"warm_start={self.warm_start}, "
             f"objective={self.objective!r}, "
-            f"max_cat_threshold={self.max_cat_threshold}"
+            f"max_cat_threshold={self.max_cat_threshold}, "
+            f"training_mode='{self.training_mode}', "
+            f"morph_rate={self.morph_rate}, "
+            f"evolution_pressure={self.evolution_pressure}, "
+            f"morph_warmup_iters={self.morph_warmup_iters}, "
+            f"lr_schedule='{self.lr_schedule}', "
+            f"lr_warmup_frac={self.lr_warmup_frac}"
             ")"
         )
 

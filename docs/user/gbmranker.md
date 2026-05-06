@@ -45,7 +45,24 @@ print("NDCG@10:", ndcg(y_test, scores, group=query_ids_test, k=10))
 ### Inherited
 
 All other parameters are inherited from `GBMRegressor` (learning rate, depth,
-regularization, etc.).
+regularization, etc.). This includes `training_mode="morph"` and the
+MorphBoost / LR-schedule parameters
+(`morph_rate`, `evolution_pressure`, `morph_warmup_iters`,
+`info_score_weight`, `depth_penalty_base`, `balance_penalty`,
+`lr_schedule`, `lr_warmup_frac`). See [MorphBoost](morphboost.md) for the
+full reference.
+
+```python
+# MorphBoost on ranking
+model = GBMRanker(
+    ranking_objective="rank:ndcg",
+    n_estimators=300,
+    learning_rate=0.05,
+    training_mode="morph",
+    seed=7,
+)
+model.fit(X_train, y_train, group=query_ids_train)
+```
 
 ## Methods
 

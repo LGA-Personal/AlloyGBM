@@ -36,8 +36,13 @@ Quick example
 Parameters
 ----------
 
-All parameters from ``GBMRegressor`` are accepted. The objective is always
-binary cross-entropy and is not configurable.
+All parameters from ``GBMRegressor`` are accepted, including
+``training_mode="morph"`` and the MorphBoost / LR-schedule parameters
+(``morph_rate``, ``evolution_pressure``, ``morph_warmup_iters``,
+``info_score_weight``, ``depth_penalty_base``, ``balance_penalty``,
+``lr_schedule``, ``lr_warmup_frac``). See :doc:`morphboost` for the full
+reference. The objective is always binary cross-entropy and is not
+configurable.
 
 Target requirements:
 

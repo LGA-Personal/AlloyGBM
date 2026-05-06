@@ -1294,6 +1294,7 @@ mod tests {
             feature_weights: Vec::new(),
             max_leaves: None,
             tree_growth: TreeGrowth::Level,
+            morph_config: None,
         }
     }
 
@@ -1723,6 +1724,7 @@ mod tests {
             node_debug_stats: None,
             objective: "squared_error".to_string(),
             native_categorical_feature_indices: vec![0],
+            morph_metadata: None,
         };
         model.to_artifact_bytes().expect("serialize should succeed")
     }
@@ -1829,6 +1831,7 @@ mod tests {
             node_debug_stats: None,
             objective: "squared_error".to_string(),
             native_categorical_feature_indices: vec![0],
+            morph_metadata: None,
         };
         let artifact = model.to_artifact_bytes().expect("serialize should succeed");
         let predictor = Predictor::from_artifact_bytes(&artifact).unwrap();

@@ -84,6 +84,43 @@ parameter accepts per-row group identifiers; data is sorted by group internally.
 Supported ranking objectives: `rank:pairwise`, `rank:ndcg`, `rank:xendcg`,
 `queryrmse`, `yetirank`.
 
+## MorphBoost (Optional Adaptive Mode)
+
+Any of the three estimators supports an opt-in MorphBoost training mode
+that augments the standard gradient gain with an information-theoretic
+term and EMA-driven gain shaping. See
+[Kriuk (2025), *MorphBoost*](https://arxiv.org/pdf/2511.13234) for the
+formulation.
+
+```python
+from alloygbm import GBMRegressor
+
+model = GBMRegressor(
+    learning_rate=0.05,
+    max_depth=6,
+    n_estimators=1200,
+    training_mode="morph",   # opt in
+    seed=7,
+)
+model.fit(X_train, y_train)
+```
+
+A learning-rate schedule (`lr_schedule="warmup_cosine"`) can also be
+applied independently of `training_mode`, useful for very low-LR
+high-`n_estimators` runs:
+
+```python
+model = GBMRegressor(
+    learning_rate=0.01,
+    n_estimators=5000,
+    training_mode="morph",
+    lr_schedule="warmup_cosine",
+    lr_warmup_frac=0.1,
+)
+```
+
+Full parameter reference: [MorphBoost](morphboost.md).
+
 ## Validation And Early Stopping
 
 ```python

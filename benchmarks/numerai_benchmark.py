@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).parent.parent
 DATA_DIR = Path(__file__).parent / "data" / "numerai"
-ALL_ARMS = ["alloygbm", "lightgbm", "xgboost", "catboost"]
+ALL_ARMS = ["alloygbm", "alloygbm_morph", "alloygbm_morph_cosine", "lightgbm", "xgboost", "catboost"]
 
 NUMERAI_DATASET_FILES = {
     "train": "v5.2/train.parquet",
@@ -273,8 +273,18 @@ def fit_model(
 ) -> tuple[object, dict[str, float]]:
     """Train a model and return (model_object, fit_timing_dict)."""
 
-    if arm == "alloygbm":
+    if arm in ("alloygbm", "alloygbm_morph", "alloygbm_morph_cosine"):
         from alloygbm import GBMRegressor
+
+        morph_kwargs: dict = {}
+        if arm == "alloygbm_morph":
+            morph_kwargs = {"training_mode": "morph"}
+        elif arm == "alloygbm_morph_cosine":
+            morph_kwargs = {
+                "training_mode": "morph",
+                "lr_schedule": "warmup_cosine",
+                "lr_warmup_frac": 0.1,
+            }
 
         model = GBMRegressor(
             learning_rate=learning_rate,
@@ -289,6 +299,7 @@ def fit_model(
             deterministic=True,
             continuous_binning_strategy=binning_strategy,
             continuous_binning_max_bins=256,
+            **morph_kwargs,
         )
         model.fit(X_train, y_train)
         timing = {k: float(v) for k, v in getattr(model, "fit_timing_", {}).items()}
@@ -368,7 +379,7 @@ def fit_model(
 
 def predict_model(arm: str, model: object, X_predict: np.ndarray) -> np.ndarray:
     """Predict using a fitted model."""
-    if arm == "alloygbm":
+    if arm in ("alloygbm", "alloygbm_morph", "alloygbm_morph_cosine"):
         preds = model.predict(X_predict)
     elif arm == "lightgbm":
         preds = model.predict(X_predict)
@@ -648,14 +659,92 @@ def print_results(records: list[NumeraiBenchmarkRecord]) -> None:
                 print(f"    {k}: {v:.3f}")
 
 
-def save_results(records: list[NumeraiBenchmarkRecord], output_dir: Path) -> None:
+def _gather_reproducibility_manifest(args: argparse.Namespace) -> dict:
+    """Capture everything needed to reproduce a run: git SHA, extension build
+    timestamp, full CLI arg snapshot. Returned as a JSON-friendly dict.
+    """
+    import os as _os
+    import subprocess as _subprocess
+    import sys as _sys
+
+    manifest: dict = {
+        "argv": list(_sys.argv),
+        "args": {k: v for k, v in vars(args).items() if k != "resolved_arms"},
+        "resolved_arms": list(getattr(args, "resolved_arms", []) or []),
+        "python_version": _sys.version,
+        "platform": _sys.platform,
+    }
+    try:
+        from alloygbm import _alloygbm as _ext
+
+        ext_path = getattr(_ext, "__file__", None)
+        if ext_path and _os.path.exists(ext_path):
+            manifest["alloygbm_extension_path"] = ext_path
+            manifest["alloygbm_extension_mtime"] = (
+                datetime.fromtimestamp(_os.path.getmtime(ext_path)).isoformat(
+                    timespec="seconds"
+                )
+            )
+            try:
+                from alloygbm import __version__ as _alloygbm_version
+
+                manifest["alloygbm_version"] = _alloygbm_version
+            except Exception:
+                pass
+            repo_root = Path(ext_path).resolve()
+            while repo_root != repo_root.parent and not (repo_root / ".git").exists():
+                repo_root = repo_root.parent
+            if (repo_root / ".git").exists():
+                try:
+                    manifest["git_sha"] = (
+                        _subprocess.check_output(
+                            ["git", "rev-parse", "HEAD"],
+                            cwd=str(repo_root),
+                            stderr=_subprocess.DEVNULL,
+                        )
+                        .decode()
+                        .strip()
+                    )
+                    manifest["git_commit_time"] = (
+                        _subprocess.check_output(
+                            ["git", "log", "-1", "--format=%cI", "HEAD"],
+                            cwd=str(repo_root),
+                            stderr=_subprocess.DEVNULL,
+                        )
+                        .decode()
+                        .strip()
+                    )
+                    manifest["git_dirty"] = (
+                        _subprocess.check_output(
+                            ["git", "status", "--porcelain"],
+                            cwd=str(repo_root),
+                            stderr=_subprocess.DEVNULL,
+                        )
+                        .decode()
+                        .strip()
+                        != ""
+                    )
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return manifest
+
+
+def save_results(
+    records: list[NumeraiBenchmarkRecord],
+    output_dir: Path,
+    args: argparse.Namespace | None = None,
+) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     out_path = output_dir / f"numerai_benchmark_{timestamp}.json"
-    payload = {
+    payload: dict = {
         "timestamp": timestamp,
         "records": [asdict(r) for r in records],
     }
+    if args is not None:
+        payload["reproducibility"] = _gather_reproducibility_manifest(args)
     with out_path.open("w") as f:
         json.dump(payload, f, indent=2, default=str)
     logger.info("Results saved to %s", out_path)
@@ -664,6 +753,63 @@ def save_results(records: list[NumeraiBenchmarkRecord], output_dir: Path) -> Non
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+def _log_alloygbm_build_info() -> None:
+    """Log the loaded alloygbm extension's build timestamp and the worktree's
+    git HEAD, then emit a warning if the extension predates HEAD (i.e., a
+    rebuild via ``maturin develop --release`` is needed to pick up recent
+    Rust changes). This makes the run self-document which binary it used and
+    surfaces stale-build issues at startup rather than via mysterious results.
+    """
+    import datetime as _dt
+    import os as _os
+    import subprocess as _subprocess
+
+    try:
+        from alloygbm import _alloygbm as _ext
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("could not import alloygbm extension: %s", exc)
+        return
+
+    ext_path = getattr(_ext, "__file__", None)
+    if not ext_path or not _os.path.exists(ext_path):
+        logger.warning("alloygbm extension path not found")
+        return
+
+    ext_mtime = _dt.datetime.fromtimestamp(_os.path.getmtime(ext_path))
+    logger.info("alloygbm extension: %s", ext_path)
+    logger.info("alloygbm extension built: %s", ext_mtime.isoformat(timespec="seconds"))
+
+    repo_root = Path(ext_path).resolve()
+    while repo_root != repo_root.parent and not (repo_root / ".git").exists():
+        repo_root = repo_root.parent
+    if not (repo_root / ".git").exists():
+        return
+
+    try:
+        sha = _subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(repo_root), stderr=_subprocess.DEVNULL,
+        ).decode().strip()
+        commit_iso = _subprocess.check_output(
+            ["git", "log", "-1", "--format=%cI", "HEAD"],
+            cwd=str(repo_root), stderr=_subprocess.DEVNULL,
+        ).decode().strip()
+        commit_time = _dt.datetime.fromisoformat(commit_iso).replace(tzinfo=None)
+    except Exception as exc:
+        logger.warning("could not read git HEAD: %s", exc)
+        return
+
+    logger.info("git HEAD: %s @ %s", sha, commit_time.isoformat(timespec="seconds"))
+
+    if ext_mtime < commit_time:
+        delta = commit_time - ext_mtime
+        logger.warning(
+            "STALE BUILD: alloygbm extension is %s older than git HEAD — "
+            "rebuild with `maturin develop --release` before relying on these results.",
+            delta,
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Numerai tournament benchmark for AlloyGBM")
     parser.add_argument("--fast", action="store_true", help="Subset eras and reduce rounds")
@@ -701,9 +847,10 @@ def main() -> None:
     try:
         from alloygbm import GBMRegressor  # noqa: F401
     except ImportError:
-        if "alloygbm" in requested:
-            logger.warning("alloygbm not installed — skipping")
-            requested.remove("alloygbm")
+        alloy_arms = [a for a in requested if a.startswith("alloygbm")]
+        if alloy_arms:
+            logger.warning("alloygbm not installed — skipping %s", alloy_arms)
+            requested = [a for a in requested if not a.startswith("alloygbm")]
     args.resolved_arms = requested
 
     if not args.resolved_arms:
@@ -715,12 +862,13 @@ def main() -> None:
         args.resolved_arms, args.rounds, args.learning_rate, args.max_depth,
         args.feature_set, args.residual_weight,
     )
+    _log_alloygbm_build_info()
 
     records = run_benchmark(args)
     print_results(records)
 
     output_dir = Path(args.output_dir) if args.output_dir else (REPO_ROOT / "benchmarks" / "results" / "numerai")
-    save_results(records, output_dir)
+    save_results(records, output_dir, args)
 
 
 if __name__ == "__main__":

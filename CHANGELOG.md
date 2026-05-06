@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.4.0
+
+### New Features
+
+- **MorphBoost adaptive training mode** -- opt-in via `training_mode="morph"` on `GBMRegressor`, `GBMClassifier`, and `GBMRanker`. Augments the standard gradient gain with a normalized information-theoretic term (with `tanh(iter/20)` warmup ramp), per-class EMA-driven gain shaping, depth-based leaf penalty, per-iteration leaf shrinkage, and an optional balance penalty. Implementation follows the formulation in [Kriuk (2025), *MorphBoost*](https://arxiv.org/pdf/2511.13234) with deliberate corrections vs the paper's reference code.
+- **Per-iteration learning-rate schedules** -- new `lr_schedule` parameter (`"constant"` default or `"warmup_cosine"`), independent of `training_mode`. The `warmup_cosine` schedule does linear warmup over `lr_warmup_frac * n_estimators` rounds then half-cosine decay to a `0.01 * learning_rate` floor.
+- **Schedule-aware auto early-stopping** -- when an LR schedule is active, the auto-tuned `min_loss_improvement` threshold is scaled by `current_lr / max_lr`, and warmup-phase rounds (empty trees, slightly-negative loss improvements) do not terminate training. Outside warmup, behaviour is bit-identical to the previous policy.
+- **MorphBoost configuration in artifacts** -- the `MorphConfig` and `final_iteration` are persisted as an optional artifact section so loaded models predict consistently.
+
+### Performance
+
+- **SIMD-accelerated kernels** via the `wide` crate (safe API; AVX2 / NEON intrinsics under the hood, scalar fallback otherwise). Standard-path histogram bin-scan and `GradientEmaStats` mean+variance pass are vectorized.
+- **Tile-size auto-tuning** for histogram parallelism. The hard-coded `MAX_TILE_FEATURE_WIDTH=64` is replaced by a thread-count-aware helper that targets ~2 tiles per thread, clamped to `[16, 64]`. Improves utilization at high feature counts (Numerai 780-feature `medium` set, etc.).
+- **Hoisted morph per-round constants** -- `tanh(iter/20)`, gradient/info-score blend coefficients, and warmup-branch flags are precomputed once per round into `MorphPrecomputed` rather than evaluated per bin candidate.
+
+### Benchmarks
+
+- **`alloygbm_morph` and `alloygbm_morph_cosine` arms** added to `benchmarks/run_model_comparison.py` for all four task types. New `--models` flag filters which arms run.
+- **`benchmarks/morph_report.py`** -- focused MorphBoost-vs-peers comparison on a curated set of sklearn datasets (~2 minutes with `--quick`).
+- **`benchmarks/morph_ablation.py`** -- toggles MorphBoost components individually on synthetic regression/binary/ranking datasets to attribute per-component impact.
+- **`benchmarks/numerai_benchmark.py`** -- adds `alloygbm_morph` and `alloygbm_morph_cosine` arms, plus a startup build-freshness check that logs the loaded extension's mtime, the worktree's git HEAD, and a `STALE BUILD` warning if the extension predates HEAD.
+
+### Documentation
+
+- New dedicated MorphBoost guides at `docs/user/morphboost.md` and `docs/site/source/morphboost.rst`, with the formulation, full parameter reference, LR-schedule behaviour, and tuning notes.
+- Cross-references and parameter notes added across the user guide, Sphinx site, benchmark READMEs, and the limitations doc.
+
 ## 0.3.2
 
 ### Bug Fixes

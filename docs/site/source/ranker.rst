@@ -44,7 +44,11 @@ Parameters
 
 - ``ranking_objective: str = "rank:ndcg"`` -- the ranking loss function
 
-All other parameters are inherited from ``GBMRegressor``.
+All other parameters are inherited from ``GBMRegressor``, including
+``training_mode="morph"`` and the MorphBoost / LR-schedule parameters
+(``morph_rate``, ``evolution_pressure``, ``morph_warmup_iters``,
+``info_score_weight``, ``depth_penalty_base``, ``balance_penalty``,
+``lr_schedule``, ``lr_warmup_frac``). See :doc:`morphboost`.
 
 Methods
 -------

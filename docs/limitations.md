@@ -1,6 +1,6 @@
 # AlloyGBM Current Limitations
 
-Last updated for v0.3.2.
+Last updated for v0.4.0.
 
 ## Remaining Limitations
 
@@ -46,3 +46,13 @@ The following were limitations in prior versions and have been addressed:
 - No custom objective/metric callbacks (now: `objective` callable and `eval_metric` callable)
 - Multiclass warm-start unsupported (now: `warm_start=True` works for multiclass with round-offset continuity)
 - Multiclass prediction per-row allocation (now: zero-copy dense slice prediction)
+- Single fixed split criterion (now: opt-in MorphBoost adaptive criterion via
+  `training_mode="morph"`, including EMA-driven gain shaping, depth/iteration
+  leaf penalties, and an info-theoretic blend term — see the
+  [paper](https://arxiv.org/pdf/2511.13234))
+- Constant-only learning rate (now: per-iteration `lr_schedule` parameter
+  supports `"constant"` and `"warmup_cosine"`, with schedule-aware
+  early-stopping logic)
+- No SIMD-accelerated kernels (now: histogram bin-scan and EMA passes are
+  vectorized via the `wide` crate; histogram tile sizing auto-tunes for
+  high-feature workloads)

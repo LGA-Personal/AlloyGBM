@@ -34,7 +34,7 @@ maturin develop --manifest-path bindings/python/Cargo.toml --release
 
 AlloyGBM targets Python `3.11+` and uses a native Rust extension module.
 
-Wheel targets for `0.3.2`:
+Wheel targets for `0.4.0`:
 
 - macOS `arm64`
 - Linux `x86_64` (manylinux)
@@ -98,6 +98,46 @@ scores = model.predict(X_test)
 print("NDCG@10:", ndcg(y_test, scores, group=query_ids_test, k=10))
 ```
 
+### MorphBoost (Adaptive Split Criterion)
+
+MorphBoost is an opt-in training mode that blends the standard gradient gain
+with a normalized information-theoretic term. Across rounds, the blend ramps
+in via a `tanh(iter/20)` warmup, an EMA over per-class gradient statistics
+shapes split selection, and leaf magnitudes are scaled by a depth penalty
+and per-iteration shrinkage. See the
+[MorphBoost paper](https://arxiv.org/pdf/2511.13234) for the formulation.
+
+```python
+from alloygbm import GBMRegressor
+
+# Constant LR (default) with morph adaptive split criterion
+model = GBMRegressor(
+    n_estimators=1200,
+    max_depth=6,
+    learning_rate=0.05,
+    training_mode="morph",      # opt in
+    morph_rate=0.1,             # per-round leaf shrinkage
+    info_score_weight=0.3,      # blend weight for info-theoretic term
+    depth_penalty_base=0.9,     # multiplier per depth level
+    balance_penalty=True,       # penalize highly imbalanced splits
+    seed=7,
+)
+model.fit(X_train, y_train)
+
+# With warmup-cosine LR schedule (good fit for very-low-LR runs)
+model = GBMRegressor(
+    n_estimators=5000,
+    learning_rate=0.01,
+    training_mode="morph",
+    lr_schedule="warmup_cosine",
+    lr_warmup_frac=0.1,         # fraction of n_estimators spent in warmup
+    seed=7,
+)
+```
+
+`training_mode="morph"` works with `GBMClassifier` and `GBMRanker` too, with
+identical parameter semantics.
+
 ### Time-Aware Validation
 
 ```python
@@ -159,6 +199,8 @@ artifact_bytes = model.artifact_bytes
 - Multiple categorical column support via `categorical_feature_indices`
 - Early stopping with `best_iteration_`, `best_score_`, `evals_result_`
 - Objective-aware training metric tracking (RMSE, log-loss, accuracy, NDCG)
+- Adaptive split criterion via `training_mode="morph"` ([MorphBoost](https://arxiv.org/pdf/2511.13234))
+- Per-iteration learning-rate schedules: `lr_schedule="constant"` (default) or `"warmup_cosine"`
 
 ### Inference and Explanations
 

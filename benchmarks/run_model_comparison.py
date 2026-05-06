@@ -641,6 +641,20 @@ def _run_model(
         )
 
 
+def _make_alloygbm_morph(task_type, **kwargs):
+    from alloygbm import GBMClassifier, GBMRanker, GBMRegressor
+    cls = {"regression": GBMRegressor, "binary": GBMClassifier,
+           "multiclass": GBMClassifier, "ranking": GBMRanker}[task_type]
+    return cls(training_mode="morph", **kwargs)
+
+
+def _make_alloygbm_morph_cosine(task_type, **kwargs):
+    from alloygbm import GBMClassifier, GBMRanker, GBMRegressor
+    cls = {"regression": GBMRegressor, "binary": GBMClassifier,
+           "multiclass": GBMClassifier, "ranking": GBMRanker}[task_type]
+    return cls(training_mode="morph", lr_schedule="warmup_cosine", lr_warmup_frac=0.1, **kwargs)
+
+
 def _model_factories(
     gbm_regressor_cls: type,
     catboost_regressor_cls: type | None,
@@ -679,6 +693,8 @@ def _model_factories(
 
     factories = {
         "alloygbm": lambda: gbm_regressor_cls(**alloy_params),
+        "alloygbm_morph": lambda: _make_alloygbm_morph("regression", **alloy_params),
+        "alloygbm_morph_cosine": lambda: _make_alloygbm_morph_cosine("regression", **alloy_params),
         "lightgbm": lambda: LGBMRegressor(
             objective="regression",
             learning_rate=learning_rate,
@@ -770,6 +786,8 @@ def _classifier_factories(
     )
     factories: dict[str, Callable[[], object]] = {
         "alloygbm": lambda: gbm_classifier_cls(**alloy_params),
+        "alloygbm_morph": lambda: _make_alloygbm_morph("binary", **alloy_params),
+        "alloygbm_morph_cosine": lambda: _make_alloygbm_morph_cosine("binary", **alloy_params),
         "lightgbm": lambda: LGBMClassifier(
             objective="binary",
             learning_rate=learning_rate,
@@ -829,6 +847,8 @@ def _multiclass_classifier_factories(
     )
     factories: dict[str, Callable[[], object]] = {
         "alloygbm": lambda: gbm_classifier_cls(**alloy_params),
+        "alloygbm_morph": lambda: _make_alloygbm_morph("multiclass", **alloy_params),
+        "alloygbm_morph_cosine": lambda: _make_alloygbm_morph_cosine("multiclass", **alloy_params),
         "lightgbm": lambda: LGBMClassifier(
             objective="multiclass",
             num_class=n_classes,
@@ -886,6 +906,8 @@ def _ranker_factories(
     )
     factories: dict[str, Callable[[], object]] = {
         "alloygbm": lambda: gbm_ranker_cls(**alloy_params),
+        "alloygbm_morph": lambda: _make_alloygbm_morph("ranking", **alloy_params),
+        "alloygbm_morph_cosine": lambda: _make_alloygbm_morph_cosine("ranking", **alloy_params),
         "lightgbm": lambda: _LGBMRankerAdapter(
             objective="lambdarank",
             learning_rate=learning_rate,
@@ -1343,6 +1365,17 @@ def main(argv: list[str]) -> int:
         help="comma-separated seeds for profile-grid/custom-profile modes",
     )
     parser.add_argument(
+        "--models",
+        nargs="+",
+        default=None,
+        metavar="MODEL",
+        help=(
+            "filter to only these model names (e.g. alloygbm alloygbm_morph lightgbm). "
+            "Default: run all models. Valid names depend on task type but include: "
+            "alloygbm, alloygbm_morph, alloygbm_morph_cosine, lightgbm, xgboost, catboost"
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("benchmarks") / "results",
@@ -1444,6 +1477,8 @@ def main(argv: list[str]) -> int:
                         catboost_classifier_cls=catboost_classifier_cls,
                         **common_factory_args,
                     )
+                    if args.models:
+                        factories = {k: v for k, v in factories.items() if k in args.models}
                 elif task_type == "multiclass_classification":
                     # Use a placeholder factory dict for error-record model names;
                     # real factories are built after _split_dataset below.
@@ -1453,18 +1488,24 @@ def main(argv: list[str]) -> int:
                         n_classes=2,  # placeholder; overwritten after split
                         **common_factory_args,
                     )
+                    if args.models:
+                        factories = {k: v for k, v in factories.items() if k in args.models}
                 elif task_type == "ranking":
                     factories = _ranker_factories(
                         gbm_ranker_cls=gbm_ranker_cls,
                         catboost_available=catboost_ranker_available,
                         **common_factory_args,
                     )
+                    if args.models:
+                        factories = {k: v for k, v in factories.items() if k in args.models}
                 else:
                     factories = _model_factories(
                         gbm_regressor_cls=gbm_regressor_cls,
                         catboost_regressor_cls=catboost_regressor_cls,
                         **common_factory_args,
                     )
+                    if args.models:
+                        factories = {k: v for k, v in factories.items() if k in args.models}
 
                 if scenario in dataset_errors:
                     error = dataset_errors[scenario]
@@ -1499,6 +1540,8 @@ def main(argv: list[str]) -> int:
                         n_classes=n_classes,
                         **common_factory_args,
                     )
+                    if args.models:
+                        factories = {k: v for k, v in factories.items() if k in args.models}
 
                 for model_name, factory in factories.items():
                     record = _run_model(
@@ -1552,6 +1595,7 @@ def main(argv: list[str]) -> int:
         "alloy_continuous_binning_max_bins": args.alloy_continuous_binning_max_bins,
         "test_size": args.test_size,
         "scenarios": args.scenarios,
+        "models_filter": args.models,
         "alloygbm_runtime": alloy_runtime,
         "catboost_runtime": catboost_runtime,
     }
