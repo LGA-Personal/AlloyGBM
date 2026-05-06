@@ -175,3 +175,58 @@ def test_morph_artifact_differs_from_auto():
     m_morph = GBMRegressor(n_estimators=15, max_depth=4, training_mode="morph", seed=0)
     m_morph.fit(X, y)
     assert m_auto.artifact_bytes != m_morph.artifact_bytes
+
+
+def test_depth_penalty_base_rejects_zero():
+    """The Rust core requires depth_penalty_base in (0, 1]; the Python
+    constructor must surface the same constraint at construction time
+    rather than letting the user reach fit() with an invalid value."""
+    with pytest.raises(ValueError, match=r"depth_penalty_base must be in \(0\.0, 1\.0\]"):
+        GBMRegressor(depth_penalty_base=0.0)
+    with pytest.raises(ValueError, match=r"depth_penalty_base must be in \(0\.0, 1\.0\]"):
+        GBMRegressor().set_params(depth_penalty_base=0.0)
+    # Strictly positive values within range continue to work.
+    GBMRegressor(depth_penalty_base=1e-6)
+    GBMRegressor(depth_penalty_base=1.0)
+
+
+def test_lr_warmup_frac_rejected_with_constant_schedule():
+    """lr_warmup_frac is only meaningful with lr_schedule='warmup_cosine'.
+    Python validation must reject non-default values with a constant
+    schedule rather than silently dropping the parameter in the bridge."""
+    with pytest.raises(ValueError, match="lr_warmup_frac=.*only valid with lr_schedule='warmup_cosine'"):
+        GBMRegressor(lr_warmup_frac=0.7)  # default lr_schedule='constant'
+    with pytest.raises(ValueError, match="lr_warmup_frac=.*only valid with lr_schedule='warmup_cosine'"):
+        GBMRegressor().set_params(lr_warmup_frac=0.7)
+    # lr_warmup_frac with warmup_cosine is fine.
+    GBMRegressor(lr_schedule="warmup_cosine", lr_warmup_frac=0.7)
+
+
+def test_lr_schedule_independent_of_training_mode():
+    """The public API documents lr_schedule as independent of
+    training_mode. Setting lr_schedule='warmup_cosine' on its own (with
+    training_mode='auto') must actually engage the schedule end-to-end,
+    not silently fall back to constant LR."""
+    X, y = _toy_regression_data(n=300, seed=21)
+    # Same seed and config except lr_schedule. If the schedule is honored
+    # in auto mode, the artifacts must differ.
+    m_constant = GBMRegressor(n_estimators=20, max_depth=4, learning_rate=0.1, seed=0)
+    m_constant.fit(X, y)
+    m_cosine = GBMRegressor(
+        n_estimators=20, max_depth=4, learning_rate=0.1, seed=0,
+        lr_schedule="warmup_cosine", lr_warmup_frac=0.2,
+    )
+    m_cosine.fit(X, y)
+    assert m_constant.artifact_bytes != m_cosine.artifact_bytes, (
+        "lr_schedule='warmup_cosine' produced identical bytes to constant LR; "
+        "the schedule was likely silently ignored in auto mode."
+    )
+    # And gain criterion remains identical to standard mode (only LR changes):
+    # an auto-mode run with constant schedule must remain bit-identical to
+    # the same config without any morph_config wiring.
+    m_constant_explicit = GBMRegressor(
+        n_estimators=20, max_depth=4, learning_rate=0.1, seed=0,
+        lr_schedule="constant",
+    )
+    m_constant_explicit.fit(X, y)
+    assert m_constant.artifact_bytes == m_constant_explicit.artifact_bytes

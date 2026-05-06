@@ -96,7 +96,7 @@ they only take effect when ``training_mode="morph"``.
        Range ``[0.0, 1.0]``. ``0.0`` disables the info-theoretic term.
    * - ``depth_penalty_base``
      - ``0.9``
-     - Base of the leaf depth penalty. Range ``[0.0, 1.0]``. ``1.0``
+     - Base of the leaf depth penalty. Range ``(0.0, 1.0]``. ``1.0``
        disables the penalty.
    * - ``balance_penalty``
      - ``True``
@@ -108,7 +108,10 @@ they only take effect when ``training_mode="morph"``.
    * - ``lr_warmup_frac``
      - ``0.1``
      - Fraction of ``n_estimators`` spent in the linear-warmup phase
-       when ``lr_schedule="warmup_cosine"``. Range ``[0.0, 1.0]``.
+       when ``lr_schedule="warmup_cosine"``. Range ``[0.0, 1.0]``. Must
+       be left at the default ``0.1`` when ``lr_schedule="constant"``;
+       non-default values with a constant schedule raise
+       ``ValueError``.
 
 Learning-Rate Schedules
 -----------------------

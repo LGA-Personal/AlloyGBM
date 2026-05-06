@@ -378,10 +378,21 @@ class GBMRegressor(_GBMRegressorBase):
             )
         if not (0.0 <= float(lr_warmup_frac) <= 1.0):
             raise ValueError("lr_warmup_frac must be in [0.0, 1.0]")
+        # lr_warmup_frac is only meaningful when lr_schedule == "warmup_cosine".
+        # We treat 0.1 as the inert default and reject any other value with a
+        # non-warmup-cosine schedule (matches the Rust-side validation contract
+        # and prevents silent drops in the bridge).
+        if lr_schedule != "warmup_cosine" and float(lr_warmup_frac) != 0.1:
+            raise ValueError(
+                f"lr_warmup_frac={lr_warmup_frac} is only valid with "
+                f"lr_schedule='warmup_cosine'; got lr_schedule='{lr_schedule}'"
+            )
         if not (0.0 <= float(info_score_weight) <= 1.0):
             raise ValueError("info_score_weight must be in [0.0, 1.0]")
-        if not (0.0 <= float(depth_penalty_base) <= 1.0):
-            raise ValueError("depth_penalty_base must be in [0.0, 1.0]")
+        # depth_penalty_base must be strictly > 0 (matches the Rust core
+        # validation: morph_config.depth_penalty_base must be in (0, 1]).
+        if not (0.0 < float(depth_penalty_base) <= 1.0):
+            raise ValueError("depth_penalty_base must be in (0.0, 1.0]")
 
         self.learning_rate = float(learning_rate)
         self.max_depth = int(max_depth)
@@ -847,8 +858,8 @@ class GBMRegressor(_GBMRegressorBase):
 
         if "depth_penalty_base" in params:
             dpb = float(params["depth_penalty_base"])
-            if not (0.0 <= dpb <= 1.0):
-                raise ValueError("depth_penalty_base must be in [0.0, 1.0]")
+            if not (0.0 < dpb <= 1.0):
+                raise ValueError("depth_penalty_base must be in (0.0, 1.0]")
             self.depth_penalty_base = dpb
 
         if "balance_penalty" in params:
@@ -871,6 +882,15 @@ class GBMRegressor(_GBMRegressorBase):
         # Cross-field validation: leaf growth requires max_leaves
         if self.tree_growth == "leaf" and self.max_leaves is None:
             raise ValueError("max_leaves must be set when tree_growth='leaf'")
+
+        # Cross-field validation: lr_warmup_frac is only meaningful with
+        # lr_schedule="warmup_cosine". Reject any non-default value with a
+        # constant schedule (matches __init__ and the Rust-side contract).
+        if self.lr_schedule != "warmup_cosine" and self.lr_warmup_frac != 0.1:
+            raise ValueError(
+                f"lr_warmup_frac={self.lr_warmup_frac} is only valid with "
+                f"lr_schedule='warmup_cosine'; got lr_schedule='{self.lr_schedule}'"
+            )
 
         return self
 
@@ -1281,6 +1301,26 @@ class GBMRegressor(_GBMRegressorBase):
                 info_score_weight=self.info_score_weight,
                 depth_penalty_base=self.depth_penalty_base,
                 balance_penalty=self.balance_penalty,
+                lr_schedule=self.lr_schedule,
+                lr_warmup_frac=self.lr_warmup_frac,
+            )
+        elif self.training_mode in ("auto", "manual") and self.lr_schedule != "constant":
+            # User opted into an LR schedule without enabling morph mode. The
+            # public API documents lr_schedule as independent of training_mode,
+            # so we build a neutral morph_config that activates only the LR
+            # schedule (and the schedule-aware early-stop logic). Setting
+            # morph_rate=0.0, info_score_weight=0.0, depth_penalty_base=1.0,
+            # balance_penalty=False, and morph_warmup_iters=0 keeps the gain
+            # criterion and leaf-value formula bit-identical to the standard
+            # path; only the per-iteration LR is overridden by the schedule.
+            from alloygbm._morph import build_morph_config_dict
+            self._morph_config_ = build_morph_config_dict(
+                morph_rate=0.0,
+                evolution_pressure=0.0,
+                morph_warmup_iters=0,
+                info_score_weight=0.0,
+                depth_penalty_base=1.0,
+                balance_penalty=False,
                 lr_schedule=self.lr_schedule,
                 lr_warmup_frac=self.lr_warmup_frac,
             )

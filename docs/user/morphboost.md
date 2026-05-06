@@ -92,10 +92,10 @@ they only take effect when `training_mode="morph"`.
 | `evolution_pressure` | `0.2` | Strength of EMA-driven gain shaping. Range `[0.0, 1.0]`. |
 | `morph_warmup_iters` | `5` | Number of initial rounds for which the morph blend collapses to the pure gradient gain. Helps stabilize early training. |
 | `info_score_weight` | `0.3` | Mixing weight between the gradient-gain term and the information-theoretic term in the post-warmup blend. Range `[0.0, 1.0]`. Setting to `0.0` disables the info term entirely (gradient-gain only). |
-| `depth_penalty_base` | `0.9` | Base of the depth penalty applied to leaf magnitudes (`depth_penalty_base ** (child_depth / 3.0)`). Range `[0.0, 1.0]`. `1.0` disables the penalty. |
+| `depth_penalty_base` | `0.9` | Base of the depth penalty applied to leaf magnitudes (`depth_penalty_base ** (child_depth / 3.0)`). Range `(0.0, 1.0]`. `1.0` disables the penalty. |
 | `balance_penalty` | `True` | Whether to apply a small penalty to highly imbalanced splits. |
 | `lr_schedule` | `"constant"` | Per-iteration LR schedule. One of `"constant"` or `"warmup_cosine"`. Independent of MorphBoost — usable on its own. |
-| `lr_warmup_frac` | `0.1` | Fraction of `n_estimators` to spend in the linear-warmup phase when `lr_schedule="warmup_cosine"`. Range `[0.0, 1.0]`. |
+| `lr_warmup_frac` | `0.1` | Fraction of `n_estimators` to spend in the linear-warmup phase when `lr_schedule="warmup_cosine"`. Range `[0.0, 1.0]`. Must be left at the default `0.1` when `lr_schedule="constant"`; non-default values with a constant schedule raise `ValueError`. |
 
 The defaults match the values recommended by the MorphBoost paper.
 
