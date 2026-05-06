@@ -150,6 +150,63 @@ impl MorphState {
         })
     }
 
+    /// Returns a scale factor for `min_loss_improvement` at the given iteration.
+    ///
+    /// Loss reduction in a GBM round is approximately linear in the learning rate
+    /// (leaf values are `-lr × grad / hess`, so per-leaf contribution to loss
+    /// reduction is `lr × grad² / hess`). When an LR schedule is active, early
+    /// (warmup) and late (decay) rounds intentionally use a smaller LR than the
+    /// schedule's peak, so the absolute loss improvement is correspondingly
+    /// smaller. Without this normalization, the auto-tuned weak-improvement
+    /// early-stopping threshold would terminate training during warmup.
+    ///
+    /// Returns `current_lr / max_lr_in_schedule`, clamped to `[0.01, 1.0]`. The
+    /// lower clamp prevents pathological zeroing if a schedule ever uses lr=0;
+    /// the upper clamp is mathematical (current_lr cannot exceed the max).
+    ///
+    /// For a `Constant` schedule, this is always 1.0 (no-op).
+    pub fn lr_loss_threshold_scale(&self, iteration: usize) -> f32 {
+        let current_lr = self.lr_for_iter(iteration);
+        let max_lr = self
+            .lr_per_iter
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max);
+        if !max_lr.is_finite() || max_lr <= 0.0 {
+            return 1.0;
+        }
+        (current_lr / max_lr).clamp(0.01, 1.0)
+    }
+
+    /// Returns `true` when the given iteration falls within the explicit
+    /// warmup phase of a non-constant LR schedule.
+    ///
+    /// During warmup, the learning rate ramps up from a small fraction of the
+    /// peak. Early-stopping signals — empty trees (`NoSplitCandidate`) and weak
+    /// loss improvement — are expected consequences of the tiny LR and must NOT
+    /// trigger termination. Once warmup completes and LR reaches its peak,
+    /// these signals regain their normal "training has truly stalled" meaning.
+    ///
+    /// Boundary semantics mirror `resolve_lr_schedule` exactly: warmup spans
+    /// `[0, round((warmup_frac * n_estimators)).max(1).min(n))`.
+    ///
+    /// For `LrSchedule::Constant`, returns `false` at all iterations.
+    pub fn is_in_warmup_phase(&self, iteration: usize) -> bool {
+        match self.config.lr_schedule {
+            LrSchedule::Constant => false,
+            LrSchedule::WarmupCosine { warmup_frac } => {
+                let n = self.lr_per_iter.len();
+                if n == 0 {
+                    return false;
+                }
+                let warmup = ((warmup_frac * n as f32).round() as usize)
+                    .max(1)
+                    .min(n);
+                iteration < warmup
+            }
+        }
+    }
+
     /// Update EMA stats for `class_idx` from a slice of [`GradientPair`]s,
     /// reusing an internal scratch buffer to avoid a per-round heap allocation.
     pub fn update_ema_from_gradient_pairs(&mut self, pairs: &[GradientPair], class_idx: usize) {
@@ -2837,8 +2894,20 @@ impl Trainer {
                 class_stumps[class_k].extend(round_stumps);
             }
 
+            let in_warmup_phase = morph_state
+                .as_ref()
+                .is_some_and(|ms| ms.is_in_warmup_phase(effective_round));
+
             if !any_tree_produced {
-                // Revert stump counts
+                if in_warmup_phase {
+                    // Empty rounds during warmup are expected: tiny LR produces
+                    // leaves below `min_abs_leaf_value`, so all splits get
+                    // rejected. This is benign — LR will ramp up. Skip this
+                    // round and continue.
+                    rounds_completed += 1;
+                    continue;
+                }
+                // Past warmup: an empty round indicates no useful split exists.
                 for class_k in 0..k {
                     class_stumps[class_k].truncate(pre_round_counts[class_k]);
                 }
@@ -2854,25 +2923,42 @@ impl Trainer {
             )?;
             let loss_improvement = current_loss - candidate_loss;
             if loss_improvement < 0.0 {
-                // Revert stump counts
+                // Truncate stumps so the model doesn't include this round's contribution.
+                // (`class_candidate_predictions` is reset from `class_predictions` at the
+                // top of each round, so the candidate state is implicitly rolled back.)
                 for class_k in 0..k {
                     class_stumps[class_k].truncate(pre_round_counts[class_k]);
+                }
+                if in_warmup_phase {
+                    // During warmup, slightly-negative loss improvements arise from
+                    // numerical noise at tiny LR (e.g., row-subsample variance over
+                    // mostly-zero gradient updates). The model is not broken — LR will
+                    // ramp up. Skip this round and continue.
+                    rounds_completed += 1;
+                    continue;
                 }
                 stop_reason = IterationStopReason::LossImprovementBelowThreshold;
                 break;
             }
-            if loss_improvement < controls.min_loss_improvement {
-                if weak_improvement_streak >= controls.max_consecutive_weak_improvements {
-                    for class_k in 0..k {
-                        class_stumps[class_k].truncate(pre_round_counts[class_k]);
+            if !in_warmup_phase {
+                let lr_threshold_scale = morph_state
+                    .as_ref()
+                    .map_or(1.0, |ms| ms.lr_loss_threshold_scale(effective_round));
+                let effective_min_loss_improvement =
+                    controls.min_loss_improvement * lr_threshold_scale;
+                if loss_improvement < effective_min_loss_improvement {
+                    if weak_improvement_streak >= controls.max_consecutive_weak_improvements {
+                        for class_k in 0..k {
+                            class_stumps[class_k].truncate(pre_round_counts[class_k]);
+                        }
+                        stop_reason = IterationStopReason::LossImprovementBelowThreshold;
+                        break;
                     }
-                    stop_reason = IterationStopReason::LossImprovementBelowThreshold;
-                    break;
+                    weak_improvement_streak += 1;
+                    weak_improvement_rounds_committed += 1;
+                } else {
+                    weak_improvement_streak = 0;
                 }
-                weak_improvement_streak += 1;
-                weak_improvement_rounds_committed += 1;
-            } else {
-                weak_improvement_streak = 0;
             }
 
             // Validation early stopping
@@ -3317,7 +3403,19 @@ impl Trainer {
                     )?
                 };
 
+            let in_warmup_phase = morph_state
+                .as_ref()
+                .is_some_and(|ms| ms.is_in_warmup_phase(effective_round_index));
+
             if candidate_round_stumps.is_empty() {
+                if in_warmup_phase {
+                    // Empty rounds during warmup are expected: tiny LR produces
+                    // leaves below `min_abs_leaf_value`, so all splits get
+                    // rejected. This is benign — LR will ramp up. Skip this
+                    // round and continue.
+                    rounds_completed += 1;
+                    continue;
+                }
                 stop_reason = round_rejection_reason;
                 break;
             }
@@ -3337,18 +3435,32 @@ impl Trainer {
             // validation early stopping (if configured) and the round cap.
             let objective_is_ranking = objective.requires_group_id();
             if !objective_is_ranking && loss_improvement < 0.0 {
+                if in_warmup_phase {
+                    // During warmup, slightly-negative loss improvements arise from
+                    // numerical noise at tiny LR. Skip this round and continue;
+                    // candidate predictions reset from current at the top of each round.
+                    rounds_completed += 1;
+                    continue;
+                }
                 stop_reason = IterationStopReason::LossImprovementBelowThreshold;
                 break;
             }
-            if !objective_is_ranking && loss_improvement < controls.min_loss_improvement {
-                if weak_improvement_streak >= controls.max_consecutive_weak_improvements {
-                    stop_reason = IterationStopReason::LossImprovementBelowThreshold;
-                    break;
+            if !in_warmup_phase {
+                let lr_threshold_scale = morph_state
+                    .as_ref()
+                    .map_or(1.0, |ms| ms.lr_loss_threshold_scale(effective_round_index));
+                let effective_min_loss_improvement =
+                    controls.min_loss_improvement * lr_threshold_scale;
+                if !objective_is_ranking && loss_improvement < effective_min_loss_improvement {
+                    if weak_improvement_streak >= controls.max_consecutive_weak_improvements {
+                        stop_reason = IterationStopReason::LossImprovementBelowThreshold;
+                        break;
+                    }
+                    weak_improvement_streak += 1;
+                    weak_improvement_rounds_committed += 1;
+                } else {
+                    weak_improvement_streak = 0;
                 }
-                weak_improvement_streak += 1;
-                weak_improvement_rounds_committed += 1;
-            } else {
-                weak_improvement_streak = 0;
             }
 
             let mut candidate_validation_predictions = None;
@@ -8751,5 +8863,136 @@ mod morph_state_tests {
         // Out-of-bounds index returns last value.
         let last = ms.lr_per_iter[4];
         assert!((ms.lr_for_iter(999) - last).abs() < 1e-6);
+    }
+
+    #[test]
+    fn morph_state_lr_threshold_scale_constant_lr() {
+        let cfg = MorphConfig {
+            morph_warmup_iters: 5,
+            info_score_weight: 0.3,
+            depth_penalty_base: 0.9,
+            balance_penalty: false,
+            morph_rate: 0.1,
+            evolution_pressure: 0.2,
+            lr_schedule: LrSchedule::Constant,
+        };
+        let state = MorphState::new(cfg, 1, 100, 0.05);
+        // Constant schedule: scale must be 1.0 at all iterations.
+        for iter in [0, 50, 99] {
+            assert!(
+                (state.lr_loss_threshold_scale(iter) - 1.0).abs() < 1e-6,
+                "constant schedule must yield scale=1.0 at iter {iter}",
+            );
+        }
+    }
+
+    #[test]
+    fn morph_state_lr_threshold_scale_warmup_cosine() {
+        let cfg = MorphConfig {
+            morph_warmup_iters: 5,
+            info_score_weight: 0.3,
+            depth_penalty_base: 0.9,
+            balance_penalty: false,
+            morph_rate: 0.1,
+            evolution_pressure: 0.2,
+            lr_schedule: LrSchedule::WarmupCosine { warmup_frac: 0.1 },
+        };
+        let n = 5000;
+        let base_lr = 0.01_f32;
+        let state = MorphState::new(cfg, 1, n, base_lr);
+        // Round 0: lr ≈ 2e-5, max ≈ 1e-2 → scale ≈ 0.002, clamped up to 0.01.
+        let scale_warmup = state.lr_loss_threshold_scale(0);
+        assert!(
+            (0.0099..=0.011).contains(&scale_warmup),
+            "warmup scale should be clamped to ~0.01, got {scale_warmup}",
+        );
+        // Around peak (round 499): scale should be ~1.0.
+        let scale_peak = state.lr_loss_threshold_scale(499);
+        assert!(
+            (scale_peak - 1.0).abs() < 0.01,
+            "peak scale should be ~1.0, got {scale_peak}",
+        );
+        // Final round: scale should be small (decayed cosine).
+        let scale_final = state.lr_loss_threshold_scale((n as usize) - 1);
+        assert!(scale_final < 0.5, "final-decay scale should be small, got {scale_final}");
+        // Lower clamp guarantees no value below 0.01.
+        assert!(scale_final >= 0.01, "scale must respect lower clamp, got {scale_final}");
+    }
+
+    #[test]
+    fn morph_state_lr_threshold_scale_handles_degenerate_schedule() {
+        let cfg = MorphConfig {
+            morph_warmup_iters: 0,
+            info_score_weight: 0.0,
+            depth_penalty_base: 1.0,
+            balance_penalty: false,
+            morph_rate: 0.0,
+            evolution_pressure: 0.0,
+            lr_schedule: LrSchedule::Constant,
+        };
+        // n=1 schedule, base_lr should still produce scale=1.0 (no division-by-zero).
+        let state = MorphState::new(cfg, 1, 1, 0.05);
+        assert!((state.lr_loss_threshold_scale(0) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn morph_state_is_in_warmup_phase_constant_schedule() {
+        use alloygbm_core::{LrSchedule, MorphConfig};
+        let cfg = MorphConfig {
+            morph_warmup_iters: 5,
+            info_score_weight: 0.3,
+            depth_penalty_base: 0.9,
+            balance_penalty: false,
+            morph_rate: 0.1,
+            evolution_pressure: 0.2,
+            lr_schedule: LrSchedule::Constant,
+        };
+        let state = MorphState::new(cfg, 1, 100, 0.05);
+        // Constant schedule: never in warmup.
+        for iter in [0, 50, 99] {
+            assert!(
+                !state.is_in_warmup_phase(iter),
+                "constant schedule must report not-in-warmup at iter {iter}"
+            );
+        }
+    }
+
+    #[test]
+    fn morph_state_is_in_warmup_phase_warmup_cosine_boundary() {
+        use alloygbm_core::{LrSchedule, MorphConfig};
+        let cfg = MorphConfig {
+            morph_warmup_iters: 5,
+            info_score_weight: 0.3,
+            depth_penalty_base: 0.9,
+            balance_penalty: false,
+            morph_rate: 0.1,
+            evolution_pressure: 0.2,
+            lr_schedule: LrSchedule::WarmupCosine { warmup_frac: 0.1 },
+        };
+        // n=5000, warmup_frac=0.1 → warmup spans [0, 500).
+        let state = MorphState::new(cfg, 1, 5000, 0.01);
+        assert!(state.is_in_warmup_phase(0));
+        assert!(state.is_in_warmup_phase(499));
+        assert!(!state.is_in_warmup_phase(500));
+        assert!(!state.is_in_warmup_phase(2500));
+        assert!(!state.is_in_warmup_phase(4999));
+    }
+
+    #[test]
+    fn morph_state_is_in_warmup_phase_handles_degenerate_schedules() {
+        use alloygbm_core::{LrSchedule, MorphConfig};
+        // n=1 with WarmupCosine → warmup is exactly 1 round (round 0 only).
+        let cfg = MorphConfig {
+            morph_warmup_iters: 0,
+            info_score_weight: 0.0,
+            depth_penalty_base: 1.0,
+            balance_penalty: false,
+            morph_rate: 0.0,
+            evolution_pressure: 0.0,
+            lr_schedule: LrSchedule::WarmupCosine { warmup_frac: 0.5 },
+        };
+        let state = MorphState::new(cfg, 1, 1, 0.01);
+        assert!(state.is_in_warmup_phase(0));
+        assert!(!state.is_in_warmup_phase(1));
     }
 }

@@ -675,6 +675,63 @@ def save_results(records: list[NumeraiBenchmarkRecord], output_dir: Path) -> Non
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+def _log_alloygbm_build_info() -> None:
+    """Log the loaded alloygbm extension's build timestamp and the worktree's
+    git HEAD, then emit a warning if the extension predates HEAD (i.e., a
+    rebuild via ``maturin develop --release`` is needed to pick up recent
+    Rust changes). This makes the run self-document which binary it used and
+    surfaces stale-build issues at startup rather than via mysterious results.
+    """
+    import datetime as _dt
+    import os as _os
+    import subprocess as _subprocess
+
+    try:
+        from alloygbm import _alloygbm as _ext
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("could not import alloygbm extension: %s", exc)
+        return
+
+    ext_path = getattr(_ext, "__file__", None)
+    if not ext_path or not _os.path.exists(ext_path):
+        logger.warning("alloygbm extension path not found")
+        return
+
+    ext_mtime = _dt.datetime.fromtimestamp(_os.path.getmtime(ext_path))
+    logger.info("alloygbm extension: %s", ext_path)
+    logger.info("alloygbm extension built: %s", ext_mtime.isoformat(timespec="seconds"))
+
+    repo_root = Path(ext_path).resolve()
+    while repo_root != repo_root.parent and not (repo_root / ".git").exists():
+        repo_root = repo_root.parent
+    if not (repo_root / ".git").exists():
+        return
+
+    try:
+        sha = _subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(repo_root), stderr=_subprocess.DEVNULL,
+        ).decode().strip()
+        commit_iso = _subprocess.check_output(
+            ["git", "log", "-1", "--format=%cI", "HEAD"],
+            cwd=str(repo_root), stderr=_subprocess.DEVNULL,
+        ).decode().strip()
+        commit_time = _dt.datetime.fromisoformat(commit_iso).replace(tzinfo=None)
+    except Exception as exc:
+        logger.warning("could not read git HEAD: %s", exc)
+        return
+
+    logger.info("git HEAD: %s @ %s", sha, commit_time.isoformat(timespec="seconds"))
+
+    if ext_mtime < commit_time:
+        delta = commit_time - ext_mtime
+        logger.warning(
+            "STALE BUILD: alloygbm extension is %s older than git HEAD — "
+            "rebuild with `maturin develop --release` before relying on these results.",
+            delta,
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Numerai tournament benchmark for AlloyGBM")
     parser.add_argument("--fast", action="store_true", help="Subset eras and reduce rounds")
@@ -727,6 +784,7 @@ def main() -> None:
         args.resolved_arms, args.rounds, args.learning_rate, args.max_depth,
         args.feature_set, args.residual_weight,
     )
+    _log_alloygbm_build_info()
 
     records = run_benchmark(args)
     print_results(records)
