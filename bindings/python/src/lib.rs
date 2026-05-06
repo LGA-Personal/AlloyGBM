@@ -3046,6 +3046,7 @@ fn build_train_params(
     feature_weights: Vec<f32>,
     max_leaves: Option<usize>,
     tree_growth: TreeGrowth,
+    morph_config: Option<alloygbm_core::MorphConfig>,
 ) -> TrainParams {
     TrainParams {
         seed,
@@ -3065,8 +3066,81 @@ fn build_train_params(
         feature_weights,
         max_leaves,
         tree_growth,
-        morph_config: None,
+        morph_config,
     }
+}
+
+/// Parse a Python dict into a `MorphConfig`.
+///
+/// Expected keys (all optional — missing keys keep the `MorphConfig::default()` value):
+///   morph_rate, evolution_pressure, morph_warmup_iters, info_score_weight,
+///   depth_penalty_base, balance_penalty, lr_schedule, lr_warmup_frac
+/// Parse a Python dict into a `MorphConfig`.
+///
+/// Expected keys (all optional — missing keys keep `MorphConfig::default()` values):
+/// - `morph_rate`, `evolution_pressure`, `morph_warmup_iters`, `info_score_weight`,
+///   `depth_penalty_base`, `balance_penalty`
+/// - `lr_schedule`: `"constant"` (default) or `"warmup_cosine"`
+/// - `lr_warmup_frac`: only meaningful when `lr_schedule="warmup_cosine"`. Providing
+///   `lr_warmup_frac` without `lr_schedule="warmup_cosine"` raises `ValueError`.
+fn parse_morph_config_from_pydict(
+    dict: &pyo3::Bound<'_, pyo3::types::PyDict>,
+) -> pyo3::PyResult<alloygbm_core::MorphConfig> {
+    use alloygbm_core::{LrSchedule, MorphConfig};
+    let mut cfg = MorphConfig::default();
+    if let Some(v) = dict.get_item("morph_rate")? {
+        cfg.morph_rate = v.extract::<f32>()?;
+    }
+    if let Some(v) = dict.get_item("evolution_pressure")? {
+        cfg.evolution_pressure = v.extract::<f32>()?;
+    }
+    if let Some(v) = dict.get_item("morph_warmup_iters")? {
+        cfg.morph_warmup_iters = v.extract::<u32>()?;
+    }
+    if let Some(v) = dict.get_item("info_score_weight")? {
+        cfg.info_score_weight = v.extract::<f32>()?;
+    }
+    if let Some(v) = dict.get_item("depth_penalty_base")? {
+        cfg.depth_penalty_base = v.extract::<f32>()?;
+    }
+    if let Some(v) = dict.get_item("balance_penalty")? {
+        cfg.balance_penalty = v.extract::<bool>()?;
+    }
+
+    // lr_warmup_frac is only meaningful together with lr_schedule="warmup_cosine".
+    let has_warmup_frac = dict.get_item("lr_warmup_frac")?.is_some();
+
+    if let Some(v) = dict.get_item("lr_schedule")? {
+        let kind: &str = v.extract()?;
+        // Default warmup_frac from the WarmupCosine default (0.1).
+        let warmup_frac = dict
+            .get_item("lr_warmup_frac")?
+            .map(|x| x.extract::<f32>())
+            .transpose()?
+            .unwrap_or(0.1);
+        cfg.lr_schedule = match kind {
+            "constant" => {
+                if has_warmup_frac {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "lr_warmup_frac has no effect when lr_schedule=\"constant\"",
+                    ));
+                }
+                LrSchedule::Constant
+            }
+            "warmup_cosine" => LrSchedule::WarmupCosine { warmup_frac },
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unknown lr_schedule: {other:?} (expected \"constant\" or \"warmup_cosine\")"
+                )));
+            }
+        };
+    } else if has_warmup_frac {
+        // lr_warmup_frac was provided but lr_schedule was not.
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "lr_warmup_frac requires lr_schedule=\"warmup_cosine\"",
+        ));
+    }
+    Ok(cfg)
 }
 
 #[pyfunction]
@@ -3161,7 +3235,8 @@ fn shap_global_importance_dense(
     time_index=None,
     continuous_binning_strategy="linear",
     continuous_binning_max_bins=255,
-    objective="squared_error"
+    objective="squared_error",
+    morph_config=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact(
@@ -3187,7 +3262,11 @@ fn train_regression_artifact(
     continuous_binning_strategy: &str,
     continuous_binning_max_bins: usize,
     objective: &str,
+    morph_config: Option<pyo3::Bound<'_, pyo3::types::PyDict>>,
 ) -> PyResult<Vec<u8>> {
+    let parsed_morph_config = morph_config
+        .map(|d| parse_morph_config_from_pydict(&d))
+        .transpose()?;
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
     }
@@ -3214,6 +3293,7 @@ fn train_regression_artifact(
         Vec::new(),
         None,
         TreeGrowth::Level,
+        parsed_morph_config,
     );
 
     let categorical_spec = resolve_categorical_spec(
@@ -3286,7 +3366,8 @@ fn train_regression_artifact(
     time_index=None,
     continuous_binning_strategy="linear",
     continuous_binning_max_bins=255,
-    objective="squared_error"
+    objective="squared_error",
+    morph_config=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense(
@@ -3314,7 +3395,11 @@ fn train_regression_artifact_dense(
     continuous_binning_strategy: &str,
     continuous_binning_max_bins: usize,
     objective: &str,
+    morph_config: Option<pyo3::Bound<'_, pyo3::types::PyDict>>,
 ) -> PyResult<Vec<u8>> {
+    let parsed_morph_config = morph_config
+        .map(|d| parse_morph_config_from_pydict(&d))
+        .transpose()?;
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
     }
@@ -3341,6 +3426,7 @@ fn train_regression_artifact_dense(
         Vec::new(),
         None,
         TreeGrowth::Level,
+        parsed_morph_config,
     );
     let categorical_spec = resolve_categorical_spec(
         categorical_feature_index,
@@ -3433,7 +3519,8 @@ fn train_regression_artifact_dense(
     custom_objective_fn=None,
     custom_loss_fn=None,
     custom_metric_fn=None,
-    max_cat_threshold=0
+    max_cat_threshold=0,
+    morph_config=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_with_summary(
@@ -3485,6 +3572,7 @@ fn train_regression_artifact_with_summary(
     custom_loss_fn: Option<Py<PyAny>>,
     custom_metric_fn: Option<Py<PyAny>>,
     max_cat_threshold: usize,
+    morph_config: Option<pyo3::Bound<'_, pyo3::types::PyDict>>,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -3495,6 +3583,9 @@ fn train_regression_artifact_with_summary(
         parse_continuous_binning_strategy(continuous_binning_strategy)
             .map_err(engine_error_to_pyerr)?;
     let tree_growth = parse_tree_growth(tree_growth).map_err(engine_error_to_pyerr)?;
+    let parsed_morph_config = morph_config
+        .map(|d| parse_morph_config_from_pydict(&d))
+        .transpose()?;
     let params = build_train_params(
         learning_rate,
         max_depth,
@@ -3513,6 +3604,7 @@ fn train_regression_artifact_with_summary(
         feature_weights,
         max_leaves,
         tree_growth,
+        parsed_morph_config,
     );
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
@@ -3631,7 +3723,8 @@ fn train_regression_artifact_with_summary(
     custom_objective_fn=None,
     custom_loss_fn=None,
     custom_metric_fn=None,
-    max_cat_threshold=0
+    max_cat_threshold=0,
+    morph_config=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary(
@@ -3686,6 +3779,7 @@ fn train_regression_artifact_dense_with_summary(
     custom_loss_fn: Option<Py<PyAny>>,
     custom_metric_fn: Option<Py<PyAny>>,
     max_cat_threshold: usize,
+    morph_config: Option<pyo3::Bound<'_, pyo3::types::PyDict>>,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -3696,6 +3790,9 @@ fn train_regression_artifact_dense_with_summary(
         parse_continuous_binning_strategy(continuous_binning_strategy)
             .map_err(engine_error_to_pyerr)?;
     let tree_growth = parse_tree_growth(tree_growth).map_err(engine_error_to_pyerr)?;
+    let parsed_morph_config = morph_config
+        .map(|d| parse_morph_config_from_pydict(&d))
+        .transpose()?;
     let params = build_train_params(
         learning_rate,
         max_depth,
@@ -3714,6 +3811,7 @@ fn train_regression_artifact_dense_with_summary(
         feature_weights,
         max_leaves,
         tree_growth,
+        parsed_morph_config,
     );
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
@@ -3828,7 +3926,8 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> PyResult<Vec<f32>> {
     custom_objective_fn=None,
     custom_loss_fn=None,
     custom_metric_fn=None,
-    max_cat_threshold=0
+    max_cat_threshold=0,
+    morph_config=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary_bytes(
@@ -3883,6 +3982,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
     custom_loss_fn: Option<Py<PyAny>>,
     custom_metric_fn: Option<Py<PyAny>>,
     max_cat_threshold: usize,
+    morph_config: Option<pyo3::Bound<'_, pyo3::types::PyDict>>,
 ) -> PyResult<NativeTrainingResult> {
     let values = bytes_to_f32_vec(values_bytes)?;
     let targets = bytes_to_f32_vec(targets_bytes)?;
@@ -3897,6 +3997,9 @@ fn train_regression_artifact_dense_with_summary_bytes(
         parse_continuous_binning_strategy(continuous_binning_strategy)
             .map_err(engine_error_to_pyerr)?;
     let tree_growth = parse_tree_growth(tree_growth).map_err(engine_error_to_pyerr)?;
+    let parsed_morph_config = morph_config
+        .map(|d| parse_morph_config_from_pydict(&d))
+        .transpose()?;
     let params = build_train_params(
         learning_rate,
         max_depth,
@@ -3915,6 +4018,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
         feature_weights,
         max_leaves,
         tree_growth,
+        parsed_morph_config,
     );
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(

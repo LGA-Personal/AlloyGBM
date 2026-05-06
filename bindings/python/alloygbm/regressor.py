@@ -243,6 +243,15 @@ class GBMRegressor(_GBMRegressorBase):
         warm_start: bool = False,
         objective: "str | None | object" = None,
         max_cat_threshold: int = 0,
+        training_mode: str = "auto",
+        morph_rate: float = 0.1,
+        evolution_pressure: float = 0.2,
+        morph_warmup_iters: int = 5,
+        info_score_weight: float = 0.3,
+        depth_penalty_base: float = 0.9,
+        balance_penalty: bool = True,
+        lr_schedule: str = "constant",
+        lr_warmup_frac: float = 0.1,
     ) -> None:
         if not (0.0 < learning_rate <= 1.0):
             raise ValueError("learning_rate must be in (0.0, 1.0]")
@@ -353,6 +362,26 @@ class GBMRegressor(_GBMRegressorBase):
             )
         if int(max_cat_threshold) < 0:
             raise ValueError("max_cat_threshold must be >= 0")
+        if training_mode not in ("auto", "manual", "morph"):
+            raise ValueError(
+                f"training_mode must be 'auto', 'manual', or 'morph', got {training_mode!r}"
+            )
+        if not (0.0 <= float(morph_rate) <= 1.0):
+            raise ValueError("morph_rate must be in [0.0, 1.0]")
+        if not (0.0 <= float(evolution_pressure) <= 1.0):
+            raise ValueError("evolution_pressure must be in [0.0, 1.0]")
+        if int(morph_warmup_iters) < 0:
+            raise ValueError("morph_warmup_iters must be >= 0")
+        if lr_schedule not in ("constant", "warmup_cosine"):
+            raise ValueError(
+                f"lr_schedule must be 'constant' or 'warmup_cosine', got {lr_schedule!r}"
+            )
+        if not (0.0 <= float(lr_warmup_frac) <= 1.0):
+            raise ValueError("lr_warmup_frac must be in [0.0, 1.0]")
+        if not (0.0 <= float(info_score_weight) <= 1.0):
+            raise ValueError("info_score_weight must be in [0.0, 1.0]")
+        if not (0.0 <= float(depth_penalty_base) <= 1.0):
+            raise ValueError("depth_penalty_base must be in [0.0, 1.0]")
 
         self.learning_rate = float(learning_rate)
         self.max_depth = int(max_depth)
@@ -400,6 +429,15 @@ class GBMRegressor(_GBMRegressorBase):
         self.warm_start = bool(warm_start)
         self.objective = objective
         self.max_cat_threshold = int(max_cat_threshold)
+        self.training_mode = str(training_mode)
+        self.morph_rate = float(morph_rate)
+        self.evolution_pressure = float(evolution_pressure)
+        self.morph_warmup_iters = int(morph_warmup_iters)
+        self.info_score_weight = float(info_score_weight)
+        self.depth_penalty_base = float(depth_penalty_base)
+        self.balance_penalty = bool(balance_penalty)
+        self.lr_schedule = str(lr_schedule)
+        self.lr_warmup_frac = float(lr_warmup_frac)
         self._is_fitted = False
         self._artifact_bytes: bytes | None = None
         self._native_predictor_handle: object | None = None
@@ -451,7 +489,16 @@ class GBMRegressor(_GBMRegressorBase):
             f"tree_growth='{self.tree_growth}', "
             f"warm_start={self.warm_start}, "
             f"objective={self.objective!r}, "
-            f"max_cat_threshold={self.max_cat_threshold}"
+            f"max_cat_threshold={self.max_cat_threshold}, "
+            f"training_mode='{self.training_mode}', "
+            f"morph_rate={self.morph_rate}, "
+            f"evolution_pressure={self.evolution_pressure}, "
+            f"morph_warmup_iters={self.morph_warmup_iters}, "
+            f"info_score_weight={self.info_score_weight}, "
+            f"depth_penalty_base={self.depth_penalty_base}, "
+            f"balance_penalty={self.balance_penalty}, "
+            f"lr_schedule='{self.lr_schedule}', "
+            f"lr_warmup_frac={self.lr_warmup_frac}"
             ")"
         )
 
@@ -489,6 +536,15 @@ class GBMRegressor(_GBMRegressorBase):
             "warm_start": self.warm_start,
             "objective": self.objective,
             "max_cat_threshold": self.max_cat_threshold,
+            "training_mode": self.training_mode,
+            "morph_rate": self.morph_rate,
+            "evolution_pressure": self.evolution_pressure,
+            "morph_warmup_iters": self.morph_warmup_iters,
+            "info_score_weight": self.info_score_weight,
+            "depth_penalty_base": self.depth_penalty_base,
+            "balance_penalty": self.balance_penalty,
+            "lr_schedule": self.lr_schedule,
+            "lr_warmup_frac": self.lr_warmup_frac,
         }
 
     def set_params(self, **params: float | int | bool | str | None) -> "GBMRegressor":
@@ -524,6 +580,15 @@ class GBMRegressor(_GBMRegressorBase):
             "warm_start",
             "objective",
             "max_cat_threshold",
+            "training_mode",
+            "morph_rate",
+            "evolution_pressure",
+            "morph_warmup_iters",
+            "info_score_weight",
+            "depth_penalty_base",
+            "balance_penalty",
+            "lr_schedule",
+            "lr_warmup_frac",
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
@@ -747,6 +812,61 @@ class GBMRegressor(_GBMRegressorBase):
             if mct < 0:
                 raise ValueError("max_cat_threshold must be >= 0")
             self.max_cat_threshold = mct
+
+        if "training_mode" in params:
+            tm = str(params["training_mode"])
+            if tm not in ("auto", "manual", "morph"):
+                raise ValueError(
+                    f"training_mode must be 'auto', 'manual', or 'morph', got {tm!r}"
+                )
+            self.training_mode = tm
+
+        if "morph_rate" in params:
+            mr = float(params["morph_rate"])
+            if not (0.0 <= mr <= 1.0):
+                raise ValueError("morph_rate must be in [0.0, 1.0]")
+            self.morph_rate = mr
+
+        if "evolution_pressure" in params:
+            ep = float(params["evolution_pressure"])
+            if not (0.0 <= ep <= 1.0):
+                raise ValueError("evolution_pressure must be in [0.0, 1.0]")
+            self.evolution_pressure = ep
+
+        if "morph_warmup_iters" in params:
+            mwi = int(params["morph_warmup_iters"])
+            if mwi < 0:
+                raise ValueError("morph_warmup_iters must be >= 0")
+            self.morph_warmup_iters = mwi
+
+        if "info_score_weight" in params:
+            isw = float(params["info_score_weight"])
+            if not (0.0 <= isw <= 1.0):
+                raise ValueError("info_score_weight must be in [0.0, 1.0]")
+            self.info_score_weight = isw
+
+        if "depth_penalty_base" in params:
+            dpb = float(params["depth_penalty_base"])
+            if not (0.0 <= dpb <= 1.0):
+                raise ValueError("depth_penalty_base must be in [0.0, 1.0]")
+            self.depth_penalty_base = dpb
+
+        if "balance_penalty" in params:
+            self.balance_penalty = bool(params["balance_penalty"])
+
+        if "lr_schedule" in params:
+            lrs = str(params["lr_schedule"])
+            if lrs not in ("constant", "warmup_cosine"):
+                raise ValueError(
+                    f"lr_schedule must be 'constant' or 'warmup_cosine', got {lrs!r}"
+                )
+            self.lr_schedule = lrs
+
+        if "lr_warmup_frac" in params:
+            lwf = float(params["lr_warmup_frac"])
+            if not (0.0 <= lwf <= 1.0):
+                raise ValueError("lr_warmup_frac must be in [0.0, 1.0]")
+            self.lr_warmup_frac = lwf
 
         # Cross-field validation: leaf growth requires max_leaves
         if self.tree_growth == "leaf" and self.max_leaves is None:
@@ -1146,6 +1266,29 @@ class GBMRegressor(_GBMRegressorBase):
         _custom_loss_fn = None  # reserved for future extension
         _custom_metric_fn = eval_metric if callable(eval_metric) else None
 
+        # Resolve morph-mode training profile.
+        _effective_max_depth = self.max_depth
+        self._morph_config_: dict | None = None
+        if self.training_mode == "morph":
+            from alloygbm._morph import build_morph_config_dict, compute_morph_fingerprint
+            fp = compute_morph_fingerprint(X, y, fast_mode=True)
+            if self.max_depth is None:
+                _effective_max_depth = fp["suggested_max_depth"]
+            self._morph_config_ = build_morph_config_dict(
+                morph_rate=self.morph_rate,
+                evolution_pressure=self.evolution_pressure,
+                morph_warmup_iters=self.morph_warmup_iters,
+                info_score_weight=self.info_score_weight,
+                depth_penalty_base=self.depth_penalty_base,
+                balance_penalty=self.balance_penalty,
+                lr_schedule=self.lr_schedule,
+                lr_warmup_frac=self.lr_warmup_frac,
+            )
+        elif self.training_mode not in ("auto", "manual"):
+            raise ValueError(
+                f"training_mode must be 'auto', 'manual', or 'morph', got {self.training_mode!r}"
+            )
+
         # Try bytes path first (avoids Python list→Vec<f32> conversion overhead)
         if dense_training_bytes_payload is not None:
             try:
@@ -1156,7 +1299,7 @@ class GBMRegressor(_GBMRegressorBase):
                     feature_count=dense_training_bytes_payload[2],
                     targets_bytes=targets_bytes,
                     learning_rate=self.learning_rate,
-                    max_depth=self.max_depth,
+                    max_depth=_effective_max_depth,
                     row_subsample=self.row_subsample,
                     col_subsample=self.col_subsample,
                     min_validation_improvement=self.min_validation_improvement,
@@ -1210,6 +1353,7 @@ class GBMRegressor(_GBMRegressorBase):
                     custom_loss_fn=_custom_loss_fn,
                     custom_metric_fn=_custom_metric_fn,
                     max_cat_threshold=self.max_cat_threshold,
+                    morph_config=self._morph_config_,
                 )
                 return self._finalize_training_result(native_result, input_adaptation_seconds, feature_count=feature_count)
             except (ImportError, AttributeError):
@@ -1247,7 +1391,7 @@ class GBMRegressor(_GBMRegressorBase):
                 feature_count=dense_training_payload[2],
                 targets=targets,
                 learning_rate=self.learning_rate,
-                max_depth=self.max_depth,
+                max_depth=_effective_max_depth,
                 row_subsample=self.row_subsample,
                 col_subsample=self.col_subsample,
                 min_validation_improvement=self.min_validation_improvement,
@@ -1301,6 +1445,7 @@ class GBMRegressor(_GBMRegressorBase):
                 custom_loss_fn=_custom_loss_fn,
                 custom_metric_fn=_custom_metric_fn,
                 max_cat_threshold=self.max_cat_threshold,
+                morph_config=self._morph_config_,
             )
         else:
             assert training_rows is not None
@@ -1308,7 +1453,7 @@ class GBMRegressor(_GBMRegressorBase):
                 rows=training_rows,
                 targets=targets,
                 learning_rate=self.learning_rate,
-                max_depth=self.max_depth,
+                max_depth=_effective_max_depth,
                 row_subsample=self.row_subsample,
                 col_subsample=self.col_subsample,
                 min_validation_improvement=self.min_validation_improvement,
@@ -1353,6 +1498,7 @@ class GBMRegressor(_GBMRegressorBase):
                 custom_loss_fn=_custom_loss_fn,
                 custom_metric_fn=_custom_metric_fn,
                 max_cat_threshold=self.max_cat_threshold,
+                morph_config=self._morph_config_,
             )
 
         self._apply_continuous_binning_metadata(native_result.continuous_binning_metadata)
@@ -1455,6 +1601,10 @@ class GBMRegressor(_GBMRegressorBase):
         if eval_set is not None:
             raise RuntimeError(
                 "eval_set requires a native alloygbm build with training summary support"
+            )
+        if self.training_mode == "morph":
+            raise RuntimeError(
+                "training_mode='morph' requires a native alloygbm build with training summary support"
             )
         if (
             self.min_data_in_leaf != 1
