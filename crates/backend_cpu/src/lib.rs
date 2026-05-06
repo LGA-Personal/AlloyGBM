@@ -10,7 +10,7 @@ use rayon::prelude::*;
 use std::cell::RefCell;
 
 mod morph;
-pub use morph::{compute_morph_gain, MorphGainInputs, SplitSideStats};
+pub use morph::{MorphGainInputs, SplitSideStats, compute_morph_gain};
 
 pub use alloygbm_core::simd;
 
@@ -1242,7 +1242,9 @@ impl CpuBackend {
                 .par_iter()
                 .filter_map(&find_best)
                 .reduce_with(|a, b| {
-                    if apply_feature_weight(&b, feature_weights) > apply_feature_weight(&a, feature_weights) {
+                    if apply_feature_weight(&b, feature_weights)
+                        > apply_feature_weight(&a, feature_weights)
+                    {
                         b
                     } else {
                         a
@@ -1254,7 +1256,9 @@ impl CpuBackend {
                 .iter()
                 .filter_map(&find_best)
                 .reduce(|a, b| {
-                    if apply_feature_weight(&b, feature_weights) > apply_feature_weight(&a, feature_weights) {
+                    if apply_feature_weight(&b, feature_weights)
+                        > apply_feature_weight(&a, feature_weights)
+                    {
                         b
                     } else {
                         a
@@ -1469,32 +1473,36 @@ impl BackendOps for CpuBackend {
             }
         };
 
-        let result = if histograms.feature_histograms.len() >= Self::PARALLEL_SPLIT_FEATURE_THRESHOLD
-        {
-            histograms
-                .feature_histograms
-                .par_iter()
-                .filter_map(find_best)
-                .reduce_with(|a, b| {
-                    if apply_feature_weight(&b, feature_weights) > apply_feature_weight(&a, feature_weights) {
-                        b
-                    } else {
-                        a
-                    }
-                })
-        } else {
-            histograms
-                .feature_histograms
-                .iter()
-                .filter_map(find_best)
-                .reduce(|a, b| {
-                    if apply_feature_weight(&b, feature_weights) > apply_feature_weight(&a, feature_weights) {
-                        b
-                    } else {
-                        a
-                    }
-                })
-        };
+        let result =
+            if histograms.feature_histograms.len() >= Self::PARALLEL_SPLIT_FEATURE_THRESHOLD {
+                histograms
+                    .feature_histograms
+                    .par_iter()
+                    .filter_map(find_best)
+                    .reduce_with(|a, b| {
+                        if apply_feature_weight(&b, feature_weights)
+                            > apply_feature_weight(&a, feature_weights)
+                        {
+                            b
+                        } else {
+                            a
+                        }
+                    })
+            } else {
+                histograms
+                    .feature_histograms
+                    .iter()
+                    .filter_map(find_best)
+                    .reduce(|a, b| {
+                        if apply_feature_weight(&b, feature_weights)
+                            > apply_feature_weight(&a, feature_weights)
+                        {
+                            b
+                        } else {
+                            a
+                        }
+                    })
+            };
 
         Ok(result)
     }

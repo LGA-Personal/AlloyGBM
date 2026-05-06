@@ -73,8 +73,8 @@ fn gradient_gain(inputs: &MorphGainInputs) -> f32 {
 }
 
 fn info_gain(inputs: &MorphGainInputs, config: &MorphConfig) -> f32 {
-    let smoothing =
-        1.0 + config.evolution_pressure * (inputs.iteration as f32 / inputs.total_iterations as f32);
+    let smoothing = 1.0
+        + config.evolution_pressure * (inputs.iteration as f32 / inputs.total_iterations as f32);
     let info_l = info_side(inputs.left, inputs.grad_mean, inputs.grad_std, smoothing);
     let info_r = info_side(inputs.right, inputs.grad_mean, inputs.grad_std, smoothing);
     let info_parent = info_side(

@@ -5,8 +5,7 @@ use alloygbm_core::{
     ModelArtifactSection, ModelMetadata, ModelSectionKind, MorphConfig, MorphMetadataPayload,
     MorphPrecomputed, NativeCategoricalSplitsPayload, NodeSlice, NodeStats, PartitionResult,
     SplitCandidate, TrainParams, TrainingDataset, TreeGrowth,
-    decode_optional_categorical_state_section_v1,
-    decode_optional_morph_metadata_artifact_section,
+    decode_optional_categorical_state_section_v1, decode_optional_morph_metadata_artifact_section,
     decode_optional_native_categorical_splits_section, deserialize_model_artifact_v1,
     encode_categorical_state_payload_v1, encode_morph_metadata_payload,
     encode_native_categorical_splits_payload, format_required_section_auto_mode_error,
@@ -118,12 +117,7 @@ pub struct MorphState {
 }
 
 impl MorphState {
-    pub fn new(
-        config: MorphConfig,
-        n_classes: usize,
-        total_iterations: u32,
-        base_lr: f32,
-    ) -> Self {
+    pub fn new(config: MorphConfig, n_classes: usize, total_iterations: u32, base_lr: f32) -> Self {
         Self {
             config,
             ema_stats: vec![GradientEmaStats::default(); n_classes.max(1)],
@@ -145,9 +139,10 @@ impl MorphState {
     }
 
     pub fn lr_for_iter(&self, iteration: usize) -> f32 {
-        self.lr_per_iter.get(iteration).copied().unwrap_or_else(|| {
-            self.lr_per_iter.last().copied().unwrap_or(0.1)
-        })
+        self.lr_per_iter
+            .get(iteration)
+            .copied()
+            .unwrap_or_else(|| self.lr_per_iter.last().copied().unwrap_or(0.1))
     }
 
     /// Returns a scale factor for `min_loss_improvement` at the given iteration.
@@ -199,9 +194,7 @@ impl MorphState {
                 if n == 0 {
                     return false;
                 }
-                let warmup = ((warmup_frac * n as f32).round() as usize)
-                    .max(1)
-                    .min(n);
+                let warmup = ((warmup_frac * n as f32).round() as usize).max(1).min(n);
                 iteration < warmup
             }
         }
@@ -2085,9 +2078,8 @@ impl TrainedModel {
         }
 
         // Decode optional morph metadata section.
-        model.morph_metadata =
-            decode_optional_morph_metadata_artifact_section(&parsed.sections)
-                .map_err(EngineError::from)?;
+        model.morph_metadata = decode_optional_morph_metadata_artifact_section(&parsed.sections)
+            .map_err(EngineError::from)?;
 
         model.feature_count = metadata_feature_count;
         model.objective = parsed.contract.metadata.objective.clone();
@@ -2800,9 +2792,10 @@ impl Trainer {
         // Build MorphState (K classes) for the duration of training when
         // morph_config is set. Total iterations spans warm-start prefix + new rounds.
         let total_iterations = (effective_round_cap + round_index_offset) as u32;
-        let mut morph_state: Option<MorphState> = self.params.morph_config.map(|cfg| {
-            MorphState::new(cfg, k, total_iterations, self.params.learning_rate)
-        });
+        let mut morph_state: Option<MorphState> = self
+            .params
+            .morph_config
+            .map(|cfg| MorphState::new(cfg, k, total_iterations, self.params.learning_rate));
 
         for round_index in 0..effective_round_cap {
             let effective_round = round_index + round_index_offset;
@@ -3319,9 +3312,10 @@ impl Trainer {
         // `total_iterations` corresponds to the round cap (including any warm-start
         // offset already-completed rounds, so the LR schedule lines up).
         let total_iterations = (effective_round_cap + round_index_offset) as u32;
-        let mut morph_state: Option<MorphState> = self.params.morph_config.map(|cfg| {
-            MorphState::new(cfg, 1, total_iterations, self.params.learning_rate)
-        });
+        let mut morph_state: Option<MorphState> = self
+            .params
+            .morph_config
+            .map(|cfg| MorphState::new(cfg, 1, total_iterations, self.params.learning_rate));
 
         for round_index in 0..effective_round_cap {
             // Offset round_index for sampling seeds and tree IDs when warm-starting
@@ -4074,7 +4068,13 @@ fn find_best_split_dispatch<B: BackendOps>(
         let ctx = m
             .state
             .morph_context(m.iteration, m.total_iterations, m.class_idx);
-        backend.best_split_morph(histograms, options, feature_weights, categorical_features, &ctx)
+        backend.best_split_morph(
+            histograms,
+            options,
+            feature_weights,
+            categorical_features,
+            &ctx,
+        )
     } else {
         backend.best_split_with_options(histograms, options, feature_weights, categorical_features)
     }
@@ -4162,10 +4162,10 @@ fn build_tree_level_wise<B: BackendOps>(
             let left_grad = l1_threshold_gradient(left_stats.grad_sum, split_options.l1_alpha);
             let right_grad = l1_threshold_gradient(right_stats.grad_sum, split_options.l1_alpha);
             let lr = morph.map_or(params.learning_rate, |m| m.lr);
-            let mut raw_left_leaf_value = -lr * left_grad
-                / (left_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
-            let mut raw_right_leaf_value = -lr * right_grad
-                / (right_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
+            let mut raw_left_leaf_value =
+                -lr * left_grad / (left_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
+            let mut raw_right_leaf_value =
+                -lr * right_grad / (right_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
 
             // Morph leaf modifications: depth penalty + per-round shrinkage.
             // Children land at depth `depth + 1` in the tree.
@@ -4449,10 +4449,10 @@ fn build_tree_leaf_wise<B: BackendOps>(
         let left_grad = l1_threshold_gradient(left_stats.grad_sum, split_options.l1_alpha);
         let right_grad = l1_threshold_gradient(right_stats.grad_sum, split_options.l1_alpha);
         let lr = morph.map_or(params.learning_rate, |m| m.lr);
-        let mut raw_left_leaf_value = -lr * left_grad
-            / (left_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
-        let mut raw_right_leaf_value = -lr * right_grad
-            / (right_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
+        let mut raw_left_leaf_value =
+            -lr * left_grad / (left_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
+        let mut raw_right_leaf_value =
+            -lr * right_grad / (right_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
 
         // Morph leaf modifications: depth penalty + per-round shrinkage.
         // Children of `pending` land at `pending.depth + 1` in the tree.
@@ -8664,7 +8664,10 @@ mod tests {
             )
             .expect("morph-mode training must succeed");
         // Model should have produced at least one stump.
-        assert!(!model.stumps.is_empty(), "morph training should produce stumps");
+        assert!(
+            !model.stumps.is_empty(),
+            "morph training should produce stumps"
+        );
     }
 
     #[test]
@@ -8743,12 +8746,11 @@ mod tests {
             ..TrainParams::default()
         };
 
-        let model_no_morph = TrainedModel::from_artifact_bytes(&bytes_a)
-            .expect("deserialise run-A artifact");
+        let model_no_morph =
+            TrainedModel::from_artifact_bytes(&bytes_a).expect("deserialise run-A artifact");
 
         let model_identity_morph = {
-            let trainer =
-                Trainer::new(identity_morph_params).expect("valid identity-morph params");
+            let trainer = Trainer::new(identity_morph_params).expect("valid identity-morph params");
             trainer
                 .fit_iterations(
                     &sample_dataset(),
@@ -8803,11 +8805,7 @@ mod morph_state_tests {
 
     #[test]
     fn warmup_cosine_starts_low_peaks_at_base_then_decays() {
-        let lrs = resolve_lr_schedule(
-            LrSchedule::WarmupCosine { warmup_frac: 0.1 },
-            100,
-            0.1,
-        );
+        let lrs = resolve_lr_schedule(LrSchedule::WarmupCosine { warmup_frac: 0.1 }, 100, 0.1);
         assert_eq!(lrs.len(), 100);
         assert!(lrs[0] < 0.1, "first lr={} should be below base 0.1", lrs[0]);
         let peak_idx = (0.1_f32 * 100.0).round() as usize - 1;
@@ -8816,17 +8814,17 @@ mod morph_state_tests {
             "peak lr={} should be near base_lr 0.1",
             lrs[peak_idx]
         );
-        assert!(lrs[99] < 0.05, "final lr={} should decay toward floor", lrs[99]);
+        assert!(
+            lrs[99] < 0.05,
+            "final lr={} should decay toward floor",
+            lrs[99]
+        );
     }
 
     #[test]
     fn warmup_cosine_full_warmup_edge_case() {
         // warmup_frac=1.0 means entire schedule is warmup; no cosine decay.
-        let lrs = resolve_lr_schedule(
-            LrSchedule::WarmupCosine { warmup_frac: 1.0 },
-            5,
-            0.1,
-        );
+        let lrs = resolve_lr_schedule(LrSchedule::WarmupCosine { warmup_frac: 1.0 }, 5, 0.1);
         assert_eq!(lrs.len(), 5);
         // Last warmup step should hit base_lr.
         assert!((lrs[4] - 0.1).abs() < 1e-5);
@@ -8914,9 +8912,15 @@ mod morph_state_tests {
         );
         // Final round: scale should be small (decayed cosine).
         let scale_final = state.lr_loss_threshold_scale((n as usize) - 1);
-        assert!(scale_final < 0.5, "final-decay scale should be small, got {scale_final}");
+        assert!(
+            scale_final < 0.5,
+            "final-decay scale should be small, got {scale_final}"
+        );
         // Lower clamp guarantees no value below 0.01.
-        assert!(scale_final >= 0.01, "scale must respect lower clamp, got {scale_final}");
+        assert!(
+            scale_final >= 0.01,
+            "scale must respect lower clamp, got {scale_final}"
+        );
     }
 
     #[test]

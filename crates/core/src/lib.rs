@@ -2855,28 +2855,34 @@ mod tests {
 
     #[test]
     fn validate_train_params_accepts_morph_config() {
-        let mut p = TrainParams::default();
-        p.morph_config = Some(MorphConfig::default());
+        let p = TrainParams {
+            morph_config: Some(MorphConfig::default()),
+            ..TrainParams::default()
+        };
         assert!(validate_train_params(&p).is_ok());
     }
 
     #[test]
     fn validate_train_params_rejects_invalid_morph_rate() {
-        let mut p = TrainParams::default();
-        p.morph_config = Some(MorphConfig {
-            morph_rate: -0.1,
-            ..MorphConfig::default()
-        });
+        let p = TrainParams {
+            morph_config: Some(MorphConfig {
+                morph_rate: -0.1,
+                ..MorphConfig::default()
+            }),
+            ..TrainParams::default()
+        };
         assert!(validate_train_params(&p).is_err());
     }
 
     #[test]
     fn validate_train_params_rejects_invalid_warmup_frac() {
-        let mut p = TrainParams::default();
-        p.morph_config = Some(MorphConfig {
-            lr_schedule: LrSchedule::WarmupCosine { warmup_frac: 1.5 },
-            ..MorphConfig::default()
-        });
+        let p = TrainParams {
+            morph_config: Some(MorphConfig {
+                lr_schedule: LrSchedule::WarmupCosine { warmup_frac: 1.5 },
+                ..MorphConfig::default()
+            }),
+            ..TrainParams::default()
+        };
         assert!(validate_train_params(&p).is_err());
     }
 
@@ -3018,9 +3024,7 @@ mod tests {
     #[test]
     fn gradient_ema_simd_matches_scalar_for_large_input() {
         // 5000 elements ensures the chunks_exact(8) path runs many iterations.
-        let gradients: Vec<f32> = (0..5000)
-            .map(|i| (i as f32 * 0.001).cos() * 0.5)
-            .collect();
+        let gradients: Vec<f32> = (0..5000).map(|i| (i as f32 * 0.001).cos() * 0.5).collect();
         let mut new_path = GradientEmaStats {
             alpha: 0.3,
             ..Default::default()
