@@ -83,8 +83,8 @@ model.fit(X_train, y_train)
 
 ## Parameters
 
-All MorphBoost parameters are top-level keyword arguments on the estimator;
-they only take effect when `training_mode="morph"`.
+All MorphBoost-related parameters are exposed as top-level keyword arguments
+on the estimator; the table below notes any mode-specific behavior.
 
 | Parameter | Default | Description |
 |---|---|---|
