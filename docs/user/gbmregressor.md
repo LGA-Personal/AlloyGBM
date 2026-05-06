@@ -112,6 +112,40 @@ default.
 When both `categorical_feature_index` and `categorical_feature_indices` are
 provided, they are merged.
 
+## MorphBoost (Adaptive Split Criterion)
+
+`GBMRegressor` supports an opt-in MorphBoost training mode that augments the
+standard gradient gain with an information-theoretic term, EMA-driven gain
+shaping, and depth/iteration leaf shrinkage. See
+[MorphBoost](morphboost.md) for the full parameter reference and the
+[paper](https://arxiv.org/pdf/2511.13234) for the formulation.
+
+- `training_mode: str = "auto"`
+  - `auto` (default): standard training with dataset-aware policy heuristics.
+  - `manual`: standard training, applies user-supplied controls verbatim.
+  - `morph`: enable MorphBoost.
+- `morph_rate: float = 0.1`
+  - Per-iteration leaf shrinkage rate when `training_mode="morph"`.
+- `evolution_pressure: float = 0.2`
+  - Strength of EMA-driven gain shaping when `training_mode="morph"`.
+- `morph_warmup_iters: int = 5`
+  - Initial rounds for which the morph blend collapses to the pure
+    gradient gain.
+- `info_score_weight: float = 0.3`
+  - Mixing weight for the information-theoretic term post-warmup. Set to
+    `0.0` to disable the info-theoretic term entirely.
+- `depth_penalty_base: float = 0.9`
+  - Base of the leaf depth penalty applied as
+    `depth_penalty_base ** (child_depth / 3.0)`.
+- `balance_penalty: bool = True`
+  - Penalize highly imbalanced splits.
+- `lr_schedule: str = "constant"`
+  - Per-iteration learning-rate schedule. One of `constant` or
+    `warmup_cosine`. Independent of `training_mode` — usable on its own.
+- `lr_warmup_frac: float = 0.1`
+  - Fraction of `n_estimators` spent in the linear-warmup phase when
+    `lr_schedule="warmup_cosine"`. Range `[0.0, 1.0]`.
+
 ## Warm-Starting
 
 - `warm_start: bool = False`

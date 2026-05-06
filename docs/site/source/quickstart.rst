@@ -85,6 +85,39 @@ Learning-to-rank
 Supported ranking objectives: ``rank:pairwise``, ``rank:ndcg``,
 ``rank:xendcg``, ``queryrmse``, ``yetirank``.
 
+MorphBoost (optional adaptive mode)
+-----------------------------------
+
+Any of the three estimators supports an opt-in MorphBoost training mode
+(see :doc:`morphboost`):
+
+.. code-block:: python
+
+   from alloygbm import GBMRegressor
+
+   model = GBMRegressor(
+       learning_rate=0.05,
+       max_depth=6,
+       n_estimators=1200,
+       training_mode="morph",       # opt in
+       seed=7,
+   )
+   model.fit(X_train, y_train)
+
+A learning-rate schedule (``lr_schedule="warmup_cosine"``) can also be
+applied independently of ``training_mode``, useful for low-LR
+high-``n_estimators`` runs:
+
+.. code-block:: python
+
+   model = GBMRegressor(
+       learning_rate=0.01,
+       n_estimators=5000,
+       training_mode="morph",
+       lr_schedule="warmup_cosine",
+       lr_warmup_frac=0.1,
+   )
+
 Validation and early stopping
 -----------------------------
 

@@ -12,10 +12,10 @@ types.
 
 .. note::
 
-   AlloyGBM ``0.3.2`` fixes ``GBMRanker`` training (silent zero-tree training
-   on larger datasets), corrects signature introspection, adds training
-   diagnostics (``stop_reason_``, ``rounds_completed_``), and adds the
-   ``california_ranking`` benchmark. See :doc:`release` for details.
+   AlloyGBM ``0.4.0`` introduces the opt-in MorphBoost adaptive split
+   criterion (``training_mode="morph"``), per-iteration learning-rate
+   schedules, and SIMD-accelerated histogram and EMA kernels. See
+   :doc:`morphboost` for the user guide and :doc:`release` for full notes.
 
 Getting started
 ---------------
@@ -31,6 +31,7 @@ If you are new to AlloyGBM, start in this order:
    estimator
    classifier
    ranker
+   morphboost
    validation
    explanations
    benchmarks

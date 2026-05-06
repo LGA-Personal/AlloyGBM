@@ -659,14 +659,92 @@ def print_results(records: list[NumeraiBenchmarkRecord]) -> None:
                 print(f"    {k}: {v:.3f}")
 
 
-def save_results(records: list[NumeraiBenchmarkRecord], output_dir: Path) -> None:
+def _gather_reproducibility_manifest(args: argparse.Namespace) -> dict:
+    """Capture everything needed to reproduce a run: git SHA, extension build
+    timestamp, full CLI arg snapshot. Returned as a JSON-friendly dict.
+    """
+    import os as _os
+    import subprocess as _subprocess
+    import sys as _sys
+
+    manifest: dict = {
+        "argv": list(_sys.argv),
+        "args": {k: v for k, v in vars(args).items() if k != "resolved_arms"},
+        "resolved_arms": list(getattr(args, "resolved_arms", []) or []),
+        "python_version": _sys.version,
+        "platform": _sys.platform,
+    }
+    try:
+        from alloygbm import _alloygbm as _ext
+
+        ext_path = getattr(_ext, "__file__", None)
+        if ext_path and _os.path.exists(ext_path):
+            manifest["alloygbm_extension_path"] = ext_path
+            manifest["alloygbm_extension_mtime"] = (
+                datetime.fromtimestamp(_os.path.getmtime(ext_path)).isoformat(
+                    timespec="seconds"
+                )
+            )
+            try:
+                from alloygbm import __version__ as _alloygbm_version
+
+                manifest["alloygbm_version"] = _alloygbm_version
+            except Exception:
+                pass
+            repo_root = Path(ext_path).resolve()
+            while repo_root != repo_root.parent and not (repo_root / ".git").exists():
+                repo_root = repo_root.parent
+            if (repo_root / ".git").exists():
+                try:
+                    manifest["git_sha"] = (
+                        _subprocess.check_output(
+                            ["git", "rev-parse", "HEAD"],
+                            cwd=str(repo_root),
+                            stderr=_subprocess.DEVNULL,
+                        )
+                        .decode()
+                        .strip()
+                    )
+                    manifest["git_commit_time"] = (
+                        _subprocess.check_output(
+                            ["git", "log", "-1", "--format=%cI", "HEAD"],
+                            cwd=str(repo_root),
+                            stderr=_subprocess.DEVNULL,
+                        )
+                        .decode()
+                        .strip()
+                    )
+                    manifest["git_dirty"] = (
+                        _subprocess.check_output(
+                            ["git", "status", "--porcelain"],
+                            cwd=str(repo_root),
+                            stderr=_subprocess.DEVNULL,
+                        )
+                        .decode()
+                        .strip()
+                        != ""
+                    )
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return manifest
+
+
+def save_results(
+    records: list[NumeraiBenchmarkRecord],
+    output_dir: Path,
+    args: argparse.Namespace | None = None,
+) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     out_path = output_dir / f"numerai_benchmark_{timestamp}.json"
-    payload = {
+    payload: dict = {
         "timestamp": timestamp,
         "records": [asdict(r) for r in records],
     }
+    if args is not None:
+        payload["reproducibility"] = _gather_reproducibility_manifest(args)
     with out_path.open("w") as f:
         json.dump(payload, f, indent=2, default=str)
     logger.info("Results saved to %s", out_path)
@@ -790,7 +868,7 @@ def main() -> None:
     print_results(records)
 
     output_dir = Path(args.output_dir) if args.output_dir else (REPO_ROOT / "benchmarks" / "results" / "numerai")
-    save_results(records, output_dir)
+    save_results(records, output_dir, args)
 
 
 if __name__ == "__main__":

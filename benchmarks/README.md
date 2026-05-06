@@ -61,6 +61,21 @@ python3 benchmarks/histogram_stress/prepare.py --rows 100000 --features 48
 
 ### Cross-library model comparison
 
+The runner registers six model arms by default per task type:
+
+- `alloygbm` (auto training mode)
+- `alloygbm_morph` (`training_mode="morph"`, constant LR)
+- `alloygbm_morph_cosine` (`training_mode="morph"`, `lr_schedule="warmup_cosine"`)
+- `lightgbm`, `xgboost`, `catboost`
+
+Use `--models` to filter which arms run. Example: just MorphBoost vs peers:
+
+```bash
+python3 benchmarks/run_model_comparison.py \
+  --models alloygbm alloygbm_morph alloygbm_morph_cosine lightgbm xgboost catboost \
+  --force-prepare
+```
+
 Run all scenarios with default profiles and a single seed:
 
 ```bash
@@ -138,6 +153,32 @@ python3 benchmarks/run_model_comparison.py \
   --profile-grid default_ultra \
   --profile-seeds 7 \
   --scenarios dense_numeric dow_jones_financial
+```
+
+### MorphBoost-focused harnesses
+
+Two additional, lighter-weight scripts target MorphBoost specifically:
+
+- `benchmarks/morph_report.py` — quick MorphBoost-vs-peers comparison on a
+  curated set of sklearn-based datasets. Defaults to `--quick` (60 rounds);
+  drop the flag for 300-round comparisons.
+- `benchmarks/morph_ablation.py` — toggles MorphBoost components individually
+  (warmup, balance penalty, lr_schedule) on synthetic data to attribute
+  per-component impact.
+- `benchmarks/numerai_benchmark.py` — Numerai-tournament-style residualized
+  regression at scale, evaluating numerai_corr, Sharpe, and MMC. Includes
+  the `alloygbm_morph` and `alloygbm_morph_cosine` arms.
+
+```bash
+# Quick MorphBoost comparison report
+python3 benchmarks/morph_report.py
+
+# MorphBoost component ablation
+python3 benchmarks/morph_ablation.py
+
+# Numerai benchmark (slow; downloads data on first run)
+python3 benchmarks/numerai_benchmark.py --feature-set small \
+  --rounds 1200 --learning-rate 0.05 --max-depth 6 --col-subsample 0.3
 ```
 
 ## Outputs

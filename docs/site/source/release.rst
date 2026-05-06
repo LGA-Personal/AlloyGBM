@@ -1,7 +1,36 @@
 Release and platform policy
 ===========================
 
-AlloyGBM ``0.3.2`` release notes and platform policy.
+AlloyGBM ``0.4.0`` release notes and platform policy.
+
+What's new in 0.4.0
+-------------------
+
+**MorphBoost mode and SIMD acceleration:**
+
+- New opt-in adaptive training mode via ``training_mode="morph"``,
+  implementing the criterion from
+  `Kriuk (2025) <https://arxiv.org/pdf/2511.13234>`_. Available on
+  :class:`~alloygbm.GBMRegressor`, :class:`~alloygbm.GBMClassifier`, and
+  :class:`~alloygbm.GBMRanker`. See :doc:`morphboost`.
+- New per-iteration learning-rate schedule parameter ``lr_schedule``
+  (``"constant"`` default, ``"warmup_cosine"`` available). Independent of
+  ``training_mode`` — usable on its own.
+- Schedule-aware auto early-stopping: when an LR schedule is active, the
+  auto-tuned ``min_loss_improvement`` threshold is scaled by
+  ``current_lr / max_lr``, and warmup-phase rounds are tolerated without
+  termination.
+- Backend SIMD acceleration via the ``wide`` crate (safe API; AVX2 / NEON
+  intrinsics underneath, scalar fallback otherwise). Histogram bin-scan
+  and EMA passes are now vectorized; histogram tile sizing is auto-tuned
+  for high-feature workloads.
+- New benchmark harnesses: ``benchmarks/morph_report.py``,
+  ``benchmarks/morph_ablation.py``, and an enhanced
+  ``benchmarks/numerai_benchmark.py`` with MorphBoost arms and a startup
+  build-freshness check.
+- ``benchmarks/run_model_comparison.py`` registers two new arms by default
+  per task type: ``alloygbm_morph`` and ``alloygbm_morph_cosine``. New
+  ``--models`` flag filters which arms run.
 
 What's new in 0.3.2
 --------------------
