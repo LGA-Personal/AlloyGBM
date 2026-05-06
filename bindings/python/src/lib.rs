@@ -3065,6 +3065,7 @@ fn build_train_params(
         feature_weights,
         max_leaves,
         tree_growth,
+        morph_config: None,
     }
 }
 
@@ -4129,6 +4130,7 @@ mod tests {
             feature_weights: Vec::new(),
             max_leaves: None,
             tree_growth: TreeGrowth::Level,
+            morph_config: None,
         }
     }
 

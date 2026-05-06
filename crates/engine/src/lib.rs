@@ -1,15 +1,17 @@
 use alloygbm_categorical::{TargetEncoderConfig, fit_transform_target_encoder};
 use alloygbm_core::{
     BinnedMatrix, CategoricalStatePayloadV1, CoreError, DatasetMatrix, Device, FeatureTile,
-    GradientPair, HistogramBundle, MISSING_BIN_U8, MODEL_FORMAT_V1, ModelArtifactSection,
-    ModelMetadata, ModelSectionKind, NativeCategoricalSplitsPayload, NodeSlice, NodeStats,
-    PartitionResult, SplitCandidate, TrainParams, TrainingDataset, TreeGrowth,
-    decode_optional_categorical_state_section_v1,
+    GradientEmaStats, GradientPair, HistogramBundle, LrSchedule, MISSING_BIN_U8, MODEL_FORMAT_V1,
+    ModelArtifactSection, ModelMetadata, ModelSectionKind, MorphConfig, MorphMetadataPayload,
+    NativeCategoricalSplitsPayload, NodeSlice, NodeStats, PartitionResult, SplitCandidate,
+    TrainParams, TrainingDataset, TreeGrowth, decode_optional_categorical_state_section_v1,
+    decode_optional_morph_metadata_artifact_section,
     decode_optional_native_categorical_splits_section, deserialize_model_artifact_v1,
-    encode_categorical_state_payload_v1, encode_native_categorical_splits_payload,
-    format_required_section_auto_mode_error, format_required_section_mode_error,
-    required_section_compatibility_report, serialize_model_artifact_v1, validate_binned_matrix,
-    validate_categorical_state_payload_v1, validate_train_params, validate_training_dataset,
+    encode_categorical_state_payload_v1, encode_morph_metadata_payload,
+    encode_native_categorical_splits_payload, format_required_section_auto_mode_error,
+    format_required_section_mode_error, required_section_compatibility_report,
+    serialize_model_artifact_v1, validate_binned_matrix, validate_categorical_state_payload_v1,
+    validate_train_params, validate_training_dataset,
 };
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
@@ -83,6 +85,121 @@ impl Default for SplitSelectionOptions {
     }
 }
 
+/// Per-round context for morph-gain split selection.
+/// Passed to `BackendOps::best_split_morph` in addition to the standard options.
+#[derive(Debug, Clone, Copy)]
+pub struct MorphContext {
+    pub iteration: u32,
+    pub total_iterations: u32,
+    pub grad_mean: f32,
+    pub grad_std: f32,
+    pub config: MorphConfig,
+}
+
+/// Trainer-resident state for morph-mode training.
+///
+/// Holds the per-class EMA gradient statistics (length 1 for single-output
+/// objectives, K for multiclass softmax) and the resolved per-iteration
+/// learning-rate schedule.
+#[derive(Debug, Clone)]
+pub struct MorphState {
+    pub config: MorphConfig,
+    /// Per-class EMA stats (length 1 for single-output, K for multiclass).
+    pub ema_stats: Vec<GradientEmaStats>,
+    /// Resolved per-iteration learning rates (length = `total_iterations`).
+    pub lr_per_iter: Vec<f32>,
+    /// Reused per round to avoid allocations when extracting grad values for EMA.
+    grad_scratch: Vec<f32>,
+}
+
+impl MorphState {
+    pub fn new(
+        config: MorphConfig,
+        n_classes: usize,
+        total_iterations: u32,
+        base_lr: f32,
+    ) -> Self {
+        Self {
+            config,
+            ema_stats: vec![GradientEmaStats::default(); n_classes.max(1)],
+            lr_per_iter: resolve_lr_schedule(config.lr_schedule, total_iterations, base_lr),
+            grad_scratch: Vec::new(),
+        }
+    }
+
+    pub fn morph_context(&self, iteration: u32, total: u32, class_idx: usize) -> MorphContext {
+        let stats = &self.ema_stats[class_idx.min(self.ema_stats.len().saturating_sub(1))];
+        MorphContext {
+            iteration,
+            total_iterations: total,
+            grad_mean: stats.mean,
+            grad_std: stats.std,
+            config: self.config,
+        }
+    }
+
+    pub fn lr_for_iter(&self, iteration: usize) -> f32 {
+        self.lr_per_iter.get(iteration).copied().unwrap_or_else(|| {
+            self.lr_per_iter.last().copied().unwrap_or(0.1)
+        })
+    }
+
+    /// Update EMA stats for `class_idx` from a slice of [`GradientPair`]s,
+    /// reusing an internal scratch buffer to avoid a per-round heap allocation.
+    pub fn update_ema_from_gradient_pairs(&mut self, pairs: &[GradientPair], class_idx: usize) {
+        self.grad_scratch.clear();
+        self.grad_scratch.extend(pairs.iter().map(|g| g.grad));
+        self.ema_stats[class_idx].update(&self.grad_scratch);
+    }
+}
+
+/// Resolve a [`LrSchedule`] into a per-iteration learning-rate vector.
+///
+/// `Constant`: returns `vec![base_lr; n]`.
+/// `WarmupCosine { warmup_frac }`: linear warmup over `round(warmup_frac * n)`
+/// rounds (clamped to `[1, n]`), then half-cosine decay from `base_lr` toward a
+/// floor of `base_lr * 0.01` over the remaining rounds.
+pub fn resolve_lr_schedule(schedule: LrSchedule, n_estimators: u32, base_lr: f32) -> Vec<f32> {
+    let n = n_estimators as usize;
+    if n == 0 {
+        return Vec::new();
+    }
+    match schedule {
+        LrSchedule::Constant => vec![base_lr; n],
+        LrSchedule::WarmupCosine { warmup_frac } => {
+            let warmup = ((warmup_frac * n as f32).round() as usize).max(1).min(n);
+            let mut lrs = Vec::with_capacity(n);
+            for i in 0..warmup {
+                lrs.push(base_lr * (i as f32 + 1.0) / warmup as f32);
+            }
+            let remaining = n - warmup;
+            let floor = base_lr * 0.01;
+            for i in 0..remaining {
+                let progress = i as f32 / remaining.max(1) as f32;
+                let cos = 0.5 * (1.0 + (std::f32::consts::PI * progress).cos());
+                lrs.push(floor + (base_lr - floor) * cos);
+            }
+            lrs
+        }
+    }
+}
+
+/// Per-round morph-mode context handed to `build_tree_*` so they can:
+/// 1. dispatch split finding via `best_split_morph`,
+/// 2. source the per-iteration learning rate from the LR schedule,
+/// 3. apply depth-penalty + iteration-shrinkage multipliers to leaf values.
+///
+/// `None` selects the legacy (byte-identical) non-morph training path.
+#[derive(Debug, Clone, Copy)]
+struct MorphTreeContext<'a> {
+    state: &'a MorphState,
+    iteration: u32,
+    total_iterations: u32,
+    class_idx: usize,
+    /// Resolved learning rate for this iteration (replaces `params.learning_rate`).
+    lr: f32,
+}
+
 pub trait BackendOps {
     fn build_histograms(
         &self,
@@ -100,6 +217,19 @@ pub trait BackendOps {
         _categorical_features: &[CategoricalFeatureInfo],
     ) -> EngineResult<Option<SplitCandidate>> {
         self.best_split(histograms)
+    }
+    /// Morph-mode split selection. Default implementation delegates to
+    /// `best_split_with_options` (i.e. ignores morph context), so backends that
+    /// don't implement morph fall back gracefully.
+    fn best_split_morph(
+        &self,
+        histograms: &HistogramBundle,
+        options: SplitSelectionOptions,
+        feature_weights: &[f32],
+        categorical_features: &[CategoricalFeatureInfo],
+        _morph: &MorphContext,
+    ) -> EngineResult<Option<SplitCandidate>> {
+        self.best_split_with_options(histograms, options, feature_weights, categorical_features)
     }
     fn apply_split(
         &self,
@@ -1383,6 +1513,8 @@ pub struct TrainedModel {
     pub objective: String,
     /// Feature indices that use native categorical splits (empty if none).
     pub native_categorical_feature_indices: Vec<u32>,
+    /// Morph training metadata (None for non-morph artifacts).
+    pub morph_metadata: Option<MorphMetadataPayload>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1779,6 +1911,13 @@ impl TrainedModel {
             let cat_bytes = encode_native_categorical_splits_payload(&payload)?;
             sections.push((ModelSectionKind::NativeCategoricalSplits, cat_bytes));
         }
+        // Morph metadata section (optional — only for morph-trained artifacts)
+        if let Some(morph) = self.morph_metadata.as_ref() {
+            sections.push((
+                ModelSectionKind::MorphMetadata,
+                encode_morph_metadata_payload(morph),
+            ));
+        }
 
         serialize_model_artifact_v1(&metadata, &sections).map_err(EngineError::from)
     }
@@ -1881,6 +2020,11 @@ impl TrainedModel {
                 }
             }
         }
+
+        // Decode optional morph metadata section.
+        model.morph_metadata =
+            decode_optional_morph_metadata_artifact_section(&parsed.sections)
+                .map_err(EngineError::from)?;
 
         model.feature_count = metadata_feature_count;
         model.objective = parsed.contract.metadata.objective.clone();
@@ -2590,6 +2734,13 @@ impl Trainer {
 
         let effective_round_cap = controls.rounds;
 
+        // Build MorphState (K classes) for the duration of training when
+        // morph_config is set. Total iterations spans warm-start prefix + new rounds.
+        let total_iterations = (effective_round_cap + round_index_offset) as u32;
+        let mut morph_state: Option<MorphState> = self.params.morph_config.map(|cfg| {
+            MorphState::new(cfg, k, total_iterations, self.params.learning_rate)
+        });
+
         for round_index in 0..effective_round_cap {
             let effective_round = round_index + round_index_offset;
             // Shared sampling for all K classes
@@ -2626,6 +2777,20 @@ impl Trainer {
                     &mut gradient_buffer,
                 )?;
 
+                // Update per-class EMA stats from this class's gradients.
+                if let Some(ms) = morph_state.as_mut() {
+                    ms.update_ema_from_gradient_pairs(&gradient_buffer, class_k);
+                }
+
+                let morph_tree_ctx: Option<MorphTreeContext<'_>> =
+                    morph_state.as_ref().map(|ms| MorphTreeContext {
+                        state: ms,
+                        iteration: effective_round as u32,
+                        total_iterations,
+                        class_idx: class_k,
+                        lr: ms.lr_for_iter(effective_round),
+                    });
+
                 let (round_stumps, _round_stop) = if self.params.tree_growth == TreeGrowth::Leaf {
                     build_tree_leaf_wise(
                         backend,
@@ -2640,6 +2805,7 @@ impl Trainer {
                         &mut class_candidate_predictions[class_k],
                         &self.params.feature_weights,
                         &self.categorical_features,
+                        morph_tree_ctx,
                     )?
                 } else {
                     build_tree_level_wise(
@@ -2655,6 +2821,7 @@ impl Trainer {
                         &mut class_candidate_predictions[class_k],
                         &self.params.feature_weights,
                         &self.categorical_features,
+                        morph_tree_ctx,
                     )?
                 };
 
@@ -2784,6 +2951,11 @@ impl Trainer {
         let final_loss = current_loss;
         let final_validation_loss = current_validation_loss;
 
+        let morph_metadata = morph_state.as_ref().map(|ms| MorphMetadataPayload {
+            config: ms.config,
+            final_iteration: rounds_completed as u32,
+            final_total: total_iterations,
+        });
         Ok(MultiClassIterationRunSummary {
             model: MultiClassTrainedModel {
                 num_classes: k,
@@ -2792,6 +2964,7 @@ impl Trainer {
                 class_stumps,
                 categorical_state: None,
                 objective: objective.objective_name().to_string(),
+                morph_metadata,
             },
             rounds_requested: effective_round_cap,
             effective_round_cap,
@@ -3050,6 +3223,14 @@ impl Trainer {
 
         let mut gradient_buffer: Vec<GradientPair> = Vec::with_capacity(dataset.row_count());
 
+        // Build MorphState for the duration of training when morph_config is set.
+        // `total_iterations` corresponds to the round cap (including any warm-start
+        // offset already-completed rounds, so the LR schedule lines up).
+        let total_iterations = (effective_round_cap + round_index_offset) as u32;
+        let mut morph_state: Option<MorphState> = self.params.morph_config.map(|cfg| {
+            MorphState::new(cfg, 1, total_iterations, self.params.learning_rate)
+        });
+
         for round_index in 0..effective_round_cap {
             // Offset round_index for sampling seeds and tree IDs when warm-starting
             let effective_round_index = round_index + round_index_offset;
@@ -3078,7 +3259,22 @@ impl Trainer {
                 validate_gradient_pairs(gradients, dataset.row_count())?;
             }
 
+            // Update EMA stats from this round's gradients before tree-building so
+            // morph split selection sees the latest mean/std.
+            if let Some(ms) = morph_state.as_mut() {
+                ms.update_ema_from_gradient_pairs(gradients, 0);
+            }
+
             candidate_predictions.copy_from_slice(&predictions);
+
+            let morph_tree_ctx: Option<MorphTreeContext<'_>> =
+                morph_state.as_ref().map(|ms| MorphTreeContext {
+                    state: ms,
+                    iteration: effective_round_index as u32,
+                    total_iterations,
+                    class_idx: 0,
+                    lr: ms.lr_for_iter(effective_round_index),
+                });
 
             let (candidate_round_stumps, round_rejection_reason) =
                 if self.params.tree_growth == TreeGrowth::Leaf {
@@ -3095,6 +3291,7 @@ impl Trainer {
                         &mut candidate_predictions,
                         &self.params.feature_weights,
                         &execution.categorical_features,
+                        morph_tree_ctx,
                     )?
                 } else {
                     build_tree_level_wise(
@@ -3110,6 +3307,7 @@ impl Trainer {
                         &mut candidate_predictions,
                         &self.params.feature_weights,
                         &execution.categorical_features,
+                        morph_tree_ctx,
                     )?
                 };
 
@@ -3348,6 +3546,11 @@ impl Trainer {
             }
         }
 
+        let morph_metadata = morph_state.as_ref().map(|ms| MorphMetadataPayload {
+            config: ms.config,
+            final_iteration: rounds_completed as u32,
+            final_total: total_iterations,
+        });
         let model = TrainedModel {
             baseline_prediction,
             feature_count: dataset.matrix.feature_count,
@@ -3356,6 +3559,7 @@ impl Trainer {
             node_debug_stats: None,
             objective: objective.objective_name().to_string(),
             native_categorical_feature_indices: Vec::new(),
+            morph_metadata,
         };
         let final_loss = current_loss;
 
@@ -3736,6 +3940,28 @@ fn target_variance(targets: &[f32], sample_weights: Option<&[f32]>) -> EngineRes
     Ok(squared_sum / weight_sum)
 }
 
+/// Dispatch best-split finding to either the morph variant or the standard
+/// variant based on whether a [`MorphTreeContext`] is supplied. Centralizes
+/// the choice so all call sites in `build_tree_level_wise` /
+/// `build_tree_leaf_wise` stay consistent.
+fn find_best_split_dispatch<B: BackendOps>(
+    backend: &B,
+    histograms: &HistogramBundle,
+    options: SplitSelectionOptions,
+    feature_weights: &[f32],
+    categorical_features: &[CategoricalFeatureInfo],
+    morph: Option<&MorphTreeContext<'_>>,
+) -> EngineResult<Option<SplitCandidate>> {
+    if let Some(m) = morph {
+        let ctx = m
+            .state
+            .morph_context(m.iteration, m.total_iterations, m.class_idx);
+        backend.best_split_morph(histograms, options, feature_weights, categorical_features, &ctx)
+    } else {
+        backend.best_split_with_options(histograms, options, feature_weights, categorical_features)
+    }
+}
+
 /// Build a single tree using level-wise (breadth-first) growth strategy.
 ///
 /// Splits all nodes at depth d before moving to depth d+1.
@@ -3753,6 +3979,7 @@ fn build_tree_level_wise<B: BackendOps>(
     candidate_predictions: &mut [f32],
     feature_weights: &[f32],
     categorical_features: &[CategoricalFeatureInfo],
+    morph: Option<MorphTreeContext<'_>>,
 ) -> EngineResult<(Vec<TrainedStump>, IterationStopReason)> {
     let mut candidate_round_stumps = Vec::new();
     let mut round_rejection_reason = IterationStopReason::NoSplitCandidate;
@@ -3762,6 +3989,7 @@ fn build_tree_level_wise<B: BackendOps>(
         backend.build_histograms(binned_matrix, gradients, &root_node, feature_tiles)?;
     // Maintain each active node's absolute leaf output so child updates
     // can replace parent contribution via deltas (tree semantics).
+    // depth is the current tree level (0-indexed); all nodes at this level share the same depth.
     let mut active_nodes = vec![(0_u32, root_node.row_indices, root_histograms, 0.0_f32)];
 
     for depth in 0..(params.max_depth as usize) {
@@ -3773,11 +4001,13 @@ fn build_tree_level_wise<B: BackendOps>(
         for (local_node_id, node_rows, histograms, parent_leaf_value) in active_nodes {
             let node_id = encode_tree_node_id(round_index, local_node_id)?;
             let node = NodeSlice::new(node_id, node_rows)?;
-            let Some(mut split) = backend.best_split_with_options(
+            let Some(mut split) = find_best_split_dispatch(
+                backend,
                 &histograms,
                 split_options,
                 feature_weights,
                 categorical_features,
+                morph.as_ref(),
             )?
             else {
                 continue;
@@ -3813,10 +4043,24 @@ fn build_tree_level_wise<B: BackendOps>(
 
             let left_grad = l1_threshold_gradient(left_stats.grad_sum, split_options.l1_alpha);
             let right_grad = l1_threshold_gradient(right_stats.grad_sum, split_options.l1_alpha);
-            let raw_left_leaf_value = -params.learning_rate * left_grad
+            let lr = morph.map_or(params.learning_rate, |m| m.lr);
+            let mut raw_left_leaf_value = -lr * left_grad
                 / (left_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
-            let raw_right_leaf_value = -params.learning_rate * right_grad
+            let mut raw_right_leaf_value = -lr * right_grad
                 / (right_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
+
+            // Morph leaf modifications: depth penalty + per-round shrinkage.
+            // Children land at depth `depth + 1` in the tree.
+            if let Some(m) = morph.as_ref() {
+                let child_depth = (depth + 1) as f32;
+                let depth_penalty = m.state.config.depth_penalty_base.powf(child_depth / 3.0);
+                let iter_shrinkage = 1.0
+                    - m.state.config.morph_rate
+                        * (m.iteration as f32 / m.total_iterations.max(1) as f32).min(1.0);
+                let scale = depth_penalty * iter_shrinkage;
+                raw_left_leaf_value *= scale;
+                raw_right_leaf_value *= scale;
+            }
 
             let left_leaf_absolute = raw_left_leaf_value
                 .clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value);
@@ -3998,6 +4242,7 @@ fn build_tree_leaf_wise<B: BackendOps>(
     candidate_predictions: &mut [f32],
     feature_weights: &[f32],
     categorical_features: &[CategoricalFeatureInfo],
+    morph: Option<MorphTreeContext<'_>>,
 ) -> EngineResult<(Vec<TrainedStump>, IterationStopReason)> {
     let max_leaves = controls.max_leaves.unwrap_or(usize::MAX);
     let max_depth = params.max_depth as usize;
@@ -4007,11 +4252,13 @@ fn build_tree_leaf_wise<B: BackendOps>(
     let root_node = NodeSlice::new(root_node_id, root_row_indices)?;
     let root_histograms =
         backend.build_histograms(binned_matrix, gradients, &root_node, feature_tiles)?;
-    let root_split = backend.best_split_with_options(
+    let root_split = find_best_split_dispatch(
+        backend,
         &root_histograms,
         split_options,
         feature_weights,
         categorical_features,
+        morph.as_ref(),
     )?;
 
     let Some(root_split) = root_split else {
@@ -4083,10 +4330,24 @@ fn build_tree_leaf_wise<B: BackendOps>(
         // Compute leaf values.
         let left_grad = l1_threshold_gradient(left_stats.grad_sum, split_options.l1_alpha);
         let right_grad = l1_threshold_gradient(right_stats.grad_sum, split_options.l1_alpha);
-        let raw_left_leaf_value = -params.learning_rate * left_grad
+        let lr = morph.map_or(params.learning_rate, |m| m.lr);
+        let mut raw_left_leaf_value = -lr * left_grad
             / (left_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
-        let raw_right_leaf_value = -params.learning_rate * right_grad
+        let mut raw_right_leaf_value = -lr * right_grad
             / (right_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
+
+        // Morph leaf modifications: depth penalty + per-round shrinkage.
+        // Children of `pending` land at `pending.depth + 1` in the tree.
+        if let Some(m) = morph.as_ref() {
+            let child_depth = (pending.depth + 1) as f32;
+            let depth_penalty = m.state.config.depth_penalty_base.powf(child_depth / 3.0);
+            let iter_shrinkage = 1.0
+                - m.state.config.morph_rate
+                    * (m.iteration as f32 / m.total_iterations.max(1) as f32).min(1.0);
+            let scale = depth_penalty * iter_shrinkage;
+            raw_left_leaf_value *= scale;
+            raw_right_leaf_value *= scale;
+        }
 
         let left_leaf_absolute =
             raw_left_leaf_value.clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value);
@@ -4189,11 +4450,13 @@ fn build_tree_leaf_wise<B: BackendOps>(
             )?;
 
             // Find best split for each child and enqueue if valid.
-            if let Some(child_split) = backend.best_split_with_options(
+            if let Some(child_split) = find_best_split_dispatch(
+                backend,
                 &smaller_histograms,
                 split_options,
                 feature_weights,
                 categorical_features,
+                morph.as_ref(),
             )? && child_split.gain.is_finite()
                 && child_split.gain > controls.min_split_gain
             {
@@ -4207,11 +4470,13 @@ fn build_tree_leaf_wise<B: BackendOps>(
                 });
             }
 
-            if let Some(child_split) = backend.best_split_with_options(
+            if let Some(child_split) = find_best_split_dispatch(
+                backend,
                 &larger_histograms,
                 split_options,
                 feature_weights,
                 categorical_features,
+                morph.as_ref(),
             )? && child_split.gain.is_finite()
                 && child_split.gain > controls.min_split_gain
             {
@@ -5470,6 +5735,7 @@ fn decode_trained_model_payload(bytes: &[u8]) -> EngineResult<TrainedModel> {
         node_debug_stats: None,
         objective: "squared_error".to_string(),
         native_categorical_feature_indices: Vec::new(),
+        morph_metadata: None,
     })
 }
 
@@ -5674,6 +5940,8 @@ pub struct MultiClassTrainedModel {
     pub class_stumps: Vec<Vec<TrainedStump>>,
     pub categorical_state: Option<CategoricalStatePayloadV1>,
     pub objective: String,
+    /// Morph training metadata (None for non-morph artifacts).
+    pub morph_metadata: Option<MorphMetadataPayload>,
 }
 
 impl MultiClassTrainedModel {
@@ -5770,6 +6038,13 @@ impl MultiClassTrainedModel {
         if let Some(categorical_state) = self.categorical_state.as_ref() {
             let categorical_payload = encode_categorical_state_payload_v1(categorical_state)?;
             sections.push((ModelSectionKind::CategoricalState, categorical_payload));
+        }
+        // Morph metadata section (optional — only for morph-trained artifacts)
+        if let Some(morph) = self.morph_metadata.as_ref() {
+            sections.push((
+                ModelSectionKind::MorphMetadata,
+                encode_morph_metadata_payload(morph),
+            ));
         }
 
         serialize_model_artifact_v1(&metadata, &sections).map_err(EngineError::from)
@@ -5881,6 +6156,9 @@ impl MultiClassTrainedModel {
         let categorical_state =
             decode_optional_categorical_state_section_v1(&parsed.sections, feature_count)?;
 
+        let morph_metadata = decode_optional_morph_metadata_artifact_section(&parsed.sections)
+            .map_err(EngineError::from)?;
+
         Ok(Self {
             num_classes,
             baseline_predictions,
@@ -5888,6 +6166,7 @@ impl MultiClassTrainedModel {
             class_stumps,
             categorical_state,
             objective: parsed.contract.metadata.objective.clone(),
+            morph_metadata,
         })
     }
 }
@@ -6888,6 +7167,7 @@ mod tests {
             node_debug_stats: None,
             objective: "squared_error".to_string(),
             native_categorical_feature_indices: Vec::new(),
+            morph_metadata: None,
         };
 
         let left = model.predict_row(&[0.0]).expect("left prediction succeeds");
@@ -7738,6 +8018,7 @@ mod tests {
             ],
             categorical_state: None,
             objective: "multiclass_softmax".to_string(),
+            morph_metadata: None,
         };
 
         let bytes = model.to_artifact_bytes().expect("serialize should succeed");
@@ -7839,6 +8120,7 @@ mod tests {
             ],
             categorical_state: None,
             objective: "multiclass_softmax".to_string(),
+            morph_metadata: None,
         };
         assert_eq!(model.rounds_completed(), 2);
     }
@@ -8113,6 +8395,7 @@ mod tests {
             node_debug_stats: None,
             objective: "squared_error".to_string(),
             native_categorical_feature_indices: vec![0],
+            morph_metadata: None,
         };
 
         let bytes = model.to_artifact_bytes().expect("serialize should succeed");
@@ -8176,6 +8459,7 @@ mod tests {
             node_debug_stats: None,
             objective: "squared_error".to_string(),
             native_categorical_feature_indices: Vec::new(),
+            morph_metadata: None,
         };
 
         let bytes = model.to_artifact_bytes().expect("serialize should succeed");
@@ -8189,5 +8473,226 @@ mod tests {
         assert_eq!(restored.stumps.len(), 1);
         assert!(!restored.stumps[0].split.is_categorical);
         assert!(restored.native_categorical_feature_indices.is_empty());
+    }
+
+    // -- Morph-mode end-to-end tests -----------------------------------------
+
+    #[test]
+    fn morph_mode_regression_trains_to_completion() {
+        use alloygbm_core::MorphConfig;
+        let params = TrainParams {
+            morph_config: Some(MorphConfig::default()),
+            ..TrainParams::default()
+        };
+        let trainer = Trainer::new(params).expect("valid params with morph config");
+        let model = trainer
+            .fit_iterations(
+                &sample_dataset(),
+                &sample_binned_matrix(),
+                &MockBackend,
+                &SquaredErrorObjective,
+                3,
+            )
+            .expect("morph-mode training must succeed");
+        // Model should have produced at least one stump.
+        assert!(!model.stumps.is_empty(), "morph training should produce stumps");
+    }
+
+    #[test]
+    fn morph_mode_non_morph_path_unchanged() {
+        // --- Part 1: two identical non-morph runs must produce byte-identical artifacts ---
+        //
+        // Trains the same dataset twice with the same seed and morph_config = None.
+        // Because the non-morph path is deterministic by design, both runs must
+        // serialise to exactly the same bytes.
+        let non_morph_params = TrainParams {
+            morph_config: None,
+            seed: 42,
+            deterministic: true,
+            ..TrainParams::default()
+        };
+
+        let bytes_a = {
+            let trainer = Trainer::new(non_morph_params.clone()).expect("valid params (run A)");
+            trainer
+                .fit_iterations(
+                    &sample_dataset(),
+                    &sample_binned_matrix(),
+                    &MockBackend,
+                    &SquaredErrorObjective,
+                    3,
+                )
+                .expect("non-morph training must succeed (run A)")
+                .to_artifact_bytes()
+                .expect("artifact serialises (run A)")
+        };
+
+        let bytes_b = {
+            let trainer = Trainer::new(non_morph_params).expect("valid params (run B)");
+            trainer
+                .fit_iterations(
+                    &sample_dataset(),
+                    &sample_binned_matrix(),
+                    &MockBackend,
+                    &SquaredErrorObjective,
+                    3,
+                )
+                .expect("non-morph training must succeed (run B)")
+                .to_artifact_bytes()
+                .expect("artifact serialises (run B)")
+        };
+
+        assert_eq!(
+            bytes_a, bytes_b,
+            "two non-morph runs with identical params must produce byte-identical artifacts"
+        );
+
+        // --- Part 2: morph path with morph_rate=0 / depth_penalty_base=1 must yield
+        //     the same leaf values as the non-morph path ---
+        //
+        // The morph path always applies `depth_penalty * iter_shrinkage` to leaf values
+        // (even during warmup), so setting morph_warmup_iters=u32::MAX alone cannot
+        // neutralise that.  Instead we zero out both multiplicative factors:
+        //   depth_penalty_base = 1.0  =>  depth_penalty = 1.0^(depth/3) = 1.0
+        //   morph_rate = 0.0          =>  iter_shrinkage = 1.0 - 0 * ... = 1.0
+        //   scale = 1.0 * 1.0 = 1.0  =>  no modification to leaf values
+        // With balance_penalty=false and info_score_weight=0 the split choice is also
+        // unchanged, so the resulting leaf values must match the non-morph path exactly.
+        use alloygbm_core::MorphConfig;
+
+        let identity_morph_params = TrainParams {
+            morph_config: Some(MorphConfig {
+                morph_rate: 0.0,
+                depth_penalty_base: 1.0,
+                balance_penalty: false,
+                info_score_weight: 0.0,
+                morph_warmup_iters: u32::MAX,
+                ..MorphConfig::default()
+            }),
+            seed: 42,
+            deterministic: true,
+            ..TrainParams::default()
+        };
+
+        let model_no_morph = TrainedModel::from_artifact_bytes(&bytes_a)
+            .expect("deserialise run-A artifact");
+
+        let model_identity_morph = {
+            let trainer =
+                Trainer::new(identity_morph_params).expect("valid identity-morph params");
+            trainer
+                .fit_iterations(
+                    &sample_dataset(),
+                    &sample_binned_matrix(),
+                    &MockBackend,
+                    &SquaredErrorObjective,
+                    3,
+                )
+                .expect("identity-morph training must succeed")
+        };
+
+        assert_eq!(
+            model_no_morph.stumps.len(),
+            model_identity_morph.stumps.len(),
+            "stump count must match between non-morph and identity-morph"
+        );
+        for (i, (s_plain, s_morph)) in model_no_morph
+            .stumps
+            .iter()
+            .zip(model_identity_morph.stumps.iter())
+            .enumerate()
+        {
+            assert!(
+                (s_plain.left_leaf_value - s_morph.left_leaf_value).abs() < 1e-5,
+                "stump {i} left_leaf_value mismatch: non-morph={} identity-morph={}",
+                s_plain.left_leaf_value,
+                s_morph.left_leaf_value,
+            );
+            assert!(
+                (s_plain.right_leaf_value - s_morph.right_leaf_value).abs() < 1e-5,
+                "stump {i} right_leaf_value mismatch: non-morph={} identity-morph={}",
+                s_plain.right_leaf_value,
+                s_morph.right_leaf_value,
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod morph_state_tests {
+    use super::*;
+    use alloygbm_core::{LrSchedule, MorphConfig};
+
+    #[test]
+    fn constant_schedule_produces_uniform_lr() {
+        let lrs = resolve_lr_schedule(LrSchedule::Constant, 10, 0.1);
+        assert_eq!(lrs.len(), 10);
+        for lr in &lrs {
+            assert!((*lr - 0.1).abs() < 1e-6, "lr={lr} expected 0.1");
+        }
+    }
+
+    #[test]
+    fn warmup_cosine_starts_low_peaks_at_base_then_decays() {
+        let lrs = resolve_lr_schedule(
+            LrSchedule::WarmupCosine { warmup_frac: 0.1 },
+            100,
+            0.1,
+        );
+        assert_eq!(lrs.len(), 100);
+        assert!(lrs[0] < 0.1, "first lr={} should be below base 0.1", lrs[0]);
+        let peak_idx = (0.1_f32 * 100.0).round() as usize - 1;
+        assert!(
+            (lrs[peak_idx] - 0.1).abs() < 1e-3,
+            "peak lr={} should be near base_lr 0.1",
+            lrs[peak_idx]
+        );
+        assert!(lrs[99] < 0.05, "final lr={} should decay toward floor", lrs[99]);
+    }
+
+    #[test]
+    fn warmup_cosine_full_warmup_edge_case() {
+        // warmup_frac=1.0 means entire schedule is warmup; no cosine decay.
+        let lrs = resolve_lr_schedule(
+            LrSchedule::WarmupCosine { warmup_frac: 1.0 },
+            5,
+            0.1,
+        );
+        assert_eq!(lrs.len(), 5);
+        // Last warmup step should hit base_lr.
+        assert!((lrs[4] - 0.1).abs() < 1e-5);
+    }
+
+    #[test]
+    fn resolve_lr_schedule_zero_estimators_returns_empty() {
+        let lrs = resolve_lr_schedule(LrSchedule::Constant, 0, 0.1);
+        assert!(lrs.is_empty());
+    }
+
+    #[test]
+    fn morph_state_new_correct_dimensions() {
+        let cfg = MorphConfig::default();
+        let ms = MorphState::new(cfg, 3, 50, 0.05);
+        assert_eq!(ms.ema_stats.len(), 3);
+        assert_eq!(ms.lr_per_iter.len(), 50);
+    }
+
+    #[test]
+    fn morph_state_single_class() {
+        let cfg = MorphConfig::default();
+        let ms = MorphState::new(cfg, 1, 10, 0.1);
+        assert_eq!(ms.ema_stats.len(), 1);
+        let ctx = ms.morph_context(0, 10, 0);
+        assert_eq!(ctx.iteration, 0);
+        assert_eq!(ctx.total_iterations, 10);
+    }
+
+    #[test]
+    fn morph_state_lr_for_iter_clamps_to_last() {
+        let cfg = MorphConfig::default();
+        let ms = MorphState::new(cfg, 1, 5, 0.1);
+        // Out-of-bounds index returns last value.
+        let last = ms.lr_per_iter[4];
+        assert!((ms.lr_for_iter(999) - last).abs() < 1e-6);
     }
 }

@@ -20,6 +20,117 @@ pub enum TreeGrowth {
     Leaf,
 }
 
+/// Per-iteration learning rate schedule for MorphBoost training.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum LrSchedule {
+    /// Use constant learning rate for all rounds.
+    #[default]
+    Constant,
+    /// Linear warmup from 0 → learning_rate over `warmup_frac * n_estimators`
+    /// rounds, then half-cosine decay to `learning_rate * 0.01` over remaining rounds.
+    WarmupCosine { warmup_frac: f32 },
+}
+
+/// Configuration for the MorphBoost-inspired training profile.
+///
+/// All fields are runtime-configurable; defaults match the paper's
+/// recommended values (Kriuk 2025, arXiv:2511.13234).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MorphConfig {
+    /// Strength of per-round leaf shrinkage: leaf *= (1 - morph_rate * t/T)
+    pub morph_rate: f32,
+    /// ρ in info-score smoothing factor (1 + ρ * t/T)
+    pub evolution_pressure: f32,
+    /// Number of pure-gradient rounds before info-score blending kicks in.
+    pub morph_warmup_iters: u32,
+    /// Blend weight on info component: gain = (1-w) * grad + w * info * tanh(t/20)
+    pub info_score_weight: f32,
+    /// Base for leaf depth penalty: leaf *= depth_penalty_base ^ (depth/3)
+    pub depth_penalty_base: f32,
+    /// Apply balance penalty for unbalanced splits.
+    pub balance_penalty: bool,
+    /// Per-iteration learning rate schedule.
+    pub lr_schedule: LrSchedule,
+}
+
+impl Default for MorphConfig {
+    fn default() -> Self {
+        Self {
+            morph_rate: 0.1,
+            evolution_pressure: 0.2,
+            morph_warmup_iters: 5,
+            info_score_weight: 0.3,
+            depth_penalty_base: 0.9,
+            balance_penalty: true,
+            lr_schedule: LrSchedule::Constant,
+        }
+    }
+}
+
+/// Top-level training profile selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TrainingMode {
+    /// Auto-policy with dataset-aware heuristics (current default).
+    #[default]
+    Auto,
+    /// Raw user-supplied parameters with no overrides.
+    Manual,
+    /// MorphBoost-inspired adaptive training profile.
+    Morph,
+}
+
+/// Exponential moving average statistics for gradients across boosting rounds.
+/// Maintained per-class for multiclass softmax (length 1 for single-output).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GradientEmaStats {
+    pub mean: f32,
+    pub std: f32,
+    /// Decay rate (0.05 per the paper).
+    pub alpha: f32,
+}
+
+impl Default for GradientEmaStats {
+    fn default() -> Self {
+        Self {
+            mean: 0.0,
+            std: 1.0,
+            alpha: 0.05,
+        }
+    }
+}
+
+impl GradientEmaStats {
+    /// Update EMA in place from a new round's gradient slice.
+    ///
+    /// Non-finite inputs (NaN, Inf) are silently skipped so the running stats
+    /// don't get permanently poisoned by transient numerical issues in
+    /// upstream gradient computation.
+    ///
+    /// Note: variance is computed with population divisor (n), not sample
+    /// divisor (n-1). This is intentional for EMA smoothing where n is large.
+    pub fn update(&mut self, gradients: &[f32]) {
+        if gradients.is_empty() {
+            return;
+        }
+        let n = gradients.len() as f32;
+        let mean: f32 = gradients.iter().sum::<f32>() / n;
+        if !mean.is_finite() {
+            return;
+        }
+        let var: f32 = gradients
+            .iter()
+            .map(|g| (g - mean) * (g - mean))
+            .sum::<f32>()
+            / n;
+        if !var.is_finite() {
+            return;
+        }
+        let std = var.sqrt();
+        self.mean = (1.0 - self.alpha) * self.mean + self.alpha * mean;
+        self.std = (1.0 - self.alpha) * self.std + self.alpha * std;
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Device {
     Cpu,
@@ -67,6 +178,8 @@ pub struct TrainParams {
     pub max_leaves: Option<usize>,
     /// Tree growth strategy: level-wise (default) or leaf-wise (best-first).
     pub tree_growth: TreeGrowth,
+    /// MorphBoost-inspired training profile config. `None` = non-morph (current behavior).
+    pub morph_config: Option<MorphConfig>,
 }
 
 impl Default for TrainParams {
@@ -89,6 +202,7 @@ impl Default for TrainParams {
             feature_weights: Vec::new(),
             max_leaves: None,
             tree_growth: TreeGrowth::Level,
+            morph_config: None,
         }
     }
 }
@@ -725,6 +839,7 @@ pub enum ModelSectionKind {
     NodeDebugStats,
     MultiClassTrees,
     NativeCategoricalSplits,
+    MorphMetadata,
     Unknown(u32),
 }
 
@@ -738,6 +853,7 @@ impl ModelSectionKind {
             Self::NodeDebugStats => 5,
             Self::MultiClassTrees => 6,
             Self::NativeCategoricalSplits => 7,
+            Self::MorphMetadata => 8,
             Self::Unknown(value) => value,
         }
     }
@@ -751,6 +867,7 @@ impl ModelSectionKind {
             5 => Self::NodeDebugStats,
             6 => Self::MultiClassTrees,
             7 => Self::NativeCategoricalSplits,
+            8 => Self::MorphMetadata,
             other => Self::Unknown(other),
         }
     }
@@ -1179,6 +1296,111 @@ pub fn decode_optional_native_categorical_splits_section(
     Ok(Some(payload))
 }
 
+/// Optional artifact section recording the MorphConfig used during training.
+/// Metadata only — predictions are deterministic from baked-in leaf values.
+/// Section is omitted entirely for non-morph artifacts.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MorphMetadataPayload {
+    pub config: MorphConfig,
+    pub final_iteration: u32,
+    pub final_total: u32,
+}
+
+pub fn encode_morph_metadata_payload(payload: &MorphMetadataPayload) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(36);
+    buf.extend_from_slice(&1u16.to_le_bytes());
+    buf.extend_from_slice(&payload.config.morph_rate.to_le_bytes());
+    buf.extend_from_slice(&payload.config.evolution_pressure.to_le_bytes());
+    buf.extend_from_slice(&payload.config.morph_warmup_iters.to_le_bytes());
+    buf.extend_from_slice(&payload.config.info_score_weight.to_le_bytes());
+    buf.extend_from_slice(&payload.config.depth_penalty_base.to_le_bytes());
+    buf.push(payload.config.balance_penalty as u8);
+    let (kind, warmup_frac) = match payload.config.lr_schedule {
+        LrSchedule::Constant => (0u8, 0.0f32),
+        LrSchedule::WarmupCosine { warmup_frac } => (1u8, warmup_frac),
+    };
+    buf.push(kind);
+    buf.extend_from_slice(&warmup_frac.to_le_bytes());
+    buf.extend_from_slice(&payload.final_iteration.to_le_bytes());
+    buf.extend_from_slice(&payload.final_total.to_le_bytes());
+    buf
+}
+
+pub fn decode_optional_morph_metadata_section(bytes: &[u8]) -> CoreResult<MorphMetadataPayload> {
+    if bytes.len() < 36 {
+        return Err(CoreError::Validation(
+            "morph metadata section too short".to_string(),
+        ));
+    }
+    let version = u16::from_le_bytes([bytes[0], bytes[1]]);
+    if version != 1 {
+        return Err(CoreError::Validation(format!(
+            "unsupported morph metadata version: {version}"
+        )));
+    }
+    let mut o = 2usize;
+    macro_rules! read_f32 {
+        () => {{
+            let v = f32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
+            o += 4;
+            v
+        }};
+    }
+    macro_rules! read_u32 {
+        () => {{
+            let v = u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
+            o += 4;
+            v
+        }};
+    }
+    let morph_rate = read_f32!();
+    let evolution_pressure = read_f32!();
+    let morph_warmup_iters = read_u32!();
+    let info_score_weight = read_f32!();
+    let depth_penalty_base = read_f32!();
+    let balance_penalty = bytes[o] != 0;
+    o += 1;
+    let lr_kind = bytes[o];
+    o += 1;
+    let warmup_frac = read_f32!();
+    let final_iteration = read_u32!();
+    let final_total = u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
+    let lr_schedule = match lr_kind {
+        0 => LrSchedule::Constant,
+        1 => LrSchedule::WarmupCosine { warmup_frac },
+        _ => {
+            return Err(CoreError::Validation(format!(
+                "unknown lr_schedule kind: {lr_kind}"
+            )));
+        }
+    };
+    Ok(MorphMetadataPayload {
+        config: MorphConfig {
+            morph_rate,
+            evolution_pressure,
+            morph_warmup_iters,
+            info_score_weight,
+            depth_penalty_base,
+            balance_penalty,
+            lr_schedule,
+        },
+        final_iteration,
+        final_total,
+    })
+}
+
+/// Decode an optional MorphMetadata section from a parsed model artifact.
+/// Returns `None` if no such section exists (non-morph artifact).
+pub fn decode_optional_morph_metadata_artifact_section(
+    sections: &[ModelArtifactSection],
+) -> CoreResult<Option<MorphMetadataPayload>> {
+    let Some(section) = optional_single_section(sections, ModelSectionKind::MorphMetadata)? else {
+        return Ok(None);
+    };
+    let payload = decode_optional_morph_metadata_section(&section.payload)?;
+    Ok(Some(payload))
+}
+
 pub fn validate_train_params(params: &TrainParams) -> CoreResult<()> {
     if !(0.0..=1.0).contains(&params.learning_rate) || params.learning_rate == 0.0 {
         return Err(CoreError::InvalidConfig(
@@ -1270,6 +1492,44 @@ pub fn validate_train_params(params: &TrainParams) -> CoreResult<()> {
         return Err(CoreError::InvalidConfig(
             "tree_growth='leaf' requires max_leaves to be set".to_string(),
         ));
+    }
+
+    if let Some(cfg) = &params.morph_config {
+        if !cfg.morph_rate.is_finite() || !(0.0..=1.0).contains(&cfg.morph_rate) {
+            return Err(CoreError::InvalidConfig(format!(
+                "morph_config.morph_rate must be in [0, 1], got {}",
+                cfg.morph_rate
+            )));
+        }
+        if !cfg.evolution_pressure.is_finite() || cfg.evolution_pressure < 0.0 {
+            return Err(CoreError::InvalidConfig(format!(
+                "morph_config.evolution_pressure must be >= 0, got {}",
+                cfg.evolution_pressure
+            )));
+        }
+        if !cfg.info_score_weight.is_finite() || !(0.0..=1.0).contains(&cfg.info_score_weight) {
+            return Err(CoreError::InvalidConfig(format!(
+                "morph_config.info_score_weight must be in [0, 1], got {}",
+                cfg.info_score_weight
+            )));
+        }
+        if !cfg.depth_penalty_base.is_finite()
+            || cfg.depth_penalty_base <= 0.0
+            || cfg.depth_penalty_base > 1.0
+        {
+            return Err(CoreError::InvalidConfig(format!(
+                "morph_config.depth_penalty_base must be in (0, 1], got {}",
+                cfg.depth_penalty_base
+            )));
+        }
+        if let LrSchedule::WarmupCosine { warmup_frac } = cfg.lr_schedule
+            && (!warmup_frac.is_finite() || !(0.0..=1.0).contains(&warmup_frac))
+        {
+            return Err(CoreError::InvalidConfig(format!(
+                "morph_config.lr_schedule.warmup_frac must be in [0, 1], got {}",
+                warmup_frac
+            )));
+        }
     }
 
     Ok(())
@@ -2486,5 +2746,157 @@ mod tests {
         let decoded = deserialize_metadata_json(&json).expect("metadata should decode");
         assert_eq!(decoded, metadata);
         assert_eq!(decoded.num_classes, None);
+    }
+
+    #[test]
+    fn morph_config_default_matches_paper() {
+        let cfg = MorphConfig::default();
+        assert_eq!(cfg.morph_rate, 0.1);
+        assert_eq!(cfg.evolution_pressure, 0.2);
+        assert_eq!(cfg.morph_warmup_iters, 5);
+        assert_eq!(cfg.info_score_weight, 0.3);
+        assert_eq!(cfg.depth_penalty_base, 0.9);
+        assert!(cfg.balance_penalty);
+        assert_eq!(cfg.lr_schedule, LrSchedule::Constant);
+    }
+
+    #[test]
+    fn lr_schedule_warmup_cosine_default_warmup_frac() {
+        let s = LrSchedule::WarmupCosine { warmup_frac: 0.1 };
+        if let LrSchedule::WarmupCosine { warmup_frac } = s {
+            assert!((warmup_frac - 0.1).abs() < 1e-6);
+        } else {
+            panic!("expected WarmupCosine");
+        }
+    }
+
+    #[test]
+    fn training_mode_default_is_auto() {
+        assert_eq!(TrainingMode::default(), TrainingMode::Auto);
+    }
+
+    #[test]
+    fn train_params_default_has_no_morph_config() {
+        let p = TrainParams::default();
+        assert!(p.morph_config.is_none());
+    }
+
+    #[test]
+    fn validate_train_params_accepts_morph_config() {
+        let mut p = TrainParams::default();
+        p.morph_config = Some(MorphConfig::default());
+        assert!(validate_train_params(&p).is_ok());
+    }
+
+    #[test]
+    fn validate_train_params_rejects_invalid_morph_rate() {
+        let mut p = TrainParams::default();
+        p.morph_config = Some(MorphConfig {
+            morph_rate: -0.1,
+            ..MorphConfig::default()
+        });
+        assert!(validate_train_params(&p).is_err());
+    }
+
+    #[test]
+    fn validate_train_params_rejects_invalid_warmup_frac() {
+        let mut p = TrainParams::default();
+        p.morph_config = Some(MorphConfig {
+            lr_schedule: LrSchedule::WarmupCosine { warmup_frac: 1.5 },
+            ..MorphConfig::default()
+        });
+        assert!(validate_train_params(&p).is_err());
+    }
+
+    #[test]
+    fn morph_metadata_round_trip() {
+        let payload = MorphMetadataPayload {
+            config: MorphConfig {
+                morph_rate: 0.15,
+                evolution_pressure: 0.25,
+                morph_warmup_iters: 7,
+                info_score_weight: 0.4,
+                depth_penalty_base: 0.85,
+                balance_penalty: false,
+                lr_schedule: LrSchedule::WarmupCosine { warmup_frac: 0.2 },
+            },
+            final_iteration: 42,
+            final_total: 100,
+        };
+        let bytes = encode_morph_metadata_payload(&payload);
+        assert_eq!(bytes.len(), 36);
+        let decoded = decode_optional_morph_metadata_section(&bytes).unwrap();
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn morph_metadata_decode_rejects_short_input() {
+        let err = decode_optional_morph_metadata_section(&[0u8; 10]).unwrap_err();
+        assert!(matches!(err, CoreError::Validation(_)));
+    }
+
+    #[test]
+    fn morph_metadata_decode_rejects_unknown_version() {
+        let mut bytes = vec![0u8; 36];
+        bytes[0] = 99; // version = 99
+        let err = decode_optional_morph_metadata_section(&bytes).unwrap_err();
+        assert!(matches!(err, CoreError::Validation(_)));
+    }
+
+    #[test]
+    fn morph_metadata_decode_rejects_unknown_lr_kind() {
+        let payload = MorphMetadataPayload {
+            config: MorphConfig::default(),
+            final_iteration: 0,
+            final_total: 1,
+        };
+        let mut bytes = encode_morph_metadata_payload(&payload);
+        bytes[23] = 99; // lr_schedule_kind at offset 2+5*4+1=23
+        let err = decode_optional_morph_metadata_section(&bytes).unwrap_err();
+        assert!(matches!(err, CoreError::Validation(_)));
+    }
+
+    #[test]
+    fn morph_metadata_artifact_round_trip() {
+        let metadata = sample_metadata();
+        let morph_payload = MorphMetadataPayload {
+            config: MorphConfig {
+                morph_rate: 0.15,
+                evolution_pressure: 0.25,
+                morph_warmup_iters: 7,
+                info_score_weight: 0.4,
+                depth_penalty_base: 0.85,
+                balance_penalty: true,
+                lr_schedule: LrSchedule::Constant,
+            },
+            final_iteration: 10,
+            final_total: 10,
+        };
+        let morph_bytes = encode_morph_metadata_payload(&morph_payload);
+        let sections = vec![
+            (ModelSectionKind::Trees, vec![1_u8, 2, 3, 4]),
+            (ModelSectionKind::PredictorLayout, vec![9_u8, 8, 7]),
+            (ModelSectionKind::MorphMetadata, morph_bytes),
+        ];
+        let bytes = serialize_model_artifact_v1(&metadata, &sections).expect("artifact encodes");
+        let parsed = deserialize_model_artifact_v1(&bytes).expect("artifact decodes");
+        assert_eq!(parsed.sections.len(), 3);
+        let decoded_morph =
+            decode_optional_morph_metadata_artifact_section(&parsed.sections).unwrap();
+        assert_eq!(decoded_morph, Some(morph_payload));
+    }
+
+    #[test]
+    fn morph_metadata_artifact_absent_for_non_morph() {
+        let metadata = sample_metadata();
+        let sections = vec![
+            (ModelSectionKind::Trees, vec![1_u8, 2, 3, 4]),
+            (ModelSectionKind::PredictorLayout, vec![9_u8, 8, 7]),
+        ];
+        let bytes = serialize_model_artifact_v1(&metadata, &sections).expect("artifact encodes");
+        let parsed = deserialize_model_artifact_v1(&bytes).expect("artifact decodes");
+        let decoded_morph =
+            decode_optional_morph_metadata_artifact_section(&parsed.sections).unwrap();
+        assert_eq!(decoded_morph, None);
     }
 }
