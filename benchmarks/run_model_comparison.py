@@ -655,6 +655,13 @@ def _make_alloygbm_morph_cosine(task_type, **kwargs):
     return cls(training_mode="morph", lr_schedule="warmup_cosine", lr_warmup_frac=0.1, **kwargs)
 
 
+def _make_alloygbm_linear(task_type, **kwargs):
+    from alloygbm import GBMClassifier, GBMRanker, GBMRegressor
+    cls = {"regression": GBMRegressor, "binary": GBMClassifier,
+           "multiclass": GBMClassifier, "ranking": GBMRanker}[task_type]
+    return cls(leaf_model="linear", **kwargs)
+
+
 def _model_factories(
     gbm_regressor_cls: type,
     catboost_regressor_cls: type | None,
@@ -693,6 +700,7 @@ def _model_factories(
 
     factories = {
         "alloygbm": lambda: gbm_regressor_cls(**alloy_params),
+        "alloygbm_linear": lambda: _make_alloygbm_linear("regression", **alloy_params),
         "alloygbm_morph": lambda: _make_alloygbm_morph("regression", **alloy_params),
         "alloygbm_morph_cosine": lambda: _make_alloygbm_morph_cosine("regression", **alloy_params),
         "lightgbm": lambda: LGBMRegressor(
@@ -786,6 +794,7 @@ def _classifier_factories(
     )
     factories: dict[str, Callable[[], object]] = {
         "alloygbm": lambda: gbm_classifier_cls(**alloy_params),
+        "alloygbm_linear": lambda: _make_alloygbm_linear("binary", **alloy_params),
         "alloygbm_morph": lambda: _make_alloygbm_morph("binary", **alloy_params),
         "alloygbm_morph_cosine": lambda: _make_alloygbm_morph_cosine("binary", **alloy_params),
         "lightgbm": lambda: LGBMClassifier(
@@ -847,6 +856,7 @@ def _multiclass_classifier_factories(
     )
     factories: dict[str, Callable[[], object]] = {
         "alloygbm": lambda: gbm_classifier_cls(**alloy_params),
+        "alloygbm_linear": lambda: _make_alloygbm_linear("multiclass", **alloy_params),
         "alloygbm_morph": lambda: _make_alloygbm_morph("multiclass", **alloy_params),
         "alloygbm_morph_cosine": lambda: _make_alloygbm_morph_cosine("multiclass", **alloy_params),
         "lightgbm": lambda: LGBMClassifier(
@@ -906,6 +916,7 @@ def _ranker_factories(
     )
     factories: dict[str, Callable[[], object]] = {
         "alloygbm": lambda: gbm_ranker_cls(**alloy_params),
+        "alloygbm_linear": lambda: _make_alloygbm_linear("ranking", **alloy_params),
         "alloygbm_morph": lambda: _make_alloygbm_morph("ranking", **alloy_params),
         "alloygbm_morph_cosine": lambda: _make_alloygbm_morph_cosine("ranking", **alloy_params),
         "lightgbm": lambda: _LGBMRankerAdapter(
@@ -1370,9 +1381,9 @@ def main(argv: list[str]) -> int:
         default=None,
         metavar="MODEL",
         help=(
-            "filter to only these model names (e.g. alloygbm alloygbm_morph lightgbm). "
+            "filter to only these model names (e.g. alloygbm alloygbm_linear lightgbm). "
             "Default: run all models. Valid names depend on task type but include: "
-            "alloygbm, alloygbm_morph, alloygbm_morph_cosine, lightgbm, xgboost, catboost"
+            "alloygbm, alloygbm_linear, alloygbm_morph, alloygbm_morph_cosine, lightgbm, xgboost, catboost"
         ),
     )
     parser.add_argument(
