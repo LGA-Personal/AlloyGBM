@@ -1186,6 +1186,9 @@ pub enum ModelSectionKind {
     MultiClassTrees,
     NativeCategoricalSplits,
     MorphMetadata,
+    /// Per-stump linear leaf coefficients (intercept + weights + regressor features).
+    /// Written alongside the Trees section for `leaf_model="linear"` models.
+    LinearLeafCoefficients,
     Unknown(u32),
 }
 
@@ -1200,6 +1203,7 @@ impl ModelSectionKind {
             Self::MultiClassTrees => 6,
             Self::NativeCategoricalSplits => 7,
             Self::MorphMetadata => 8,
+            Self::LinearLeafCoefficients => 9,
             Self::Unknown(value) => value,
         }
     }
@@ -1214,6 +1218,7 @@ impl ModelSectionKind {
             6 => Self::MultiClassTrees,
             7 => Self::NativeCategoricalSplits,
             8 => Self::MorphMetadata,
+            9 => Self::LinearLeafCoefficients,
             other => Self::Unknown(other),
         }
     }
@@ -1744,6 +1749,166 @@ pub fn decode_optional_morph_metadata_artifact_section(
         return Ok(None);
     };
     let payload = decode_optional_morph_metadata_section(&section.payload)?;
+    Ok(Some(payload))
+}
+
+// ── Linear-leaf coefficients section ─────────────────────────────────────────
+
+/// One stump's linear-leaf entries inside the `LinearLeafCoefficients` section.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearLeafEntry {
+    pub stump_idx: u32,
+    pub left_leaf: Option<LinearLeaf>,
+    pub right_leaf: Option<LinearLeaf>,
+}
+
+/// Payload for `ModelSectionKind::LinearLeafCoefficients`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearLeafCoefficientsPayload {
+    pub entries: Vec<LinearLeafEntry>,
+}
+
+/// Encode a `LinearLeafCoefficientsPayload` to bytes.
+///
+/// Layout:
+/// ```text
+/// [u32 version=1] [u32 entry_count]
+/// For each entry:
+///   [u32 stump_idx] [u8 flags]
+///   if flags & 1: [u8 d] [f32 intercept] [d × f32 weights] [d × u32 regressor_features]
+///   if flags & 2: same for right leaf
+/// ```
+pub fn encode_linear_leaf_coefficients_payload(
+    payload: &LinearLeafCoefficientsPayload,
+) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&1u32.to_le_bytes()); // version
+    buf.extend_from_slice(&(payload.entries.len() as u32).to_le_bytes());
+    for entry in &payload.entries {
+        buf.extend_from_slice(&entry.stump_idx.to_le_bytes());
+        let flags: u8 = (entry.left_leaf.is_some() as u8)
+            | ((entry.right_leaf.is_some() as u8) << 1);
+        buf.push(flags);
+
+        let write_leaf = |buf: &mut Vec<u8>, leaf: &LinearLeaf| {
+            let d = leaf.weights.len().min(MAX_PL_REGRESSORS);
+            buf.push(d as u8);
+            buf.extend_from_slice(&leaf.intercept.to_le_bytes());
+            for i in 0..d {
+                buf.extend_from_slice(&leaf.weights[i].to_le_bytes());
+            }
+            for i in 0..d {
+                let feat = *leaf.regressor_features.get(i).unwrap_or(&0);
+                buf.extend_from_slice(&feat.to_le_bytes());
+            }
+        };
+        if let Some(ref ll) = entry.left_leaf {
+            write_leaf(&mut buf, ll);
+        }
+        if let Some(ref rl) = entry.right_leaf {
+            write_leaf(&mut buf, rl);
+        }
+    }
+    buf
+}
+
+/// Decode a `LinearLeafCoefficientsPayload` from raw section bytes.
+pub fn decode_linear_leaf_coefficients_payload(
+    bytes: &[u8],
+) -> CoreResult<LinearLeafCoefficientsPayload> {
+    if bytes.len() < 8 {
+        return Err(CoreError::Validation(
+            "linear leaf coefficients section too short".to_string(),
+        ));
+    }
+    let version = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    if version != 1 {
+        return Err(CoreError::Validation(format!(
+            "unsupported linear leaf coefficients version: {version}"
+        )));
+    }
+    let entry_count = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+    let mut o = 8usize;
+    let mut entries = Vec::with_capacity(entry_count);
+
+    let read_u32 = |bytes: &[u8], o: &mut usize| -> CoreResult<u32> {
+        if *o + 4 > bytes.len() {
+            return Err(CoreError::Validation(
+                "unexpected end of linear leaf coefficients data".to_string(),
+            ));
+        }
+        let v = u32::from_le_bytes([bytes[*o], bytes[*o+1], bytes[*o+2], bytes[*o+3]]);
+        *o += 4;
+        Ok(v)
+    };
+    let read_f32 = |bytes: &[u8], o: &mut usize| -> CoreResult<f32> {
+        if *o + 4 > bytes.len() {
+            return Err(CoreError::Validation(
+                "unexpected end of linear leaf coefficients data".to_string(),
+            ));
+        }
+        let v = f32::from_le_bytes([bytes[*o], bytes[*o+1], bytes[*o+2], bytes[*o+3]]);
+        *o += 4;
+        Ok(v)
+    };
+
+    for _ in 0..entry_count {
+        let stump_idx = read_u32(bytes, &mut o)?;
+        if o >= bytes.len() {
+            return Err(CoreError::Validation(
+                "unexpected end of linear leaf coefficients data".to_string(),
+            ));
+        }
+        let flags = bytes[o];
+        o += 1;
+
+        let read_leaf = |bytes: &[u8], o: &mut usize| -> CoreResult<LinearLeaf> {
+            if *o >= bytes.len() {
+                return Err(CoreError::Validation(
+                    "unexpected end reading linear leaf".to_string(),
+                ));
+            }
+            let d = bytes[*o] as usize;
+            *o += 1;
+            let intercept = read_f32(bytes, o)?;
+            let mut weights = Vec::with_capacity(d);
+            for _ in 0..d {
+                weights.push(read_f32(bytes, o)?);
+            }
+            let mut regressor_features = Vec::with_capacity(d);
+            for _ in 0..d {
+                regressor_features.push(read_u32(bytes, o)?);
+            }
+            Ok(LinearLeaf { intercept, weights, regressor_features })
+        };
+
+        let left_leaf = if flags & 1 != 0 {
+            Some(read_leaf(bytes, &mut o)?)
+        } else {
+            None
+        };
+        let right_leaf = if flags & 2 != 0 {
+            Some(read_leaf(bytes, &mut o)?)
+        } else {
+            None
+        };
+        entries.push(LinearLeafEntry { stump_idx, left_leaf, right_leaf });
+    }
+
+    Ok(LinearLeafCoefficientsPayload { entries })
+}
+
+/// Decode an optional `LinearLeafCoefficients` section from parsed artifact sections.
+/// Returns `None` if no such section exists (constant-leaf artifact).
+pub fn decode_optional_linear_leaf_coefficients_section(
+    sections: &[ModelArtifactSection],
+) -> CoreResult<Option<LinearLeafCoefficientsPayload>> {
+    let Some(section) =
+        optional_single_section(sections, ModelSectionKind::LinearLeafCoefficients)?
+    else {
+        return Ok(None);
+    };
+    let payload = decode_linear_leaf_coefficients_payload(&section.payload)?;
     Ok(Some(payload))
 }
 

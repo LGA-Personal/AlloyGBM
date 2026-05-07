@@ -1,6 +1,7 @@
 use alloygbm_core::{
     CategoricalStatePayloadV1, CoreError, MODEL_FORMAT_V1, ModelArtifactSection, ModelMetadata,
     ModelSectionKind, decode_optional_categorical_state_section_v1,
+    decode_optional_linear_leaf_coefficients_section,
     decode_optional_native_categorical_splits_section, deserialize_model_artifact_v1,
     format_required_section_mode_error, required_section_compatibility_report,
 };
@@ -43,6 +44,28 @@ pub type PredictorResult<T> = Result<T, PredictorError>;
 /// `(num_classes, feature_count, baselines, per_class_stumps)`.
 type MultiClassTreesPayload = (usize, usize, Vec<f32>, Vec<Vec<PredictorStump>>);
 
+/// Compact linear leaf for fast predictor evaluation.
+/// Stores regressor feature indices as `usize` for zero-cost indexing.
+#[derive(Debug, Clone, PartialEq)]
+struct LinearLeafCompact {
+    intercept: f32,
+    weights: Vec<f32>,
+    feature_indices: Vec<usize>,
+}
+
+impl LinearLeafCompact {
+    #[inline]
+    fn eval(&self, features: &[f32]) -> f32 {
+        let mut v = self.intercept;
+        for (w, &fi) in self.weights.iter().zip(self.feature_indices.iter()) {
+            if fi < features.len() {
+                v += w * features[fi];
+            }
+        }
+        v
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct PredictorStump {
     node_id: u32,
@@ -53,6 +76,8 @@ struct PredictorStump {
     categorical_bitset: Option<Vec<u8>>,
     left_leaf_value: f32,
     right_leaf_value: f32,
+    left_linear: Option<LinearLeafCompact>,
+    right_linear: Option<LinearLeafCompact>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +94,26 @@ struct PredictorTreeNode {
     categorical_bitset: Option<Vec<u8>>,
     left_leaf_value: f32,
     right_leaf_value: f32,
+    left_linear: Option<LinearLeafCompact>,
+    right_linear: Option<LinearLeafCompact>,
+}
+
+impl PredictorTreeNode {
+    #[inline]
+    fn eval_left_leaf(&self, features: &[f32]) -> f32 {
+        match &self.left_linear {
+            Some(ll) => ll.eval(features),
+            None => self.left_leaf_value,
+        }
+    }
+
+    #[inline]
+    fn eval_right_leaf(&self, features: &[f32]) -> f32 {
+        match &self.right_linear {
+            Some(rl) => rl.eval(features),
+            None => self.right_leaf_value,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -176,6 +221,35 @@ impl Predictor {
                 )));
             }
 
+            // Decode optional linear leaf coefficients for multiclass.
+            // Global stump index = class_idx * stumps_per_class + stump_within_class.
+            if let Some(ll_payload) =
+                decode_optional_linear_leaf_coefficients_section(&parsed.sections)
+                    .map_err(PredictorError::from)?
+            {
+                let stumps_per_class = per_class_stumps.first().map_or(0, |v| v.len());
+                for entry in ll_payload.entries {
+                    let global_idx = entry.stump_idx as usize;
+                    if stumps_per_class == 0 {
+                        break;
+                    }
+                    let class_idx = global_idx / stumps_per_class;
+                    let stump_idx = global_idx % stumps_per_class;
+                    if class_idx < per_class_stumps.len()
+                        && stump_idx < per_class_stumps[class_idx].len()
+                    {
+                        if let Some(ll) = entry.left_leaf {
+                            per_class_stumps[class_idx][stump_idx].left_linear =
+                                Some(linear_leaf_to_compact(&ll));
+                        }
+                        if let Some(rl) = entry.right_leaf {
+                            per_class_stumps[class_idx][stump_idx].right_linear =
+                                Some(linear_leaf_to_compact(&rl));
+                        }
+                    }
+                }
+            }
+
             let mut class_trees = Vec::with_capacity(num_classes);
             for stumps in &per_class_stumps {
                 class_trees.push(build_predictor_trees(stumps)?);
@@ -214,6 +288,24 @@ impl Predictor {
                 let idx = stump_index as usize;
                 if idx < stumps.len() {
                     stumps[idx].categorical_bitset = Some(bitset);
+                }
+            }
+        }
+
+        // Decode optional linear leaf coefficients for single-output.
+        if let Some(ll_payload) =
+            decode_optional_linear_leaf_coefficients_section(&parsed.sections)
+                .map_err(PredictorError::from)?
+        {
+            for entry in ll_payload.entries {
+                let idx = entry.stump_idx as usize;
+                if idx < stumps.len() {
+                    if let Some(ll) = entry.left_leaf {
+                        stumps[idx].left_linear = Some(linear_leaf_to_compact(&ll));
+                    }
+                    if let Some(rl) = entry.right_leaf {
+                        stumps[idx].right_linear = Some(linear_leaf_to_compact(&rl));
+                    }
                 }
             }
         }
@@ -416,9 +508,9 @@ impl Predictor {
                 let feature_value = features[node.feature_index];
                 let went_left = predictor_went_left(node, feature_value, use_float);
                 prediction += if went_left {
-                    node.left_leaf_value
+                    node.eval_left_leaf(features)
                 } else {
-                    node.right_leaf_value
+                    node.eval_right_leaf(features)
                 };
                 local_node_id = if went_left {
                     local_node_id.saturating_mul(2).saturating_add(1)
@@ -542,9 +634,9 @@ impl Predictor {
                 let feature_value = features[node.feature_index];
                 let went_left = predictor_went_left(node, feature_value, use_float);
                 prediction += if went_left {
-                    node.left_leaf_value
+                    node.eval_left_leaf(features)
                 } else {
-                    node.right_leaf_value
+                    node.eval_right_leaf(features)
                 };
                 local_node_id = if went_left {
                     local_node_id * 2 + 1
@@ -702,9 +794,9 @@ impl Predictor {
                         let went_left =
                             predictor_went_left(node, feature_value, self.use_float_thresholds);
                         logits[class_k] += if went_left {
-                            node.left_leaf_value
+                            node.eval_left_leaf(features)
                         } else {
-                            node.right_leaf_value
+                            node.eval_right_leaf(features)
                         };
                         local_node_id = if went_left {
                             local_node_id * 2 + 1
@@ -787,9 +879,9 @@ impl Predictor {
                         let feature_value = features[node.feature_index];
                         let went_left = predictor_went_left(node, feature_value, use_float);
                         logits[class_k] += if went_left {
-                            node.left_leaf_value
+                            node.eval_left_leaf(features)
                         } else {
-                            node.right_leaf_value
+                            node.eval_right_leaf(features)
                         };
                         local_node_id = if went_left {
                             local_node_id * 2 + 1
@@ -1005,6 +1097,8 @@ fn decode_trained_model_payload(
             categorical_bitset: None, // populated from NativeCategoricalSplits section
             left_leaf_value,
             right_leaf_value,
+            left_linear: None,  // populated from LinearLeafCoefficients section
+            right_linear: None, // populated from LinearLeafCoefficients section
         });
     }
 
@@ -1015,6 +1109,14 @@ const TREE_NODE_STRIDE: u32 = 1 << 20;
 
 fn decode_tree_node_id(node_id: u32) -> (u32, u32) {
     (node_id / TREE_NODE_STRIDE, node_id % TREE_NODE_STRIDE)
+}
+
+fn linear_leaf_to_compact(ll: &alloygbm_core::LinearLeaf) -> LinearLeafCompact {
+    LinearLeafCompact {
+        intercept: ll.intercept,
+        weights: ll.weights.to_vec(),
+        feature_indices: ll.regressor_features.iter().map(|&f| f as usize).collect(),
+    }
 }
 
 fn build_predictor_trees(stumps: &[PredictorStump]) -> PredictorResult<Vec<PredictorTree>> {
@@ -1031,6 +1133,8 @@ fn build_predictor_trees(stumps: &[PredictorStump]) -> PredictorResult<Vec<Predi
                 categorical_bitset: stump.categorical_bitset.clone(),
                 left_leaf_value: stump.left_leaf_value,
                 right_leaf_value: stump.right_leaf_value,
+                left_linear: stump.left_linear.clone(),
+                right_linear: stump.right_linear.clone(),
             },
         ));
     }
@@ -1191,6 +1295,8 @@ fn decode_multiclass_trees_payload(bytes: &[u8]) -> PredictorResult<MultiClassTr
                 categorical_bitset: None,
                 left_leaf_value,
                 right_leaf_value,
+                left_linear: None,  // populated from LinearLeafCoefficients section
+                right_linear: None, // populated from LinearLeafCoefficients section
             });
             offset += STUMP_SIZE;
         }
@@ -1866,5 +1972,84 @@ mod tests {
         assert!((batch[1] - p2).abs() < 1e-6);
         assert!((batch[2] - p3).abs() < 1e-6);
         assert!((batch[3] - p4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn pl_tree_artifact_roundtrip_train_predict_via_predictor() {
+        // Train a 2-feature model with leaf_model=Linear, save, reload via Predictor,
+        // and verify predictions are bit-for-bit identical.
+        let n = 16_usize;
+        let fc = 2_usize;
+        let float_values: Vec<f32> = (0..n)
+            .flat_map(|i| {
+                let x0 = i as f32 / (n as f32 - 1.0);
+                let x1 = 1.0 - x0;
+                [x0, x1]
+            })
+            .collect();
+        let targets: Vec<f32> = (0..n)
+            .map(|i| float_values[i * fc] * 1.5 - float_values[i * fc + 1] * 0.8)
+            .collect();
+
+        let dataset = TrainingDataset {
+            matrix: DatasetMatrix::new(n, fc, float_values.clone()).expect("matrix ok"),
+            targets: targets.clone(),
+            sample_weights: None,
+            time_index: None,
+            group_id: None,
+        };
+
+        // Build a 4-bin binned matrix.
+        let bins: Vec<u8> = (0..n)
+            .flat_map(|i| {
+                let b0 = (i * 4 / n) as u8;
+                let b1 = 3_u8.saturating_sub(b0);
+                [b0, b1]
+            })
+            .collect();
+        let binned = BinnedMatrix::new(n, fc, 4, bins).expect("binned ok");
+
+        let mut params = TrainParams::default();
+        params.leaf_model = LeafModelKind::Linear;
+
+        let trainer = Trainer::new(params).expect("params valid");
+        let engine_model = trainer
+            .fit_iterations(&dataset, &binned, &CpuBackend, &SquaredErrorObjective, 4)
+            .expect("training succeeds");
+
+        // Save via engine, reload via Predictor.
+        let bytes = engine_model.to_artifact_bytes().expect("serializes");
+        let predictor = Predictor::from_artifact_bytes(&bytes).expect("Predictor loads");
+
+        // Verify LinearLeafCoefficients section is present.
+        let parsed = deserialize_model_artifact_v1(&bytes).expect("parses");
+        assert!(
+            parsed
+                .sections
+                .iter()
+                .any(|s| s.descriptor.kind == ModelSectionKind::LinearLeafCoefficients),
+            "LinearLeafCoefficients section missing"
+        );
+
+        // Predictions must match between engine model and Predictor.
+        let test_rows = [
+            [0.0f32, 1.0],
+            [0.333, 0.667],
+            [0.667, 0.333],
+            [1.0, 0.0],
+        ];
+        for row in &test_rows {
+            let engine_pred = engine_model
+                .predict_batch(&[row.to_vec()])
+                .expect("engine predicts")[0];
+            let pred_pred = predictor
+                .predict_row(row)
+                .expect("predictor predicts");
+            assert!(
+                (engine_pred - pred_pred).abs() < 1e-4,
+                "mismatch for row {:?}: engine={engine_pred} predictor={pred_pred}",
+                row
+            );
+        }
     }
 }

@@ -6,10 +6,13 @@ use alloygbm_core::{
     MODEL_FORMAT_V1, ModelArtifactSection, ModelMetadata, ModelSectionKind, MorphConfig,
     MorphMetadataPayload, MorphPrecomputed, NativeCategoricalSplitsPayload, NodeSlice, NodeStats,
     PartitionResult, SplitCandidate, TrainParams, TrainingDataset, TreeGrowth,
+    LinearLeafCoefficientsPayload, LinearLeafEntry,
     decode_optional_categorical_state_section_v1,
+    decode_optional_linear_leaf_coefficients_section,
     decode_optional_morph_metadata_artifact_section,
     decode_optional_native_categorical_splits_section, deserialize_model_artifact_v1,
-    encode_categorical_state_payload_v1, encode_morph_metadata_payload,
+    encode_categorical_state_payload_v1, encode_linear_leaf_coefficients_payload,
+    encode_morph_metadata_payload,
     encode_native_categorical_splits_payload, format_required_section_auto_mode_error,
     format_required_section_mode_error, required_section_compatibility_report,
     serialize_model_artifact_v1, validate_binned_matrix, validate_categorical_state_payload_v1,
@@ -2064,6 +2067,41 @@ impl TrainedModel {
                 encode_morph_metadata_payload(morph),
             ));
         }
+        // Linear leaf coefficients section (optional — only for pl-tree artifacts)
+        {
+            let linear_entries: Vec<LinearLeafEntry> = self
+                .stumps
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, stump)| {
+                    let left = match &stump.left_leaf_value {
+                        LeafValue::Linear(ll) => Some(ll.clone()),
+                        _ => None,
+                    };
+                    let right = match &stump.right_leaf_value {
+                        LeafValue::Linear(rl) => Some(rl.clone()),
+                        _ => None,
+                    };
+                    if left.is_some() || right.is_some() {
+                        Some(LinearLeafEntry {
+                            stump_idx: idx as u32,
+                            left_leaf: left,
+                            right_leaf: right,
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if !linear_entries.is_empty() {
+                sections.push((
+                    ModelSectionKind::LinearLeafCoefficients,
+                    encode_linear_leaf_coefficients_payload(&LinearLeafCoefficientsPayload {
+                        entries: linear_entries,
+                    }),
+                ));
+            }
+        }
 
         serialize_model_artifact_v1(&metadata, &sections).map_err(EngineError::from)
     }
@@ -2170,6 +2208,24 @@ impl TrainedModel {
         // Decode optional morph metadata section.
         model.morph_metadata = decode_optional_morph_metadata_artifact_section(&parsed.sections)
             .map_err(EngineError::from)?;
+
+        // Decode optional linear leaf coefficients section and backfill LeafValue::Linear on stumps.
+        if let Some(ll_payload) =
+            decode_optional_linear_leaf_coefficients_section(&parsed.sections)
+                .map_err(EngineError::from)?
+        {
+            for entry in ll_payload.entries {
+                let idx = entry.stump_idx as usize;
+                if idx < model.stumps.len() {
+                    if let Some(ll) = entry.left_leaf {
+                        model.stumps[idx].left_leaf_value = LeafValue::Linear(ll);
+                    }
+                    if let Some(rl) = entry.right_leaf {
+                        model.stumps[idx].right_leaf_value = LeafValue::Linear(rl);
+                    }
+                }
+            }
+        }
 
         model.feature_count = metadata_feature_count;
         model.objective = parsed.contract.metadata.objective.clone();
@@ -6429,6 +6485,50 @@ impl MultiClassTrainedModel {
                 encode_morph_metadata_payload(morph),
             ));
         }
+        // Linear leaf coefficients section (optional — only for pl-tree artifacts)
+        // Multi-class linear leaf serialization: global stump index = class_idx * stumps_per_class + stump_within_class
+        {
+            let stumps_per_class = self.class_stumps.first().map_or(0, |v| v.len());
+            let linear_entries: Vec<LinearLeafEntry> = self
+                .class_stumps
+                .iter()
+                .enumerate()
+                .flat_map(|(class_idx, class_stumps)| {
+                    class_stumps
+                        .iter()
+                        .enumerate()
+                        .filter_map(move |(stump_idx, stump)| {
+                            let left = match &stump.left_leaf_value {
+                                LeafValue::Linear(ll) => Some(ll.clone()),
+                                _ => None,
+                            };
+                            let right = match &stump.right_leaf_value {
+                                LeafValue::Linear(rl) => Some(rl.clone()),
+                                _ => None,
+                            };
+                            if left.is_some() || right.is_some() {
+                                let global_idx =
+                                    (class_idx * stumps_per_class + stump_idx) as u32;
+                                Some(LinearLeafEntry {
+                                    stump_idx: global_idx,
+                                    left_leaf: left,
+                                    right_leaf: right,
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                })
+                .collect();
+            if !linear_entries.is_empty() {
+                sections.push((
+                    ModelSectionKind::LinearLeafCoefficients,
+                    encode_linear_leaf_coefficients_payload(&LinearLeafCoefficientsPayload {
+                        entries: linear_entries,
+                    }),
+                ));
+            }
+        }
 
         serialize_model_artifact_v1(&metadata, &sections).map_err(EngineError::from)
     }
@@ -6541,6 +6641,31 @@ impl MultiClassTrainedModel {
 
         let morph_metadata = decode_optional_morph_metadata_artifact_section(&parsed.sections)
             .map_err(EngineError::from)?;
+
+        // Decode optional linear leaf coefficients and backfill class_stumps.
+        // Global stump index = class_idx * stumps_per_class + stump_within_class.
+        if let Some(ll_payload) =
+            decode_optional_linear_leaf_coefficients_section(&parsed.sections)
+                .map_err(EngineError::from)?
+        {
+            let stumps_per_class = class_stumps.first().map_or(0, |v| v.len());
+            for entry in ll_payload.entries {
+                let global_idx = entry.stump_idx as usize;
+                if stumps_per_class == 0 {
+                    break;
+                }
+                let class_idx = global_idx / stumps_per_class;
+                let stump_idx = global_idx % stumps_per_class;
+                if class_idx < class_stumps.len() && stump_idx < class_stumps[class_idx].len() {
+                    if let Some(ll) = entry.left_leaf {
+                        class_stumps[class_idx][stump_idx].left_leaf_value = LeafValue::Linear(ll);
+                    }
+                    if let Some(rl) = entry.right_leaf {
+                        class_stumps[class_idx][stump_idx].right_leaf_value = LeafValue::Linear(rl);
+                    }
+                }
+            }
+        }
 
         Ok(Self {
             num_classes,
