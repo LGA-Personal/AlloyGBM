@@ -1209,7 +1209,7 @@ mod tests {
         Device, LeafModelKind, ModelSectionKind, TrainParams, TrainingDataset, TreeGrowth,
         serialize_model_artifact_v1,
     };
-    use alloygbm_core::{NodeStats, SplitCandidate};
+    use alloygbm_core::{LeafValue, NodeStats, SplitCandidate};
     use alloygbm_engine::{SquaredErrorObjective, TrainedModel, TrainedStump, Trainer};
 
     fn predictor_stub() -> Predictor {
@@ -1718,8 +1718,8 @@ mod tests {
                         row_count: 10,
                     },
                 },
-                left_leaf_value: -0.1,
-                right_leaf_value: 0.1,
+                left_leaf_value: LeafValue::Scalar(-0.1),
+                right_leaf_value: LeafValue::Scalar(0.1),
             }],
             categorical_state: None,
             node_debug_stats: None,
@@ -1799,8 +1799,8 @@ mod tests {
                             row_count: 10,
                         },
                     },
-                    left_leaf_value: -0.2,
-                    right_leaf_value: 0.2,
+                    left_leaf_value: LeafValue::Scalar(-0.2),
+                    right_leaf_value: LeafValue::Scalar(0.2),
                 },
                 // Continuous split on feature 1: threshold_bin 3 (i.e. <=3 left, >3 right)
                 // node_id in tree 1 (tree_id=1, local=0 → 1 * 1048576 + 0)
@@ -1824,8 +1824,8 @@ mod tests {
                             row_count: 5,
                         },
                     },
-                    left_leaf_value: 0.1,
-                    right_leaf_value: -0.1,
+                    left_leaf_value: LeafValue::Scalar(0.1),
+                    right_leaf_value: LeafValue::Scalar(-0.1),
                 },
             ],
             categorical_state: None,

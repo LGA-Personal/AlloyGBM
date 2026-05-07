@@ -1,11 +1,12 @@
 use alloygbm_categorical::{TargetEncoderConfig, fit_transform_target_encoder};
 use alloygbm_core::{
     BinnedMatrix, CategoricalStatePayloadV1, CoreError, DatasetMatrix, Device, FeatureTile,
-    GradientEmaStats, GradientPair, HistogramBundle, LinearHistogramBundle,
-    LrSchedule, MISSING_BIN_U8, MODEL_FORMAT_V1, ModelArtifactSection, ModelMetadata,
-    ModelSectionKind, MorphConfig, MorphMetadataPayload, MorphPrecomputed,
-    NativeCategoricalSplitsPayload, NodeSlice, NodeStats, PartitionResult, SplitCandidate,
-    TrainParams, TrainingDataset, TreeGrowth, decode_optional_categorical_state_section_v1,
+    GradientEmaStats, GradientPair, HistogramBundle, LeafModelKind, LeafValue, LinearHistogramBundle,
+    LinearLeaf, LrSchedule, MAX_PL_REGRESSORS, MISSING_BIN_U8,
+    MODEL_FORMAT_V1, ModelArtifactSection, ModelMetadata, ModelSectionKind, MorphConfig,
+    MorphMetadataPayload, MorphPrecomputed, NativeCategoricalSplitsPayload, NodeSlice, NodeStats,
+    PartitionResult, SplitCandidate, TrainParams, TrainingDataset, TreeGrowth,
+    decode_optional_categorical_state_section_v1,
     decode_optional_morph_metadata_artifact_section,
     decode_optional_native_categorical_splits_section, deserialize_model_artifact_v1,
     encode_categorical_state_payload_v1, encode_morph_metadata_payload,
@@ -377,6 +378,27 @@ pub trait BackendOps {
         Err(EngineError::NotImplemented(
             "best_split_linear not implemented for this backend".to_string(),
         ))
+    }
+
+    /// Given a `LinearHistogramBundle` for a node and the winning split parameters,
+    /// solve for the optimal `LinearLeaf` for each child.
+    ///
+    /// Returns `Some((left_leaf, right_leaf))` on success, or `None` if the feature
+    /// is not found in the bundle or the matrix is singular (causing a fallback to
+    /// scalar leaves).
+    ///
+    /// Default implementation returns `None`; backends override this.
+    fn compute_linear_leaf_pair(
+        &self,
+        _linear_histograms: &LinearHistogramBundle,
+        _feature_index: u32,
+        _threshold_bin: usize,
+        _default_left: bool,
+        _missing_bin_index: usize,
+        _learning_rate: f32,
+        _l2_lambda: f32,
+    ) -> Option<(LinearLeaf, LinearLeaf)> {
+        None
     }
 }
 
@@ -1611,8 +1633,8 @@ pub struct ValidationDatasetRef<'a> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrainedStump {
     pub split: SplitCandidate,
-    pub left_leaf_value: f32,
-    pub right_leaf_value: f32,
+    pub left_leaf_value: LeafValue,
+    pub right_leaf_value: LeafValue,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1971,9 +1993,9 @@ impl TrainedModel {
             let feature_index = stump.split.feature_index as usize;
             let feature_value = features[feature_index];
             prediction += if split_went_left(&stump.split, feature_value) {
-                stump.left_leaf_value
+                stump.left_leaf_value.as_scalar()
             } else {
-                stump.right_leaf_value
+                stump.right_leaf_value.as_scalar()
             };
         }
 
@@ -2915,6 +2937,7 @@ impl Trainer {
                         lr: ms.lr_for_iter(effective_round),
                     });
 
+                let raw_fv = &dataset.matrix.values;
                 let (round_stumps, _round_stop) = if self.params.tree_growth == TreeGrowth::Leaf {
                     build_tree_leaf_wise(
                         backend,
@@ -2930,6 +2953,7 @@ impl Trainer {
                         &self.params.feature_weights,
                         &self.categorical_features,
                         morph_tree_ctx,
+                        raw_fv,
                     )?
                 } else {
                     build_tree_level_wise(
@@ -2946,6 +2970,7 @@ impl Trainer {
                         &self.params.feature_weights,
                         &self.categorical_features,
                         morph_tree_ctx,
+                        raw_fv,
                     )?
                 };
 
@@ -3430,6 +3455,7 @@ impl Trainer {
                     lr: ms.lr_for_iter(effective_round_index),
                 });
 
+            let raw_fv = &dataset.matrix.values;
             let (candidate_round_stumps, round_rejection_reason) =
                 if self.params.tree_growth == TreeGrowth::Leaf {
                     build_tree_leaf_wise(
@@ -3446,6 +3472,7 @@ impl Trainer {
                         &self.params.feature_weights,
                         &execution.categorical_features,
                         morph_tree_ctx,
+                        raw_fv,
                     )?
                 } else {
                     build_tree_level_wise(
@@ -3462,6 +3489,7 @@ impl Trainer {
                         &self.params.feature_weights,
                         &execution.categorical_features,
                         morph_tree_ctx,
+                        raw_fv,
                     )?
                 };
 
@@ -4166,6 +4194,7 @@ fn build_tree_level_wise<B: BackendOps>(
     feature_weights: &[f32],
     categorical_features: &[CategoricalFeatureInfo],
     morph: Option<MorphTreeContext<'_>>,
+    raw_feature_values: &[f32],
 ) -> EngineResult<(Vec<TrainedStump>, IterationStopReason)> {
     let mut candidate_round_stumps = Vec::new();
     let mut round_rejection_reason = IterationStopReason::NoSplitCandidate;
@@ -4237,7 +4266,7 @@ fn build_tree_level_wise<B: BackendOps>(
 
             // Morph leaf modifications: depth penalty + per-round shrinkage.
             // Children land at depth `depth + 1` in the tree.
-            if let Some(m) = morph.as_ref() {
+            let morph_scale = if let Some(m) = morph.as_ref() {
                 let child_depth = (depth + 1) as f32;
                 let depth_penalty = m.state.config.depth_penalty_base.powf(child_depth / 3.0);
                 let iter_shrinkage = 1.0
@@ -4246,7 +4275,10 @@ fn build_tree_level_wise<B: BackendOps>(
                 let scale = depth_penalty * iter_shrinkage;
                 raw_left_leaf_value *= scale;
                 raw_right_leaf_value *= scale;
-            }
+                scale
+            } else {
+                1.0
+            };
 
             let left_leaf_absolute = raw_left_leaf_value
                 .clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value);
@@ -4286,12 +4318,81 @@ fn build_tree_level_wise<B: BackendOps>(
                 }
             }
 
-            apply_partition_leaf_updates(
-                candidate_predictions,
-                &partition,
-                left_leaf_value,
-                right_leaf_value,
-            )?;
+            // ── Linear leaf path ───────────────────────────────────────────────
+            // If leaf_model == Linear, build a LinearHistogramBundle for this node
+            // and solve closed-form ridge leaves. Falls back to scalar on any error.
+            let linear_leaf_pair: Option<(LinearLeaf, LinearLeaf)> =
+                if params.leaf_model == LeafModelKind::Linear
+                    && !raw_feature_values.is_empty()
+                    && !split.is_categorical
+                {
+                    let d = binned_matrix.feature_count.min(MAX_PL_REGRESSORS);
+                    let regressor_features: Vec<u32> = (0..d as u32).collect();
+                    backend
+                        .build_linear_histograms(
+                            binned_matrix,
+                            gradients,
+                            &node,
+                            feature_tiles,
+                            &regressor_features,
+                            raw_feature_values,
+                            binned_matrix.row_count,
+                            binned_matrix.feature_count,
+                        )
+                        .ok()
+                        .and_then(|lin_hist| {
+                            backend.compute_linear_leaf_pair(
+                                &lin_hist,
+                                split.feature_index,
+                                split.threshold_bin as usize,
+                                split.default_left,
+                                split_options.missing_bin_index,
+                                lr,
+                                split_options.l2_lambda,
+                            )
+                        })
+                        .map(|(mut ll, mut rl)| {
+                            // Apply morph scaling to weights and intercept.
+                            ll.intercept *= morph_scale;
+                            rl.intercept *= morph_scale;
+                            for w in &mut ll.weights { *w *= morph_scale; }
+                            for w in &mut rl.weights { *w *= morph_scale; }
+                            // Clamp intercept and convert to parent-relative delta.
+                            ll.intercept = ll.intercept
+                                .clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value)
+                                - parent_leaf_value;
+                            rl.intercept = rl.intercept
+                                .clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value)
+                                - parent_leaf_value;
+                            (ll, rl)
+                        })
+                } else {
+                    None
+                };
+
+            // Apply candidate_predictions update.
+            if let Some((ref ll, ref rl)) = linear_leaf_pair {
+                let fc = binned_matrix.feature_count;
+                for &row in &partition.left_row_indices {
+                    let r = row as usize;
+                    if r < candidate_predictions.len() {
+                        candidate_predictions[r] += ll.eval(raw_feature_values, r * fc);
+                    }
+                }
+                for &row in &partition.right_row_indices {
+                    let r = row as usize;
+                    if r < candidate_predictions.len() {
+                        candidate_predictions[r] += rl.eval(raw_feature_values, r * fc);
+                    }
+                }
+            } else {
+                apply_partition_leaf_updates(
+                    candidate_predictions,
+                    &partition,
+                    left_leaf_value,
+                    right_leaf_value,
+                )?;
+            }
 
             split.left_stats = left_stats;
             split.right_stats = right_stats;
@@ -4353,10 +4454,16 @@ fn build_tree_level_wise<B: BackendOps>(
                 }
             }
 
+            let (final_left_leaf, final_right_leaf) =
+                if let Some((ll, rl)) = linear_leaf_pair {
+                    (LeafValue::Linear(ll), LeafValue::Linear(rl))
+                } else {
+                    (LeafValue::Scalar(left_leaf_value), LeafValue::Scalar(right_leaf_value))
+                };
             candidate_round_stumps.push(TrainedStump {
                 split,
-                left_leaf_value,
-                right_leaf_value,
+                left_leaf_value: final_left_leaf,
+                right_leaf_value: final_right_leaf,
             });
         }
         active_nodes = next_nodes;
@@ -4429,6 +4536,7 @@ fn build_tree_leaf_wise<B: BackendOps>(
     feature_weights: &[f32],
     categorical_features: &[CategoricalFeatureInfo],
     morph: Option<MorphTreeContext<'_>>,
+    raw_feature_values: &[f32],
 ) -> EngineResult<(Vec<TrainedStump>, IterationStopReason)> {
     let max_leaves = controls.max_leaves.unwrap_or(usize::MAX);
     let max_depth = params.max_depth as usize;
@@ -4524,7 +4632,7 @@ fn build_tree_leaf_wise<B: BackendOps>(
 
         // Morph leaf modifications: depth penalty + per-round shrinkage.
         // Children of `pending` land at `pending.depth + 1` in the tree.
-        if let Some(m) = morph.as_ref() {
+        let morph_scale = if let Some(m) = morph.as_ref() {
             let child_depth = (pending.depth + 1) as f32;
             let depth_penalty = m.state.config.depth_penalty_base.powf(child_depth / 3.0);
             let iter_shrinkage = 1.0
@@ -4533,7 +4641,10 @@ fn build_tree_leaf_wise<B: BackendOps>(
             let scale = depth_penalty * iter_shrinkage;
             raw_left_leaf_value *= scale;
             raw_right_leaf_value *= scale;
-        }
+            scale
+        } else {
+            1.0
+        };
 
         let left_leaf_absolute =
             raw_left_leaf_value.clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value);
@@ -4565,22 +4676,92 @@ fn build_tree_leaf_wise<B: BackendOps>(
             }
         }
 
+        // ── Linear leaf path ───────────────────────────────────────────────────
+        let linear_leaf_pair: Option<(LinearLeaf, LinearLeaf)> =
+            if params.leaf_model == LeafModelKind::Linear
+                && !raw_feature_values.is_empty()
+                && !split.is_categorical
+            {
+                let d = binned_matrix.feature_count.min(MAX_PL_REGRESSORS);
+                let regressor_features: Vec<u32> = (0..d as u32).collect();
+                backend
+                    .build_linear_histograms(
+                        binned_matrix,
+                        gradients,
+                        &node,
+                        feature_tiles,
+                        &regressor_features,
+                        raw_feature_values,
+                        binned_matrix.row_count,
+                        binned_matrix.feature_count,
+                    )
+                    .ok()
+                    .and_then(|lin_hist| {
+                        backend.compute_linear_leaf_pair(
+                            &lin_hist,
+                            split.feature_index,
+                            split.threshold_bin as usize,
+                            split.default_left,
+                            split_options.missing_bin_index,
+                            lr,
+                            split_options.l2_lambda,
+                        )
+                    })
+                    .map(|(mut ll, mut rl)| {
+                        ll.intercept *= morph_scale;
+                        rl.intercept *= morph_scale;
+                        for w in &mut ll.weights { *w *= morph_scale; }
+                        for w in &mut rl.weights { *w *= morph_scale; }
+                        ll.intercept = ll.intercept
+                            .clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value)
+                            - pending.parent_leaf_value;
+                        rl.intercept = rl.intercept
+                            .clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value)
+                            - pending.parent_leaf_value;
+                        (ll, rl)
+                    })
+            } else {
+                None
+            };
+
         // Commit the split: update predictions and record stump.
-        apply_partition_leaf_updates(
-            candidate_predictions,
-            &partition,
-            left_leaf_value,
-            right_leaf_value,
-        )?;
+        if let Some((ref ll, ref rl)) = linear_leaf_pair {
+            let fc = binned_matrix.feature_count;
+            for &row in &partition.left_row_indices {
+                let r = row as usize;
+                if r < candidate_predictions.len() {
+                    candidate_predictions[r] += ll.eval(raw_feature_values, r * fc);
+                }
+            }
+            for &row in &partition.right_row_indices {
+                let r = row as usize;
+                if r < candidate_predictions.len() {
+                    candidate_predictions[r] += rl.eval(raw_feature_values, r * fc);
+                }
+            }
+        } else {
+            apply_partition_leaf_updates(
+                candidate_predictions,
+                &partition,
+                left_leaf_value,
+                right_leaf_value,
+            )?;
+        }
 
         let mut committed_split = split;
         committed_split.left_stats = left_stats;
         committed_split.right_stats = right_stats;
 
+        let (final_left_leaf, final_right_leaf) =
+            if let Some((ll, rl)) = linear_leaf_pair {
+                (LeafValue::Linear(ll), LeafValue::Linear(rl))
+            } else {
+                (LeafValue::Scalar(left_leaf_value), LeafValue::Scalar(right_leaf_value))
+            };
         stumps.push(TrainedStump {
             split: committed_split,
-            left_leaf_value,
-            right_leaf_value,
+            left_leaf_value: final_left_leaf,
+            right_leaf_value: final_right_leaf,
         });
         leaves_used += 1;
 
@@ -5094,10 +5275,10 @@ fn apply_round_stumps_tree_walk(
             let feature_index = stump.split.feature_index as usize;
             let bin = binned_matrix.row_bin(row_base + feature_index);
             if bin <= stump.split.threshold_bin {
-                *prediction += stump.left_leaf_value;
+                *prediction += stump.left_leaf_value.as_scalar();
                 local_id = local_id * 2 + 1; // left child
             } else {
-                *prediction += stump.right_leaf_value;
+                *prediction += stump.right_leaf_value.as_scalar();
                 local_id = local_id * 2 + 2; // right child
             }
         }
@@ -5320,13 +5501,13 @@ fn refine_tree_stumps(
         let left_absolute = refined_absolute_outputs
             .get(&left_local_node_id)
             .copied()
-            .unwrap_or(parent_absolute + stump.left_leaf_value);
+            .unwrap_or(parent_absolute + stump.left_leaf_value.as_scalar());
         let right_absolute = refined_absolute_outputs
             .get(&right_local_node_id)
             .copied()
-            .unwrap_or(parent_absolute + stump.right_leaf_value);
-        stump.left_leaf_value = left_absolute - parent_absolute;
-        stump.right_leaf_value = right_absolute - parent_absolute;
+            .unwrap_or(parent_absolute + stump.right_leaf_value.as_scalar());
+        stump.left_leaf_value = LeafValue::Scalar(left_absolute - parent_absolute);
+        stump.right_leaf_value = LeafValue::Scalar(right_absolute - parent_absolute);
     }
 
     Ok(refined_stumps)
@@ -5343,10 +5524,10 @@ fn populate_child_absolute_outputs(
     let parent_absolute = absolute_outputs.get(&local_node_id).copied().unwrap_or(0.0);
     let left_local_node_id = left_child_node_id(local_node_id)?;
     let right_local_node_id = right_child_node_id(local_node_id)?;
-    absolute_outputs.insert(left_local_node_id, parent_absolute + stump.left_leaf_value);
+    absolute_outputs.insert(left_local_node_id, parent_absolute + stump.left_leaf_value.as_scalar());
     absolute_outputs.insert(
         right_local_node_id,
-        parent_absolute + stump.right_leaf_value,
+        parent_absolute + stump.right_leaf_value.as_scalar(),
     );
     populate_child_absolute_outputs(left_local_node_id, stumps_by_local, absolute_outputs)?;
     populate_child_absolute_outputs(right_local_node_id, stumps_by_local, absolute_outputs)?;
@@ -5848,8 +6029,8 @@ fn encode_trained_model_payload(model: &TrainedModel) -> EngineResult<Vec<u8>> {
         }
         bytes.extend_from_slice(&stump_flags.to_le_bytes());
         bytes.extend_from_slice(&stump.split.gain.to_le_bytes());
-        bytes.extend_from_slice(&stump.left_leaf_value.to_le_bytes());
-        bytes.extend_from_slice(&stump.right_leaf_value.to_le_bytes());
+        bytes.extend_from_slice(&stump.left_leaf_value.as_scalar().to_le_bytes());
+        bytes.extend_from_slice(&stump.right_leaf_value.as_scalar().to_le_bytes());
         bytes.extend_from_slice(&stump.split.left_stats.row_count.to_le_bytes());
         bytes.extend_from_slice(&stump.split.right_stats.row_count.to_le_bytes());
     }
@@ -5924,8 +6105,8 @@ fn decode_trained_model_payload(bytes: &[u8]) -> EngineResult<TrainedModel> {
                     row_count: right_count,
                 },
             },
-            left_leaf_value,
-            right_leaf_value,
+            left_leaf_value: LeafValue::Scalar(left_leaf_value),
+            right_leaf_value: LeafValue::Scalar(right_leaf_value),
         });
     }
 
@@ -6209,8 +6390,8 @@ impl MultiClassTrainedModel {
                 }
                 mc_payload.extend_from_slice(&flags.to_le_bytes());
                 mc_payload.extend_from_slice(&stump.split.gain.to_le_bytes());
-                mc_payload.extend_from_slice(&stump.left_leaf_value.to_le_bytes());
-                mc_payload.extend_from_slice(&stump.right_leaf_value.to_le_bytes());
+                mc_payload.extend_from_slice(&stump.left_leaf_value.as_scalar().to_le_bytes());
+                mc_payload.extend_from_slice(&stump.right_leaf_value.as_scalar().to_le_bytes());
                 mc_payload.extend_from_slice(&stump.split.left_stats.row_count.to_le_bytes());
                 mc_payload.extend_from_slice(&stump.split.right_stats.row_count.to_le_bytes());
             }
@@ -6347,8 +6528,8 @@ impl MultiClassTrainedModel {
                             row_count: right_count,
                         },
                     },
-                    left_leaf_value,
-                    right_leaf_value,
+                    left_leaf_value: LeafValue::Scalar(left_leaf_value),
+                    right_leaf_value: LeafValue::Scalar(right_leaf_value),
                 });
                 offset += STUMP_SIZE;
             }
@@ -6738,8 +6919,8 @@ mod tests {
                     row_count: 2,
                 },
             },
-            left_leaf_value: 0.0,
-            right_leaf_value: 0.0,
+            left_leaf_value: LeafValue::Scalar(0.0),
+            right_leaf_value: LeafValue::Scalar(0.0),
         }];
         let matrix = sample_binned_matrix();
         let targets = sample_dataset().targets;
@@ -6756,8 +6937,8 @@ mod tests {
         let after_loss = squared_error_loss(&after, &targets, None).expect("loss should compute");
 
         assert!(after_loss < before_loss);
-        assert!(stumps[0].left_leaf_value > 0.0);
-        assert!(stumps[0].right_leaf_value < 0.0);
+        assert!(stumps[0].left_leaf_value.as_scalar() > 0.0);
+        assert!(stumps[0].right_leaf_value.as_scalar() < 0.0);
     }
 
     #[test]
@@ -7266,8 +7447,8 @@ mod tests {
 
         assert!(!model.stumps.is_empty());
         for stump in &model.stumps {
-            assert!(stump.left_leaf_value.abs() <= 0.1);
-            assert!(stump.right_leaf_value.abs() <= 0.1);
+            assert!(stump.left_leaf_value.as_scalar().abs() <= 0.1);
+            assert!(stump.right_leaf_value.as_scalar().abs() <= 0.1);
         }
     }
 
@@ -7373,8 +7554,8 @@ mod tests {
                             row_count: 1,
                         },
                     },
-                    left_leaf_value: 0.0,
-                    right_leaf_value: 1.0,
+                    left_leaf_value: LeafValue::Scalar(0.0),
+                    right_leaf_value: LeafValue::Scalar(1.0),
                 },
                 TrainedStump {
                     split: SplitCandidate {
@@ -7396,8 +7577,8 @@ mod tests {
                             row_count: 1,
                         },
                     },
-                    left_leaf_value: 10.0,
-                    right_leaf_value: 20.0,
+                    left_leaf_value: LeafValue::Scalar(10.0),
+                    right_leaf_value: LeafValue::Scalar(20.0),
                 },
             ],
             categorical_state: None,
@@ -8225,8 +8406,8 @@ mod tests {
                             row_count: 3,
                         },
                     },
-                    left_leaf_value: -0.1,
-                    right_leaf_value: 0.1,
+                    left_leaf_value: LeafValue::Scalar(-0.1),
+                    right_leaf_value: LeafValue::Scalar(0.1),
                 }],
                 vec![TrainedStump {
                     split: SplitCandidate {
@@ -8248,8 +8429,8 @@ mod tests {
                             row_count: 4,
                         },
                     },
-                    left_leaf_value: 0.2,
-                    right_leaf_value: -0.05,
+                    left_leaf_value: LeafValue::Scalar(0.2),
+                    right_leaf_value: LeafValue::Scalar(-0.05),
                 }],
                 vec![], // class 2 has no stumps
             ],
@@ -8303,8 +8484,8 @@ mod tests {
                                 row_count: 2,
                             },
                         },
-                        left_leaf_value: -0.1,
-                        right_leaf_value: 0.1,
+                        left_leaf_value: LeafValue::Scalar(-0.1),
+                        right_leaf_value: LeafValue::Scalar(0.1),
                     },
                     TrainedStump {
                         split: SplitCandidate {
@@ -8326,8 +8507,8 @@ mod tests {
                                 row_count: 2,
                             },
                         },
-                        left_leaf_value: -0.05,
-                        right_leaf_value: 0.05,
+                        left_leaf_value: LeafValue::Scalar(-0.05),
+                        right_leaf_value: LeafValue::Scalar(0.05),
                     },
                 ],
                 // Class 1: same structure
@@ -8351,8 +8532,8 @@ mod tests {
                             row_count: 2,
                         },
                     },
-                    left_leaf_value: 0.1,
-                    right_leaf_value: -0.1,
+                    left_leaf_value: LeafValue::Scalar(0.1),
+                    right_leaf_value: LeafValue::Scalar(-0.1),
                 }],
             ],
             categorical_state: None,
@@ -8601,8 +8782,8 @@ mod tests {
                             row_count: 10,
                         },
                     },
-                    left_leaf_value: -0.1,
-                    right_leaf_value: 0.1,
+                    left_leaf_value: LeafValue::Scalar(-0.1),
+                    right_leaf_value: LeafValue::Scalar(0.1),
                 },
                 TrainedStump {
                     split: SplitCandidate {
@@ -8624,8 +8805,8 @@ mod tests {
                             row_count: 5,
                         },
                     },
-                    left_leaf_value: 0.05,
-                    right_leaf_value: -0.05,
+                    left_leaf_value: LeafValue::Scalar(0.05),
+                    right_leaf_value: LeafValue::Scalar(-0.05),
                 },
             ],
             categorical_state: None,
@@ -8653,8 +8834,8 @@ mod tests {
         let stump0 = &restored.stumps[0];
         assert!(stump0.split.is_categorical);
         assert_eq!(stump0.split.categorical_bitset, Some(vec![0b0000_0011]));
-        assert_eq!(stump0.left_leaf_value, -0.1);
-        assert_eq!(stump0.right_leaf_value, 0.1);
+        assert_eq!(stump0.left_leaf_value.as_scalar(), -0.1);
+        assert_eq!(stump0.right_leaf_value.as_scalar(), 0.1);
 
         // Verify continuous stump
         let stump1 = &restored.stumps[1];
@@ -8689,8 +8870,8 @@ mod tests {
                         row_count: 3,
                     },
                 },
-                left_leaf_value: -0.2,
-                right_leaf_value: 0.2,
+                left_leaf_value: LeafValue::Scalar(-0.2),
+                right_leaf_value: LeafValue::Scalar(0.2),
             }],
             categorical_state: None,
             node_debug_stats: None,
@@ -8842,16 +9023,16 @@ mod tests {
             .enumerate()
         {
             assert!(
-                (s_plain.left_leaf_value - s_morph.left_leaf_value).abs() < 1e-5,
+                (s_plain.left_leaf_value.as_scalar() - s_morph.left_leaf_value.as_scalar()).abs() < 1e-5,
                 "stump {i} left_leaf_value mismatch: non-morph={} identity-morph={}",
-                s_plain.left_leaf_value,
-                s_morph.left_leaf_value,
+                s_plain.left_leaf_value.as_scalar(),
+                s_morph.left_leaf_value.as_scalar(),
             );
             assert!(
-                (s_plain.right_leaf_value - s_morph.right_leaf_value).abs() < 1e-5,
+                (s_plain.right_leaf_value.as_scalar() - s_morph.right_leaf_value.as_scalar()).abs() < 1e-5,
                 "stump {i} right_leaf_value mismatch: non-morph={} identity-morph={}",
-                s_plain.right_leaf_value,
-                s_morph.right_leaf_value,
+                s_plain.right_leaf_value.as_scalar(),
+                s_morph.right_leaf_value.as_scalar(),
             );
         }
     }

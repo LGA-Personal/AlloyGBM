@@ -1,7 +1,7 @@
 use alloygbm_core::{
     BinnedMatrix, Device, FeatureHistogram, FeatureTile, GradientPair, HistogramBin,
-    HistogramBundle, LinearFeatureHistogram, LinearHistogramBundle, NodeSlice, NodeStats,
-    PartitionResult, SplitCandidate,
+    HistogramBundle, LinearFeatureHistogram, LinearHistogramBundle, LinearLeaf, NodeSlice,
+    NodeStats, PartitionResult, SplitCandidate,
 };
 use alloygbm_engine::{
     BackendOps, CategoricalFeatureInfo, EngineError, EngineResult, LinearContext, MorphContext,
@@ -1731,6 +1731,45 @@ impl BackendOps for CpuBackend {
             };
 
         Ok(result)
+    }
+
+    fn compute_linear_leaf_pair(
+        &self,
+        linear_histograms: &LinearHistogramBundle,
+        feature_index: u32,
+        threshold_bin: usize,
+        default_left: bool,
+        missing_bin_index: usize,
+        learning_rate: f32,
+        l2_lambda: f32,
+    ) -> Option<(LinearLeaf, LinearLeaf)> {
+        let d = linear_histograms.num_regressors;
+        if d == 0 {
+            return None;
+        }
+        let lin_fh = linear_histograms
+            .feature_histograms
+            .iter()
+            .find(|fh| fh.feature_index == feature_index)?;
+
+        let (l_xtg, l_xthx, l_gs, l_hs, r_xtg, r_xthx, r_gs, r_hs) =
+            pl::leaf_linear_stats_for_split(
+                lin_fh,
+                threshold_bin,
+                missing_bin_index,
+                default_left,
+                d,
+            );
+
+        let regressor_features = &linear_histograms.regressor_features;
+        let left_leaf = pl::solve_pl_leaf(
+            &l_xtg, &l_xthx, l_gs, l_hs, learning_rate, l2_lambda, regressor_features,
+        );
+        let right_leaf = pl::solve_pl_leaf(
+            &r_xtg, &r_xthx, r_gs, r_hs, learning_rate, l2_lambda, regressor_features,
+        );
+
+        Some((left_leaf, right_leaf))
     }
 }
 

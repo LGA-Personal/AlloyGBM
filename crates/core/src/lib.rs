@@ -1022,6 +1022,70 @@ pub fn subtract_linear_histogram_bundle(
     }
 }
 
+/// A linear leaf model: `f_s(x) = intercept + Σ_j weights[j] * x[regressor_features[j]]`.
+///
+/// `intercept` holds the standard Newton-Raphson scalar (so constant-only behaviour
+/// degrades gracefully when `weights` is all-zero).  `weights` contains the `d` linear
+/// correction coefficients solved via `α* = -(XᵀHX + λI)⁻¹ Xᵀg`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearLeaf {
+    /// Constant offset (standard scalar leaf value, learning-rate scaled).
+    pub intercept: f32,
+    /// Linear correction weights `α_j` for each regressor (length `d`).
+    pub weights: Vec<f32>,
+    /// Feature indices of the regressors (length `d`, matches `weights`).
+    pub regressor_features: Vec<u32>,
+}
+
+impl LinearLeaf {
+    /// Evaluate the leaf model for one row of raw (float) feature data.
+    ///
+    /// `raw_features` is the full flat row-major feature matrix; `row_offset` is
+    /// `row_index * feature_count`.
+    #[inline]
+    pub fn eval(&self, raw_features: &[f32], row_offset: usize) -> f32 {
+        let mut val = self.intercept;
+        for (w, &feat) in self.weights.iter().zip(self.regressor_features.iter()) {
+            let idx = row_offset + feat as usize;
+            if idx < raw_features.len() {
+                val += w * raw_features[idx];
+            }
+        }
+        val
+    }
+}
+
+/// The value stored at a trained leaf node.
+///
+/// * `Scalar(f32)` — constant leaf; identical to the pre-PL-Trees behaviour.
+/// * `Linear(LinearLeaf)` — piecewise-linear leaf with `d` regressor features.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LeafValue {
+    Scalar(f32),
+    Linear(LinearLeaf),
+}
+
+impl LeafValue {
+    /// Extract the scalar representation of this leaf value.
+    ///
+    /// For `Scalar(v)` this is exact.  For `Linear`, this returns the intercept
+    /// (the best constant approximation), used in places that do not yet support
+    /// full row-level linear evaluation (Phase-4 code will handle those properly).
+    #[inline]
+    pub fn as_scalar(&self) -> f32 {
+        match self {
+            Self::Scalar(v) => *v,
+            Self::Linear(leaf) => leaf.intercept,
+        }
+    }
+
+    /// Return `true` when this is a constant (scalar) leaf.
+    #[inline]
+    pub fn is_scalar(&self) -> bool {
+        matches!(self, Self::Scalar(_))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SplitCandidate {
     pub node_id: u32,
@@ -1773,12 +1837,6 @@ pub fn validate_train_params(params: &TrainParams) -> CoreResult<()> {
     if params.tree_growth == TreeGrowth::Leaf && params.max_leaves.is_none() {
         return Err(CoreError::InvalidConfig(
             "tree_growth='leaf' requires max_leaves to be set".to_string(),
-        ));
-    }
-
-    if params.leaf_model == LeafModelKind::Linear {
-        return Err(CoreError::NotImplemented(
-            "leaf_model='linear' (PL Trees) is not yet implemented in this version".to_string(),
         ));
     }
 

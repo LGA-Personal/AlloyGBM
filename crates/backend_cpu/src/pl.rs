@@ -15,8 +15,8 @@
 //! skipped.
 
 use alloygbm_core::{
-    LinearFeatureHistogram, MAX_PL_MATRIX_ENTRIES, MAX_PL_REGRESSORS, NodeStats, SplitCandidate,
-    pl_matrix_index,
+    LinearFeatureHistogram, LinearLeaf, MAX_PL_MATRIX_ENTRIES, MAX_PL_REGRESSORS, NodeStats,
+    SplitCandidate, pl_matrix_index,
 };
 use alloygbm_engine::{LinearContext, SplitSelectionOptions};
 
@@ -291,6 +291,249 @@ pub fn best_split_linear_for_feature(
     }
 
     best_candidate
+}
+
+// ── Leaf-weight solve ─────────────────────────────────────────────────────────
+
+/// Accumulate the left-child linear statistics from a `LinearFeatureHistogram`
+/// by summing bins `0..=threshold_bin` (non-missing), handling the NaN
+/// direction via `default_left`.
+///
+/// Returns `(xtg, xt_hx, grad_sum, hess_sum)` for the left and right children.
+pub fn leaf_linear_stats_for_split(
+    linear_fh: &LinearFeatureHistogram,
+    threshold_bin: usize,
+    missing_bin_idx: usize,
+    default_left: bool,
+    d: usize,
+) -> (
+    [f32; MAX_PL_REGRESSORS],
+    [f32; MAX_PL_MATRIX_ENTRIES],
+    f32,
+    f32,
+    [f32; MAX_PL_REGRESSORS],
+    [f32; MAX_PL_MATRIX_ENTRIES],
+    f32,
+    f32,
+) {
+    let tri_len = d * (d + 1) / 2;
+    let scan_limit = linear_fh.bins.len().min(missing_bin_idx);
+
+    // Missing bin.
+    let (m_xtg, m_xt_hx, m_grad, m_hess) = if missing_bin_idx < linear_fh.bins.len() {
+        let mb = &linear_fh.bins[missing_bin_idx];
+        let mut mxtg = [0.0_f32; MAX_PL_REGRESSORS];
+        let mut mxthx = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
+        for j in 0..d {
+            mxtg[j] = mb.xtg[j];
+        }
+        for idx in 0..tri_len {
+            mxthx[idx] = mb.xt_hx[idx];
+        }
+        (mxtg, mxthx, mb.grad_sum, mb.hess_sum)
+    } else {
+        (
+            [0.0_f32; MAX_PL_REGRESSORS],
+            [0.0_f32; MAX_PL_MATRIX_ENTRIES],
+            0.0_f32,
+            0.0_f32,
+        )
+    };
+
+    // Sum non-missing bins up to (and including) threshold_bin for the left side.
+    let mut l_xtg = [0.0_f32; MAX_PL_REGRESSORS];
+    let mut l_xt_hx = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
+    let mut l_grad = 0.0_f32;
+    let mut l_hess = 0.0_f32;
+    for bin in linear_fh.bins.iter().take(scan_limit.min(threshold_bin + 1)) {
+        l_grad += bin.grad_sum;
+        l_hess += bin.hess_sum;
+        for j in 0..d {
+            l_xtg[j] += bin.xtg[j];
+        }
+        for idx in 0..tri_len {
+            l_xt_hx[idx] += bin.xt_hx[idx];
+        }
+    }
+
+    // Parent non-missing totals.
+    let mut nm_xtg = [0.0_f32; MAX_PL_REGRESSORS];
+    let mut nm_xt_hx = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
+    let mut nm_grad = 0.0_f32;
+    let mut nm_hess = 0.0_f32;
+    for bin in linear_fh.bins.iter().take(scan_limit) {
+        nm_grad += bin.grad_sum;
+        nm_hess += bin.hess_sum;
+        for j in 0..d {
+            nm_xtg[j] += bin.xtg[j];
+        }
+        for idx in 0..tri_len {
+            nm_xt_hx[idx] += bin.xt_hx[idx];
+        }
+    }
+
+    // Right non-missing = parent_nm - left.
+    let mut r_xtg_nm = [0.0_f32; MAX_PL_REGRESSORS];
+    let mut r_xt_hx_nm = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
+    for j in 0..d {
+        r_xtg_nm[j] = nm_xtg[j] - l_xtg[j];
+    }
+    for idx in 0..tri_len {
+        r_xt_hx_nm[idx] = nm_xt_hx[idx] - l_xt_hx[idx];
+    }
+    let r_grad_nm = nm_grad - l_grad;
+    let r_hess_nm = nm_hess - l_hess;
+
+    // Apply NaN direction.
+    let (eff_l_xtg, eff_l_xt_hx, eff_l_grad, eff_l_hess, eff_r_xtg, eff_r_xt_hx, eff_r_grad, eff_r_hess) =
+        if default_left {
+            let mut el_xtg = l_xtg;
+            let mut el_xthx = l_xt_hx;
+            for j in 0..d {
+                el_xtg[j] += m_xtg[j];
+            }
+            for idx in 0..tri_len {
+                el_xthx[idx] += m_xt_hx[idx];
+            }
+            (
+                el_xtg,
+                el_xthx,
+                l_grad + m_grad,
+                l_hess + m_hess,
+                r_xtg_nm,
+                r_xt_hx_nm,
+                r_grad_nm,
+                r_hess_nm,
+            )
+        } else {
+            let mut er_xtg = r_xtg_nm;
+            let mut er_xthx = r_xt_hx_nm;
+            for j in 0..d {
+                er_xtg[j] += m_xtg[j];
+            }
+            for idx in 0..tri_len {
+                er_xthx[idx] += m_xt_hx[idx];
+            }
+            (
+                l_xtg,
+                l_xt_hx,
+                l_grad,
+                l_hess,
+                er_xtg,
+                er_xthx,
+                r_grad_nm + m_grad,
+                r_hess_nm + m_hess,
+            )
+        };
+
+    (
+        eff_l_xtg, eff_l_xt_hx, eff_l_grad, eff_l_hess,
+        eff_r_xtg, eff_r_xt_hx, eff_r_grad, eff_r_hess,
+    )
+}
+
+/// Solve for PL leaf weights: `α* = -(XᵀHX + λI)⁻¹ Xᵀg`.
+///
+/// Returns the weight vector `[α_0, …, α_{d-1}]`.  On Cholesky failure
+/// (non-PD matrix) returns all-zero (falls back to scalar leaf).
+fn cholesky_solve_alpha(
+    xtg: &[f32; MAX_PL_REGRESSORS],
+    xt_hx: &[f32; MAX_PL_MATRIX_ENTRIES],
+    d: usize,
+    l2_lambda: f32,
+) -> [f32; MAX_PL_REGRESSORS] {
+    if d == 0 {
+        return [0.0; MAX_PL_REGRESSORS];
+    }
+
+    // Build full d×d matrix A = XᵀHX + λI.
+    let mut a = [0.0_f32; MAX_PL_REGRESSORS * MAX_PL_REGRESSORS];
+    for j in 0..d {
+        for k in j..d {
+            let val = xt_hx[pl_matrix_index(j, k)];
+            a[j * d + k] = val;
+            a[k * d + j] = val;
+        }
+        a[j * d + j] += l2_lambda;
+    }
+
+    // Cholesky: A = L Lᵀ.
+    let mut l = [0.0_f32; MAX_PL_REGRESSORS * MAX_PL_REGRESSORS];
+    for i in 0..d {
+        for j in 0..=i {
+            let mut s = a[i * d + j];
+            for k in 0..j {
+                s -= l[i * d + k] * l[j * d + k];
+            }
+            if i == j {
+                if s <= 0.0 {
+                    return [0.0; MAX_PL_REGRESSORS]; // Fallback to scalar.
+                }
+                l[i * d + j] = s.sqrt();
+            } else {
+                l[i * d + j] = s / l[j * d + j];
+            }
+        }
+    }
+
+    // Forward substitution: L y = -Xᵀg.
+    let mut y = [0.0_f32; MAX_PL_REGRESSORS];
+    for i in 0..d {
+        let mut s = -xtg[i]; // Note: solving for -Xᵀg (gives α* = -(XᵀHX+λI)⁻¹ Xᵀg)
+        for k in 0..i {
+            s -= l[i * d + k] * y[k];
+        }
+        y[i] = s / l[i * d + i];
+    }
+
+    // Backward substitution: Lᵀ α = y.
+    let mut alpha = [0.0_f32; MAX_PL_REGRESSORS];
+    for i in (0..d).rev() {
+        let mut s = y[i];
+        for k in (i + 1)..d {
+            s -= l[k * d + i] * alpha[k];
+        }
+        alpha[i] = s / l[i * d + i];
+    }
+
+    alpha
+}
+
+/// Build a [`LinearLeaf`] from the accumulated statistics for one side of a split.
+///
+/// # Arguments
+/// * `xtg` / `xt_hx` — matrix statistics accumulated from histogram bins
+/// * `grad_sum` / `hess_sum` — scalar sums (for the Newton-Raphson intercept)
+/// * `learning_rate` — applied to both intercept and weights
+/// * `l2_lambda` — ridge regularisation
+/// * `regressor_features` — indices of the `d` regressors
+pub fn solve_pl_leaf(
+    xtg: &[f32; MAX_PL_REGRESSORS],
+    xt_hx: &[f32; MAX_PL_MATRIX_ENTRIES],
+    grad_sum: f32,
+    hess_sum: f32,
+    learning_rate: f32,
+    l2_lambda: f32,
+    regressor_features: &[u32],
+) -> LinearLeaf {
+    let d = regressor_features.len();
+    const LEAF_EPS: f32 = 1e-6;
+
+    // Standard Newton-Raphson intercept (same formula as scalar leaves).
+    let intercept = -learning_rate * grad_sum / (hess_sum + l2_lambda + LEAF_EPS);
+
+    // Linear correction weights α* = -(XᵀHX + λI)⁻¹ Xᵀg, scaled by lr.
+    let raw_alpha = cholesky_solve_alpha(xtg, xt_hx, d, l2_lambda);
+    let weights: Vec<f32> = raw_alpha[..d]
+        .iter()
+        .map(|&w| learning_rate * w)
+        .collect();
+
+    LinearLeaf {
+        intercept,
+        weights,
+        regressor_features: regressor_features.to_vec(),
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

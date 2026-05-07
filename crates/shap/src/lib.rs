@@ -389,7 +389,7 @@ fn expected_subtree(
         if is_known {
             let goes_left = stump_goes_left(&stump.split, row[split_feature_index]);
             if goes_left {
-                return Ok(stump.left_leaf_value
+                return Ok(stump.left_leaf_value.as_scalar()
                     + expected_subtree(
                         tree_id,
                         left_child_local,
@@ -398,7 +398,7 @@ fn expected_subtree(
                         model_structure,
                     )?);
             }
-            return Ok(stump.right_leaf_value
+            return Ok(stump.right_leaf_value.as_scalar()
                 + expected_subtree(
                     tree_id,
                     right_child_local,
@@ -419,9 +419,9 @@ fn expected_subtree(
     };
     let right_probability = 1.0 - left_probability;
 
-    let left_expected = stump.left_leaf_value
+    let left_expected = stump.left_leaf_value.as_scalar()
         + expected_subtree(tree_id, left_child_local, row, subset_mask, model_structure)?;
-    let right_expected = stump.right_leaf_value
+    let right_expected = stump.right_leaf_value.as_scalar()
         + expected_subtree(
             tree_id,
             right_child_local,
@@ -644,14 +644,14 @@ fn build_std_tree(
                 left: Box::new(build_std_tree(
                     tree_id,
                     2 * local_id + 1,
-                    accumulated_value + stump.left_leaf_value as f64,
+                    accumulated_value + stump.left_leaf_value.as_scalar() as f64,
                     left_cover,
                     nodes,
                 )),
                 right: Box::new(build_std_tree(
                     tree_id,
                     2 * local_id + 2,
-                    accumulated_value + stump.right_leaf_value as f64,
+                    accumulated_value + stump.right_leaf_value.as_scalar() as f64,
                     right_cover,
                     nodes,
                 )),
@@ -946,7 +946,7 @@ fn explain_rows_tree_shap(
 mod tests {
     use super::*;
     use alloygbm_core::{
-        Device, ModelMetadata, ModelSectionKind, NodeStats, SplitCandidate,
+        Device, LeafValue, ModelMetadata, ModelSectionKind, NodeStats, SplitCandidate,
         serialize_model_artifact_v1,
     };
     use alloygbm_engine::TrainedModel;
@@ -1022,18 +1022,18 @@ mod tests {
             stumps: vec![
                 TrainedStump {
                     split: split(0, 0, 1),
-                    left_leaf_value: 1.0,
-                    right_leaf_value: 2.0,
+                    left_leaf_value: LeafValue::Scalar(1.0),
+                    right_leaf_value: LeafValue::Scalar(2.0),
                 },
                 TrainedStump {
                     split: split(1, 1, 0),
-                    left_leaf_value: 0.1,
-                    right_leaf_value: 0.2,
+                    left_leaf_value: LeafValue::Scalar(0.1),
+                    right_leaf_value: LeafValue::Scalar(0.2),
                 },
                 TrainedStump {
                     split: split(2, 1, 1),
-                    left_leaf_value: 0.3,
-                    right_leaf_value: 0.4,
+                    left_leaf_value: LeafValue::Scalar(0.3),
+                    right_leaf_value: LeafValue::Scalar(0.4),
                 },
             ],
             categorical_state: None,
@@ -1375,8 +1375,8 @@ mod tests {
             feature_count: 2,
             stumps: vec![TrainedStump {
                 split: split_with_counts(0, 0, 5, 3, 7),
-                left_leaf_value: -0.5,
-                right_leaf_value: 0.3,
+                left_leaf_value: LeafValue::Scalar(-0.5),
+                right_leaf_value: LeafValue::Scalar(0.3),
             }],
             categorical_state: None,
             node_debug_stats: None,
@@ -1410,13 +1410,13 @@ mod tests {
             stumps: vec![
                 TrainedStump {
                     split: split_with_counts(0, 0, 5, 4, 6),
-                    left_leaf_value: 1.0,
-                    right_leaf_value: -1.0,
+                    left_leaf_value: LeafValue::Scalar(1.0),
+                    right_leaf_value: LeafValue::Scalar(-1.0),
                 },
                 TrainedStump {
                     split: split_with_counts(stride, 1, 3, 5, 5),
-                    left_leaf_value: 0.5,
-                    right_leaf_value: -0.5,
+                    left_leaf_value: LeafValue::Scalar(0.5),
+                    right_leaf_value: LeafValue::Scalar(-0.5),
                 },
             ],
             categorical_state: None,
@@ -1488,8 +1488,8 @@ mod tests {
             feature_count: 2,
             stumps: vec![TrainedStump {
                 split: categorical_split_with_counts(0, 0, vec![0b0000_0101], 4, 6),
-                left_leaf_value: -0.3,
-                right_leaf_value: 0.2,
+                left_leaf_value: LeafValue::Scalar(-0.3),
+                right_leaf_value: LeafValue::Scalar(0.2),
             }],
             categorical_state: None,
             node_debug_stats: None,
@@ -1525,8 +1525,8 @@ mod tests {
             feature_count: 2,
             stumps: vec![TrainedStump {
                 split: categorical_split_with_counts(0, 0, vec![0b0000_0101], 4, 6),
-                left_leaf_value: -0.3,
-                right_leaf_value: 0.2,
+                left_leaf_value: LeafValue::Scalar(-0.3),
+                right_leaf_value: LeafValue::Scalar(0.2),
             }],
             categorical_state: None,
             node_debug_stats: None,
@@ -1565,14 +1565,14 @@ mod tests {
                     // Tree 0: categorical split on feature 0
                     // Bitset 0b0000_0011 = categories {0, 1} go left
                     split: categorical_split_with_counts(0, 0, vec![0b0000_0011], 5, 5),
-                    left_leaf_value: -0.2,
-                    right_leaf_value: 0.3,
+                    left_leaf_value: LeafValue::Scalar(-0.2),
+                    right_leaf_value: LeafValue::Scalar(0.3),
                 },
                 TrainedStump {
                     // Tree 1: numeric split on feature 1 at threshold 3
                     split: split_with_counts(stride, 1, 3, 4, 6),
-                    left_leaf_value: 0.1,
-                    right_leaf_value: -0.1,
+                    left_leaf_value: LeafValue::Scalar(0.1),
+                    right_leaf_value: LeafValue::Scalar(-0.1),
                 },
             ],
             categorical_state: None,
@@ -1628,18 +1628,18 @@ mod tests {
             stumps: vec![
                 TrainedStump {
                     split: split_with_counts(0, 0, 5, 6, 4),
-                    left_leaf_value: 0.2,
-                    right_leaf_value: -0.3,
+                    left_leaf_value: LeafValue::Scalar(0.2),
+                    right_leaf_value: LeafValue::Scalar(-0.3),
                 },
                 TrainedStump {
                     split: split_with_counts(1, 0, 2, 3, 3),
-                    left_leaf_value: 0.1,
-                    right_leaf_value: -0.1,
+                    left_leaf_value: LeafValue::Scalar(0.1),
+                    right_leaf_value: LeafValue::Scalar(-0.1),
                 },
                 TrainedStump {
                     split: split_with_counts(2, 1, 3, 2, 2),
-                    left_leaf_value: 0.15,
-                    right_leaf_value: -0.15,
+                    left_leaf_value: LeafValue::Scalar(0.15),
+                    right_leaf_value: LeafValue::Scalar(-0.15),
                 },
             ],
             categorical_state: None,
