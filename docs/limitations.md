@@ -1,6 +1,6 @@
 # AlloyGBM Current Limitations
 
-Last updated for v0.4.0.
+Last updated for v0.5.0.
 
 ## Remaining Limitations
 
@@ -56,3 +56,7 @@ The following were limitations in prior versions and have been addressed:
 - No SIMD-accelerated kernels (now: histogram bin-scan and EMA passes are
   vectorized via the `wide` crate; histogram tile sizing auto-tunes for
   high-feature workloads)
+- Constant leaves only (now: `leaf_model="linear"` replaces scalar leaves with
+  closed-form piecewise-linear leaves `f_s(x) = b_s + Σ α_j x_j`, available on
+  all three estimators; `leaf_model="polynomial"` and `leaf_model="rff"` remain
+  future work)

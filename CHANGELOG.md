@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.5.0
+
+### New Features
+
+- **Piecewise-linear (PL) tree leaves** via `leaf_model="linear"` on `GBMRegressor`, `GBMClassifier`, and `GBMRanker`. Each leaf stores a small linear model `f_s(x) = b_s + Σ α_j x_j` (up to 8 regressors per leaf, inherited from the split path's feature indices). Optimal weights are solved in closed form: `α* = -(XᵀHX + λI)⁻¹ Xᵀg`, regularised by `lambda_l2`. Default `leaf_model="constant"` preserves all prior behaviour exactly.
+- **`LinearHistogramBundle`** -- parallel histogram structure accumulating `xtg` vector and `xtHx` matrix statistics alongside standard grad/hess bins. Standard SIMD histogram path is untouched.
+- **`GainStrategy::Linear`** -- new dispatch arm in the split-gain criterion; closed-form PL gain computed via an ≤8×8 Cholesky solve in the new `crates/backend_cpu/src/pl.rs` module.
+- **`LeafValue` enum** (`Scalar(f32)` | `Linear(LinearLeaf)`) replaces the plain `f32` leaf fields on `TrainedStump`. In-memory prediction during boosting evaluates the leaf's linear model at each row's feature values.
+- **New artifact section** `ModelSectionKind::LinearLeafCoefficients` stores per-stump linear leaf data. Backward-compatible with v0.4.0 artifacts: a per-stump flag bit indicates linear leaves; older readers continue to work for constant-leaf models.
+- **Categorical-native split interaction**: native-bitset categorical splits (`max_cat_threshold > 0`) continue to use constant leaves for that split node; descendant leaves below such a split use linear leaves on all remaining numeric regressors.
+
+### Performance
+
+- Benchmarks show **~10× faster convergence** on linearly-structured datasets (fewer rounds to reach the same RMSE) and **+3.5% RMSE improvement** on California Housing vs constant leaves.
+- +1.75pp accuracy improvement on Breast Cancer classification with `leaf_model="linear"`.
+- 2–8× training time overhead (Cholesky solve per node); recommended with `lambda_l2=0.01` for weight stability.
+
+### Benchmarks
+
+- **`alloygbm_linear` arm** added to `benchmarks/run_model_comparison.py` for all four task types.
+- **`benchmarks/pl_trees_benchmark.py`** -- convergence-curve and λ-sweep analysis across regression, classification, and ranking scenarios.
+- Benchmark report committed to `docs/benchmarks/pl_trees_v1.md`.
+
 ## 0.4.0
 
 ### New Features

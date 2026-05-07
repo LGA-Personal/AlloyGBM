@@ -112,6 +112,30 @@ default.
 When both `categorical_feature_index` and `categorical_feature_indices` are
 provided, they are merged.
 
+## Piecewise-Linear Leaves
+
+- `leaf_model: str = "constant"`
+  - `"constant"` (default): standard scalar leaf value — identical to all prior
+    AlloyGBM behaviour.
+  - `"linear"`: each leaf stores a small linear model
+    `f_s(x) = b_s + Σ α_j x_j` (up to `MAX_PL_REGRESSORS = 8` regressors per
+    leaf, inherited from the split path's feature indices). Optimal weights are
+    solved in closed form: `α* = -(XᵀHX + λI)⁻¹ Xᵀg`, regularised by the same
+    `lambda_l2` you pass to the estimator.
+
+  **When to use `"linear"`**: datasets where the residual signal within each tree
+  node is approximately linear in the input features (e.g. smooth tabular
+  regression, classification with well-separated linear decision boundaries).
+  Benchmarks show 2–10× faster convergence on linearly-structured data, at a 2–8×
+  training time overhead. Use a small non-zero `lambda_l2` (e.g. `0.01`) with
+  linear leaves to improve weight stability.
+
+  **Limitations**: training time scales with the number of regressors per node
+  (Cholesky solve). Native-bitset categorical features that use Fisher-sort splits
+  (`max_cat_threshold > 0`) still fall back to constant leaves for that split;
+  descendant leaves below such a split use linear leaves on all remaining numeric
+  features.
+
 ## MorphBoost (Adaptive Split Criterion)
 
 `GBMRegressor` supports an opt-in MorphBoost training mode that augments the

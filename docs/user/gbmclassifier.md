@@ -32,13 +32,15 @@ print("log_loss:", log_loss(y_test, probas[:, 1]))
 
 ## Parameters
 
-All parameters from `GBMRegressor` are accepted, including
-`training_mode="morph"` and the rest of the MorphBoost / LR-schedule
-parameters (`morph_rate`, `evolution_pressure`, `morph_warmup_iters`,
-`info_score_weight`, `depth_penalty_base`, `balance_penalty`,
-`lr_schedule`, `lr_warmup_frac`). See [MorphBoost](morphboost.md) for the
-full reference. The objective is always binary cross-entropy and is not
-configurable.
+All parameters from `GBMRegressor` are accepted, including:
+- `leaf_model="linear"` for piecewise-linear leaves (see
+  [GBMRegressor — Piecewise-Linear Leaves](gbmregressor.md#piecewise-linear-leaves)).
+- `training_mode="morph"` and the rest of the MorphBoost / LR-schedule parameters
+  (`morph_rate`, `evolution_pressure`, `morph_warmup_iters`, `info_score_weight`,
+  `depth_penalty_base`, `balance_penalty`, `lr_schedule`, `lr_warmup_frac`).
+  See [MorphBoost](morphboost.md) for the full reference.
+
+The objective is always binary cross-entropy and is not configurable.
 
 ```python
 # MorphBoost on binary classification
