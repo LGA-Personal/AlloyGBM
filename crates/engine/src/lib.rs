@@ -101,6 +101,26 @@ pub struct MorphContext {
     pub precomputed: MorphPrecomputed,
 }
 
+/// Per-node context for piecewise-linear split-gain selection.
+///
+/// Passed to `BackendOps::best_split_linear` alongside `SplitSelectionOptions`.
+/// Carries the regressor feature set and the PL-specific ridge regularisation.
+#[derive(Debug, Clone)]
+pub struct LinearContext {
+    /// Indices of features used as linear regressors in this node's leaf model
+    /// (length `d`, capped at `MAX_PL_REGRESSORS`).
+    pub regressor_features: Vec<u32>,
+    /// L2 regularisation added to the diagonal of `XᵀHX` before inversion.
+    pub l2_lambda: f32,
+}
+
+impl LinearContext {
+    /// Number of regressors (`d`).
+    pub fn d(&self) -> usize {
+        self.regressor_features.len()
+    }
+}
+
 /// Trainer-resident state for morph-mode training.
 ///
 /// Holds the per-class EMA gradient statistics (length 1 for single-output
@@ -334,6 +354,28 @@ pub trait BackendOps {
     ) -> EngineResult<LinearHistogramBundle> {
         Err(EngineError::NotImplemented(
             "build_linear_histograms not implemented for this backend".to_string(),
+        ))
+    }
+
+    /// Find the best split point using the PL ridge-regression gain criterion.
+    ///
+    /// Scans the `LinearHistogramBundle` (one `LinearFeatureHistogram` per split
+    /// feature) and returns the `SplitCandidate` with the highest PL gain:
+    /// `gain = 0.5·(Xᵀg_L)ᵀ(XᵀHX_L + λI)⁻¹(Xᵀg_L)
+    ///       + 0.5·(Xᵀg_R)ᵀ(XᵀHX_R + λI)⁻¹(Xᵀg_R)
+    ///       − 0.5·(Xᵀg_P)ᵀ(XᵀHX_P + λI)⁻¹(Xᵀg_P)`
+    ///
+    /// Default implementation returns `EngineError::NotImplemented`.
+    fn best_split_linear(
+        &self,
+        _linear_histograms: &LinearHistogramBundle,
+        _options: SplitSelectionOptions,
+        _feature_weights: &[f32],
+        _categorical_features: &[CategoricalFeatureInfo],
+        _ctx: &LinearContext,
+    ) -> EngineResult<Option<SplitCandidate>> {
+        Err(EngineError::NotImplemented(
+            "best_split_linear not implemented for this backend".to_string(),
         ))
     }
 }

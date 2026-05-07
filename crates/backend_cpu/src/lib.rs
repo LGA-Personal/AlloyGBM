@@ -1,9 +1,10 @@
 use alloygbm_core::{
     BinnedMatrix, Device, FeatureHistogram, FeatureTile, GradientPair, HistogramBin,
-    HistogramBundle, LinearHistogramBundle, NodeSlice, NodeStats, PartitionResult, SplitCandidate,
+    HistogramBundle, LinearFeatureHistogram, LinearHistogramBundle, NodeSlice, NodeStats,
+    PartitionResult, SplitCandidate,
 };
 use alloygbm_engine::{
-    BackendOps, CategoricalFeatureInfo, EngineError, EngineResult, MorphContext,
+    BackendOps, CategoricalFeatureInfo, EngineError, EngineResult, LinearContext, MorphContext,
     SplitSelectionOptions,
 };
 use rayon::prelude::*;
@@ -14,6 +15,8 @@ pub use morph::{MorphGainInputs, SplitSideStats, compute_morph_gain};
 
 mod pl_histogram;
 pub use pl_histogram::build_linear_histograms_cpu;
+
+mod pl;
 
 pub use alloygbm_core::simd;
 
@@ -1680,6 +1683,54 @@ impl BackendOps for CpuBackend {
             row_count,
             feature_count,
         )
+    }
+
+    fn best_split_linear(
+        &self,
+        linear_histograms: &LinearHistogramBundle,
+        options: SplitSelectionOptions,
+        feature_weights: &[f32],
+        _categorical_features: &[CategoricalFeatureInfo],
+        ctx: &LinearContext,
+    ) -> EngineResult<Option<SplitCandidate>> {
+        let node_id = linear_histograms.node_id;
+        let find_best = |linear_fh: &LinearFeatureHistogram| -> Option<SplitCandidate> {
+            pl::best_split_linear_for_feature(linear_fh, node_id, options, ctx)
+        };
+
+        let result =
+            if linear_histograms.feature_histograms.len() >= Self::PARALLEL_SPLIT_FEATURE_THRESHOLD
+            {
+                linear_histograms
+                    .feature_histograms
+                    .par_iter()
+                    .filter_map(find_best)
+                    .reduce_with(|a, b| {
+                        if apply_feature_weight(&b, feature_weights)
+                            > apply_feature_weight(&a, feature_weights)
+                        {
+                            b
+                        } else {
+                            a
+                        }
+                    })
+            } else {
+                linear_histograms
+                    .feature_histograms
+                    .iter()
+                    .filter_map(find_best)
+                    .reduce(|a, b| {
+                        if apply_feature_weight(&b, feature_weights)
+                            > apply_feature_weight(&a, feature_weights)
+                        {
+                            b
+                        } else {
+                            a
+                        }
+                    })
+            };
+
+        Ok(result)
     }
 }
 
