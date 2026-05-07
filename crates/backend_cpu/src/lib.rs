@@ -1,6 +1,6 @@
 use alloygbm_core::{
     BinnedMatrix, Device, FeatureHistogram, FeatureTile, GradientPair, HistogramBin,
-    HistogramBundle, NodeSlice, NodeStats, PartitionResult, SplitCandidate,
+    HistogramBundle, LinearHistogramBundle, NodeSlice, NodeStats, PartitionResult, SplitCandidate,
 };
 use alloygbm_engine::{
     BackendOps, CategoricalFeatureInfo, EngineError, EngineResult, MorphContext,
@@ -11,6 +11,9 @@ use std::cell::RefCell;
 
 mod morph;
 pub use morph::{MorphGainInputs, SplitSideStats, compute_morph_gain};
+
+mod pl_histogram;
+pub use pl_histogram::build_linear_histograms_cpu;
 
 pub use alloygbm_core::simd;
 
@@ -1654,6 +1657,29 @@ impl BackendOps for CpuBackend {
             hess_sum,
             row_count: row_indices.len() as u32,
         })
+    }
+
+    fn build_linear_histograms(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: &NodeSlice,
+        feature_tiles: &[FeatureTile],
+        regressor_features: &[u32],
+        raw_feature_values: &[f32],
+        row_count: usize,
+        feature_count: usize,
+    ) -> EngineResult<LinearHistogramBundle> {
+        pl_histogram::build_linear_histograms_cpu(
+            binned_matrix,
+            gradients,
+            node,
+            feature_tiles,
+            regressor_features,
+            raw_feature_values,
+            row_count,
+            feature_count,
+        )
     }
 }
 

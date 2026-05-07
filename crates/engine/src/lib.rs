@@ -1,11 +1,12 @@
 use alloygbm_categorical::{TargetEncoderConfig, fit_transform_target_encoder};
 use alloygbm_core::{
     BinnedMatrix, CategoricalStatePayloadV1, CoreError, DatasetMatrix, Device, FeatureTile,
-    GradientEmaStats, GradientPair, HistogramBundle, LrSchedule, MISSING_BIN_U8, MODEL_FORMAT_V1,
-    ModelArtifactSection, ModelMetadata, ModelSectionKind, MorphConfig, MorphMetadataPayload,
-    MorphPrecomputed, NativeCategoricalSplitsPayload, NodeSlice, NodeStats, PartitionResult,
-    SplitCandidate, TrainParams, TrainingDataset, TreeGrowth,
-    decode_optional_categorical_state_section_v1, decode_optional_morph_metadata_artifact_section,
+    GradientEmaStats, GradientPair, HistogramBundle, LinearHistogramBundle,
+    LrSchedule, MISSING_BIN_U8, MODEL_FORMAT_V1, ModelArtifactSection, ModelMetadata,
+    ModelSectionKind, MorphConfig, MorphMetadataPayload, MorphPrecomputed,
+    NativeCategoricalSplitsPayload, NodeSlice, NodeStats, PartitionResult, SplitCandidate,
+    TrainParams, TrainingDataset, TreeGrowth, decode_optional_categorical_state_section_v1,
+    decode_optional_morph_metadata_artifact_section,
     decode_optional_native_categorical_splits_section, deserialize_model_artifact_v1,
     encode_categorical_state_payload_v1, encode_morph_metadata_payload,
     encode_native_categorical_splits_payload, format_required_section_auto_mode_error,
@@ -310,6 +311,31 @@ pub trait BackendOps {
         gradients: &[GradientPair],
         row_indices: &[u32],
     ) -> EngineResult<NodeStats>;
+
+    /// Build piecewise-linear histogram statistics for a node.
+    ///
+    /// `regressor_features` lists the feature indices whose raw float values
+    /// are used as regressors.  The returned bundle contains `(Xᵀg, XᵀHX)`
+    /// statistics per bin, per split feature, needed for the PL gain criterion
+    /// and leaf-weight solve.
+    ///
+    /// Default implementation returns `EngineError::NotImplemented`; backends
+    /// that support PL Trees override this.
+    fn build_linear_histograms(
+        &self,
+        _binned_matrix: &BinnedMatrix,
+        _gradients: &[GradientPair],
+        _node: &NodeSlice,
+        _feature_tiles: &[FeatureTile],
+        _regressor_features: &[u32],
+        _raw_feature_values: &[f32],
+        _row_count: usize,
+        _feature_count: usize,
+    ) -> EngineResult<LinearHistogramBundle> {
+        Err(EngineError::NotImplemented(
+            "build_linear_histograms not implemented for this backend".to_string(),
+        ))
+    }
 }
 
 /// Callback invoked after each boosting round to evaluate a custom metric.

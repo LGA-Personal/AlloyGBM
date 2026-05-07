@@ -835,6 +835,193 @@ impl HistogramBundle {
     }
 }
 
+// ── Piecewise-linear leaf histogram types ────────────────────────────────────
+
+/// Maximum number of regressor features per leaf for piecewise-linear trees.
+/// Matches `min(8, max_depth)` at run time, but we always pad to this constant
+/// so that bin layouts are fixed-size and cache-friendly.
+pub const MAX_PL_REGRESSORS: usize = 8;
+
+/// Maximum number of upper-triangular entries for an 8×8 matrix: 8*9/2 = 36.
+pub const MAX_PL_MATRIX_ENTRIES: usize = 36;
+
+/// A single histogram bin for a piecewise-linear (PL) leaf model.
+///
+/// Stores the `(Xᵀg, XᵀHX)` statistics needed for the closed-form ridge-
+/// regression leaf-weight solve `α* = -(XᵀHX + λI)⁻¹ Xᵀg`.
+///
+/// Only the first `d` entries of `xtg` and the first `d*(d+1)/2` entries of
+/// `xt_hx` are meaningful; the remainder is zero padding.  `d` is recorded in
+/// the parent [`LinearHistogramBundle`].
+///
+/// Upper-triangular packing for `xt_hx` (j ≤ k):
+/// `index(j, k) = j*(2*d - j + 1)/2 + (k - j)`  where `d = MAX_PL_REGRESSORS`.
+/// For fixed d, use the [`pl_matrix_index`] helper.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LinearHistogramBin {
+    /// Sum of gradients for samples in this bin.
+    pub grad_sum: f32,
+    /// Sum of hessians for samples in this bin.
+    pub hess_sum: f32,
+    /// Number of samples in this bin.
+    pub count: u32,
+    /// `Xᵀg` vector: `xtg[j] = Σ_{i in bin} g_i * x_{i, regressor_j}` for j = 0..d.
+    pub xtg: [f32; MAX_PL_REGRESSORS],
+    /// `XᵀHX` upper-triangular: `xt_hx[idx(j,k)] = Σ_{i in bin} h_i * x_{i,j} * x_{i,k}`
+    /// for j ≤ k < d. Packed with the formula above.
+    pub xt_hx: [f32; MAX_PL_MATRIX_ENTRIES],
+}
+
+impl Default for LinearHistogramBin {
+    fn default() -> Self {
+        Self {
+            grad_sum: 0.0,
+            hess_sum: 0.0,
+            count: 0,
+            xtg: [0.0; MAX_PL_REGRESSORS],
+            xt_hx: [0.0; MAX_PL_MATRIX_ENTRIES],
+        }
+    }
+}
+
+/// Return the flat index into the upper-triangular `xt_hx` array for element (j, k).
+///
+/// Panics in debug builds if `j > k` or `k >= MAX_PL_REGRESSORS`.
+#[inline]
+pub fn pl_matrix_index(j: usize, k: usize) -> usize {
+    debug_assert!(j <= k, "j ({j}) must be <= k ({k}) for upper-triangular index");
+    debug_assert!(k < MAX_PL_REGRESSORS, "k ({k}) must be < MAX_PL_REGRESSORS");
+    // Row j of an upper-triangular matrix of size d × d starts at index
+    // j * d - j*(j-1)/2.  Within that row, element k-j is at offset k-j.
+    // With d = MAX_PL_REGRESSORS:
+    j * (2 * MAX_PL_REGRESSORS - j + 1) / 2 + (k - j)
+}
+
+/// Per-feature histogram for piecewise-linear leaf statistics.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearFeatureHistogram {
+    pub feature_index: u32,
+    pub bins: Vec<LinearHistogramBin>,
+}
+
+/// Bundle of per-feature PL histograms for a single tree node.
+///
+/// `num_regressors` tells how many entries in each bin's `xtg` / `xt_hx`
+/// fields are valid; the rest are zero padding.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearHistogramBundle {
+    pub node_id: u32,
+    /// Number of active regressors for this node (1 ≤ d ≤ MAX_PL_REGRESSORS).
+    pub num_regressors: usize,
+    /// Which feature indices are the regressors for this node, length = num_regressors.
+    pub regressor_features: Vec<u32>,
+    pub feature_histograms: Vec<LinearFeatureHistogram>,
+}
+
+impl LinearHistogramBundle {
+    /// Zero all bin values in-place without deallocating.
+    pub fn reset(&mut self, node_id: u32) {
+        self.node_id = node_id;
+        for fh in &mut self.feature_histograms {
+            for bin in &mut fh.bins {
+                *bin = LinearHistogramBin::default();
+            }
+        }
+    }
+
+    /// Create a pre-allocated, zeroed linear histogram bundle.
+    pub fn new_zeroed(
+        node_id: u32,
+        feature_indices: &[u32],
+        bin_count: usize,
+        num_regressors: usize,
+        regressor_features: Vec<u32>,
+    ) -> Self {
+        debug_assert!(
+            num_regressors <= MAX_PL_REGRESSORS,
+            "num_regressors ({num_regressors}) exceeds MAX_PL_REGRESSORS"
+        );
+        let feature_histograms = feature_indices
+            .iter()
+            .map(|&fi| LinearFeatureHistogram {
+                feature_index: fi,
+                bins: vec![LinearHistogramBin::default(); bin_count],
+            })
+            .collect();
+        Self {
+            node_id,
+            num_regressors,
+            regressor_features,
+            feature_histograms,
+        }
+    }
+}
+
+/// Compute the larger-child linear histogram bundle using the subtraction trick.
+///
+/// Given `parent` and the `smaller` child's bundle (both with the same node
+/// layout), returns the `larger` child bundle via element-wise subtraction:
+/// `larger[f][b] = parent[f][b] - smaller[f][b]` for all fields.
+///
+/// Both bundles must have the same number of features (in the same order) and
+/// the same number of bins per feature.
+pub fn subtract_linear_histogram_bundle(
+    parent: &LinearHistogramBundle,
+    smaller: &LinearHistogramBundle,
+) -> LinearHistogramBundle {
+    debug_assert_eq!(
+        parent.feature_histograms.len(),
+        smaller.feature_histograms.len(),
+        "feature count mismatch in linear histogram subtraction"
+    );
+    debug_assert_eq!(
+        parent.num_regressors, smaller.num_regressors,
+        "num_regressors mismatch in linear histogram subtraction"
+    );
+    let d = parent.num_regressors;
+    let tri_len = d * (d + 1) / 2;
+    let feature_histograms = parent
+        .feature_histograms
+        .iter()
+        .zip(smaller.feature_histograms.iter())
+        .map(|(pfh, sfh)| {
+            debug_assert_eq!(pfh.bins.len(), sfh.bins.len());
+            let bins = pfh
+                .bins
+                .iter()
+                .zip(sfh.bins.iter())
+                .map(|(pb, sb)| {
+                    let mut xtg = [0.0f32; MAX_PL_REGRESSORS];
+                    let mut xt_hx = [0.0f32; MAX_PL_MATRIX_ENTRIES];
+                    for j in 0..d {
+                        xtg[j] = pb.xtg[j] - sb.xtg[j];
+                    }
+                    for idx in 0..tri_len {
+                        xt_hx[idx] = pb.xt_hx[idx] - sb.xt_hx[idx];
+                    }
+                    LinearHistogramBin {
+                        grad_sum: pb.grad_sum - sb.grad_sum,
+                        hess_sum: pb.hess_sum - sb.hess_sum,
+                        count: pb.count - sb.count,
+                        xtg,
+                        xt_hx,
+                    }
+                })
+                .collect();
+            LinearFeatureHistogram {
+                feature_index: pfh.feature_index,
+                bins,
+            }
+        })
+        .collect();
+    LinearHistogramBundle {
+        node_id: smaller.node_id, // larger child gets a different node_id assigned by caller
+        num_regressors: parent.num_regressors,
+        regressor_features: parent.regressor_features.clone(),
+        feature_histograms,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SplitCandidate {
     pub node_id: u32,
