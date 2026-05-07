@@ -1660,7 +1660,7 @@ impl BackendOps for CpuBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloygbm_core::{DatasetMatrix, FeatureTile, TrainParams, TrainingDataset, TreeGrowth};
+    use alloygbm_core::{DatasetMatrix, FeatureTile, LeafModelKind, TrainParams, TrainingDataset, TreeGrowth};
     use alloygbm_engine::{SquaredErrorObjective, Trainer};
 
     fn sample_binned_matrix() -> BinnedMatrix {
@@ -1762,6 +1762,7 @@ mod tests {
             max_leaves: None,
             tree_growth: TreeGrowth::Level,
             morph_config: None,
+            leaf_model: LeafModelKind::Constant,
         }
     }
 

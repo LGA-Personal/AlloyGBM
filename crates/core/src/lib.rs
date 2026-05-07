@@ -22,6 +22,25 @@ pub enum TreeGrowth {
     Leaf,
 }
 
+/// Leaf representation strategy for tree models.
+///
+/// `Constant` (default) is identical to current behavior: each leaf stores a
+/// single scalar output `f_s = -lr * Σg / (Σh + λ)`.
+///
+/// `Linear` replaces the scalar with a small ridge-regression model
+/// `f_s(x) = b_s + Σ_j α_j x_{k_j}` fit analytically via the closed-form
+/// Newton step `α* = -(XᵀHX + λI)⁻¹ Xᵀg`.  Feature regressors are chosen
+/// incrementally as the tree grows (inheriting the parent's set plus the
+/// current split feature, capped at `min(8, max_depth)`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LeafModelKind {
+    /// Single scalar leaf value (current default behavior).
+    #[default]
+    Constant,
+    /// Piecewise-linear leaf model fit by ridge regression.
+    Linear,
+}
+
 /// Per-iteration learning rate schedule for MorphBoost training.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum LrSchedule {
@@ -252,6 +271,9 @@ pub struct TrainParams {
     pub tree_growth: TreeGrowth,
     /// MorphBoost-inspired training profile config. `None` = non-morph (current behavior).
     pub morph_config: Option<MorphConfig>,
+    /// Leaf representation strategy.  `Constant` (default) preserves all existing
+    /// behaviour.  `Linear` enables piecewise-linear leaves fitted by ridge regression.
+    pub leaf_model: LeafModelKind,
 }
 
 impl Default for TrainParams {
@@ -275,6 +297,7 @@ impl Default for TrainParams {
             max_leaves: None,
             tree_growth: TreeGrowth::Level,
             morph_config: None,
+            leaf_model: LeafModelKind::Constant,
         }
     }
 }
@@ -1563,6 +1586,12 @@ pub fn validate_train_params(params: &TrainParams) -> CoreResult<()> {
     if params.tree_growth == TreeGrowth::Leaf && params.max_leaves.is_none() {
         return Err(CoreError::InvalidConfig(
             "tree_growth='leaf' requires max_leaves to be set".to_string(),
+        ));
+    }
+
+    if params.leaf_model == LeafModelKind::Linear {
+        return Err(CoreError::NotImplemented(
+            "leaf_model='linear' (PL Trees) is not yet implemented in this version".to_string(),
         ));
     }
 

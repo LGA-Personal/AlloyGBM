@@ -252,6 +252,7 @@ class GBMRegressor(_GBMRegressorBase):
         balance_penalty: bool = True,
         lr_schedule: str = "constant",
         lr_warmup_frac: float = 0.1,
+        leaf_model: str = "constant",
     ) -> None:
         if not (0.0 < learning_rate <= 1.0):
             raise ValueError("learning_rate must be in (0.0, 1.0]")
@@ -393,6 +394,10 @@ class GBMRegressor(_GBMRegressorBase):
         # validation: morph_config.depth_penalty_base must be in (0, 1]).
         if not (0.0 < float(depth_penalty_base) <= 1.0):
             raise ValueError("depth_penalty_base must be in (0.0, 1.0]")
+        if str(leaf_model) not in ("constant", "linear"):
+            raise ValueError(
+                f"leaf_model must be 'constant' or 'linear', got {leaf_model!r}"
+            )
 
         self.learning_rate = float(learning_rate)
         self.max_depth = int(max_depth)
@@ -449,6 +454,7 @@ class GBMRegressor(_GBMRegressorBase):
         self.balance_penalty = bool(balance_penalty)
         self.lr_schedule = str(lr_schedule)
         self.lr_warmup_frac = float(lr_warmup_frac)
+        self.leaf_model = str(leaf_model)
         self._is_fitted = False
         self._artifact_bytes: bytes | None = None
         self._native_predictor_handle: object | None = None
@@ -509,7 +515,8 @@ class GBMRegressor(_GBMRegressorBase):
             f"depth_penalty_base={self.depth_penalty_base}, "
             f"balance_penalty={self.balance_penalty}, "
             f"lr_schedule='{self.lr_schedule}', "
-            f"lr_warmup_frac={self.lr_warmup_frac}"
+            f"lr_warmup_frac={self.lr_warmup_frac}, "
+            f"leaf_model='{self.leaf_model}'"
             ")"
         )
 
@@ -556,6 +563,7 @@ class GBMRegressor(_GBMRegressorBase):
             "balance_penalty": self.balance_penalty,
             "lr_schedule": self.lr_schedule,
             "lr_warmup_frac": self.lr_warmup_frac,
+            "leaf_model": self.leaf_model,
         }
 
     def set_params(self, **params: float | int | bool | str | None) -> "GBMRegressor":
@@ -600,6 +608,7 @@ class GBMRegressor(_GBMRegressorBase):
             "balance_penalty",
             "lr_schedule",
             "lr_warmup_frac",
+            "leaf_model",
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
@@ -878,6 +887,14 @@ class GBMRegressor(_GBMRegressorBase):
             if not (0.0 <= lwf <= 1.0):
                 raise ValueError("lr_warmup_frac must be in [0.0, 1.0]")
             self.lr_warmup_frac = lwf
+
+        if "leaf_model" in params:
+            lm = str(params["leaf_model"])
+            if lm not in ("constant", "linear"):
+                raise ValueError(
+                    f"leaf_model must be 'constant' or 'linear', got {lm!r}"
+                )
+            self.leaf_model = lm
 
         # Cross-field validation: leaf growth requires max_leaves
         if self.tree_growth == "leaf" and self.max_leaves is None:
@@ -1394,6 +1411,7 @@ class GBMRegressor(_GBMRegressorBase):
                     custom_metric_fn=_custom_metric_fn,
                     max_cat_threshold=self.max_cat_threshold,
                     morph_config=self._morph_config_,
+                    leaf_model=self.leaf_model,
                 )
                 return self._finalize_training_result(native_result, input_adaptation_seconds, feature_count=feature_count)
             except (ImportError, AttributeError):
@@ -1486,6 +1504,7 @@ class GBMRegressor(_GBMRegressorBase):
                 custom_metric_fn=_custom_metric_fn,
                 max_cat_threshold=self.max_cat_threshold,
                 morph_config=self._morph_config_,
+                leaf_model=self.leaf_model,
             )
         else:
             assert training_rows is not None
@@ -1539,6 +1558,7 @@ class GBMRegressor(_GBMRegressorBase):
                 custom_metric_fn=_custom_metric_fn,
                 max_cat_threshold=self.max_cat_threshold,
                 morph_config=self._morph_config_,
+                leaf_model=self.leaf_model,
             )
 
         self._apply_continuous_binning_metadata(native_result.continuous_binning_metadata)
@@ -1862,6 +1882,7 @@ class GBMRegressor(_GBMRegressorBase):
                 continuous_binning_strategy=self.continuous_binning_strategy,
                 continuous_binning_max_bins=self.continuous_binning_max_bins,
                 objective=self._objective_name(),
+                leaf_model=self.leaf_model,
             )
         else:
             train_regression_artifact = _load_native_train_regression_artifact()
@@ -1888,6 +1909,7 @@ class GBMRegressor(_GBMRegressorBase):
                 continuous_binning_strategy=self.continuous_binning_strategy,
                 continuous_binning_max_bins=self.continuous_binning_max_bins,
                 objective=self._objective_name(),
+                leaf_model=self.leaf_model,
             )
 
         self._n_features_in = feature_count
