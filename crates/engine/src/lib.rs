@@ -1996,9 +1996,9 @@ impl TrainedModel {
             let feature_index = stump.split.feature_index as usize;
             let feature_value = features[feature_index];
             prediction += if split_went_left(&stump.split, feature_value) {
-                stump.left_leaf_value.as_scalar()
+                stump.left_leaf_value.eval_row(features)
             } else {
-                stump.right_leaf_value.as_scalar()
+                stump.right_leaf_value.eval_row(features)
             };
         }
 

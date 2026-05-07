@@ -979,7 +979,6 @@ pub fn subtract_linear_histogram_bundle(
         "num_regressors mismatch in linear histogram subtraction"
     );
     let d = parent.num_regressors;
-    let tri_len = d * (d + 1) / 2;
     let feature_histograms = parent
         .feature_histograms
         .iter()
@@ -996,8 +995,13 @@ pub fn subtract_linear_histogram_bundle(
                     for j in 0..d {
                         xtg[j] = pb.xtg[j] - sb.xtg[j];
                     }
-                    for idx in 0..tri_len {
-                        xt_hx[idx] = pb.xt_hx[idx] - sb.xt_hx[idx];
+                    // Use pl_matrix_index to iterate only the active (j,k) pairs,
+                    // since the indices are non-contiguous for d < MAX_PL_REGRESSORS.
+                    for j in 0..d {
+                        for k in j..d {
+                            let idx = pl_matrix_index(j, k);
+                            xt_hx[idx] = pb.xt_hx[idx] - sb.xt_hx[idx];
+                        }
                     }
                     LinearHistogramBin {
                         grad_sum: pb.grad_sum - sb.grad_sum,
@@ -1076,6 +1080,18 @@ impl LeafValue {
         match self {
             Self::Scalar(v) => *v,
             Self::Linear(leaf) => leaf.intercept,
+        }
+    }
+
+    /// Evaluate this leaf for a single row passed as a flat feature slice.
+    ///
+    /// For [`LeafValue::Scalar`], returns the scalar directly.
+    /// For [`LeafValue::Linear`], computes `intercept + Σ w_j * features[regressor_j]`.
+    #[inline]
+    pub fn eval_row(&self, features: &[f32]) -> f32 {
+        match self {
+            Self::Scalar(v) => *v,
+            Self::Linear(leaf) => leaf.eval(features, 0),
         }
     }
 

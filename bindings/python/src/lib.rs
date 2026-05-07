@@ -2434,6 +2434,9 @@ fn train_regression_artifact_with_summary_dense_impl(
     max_cat_threshold: usize,
 ) -> Result<NativeTrainingResult, EngineError> {
     let bridge_start = Instant::now();
+    let is_linear_leaf = params.leaf_model == alloygbm_core::LeafModelKind::Linear;
+    // Dense float values are needed for categorical target encoding.  For linear-leaf
+    // training we need the raw feature values separately (see post-processing below).
     let need_dense_values = !categorical_specs.is_empty();
     let mut prepared = prepare_training_matrices_from_dense_values(
         values,
@@ -2447,6 +2450,16 @@ fn train_regression_artifact_with_summary_dense_impl(
         continuous_binning_max_bins,
         need_dense_values,
     )?;
+
+    // For linear-leaf training the engine reads `dataset.matrix.values` as raw (float)
+    // feature values inside `build_linear_histograms_cpu`.  The preparation step above
+    // stores *bin indices* as f32 when `need_dense_values=true` (for categorical
+    // encoding), so we must replace the DatasetMatrix with the original floats here.
+    // Categorical encoding runs afterwards and will overwrite its own columns.
+    if is_linear_leaf {
+        prepared.dataset.matrix =
+            DatasetMatrix::new(row_count, feature_count, values.to_vec())?;
+    }
 
     let training_targets_for_validation = prepared.dataset.targets.clone();
     let training_time_index_for_validation = prepared.dataset.time_index.clone();

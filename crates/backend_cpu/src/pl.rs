@@ -20,6 +20,69 @@ use alloygbm_core::{
 };
 use alloygbm_engine::{LinearContext, SplitSelectionOptions};
 
+// ── xt_hx helpers ─────────────────────────────────────────────────────────────
+//
+// `pl_matrix_index(j, k)` uses MAX_PL_REGRESSORS as the stride, so the valid
+// indices for a d-regressor problem are NOT a contiguous 0..tri_len range.
+// These helpers iterate only the (j,k) pairs that are active for a given d.
+
+#[inline]
+fn copy_xt_hx(
+    src: &[f32; MAX_PL_MATRIX_ENTRIES],
+    dst: &mut [f32; MAX_PL_MATRIX_ENTRIES],
+    d: usize,
+) {
+    for j in 0..d {
+        for k in j..d {
+            let idx = pl_matrix_index(j, k);
+            dst[idx] = src[idx];
+        }
+    }
+}
+
+#[inline]
+fn add_xt_hx(
+    src: &[f32; MAX_PL_MATRIX_ENTRIES],
+    dst: &mut [f32; MAX_PL_MATRIX_ENTRIES],
+    d: usize,
+) {
+    for j in 0..d {
+        for k in j..d {
+            let idx = pl_matrix_index(j, k);
+            dst[idx] += src[idx];
+        }
+    }
+}
+
+#[inline]
+fn sub_xt_hx(
+    src: &[f32; MAX_PL_MATRIX_ENTRIES],
+    dst: &mut [f32; MAX_PL_MATRIX_ENTRIES],
+    d: usize,
+) {
+    for j in 0..d {
+        for k in j..d {
+            let idx = pl_matrix_index(j, k);
+            dst[idx] -= src[idx];
+        }
+    }
+}
+
+#[inline]
+fn diff_xt_hx(
+    b: &[f32; MAX_PL_MATRIX_ENTRIES],
+    c: &[f32; MAX_PL_MATRIX_ENTRIES],
+    dst: &mut [f32; MAX_PL_MATRIX_ENTRIES],
+    d: usize,
+) {
+    for j in 0..d {
+        for k in j..d {
+            let idx = pl_matrix_index(j, k);
+            dst[idx] = b[idx] - c[idx];
+        }
+    }
+}
+
 /// Compute the PL gain for one side of a split:
 /// `0.5 · (Xᵀg)ᵀ (XᵀHX + λI)⁻¹ (Xᵀg)`.
 ///
@@ -99,7 +162,6 @@ pub fn best_split_linear_for_feature(
     if d == 0 || linear_fh.bins.len() < 2 {
         return None;
     }
-    let tri_len = d * (d + 1) / 2;
     let missing_bin_idx = options.missing_bin_index;
 
     // ── Parent (node-level) totals ──────────────────────────────────────────
@@ -115,9 +177,7 @@ pub fn best_split_linear_for_feature(
         for j in 0..d {
             p_xtg[j] += bin.xtg[j];
         }
-        for idx in 0..tri_len {
-            p_xt_hx[idx] += bin.xt_hx[idx];
-        }
+        add_xt_hx(&bin.xt_hx, &mut p_xt_hx, d);
     }
 
     if p_hess <= options.min_child_hessian {
@@ -132,9 +192,7 @@ pub fn best_split_linear_for_feature(
         for j in 0..d {
             mxtg[j] = mb.xtg[j];
         }
-        for idx in 0..tri_len {
-            mxthx[idx] = mb.xt_hx[idx];
-        }
+        copy_xt_hx(&mb.xt_hx, &mut mxthx, d);
         (mxtg, mxthx, mb.grad_sum, mb.hess_sum, mb.count)
     } else {
         (
@@ -159,9 +217,7 @@ pub fn best_split_linear_for_feature(
     for j in 0..d {
         nm_xtg[j] -= m_xtg[j];
     }
-    for idx in 0..tri_len {
-        nm_xt_hx[idx] -= m_xt_hx[idx];
-    }
+    sub_xt_hx(&m_xt_hx, &mut nm_xt_hx, d);
 
     // ── Running left accumulators (non-missing bins only) ────────────────────
     let mut l_xtg = [0.0_f32; MAX_PL_REGRESSORS];
@@ -181,9 +237,7 @@ pub fn best_split_linear_for_feature(
         for j in 0..d {
             l_xtg[j] += bin.xtg[j];
         }
-        for idx in 0..tri_len {
-            l_xt_hx[idx] += bin.xt_hx[idx];
-        }
+        add_xt_hx(&bin.xt_hx, &mut l_xt_hx, d);
 
         // Need at least one non-missing bin on the right side.
         if threshold_bin + 1 >= scan_limit && nm_count == l_count {
@@ -199,9 +253,7 @@ pub fn best_split_linear_for_feature(
         for j in 0..d {
             r_xtg_nm[j] = nm_xtg[j] - l_xtg[j];
         }
-        for idx in 0..tri_len {
-            r_xt_hx_nm[idx] = nm_xt_hx[idx] - l_xt_hx[idx];
-        }
+        diff_xt_hx(&nm_xt_hx, &l_xt_hx, &mut r_xt_hx_nm, d);
 
         // Evaluate NaN-goes-left and NaN-goes-right, pick the better one.
         for default_left in [true, false] {
@@ -214,9 +266,7 @@ pub fn best_split_linear_for_feature(
                 for j in 0..d {
                     el_xtg[j] += m_xtg[j];
                 }
-                for idx in 0..tri_len {
-                    el_xthx[idx] += m_xt_hx[idx];
-                }
+                add_xt_hx(&m_xt_hx, &mut el_xthx, d);
                 (
                     l_grad + m_grad,
                     l_hess + m_hess,
@@ -236,9 +286,7 @@ pub fn best_split_linear_for_feature(
                 for j in 0..d {
                     er_xtg[j] += m_xtg[j];
                 }
-                for idx in 0..tri_len {
-                    er_xthx[idx] += m_xt_hx[idx];
-                }
+                add_xt_hx(&m_xt_hx, &mut er_xthx, d);
                 (
                     l_grad,
                     l_hess,
@@ -316,7 +364,6 @@ pub fn leaf_linear_stats_for_split(
     f32,
     f32,
 ) {
-    let tri_len = d * (d + 1) / 2;
     let scan_limit = linear_fh.bins.len().min(missing_bin_idx);
 
     // Missing bin.
@@ -327,9 +374,7 @@ pub fn leaf_linear_stats_for_split(
         for j in 0..d {
             mxtg[j] = mb.xtg[j];
         }
-        for idx in 0..tri_len {
-            mxthx[idx] = mb.xt_hx[idx];
-        }
+        copy_xt_hx(&mb.xt_hx, &mut mxthx, d);
         (mxtg, mxthx, mb.grad_sum, mb.hess_sum)
     } else {
         (
@@ -351,9 +396,7 @@ pub fn leaf_linear_stats_for_split(
         for j in 0..d {
             l_xtg[j] += bin.xtg[j];
         }
-        for idx in 0..tri_len {
-            l_xt_hx[idx] += bin.xt_hx[idx];
-        }
+        add_xt_hx(&bin.xt_hx, &mut l_xt_hx, d);
     }
 
     // Parent non-missing totals.
@@ -367,9 +410,7 @@ pub fn leaf_linear_stats_for_split(
         for j in 0..d {
             nm_xtg[j] += bin.xtg[j];
         }
-        for idx in 0..tri_len {
-            nm_xt_hx[idx] += bin.xt_hx[idx];
-        }
+        add_xt_hx(&bin.xt_hx, &mut nm_xt_hx, d);
     }
 
     // Right non-missing = parent_nm - left.
@@ -378,9 +419,7 @@ pub fn leaf_linear_stats_for_split(
     for j in 0..d {
         r_xtg_nm[j] = nm_xtg[j] - l_xtg[j];
     }
-    for idx in 0..tri_len {
-        r_xt_hx_nm[idx] = nm_xt_hx[idx] - l_xt_hx[idx];
-    }
+    diff_xt_hx(&nm_xt_hx, &l_xt_hx, &mut r_xt_hx_nm, d);
     let r_grad_nm = nm_grad - l_grad;
     let r_hess_nm = nm_hess - l_hess;
 
@@ -392,9 +431,7 @@ pub fn leaf_linear_stats_for_split(
             for j in 0..d {
                 el_xtg[j] += m_xtg[j];
             }
-            for idx in 0..tri_len {
-                el_xthx[idx] += m_xt_hx[idx];
-            }
+            add_xt_hx(&m_xt_hx, &mut el_xthx, d);
             (
                 el_xtg,
                 el_xthx,
@@ -411,9 +448,7 @@ pub fn leaf_linear_stats_for_split(
             for j in 0..d {
                 er_xtg[j] += m_xtg[j];
             }
-            for idx in 0..tri_len {
-                er_xthx[idx] += m_xt_hx[idx];
-            }
+            add_xt_hx(&m_xt_hx, &mut er_xthx, d);
             (
                 l_xtg,
                 l_xt_hx,

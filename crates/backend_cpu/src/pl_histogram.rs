@@ -46,7 +46,6 @@ pub fn build_linear_histograms_cpu(
     }
 
     let bin_count = binned_matrix.max_bin as usize + 2; // include missing bin
-    let tri_len = d * (d + 1) / 2;
 
     // Collect all split feature indices from the tiles.
     let split_features: Vec<u32> = feature_tiles
@@ -100,7 +99,7 @@ pub fn build_linear_histograms_cpu(
 
             // Replace NaN/Inf in accumulated values with 0 (defensive).
             for bin in &mut bins {
-                sanitize_linear_bin(bin, tri_len);
+                sanitize_linear_bin(bin, d);
             }
 
             LinearFeatureHistogram {
@@ -119,22 +118,29 @@ pub fn build_linear_histograms_cpu(
 }
 
 /// Zero out any non-finite entries in a bin's linear statistics.
+///
+/// `d` is the number of active regressors so we iterate only the active
+/// `(j, k)` index pairs in `xt_hx` (the indices are non-contiguous for
+/// `d < MAX_PL_REGRESSORS` due to how `pl_matrix_index` works).
 #[inline]
-fn sanitize_linear_bin(bin: &mut LinearHistogramBin, tri_len: usize) {
+fn sanitize_linear_bin(bin: &mut LinearHistogramBin, d: usize) {
     if !bin.grad_sum.is_finite() {
         bin.grad_sum = 0.0;
     }
     if !bin.hess_sum.is_finite() {
         bin.hess_sum = 0.0;
     }
-    for j in 0..MAX_PL_REGRESSORS {
+    for j in 0..d {
         if !bin.xtg[j].is_finite() {
             bin.xtg[j] = 0.0;
         }
     }
-    for idx in 0..tri_len {
-        if !bin.xt_hx[idx].is_finite() {
-            bin.xt_hx[idx] = 0.0;
+    for j in 0..d {
+        for k in j..d {
+            let idx = pl_matrix_index(j, k);
+            if !bin.xt_hx[idx].is_finite() {
+                bin.xt_hx[idx] = 0.0;
+            }
         }
     }
 }
