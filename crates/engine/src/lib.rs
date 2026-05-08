@@ -64,7 +64,10 @@ type ActiveNodeEntry = (u32, Vec<u32>, HistogramBundle, f32, Option<LinearLeaf>)
 type LinearLeafQuad = (LinearLeaf, LinearLeaf, LinearLeaf, LinearLeaf);
 
 /// Type alias for a pair of optional linear leaves (delta pair, absolute pair).
-type LinearLeafPairSplit = (Option<(LinearLeaf, LinearLeaf)>, Option<(LinearLeaf, LinearLeaf)>);
+type LinearLeafPairSplit = (
+    Option<(LinearLeaf, LinearLeaf)>,
+    Option<(LinearLeaf, LinearLeaf)>,
+);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SplitSelectionOptions {
@@ -3401,7 +3404,10 @@ impl Trainer {
             } else {
                 (fit_contract.baseline_prediction, Vec::new(), 0)
             };
-        let raw_features_opt = Some((&dataset.matrix.values as &[f32], dataset.matrix.feature_count));
+        let raw_features_opt = Some((
+            &dataset.matrix.values as &[f32],
+            dataset.matrix.feature_count,
+        ));
         let mut predictions = vec![baseline_prediction; dataset.row_count()];
         if !initial_stumps.is_empty() {
             apply_tree_to_binned_predictions(
@@ -4407,11 +4413,11 @@ fn build_tree_level_wise<B: BackendOps>(
             // ── Linear leaf path ───────────────────────────────────────────────
             // If leaf_model == Linear, build a LinearHistogramBundle for this node
             // and solve closed-form ridge leaves. Falls back to scalar on any error.
-            let linear_leaf_computation_result: Option<LinearLeafQuad> =
-                if params.leaf_model == LeafModelKind::Linear
-                    && !raw_feature_values.is_empty()
-                    && !split.is_categorical
-                {
+            let linear_leaf_computation_result: Option<LinearLeafQuad> = if params.leaf_model
+                == LeafModelKind::Linear
+                && !raw_feature_values.is_empty()
+                && !split.is_categorical
+            {
                 let d = binned_matrix.feature_count.min(MAX_PL_REGRESSORS);
                 let regressor_features: Vec<u32> = (0..d as u32).collect();
                 backend
@@ -4809,11 +4815,11 @@ fn build_tree_leaf_wise<B: BackendOps>(
         }
 
         // ── Linear leaf path ───────────────────────────────────────────────────
-        let linear_leaf_computation_result: Option<LinearLeafQuad> =
-            if params.leaf_model == LeafModelKind::Linear
-                && !raw_feature_values.is_empty()
-                && !split.is_categorical
-            {
+        let linear_leaf_computation_result: Option<LinearLeafQuad> = if params.leaf_model
+            == LeafModelKind::Linear
+            && !raw_feature_values.is_empty()
+            && !split.is_categorical
+        {
             let d = binned_matrix.feature_count.min(MAX_PL_REGRESSORS);
             let regressor_features: Vec<u32> = (0..d as u32).collect();
             backend
@@ -5499,7 +5505,12 @@ fn apply_tree_to_binned_predictions(
             current_tree_id = tree_id;
         }
     }
-    apply_round_stumps_tree_walk(predictions, binned_matrix, &stumps[round_start..], raw_features)?;
+    apply_round_stumps_tree_walk(
+        predictions,
+        binned_matrix,
+        &stumps[round_start..],
+        raw_features,
+    )?;
     Ok(())
 }
 
