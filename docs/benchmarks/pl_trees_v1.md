@@ -85,7 +85,10 @@ Constant-leaf timings are unchanged.
 
 The slowdown of linear-leaf vs constant-leaf training drops from ~30-44× in
 v0.5.0 to ~10-13× in v0.5.1 on Apple Silicon. Matrix histograms remain
-fundamentally more expensive than scalar grad/hess histograms because each bin
-stores 47 floats (`Xᵀg` + `XᵀHX`) instead of 3, but with SIMD the per-bin
-update is 8× wider in registers.
+fundamentally more expensive than scalar grad/hess histograms because each
+bin now stores 72 floats (`Xᵀg` + the padded stride-8 `XᵀHX` = 8 + 64) instead
+of the 3 scalars (grad/hess/count) used by constant leaves. The padded layout
+trades ~28 zero floats per bin (the unused lower triangle) for SIMD
+alignment that lets every matrix op vectorise as 8 lanes wide with no scalar
+tail — net win on every modern CPU.
 
