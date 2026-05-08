@@ -121,6 +121,32 @@ model = GBMRegressor(
 
 Full parameter reference: [MorphBoost](morphboost.md).
 
+## Piecewise-Linear Leaves (Optional)
+
+`leaf_model="linear"` replaces scalar leaves with closed-form linear models
+solved per leaf via `α* = -(XᵀHX + λI)⁻¹ Xᵀg`. On data with linear
+within-node residual structure this typically reaches the same loss in
+fewer rounds.
+
+```python
+from alloygbm import GBMRegressor
+
+model = GBMRegressor(
+    n_estimators=300,
+    max_depth=6,
+    learning_rate=0.05,
+    leaf_model="linear",
+    lambda_l2=0.01,    # recommended >= 0.01 with linear leaves
+    seed=7,
+)
+model.fit(X_train, y_train)
+```
+
+`leaf_model="linear"` works on `GBMClassifier` and `GBMRanker` too, and
+composes with `training_mode="morph"`. SHAP currently requires
+`leaf_model="constant"`. Full reference:
+[GBMRegressor — Piecewise-Linear Leaves](gbmregressor.md#piecewise-linear-leaves).
+
 ## Validation And Early Stopping
 
 ```python

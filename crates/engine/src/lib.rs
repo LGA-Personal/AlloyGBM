@@ -5459,7 +5459,9 @@ fn apply_round_stumps_tree_walk(
             let feature_index = stump.split.feature_index as usize;
             let bin = binned_matrix.row_bin(row_base + feature_index);
             if bin <= stump.split.threshold_bin {
-                *prediction += if let Some((raw, fc)) = raw_features {
+                *prediction += if let Some((raw, fc)) = raw_features
+                    && !raw.is_empty()
+                {
                     let row_offset = row_index * fc;
                     stump.left_leaf_value.eval_row(&raw[row_offset..])
                 } else {
@@ -5467,7 +5469,9 @@ fn apply_round_stumps_tree_walk(
                 };
                 local_id = local_id * 2 + 1; // left child
             } else {
-                *prediction += if let Some((raw, fc)) = raw_features {
+                *prediction += if let Some((raw, fc)) = raw_features
+                    && !raw.is_empty()
+                {
                     let row_offset = row_index * fc;
                     stump.right_leaf_value.eval_row(&raw[row_offset..])
                 } else {

@@ -145,6 +145,15 @@ becomes schedule-aware: the auto-tuned ``min_loss_improvement`` threshold
 is scaled by ``current_lr / max_lr``, and empty / slightly-negative
 rounds during the explicit warmup phase do not terminate training.
 
+Combining with piecewise-linear leaves
+--------------------------------------
+
+``training_mode="morph"`` composes with ``leaf_model="linear"``. The
+MorphBoost gain criterion drives split selection, and each resulting leaf
+still fits a closed-form linear model via the ridge solve. Pair with
+``lambda_l2 >= 0.01`` for weight stability. See :doc:`estimator` for the
+full ``leaf_model`` reference.
+
 Persistence
 -----------
 

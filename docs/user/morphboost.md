@@ -150,6 +150,14 @@ training won't terminate after a handful of warmup rounds.
 - For long, low-LR runs (`n_estimators >= 1500`, `learning_rate <= 0.02`),
   try `lr_schedule="warmup_cosine"` — empirically improves stability.
 
+## Combining With Piecewise-Linear Leaves
+
+`training_mode="morph"` composes with `leaf_model="linear"`. The MorphBoost
+gain criterion is used for split selection, and each resulting leaf still
+fits a closed-form linear model via the ridge solve. Pair with
+`lambda_l2 >= 0.01` for weight stability. See
+[GBMRegressor — Piecewise-Linear Leaves](gbmregressor.md#piecewise-linear-leaves).
+
 ## Persistence
 
 Models trained with `training_mode="morph"` save and load identically to

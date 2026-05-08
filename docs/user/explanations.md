@@ -65,3 +65,10 @@ SHAP explanations work with all three estimators:
 - `GBMRegressor.shap_values(...)`
 - `GBMClassifier.shap_values(...)`
 - `GBMRanker.shap_values(...)`
+
+## Leaf Model Compatibility
+
+SHAP currently supports `leaf_model="constant"` only. Calling `shap_values(...)`
+or `feature_importances(...)` on a model trained with `leaf_model="linear"`
+raises an error. Train with the default `leaf_model="constant"` if you need
+SHAP explanations.

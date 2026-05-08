@@ -61,18 +61,32 @@ python3 benchmarks/histogram_stress/prepare.py --rows 100000 --features 48
 
 ### Cross-library model comparison
 
-The runner registers six model arms by default per task type:
+The runner registers eight model arms by default per task type:
 
 - `alloygbm` (auto training mode)
 - `alloygbm_morph` (`training_mode="morph"`, constant LR)
 - `alloygbm_morph_cosine` (`training_mode="morph"`, `lr_schedule="warmup_cosine"`)
+- `alloygbm_linear` (`leaf_model="linear"`, auto training mode)
+- `alloygbm_morph_linear` (`leaf_model="linear"` + `training_mode="morph"`)
 - `lightgbm`, `xgboost`, `catboost`
+
+The two `*_linear` arms apply `lambda_l2=0.01` by default
+(tunable via `--alloy-linear-lambda-l2`), as recommended for weight stability
+under the closed-form ridge solve.
 
 Use `--models` to filter which arms run. Example: just MorphBoost vs peers:
 
 ```bash
 python3 benchmarks/run_model_comparison.py \
   --models alloygbm alloygbm_morph alloygbm_morph_cosine lightgbm xgboost catboost \
+  --force-prepare
+```
+
+Just PL-trees vs peers:
+
+```bash
+python3 benchmarks/run_model_comparison.py \
+  --models alloygbm alloygbm_linear lightgbm xgboost catboost \
   --force-prepare
 ```
 
@@ -155,9 +169,9 @@ python3 benchmarks/run_model_comparison.py \
   --scenarios dense_numeric dow_jones_financial
 ```
 
-### MorphBoost-focused harnesses
+### Focused harnesses
 
-Two additional, lighter-weight scripts target MorphBoost specifically:
+Additional lighter-weight scripts target specific features:
 
 - `benchmarks/morph_report.py` — quick MorphBoost-vs-peers comparison on a
   curated set of sklearn-based datasets. Defaults to `--quick` (60 rounds);
@@ -168,6 +182,9 @@ Two additional, lighter-weight scripts target MorphBoost specifically:
 - `benchmarks/numerai_benchmark.py` — Numerai-tournament-style residualized
   regression at scale, evaluating numerai_corr, Sharpe, and MMC. Includes
   the `alloygbm_morph` and `alloygbm_morph_cosine` arms.
+- `benchmarks/pl_trees_benchmark.py` — piecewise-linear-leaf
+  convergence-curve and λ-sweep analysis across regression, classification,
+  and ranking scenarios. Report at `docs/benchmarks/pl_trees_v1.md`.
 
 ```bash
 # Quick MorphBoost comparison report

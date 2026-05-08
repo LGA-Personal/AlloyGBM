@@ -68,6 +68,14 @@ SHAP explanations work with all three estimators:
 - ``GBMClassifier.shap_values(...)``
 - ``GBMRanker.shap_values(...)``
 
+Leaf model compatibility
+------------------------
+
+SHAP currently supports ``leaf_model="constant"`` only. Calling
+``shap_values(...)`` or ``feature_importances(...)`` on a model trained with
+``leaf_model="linear"`` raises an error. Use the default
+``leaf_model="constant"`` when SHAP explanations are required.
+
 .. figure:: _static/shap_tree_path_example.png
    :alt: SHAP explanation example showing a highlighted decision-tree path and additive feature contributions to a prediction.
    :width: 90%

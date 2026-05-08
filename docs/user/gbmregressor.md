@@ -118,23 +118,37 @@ provided, they are merged.
   - `"constant"` (default): standard scalar leaf value — identical to all prior
     AlloyGBM behaviour.
   - `"linear"`: each leaf stores a small linear model
-    `f_s(x) = b_s + Σ α_j x_j` (up to `MAX_PL_REGRESSORS = 8` regressors per
-    leaf, inherited from the split path's feature indices). Optimal weights are
-    solved in closed form: `α* = -(XᵀHX + λI)⁻¹ Xᵀg`, regularised by the same
-    `lambda_l2` you pass to the estimator.
+    `f_s(x) = b_s + Σ α_j x_j` (up to 8 regressors per leaf, inherited from the
+    split path's feature indices; the per-leaf cap is internal and not
+    user-tunable in v0.5.0). Optimal weights are solved in closed form:
+    `α* = -(XᵀHX + λI)⁻¹ Xᵀg`, regularised by the same `lambda_l2` you pass to
+    the estimator.
 
   **When to use `"linear"`**: datasets where the residual signal within each tree
   node is approximately linear in the input features (e.g. smooth tabular
   regression, classification with well-separated linear decision boundaries).
-  Benchmarks show 2–10× faster convergence on linearly-structured data, at a 2–8×
-  training time overhead. Use a small non-zero `lambda_l2` (e.g. `0.01`) with
-  linear leaves to improve weight stability.
+  Benchmarks show ~10× faster convergence on linearly-structured data, +3.5%
+  RMSE on California Housing, and +1.75pp accuracy on Breast Cancer, at a 2–8×
+  training time overhead.
 
-  **Limitations**: training time scales with the number of regressors per node
-  (Cholesky solve). Native-bitset categorical features that use Fisher-sort splits
-  (`max_cat_threshold > 0`) still fall back to constant leaves for that split;
-  descendant leaves below such a split use linear leaves on all remaining numeric
-  features.
+  **Recommended `lambda_l2`**: pass at least `lambda_l2=0.01` when using
+  `leaf_model="linear"`. Without it, the closed-form ridge solve can produce
+  noisy per-leaf weights that overfit at high round counts on non-linear data.
+
+  **Multi-class softmax**: when `GBMClassifier` is fit with K > 2 classes, each
+  per-class tree sequence independently uses linear leaves.
+
+  **Limitations**:
+
+  - Training time scales with the number of regressors per node (≤ 8×8
+    Cholesky solve).
+  - Native-bitset categorical features that use Fisher-sort splits
+    (`max_cat_threshold > 0`) fall back to constant leaves for that split node;
+    descendant leaves below such a split use linear leaves on all remaining
+    numeric regressors.
+  - SHAP (`shap_values`, `feature_importances`) currently raises an error for
+    `leaf_model="linear"` artifacts. Train with `leaf_model="constant"` if you
+    need SHAP explanations.
 
 ## MorphBoost (Adaptive Split Criterion)
 

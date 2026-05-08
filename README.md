@@ -34,7 +34,7 @@ maturin develop --manifest-path bindings/python/Cargo.toml --release
 
 AlloyGBM targets Python `3.11+` and uses a native Rust extension module.
 
-Wheel targets for `0.4.0`:
+Wheel targets for `0.5.0`:
 
 - macOS `arm64`
 - Linux `x86_64` (manylinux)
@@ -138,6 +138,31 @@ model = GBMRegressor(
 `training_mode="morph"` works with `GBMClassifier` and `GBMRanker` too, with
 identical parameter semantics.
 
+### Piecewise-Linear Leaves
+
+Set `leaf_model="linear"` on any estimator to replace scalar leaves with small
+closed-form linear models (`f_s(x) = b_s + Σ α_j x_j`). Weights are solved via
+ridge regression `α* = -(XᵀHX + λI)⁻¹ Xᵀg` regularised by `lambda_l2`. This
+typically converges in fewer rounds on data with linear within-node residual
+structure (e.g. California Housing), at a 2–8× per-round training overhead.
+
+```python
+from alloygbm import GBMRegressor
+
+model = GBMRegressor(
+    n_estimators=300,
+    max_depth=6,
+    learning_rate=0.05,
+    leaf_model="linear",
+    lambda_l2=0.01,    # recommended >= 0.01 with linear leaves
+    seed=7,
+)
+model.fit(X_train, y_train)
+```
+
+`leaf_model="linear"` works with `GBMClassifier` and `GBMRanker`, and composes
+with `training_mode="morph"`. SHAP currently requires `leaf_model="constant"`.
+
 ### Time-Aware Validation
 
 ```python
@@ -201,6 +226,7 @@ artifact_bytes = model.artifact_bytes
 - Objective-aware training metric tracking (RMSE, log-loss, accuracy, NDCG)
 - Adaptive split criterion via `training_mode="morph"` ([MorphBoost](https://arxiv.org/pdf/2511.13234))
 - Per-iteration learning-rate schedules: `lr_schedule="constant"` (default) or `"warmup_cosine"`
+- Piecewise-linear leaves via `leaf_model="linear"` (closed-form ridge solve, faster convergence on linear-trend data)
 
 ### Inference and Explanations
 
@@ -243,11 +269,10 @@ Benchmark tooling and methodology live in [benchmarks/README.md](benchmarks/READ
 
 ## Current Limitations
 
-- Binary classification only (no multi-class yet)
 - CPU-only runtime (GPU backend is architecturally planned but not implemented)
-- No custom objective / custom metric callbacks from Python
 - No interaction constraints
 - No dart/goss boosting modes
+- SHAP not yet supported with `leaf_model="linear"` (use `"constant"` for now)
 
 ## Documentation
 
