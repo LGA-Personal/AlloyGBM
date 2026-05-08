@@ -221,3 +221,17 @@ class TestPLRanker:
         finally:
             os.unlink(fname)
         np.testing.assert_allclose(scores_before, scores_after, atol=1e-4)
+
+
+class TestPlTreesShapNotSupported:
+    """SHAP currently raises a clear error for `leaf_model='linear'` artifacts."""
+
+    def test_shap_raises_on_linear_leaf_regressor(self):
+        rng = np.random.default_rng(0)
+        X = rng.standard_normal((60, 4)).astype("float32")
+        y = X @ np.array([0.5, -0.3, 0.2, 0.1]).astype("float32") + 0.1 * rng.standard_normal(60).astype("float32")
+        m = GBMRegressor(n_estimators=5, leaf_model="linear", max_depth=2).fit(X, y)
+        with pytest.raises(Exception) as excinfo:
+            m.shap_values(X[:3])
+        msg = str(excinfo.value).lower()
+        assert "linear" in msg or "not supported" in msg, f"Expected an explanatory error, got: {excinfo.value}"

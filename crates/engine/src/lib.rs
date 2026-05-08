@@ -2901,13 +2901,17 @@ impl Trainer {
             && let Some(validation_ref) = validation
             && let Some(val_preds) = validation_class_predictions.as_mut()
         {
+            let val_raw = Some((
+                &validation_ref.dataset.matrix.values as &[f32],
+                validation_ref.dataset.matrix.feature_count,
+            ));
             for class_k in 0..k {
                 if !class_stumps[class_k].is_empty() {
                     apply_round_stumps_tree_walk(
                         &mut val_preds[class_k],
                         validation_ref.binned_matrix,
                         &class_stumps[class_k],
-                        None,
+                        val_raw,
                     )?;
                 }
             }
@@ -3121,6 +3125,10 @@ impl Trainer {
             let mut stop_for_validation_plateau = false;
             if let Some(validation_ref) = validation {
                 let val_preds = validation_class_predictions.as_mut().unwrap();
+                let val_raw = Some((
+                    &validation_ref.dataset.matrix.values as &[f32],
+                    validation_ref.dataset.matrix.feature_count,
+                ));
                 for class_k in 0..k {
                     let round_stumps = &class_stumps[class_k][pre_round_counts[class_k]..];
                     if !round_stumps.is_empty() {
@@ -3128,7 +3136,7 @@ impl Trainer {
                             &mut val_preds[class_k],
                             validation_ref.binned_matrix,
                             round_stumps,
-                            None,
+                            val_raw,
                         )?;
                     }
                 }
@@ -3425,7 +3433,10 @@ impl Trainer {
                     &mut vp,
                     validation_ref.binned_matrix,
                     &initial_stumps,
-                    None,
+                    Some((
+                        &validation_ref.dataset.matrix.values as &[f32],
+                        validation_ref.dataset.matrix.feature_count,
+                    )),
                 )?;
             }
             Some(vp)
@@ -3649,7 +3660,10 @@ impl Trainer {
                     &mut next_validation_predictions,
                     validation_ref.binned_matrix,
                     &candidate_round_stumps,
-                    None,
+                    Some((
+                        &validation_ref.dataset.matrix.values as &[f32],
+                        validation_ref.dataset.matrix.feature_count,
+                    )),
                 )?;
                 let next_validation_loss = objective.loss(
                     &next_validation_predictions,
