@@ -69,14 +69,14 @@ Synthetic linear dataset with 8 features. `training_policy='manual'`, no subsamp
 - Linear leaves use the closed-form ridge solve   `α* = -(XᵀHX + λI)⁻¹ Xᵀg` per node.
 - `lambda_l2` regularizes both the scalar leaf (standard NR) and the   linear leaf weights.
 
-## v0.6.0 SIMD Speedup
+## v0.5.1 SIMD Speedup
 
-v0.6.0 vectorises the per-row matrix-histogram accumulation via `wide::f32x8`.
+v0.5.1 vectorises the per-row matrix-histogram accumulation via `wide::f32x8`.
 Below is the head-to-head wall-time comparison on the same hardware (Apple
 Silicon, M-series; expect ~5× on x86_64 AVX2 due to the wider 256-bit lanes).
 Constant-leaf timings are unchanged.
 
-| Scenario (regression, depth=6, manual policy) | v0.5.0 linear | v0.6.0 linear (SIMD) | Speedup |
+| Scenario (regression, depth=6, manual policy) | v0.5.0 linear | v0.5.1 linear (SIMD) | Speedup |
 | --- | ---: | ---: | ---: |
 | n=20K, n_features=8, n_est=200 | 6.84 s | 2.31 s | **2.96×** |
 | n=50K, n_features=8, n_est=200 | 16.02 s | 4.99 s | **3.21×** |
@@ -84,7 +84,7 @@ Constant-leaf timings are unchanged.
 | n=50K, n_features=8, n_est=500 | 40.07 s | 12.40 s | **3.23×** |
 
 The slowdown of linear-leaf vs constant-leaf training drops from ~30-44× in
-v0.5.0 to ~10-13× in v0.6.0 on Apple Silicon. Matrix histograms remain
+v0.5.0 to ~10-13× in v0.5.1 on Apple Silicon. Matrix histograms remain
 fundamentally more expensive than scalar grad/hess histograms because each bin
 stores 47 floats (`Xᵀg` + `XᵀHX`) instead of 3, but with SIMD the per-bin
 update is 8× wider in registers.

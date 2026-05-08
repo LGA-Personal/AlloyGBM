@@ -1,13 +1,13 @@
 # Changelog
 
-## 0.6.0
+## 0.5.1
 
 ### Performance
 
-- **PL trees ~3× faster on Apple Silicon (NEON), expected ~5× on x86_64 with AVX2.** Inner-loop matrix histogram accumulation is now SIMD-vectorised via `wide::f32x8`. The per-row cost of a linear-leaf tree was ~30-44× slower than constant leaves in 0.5.0; 0.6.0 brings the ratio down to ~10-13×.
+- **PL trees ~3× faster on Apple Silicon (NEON), expected ~5× on x86_64 with AVX2.** Inner-loop matrix histogram accumulation is now SIMD-vectorised via `wide::f32x8`. The per-row cost of a linear-leaf tree was ~30-44× slower than constant leaves in 0.5.0; 0.5.1 brings the ratio down to ~10-13×.
 - Concrete numbers (regression, n_features=8, max_depth=6, manual policy, Apple M-series; before/after on the same hardware):
 
-  | Scenario | 0.5.0 linear | 0.6.0 linear (SIMD) | Speedup |
+  | Scenario | 0.5.0 linear | 0.5.1 linear (SIMD) | Speedup |
   | --- | ---: | ---: | ---: |
   | n=20K, n_est=200 | 6.84 s | 2.31 s | **2.96×** |
   | n=50K, n_est=200 | 16.02 s | 4.99 s | **3.21×** |
@@ -24,7 +24,7 @@
 
 ### Compatibility
 
-- **Backward compatible.** v0.5.0 PL-trees model artifacts (`leaf_model="linear"`) load and predict identically in 0.6.0 — the layout change is internal to histogram construction at training time only; the `LinearLeafCoefficients` artifact section format is unchanged. Constant-leaf artifacts are unaffected.
+- **Backward compatible.** v0.5.0 PL-trees model artifacts (`leaf_model="linear"`) load and predict identically in 0.5.1 — the layout change is internal to histogram construction at training time only; the `LinearLeafCoefficients` artifact section format is unchanged. Constant-leaf artifacts are unaffected.
 
 ## 0.5.0
 
