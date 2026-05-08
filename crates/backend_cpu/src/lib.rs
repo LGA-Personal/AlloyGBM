@@ -1698,37 +1698,37 @@ impl BackendOps for CpuBackend {
             pl::best_split_linear_for_feature(linear_fh, node_id, options, ctx)
         };
 
-        let result =
-            if linear_histograms.feature_histograms.len() >= Self::PARALLEL_SPLIT_FEATURE_THRESHOLD
-            {
-                linear_histograms
-                    .feature_histograms
-                    .par_iter()
-                    .filter_map(find_best)
-                    .reduce_with(|a, b| {
-                        if apply_feature_weight(&b, feature_weights)
-                            > apply_feature_weight(&a, feature_weights)
-                        {
-                            b
-                        } else {
-                            a
-                        }
-                    })
-            } else {
-                linear_histograms
-                    .feature_histograms
-                    .iter()
-                    .filter_map(find_best)
-                    .reduce(|a, b| {
-                        if apply_feature_weight(&b, feature_weights)
-                            > apply_feature_weight(&a, feature_weights)
-                        {
-                            b
-                        } else {
-                            a
-                        }
-                    })
-            };
+        let result = if linear_histograms.feature_histograms.len()
+            >= Self::PARALLEL_SPLIT_FEATURE_THRESHOLD
+        {
+            linear_histograms
+                .feature_histograms
+                .par_iter()
+                .filter_map(find_best)
+                .reduce_with(|a, b| {
+                    if apply_feature_weight(&b, feature_weights)
+                        > apply_feature_weight(&a, feature_weights)
+                    {
+                        b
+                    } else {
+                        a
+                    }
+                })
+        } else {
+            linear_histograms
+                .feature_histograms
+                .iter()
+                .filter_map(find_best)
+                .reduce(|a, b| {
+                    if apply_feature_weight(&b, feature_weights)
+                        > apply_feature_weight(&a, feature_weights)
+                    {
+                        b
+                    } else {
+                        a
+                    }
+                })
+        };
 
         Ok(result)
     }
@@ -1763,10 +1763,22 @@ impl BackendOps for CpuBackend {
 
         let regressor_features = &linear_histograms.regressor_features;
         let left_leaf = pl::solve_pl_leaf(
-            &l_xtg, &l_xthx, l_gs, l_hs, learning_rate, l2_lambda, regressor_features,
+            &l_xtg,
+            &l_xthx,
+            l_gs,
+            l_hs,
+            learning_rate,
+            l2_lambda,
+            regressor_features,
         );
         let right_leaf = pl::solve_pl_leaf(
-            &r_xtg, &r_xthx, r_gs, r_hs, learning_rate, l2_lambda, regressor_features,
+            &r_xtg,
+            &r_xthx,
+            r_gs,
+            r_hs,
+            learning_rate,
+            l2_lambda,
+            regressor_features,
         );
 
         Some((left_leaf, right_leaf))
@@ -1776,7 +1788,9 @@ impl BackendOps for CpuBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloygbm_core::{DatasetMatrix, FeatureTile, LeafModelKind, TrainParams, TrainingDataset, TreeGrowth};
+    use alloygbm_core::{
+        DatasetMatrix, FeatureTile, LeafModelKind, TrainParams, TrainingDataset, TreeGrowth,
+    };
     use alloygbm_engine::{SquaredErrorObjective, Trainer};
 
     fn sample_binned_matrix() -> BinnedMatrix {

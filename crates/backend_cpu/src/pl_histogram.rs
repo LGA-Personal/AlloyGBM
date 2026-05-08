@@ -150,27 +150,33 @@ fn sanitize_linear_bin(bin: &mut LinearHistogramBin, d: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloygbm_core::{BinnedMatrix, FeatureTile, GradientPair, NodeSlice};
     use alloygbm_core::subtract_linear_histogram_bundle;
+    use alloygbm_core::{BinnedMatrix, FeatureTile, GradientPair, NodeSlice};
 
     /// Build a minimal BinnedMatrix for tests: 2 features, 4 rows, 3 bins each.
     fn fixture_binned() -> BinnedMatrix {
         // Bins: feature 0: [0,1,2,2], feature 1: [0,0,1,2]
-        BinnedMatrix::new(
-            4,
-            2,
-            2,
-            vec![0u8, 0, 1, 0, 2, 1, 2, 2],
-        )
-        .expect("valid")
+        BinnedMatrix::new(4, 2, 2, vec![0u8, 0, 1, 0, 2, 1, 2, 2]).expect("valid")
     }
 
     fn fixture_gradients() -> Vec<GradientPair> {
         vec![
-            GradientPair { grad: 1.0, hess: 1.0 },
-            GradientPair { grad: 2.0, hess: 1.0 },
-            GradientPair { grad: -1.0, hess: 2.0 },
-            GradientPair { grad: 0.5, hess: 0.5 },
+            GradientPair {
+                grad: 1.0,
+                hess: 1.0,
+            },
+            GradientPair {
+                grad: 2.0,
+                hess: 1.0,
+            },
+            GradientPair {
+                grad: -1.0,
+                hess: 2.0,
+            },
+            GradientPair {
+                grad: 0.5,
+                hess: 0.5,
+            },
         ]
     }
 
@@ -188,7 +194,10 @@ mod tests {
     }
 
     fn all_feature_tile() -> Vec<FeatureTile> {
-        vec![FeatureTile { start_feature: 0, end_feature: 2 }]
+        vec![FeatureTile {
+            start_feature: 0,
+            end_feature: 2,
+        }]
     }
 
     #[test]
@@ -247,46 +256,22 @@ mod tests {
 
         // Parent node = rows 0..3
         let parent_node = all_rows_node();
-        let parent_bundle = build_linear_histograms_cpu(
-            &binned,
-            &grads,
-            &parent_node,
-            &tiles,
-            &[0],
-            &raw,
-            4,
-            2,
-        )
-        .expect("parent build");
+        let parent_bundle =
+            build_linear_histograms_cpu(&binned, &grads, &parent_node, &tiles, &[0], &raw, 4, 2)
+                .expect("parent build");
 
         // Smaller child = rows 0..1
         let smaller_node = NodeSlice::new(2, vec![0, 1]).expect("valid");
-        let smaller_bundle = build_linear_histograms_cpu(
-            &binned,
-            &grads,
-            &smaller_node,
-            &tiles,
-            &[0],
-            &raw,
-            4,
-            2,
-        )
-        .expect("smaller build");
+        let smaller_bundle =
+            build_linear_histograms_cpu(&binned, &grads, &smaller_node, &tiles, &[0], &raw, 4, 2)
+                .expect("smaller build");
 
         // Larger child via subtraction = rows 2..3
         let larger_bundle = subtract_linear_histogram_bundle(&parent_bundle, &smaller_bundle);
         let larger_node = NodeSlice::new(3, vec![2, 3]).expect("valid");
-        let larger_direct = build_linear_histograms_cpu(
-            &binned,
-            &grads,
-            &larger_node,
-            &tiles,
-            &[0],
-            &raw,
-            4,
-            2,
-        )
-        .expect("larger direct build");
+        let larger_direct =
+            build_linear_histograms_cpu(&binned, &grads, &larger_node, &tiles, &[0], &raw, 4, 2)
+                .expect("larger direct build");
 
         // Compare every bin of every feature histogram.
         for (lfh, dfh) in larger_bundle

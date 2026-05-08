@@ -293,9 +293,8 @@ impl Predictor {
         }
 
         // Decode optional linear leaf coefficients for single-output.
-        if let Some(ll_payload) =
-            decode_optional_linear_leaf_coefficients_section(&parsed.sections)
-                .map_err(PredictorError::from)?
+        if let Some(ll_payload) = decode_optional_linear_leaf_coefficients_section(&parsed.sections)
+            .map_err(PredictorError::from)?
         {
             for entry in ll_payload.entries {
                 let idx = entry.stump_idx as usize;
@@ -2032,19 +2031,12 @@ mod tests {
         );
 
         // Predictions must match between engine model and Predictor.
-        let test_rows = [
-            [0.0f32, 1.0],
-            [0.333, 0.667],
-            [0.667, 0.333],
-            [1.0, 0.0],
-        ];
+        let test_rows = [[0.0f32, 1.0], [0.333, 0.667], [0.667, 0.333], [1.0, 0.0]];
         for row in &test_rows {
             let engine_pred = engine_model
                 .predict_batch(&[row.to_vec()])
                 .expect("engine predicts")[0];
-            let pred_pred = predictor
-                .predict_row(row)
-                .expect("predictor predicts");
+            let pred_pred = predictor.predict_row(row).expect("predictor predicts");
             assert!(
                 (engine_pred - pred_pred).abs() < 1e-4,
                 "mismatch for row {:?}: engine={engine_pred} predictor={pred_pred}",

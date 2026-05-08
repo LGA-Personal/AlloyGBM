@@ -41,11 +41,7 @@ fn copy_xt_hx(
 }
 
 #[inline]
-fn add_xt_hx(
-    src: &[f32; MAX_PL_MATRIX_ENTRIES],
-    dst: &mut [f32; MAX_PL_MATRIX_ENTRIES],
-    d: usize,
-) {
+fn add_xt_hx(src: &[f32; MAX_PL_MATRIX_ENTRIES], dst: &mut [f32; MAX_PL_MATRIX_ENTRIES], d: usize) {
     for j in 0..d {
         for k in j..d {
             let idx = pl_matrix_index(j, k);
@@ -55,11 +51,7 @@ fn add_xt_hx(
 }
 
 #[inline]
-fn sub_xt_hx(
-    src: &[f32; MAX_PL_MATRIX_ENTRIES],
-    dst: &mut [f32; MAX_PL_MATRIX_ENTRIES],
-    d: usize,
-) {
+fn sub_xt_hx(src: &[f32; MAX_PL_MATRIX_ENTRIES], dst: &mut [f32; MAX_PL_MATRIX_ENTRIES], d: usize) {
     for j in 0..d {
         for k in j..d {
             let idx = pl_matrix_index(j, k);
@@ -258,8 +250,18 @@ pub fn best_split_linear_for_feature(
         // Evaluate NaN-goes-left and NaN-goes-right, pick the better one.
         for default_left in [true, false] {
             // Effective left and right statistics for this NaN direction.
-            let (eff_lg, eff_lh, eff_lc, eff_lxtg, eff_lxthx, eff_rg, eff_rh, eff_rc,
-                 eff_rxtg, eff_rxthx) = if default_left {
+            let (
+                eff_lg,
+                eff_lh,
+                eff_lc,
+                eff_lxtg,
+                eff_lxthx,
+                eff_rg,
+                eff_rh,
+                eff_rc,
+                eff_rxtg,
+                eff_rxthx,
+            ) = if default_left {
                 // NaN joins the left child.
                 let mut el_xtg = l_xtg;
                 let mut el_xthx = l_xt_hx;
@@ -390,7 +392,11 @@ pub fn leaf_linear_stats_for_split(
     let mut l_xt_hx = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
     let mut l_grad = 0.0_f32;
     let mut l_hess = 0.0_f32;
-    for bin in linear_fh.bins.iter().take(scan_limit.min(threshold_bin + 1)) {
+    for bin in linear_fh
+        .bins
+        .iter()
+        .take(scan_limit.min(threshold_bin + 1))
+    {
         l_grad += bin.grad_sum;
         l_hess += bin.hess_sum;
         for j in 0..d {
@@ -424,46 +430,60 @@ pub fn leaf_linear_stats_for_split(
     let r_hess_nm = nm_hess - l_hess;
 
     // Apply NaN direction.
-    let (eff_l_xtg, eff_l_xt_hx, eff_l_grad, eff_l_hess, eff_r_xtg, eff_r_xt_hx, eff_r_grad, eff_r_hess) =
-        if default_left {
-            let mut el_xtg = l_xtg;
-            let mut el_xthx = l_xt_hx;
-            for j in 0..d {
-                el_xtg[j] += m_xtg[j];
-            }
-            add_xt_hx(&m_xt_hx, &mut el_xthx, d);
-            (
-                el_xtg,
-                el_xthx,
-                l_grad + m_grad,
-                l_hess + m_hess,
-                r_xtg_nm,
-                r_xt_hx_nm,
-                r_grad_nm,
-                r_hess_nm,
-            )
-        } else {
-            let mut er_xtg = r_xtg_nm;
-            let mut er_xthx = r_xt_hx_nm;
-            for j in 0..d {
-                er_xtg[j] += m_xtg[j];
-            }
-            add_xt_hx(&m_xt_hx, &mut er_xthx, d);
-            (
-                l_xtg,
-                l_xt_hx,
-                l_grad,
-                l_hess,
-                er_xtg,
-                er_xthx,
-                r_grad_nm + m_grad,
-                r_hess_nm + m_hess,
-            )
-        };
+    let (
+        eff_l_xtg,
+        eff_l_xt_hx,
+        eff_l_grad,
+        eff_l_hess,
+        eff_r_xtg,
+        eff_r_xt_hx,
+        eff_r_grad,
+        eff_r_hess,
+    ) = if default_left {
+        let mut el_xtg = l_xtg;
+        let mut el_xthx = l_xt_hx;
+        for j in 0..d {
+            el_xtg[j] += m_xtg[j];
+        }
+        add_xt_hx(&m_xt_hx, &mut el_xthx, d);
+        (
+            el_xtg,
+            el_xthx,
+            l_grad + m_grad,
+            l_hess + m_hess,
+            r_xtg_nm,
+            r_xt_hx_nm,
+            r_grad_nm,
+            r_hess_nm,
+        )
+    } else {
+        let mut er_xtg = r_xtg_nm;
+        let mut er_xthx = r_xt_hx_nm;
+        for j in 0..d {
+            er_xtg[j] += m_xtg[j];
+        }
+        add_xt_hx(&m_xt_hx, &mut er_xthx, d);
+        (
+            l_xtg,
+            l_xt_hx,
+            l_grad,
+            l_hess,
+            er_xtg,
+            er_xthx,
+            r_grad_nm + m_grad,
+            r_hess_nm + m_hess,
+        )
+    };
 
     (
-        eff_l_xtg, eff_l_xt_hx, eff_l_grad, eff_l_hess,
-        eff_r_xtg, eff_r_xt_hx, eff_r_grad, eff_r_hess,
+        eff_l_xtg,
+        eff_l_xt_hx,
+        eff_l_grad,
+        eff_l_hess,
+        eff_r_xtg,
+        eff_r_xt_hx,
+        eff_r_grad,
+        eff_r_hess,
     )
 }
 
@@ -559,10 +579,7 @@ pub fn solve_pl_leaf(
 
     // Linear correction weights α* = -(XᵀHX + λI)⁻¹ Xᵀg, scaled by lr.
     let raw_alpha = cholesky_solve_alpha(xtg, xt_hx, d, l2_lambda);
-    let weights: Vec<f32> = raw_alpha[..d]
-        .iter()
-        .map(|&w| learning_rate * w)
-        .collect();
+    let weights: Vec<f32> = raw_alpha[..d].iter().map(|&w| learning_rate * w).collect();
 
     LinearLeaf {
         intercept,
@@ -606,7 +623,10 @@ mod tests {
             bin.xt_hx[0] = xt_hx00; // pl_matrix_index(0,0) = 0
             bins.push(bin);
         }
-        LinearFeatureHistogram { feature_index, bins }
+        LinearFeatureHistogram {
+            feature_index,
+            bins,
+        }
     }
 
     // ── Unit tests for compute_pl_gain_one_side ───────────────────────────────
@@ -659,7 +679,10 @@ mod tests {
         xthx[pl_matrix_index(1, 1)] = 3.0;
         let gain = compute_pl_gain_one_side(&xtg, &xthx, 2, 0.0);
         let expected = 0.5 * 12.0 / 11.0;
-        assert!((gain - expected).abs() < 1e-5, "gain={gain} expected={expected}");
+        assert!(
+            (gain - expected).abs() < 1e-5,
+            "gain={gain} expected={expected}"
+        );
     }
 
     // ── Unit tests for best_split_linear_for_feature ─────────────────────────
@@ -699,8 +722,8 @@ mod tests {
         let fh = make_feature_histogram_d1(
             0,
             &[
-                (0.1, 1.0, 10, 0.1, 1.0),  // bin 0 — weak
-                (8.0, 4.0, 40, 8.0, 4.0),  // bin 1 — strong positive
+                (0.1, 1.0, 10, 0.1, 1.0),   // bin 0 — weak
+                (8.0, 4.0, 40, 8.0, 4.0),   // bin 1 — strong positive
                 (-8.0, 4.0, 40, -8.0, 4.0), // bin 2 — strong negative
             ],
         );
@@ -713,7 +736,11 @@ mod tests {
         assert!(result.is_some(), "expected a split to be found");
         let c = result.unwrap();
         // threshold_bin=1: left = bins 0+1, right = bin 2 (best separation)
-        assert_eq!(c.threshold_bin, 1, "expected threshold at bin 1, got {}", c.threshold_bin);
+        assert_eq!(
+            c.threshold_bin, 1,
+            "expected threshold at bin 1, got {}",
+            c.threshold_bin
+        );
         assert!(c.gain > 0.0);
     }
 
@@ -736,7 +763,10 @@ mod tests {
 
         let pl_gain_l = compute_pl_gain_one_side(&xtg_l, &xthx_l, 1, lambda);
         let xgb_gain_l = 0.5 * g_l * g_l / (h_l + lambda);
-        assert!((pl_gain_l - xgb_gain_l).abs() < 1e-6, "d1 x=1: PL gain ({pl_gain_l}) ≠ XGB gain ({xgb_gain_l})");
+        assert!(
+            (pl_gain_l - xgb_gain_l).abs() < 1e-6,
+            "d1 x=1: PL gain ({pl_gain_l}) ≠ XGB gain ({xgb_gain_l})"
+        );
 
         let mut xtg_r = [0.0_f32; MAX_PL_REGRESSORS];
         let mut xthx_r = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
@@ -744,7 +774,10 @@ mod tests {
         xthx_r[pl_matrix_index(0, 0)] = h_r;
         let pl_gain_r = compute_pl_gain_one_side(&xtg_r, &xthx_r, 1, lambda);
         let xgb_gain_r = 0.5 * g_r * g_r / (h_r + lambda);
-        assert!((pl_gain_r - xgb_gain_r).abs() < 1e-6, "d1 x=1: PL gain ({pl_gain_r}) ≠ XGB gain ({xgb_gain_r})");
+        assert!(
+            (pl_gain_r - xgb_gain_r).abs() < 1e-6,
+            "d1 x=1: PL gain ({pl_gain_r}) ≠ XGB gain ({xgb_gain_r})"
+        );
     }
 
     #[test]

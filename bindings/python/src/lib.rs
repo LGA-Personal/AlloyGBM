@@ -2457,8 +2457,7 @@ fn train_regression_artifact_with_summary_dense_impl(
     // encoding), so we must replace the DatasetMatrix with the original floats here.
     // Categorical encoding runs afterwards and will overwrite its own columns.
     if is_linear_leaf {
-        prepared.dataset.matrix =
-            DatasetMatrix::new(row_count, feature_count, values.to_vec())?;
+        prepared.dataset.matrix = DatasetMatrix::new(row_count, feature_count, values.to_vec())?;
     }
 
     let training_targets_for_validation = prepared.dataset.targets.clone();
@@ -4159,8 +4158,8 @@ mod tests {
     use alloygbm_backend_cpu::CpuBackend;
     use alloygbm_categorical::TargetEncoderConfig;
     use alloygbm_core::{
-        BinnedMatrix, DatasetMatrix, LeafModelKind, ModelSectionKind, TrainParams, TrainingDataset, TreeGrowth,
-        deserialize_model_artifact_v1, serialize_model_artifact_v1,
+        BinnedMatrix, DatasetMatrix, LeafModelKind, ModelSectionKind, TrainParams, TrainingDataset,
+        TreeGrowth, deserialize_model_artifact_v1, serialize_model_artifact_v1,
     };
     use alloygbm_engine::{
         CategoricalTargetEncodingSpec, EngineError, SquaredErrorObjective, Trainer,

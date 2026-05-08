@@ -889,7 +889,10 @@ impl Default for LinearHistogramBin {
 /// Panics in debug builds if `j > k` or `k >= MAX_PL_REGRESSORS`.
 #[inline]
 pub fn pl_matrix_index(j: usize, k: usize) -> usize {
-    debug_assert!(j <= k, "j ({j}) must be <= k ({k}) for upper-triangular index");
+    debug_assert!(
+        j <= k,
+        "j ({j}) must be <= k ({k}) for upper-triangular index"
+    );
     debug_assert!(k < MAX_PL_REGRESSORS, "k ({k}) must be < MAX_PL_REGRESSORS");
     // Row j of an upper-triangular matrix of size d × d starts at index
     // j * d - j*(j-1)/2.  Within that row, element k-j is at offset k-j.
@@ -1794,16 +1797,14 @@ pub struct LinearLeafCoefficientsPayload {
 ///   if flags & 1: [u8 d] [f32 intercept] [d × f32 weights] [d × u32 regressor_features]
 ///   if flags & 2: same for right leaf
 /// ```
-pub fn encode_linear_leaf_coefficients_payload(
-    payload: &LinearLeafCoefficientsPayload,
-) -> Vec<u8> {
+pub fn encode_linear_leaf_coefficients_payload(payload: &LinearLeafCoefficientsPayload) -> Vec<u8> {
     let mut buf = Vec::new();
     buf.extend_from_slice(&1u32.to_le_bytes()); // version
     buf.extend_from_slice(&(payload.entries.len() as u32).to_le_bytes());
     for entry in &payload.entries {
         buf.extend_from_slice(&entry.stump_idx.to_le_bytes());
-        let flags: u8 = (entry.left_leaf.is_some() as u8)
-            | ((entry.right_leaf.is_some() as u8) << 1);
+        let flags: u8 =
+            (entry.left_leaf.is_some() as u8) | ((entry.right_leaf.is_some() as u8) << 1);
         buf.push(flags);
 
         let write_leaf = |buf: &mut Vec<u8>, leaf: &LinearLeaf| {
@@ -1853,7 +1854,7 @@ pub fn decode_linear_leaf_coefficients_payload(
                 "unexpected end of linear leaf coefficients data".to_string(),
             ));
         }
-        let v = u32::from_le_bytes([bytes[*o], bytes[*o+1], bytes[*o+2], bytes[*o+3]]);
+        let v = u32::from_le_bytes([bytes[*o], bytes[*o + 1], bytes[*o + 2], bytes[*o + 3]]);
         *o += 4;
         Ok(v)
     };
@@ -1863,7 +1864,7 @@ pub fn decode_linear_leaf_coefficients_payload(
                 "unexpected end of linear leaf coefficients data".to_string(),
             ));
         }
-        let v = f32::from_le_bytes([bytes[*o], bytes[*o+1], bytes[*o+2], bytes[*o+3]]);
+        let v = f32::from_le_bytes([bytes[*o], bytes[*o + 1], bytes[*o + 2], bytes[*o + 3]]);
         *o += 4;
         Ok(v)
     };
@@ -1895,7 +1896,11 @@ pub fn decode_linear_leaf_coefficients_payload(
             for _ in 0..d {
                 regressor_features.push(read_u32(bytes, o)?);
             }
-            Ok(LinearLeaf { intercept, weights, regressor_features })
+            Ok(LinearLeaf {
+                intercept,
+                weights,
+                regressor_features,
+            })
         };
 
         let left_leaf = if flags & 1 != 0 {
@@ -1908,7 +1913,11 @@ pub fn decode_linear_leaf_coefficients_payload(
         } else {
             None
         };
-        entries.push(LinearLeafEntry { stump_idx, left_leaf, right_leaf });
+        entries.push(LinearLeafEntry {
+            stump_idx,
+            left_leaf,
+            right_leaf,
+        });
     }
 
     Ok(LinearLeafCoefficientsPayload { entries })
