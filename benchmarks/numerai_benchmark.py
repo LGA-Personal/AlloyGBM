@@ -43,7 +43,16 @@ logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).parent.parent
 DATA_DIR = Path(__file__).parent / "data" / "numerai"
-ALL_ARMS = ["alloygbm", "alloygbm_morph", "alloygbm_morph_cosine", "lightgbm", "xgboost", "catboost"]
+ALL_ARMS = [
+    "alloygbm",
+    "alloygbm_morph",
+    "alloygbm_morph_cosine",
+    "alloygbm_linear",
+    "alloygbm_morph_linear",
+    "lightgbm",
+    "xgboost",
+    "catboost",
+]
 
 NUMERAI_DATASET_FILES = {
     "train": "v5.2/train.parquet",
@@ -273,9 +282,10 @@ def fit_model(
 ) -> tuple[object, dict[str, float]]:
     """Train a model and return (model_object, fit_timing_dict)."""
 
-    if arm in ("alloygbm", "alloygbm_morph", "alloygbm_morph_cosine"):
+    if arm.startswith("alloygbm"):
         from alloygbm import GBMRegressor
 
+        # Compose training_mode (morph) and leaf_model (linear) from arm name.
         morph_kwargs: dict = {}
         if arm == "alloygbm_morph":
             morph_kwargs = {"training_mode": "morph"}
@@ -285,6 +295,12 @@ def fit_model(
                 "lr_schedule": "warmup_cosine",
                 "lr_warmup_frac": 0.1,
             }
+        elif arm == "alloygbm_linear":
+            morph_kwargs = {"leaf_model": "linear"}
+        elif arm == "alloygbm_morph_linear":
+            morph_kwargs = {"training_mode": "morph", "leaf_model": "linear"}
+        elif arm != "alloygbm":
+            raise ValueError(f"Unknown alloygbm arm: {arm}")
 
         model = GBMRegressor(
             learning_rate=learning_rate,
@@ -379,7 +395,7 @@ def fit_model(
 
 def predict_model(arm: str, model: object, X_predict: np.ndarray) -> np.ndarray:
     """Predict using a fitted model."""
-    if arm in ("alloygbm", "alloygbm_morph", "alloygbm_morph_cosine"):
+    if arm.startswith("alloygbm"):
         preds = model.predict(X_predict)
     elif arm == "lightgbm":
         preds = model.predict(X_predict)
@@ -647,14 +663,14 @@ def print_results(records: list[NumeraiBenchmarkRecord]) -> None:
                 f"{mmc_str} | {bmmc_str} | {r.positive_eras_pct:>9.1f} | {r.wall_seconds:>8.1f}"
             )
 
-    # Timing breakdown for AlloyGBM
-    alloy_records = [r for r in records if r.arm == "alloygbm" and r.fit_timing]
+    # Timing breakdown for all AlloyGBM variants
+    alloy_records = [r for r in records if r.arm.startswith("alloygbm") and r.fit_timing]
     if alloy_records:
         print(f"\n{'=' * 60}")
         print("  AlloyGBM fit_timing_ breakdown (seconds)")
         print(f"{'=' * 60}")
         for r in alloy_records:
-            print(f"  [{r.phase}]")
+            print(f"  [{r.arm} / {r.phase}]")
             for k, v in sorted(r.fit_timing.items()):
                 print(f"    {k}: {v:.3f}")
 
