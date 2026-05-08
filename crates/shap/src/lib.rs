@@ -1,5 +1,5 @@
 use alloygbm_core::{
-    ModelMetadata, deserialize_model_artifact_v1, format_required_section_mode_error,
+    LeafValue, ModelMetadata, deserialize_model_artifact_v1, format_required_section_mode_error,
     required_section_compatibility_report,
 };
 use alloygbm_engine::{ArtifactCompatibilityMode, TrainedModel, TrainedStump};
@@ -16,6 +16,7 @@ const MAX_EXACT_SPLIT_FEATURES: usize = 25;
 pub enum ShapError {
     InvalidInput(String),
     ContractViolation(String),
+    NotSupported(String),
 }
 
 impl Display for ShapError {
@@ -23,6 +24,7 @@ impl Display for ShapError {
         match self {
             Self::InvalidInput(message) => write!(f, "invalid input: {message}"),
             Self::ContractViolation(message) => write!(f, "contract violation: {message}"),
+            Self::NotSupported(message) => write!(f, "not supported: {message}"),
         }
     }
 }
@@ -200,6 +202,18 @@ fn explain_rows_from_model(
     rows: &[Vec<f32>],
 ) -> ShapResult<ShapExplanationBatch> {
     validate_rows(rows, model.feature_count)?;
+
+    // Reject models with linear leaves — SHAP additivity requires full row-level
+    // linear evaluation which is not yet implemented.
+    let has_linear_leaves = model.stumps.iter().any(|s| {
+        matches!(s.left_leaf_value, LeafValue::Linear(_))
+            || matches!(s.right_leaf_value, LeafValue::Linear(_))
+    });
+    if has_linear_leaves {
+        return Err(ShapError::NotSupported(
+            "SHAP is not yet supported for leaf_model='linear' artifacts; use leaf_model='constant'".to_string(),
+        ));
+    }
 
     // Count distinct split features to choose algorithm.
     let distinct_split_feature_count = {

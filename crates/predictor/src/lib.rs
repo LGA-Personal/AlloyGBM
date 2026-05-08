@@ -222,29 +222,34 @@ impl Predictor {
             }
 
             // Decode optional linear leaf coefficients for multiclass.
-            // Global stump index = class_idx * stumps_per_class + stump_within_class.
+            // Global stump index uses prefix-sum offsets:
+            // global_idx = prefix[class_idx] + stump_within_class, where
+            // prefix[k] = sum of stump counts for classes 0..k.
             if let Some(ll_payload) =
                 decode_optional_linear_leaf_coefficients_section(&parsed.sections)
                     .map_err(PredictorError::from)?
             {
-                let stumps_per_class = per_class_stumps.first().map_or(0, |v| v.len());
+                // Build prefix sums from per-class stump counts.
+                let mut prefix = vec![0usize; per_class_stumps.len() + 1];
+                for (k, cs) in per_class_stumps.iter().enumerate() {
+                    prefix[k + 1] = prefix[k] + cs.len();
+                }
                 for entry in ll_payload.entries {
                     let global_idx = entry.stump_idx as usize;
-                    if stumps_per_class == 0 {
-                        break;
-                    }
-                    let class_idx = global_idx / stumps_per_class;
-                    let stump_idx = global_idx % stumps_per_class;
-                    if class_idx < per_class_stumps.len()
-                        && stump_idx < per_class_stumps[class_idx].len()
-                    {
-                        if let Some(ll) = entry.left_leaf {
-                            per_class_stumps[class_idx][stump_idx].left_linear =
-                                Some(linear_leaf_to_compact(&ll));
-                        }
-                        if let Some(rl) = entry.right_leaf {
-                            per_class_stumps[class_idx][stump_idx].right_linear =
-                                Some(linear_leaf_to_compact(&rl));
+                    // Binary search to find which class this index belongs to.
+                    // partition_point on prefix[1..] finds first k where prefix[k+1] > global_idx.
+                    let class_idx = prefix[1..].partition_point(|&p| p <= global_idx);
+                    if class_idx < per_class_stumps.len() {
+                        let stump_idx = global_idx - prefix[class_idx];
+                        if stump_idx < per_class_stumps[class_idx].len() {
+                            if let Some(ll) = entry.left_leaf {
+                                per_class_stumps[class_idx][stump_idx].left_linear =
+                                    Some(linear_leaf_to_compact(&ll));
+                            }
+                            if let Some(rl) = entry.right_leaf {
+                                per_class_stumps[class_idx][stump_idx].right_linear =
+                                    Some(linear_leaf_to_compact(&rl));
+                            }
                         }
                     }
                 }

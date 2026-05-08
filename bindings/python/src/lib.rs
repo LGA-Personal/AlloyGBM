@@ -1961,6 +1961,7 @@ fn shap_error_to_pyerr(error: ShapError) -> PyErr {
     match error {
         ShapError::InvalidInput(message) => PyValueError::new_err(message),
         ShapError::ContractViolation(message) => PyRuntimeError::new_err(message),
+        ShapError::NotSupported(message) => PyRuntimeError::new_err(message),
     }
 }
 
