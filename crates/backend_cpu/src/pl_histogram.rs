@@ -7,9 +7,10 @@
 //! The SIMD path for standard (scalar-leaf) histograms is left completely
 //! untouched.  This module is a parallel addition, not a modification.
 
+use alloygbm_core::simd::f32x8;
 use alloygbm_core::{
     BinnedMatrix, FeatureTile, GradientPair, LinearFeatureHistogram, LinearHistogramBin,
-    LinearHistogramBundle, MAX_PL_REGRESSORS, NodeSlice, pl_matrix_index,
+    LinearHistogramBundle, MAX_PL_REGRESSORS, NodeSlice,
 };
 use alloygbm_engine::{EngineError, EngineResult};
 
@@ -55,6 +56,18 @@ pub fn build_linear_histograms_cpu(
         .collect();
 
     // Build one feature histogram per split feature.
+    //
+    // Inner loop is SIMD-vectorised via `wide::f32x8`: per row we compute
+    // `b.xtg += g * x` as one `f32x8` op, then `b.xt_hx += h * x ⊗ x` as 8
+    // `f32x8` ops (one per row of the 8×8 matrix).  `x_arr` is zero-padded
+    // when `d < MAX_PL_REGRESSORS`, so the unused matrix slots multiply by
+    // zero and stay zero — which is correct for the closed-form ridge solve.
+    //
+    // The outer product writes BOTH triangles of the symmetric matrix.  The
+    // Cholesky in `compute_pl_gain_one_side` reads only the upper triangle
+    // (and mirrors to fill the lower), so the lower-triangle SIMD writes are
+    // mathematically harmless.  `subtract_linear_histogram_bundle` likewise
+    // operates on all 64 entries to stay consistent.
     let feature_histograms: Vec<LinearFeatureHistogram> = split_features
         .iter()
         .map(|&split_feat_idx| {
@@ -76,33 +89,40 @@ pub fn build_linear_histograms_cpu(
                 b.hess_sum += h;
                 b.count += 1;
 
-                // Accumulate Xᵀg and XᵀHX using only the first `d` regressors.
-                for j in 0..d {
-                    let feat_j = regressor_features[j] as usize;
-                    let x_j = if feat_j < feature_count && row_idx < row_count {
-                        raw_feature_values[row_idx * feature_count + feat_j]
+                // Pre-load the d regressor values into a zero-padded f32x8.
+                // Slots beyond `d` stay zero; multiplications against them
+                // contribute nothing to the active matrix block.
+                let mut x_arr = [0.0_f32; MAX_PL_REGRESSORS];
+                for (slot, &feat_raw) in x_arr.iter_mut().zip(regressor_features.iter()).take(d) {
+                    let feat = feat_raw as usize;
+                    *slot = if feat < feature_count && row_idx < row_count {
+                        raw_feature_values[row_idx * feature_count + feat]
                     } else {
                         0.0
                     };
-                    b.xtg[j] += g * x_j;
-                    for (k, &feat_k_raw) in
-                        regressor_features.iter().enumerate().skip(j).take(d - j)
-                    {
-                        let feat_k = feat_k_raw as usize;
-                        let x_k = if feat_k < feature_count {
-                            raw_feature_values[row_idx * feature_count + feat_k]
-                        } else {
-                            0.0
-                        };
-                        let idx = pl_matrix_index(j, k);
-                        b.xt_hx[idx] += h * x_j * x_k;
-                    }
+                }
+                let x_v = f32x8::from(x_arr);
+
+                // Xᵀg: b.xtg += g * x   (1 SIMD op).
+                let xtg_v = f32x8::from(b.xtg) + f32x8::splat(g) * x_v;
+                b.xtg = xtg_v.to_array();
+
+                // XᵀHX: b.xt_hx += h * x ⊗ x   (8 SIMD ops, full outer product).
+                // Layout is stride-8 row-major: row j occupies xt_hx[j*8..(j+1)*8].
+                for (j, &x_j) in x_arr.iter().enumerate() {
+                    let row_v = f32x8::splat(h * x_j) * x_v;
+                    let base = j * MAX_PL_REGRESSORS;
+                    let cur_arr: [f32; 8] =
+                        b.xt_hx[base..base + 8].try_into().expect("8-entry slice");
+                    let cur_v = f32x8::from(cur_arr);
+                    let new_arr = (cur_v + row_v).to_array();
+                    b.xt_hx[base..base + 8].copy_from_slice(&new_arr);
                 }
             }
 
             // Replace NaN/Inf in accumulated values with 0 (defensive).
             for bin in &mut bins {
-                sanitize_linear_bin(bin, d);
+                sanitize_linear_bin(bin);
             }
 
             LinearFeatureHistogram {
@@ -122,28 +142,27 @@ pub fn build_linear_histograms_cpu(
 
 /// Zero out any non-finite entries in a bin's linear statistics.
 ///
-/// `d` is the number of active regressors so we iterate only the active
-/// `(j, k)` index pairs in `xt_hx` (the indices are non-contiguous for
-/// `d < MAX_PL_REGRESSORS` due to how `pl_matrix_index` works).
+/// Operates on all `MAX_PL_REGRESSORS` entries of `xtg` and all
+/// `MAX_PL_MATRIX_ENTRIES` entries of `xt_hx`: with the SIMD-vectorised
+/// histogram build, both triangles of `xt_hx` may be populated, and unused
+/// slots are zero (already finite).  Iterating the full storage is
+/// sufficient and matches the rest of the SIMD-friendly code paths.
 #[inline]
-fn sanitize_linear_bin(bin: &mut LinearHistogramBin, d: usize) {
+fn sanitize_linear_bin(bin: &mut LinearHistogramBin) {
     if !bin.grad_sum.is_finite() {
         bin.grad_sum = 0.0;
     }
     if !bin.hess_sum.is_finite() {
         bin.hess_sum = 0.0;
     }
-    for j in 0..d {
-        if !bin.xtg[j].is_finite() {
-            bin.xtg[j] = 0.0;
+    for slot in &mut bin.xtg {
+        if !slot.is_finite() {
+            *slot = 0.0;
         }
     }
-    for j in 0..d {
-        for k in j..d {
-            let idx = pl_matrix_index(j, k);
-            if !bin.xt_hx[idx].is_finite() {
-                bin.xt_hx[idx] = 0.0;
-            }
+    for slot in &mut bin.xt_hx {
+        if !slot.is_finite() {
+            *slot = 0.0;
         }
     }
 }
@@ -312,16 +331,213 @@ mod tests {
 
     #[test]
     fn memory_footprint_reasonable() {
-        // d=6, bins=256, features=20 should be < 10 MB.
+        // d=6, bins=256, features=20 should still fit comfortably in L2.
         let d = 6;
         let bins = 256;
         let features = 20;
         let bin_size = std::mem::size_of::<LinearHistogramBin>();
         let total_bytes = bin_size * bins * features;
-        // LinearHistogramBin: 4+4+4 + 8*4 + 36*4 = 12 + 32 + 144 = 188 bytes
+        // LinearHistogramBin (stride-8 layout): 4+4+4 + 8*4 + 64*4 = 12 + 32 + 256
+        // = 300 bytes (rounded up by alignment).  20 features × 256 bins × 300 B
+        // ≈ 1.5 MB, well under the 10 MB target.
         assert!(
             total_bytes < 10 * 1024 * 1024,
             "footprint {total_bytes} bytes exceeds 10 MB for d={d}, bins={bins}, features={features}"
         );
+    }
+
+    /// Scalar reference implementation of the per-row inner loop, used to
+    /// verify the SIMD path's correctness end-to-end.  Mirrors the pre-SIMD
+    /// histogram build with the new stride-8 layout: writes the full upper
+    /// triangle via `pl_matrix_index`.  The SIMD path additionally writes the
+    /// lower triangle (full outer product), but the upper-triangle values are
+    /// the only ones the Cholesky solver reads.
+    #[allow(clippy::too_many_arguments)]
+    fn build_linear_histograms_scalar_reference(
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: &NodeSlice,
+        feature_tiles: &[FeatureTile],
+        regressor_features: &[u32],
+        raw_feature_values: &[f32],
+        row_count: usize,
+        feature_count: usize,
+    ) -> LinearHistogramBundle {
+        use alloygbm_core::pl_matrix_index;
+
+        let d = regressor_features.len();
+        let bin_count = binned_matrix.max_bin as usize + 2;
+        let split_features: Vec<u32> = feature_tiles
+            .iter()
+            .flat_map(|tile| tile.start_feature..tile.end_feature)
+            .collect();
+
+        let feature_histograms: Vec<LinearFeatureHistogram> = split_features
+            .iter()
+            .map(|&split_feat_idx| {
+                let mut bins = vec![LinearHistogramBin::default(); bin_count];
+                for &row_idx in &node.row_indices {
+                    let row_idx = row_idx as usize;
+                    let bin = binned_matrix
+                        .row_bin(row_idx * binned_matrix.feature_count + split_feat_idx as usize)
+                        as usize;
+                    let b = &mut bins[bin];
+                    let gp = &gradients[row_idx];
+                    let g = gp.grad;
+                    let h = gp.hess;
+                    b.grad_sum += g;
+                    b.hess_sum += h;
+                    b.count += 1;
+                    for (j, &feat_j_raw) in regressor_features.iter().enumerate().take(d) {
+                        let feat_j = feat_j_raw as usize;
+                        let x_j = if feat_j < feature_count && row_idx < row_count {
+                            raw_feature_values[row_idx * feature_count + feat_j]
+                        } else {
+                            0.0
+                        };
+                        b.xtg[j] += g * x_j;
+                        for (k, &feat_k_raw) in
+                            regressor_features.iter().enumerate().skip(j).take(d - j)
+                        {
+                            let feat_k = feat_k_raw as usize;
+                            let x_k = if feat_k < feature_count {
+                                raw_feature_values[row_idx * feature_count + feat_k]
+                            } else {
+                                0.0
+                            };
+                            b.xt_hx[pl_matrix_index(j, k)] += h * x_j * x_k;
+                        }
+                    }
+                }
+                LinearFeatureHistogram {
+                    feature_index: split_feat_idx,
+                    bins,
+                }
+            })
+            .collect();
+
+        LinearHistogramBundle {
+            node_id: node.node_id,
+            num_regressors: d,
+            regressor_features: regressor_features.to_vec(),
+            feature_histograms,
+        }
+    }
+
+    /// End-to-end equivalence check: the SIMD `build_linear_histograms_cpu`
+    /// must produce results that agree with the scalar reference on the
+    /// upper-triangle entries (the only ones consumed by the Cholesky solve).
+    /// Tested across 1000 randomised rows with d=6 regressors, 16 bins, and
+    /// 5 split features — wide enough to exercise the bin-scatter pattern.
+    #[test]
+    fn build_linear_histograms_simd_matches_scalar_reference() {
+        // Deterministic LCG for reproducibility.
+        fn step(state: &mut u64) -> u64 {
+            *state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *state
+        }
+        fn next_f32(state: &mut u64) -> f32 {
+            let s = step(state);
+            ((s >> 32) as i32 as f32) / (i32::MAX as f32) * 2.0
+        }
+
+        let mut state: u64 = 0xDEADBEEF;
+        let row_count = 1000usize;
+        let feature_count = 8usize;
+        let d = 6usize;
+        let regressor_features: Vec<u32> = (0..d as u32).collect();
+        let max_bin = 15u16;
+
+        let mut bins = Vec::with_capacity(row_count * feature_count);
+        for _ in 0..row_count * feature_count {
+            let s = step(&mut state);
+            bins.push(((s >> 56) as u8) % (max_bin as u8 + 1));
+        }
+        let binned = BinnedMatrix::new(row_count, feature_count, max_bin, bins).expect("ok");
+
+        let gradients: Vec<GradientPair> = (0..row_count)
+            .map(|_| GradientPair {
+                grad: next_f32(&mut state),
+                hess: next_f32(&mut state).abs() + 0.1,
+            })
+            .collect();
+
+        let raw: Vec<f32> = (0..row_count * feature_count)
+            .map(|_| next_f32(&mut state))
+            .collect();
+        let node = NodeSlice::new(1, (0..row_count as u32).collect()).expect("ok");
+        let tiles = vec![FeatureTile {
+            start_feature: 0,
+            end_feature: 5, // 5 split features
+        }];
+
+        let simd_bundle = build_linear_histograms_cpu(
+            &binned,
+            &gradients,
+            &node,
+            &tiles,
+            &regressor_features,
+            &raw,
+            row_count,
+            feature_count,
+        )
+        .expect("simd ok");
+        let scalar_bundle = build_linear_histograms_scalar_reference(
+            &binned,
+            &gradients,
+            &node,
+            &tiles,
+            &regressor_features,
+            &raw,
+            row_count,
+            feature_count,
+        );
+
+        assert_eq!(
+            simd_bundle.feature_histograms.len(),
+            scalar_bundle.feature_histograms.len()
+        );
+        for (sfh, rfh) in simd_bundle
+            .feature_histograms
+            .iter()
+            .zip(scalar_bundle.feature_histograms.iter())
+        {
+            assert_eq!(sfh.bins.len(), rfh.bins.len());
+            for (sb, rb) in sfh.bins.iter().zip(rfh.bins.iter()) {
+                // Scalar accumulators (always bit-exact: identical add order).
+                assert!(
+                    (sb.grad_sum - rb.grad_sum).abs() < 1e-3,
+                    "grad_sum: simd={} scalar={}",
+                    sb.grad_sum,
+                    rb.grad_sum
+                );
+                assert!(
+                    (sb.hess_sum - rb.hess_sum).abs() < 1e-3,
+                    "hess_sum: simd={} scalar={}",
+                    sb.hess_sum,
+                    rb.hess_sum
+                );
+                assert_eq!(sb.count, rb.count);
+                for j in 0..d {
+                    assert!(
+                        (sb.xtg[j] - rb.xtg[j]).abs() < 1e-3,
+                        "xtg[{j}]: simd={} scalar={}",
+                        sb.xtg[j],
+                        rb.xtg[j]
+                    );
+                    for k in j..d {
+                        let idx = j * MAX_PL_REGRESSORS + k;
+                        assert!(
+                            (sb.xt_hx[idx] - rb.xt_hx[idx]).abs() < 1e-3,
+                            "xt_hx[{j},{k}]: simd={} scalar={}",
+                            sb.xt_hx[idx],
+                            rb.xt_hx[idx]
+                        );
+                    }
+                }
+            }
+        }
     }
 }

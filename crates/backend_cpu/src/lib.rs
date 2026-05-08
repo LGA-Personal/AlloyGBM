@@ -1753,13 +1753,7 @@ impl BackendOps for CpuBackend {
             .find(|fh| fh.feature_index == feature_index)?;
 
         let (l_xtg, l_xthx, l_gs, l_hs, r_xtg, r_xthx, r_gs, r_hs) =
-            pl::leaf_linear_stats_for_split(
-                lin_fh,
-                threshold_bin,
-                missing_bin_index,
-                default_left,
-                d,
-            );
+            pl::leaf_linear_stats_for_split(lin_fh, threshold_bin, missing_bin_index, default_left);
 
         let regressor_features = &linear_histograms.regressor_features;
         let left_leaf = pl::solve_pl_leaf(

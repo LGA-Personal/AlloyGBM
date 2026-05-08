@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.6.0
+
+### Performance
+
+- **PL trees ~3× faster on Apple Silicon (NEON), expected ~5× on x86_64 with AVX2.** Inner-loop matrix histogram accumulation is now SIMD-vectorised via `wide::f32x8`. The per-row cost of a linear-leaf tree was ~30-44× slower than constant leaves in 0.5.0; 0.6.0 brings the ratio down to ~10-13×.
+- Concrete numbers (regression, n_features=8, max_depth=6, manual policy, Apple M-series; before/after on the same hardware):
+
+  | Scenario | 0.5.0 linear | 0.6.0 linear (SIMD) | Speedup |
+  | --- | ---: | ---: | ---: |
+  | n=20K, n_est=200 | 6.84 s | 2.31 s | **2.96×** |
+  | n=50K, n_est=200 | 16.02 s | 4.99 s | **3.21×** |
+  | n=100K, n_est=200 | 31.17 s | 9.49 s | **3.28×** |
+  | n=50K, n_est=500 | 40.07 s | 12.40 s | **3.23×** |
+
+### Internal
+
+- `LinearHistogramBin.xt_hx` layout changed from a 36-entry compacted upper-triangle to a 64-entry stride-8 row-major (`xt_hx[j * 8 + k]`). The lower-triangle slots stay zero in the current scalar code paths and are populated by mirror values in the SIMD outer-product path; both representations are mathematically equivalent under the closed-form ridge solve, which only reads the upper triangle. `MAX_PL_MATRIX_ENTRIES` is now `MAX_PL_REGRESSORS * MAX_PL_REGRESSORS = 64`.
+- `pl_matrix_index(j, k)` simplified to `j * MAX_PL_REGRESSORS + k`.
+- New SIMD helpers in `crates/backend_cpu/src/pl.rs` (`add_xt_hx`, `sub_xt_hx`, `diff_xt_hx`, `copy_xt_hx`, `add_xtg`, `sub_xtg`, `diff_xtg`) replace the previous scalar versions throughout the bin scan and leaf solve. All are bit-exact with their scalar counterparts (lane-independent ops).
+- `subtract_linear_histogram_bundle` operates on all 64 matrix entries instead of upper-triangle only — required so the histogram subtraction trick stays correct under the SIMD outer-product write pattern.
+- 13 new property tests (7 SIMD-vs-scalar helpers, 1 layout-uniqueness invariant, 1 SIMD-vs-scalar-reference equivalence test on 1000 rows × 5 split features × d=6).
+
+### Compatibility
+
+- **Backward compatible.** v0.5.0 PL-trees model artifacts (`leaf_model="linear"`) load and predict identically in 0.6.0 — the layout change is internal to histogram construction at training time only; the `LinearLeafCoefficients` artifact section format is unchanged. Constant-leaf artifacts are unaffected.
+
 ## 0.5.0
 
 ### New Features

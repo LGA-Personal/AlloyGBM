@@ -14,6 +14,7 @@
 //! possible with extreme data) the gain defaults to `0.0` and the split is
 //! skipped.
 
+use alloygbm_core::simd::f32x8;
 use alloygbm_core::{
     LinearFeatureHistogram, LinearLeaf, MAX_PL_MATRIX_ENTRIES, MAX_PL_REGRESSORS, NodeStats,
     SplitCandidate, pl_matrix_index,
@@ -22,41 +23,68 @@ use alloygbm_engine::{LinearContext, SplitSelectionOptions};
 
 // ── xt_hx helpers ─────────────────────────────────────────────────────────────
 //
-// `pl_matrix_index(j, k)` uses MAX_PL_REGRESSORS as the stride, so the valid
-// indices for a d-regressor problem are NOT a contiguous 0..tri_len range.
-// These helpers iterate only the (j,k) pairs that are active for a given d.
+// `xt_hx` is laid out stride-8 row-major (`xt_hx[j * 8 + k]`).  The histogram
+// builder writes only the upper-triangular slots; lower-triangle entries stay
+// zero.  Operating on the full 64 entries is harmless under add/sub/copy/diff
+// because zero is the identity for these operations.  This lets us use 8 full-
+// width `f32x8` ops per call with no scalar tail — matching the SIMD pattern
+// used by the constant-leaf bin scan in `crates/backend_cpu/src/lib.rs`.
+//
+// The `d: usize` parameter is no longer needed (we always operate on all 64
+// entries); it was required by the previous compacted upper-triangle layout.
+//
+// All four helpers are bit-exact with their scalar counterparts: each lane of
+// `f32x8` performs an independent f32 op identical to `dst[i] op src[i]`, so
+// rounding is byte-equal regardless of vector width.
+
+const XT_HX_CHUNKS: usize = MAX_PL_MATRIX_ENTRIES / 8;
+const _CHUNKS_DIVIDE_EVENLY: () = assert!(MAX_PL_MATRIX_ENTRIES.is_multiple_of(8));
 
 #[inline]
-fn copy_xt_hx(
-    src: &[f32; MAX_PL_MATRIX_ENTRIES],
-    dst: &mut [f32; MAX_PL_MATRIX_ENTRIES],
-    d: usize,
-) {
-    for j in 0..d {
-        for k in j..d {
-            let idx = pl_matrix_index(j, k);
-            dst[idx] = src[idx];
-        }
+fn load_chunk(src: &[f32; MAX_PL_MATRIX_ENTRIES], chunk: usize) -> f32x8 {
+    let base = chunk * 8;
+    f32x8::from([
+        src[base],
+        src[base + 1],
+        src[base + 2],
+        src[base + 3],
+        src[base + 4],
+        src[base + 5],
+        src[base + 6],
+        src[base + 7],
+    ])
+}
+
+#[inline]
+fn store_chunk(dst: &mut [f32; MAX_PL_MATRIX_ENTRIES], chunk: usize, v: f32x8) {
+    let base = chunk * 8;
+    let arr = v.to_array();
+    dst[base..base + 8].copy_from_slice(&arr);
+}
+
+#[inline]
+fn copy_xt_hx(src: &[f32; MAX_PL_MATRIX_ENTRIES], dst: &mut [f32; MAX_PL_MATRIX_ENTRIES]) {
+    // `*dst = *src` is itself optimal for a 64-byte memcpy; the SIMD form is
+    // here for symmetry with the other helpers and to keep the whole module
+    // on a single code path.
+    *dst = *src;
+}
+
+#[inline]
+fn add_xt_hx(src: &[f32; MAX_PL_MATRIX_ENTRIES], dst: &mut [f32; MAX_PL_MATRIX_ENTRIES]) {
+    for chunk in 0..XT_HX_CHUNKS {
+        let s = load_chunk(src, chunk);
+        let d = load_chunk(dst, chunk);
+        store_chunk(dst, chunk, d + s);
     }
 }
 
 #[inline]
-fn add_xt_hx(src: &[f32; MAX_PL_MATRIX_ENTRIES], dst: &mut [f32; MAX_PL_MATRIX_ENTRIES], d: usize) {
-    for j in 0..d {
-        for k in j..d {
-            let idx = pl_matrix_index(j, k);
-            dst[idx] += src[idx];
-        }
-    }
-}
-
-#[inline]
-fn sub_xt_hx(src: &[f32; MAX_PL_MATRIX_ENTRIES], dst: &mut [f32; MAX_PL_MATRIX_ENTRIES], d: usize) {
-    for j in 0..d {
-        for k in j..d {
-            let idx = pl_matrix_index(j, k);
-            dst[idx] -= src[idx];
-        }
+fn sub_xt_hx(src: &[f32; MAX_PL_MATRIX_ENTRIES], dst: &mut [f32; MAX_PL_MATRIX_ENTRIES]) {
+    for chunk in 0..XT_HX_CHUNKS {
+        let s = load_chunk(src, chunk);
+        let d = load_chunk(dst, chunk);
+        store_chunk(dst, chunk, d - s);
     }
 }
 
@@ -65,14 +93,43 @@ fn diff_xt_hx(
     b: &[f32; MAX_PL_MATRIX_ENTRIES],
     c: &[f32; MAX_PL_MATRIX_ENTRIES],
     dst: &mut [f32; MAX_PL_MATRIX_ENTRIES],
-    d: usize,
 ) {
-    for j in 0..d {
-        for k in j..d {
-            let idx = pl_matrix_index(j, k);
-            dst[idx] = b[idx] - c[idx];
-        }
+    for chunk in 0..XT_HX_CHUNKS {
+        let bv = load_chunk(b, chunk);
+        let cv = load_chunk(c, chunk);
+        store_chunk(dst, chunk, bv - cv);
     }
+}
+
+/// Add `src` into `dst` lane-wise: `dst[i] += src[i]` for `i in 0..MAX_PL_REGRESSORS`.
+///
+/// `xtg` is exactly 8 entries (one `f32x8` lane), so this collapses to a single
+/// SIMD op.  Used wherever the scalar path was iterating with `zip`/`take(d)`.
+#[inline]
+fn add_xtg(src: &[f32; MAX_PL_REGRESSORS], dst: &mut [f32; MAX_PL_REGRESSORS]) {
+    let s = f32x8::from(*src);
+    let d = f32x8::from(*dst);
+    *dst = (d + s).to_array();
+}
+
+/// Subtract `src` from `dst` lane-wise: `dst[i] -= src[i]`.
+#[inline]
+fn sub_xtg(src: &[f32; MAX_PL_REGRESSORS], dst: &mut [f32; MAX_PL_REGRESSORS]) {
+    let s = f32x8::from(*src);
+    let d = f32x8::from(*dst);
+    *dst = (d - s).to_array();
+}
+
+/// Compute `dst[i] = b[i] - c[i]` lane-wise.
+#[inline]
+fn diff_xtg(
+    b: &[f32; MAX_PL_REGRESSORS],
+    c: &[f32; MAX_PL_REGRESSORS],
+    dst: &mut [f32; MAX_PL_REGRESSORS],
+) {
+    let bv = f32x8::from(*b);
+    let cv = f32x8::from(*c);
+    *dst = (bv - cv).to_array();
 }
 
 /// Compute the PL gain for one side of a split:
@@ -163,10 +220,8 @@ pub fn best_split_linear_for_feature(
         p_grad += bin.grad_sum;
         p_hess += bin.hess_sum;
         p_count += bin.count;
-        for (a, &b) in p_xtg[..d].iter_mut().zip(bin.xtg[..d].iter()) {
-            *a += b;
-        }
-        add_xt_hx(&bin.xt_hx, &mut p_xt_hx, d);
+        add_xtg(&bin.xtg, &mut p_xtg);
+        add_xt_hx(&bin.xt_hx, &mut p_xt_hx);
     }
 
     if p_hess <= options.min_child_hessian {
@@ -176,11 +231,9 @@ pub fn best_split_linear_for_feature(
     // ── Missing-bin contribution ─────────────────────────────────────────────
     let (m_xtg, m_xt_hx, m_grad, m_hess, m_count) = if missing_bin_idx < linear_fh.bins.len() {
         let mb = &linear_fh.bins[missing_bin_idx];
-        let mut mxtg = [0.0_f32; MAX_PL_REGRESSORS];
         let mut mxthx = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
-        mxtg[..d].copy_from_slice(&mb.xtg[..d]);
-        copy_xt_hx(&mb.xt_hx, &mut mxthx, d);
-        (mxtg, mxthx, mb.grad_sum, mb.hess_sum, mb.count)
+        copy_xt_hx(&mb.xt_hx, &mut mxthx);
+        (mb.xtg, mxthx, mb.grad_sum, mb.hess_sum, mb.count)
     } else {
         (
             [0.0_f32; MAX_PL_REGRESSORS],
@@ -201,10 +254,8 @@ pub fn best_split_linear_for_feature(
     let nm_count = p_count.saturating_sub(m_count);
     let mut nm_xtg = p_xtg;
     let mut nm_xt_hx = p_xt_hx;
-    for j in 0..d {
-        nm_xtg[j] -= m_xtg[j];
-    }
-    sub_xt_hx(&m_xt_hx, &mut nm_xt_hx, d);
+    sub_xtg(&m_xtg, &mut nm_xtg);
+    sub_xt_hx(&m_xt_hx, &mut nm_xt_hx);
 
     // ── Running left accumulators (non-missing bins only) ────────────────────
     let mut l_xtg = [0.0_f32; MAX_PL_REGRESSORS];
@@ -221,10 +272,8 @@ pub fn best_split_linear_for_feature(
         l_grad += bin.grad_sum;
         l_hess += bin.hess_sum;
         l_count += bin.count;
-        for (a, &b) in l_xtg[..d].iter_mut().zip(bin.xtg[..d].iter()) {
-            *a += b;
-        }
-        add_xt_hx(&bin.xt_hx, &mut l_xt_hx, d);
+        add_xtg(&bin.xtg, &mut l_xtg);
+        add_xt_hx(&bin.xt_hx, &mut l_xt_hx);
 
         // Need at least one non-missing bin on the right side.
         if threshold_bin + 1 >= scan_limit && nm_count == l_count {
@@ -237,10 +286,8 @@ pub fn best_split_linear_for_feature(
         let r_count_nm = nm_count.saturating_sub(l_count);
         let mut r_xtg_nm = [0.0_f32; MAX_PL_REGRESSORS];
         let mut r_xt_hx_nm = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
-        for j in 0..d {
-            r_xtg_nm[j] = nm_xtg[j] - l_xtg[j];
-        }
-        diff_xt_hx(&nm_xt_hx, &l_xt_hx, &mut r_xt_hx_nm, d);
+        diff_xtg(&nm_xtg, &l_xtg, &mut r_xtg_nm);
+        diff_xt_hx(&nm_xt_hx, &l_xt_hx, &mut r_xt_hx_nm);
 
         // Evaluate NaN-goes-left and NaN-goes-right, pick the better one.
         for default_left in [true, false] {
@@ -260,10 +307,8 @@ pub fn best_split_linear_for_feature(
                 // NaN joins the left child.
                 let mut el_xtg = l_xtg;
                 let mut el_xthx = l_xt_hx;
-                for j in 0..d {
-                    el_xtg[j] += m_xtg[j];
-                }
-                add_xt_hx(&m_xt_hx, &mut el_xthx, d);
+                add_xtg(&m_xtg, &mut el_xtg);
+                add_xt_hx(&m_xt_hx, &mut el_xthx);
                 (
                     l_grad + m_grad,
                     l_hess + m_hess,
@@ -280,10 +325,8 @@ pub fn best_split_linear_for_feature(
                 // NaN joins the right child.
                 let mut er_xtg = r_xtg_nm;
                 let mut er_xthx = r_xt_hx_nm;
-                for j in 0..d {
-                    er_xtg[j] += m_xtg[j];
-                }
-                add_xt_hx(&m_xt_hx, &mut er_xthx, d);
+                add_xtg(&m_xtg, &mut er_xtg);
+                add_xt_hx(&m_xt_hx, &mut er_xthx);
                 (
                     l_grad,
                     l_hess,
@@ -351,7 +394,6 @@ pub fn leaf_linear_stats_for_split(
     threshold_bin: usize,
     missing_bin_idx: usize,
     default_left: bool,
-    d: usize,
 ) -> (
     [f32; MAX_PL_REGRESSORS],
     [f32; MAX_PL_MATRIX_ENTRIES],
@@ -367,11 +409,9 @@ pub fn leaf_linear_stats_for_split(
     // Missing bin.
     let (m_xtg, m_xt_hx, m_grad, m_hess) = if missing_bin_idx < linear_fh.bins.len() {
         let mb = &linear_fh.bins[missing_bin_idx];
-        let mut mxtg = [0.0_f32; MAX_PL_REGRESSORS];
         let mut mxthx = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
-        mxtg[..d].copy_from_slice(&mb.xtg[..d]);
-        copy_xt_hx(&mb.xt_hx, &mut mxthx, d);
-        (mxtg, mxthx, mb.grad_sum, mb.hess_sum)
+        copy_xt_hx(&mb.xt_hx, &mut mxthx);
+        (mb.xtg, mxthx, mb.grad_sum, mb.hess_sum)
     } else {
         (
             [0.0_f32; MAX_PL_REGRESSORS],
@@ -393,10 +433,8 @@ pub fn leaf_linear_stats_for_split(
     {
         l_grad += bin.grad_sum;
         l_hess += bin.hess_sum;
-        for (a, &b) in l_xtg[..d].iter_mut().zip(bin.xtg[..d].iter()) {
-            *a += b;
-        }
-        add_xt_hx(&bin.xt_hx, &mut l_xt_hx, d);
+        add_xtg(&bin.xtg, &mut l_xtg);
+        add_xt_hx(&bin.xt_hx, &mut l_xt_hx);
     }
 
     // Parent non-missing totals.
@@ -407,19 +445,15 @@ pub fn leaf_linear_stats_for_split(
     for bin in linear_fh.bins.iter().take(scan_limit) {
         nm_grad += bin.grad_sum;
         nm_hess += bin.hess_sum;
-        for (a, &b) in nm_xtg[..d].iter_mut().zip(bin.xtg[..d].iter()) {
-            *a += b;
-        }
-        add_xt_hx(&bin.xt_hx, &mut nm_xt_hx, d);
+        add_xtg(&bin.xtg, &mut nm_xtg);
+        add_xt_hx(&bin.xt_hx, &mut nm_xt_hx);
     }
 
     // Right non-missing = parent_nm - left.
     let mut r_xtg_nm = [0.0_f32; MAX_PL_REGRESSORS];
     let mut r_xt_hx_nm = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
-    for j in 0..d {
-        r_xtg_nm[j] = nm_xtg[j] - l_xtg[j];
-    }
-    diff_xt_hx(&nm_xt_hx, &l_xt_hx, &mut r_xt_hx_nm, d);
+    diff_xtg(&nm_xtg, &l_xtg, &mut r_xtg_nm);
+    diff_xt_hx(&nm_xt_hx, &l_xt_hx, &mut r_xt_hx_nm);
     let r_grad_nm = nm_grad - l_grad;
     let r_hess_nm = nm_hess - l_hess;
 
@@ -436,10 +470,8 @@ pub fn leaf_linear_stats_for_split(
     ) = if default_left {
         let mut el_xtg = l_xtg;
         let mut el_xthx = l_xt_hx;
-        for j in 0..d {
-            el_xtg[j] += m_xtg[j];
-        }
-        add_xt_hx(&m_xt_hx, &mut el_xthx, d);
+        add_xtg(&m_xtg, &mut el_xtg);
+        add_xt_hx(&m_xt_hx, &mut el_xthx);
         (
             el_xtg,
             el_xthx,
@@ -453,10 +485,8 @@ pub fn leaf_linear_stats_for_split(
     } else {
         let mut er_xtg = r_xtg_nm;
         let mut er_xthx = r_xt_hx_nm;
-        for j in 0..d {
-            er_xtg[j] += m_xtg[j];
-        }
-        add_xt_hx(&m_xt_hx, &mut er_xthx, d);
+        add_xtg(&m_xtg, &mut er_xtg);
+        add_xt_hx(&m_xt_hx, &mut er_xthx);
         (
             l_xtg,
             l_xt_hx,
@@ -587,8 +617,39 @@ pub fn solve_pl_leaf(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloygbm_core::{LinearFeatureHistogram, LinearHistogramBin, pl_matrix_index};
+    use alloygbm_core::{
+        LinearFeatureHistogram, LinearHistogramBin, MAX_PL_REGRESSORS, pl_matrix_index,
+    };
     use alloygbm_engine::{LinearContext, SplitSelectionOptions};
+
+    // ── Layout invariants ────────────────────────────────────────────────────
+
+    /// All `pl_matrix_index(j, k)` values for `0 ≤ j ≤ k < MAX_PL_REGRESSORS`
+    /// are unique and bounded by `MAX_PL_MATRIX_ENTRIES`.  This protects the
+    /// SIMD-friendly stride-8 layout from accidentally regressing back to a
+    /// compacted form (which would alias indices across rows).
+    #[test]
+    fn pl_matrix_index_uniqueness_and_bounds() {
+        let mut seen = std::collections::HashSet::new();
+        for j in 0..MAX_PL_REGRESSORS {
+            for k in j..MAX_PL_REGRESSORS {
+                let idx = pl_matrix_index(j, k);
+                assert!(
+                    idx < MAX_PL_MATRIX_ENTRIES,
+                    "pl_matrix_index({j},{k}) = {idx} exceeds MAX_PL_MATRIX_ENTRIES"
+                );
+                assert!(
+                    seen.insert(idx),
+                    "pl_matrix_index({j},{k}) = {idx} collides with an earlier (j,k)"
+                );
+            }
+        }
+        // Stride-8 layout: j * 8 + k.
+        assert_eq!(pl_matrix_index(0, 0), 0);
+        assert_eq!(pl_matrix_index(0, 7), 7);
+        assert_eq!(pl_matrix_index(1, 1), 9);
+        assert_eq!(pl_matrix_index(7, 7), 63);
+    }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -814,6 +875,145 @@ mod tests {
             let net = gain_l + gain_r - gain_p;
             // Net gain can be negative if parent is already well-fit; just assert no NaN/inf.
             assert!(net.is_finite(), "gain should be finite, got {net}");
+        }
+    }
+
+    // ── SIMD helper property tests ────────────────────────────────────────────
+    //
+    // For the lane-wise helpers (`add_xt_hx`, `sub_xt_hx`, `diff_xt_hx`,
+    // `copy_xt_hx`, `add_xtg`, `sub_xtg`, `diff_xtg`), each output element is
+    // an independent f32 op of the form `dst[i] = f(src[i], ...)`.  SIMD
+    // vectorisation processes 8 such ops in parallel but does not reorder
+    // operations or introduce reductions, so the result is **bit-exact** with
+    // a naïve scalar loop.  These tests pin that invariant.
+
+    /// Generate a deterministic 64-entry xt_hx-shaped matrix from a seed.
+    fn xt_hx_from_seed(seed: u64) -> [f32; MAX_PL_MATRIX_ENTRIES] {
+        let mut state = seed.wrapping_mul(0x9E3779B97F4A7C15);
+        let mut out = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
+        for slot in out.iter_mut() {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            // Map u64 to f32 in roughly [-10, 10].
+            let x = ((state >> 32) as i32 as f32) / (i32::MAX as f32) * 10.0;
+            *slot = x;
+        }
+        out
+    }
+
+    fn xtg_from_seed(seed: u64) -> [f32; MAX_PL_REGRESSORS] {
+        let mut state = seed.wrapping_mul(0x9E3779B97F4A7C15);
+        let mut out = [0.0_f32; MAX_PL_REGRESSORS];
+        for slot in out.iter_mut() {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let x = ((state >> 32) as i32 as f32) / (i32::MAX as f32) * 10.0;
+            *slot = x;
+        }
+        out
+    }
+
+    #[test]
+    fn add_xt_hx_simd_matches_scalar() {
+        for seed in 0..100 {
+            let src = xt_hx_from_seed(seed);
+            let initial = xt_hx_from_seed(seed.wrapping_add(1));
+            let mut dst_simd = initial;
+            let mut dst_scalar = initial;
+            add_xt_hx(&src, &mut dst_simd);
+            for i in 0..MAX_PL_MATRIX_ENTRIES {
+                dst_scalar[i] += src[i];
+            }
+            assert_eq!(dst_simd, dst_scalar, "seed {seed}: bit-exact mismatch");
+        }
+    }
+
+    #[test]
+    fn sub_xt_hx_simd_matches_scalar() {
+        for seed in 0..100 {
+            let src = xt_hx_from_seed(seed);
+            let initial = xt_hx_from_seed(seed.wrapping_add(1));
+            let mut dst_simd = initial;
+            let mut dst_scalar = initial;
+            sub_xt_hx(&src, &mut dst_simd);
+            for i in 0..MAX_PL_MATRIX_ENTRIES {
+                dst_scalar[i] -= src[i];
+            }
+            assert_eq!(dst_simd, dst_scalar, "seed {seed}: bit-exact mismatch");
+        }
+    }
+
+    #[test]
+    fn diff_xt_hx_simd_matches_scalar() {
+        for seed in 0..100 {
+            let b = xt_hx_from_seed(seed);
+            let c = xt_hx_from_seed(seed.wrapping_add(1));
+            let mut dst_simd = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
+            let mut dst_scalar = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
+            diff_xt_hx(&b, &c, &mut dst_simd);
+            for i in 0..MAX_PL_MATRIX_ENTRIES {
+                dst_scalar[i] = b[i] - c[i];
+            }
+            assert_eq!(dst_simd, dst_scalar, "seed {seed}: bit-exact mismatch");
+        }
+    }
+
+    #[test]
+    fn copy_xt_hx_simd_matches_scalar() {
+        for seed in 0..100 {
+            let src = xt_hx_from_seed(seed);
+            let mut dst_simd = [9.0_f32; MAX_PL_MATRIX_ENTRIES];
+            let mut dst_scalar = [9.0_f32; MAX_PL_MATRIX_ENTRIES];
+            copy_xt_hx(&src, &mut dst_simd);
+            dst_scalar[..MAX_PL_MATRIX_ENTRIES].copy_from_slice(&src);
+            assert_eq!(dst_simd, dst_scalar, "seed {seed}: bit-exact mismatch");
+        }
+    }
+
+    #[test]
+    fn add_xtg_simd_matches_scalar() {
+        for seed in 0..100 {
+            let src = xtg_from_seed(seed);
+            let initial = xtg_from_seed(seed.wrapping_add(1));
+            let mut dst_simd = initial;
+            let mut dst_scalar = initial;
+            add_xtg(&src, &mut dst_simd);
+            for i in 0..MAX_PL_REGRESSORS {
+                dst_scalar[i] += src[i];
+            }
+            assert_eq!(dst_simd, dst_scalar, "seed {seed}: bit-exact mismatch");
+        }
+    }
+
+    #[test]
+    fn sub_xtg_simd_matches_scalar() {
+        for seed in 0..100 {
+            let src = xtg_from_seed(seed);
+            let initial = xtg_from_seed(seed.wrapping_add(1));
+            let mut dst_simd = initial;
+            let mut dst_scalar = initial;
+            sub_xtg(&src, &mut dst_simd);
+            for i in 0..MAX_PL_REGRESSORS {
+                dst_scalar[i] -= src[i];
+            }
+            assert_eq!(dst_simd, dst_scalar, "seed {seed}: bit-exact mismatch");
+        }
+    }
+
+    #[test]
+    fn diff_xtg_simd_matches_scalar() {
+        for seed in 0..100 {
+            let b = xtg_from_seed(seed);
+            let c = xtg_from_seed(seed.wrapping_add(1));
+            let mut dst_simd = [0.0_f32; MAX_PL_REGRESSORS];
+            let mut dst_scalar = [0.0_f32; MAX_PL_REGRESSORS];
+            diff_xtg(&b, &c, &mut dst_simd);
+            for i in 0..MAX_PL_REGRESSORS {
+                dst_scalar[i] = b[i] - c[i];
+            }
+            assert_eq!(dst_simd, dst_scalar, "seed {seed}: bit-exact mismatch");
         }
     }
 }

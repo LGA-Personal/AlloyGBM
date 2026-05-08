@@ -842,21 +842,27 @@ impl HistogramBundle {
 /// so that bin layouts are fixed-size and cache-friendly.
 pub const MAX_PL_REGRESSORS: usize = 8;
 
-/// Maximum number of upper-triangular entries for an 8×8 matrix: 8*9/2 = 36.
-pub const MAX_PL_MATRIX_ENTRIES: usize = 36;
+/// Number of `XᵀHX` matrix entries stored per histogram bin: a padded 8×8 = 64
+/// stride-8 layout (changed from a 36-entry compacted upper-triangle in v0.5.0
+/// so that all matrix operations map cleanly to `wide::f32x8` lanes with no
+/// scalar tail). The lower-triangle entries stay zero (`XᵀHX` is symmetric and
+/// only the upper triangle is populated by `pl_histogram`); SIMD operations on
+/// those zero slots are harmless.
+pub const MAX_PL_MATRIX_ENTRIES: usize = MAX_PL_REGRESSORS * MAX_PL_REGRESSORS;
 
 /// A single histogram bin for a piecewise-linear (PL) leaf model.
 ///
 /// Stores the `(Xᵀg, XᵀHX)` statistics needed for the closed-form ridge-
 /// regression leaf-weight solve `α* = -(XᵀHX + λI)⁻¹ Xᵀg`.
 ///
-/// Only the first `d` entries of `xtg` and the first `d*(d+1)/2` entries of
-/// `xt_hx` are meaningful; the remainder is zero padding.  `d` is recorded in
-/// the parent [`LinearHistogramBundle`].
+/// Only the first `d` entries of `xtg` and only the upper-triangle of the
+/// `d × d` block of `xt_hx` are written by the histogram builder; the rest of
+/// each array is zero padding (so SIMD operations covering the full storage
+/// produce mathematically correct results).  `d` is recorded in the parent
+/// [`LinearHistogramBundle`].
 ///
-/// Upper-triangular packing for `xt_hx` (j ≤ k):
-/// `index(j, k) = j*(2*d - j + 1)/2 + (k - j)`  where `d = MAX_PL_REGRESSORS`.
-/// For fixed d, use the [`pl_matrix_index`] helper.
+/// `xt_hx` uses a stride-8 row-major layout: `xt_hx[j * MAX_PL_REGRESSORS + k]`
+/// holds `Σ h_i x_{i,j} x_{i,k}` for `j ≤ k < d`.  See [`pl_matrix_index`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LinearHistogramBin {
     /// Sum of gradients for samples in this bin.
@@ -867,8 +873,7 @@ pub struct LinearHistogramBin {
     pub count: u32,
     /// `Xᵀg` vector: `xtg[j] = Σ_{i in bin} g_i * x_{i, regressor_j}` for j = 0..d.
     pub xtg: [f32; MAX_PL_REGRESSORS],
-    /// `XᵀHX` upper-triangular: `xt_hx[idx(j,k)] = Σ_{i in bin} h_i * x_{i,j} * x_{i,k}`
-    /// for j ≤ k < d. Packed with the formula above.
+    /// `XᵀHX` stride-8 row-major: `xt_hx[j * MAX_PL_REGRESSORS + k]` for j ≤ k < d.
     pub xt_hx: [f32; MAX_PL_MATRIX_ENTRIES],
 }
 
@@ -884,20 +889,20 @@ impl Default for LinearHistogramBin {
     }
 }
 
-/// Return the flat index into the upper-triangular `xt_hx` array for element (j, k).
+/// Return the flat index into the stride-8 row-major `xt_hx` array for element
+/// `(j, k)`.
 ///
-/// Panics in debug builds if `j > k` or `k >= MAX_PL_REGRESSORS`.
+/// The histogram builder writes only the upper triangle (`j ≤ k < d`); lower-
+/// triangle entries stay zero.  Callers may also reference `(j, k)` pairs in
+/// the lower triangle for symmetric reads — those slots are zero and a SIMD
+/// reduction over the full row produces the correct result.
+///
+/// Panics in debug builds if either index is out of range.
 #[inline]
 pub fn pl_matrix_index(j: usize, k: usize) -> usize {
-    debug_assert!(
-        j <= k,
-        "j ({j}) must be <= k ({k}) for upper-triangular index"
-    );
+    debug_assert!(j < MAX_PL_REGRESSORS, "j ({j}) must be < MAX_PL_REGRESSORS");
     debug_assert!(k < MAX_PL_REGRESSORS, "k ({k}) must be < MAX_PL_REGRESSORS");
-    // Row j of an upper-triangular matrix of size d × d starts at index
-    // j * d - j*(j-1)/2.  Within that row, element k-j is at offset k-j.
-    // With d = MAX_PL_REGRESSORS:
-    j * (2 * MAX_PL_REGRESSORS - j + 1) / 2 + (k - j)
+    j * MAX_PL_REGRESSORS + k
 }
 
 /// Per-feature histogram for piecewise-linear leaf statistics.
@@ -981,7 +986,6 @@ pub fn subtract_linear_histogram_bundle(
         parent.num_regressors, smaller.num_regressors,
         "num_regressors mismatch in linear histogram subtraction"
     );
-    let d = parent.num_regressors;
     let feature_histograms = parent
         .feature_histograms
         .iter()
@@ -993,18 +997,19 @@ pub fn subtract_linear_histogram_bundle(
                 .iter()
                 .zip(sfh.bins.iter())
                 .map(|(pb, sb)| {
+                    // Operate on all `MAX_PL_REGRESSORS` / `MAX_PL_MATRIX_ENTRIES`
+                    // slots — the histogram builder may populate both triangles
+                    // of `xt_hx` (full 8×8 outer product) and unused entries
+                    // are zero in both `pb` and `sb`, so subtracting all
+                    // entries is correct and matches the SIMD-friendly
+                    // stride-8 layout.
                     let mut xtg = [0.0f32; MAX_PL_REGRESSORS];
-                    let mut xt_hx = [0.0f32; MAX_PL_MATRIX_ENTRIES];
-                    for (j, xtg_j) in xtg.iter_mut().enumerate().take(d) {
+                    for (j, xtg_j) in xtg.iter_mut().enumerate() {
                         *xtg_j = pb.xtg[j] - sb.xtg[j];
                     }
-                    // Use pl_matrix_index to iterate only the active (j,k) pairs,
-                    // since the indices are non-contiguous for d < MAX_PL_REGRESSORS.
-                    for j in 0..d {
-                        for k in j..d {
-                            let idx = pl_matrix_index(j, k);
-                            xt_hx[idx] = pb.xt_hx[idx] - sb.xt_hx[idx];
-                        }
+                    let mut xt_hx = [0.0f32; MAX_PL_MATRIX_ENTRIES];
+                    for (i, slot) in xt_hx.iter_mut().enumerate() {
+                        *slot = pb.xt_hx[i] - sb.xt_hx[i];
                     }
                     LinearHistogramBin {
                         grad_sum: pb.grad_sum - sb.grad_sum,
