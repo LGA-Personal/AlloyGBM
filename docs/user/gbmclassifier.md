@@ -32,13 +32,18 @@ print("log_loss:", log_loss(y_test, probas[:, 1]))
 
 ## Parameters
 
-All parameters from `GBMRegressor` are accepted, including
-`training_mode="morph"` and the rest of the MorphBoost / LR-schedule
-parameters (`morph_rate`, `evolution_pressure`, `morph_warmup_iters`,
-`info_score_weight`, `depth_penalty_base`, `balance_penalty`,
-`lr_schedule`, `lr_warmup_frac`). See [MorphBoost](morphboost.md) for the
-full reference. The objective is always binary cross-entropy and is not
-configurable.
+All parameters from `GBMRegressor` are accepted, including:
+- `leaf_model="linear"` for piecewise-linear leaves (see
+  [GBMRegressor — Piecewise-Linear Leaves](gbmregressor.md#piecewise-linear-leaves)).
+  Multi-class softmax fits each per-class tree sequence with linear leaves
+  independently. Pair with `lambda_l2 >= 0.01` for weight stability.
+- `training_mode="morph"` and the rest of the MorphBoost / LR-schedule parameters
+  (`morph_rate`, `evolution_pressure`, `morph_warmup_iters`, `info_score_weight`,
+  `depth_penalty_base`, `balance_penalty`, `lr_schedule`, `lr_warmup_frac`).
+  `leaf_model="linear"` and `training_mode="morph"` can be combined.
+  See [MorphBoost](morphboost.md) for the full reference.
+
+The objective is always binary cross-entropy and is not configurable.
 
 ```python
 # MorphBoost on binary classification
@@ -110,5 +115,5 @@ print(model.best_score_)
 
 ## Current Scope
 
-- Binary classification only. Multi-class is not yet supported.
+- Binary cross-entropy and multi-class softmax objectives are supported.
 - No `scale_pos_weight` parameter (use `sample_weight` for class imbalance).

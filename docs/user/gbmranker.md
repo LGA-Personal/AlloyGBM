@@ -45,12 +45,15 @@ print("NDCG@10:", ndcg(y_test, scores, group=query_ids_test, k=10))
 ### Inherited
 
 All other parameters are inherited from `GBMRegressor` (learning rate, depth,
-regularization, etc.). This includes `training_mode="morph"` and the
-MorphBoost / LR-schedule parameters
-(`morph_rate`, `evolution_pressure`, `morph_warmup_iters`,
-`info_score_weight`, `depth_penalty_base`, `balance_penalty`,
-`lr_schedule`, `lr_warmup_frac`). See [MorphBoost](morphboost.md) for the
-full reference.
+regularization, etc.). This includes:
+- `leaf_model="linear"` for piecewise-linear leaves (see
+  [GBMRegressor — Piecewise-Linear Leaves](gbmregressor.md#piecewise-linear-leaves)).
+  Pair with `lambda_l2 >= 0.01` for weight stability.
+- `training_mode="morph"` and the MorphBoost / LR-schedule parameters
+  (`morph_rate`, `evolution_pressure`, `morph_warmup_iters`, `info_score_weight`,
+  `depth_penalty_base`, `balance_penalty`, `lr_schedule`, `lr_warmup_frac`).
+  `leaf_model="linear"` and `training_mode="morph"` can be combined.
+  See [MorphBoost](morphboost.md) for the full reference.
 
 ```python
 # MorphBoost on ranking

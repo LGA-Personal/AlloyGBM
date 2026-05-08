@@ -22,6 +22,25 @@ pub enum TreeGrowth {
     Leaf,
 }
 
+/// Leaf representation strategy for tree models.
+///
+/// `Constant` (default) is identical to current behavior: each leaf stores a
+/// single scalar output `f_s = -lr * Σg / (Σh + λ)`.
+///
+/// `Linear` replaces the scalar with a small ridge-regression model
+/// `f_s(x) = b_s + Σ_j α_j x_{k_j}` fit analytically via the closed-form
+/// Newton step `α* = -(XᵀHX + λI)⁻¹ Xᵀg`.  Feature regressors are chosen
+/// incrementally as the tree grows (inheriting the parent's set plus the
+/// current split feature, capped at `min(8, max_depth)`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LeafModelKind {
+    /// Single scalar leaf value (current default behavior).
+    #[default]
+    Constant,
+    /// Piecewise-linear leaf model fit by ridge regression.
+    Linear,
+}
+
 /// Per-iteration learning rate schedule for MorphBoost training.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum LrSchedule {
@@ -252,6 +271,9 @@ pub struct TrainParams {
     pub tree_growth: TreeGrowth,
     /// MorphBoost-inspired training profile config. `None` = non-morph (current behavior).
     pub morph_config: Option<MorphConfig>,
+    /// Leaf representation strategy.  `Constant` (default) preserves all existing
+    /// behaviour.  `Linear` enables piecewise-linear leaves fitted by ridge regression.
+    pub leaf_model: LeafModelKind,
 }
 
 impl Default for TrainParams {
@@ -275,6 +297,7 @@ impl Default for TrainParams {
             max_leaves: None,
             tree_growth: TreeGrowth::Level,
             morph_config: None,
+            leaf_model: LeafModelKind::Constant,
         }
     }
 }
@@ -812,6 +835,276 @@ impl HistogramBundle {
     }
 }
 
+// ── Piecewise-linear leaf histogram types ────────────────────────────────────
+
+/// Maximum number of regressor features per leaf for piecewise-linear trees.
+/// Matches `min(8, max_depth)` at run time, but we always pad to this constant
+/// so that bin layouts are fixed-size and cache-friendly.
+pub const MAX_PL_REGRESSORS: usize = 8;
+
+/// Maximum number of upper-triangular entries for an 8×8 matrix: 8*9/2 = 36.
+pub const MAX_PL_MATRIX_ENTRIES: usize = 36;
+
+/// A single histogram bin for a piecewise-linear (PL) leaf model.
+///
+/// Stores the `(Xᵀg, XᵀHX)` statistics needed for the closed-form ridge-
+/// regression leaf-weight solve `α* = -(XᵀHX + λI)⁻¹ Xᵀg`.
+///
+/// Only the first `d` entries of `xtg` and the first `d*(d+1)/2` entries of
+/// `xt_hx` are meaningful; the remainder is zero padding.  `d` is recorded in
+/// the parent [`LinearHistogramBundle`].
+///
+/// Upper-triangular packing for `xt_hx` (j ≤ k):
+/// `index(j, k) = j*(2*d - j + 1)/2 + (k - j)`  where `d = MAX_PL_REGRESSORS`.
+/// For fixed d, use the [`pl_matrix_index`] helper.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LinearHistogramBin {
+    /// Sum of gradients for samples in this bin.
+    pub grad_sum: f32,
+    /// Sum of hessians for samples in this bin.
+    pub hess_sum: f32,
+    /// Number of samples in this bin.
+    pub count: u32,
+    /// `Xᵀg` vector: `xtg[j] = Σ_{i in bin} g_i * x_{i, regressor_j}` for j = 0..d.
+    pub xtg: [f32; MAX_PL_REGRESSORS],
+    /// `XᵀHX` upper-triangular: `xt_hx[idx(j,k)] = Σ_{i in bin} h_i * x_{i,j} * x_{i,k}`
+    /// for j ≤ k < d. Packed with the formula above.
+    pub xt_hx: [f32; MAX_PL_MATRIX_ENTRIES],
+}
+
+impl Default for LinearHistogramBin {
+    fn default() -> Self {
+        Self {
+            grad_sum: 0.0,
+            hess_sum: 0.0,
+            count: 0,
+            xtg: [0.0; MAX_PL_REGRESSORS],
+            xt_hx: [0.0; MAX_PL_MATRIX_ENTRIES],
+        }
+    }
+}
+
+/// Return the flat index into the upper-triangular `xt_hx` array for element (j, k).
+///
+/// Panics in debug builds if `j > k` or `k >= MAX_PL_REGRESSORS`.
+#[inline]
+pub fn pl_matrix_index(j: usize, k: usize) -> usize {
+    debug_assert!(
+        j <= k,
+        "j ({j}) must be <= k ({k}) for upper-triangular index"
+    );
+    debug_assert!(k < MAX_PL_REGRESSORS, "k ({k}) must be < MAX_PL_REGRESSORS");
+    // Row j of an upper-triangular matrix of size d × d starts at index
+    // j * d - j*(j-1)/2.  Within that row, element k-j is at offset k-j.
+    // With d = MAX_PL_REGRESSORS:
+    j * (2 * MAX_PL_REGRESSORS - j + 1) / 2 + (k - j)
+}
+
+/// Per-feature histogram for piecewise-linear leaf statistics.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearFeatureHistogram {
+    pub feature_index: u32,
+    pub bins: Vec<LinearHistogramBin>,
+}
+
+/// Bundle of per-feature PL histograms for a single tree node.
+///
+/// `num_regressors` tells how many entries in each bin's `xtg` / `xt_hx`
+/// fields are valid; the rest are zero padding.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearHistogramBundle {
+    pub node_id: u32,
+    /// Number of active regressors for this node (1 ≤ d ≤ MAX_PL_REGRESSORS).
+    pub num_regressors: usize,
+    /// Which feature indices are the regressors for this node, length = num_regressors.
+    pub regressor_features: Vec<u32>,
+    pub feature_histograms: Vec<LinearFeatureHistogram>,
+}
+
+impl LinearHistogramBundle {
+    /// Zero all bin values in-place without deallocating.
+    pub fn reset(&mut self, node_id: u32) {
+        self.node_id = node_id;
+        for fh in &mut self.feature_histograms {
+            for bin in &mut fh.bins {
+                *bin = LinearHistogramBin::default();
+            }
+        }
+    }
+
+    /// Create a pre-allocated, zeroed linear histogram bundle.
+    pub fn new_zeroed(
+        node_id: u32,
+        feature_indices: &[u32],
+        bin_count: usize,
+        num_regressors: usize,
+        regressor_features: Vec<u32>,
+    ) -> Self {
+        debug_assert!(
+            num_regressors <= MAX_PL_REGRESSORS,
+            "num_regressors ({num_regressors}) exceeds MAX_PL_REGRESSORS"
+        );
+        let feature_histograms = feature_indices
+            .iter()
+            .map(|&fi| LinearFeatureHistogram {
+                feature_index: fi,
+                bins: vec![LinearHistogramBin::default(); bin_count],
+            })
+            .collect();
+        Self {
+            node_id,
+            num_regressors,
+            regressor_features,
+            feature_histograms,
+        }
+    }
+}
+
+/// Compute the larger-child linear histogram bundle using the subtraction trick.
+///
+/// Given `parent` and the `smaller` child's bundle (both with the same node
+/// layout), returns the `larger` child bundle via element-wise subtraction:
+/// `larger[f][b] = parent[f][b] - smaller[f][b]` for all fields.
+///
+/// Both bundles must have the same number of features (in the same order) and
+/// the same number of bins per feature.
+pub fn subtract_linear_histogram_bundle(
+    parent: &LinearHistogramBundle,
+    smaller: &LinearHistogramBundle,
+) -> LinearHistogramBundle {
+    debug_assert_eq!(
+        parent.feature_histograms.len(),
+        smaller.feature_histograms.len(),
+        "feature count mismatch in linear histogram subtraction"
+    );
+    debug_assert_eq!(
+        parent.num_regressors, smaller.num_regressors,
+        "num_regressors mismatch in linear histogram subtraction"
+    );
+    let d = parent.num_regressors;
+    let feature_histograms = parent
+        .feature_histograms
+        .iter()
+        .zip(smaller.feature_histograms.iter())
+        .map(|(pfh, sfh)| {
+            debug_assert_eq!(pfh.bins.len(), sfh.bins.len());
+            let bins = pfh
+                .bins
+                .iter()
+                .zip(sfh.bins.iter())
+                .map(|(pb, sb)| {
+                    let mut xtg = [0.0f32; MAX_PL_REGRESSORS];
+                    let mut xt_hx = [0.0f32; MAX_PL_MATRIX_ENTRIES];
+                    for (j, xtg_j) in xtg.iter_mut().enumerate().take(d) {
+                        *xtg_j = pb.xtg[j] - sb.xtg[j];
+                    }
+                    // Use pl_matrix_index to iterate only the active (j,k) pairs,
+                    // since the indices are non-contiguous for d < MAX_PL_REGRESSORS.
+                    for j in 0..d {
+                        for k in j..d {
+                            let idx = pl_matrix_index(j, k);
+                            xt_hx[idx] = pb.xt_hx[idx] - sb.xt_hx[idx];
+                        }
+                    }
+                    LinearHistogramBin {
+                        grad_sum: pb.grad_sum - sb.grad_sum,
+                        hess_sum: pb.hess_sum - sb.hess_sum,
+                        count: pb.count - sb.count,
+                        xtg,
+                        xt_hx,
+                    }
+                })
+                .collect();
+            LinearFeatureHistogram {
+                feature_index: pfh.feature_index,
+                bins,
+            }
+        })
+        .collect();
+    LinearHistogramBundle {
+        node_id: smaller.node_id, // larger child gets a different node_id assigned by caller
+        num_regressors: parent.num_regressors,
+        regressor_features: parent.regressor_features.clone(),
+        feature_histograms,
+    }
+}
+
+/// A linear leaf model: `f_s(x) = intercept + Σ_j weights[j] * x[regressor_features[j]]`.
+///
+/// `intercept` holds the standard Newton-Raphson scalar (so constant-only behaviour
+/// degrades gracefully when `weights` is all-zero).  `weights` contains the `d` linear
+/// correction coefficients solved via `α* = -(XᵀHX + λI)⁻¹ Xᵀg`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearLeaf {
+    /// Constant offset (standard scalar leaf value, learning-rate scaled).
+    pub intercept: f32,
+    /// Linear correction weights `α_j` for each regressor (length `d`).
+    pub weights: Vec<f32>,
+    /// Feature indices of the regressors (length `d`, matches `weights`).
+    pub regressor_features: Vec<u32>,
+}
+
+impl LinearLeaf {
+    /// Evaluate the leaf model for one row of raw (float) feature data.
+    ///
+    /// `raw_features` is the full flat row-major feature matrix; `row_offset` is
+    /// `row_index * feature_count`.
+    #[inline]
+    pub fn eval(&self, raw_features: &[f32], row_offset: usize) -> f32 {
+        let mut val = self.intercept;
+        for (w, &feat) in self.weights.iter().zip(self.regressor_features.iter()) {
+            let idx = row_offset + feat as usize;
+            if idx < raw_features.len() {
+                val += w * raw_features[idx];
+            }
+        }
+        val
+    }
+}
+
+/// The value stored at a trained leaf node.
+///
+/// * `Scalar(f32)` — constant leaf; identical to the pre-PL-Trees behaviour.
+/// * `Linear(LinearLeaf)` — piecewise-linear leaf with `d` regressor features.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LeafValue {
+    Scalar(f32),
+    Linear(LinearLeaf),
+}
+
+impl LeafValue {
+    /// Extract the scalar representation of this leaf value.
+    ///
+    /// For `Scalar(v)` this is exact.  For `Linear`, this returns the intercept
+    /// (the best constant approximation), used in places that do not yet support
+    /// full row-level linear evaluation (Phase-4 code will handle those properly).
+    #[inline]
+    pub fn as_scalar(&self) -> f32 {
+        match self {
+            Self::Scalar(v) => *v,
+            Self::Linear(leaf) => leaf.intercept,
+        }
+    }
+
+    /// Evaluate this leaf for a single row passed as a flat feature slice.
+    ///
+    /// For [`LeafValue::Scalar`], returns the scalar directly.
+    /// For [`LeafValue::Linear`], computes `intercept + Σ w_j * features[regressor_j]`.
+    #[inline]
+    pub fn eval_row(&self, features: &[f32]) -> f32 {
+        match self {
+            Self::Scalar(v) => *v,
+            Self::Linear(leaf) => leaf.eval(features, 0),
+        }
+    }
+
+    /// Return `true` when this is a constant (scalar) leaf.
+    #[inline]
+    pub fn is_scalar(&self) -> bool {
+        matches!(self, Self::Scalar(_))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SplitCandidate {
     pub node_id: u32,
@@ -912,6 +1205,9 @@ pub enum ModelSectionKind {
     MultiClassTrees,
     NativeCategoricalSplits,
     MorphMetadata,
+    /// Per-stump linear leaf coefficients (intercept + weights + regressor features).
+    /// Written alongside the Trees section for `leaf_model="linear"` models.
+    LinearLeafCoefficients,
     Unknown(u32),
 }
 
@@ -926,6 +1222,7 @@ impl ModelSectionKind {
             Self::MultiClassTrees => 6,
             Self::NativeCategoricalSplits => 7,
             Self::MorphMetadata => 8,
+            Self::LinearLeafCoefficients => 9,
             Self::Unknown(value) => value,
         }
     }
@@ -940,6 +1237,7 @@ impl ModelSectionKind {
             6 => Self::MultiClassTrees,
             7 => Self::NativeCategoricalSplits,
             8 => Self::MorphMetadata,
+            9 => Self::LinearLeafCoefficients,
             other => Self::Unknown(other),
         }
     }
@@ -1470,6 +1768,172 @@ pub fn decode_optional_morph_metadata_artifact_section(
         return Ok(None);
     };
     let payload = decode_optional_morph_metadata_section(&section.payload)?;
+    Ok(Some(payload))
+}
+
+// ── Linear-leaf coefficients section ─────────────────────────────────────────
+
+/// One stump's linear-leaf entries inside the `LinearLeafCoefficients` section.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearLeafEntry {
+    pub stump_idx: u32,
+    pub left_leaf: Option<LinearLeaf>,
+    pub right_leaf: Option<LinearLeaf>,
+}
+
+/// Payload for `ModelSectionKind::LinearLeafCoefficients`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearLeafCoefficientsPayload {
+    pub entries: Vec<LinearLeafEntry>,
+}
+
+/// Encode a `LinearLeafCoefficientsPayload` to bytes.
+///
+/// Layout:
+/// ```text
+/// [u32 version=1] [u32 entry_count]
+/// For each entry:
+///   [u32 stump_idx] [u8 flags]
+///   if flags & 1: [u8 d] [f32 intercept] [d × f32 weights] [d × u32 regressor_features]
+///   if flags & 2: same for right leaf
+/// ```
+pub fn encode_linear_leaf_coefficients_payload(payload: &LinearLeafCoefficientsPayload) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&1u32.to_le_bytes()); // version
+    buf.extend_from_slice(&(payload.entries.len() as u32).to_le_bytes());
+    for entry in &payload.entries {
+        buf.extend_from_slice(&entry.stump_idx.to_le_bytes());
+        let flags: u8 =
+            (entry.left_leaf.is_some() as u8) | ((entry.right_leaf.is_some() as u8) << 1);
+        buf.push(flags);
+
+        let write_leaf = |buf: &mut Vec<u8>, leaf: &LinearLeaf| {
+            let d = leaf.weights.len().min(MAX_PL_REGRESSORS);
+            buf.push(d as u8);
+            buf.extend_from_slice(&leaf.intercept.to_le_bytes());
+            for i in 0..d {
+                buf.extend_from_slice(&leaf.weights[i].to_le_bytes());
+            }
+            for i in 0..d {
+                let feat = *leaf.regressor_features.get(i).unwrap_or(&0);
+                buf.extend_from_slice(&feat.to_le_bytes());
+            }
+        };
+        if let Some(ref ll) = entry.left_leaf {
+            write_leaf(&mut buf, ll);
+        }
+        if let Some(ref rl) = entry.right_leaf {
+            write_leaf(&mut buf, rl);
+        }
+    }
+    buf
+}
+
+/// Decode a `LinearLeafCoefficientsPayload` from raw section bytes.
+pub fn decode_linear_leaf_coefficients_payload(
+    bytes: &[u8],
+) -> CoreResult<LinearLeafCoefficientsPayload> {
+    if bytes.len() < 8 {
+        return Err(CoreError::Validation(
+            "linear leaf coefficients section too short".to_string(),
+        ));
+    }
+    let version = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    if version != 1 {
+        return Err(CoreError::Validation(format!(
+            "unsupported linear leaf coefficients version: {version}"
+        )));
+    }
+    let entry_count = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+    let mut o = 8usize;
+    let mut entries = Vec::with_capacity(entry_count);
+
+    let read_u32 = |bytes: &[u8], o: &mut usize| -> CoreResult<u32> {
+        if *o + 4 > bytes.len() {
+            return Err(CoreError::Validation(
+                "unexpected end of linear leaf coefficients data".to_string(),
+            ));
+        }
+        let v = u32::from_le_bytes([bytes[*o], bytes[*o + 1], bytes[*o + 2], bytes[*o + 3]]);
+        *o += 4;
+        Ok(v)
+    };
+    let read_f32 = |bytes: &[u8], o: &mut usize| -> CoreResult<f32> {
+        if *o + 4 > bytes.len() {
+            return Err(CoreError::Validation(
+                "unexpected end of linear leaf coefficients data".to_string(),
+            ));
+        }
+        let v = f32::from_le_bytes([bytes[*o], bytes[*o + 1], bytes[*o + 2], bytes[*o + 3]]);
+        *o += 4;
+        Ok(v)
+    };
+
+    for _ in 0..entry_count {
+        let stump_idx = read_u32(bytes, &mut o)?;
+        if o >= bytes.len() {
+            return Err(CoreError::Validation(
+                "unexpected end of linear leaf coefficients data".to_string(),
+            ));
+        }
+        let flags = bytes[o];
+        o += 1;
+
+        let read_leaf = |bytes: &[u8], o: &mut usize| -> CoreResult<LinearLeaf> {
+            if *o >= bytes.len() {
+                return Err(CoreError::Validation(
+                    "unexpected end reading linear leaf".to_string(),
+                ));
+            }
+            let d = bytes[*o] as usize;
+            *o += 1;
+            let intercept = read_f32(bytes, o)?;
+            let mut weights = Vec::with_capacity(d);
+            for _ in 0..d {
+                weights.push(read_f32(bytes, o)?);
+            }
+            let mut regressor_features = Vec::with_capacity(d);
+            for _ in 0..d {
+                regressor_features.push(read_u32(bytes, o)?);
+            }
+            Ok(LinearLeaf {
+                intercept,
+                weights,
+                regressor_features,
+            })
+        };
+
+        let left_leaf = if flags & 1 != 0 {
+            Some(read_leaf(bytes, &mut o)?)
+        } else {
+            None
+        };
+        let right_leaf = if flags & 2 != 0 {
+            Some(read_leaf(bytes, &mut o)?)
+        } else {
+            None
+        };
+        entries.push(LinearLeafEntry {
+            stump_idx,
+            left_leaf,
+            right_leaf,
+        });
+    }
+
+    Ok(LinearLeafCoefficientsPayload { entries })
+}
+
+/// Decode an optional `LinearLeafCoefficients` section from parsed artifact sections.
+/// Returns `None` if no such section exists (constant-leaf artifact).
+pub fn decode_optional_linear_leaf_coefficients_section(
+    sections: &[ModelArtifactSection],
+) -> CoreResult<Option<LinearLeafCoefficientsPayload>> {
+    let Some(section) =
+        optional_single_section(sections, ModelSectionKind::LinearLeafCoefficients)?
+    else {
+        return Ok(None);
+    };
+    let payload = decode_linear_leaf_coefficients_payload(&section.payload)?;
     Ok(Some(payload))
 }
 

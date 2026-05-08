@@ -13,14 +13,18 @@ The suite compares AlloyGBM against:
 - LightGBM
 - CatBoost
 
-It also includes two MorphBoost variants of AlloyGBM as separate arms:
+It also includes additional AlloyGBM variants as separate arms:
 
 - `alloygbm_morph` -- `training_mode="morph"` with the default constant LR schedule
 - `alloygbm_morph_cosine` -- `training_mode="morph"` with `lr_schedule="warmup_cosine"`
+- `alloygbm_linear` -- `leaf_model="linear"` (piecewise-linear leaves) with auto training mode
+- `alloygbm_morph_linear` -- `leaf_model="linear"` combined with `training_mode="morph"`
 
 A focused MorphBoost-vs-peers comparison script is also provided at
 `benchmarks/morph_report.py`, with a Numerai-specific harness at
-`benchmarks/numerai_benchmark.py`.
+`benchmarks/numerai_benchmark.py`. A dedicated PL-trees benchmark with
+convergence-curve and λ-sweep analysis lives at `benchmarks/pl_trees_benchmark.py`;
+results are reported in `docs/benchmarks/pl_trees_v1.md`.
 
 Benchmarks span three task types:
 
@@ -74,6 +78,15 @@ each library behaves under different learning-rate / depth / round budgets.
 - `alloygbm_morph` is typically the fastest of the three AlloyGBM variants
   on this workload due to faster convergence under the EMA-shaped gain.
 - See `benchmarks/numerai_benchmark.py` for the reproducer.
+
+### Piecewise-Linear Leaf Variants
+
+- `leaf_model="linear"` shows ~10× faster convergence on linearly-structured
+  data (fewer rounds to reach the same RMSE).
+- +3.5% RMSE improvement on California Housing and +1.75pp accuracy on
+  Breast Cancer vs constant-leaf baselines.
+- 2–8× per-round training overhead from the closed-form Cholesky solve.
+- See `docs/benchmarks/pl_trees_v1.md` for the full report.
 
 ## Metrics By Task Type
 

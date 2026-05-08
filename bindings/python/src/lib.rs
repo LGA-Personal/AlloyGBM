@@ -1961,6 +1961,7 @@ fn shap_error_to_pyerr(error: ShapError) -> PyErr {
     match error {
         ShapError::InvalidInput(message) => PyValueError::new_err(message),
         ShapError::ContractViolation(message) => PyRuntimeError::new_err(message),
+        ShapError::NotSupported(message) => PyRuntimeError::new_err(message),
     }
 }
 
@@ -2434,6 +2435,9 @@ fn train_regression_artifact_with_summary_dense_impl(
     max_cat_threshold: usize,
 ) -> Result<NativeTrainingResult, EngineError> {
     let bridge_start = Instant::now();
+    let is_linear_leaf = params.leaf_model == alloygbm_core::LeafModelKind::Linear;
+    // Dense float values are needed for categorical target encoding.  For linear-leaf
+    // training we need the raw feature values separately (see post-processing below).
     let need_dense_values = !categorical_specs.is_empty();
     let mut prepared = prepare_training_matrices_from_dense_values(
         values,
@@ -2447,6 +2451,15 @@ fn train_regression_artifact_with_summary_dense_impl(
         continuous_binning_max_bins,
         need_dense_values,
     )?;
+
+    // For linear-leaf training the engine reads `dataset.matrix.values` as raw (float)
+    // feature values inside `build_linear_histograms_cpu`.  The preparation step above
+    // stores *bin indices* as f32 when `need_dense_values=true` (for categorical
+    // encoding), so we must replace the DatasetMatrix with the original floats here.
+    // Categorical encoding runs afterwards and will overwrite its own columns.
+    if is_linear_leaf {
+        prepared.dataset.matrix = DatasetMatrix::new(row_count, feature_count, values.to_vec())?;
+    }
 
     let training_targets_for_validation = prepared.dataset.targets.clone();
     let training_time_index_for_validation = prepared.dataset.time_index.clone();
@@ -3047,6 +3060,7 @@ fn build_train_params(
     max_leaves: Option<usize>,
     tree_growth: TreeGrowth,
     morph_config: Option<alloygbm_core::MorphConfig>,
+    leaf_model: alloygbm_core::LeafModelKind,
 ) -> TrainParams {
     TrainParams {
         seed,
@@ -3067,6 +3081,20 @@ fn build_train_params(
         max_leaves,
         tree_growth,
         morph_config,
+        leaf_model,
+    }
+}
+
+/// Parse a `leaf_model` string into a [`alloygbm_core::LeafModelKind`].
+///
+/// Valid values: `"constant"` (default), `"linear"`.
+fn parse_leaf_model(leaf_model: &str) -> pyo3::PyResult<alloygbm_core::LeafModelKind> {
+    match leaf_model {
+        "constant" => Ok(alloygbm_core::LeafModelKind::Constant),
+        "linear" => Ok(alloygbm_core::LeafModelKind::Linear),
+        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "leaf_model must be 'constant' or 'linear', got '{other}'"
+        ))),
     }
 }
 
@@ -3236,7 +3264,8 @@ fn shap_global_importance_dense(
     continuous_binning_strategy="linear",
     continuous_binning_max_bins=255,
     objective="squared_error",
-    morph_config=None
+    morph_config=None,
+    leaf_model="constant"
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact(
@@ -3263,10 +3292,12 @@ fn train_regression_artifact(
     continuous_binning_max_bins: usize,
     objective: &str,
     morph_config: Option<pyo3::Bound<'_, pyo3::types::PyDict>>,
+    leaf_model: &str,
 ) -> PyResult<Vec<u8>> {
     let parsed_morph_config = morph_config
         .map(|d| parse_morph_config_from_pydict(&d))
         .transpose()?;
+    let parsed_leaf_model = parse_leaf_model(leaf_model)?;
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
     }
@@ -3294,6 +3325,7 @@ fn train_regression_artifact(
         None,
         TreeGrowth::Level,
         parsed_morph_config,
+        parsed_leaf_model,
     );
 
     let categorical_spec = resolve_categorical_spec(
@@ -3367,7 +3399,8 @@ fn train_regression_artifact(
     continuous_binning_strategy="linear",
     continuous_binning_max_bins=255,
     objective="squared_error",
-    morph_config=None
+    morph_config=None,
+    leaf_model="constant"
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense(
@@ -3396,10 +3429,12 @@ fn train_regression_artifact_dense(
     continuous_binning_max_bins: usize,
     objective: &str,
     morph_config: Option<pyo3::Bound<'_, pyo3::types::PyDict>>,
+    leaf_model: &str,
 ) -> PyResult<Vec<u8>> {
     let parsed_morph_config = morph_config
         .map(|d| parse_morph_config_from_pydict(&d))
         .transpose()?;
+    let parsed_leaf_model = parse_leaf_model(leaf_model)?;
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
     }
@@ -3427,6 +3462,7 @@ fn train_regression_artifact_dense(
         None,
         TreeGrowth::Level,
         parsed_morph_config,
+        parsed_leaf_model,
     );
     let categorical_spec = resolve_categorical_spec(
         categorical_feature_index,
@@ -3520,7 +3556,8 @@ fn train_regression_artifact_dense(
     custom_loss_fn=None,
     custom_metric_fn=None,
     max_cat_threshold=0,
-    morph_config=None
+    morph_config=None,
+    leaf_model="constant"
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_with_summary(
@@ -3573,6 +3610,7 @@ fn train_regression_artifact_with_summary(
     custom_metric_fn: Option<Py<PyAny>>,
     max_cat_threshold: usize,
     morph_config: Option<pyo3::Bound<'_, pyo3::types::PyDict>>,
+    leaf_model: &str,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -3586,6 +3624,7 @@ fn train_regression_artifact_with_summary(
     let parsed_morph_config = morph_config
         .map(|d| parse_morph_config_from_pydict(&d))
         .transpose()?;
+    let parsed_leaf_model = parse_leaf_model(leaf_model)?;
     let params = build_train_params(
         learning_rate,
         max_depth,
@@ -3605,6 +3644,7 @@ fn train_regression_artifact_with_summary(
         max_leaves,
         tree_growth,
         parsed_morph_config,
+        parsed_leaf_model,
     );
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
@@ -3724,7 +3764,8 @@ fn train_regression_artifact_with_summary(
     custom_loss_fn=None,
     custom_metric_fn=None,
     max_cat_threshold=0,
-    morph_config=None
+    morph_config=None,
+    leaf_model="constant"
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary(
@@ -3780,6 +3821,7 @@ fn train_regression_artifact_dense_with_summary(
     custom_metric_fn: Option<Py<PyAny>>,
     max_cat_threshold: usize,
     morph_config: Option<pyo3::Bound<'_, pyo3::types::PyDict>>,
+    leaf_model: &str,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -3793,6 +3835,7 @@ fn train_regression_artifact_dense_with_summary(
     let parsed_morph_config = morph_config
         .map(|d| parse_morph_config_from_pydict(&d))
         .transpose()?;
+    let parsed_leaf_model = parse_leaf_model(leaf_model)?;
     let params = build_train_params(
         learning_rate,
         max_depth,
@@ -3812,6 +3855,7 @@ fn train_regression_artifact_dense_with_summary(
         max_leaves,
         tree_growth,
         parsed_morph_config,
+        parsed_leaf_model,
     );
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
@@ -3927,7 +3971,8 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> PyResult<Vec<f32>> {
     custom_loss_fn=None,
     custom_metric_fn=None,
     max_cat_threshold=0,
-    morph_config=None
+    morph_config=None,
+    leaf_model="constant"
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary_bytes(
@@ -3983,6 +4028,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
     custom_metric_fn: Option<Py<PyAny>>,
     max_cat_threshold: usize,
     morph_config: Option<pyo3::Bound<'_, pyo3::types::PyDict>>,
+    leaf_model: &str,
 ) -> PyResult<NativeTrainingResult> {
     let values = bytes_to_f32_vec(values_bytes)?;
     let targets = bytes_to_f32_vec(targets_bytes)?;
@@ -4000,6 +4046,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
     let parsed_morph_config = morph_config
         .map(|d| parse_morph_config_from_pydict(&d))
         .transpose()?;
+    let parsed_leaf_model = parse_leaf_model(leaf_model)?;
     let params = build_train_params(
         learning_rate,
         max_depth,
@@ -4019,6 +4066,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
         max_leaves,
         tree_growth,
         parsed_morph_config,
+        parsed_leaf_model,
     );
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
@@ -4111,8 +4159,8 @@ mod tests {
     use alloygbm_backend_cpu::CpuBackend;
     use alloygbm_categorical::TargetEncoderConfig;
     use alloygbm_core::{
-        BinnedMatrix, DatasetMatrix, ModelSectionKind, TrainParams, TrainingDataset, TreeGrowth,
-        deserialize_model_artifact_v1, serialize_model_artifact_v1,
+        BinnedMatrix, DatasetMatrix, LeafModelKind, ModelSectionKind, TrainParams, TrainingDataset,
+        TreeGrowth, deserialize_model_artifact_v1, serialize_model_artifact_v1,
     };
     use alloygbm_engine::{
         CategoricalTargetEncodingSpec, EngineError, SquaredErrorObjective, Trainer,
@@ -4235,6 +4283,7 @@ mod tests {
             max_leaves: None,
             tree_growth: TreeGrowth::Level,
             morph_config: None,
+            leaf_model: LeafModelKind::Constant,
         }
     }
 

@@ -37,11 +37,14 @@ Parameters
 ----------
 
 All parameters from ``GBMRegressor`` are accepted, including
-``training_mode="morph"`` and the MorphBoost / LR-schedule parameters
+``leaf_model="linear"`` for piecewise-linear leaves (see :doc:`estimator`),
+and ``training_mode="morph"`` and the MorphBoost / LR-schedule parameters
 (``morph_rate``, ``evolution_pressure``, ``morph_warmup_iters``,
 ``info_score_weight``, ``depth_penalty_base``, ``balance_penalty``,
 ``lr_schedule``, ``lr_warmup_frac``). See :doc:`morphboost` for the full
-reference. The objective is always binary cross-entropy and is not
+reference. ``leaf_model="linear"`` and ``training_mode="morph"`` can be
+combined. Multi-class softmax fits each per-class tree sequence with linear
+leaves independently. The objective is always cross-entropy and is not
 configurable.
 
 Target requirements:
@@ -96,5 +99,5 @@ Early stopping monitors log-loss on the validation set:
 Current scope
 -------------
 
-- Binary classification only (no multi-class yet)
+- Binary cross-entropy and multi-class softmax objectives are supported
 - No ``scale_pos_weight`` parameter (use ``sample_weight`` for class imbalance)

@@ -655,6 +655,24 @@ def _make_alloygbm_morph_cosine(task_type, **kwargs):
     return cls(training_mode="morph", lr_schedule="warmup_cosine", lr_warmup_frac=0.1, **kwargs)
 
 
+def _make_alloygbm_linear(task_type, **kwargs):
+    from alloygbm import GBMClassifier, GBMRanker, GBMRegressor
+    cls = {"regression": GBMRegressor, "binary": GBMClassifier,
+           "multiclass": GBMClassifier, "ranking": GBMRanker}[task_type]
+    # Linear leaves need weight regularisation to avoid divergence at high round counts.
+    # Default lambda_l2=0.01 (from pl_trees_benchmark sweep); overridable via --linear-lambda-l2.
+    kwargs.setdefault("lambda_l2", 0.01)
+    return cls(leaf_model="linear", **kwargs)
+
+
+def _make_alloygbm_morph_linear(task_type, **kwargs):
+    from alloygbm import GBMClassifier, GBMRanker, GBMRegressor
+    cls = {"regression": GBMRegressor, "binary": GBMClassifier,
+           "multiclass": GBMClassifier, "ranking": GBMRanker}[task_type]
+    kwargs.setdefault("lambda_l2", 0.01)
+    return cls(training_mode="morph", leaf_model="linear", **kwargs)
+
+
 def _model_factories(
     gbm_regressor_cls: type,
     catboost_regressor_cls: type | None,
@@ -664,6 +682,7 @@ def _model_factories(
     rounds: int,
     alloy_continuous_binning_strategy: str,
     alloy_continuous_binning_max_bins: int,
+    linear_lambda_l2: float = 0.01,
 ) -> dict:
     from lightgbm import LGBMRegressor
     from xgboost import XGBRegressor
@@ -693,8 +712,10 @@ def _model_factories(
 
     factories = {
         "alloygbm": lambda: gbm_regressor_cls(**alloy_params),
+        "alloygbm_linear": lambda: _make_alloygbm_linear("regression", lambda_l2=linear_lambda_l2, **alloy_params),
         "alloygbm_morph": lambda: _make_alloygbm_morph("regression", **alloy_params),
         "alloygbm_morph_cosine": lambda: _make_alloygbm_morph_cosine("regression", **alloy_params),
+        "alloygbm_morph_linear": lambda: _make_alloygbm_morph_linear("regression", lambda_l2=linear_lambda_l2, **alloy_params),
         "lightgbm": lambda: LGBMRegressor(
             objective="regression",
             learning_rate=learning_rate,
@@ -776,6 +797,7 @@ def _classifier_factories(
     rounds: int,
     alloy_continuous_binning_strategy: str,
     alloy_continuous_binning_max_bins: int,
+    linear_lambda_l2: float = 0.01,
 ) -> dict:
     from lightgbm import LGBMClassifier
     from xgboost import XGBClassifier
@@ -786,8 +808,10 @@ def _classifier_factories(
     )
     factories: dict[str, Callable[[], object]] = {
         "alloygbm": lambda: gbm_classifier_cls(**alloy_params),
+        "alloygbm_linear": lambda: _make_alloygbm_linear("binary", lambda_l2=linear_lambda_l2, **alloy_params),
         "alloygbm_morph": lambda: _make_alloygbm_morph("binary", **alloy_params),
         "alloygbm_morph_cosine": lambda: _make_alloygbm_morph_cosine("binary", **alloy_params),
+        "alloygbm_morph_linear": lambda: _make_alloygbm_morph_linear("binary", lambda_l2=linear_lambda_l2, **alloy_params),
         "lightgbm": lambda: LGBMClassifier(
             objective="binary",
             learning_rate=learning_rate,
@@ -837,6 +861,7 @@ def _multiclass_classifier_factories(
     rounds: int,
     alloy_continuous_binning_strategy: str,
     alloy_continuous_binning_max_bins: int,
+    linear_lambda_l2: float = 0.01,
 ) -> dict:
     from lightgbm import LGBMClassifier
     from xgboost import XGBClassifier
@@ -847,8 +872,10 @@ def _multiclass_classifier_factories(
     )
     factories: dict[str, Callable[[], object]] = {
         "alloygbm": lambda: gbm_classifier_cls(**alloy_params),
+        "alloygbm_linear": lambda: _make_alloygbm_linear("multiclass", lambda_l2=linear_lambda_l2, **alloy_params),
         "alloygbm_morph": lambda: _make_alloygbm_morph("multiclass", **alloy_params),
         "alloygbm_morph_cosine": lambda: _make_alloygbm_morph_cosine("multiclass", **alloy_params),
+        "alloygbm_morph_linear": lambda: _make_alloygbm_morph_linear("multiclass", lambda_l2=linear_lambda_l2, **alloy_params),
         "lightgbm": lambda: LGBMClassifier(
             objective="multiclass",
             num_class=n_classes,
@@ -899,6 +926,7 @@ def _ranker_factories(
     rounds: int,
     alloy_continuous_binning_strategy: str,
     alloy_continuous_binning_max_bins: int,
+    linear_lambda_l2: float = 0.01,
 ) -> dict:
     alloy_params = _build_alloy_params(
         gbm_ranker_cls, seed, learning_rate, max_depth, rounds,
@@ -906,8 +934,10 @@ def _ranker_factories(
     )
     factories: dict[str, Callable[[], object]] = {
         "alloygbm": lambda: gbm_ranker_cls(**alloy_params),
+        "alloygbm_linear": lambda: _make_alloygbm_linear("ranking", lambda_l2=linear_lambda_l2, **alloy_params),
         "alloygbm_morph": lambda: _make_alloygbm_morph("ranking", **alloy_params),
         "alloygbm_morph_cosine": lambda: _make_alloygbm_morph_cosine("ranking", **alloy_params),
+        "alloygbm_morph_linear": lambda: _make_alloygbm_morph_linear("ranking", lambda_l2=linear_lambda_l2, **alloy_params),
         "lightgbm": lambda: _LGBMRankerAdapter(
             objective="lambdarank",
             learning_rate=learning_rate,
@@ -1370,9 +1400,21 @@ def main(argv: list[str]) -> int:
         default=None,
         metavar="MODEL",
         help=(
-            "filter to only these model names (e.g. alloygbm alloygbm_morph lightgbm). "
+            "filter to only these model names (e.g. alloygbm alloygbm_linear lightgbm). "
             "Default: run all models. Valid names depend on task type but include: "
-            "alloygbm, alloygbm_morph, alloygbm_morph_cosine, lightgbm, xgboost, catboost"
+            "alloygbm, alloygbm_linear, alloygbm_morph, alloygbm_morph_cosine, "
+            "alloygbm_morph_linear, lightgbm, xgboost, catboost"
+        ),
+    )
+    parser.add_argument(
+        "--linear-lambda-l2",
+        type=float,
+        default=0.01,
+        metavar="LAMBDA",
+        help=(
+            "L2 regularisation applied to linear leaf weights for alloygbm_linear and "
+            "alloygbm_morph_linear variants. Default 0.01 (from pl_trees_benchmark sweep). "
+            "Constant-leaf variants always use lambda_l2=0.0."
         ),
     )
     parser.add_argument(
@@ -1458,6 +1500,7 @@ def main(argv: list[str]) -> int:
                 rounds=profile.rounds,
                 alloy_continuous_binning_strategy=args.alloy_continuous_binning_strategy,
                 alloy_continuous_binning_max_bins=args.alloy_continuous_binning_max_bins,
+                linear_lambda_l2=args.linear_lambda_l2,
             )
 
             for scenario in args.scenarios:

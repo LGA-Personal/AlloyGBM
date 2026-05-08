@@ -4,7 +4,28 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
-The `0.4.0` release introduces the opt-in MorphBoost adaptive split criterion, per-iteration learning-rate schedules, and SIMD-accelerated histogram and EMA kernels. The `0.3.2` release fixed GBMRanker training and added a real-data ranking benchmark. The `0.3.1` release fixed multiclass prediction and expanded the benchmark suite.
+The `0.5.0` release introduces piecewise-linear (PL) tree leaves via `leaf_model="linear"` on all three estimators. The `0.4.0` release introduced the opt-in MorphBoost adaptive split criterion, per-iteration learning-rate schedules, and SIMD-accelerated histogram and EMA kernels. The `0.3.2` release fixed GBMRanker training and added a real-data ranking benchmark. The `0.3.1` release fixed multiclass prediction and expanded the benchmark suite.
+
+## What Shipped In 0.5.0
+
+- **Piecewise-linear (PL) tree leaves** via `leaf_model="linear"` on `GBMRegressor`,
+  `GBMClassifier`, and `GBMRanker`. Each leaf stores a small linear model
+  `f_s(x) = b_s + Σ α_j x_j` whose weights are solved in closed form via the
+  ridge regression `α* = -(XᵀHX + λI)⁻¹ Xᵀg`, using the same L2 regularizer
+  (`lambda_l2`) as the split criterion. Benchmarks show:
+  - ~10× faster convergence on linearly-structured datasets (fewer rounds to reach
+    the same RMSE)
+  - +3.5% RMSE improvement on California Housing vs constant leaves
+  - +1.75pp accuracy improvement on Breast Cancer classification
+  - 2–8× training time overhead (Cholesky solve per node)
+- **New artifact section** (`ModelSectionKind::LinearLeafCoefficients`) stores
+  per-stump linear leaf data; backward-compatible with v0.4.0 artifacts
+- **`alloygbm_linear` benchmark arm** in `run_model_comparison.py`; new
+  `benchmarks/pl_trees_benchmark.py` script with convergence-curve and λ-sweep
+  analysis; report at `docs/benchmarks/pl_trees_v1.md`
+- Categorical-native splits continue to use constant leaves when
+  `max_cat_threshold > 0`; descendant leaves below a categorical root node use
+  linear leaves on all remaining numeric regressors
 
 ## What Shipped In 0.4.0
 

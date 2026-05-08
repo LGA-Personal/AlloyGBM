@@ -1,7 +1,49 @@
 Release and platform policy
 ===========================
 
-AlloyGBM ``0.4.0`` release notes and platform policy.
+AlloyGBM ``0.5.0`` release notes and platform policy.
+
+What's new in 0.5.0
+-------------------
+
+**Piecewise-linear (PL) tree leaves:**
+
+- New opt-in ``leaf_model="linear"`` parameter on
+  :class:`~alloygbm.GBMRegressor`, :class:`~alloygbm.GBMClassifier`, and
+  :class:`~alloygbm.GBMRanker`. Each leaf stores a small linear model
+  ``f_s(x) = b_s + Σ α_j x_j`` (up to 8 regressors per leaf, inherited from
+  the split path's feature indices; the cap is internal and not user-tunable
+  in v0.5.0). Optimal weights are solved in closed form via the ridge
+  regression ``α* = -(XᵀHX + λI)⁻¹ Xᵀg``, regularised by ``lambda_l2``.
+- Default ``leaf_model="constant"`` preserves all prior behaviour exactly.
+- New artifact section ``ModelSectionKind::LinearLeafCoefficients`` stores
+  per-stump linear leaf data; backward-compatible with v0.4.0 artifacts.
+- Native-bitset categorical splits (``max_cat_threshold > 0``) fall back to
+  constant leaves at the categorical split node; descendant numeric leaves
+  use linear leaves normally.
+- Multi-class softmax fits each per-class tree sequence with linear leaves
+  independently.
+- ``leaf_model="linear"`` composes with ``training_mode="morph"``.
+- SHAP (``shap_values``, ``feature_importances``) currently raises an error
+  for ``leaf_model="linear"`` artifacts; use ``leaf_model="constant"`` if you
+  need SHAP.
+
+**Performance:**
+
+- ~10× faster convergence on linearly-structured datasets (fewer rounds to
+  reach the same RMSE).
+- +3.5% RMSE on California Housing and +1.75pp accuracy on Breast Cancer vs
+  constant leaves.
+- 2–8× per-round training overhead from the closed-form Cholesky solve.
+  Recommended ``lambda_l2 >= 0.01`` for weight stability.
+
+**Benchmarks:**
+
+- ``alloygbm_linear`` and ``alloygbm_morph_linear`` arms added to
+  ``benchmarks/run_model_comparison.py`` for all four task types.
+- New ``benchmarks/pl_trees_benchmark.py`` script with convergence-curve and
+  λ-sweep analysis.
+- Benchmark report committed to ``docs/benchmarks/pl_trees_v1.md``.
 
 What's new in 0.4.0
 -------------------
@@ -164,7 +206,7 @@ series:
 Validated release surface
 -------------------------
 
-For ``0.3.0``, the intended release surface is:
+For ``0.5.0``, the intended release surface is:
 
 - macOS ``arm64`` wheel
 - Linux ``x86_64`` manylinux wheel

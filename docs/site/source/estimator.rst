@@ -92,6 +92,34 @@ Categorical support
   the threshold fall back to target encoding. Default 0 disables native
   splits.
 
+Piecewise-linear leaves
+-----------------------
+
+- ``leaf_model: str = "constant"``
+
+  - ``"constant"`` (default) -- standard scalar leaf value, identical to all
+    prior AlloyGBM behaviour.
+  - ``"linear"`` -- each leaf stores a small linear model
+    ``f_s(x) = b_s + Σ α_j x_j`` (up to 8 regressors per leaf, inherited from
+    the split path's feature indices; the per-leaf cap is internal and not
+    user-tunable in v0.5.0). Optimal weights are solved in closed form via the
+    ridge regression ``α* = -(XᵀHX + λI)⁻¹ Xᵀg``, regularised by ``lambda_l2``.
+
+Empirically, ``"linear"`` converges in fewer rounds on data with linear
+within-node residual structure (~10× faster on linearly-structured datasets,
++3.5% RMSE on California Housing, +1.75pp accuracy on Breast Cancer), at a
+2–8× per-round training overhead. Recommended ``lambda_l2 >= 0.01`` for weight
+stability.
+
+Limitations:
+
+- Native-bitset categorical splits (``max_cat_threshold > 0``) fall back to
+  constant leaves at the categorical split node; descendant leaves below the
+  split use linear leaves on remaining numeric regressors.
+- SHAP (``shap_values``, ``feature_importances``) currently raises an error for
+  ``leaf_model="linear"`` artifacts. Use ``"constant"`` if you need SHAP.
+- ``leaf_model="linear"`` composes with ``training_mode="morph"``.
+
 MorphBoost (Adaptive Split Criterion)
 -------------------------------------
 

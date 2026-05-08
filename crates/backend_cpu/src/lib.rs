@@ -1,9 +1,10 @@
 use alloygbm_core::{
     BinnedMatrix, Device, FeatureHistogram, FeatureTile, GradientPair, HistogramBin,
-    HistogramBundle, NodeSlice, NodeStats, PartitionResult, SplitCandidate,
+    HistogramBundle, LinearFeatureHistogram, LinearHistogramBundle, LinearLeaf, NodeSlice,
+    NodeStats, PartitionResult, SplitCandidate,
 };
 use alloygbm_engine::{
-    BackendOps, CategoricalFeatureInfo, EngineError, EngineResult, MorphContext,
+    BackendOps, CategoricalFeatureInfo, EngineError, EngineResult, LinearContext, MorphContext,
     SplitSelectionOptions,
 };
 use rayon::prelude::*;
@@ -11,6 +12,11 @@ use std::cell::RefCell;
 
 mod morph;
 pub use morph::{MorphGainInputs, SplitSideStats, compute_morph_gain};
+
+mod pl_histogram;
+pub use pl_histogram::build_linear_histograms_cpu;
+
+mod pl;
 
 pub use alloygbm_core::simd;
 
@@ -1655,12 +1661,136 @@ impl BackendOps for CpuBackend {
             row_count: row_indices.len() as u32,
         })
     }
+
+    fn build_linear_histograms(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: &NodeSlice,
+        feature_tiles: &[FeatureTile],
+        regressor_features: &[u32],
+        raw_feature_values: &[f32],
+        row_count: usize,
+        feature_count: usize,
+    ) -> EngineResult<LinearHistogramBundle> {
+        pl_histogram::build_linear_histograms_cpu(
+            binned_matrix,
+            gradients,
+            node,
+            feature_tiles,
+            regressor_features,
+            raw_feature_values,
+            row_count,
+            feature_count,
+        )
+    }
+
+    fn best_split_linear(
+        &self,
+        linear_histograms: &LinearHistogramBundle,
+        options: SplitSelectionOptions,
+        feature_weights: &[f32],
+        _categorical_features: &[CategoricalFeatureInfo],
+        ctx: &LinearContext,
+    ) -> EngineResult<Option<SplitCandidate>> {
+        let node_id = linear_histograms.node_id;
+        let find_best = |linear_fh: &LinearFeatureHistogram| -> Option<SplitCandidate> {
+            pl::best_split_linear_for_feature(linear_fh, node_id, options, ctx)
+        };
+
+        let result = if linear_histograms.feature_histograms.len()
+            >= Self::PARALLEL_SPLIT_FEATURE_THRESHOLD
+        {
+            linear_histograms
+                .feature_histograms
+                .par_iter()
+                .filter_map(find_best)
+                .reduce_with(|a, b| {
+                    if apply_feature_weight(&b, feature_weights)
+                        > apply_feature_weight(&a, feature_weights)
+                    {
+                        b
+                    } else {
+                        a
+                    }
+                })
+        } else {
+            linear_histograms
+                .feature_histograms
+                .iter()
+                .filter_map(find_best)
+                .reduce(|a, b| {
+                    if apply_feature_weight(&b, feature_weights)
+                        > apply_feature_weight(&a, feature_weights)
+                    {
+                        b
+                    } else {
+                        a
+                    }
+                })
+        };
+
+        Ok(result)
+    }
+
+    fn compute_linear_leaf_pair(
+        &self,
+        linear_histograms: &LinearHistogramBundle,
+        feature_index: u32,
+        threshold_bin: usize,
+        default_left: bool,
+        missing_bin_index: usize,
+        learning_rate: f32,
+        l2_lambda: f32,
+    ) -> Option<(LinearLeaf, LinearLeaf)> {
+        let d = linear_histograms.num_regressors;
+        if d == 0 {
+            return None;
+        }
+        let lin_fh = linear_histograms
+            .feature_histograms
+            .iter()
+            .find(|fh| fh.feature_index == feature_index)?;
+
+        let (l_xtg, l_xthx, l_gs, l_hs, r_xtg, r_xthx, r_gs, r_hs) =
+            pl::leaf_linear_stats_for_split(
+                lin_fh,
+                threshold_bin,
+                missing_bin_index,
+                default_left,
+                d,
+            );
+
+        let regressor_features = &linear_histograms.regressor_features;
+        let left_leaf = pl::solve_pl_leaf(
+            &l_xtg,
+            &l_xthx,
+            l_gs,
+            l_hs,
+            learning_rate,
+            l2_lambda,
+            regressor_features,
+        );
+        let right_leaf = pl::solve_pl_leaf(
+            &r_xtg,
+            &r_xthx,
+            r_gs,
+            r_hs,
+            learning_rate,
+            l2_lambda,
+            regressor_features,
+        );
+
+        Some((left_leaf, right_leaf))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloygbm_core::{DatasetMatrix, FeatureTile, TrainParams, TrainingDataset, TreeGrowth};
+    use alloygbm_core::{
+        DatasetMatrix, FeatureTile, LeafModelKind, TrainParams, TrainingDataset, TreeGrowth,
+    };
     use alloygbm_engine::{SquaredErrorObjective, Trainer};
 
     fn sample_binned_matrix() -> BinnedMatrix {
@@ -1762,6 +1892,7 @@ mod tests {
             max_leaves: None,
             tree_growth: TreeGrowth::Level,
             morph_config: None,
+            leaf_model: LeafModelKind::Constant,
         }
     }
 
