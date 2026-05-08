@@ -132,10 +132,7 @@ pub fn compute_pl_gain_one_side(
     }
 
     // gain = 0.5 · yᵀy  (since xᵀ A⁻¹ x = |L⁻¹ x|² = |y|²)
-    let mut sq = 0.0_f32;
-    for i in 0..d {
-        sq += y[i] * y[i];
-    }
+    let sq: f32 = y[..d].iter().map(|&yi| yi * yi).sum();
     0.5 * sq
 }
 
@@ -166,8 +163,8 @@ pub fn best_split_linear_for_feature(
         p_grad += bin.grad_sum;
         p_hess += bin.hess_sum;
         p_count += bin.count;
-        for j in 0..d {
-            p_xtg[j] += bin.xtg[j];
+        for (a, &b) in p_xtg[..d].iter_mut().zip(bin.xtg[..d].iter()) {
+            *a += b;
         }
         add_xt_hx(&bin.xt_hx, &mut p_xt_hx, d);
     }
@@ -181,9 +178,7 @@ pub fn best_split_linear_for_feature(
         let mb = &linear_fh.bins[missing_bin_idx];
         let mut mxtg = [0.0_f32; MAX_PL_REGRESSORS];
         let mut mxthx = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
-        for j in 0..d {
-            mxtg[j] = mb.xtg[j];
-        }
+        mxtg[..d].copy_from_slice(&mb.xtg[..d]);
         copy_xt_hx(&mb.xt_hx, &mut mxthx, d);
         (mxtg, mxthx, mb.grad_sum, mb.hess_sum, mb.count)
     } else {
@@ -226,8 +221,8 @@ pub fn best_split_linear_for_feature(
         l_grad += bin.grad_sum;
         l_hess += bin.hess_sum;
         l_count += bin.count;
-        for j in 0..d {
-            l_xtg[j] += bin.xtg[j];
+        for (a, &b) in l_xtg[..d].iter_mut().zip(bin.xtg[..d].iter()) {
+            *a += b;
         }
         add_xt_hx(&bin.xt_hx, &mut l_xt_hx, d);
 
@@ -350,6 +345,7 @@ pub fn best_split_linear_for_feature(
 /// direction via `default_left`.
 ///
 /// Returns `(xtg, xt_hx, grad_sum, hess_sum)` for the left and right children.
+#[allow(clippy::type_complexity)]
 pub fn leaf_linear_stats_for_split(
     linear_fh: &LinearFeatureHistogram,
     threshold_bin: usize,
@@ -373,9 +369,7 @@ pub fn leaf_linear_stats_for_split(
         let mb = &linear_fh.bins[missing_bin_idx];
         let mut mxtg = [0.0_f32; MAX_PL_REGRESSORS];
         let mut mxthx = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
-        for j in 0..d {
-            mxtg[j] = mb.xtg[j];
-        }
+        mxtg[..d].copy_from_slice(&mb.xtg[..d]);
         copy_xt_hx(&mb.xt_hx, &mut mxthx, d);
         (mxtg, mxthx, mb.grad_sum, mb.hess_sum)
     } else {
@@ -399,8 +393,8 @@ pub fn leaf_linear_stats_for_split(
     {
         l_grad += bin.grad_sum;
         l_hess += bin.hess_sum;
-        for j in 0..d {
-            l_xtg[j] += bin.xtg[j];
+        for (a, &b) in l_xtg[..d].iter_mut().zip(bin.xtg[..d].iter()) {
+            *a += b;
         }
         add_xt_hx(&bin.xt_hx, &mut l_xt_hx, d);
     }
@@ -413,8 +407,8 @@ pub fn leaf_linear_stats_for_split(
     for bin in linear_fh.bins.iter().take(scan_limit) {
         nm_grad += bin.grad_sum;
         nm_hess += bin.hess_sum;
-        for j in 0..d {
-            nm_xtg[j] += bin.xtg[j];
+        for (a, &b) in nm_xtg[..d].iter_mut().zip(bin.xtg[..d].iter()) {
+            *a += b;
         }
         add_xt_hx(&bin.xt_hx, &mut nm_xt_hx, d);
     }
@@ -615,10 +609,12 @@ mod tests {
     ) -> LinearFeatureHistogram {
         let mut bins = Vec::new();
         for &(g, h, c, xtg0, xt_hx00) in bins_data {
-            let mut bin = LinearHistogramBin::default();
-            bin.grad_sum = g;
-            bin.hess_sum = h;
-            bin.count = c;
+            let mut bin = LinearHistogramBin {
+                grad_sum: g,
+                hess_sum: h,
+                count: c,
+                ..Default::default()
+            };
             bin.xtg[0] = xtg0;
             bin.xt_hx[0] = xt_hx00; // pl_matrix_index(0,0) = 0
             bins.push(bin);

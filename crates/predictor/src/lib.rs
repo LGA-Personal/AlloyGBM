@@ -2008,8 +2008,10 @@ mod tests {
             .collect();
         let binned = BinnedMatrix::new(n, fc, 4, bins).expect("binned ok");
 
-        let mut params = TrainParams::default();
-        params.leaf_model = LeafModelKind::Linear;
+        let params = TrainParams {
+            leaf_model: LeafModelKind::Linear,
+            ..Default::default()
+        };
 
         let trainer = Trainer::new(params).expect("params valid");
         let engine_model = trainer

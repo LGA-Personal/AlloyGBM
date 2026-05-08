@@ -23,6 +23,7 @@ use alloygbm_engine::{EngineError, EngineResult};
 /// * `regressor_features` — indices of features used as linear regressors
 /// * `raw_feature_values` — **row-major** float matrix: `[row * feature_count + feat]`
 /// * `row_count` / `feature_count` — dimensions of `raw_feature_values`
+#[allow(clippy::too_many_arguments)]
 pub fn build_linear_histograms_cpu(
     binned_matrix: &BinnedMatrix,
     gradients: &[GradientPair],
@@ -84,8 +85,10 @@ pub fn build_linear_histograms_cpu(
                         0.0
                     };
                     b.xtg[j] += g * x_j;
-                    for k in j..d {
-                        let feat_k = regressor_features[k] as usize;
+                    for (k, &feat_k_raw) in
+                        regressor_features.iter().enumerate().skip(j).take(d - j)
+                    {
+                        let feat_k = feat_k_raw as usize;
                         let x_k = if feat_k < feature_count {
                             raw_feature_values[row_idx * feature_count + feat_k]
                         } else {

@@ -343,6 +343,7 @@ pub trait BackendOps {
     ///
     /// Default implementation returns `EngineError::NotImplemented`; backends
     /// that support PL Trees override this.
+    #[allow(clippy::too_many_arguments)]
     fn build_linear_histograms(
         &self,
         _binned_matrix: &BinnedMatrix,
@@ -389,6 +390,7 @@ pub trait BackendOps {
     /// scalar leaves).
     ///
     /// Default implementation returns `None`; backends override this.
+    #[allow(clippy::too_many_arguments)]
     fn compute_linear_leaf_pair(
         &self,
         _linear_histograms: &LinearHistogramBundle,

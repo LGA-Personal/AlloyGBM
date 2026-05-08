@@ -995,8 +995,8 @@ pub fn subtract_linear_histogram_bundle(
                 .map(|(pb, sb)| {
                     let mut xtg = [0.0f32; MAX_PL_REGRESSORS];
                     let mut xt_hx = [0.0f32; MAX_PL_MATRIX_ENTRIES];
-                    for j in 0..d {
-                        xtg[j] = pb.xtg[j] - sb.xtg[j];
+                    for (j, xtg_j) in xtg.iter_mut().enumerate().take(d) {
+                        *xtg_j = pb.xtg[j] - sb.xtg[j];
                     }
                     // Use pl_matrix_index to iterate only the active (j,k) pairs,
                     // since the indices are non-contiguous for d < MAX_PL_REGRESSORS.
