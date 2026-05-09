@@ -1405,6 +1405,8 @@ mod tests {
             max_leaves: None,
             tree_growth: TreeGrowth::Level,
             morph_config: None,
+            leaf_solver: alloygbm_core::LeafSolverKind::Standard,
+            dro_config: None,
             leaf_model: LeafModelKind::Constant,
         }
     }
@@ -1820,11 +1822,13 @@ mod tests {
                     left_stats: NodeStats {
                         grad_sum: -1.0,
                         hess_sum: 2.0,
+                        grad_sq_sum: 0.0,
                         row_count: 10,
                     },
                     right_stats: NodeStats {
                         grad_sum: 1.0,
                         hess_sum: 2.0,
+                        grad_sq_sum: 0.0,
                         row_count: 10,
                     },
                 },
@@ -1836,6 +1840,7 @@ mod tests {
             objective: "squared_error".to_string(),
             native_categorical_feature_indices: vec![0],
             morph_metadata: None,
+            dro_metadata: None,
         };
         model.to_artifact_bytes().expect("serialize should succeed")
     }
@@ -1901,11 +1906,13 @@ mod tests {
                         left_stats: NodeStats {
                             grad_sum: -1.0,
                             hess_sum: 2.0,
+                            grad_sq_sum: 0.0,
                             row_count: 10,
                         },
                         right_stats: NodeStats {
                             grad_sum: 1.0,
                             hess_sum: 2.0,
+                            grad_sq_sum: 0.0,
                             row_count: 10,
                         },
                     },
@@ -1926,11 +1933,13 @@ mod tests {
                         left_stats: NodeStats {
                             grad_sum: 0.5,
                             hess_sum: 1.0,
+                            grad_sq_sum: 0.0,
                             row_count: 5,
                         },
                         right_stats: NodeStats {
                             grad_sum: -0.5,
                             hess_sum: 1.0,
+                            grad_sq_sum: 0.0,
                             row_count: 5,
                         },
                     },
@@ -1943,6 +1952,7 @@ mod tests {
             objective: "squared_error".to_string(),
             native_categorical_feature_indices: vec![0],
             morph_metadata: None,
+            dro_metadata: None,
         };
         let artifact = model.to_artifact_bytes().expect("serialize should succeed");
         let predictor = Predictor::from_artifact_bytes(&artifact).unwrap();

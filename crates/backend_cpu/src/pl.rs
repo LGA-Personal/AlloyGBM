@@ -366,11 +366,13 @@ pub fn best_split_linear_for_feature(
                     left_stats: NodeStats {
                         grad_sum: eff_lg,
                         hess_sum: eff_lh,
+                        grad_sq_sum: 0.0,
                         row_count: eff_lc,
                     },
                     right_stats: NodeStats {
                         grad_sum: eff_rg,
                         hess_sum: eff_rh,
+                        grad_sq_sum: 0.0,
                         row_count: eff_rc,
                     },
                 });
