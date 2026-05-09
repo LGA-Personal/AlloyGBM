@@ -2293,6 +2293,12 @@ impl Trainer {
         validate_train_params(&self.params)?;
         validate_training_dataset(dataset)?;
 
+        if self.params.neutralization_config.is_some() && dataset.factor_exposures.is_none() {
+            return Err(EngineError::ContractViolation(
+                "factor_exposures are required when neutralization_config is set".to_string(),
+            ));
+        }
+
         let baseline_prediction =
             objective.initial_prediction(&dataset.targets, dataset.sample_weights.as_deref())?;
         if !baseline_prediction.is_finite() {
@@ -7213,6 +7219,21 @@ mod tests {
     fn trainer_rejects_gradient_length_mismatch() {
         let trainer = Trainer::new(TrainParams::default()).expect("valid default params");
         let result = trainer.validate_fit_contract(&sample_dataset(), &BadObjective);
+        assert!(matches!(result, Err(EngineError::ContractViolation(_))));
+    }
+
+    #[test]
+    fn trainer_rejects_neutralization_without_factor_exposures() {
+        let trainer = Trainer::new(TrainParams {
+            neutralization_config: Some(alloygbm_core::FactorNeutralizationConfig {
+                kind: alloygbm_core::NeutralizationKind::PerRoundGradient,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            }),
+            ..TrainParams::default()
+        })
+        .expect("neutralization params are valid");
+        let result = trainer.validate_fit_contract(&sample_dataset(), &SquaredErrorObjective);
         assert!(matches!(result, Err(EngineError::ContractViolation(_))));
     }
 
