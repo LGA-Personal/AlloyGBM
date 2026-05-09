@@ -1,12 +1,13 @@
 use alloygbm_categorical::{TargetEncoderConfig, fit_transform_target_encoder};
 use alloygbm_core::{
     BinnedMatrix, CategoricalStatePayloadV1, CoreError, DatasetMatrix, Device, DroConfig,
-    DroMetadataPayload, FeatureTile, GradientEmaStats, GradientPair, HistogramBundle,
-    LeafModelKind, LeafSolverKind, LeafValue, LinearHistogramBundle, LinearLeaf,
-    LinearLeafCoefficientsPayload, LinearLeafEntry, LrSchedule, MAX_PL_REGRESSORS, MISSING_BIN_U8,
-    MODEL_FORMAT_V1, ModelArtifactSection, ModelMetadata, ModelSectionKind, MorphConfig,
-    MorphMetadataPayload, MorphPrecomputed, NativeCategoricalSplitsPayload, NodeSlice, NodeStats,
-    PartitionResult, SplitCandidate, TrainParams, TrainingDataset, TreeGrowth,
+    DroMetadataPayload, FactorExposureMatrix, FactorNeutralizationConfig, FeatureTile,
+    GradientEmaStats, GradientPair, HistogramBundle, LeafModelKind, LeafSolverKind, LeafValue,
+    LinearHistogramBundle, LinearLeaf, LinearLeafCoefficientsPayload, LinearLeafEntry, LrSchedule,
+    MAX_PL_REGRESSORS, MISSING_BIN_U8, MODEL_FORMAT_V1, ModelArtifactSection, ModelMetadata,
+    ModelSectionKind, MorphConfig, MorphMetadataPayload, MorphPrecomputed,
+    NativeCategoricalSplitsPayload, NeutralizationKind, NodeSlice, NodeStats, PartitionResult,
+    SplitCandidate, TrainParams, TrainingDataset, TreeGrowth,
     decode_optional_categorical_state_section_v1, decode_optional_dro_metadata_artifact_section,
     decode_optional_linear_leaf_coefficients_section,
     decode_optional_morph_metadata_artifact_section,
@@ -70,6 +71,152 @@ type LinearLeafPairSplit = (
     Option<(LinearLeaf, LinearLeaf)>,
     Option<(LinearLeaf, LinearLeaf)>,
 );
+
+struct FactorProjector<'a> {
+    exposures: &'a FactorExposureMatrix,
+    weights: Option<&'a [f32]>,
+    cholesky_lower: Vec<f64>,
+}
+
+impl<'a> FactorProjector<'a> {
+    fn new(
+        exposures: &'a FactorExposureMatrix,
+        weights: Option<&'a [f32]>,
+        ridge_lambda: f32,
+    ) -> EngineResult<Self> {
+        if let Some(w) = weights
+            && w.len() != exposures.row_count
+        {
+            return Err(EngineError::ContractViolation(
+                "sample_weight length must match factor_exposures row_count".to_string(),
+            ));
+        }
+        let k = exposures.factor_count;
+        let mut gram = vec![0.0_f64; k * k];
+        for row in 0..exposures.row_count {
+            let weight = weights.map_or(1.0_f64, |w| f64::from(w[row]));
+            let f = exposures.row(row)?;
+            for a in 0..k {
+                for b in 0..=a {
+                    gram[a * k + b] += weight * f64::from(f[a]) * f64::from(f[b]);
+                }
+            }
+        }
+        for i in 0..k {
+            gram[i * k + i] += f64::from(ridge_lambda);
+        }
+        let cholesky_lower = cholesky_lower(gram, k)?;
+        Ok(Self {
+            exposures,
+            weights,
+            cholesky_lower,
+        })
+    }
+
+    fn project_gradient_pairs_in_place(&self, gradients: &mut [GradientPair]) -> EngineResult<()> {
+        if gradients.len() != self.exposures.row_count {
+            return Err(EngineError::ContractViolation(
+                "gradient length must match factor_exposures row_count".to_string(),
+            ));
+        }
+        let coefficients = self.projection_coefficients(gradients.iter().map(|g| g.grad))?;
+        for (row, gradient) in gradients.iter_mut().enumerate() {
+            gradient.grad -= projected_row_value(self.exposures.row(row)?, &coefficients);
+        }
+        Ok(())
+    }
+
+    fn residualize_values_in_place(&self, values: &mut [f32]) -> EngineResult<()> {
+        if values.len() != self.exposures.row_count {
+            return Err(EngineError::ContractViolation(
+                "value length must match factor_exposures row_count".to_string(),
+            ));
+        }
+        let coefficients = self.projection_coefficients(values.iter().copied())?;
+        for (row, value) in values.iter_mut().enumerate() {
+            *value -= projected_row_value(self.exposures.row(row)?, &coefficients);
+        }
+        Ok(())
+    }
+
+    fn projection_coefficients(
+        &self,
+        values: impl IntoIterator<Item = f32>,
+    ) -> EngineResult<Vec<f64>> {
+        let k = self.exposures.factor_count;
+        let mut rhs = vec![0.0_f64; k];
+        for (row, value) in values.into_iter().enumerate() {
+            let weight = self.weights.map_or(1.0_f64, |w| f64::from(w[row]));
+            let f = self.exposures.row(row)?;
+            for a in 0..k {
+                rhs[a] += weight * f64::from(f[a]) * f64::from(value);
+            }
+        }
+        self.solve_cholesky(&rhs)
+    }
+
+    fn solve_cholesky(&self, rhs: &[f64]) -> EngineResult<Vec<f64>> {
+        let k = self.exposures.factor_count;
+        if rhs.len() != k {
+            return Err(EngineError::ContractViolation(
+                "factor projection rhs length must match factor count".to_string(),
+            ));
+        }
+
+        let mut y = vec![0.0_f64; k];
+        for i in 0..k {
+            let mut sum = rhs[i];
+            for j in 0..i {
+                sum -= self.cholesky_lower[i * k + j] * y[j];
+            }
+            y[i] = sum / self.cholesky_lower[i * k + i];
+        }
+
+        let mut x = vec![0.0_f64; k];
+        for i in (0..k).rev() {
+            let mut sum = y[i];
+            for j in i + 1..k {
+                sum -= self.cholesky_lower[j * k + i] * x[j];
+            }
+            x[i] = sum / self.cholesky_lower[i * k + i];
+        }
+        Ok(x)
+    }
+}
+
+fn cholesky_lower(mut matrix: Vec<f64>, k: usize) -> EngineResult<Vec<f64>> {
+    for i in 0..k {
+        for j in 0..=i {
+            let mut sum = matrix[i * k + j];
+            for p in 0..j {
+                sum -= matrix[i * k + p] * matrix[j * k + p];
+            }
+            if i == j {
+                if sum <= 1e-12 {
+                    return Err(EngineError::ContractViolation(
+                        "factor exposure Gram matrix is singular; increase factor_neutralization_lambda"
+                            .to_string(),
+                    ));
+                }
+                matrix[i * k + j] = sum.sqrt();
+            } else {
+                matrix[i * k + j] = sum / matrix[j * k + j];
+            }
+        }
+        for j in i + 1..k {
+            matrix[i * k + j] = 0.0;
+        }
+    }
+    Ok(matrix)
+}
+
+fn projected_row_value(exposures: &[f32], coefficients: &[f64]) -> f32 {
+    exposures
+        .iter()
+        .zip(coefficients.iter())
+        .map(|(factor, coefficient)| f64::from(*factor) * coefficient)
+        .sum::<f64>() as f32
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SplitSelectionOptions {
@@ -7225,8 +7372,8 @@ mod tests {
     #[test]
     fn trainer_rejects_neutralization_without_factor_exposures() {
         let trainer = Trainer::new(TrainParams {
-            neutralization_config: Some(alloygbm_core::FactorNeutralizationConfig {
-                kind: alloygbm_core::NeutralizationKind::PerRoundGradient,
+            neutralization_config: Some(FactorNeutralizationConfig {
+                kind: NeutralizationKind::PerRoundGradient,
                 ridge_lambda: 1e-6,
                 split_penalty: 0.0,
             }),
@@ -7235,6 +7382,51 @@ mod tests {
         .expect("neutralization params are valid");
         let result = trainer.validate_fit_contract(&sample_dataset(), &SquaredErrorObjective);
         assert!(matches!(result, Err(EngineError::ContractViolation(_))));
+    }
+
+    #[test]
+    fn factor_projector_orthogonalizes_gradient() {
+        let exposures = FactorExposureMatrix::new(4, 1, vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        let projector = FactorProjector::new(&exposures, None, 1e-6).unwrap();
+        let mut gradients = vec![
+            GradientPair {
+                grad: 1.0,
+                hess: 1.0,
+            },
+            GradientPair {
+                grad: 2.0,
+                hess: 1.0,
+            },
+            GradientPair {
+                grad: 3.0,
+                hess: 1.0,
+            },
+            GradientPair {
+                grad: 4.0,
+                hess: 1.0,
+            },
+        ];
+        projector
+            .project_gradient_pairs_in_place(&mut gradients)
+            .unwrap();
+        let dot: f32 = exposures
+            .values
+            .iter()
+            .zip(gradients.iter())
+            .map(|(f, g)| *f * g.grad)
+            .sum();
+        assert!(dot.abs() < 1e-4, "factor dot after projection was {dot}");
+        assert!(gradients.iter().all(|g| g.hess == 1.0));
+    }
+
+    #[test]
+    fn factor_projector_ridge_handles_collinear_factors() {
+        let exposures =
+            FactorExposureMatrix::new(3, 2, vec![1.0, 2.0, 2.0, 4.0, 3.0, 6.0]).unwrap();
+        let projector = FactorProjector::new(&exposures, None, 1e-3).unwrap();
+        let mut values = vec![1.0, 2.0, 3.0];
+        projector.residualize_values_in_place(&mut values).unwrap();
+        assert!(values.iter().all(|v| v.is_finite()));
     }
 
     #[test]
