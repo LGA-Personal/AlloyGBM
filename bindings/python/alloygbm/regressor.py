@@ -253,6 +253,9 @@ class GBMRegressor(_GBMRegressorBase):
         lr_schedule: str = "constant",
         lr_warmup_frac: float = 0.1,
         leaf_model: str = "constant",
+        leaf_solver: str = "standard",
+        dro_radius: float = 0.05,
+        dro_metric: str = "wasserstein",
     ) -> None:
         if not (0.0 < learning_rate <= 1.0):
             raise ValueError("learning_rate must be in (0.0, 1.0]")
@@ -398,6 +401,20 @@ class GBMRegressor(_GBMRegressorBase):
             raise ValueError(
                 f"leaf_model must be 'constant' or 'linear', got {leaf_model!r}"
             )
+        if str(leaf_solver) not in ("standard", "dro"):
+            raise ValueError(
+                f"leaf_solver must be 'standard' or 'dro', got {leaf_solver!r}"
+            )
+        if not math.isfinite(float(dro_radius)) or float(dro_radius) < 0.0:
+            raise ValueError("dro_radius must be finite and >= 0")
+        if str(dro_metric) != "wasserstein":
+            raise ValueError(
+                f"dro_metric must be 'wasserstein', got {dro_metric!r}"
+            )
+        if str(leaf_solver) == "dro" and str(leaf_model) != "constant":
+            raise ValueError(
+                "leaf_solver='dro' requires leaf_model='constant' in v0.6.0"
+            )
 
         self.learning_rate = float(learning_rate)
         self.max_depth = int(max_depth)
@@ -455,6 +472,9 @@ class GBMRegressor(_GBMRegressorBase):
         self.lr_schedule = str(lr_schedule)
         self.lr_warmup_frac = float(lr_warmup_frac)
         self.leaf_model = str(leaf_model)
+        self.leaf_solver = str(leaf_solver)
+        self.dro_radius = float(dro_radius)
+        self.dro_metric = str(dro_metric)
         self._is_fitted = False
         self._artifact_bytes: bytes | None = None
         self._native_predictor_handle: object | None = None
@@ -516,7 +536,10 @@ class GBMRegressor(_GBMRegressorBase):
             f"balance_penalty={self.balance_penalty}, "
             f"lr_schedule='{self.lr_schedule}', "
             f"lr_warmup_frac={self.lr_warmup_frac}, "
-            f"leaf_model='{self.leaf_model}'"
+            f"leaf_model='{self.leaf_model}', "
+            f"leaf_solver='{self.leaf_solver}', "
+            f"dro_radius={self.dro_radius}, "
+            f"dro_metric='{self.dro_metric}'"
             ")"
         )
 
@@ -564,6 +587,9 @@ class GBMRegressor(_GBMRegressorBase):
             "lr_schedule": self.lr_schedule,
             "lr_warmup_frac": self.lr_warmup_frac,
             "leaf_model": self.leaf_model,
+            "leaf_solver": self.leaf_solver,
+            "dro_radius": self.dro_radius,
+            "dro_metric": self.dro_metric,
         }
 
     def set_params(self, **params: float | int | bool | str | None) -> "GBMRegressor":
@@ -609,6 +635,9 @@ class GBMRegressor(_GBMRegressorBase):
             "lr_schedule",
             "lr_warmup_frac",
             "leaf_model",
+            "leaf_solver",
+            "dro_radius",
+            "dro_metric",
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
@@ -896,6 +925,26 @@ class GBMRegressor(_GBMRegressorBase):
                 )
             self.leaf_model = lm
 
+        if "leaf_solver" in params:
+            ls = str(params["leaf_solver"])
+            if ls not in ("standard", "dro"):
+                raise ValueError(
+                    f"leaf_solver must be 'standard' or 'dro', got {ls!r}"
+                )
+            self.leaf_solver = ls
+
+        if "dro_radius" in params:
+            dr = float(params["dro_radius"])
+            if not math.isfinite(dr) or dr < 0.0:
+                raise ValueError("dro_radius must be finite and >= 0")
+            self.dro_radius = dr
+
+        if "dro_metric" in params:
+            dm = str(params["dro_metric"])
+            if dm != "wasserstein":
+                raise ValueError(f"dro_metric must be 'wasserstein', got {dm!r}")
+            self.dro_metric = dm
+
         # Cross-field validation: leaf growth requires max_leaves
         if self.tree_growth == "leaf" and self.max_leaves is None:
             raise ValueError("max_leaves must be set when tree_growth='leaf'")
@@ -907,6 +956,11 @@ class GBMRegressor(_GBMRegressorBase):
             raise ValueError(
                 f"lr_warmup_frac={self.lr_warmup_frac} is only valid with "
                 f"lr_schedule='warmup_cosine'; got lr_schedule='{self.lr_schedule}'"
+            )
+
+        if self.leaf_solver == "dro" and self.leaf_model != "constant":
+            raise ValueError(
+                "leaf_solver='dro' requires leaf_model='constant' in v0.6.0"
             )
 
         return self
@@ -1412,6 +1466,9 @@ class GBMRegressor(_GBMRegressorBase):
                     max_cat_threshold=self.max_cat_threshold,
                     morph_config=self._morph_config_,
                     leaf_model=self.leaf_model,
+                    leaf_solver=self.leaf_solver,
+                    dro_radius=self.dro_radius,
+                    dro_metric=self.dro_metric,
                 )
                 return self._finalize_training_result(native_result, input_adaptation_seconds, feature_count=feature_count)
             except (ImportError, AttributeError):
@@ -1505,6 +1562,9 @@ class GBMRegressor(_GBMRegressorBase):
                 max_cat_threshold=self.max_cat_threshold,
                 morph_config=self._morph_config_,
                 leaf_model=self.leaf_model,
+                leaf_solver=self.leaf_solver,
+                dro_radius=self.dro_radius,
+                dro_metric=self.dro_metric,
             )
         else:
             assert training_rows is not None
@@ -1559,6 +1619,9 @@ class GBMRegressor(_GBMRegressorBase):
                 max_cat_threshold=self.max_cat_threshold,
                 morph_config=self._morph_config_,
                 leaf_model=self.leaf_model,
+                leaf_solver=self.leaf_solver,
+                dro_radius=self.dro_radius,
+                dro_metric=self.dro_metric,
             )
 
         self._apply_continuous_binning_metadata(native_result.continuous_binning_metadata)
@@ -1883,6 +1946,9 @@ class GBMRegressor(_GBMRegressorBase):
                 continuous_binning_max_bins=self.continuous_binning_max_bins,
                 objective=self._objective_name(),
                 leaf_model=self.leaf_model,
+                leaf_solver=self.leaf_solver,
+                dro_radius=self.dro_radius,
+                dro_metric=self.dro_metric,
             )
         else:
             train_regression_artifact = _load_native_train_regression_artifact()
@@ -1910,6 +1976,9 @@ class GBMRegressor(_GBMRegressorBase):
                 continuous_binning_max_bins=self.continuous_binning_max_bins,
                 objective=self._objective_name(),
                 leaf_model=self.leaf_model,
+                leaf_solver=self.leaf_solver,
+                dro_radius=self.dro_radius,
+                dro_metric=self.dro_metric,
             )
 
         self._n_features_in = feature_count

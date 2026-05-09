@@ -112,6 +112,30 @@ default.
 When both `categorical_feature_index` and `categorical_feature_indices` are
 provided, they are merged.
 
+## DRO Leaf Solver
+
+- `leaf_solver: str = "standard"`
+  - `"standard"` (default): the usual scalar Newton leaf update.
+  - `"dro"`: a fast robust scalar update that penalizes weak leaf signal by
+    within-leaf gradient dispersion before solving the leaf value.
+- `dro_radius: float = 0.05`
+  - Non-negative radius scaling the gradient-uncertainty penalty. `0.0`
+    preserves standard-leaf predictions while recording DRO metadata.
+- `dro_metric: str = "wasserstein"`
+  - Accepted value for v0.6.0. It denotes the Wasserstein-inspired
+    closed-form robust counterpart over leaf gradient uncertainty.
+
+The v0.6.0 DRO solver is intentionally conservative: it is not a full
+Wasserstein optimizer over raw feature/target distributions and does not claim
+guaranteed live-market stability. It modifies split gain and final scalar leaf
+values consistently using the same robust effective gradient. Inference speed is
+unchanged because leaf values are baked into the artifact.
+
+`leaf_solver="dro"` works on `GBMRegressor`, `GBMClassifier`, and `GBMRanker`,
+and composes with `training_mode="morph"`. It requires
+`leaf_model="constant"` in v0.6.0; `leaf_model="linear"` continues to use the PL
+leaf solver.
+
 ## Piecewise-Linear Leaves
 
 - `leaf_model: str = "constant"`

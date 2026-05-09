@@ -33,6 +33,9 @@ print("log_loss:", log_loss(y_test, probas[:, 1]))
 ## Parameters
 
 All parameters from `GBMRegressor` are accepted, including:
+- `leaf_solver="dro"` for robust scalar leaves (see
+  [GBMRegressor — DRO Leaf Solver](gbmregressor.md#dro-leaf-solver)). It works
+  for binary and multi-class classification and requires `leaf_model="constant"`.
 - `leaf_model="linear"` for piecewise-linear leaves (see
   [GBMRegressor — Piecewise-Linear Leaves](gbmregressor.md#piecewise-linear-leaves)).
   Multi-class softmax fits each per-class tree sequence with linear leaves

@@ -121,6 +121,30 @@ model = GBMRegressor(
 
 Full parameter reference: [MorphBoost](morphboost.md).
 
+## DRO Leaf Solver (Optional)
+
+`leaf_solver="dro"` keeps constant-leaf inference unchanged but uses a robust
+training-time scalar leaf update that shrinks noisy within-leaf gradient signal.
+
+```python
+from alloygbm import GBMRegressor
+
+model = GBMRegressor(
+    n_estimators=600,
+    max_depth=6,
+    learning_rate=0.05,
+    leaf_solver="dro",
+    dro_radius=0.05,
+    seed=7,
+)
+model.fit(X_train, y_train)
+```
+
+`dro_metric="wasserstein"` is the v0.6.0 metric name for this
+Wasserstein-inspired gradient-uncertainty counterpart. It is not a full
+raw-distribution Wasserstein DRO guarantee. `leaf_solver="dro"` requires
+`leaf_model="constant"` and composes with `training_mode="morph"`.
+
 ## Piecewise-Linear Leaves (Optional)
 
 `leaf_model="linear"` replaces scalar leaves with closed-form linear models

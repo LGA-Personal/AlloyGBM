@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.6.0
+
+### New Features
+
+- **DRO-style scalar leaf solver** via `leaf_solver="dro"` on `GBMRegressor`,
+  `GBMClassifier`, and `GBMRanker`. The v0.6.0 implementation is a fast,
+  closed-form robust Newton update over within-leaf gradient uncertainty:
+  `dro_radius` scales a dispersion penalty before the usual L1 soft-threshold
+  and L2 Hessian denominator. `dro_metric="wasserstein"` is the only accepted
+  value and denotes this Wasserstein-inspired gradient-uncertainty counterpart,
+  not a full optimizer over raw feature/target distributions.
+- **Zero-radius parity**: `leaf_solver="dro", dro_radius=0.0` preserves standard
+  constant-leaf predictions while writing optional DRO metadata to artifacts.
+- **MorphBoost composition**: `leaf_solver="dro"` composes with
+  `training_mode="morph"`; robust gradient gain is computed first, then MorphBoost
+  blends in its information score and leaf scaling.
+
+### Compatibility And Limitations
+
+- Default `leaf_solver="standard"` preserves existing behavior.
+- `leaf_solver="dro"` requires `leaf_model="constant"` in v0.6.0. PL trees
+  (`leaf_model="linear"`) continue to use the standard linear-leaf solver.
+- Inference speed is unchanged for DRO constant-leaf models because the robust
+  leaf values are baked into the model artifact.
+
+### Benchmarks
+
+- Added an `alloygbm_dro` arm to `benchmarks/run_model_comparison.py`.
+- Benchmark reports now include a temporal/panel stability section with mean,
+  worst, and standard deviation of a task-normalized score across repeated runs.
+
 ## 0.5.1
 
 ### Performance

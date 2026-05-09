@@ -110,6 +110,7 @@ fn build_histograms_baseline_reference(
                 HistogramBin {
                     grad_sum: 0.0,
                     hess_sum: 0.0,
+                    grad_sq_sum: 0.0,
                     count: 0,
                 };
                 binned_matrix.max_bin as usize + 1

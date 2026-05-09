@@ -41,6 +41,42 @@ pub enum LeafModelKind {
     Linear,
 }
 
+/// Scalar leaf solver strategy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LeafSolverKind {
+    /// Standard Newton leaf solve using empirical gradient/hessian sums.
+    #[default]
+    Standard,
+    /// Distributionally robust leaf solve over within-leaf gradient dispersion.
+    Dro,
+}
+
+/// Uncertainty metric used by the DRO leaf solver.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DroMetric {
+    /// Wasserstein-inspired uncertainty radius over leaf gradient dispersion.
+    #[default]
+    Wasserstein,
+}
+
+/// Configuration for the fast DRO-style scalar leaf solver.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DroConfig {
+    /// Non-negative robustness radius. `0.0` is exactly standard leaf behavior.
+    pub radius: f32,
+    /// Uncertainty metric for interpreting the radius.
+    pub metric: DroMetric,
+}
+
+impl Default for DroConfig {
+    fn default() -> Self {
+        Self {
+            radius: 0.05,
+            metric: DroMetric::Wasserstein,
+        }
+    }
+}
+
 /// Per-iteration learning rate schedule for MorphBoost training.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum LrSchedule {
@@ -274,6 +310,10 @@ pub struct TrainParams {
     /// Leaf representation strategy.  `Constant` (default) preserves all existing
     /// behaviour.  `Linear` enables piecewise-linear leaves fitted by ridge regression.
     pub leaf_model: LeafModelKind,
+    /// Scalar leaf solver strategy. `Standard` preserves existing behavior.
+    pub leaf_solver: LeafSolverKind,
+    /// Configuration for `leaf_solver == Dro`.
+    pub dro_config: Option<DroConfig>,
 }
 
 impl Default for TrainParams {
@@ -298,6 +338,8 @@ impl Default for TrainParams {
             tree_growth: TreeGrowth::Level,
             morph_config: None,
             leaf_model: LeafModelKind::Constant,
+            leaf_solver: LeafSolverKind::Standard,
+            dro_config: None,
         }
     }
 }
@@ -717,6 +759,45 @@ impl GradientPair {
     }
 }
 
+pub fn leaf_effective_gradient(
+    grad_sum: f32,
+    grad_sq_sum: f32,
+    row_count: u32,
+    l1_alpha: f32,
+    dro_config: Option<&DroConfig>,
+) -> f32 {
+    let mut threshold = l1_alpha.max(0.0);
+    if let Some(cfg) = dro_config
+        && cfg.radius > 0.0
+    {
+        let n = row_count.max(1) as f64;
+        let mean = f64::from(grad_sum) / n;
+        let variance = (f64::from(grad_sq_sum) / n - mean * mean).max(0.0);
+        threshold += (f64::from(cfg.radius) * n.sqrt() * variance.sqrt()) as f32;
+    }
+    if grad_sum > threshold {
+        grad_sum - threshold
+    } else if grad_sum < -threshold {
+        grad_sum + threshold
+    } else {
+        0.0
+    }
+}
+
+pub fn leaf_gain_term(
+    grad_sum: f32,
+    hess_sum: f32,
+    grad_sq_sum: f32,
+    row_count: u32,
+    l1_alpha: f32,
+    l2_lambda: f32,
+    dro_config: Option<&DroConfig>,
+) -> f32 {
+    const EPSILON: f32 = 1e-6;
+    let effective = leaf_effective_gradient(grad_sum, grad_sq_sum, row_count, l1_alpha, dro_config);
+    0.5 * effective * effective / (hess_sum + l2_lambda + EPSILON)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeatureTile {
     pub start_feature: u32,
@@ -773,6 +854,7 @@ impl NodeSlice {
 pub struct NodeStats {
     pub grad_sum: f32,
     pub hess_sum: f32,
+    pub grad_sq_sum: f32,
     pub row_count: u32,
 }
 
@@ -780,6 +862,7 @@ pub struct NodeStats {
 pub struct HistogramBin {
     pub grad_sum: f32,
     pub hess_sum: f32,
+    pub grad_sq_sum: f32,
     pub count: u32,
 }
 
@@ -807,6 +890,7 @@ impl HistogramBundle {
             for bin in &mut fh.bins {
                 bin.grad_sum = 0.0;
                 bin.hess_sum = 0.0;
+                bin.grad_sq_sum = 0.0;
                 bin.count = 0;
             }
         }
@@ -822,6 +906,7 @@ impl HistogramBundle {
                     HistogramBin {
                         grad_sum: 0.0,
                         hess_sum: 0.0,
+                        grad_sq_sum: 0.0,
                         count: 0,
                     };
                     bin_count
@@ -1213,6 +1298,8 @@ pub enum ModelSectionKind {
     /// Per-stump linear leaf coefficients (intercept + weights + regressor features).
     /// Written alongside the Trees section for `leaf_model="linear"` models.
     LinearLeafCoefficients,
+    /// Metadata for DRO-style scalar leaf solving.
+    DroMetadata,
     Unknown(u32),
 }
 
@@ -1228,6 +1315,7 @@ impl ModelSectionKind {
             Self::NativeCategoricalSplits => 7,
             Self::MorphMetadata => 8,
             Self::LinearLeafCoefficients => 9,
+            Self::DroMetadata => 10,
             Self::Unknown(value) => value,
         }
     }
@@ -1243,6 +1331,7 @@ impl ModelSectionKind {
             7 => Self::NativeCategoricalSplits,
             8 => Self::MorphMetadata,
             9 => Self::LinearLeafCoefficients,
+            10 => Self::DroMetadata,
             other => Self::Unknown(other),
         }
     }
@@ -1776,6 +1865,65 @@ pub fn decode_optional_morph_metadata_artifact_section(
     Ok(Some(payload))
 }
 
+// ── DRO leaf-solver metadata section ────────────────────────────────────────
+
+/// Optional artifact section recording the DRO leaf solver configuration.
+/// Metadata only — prediction uses baked scalar leaf values.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DroMetadataPayload {
+    pub config: DroConfig,
+}
+
+pub fn encode_dro_metadata_payload(payload: &DroMetadataPayload) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(7);
+    buf.extend_from_slice(&1u16.to_le_bytes());
+    buf.extend_from_slice(&payload.config.radius.to_le_bytes());
+    buf.push(match payload.config.metric {
+        DroMetric::Wasserstein => 0,
+    });
+    buf
+}
+
+pub fn decode_dro_metadata_payload(bytes: &[u8]) -> CoreResult<DroMetadataPayload> {
+    if bytes.len() < 7 {
+        return Err(CoreError::Validation(
+            "dro metadata section too short".to_string(),
+        ));
+    }
+    let version = u16::from_le_bytes([bytes[0], bytes[1]]);
+    if version != 1 {
+        return Err(CoreError::Validation(format!(
+            "unsupported dro metadata version: {version}"
+        )));
+    }
+    let radius = f32::from_le_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]);
+    if !radius.is_finite() || radius < 0.0 {
+        return Err(CoreError::Validation(
+            "dro metadata radius must be finite and >= 0".to_string(),
+        ));
+    }
+    let metric = match bytes[6] {
+        0 => DroMetric::Wasserstein,
+        other => {
+            return Err(CoreError::Validation(format!(
+                "unsupported dro metadata metric kind: {other}"
+            )));
+        }
+    };
+    Ok(DroMetadataPayload {
+        config: DroConfig { radius, metric },
+    })
+}
+
+pub fn decode_optional_dro_metadata_artifact_section(
+    sections: &[ModelArtifactSection],
+) -> CoreResult<Option<DroMetadataPayload>> {
+    let Some(section) = optional_single_section(sections, ModelSectionKind::DroMetadata)? else {
+        return Ok(None);
+    };
+    Ok(Some(decode_dro_metadata_payload(&section.payload)?))
+}
+
 // ── Linear-leaf coefficients section ─────────────────────────────────────────
 
 /// One stump's linear-leaf entries inside the `LinearLeafCoefficients` section.
@@ -2032,6 +2180,28 @@ pub fn validate_train_params(params: &TrainParams) -> CoreResult<()> {
     if params.tree_growth == TreeGrowth::Leaf && params.max_leaves.is_none() {
         return Err(CoreError::InvalidConfig(
             "tree_growth='leaf' requires max_leaves to be set".to_string(),
+        ));
+    }
+
+    if params.leaf_solver == LeafSolverKind::Dro {
+        if params.leaf_model != LeafModelKind::Constant {
+            return Err(CoreError::InvalidConfig(
+                "leaf_solver='dro' requires leaf_model='constant' in v0.6.0".to_string(),
+            ));
+        }
+        let Some(cfg) = params.dro_config else {
+            return Err(CoreError::InvalidConfig(
+                "leaf_solver='dro' requires dro_config".to_string(),
+            ));
+        };
+        if !cfg.radius.is_finite() || cfg.radius < 0.0 {
+            return Err(CoreError::InvalidConfig(
+                "dro_config.radius must be finite and >= 0".to_string(),
+            ));
+        }
+    } else if params.dro_config.is_some() {
+        return Err(CoreError::InvalidConfig(
+            "dro_config is only valid with leaf_solver='dro'".to_string(),
         ));
     }
 
@@ -3320,6 +3490,42 @@ mod tests {
     fn train_params_default_has_no_morph_config() {
         let p = TrainParams::default();
         assert!(p.morph_config.is_none());
+    }
+
+    #[test]
+    fn dro_effective_gradient_zero_radius_matches_l1_threshold() {
+        let cfg = DroConfig {
+            radius: 0.0,
+            metric: DroMetric::Wasserstein,
+        };
+        assert_eq!(leaf_effective_gradient(4.0, 20.0, 5, 0.5, Some(&cfg)), 3.5);
+        assert_eq!(
+            leaf_effective_gradient(-4.0, 20.0, 5, 0.5, Some(&cfg)),
+            -3.5
+        );
+    }
+
+    #[test]
+    fn dro_effective_gradient_shrinks_uncertain_leaf_signal() {
+        let cfg = DroConfig {
+            radius: 1.0,
+            metric: DroMetric::Wasserstein,
+        };
+        let robust = leaf_effective_gradient(2.0, 20.0, 5, 0.0, Some(&cfg));
+        assert!(robust.abs() < 2.0);
+        assert_eq!(robust, 0.0);
+    }
+
+    #[test]
+    fn dro_leaf_gain_uses_same_effective_gradient_as_leaf_solve() {
+        let cfg = DroConfig {
+            radius: 0.25,
+            metric: DroMetric::Wasserstein,
+        };
+        let effective = leaf_effective_gradient(10.0, 120.0, 8, 0.1, Some(&cfg));
+        let gain = leaf_gain_term(10.0, 6.0, 120.0, 8, 0.1, 0.3, Some(&cfg));
+        let expected = 0.5 * effective * effective / (6.0 + 0.3 + 1e-6);
+        assert!((gain - expected).abs() < 1e-6);
     }
 
     #[test]

@@ -1,18 +1,20 @@
 use alloygbm_categorical::{TargetEncoderConfig, fit_transform_target_encoder};
 use alloygbm_core::{
-    BinnedMatrix, CategoricalStatePayloadV1, CoreError, DatasetMatrix, Device, FeatureTile,
-    GradientEmaStats, GradientPair, HistogramBundle, LeafModelKind, LeafValue,
-    LinearHistogramBundle, LinearLeaf, LinearLeafCoefficientsPayload, LinearLeafEntry, LrSchedule,
-    MAX_PL_REGRESSORS, MISSING_BIN_U8, MODEL_FORMAT_V1, ModelArtifactSection, ModelMetadata,
-    ModelSectionKind, MorphConfig, MorphMetadataPayload, MorphPrecomputed,
-    NativeCategoricalSplitsPayload, NodeSlice, NodeStats, PartitionResult, SplitCandidate,
-    TrainParams, TrainingDataset, TreeGrowth, decode_optional_categorical_state_section_v1,
+    BinnedMatrix, CategoricalStatePayloadV1, CoreError, DatasetMatrix, Device, DroConfig,
+    DroMetadataPayload, FeatureTile, GradientEmaStats, GradientPair, HistogramBundle,
+    LeafModelKind, LeafSolverKind, LeafValue, LinearHistogramBundle, LinearLeaf,
+    LinearLeafCoefficientsPayload, LinearLeafEntry, LrSchedule, MAX_PL_REGRESSORS, MISSING_BIN_U8,
+    MODEL_FORMAT_V1, ModelArtifactSection, ModelMetadata, ModelSectionKind, MorphConfig,
+    MorphMetadataPayload, MorphPrecomputed, NativeCategoricalSplitsPayload, NodeSlice, NodeStats,
+    PartitionResult, SplitCandidate, TrainParams, TrainingDataset, TreeGrowth,
+    decode_optional_categorical_state_section_v1, decode_optional_dro_metadata_artifact_section,
     decode_optional_linear_leaf_coefficients_section,
     decode_optional_morph_metadata_artifact_section,
     decode_optional_native_categorical_splits_section, deserialize_model_artifact_v1,
-    encode_categorical_state_payload_v1, encode_linear_leaf_coefficients_payload,
-    encode_morph_metadata_payload, encode_native_categorical_splits_payload,
-    format_required_section_auto_mode_error, format_required_section_mode_error,
+    encode_categorical_state_payload_v1, encode_dro_metadata_payload,
+    encode_linear_leaf_coefficients_payload, encode_morph_metadata_payload,
+    encode_native_categorical_splits_payload, format_required_section_auto_mode_error,
+    format_required_section_mode_error, leaf_effective_gradient,
     required_section_compatibility_report, serialize_model_artifact_v1, validate_binned_matrix,
     validate_categorical_state_payload_v1, validate_train_params, validate_training_dataset,
 };
@@ -75,6 +77,7 @@ pub struct SplitSelectionOptions {
     pub l1_alpha: f32,
     pub min_child_hessian: f32,
     pub min_leaf_magnitude: f32,
+    pub dro_config: Option<DroConfig>,
     /// Histogram index for the NaN/missing bin.
     /// For u8 bins: 255. For u16 bins: max_data_bin + 1 (dynamic).
     pub missing_bin_index: usize,
@@ -96,6 +99,7 @@ impl Default for SplitSelectionOptions {
             l1_alpha: 0.0,
             min_child_hessian: 0.0,
             min_leaf_magnitude: 0.0,
+            dro_config: None,
             missing_bin_index: MISSING_BIN_U8 as usize,
         }
     }
@@ -1677,6 +1681,8 @@ pub struct TrainedModel {
     pub native_categorical_feature_indices: Vec<u32>,
     /// Morph training metadata (None for non-morph artifacts).
     pub morph_metadata: Option<MorphMetadataPayload>,
+    /// DRO leaf-solver metadata (None for standard leaf solving).
+    pub dro_metadata: Option<DroMetadataPayload>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2080,6 +2086,13 @@ impl TrainedModel {
                 encode_morph_metadata_payload(morph),
             ));
         }
+        // DRO metadata section (optional — only for DRO leaf-solver artifacts)
+        if let Some(dro) = self.dro_metadata.as_ref() {
+            sections.push((
+                ModelSectionKind::DroMetadata,
+                encode_dro_metadata_payload(dro),
+            ));
+        }
         // Linear leaf coefficients section (optional — only for pl-tree artifacts)
         {
             let linear_entries: Vec<LinearLeafEntry> = self
@@ -2220,6 +2233,8 @@ impl TrainedModel {
 
         // Decode optional morph metadata section.
         model.morph_metadata = decode_optional_morph_metadata_artifact_section(&parsed.sections)
+            .map_err(EngineError::from)?;
+        model.dro_metadata = decode_optional_dro_metadata_artifact_section(&parsed.sections)
             .map_err(EngineError::from)?;
 
         // Decode optional linear leaf coefficients section and backfill LeafValue::Linear on stumps.
@@ -3213,6 +3228,10 @@ impl Trainer {
             final_iteration: rounds_completed as u32,
             final_total: total_iterations,
         });
+        let dro_metadata = self
+            .params
+            .dro_config
+            .map(|config| DroMetadataPayload { config });
         Ok(MultiClassIterationRunSummary {
             model: MultiClassTrainedModel {
                 num_classes: k,
@@ -3222,6 +3241,7 @@ impl Trainer {
                 categorical_state: None,
                 objective: objective.objective_name().to_string(),
                 morph_metadata,
+                dro_metadata,
             },
             rounds_requested: effective_round_cap,
             effective_round_cap,
@@ -3861,6 +3881,10 @@ impl Trainer {
             final_iteration: rounds_completed as u32,
             final_total: total_iterations,
         });
+        let dro_metadata = self
+            .params
+            .dro_config
+            .map(|config| DroMetadataPayload { config });
         let model = TrainedModel {
             baseline_prediction,
             feature_count: dataset.matrix.feature_count,
@@ -3870,6 +3894,7 @@ impl Trainer {
             objective: objective.objective_name().to_string(),
             native_categorical_feature_indices: Vec::new(),
             morph_metadata,
+            dro_metadata,
         };
         let final_loss = current_loss;
 
@@ -3932,6 +3957,7 @@ fn split_selection_options_from_env() -> EngineResult<SplitSelectionOptions> {
         l1_alpha: parse_nonnegative_env_f32(SPLIT_L1_ENV_VAR)?,
         min_child_hessian: parse_nonnegative_env_f32(MIN_CHILD_HESS_ENV_VAR)?,
         min_leaf_magnitude: parse_nonnegative_env_f32(SPLIT_MIN_LEAF_MAGNITUDE_ENV_VAR)?,
+        dro_config: None,
         missing_bin_index: MISSING_BIN_U8 as usize,
     })
 }
@@ -3977,19 +4003,6 @@ fn parse_nonnegative_env_f32(env_name: &str) -> EngineResult<f32> {
     }
 }
 
-fn l1_threshold_gradient(grad_sum: f32, l1_alpha: f32) -> f32 {
-    if l1_alpha <= 0.0 {
-        return grad_sum;
-    }
-    if grad_sum > l1_alpha {
-        grad_sum - l1_alpha
-    } else if grad_sum < -l1_alpha {
-        grad_sum + l1_alpha
-    } else {
-        0.0
-    }
-}
-
 fn split_selection_options_for_training(
     params: &TrainParams,
     policy_mode: Option<TrainingPolicyMode>,
@@ -4004,6 +4017,9 @@ fn split_selection_options_for_training(
         l1_alpha: params.lambda_l1,
         min_child_hessian: params.min_child_hessian,
         min_leaf_magnitude: env_options.min_leaf_magnitude,
+        dro_config: params
+            .dro_config
+            .filter(|config| params.leaf_solver == LeafSolverKind::Dro && config.radius > 0.0),
         missing_bin_index: binned_matrix.nan_bin_index as usize,
     };
     if !user_set_regularization {
@@ -4362,8 +4378,20 @@ fn build_tree_level_wise<B: BackendOps>(
                 ));
             }
 
-            let left_grad = l1_threshold_gradient(left_stats.grad_sum, split_options.l1_alpha);
-            let right_grad = l1_threshold_gradient(right_stats.grad_sum, split_options.l1_alpha);
+            let left_grad = leaf_effective_gradient(
+                left_stats.grad_sum,
+                left_stats.grad_sq_sum,
+                left_stats.row_count,
+                split_options.l1_alpha,
+                split_options.dro_config.as_ref(),
+            );
+            let right_grad = leaf_effective_gradient(
+                right_stats.grad_sum,
+                right_stats.grad_sq_sum,
+                right_stats.row_count,
+                split_options.l1_alpha,
+                split_options.dro_config.as_ref(),
+            );
             let lr = morph.map_or(params.learning_rate, |m| m.lr);
             let mut raw_left_leaf_value =
                 -lr * left_grad / (left_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
@@ -4774,8 +4802,20 @@ fn build_tree_leaf_wise<B: BackendOps>(
         }
 
         // Compute leaf values.
-        let left_grad = l1_threshold_gradient(left_stats.grad_sum, split_options.l1_alpha);
-        let right_grad = l1_threshold_gradient(right_stats.grad_sum, split_options.l1_alpha);
+        let left_grad = leaf_effective_gradient(
+            left_stats.grad_sum,
+            left_stats.grad_sq_sum,
+            left_stats.row_count,
+            split_options.l1_alpha,
+            split_options.dro_config.as_ref(),
+        );
+        let right_grad = leaf_effective_gradient(
+            right_stats.grad_sum,
+            right_stats.grad_sq_sum,
+            right_stats.row_count,
+            split_options.l1_alpha,
+            split_options.dro_config.as_ref(),
+        );
         let lr = morph.map_or(params.learning_rate, |m| m.lr);
         let mut raw_left_leaf_value =
             -lr * left_grad / (left_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
@@ -5096,6 +5136,7 @@ fn subtract_histogram_bundle_into(
         {
             dest_bin.grad_sum = parent_bin.grad_sum - child_bin.grad_sum;
             dest_bin.hess_sum = parent_bin.hess_sum - child_bin.hess_sum;
+            dest_bin.grad_sq_sum = parent_bin.grad_sq_sum - child_bin.grad_sq_sum;
             dest_bin.count = parent_bin.count - child_bin.count;
         }
     }
@@ -6212,11 +6253,13 @@ fn decode_node_debug_stats_payload(bytes: &[u8]) -> EngineResult<Vec<NodeDebugSt
             left_stats: NodeStats {
                 grad_sum: read_f32_le(bytes, base + 16)?,
                 hess_sum: read_f32_le(bytes, base + 20)?,
+                grad_sq_sum: 0.0,
                 row_count: read_u32_le(bytes, base + 24)?,
             },
             right_stats: NodeStats {
                 grad_sum: read_f32_le(bytes, base + 28)?,
                 hess_sum: read_f32_le(bytes, base + 32)?,
+                grad_sq_sum: 0.0,
                 row_count: read_u32_le(bytes, base + 36)?,
             },
         });
@@ -6324,11 +6367,13 @@ fn decode_trained_model_payload(bytes: &[u8]) -> EngineResult<TrainedModel> {
                 left_stats: NodeStats {
                     grad_sum: 0.0,
                     hess_sum: left_count as f32,
+                    grad_sq_sum: 0.0,
                     row_count: left_count,
                 },
                 right_stats: NodeStats {
                     grad_sum: 0.0,
                     hess_sum: right_count as f32,
+                    grad_sq_sum: 0.0,
                     row_count: right_count,
                 },
             },
@@ -6346,6 +6391,7 @@ fn decode_trained_model_payload(bytes: &[u8]) -> EngineResult<TrainedModel> {
         objective: "squared_error".to_string(),
         native_categorical_feature_indices: Vec::new(),
         morph_metadata: None,
+        dro_metadata: None,
     })
 }
 
@@ -6552,6 +6598,8 @@ pub struct MultiClassTrainedModel {
     pub objective: String,
     /// Morph training metadata (None for non-morph artifacts).
     pub morph_metadata: Option<MorphMetadataPayload>,
+    /// DRO leaf-solver metadata (None for standard leaf solving).
+    pub dro_metadata: Option<DroMetadataPayload>,
 }
 
 impl MultiClassTrainedModel {
@@ -6654,6 +6702,13 @@ impl MultiClassTrainedModel {
             sections.push((
                 ModelSectionKind::MorphMetadata,
                 encode_morph_metadata_payload(morph),
+            ));
+        }
+        // DRO metadata section (optional — only for DRO leaf-solver artifacts)
+        if let Some(dro) = self.dro_metadata.as_ref() {
+            sections.push((
+                ModelSectionKind::DroMetadata,
+                encode_dro_metadata_payload(dro),
             ));
         }
         // Linear leaf coefficients section (optional — only for pl-tree artifacts)
@@ -6796,11 +6851,13 @@ impl MultiClassTrainedModel {
                         left_stats: NodeStats {
                             grad_sum: 0.0,
                             hess_sum: left_count as f32,
+                            grad_sq_sum: 0.0,
                             row_count: left_count,
                         },
                         right_stats: NodeStats {
                             grad_sum: 0.0,
                             hess_sum: right_count as f32,
+                            grad_sq_sum: 0.0,
                             row_count: right_count,
                         },
                     },
@@ -6816,6 +6873,8 @@ impl MultiClassTrainedModel {
             decode_optional_categorical_state_section_v1(&parsed.sections, feature_count)?;
 
         let morph_metadata = decode_optional_morph_metadata_artifact_section(&parsed.sections)
+            .map_err(EngineError::from)?;
+        let dro_metadata = decode_optional_dro_metadata_artifact_section(&parsed.sections)
             .map_err(EngineError::from)?;
 
         // Decode optional linear leaf coefficients and backfill class_stumps.
@@ -6854,6 +6913,7 @@ impl MultiClassTrainedModel {
             categorical_state,
             objective: parsed.contract.metadata.objective.clone(),
             morph_metadata,
+            dro_metadata,
         })
     }
 }
@@ -7026,11 +7086,13 @@ mod tests {
                 left_stats: NodeStats {
                     grad_sum: 0.0,
                     hess_sum: 0.0,
+                    grad_sq_sum: 0.0,
                     row_count: 0,
                 },
                 right_stats: NodeStats {
                     grad_sum: 0.0,
                     hess_sum: 0.0,
+                    grad_sq_sum: 0.0,
                     row_count: 0,
                 },
             }))
@@ -7070,6 +7132,7 @@ mod tests {
         ) -> EngineResult<NodeStats> {
             let mut grad_sum = 0.0_f32;
             let mut hess_sum = 0.0_f32;
+            let mut grad_sq_sum = 0.0_f32;
             for &row_index in row_indices {
                 let gp = gradients.get(row_index as usize).ok_or_else(|| {
                     EngineError::ContractViolation(
@@ -7078,10 +7141,12 @@ mod tests {
                 })?;
                 grad_sum += gp.grad;
                 hess_sum += gp.hess;
+                grad_sq_sum += gp.grad * gp.grad;
             }
             Ok(NodeStats {
                 grad_sum,
                 hess_sum,
+                grad_sq_sum,
                 row_count: row_indices.len() as u32,
             })
         }
@@ -7201,6 +7266,169 @@ mod tests {
     }
 
     #[test]
+    fn dro_zero_radius_matches_standard_constant_leaf_predictions() {
+        let standard_params = TrainParams {
+            learning_rate: 0.5,
+            ..TrainParams::default()
+        };
+        let dro_params = TrainParams {
+            learning_rate: 0.5,
+            leaf_solver: LeafSolverKind::Dro,
+            dro_config: Some(DroConfig {
+                radius: 0.0,
+                metric: alloygbm_core::DroMetric::Wasserstein,
+            }),
+            ..TrainParams::default()
+        };
+
+        let standard_model = Trainer::new(standard_params)
+            .expect("standard params are valid")
+            .fit_iterations(
+                &sample_dataset(),
+                &sample_binned_matrix(),
+                &MockBackend,
+                &SquaredErrorObjective,
+                3,
+            )
+            .expect("standard training succeeds");
+        let dro_model = Trainer::new(dro_params)
+            .expect("dro params are valid")
+            .fit_iterations(
+                &sample_dataset(),
+                &sample_binned_matrix(),
+                &MockBackend,
+                &SquaredErrorObjective,
+                3,
+            )
+            .expect("zero-radius dro training succeeds");
+
+        for row in [[0.0, 0.0], [1.0, 1.0], [2.0, 0.0], [3.0, 1.0]] {
+            let standard_pred = standard_model.predict_row(&row).expect("standard predicts");
+            let dro_pred = dro_model.predict_row(&row).expect("dro predicts");
+            assert_eq!(standard_pred.to_bits(), dro_pred.to_bits());
+        }
+        assert!(standard_model.dro_metadata.is_none());
+        assert_eq!(
+            dro_model.dro_metadata.expect("dro metadata").config.radius,
+            0.0
+        );
+    }
+
+    #[test]
+    fn dro_zero_radius_uses_standard_split_options() {
+        let params = TrainParams {
+            leaf_solver: LeafSolverKind::Dro,
+            dro_config: Some(DroConfig {
+                radius: 0.0,
+                metric: alloygbm_core::DroMetric::Wasserstein,
+            }),
+            ..TrainParams::default()
+        };
+
+        let options = split_selection_options_for_training(
+            &params,
+            None,
+            &sample_dataset(),
+            &sample_binned_matrix(),
+        )
+        .expect("split options should build");
+
+        assert!(
+            options.dro_config.is_none(),
+            "zero-radius DRO should keep standard split-selection fast paths"
+        );
+    }
+
+    #[test]
+    fn dro_metadata_round_trips_through_artifact() {
+        let params = TrainParams {
+            leaf_solver: LeafSolverKind::Dro,
+            dro_config: Some(DroConfig {
+                radius: 0.05,
+                metric: alloygbm_core::DroMetric::Wasserstein,
+            }),
+            ..TrainParams::default()
+        };
+        let model = Trainer::new(params)
+            .expect("dro params are valid")
+            .fit_iterations(
+                &sample_dataset(),
+                &sample_binned_matrix(),
+                &MockBackend,
+                &SquaredErrorObjective,
+                1,
+            )
+            .expect("dro training succeeds");
+
+        let bytes = model.to_artifact_bytes().expect("artifact serializes");
+        let restored = TrainedModel::from_artifact_bytes(&bytes).expect("artifact loads");
+        assert_eq!(
+            restored.dro_metadata.as_ref().expect("dro metadata").config,
+            DroConfig {
+                radius: 0.05,
+                metric: alloygbm_core::DroMetric::Wasserstein,
+            }
+        );
+        assert_eq!(
+            model.predict_row(&[0.0, 0.0]).expect("original predicts"),
+            restored
+                .predict_row(&[0.0, 0.0])
+                .expect("restored predicts")
+        );
+    }
+
+    #[test]
+    fn dro_leaf_solver_trains_with_morph_mode() {
+        let params = TrainParams {
+            leaf_solver: LeafSolverKind::Dro,
+            dro_config: Some(DroConfig {
+                radius: 0.05,
+                metric: alloygbm_core::DroMetric::Wasserstein,
+            }),
+            morph_config: Some(MorphConfig::default()),
+            ..TrainParams::default()
+        };
+        let model = Trainer::new(params)
+            .expect("dro morph params are valid")
+            .fit_iterations(
+                &sample_dataset(),
+                &sample_binned_matrix(),
+                &MockBackend,
+                &SquaredErrorObjective,
+                2,
+            )
+            .expect("dro morph training succeeds");
+
+        assert!(!model.stumps.is_empty());
+        assert!(model.dro_metadata.is_some());
+        assert!(model.morph_metadata.is_some());
+    }
+
+    #[test]
+    fn dro_leaf_solver_rejects_linear_leaves_for_v0_6_0() {
+        let params = TrainParams {
+            leaf_solver: LeafSolverKind::Dro,
+            dro_config: Some(DroConfig {
+                radius: 0.05,
+                metric: alloygbm_core::DroMetric::Wasserstein,
+            }),
+            leaf_model: LeafModelKind::Linear,
+            ..TrainParams::default()
+        };
+
+        let err = Trainer::new(params).expect_err("dro linear leaves are not supported");
+        assert!(matches!(
+            err,
+            EngineError::Core(CoreError::InvalidConfig(_))
+        ));
+        assert!(
+            err.to_string()
+                .contains("leaf_solver='dro' requires leaf_model='constant'"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn refine_regression_leaf_values_reduces_loss_for_fixed_structure() {
         let node_id = encode_tree_node_id(0, 0).expect("node id encodes");
         let mut stumps = vec![TrainedStump {
@@ -7215,11 +7443,13 @@ mod tests {
                 left_stats: NodeStats {
                     grad_sum: 0.0,
                     hess_sum: 2.0,
+                    grad_sq_sum: 0.0,
                     row_count: 2,
                 },
                 right_stats: NodeStats {
                     grad_sum: 0.0,
                     hess_sum: 2.0,
+                    grad_sq_sum: 0.0,
                     row_count: 2,
                 },
             },
@@ -7850,11 +8080,13 @@ mod tests {
                         left_stats: NodeStats {
                             grad_sum: 0.0,
                             hess_sum: 1.0,
+                            grad_sq_sum: 0.0,
                             row_count: 1,
                         },
                         right_stats: NodeStats {
                             grad_sum: 0.0,
                             hess_sum: 1.0,
+                            grad_sq_sum: 0.0,
                             row_count: 1,
                         },
                     },
@@ -7873,11 +8105,13 @@ mod tests {
                         left_stats: NodeStats {
                             grad_sum: 0.0,
                             hess_sum: 1.0,
+                            grad_sq_sum: 0.0,
                             row_count: 1,
                         },
                         right_stats: NodeStats {
                             grad_sum: 0.0,
                             hess_sum: 1.0,
+                            grad_sq_sum: 0.0,
                             row_count: 1,
                         },
                     },
@@ -7890,6 +8124,7 @@ mod tests {
             objective: "squared_error".to_string(),
             native_categorical_feature_indices: Vec::new(),
             morph_metadata: None,
+            dro_metadata: None,
         };
 
         let left = model.predict_row(&[0.0]).expect("left prediction succeeds");
@@ -8181,11 +8416,13 @@ mod tests {
                         alloygbm_core::HistogramBin {
                             grad_sum: 3.0,
                             hess_sum: 5.0,
+                            grad_sq_sum: 11.0,
                             count: 4,
                         },
                         alloygbm_core::HistogramBin {
                             grad_sum: -1.0,
                             hess_sum: 2.0,
+                            grad_sq_sum: 7.0,
                             count: 2,
                         },
                     ],
@@ -8196,11 +8433,13 @@ mod tests {
                         alloygbm_core::HistogramBin {
                             grad_sum: 1.5,
                             hess_sum: 4.0,
+                            grad_sq_sum: 0.0,
                             count: 3,
                         },
                         alloygbm_core::HistogramBin {
                             grad_sum: -0.5,
                             hess_sum: 1.0,
+                            grad_sq_sum: 0.0,
                             count: 1,
                         },
                     ],
@@ -8216,11 +8455,13 @@ mod tests {
                         alloygbm_core::HistogramBin {
                             grad_sum: 2.0,
                             hess_sum: 3.0,
+                            grad_sq_sum: 5.0,
                             count: 2,
                         },
                         alloygbm_core::HistogramBin {
                             grad_sum: -0.25,
                             hess_sum: 0.5,
+                            grad_sq_sum: 1.5,
                             count: 1,
                         },
                     ],
@@ -8231,11 +8472,13 @@ mod tests {
                         alloygbm_core::HistogramBin {
                             grad_sum: 1.0,
                             hess_sum: 2.5,
+                            grad_sq_sum: 0.0,
                             count: 2,
                         },
                         alloygbm_core::HistogramBin {
                             grad_sum: -0.25,
                             hess_sum: 0.25,
+                            grad_sq_sum: 0.0,
                             count: 1,
                         },
                     ],
@@ -8251,6 +8494,8 @@ mod tests {
         assert_eq!(complement.feature_histograms[0].bins[1].count, 1);
         assert!((complement.feature_histograms[0].bins[0].grad_sum - 1.0).abs() < 1e-6);
         assert!((complement.feature_histograms[0].bins[1].grad_sum + 0.75).abs() < 1e-6);
+        assert!((complement.feature_histograms[0].bins[0].grad_sq_sum - 6.0).abs() < 1e-6);
+        assert!((complement.feature_histograms[0].bins[1].grad_sq_sum - 5.5).abs() < 1e-6);
         assert!((complement.feature_histograms[1].bins[0].hess_sum - 1.5).abs() < 1e-6);
         assert!((complement.feature_histograms[1].bins[1].hess_sum - 0.75).abs() < 1e-6);
     }
@@ -8265,11 +8510,13 @@ mod tests {
                     alloygbm_core::HistogramBin {
                         grad_sum: 3.0,
                         hess_sum: 5.0,
+                        grad_sq_sum: 0.0,
                         count: 4,
                     },
                     alloygbm_core::HistogramBin {
                         grad_sum: -1.0,
                         hess_sum: 2.0,
+                        grad_sq_sum: 0.0,
                         count: 2,
                     },
                 ],
@@ -8283,11 +8530,13 @@ mod tests {
                     alloygbm_core::HistogramBin {
                         grad_sum: 2.0,
                         hess_sum: 3.0,
+                        grad_sq_sum: 0.0,
                         count: 2,
                     },
                     alloygbm_core::HistogramBin {
                         grad_sum: -0.25,
                         hess_sum: 0.5,
+                        grad_sq_sum: 0.0,
                         count: 1,
                     },
                 ],
@@ -8702,11 +8951,13 @@ mod tests {
                         left_stats: NodeStats {
                             grad_sum: -1.0,
                             hess_sum: 2.0,
+                            grad_sq_sum: 0.0,
                             row_count: 3,
                         },
                         right_stats: NodeStats {
                             grad_sum: 1.0,
                             hess_sum: 2.0,
+                            grad_sq_sum: 0.0,
                             row_count: 3,
                         },
                     },
@@ -8725,11 +8976,13 @@ mod tests {
                         left_stats: NodeStats {
                             grad_sum: 0.5,
                             hess_sum: 1.0,
+                            grad_sq_sum: 0.0,
                             row_count: 2,
                         },
                         right_stats: NodeStats {
                             grad_sum: -0.5,
                             hess_sum: 1.0,
+                            grad_sq_sum: 0.0,
                             row_count: 4,
                         },
                     },
@@ -8741,6 +8994,7 @@ mod tests {
             categorical_state: None,
             objective: "multiclass_softmax".to_string(),
             morph_metadata: None,
+            dro_metadata: None,
         };
 
         let bytes = model.to_artifact_bytes().expect("serialize should succeed");
@@ -8780,11 +9034,13 @@ mod tests {
                             left_stats: NodeStats {
                                 grad_sum: 0.0,
                                 hess_sum: 1.0,
+                                grad_sq_sum: 0.0,
                                 row_count: 2,
                             },
                             right_stats: NodeStats {
                                 grad_sum: 0.0,
                                 hess_sum: 1.0,
+                                grad_sq_sum: 0.0,
                                 row_count: 2,
                             },
                         },
@@ -8803,11 +9059,13 @@ mod tests {
                             left_stats: NodeStats {
                                 grad_sum: 0.0,
                                 hess_sum: 1.0,
+                                grad_sq_sum: 0.0,
                                 row_count: 2,
                             },
                             right_stats: NodeStats {
                                 grad_sum: 0.0,
                                 hess_sum: 1.0,
+                                grad_sq_sum: 0.0,
                                 row_count: 2,
                             },
                         },
@@ -8828,11 +9086,13 @@ mod tests {
                         left_stats: NodeStats {
                             grad_sum: 0.0,
                             hess_sum: 1.0,
+                            grad_sq_sum: 0.0,
                             row_count: 2,
                         },
                         right_stats: NodeStats {
                             grad_sum: 0.0,
                             hess_sum: 1.0,
+                            grad_sq_sum: 0.0,
                             row_count: 2,
                         },
                     },
@@ -8843,6 +9103,7 @@ mod tests {
             categorical_state: None,
             objective: "multiclass_softmax".to_string(),
             morph_metadata: None,
+            dro_metadata: None,
         };
         assert_eq!(model.rounds_completed(), 2);
     }
@@ -9078,11 +9339,13 @@ mod tests {
                         left_stats: NodeStats {
                             grad_sum: -1.0,
                             hess_sum: 2.0,
+                            grad_sq_sum: 0.0,
                             row_count: 10,
                         },
                         right_stats: NodeStats {
                             grad_sum: 1.0,
                             hess_sum: 2.0,
+                            grad_sq_sum: 0.0,
                             row_count: 10,
                         },
                     },
@@ -9101,11 +9364,13 @@ mod tests {
                         left_stats: NodeStats {
                             grad_sum: 0.5,
                             hess_sum: 1.0,
+                            grad_sq_sum: 0.0,
                             row_count: 5,
                         },
                         right_stats: NodeStats {
                             grad_sum: -0.5,
                             hess_sum: 1.0,
+                            grad_sq_sum: 0.0,
                             row_count: 5,
                         },
                     },
@@ -9118,6 +9383,7 @@ mod tests {
             objective: "squared_error".to_string(),
             native_categorical_feature_indices: vec![0],
             morph_metadata: None,
+            dro_metadata: None,
         };
 
         let bytes = model.to_artifact_bytes().expect("serialize should succeed");
@@ -9166,11 +9432,13 @@ mod tests {
                     left_stats: NodeStats {
                         grad_sum: -0.5,
                         hess_sum: 1.0,
+                        grad_sq_sum: 0.0,
                         row_count: 3,
                     },
                     right_stats: NodeStats {
                         grad_sum: 0.5,
                         hess_sum: 1.0,
+                        grad_sq_sum: 0.0,
                         row_count: 3,
                     },
                 },
@@ -9182,6 +9450,7 @@ mod tests {
             objective: "squared_error".to_string(),
             native_categorical_feature_indices: Vec::new(),
             morph_metadata: None,
+            dro_metadata: None,
         };
 
         let bytes = model.to_artifact_bytes().expect("serialize should succeed");

@@ -3061,6 +3061,8 @@ fn build_train_params(
     tree_growth: TreeGrowth,
     morph_config: Option<alloygbm_core::MorphConfig>,
     leaf_model: alloygbm_core::LeafModelKind,
+    leaf_solver: alloygbm_core::LeafSolverKind,
+    dro_config: Option<alloygbm_core::DroConfig>,
 ) -> TrainParams {
     TrainParams {
         seed,
@@ -3082,6 +3084,8 @@ fn build_train_params(
         tree_growth,
         morph_config,
         leaf_model,
+        leaf_solver,
+        dro_config,
     }
 }
 
@@ -3096,6 +3100,43 @@ fn parse_leaf_model(leaf_model: &str) -> pyo3::PyResult<alloygbm_core::LeafModel
             "leaf_model must be 'constant' or 'linear', got '{other}'"
         ))),
     }
+}
+
+fn parse_leaf_solver(leaf_solver: &str) -> pyo3::PyResult<alloygbm_core::LeafSolverKind> {
+    match leaf_solver {
+        "standard" => Ok(alloygbm_core::LeafSolverKind::Standard),
+        "dro" => Ok(alloygbm_core::LeafSolverKind::Dro),
+        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "leaf_solver must be 'standard' or 'dro', got '{other}'"
+        ))),
+    }
+}
+
+fn parse_dro_config(
+    leaf_solver: alloygbm_core::LeafSolverKind,
+    dro_radius: f32,
+    dro_metric: &str,
+) -> pyo3::PyResult<Option<alloygbm_core::DroConfig>> {
+    if !dro_radius.is_finite() || dro_radius < 0.0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "dro_radius must be finite and >= 0",
+        ));
+    }
+    let metric = match dro_metric {
+        "wasserstein" => alloygbm_core::DroMetric::Wasserstein,
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "dro_metric must be 'wasserstein', got '{other}'"
+            )));
+        }
+    };
+    Ok(match leaf_solver {
+        alloygbm_core::LeafSolverKind::Standard => None,
+        alloygbm_core::LeafSolverKind::Dro => Some(alloygbm_core::DroConfig {
+            radius: dro_radius,
+            metric,
+        }),
+    })
 }
 
 /// Parse a Python dict into a `MorphConfig`.
@@ -3265,7 +3306,10 @@ fn shap_global_importance_dense(
     continuous_binning_max_bins=255,
     objective="squared_error",
     morph_config=None,
-    leaf_model="constant"
+    leaf_model="constant",
+    leaf_solver="standard",
+    dro_radius=0.05,
+    dro_metric="wasserstein"
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact(
@@ -3293,11 +3337,16 @@ fn train_regression_artifact(
     objective: &str,
     morph_config: Option<pyo3::Bound<'_, pyo3::types::PyDict>>,
     leaf_model: &str,
+    leaf_solver: &str,
+    dro_radius: f32,
+    dro_metric: &str,
 ) -> PyResult<Vec<u8>> {
     let parsed_morph_config = morph_config
         .map(|d| parse_morph_config_from_pydict(&d))
         .transpose()?;
     let parsed_leaf_model = parse_leaf_model(leaf_model)?;
+    let parsed_leaf_solver = parse_leaf_solver(leaf_solver)?;
+    let parsed_dro_config = parse_dro_config(parsed_leaf_solver, dro_radius, dro_metric)?;
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
     }
@@ -3326,6 +3375,8 @@ fn train_regression_artifact(
         TreeGrowth::Level,
         parsed_morph_config,
         parsed_leaf_model,
+        parsed_leaf_solver,
+        parsed_dro_config,
     );
 
     let categorical_spec = resolve_categorical_spec(
@@ -3400,7 +3451,10 @@ fn train_regression_artifact(
     continuous_binning_max_bins=255,
     objective="squared_error",
     morph_config=None,
-    leaf_model="constant"
+    leaf_model="constant",
+    leaf_solver="standard",
+    dro_radius=0.05,
+    dro_metric="wasserstein"
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense(
@@ -3430,11 +3484,16 @@ fn train_regression_artifact_dense(
     objective: &str,
     morph_config: Option<pyo3::Bound<'_, pyo3::types::PyDict>>,
     leaf_model: &str,
+    leaf_solver: &str,
+    dro_radius: f32,
+    dro_metric: &str,
 ) -> PyResult<Vec<u8>> {
     let parsed_morph_config = morph_config
         .map(|d| parse_morph_config_from_pydict(&d))
         .transpose()?;
     let parsed_leaf_model = parse_leaf_model(leaf_model)?;
+    let parsed_leaf_solver = parse_leaf_solver(leaf_solver)?;
+    let parsed_dro_config = parse_dro_config(parsed_leaf_solver, dro_radius, dro_metric)?;
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
     }
@@ -3463,6 +3522,8 @@ fn train_regression_artifact_dense(
         TreeGrowth::Level,
         parsed_morph_config,
         parsed_leaf_model,
+        parsed_leaf_solver,
+        parsed_dro_config,
     );
     let categorical_spec = resolve_categorical_spec(
         categorical_feature_index,
@@ -3557,7 +3618,10 @@ fn train_regression_artifact_dense(
     custom_metric_fn=None,
     max_cat_threshold=0,
     morph_config=None,
-    leaf_model="constant"
+    leaf_model="constant",
+    leaf_solver="standard",
+    dro_radius=0.05,
+    dro_metric="wasserstein"
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_with_summary(
@@ -3611,6 +3675,9 @@ fn train_regression_artifact_with_summary(
     max_cat_threshold: usize,
     morph_config: Option<pyo3::Bound<'_, pyo3::types::PyDict>>,
     leaf_model: &str,
+    leaf_solver: &str,
+    dro_radius: f32,
+    dro_metric: &str,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -3625,6 +3692,8 @@ fn train_regression_artifact_with_summary(
         .map(|d| parse_morph_config_from_pydict(&d))
         .transpose()?;
     let parsed_leaf_model = parse_leaf_model(leaf_model)?;
+    let parsed_leaf_solver = parse_leaf_solver(leaf_solver)?;
+    let parsed_dro_config = parse_dro_config(parsed_leaf_solver, dro_radius, dro_metric)?;
     let params = build_train_params(
         learning_rate,
         max_depth,
@@ -3645,6 +3714,8 @@ fn train_regression_artifact_with_summary(
         tree_growth,
         parsed_morph_config,
         parsed_leaf_model,
+        parsed_leaf_solver,
+        parsed_dro_config,
     );
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
@@ -3765,7 +3836,10 @@ fn train_regression_artifact_with_summary(
     custom_metric_fn=None,
     max_cat_threshold=0,
     morph_config=None,
-    leaf_model="constant"
+    leaf_model="constant",
+    leaf_solver="standard",
+    dro_radius=0.05,
+    dro_metric="wasserstein"
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary(
@@ -3822,6 +3896,9 @@ fn train_regression_artifact_dense_with_summary(
     max_cat_threshold: usize,
     morph_config: Option<pyo3::Bound<'_, pyo3::types::PyDict>>,
     leaf_model: &str,
+    leaf_solver: &str,
+    dro_radius: f32,
+    dro_metric: &str,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -3836,6 +3913,8 @@ fn train_regression_artifact_dense_with_summary(
         .map(|d| parse_morph_config_from_pydict(&d))
         .transpose()?;
     let parsed_leaf_model = parse_leaf_model(leaf_model)?;
+    let parsed_leaf_solver = parse_leaf_solver(leaf_solver)?;
+    let parsed_dro_config = parse_dro_config(parsed_leaf_solver, dro_radius, dro_metric)?;
     let params = build_train_params(
         learning_rate,
         max_depth,
@@ -3856,6 +3935,8 @@ fn train_regression_artifact_dense_with_summary(
         tree_growth,
         parsed_morph_config,
         parsed_leaf_model,
+        parsed_leaf_solver,
+        parsed_dro_config,
     );
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
@@ -3972,7 +4053,10 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> PyResult<Vec<f32>> {
     custom_metric_fn=None,
     max_cat_threshold=0,
     morph_config=None,
-    leaf_model="constant"
+    leaf_model="constant",
+    leaf_solver="standard",
+    dro_radius=0.05,
+    dro_metric="wasserstein"
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary_bytes(
@@ -4029,6 +4113,9 @@ fn train_regression_artifact_dense_with_summary_bytes(
     max_cat_threshold: usize,
     morph_config: Option<pyo3::Bound<'_, pyo3::types::PyDict>>,
     leaf_model: &str,
+    leaf_solver: &str,
+    dro_radius: f32,
+    dro_metric: &str,
 ) -> PyResult<NativeTrainingResult> {
     let values = bytes_to_f32_vec(values_bytes)?;
     let targets = bytes_to_f32_vec(targets_bytes)?;
@@ -4047,6 +4134,8 @@ fn train_regression_artifact_dense_with_summary_bytes(
         .map(|d| parse_morph_config_from_pydict(&d))
         .transpose()?;
     let parsed_leaf_model = parse_leaf_model(leaf_model)?;
+    let parsed_leaf_solver = parse_leaf_solver(leaf_solver)?;
+    let parsed_dro_config = parse_dro_config(parsed_leaf_solver, dro_radius, dro_metric)?;
     let params = build_train_params(
         learning_rate,
         max_depth,
@@ -4067,6 +4156,8 @@ fn train_regression_artifact_dense_with_summary_bytes(
         tree_growth,
         parsed_morph_config,
         parsed_leaf_model,
+        parsed_leaf_solver,
+        parsed_dro_config,
     );
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
@@ -4284,6 +4375,8 @@ mod tests {
             tree_growth: TreeGrowth::Level,
             morph_config: None,
             leaf_model: LeafModelKind::Constant,
+            leaf_solver: alloygbm_core::LeafSolverKind::Standard,
+            dro_config: None,
         }
     }
 

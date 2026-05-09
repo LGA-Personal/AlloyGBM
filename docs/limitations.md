@@ -60,3 +60,7 @@ The following were limitations in prior versions and have been addressed:
   closed-form piecewise-linear leaves `f_s(x) = b_s + Σ α_j x_j`, available on
   all three estimators; `leaf_model="polynomial"` and `leaf_model="rff"` remain
   future work)
+- No full raw-distribution Wasserstein DRO guarantee (now:
+  `leaf_solver="dro"` provides a fast Wasserstein-inspired robust scalar leaf
+  update over gradient uncertainty; exact distributional DRO is still research
+  work)

@@ -1,7 +1,7 @@
 use alloygbm_core::{
     BinnedMatrix, Device, FeatureHistogram, FeatureTile, GradientPair, HistogramBin,
     HistogramBundle, LinearFeatureHistogram, LinearHistogramBundle, LinearLeaf, NodeSlice,
-    NodeStats, PartitionResult, SplitCandidate,
+    NodeStats, PartitionResult, SplitCandidate, leaf_effective_gradient, leaf_gain_term,
 };
 use alloygbm_engine::{
     BackendOps, CategoricalFeatureInfo, EngineError, EngineResult, LinearContext, MorphContext,
@@ -42,6 +42,21 @@ enum GainStrategy<'a> {
     Morph(&'a MorphContext),
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ScalarSideStats {
+    grad: f32,
+    hess: f32,
+    grad_sq: f32,
+    count: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MissingDirectionCandidate {
+    left: ScalarSideStats,
+    right: ScalarSideStats,
+    default_left: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HistogramKernelPath {
     TinyNodeScalar,
@@ -54,6 +69,7 @@ struct HistogramArena {
     bin_count: usize,
     grad_sums: Vec<f32>,
     hess_sums: Vec<f32>,
+    grad_sq_sums: Vec<f32>,
     counts: Vec<u32>,
 }
 
@@ -64,6 +80,7 @@ impl HistogramArena {
             bin_count,
             grad_sums: vec![0.0; flat_len],
             hess_sums: vec![0.0; flat_len],
+            grad_sq_sums: vec![0.0; flat_len],
             counts: vec![0; flat_len],
         }
     }
@@ -72,6 +89,7 @@ impl HistogramArena {
     fn reset(&mut self) {
         self.grad_sums.fill(0.0);
         self.hess_sums.fill(0.0);
+        self.grad_sq_sums.fill(0.0);
         self.counts.fill(0);
     }
 
@@ -85,9 +103,11 @@ impl HistogramArena {
         } else {
             self.grad_sums.resize(flat_len, 0.0);
             self.hess_sums.resize(flat_len, 0.0);
+            self.grad_sq_sums.resize(flat_len, 0.0);
             self.counts.resize(flat_len, 0);
             self.grad_sums.fill(0.0);
             self.hess_sums.fill(0.0);
+            self.grad_sq_sums.fill(0.0);
             self.counts.fill(0);
         }
     }
@@ -98,6 +118,7 @@ impl HistogramArena {
             self.bin_count,
             &self.grad_sums,
             &self.hess_sums,
+            &self.grad_sq_sums,
             &self.counts,
             feature_histograms,
         );
@@ -141,6 +162,7 @@ impl CpuBackend {
         bin_count: usize,
         grad_sums: &[f32],
         hess_sums: &[f32],
+        grad_sq_sums: &[f32],
         counts: &[u32],
         feature_histograms: &mut Vec<FeatureHistogram>,
     ) {
@@ -153,6 +175,7 @@ impl CpuBackend {
                 bins.push(HistogramBin {
                     grad_sum: grad_sums[flat_index],
                     hess_sum: hess_sums[flat_index],
+                    grad_sq_sum: grad_sq_sums[flat_index],
                     count: counts[flat_index],
                 });
             }
@@ -180,6 +203,7 @@ impl CpuBackend {
                 HistogramBin {
                     grad_sum: 0.0,
                     hess_sum: 0.0,
+                    grad_sq_sum: 0.0,
                     count: 0,
                 };
                 bin_count
@@ -195,6 +219,7 @@ impl CpuBackend {
                     let target_bin = &mut bins[bin_index];
                     target_bin.grad_sum += gradient.grad;
                     target_bin.hess_sum += gradient.hess;
+                    target_bin.grad_sq_sum += gradient.grad * gradient.grad;
                     target_bin.count += 1;
                 }
             } else {
@@ -206,6 +231,7 @@ impl CpuBackend {
                     let target_bin = &mut bins[bin_index];
                     target_bin.grad_sum += gradient.grad;
                     target_bin.hess_sum += gradient.hess;
+                    target_bin.grad_sq_sum += gradient.grad * gradient.grad;
                     target_bin.count += 1;
                 }
             }
@@ -237,6 +263,7 @@ impl CpuBackend {
                 let flat_index = local_feature_index * arena.bin_count + bin_index;
                 arena.grad_sums[flat_index] += gradient.grad;
                 arena.hess_sums[flat_index] += gradient.hess;
+                arena.grad_sq_sums[flat_index] += gradient.grad * gradient.grad;
                 arena.counts[flat_index] += 1;
             }
         }
@@ -436,34 +463,42 @@ impl CpuBackend {
 
                 arena.grad_sums[idx0] += gradient0.grad;
                 arena.hess_sums[idx0] += gradient0.hess;
+                arena.grad_sq_sums[idx0] += gradient0.grad * gradient0.grad;
                 arena.counts[idx0] += 1;
 
                 arena.grad_sums[idx1] += gradient1.grad;
                 arena.hess_sums[idx1] += gradient1.hess;
+                arena.grad_sq_sums[idx1] += gradient1.grad * gradient1.grad;
                 arena.counts[idx1] += 1;
 
                 arena.grad_sums[idx2] += gradient2.grad;
                 arena.hess_sums[idx2] += gradient2.hess;
+                arena.grad_sq_sums[idx2] += gradient2.grad * gradient2.grad;
                 arena.counts[idx2] += 1;
 
                 arena.grad_sums[idx3] += gradient3.grad;
                 arena.hess_sums[idx3] += gradient3.hess;
+                arena.grad_sq_sums[idx3] += gradient3.grad * gradient3.grad;
                 arena.counts[idx3] += 1;
 
                 arena.grad_sums[idx4] += gradient4.grad;
                 arena.hess_sums[idx4] += gradient4.hess;
+                arena.grad_sq_sums[idx4] += gradient4.grad * gradient4.grad;
                 arena.counts[idx4] += 1;
 
                 arena.grad_sums[idx5] += gradient5.grad;
                 arena.hess_sums[idx5] += gradient5.hess;
+                arena.grad_sq_sums[idx5] += gradient5.grad * gradient5.grad;
                 arena.counts[idx5] += 1;
 
                 arena.grad_sums[idx6] += gradient6.grad;
                 arena.hess_sums[idx6] += gradient6.hess;
+                arena.grad_sq_sums[idx6] += gradient6.grad * gradient6.grad;
                 arena.counts[idx6] += 1;
 
                 arena.grad_sums[idx7] += gradient7.grad;
                 arena.hess_sums[idx7] += gradient7.hess;
+                arena.grad_sq_sums[idx7] += gradient7.grad * gradient7.grad;
                 arena.counts[idx7] += 1;
             }
         }
@@ -477,6 +512,7 @@ impl CpuBackend {
                 let flat_index = local_feature_index * arena.bin_count + bin_index;
                 arena.grad_sums[flat_index] += gradient.grad;
                 arena.hess_sums[flat_index] += gradient.hess;
+                arena.grad_sq_sums[flat_index] += gradient.grad * gradient.grad;
                 arena.counts[flat_index] += 1;
             }
         }
@@ -487,6 +523,14 @@ impl CpuBackend {
         node_id: u32,
         options: SplitSelectionOptions,
     ) -> Option<SplitCandidate> {
+        if options.dro_config.is_some() {
+            return Self::best_split_for_feature_inner(
+                feature_histogram,
+                node_id,
+                options,
+                GainStrategy::Standard,
+            );
+        }
         // Standard-path bin-scan goes through the SIMD-vectorized fast path.
         // The morph path retains the scalar implementation because its gain
         // formula calls `tanh`/`ln`/`exp`, which are not safely vectorizable
@@ -520,20 +564,22 @@ impl CpuBackend {
 
         // Extract missing-value stats if the histogram covers the NaN bin.
         let missing_bin_idx = options.missing_bin_index;
-        let (missing_grad, missing_hess, missing_count) =
+        let (missing_grad, missing_hess, missing_grad_sq, missing_count) =
             if missing_bin_idx < feature_histogram.bins.len() {
                 let mb = &feature_histogram.bins[missing_bin_idx];
-                (mb.grad_sum, mb.hess_sum, mb.count)
+                (mb.grad_sum, mb.hess_sum, mb.grad_sq_sum, mb.count)
             } else {
-                (0.0_f32, 0.0_f32, 0_u32)
+                (0.0_f32, 0.0_f32, 0.0_f32, 0_u32)
             };
 
         let mut total_grad = 0.0_f32;
         let mut total_hess = 0.0_f32;
+        let mut total_grad_sq = 0.0_f32;
         let mut total_count = 0_u32;
         for bin in &feature_histogram.bins {
             total_grad += bin.grad_sum;
             total_hess += bin.hess_sum;
+            total_grad_sq += bin.grad_sq_sum;
             total_count += bin.count;
         }
 
@@ -543,6 +589,7 @@ impl CpuBackend {
 
         let nm_total_grad = total_grad - missing_grad;
         let nm_total_hess = total_hess - missing_hess;
+        let nm_total_grad_sq = total_grad_sq - missing_grad_sq;
         let nm_total_count = total_count.saturating_sub(missing_count);
 
         let parent_denom = total_hess + options.l2_lambda + EPSILON;
@@ -558,17 +605,21 @@ impl CpuBackend {
         // inherently sequential, so we keep it in scalar code.
         let mut cum_left_grad = vec![0.0_f32; scan_limit];
         let mut cum_left_hess = vec![0.0_f32; scan_limit];
+        let mut cum_left_grad_sq = vec![0.0_f32; scan_limit];
         let mut cum_left_count = vec![0_u32; scan_limit];
         {
             let mut g = 0.0_f32;
             let mut h = 0.0_f32;
+            let mut q = 0.0_f32;
             let mut c = 0_u32;
             for (i, bin) in feature_histogram.bins.iter().enumerate().take(scan_limit) {
                 g += bin.grad_sum;
                 h += bin.hess_sum;
+                q += bin.grad_sq_sum;
                 c += bin.count;
                 cum_left_grad[i] = g;
                 cum_left_hess[i] = h;
+                cum_left_grad_sq[i] = q;
                 cum_left_count[i] = c;
             }
         }
@@ -728,27 +779,34 @@ impl CpuBackend {
         let threshold_bin = best_threshold;
         let left_grad = cum_left_grad[threshold_bin];
         let left_hess = cum_left_hess[threshold_bin];
+        let left_grad_sq = cum_left_grad_sq[threshold_bin];
         let left_count = cum_left_count[threshold_bin];
         let right_grad = nm_total_grad - left_grad;
         let right_hess = nm_total_hess - left_hess;
+        let right_grad_sq = nm_total_grad_sq - left_grad_sq;
         let right_count = nm_total_count.saturating_sub(left_count);
 
-        let (eff_lg, eff_lh, eff_lc, eff_rg, eff_rh, eff_rc) = if best_default_left {
+        let (eff_lg, eff_lh, eff_lq, eff_lc, eff_rg, eff_rh, eff_rq, eff_rc) = if best_default_left
+        {
             (
                 left_grad + missing_grad,
                 left_hess + missing_hess,
+                left_grad_sq + missing_grad_sq,
                 left_count + missing_count,
                 right_grad,
                 right_hess,
+                right_grad_sq,
                 right_count,
             )
         } else {
             (
                 left_grad,
                 left_hess,
+                left_grad_sq,
                 left_count,
                 right_grad + missing_grad,
                 right_hess + missing_hess,
+                right_grad_sq + missing_grad_sq,
                 right_count + missing_count,
             )
         };
@@ -764,11 +822,13 @@ impl CpuBackend {
             left_stats: NodeStats {
                 grad_sum: eff_lg,
                 hess_sum: eff_lh,
+                grad_sq_sum: eff_lq,
                 row_count: eff_lc,
             },
             right_stats: NodeStats {
                 grad_sum: eff_rg,
                 hess_sum: eff_rh,
+                grad_sq_sum: eff_rq,
                 row_count: eff_rc,
             },
         })
@@ -801,20 +861,22 @@ impl CpuBackend {
 
         // Extract missing-value stats if the histogram covers the NaN bin.
         let missing_bin_idx = options.missing_bin_index;
-        let (missing_grad, missing_hess, missing_count) =
+        let (missing_grad, missing_hess, missing_grad_sq, missing_count) =
             if missing_bin_idx < feature_histogram.bins.len() {
                 let mb = &feature_histogram.bins[missing_bin_idx];
-                (mb.grad_sum, mb.hess_sum, mb.count)
+                (mb.grad_sum, mb.hess_sum, mb.grad_sq_sum, mb.count)
             } else {
-                (0.0, 0.0, 0)
+                (0.0, 0.0, 0.0, 0)
             };
 
         let mut total_grad = 0.0_f32;
         let mut total_hess = 0.0_f32;
+        let mut total_grad_sq = 0.0_f32;
         let mut total_count = 0_u32;
         for bin in &feature_histogram.bins {
             total_grad += bin.grad_sum;
             total_hess += bin.hess_sum;
+            total_grad_sq += bin.grad_sq_sum;
             total_count += bin.count;
         }
 
@@ -825,16 +887,17 @@ impl CpuBackend {
         // Non-missing totals for the scan loop.
         let nm_total_grad = total_grad - missing_grad;
         let nm_total_hess = total_hess - missing_hess;
+        let nm_total_grad_sq = total_grad_sq - missing_grad_sq;
         let nm_total_count = total_count.saturating_sub(missing_count);
 
-        let parent_denom = total_hess + options.l2_lambda + EPSILON;
-        let parent_grad = l1_threshold_gradient(total_grad, options.l1_alpha);
-        let parent_gain_term = (parent_grad * parent_grad) / parent_denom;
+        let parent_gain_term =
+            split_gain_term(total_grad, total_hess, total_grad_sq, total_count, &options);
 
         let mut best_candidate: Option<SplitCandidate> = None;
         let mut best_gain = 0.0_f32;
         let mut left_grad = 0.0_f32;
         let mut left_hess = 0.0_f32;
+        let mut left_grad_sq = 0.0_f32;
         let mut left_count = 0_u32;
 
         // Scan only non-missing bins (0..min(num_bins-1, MISSING_BIN-1)).
@@ -842,6 +905,7 @@ impl CpuBackend {
         for (threshold_bin, bin) in feature_histogram.bins.iter().enumerate().take(scan_limit) {
             left_grad += bin.grad_sum;
             left_hess += bin.hess_sum;
+            left_grad_sq += bin.grad_sq_sum;
             left_count += bin.count;
 
             // Skip if this isn't a valid split point (need at least the
@@ -852,46 +916,70 @@ impl CpuBackend {
 
             let right_grad = nm_total_grad - left_grad;
             let right_hess = nm_total_hess - left_hess;
+            let right_grad_sq = nm_total_grad_sq - left_grad_sq;
             let right_count = nm_total_count.saturating_sub(left_count);
 
-            // Try both NaN directions and pick the better one.
-            let candidates: [(f32, f32, u32, f32, f32, u32, bool); 2] = [
-                // NaN goes left
-                (
-                    left_grad + missing_grad,
-                    left_hess + missing_hess,
-                    left_count + missing_count,
-                    right_grad,
-                    right_hess,
-                    right_count,
-                    true,
-                ),
-                // NaN goes right
-                (
-                    left_grad,
-                    left_hess,
-                    left_count,
-                    right_grad + missing_grad,
-                    right_hess + missing_hess,
-                    right_count + missing_count,
-                    false,
-                ),
+            let candidates = [
+                MissingDirectionCandidate {
+                    left: ScalarSideStats {
+                        grad: left_grad + missing_grad,
+                        hess: left_hess + missing_hess,
+                        grad_sq: left_grad_sq + missing_grad_sq,
+                        count: left_count + missing_count,
+                    },
+                    right: ScalarSideStats {
+                        grad: right_grad,
+                        hess: right_hess,
+                        grad_sq: right_grad_sq,
+                        count: right_count,
+                    },
+                    default_left: true,
+                },
+                MissingDirectionCandidate {
+                    left: ScalarSideStats {
+                        grad: left_grad,
+                        hess: left_hess,
+                        grad_sq: left_grad_sq,
+                        count: left_count,
+                    },
+                    right: ScalarSideStats {
+                        grad: right_grad + missing_grad,
+                        hess: right_hess + missing_hess,
+                        grad_sq: right_grad_sq + missing_grad_sq,
+                        count: right_count + missing_count,
+                    },
+                    default_left: false,
+                },
             ];
 
-            for &(eff_lg, eff_lh, eff_lc, eff_rg, eff_rh, eff_rc, default_left) in &candidates {
-                if eff_lc == 0
-                    || eff_rc == 0
-                    || eff_lh <= options.min_child_hessian
-                    || eff_rh <= options.min_child_hessian
+            for candidate in candidates {
+                let left = candidate.left;
+                let right = candidate.right;
+                if left.count == 0
+                    || right.count == 0
+                    || left.hess <= options.min_child_hessian
+                    || right.hess <= options.min_child_hessian
                 {
                     continue;
                 }
 
                 // Apply L1 thresholding uniformly before gain computation.
-                let left_grad_for_gain = l1_threshold_gradient(eff_lg, options.l1_alpha);
-                let right_grad_for_gain = l1_threshold_gradient(eff_rg, options.l1_alpha);
-                let left_denom = eff_lh + options.l2_lambda + EPSILON;
-                let right_denom = eff_rh + options.l2_lambda + EPSILON;
+                let left_grad_for_gain = leaf_effective_gradient(
+                    left.grad,
+                    left.grad_sq,
+                    left.count,
+                    options.l1_alpha,
+                    options.dro_config.as_ref(),
+                );
+                let right_grad_for_gain = leaf_effective_gradient(
+                    right.grad,
+                    right.grad_sq,
+                    right.count,
+                    options.l1_alpha,
+                    options.dro_config.as_ref(),
+                );
+                let left_denom = left.hess + options.l2_lambda + EPSILON;
+                let right_denom = right.hess + options.l2_lambda + EPSILON;
 
                 // Apply min_leaf_magnitude filter uniformly.
                 if options.min_leaf_magnitude > 0.0 {
@@ -906,8 +994,14 @@ impl CpuBackend {
 
                 let gain = match &strategy {
                     GainStrategy::Standard => {
-                        (left_grad_for_gain * left_grad_for_gain) / left_denom
-                            + (right_grad_for_gain * right_grad_for_gain) / right_denom
+                        split_gain_term(left.grad, left.hess, left.grad_sq, left.count, &options)
+                            + split_gain_term(
+                                right.grad,
+                                right.hess,
+                                right.grad_sq,
+                                right.count,
+                                &options,
+                            )
                             - parent_gain_term
                     }
                     GainStrategy::Morph(morph) => {
@@ -915,13 +1009,13 @@ impl CpuBackend {
                         let inputs = MorphGainInputs {
                             left: SplitSideStats {
                                 gradient_sum: left_grad_for_gain,
-                                hessian_sum: eff_lh,
-                                count: eff_lc,
+                                hessian_sum: left.hess,
+                                count: left.count,
                             },
                             right: SplitSideStats {
                                 gradient_sum: right_grad_for_gain,
-                                hessian_sum: eff_rh,
-                                count: eff_rc,
+                                hessian_sum: right.hess,
+                                count: right.count,
                             },
                             iteration: morph.iteration,
                             total_iterations: morph.total_iterations.max(1),
@@ -940,18 +1034,20 @@ impl CpuBackend {
                         feature_index: feature_histogram.feature_index,
                         threshold_bin: threshold_bin as u16,
                         gain,
-                        default_left,
+                        default_left: candidate.default_left,
                         is_categorical: false,
                         categorical_bitset: None,
                         left_stats: NodeStats {
-                            grad_sum: eff_lg,
-                            hess_sum: eff_lh,
-                            row_count: eff_lc,
+                            grad_sum: left.grad,
+                            hess_sum: left.hess,
+                            grad_sq_sum: left.grad_sq,
+                            row_count: left.count,
                         },
                         right_stats: NodeStats {
-                            grad_sum: eff_rg,
-                            hess_sum: eff_rh,
-                            row_count: eff_rc,
+                            grad_sum: right.grad,
+                            hess_sum: right.hess,
+                            grad_sq_sum: right.grad_sq,
+                            row_count: right.count,
                         },
                     });
                 }
@@ -1008,7 +1104,8 @@ impl CpuBackend {
     /// This is the single source of truth for:
     /// - Missing-bin extraction
     /// - Total-hessian guard
-    /// - Fisher-sort ordering (by `grad_sum / (hess_sum + l2_lambda + eps)`)
+    /// - Fisher-sort ordering (by raw leaf score for standard mode, or by
+    ///   DRO effective gradient score when robust scalar leaves are active)
     /// - Prefix-scan candidate generation
     /// - NaN-direction candidate generation
     /// - L1 thresholding (applied to both left and right gradient sums)
@@ -1033,18 +1130,19 @@ impl CpuBackend {
 
         // Extract missing-value stats.
         let missing_bin_idx = options.missing_bin_index;
-        let (missing_grad, missing_hess, missing_count) =
+        let (missing_grad, missing_hess, missing_grad_sq, missing_count) =
             if missing_bin_idx < feature_histogram.bins.len() {
                 let mb = &feature_histogram.bins[missing_bin_idx];
-                (mb.grad_sum, mb.hess_sum, mb.count)
+                (mb.grad_sum, mb.hess_sum, mb.grad_sq_sum, mb.count)
             } else {
-                (0.0, 0.0, 0)
+                (0.0, 0.0, 0.0, 0)
             };
 
         // Collect populated categories (bins 0..num_categories).
-        let mut categories: Vec<(u16, f32, f32, u32)> = Vec::new(); // (bin_id, grad, hess, count)
+        let mut categories: Vec<(u16, f32, f32, f32, u32)> = Vec::new(); // (bin_id, grad, hess, grad_sq, count)
         let mut nm_total_grad = 0.0_f32;
         let mut nm_total_hess = 0.0_f32;
+        let mut nm_total_grad_sq = 0.0_f32;
         let mut nm_total_count = 0_u32;
 
         let scan_limit = num_categories
@@ -1053,10 +1151,17 @@ impl CpuBackend {
         for bin_id in 0..scan_limit {
             let bin = &feature_histogram.bins[bin_id];
             if bin.count > 0 {
-                categories.push((bin_id as u16, bin.grad_sum, bin.hess_sum, bin.count));
+                categories.push((
+                    bin_id as u16,
+                    bin.grad_sum,
+                    bin.hess_sum,
+                    bin.grad_sq_sum,
+                    bin.count,
+                ));
             }
             nm_total_grad += bin.grad_sum;
             nm_total_hess += bin.hess_sum;
+            nm_total_grad_sq += bin.grad_sq_sum;
             nm_total_count += bin.count;
         }
 
@@ -1066,19 +1171,34 @@ impl CpuBackend {
 
         let total_grad = nm_total_grad + missing_grad;
         let total_hess = nm_total_hess + missing_hess;
+        let total_grad_sq = nm_total_grad_sq + missing_grad_sq;
 
         if total_hess <= options.min_child_hessian {
             return None;
         }
 
-        let parent_denom = total_hess + options.l2_lambda + EPSILON;
-        let parent_grad_l1 = l1_threshold_gradient(total_grad, options.l1_alpha);
-        let parent_gain_term = (parent_grad_l1 * parent_grad_l1) / parent_denom;
+        let total_count = nm_total_count + missing_count;
+        let parent_gain_term =
+            split_gain_term(total_grad, total_hess, total_grad_sq, total_count, &options);
 
-        // Sort categories by score: grad_sum / (hess_sum + l2_lambda + eps) ascending.
+        // Sort categories by the same gradient signal used for leaf values.
+        // For standard mode this preserves the historical raw-gradient Fisher
+        // ordering. For DRO mode, the robust effective gradient can reorder
+        // categories when gradient dispersion changes the leaf signal.
+        let dro_sort_config = options.dro_config.filter(|config| config.radius > 0.0);
         categories.sort_by(|a, b| {
-            let score_a = a.1 / (a.2 + options.l2_lambda + EPSILON);
-            let score_b = b.1 / (b.2 + options.l2_lambda + EPSILON);
+            let grad_a = if dro_sort_config.is_some() {
+                leaf_effective_gradient(a.1, a.3, a.4, options.l1_alpha, dro_sort_config.as_ref())
+            } else {
+                a.1
+            };
+            let grad_b = if dro_sort_config.is_some() {
+                leaf_effective_gradient(b.1, b.3, b.4, options.l1_alpha, dro_sort_config.as_ref())
+            } else {
+                b.1
+            };
+            let score_a = grad_a / (a.2 + options.l2_lambda + EPSILON);
+            let score_b = grad_b / (b.2 + options.l2_lambda + EPSILON);
             score_a
                 .partial_cmp(&score_b)
                 .unwrap_or(std::cmp::Ordering::Equal)
@@ -1089,57 +1209,83 @@ impl CpuBackend {
         let mut best_gain = 0.0_f32;
         let mut left_grad = 0.0_f32;
         let mut left_hess = 0.0_f32;
+        let mut left_grad_sq = 0.0_f32;
         let mut left_count = 0_u32;
 
         // Try splits: first k categories go left, rest go right (k = 1..len-1).
         for k in 0..categories.len() - 1 {
-            let (_, g, h, c) = categories[k];
+            let (_, g, h, q, c) = categories[k];
             left_grad += g;
             left_hess += h;
+            left_grad_sq += q;
             left_count += c;
 
             let right_grad = nm_total_grad - left_grad;
             let right_hess = nm_total_hess - left_hess;
+            let right_grad_sq = nm_total_grad_sq - left_grad_sq;
             let right_count = nm_total_count.saturating_sub(left_count);
 
-            // Try both NaN directions.
-            let candidates: [(f32, f32, u32, f32, f32, u32, bool); 2] = [
-                // NaN goes left
-                (
-                    left_grad + missing_grad,
-                    left_hess + missing_hess,
-                    left_count + missing_count,
-                    right_grad,
-                    right_hess,
-                    right_count,
-                    true,
-                ),
-                // NaN goes right
-                (
-                    left_grad,
-                    left_hess,
-                    left_count,
-                    right_grad + missing_grad,
-                    right_hess + missing_hess,
-                    right_count + missing_count,
-                    false,
-                ),
+            let candidates = [
+                MissingDirectionCandidate {
+                    left: ScalarSideStats {
+                        grad: left_grad + missing_grad,
+                        hess: left_hess + missing_hess,
+                        grad_sq: left_grad_sq + missing_grad_sq,
+                        count: left_count + missing_count,
+                    },
+                    right: ScalarSideStats {
+                        grad: right_grad,
+                        hess: right_hess,
+                        grad_sq: right_grad_sq,
+                        count: right_count,
+                    },
+                    default_left: true,
+                },
+                MissingDirectionCandidate {
+                    left: ScalarSideStats {
+                        grad: left_grad,
+                        hess: left_hess,
+                        grad_sq: left_grad_sq,
+                        count: left_count,
+                    },
+                    right: ScalarSideStats {
+                        grad: right_grad + missing_grad,
+                        hess: right_hess + missing_hess,
+                        grad_sq: right_grad_sq + missing_grad_sq,
+                        count: right_count + missing_count,
+                    },
+                    default_left: false,
+                },
             ];
 
-            for &(eff_lg, eff_lh, eff_lc, eff_rg, eff_rh, eff_rc, default_left) in &candidates {
-                if eff_lc == 0
-                    || eff_rc == 0
-                    || eff_lh <= options.min_child_hessian
-                    || eff_rh <= options.min_child_hessian
+            for candidate in candidates {
+                let left = candidate.left;
+                let right = candidate.right;
+                if left.count == 0
+                    || right.count == 0
+                    || left.hess <= options.min_child_hessian
+                    || right.hess <= options.min_child_hessian
                 {
                     continue;
                 }
 
                 // Apply L1 thresholding uniformly before gain computation.
-                let left_grad_for_gain = l1_threshold_gradient(eff_lg, options.l1_alpha);
-                let right_grad_for_gain = l1_threshold_gradient(eff_rg, options.l1_alpha);
-                let left_denom = eff_lh + options.l2_lambda + EPSILON;
-                let right_denom = eff_rh + options.l2_lambda + EPSILON;
+                let left_grad_for_gain = leaf_effective_gradient(
+                    left.grad,
+                    left.grad_sq,
+                    left.count,
+                    options.l1_alpha,
+                    options.dro_config.as_ref(),
+                );
+                let right_grad_for_gain = leaf_effective_gradient(
+                    right.grad,
+                    right.grad_sq,
+                    right.count,
+                    options.l1_alpha,
+                    options.dro_config.as_ref(),
+                );
+                let left_denom = left.hess + options.l2_lambda + EPSILON;
+                let right_denom = right.hess + options.l2_lambda + EPSILON;
 
                 // Apply min_leaf_magnitude filter uniformly.
                 if options.min_leaf_magnitude > 0.0 {
@@ -1154,8 +1300,14 @@ impl CpuBackend {
 
                 let gain = match &strategy {
                     GainStrategy::Standard => {
-                        (left_grad_for_gain * left_grad_for_gain) / left_denom
-                            + (right_grad_for_gain * right_grad_for_gain) / right_denom
+                        split_gain_term(left.grad, left.hess, left.grad_sq, left.count, &options)
+                            + split_gain_term(
+                                right.grad,
+                                right.hess,
+                                right.grad_sq,
+                                right.count,
+                                &options,
+                            )
                             - parent_gain_term
                     }
                     GainStrategy::Morph(morph) => {
@@ -1163,13 +1315,13 @@ impl CpuBackend {
                         let inputs = MorphGainInputs {
                             left: SplitSideStats {
                                 gradient_sum: left_grad_for_gain,
-                                hessian_sum: eff_lh,
-                                count: eff_lc,
+                                hessian_sum: left.hess,
+                                count: left.count,
                             },
                             right: SplitSideStats {
                                 gradient_sum: right_grad_for_gain,
-                                hessian_sum: eff_rh,
-                                count: eff_rc,
+                                hessian_sum: right.hess,
+                                count: right.count,
                             },
                             iteration: morph.iteration,
                             total_iterations: morph.total_iterations.max(1),
@@ -1185,7 +1337,7 @@ impl CpuBackend {
                     // Build bitset: categories 0..=k in sorted order go left.
                     let bitset_len = num_categories.div_ceil(8);
                     let mut bitset = vec![0u8; bitset_len];
-                    for &(bin_id, _, _, _) in &categories[..=k] {
+                    for &(bin_id, _, _, _, _) in &categories[..=k] {
                         let byte_idx = (bin_id / 8) as usize;
                         let bit_idx = (bin_id % 8) as usize;
                         if byte_idx < bitset.len() {
@@ -1199,18 +1351,20 @@ impl CpuBackend {
                         feature_index: feature_histogram.feature_index,
                         threshold_bin: 0, // unused for categorical
                         gain,
-                        default_left,
+                        default_left: candidate.default_left,
                         is_categorical: true,
                         categorical_bitset: Some(bitset),
                         left_stats: NodeStats {
-                            grad_sum: eff_lg,
-                            hess_sum: eff_lh,
-                            row_count: eff_lc,
+                            grad_sum: left.grad,
+                            hess_sum: left.hess,
+                            grad_sq_sum: left.grad_sq,
+                            row_count: left.count,
                         },
                         right_stats: NodeStats {
-                            grad_sum: eff_rg,
-                            hess_sum: eff_rh,
-                            row_count: eff_rc,
+                            grad_sum: right.grad,
+                            hess_sum: right.hess,
+                            grad_sq_sum: right.grad_sq,
+                            row_count: right.count,
                         },
                     });
                 }
@@ -1296,7 +1450,7 @@ impl CpuBackend {
         node: &NodeSlice,
         split: &SplitCandidate,
     ) -> EngineResult<(PartitionResult, NodeStats, NodeStats)> {
-        type ChunkResult = (Vec<u32>, Vec<u32>, f32, f32, f32, f32);
+        type ChunkResult = (Vec<u32>, Vec<u32>, f32, f32, f32, f32, f32, f32);
         let chunk_size = (node.row_indices.len() / rayon::current_num_threads().max(1)).max(4096);
         let chunk_results: Vec<ChunkResult> = node
             .row_indices
@@ -1306,8 +1460,10 @@ impl CpuBackend {
                 let mut right = Vec::new();
                 let mut lg = 0.0_f32;
                 let mut lh = 0.0_f32;
+                let mut lq = 0.0_f32;
                 let mut rg = 0.0_f32;
                 let mut rh = 0.0_f32;
+                let mut rq = 0.0_f32;
                 let feature_index = split.feature_index as usize;
                 let use_col_major = binned_matrix.has_col_major();
                 let col_base = feature_index * binned_matrix.row_count;
@@ -1325,13 +1481,15 @@ impl CpuBackend {
                         left.push(row_index_u32);
                         lg += gradient.grad;
                         lh += gradient.hess;
+                        lq += gradient.grad * gradient.grad;
                     } else {
                         right.push(row_index_u32);
                         rg += gradient.grad;
                         rh += gradient.hess;
+                        rq += gradient.grad * gradient.grad;
                     }
                 }
-                (left, right, lg, lh, rg, rh)
+                (left, right, lg, lh, lq, rg, rh, rq)
             })
             .collect();
 
@@ -1340,16 +1498,20 @@ impl CpuBackend {
         let mut right_row_indices = Vec::with_capacity(total_rows / 2);
         let mut left_grad_sum = 0.0_f32;
         let mut left_hess_sum = 0.0_f32;
+        let mut left_grad_sq_sum = 0.0_f32;
         let mut right_grad_sum = 0.0_f32;
         let mut right_hess_sum = 0.0_f32;
+        let mut right_grad_sq_sum = 0.0_f32;
 
-        for (left, right, lg, lh, rg, rh) in chunk_results {
+        for (left, right, lg, lh, lq, rg, rh, rq) in chunk_results {
             left_row_indices.extend(left);
             right_row_indices.extend(right);
             left_grad_sum += lg;
             left_hess_sum += lh;
+            left_grad_sq_sum += lq;
             right_grad_sum += rg;
             right_hess_sum += rh;
+            right_grad_sq_sum += rq;
         }
 
         let left_count = left_row_indices.len() as u32;
@@ -1362,11 +1524,13 @@ impl CpuBackend {
             NodeStats {
                 grad_sum: left_grad_sum,
                 hess_sum: left_hess_sum,
+                grad_sq_sum: left_grad_sq_sum,
                 row_count: left_count,
             },
             NodeStats {
                 grad_sum: right_grad_sum,
                 hess_sum: right_hess_sum,
+                grad_sq_sum: right_grad_sq_sum,
                 row_count: right_count,
             },
         ))
@@ -1384,6 +1548,24 @@ fn l1_threshold_gradient(grad_sum: f32, l1_alpha: f32) -> f32 {
     } else {
         0.0
     }
+}
+
+fn split_gain_term(
+    grad_sum: f32,
+    hess_sum: f32,
+    grad_sq_sum: f32,
+    row_count: u32,
+    options: &SplitSelectionOptions,
+) -> f32 {
+    2.0 * leaf_gain_term(
+        grad_sum,
+        hess_sum,
+        grad_sq_sum,
+        row_count,
+        options.l1_alpha,
+        options.l2_lambda,
+        options.dro_config.as_ref(),
+    )
 }
 
 /// Determine if a row goes to the left child for a given split.
@@ -1586,8 +1768,10 @@ impl BackendOps for CpuBackend {
         let mut right_row_indices = Vec::with_capacity(node.row_indices.len() / 2);
         let mut left_grad_sum = 0.0_f32;
         let mut left_hess_sum = 0.0_f32;
+        let mut left_grad_sq_sum = 0.0_f32;
         let mut right_grad_sum = 0.0_f32;
         let mut right_hess_sum = 0.0_f32;
+        let mut right_grad_sq_sum = 0.0_f32;
 
         let feature_index = split.feature_index as usize;
         let use_col_major = binned_matrix.has_col_major();
@@ -1606,10 +1790,12 @@ impl BackendOps for CpuBackend {
                 left_row_indices.push(row_index_u32);
                 left_grad_sum += gradient.grad;
                 left_hess_sum += gradient.hess;
+                left_grad_sq_sum += gradient.grad * gradient.grad;
             } else {
                 right_row_indices.push(row_index_u32);
                 right_grad_sum += gradient.grad;
                 right_hess_sum += gradient.hess;
+                right_grad_sq_sum += gradient.grad * gradient.grad;
             }
         }
 
@@ -1620,11 +1806,13 @@ impl BackendOps for CpuBackend {
         let left_stats = NodeStats {
             grad_sum: left_grad_sum,
             hess_sum: left_hess_sum,
+            grad_sq_sum: left_grad_sq_sum,
             row_count: partition.left_row_indices.len() as u32,
         };
         let right_stats = NodeStats {
             grad_sum: right_grad_sum,
             hess_sum: right_hess_sum,
+            grad_sq_sum: right_grad_sq_sum,
             row_count: partition.right_row_indices.len() as u32,
         };
 
@@ -1644,6 +1832,7 @@ impl BackendOps for CpuBackend {
 
         let mut grad_sum = 0.0_f32;
         let mut hess_sum = 0.0_f32;
+        let mut grad_sq_sum = 0.0_f32;
         for &row_index in row_indices {
             let gradient = gradients.get(row_index as usize).ok_or_else(|| {
                 EngineError::ContractViolation(format!(
@@ -1653,11 +1842,13 @@ impl BackendOps for CpuBackend {
             })?;
             grad_sum += gradient.grad;
             hess_sum += gradient.hess;
+            grad_sq_sum += gradient.grad * gradient.grad;
         }
 
         Ok(NodeStats {
             grad_sum,
             hess_sum,
+            grad_sq_sum,
             row_count: row_indices.len() as u32,
         })
     }
@@ -1887,6 +2078,8 @@ mod tests {
             tree_growth: TreeGrowth::Level,
             morph_config: None,
             leaf_model: LeafModelKind::Constant,
+            leaf_solver: alloygbm_core::LeafSolverKind::Standard,
+            dro_config: None,
         }
     }
 
@@ -2162,6 +2355,7 @@ mod tests {
                     l1_alpha: 0.0,
                     min_child_hessian: 0.0,
                     min_leaf_magnitude: 0.0,
+                    dro_config: None,
                     missing_bin_index: 255,
                 },
                 &[],
@@ -2199,6 +2393,7 @@ mod tests {
                     l1_alpha: 0.5,
                     min_child_hessian: 0.0,
                     min_leaf_magnitude: 0.0,
+                    dro_config: None,
                     missing_bin_index: 255,
                 },
                 &[],
@@ -2232,6 +2427,7 @@ mod tests {
                     l1_alpha: 0.0,
                     min_child_hessian: 10.0,
                     min_leaf_magnitude: 0.0,
+                    dro_config: None,
                     missing_bin_index: 255,
                 },
                 &[],
@@ -2254,16 +2450,19 @@ mod tests {
                         HistogramBin {
                             grad_sum: 1.0,
                             hess_sum: 20.0,
+                            grad_sq_sum: 0.0,
                             count: 5,
                         },
                         HistogramBin {
                             grad_sum: -1.0,
                             hess_sum: 20.0,
+                            grad_sq_sum: 0.0,
                             count: 5,
                         },
                         HistogramBin {
                             grad_sum: 0.0,
                             hess_sum: 0.0,
+                            grad_sq_sum: 0.0,
                             count: 0,
                         },
                     ],
@@ -2274,16 +2473,19 @@ mod tests {
                         HistogramBin {
                             grad_sum: 0.5,
                             hess_sum: 5.0,
+                            grad_sq_sum: 0.0,
                             count: 5,
                         },
                         HistogramBin {
                             grad_sum: -0.5,
                             hess_sum: 5.0,
+                            grad_sq_sum: 0.0,
                             count: 5,
                         },
                         HistogramBin {
                             grad_sum: 0.0,
                             hess_sum: 0.0,
+                            grad_sq_sum: 0.0,
                             count: 0,
                         },
                     ],
@@ -2303,6 +2505,7 @@ mod tests {
                     l1_alpha: 0.0,
                     min_child_hessian: 0.0,
                     min_leaf_magnitude: 0.06,
+                    dro_config: None,
                     missing_bin_index: 255,
                 },
                 &[],
@@ -2330,11 +2533,13 @@ mod tests {
             left_stats: NodeStats {
                 grad_sum: 3.0,
                 hess_sum: 2.0,
+                grad_sq_sum: 0.0,
                 row_count: 2,
             },
             right_stats: NodeStats {
                 grad_sum: -3.0,
                 hess_sum: 2.0,
+                grad_sq_sum: 0.0,
                 row_count: 2,
             },
         };
@@ -2363,11 +2568,13 @@ mod tests {
             left_stats: NodeStats {
                 grad_sum: 0.0,
                 hess_sum: 0.0,
+                grad_sq_sum: 0.0,
                 row_count: 0,
             },
             right_stats: NodeStats {
                 grad_sum: 0.0,
                 hess_sum: 0.0,
+                grad_sq_sum: 0.0,
                 row_count: 0,
             },
         };
@@ -2461,6 +2668,7 @@ mod tests {
             HistogramBin {
                 grad_sum: 0.0,
                 hess_sum: 0.0,
+                grad_sq_sum: 0.0,
                 count: 0,
             };
             num_bins
@@ -2469,18 +2677,21 @@ mod tests {
         bins[0] = HistogramBin {
             grad_sum: -2.0,
             hess_sum: 2.0,
+            grad_sq_sum: 0.0,
             count: 10,
         };
         // Category 1: grad=-1.5, hess=2.0 (score = -1.5/2 = -0.75)
         bins[1] = HistogramBin {
             grad_sum: -1.5,
             hess_sum: 2.0,
+            grad_sq_sum: 0.0,
             count: 10,
         };
         // Category 2: grad=3.5, hess=2.0 (score = 3.5/2 = 1.75)
         bins[2] = HistogramBin {
             grad_sum: 3.5,
             hess_sum: 2.0,
+            grad_sq_sum: 0.0,
             count: 10,
         };
         // NaN bin: no data
@@ -2494,6 +2705,7 @@ mod tests {
             l1_alpha: 0.0,
             min_child_hessian: 0.0,
             min_leaf_magnitude: 0.0,
+            dro_config: None,
             missing_bin_index: nan_bin,
         };
 
@@ -2515,6 +2727,112 @@ mod tests {
     }
 
     #[test]
+    fn dro_categorical_split_stats_match_direct_scan() {
+        let num_cats = 4usize;
+        let nan_bin = 15usize;
+        let mut bins = vec![
+            HistogramBin {
+                grad_sum: 0.0,
+                hess_sum: 0.0,
+                grad_sq_sum: 0.0,
+                count: 0,
+            };
+            nan_bin + 1
+        ];
+        bins[0] = HistogramBin {
+            grad_sum: -4.0,
+            hess_sum: 3.0,
+            grad_sq_sum: 7.0,
+            count: 6,
+        };
+        bins[1] = HistogramBin {
+            grad_sum: -2.0,
+            hess_sum: 2.0,
+            grad_sq_sum: 3.0,
+            count: 4,
+        };
+        bins[2] = HistogramBin {
+            grad_sum: 3.0,
+            hess_sum: 2.5,
+            grad_sq_sum: 5.0,
+            count: 5,
+        };
+        bins[3] = HistogramBin {
+            grad_sum: 4.0,
+            hess_sum: 3.5,
+            grad_sq_sum: 8.0,
+            count: 7,
+        };
+        bins[nan_bin] = HistogramBin {
+            grad_sum: 0.75,
+            hess_sum: 1.0,
+            grad_sq_sum: 0.75,
+            count: 2,
+        };
+        let fh = FeatureHistogram {
+            feature_index: 0,
+            bins,
+        };
+        let options = SplitSelectionOptions {
+            dro_config: Some(alloygbm_core::DroConfig {
+                radius: 0.05,
+                metric: alloygbm_core::DroMetric::Wasserstein,
+            }),
+            missing_bin_index: nan_bin,
+            ..SplitSelectionOptions::default()
+        };
+
+        let split = CpuBackend::best_split_for_categorical_feature(&fh, 0, options, num_cats)
+            .expect("dro categorical split should exist");
+        let bitset = split
+            .categorical_bitset
+            .as_ref()
+            .expect("categorical split has bitset");
+        let mut expected_left = HistogramBin {
+            grad_sum: 0.0,
+            hess_sum: 0.0,
+            grad_sq_sum: 0.0,
+            count: 0,
+        };
+        let mut expected_right = HistogramBin {
+            grad_sum: 0.0,
+            hess_sum: 0.0,
+            grad_sq_sum: 0.0,
+            count: 0,
+        };
+        for (bin_id, bin) in fh.bins.iter().enumerate() {
+            if bin.count == 0 {
+                continue;
+            }
+            let goes_left = if bin_id == nan_bin {
+                split.default_left
+            } else if bin_id < num_cats {
+                bitset[bin_id / 8] & (1 << (bin_id % 8)) != 0
+            } else {
+                continue;
+            };
+            let target = if goes_left {
+                &mut expected_left
+            } else {
+                &mut expected_right
+            };
+            target.grad_sum += bin.grad_sum;
+            target.hess_sum += bin.hess_sum;
+            target.grad_sq_sum += bin.grad_sq_sum;
+            target.count += bin.count;
+        }
+
+        assert!((split.left_stats.grad_sum - expected_left.grad_sum).abs() < 1e-6);
+        assert!((split.left_stats.hess_sum - expected_left.hess_sum).abs() < 1e-6);
+        assert!((split.left_stats.grad_sq_sum - expected_left.grad_sq_sum).abs() < 1e-6);
+        assert_eq!(split.left_stats.row_count, expected_left.count);
+        assert!((split.right_stats.grad_sum - expected_right.grad_sum).abs() < 1e-6);
+        assert!((split.right_stats.hess_sum - expected_right.hess_sum).abs() < 1e-6);
+        assert!((split.right_stats.grad_sq_sum - expected_right.grad_sq_sum).abs() < 1e-6);
+        assert_eq!(split.right_stats.row_count, expected_right.count);
+    }
+
+    #[test]
     fn test_best_split_categorical_single_populated() {
         // Only 1 category has data -> no valid split possible
         let num_cats = 3;
@@ -2524,6 +2842,7 @@ mod tests {
             HistogramBin {
                 grad_sum: 0.0,
                 hess_sum: 0.0,
+                grad_sq_sum: 0.0,
                 count: 0,
             };
             num_bins
@@ -2531,6 +2850,7 @@ mod tests {
         bins[1] = HistogramBin {
             grad_sum: 2.0,
             hess_sum: 5.0,
+            grad_sq_sum: 0.0,
             count: 20,
         };
         let fh = FeatureHistogram {
@@ -2570,11 +2890,13 @@ mod tests {
             left_stats: NodeStats {
                 grad_sum: 0.0,
                 hess_sum: 0.0,
+                grad_sq_sum: 0.0,
                 row_count: 0,
             },
             right_stats: NodeStats {
                 grad_sum: 0.0,
                 hess_sum: 0.0,
+                grad_sq_sum: 0.0,
                 row_count: 0,
             },
         };
@@ -2622,6 +2944,7 @@ mod tests {
             l1_alpha: 0.0,
             min_child_hessian: 0.0,
             min_leaf_magnitude: 0.0,
+            dro_config: None,
             missing_bin_index: 255,
         };
 
@@ -2689,6 +3012,7 @@ mod tests {
             l1_alpha: 0.5,
             min_child_hessian: 0.0,
             min_leaf_magnitude: 0.0,
+            dro_config: None,
             missing_bin_index: 255,
         };
 
@@ -2728,6 +3052,91 @@ mod tests {
         );
     }
 
+    #[test]
+    fn best_split_morph_with_dro_uses_robust_gradient_gain_signal() {
+        use alloygbm_core::{DroConfig, DroMetric, MorphConfig, MorphPrecomputed};
+        use alloygbm_engine::MorphContext;
+
+        let backend = CpuBackend;
+        let histograms = backend
+            .build_histograms(
+                &sample_binned_matrix(),
+                &sample_gradients(),
+                &sample_node(),
+                &[FeatureTile::new(0, 2).expect("feature tile is valid")],
+            )
+            .expect("histograms should build");
+
+        let options = SplitSelectionOptions {
+            l2_lambda: 0.1,
+            l1_alpha: 0.0,
+            min_child_hessian: 0.0,
+            min_leaf_magnitude: 0.0,
+            dro_config: Some(DroConfig {
+                radius: 0.05,
+                metric: DroMetric::Wasserstein,
+            }),
+            missing_bin_index: 255,
+        };
+
+        let cfg = MorphConfig {
+            morph_warmup_iters: 0,
+            balance_penalty: false,
+            ..MorphConfig::default()
+        };
+        let morph = MorphContext {
+            iteration: 10,
+            total_iterations: 100,
+            grad_mean: 0.0,
+            grad_std: 1.0,
+            config: cfg,
+            precomputed: MorphPrecomputed::for_iteration(10, &cfg),
+        };
+
+        let split = backend
+            .best_split_morph(&histograms, options, &[], &[], &morph)
+            .expect("morph split search should succeed")
+            .expect("test fixture should produce a split");
+
+        let left_gradient_sum = leaf_effective_gradient(
+            split.left_stats.grad_sum,
+            split.left_stats.grad_sq_sum,
+            split.left_stats.row_count,
+            options.l1_alpha,
+            options.dro_config.as_ref(),
+        );
+        let right_gradient_sum = leaf_effective_gradient(
+            split.right_stats.grad_sum,
+            split.right_stats.grad_sq_sum,
+            split.right_stats.row_count,
+            options.l1_alpha,
+            options.dro_config.as_ref(),
+        );
+        let expected = compute_morph_gain(
+            MorphGainInputs {
+                left: SplitSideStats {
+                    gradient_sum: left_gradient_sum,
+                    hessian_sum: split.left_stats.hess_sum,
+                    count: split.left_stats.row_count,
+                },
+                right: SplitSideStats {
+                    gradient_sum: right_gradient_sum,
+                    hessian_sum: split.right_stats.hess_sum,
+                    count: split.right_stats.row_count,
+                },
+                iteration: morph.iteration,
+                total_iterations: morph.total_iterations,
+                grad_mean: morph.grad_mean,
+                grad_std: morph.grad_std,
+                lambda_l2: options.l2_lambda,
+            },
+            &morph.config,
+            &morph.precomputed,
+        );
+
+        assert!((split.gain - expected).abs() < 1e-6);
+    }
+
     /// Regression test: at `iteration < morph_warmup_iters` with `balance_penalty=false`,
     /// the morph categorical path must select the same partition as the standard path.
     ///
@@ -2750,6 +3159,7 @@ mod tests {
             HistogramBin {
                 grad_sum: 0.0,
                 hess_sum: 0.0,
+                grad_sq_sum: 0.0,
                 count: 0,
             };
             num_bins
@@ -2758,24 +3168,28 @@ mod tests {
         bins[0] = HistogramBin {
             grad_sum: -4.0,
             hess_sum: 2.0,
+            grad_sq_sum: 0.0,
             count: 20,
         };
         // Category 1: negative gradient
         bins[1] = HistogramBin {
             grad_sum: -3.0,
             hess_sum: 2.0,
+            grad_sq_sum: 0.0,
             count: 20,
         };
         // Category 2: positive gradient
         bins[2] = HistogramBin {
             grad_sum: 3.0,
             hess_sum: 2.0,
+            grad_sq_sum: 0.0,
             count: 20,
         };
         // Category 3: strongly positive gradient
         bins[3] = HistogramBin {
             grad_sum: 4.0,
             hess_sum: 2.0,
+            grad_sq_sum: 0.0,
             count: 20,
         };
 
@@ -2793,6 +3207,7 @@ mod tests {
             l1_alpha: 0.0,
             min_child_hessian: 0.0,
             min_leaf_magnitude: 0.0,
+            dro_config: None,
             missing_bin_index: nan_bin,
         };
 
@@ -2864,6 +3279,7 @@ mod tests {
             l2_lambda,
             min_child_hessian,
             min_leaf_magnitude,
+            dro_config: None,
             missing_bin_index,
         }
     }
@@ -2874,6 +3290,7 @@ mod tests {
             .map(|i| HistogramBin {
                 grad_sum: ((i as f32 - 15.5) * 0.1).sin(),
                 hess_sum: 0.5 + (i as f32 * 0.05).cos().abs(),
+                grad_sq_sum: 0.0,
                 count: 10 + (i as u32 % 7),
             })
             .collect();
@@ -2911,6 +3328,7 @@ mod tests {
             .map(|i| HistogramBin {
                 grad_sum: (i as f32 - 7.5) * 0.02,
                 hess_sum: 1.0,
+                grad_sq_sum: 0.0,
                 count: 20,
             })
             .collect();
@@ -2939,6 +3357,7 @@ mod tests {
             .map(|i| HistogramBin {
                 grad_sum: ((i as f32 - 7.5) * 0.05).sin(),
                 hess_sum: 1.0 + (i as f32 * 0.1).cos().abs(),
+                grad_sq_sum: 0.0,
                 count: 12 + (i as u32 % 5),
             })
             .collect();
@@ -2968,6 +3387,7 @@ mod tests {
             .map(|i| HistogramBin {
                 grad_sum: ((i as f32 - 7.5) * 0.1).sin(),
                 hess_sum: 1.0 + (i as f32 * 0.05).cos().abs(),
+                grad_sq_sum: 0.0,
                 count: 8 + (i as u32 % 4),
             })
             .collect();
@@ -2975,6 +3395,7 @@ mod tests {
         bins[15] = HistogramBin {
             grad_sum: 0.4,
             hess_sum: 1.5,
+            grad_sq_sum: 0.0,
             count: 7,
         };
         let fh = FeatureHistogram {
@@ -2996,5 +3417,77 @@ mod tests {
             (None, None) => {}
             _ => panic!("scalar/simd disagreement on missing-bin path"),
         }
+    }
+
+    #[test]
+    fn dro_missing_bin_split_stats_match_direct_scan() {
+        let missing_bin = 7usize;
+        let mut bins: Vec<HistogramBin> = (0..=missing_bin)
+            .map(|i| HistogramBin {
+                grad_sum: (i as f32 - 3.0) * 0.7,
+                hess_sum: 1.0 + i as f32 * 0.2,
+                grad_sq_sum: 0.5 + i as f32 * 0.4,
+                count: 3 + i as u32,
+            })
+            .collect();
+        bins[missing_bin] = HistogramBin {
+            grad_sum: -0.8,
+            hess_sum: 1.4,
+            grad_sq_sum: 1.2,
+            count: 5,
+        };
+        let fh = FeatureHistogram {
+            feature_index: 0,
+            bins,
+        };
+        let options = SplitSelectionOptions {
+            dro_config: Some(alloygbm_core::DroConfig {
+                radius: 0.05,
+                metric: alloygbm_core::DroMetric::Wasserstein,
+            }),
+            missing_bin_index: missing_bin,
+            ..SplitSelectionOptions::default()
+        };
+
+        let split =
+            CpuBackend::best_split_for_feature_inner(&fh, 0, options, GainStrategy::Standard)
+                .expect("dro split with missing bin should exist");
+        let mut expected_left = HistogramBin {
+            grad_sum: 0.0,
+            hess_sum: 0.0,
+            grad_sq_sum: 0.0,
+            count: 0,
+        };
+        let mut expected_right = HistogramBin {
+            grad_sum: 0.0,
+            hess_sum: 0.0,
+            grad_sq_sum: 0.0,
+            count: 0,
+        };
+        for (bin_id, bin) in fh.bins.iter().enumerate() {
+            let goes_left = if bin_id == missing_bin {
+                split.default_left
+            } else {
+                bin_id <= split.threshold_bin as usize
+            };
+            let target = if goes_left {
+                &mut expected_left
+            } else {
+                &mut expected_right
+            };
+            target.grad_sum += bin.grad_sum;
+            target.hess_sum += bin.hess_sum;
+            target.grad_sq_sum += bin.grad_sq_sum;
+            target.count += bin.count;
+        }
+
+        assert!((split.left_stats.grad_sum - expected_left.grad_sum).abs() < 1e-6);
+        assert!((split.left_stats.hess_sum - expected_left.hess_sum).abs() < 1e-6);
+        assert!((split.left_stats.grad_sq_sum - expected_left.grad_sq_sum).abs() < 1e-6);
+        assert_eq!(split.left_stats.row_count, expected_left.count);
+        assert!((split.right_stats.grad_sum - expected_right.grad_sum).abs() < 1e-6);
+        assert!((split.right_stats.hess_sum - expected_right.hess_sum).abs() < 1e-6);
+        assert!((split.right_stats.grad_sq_sum - expected_right.grad_sq_sum).abs() < 1e-6);
+        assert_eq!(split.right_stats.row_count, expected_right.count);
     }
 }

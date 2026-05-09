@@ -991,11 +991,13 @@ mod tests {
             left_stats: NodeStats {
                 grad_sum: 0.0,
                 hess_sum: 1.0,
+                grad_sq_sum: 0.0,
                 row_count: 1,
             },
             right_stats: NodeStats {
                 grad_sum: 0.0,
                 hess_sum: 1.0,
+                grad_sq_sum: 0.0,
                 row_count: 1,
             },
         }
@@ -1019,11 +1021,13 @@ mod tests {
             left_stats: NodeStats {
                 grad_sum: 0.0,
                 hess_sum: left_count as f32,
+                grad_sq_sum: 0.0,
                 row_count: left_count,
             },
             right_stats: NodeStats {
                 grad_sum: 0.0,
                 hess_sum: right_count as f32,
+                grad_sq_sum: 0.0,
                 row_count: right_count,
             },
         }
@@ -1055,6 +1059,7 @@ mod tests {
             objective: "squared_error".to_string(),
             native_categorical_feature_indices: Vec::new(),
             morph_metadata: None,
+            dro_metadata: None,
         }
     }
 
@@ -1068,6 +1073,7 @@ mod tests {
             objective: "squared_error".to_string(),
             native_categorical_feature_indices: Vec::new(),
             morph_metadata: None,
+            dro_metadata: None,
         }
     }
 
@@ -1397,6 +1403,7 @@ mod tests {
             objective: "squared_error".to_string(),
             native_categorical_feature_indices: Vec::new(),
             morph_metadata: None,
+            dro_metadata: None,
         };
 
         let rows = vec![vec![3.0, 0.0], vec![8.0, 0.0]];
@@ -1438,6 +1445,7 @@ mod tests {
             objective: "squared_error".to_string(),
             native_categorical_feature_indices: Vec::new(),
             morph_metadata: None,
+            dro_metadata: None,
         };
 
         let rows = vec![
@@ -1483,11 +1491,13 @@ mod tests {
             left_stats: NodeStats {
                 grad_sum: 0.0,
                 hess_sum: left_count as f32,
+                grad_sq_sum: 0.0,
                 row_count: left_count,
             },
             right_stats: NodeStats {
                 grad_sum: 0.0,
                 hess_sum: right_count as f32,
+                grad_sq_sum: 0.0,
                 row_count: right_count,
             },
         }
@@ -1510,6 +1520,7 @@ mod tests {
             objective: "squared_error".to_string(),
             native_categorical_feature_indices: vec![0],
             morph_metadata: None,
+            dro_metadata: None,
         };
 
         // Feature 0 values: 0.0 (cat 0, left), 1.0 (cat 1, right),
@@ -1547,6 +1558,7 @@ mod tests {
             objective: "squared_error".to_string(),
             native_categorical_feature_indices: vec![0],
             morph_metadata: None,
+            dro_metadata: None,
         };
 
         let rows = vec![
@@ -1594,6 +1606,7 @@ mod tests {
             objective: "squared_error".to_string(),
             native_categorical_feature_indices: vec![0],
             morph_metadata: None,
+            dro_metadata: None,
         };
 
         let rows = vec![
@@ -1661,6 +1674,7 @@ mod tests {
             objective: "squared_error".to_string(),
             native_categorical_feature_indices: Vec::new(),
             morph_metadata: None,
+            dro_metadata: None,
         };
 
         let rows = vec![

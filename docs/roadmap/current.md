@@ -4,7 +4,23 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
-The `0.5.0` release introduces piecewise-linear (PL) tree leaves via `leaf_model="linear"` on all three estimators. The `0.4.0` release introduced the opt-in MorphBoost adaptive split criterion, per-iteration learning-rate schedules, and SIMD-accelerated histogram and EMA kernels. The `0.3.2` release fixed GBMRanker training and added a real-data ranking benchmark. The `0.3.1` release fixed multiclass prediction and expanded the benchmark suite.
+The `0.6.0` release introduces `leaf_solver="dro"`, a conservative DRO-style scalar leaf solver that penalizes within-leaf gradient uncertainty while preserving standard prediction-time artifacts. The `0.5.0` release introduced piecewise-linear (PL) tree leaves via `leaf_model="linear"` on all three estimators. The `0.4.0` release introduced the opt-in MorphBoost adaptive split criterion, per-iteration learning-rate schedules, and SIMD-accelerated histogram and EMA kernels.
+
+## What Shipped In 0.6.0
+
+- **DRO-style scalar leaves** via `leaf_solver="dro"` on `GBMRegressor`,
+  `GBMClassifier`, and `GBMRanker`. This is a fast closed-form robust Newton
+  update over leaf gradient uncertainty, exposed with `dro_radius` and
+  `dro_metric="wasserstein"`.
+- **Conservative contract**: default `leaf_solver="standard"` preserves existing
+  behavior; `dro_radius=0.0` preserves standard predictions while recording
+  optional DRO metadata; v0.6.0 does not claim full raw-distribution
+  Wasserstein DRO guarantees.
+- **Interactions**: `leaf_solver="dro"` composes with `training_mode="morph"`
+  and requires `leaf_model="constant"` for this release.
+- **Benchmark support**: `alloygbm_dro` was added to the comparative benchmark
+  runner, with temporal/panel stability reporting focused on mean, worst, and
+  standard deviation of task-normalized score.
 
 ## What Shipped In 0.5.0
 
