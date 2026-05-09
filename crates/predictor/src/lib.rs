@@ -1409,6 +1409,7 @@ mod tests {
             leaf_solver: alloygbm_core::LeafSolverKind::Standard,
             dro_config: None,
             leaf_model: LeafModelKind::Constant,
+            neutralization_config: None,
         }
     }
 

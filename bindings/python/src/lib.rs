@@ -3094,6 +3094,7 @@ fn build_train_params(
         leaf_model,
         leaf_solver,
         dro_config,
+        neutralization_config: None,
     }
 }
 
@@ -4386,6 +4387,7 @@ mod tests {
             leaf_model: LeafModelKind::Constant,
             leaf_solver: alloygbm_core::LeafSolverKind::Standard,
             dro_config: None,
+            neutralization_config: None,
         }
     }
 
