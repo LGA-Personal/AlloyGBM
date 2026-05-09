@@ -7,6 +7,11 @@
 use alloygbm_core::{MorphConfig, MorphPrecomputed};
 
 /// Statistics for one side of a split (left, right, or parent).
+///
+/// `gradient_sum` is the gain signal selected by the caller. Standard and
+/// MorphBoost-only training pass the L1-thresholded gradient; DRO+Morph passes
+/// the DRO effective gradient so MorphBoost blends its information score with
+/// the same robust gradient gain used by scalar leaf solving.
 #[derive(Debug, Clone, Copy)]
 pub struct SplitSideStats {
     pub gradient_sum: f32,

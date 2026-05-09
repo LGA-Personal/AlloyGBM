@@ -1104,7 +1104,8 @@ impl CpuBackend {
     /// This is the single source of truth for:
     /// - Missing-bin extraction
     /// - Total-hessian guard
-    /// - Fisher-sort ordering (by `grad_sum / (hess_sum + l2_lambda + eps)`)
+    /// - Fisher-sort ordering (by raw leaf score for standard mode, or by
+    ///   DRO effective gradient score when robust scalar leaves are active)
     /// - Prefix-scan candidate generation
     /// - NaN-direction candidate generation
     /// - L1 thresholding (applied to both left and right gradient sums)
@@ -1180,10 +1181,24 @@ impl CpuBackend {
         let parent_gain_term =
             split_gain_term(total_grad, total_hess, total_grad_sq, total_count, &options);
 
-        // Sort categories by score: grad_sum / (hess_sum + l2_lambda + eps) ascending.
+        // Sort categories by the same gradient signal used for leaf values.
+        // For standard mode this preserves the historical raw-gradient Fisher
+        // ordering. For DRO mode, the robust effective gradient can reorder
+        // categories when gradient dispersion changes the leaf signal.
+        let dro_sort_config = options.dro_config.filter(|config| config.radius > 0.0);
         categories.sort_by(|a, b| {
-            let score_a = a.1 / (a.2 + options.l2_lambda + EPSILON);
-            let score_b = b.1 / (b.2 + options.l2_lambda + EPSILON);
+            let grad_a = if dro_sort_config.is_some() {
+                leaf_effective_gradient(a.1, a.3, a.4, options.l1_alpha, dro_sort_config.as_ref())
+            } else {
+                a.1
+            };
+            let grad_b = if dro_sort_config.is_some() {
+                leaf_effective_gradient(b.1, b.3, b.4, options.l1_alpha, dro_sort_config.as_ref())
+            } else {
+                b.1
+            };
+            let score_a = grad_a / (a.2 + options.l2_lambda + EPSILON);
+            let score_b = grad_b / (b.2 + options.l2_lambda + EPSILON);
             score_a
                 .partial_cmp(&score_b)
                 .unwrap_or(std::cmp::Ordering::Equal)
@@ -3035,6 +3050,91 @@ mod tests {
             a.threshold_bin, b.threshold_bin,
             "threshold_bin disagreed under L1/L2 regularization"
         );
+    }
+
+    #[test]
+    fn best_split_morph_with_dro_uses_robust_gradient_gain_signal() {
+        use alloygbm_core::{DroConfig, DroMetric, MorphConfig, MorphPrecomputed};
+        use alloygbm_engine::MorphContext;
+
+        let backend = CpuBackend;
+        let histograms = backend
+            .build_histograms(
+                &sample_binned_matrix(),
+                &sample_gradients(),
+                &sample_node(),
+                &[FeatureTile::new(0, 2).expect("feature tile is valid")],
+            )
+            .expect("histograms should build");
+
+        let options = SplitSelectionOptions {
+            l2_lambda: 0.1,
+            l1_alpha: 0.0,
+            min_child_hessian: 0.0,
+            min_leaf_magnitude: 0.0,
+            dro_config: Some(DroConfig {
+                radius: 0.05,
+                metric: DroMetric::Wasserstein,
+            }),
+            missing_bin_index: 255,
+        };
+
+        let cfg = MorphConfig {
+            morph_warmup_iters: 0,
+            balance_penalty: false,
+            ..MorphConfig::default()
+        };
+        let morph = MorphContext {
+            iteration: 10,
+            total_iterations: 100,
+            grad_mean: 0.0,
+            grad_std: 1.0,
+            config: cfg,
+            precomputed: MorphPrecomputed::for_iteration(10, &cfg),
+        };
+
+        let split = backend
+            .best_split_morph(&histograms, options, &[], &[], &morph)
+            .expect("morph split search should succeed")
+            .expect("test fixture should produce a split");
+
+        let left_gradient_sum = leaf_effective_gradient(
+            split.left_stats.grad_sum,
+            split.left_stats.grad_sq_sum,
+            split.left_stats.row_count,
+            options.l1_alpha,
+            options.dro_config.as_ref(),
+        );
+        let right_gradient_sum = leaf_effective_gradient(
+            split.right_stats.grad_sum,
+            split.right_stats.grad_sq_sum,
+            split.right_stats.row_count,
+            options.l1_alpha,
+            options.dro_config.as_ref(),
+        );
+        let expected = compute_morph_gain(
+            MorphGainInputs {
+                left: SplitSideStats {
+                    gradient_sum: left_gradient_sum,
+                    hessian_sum: split.left_stats.hess_sum,
+                    count: split.left_stats.row_count,
+                },
+                right: SplitSideStats {
+                    gradient_sum: right_gradient_sum,
+                    hessian_sum: split.right_stats.hess_sum,
+                    count: split.right_stats.row_count,
+                },
+                iteration: morph.iteration,
+                total_iterations: morph.total_iterations,
+                grad_mean: morph.grad_mean,
+                grad_std: morph.grad_std,
+                lambda_l2: options.l2_lambda,
+            },
+            &morph.config,
+            &morph.precomputed,
+        );
+
+        assert!((split.gain - expected).abs() < 1e-6);
     }
 
     /// Regression test: at `iteration < morph_warmup_iters` with `balance_penalty=false`,

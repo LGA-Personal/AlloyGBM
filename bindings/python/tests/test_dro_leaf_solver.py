@@ -86,6 +86,13 @@ class DroLeafSolverTests(unittest.TestCase):
         ).fit(X, y_multi)
         self.assertEqual(multiclass.predict_proba(X).shape, (len(X), 3))
 
+    def test_classifier_repr_includes_dro_params(self) -> None:
+        text = repr(GBMClassifier(leaf_solver="dro", dro_radius=0.2))
+        self.assertIn("leaf_model='constant'", text)
+        self.assertIn("leaf_solver='dro'", text)
+        self.assertIn("dro_radius=0.2", text)
+        self.assertIn("dro_metric='wasserstein'", text)
+
     def test_dro_ranker_trains(self) -> None:
         X, _ = _regression_data()
         y = np.asarray([0, 1, 2, 3, 0, 1, 2, 3], dtype=np.float32)

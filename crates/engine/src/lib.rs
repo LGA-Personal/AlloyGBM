@@ -4019,7 +4019,7 @@ fn split_selection_options_for_training(
         min_leaf_magnitude: env_options.min_leaf_magnitude,
         dro_config: params
             .dro_config
-            .filter(|_| params.leaf_solver == LeafSolverKind::Dro),
+            .filter(|config| params.leaf_solver == LeafSolverKind::Dro && config.radius > 0.0),
         missing_bin_index: binned_matrix.nan_bin_index as usize,
     };
     if !user_set_regularization {
@@ -7311,6 +7311,31 @@ mod tests {
         assert_eq!(
             dro_model.dro_metadata.expect("dro metadata").config.radius,
             0.0
+        );
+    }
+
+    #[test]
+    fn dro_zero_radius_uses_standard_split_options() {
+        let params = TrainParams {
+            leaf_solver: LeafSolverKind::Dro,
+            dro_config: Some(DroConfig {
+                radius: 0.0,
+                metric: alloygbm_core::DroMetric::Wasserstein,
+            }),
+            ..TrainParams::default()
+        };
+
+        let options = split_selection_options_for_training(
+            &params,
+            None,
+            &sample_dataset(),
+            &sample_binned_matrix(),
+        )
+        .expect("split options should build");
+
+        assert!(
+            options.dro_config.is_none(),
+            "zero-radius DRO should keep standard split-selection fast paths"
         );
     }
 

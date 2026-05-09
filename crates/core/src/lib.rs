@@ -770,10 +770,10 @@ pub fn leaf_effective_gradient(
     if let Some(cfg) = dro_config
         && cfg.radius > 0.0
     {
-        let n = row_count.max(1) as f32;
-        let mean = grad_sum / n;
-        let variance = (grad_sq_sum / n - mean * mean).max(0.0);
-        threshold += cfg.radius * n.sqrt() * variance.sqrt();
+        let n = row_count.max(1) as f64;
+        let mean = f64::from(grad_sum) / n;
+        let variance = (f64::from(grad_sq_sum) / n - mean * mean).max(0.0);
+        threshold += (f64::from(cfg.radius) * n.sqrt() * variance.sqrt()) as f32;
     }
     if grad_sum > threshold {
         grad_sum - threshold
