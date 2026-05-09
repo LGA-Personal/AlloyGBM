@@ -3057,6 +3057,9 @@ impl Trainer {
                 "validation early stopping requires a validation dataset".to_string(),
             ));
         }
+        validate_train_params(&self.params)?;
+        validate_training_dataset(dataset)?;
+        validate_neutralization_fit_contract_for_support(&self.params, dataset, false)?;
         validate_training_alignment(dataset, binned_matrix)?;
         if let Some(validation_ref) = validation {
             validate_training_alignment(validation_ref.dataset, validation_ref.binned_matrix)?;
@@ -3082,6 +3085,21 @@ impl Trainer {
         let split_options =
             split_selection_options_for_training(&self.params, None, dataset, binned_matrix)?;
         let feature_count = binned_matrix.feature_count;
+        let gradient_projector = if let Some(config) = gradient_neutralization_config(&self.params)
+        {
+            let exposures = dataset.factor_exposures.as_ref().ok_or_else(|| {
+                EngineError::ContractViolation(
+                    "factor_exposures are required when neutralization is active".to_string(),
+                )
+            })?;
+            Some(FactorProjector::new(
+                exposures,
+                dataset.sample_weights.as_deref(),
+                config.ridge_lambda,
+            )?)
+        } else {
+            None
+        };
 
         // Initialize K prediction arrays — from warm-start or fresh
         let (baselines, mut class_stumps, round_index_offset, initial_stump_counts) =
@@ -3239,6 +3257,9 @@ impl Trainer {
                     class_k,
                     &mut gradient_buffer,
                 )?;
+                if let Some(projector) = &gradient_projector {
+                    projector.project_gradient_pairs_in_place(&mut gradient_buffer)?;
+                }
 
                 // Update per-class EMA stats from this class's gradients.
                 if let Some(ms) = morph_state.as_mut() {
@@ -4187,6 +4208,18 @@ fn validate_neutralization_fit_contract<O: ObjectiveOps>(
     dataset: &TrainingDataset,
     objective: &O,
 ) -> EngineResult<()> {
+    validate_neutralization_fit_contract_for_support(
+        params,
+        dataset,
+        objective.supports_pre_target_neutralization(),
+    )
+}
+
+fn validate_neutralization_fit_contract_for_support(
+    params: &TrainParams,
+    dataset: &TrainingDataset,
+    supports_pre_target_neutralization: bool,
+) -> EngineResult<()> {
     let Some(config) = params.neutralization_config else {
         if dataset.factor_exposures.is_some() {
             return Err(EngineError::ContractViolation(
@@ -4207,9 +4240,7 @@ fn validate_neutralization_fit_contract<O: ObjectiveOps>(
             dataset.row_count()
         )));
     }
-    if config.kind == NeutralizationKind::PreTarget
-        && !objective.supports_pre_target_neutralization()
-    {
+    if config.kind == NeutralizationKind::PreTarget && !supports_pre_target_neutralization {
         return Err(EngineError::ContractViolation(
             "neutralization='pre_target' is only supported for GBMRegressor squared-error training"
                 .to_string(),
@@ -7331,6 +7362,32 @@ mod tests {
         }
     }
 
+    fn multiclass_factor_dominated_dataset() -> TrainingDataset {
+        TrainingDataset {
+            matrix: alloygbm_core::DatasetMatrix::new(
+                6,
+                2,
+                vec![
+                    0.0, 0.0, //
+                    1.0, 0.0, //
+                    2.0, 0.0, //
+                    0.0, 1.0, //
+                    1.0, 1.0, //
+                    2.0, 1.0, //
+                ],
+            )
+            .expect("matrix is valid"),
+            targets: vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0],
+            sample_weights: None,
+            time_index: None,
+            group_id: None,
+            factor_exposures: Some(
+                FactorExposureMatrix::new(6, 1, vec![-3.0, -2.0, -1.0, 1.0, 2.0, 3.0])
+                    .expect("factor exposures are valid"),
+            ),
+        }
+    }
+
     fn sample_binned_matrix_for_dataset(dataset: &TrainingDataset) -> BinnedMatrix {
         let mut bins = Vec::with_capacity(dataset.row_count() * dataset.matrix.feature_count);
         for row in 0..dataset.row_count() {
@@ -7681,6 +7738,103 @@ mod tests {
         apply_pre_target_neutralization_for_test(&mut dataset, 1e-6).unwrap();
         let after = factor_dot(dataset.factor_exposures.as_ref().unwrap(), &dataset.targets);
         assert!(after.abs() < before.abs() * 0.01);
+    }
+
+    #[test]
+    fn multiclass_neutralization_rejects_inactive_factor_exposures() {
+        let dataset = multiclass_factor_dominated_dataset();
+        let binned = sample_binned_matrix_for_dataset(&dataset);
+        let objective = MultiClassSoftmaxObjective::new(2).unwrap();
+        let controls = IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).unwrap();
+        let result = Trainer::new(TrainParams::default())
+            .unwrap()
+            .fit_multiclass_iterations_with_summary(
+                &dataset,
+                &binned,
+                &MockBackend,
+                &objective,
+                controls,
+            );
+        assert!(matches!(result, Err(EngineError::ContractViolation(_))));
+    }
+
+    #[test]
+    fn multiclass_neutralization_rejects_active_without_factor_exposures() {
+        let mut dataset = multiclass_factor_dominated_dataset();
+        dataset.factor_exposures = None;
+        let binned = sample_binned_matrix_for_dataset(&dataset);
+        let objective = MultiClassSoftmaxObjective::new(2).unwrap();
+        let controls = IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).unwrap();
+        let params = TrainParams {
+            neutralization_config: Some(alloygbm_core::FactorNeutralizationConfig {
+                kind: alloygbm_core::NeutralizationKind::PerRoundGradient,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            }),
+            ..TrainParams::default()
+        };
+        let result = Trainer::new(params)
+            .unwrap()
+            .fit_multiclass_iterations_with_summary(
+                &dataset,
+                &binned,
+                &MockBackend,
+                &objective,
+                controls,
+            );
+        assert!(matches!(result, Err(EngineError::ContractViolation(_))));
+    }
+
+    #[test]
+    fn multiclass_neutralization_rejects_pre_target() {
+        let dataset = multiclass_factor_dominated_dataset();
+        let binned = sample_binned_matrix_for_dataset(&dataset);
+        let objective = MultiClassSoftmaxObjective::new(2).unwrap();
+        let controls = IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).unwrap();
+        let params = TrainParams {
+            neutralization_config: Some(alloygbm_core::FactorNeutralizationConfig {
+                kind: alloygbm_core::NeutralizationKind::PreTarget,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            }),
+            ..TrainParams::default()
+        };
+        let result = Trainer::new(params)
+            .unwrap()
+            .fit_multiclass_iterations_with_summary(
+                &dataset,
+                &binned,
+                &MockBackend,
+                &objective,
+                controls,
+            );
+        assert!(matches!(result, Err(EngineError::ContractViolation(_))));
+    }
+
+    #[test]
+    fn multiclass_per_round_gradient_neutralization_projects_each_class() {
+        let dataset = multiclass_factor_dominated_dataset();
+        let binned = sample_binned_matrix_for_dataset(&dataset);
+        let objective = MultiClassSoftmaxObjective::new(2).unwrap();
+        let controls = IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).unwrap();
+        let backend = GradientNeutralizationCheckingBackend {
+            exposures: dataset.factor_exposures.as_ref().unwrap().clone(),
+        };
+        let params = TrainParams {
+            neutralization_config: Some(alloygbm_core::FactorNeutralizationConfig {
+                kind: alloygbm_core::NeutralizationKind::PerRoundGradient,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            }),
+            ..TrainParams::default()
+        };
+        let summary = Trainer::new(params)
+            .unwrap()
+            .fit_multiclass_iterations_with_summary(
+                &dataset, &binned, &backend, &objective, controls,
+            )
+            .unwrap();
+        assert_eq!(summary.rounds_completed, 3);
     }
 
     #[test]
