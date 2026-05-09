@@ -92,6 +92,24 @@ Categorical support
   the threshold fall back to target encoding. Default 0 disables native
   splits.
 
+DRO leaf solver
+---------------
+
+- ``leaf_solver: str = "standard"`` -- ``"standard"`` keeps the usual scalar
+  Newton leaf update; ``"dro"`` enables a fast robust scalar update that
+  penalizes weak leaf signal by within-leaf gradient dispersion.
+- ``dro_radius: float = 0.05`` -- non-negative penalty scale. ``0.0`` preserves
+  standard-leaf predictions while recording DRO metadata.
+- ``dro_metric: str = "wasserstein"`` -- the only accepted v0.6.0 value. It
+  denotes a Wasserstein-inspired closed-form robust counterpart over leaf
+  gradient uncertainty.
+
+This is not a full Wasserstein optimizer over raw feature/target
+distributions. Inference speed is unchanged because robust scalar leaf values
+are stored directly in the artifact. ``leaf_solver="dro"`` works on all three
+estimators, composes with ``training_mode="morph"``, and requires
+``leaf_model="constant"`` in v0.6.0.
+
 Piecewise-linear leaves
 -----------------------
 

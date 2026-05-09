@@ -158,6 +158,13 @@ fits a closed-form linear model via the ridge solve. Pair with
 `lambda_l2 >= 0.01` for weight stability. See
 [GBMRegressor — Piecewise-Linear Leaves](gbmregressor.md#piecewise-linear-leaves).
 
+## Combining With DRO Leaves
+
+`training_mode="morph"` also composes with `leaf_solver="dro"` when
+`leaf_model="constant"`. The robust gradient gain and scalar leaf value are
+computed first; MorphBoost then blends the robust gradient gain with its
+information score and applies the usual depth/iteration leaf scaling.
+
 ## Persistence
 
 Models trained with `training_mode="morph"` save and load identically to

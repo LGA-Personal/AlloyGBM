@@ -15,6 +15,7 @@ The suite compares AlloyGBM against:
 
 It also includes additional AlloyGBM variants as separate arms:
 
+- `alloygbm_dro` -- `leaf_solver="dro"` with robust scalar leaves
 - `alloygbm_morph` -- `training_mode="morph"` with the default constant LR schedule
 - `alloygbm_morph_cosine` -- `training_mode="morph"` with `lr_schedule="warmup_cosine"`
 - `alloygbm_linear` -- `leaf_model="linear"` (piecewise-linear leaves) with auto training mode
@@ -25,6 +26,11 @@ A focused MorphBoost-vs-peers comparison script is also provided at
 `benchmarks/numerai_benchmark.py`. A dedicated PL-trees benchmark with
 convergence-curve and λ-sweep analysis lives at `benchmarks/pl_trees_benchmark.py`;
 results are reported in `docs/benchmarks/pl_trees_v1.md`.
+
+The comparative runner also emits a temporal/panel stability table for scenarios
+whose names include `time`, `temporal`, or `panel`. It reports mean score,
+worst score, and score standard deviation across repeated runs; this is the
+primary comparison surface for `alloygbm_dro`.
 
 Benchmarks span three task types:
 
@@ -87,6 +93,15 @@ each library behaves under different learning-rate / depth / round budgets.
   Breast Cancer vs constant-leaf baselines.
 - 2–8× per-round training overhead from the closed-form Cholesky solve.
 - See `docs/benchmarks/pl_trees_v1.md` for the full report.
+
+### DRO Leaf Variant
+
+- `leaf_solver="dro"` is expected to trade a modest training-time overhead for
+  lower sensitivity to noisy within-leaf gradient dispersion.
+- Inference speed matches standard constant leaves because DRO values are stored
+  directly in the artifact.
+- Treat success as improved temporal/panel stability, especially worst-run or
+  worst-era score, not necessarily better in-sample convergence.
 
 ## Metrics By Task Type
 

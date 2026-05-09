@@ -655,6 +655,13 @@ def _make_alloygbm_morph_cosine(task_type, **kwargs):
     return cls(training_mode="morph", lr_schedule="warmup_cosine", lr_warmup_frac=0.1, **kwargs)
 
 
+def _make_alloygbm_dro(task_type, **kwargs):
+    from alloygbm import GBMClassifier, GBMRanker, GBMRegressor
+    cls = {"regression": GBMRegressor, "binary": GBMClassifier,
+           "multiclass": GBMClassifier, "ranking": GBMRanker}[task_type]
+    return cls(leaf_solver="dro", dro_radius=0.05, dro_metric="wasserstein", **kwargs)
+
+
 def _make_alloygbm_linear(task_type, **kwargs):
     from alloygbm import GBMClassifier, GBMRanker, GBMRegressor
     cls = {"regression": GBMRegressor, "binary": GBMClassifier,
@@ -712,6 +719,7 @@ def _model_factories(
 
     factories = {
         "alloygbm": lambda: gbm_regressor_cls(**alloy_params),
+        "alloygbm_dro": lambda: _make_alloygbm_dro("regression", **alloy_params),
         "alloygbm_linear": lambda: _make_alloygbm_linear("regression", lambda_l2=linear_lambda_l2, **alloy_params),
         "alloygbm_morph": lambda: _make_alloygbm_morph("regression", **alloy_params),
         "alloygbm_morph_cosine": lambda: _make_alloygbm_morph_cosine("regression", **alloy_params),
@@ -808,6 +816,7 @@ def _classifier_factories(
     )
     factories: dict[str, Callable[[], object]] = {
         "alloygbm": lambda: gbm_classifier_cls(**alloy_params),
+        "alloygbm_dro": lambda: _make_alloygbm_dro("binary", **alloy_params),
         "alloygbm_linear": lambda: _make_alloygbm_linear("binary", lambda_l2=linear_lambda_l2, **alloy_params),
         "alloygbm_morph": lambda: _make_alloygbm_morph("binary", **alloy_params),
         "alloygbm_morph_cosine": lambda: _make_alloygbm_morph_cosine("binary", **alloy_params),
@@ -872,6 +881,7 @@ def _multiclass_classifier_factories(
     )
     factories: dict[str, Callable[[], object]] = {
         "alloygbm": lambda: gbm_classifier_cls(**alloy_params),
+        "alloygbm_dro": lambda: _make_alloygbm_dro("multiclass", **alloy_params),
         "alloygbm_linear": lambda: _make_alloygbm_linear("multiclass", lambda_l2=linear_lambda_l2, **alloy_params),
         "alloygbm_morph": lambda: _make_alloygbm_morph("multiclass", **alloy_params),
         "alloygbm_morph_cosine": lambda: _make_alloygbm_morph_cosine("multiclass", **alloy_params),
@@ -934,6 +944,7 @@ def _ranker_factories(
     )
     factories: dict[str, Callable[[], object]] = {
         "alloygbm": lambda: gbm_ranker_cls(**alloy_params),
+        "alloygbm_dro": lambda: _make_alloygbm_dro("ranking", **alloy_params),
         "alloygbm_linear": lambda: _make_alloygbm_linear("ranking", lambda_l2=linear_lambda_l2, **alloy_params),
         "alloygbm_morph": lambda: _make_alloygbm_morph("ranking", **alloy_params),
         "alloygbm_morph_cosine": lambda: _make_alloygbm_morph_cosine("ranking", **alloy_params),
@@ -1105,6 +1116,59 @@ def _best_rows_by_scenario(
     grouped = summary.groupby("scenario", as_index=False)
     index = grouped[metric].idxmin() if ascending else grouped[metric].idxmax()
     return summary.loc[index[metric]].sort_values("scenario")
+
+
+def _temporal_panel_stability_summary(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return pd.DataFrame()
+
+    passed = frame[frame["status"] == "PASS"].copy()
+    if passed.empty:
+        return pd.DataFrame()
+
+    scenario_text = passed["scenario"].astype(str).str.lower()
+    focused = passed[
+        scenario_text.str.contains("time")
+        | scenario_text.str.contains("temporal")
+        | scenario_text.str.contains("panel")
+    ].copy()
+    if focused.empty:
+        return pd.DataFrame()
+
+    def score(row: pd.Series) -> float:
+        task_type = row["task_type"]
+        if task_type == "regression":
+            return -float(row["rmse"])
+        if task_type == "classification":
+            return float(row["auc"]) if np.isfinite(row["auc"]) else float(row["accuracy"])
+        if task_type == "multiclass_classification":
+            return -float(row["log_loss_val"])
+        if task_type == "ranking":
+            return float(row["ndcg_full"])
+        return float("nan")
+
+    focused["stability_score"] = focused.apply(score, axis=1)
+    focused = focused[np.isfinite(focused["stability_score"])]
+    if focused.empty:
+        return pd.DataFrame()
+
+    return (
+        focused.groupby(
+            ["scenario", "task_type", "profile_name", "model"],
+            as_index=False,
+        )
+        .agg(
+            runs=("stability_score", "count"),
+            mean_score=("stability_score", "mean"),
+            worst_score=("stability_score", "min"),
+            score_std=("stability_score", "std"),
+            fit_seconds_median=("fit_seconds", "median"),
+            predict_seconds_median=("predict_seconds", "median"),
+        )
+        .assign(score_std=lambda df: df["score_std"].fillna(0.0))
+        .sort_values(["scenario", "profile_name", "worst_score"], ascending=[True, True, False])
+        .reset_index(drop=True)
+    )
 
 
 def _render_results_markdown(
@@ -1280,6 +1344,23 @@ def _render_results_markdown(
         for _, row in fastest_fit.iterrows():
             lines.append(f"| {row['scenario']} | {row['profile_name']} | {row['model']} | {row['fit_seconds_median']:.6f} |")
 
+    stability = _temporal_panel_stability_summary(frame)
+    lines.extend(["", "## Temporal/Panel Stability", ""])
+    if stability.empty:
+        lines.append("No temporal or panel PASS records available.")
+    else:
+        lines.extend([
+            "| scenario | task | profile | model | runs | mean_score | worst_score | score_std | fit_seconds_median | predict_seconds_median |",
+            "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ])
+        for _, row in stability.iterrows():
+            lines.append(
+                f"| {row['scenario']} | {row['task_type']} | {row['profile_name']} | "
+                f"{row['model']} | {int(row['runs'])} | {row['mean_score']:.6f} | "
+                f"{row['worst_score']:.6f} | {row['score_std']:.6f} | "
+                f"{row['fit_seconds_median']:.6f} | {row['predict_seconds_median']:.6f} |"
+            )
+
     return "\n".join(lines) + "\n"
 
 
@@ -1402,7 +1483,7 @@ def main(argv: list[str]) -> int:
         help=(
             "filter to only these model names (e.g. alloygbm alloygbm_linear lightgbm). "
             "Default: run all models. Valid names depend on task type but include: "
-            "alloygbm, alloygbm_linear, alloygbm_morph, alloygbm_morph_cosine, "
+            "alloygbm, alloygbm_dro, alloygbm_linear, alloygbm_morph, alloygbm_morph_cosine, "
             "alloygbm_morph_linear, lightgbm, xgboost, catboost"
         ),
     )

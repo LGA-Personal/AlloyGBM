@@ -138,6 +138,34 @@ model = GBMRegressor(
 `training_mode="morph"` works with `GBMClassifier` and `GBMRanker` too, with
 identical parameter semantics.
 
+### DRO Leaf Solver (Robust Scalar Leaves)
+
+Set `leaf_solver="dro"` to use a fast Wasserstein-inspired robust Newton update
+for scalar leaves. The solver penalizes each candidate leaf by within-leaf
+gradient dispersion, reducing sensitivity to noisy or weak leaf signals while
+keeping prediction speed identical to standard constant leaves.
+
+```python
+from alloygbm import GBMRegressor
+
+model = GBMRegressor(
+    n_estimators=600,
+    max_depth=6,
+    learning_rate=0.05,
+    leaf_solver="dro",
+    dro_radius=0.05,
+    dro_metric="wasserstein",
+    seed=7,
+)
+model.fit(X_train, y_train)
+```
+
+`leaf_solver="dro"` works with `GBMRegressor`, `GBMClassifier`, and
+`GBMRanker`, and composes with `training_mode="morph"`. In v0.6.0 it requires
+`leaf_model="constant"`; piecewise-linear leaves still use the standard PL
+solver. `dro_radius=0.0` preserves standard-leaf predictions while retaining
+DRO metadata in the artifact.
+
 ### Piecewise-Linear Leaves
 
 Set `leaf_model="linear"` on any estimator to replace scalar leaves with small
@@ -226,6 +254,7 @@ artifact_bytes = model.artifact_bytes
 - Objective-aware training metric tracking (RMSE, log-loss, accuracy, NDCG)
 - Adaptive split criterion via `training_mode="morph"` ([MorphBoost](https://arxiv.org/pdf/2511.13234))
 - Per-iteration learning-rate schedules: `lr_schedule="constant"` (default) or `"warmup_cosine"`
+- DRO-style robust scalar leaves via `leaf_solver="dro"` (closed-form gradient-uncertainty penalty)
 - Piecewise-linear leaves via `leaf_model="linear"` (closed-form ridge solve, faster convergence on linear-trend data)
 
 ### Inference and Explanations
@@ -273,6 +302,7 @@ Benchmark tooling and methodology live in [benchmarks/README.md](benchmarks/READ
 - No interaction constraints
 - No dart/goss boosting modes
 - SHAP not yet supported with `leaf_model="linear"` (use `"constant"` for now)
+- `leaf_solver="dro"` is a robust scalar leaf update, not a full raw-distribution Wasserstein DRO guarantee
 
 ## Documentation
 

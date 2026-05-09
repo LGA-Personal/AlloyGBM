@@ -46,6 +46,9 @@ print("NDCG@10:", ndcg(y_test, scores, group=query_ids_test, k=10))
 
 All other parameters are inherited from `GBMRegressor` (learning rate, depth,
 regularization, etc.). This includes:
+- `leaf_solver="dro"` for robust scalar leaves (see
+  [GBMRegressor — DRO Leaf Solver](gbmregressor.md#dro-leaf-solver)). It
+  requires `leaf_model="constant"`.
 - `leaf_model="linear"` for piecewise-linear leaves (see
   [GBMRegressor — Piecewise-Linear Leaves](gbmregressor.md#piecewise-linear-leaves)).
   Pair with `lambda_l2 >= 0.01` for weight stability.
