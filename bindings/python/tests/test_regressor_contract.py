@@ -165,6 +165,14 @@ class GBMRegressorContractTests(unittest.TestCase):
             GBMRegressor(continuous_binning_max_bins=1)
         with self.assertRaisesRegex(ValueError, "continuous_binning_max_bins"):
             GBMRegressor(continuous_binning_max_bins=65536)
+        with self.assertRaisesRegex(ValueError, "leaf_solver"):
+            GBMRegressor(leaf_solver="invalid")
+        with self.assertRaisesRegex(ValueError, "dro_radius"):
+            GBMRegressor(leaf_solver="dro", dro_radius=-0.1)
+        with self.assertRaisesRegex(ValueError, "dro_metric"):
+            GBMRegressor(leaf_solver="dro", dro_metric="kl")
+        with self.assertRaisesRegex(ValueError, "leaf_solver='dro'.*leaf_model='constant'"):
+            GBMRegressor(leaf_solver="dro", leaf_model="linear")
 
     def test_get_params_and_set_params_roundtrip(self) -> None:
         model = GBMRegressor()
@@ -190,6 +198,9 @@ class GBMRegressorContractTests(unittest.TestCase):
         self.assertEqual(params["categorical_smoothing"], 20.0)
         self.assertEqual(params["categorical_min_samples_leaf"], 1)
         self.assertFalse(params["categorical_time_aware"])
+        self.assertEqual(params["leaf_solver"], "standard")
+        self.assertEqual(params["dro_radius"], 0.05)
+        self.assertEqual(params["dro_metric"], "wasserstein")
 
         updated = model.set_params(
             learning_rate=0.2,
@@ -213,11 +224,17 @@ class GBMRegressorContractTests(unittest.TestCase):
             categorical_smoothing=5.0,
             categorical_min_samples_leaf=2,
             categorical_time_aware=True,
+            leaf_solver="dro",
+            dro_radius=0.2,
+            dro_metric="wasserstein",
         )
         self.assertIs(updated, model)
         self.assertEqual(model.get_params()["learning_rate"], 0.2)
         self.assertEqual(model.get_params()["max_depth"], 4)
         self.assertEqual(model.get_params()["n_estimators"], 9)
+        self.assertEqual(model.get_params()["leaf_solver"], "dro")
+        self.assertEqual(model.get_params()["dro_radius"], 0.2)
+        self.assertEqual(model.get_params()["dro_metric"], "wasserstein")
         self.assertEqual(model.get_params()["row_subsample"], 0.75)
         self.assertEqual(model.get_params()["col_subsample"], 0.5)
         self.assertEqual(model.get_params()["early_stopping_rounds"], 4)
@@ -345,6 +362,9 @@ class GBMRegressorContractTests(unittest.TestCase):
                         "continuous_binning_max_bins": 256,
                         "objective": "squared_error",
                         "leaf_model": "constant",
+                        "leaf_solver": "standard",
+                        "dro_radius": 0.05,
+                        "dro_metric": "wasserstein",
                     }
                 ],
             )
