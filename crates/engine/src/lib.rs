@@ -5,9 +5,10 @@ use alloygbm_core::{
     HistogramBundle, LeafModelKind, LeafSolverKind, LeafValue, LinearHistogramBundle, LinearLeaf,
     LinearLeafCoefficientsPayload, LinearLeafEntry, LrSchedule, MAX_PL_REGRESSORS, MISSING_BIN_U8,
     MODEL_FORMAT_V1, ModelArtifactSection, ModelMetadata, ModelSectionKind, MorphConfig,
-    MorphMetadataPayload, MorphPrecomputed, NativeCategoricalSplitsPayload, NodeSlice, NodeStats,
-    PartitionResult, SplitCandidate, TrainParams, TrainingDataset, TreeGrowth,
-    decode_optional_categorical_state_section_v1, decode_optional_dro_metadata_artifact_section,
+    MorphMetadataPayload, MorphPrecomputed, NativeCategoricalSplitsPayload, NeutralizationKind,
+    NodeSlice, NodeStats, PartitionResult, SplitCandidate, TrainParams, TrainingDataset,
+    TreeGrowth, decode_optional_categorical_state_section_v1,
+    decode_optional_dro_metadata_artifact_section,
     decode_optional_linear_leaf_coefficients_section,
     decode_optional_morph_metadata_artifact_section,
     decode_optional_native_categorical_splits_section, deserialize_model_artifact_v1,
@@ -255,6 +256,19 @@ fn projected_row_value(exposures: &[f32], coefficients: &[f64]) -> f64 {
         .zip(coefficients.iter())
         .map(|(factor, coefficient)| f64::from(*factor) * coefficient)
         .sum::<f64>()
+}
+
+fn apply_pre_target_neutralization(
+    dataset: &mut TrainingDataset,
+    ridge_lambda: f32,
+) -> EngineResult<()> {
+    let exposures = dataset.factor_exposures.as_ref().ok_or_else(|| {
+        EngineError::ContractViolation(
+            "factor_exposures are required when neutralization is active".to_string(),
+        )
+    })?;
+    FactorProjector::new(exposures, dataset.sample_weights.as_deref(), ridge_lambda)?
+        .residualize_values_in_place(&mut dataset.targets)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -679,6 +693,11 @@ pub trait ObjectiveOps {
     fn supports_leaf_refinement(&self) -> bool {
         true
     }
+
+    /// Whether pre-target factor neutralization is valid for this objective.
+    fn supports_pre_target_neutralization(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -813,6 +832,10 @@ impl ObjectiveOps for SquaredErrorObjective {
         sample_weights: Option<&[f32]>,
     ) -> EngineResult<f32> {
         squared_error_loss(predictions, targets, sample_weights)
+    }
+
+    fn supports_pre_target_neutralization(&self) -> bool {
+        true
     }
 }
 
@@ -2478,28 +2501,41 @@ impl Trainer {
     ) -> EngineResult<FitContractEvaluation> {
         validate_train_params(&self.params)?;
         validate_training_dataset(dataset)?;
+        validate_neutralization_fit_contract(&self.params, dataset, objective)?;
 
-        if self.params.neutralization_config.is_some() && dataset.factor_exposures.is_none() {
-            return Err(EngineError::ContractViolation(
-                "factor_exposures are required when neutralization_config is set".to_string(),
-            ));
-        }
+        let owned_dataset = prepare_pre_target_training_dataset(&self.params, dataset)?;
+        let active_dataset = owned_dataset.as_ref().unwrap_or(dataset);
 
-        let baseline_prediction =
-            objective.initial_prediction(&dataset.targets, dataset.sample_weights.as_deref())?;
+        let baseline_prediction = objective.initial_prediction(
+            &active_dataset.targets,
+            active_dataset.sample_weights.as_deref(),
+        )?;
         if !baseline_prediction.is_finite() {
             return Err(EngineError::ContractViolation(
                 "objective returned non-finite initial prediction".to_string(),
             ));
         }
 
-        let predictions = vec![baseline_prediction; dataset.row_count()];
-        let gradients = objective.compute_gradients(
+        let predictions = vec![baseline_prediction; active_dataset.row_count()];
+        let mut gradients = objective.compute_gradients(
             &predictions,
-            &dataset.targets,
-            dataset.sample_weights.as_deref(),
+            &active_dataset.targets,
+            active_dataset.sample_weights.as_deref(),
         )?;
-        validate_gradient_pairs(&gradients, dataset.row_count())?;
+        if let Some(config) = gradient_neutralization_config(&self.params) {
+            let exposures = active_dataset.factor_exposures.as_ref().ok_or_else(|| {
+                EngineError::ContractViolation(
+                    "factor_exposures are required when neutralization is active".to_string(),
+                )
+            })?;
+            FactorProjector::new(
+                exposures,
+                active_dataset.sample_weights.as_deref(),
+                config.ridge_lambda,
+            )?
+            .project_gradient_pairs_in_place(&mut gradients)?;
+        }
+        validate_gradient_pairs(&gradients, active_dataset.row_count())?;
 
         Ok(FitContractEvaluation {
             baseline_prediction,
@@ -3604,12 +3640,32 @@ impl Trainer {
                 ));
             }
         }
+        validate_train_params(&self.params)?;
+        validate_training_dataset(dataset)?;
+        validate_neutralization_fit_contract(&self.params, dataset, objective)?;
+        let owned_dataset = prepare_pre_target_training_dataset(&self.params, dataset)?;
+        let active_dataset = owned_dataset.as_ref().unwrap_or(dataset);
         let fit_contract = self.validate_fit_contract(dataset, objective)?;
+        let gradient_projector = if let Some(config) = gradient_neutralization_config(&self.params)
+        {
+            let exposures = active_dataset.factor_exposures.as_ref().ok_or_else(|| {
+                EngineError::ContractViolation(
+                    "factor_exposures are required when neutralization is active".to_string(),
+                )
+            })?;
+            Some(FactorProjector::new(
+                exposures,
+                active_dataset.sample_weights.as_deref(),
+                config.ridge_lambda,
+            )?)
+        } else {
+            None
+        };
         let sampling_seed_base = sampling_seed_base(self.params.seed, self.params.deterministic);
         let split_options = split_selection_options_for_training(
             &self.params,
             execution.policy_mode,
-            dataset,
+            active_dataset,
             binned_matrix,
         )?;
 
@@ -3625,10 +3681,10 @@ impl Trainer {
                 (fit_contract.baseline_prediction, Vec::new(), 0)
             };
         let raw_features_opt = Some((
-            &dataset.matrix.values as &[f32],
-            dataset.matrix.feature_count,
+            &active_dataset.matrix.values as &[f32],
+            active_dataset.matrix.feature_count,
         ));
-        let mut predictions = vec![baseline_prediction; dataset.row_count()];
+        let mut predictions = vec![baseline_prediction; active_dataset.row_count()];
         if !initial_stumps.is_empty() {
             apply_tree_to_binned_predictions(
                 &mut predictions,
@@ -3663,8 +3719,8 @@ impl Trainer {
         let mut stop_reason = IterationStopReason::CompletedRequestedRounds;
         let initial_loss = objective.loss(
             &predictions,
-            &dataset.targets,
-            dataset.sample_weights.as_deref(),
+            &active_dataset.targets,
+            active_dataset.sample_weights.as_deref(),
         )?;
         let initial_validation_loss = if let Some(validation_ref) = validation {
             let validation_predictions_ref = validation_predictions.as_ref().ok_or_else(|| {
@@ -3703,7 +3759,7 @@ impl Trainer {
         let mut best_custom_metric_round: Option<usize> = None;
         let mut custom_metric_no_improvement_rounds = 0_usize;
 
-        let mut gradient_buffer: Vec<GradientPair> = Vec::with_capacity(dataset.row_count());
+        let mut gradient_buffer: Vec<GradientPair> = Vec::with_capacity(active_dataset.row_count());
 
         // Build MorphState for the duration of training when morph_config is set.
         // `total_iterations` corresponds to the round cap (including any warm-start
@@ -3718,7 +3774,7 @@ impl Trainer {
             // Offset round_index for sampling seeds and tree IDs when warm-starting
             let effective_round_index = round_index + round_index_offset;
             let root_row_indices = sampled_row_indices(
-                dataset.row_count(),
+                active_dataset.row_count(),
                 controls.row_subsample,
                 sampling_seed_base,
                 effective_round_index as u64,
@@ -3732,14 +3788,17 @@ impl Trainer {
             let sampled_row_count = root_row_indices.len();
             objective.compute_gradients_into(
                 &predictions,
-                &dataset.targets,
-                dataset.sample_weights.as_deref(),
+                &active_dataset.targets,
+                active_dataset.sample_weights.as_deref(),
                 &mut gradient_buffer,
             )?;
+            if let Some(projector) = &gradient_projector {
+                projector.project_gradient_pairs_in_place(&mut gradient_buffer)?;
+            }
             let gradients = &gradient_buffer;
-            validate_gradient_pair_length(gradients, dataset.row_count())?;
+            validate_gradient_pair_length(gradients, active_dataset.row_count())?;
             if cfg!(debug_assertions) {
-                validate_gradient_pairs(gradients, dataset.row_count())?;
+                validate_gradient_pairs(gradients, active_dataset.row_count())?;
             }
 
             // Update EMA stats from this round's gradients before tree-building so
@@ -3759,7 +3818,7 @@ impl Trainer {
                     lr: ms.lr_for_iter(effective_round_index),
                 });
 
-            let raw_fv = &dataset.matrix.values;
+            let raw_fv = &active_dataset.matrix.values;
             let (candidate_round_stumps, round_rejection_reason) =
                 if self.params.tree_growth == TreeGrowth::Leaf {
                     build_tree_leaf_wise(
@@ -3816,8 +3875,8 @@ impl Trainer {
 
             let candidate_loss = objective.loss(
                 &candidate_predictions,
-                &dataset.targets,
-                dataset.sample_weights.as_deref(),
+                &active_dataset.targets,
+                active_dataset.sample_weights.as_deref(),
             )?;
             let loss_improvement = current_loss - candidate_loss;
             // Ranking objectives (LambdaMART, pairwise, XeNDCG, YetiRank,
@@ -4022,15 +4081,15 @@ impl Trainer {
         if experiment_leaf_refinement_enabled() && objective.supports_leaf_refinement() {
             refine_regression_leaf_values(
                 baseline_prediction,
-                &dataset.targets,
-                dataset.sample_weights.as_deref(),
+                &active_dataset.targets,
+                active_dataset.sample_weights.as_deref(),
                 binned_matrix,
                 &mut stumps,
                 &stumps_per_completed_round,
                 controls.max_abs_leaf_value,
             )?;
 
-            let mut refined_predictions = vec![baseline_prediction; dataset.row_count()];
+            let mut refined_predictions = vec![baseline_prediction; active_dataset.row_count()];
             apply_tree_to_binned_predictions(
                 &mut refined_predictions,
                 binned_matrix,
@@ -4039,8 +4098,8 @@ impl Trainer {
             )?;
             current_loss = objective.loss(
                 &refined_predictions,
-                &dataset.targets,
-                dataset.sample_weights.as_deref(),
+                &active_dataset.targets,
+                active_dataset.sample_weights.as_deref(),
             )?;
             if let Some(last_loss) = loss_per_completed_round.last_mut() {
                 *last_loss = current_loss;
@@ -4079,7 +4138,7 @@ impl Trainer {
             .map(|config| DroMetadataPayload { config });
         let model = TrainedModel {
             baseline_prediction,
-            feature_count: dataset.matrix.feature_count,
+            feature_count: active_dataset.matrix.feature_count,
             stumps,
             categorical_state: None,
             node_debug_stats: None,
@@ -4121,6 +4180,68 @@ impl Trainer {
     ) -> EngineResult<TrainRoundSummary> {
         self.fit_one_round(dataset, binned_matrix, backend, objective)
     }
+}
+
+fn validate_neutralization_fit_contract<O: ObjectiveOps>(
+    params: &TrainParams,
+    dataset: &TrainingDataset,
+    objective: &O,
+) -> EngineResult<()> {
+    let Some(config) = params.neutralization_config else {
+        if dataset.factor_exposures.is_some() {
+            return Err(EngineError::ContractViolation(
+                "factor_exposures were provided but neutralization='none'".to_string(),
+            ));
+        }
+        return Ok(());
+    };
+    let exposures = dataset.factor_exposures.as_ref().ok_or_else(|| {
+        EngineError::ContractViolation(
+            "factor_exposures are required when neutralization is active".to_string(),
+        )
+    })?;
+    if exposures.row_count != dataset.row_count() {
+        return Err(EngineError::ContractViolation(format!(
+            "factor_exposures row_count {} does not match training row_count {}",
+            exposures.row_count,
+            dataset.row_count()
+        )));
+    }
+    if config.kind == NeutralizationKind::PreTarget
+        && !objective.supports_pre_target_neutralization()
+    {
+        return Err(EngineError::ContractViolation(
+            "neutralization='pre_target' is only supported for GBMRegressor squared-error training"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn prepare_pre_target_training_dataset(
+    params: &TrainParams,
+    dataset: &TrainingDataset,
+) -> EngineResult<Option<TrainingDataset>> {
+    let Some(config) = params.neutralization_config else {
+        return Ok(None);
+    };
+    if config.kind != NeutralizationKind::PreTarget {
+        return Ok(None);
+    }
+    let mut owned_dataset = dataset.clone();
+    apply_pre_target_neutralization(&mut owned_dataset, config.ridge_lambda)?;
+    Ok(Some(owned_dataset))
+}
+
+fn gradient_neutralization_config(
+    params: &TrainParams,
+) -> Option<alloygbm_core::FactorNeutralizationConfig> {
+    params.neutralization_config.filter(|config| {
+        matches!(
+            config.kind,
+            NeutralizationKind::PerRoundGradient | NeutralizationKind::SplitPenalty
+        )
+    })
 }
 
 fn validate_gradient_pairs(gradients: &[GradientPair], row_count: usize) -> EngineResult<()> {
@@ -7141,6 +7262,9 @@ mod tests {
     use super::*;
 
     struct MockBackend;
+    struct GradientNeutralizationCheckingBackend {
+        exposures: FactorExposureMatrix,
+    }
     struct BadObjective;
 
     fn sample_dataset() -> TrainingDataset {
@@ -7177,6 +7301,73 @@ mod tests {
             ],
         )
         .expect("binned matrix is valid")
+    }
+
+    fn factor_dominated_dataset() -> TrainingDataset {
+        TrainingDataset {
+            matrix: alloygbm_core::DatasetMatrix::new(
+                8,
+                2,
+                vec![
+                    0.0, 0.0, //
+                    1.0, 0.0, //
+                    2.0, 0.0, //
+                    3.0, 0.0, //
+                    0.0, 1.0, //
+                    1.0, 1.0, //
+                    2.0, 1.0, //
+                    3.0, 1.0, //
+                ],
+            )
+            .expect("matrix is valid"),
+            targets: vec![-4.0, -3.0, -2.0, -1.0, 1.0, 2.0, 3.0, 4.0],
+            sample_weights: None,
+            time_index: None,
+            group_id: None,
+            factor_exposures: Some(
+                FactorExposureMatrix::new(8, 1, vec![-4.0, -3.0, -2.0, -1.0, 1.0, 2.0, 3.0, 4.0])
+                    .expect("factor exposures are valid"),
+            ),
+        }
+    }
+
+    fn sample_binned_matrix_for_dataset(dataset: &TrainingDataset) -> BinnedMatrix {
+        let mut bins = Vec::with_capacity(dataset.row_count() * dataset.matrix.feature_count);
+        for row in 0..dataset.row_count() {
+            for feature in 0..dataset.matrix.feature_count {
+                let value = dataset.matrix.values[row * dataset.matrix.feature_count + feature];
+                bins.push(value as u8);
+            }
+        }
+        BinnedMatrix::new(dataset.row_count(), dataset.matrix.feature_count, 3, bins)
+            .expect("binned matrix is valid")
+    }
+
+    fn factor_dot(exposures: &FactorExposureMatrix, values: &[f32]) -> f32 {
+        assert_eq!(exposures.factor_count, 1);
+        exposures
+            .values
+            .iter()
+            .zip(values.iter())
+            .map(|(factor, value)| *factor * *value)
+            .sum()
+    }
+
+    fn gradient_factor_dot(exposures: &FactorExposureMatrix, gradients: &[GradientPair]) -> f32 {
+        assert_eq!(exposures.factor_count, 1);
+        exposures
+            .values
+            .iter()
+            .zip(gradients.iter())
+            .map(|(factor, gradient)| *factor * gradient.grad)
+            .sum()
+    }
+
+    fn apply_pre_target_neutralization_for_test(
+        dataset: &mut TrainingDataset,
+        ridge_lambda: f32,
+    ) -> EngineResult<()> {
+        apply_pre_target_neutralization(dataset, ridge_lambda)
     }
 
     fn sample_wide_small_dataset() -> TrainingDataset {
@@ -7348,6 +7539,44 @@ mod tests {
         }
     }
 
+    impl BackendOps for GradientNeutralizationCheckingBackend {
+        fn build_histograms(
+            &self,
+            binned_matrix: &BinnedMatrix,
+            gradients: &[GradientPair],
+            node: &NodeSlice,
+            feature_tiles: &[FeatureTile],
+        ) -> EngineResult<HistogramBundle> {
+            let dot = gradient_factor_dot(&self.exposures, gradients);
+            assert!(
+                dot.abs() < 1e-3,
+                "factor dot after per-round gradient projection was {dot}"
+            );
+            MockBackend.build_histograms(binned_matrix, gradients, node, feature_tiles)
+        }
+
+        fn best_split(&self, histograms: &HistogramBundle) -> EngineResult<Option<SplitCandidate>> {
+            MockBackend.best_split(histograms)
+        }
+
+        fn apply_split(
+            &self,
+            binned_matrix: &BinnedMatrix,
+            node: &NodeSlice,
+            split: &SplitCandidate,
+        ) -> EngineResult<PartitionResult> {
+            MockBackend.apply_split(binned_matrix, node, split)
+        }
+
+        fn reduce_sums(
+            &self,
+            gradients: &[GradientPair],
+            row_indices: &[u32],
+        ) -> EngineResult<NodeStats> {
+            MockBackend.reduce_sums(gradients, row_indices)
+        }
+    }
+
     impl ObjectiveOps for BadObjective {
         fn objective_name(&self) -> &str {
             "bad"
@@ -7421,6 +7650,37 @@ mod tests {
         .expect("neutralization params are valid");
         let result = trainer.validate_fit_contract(&sample_dataset(), &SquaredErrorObjective);
         assert!(matches!(result, Err(EngineError::ContractViolation(_))));
+    }
+
+    #[test]
+    fn per_round_gradient_neutralization_trains_regression() {
+        let dataset = factor_dominated_dataset();
+        let binned = sample_binned_matrix_for_dataset(&dataset);
+        let backend = GradientNeutralizationCheckingBackend {
+            exposures: dataset.factor_exposures.as_ref().unwrap().clone(),
+        };
+        let params = TrainParams {
+            neutralization_config: Some(alloygbm_core::FactorNeutralizationConfig {
+                kind: alloygbm_core::NeutralizationKind::PerRoundGradient,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            }),
+            ..TrainParams::default()
+        };
+        let model = Trainer::new(params)
+            .unwrap()
+            .fit_iterations(&dataset, &binned, &backend, &SquaredErrorObjective, 5)
+            .unwrap();
+        assert_eq!(model.rounds_completed(), 5);
+    }
+
+    #[test]
+    fn pre_target_neutralization_reduces_target_factor_dot() {
+        let mut dataset = factor_dominated_dataset();
+        let before = factor_dot(dataset.factor_exposures.as_ref().unwrap(), &dataset.targets);
+        apply_pre_target_neutralization_for_test(&mut dataset, 1e-6).unwrap();
+        let after = factor_dot(dataset.factor_exposures.as_ref().unwrap(), &dataset.targets);
+        assert!(after.abs() < before.abs() * 0.01);
     }
 
     #[test]
