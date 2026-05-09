@@ -51,6 +51,65 @@ pub enum LeafSolverKind {
     Dro,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NeutralizationKind {
+    None,
+    PreTarget,
+    PerRoundGradient,
+    SplitPenalty,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FactorNeutralizationConfig {
+    pub kind: NeutralizationKind,
+    pub ridge_lambda: f32,
+    pub split_penalty: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FactorExposureMatrix {
+    pub row_count: usize,
+    pub factor_count: usize,
+    pub values: Vec<f32>,
+}
+
+impl FactorExposureMatrix {
+    pub fn new(row_count: usize, factor_count: usize, values: Vec<f32>) -> CoreResult<Self> {
+        if row_count == 0 {
+            return Err(CoreError::Validation(
+                "factor_exposures row_count must be greater than 0".to_string(),
+            ));
+        }
+        if factor_count == 0 {
+            return Err(CoreError::Validation(
+                "factor_exposures factor_count must be greater than 0".to_string(),
+            ));
+        }
+        if values.len() != row_count * factor_count {
+            return Err(CoreError::Validation(format!(
+                "factor_exposures values length {} does not match row_count * factor_count {}",
+                values.len(),
+                row_count * factor_count
+            )));
+        }
+        if values.iter().any(|v| !v.is_finite()) {
+            return Err(CoreError::Validation(
+                "factor_exposures must contain only finite values".to_string(),
+            ));
+        }
+        Ok(Self {
+            row_count,
+            factor_count,
+            values,
+        })
+    }
+
+    pub fn row(&self, row_index: usize) -> &[f32] {
+        let start = row_index * self.factor_count;
+        &self.values[start..start + self.factor_count]
+    }
+}
+
 /// Uncertainty metric used by the DRO leaf solver.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum DroMetric {
@@ -314,6 +373,7 @@ pub struct TrainParams {
     pub leaf_solver: LeafSolverKind,
     /// Configuration for `leaf_solver == Dro`.
     pub dro_config: Option<DroConfig>,
+    pub neutralization_config: Option<FactorNeutralizationConfig>,
 }
 
 impl Default for TrainParams {
@@ -340,6 +400,7 @@ impl Default for TrainParams {
             leaf_model: LeafModelKind::Constant,
             leaf_solver: LeafSolverKind::Standard,
             dro_config: None,
+            neutralization_config: None,
         }
     }
 }
@@ -500,6 +561,7 @@ pub struct TrainingDataset {
     pub sample_weights: Option<Vec<f32>>,
     pub time_index: Option<Vec<i64>>,
     pub group_id: Option<Vec<u32>>,
+    pub factor_exposures: Option<FactorExposureMatrix>,
 }
 
 impl TrainingDataset {
@@ -2183,6 +2245,29 @@ pub fn validate_train_params(params: &TrainParams) -> CoreResult<()> {
         ));
     }
 
+    if let Some(config) = params.neutralization_config {
+        if config.kind == NeutralizationKind::None {
+            return Err(CoreError::Validation(
+                "neutralization_config must be None when neutralization kind is None".to_string(),
+            ));
+        }
+        if !config.ridge_lambda.is_finite() || config.ridge_lambda < 0.0 {
+            return Err(CoreError::Validation(
+                "factor_neutralization_lambda must be finite and >= 0".to_string(),
+            ));
+        }
+        if !config.split_penalty.is_finite() || config.split_penalty < 0.0 {
+            return Err(CoreError::Validation(
+                "factor_penalty must be finite and >= 0".to_string(),
+            ));
+        }
+        if config.kind != NeutralizationKind::SplitPenalty && config.split_penalty != 0.0 {
+            return Err(CoreError::Validation(
+                "factor_penalty is only valid with neutralization='split_penalty'".to_string(),
+            ));
+        }
+    }
+
     if params.leaf_solver == LeafSolverKind::Dro {
         if params.leaf_model != LeafModelKind::Constant {
             return Err(CoreError::InvalidConfig(
@@ -2936,6 +3021,48 @@ mod tests {
     }
 
     #[test]
+    fn train_params_default_has_no_neutralization_config() {
+        let params = TrainParams::default();
+        assert!(params.neutralization_config.is_none());
+    }
+
+    #[test]
+    fn validates_factor_exposure_matrix_shape_and_finiteness() {
+        assert!(FactorExposureMatrix::new(2, 2, vec![1.0, 0.0, 0.0, 1.0]).is_ok());
+        assert!(FactorExposureMatrix::new(0, 2, vec![]).is_err());
+        assert!(FactorExposureMatrix::new(2, 0, vec![]).is_err());
+        assert!(FactorExposureMatrix::new(2, 2, vec![1.0, f32::NAN, 0.0, 1.0]).is_err());
+        assert!(FactorExposureMatrix::new(2, 2, vec![1.0, 0.0, 1.0]).is_err());
+    }
+
+    #[test]
+    fn validates_neutralization_config_contract() {
+        let mut params = TrainParams {
+            neutralization_config: Some(FactorNeutralizationConfig {
+                kind: NeutralizationKind::PerRoundGradient,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            }),
+            ..TrainParams::default()
+        };
+        assert!(validate_train_params(&params).is_ok());
+
+        params.neutralization_config = Some(FactorNeutralizationConfig {
+            kind: NeutralizationKind::SplitPenalty,
+            ridge_lambda: 1e-6,
+            split_penalty: 0.1,
+        });
+        assert!(validate_train_params(&params).is_ok());
+
+        params.neutralization_config = Some(FactorNeutralizationConfig {
+            kind: NeutralizationKind::SplitPenalty,
+            ridge_lambda: 1e-6,
+            split_penalty: -0.1,
+        });
+        assert!(validate_train_params(&params).is_err());
+    }
+
+    #[test]
     fn rejects_invalid_learning_rate() {
         let params = TrainParams {
             learning_rate: 0.0,
@@ -3039,6 +3166,7 @@ mod tests {
             sample_weights: None,
             time_index: None,
             group_id: None,
+            factor_exposures: None,
         };
         assert!(matches!(
             validate_training_dataset(&dataset),
