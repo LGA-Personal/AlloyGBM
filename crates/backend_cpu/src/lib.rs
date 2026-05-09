@@ -2014,6 +2014,7 @@ mod tests {
             sample_weights: None,
             time_index: None,
             group_id: None,
+            factor_exposures: None,
         }
     }
 

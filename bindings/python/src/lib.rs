@@ -1232,6 +1232,7 @@ fn prepare_validation_matrices_from_dense_values(
                 sample_weights,
                 time_index,
                 group_id,
+                factor_exposures: None,
             };
             let binned_matrix = BinnedMatrix::new_u16(
                 row_count,
@@ -1281,6 +1282,7 @@ fn prepare_validation_matrices_from_dense_values(
                 sample_weights,
                 time_index,
                 group_id,
+                factor_exposures: None,
             };
             let binned_matrix = BinnedMatrix::new(
                 row_count,
@@ -1318,6 +1320,7 @@ fn prepare_validation_matrices_from_dense_values(
             sample_weights,
             time_index,
             group_id,
+            factor_exposures: None,
         };
         let binned_matrix = BinnedMatrix::new_u16(
             row_count,
@@ -1350,6 +1353,7 @@ fn prepare_validation_matrices_from_dense_values(
             sample_weights,
             time_index,
             group_id,
+            factor_exposures: None,
         };
         let binned_matrix = BinnedMatrix::new(
             row_count,
@@ -1864,6 +1868,7 @@ fn prepare_training_matrices_from_dense_values(
             sample_weights,
             time_index,
             group_id,
+            factor_exposures: None,
         };
         let binned_matrix = BinnedMatrix::new_u16(
             row_count,
@@ -1922,6 +1927,7 @@ fn prepare_training_matrices_from_dense_values(
             sample_weights,
             time_index,
             group_id,
+            factor_exposures: None,
         };
         let binned_matrix = BinnedMatrix::new(
             row_count,
@@ -2252,6 +2258,7 @@ fn apply_categorical_encoding_to_training_matrices_multi(
                 sample_weights: prepared.dataset.sample_weights,
                 time_index: prepared.dataset.time_index,
                 group_id: prepared.dataset.group_id,
+                factor_exposures: prepared.dataset.factor_exposures,
             },
             binned_matrix: BinnedMatrix::new(row_count, feature_count, max_bin, bins)?,
             metadata: prepared.metadata,
@@ -2329,6 +2336,7 @@ fn apply_categorical_encoding_to_validation_matrices_multi(
             sample_weights: prepared.dataset.sample_weights,
             time_index: prepared.dataset.time_index,
             group_id: prepared.dataset.group_id,
+            factor_exposures: prepared.dataset.factor_exposures,
         },
         binned_matrix: BinnedMatrix::new(row_count, feature_count, max_bin, bins)?,
         metadata: prepared.metadata,
@@ -4323,6 +4331,7 @@ mod tests {
             sample_weights: None,
             time_index: None,
             group_id: None,
+            factor_exposures: None,
         }
     }
 

@@ -1354,6 +1354,7 @@ mod tests {
             sample_weights: None,
             time_index: None,
             group_id: None,
+            factor_exposures: None,
         }
     }
 
@@ -1657,6 +1658,7 @@ mod tests {
             sample_weights: None,
             time_index: None,
             group_id: None,
+            factor_exposures: None,
         }
     }
 
@@ -2011,6 +2013,7 @@ mod tests {
             sample_weights: None,
             time_index: None,
             group_id: None,
+            factor_exposures: None,
         };
 
         // Build a 4-bin binned matrix.

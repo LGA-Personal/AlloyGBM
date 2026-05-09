@@ -4115,6 +4115,7 @@ fn apply_single_categorical_target_encoding(
         sample_weights: dataset.sample_weights.clone(),
         time_index: dataset.time_index.clone(),
         group_id: dataset.group_id.clone(),
+        factor_exposures: dataset.factor_exposures.clone(),
     };
 
     let mut encoded_bins_payload = binned_matrix.bins.clone();
@@ -6967,6 +6968,7 @@ mod tests {
             sample_weights: None,
             time_index: None,
             group_id: None,
+            factor_exposures: None,
         }
     }
 
@@ -7002,6 +7004,7 @@ mod tests {
             sample_weights: None,
             time_index: None,
             group_id: None,
+            factor_exposures: None,
         }
     }
 
@@ -7037,6 +7040,7 @@ mod tests {
             sample_weights: None,
             time_index: None,
             group_id: None,
+            factor_exposures: None,
         }
     }
 
@@ -7545,6 +7549,7 @@ mod tests {
             sample_weights: None,
             time_index: None,
             group_id: None,
+            factor_exposures: None,
         }
     }
 
