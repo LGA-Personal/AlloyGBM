@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect as _inspect
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -52,6 +53,16 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
 
     _num_classes_for_training: int | None
     """Passed to Rust bridge for multiclass_softmax. None for binary."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        if kwargs.get("neutralization") == "pre_target":
+            raise ValueError(
+                "neutralization='pre_target' is only supported for GBMRegressor "
+                "squared-error training"
+            )
+        super().__init__(*args, **kwargs)
+
+    __init__.__signature__ = _inspect.signature(GBMRegressor.__init__)  # type: ignore[attr-defined]
 
     def _objective_name(self) -> str:
         # Custom callable objective takes priority over auto-detection.
@@ -340,9 +351,21 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
             f"leaf_model='{self.leaf_model}', "
             f"leaf_solver='{self.leaf_solver}', "
             f"dro_radius={self.dro_radius}, "
-            f"dro_metric='{self.dro_metric}'"
+            f"dro_metric='{self.dro_metric}', "
+            f"neutralization='{self.neutralization}', "
+            f"factor_neutralization_lambda={self.factor_neutralization_lambda}, "
+            f"factor_penalty={self.factor_penalty}"
             ")"
         )
+
+    def set_params(self, **params: object) -> "GBMClassifier":
+        if params.get("neutralization") == "pre_target":
+            raise ValueError(
+                "neutralization='pre_target' is only supported for GBMRegressor "
+                "squared-error training"
+            )
+        super().set_params(**params)
+        return self
 
     def __sklearn_tags__(self):
         try:

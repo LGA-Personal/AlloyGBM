@@ -55,6 +55,11 @@ class GBMRanker(GBMRegressor):
                 f"ranking_objective must be one of {sorted(_RANKING_OBJECTIVES)}, "
                 f"got {ranking_objective!r}"
             )
+        if kwargs.get("neutralization") == "pre_target":
+            raise ValueError(
+                "neutralization='pre_target' is only supported for GBMRegressor "
+                "squared-error training"
+            )
         super().__init__(**kwargs)
         self.ranking_objective = ranking_objective
 
@@ -288,6 +293,11 @@ class GBMRanker(GBMRegressor):
         return params
 
     def set_params(self, **params: object) -> "GBMRanker":
+        if params.get("neutralization") == "pre_target":
+            raise ValueError(
+                "neutralization='pre_target' is only supported for GBMRegressor "
+                "squared-error training"
+            )
         if "ranking_objective" in params:
             val = params.pop("ranking_objective")
             if val not in _RANKING_OBJECTIVES:

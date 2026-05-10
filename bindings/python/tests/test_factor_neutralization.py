@@ -56,6 +56,28 @@ class FactorNeutralizationTests(unittest.TestCase):
                 x, y, group=np.repeat([0, 1, 2], 8), factor_exposures=f
             )
 
+    def test_classifier_repr_includes_neutralization_params(self):
+        model = GBMClassifier(
+            neutralization="per_round_gradient",
+            factor_neutralization_lambda=1e-4,
+        )
+        text = repr(model)
+        self.assertIn("neutralization='per_round_gradient'", text)
+        self.assertIn("factor_neutralization_lambda=0.0001", text)
+        self.assertIn("factor_penalty=0.0", text)
+
+    def test_pre_target_rejected_by_classifier_and_ranker_constructors(self):
+        with self.assertRaises(ValueError):
+            GBMClassifier(neutralization="pre_target")
+        with self.assertRaises(ValueError):
+            GBMRanker(neutralization="pre_target")
+
+    def test_pre_target_rejected_by_classifier_and_ranker_set_params(self):
+        with self.assertRaises(ValueError):
+            GBMClassifier().set_params(neutralization="pre_target")
+        with self.assertRaises(ValueError):
+            GBMRanker().set_params(neutralization="pre_target")
+
     def test_pickle_preserves_params_and_predictions(self):
         x, y, f = factor_data()
         model = GBMRegressor(
