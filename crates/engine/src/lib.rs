@@ -7463,11 +7463,17 @@ pub struct MultiClassIterationRunSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     struct MockBackend;
     struct GradientNeutralizationCheckingBackend {
         exposures: FactorExposureMatrix,
         weights: Option<Vec<f32>>,
+    }
+    struct MorphGradientNeutralizationCheckingBackend {
+        exposures: FactorExposureMatrix,
+        raw_factor_dot: f32,
+        saw_morph_split: Cell<bool>,
     }
     struct EncodedFeatureCheckingBackend {
         feature_index: usize,
@@ -7853,6 +7859,65 @@ mod tests {
         }
     }
 
+    impl BackendOps for MorphGradientNeutralizationCheckingBackend {
+        fn build_histograms(
+            &self,
+            binned_matrix: &BinnedMatrix,
+            gradients: &[GradientPair],
+            node: &NodeSlice,
+            feature_tiles: &[FeatureTile],
+        ) -> EngineResult<HistogramBundle> {
+            assert!(
+                self.raw_factor_dot.abs() > 1.0,
+                "test fixture should start with factor-loaded gradients, got {}",
+                self.raw_factor_dot
+            );
+            let projected_dot = weighted_gradient_factor_dot(&self.exposures, None, gradients);
+            assert!(
+                projected_dot.abs() < self.raw_factor_dot.abs() * 0.001,
+                "Morph split path saw unprojected factor dot: before={}, after={}",
+                self.raw_factor_dot,
+                projected_dot
+            );
+            MockBackend.build_histograms(binned_matrix, gradients, node, feature_tiles)
+        }
+
+        fn best_split(&self, histograms: &HistogramBundle) -> EngineResult<Option<SplitCandidate>> {
+            MockBackend.best_split(histograms)
+        }
+
+        fn best_split_morph_with_factor_context(
+            &self,
+            histograms: &HistogramBundle,
+            _options: SplitSelectionOptions,
+            _feature_weights: &[f32],
+            _categorical_features: &[CategoricalFeatureInfo],
+            _morph: &MorphContext,
+            factor_context: Option<&FactorSplitContext<'_>>,
+        ) -> EngineResult<Option<SplitCandidate>> {
+            assert!(factor_context.is_none());
+            self.saw_morph_split.set(true);
+            MockBackend.best_split(histograms)
+        }
+
+        fn apply_split(
+            &self,
+            binned_matrix: &BinnedMatrix,
+            node: &NodeSlice,
+            split: &SplitCandidate,
+        ) -> EngineResult<PartitionResult> {
+            MockBackend.apply_split(binned_matrix, node, split)
+        }
+
+        fn reduce_sums(
+            &self,
+            gradients: &[GradientPair],
+            row_indices: &[u32],
+        ) -> EngineResult<NodeStats> {
+            MockBackend.reduce_sums(gradients, row_indices)
+        }
+    }
+
     impl BackendOps for EncodedFeatureCheckingBackend {
         fn build_histograms(
             &self,
@@ -8080,6 +8145,54 @@ mod tests {
             .unwrap()
             .fit_iterations(&dataset, &binned, &backend, &SquaredErrorObjective, 5)
             .unwrap();
+    }
+
+    #[test]
+    fn morph_neutralization_split_path_sees_per_round_projected_gradients() {
+        let dataset = factor_dominated_dataset();
+        let binned = sample_binned_matrix_for_dataset(&dataset);
+        let baseline = SquaredErrorObjective
+            .initial_prediction(&dataset.targets, dataset.sample_weights.as_deref())
+            .expect("baseline should compute");
+        let predictions = vec![baseline; dataset.row_count()];
+        let raw_gradients = SquaredErrorObjective
+            .compute_gradients(
+                &predictions,
+                &dataset.targets,
+                dataset.sample_weights.as_deref(),
+            )
+            .expect("raw gradients should compute");
+        let raw_factor_dot = weighted_gradient_factor_dot(
+            dataset.factor_exposures.as_ref().unwrap(),
+            dataset.sample_weights.as_deref(),
+            &raw_gradients,
+        );
+        let backend = MorphGradientNeutralizationCheckingBackend {
+            exposures: dataset.factor_exposures.as_ref().unwrap().clone(),
+            raw_factor_dot,
+            saw_morph_split: Cell::new(false),
+        };
+        let params = TrainParams {
+            neutralization_config: Some(alloygbm_core::FactorNeutralizationConfig {
+                kind: alloygbm_core::NeutralizationKind::PerRoundGradient,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            }),
+            morph_config: Some(MorphConfig::default()),
+            ..TrainParams::default()
+        };
+
+        let model = Trainer::new(params)
+            .unwrap()
+            .fit_iterations(&dataset, &binned, &backend, &SquaredErrorObjective, 3)
+            .unwrap();
+
+        assert!(
+            backend.saw_morph_split.get(),
+            "Morph split path was not used"
+        );
+        assert_eq!(model.rounds_completed(), 3);
+        assert!(model.morph_metadata.is_some());
     }
 
     #[test]

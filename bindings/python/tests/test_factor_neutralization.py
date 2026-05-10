@@ -64,6 +64,19 @@ class FactorNeutralizationTests(unittest.TestCase):
         model.fit(x, y, factor_exposures=f)
         self.assertEqual(np.asarray(model.predict(x)).shape, (len(x),))
 
+    def test_factor_neutralization_with_dro_and_morph(self):
+        x, y, f = factor_data()
+        model = GBMRegressor(
+            neutralization="per_round_gradient",
+            leaf_solver="dro",
+            dro_radius=0.01,
+            training_mode="morph",
+            n_estimators=5,
+            seed=2,
+        )
+        model.fit(x, y, factor_exposures=f)
+        self.assertEqual(np.asarray(model.predict(x)).shape, (len(x),))
+
     def test_regressor_trains_with_split_penalty(self):
         x, y, f = factor_data()
         model = GBMRegressor(
@@ -74,6 +87,15 @@ class FactorNeutralizationTests(unittest.TestCase):
         )
         model.fit(x, y, factor_exposures=f)
         self.assertEqual(np.asarray(model.predict(x)).shape, (len(x),))
+
+    def test_split_penalty_rejects_linear_leaves(self):
+        x, y, f = factor_data()
+        with self.assertRaises(ValueError):
+            GBMRegressor(
+                neutralization="split_penalty",
+                factor_penalty=0.1,
+                leaf_model="linear",
+            ).fit(x, y, factor_exposures=f)
 
     def test_set_params_invalid_neutralization_combo_is_atomic(self):
         model = GBMRegressor(neutralization="split_penalty", factor_penalty=0.1)

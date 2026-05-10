@@ -2736,6 +2736,68 @@ mod tests {
     }
 
     #[test]
+    fn morph_neutralization_split_penalty_reduces_factor_loaded_gain() {
+        use alloygbm_core::{MorphConfig, MorphPrecomputed};
+        use alloygbm_engine::MorphContext;
+
+        let backend = CpuBackend;
+        let matrix = sample_binned_matrix();
+        let node = sample_node();
+        let histograms = backend
+            .build_histograms(
+                &matrix,
+                &sample_gradients(),
+                &node,
+                &[FeatureTile::new(0, 2).expect("feature tile is valid")],
+            )
+            .expect("histograms should build");
+        let exposures = FactorExposureMatrix::new(4, 1, vec![1.0, 1.0, -1.0, -1.0])
+            .expect("factor exposures are valid");
+        let cfg = MorphConfig {
+            morph_warmup_iters: 0,
+            balance_penalty: false,
+            ..MorphConfig::default()
+        };
+        let morph = MorphContext {
+            iteration: 10,
+            total_iterations: 100,
+            grad_mean: 0.0,
+            grad_std: 1.0,
+            config: cfg,
+            precomputed: MorphPrecomputed::for_iteration(10, &cfg),
+        };
+        let no_penalty = backend
+            .best_split_morph(
+                &histograms,
+                SplitSelectionOptions::default(),
+                &[],
+                &[],
+                &morph,
+            )
+            .expect("morph split search should succeed")
+            .expect("split should exist");
+        let factor_context = FactorSplitContext {
+            binned_matrix: &matrix,
+            exposures: &exposures,
+            row_indices: &node.row_indices,
+            factor_penalty: 0.1,
+        };
+        let penalized = backend
+            .best_split_morph_with_factor_context(
+                &histograms,
+                SplitSelectionOptions::default(),
+                &[],
+                &[],
+                &morph,
+                Some(&factor_context),
+            )
+            .expect("morph split search should succeed")
+            .expect("split should exist");
+
+        assert!(penalized.gain <= no_penalty.gain);
+    }
+
+    #[test]
     fn factor_split_penalty_formula_matches_expected() {
         let left_factor_sums = [3.0_f32, -1.0];
         let right_factor_sums = [-2.0_f32, 4.0];
