@@ -2794,7 +2794,19 @@ mod tests {
             .expect("morph split search should succeed")
             .expect("split should exist");
 
-        assert!(penalized.gain <= no_penalty.gain);
+        assert_eq!(penalized.feature_index, no_penalty.feature_index);
+        assert_eq!(penalized.threshold_bin, no_penalty.threshold_bin);
+        let expected_penalty =
+            factor_split_penalty(&[2.0], &[-2.0], -1.5, 1.5, 0.1, node.row_indices.len());
+        let observed_penalty = no_penalty.gain - penalized.gain;
+        assert!(
+            (observed_penalty - expected_penalty).abs() < 1e-6,
+            "expected Morph factor penalty {expected_penalty}, observed {observed_penalty}"
+        );
+        assert!(
+            observed_penalty > 0.5,
+            "factor context should strictly reduce Morph gain, observed {observed_penalty}"
+        );
     }
 
     #[test]

@@ -75,7 +75,13 @@ class FactorNeutralizationTests(unittest.TestCase):
             seed=2,
         )
         model.fit(x, y, factor_exposures=f)
-        self.assertEqual(np.asarray(model.predict(x)).shape, (len(x),))
+        predictions = np.asarray(model.predict(x))
+        self.assertEqual(predictions.shape, (len(x),))
+        self.assertTrue(np.all(np.isfinite(predictions)))
+        self.assertGreater(float(np.ptp(predictions)), 1e-6)
+        self.assertEqual(model.neutralization, "per_round_gradient")
+        self.assertEqual(model.leaf_solver, "dro")
+        self.assertEqual(model.training_mode, "morph")
 
     def test_regressor_trains_with_split_penalty(self):
         x, y, f = factor_data()
