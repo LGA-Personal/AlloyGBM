@@ -86,6 +86,7 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
         time_index: object | None = None,
         init_model: "GBMRegressor | None" = None,
         eval_metric: object | None = None,
+        factor_exposures: object | None = None,
     ) -> "GBMClassifier":
         """Fit the classifier.
 
@@ -102,6 +103,12 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
         -------
         self
         """
+        if self.neutralization == "pre_target":
+            raise ValueError(
+                "neutralization='pre_target' is only supported for GBMRegressor "
+                "squared-error training"
+            )
+
         # Encode targets
         float_targets, sorted_classes, n_classes, label_map = (
             self._encode_classification_targets(y)
@@ -151,6 +158,7 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
             time_index=time_index,
             init_model=init_model,
             eval_metric=eval_metric,
+            factor_exposures=factor_exposures,
         )
         self.classes_ = sorted_classes
         self.n_classes_ = n_classes

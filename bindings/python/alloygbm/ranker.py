@@ -108,6 +108,7 @@ class GBMRanker(GBMRegressor):
         time_index: object | None = None,
         init_model: "GBMRegressor | None" = None,
         eval_metric: object | None = None,
+        factor_exposures: object | None = None,
     ) -> "GBMRanker":
         """Fit the ranker.
 
@@ -132,9 +133,20 @@ class GBMRanker(GBMRegressor):
         """
         if group is None:
             raise ValueError("GBMRanker requires 'group' to be provided in fit()")
+        if self.neutralization == "pre_target":
+            raise ValueError(
+                "neutralization='pre_target' is only supported for GBMRegressor "
+                "squared-error training"
+            )
 
         # Sort training data by group, preserving DataFrame metadata.
         X_sorted, y_sorted, group_sorted, sort_idx = self._sort_by_group(X, y, group)
+
+        sorted_factor_exposures = factor_exposures
+        if factor_exposures is not None:
+            fe_arr = np.asarray(factor_exposures, dtype=np.float32)
+            if fe_arr.ndim == 2 and fe_arr.shape[0] == len(sort_idx):
+                sorted_factor_exposures = fe_arr[sort_idx]
 
         # Sort sample_weight to match if present.
         sorted_sample_weight = None
@@ -204,6 +216,7 @@ class GBMRanker(GBMRegressor):
             time_index=sorted_time_index,
             init_model=init_model,
             eval_metric=eval_metric,
+            factor_exposures=sorted_factor_exposures,
         )
         return self
 
@@ -262,7 +275,10 @@ class GBMRanker(GBMRegressor):
             f"leaf_model='{self.leaf_model}', "
             f"leaf_solver='{self.leaf_solver}', "
             f"dro_radius={self.dro_radius}, "
-            f"dro_metric='{self.dro_metric}'"
+            f"dro_metric='{self.dro_metric}', "
+            f"neutralization='{self.neutralization}', "
+            f"factor_neutralization_lambda={self.factor_neutralization_lambda}, "
+            f"factor_penalty={self.factor_penalty}"
             ")"
         )
 

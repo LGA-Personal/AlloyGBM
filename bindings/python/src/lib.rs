@@ -6,7 +6,8 @@ use alloygbm_categorical::{
 };
 use alloygbm_core::{
     BinnedMatrix, CATEGORICAL_STATE_FORMAT_V1, CategoricalStatePayloadV1, DatasetMatrix,
-    DenseMatrixView, GradientPair, MISSING_BIN_U8, TrainParams, TrainingDataset, TreeGrowth,
+    DenseMatrixView, FactorExposureMatrix, FactorNeutralizationConfig, GradientPair,
+    MISSING_BIN_U8, NeutralizationKind, TrainParams, TrainingDataset, TreeGrowth,
 };
 use alloygbm_engine::{
     ArtifactCompatibilityMode, BinaryCrossEntropyObjective, CategoricalFeatureInfo,
@@ -2419,6 +2420,7 @@ fn train_regression_artifact_with_summary_dense_impl(
     targets: &[f32],
     sample_weights: Option<Vec<f32>>,
     group_id: Option<Vec<u32>>,
+    factor_exposures: Option<FactorExposureMatrix>,
     validation_values: Option<&[f32]>,
     validation_row_count: Option<usize>,
     validation_targets: Option<&[f32]>,
@@ -2459,6 +2461,7 @@ fn train_regression_artifact_with_summary_dense_impl(
         continuous_binning_max_bins,
         need_dense_values,
     )?;
+    prepared.dataset.factor_exposures = factor_exposures;
 
     // For linear-leaf training the engine reads `dataset.matrix.values` as raw (float)
     // feature values inside `build_linear_histograms_cpu`.  The preparation step above
@@ -3071,6 +3074,7 @@ fn build_train_params(
     leaf_model: alloygbm_core::LeafModelKind,
     leaf_solver: alloygbm_core::LeafSolverKind,
     dro_config: Option<alloygbm_core::DroConfig>,
+    neutralization_config: Option<FactorNeutralizationConfig>,
 ) -> TrainParams {
     TrainParams {
         seed,
@@ -3094,7 +3098,66 @@ fn build_train_params(
         leaf_model,
         leaf_solver,
         dro_config,
-        neutralization_config: None,
+        neutralization_config,
+    }
+}
+
+fn parse_neutralization_config(
+    neutralization: &str,
+    factor_neutralization_lambda: f32,
+    factor_penalty: f32,
+) -> PyResult<Option<FactorNeutralizationConfig>> {
+    let kind = match neutralization {
+        "none" => NeutralizationKind::None,
+        "pre_target" => NeutralizationKind::PreTarget,
+        "per_round_gradient" => NeutralizationKind::PerRoundGradient,
+        "split_penalty" => NeutralizationKind::SplitPenalty,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "neutralization must be 'none', 'pre_target', 'per_round_gradient', or 'split_penalty', got '{other}'"
+            )));
+        }
+    };
+    if !factor_neutralization_lambda.is_finite() || factor_neutralization_lambda < 0.0 {
+        return Err(PyValueError::new_err(
+            "factor_neutralization_lambda must be finite and >= 0",
+        ));
+    }
+    if !factor_penalty.is_finite() || factor_penalty < 0.0 {
+        return Err(PyValueError::new_err(
+            "factor_penalty must be finite and >= 0",
+        ));
+    }
+    Ok(match kind {
+        NeutralizationKind::None => None,
+        _ => Some(FactorNeutralizationConfig {
+            kind,
+            ridge_lambda: factor_neutralization_lambda,
+            split_penalty: factor_penalty,
+        }),
+    })
+}
+
+fn parse_factor_exposure_matrix(
+    factor_exposure_values: Option<Vec<f32>>,
+    factor_exposure_row_count: Option<usize>,
+    factor_exposure_factor_count: Option<usize>,
+) -> PyResult<Option<FactorExposureMatrix>> {
+    match (
+        factor_exposure_values,
+        factor_exposure_row_count,
+        factor_exposure_factor_count,
+    ) {
+        (None, None, None) => Ok(None),
+        (Some(values), Some(row_count), Some(factor_count)) => {
+            FactorExposureMatrix::new(row_count, factor_count, values)
+                .map(Some)
+                .map_err(|err| PyValueError::new_err(err.to_string()))
+        }
+        _ => Err(PyValueError::new_err(
+            "factor_exposure_values, factor_exposure_row_count, and \
+             factor_exposure_factor_count must be provided together",
+        )),
     }
 }
 
@@ -3318,7 +3381,13 @@ fn shap_global_importance_dense(
     leaf_model="constant",
     leaf_solver="standard",
     dro_radius=0.05,
-    dro_metric="wasserstein"
+    dro_metric="wasserstein",
+    neutralization="none",
+    factor_neutralization_lambda=1e-6,
+    factor_penalty=0.0,
+    factor_exposure_values=None,
+    factor_exposure_row_count=None,
+    factor_exposure_factor_count=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact(
@@ -3349,6 +3418,12 @@ fn train_regression_artifact(
     leaf_solver: &str,
     dro_radius: f32,
     dro_metric: &str,
+    neutralization: &str,
+    factor_neutralization_lambda: f32,
+    factor_penalty: f32,
+    factor_exposure_values: Option<Vec<f32>>,
+    factor_exposure_row_count: Option<usize>,
+    factor_exposure_factor_count: Option<usize>,
 ) -> PyResult<Vec<u8>> {
     let parsed_morph_config = morph_config
         .map(|d| parse_morph_config_from_pydict(&d))
@@ -3356,6 +3431,13 @@ fn train_regression_artifact(
     let parsed_leaf_model = parse_leaf_model(leaf_model)?;
     let parsed_leaf_solver = parse_leaf_solver(leaf_solver)?;
     let parsed_dro_config = parse_dro_config(parsed_leaf_solver, dro_radius, dro_metric)?;
+    let parsed_neutralization_config =
+        parse_neutralization_config(neutralization, factor_neutralization_lambda, factor_penalty)?;
+    let factor_exposures = parse_factor_exposure_matrix(
+        factor_exposure_values,
+        factor_exposure_row_count,
+        factor_exposure_factor_count,
+    )?;
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
     }
@@ -3386,6 +3468,7 @@ fn train_regression_artifact(
         parsed_leaf_model,
         parsed_leaf_solver,
         parsed_dro_config,
+        parsed_neutralization_config,
     );
 
     let categorical_spec = resolve_categorical_spec(
@@ -3407,6 +3490,7 @@ fn train_regression_artifact(
         &targets,
         None, // sample_weights
         None, // group_id
+        factor_exposures,
         None,
         None,
         None,
@@ -3463,7 +3547,13 @@ fn train_regression_artifact(
     leaf_model="constant",
     leaf_solver="standard",
     dro_radius=0.05,
-    dro_metric="wasserstein"
+    dro_metric="wasserstein",
+    neutralization="none",
+    factor_neutralization_lambda=1e-6,
+    factor_penalty=0.0,
+    factor_exposure_values=None,
+    factor_exposure_row_count=None,
+    factor_exposure_factor_count=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense(
@@ -3496,6 +3586,12 @@ fn train_regression_artifact_dense(
     leaf_solver: &str,
     dro_radius: f32,
     dro_metric: &str,
+    neutralization: &str,
+    factor_neutralization_lambda: f32,
+    factor_penalty: f32,
+    factor_exposure_values: Option<Vec<f32>>,
+    factor_exposure_row_count: Option<usize>,
+    factor_exposure_factor_count: Option<usize>,
 ) -> PyResult<Vec<u8>> {
     let parsed_morph_config = morph_config
         .map(|d| parse_morph_config_from_pydict(&d))
@@ -3503,6 +3599,13 @@ fn train_regression_artifact_dense(
     let parsed_leaf_model = parse_leaf_model(leaf_model)?;
     let parsed_leaf_solver = parse_leaf_solver(leaf_solver)?;
     let parsed_dro_config = parse_dro_config(parsed_leaf_solver, dro_radius, dro_metric)?;
+    let parsed_neutralization_config =
+        parse_neutralization_config(neutralization, factor_neutralization_lambda, factor_penalty)?;
+    let factor_exposures = parse_factor_exposure_matrix(
+        factor_exposure_values,
+        factor_exposure_row_count,
+        factor_exposure_factor_count,
+    )?;
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
     }
@@ -3533,6 +3636,7 @@ fn train_regression_artifact_dense(
         parsed_leaf_model,
         parsed_leaf_solver,
         parsed_dro_config,
+        parsed_neutralization_config,
     );
     let categorical_spec = resolve_categorical_spec(
         categorical_feature_index,
@@ -3550,6 +3654,7 @@ fn train_regression_artifact_dense(
         &targets,
         None, // sample_weights
         None, // group_id
+        factor_exposures,
         None,
         None,
         None,
@@ -3630,7 +3735,13 @@ fn train_regression_artifact_dense(
     leaf_model="constant",
     leaf_solver="standard",
     dro_radius=0.05,
-    dro_metric="wasserstein"
+    dro_metric="wasserstein",
+    neutralization="none",
+    factor_neutralization_lambda=1e-6,
+    factor_penalty=0.0,
+    factor_exposure_values=None,
+    factor_exposure_row_count=None,
+    factor_exposure_factor_count=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_with_summary(
@@ -3687,6 +3798,12 @@ fn train_regression_artifact_with_summary(
     leaf_solver: &str,
     dro_radius: f32,
     dro_metric: &str,
+    neutralization: &str,
+    factor_neutralization_lambda: f32,
+    factor_penalty: f32,
+    factor_exposure_values: Option<Vec<f32>>,
+    factor_exposure_row_count: Option<usize>,
+    factor_exposure_factor_count: Option<usize>,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -3703,6 +3820,13 @@ fn train_regression_artifact_with_summary(
     let parsed_leaf_model = parse_leaf_model(leaf_model)?;
     let parsed_leaf_solver = parse_leaf_solver(leaf_solver)?;
     let parsed_dro_config = parse_dro_config(parsed_leaf_solver, dro_radius, dro_metric)?;
+    let parsed_neutralization_config =
+        parse_neutralization_config(neutralization, factor_neutralization_lambda, factor_penalty)?;
+    let factor_exposures = parse_factor_exposure_matrix(
+        factor_exposure_values,
+        factor_exposure_row_count,
+        factor_exposure_factor_count,
+    )?;
     let params = build_train_params(
         learning_rate,
         max_depth,
@@ -3725,6 +3849,7 @@ fn train_regression_artifact_with_summary(
         parsed_leaf_model,
         parsed_leaf_solver,
         parsed_dro_config,
+        parsed_neutralization_config,
     );
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
@@ -3764,6 +3889,7 @@ fn train_regression_artifact_with_summary(
         &targets,
         sample_weights,
         group_id,
+        factor_exposures,
         validation_payload
             .as_ref()
             .map(|(values, _, _)| values.as_slice()),
@@ -3848,7 +3974,13 @@ fn train_regression_artifact_with_summary(
     leaf_model="constant",
     leaf_solver="standard",
     dro_radius=0.05,
-    dro_metric="wasserstein"
+    dro_metric="wasserstein",
+    neutralization="none",
+    factor_neutralization_lambda=1e-6,
+    factor_penalty=0.0,
+    factor_exposure_values=None,
+    factor_exposure_row_count=None,
+    factor_exposure_factor_count=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary(
@@ -3908,6 +4040,12 @@ fn train_regression_artifact_dense_with_summary(
     leaf_solver: &str,
     dro_radius: f32,
     dro_metric: &str,
+    neutralization: &str,
+    factor_neutralization_lambda: f32,
+    factor_penalty: f32,
+    factor_exposure_values: Option<Vec<f32>>,
+    factor_exposure_row_count: Option<usize>,
+    factor_exposure_factor_count: Option<usize>,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -3924,6 +4062,13 @@ fn train_regression_artifact_dense_with_summary(
     let parsed_leaf_model = parse_leaf_model(leaf_model)?;
     let parsed_leaf_solver = parse_leaf_solver(leaf_solver)?;
     let parsed_dro_config = parse_dro_config(parsed_leaf_solver, dro_radius, dro_metric)?;
+    let parsed_neutralization_config =
+        parse_neutralization_config(neutralization, factor_neutralization_lambda, factor_penalty)?;
+    let factor_exposures = parse_factor_exposure_matrix(
+        factor_exposure_values,
+        factor_exposure_row_count,
+        factor_exposure_factor_count,
+    )?;
     let params = build_train_params(
         learning_rate,
         max_depth,
@@ -3946,6 +4091,7 @@ fn train_regression_artifact_dense_with_summary(
         parsed_leaf_model,
         parsed_leaf_solver,
         parsed_dro_config,
+        parsed_neutralization_config,
     );
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
@@ -3968,6 +4114,7 @@ fn train_regression_artifact_dense_with_summary(
         &targets,
         sample_weights,
         group_id,
+        factor_exposures,
         validation_values.as_deref(),
         validation_row_count,
         validation_targets.as_deref(),
@@ -4065,7 +4212,13 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> PyResult<Vec<f32>> {
     leaf_model="constant",
     leaf_solver="standard",
     dro_radius=0.05,
-    dro_metric="wasserstein"
+    dro_metric="wasserstein",
+    neutralization="none",
+    factor_neutralization_lambda=1e-6,
+    factor_penalty=0.0,
+    factor_exposure_values=None,
+    factor_exposure_row_count=None,
+    factor_exposure_factor_count=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary_bytes(
@@ -4125,6 +4278,12 @@ fn train_regression_artifact_dense_with_summary_bytes(
     leaf_solver: &str,
     dro_radius: f32,
     dro_metric: &str,
+    neutralization: &str,
+    factor_neutralization_lambda: f32,
+    factor_penalty: f32,
+    factor_exposure_values: Option<Vec<f32>>,
+    factor_exposure_row_count: Option<usize>,
+    factor_exposure_factor_count: Option<usize>,
 ) -> PyResult<NativeTrainingResult> {
     let values = bytes_to_f32_vec(values_bytes)?;
     let targets = bytes_to_f32_vec(targets_bytes)?;
@@ -4145,6 +4304,13 @@ fn train_regression_artifact_dense_with_summary_bytes(
     let parsed_leaf_model = parse_leaf_model(leaf_model)?;
     let parsed_leaf_solver = parse_leaf_solver(leaf_solver)?;
     let parsed_dro_config = parse_dro_config(parsed_leaf_solver, dro_radius, dro_metric)?;
+    let parsed_neutralization_config =
+        parse_neutralization_config(neutralization, factor_neutralization_lambda, factor_penalty)?;
+    let factor_exposures = parse_factor_exposure_matrix(
+        factor_exposure_values,
+        factor_exposure_row_count,
+        factor_exposure_factor_count,
+    )?;
     let params = build_train_params(
         learning_rate,
         max_depth,
@@ -4167,6 +4333,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
         parsed_leaf_model,
         parsed_leaf_solver,
         parsed_dro_config,
+        parsed_neutralization_config,
     );
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
@@ -4189,6 +4356,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
         &targets,
         sample_weights,
         group_id,
+        factor_exposures,
         validation_values.as_deref(),
         validation_row_count,
         validation_targets.as_deref(),
