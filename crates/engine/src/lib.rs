@@ -2002,6 +2002,7 @@ struct IterationExecutionContext<'a> {
     custom_metric_callback: Option<&'a dyn PerRoundMetricCallback>,
     /// Features that use native categorical splits (empty = all continuous).
     categorical_features: Vec<CategoricalFeatureInfo>,
+    pre_target_already_applied: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2506,6 +2507,14 @@ impl Trainer {
         let owned_dataset = prepare_pre_target_training_dataset(&self.params, dataset)?;
         let active_dataset = owned_dataset.as_ref().unwrap_or(dataset);
 
+        self.evaluate_fit_contract_on_active_dataset(active_dataset, objective)
+    }
+
+    fn evaluate_fit_contract_on_active_dataset<O: ObjectiveOps>(
+        &self,
+        active_dataset: &TrainingDataset,
+        objective: &O,
+    ) -> EngineResult<FitContractEvaluation> {
         let baseline_prediction = objective.initial_prediction(
             &active_dataset.targets,
             active_dataset.sample_weights.as_deref(),
@@ -2660,15 +2669,38 @@ impl Trainer {
         objective: &O,
         request: PolicyFitRequest,
     ) -> EngineResult<TrainedModel> {
+        validate_training_alignment(dataset, binned_matrix)?;
+        validate_train_params(&self.params)?;
+        validate_training_dataset(dataset)?;
+        validate_neutralization_fit_contract(&self.params, dataset, objective)?;
+        let owned_dataset = prepare_pre_target_training_dataset(&self.params, dataset)?;
+        let active_dataset = owned_dataset.as_ref().unwrap_or(dataset);
+        self.fit_iterations_with_policy_request_active(
+            active_dataset,
+            binned_matrix,
+            backend,
+            objective,
+            request,
+        )
+    }
+
+    fn fit_iterations_with_policy_request_active<B: BackendOps, O: ObjectiveOps>(
+        &self,
+        active_dataset: &TrainingDataset,
+        binned_matrix: &BinnedMatrix,
+        backend: &B,
+        objective: &O,
+        request: PolicyFitRequest,
+    ) -> EngineResult<TrainedModel> {
         let controls = self.iteration_controls_for_policy_ext(
-            dataset,
+            active_dataset,
             binned_matrix,
             request.rounds,
             request.policy_mode,
             objective.requires_group_id(),
         )?;
         let summary = self.fit_iterations_with_optional_validation_summary(
-            dataset,
+            active_dataset,
             binned_matrix,
             backend,
             objective,
@@ -2679,6 +2711,7 @@ impl Trainer {
                 warm_start: None,
                 custom_metric_callback: None,
                 categorical_features: self.categorical_features.clone(),
+                pre_target_already_applied: true,
             },
         )?;
         let model = summary.model;
@@ -2730,14 +2763,20 @@ impl Trainer {
         objective: &O,
         request: PolicyFitRequest,
     ) -> EngineResult<TrainedModel> {
+        validate_training_alignment(dataset, binned_matrix)?;
+        validate_train_params(&self.params)?;
+        validate_training_dataset(dataset)?;
+        validate_neutralization_fit_contract(&self.params, dataset, objective)?;
+        let owned_dataset = prepare_pre_target_training_dataset(&self.params, dataset)?;
+        let active_dataset = owned_dataset.as_ref().unwrap_or(dataset);
         let (encoded_dataset, encoded_binned_matrix) =
-            apply_single_categorical_target_encoding(dataset, binned_matrix, spec)?;
+            apply_single_categorical_target_encoding(active_dataset, binned_matrix, spec)?;
         let categorical_state = CategoricalStatePayloadV1 {
             format_version: alloygbm_core::CATEGORICAL_STATE_FORMAT_V1,
             leakage_safe_target_encoding: spec.config.time_aware,
             categorical_feature_indices: vec![spec.feature_index as u32],
         };
-        let model = self.fit_iterations_with_policy_request(
+        let model = self.fit_iterations_with_policy_request_active(
             &encoded_dataset,
             &encoded_binned_matrix,
             backend,
@@ -2812,6 +2851,7 @@ impl Trainer {
                 warm_start: None,
                 custom_metric_callback: None,
                 categorical_features: self.categorical_features.clone(),
+                pre_target_already_applied: false,
             },
         )
     }
@@ -2837,6 +2877,7 @@ impl Trainer {
                 warm_start: None,
                 custom_metric_callback: None,
                 categorical_features: self.categorical_features.clone(),
+                pre_target_already_applied: false,
             },
         )
     }
@@ -2863,6 +2904,7 @@ impl Trainer {
                 warm_start: Some(warm_start),
                 custom_metric_callback: None,
                 categorical_features: self.categorical_features.clone(),
+                pre_target_already_applied: false,
             },
         )
     }
@@ -2891,6 +2933,7 @@ impl Trainer {
                 warm_start: Some(warm_start),
                 custom_metric_callback: None,
                 categorical_features: self.categorical_features.clone(),
+                pre_target_already_applied: false,
             },
         )
     }
@@ -2921,6 +2964,7 @@ impl Trainer {
                 warm_start: None,
                 custom_metric_callback: custom_metric,
                 categorical_features: self.categorical_features.clone(),
+                pre_target_already_applied: false,
             },
         )
     }
@@ -2950,6 +2994,7 @@ impl Trainer {
                 warm_start: Some(warm_start),
                 custom_metric_callback: custom_metric,
                 categorical_features: self.categorical_features.clone(),
+                pre_target_already_applied: false,
             },
         )
     }
@@ -3664,9 +3709,14 @@ impl Trainer {
         validate_train_params(&self.params)?;
         validate_training_dataset(dataset)?;
         validate_neutralization_fit_contract(&self.params, dataset, objective)?;
-        let owned_dataset = prepare_pre_target_training_dataset(&self.params, dataset)?;
+        let owned_dataset = if execution.pre_target_already_applied {
+            None
+        } else {
+            prepare_pre_target_training_dataset(&self.params, dataset)?
+        };
         let active_dataset = owned_dataset.as_ref().unwrap_or(dataset);
-        let fit_contract = self.validate_fit_contract(dataset, objective)?;
+        let fit_contract =
+            self.evaluate_fit_contract_on_active_dataset(active_dataset, objective)?;
         let gradient_projector = if let Some(config) = gradient_neutralization_config(&self.params)
         {
             let exposures = active_dataset.factor_exposures.as_ref().ok_or_else(|| {
@@ -4099,7 +4149,13 @@ impl Trainer {
             };
         }
 
-        if experiment_leaf_refinement_enabled() && objective.supports_leaf_refinement() {
+        if experiment_leaf_refinement_enabled()
+            && objective.supports_leaf_refinement()
+            && gradient_neutralization_config(&self.params).is_none()
+        {
+            // Leaf refinement re-solves leaves against targets, so skip it for
+            // per-round factor-neutralized gradients until refinement can apply
+            // the same projection contract.
             refine_regression_leaf_values(
                 baseline_prediction,
                 &active_dataset.targets,
@@ -7295,6 +7351,11 @@ mod tests {
     struct MockBackend;
     struct GradientNeutralizationCheckingBackend {
         exposures: FactorExposureMatrix,
+        weights: Option<Vec<f32>>,
+    }
+    struct EncodedFeatureCheckingBackend {
+        feature_index: usize,
+        expected_bins: Vec<u16>,
     }
     struct BadObjective;
 
@@ -7362,6 +7423,40 @@ mod tests {
         }
     }
 
+    fn weighted_factor_dominated_dataset() -> TrainingDataset {
+        let mut dataset = factor_dominated_dataset();
+        dataset.sample_weights = Some(vec![1.0, 3.0, 2.0, 4.0, 1.5, 2.5, 3.5, 4.5]);
+        dataset
+    }
+
+    fn target_encoding_factor_loaded_dataset() -> TrainingDataset {
+        TrainingDataset {
+            matrix: alloygbm_core::DatasetMatrix::new(
+                8,
+                2,
+                vec![
+                    0.0, 0.0, //
+                    1.0, 0.0, //
+                    2.0, 0.0, //
+                    3.0, 0.0, //
+                    0.0, 1.0, //
+                    1.0, 1.0, //
+                    2.0, 1.0, //
+                    3.0, 1.0, //
+                ],
+            )
+            .expect("matrix is valid"),
+            targets: vec![-3.0, -2.0, -1.0, 0.0, 0.0, 1.0, 2.0, 3.0],
+            sample_weights: None,
+            time_index: None,
+            group_id: None,
+            factor_exposures: Some(
+                FactorExposureMatrix::new(8, 1, vec![-4.0, -3.0, -2.0, -1.0, 1.0, 2.0, 3.0, 4.0])
+                    .expect("factor exposures are valid"),
+            ),
+        }
+    }
+
     fn multiclass_factor_dominated_dataset() -> TrainingDataset {
         TrainingDataset {
             matrix: alloygbm_core::DatasetMatrix::new(
@@ -7410,13 +7505,20 @@ mod tests {
             .sum()
     }
 
-    fn gradient_factor_dot(exposures: &FactorExposureMatrix, gradients: &[GradientPair]) -> f32 {
+    fn weighted_gradient_factor_dot(
+        exposures: &FactorExposureMatrix,
+        weights: Option<&[f32]>,
+        gradients: &[GradientPair],
+    ) -> f32 {
         assert_eq!(exposures.factor_count, 1);
         exposures
             .values
             .iter()
             .zip(gradients.iter())
-            .map(|(factor, gradient)| *factor * gradient.grad)
+            .enumerate()
+            .map(|(row, (factor, gradient))| {
+                weights.map_or(1.0, |sample_weights| sample_weights[row]) * *factor * gradient.grad
+            })
             .sum()
     }
 
@@ -7604,11 +7706,51 @@ mod tests {
             node: &NodeSlice,
             feature_tiles: &[FeatureTile],
         ) -> EngineResult<HistogramBundle> {
-            let dot = gradient_factor_dot(&self.exposures, gradients);
+            let dot =
+                weighted_gradient_factor_dot(&self.exposures, self.weights.as_deref(), gradients);
             assert!(
                 dot.abs() < 1e-3,
                 "factor dot after per-round gradient projection was {dot}"
             );
+            MockBackend.build_histograms(binned_matrix, gradients, node, feature_tiles)
+        }
+
+        fn best_split(&self, histograms: &HistogramBundle) -> EngineResult<Option<SplitCandidate>> {
+            MockBackend.best_split(histograms)
+        }
+
+        fn apply_split(
+            &self,
+            binned_matrix: &BinnedMatrix,
+            node: &NodeSlice,
+            split: &SplitCandidate,
+        ) -> EngineResult<PartitionResult> {
+            MockBackend.apply_split(binned_matrix, node, split)
+        }
+
+        fn reduce_sums(
+            &self,
+            gradients: &[GradientPair],
+            row_indices: &[u32],
+        ) -> EngineResult<NodeStats> {
+            MockBackend.reduce_sums(gradients, row_indices)
+        }
+    }
+
+    impl BackendOps for EncodedFeatureCheckingBackend {
+        fn build_histograms(
+            &self,
+            binned_matrix: &BinnedMatrix,
+            gradients: &[GradientPair],
+            node: &NodeSlice,
+            feature_tiles: &[FeatureTile],
+        ) -> EngineResult<HistogramBundle> {
+            let actual_bins = (0..binned_matrix.row_count)
+                .map(|row| {
+                    binned_matrix.row_bin(row * binned_matrix.feature_count + self.feature_index)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(actual_bins, self.expected_bins);
             MockBackend.build_histograms(binned_matrix, gradients, node, feature_tiles)
         }
 
@@ -7715,6 +7857,7 @@ mod tests {
         let binned = sample_binned_matrix_for_dataset(&dataset);
         let backend = GradientNeutralizationCheckingBackend {
             exposures: dataset.factor_exposures.as_ref().unwrap().clone(),
+            weights: None,
         };
         let params = TrainParams {
             neutralization_config: Some(alloygbm_core::FactorNeutralizationConfig {
@@ -7729,6 +7872,98 @@ mod tests {
             .fit_iterations(&dataset, &binned, &backend, &SquaredErrorObjective, 5)
             .unwrap();
         assert_eq!(model.rounds_completed(), 5);
+    }
+
+    #[test]
+    fn pre_target_neutralization_fit_iterations_uses_residualized_targets_for_target_encoding() {
+        let dataset = target_encoding_factor_loaded_dataset();
+        let binned = sample_binned_matrix_for_dataset(&dataset);
+        let spec = CategoricalTargetEncodingSpec {
+            feature_index: 1,
+            values: vec![
+                "B".to_string(),
+                "B".to_string(),
+                "B".to_string(),
+                "B".to_string(),
+                "A".to_string(),
+                "A".to_string(),
+                "A".to_string(),
+                "A".to_string(),
+            ],
+            config: TargetEncoderConfig {
+                smoothing: 0.0,
+                min_samples_leaf: 1,
+                time_aware: false,
+            },
+        };
+
+        let mut residualized_dataset = dataset.clone();
+        apply_pre_target_neutralization_for_test(&mut residualized_dataset, 1e-6).unwrap();
+        let (_, residualized_encoded_binned) =
+            apply_single_categorical_target_encoding(&residualized_dataset, &binned, &spec)
+                .unwrap();
+        let (_, raw_encoded_binned) =
+            apply_single_categorical_target_encoding(&dataset, &binned, &spec).unwrap();
+        let residualized_expected_bins = (0..residualized_encoded_binned.row_count)
+            .map(|row| {
+                residualized_encoded_binned
+                    .row_bin(row * residualized_encoded_binned.feature_count + spec.feature_index)
+            })
+            .collect::<Vec<_>>();
+        let raw_bins = (0..raw_encoded_binned.row_count)
+            .map(|row| {
+                raw_encoded_binned
+                    .row_bin(row * raw_encoded_binned.feature_count + spec.feature_index)
+            })
+            .collect::<Vec<_>>();
+        assert_ne!(residualized_expected_bins, raw_bins);
+
+        let params = TrainParams {
+            neutralization_config: Some(alloygbm_core::FactorNeutralizationConfig {
+                kind: alloygbm_core::NeutralizationKind::PreTarget,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            }),
+            ..TrainParams::default()
+        };
+        let backend = EncodedFeatureCheckingBackend {
+            feature_index: spec.feature_index,
+            expected_bins: residualized_expected_bins,
+        };
+        let model = Trainer::new(params)
+            .unwrap()
+            .fit_iterations_with_single_target_encoded_feature(
+                &dataset,
+                &binned,
+                &spec,
+                &backend,
+                &SquaredErrorObjective,
+                1,
+            )
+            .unwrap();
+        assert_eq!(model.rounds_completed(), 1);
+    }
+
+    #[test]
+    fn weighted_per_round_gradient_neutralization_trains_regression() {
+        let dataset = weighted_factor_dominated_dataset();
+        let binned = sample_binned_matrix_for_dataset(&dataset);
+        let backend = GradientNeutralizationCheckingBackend {
+            exposures: dataset.factor_exposures.as_ref().unwrap().clone(),
+            weights: dataset.sample_weights.clone(),
+        };
+        let params = TrainParams {
+            neutralization_config: Some(alloygbm_core::FactorNeutralizationConfig {
+                kind: alloygbm_core::NeutralizationKind::PerRoundGradient,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            }),
+            ..TrainParams::default()
+        };
+        Trainer::new(params)
+            .unwrap()
+            .fit_iterations(&dataset, &binned, &backend, &SquaredErrorObjective, 5)
+            .unwrap();
     }
 
     #[test]
@@ -7819,6 +8054,7 @@ mod tests {
         let controls = IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).unwrap();
         let backend = GradientNeutralizationCheckingBackend {
             exposures: dataset.factor_exposures.as_ref().unwrap().clone(),
+            weights: None,
         };
         let params = TrainParams {
             neutralization_config: Some(alloygbm_core::FactorNeutralizationConfig {
