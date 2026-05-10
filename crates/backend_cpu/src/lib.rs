@@ -1038,12 +1038,14 @@ impl CpuBackend {
                     gain -= factor_split_penalty_for_candidate(
                         ctx,
                         scratch,
-                        feature_histogram.feature_index,
-                        threshold_bin as u16,
-                        candidate.default_left,
-                        None,
-                        left_leaf_value,
-                        right_leaf_value,
+                        FactorSplitCandidate {
+                            feature_index: feature_histogram.feature_index,
+                            threshold_bin: threshold_bin as u16,
+                            default_left: candidate.default_left,
+                            categorical_bitset: None,
+                            left_leaf_value,
+                            right_leaf_value,
+                        },
                     );
                 }
 
@@ -1377,12 +1379,14 @@ impl CpuBackend {
                     gain -= factor_split_penalty_for_candidate(
                         ctx,
                         scratch,
-                        feature_histogram.feature_index,
-                        0,
-                        candidate.default_left,
-                        Some(&bitset),
-                        left_leaf_value,
-                        right_leaf_value,
+                        FactorSplitCandidate {
+                            feature_index: feature_histogram.feature_index,
+                            threshold_bin: 0,
+                            default_left: candidate.default_left,
+                            categorical_bitset: Some(&bitset),
+                            left_leaf_value,
+                            right_leaf_value,
+                        },
                     );
                     scratch.categorical_bitset = bitset;
                 }
@@ -1674,15 +1678,19 @@ impl FactorSplitScratch {
     }
 }
 
-fn factor_split_penalty_for_candidate(
-    context: &FactorSplitContext<'_>,
-    scratch: &mut FactorSplitScratch,
+struct FactorSplitCandidate<'a> {
     feature_index: u32,
     threshold_bin: u16,
     default_left: bool,
-    categorical_bitset: Option<&[u8]>,
+    categorical_bitset: Option<&'a [u8]>,
     left_leaf_value: f32,
     right_leaf_value: f32,
+}
+
+fn factor_split_penalty_for_candidate(
+    context: &FactorSplitContext<'_>,
+    scratch: &mut FactorSplitScratch,
+    candidate: FactorSplitCandidate<'_>,
 ) -> f32 {
     if context.factor_penalty == 0.0 {
         return 0.0;
@@ -1690,7 +1698,7 @@ fn factor_split_penalty_for_candidate(
 
     let factor_count = context.exposures.factor_count;
     scratch.clear_factor_sums();
-    let feature_index = feature_index as usize;
+    let feature_index = candidate.feature_index as usize;
     let feature_count = context.binned_matrix.feature_count;
     let missing = context.binned_matrix.missing_bin();
 
@@ -1700,13 +1708,13 @@ fn factor_split_penalty_for_candidate(
             .binned_matrix
             .row_bin(row_index * feature_count + feature_index);
         let goes_left = if bin == missing {
-            default_left
-        } else if let Some(bitset) = categorical_bitset {
+            candidate.default_left
+        } else if let Some(bitset) = candidate.categorical_bitset {
             let byte_idx = (bin / 8) as usize;
             let bit_idx = (bin % 8) as usize;
             byte_idx < bitset.len() && (bitset[byte_idx] & (1 << bit_idx)) != 0
         } else {
-            bin <= threshold_bin
+            bin <= candidate.threshold_bin
         };
         let exposure_start = row_index * factor_count;
         let exposure_row = &context.exposures.values[exposure_start..exposure_start + factor_count];
@@ -1723,8 +1731,8 @@ fn factor_split_penalty_for_candidate(
     factor_split_penalty(
         &scratch.left_factor_sums,
         &scratch.right_factor_sums,
-        left_leaf_value,
-        right_leaf_value,
+        candidate.left_leaf_value,
+        candidate.right_leaf_value,
         context.factor_penalty,
         context.row_indices.len(),
     )
@@ -2817,7 +2825,7 @@ mod tests {
             factor_split_penalty(&left_factor_sums, &right_factor_sums, 0.5, -0.25, 2.0, 5);
 
         let load0 = 3.0 * 0.5 + -2.0 * -0.25;
-        let load1 = -1.0 * 0.5 + 4.0 * -0.25;
+        let load1 = -0.5 + 4.0 * -0.25;
         let expected = 2.0 * (load0 * load0 + load1 * load1) / 5.0;
         assert!((penalty - expected).abs() < 1e-6);
     }

@@ -204,8 +204,8 @@ impl<'a> FactorProjector<'a> {
         let mut y = vec![0.0_f64; k];
         for i in 0..k {
             let mut sum = rhs[i];
-            for j in 0..i {
-                sum -= self.cholesky_lower[i * k + j] * y[j];
+            for (j, y_j) in y.iter().enumerate().take(i) {
+                sum -= self.cholesky_lower[i * k + j] * *y_j;
             }
             y[i] = sum / self.cholesky_lower[i * k + i];
         }
@@ -213,8 +213,8 @@ impl<'a> FactorProjector<'a> {
         let mut x = vec![0.0_f64; k];
         for i in (0..k).rev() {
             let mut sum = y[i];
-            for j in i + 1..k {
-                sum -= self.cholesky_lower[j * k + i] * x[j];
+            for (j, x_j) in x.iter().enumerate().take(k).skip(i + 1) {
+                sum -= self.cholesky_lower[j * k + i] * *x_j;
             }
             x[i] = sum / self.cholesky_lower[i * k + i];
         }

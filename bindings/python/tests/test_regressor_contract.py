@@ -365,6 +365,12 @@ class GBMRegressorContractTests(unittest.TestCase):
                         "leaf_solver": "standard",
                         "dro_radius": 0.05,
                         "dro_metric": "wasserstein",
+                        "neutralization": "none",
+                        "factor_neutralization_lambda": 1e-6,
+                        "factor_penalty": 0.0,
+                        "factor_exposure_values": None,
+                        "factor_exposure_row_count": None,
+                        "factor_exposure_factor_count": None,
                     }
                 ],
             )
