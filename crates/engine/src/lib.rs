@@ -532,8 +532,13 @@ pub trait BackendOps {
         options: SplitSelectionOptions,
         feature_weights: &[f32],
         categorical_features: &[CategoricalFeatureInfo],
-        _factor_context: Option<&FactorSplitContext<'_>>,
+        factor_context: Option<&FactorSplitContext<'_>>,
     ) -> EngineResult<Option<SplitCandidate>> {
+        if factor_context.is_some() {
+            return Err(EngineError::ContractViolation(
+                "factor split context is not supported by this backend".to_string(),
+            ));
+        }
         self.best_split_with_options(histograms, options, feature_weights, categorical_features)
     }
     /// Morph-mode split selection. Default implementation delegates to
@@ -556,8 +561,13 @@ pub trait BackendOps {
         feature_weights: &[f32],
         categorical_features: &[CategoricalFeatureInfo],
         morph: &MorphContext,
-        _factor_context: Option<&FactorSplitContext<'_>>,
+        factor_context: Option<&FactorSplitContext<'_>>,
     ) -> EngineResult<Option<SplitCandidate>> {
+        if factor_context.is_some() {
+            return Err(EngineError::ContractViolation(
+                "factor split context is not supported by this backend".to_string(),
+            ));
+        }
         self.best_split_morph(
             histograms,
             options,
@@ -8556,6 +8566,40 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("neutralization='split_penalty' requires leaf_model='constant'"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn default_backend_neutralization_split_penalty_context_returns_error() {
+        let matrix = sample_binned_matrix();
+        let exposures = FactorExposureMatrix::new(4, 1, vec![1.0, 1.0, -1.0, -1.0])
+            .expect("factor exposures are valid");
+        let rows = vec![0, 1, 2, 3];
+        let context = FactorSplitContext {
+            binned_matrix: &matrix,
+            exposures: &exposures,
+            row_indices: &rows,
+            factor_penalty: 0.1,
+        };
+        let histograms = HistogramBundle {
+            node_id: 0,
+            feature_histograms: Vec::new(),
+        };
+
+        let err = MockBackend
+            .best_split_with_factor_context(
+                &histograms,
+                SplitSelectionOptions::default(),
+                &[],
+                &[],
+                Some(&context),
+            )
+            .expect_err("default backend must not ignore factor context");
+        assert!(matches!(err, EngineError::ContractViolation(_)));
+        assert!(
+            err.to_string()
+                .contains("factor split context is not supported"),
             "unexpected error: {err}"
         );
     }

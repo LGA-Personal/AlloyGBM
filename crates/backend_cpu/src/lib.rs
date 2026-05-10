@@ -896,6 +896,8 @@ impl CpuBackend {
         let parent_gain_term =
             split_gain_term(total_grad, total_hess, total_grad_sq, total_count, &options);
 
+        let mut factor_scratch =
+            factor_context.map(|ctx| FactorSplitScratch::new(ctx.exposures.factor_count));
         let mut best_candidate: Option<SplitCandidate> = None;
         let mut best_gain = 0.0_f32;
         let mut left_grad = 0.0_f32;
@@ -1030,11 +1032,12 @@ impl CpuBackend {
                     }
                 };
 
-                if let Some(ctx) = factor_context {
+                if let (Some(ctx), Some(scratch)) = (factor_context, factor_scratch.as_mut()) {
                     let left_leaf_value = -left_grad_for_gain / left_denom;
                     let right_leaf_value = -right_grad_for_gain / right_denom;
                     gain -= factor_split_penalty_for_candidate(
                         ctx,
+                        scratch,
                         feature_histogram.feature_index,
                         threshold_bin as u16,
                         candidate.default_left,
@@ -1237,6 +1240,8 @@ impl CpuBackend {
         let mut left_hess = 0.0_f32;
         let mut left_grad_sq = 0.0_f32;
         let mut left_count = 0_u32;
+        let mut factor_scratch =
+            factor_context.map(|ctx| FactorSplitScratch::new(ctx.exposures.factor_count));
 
         // Try splits: first k categories go left, rest go right (k = 1..len-1).
         for k in 0..categories.len() - 1 {
@@ -1359,20 +1364,27 @@ impl CpuBackend {
                     }
                 };
 
-                let penalty_bitset = factor_context
-                    .map(|_| categorical_bitset_for_prefix(num_categories, &categories, k));
-                if let Some(ctx) = factor_context {
+                if let (Some(ctx), Some(scratch)) = (factor_context, factor_scratch.as_mut()) {
+                    categorical_bitset_for_prefix_into(
+                        num_categories,
+                        &categories,
+                        k,
+                        &mut scratch.categorical_bitset,
+                    );
+                    let bitset = std::mem::take(&mut scratch.categorical_bitset);
                     let left_leaf_value = -left_grad_for_gain / left_denom;
                     let right_leaf_value = -right_grad_for_gain / right_denom;
                     gain -= factor_split_penalty_for_candidate(
                         ctx,
+                        scratch,
                         feature_histogram.feature_index,
                         0,
                         candidate.default_left,
-                        penalty_bitset.as_deref(),
+                        Some(&bitset),
                         left_leaf_value,
                         right_leaf_value,
                     );
+                    scratch.categorical_bitset = bitset;
                 }
 
                 if !gain.is_finite() {
@@ -1380,9 +1392,11 @@ impl CpuBackend {
                 }
 
                 if gain > best_gain {
-                    let bitset = penalty_bitset.unwrap_or_else(|| {
+                    let bitset = if let Some(scratch) = factor_scratch.as_ref() {
+                        scratch.categorical_bitset.clone()
+                    } else {
                         categorical_bitset_for_prefix(num_categories, &categories, k)
-                    });
+                    };
                     best_gain = gain;
                     best_candidate = Some(SplitCandidate {
                         node_id,
@@ -1617,6 +1631,19 @@ fn categorical_bitset_for_prefix(
 ) -> Vec<u8> {
     let bitset_len = num_categories.div_ceil(8);
     let mut bitset = vec![0u8; bitset_len];
+    categorical_bitset_for_prefix_into(num_categories, categories, prefix_end, &mut bitset);
+    bitset
+}
+
+fn categorical_bitset_for_prefix_into(
+    num_categories: usize,
+    categories: &[(u16, f32, f32, f32, u32)],
+    prefix_end: usize,
+    bitset: &mut Vec<u8>,
+) {
+    let bitset_len = num_categories.div_ceil(8);
+    bitset.clear();
+    bitset.resize(bitset_len, 0);
     for &(bin_id, _, _, _, _) in &categories[..=prefix_end] {
         let byte_idx = (bin_id / 8) as usize;
         let bit_idx = (bin_id % 8) as usize;
@@ -1624,11 +1651,32 @@ fn categorical_bitset_for_prefix(
             bitset[byte_idx] |= 1 << bit_idx;
         }
     }
-    bitset
+}
+
+struct FactorSplitScratch {
+    left_factor_sums: Vec<f32>,
+    right_factor_sums: Vec<f32>,
+    categorical_bitset: Vec<u8>,
+}
+
+impl FactorSplitScratch {
+    fn new(factor_count: usize) -> Self {
+        Self {
+            left_factor_sums: vec![0.0; factor_count],
+            right_factor_sums: vec![0.0; factor_count],
+            categorical_bitset: Vec::new(),
+        }
+    }
+
+    fn clear_factor_sums(&mut self) {
+        self.left_factor_sums.fill(0.0);
+        self.right_factor_sums.fill(0.0);
+    }
 }
 
 fn factor_split_penalty_for_candidate(
     context: &FactorSplitContext<'_>,
+    scratch: &mut FactorSplitScratch,
     feature_index: u32,
     threshold_bin: u16,
     default_left: bool,
@@ -1641,8 +1689,7 @@ fn factor_split_penalty_for_candidate(
     }
 
     let factor_count = context.exposures.factor_count;
-    let mut left_factor_sums = vec![0.0_f32; factor_count];
-    let mut right_factor_sums = vec![0.0_f32; factor_count];
+    scratch.clear_factor_sums();
     let feature_index = feature_index as usize;
     let feature_count = context.binned_matrix.feature_count;
     let missing = context.binned_matrix.missing_bin();
@@ -1664,9 +1711,9 @@ fn factor_split_penalty_for_candidate(
         let exposure_start = row_index * factor_count;
         let exposure_row = &context.exposures.values[exposure_start..exposure_start + factor_count];
         let target_sums = if goes_left {
-            &mut left_factor_sums
+            &mut scratch.left_factor_sums
         } else {
-            &mut right_factor_sums
+            &mut scratch.right_factor_sums
         };
         for (sum, exposure) in target_sums.iter_mut().zip(exposure_row) {
             *sum += *exposure;
@@ -1674,8 +1721,8 @@ fn factor_split_penalty_for_candidate(
     }
 
     factor_split_penalty(
-        &left_factor_sums,
-        &right_factor_sums,
+        &scratch.left_factor_sums,
+        &scratch.right_factor_sums,
         left_leaf_value,
         right_leaf_value,
         context.factor_penalty,
@@ -1706,6 +1753,37 @@ fn validate_factor_split_context(context: &FactorSplitContext<'_>) -> EngineResu
     if !context.factor_penalty.is_finite() || context.factor_penalty < 0.0 {
         return Err(EngineError::ContractViolation(
             "factor split penalty must be finite and >= 0".to_string(),
+        ));
+    }
+    if context.exposures.factor_count == 0 {
+        return Err(EngineError::ContractViolation(
+            "factor_exposures factor_count must be greater than 0".to_string(),
+        ));
+    }
+    let expected_len = context
+        .exposures
+        .row_count
+        .checked_mul(context.exposures.factor_count)
+        .ok_or_else(|| {
+            EngineError::ContractViolation(
+                "factor_exposures row_count * factor_count overflow".to_string(),
+            )
+        })?;
+    if context.exposures.values.len() != expected_len {
+        return Err(EngineError::ContractViolation(format!(
+            "factor_exposures values length {} does not match row_count * factor_count {}",
+            context.exposures.values.len(),
+            expected_len
+        )));
+    }
+    if context
+        .exposures
+        .values
+        .iter()
+        .any(|value| !value.is_finite())
+    {
+        return Err(EngineError::ContractViolation(
+            "factor_exposures must contain only finite values".to_string(),
         ));
     }
     if context.exposures.row_count != context.binned_matrix.row_count {
@@ -2655,6 +2733,84 @@ mod tests {
             .expect("split search should succeed")
             .expect("split should exist");
         assert!(penalized.gain <= no_penalty.gain);
+    }
+
+    #[test]
+    fn factor_split_penalty_formula_matches_expected() {
+        let left_factor_sums = [3.0_f32, -1.0];
+        let right_factor_sums = [-2.0_f32, 4.0];
+        let penalty =
+            factor_split_penalty(&left_factor_sums, &right_factor_sums, 0.5, -0.25, 2.0, 5);
+
+        let load0 = 3.0 * 0.5 + -2.0 * -0.25;
+        let load1 = -1.0 * 0.5 + 4.0 * -0.25;
+        let expected = 2.0 * (load0 * load0 + load1 * load1) / 5.0;
+        assert!((penalty - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn factor_split_penalty_rejects_malformed_factor_context() {
+        let backend = CpuBackend;
+        let matrix = sample_binned_matrix();
+        let node = sample_node();
+        let histograms = backend
+            .build_histograms(
+                &matrix,
+                &sample_gradients(),
+                &node,
+                &[FeatureTile::new(0, 2).expect("feature tile is valid")],
+            )
+            .expect("histograms should build");
+        let cases = [
+            (
+                FactorExposureMatrix {
+                    row_count: 4,
+                    factor_count: 0,
+                    values: Vec::new(),
+                },
+                "factor_exposures factor_count must be greater than 0",
+            ),
+            (
+                FactorExposureMatrix {
+                    row_count: 4,
+                    factor_count: 1,
+                    values: vec![1.0, 1.0, -1.0],
+                },
+                "factor_exposures values length 3 does not match row_count * factor_count 4",
+            ),
+            (
+                FactorExposureMatrix {
+                    row_count: 4,
+                    factor_count: 1,
+                    values: vec![1.0, f32::NAN, -1.0, -1.0],
+                },
+                "factor_exposures must contain only finite values",
+            ),
+        ];
+
+        for (malformed, expected_message) in cases {
+            let factor_context = FactorSplitContext {
+                binned_matrix: &matrix,
+                exposures: &malformed,
+                row_indices: &node.row_indices,
+                factor_penalty: 0.1,
+            };
+
+            let err = backend
+                .best_split_with_factor_context(
+                    &histograms,
+                    SplitSelectionOptions::default(),
+                    &[],
+                    &[],
+                    Some(&factor_context),
+                )
+                .expect_err("malformed factor context should be rejected");
+            assert!(matches!(err, EngineError::ContractViolation(_)));
+            assert!(
+                err.to_string().contains(expected_message),
+                "unexpected error: {err}"
+            );
+        }
     }
 
     #[test]
