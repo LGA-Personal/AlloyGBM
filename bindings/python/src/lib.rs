@@ -3128,6 +3128,11 @@ fn parse_neutralization_config(
             "factor_penalty must be finite and >= 0",
         ));
     }
+    if kind != NeutralizationKind::SplitPenalty && factor_penalty != 0.0 {
+        return Err(PyValueError::new_err(
+            "factor_penalty is only valid with neutralization='split_penalty'",
+        ));
+    }
     Ok(match kind {
         NeutralizationKind::None => None,
         _ => Some(FactorNeutralizationConfig {
@@ -3136,6 +3141,20 @@ fn parse_neutralization_config(
             split_penalty: factor_penalty,
         }),
     })
+}
+
+fn validate_neutralization_leaf_model(
+    neutralization_config: Option<FactorNeutralizationConfig>,
+    leaf_model: alloygbm_core::LeafModelKind,
+) -> PyResult<()> {
+    if neutralization_config.is_some_and(|config| config.kind == NeutralizationKind::SplitPenalty)
+        && leaf_model == alloygbm_core::LeafModelKind::Linear
+    {
+        return Err(PyValueError::new_err(
+            "neutralization='split_penalty' requires leaf_model='constant'",
+        ));
+    }
+    Ok(())
 }
 
 fn parse_factor_exposure_matrix(
@@ -3433,6 +3452,7 @@ fn train_regression_artifact(
     let parsed_dro_config = parse_dro_config(parsed_leaf_solver, dro_radius, dro_metric)?;
     let parsed_neutralization_config =
         parse_neutralization_config(neutralization, factor_neutralization_lambda, factor_penalty)?;
+    validate_neutralization_leaf_model(parsed_neutralization_config, parsed_leaf_model)?;
     let factor_exposures = parse_factor_exposure_matrix(
         factor_exposure_values,
         factor_exposure_row_count,
@@ -3601,6 +3621,7 @@ fn train_regression_artifact_dense(
     let parsed_dro_config = parse_dro_config(parsed_leaf_solver, dro_radius, dro_metric)?;
     let parsed_neutralization_config =
         parse_neutralization_config(neutralization, factor_neutralization_lambda, factor_penalty)?;
+    validate_neutralization_leaf_model(parsed_neutralization_config, parsed_leaf_model)?;
     let factor_exposures = parse_factor_exposure_matrix(
         factor_exposure_values,
         factor_exposure_row_count,
@@ -3822,6 +3843,7 @@ fn train_regression_artifact_with_summary(
     let parsed_dro_config = parse_dro_config(parsed_leaf_solver, dro_radius, dro_metric)?;
     let parsed_neutralization_config =
         parse_neutralization_config(neutralization, factor_neutralization_lambda, factor_penalty)?;
+    validate_neutralization_leaf_model(parsed_neutralization_config, parsed_leaf_model)?;
     let factor_exposures = parse_factor_exposure_matrix(
         factor_exposure_values,
         factor_exposure_row_count,
@@ -4064,6 +4086,7 @@ fn train_regression_artifact_dense_with_summary(
     let parsed_dro_config = parse_dro_config(parsed_leaf_solver, dro_radius, dro_metric)?;
     let parsed_neutralization_config =
         parse_neutralization_config(neutralization, factor_neutralization_lambda, factor_penalty)?;
+    validate_neutralization_leaf_model(parsed_neutralization_config, parsed_leaf_model)?;
     let factor_exposures = parse_factor_exposure_matrix(
         factor_exposure_values,
         factor_exposure_row_count,
@@ -4306,6 +4329,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
     let parsed_dro_config = parse_dro_config(parsed_leaf_solver, dro_radius, dro_metric)?;
     let parsed_neutralization_config =
         parse_neutralization_config(neutralization, factor_neutralization_lambda, factor_penalty)?;
+    validate_neutralization_leaf_model(parsed_neutralization_config, parsed_leaf_model)?;
     let factor_exposures = parse_factor_exposure_matrix(
         factor_exposure_values,
         factor_exposure_row_count,

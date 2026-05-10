@@ -683,6 +683,60 @@ class GBMRegressor(_GBMRegressorBase):
         if unknown:
             raise ValueError(f"Unknown parameter(s): {', '.join(unknown)}")
 
+        if (
+            "neutralization" in params
+            or "factor_neutralization_lambda" in params
+            or "factor_penalty" in params
+            or "leaf_model" in params
+        ):
+            candidate_neutralization = str(
+                params.get("neutralization", self.neutralization)
+            )
+            if candidate_neutralization not in (
+                "none",
+                "pre_target",
+                "per_round_gradient",
+                "split_penalty",
+            ):
+                raise ValueError(
+                    "neutralization must be 'none', 'pre_target', "
+                    "'per_round_gradient', or 'split_penalty'"
+                )
+            candidate_factor_neutralization_lambda = float(
+                params.get(
+                    "factor_neutralization_lambda",
+                    self.factor_neutralization_lambda,
+                )
+            )
+            if (
+                not math.isfinite(candidate_factor_neutralization_lambda)
+                or candidate_factor_neutralization_lambda < 0.0
+            ):
+                raise ValueError("factor_neutralization_lambda must be finite and >= 0")
+            candidate_factor_penalty = float(
+                params.get("factor_penalty", self.factor_penalty)
+            )
+            if (
+                not math.isfinite(candidate_factor_penalty)
+                or candidate_factor_penalty < 0.0
+            ):
+                raise ValueError("factor_penalty must be finite and >= 0")
+            candidate_leaf_model = str(params.get("leaf_model", self.leaf_model))
+            if (
+                candidate_neutralization != "split_penalty"
+                and candidate_factor_penalty != 0.0
+            ):
+                raise ValueError(
+                    "factor_penalty is only valid with neutralization='split_penalty'"
+                )
+            if (
+                candidate_neutralization == "split_penalty"
+                and candidate_leaf_model == "linear"
+            ):
+                raise ValueError(
+                    "neutralization='split_penalty' requires leaf_model='constant'"
+                )
+
         if "learning_rate" in params:
             learning_rate = float(params["learning_rate"])
             if not (0.0 < learning_rate <= 1.0):
