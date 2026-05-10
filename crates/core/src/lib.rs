@@ -2295,6 +2295,13 @@ pub fn validate_train_params(params: &TrainParams) -> CoreResult<()> {
                 "factor_penalty is only valid with neutralization='split_penalty'".to_string(),
             ));
         }
+        if config.kind == NeutralizationKind::SplitPenalty
+            && params.leaf_model == LeafModelKind::Linear
+        {
+            return Err(CoreError::InvalidConfig(
+                "neutralization='split_penalty' requires leaf_model='constant'".to_string(),
+            ));
+        }
     }
 
     if params.leaf_solver == LeafSolverKind::Dro {

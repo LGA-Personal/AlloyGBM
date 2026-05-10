@@ -4,8 +4,8 @@ use alloygbm_core::{
     NodeStats, PartitionResult, SplitCandidate, leaf_effective_gradient, leaf_gain_term,
 };
 use alloygbm_engine::{
-    BackendOps, CategoricalFeatureInfo, EngineError, EngineResult, LinearContext, MorphContext,
-    SplitSelectionOptions,
+    BackendOps, CategoricalFeatureInfo, EngineError, EngineResult, FactorSplitContext,
+    LinearContext, MorphContext, SplitSelectionOptions,
 };
 use rayon::prelude::*;
 use std::cell::RefCell;
@@ -522,13 +522,15 @@ impl CpuBackend {
         feature_histogram: &FeatureHistogram,
         node_id: u32,
         options: SplitSelectionOptions,
+        factor_context: Option<&FactorSplitContext<'_>>,
     ) -> Option<SplitCandidate> {
-        if options.dro_config.is_some() {
+        if options.dro_config.is_some() || factor_context.is_some() {
             return Self::best_split_for_feature_inner(
                 feature_histogram,
                 node_id,
                 options,
                 GainStrategy::Standard,
+                factor_context,
             );
         }
         // Standard-path bin-scan goes through the SIMD-vectorized fast path.
@@ -852,6 +854,7 @@ impl CpuBackend {
         node_id: u32,
         options: SplitSelectionOptions,
         strategy: GainStrategy<'_>,
+        factor_context: Option<&FactorSplitContext<'_>>,
     ) -> Option<SplitCandidate> {
         const EPSILON: f32 = 1e-6;
 
@@ -992,7 +995,7 @@ impl CpuBackend {
                     }
                 }
 
-                let gain = match &strategy {
+                let mut gain = match &strategy {
                     GainStrategy::Standard => {
                         split_gain_term(left.grad, left.hess, left.grad_sq, left.count, &options)
                             + split_gain_term(
@@ -1026,6 +1029,24 @@ impl CpuBackend {
                         compute_morph_gain(inputs, &morph.config, &morph.precomputed)
                     }
                 };
+
+                if let Some(ctx) = factor_context {
+                    let left_leaf_value = -left_grad_for_gain / left_denom;
+                    let right_leaf_value = -right_grad_for_gain / right_denom;
+                    gain -= factor_split_penalty_for_candidate(
+                        ctx,
+                        feature_histogram.feature_index,
+                        threshold_bin as u16,
+                        candidate.default_left,
+                        None,
+                        left_leaf_value,
+                        right_leaf_value,
+                    );
+                }
+
+                if !gain.is_finite() {
+                    continue;
+                }
 
                 if gain > best_gain {
                     best_gain = gain;
@@ -1069,6 +1090,7 @@ impl CpuBackend {
         node_id: u32,
         options: SplitSelectionOptions,
         num_categories: usize,
+        factor_context: Option<&FactorSplitContext<'_>>,
     ) -> Option<SplitCandidate> {
         Self::best_split_for_categorical_feature_inner(
             feature_histogram,
@@ -1076,6 +1098,7 @@ impl CpuBackend {
             options,
             num_categories,
             GainStrategy::Standard,
+            factor_context,
         )
     }
 
@@ -1089,6 +1112,7 @@ impl CpuBackend {
         options: &SplitSelectionOptions,
         num_categories: usize,
         morph: &MorphContext,
+        factor_context: Option<&FactorSplitContext<'_>>,
     ) -> Option<SplitCandidate> {
         Self::best_split_for_categorical_feature_inner(
             feature_histogram,
@@ -1096,6 +1120,7 @@ impl CpuBackend {
             *options,
             num_categories,
             GainStrategy::Morph(morph),
+            factor_context,
         )
     }
 
@@ -1121,6 +1146,7 @@ impl CpuBackend {
         options: SplitSelectionOptions,
         num_categories: usize,
         strategy: GainStrategy<'_>,
+        factor_context: Option<&FactorSplitContext<'_>>,
     ) -> Option<SplitCandidate> {
         const EPSILON: f32 = 1e-6;
 
@@ -1298,7 +1324,7 @@ impl CpuBackend {
                     }
                 }
 
-                let gain = match &strategy {
+                let mut gain = match &strategy {
                     GainStrategy::Standard => {
                         split_gain_term(left.grad, left.hess, left.grad_sq, left.count, &options)
                             + split_gain_term(
@@ -1333,18 +1359,30 @@ impl CpuBackend {
                     }
                 };
 
-                if gain > best_gain {
-                    // Build bitset: categories 0..=k in sorted order go left.
-                    let bitset_len = num_categories.div_ceil(8);
-                    let mut bitset = vec![0u8; bitset_len];
-                    for &(bin_id, _, _, _, _) in &categories[..=k] {
-                        let byte_idx = (bin_id / 8) as usize;
-                        let bit_idx = (bin_id % 8) as usize;
-                        if byte_idx < bitset.len() {
-                            bitset[byte_idx] |= 1 << bit_idx;
-                        }
-                    }
+                let penalty_bitset = factor_context
+                    .map(|_| categorical_bitset_for_prefix(num_categories, &categories, k));
+                if let Some(ctx) = factor_context {
+                    let left_leaf_value = -left_grad_for_gain / left_denom;
+                    let right_leaf_value = -right_grad_for_gain / right_denom;
+                    gain -= factor_split_penalty_for_candidate(
+                        ctx,
+                        feature_histogram.feature_index,
+                        0,
+                        candidate.default_left,
+                        penalty_bitset.as_deref(),
+                        left_leaf_value,
+                        right_leaf_value,
+                    );
+                }
 
+                if !gain.is_finite() {
+                    continue;
+                }
+
+                if gain > best_gain {
+                    let bitset = penalty_bitset.unwrap_or_else(|| {
+                        categorical_bitset_for_prefix(num_categories, &categories, k)
+                    });
                     best_gain = gain;
                     best_candidate = Some(SplitCandidate {
                         node_id,
@@ -1381,6 +1419,7 @@ impl CpuBackend {
         options: SplitSelectionOptions,
         feature_weights: &[f32],
         categorical_features: &[CategoricalFeatureInfo],
+        factor_context: Option<&FactorSplitContext<'_>>,
     ) -> Option<SplitCandidate> {
         let find_best = |fh: &FeatureHistogram| -> Option<SplitCandidate> {
             let fi = fh.feature_index as usize;
@@ -1390,9 +1429,10 @@ impl CpuBackend {
                     histograms.node_id,
                     options,
                     cat_info.num_categories,
+                    factor_context,
                 )
             } else {
-                Self::best_split_for_feature(fh, histograms.node_id, options)
+                Self::best_split_for_feature(fh, histograms.node_id, options, factor_context)
             }
         };
 
@@ -1435,12 +1475,14 @@ impl CpuBackend {
         node_id: u32,
         options: &SplitSelectionOptions,
         morph: &MorphContext,
+        factor_context: Option<&FactorSplitContext<'_>>,
     ) -> Option<SplitCandidate> {
         Self::best_split_for_feature_inner(
             feature_histogram,
             node_id,
             *options,
             GainStrategy::Morph(morph),
+            factor_context,
         )
     }
 
@@ -1568,6 +1610,122 @@ fn split_gain_term(
     )
 }
 
+fn categorical_bitset_for_prefix(
+    num_categories: usize,
+    categories: &[(u16, f32, f32, f32, u32)],
+    prefix_end: usize,
+) -> Vec<u8> {
+    let bitset_len = num_categories.div_ceil(8);
+    let mut bitset = vec![0u8; bitset_len];
+    for &(bin_id, _, _, _, _) in &categories[..=prefix_end] {
+        let byte_idx = (bin_id / 8) as usize;
+        let bit_idx = (bin_id % 8) as usize;
+        if byte_idx < bitset.len() {
+            bitset[byte_idx] |= 1 << bit_idx;
+        }
+    }
+    bitset
+}
+
+fn factor_split_penalty_for_candidate(
+    context: &FactorSplitContext<'_>,
+    feature_index: u32,
+    threshold_bin: u16,
+    default_left: bool,
+    categorical_bitset: Option<&[u8]>,
+    left_leaf_value: f32,
+    right_leaf_value: f32,
+) -> f32 {
+    if context.factor_penalty == 0.0 {
+        return 0.0;
+    }
+
+    let factor_count = context.exposures.factor_count;
+    let mut left_factor_sums = vec![0.0_f32; factor_count];
+    let mut right_factor_sums = vec![0.0_f32; factor_count];
+    let feature_index = feature_index as usize;
+    let feature_count = context.binned_matrix.feature_count;
+    let missing = context.binned_matrix.missing_bin();
+
+    for &row_index in context.row_indices {
+        let row_index = row_index as usize;
+        let bin = context
+            .binned_matrix
+            .row_bin(row_index * feature_count + feature_index);
+        let goes_left = if bin == missing {
+            default_left
+        } else if let Some(bitset) = categorical_bitset {
+            let byte_idx = (bin / 8) as usize;
+            let bit_idx = (bin % 8) as usize;
+            byte_idx < bitset.len() && (bitset[byte_idx] & (1 << bit_idx)) != 0
+        } else {
+            bin <= threshold_bin
+        };
+        let exposure_start = row_index * factor_count;
+        let exposure_row = &context.exposures.values[exposure_start..exposure_start + factor_count];
+        let target_sums = if goes_left {
+            &mut left_factor_sums
+        } else {
+            &mut right_factor_sums
+        };
+        for (sum, exposure) in target_sums.iter_mut().zip(exposure_row) {
+            *sum += *exposure;
+        }
+    }
+
+    factor_split_penalty(
+        &left_factor_sums,
+        &right_factor_sums,
+        left_leaf_value,
+        right_leaf_value,
+        context.factor_penalty,
+        context.row_indices.len(),
+    )
+}
+
+fn factor_split_penalty(
+    left_factor_sums: &[f32],
+    right_factor_sums: &[f32],
+    left_leaf_value: f32,
+    right_leaf_value: f32,
+    factor_penalty: f32,
+    row_count: usize,
+) -> f32 {
+    if factor_penalty == 0.0 {
+        return 0.0;
+    }
+    let mut norm_sq = 0.0_f32;
+    for i in 0..left_factor_sums.len() {
+        let load = left_factor_sums[i] * left_leaf_value + right_factor_sums[i] * right_leaf_value;
+        norm_sq += load * load;
+    }
+    factor_penalty * norm_sq / row_count.max(1) as f32
+}
+
+fn validate_factor_split_context(context: &FactorSplitContext<'_>) -> EngineResult<()> {
+    if !context.factor_penalty.is_finite() || context.factor_penalty < 0.0 {
+        return Err(EngineError::ContractViolation(
+            "factor split penalty must be finite and >= 0".to_string(),
+        ));
+    }
+    if context.exposures.row_count != context.binned_matrix.row_count {
+        return Err(EngineError::ContractViolation(format!(
+            "factor_exposures row_count {} does not match binned matrix row_count {}",
+            context.exposures.row_count, context.binned_matrix.row_count
+        )));
+    }
+    for &row_index in context.row_indices {
+        let row_index = row_index as usize;
+        if row_index >= context.exposures.row_count {
+            return Err(EngineError::ContractViolation(format!(
+                "factor split context row index {row_index} is out of bounds for row_count {}",
+                context.exposures.row_count
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Determine if a row goes to the left child for a given split.
 /// Handles both continuous (threshold comparison) and categorical (bitset membership) splits.
 #[inline]
@@ -1620,6 +1778,7 @@ impl BackendOps for CpuBackend {
             SplitSelectionOptions::default(),
             &[],
             &[],
+            None,
         ))
     }
 
@@ -1635,6 +1794,27 @@ impl BackendOps for CpuBackend {
             options,
             feature_weights,
             categorical_features,
+            None,
+        ))
+    }
+
+    fn best_split_with_factor_context(
+        &self,
+        histograms: &HistogramBundle,
+        options: SplitSelectionOptions,
+        feature_weights: &[f32],
+        categorical_features: &[CategoricalFeatureInfo],
+        factor_context: Option<&FactorSplitContext<'_>>,
+    ) -> EngineResult<Option<SplitCandidate>> {
+        if let Some(ctx) = factor_context {
+            validate_factor_split_context(ctx)?;
+        }
+        Ok(Self::best_split_with_options_internal(
+            histograms,
+            options,
+            feature_weights,
+            categorical_features,
+            factor_context,
         ))
     }
 
@@ -1646,6 +1826,28 @@ impl BackendOps for CpuBackend {
         categorical_features: &[CategoricalFeatureInfo],
         morph: &MorphContext,
     ) -> EngineResult<Option<SplitCandidate>> {
+        self.best_split_morph_with_factor_context(
+            histograms,
+            options,
+            feature_weights,
+            categorical_features,
+            morph,
+            None,
+        )
+    }
+
+    fn best_split_morph_with_factor_context(
+        &self,
+        histograms: &HistogramBundle,
+        options: SplitSelectionOptions,
+        feature_weights: &[f32],
+        categorical_features: &[CategoricalFeatureInfo],
+        morph: &MorphContext,
+        factor_context: Option<&FactorSplitContext<'_>>,
+    ) -> EngineResult<Option<SplitCandidate>> {
+        if let Some(ctx) = factor_context {
+            validate_factor_split_context(ctx)?;
+        }
         let find_best = |fh: &FeatureHistogram| -> Option<SplitCandidate> {
             let fi = fh.feature_index as usize;
             if let Some(cat_info) = categorical_features.iter().find(|c| c.feature_index == fi) {
@@ -1655,9 +1857,16 @@ impl BackendOps for CpuBackend {
                     &options,
                     cat_info.num_categories,
                     morph,
+                    factor_context,
                 )
             } else {
-                Self::best_split_morph_numeric_feature(fh, histograms.node_id, &options, morph)
+                Self::best_split_morph_numeric_feature(
+                    fh,
+                    histograms.node_id,
+                    &options,
+                    morph,
+                    factor_context,
+                )
             }
         };
 
@@ -1974,9 +2183,10 @@ impl BackendOps for CpuBackend {
 mod tests {
     use super::*;
     use alloygbm_core::{
-        DatasetMatrix, FeatureTile, LeafModelKind, TrainParams, TrainingDataset, TreeGrowth,
+        DatasetMatrix, FactorExposureMatrix, FeatureTile, LeafModelKind, TrainParams,
+        TrainingDataset, TreeGrowth,
     };
-    use alloygbm_engine::{SquaredErrorObjective, Trainer};
+    use alloygbm_engine::{FactorSplitContext, SquaredErrorObjective, Trainer};
 
     fn sample_binned_matrix() -> BinnedMatrix {
         BinnedMatrix::new(
@@ -2410,6 +2620,44 @@ mod tests {
     }
 
     #[test]
+    fn factor_split_penalty_reduces_factor_loaded_gain() {
+        let backend = CpuBackend;
+        let matrix = sample_binned_matrix();
+        let node = sample_node();
+        let histograms = backend
+            .build_histograms(
+                &matrix,
+                &sample_gradients(),
+                &node,
+                &[FeatureTile::new(0, 2).expect("feature tile is valid")],
+            )
+            .expect("histograms should build");
+        let exposures = FactorExposureMatrix::new(4, 1, vec![1.0, 1.0, -1.0, -1.0])
+            .expect("factor exposures are valid");
+        let no_penalty = backend
+            .best_split_with_options(&histograms, SplitSelectionOptions::default(), &[], &[])
+            .expect("split search should succeed")
+            .expect("split should exist");
+        let factor_context = FactorSplitContext {
+            binned_matrix: &matrix,
+            exposures: &exposures,
+            row_indices: &node.row_indices,
+            factor_penalty: 0.1,
+        };
+        let penalized = backend
+            .best_split_with_factor_context(
+                &histograms,
+                SplitSelectionOptions::default(),
+                &[],
+                &[],
+                Some(&factor_context),
+            )
+            .expect("split search should succeed")
+            .expect("split should exist");
+        assert!(penalized.gain <= no_penalty.gain);
+    }
+
+    #[test]
     fn best_split_with_min_child_hessian_can_prune_all_splits() {
         let backend = CpuBackend;
         let histograms = backend
@@ -2711,7 +2959,8 @@ mod tests {
             missing_bin_index: nan_bin,
         };
 
-        let result = CpuBackend::best_split_for_categorical_feature(&fh, 0, options, num_cats);
+        let result =
+            CpuBackend::best_split_for_categorical_feature(&fh, 0, options, num_cats, None);
         assert!(result.is_some(), "should find a split");
         let split = result.unwrap();
         assert!(split.is_categorical);
@@ -2784,7 +3033,7 @@ mod tests {
             ..SplitSelectionOptions::default()
         };
 
-        let split = CpuBackend::best_split_for_categorical_feature(&fh, 0, options, num_cats)
+        let split = CpuBackend::best_split_for_categorical_feature(&fh, 0, options, num_cats, None)
             .expect("dro categorical split should exist");
         let bitset = split
             .categorical_bitset
@@ -2861,7 +3110,8 @@ mod tests {
         };
 
         let options = SplitSelectionOptions::default();
-        let result = CpuBackend::best_split_for_categorical_feature(&fh, 0, options, num_cats);
+        let result =
+            CpuBackend::best_split_for_categorical_feature(&fh, 0, options, num_cats, None);
         assert!(
             result.is_none(),
             "single populated category should not split"
@@ -3302,7 +3552,7 @@ mod tests {
         };
         let options = make_options(0.05, 0.1, 1.0, 0.0, 31);
         let scalar =
-            CpuBackend::best_split_for_feature_inner(&fh, 0, options, GainStrategy::Standard);
+            CpuBackend::best_split_for_feature_inner(&fh, 0, options, GainStrategy::Standard, None);
         let simd = CpuBackend::best_split_for_feature_standard_simd(&fh, 0, options);
         match (scalar, simd) {
             (Some(s), Some(v)) => {
@@ -3340,7 +3590,7 @@ mod tests {
         };
         let options = make_options(0.10, 0.1, 0.5, 0.0, 15);
         let scalar =
-            CpuBackend::best_split_for_feature_inner(&fh, 0, options, GainStrategy::Standard);
+            CpuBackend::best_split_for_feature_inner(&fh, 0, options, GainStrategy::Standard, None);
         let simd = CpuBackend::best_split_for_feature_standard_simd(&fh, 0, options);
         match (scalar, simd) {
             (Some(s), Some(v)) => {
@@ -3369,7 +3619,7 @@ mod tests {
         };
         let options = make_options(0.0, 0.1, 0.0, 0.05, 15);
         let scalar =
-            CpuBackend::best_split_for_feature_inner(&fh, 0, options, GainStrategy::Standard);
+            CpuBackend::best_split_for_feature_inner(&fh, 0, options, GainStrategy::Standard, None);
         let simd = CpuBackend::best_split_for_feature_standard_simd(&fh, 0, options);
         match (scalar, simd) {
             (Some(s), Some(v)) => {
@@ -3406,7 +3656,7 @@ mod tests {
         };
         let options = make_options(0.0, 0.1, 0.5, 0.0, 15);
         let scalar =
-            CpuBackend::best_split_for_feature_inner(&fh, 0, options, GainStrategy::Standard);
+            CpuBackend::best_split_for_feature_inner(&fh, 0, options, GainStrategy::Standard, None);
         let simd = CpuBackend::best_split_for_feature_standard_simd(&fh, 0, options);
         match (scalar, simd) {
             (Some(s), Some(v)) => {
@@ -3452,7 +3702,7 @@ mod tests {
         };
 
         let split =
-            CpuBackend::best_split_for_feature_inner(&fh, 0, options, GainStrategy::Standard)
+            CpuBackend::best_split_for_feature_inner(&fh, 0, options, GainStrategy::Standard, None)
                 .expect("dro split with missing bin should exist");
         let mut expected_left = HistogramBin {
             grad_sum: 0.0,

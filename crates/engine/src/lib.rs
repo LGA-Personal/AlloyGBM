@@ -305,6 +305,18 @@ impl Default for SplitSelectionOptions {
     }
 }
 
+/// Per-node context for split exposure penalties over scalar leaves.
+///
+/// This is passed separately from [`SplitSelectionOptions`] so the hot no-penalty
+/// path can keep using small `Copy` options.
+#[derive(Debug, Clone, Copy)]
+pub struct FactorSplitContext<'a> {
+    pub binned_matrix: &'a BinnedMatrix,
+    pub exposures: &'a FactorExposureMatrix,
+    pub row_indices: &'a [u32],
+    pub factor_penalty: f32,
+}
+
 /// Per-round context for morph-gain split selection.
 /// Passed to `BackendOps::best_split_morph` in addition to the standard options.
 #[derive(Debug, Clone, Copy)]
@@ -514,6 +526,16 @@ pub trait BackendOps {
     ) -> EngineResult<Option<SplitCandidate>> {
         self.best_split(histograms)
     }
+    fn best_split_with_factor_context(
+        &self,
+        histograms: &HistogramBundle,
+        options: SplitSelectionOptions,
+        feature_weights: &[f32],
+        categorical_features: &[CategoricalFeatureInfo],
+        _factor_context: Option<&FactorSplitContext<'_>>,
+    ) -> EngineResult<Option<SplitCandidate>> {
+        self.best_split_with_options(histograms, options, feature_weights, categorical_features)
+    }
     /// Morph-mode split selection. Default implementation delegates to
     /// `best_split_with_options` (i.e. ignores morph context), so backends that
     /// don't implement morph fall back gracefully.
@@ -526,6 +548,23 @@ pub trait BackendOps {
         _morph: &MorphContext,
     ) -> EngineResult<Option<SplitCandidate>> {
         self.best_split_with_options(histograms, options, feature_weights, categorical_features)
+    }
+    fn best_split_morph_with_factor_context(
+        &self,
+        histograms: &HistogramBundle,
+        options: SplitSelectionOptions,
+        feature_weights: &[f32],
+        categorical_features: &[CategoricalFeatureInfo],
+        morph: &MorphContext,
+        _factor_context: Option<&FactorSplitContext<'_>>,
+    ) -> EngineResult<Option<SplitCandidate>> {
+        self.best_split_morph(
+            histograms,
+            options,
+            feature_weights,
+            categorical_features,
+            morph,
+        )
     }
     fn apply_split(
         &self,
@@ -2573,11 +2612,18 @@ impl Trainer {
             &root_node,
             &feature_tiles,
         )?;
-        let split_candidate = backend.best_split_with_options(
+        let factor_context = factor_split_context_for_node(
+            &self.params,
+            binned_matrix,
+            dataset.factor_exposures.as_ref(),
+            &root_node.row_indices,
+        );
+        let split_candidate = backend.best_split_with_factor_context(
             &histograms,
             split_options,
             &self.params.feature_weights,
             &[],
+            factor_context.as_ref(),
         )?;
         let root_stats = backend.reduce_sums(&fit_contract.gradients, &root_node.row_indices)?;
 
@@ -3337,6 +3383,7 @@ impl Trainer {
                         &self.categorical_features,
                         morph_tree_ctx,
                         raw_fv,
+                        dataset.factor_exposures.as_ref(),
                     )?
                 } else {
                     build_tree_level_wise(
@@ -3354,6 +3401,7 @@ impl Trainer {
                         &self.categorical_features,
                         morph_tree_ctx,
                         raw_fv,
+                        dataset.factor_exposures.as_ref(),
                     )?
                 };
 
@@ -3907,6 +3955,7 @@ impl Trainer {
                         &execution.categorical_features,
                         morph_tree_ctx,
                         raw_fv,
+                        active_dataset.factor_exposures.as_ref(),
                     )?
                 } else {
                     build_tree_level_wise(
@@ -3924,6 +3973,7 @@ impl Trainer {
                         &execution.categorical_features,
                         morph_tree_ctx,
                         raw_fv,
+                        active_dataset.factor_exposures.as_ref(),
                     )?
                 };
 
@@ -4331,6 +4381,24 @@ fn gradient_neutralization_config(
     })
 }
 
+fn factor_split_context_for_node<'a>(
+    params: &TrainParams,
+    binned_matrix: &'a BinnedMatrix,
+    exposures: Option<&'a FactorExposureMatrix>,
+    row_indices: &'a [u32],
+) -> Option<FactorSplitContext<'a>> {
+    let config = params.neutralization_config?;
+    if config.kind != NeutralizationKind::SplitPenalty || config.split_penalty == 0.0 {
+        return None;
+    }
+    Some(FactorSplitContext {
+        binned_matrix,
+        exposures: exposures?,
+        row_indices,
+        factor_penalty: config.split_penalty,
+    })
+}
+
 fn validate_gradient_pairs(gradients: &[GradientPair], row_count: usize) -> EngineResult<()> {
     validate_gradient_pair_length(gradients, row_count)?;
     for gradient in gradients {
@@ -4678,20 +4746,28 @@ fn find_best_split_dispatch<B: BackendOps>(
     feature_weights: &[f32],
     categorical_features: &[CategoricalFeatureInfo],
     morph: Option<&MorphTreeContext<'_>>,
+    factor_context: Option<&FactorSplitContext<'_>>,
 ) -> EngineResult<Option<SplitCandidate>> {
     if let Some(m) = morph {
         let ctx = m
             .state
             .morph_context(m.iteration, m.total_iterations, m.class_idx);
-        backend.best_split_morph(
+        backend.best_split_morph_with_factor_context(
             histograms,
             options,
             feature_weights,
             categorical_features,
             &ctx,
+            factor_context,
         )
     } else {
-        backend.best_split_with_options(histograms, options, feature_weights, categorical_features)
+        backend.best_split_with_factor_context(
+            histograms,
+            options,
+            feature_weights,
+            categorical_features,
+            factor_context,
+        )
     }
 }
 
@@ -4714,6 +4790,7 @@ fn build_tree_level_wise<B: BackendOps>(
     categorical_features: &[CategoricalFeatureInfo],
     morph: Option<MorphTreeContext<'_>>,
     raw_feature_values: &[f32],
+    factor_exposures: Option<&FactorExposureMatrix>,
 ) -> EngineResult<(Vec<TrainedStump>, IterationStopReason)> {
     let mut candidate_round_stumps = Vec::new();
     let mut round_rejection_reason = IterationStopReason::NoSplitCandidate;
@@ -4739,6 +4816,12 @@ fn build_tree_level_wise<B: BackendOps>(
         {
             let node_id = encode_tree_node_id(round_index, local_node_id)?;
             let node = NodeSlice::new(node_id, node_rows)?;
+            let factor_context = factor_split_context_for_node(
+                params,
+                binned_matrix,
+                factor_exposures,
+                &node.row_indices,
+            );
             let Some(mut split) = find_best_split_dispatch(
                 backend,
                 &histograms,
@@ -4746,6 +4829,7 @@ fn build_tree_level_wise<B: BackendOps>(
                 feature_weights,
                 categorical_features,
                 morph.as_ref(),
+                factor_context.as_ref(),
             )?
             else {
                 continue;
@@ -5117,6 +5201,7 @@ fn build_tree_leaf_wise<B: BackendOps>(
     categorical_features: &[CategoricalFeatureInfo],
     morph: Option<MorphTreeContext<'_>>,
     raw_feature_values: &[f32],
+    factor_exposures: Option<&FactorExposureMatrix>,
 ) -> EngineResult<(Vec<TrainedStump>, IterationStopReason)> {
     let max_leaves = controls.max_leaves.unwrap_or(usize::MAX);
     let max_depth = params.max_depth as usize;
@@ -5126,6 +5211,12 @@ fn build_tree_leaf_wise<B: BackendOps>(
     let root_node = NodeSlice::new(root_node_id, root_row_indices)?;
     let root_histograms =
         backend.build_histograms(binned_matrix, gradients, &root_node, feature_tiles)?;
+    let root_factor_context = factor_split_context_for_node(
+        params,
+        binned_matrix,
+        factor_exposures,
+        &root_node.row_indices,
+    );
     let root_split = find_best_split_dispatch(
         backend,
         &root_histograms,
@@ -5133,6 +5224,7 @@ fn build_tree_leaf_wise<B: BackendOps>(
         feature_weights,
         categorical_features,
         morph.as_ref(),
+        root_factor_context.as_ref(),
     )?;
 
     let Some(root_split) = root_split else {
@@ -5453,6 +5545,12 @@ fn build_tree_leaf_wise<B: BackendOps>(
             )?;
 
             // Find best split for each child and enqueue if valid.
+            let smaller_factor_context = factor_split_context_for_node(
+                params,
+                binned_matrix,
+                factor_exposures,
+                &smaller_node.row_indices,
+            );
             if let Some(child_split) = find_best_split_dispatch(
                 backend,
                 &smaller_histograms,
@@ -5460,6 +5558,7 @@ fn build_tree_leaf_wise<B: BackendOps>(
                 feature_weights,
                 categorical_features,
                 morph.as_ref(),
+                smaller_factor_context.as_ref(),
             )? && child_split.gain.is_finite()
                 && child_split.gain > controls.min_split_gain
             {
@@ -5474,6 +5573,12 @@ fn build_tree_leaf_wise<B: BackendOps>(
                 });
             }
 
+            let larger_factor_context = factor_split_context_for_node(
+                params,
+                binned_matrix,
+                factor_exposures,
+                &larger_indices,
+            );
             if let Some(child_split) = find_best_split_dispatch(
                 backend,
                 &larger_histograms,
@@ -5481,6 +5586,7 @@ fn build_tree_leaf_wise<B: BackendOps>(
                 feature_weights,
                 categorical_features,
                 morph.as_ref(),
+                larger_factor_context.as_ref(),
             )? && child_split.gain.is_finite()
                 && child_split.gain > controls.min_split_gain
             {
@@ -8426,6 +8532,30 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("leaf_solver='dro' requires leaf_model='constant'"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn split_penalty_neutralization_rejects_linear_leaves() {
+        let params = TrainParams {
+            neutralization_config: Some(alloygbm_core::FactorNeutralizationConfig {
+                kind: NeutralizationKind::SplitPenalty,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.1,
+            }),
+            leaf_model: LeafModelKind::Linear,
+            ..TrainParams::default()
+        };
+
+        let err = Trainer::new(params).expect_err("split penalty requires scalar leaves");
+        assert!(matches!(
+            err,
+            EngineError::Core(CoreError::InvalidConfig(_))
+        ));
+        assert!(
+            err.to_string()
+                .contains("neutralization='split_penalty' requires leaf_model='constant'"),
             "unexpected error: {err}"
         );
     }
