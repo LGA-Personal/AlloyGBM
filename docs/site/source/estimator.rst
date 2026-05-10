@@ -212,13 +212,17 @@ Compatibility:
      - supported
      - rejected
    * - warm start
-     - rejected for non-``none`` in first release
-     - rejected for non-``none`` in first release
-     - rejected for non-``none`` in first release
+     - supported with matching ``factor_exposures`` on each fit
+     - supported with matching ``factor_exposures`` on each fit
+     - supported with matching ``factor_exposures`` on each fit
 
 This is a training-time regularization tool. It does not guarantee
 prediction-time zero exposure unless predictions are neutralized against
 evaluation-time factors outside the model.
+
+Exposure matrices are not persisted in the estimator or artifact. For
+neutralized warm-start training, pass row-matched ``factor_exposures`` on every
+``fit(...)`` call that continues the model.
 
 Piecewise-linear leaves
 -----------------------

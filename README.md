@@ -240,7 +240,11 @@ Compatibility:
 | `training_mode="morph"` | supported | supported | supported |
 | `leaf_solver="dro"` | supported | supported | supported |
 | `leaf_model="linear"` | supported | supported | rejected |
-| warm start | rejected for non-`none` in first release | rejected for non-`none` in first release | rejected for non-`none` in first release |
+| warm start | supported with matching `factor_exposures` on each fit | supported with matching `factor_exposures` on each fit | supported with matching `factor_exposures` on each fit |
+
+Exposure matrices are not persisted in the estimator or artifact. For
+neutralized warm-start training, pass row-matched `factor_exposures` on every
+`fit(...)` call that continues the model.
 
 ### Piecewise-Linear Leaves
 
