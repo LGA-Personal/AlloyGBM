@@ -213,15 +213,16 @@ Compatibility:
 | `training_mode="morph"` | supported | supported | supported |
 | `leaf_solver="dro"` | supported | supported | supported |
 | `leaf_model="linear"` | supported | supported | rejected |
-| warm start | supported with matching `factor_exposures` on each fit | supported with matching `factor_exposures` on each fit | supported with matching `factor_exposures` on each fit |
+| warm start | rejected in this release | rejected in this release | rejected in this release |
 
 This is a training-time regularization tool. It does not guarantee
 prediction-time zero exposure unless predictions are neutralized against
 evaluation-time factors outside the model.
 
-Exposure matrices are not persisted in the estimator or artifact. For
-neutralized warm-start training, pass row-matched `factor_exposures` on every
-`fit(...)` call that continues the model.
+Exposure matrices and neutralization metadata are not persisted in artifacts
+yet. For this release, neutralized warm-start and `init_model` continuation are
+rejected because the previous model and current estimator cannot prove matching
+neutralization contracts.
 
 ## Piecewise-Linear Leaves
 

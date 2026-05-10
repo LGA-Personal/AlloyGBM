@@ -2187,6 +2187,139 @@ fn encode_bins_from_encoded_values(encoded_values: &[f32]) -> Result<(Vec<u8>, u
     Ok((bins, (unique_values.len().saturating_sub(1)) as u16))
 }
 
+fn bridge_cholesky_lower(mut matrix: Vec<f64>, k: usize) -> Result<Vec<f64>, EngineError> {
+    for i in 0..k {
+        for j in 0..=i {
+            let mut sum = matrix[i * k + j];
+            for p in 0..j {
+                sum -= matrix[i * k + p] * matrix[j * k + p];
+            }
+            if i == j {
+                if sum <= 1e-12 {
+                    return Err(EngineError::ContractViolation(
+                        "factor exposure Gram matrix is singular; increase factor_neutralization_lambda"
+                            .to_string(),
+                    ));
+                }
+                matrix[i * k + j] = sum.sqrt();
+            } else {
+                matrix[i * k + j] = sum / matrix[j * k + j];
+            }
+        }
+        for j in i + 1..k {
+            matrix[i * k + j] = 0.0;
+        }
+    }
+    Ok(matrix)
+}
+
+fn bridge_solve_cholesky(lower: &[f64], rhs: &[f64], k: usize) -> Result<Vec<f64>, EngineError> {
+    if rhs.len() != k {
+        return Err(EngineError::ContractViolation(
+            "factor projection rhs length must match factor count".to_string(),
+        ));
+    }
+
+    let mut y = vec![0.0_f64; k];
+    for i in 0..k {
+        let mut sum = rhs[i];
+        for (j, y_j) in y.iter().enumerate().take(i) {
+            sum -= lower[i * k + j] * *y_j;
+        }
+        y[i] = sum / lower[i * k + i];
+    }
+
+    let mut x = vec![0.0_f64; k];
+    for i in (0..k).rev() {
+        let mut sum = y[i];
+        for (j, x_j) in x.iter().enumerate().take(k).skip(i + 1) {
+            sum -= lower[j * k + i] * *x_j;
+        }
+        x[i] = sum / lower[i * k + i];
+    }
+    Ok(x)
+}
+
+fn bridge_residualize_values_in_place(
+    values: &mut [f32],
+    exposures: &FactorExposureMatrix,
+    weights: Option<&[f32]>,
+    ridge_lambda: f32,
+) -> Result<(), EngineError> {
+    if values.len() != exposures.row_count {
+        return Err(EngineError::ContractViolation(
+            "value length must match factor_exposures row_count".to_string(),
+        ));
+    }
+    if let Some(weights) = weights
+        && weights.len() != exposures.row_count
+    {
+        return Err(EngineError::ContractViolation(
+            "sample_weight length must match factor_exposures row_count".to_string(),
+        ));
+    }
+
+    let k = exposures.factor_count;
+    let mut gram = vec![0.0_f64; k * k];
+    let mut rhs = vec![0.0_f64; k];
+    for (row, value) in values.iter().enumerate().take(exposures.row_count) {
+        let weight = weights.map_or(1.0_f64, |sample_weights| f64::from(sample_weights[row]));
+        let factors = exposures.row(row)?;
+        for a in 0..k {
+            rhs[a] += weight * f64::from(factors[a]) * f64::from(*value);
+            for b in 0..=a {
+                gram[a * k + b] += weight * f64::from(factors[a]) * f64::from(factors[b]);
+            }
+        }
+    }
+    for i in 0..k {
+        gram[i * k + i] += f64::from(ridge_lambda);
+    }
+    let lower = bridge_cholesky_lower(gram, k)?;
+    let coefficients = bridge_solve_cholesky(&lower, &rhs, k)?;
+
+    let mut residualized = Vec::with_capacity(values.len());
+    for (row, value) in values.iter().enumerate() {
+        let projected = exposures
+            .row(row)?
+            .iter()
+            .zip(coefficients.iter())
+            .map(|(factor, coefficient)| f64::from(*factor) * coefficient)
+            .sum::<f64>();
+        let residual = (f64::from(*value) - projected) as f32;
+        if !residual.is_finite() {
+            return Err(EngineError::ContractViolation(
+                "residualized value must be finite".to_string(),
+            ));
+        }
+        residualized.push(residual);
+    }
+    values.copy_from_slice(&residualized);
+    Ok(())
+}
+
+fn apply_bridge_pre_target_neutralization(
+    prepared: &mut PreparedTrainingMatrices,
+    config: FactorNeutralizationConfig,
+) -> Result<(), EngineError> {
+    if config.kind != NeutralizationKind::PreTarget {
+        return Ok(());
+    }
+    let exposures = prepared.dataset.factor_exposures.as_ref().ok_or_else(|| {
+        EngineError::ContractViolation(
+            "factor_exposures are required when neutralization is active".to_string(),
+        )
+    })?;
+    bridge_residualize_values_in_place(
+        &mut prepared.dataset.targets,
+        exposures,
+        prepared.dataset.sample_weights.as_deref(),
+        config.ridge_lambda,
+    )?;
+    prepared.dataset.factor_exposures = None;
+    Ok(())
+}
+
 /// Encode multiple categorical features in the training matrices via target encoding.
 fn apply_categorical_encoding_to_training_matrices_multi(
     prepared: PreparedTrainingMatrices,
@@ -2426,7 +2559,7 @@ fn train_regression_artifact_with_summary_dense_impl(
     validation_targets: Option<&[f32]>,
     validation_sample_weights: Option<Vec<f32>>,
     validation_group_id: Option<Vec<u32>>,
-    params: TrainParams,
+    mut params: TrainParams,
     rounds: usize,
     time_index: Option<Vec<i64>>,
     validation_time_index: Option<Vec<i64>>,
@@ -2445,6 +2578,12 @@ fn train_regression_artifact_with_summary_dense_impl(
     max_cat_threshold: usize,
 ) -> Result<NativeTrainingResult, EngineError> {
     let bridge_start = Instant::now();
+    if init_artifact_bytes.is_some() && params.neutralization_config.is_some() {
+        return Err(EngineError::ContractViolation(
+            "neutralized warm-start training is not supported because model artifacts do not persist neutralization metadata yet"
+                .to_string(),
+        ));
+    }
     let is_linear_leaf = params.leaf_model == alloygbm_core::LeafModelKind::Linear;
     // Dense float values are needed for categorical target encoding.  For linear-leaf
     // training we need the raw feature values separately (see post-processing below).
@@ -2470,6 +2609,13 @@ fn train_regression_artifact_with_summary_dense_impl(
     // Categorical encoding runs afterwards and will overwrite its own columns.
     if is_linear_leaf {
         prepared.dataset.matrix = DatasetMatrix::new(row_count, feature_count, values.to_vec())?;
+    }
+
+    if let Some(config) = params.neutralization_config
+        && config.kind == NeutralizationKind::PreTarget
+    {
+        apply_bridge_pre_target_neutralization(&mut prepared, config)?;
+        params.neutralization_config = None;
     }
 
     let training_targets_for_validation = prepared.dataset.targets.clone();
@@ -4451,7 +4597,8 @@ mod tests {
     use alloygbm_backend_cpu::CpuBackend;
     use alloygbm_categorical::TargetEncoderConfig;
     use alloygbm_core::{
-        BinnedMatrix, DatasetMatrix, LeafModelKind, ModelSectionKind, TrainParams, TrainingDataset,
+        BinnedMatrix, DatasetMatrix, FactorExposureMatrix, FactorNeutralizationConfig,
+        LeafModelKind, ModelSectionKind, NeutralizationKind, TrainParams, TrainingDataset,
         TreeGrowth, deserialize_model_artifact_v1, serialize_model_artifact_v1,
     };
     use alloygbm_engine::{
@@ -4546,6 +4693,18 @@ mod tests {
             ],
         )
         .expect("binned matrix is valid")
+    }
+
+    fn binned_matrix_from_fixture_dataset(dataset: &TrainingDataset) -> BinnedMatrix {
+        let mut bins = Vec::with_capacity(dataset.row_count() * dataset.matrix.feature_count);
+        for row in 0..dataset.row_count() {
+            for feature in 0..dataset.matrix.feature_count {
+                let value = dataset.matrix.values[row * dataset.matrix.feature_count + feature];
+                bins.push(value as u8);
+            }
+        }
+        BinnedMatrix::new(dataset.row_count(), dataset.matrix.feature_count, 3, bins)
+            .expect("binned matrix is valid")
     }
 
     fn fixture_rows(dataset: &TrainingDataset) -> Vec<Vec<f32>> {
@@ -4740,6 +4899,117 @@ mod tests {
         let bridge_model =
             alloygbm_engine::TrainedModel::from_artifact_bytes(&bridge_artifact).expect("parses");
         assert!(bridge_model.categorical_state.is_some());
+
+        let engine_predictions = engine_model.predict_batch(&rows).expect("engine predicts");
+        let bridge_predictions =
+            predictor_predict_batch_impl(&bridge_artifact, &rows).expect("bridge predicts");
+        assert_eq!(bridge_predictions, engine_predictions);
+    }
+
+    fn target_encoding_factor_loaded_dataset() -> TrainingDataset {
+        TrainingDataset {
+            matrix: DatasetMatrix::new(
+                8,
+                2,
+                vec![
+                    0.0, 0.0, //
+                    1.0, 0.0, //
+                    2.0, 0.0, //
+                    3.0, 0.0, //
+                    0.0, 1.0, //
+                    1.0, 1.0, //
+                    2.0, 1.0, //
+                    3.0, 1.0, //
+                ],
+            )
+            .expect("matrix is valid"),
+            targets: vec![-3.0, -2.0, -1.0, 0.0, 0.0, 1.0, 2.0, 3.0],
+            sample_weights: None,
+            time_index: None,
+            group_id: None,
+            factor_exposures: Some(
+                FactorExposureMatrix::new(8, 1, vec![-4.0, -3.0, -2.0, -1.0, 1.0, 2.0, 3.0, 4.0])
+                    .expect("factor exposures are valid"),
+            ),
+        }
+    }
+
+    #[test]
+    fn train_bridge_pre_target_categorical_encoding_matches_engine_residualized_targets() {
+        let dataset = target_encoding_factor_loaded_dataset();
+        let binned = binned_matrix_from_fixture_dataset(&dataset);
+        let rows = fixture_rows(&dataset);
+        let categorical_spec = CategoricalTargetEncodingSpec {
+            feature_index: 1,
+            values: vec![
+                "B".to_string(),
+                "B".to_string(),
+                "B".to_string(),
+                "B".to_string(),
+                "A".to_string(),
+                "A".to_string(),
+                "A".to_string(),
+                "A".to_string(),
+            ],
+            config: TargetEncoderConfig {
+                smoothing: 0.0,
+                min_samples_leaf: 1,
+                time_aware: false,
+            },
+        };
+        let params = TrainParams {
+            neutralization_config: Some(FactorNeutralizationConfig {
+                kind: NeutralizationKind::PreTarget,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            }),
+            ..fixture_params()
+        };
+
+        let engine_model = Trainer::new(params.clone())
+            .expect("params are valid")
+            .fit_iterations_with_single_target_encoded_feature(
+                &dataset,
+                &binned,
+                &categorical_spec,
+                &CpuBackend,
+                &SquaredErrorObjective,
+                DEFAULT_TRAIN_ROUNDS,
+            )
+            .expect("engine training succeeds");
+        let bridge_artifact = train_regression_artifact_with_summary_dense_impl(
+            &dataset.matrix.values,
+            dataset.row_count(),
+            dataset.matrix.feature_count,
+            &dataset.targets,
+            None,
+            None,
+            dataset.factor_exposures.clone(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            params,
+            DEFAULT_TRAIN_ROUNDS,
+            None,
+            None,
+            vec![categorical_spec],
+            Vec::new(),
+            TrainingPolicyMode::Manual,
+            false,
+            ContinuousBinningStrategy::Linear,
+            MAX_CONTINUOUS_QUANTIZED_BIN_U8 as usize + 1,
+            "squared_error",
+            None,
+            None,
+            None,
+            None,
+            None,
+            0,
+        )
+        .expect("bridge training succeeds")
+        .artifact_bytes;
 
         let engine_predictions = engine_model.predict_batch(&rows).expect("engine predicts");
         let bridge_predictions =

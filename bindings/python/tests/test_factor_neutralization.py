@@ -185,3 +185,33 @@ class FactorNeutralizationTests(unittest.TestCase):
         restored = pickle.loads(pickle.dumps(model))
         np.testing.assert_allclose(restored.predict(x), model.predict(x), atol=1e-6)
         self.assertEqual(restored.neutralization, "per_round_gradient")
+
+    def test_neutralized_warm_start_rejected_without_artifact_metadata(self):
+        x, y, f = factor_data()
+        model = GBMRegressor(
+            neutralization="per_round_gradient",
+            n_estimators=2,
+            warm_start=True,
+            seed=1,
+        )
+        model.fit(x, y, factor_exposures=f)
+        model.n_estimators = 3
+
+        with self.assertRaisesRegex(
+            ValueError, "neutralized warm-start training is not supported"
+        ):
+            model.fit(x, y, factor_exposures=f)
+
+    def test_neutralized_init_model_rejected_without_artifact_metadata(self):
+        x, y, f = factor_data()
+        base = GBMRegressor(n_estimators=2, seed=1).fit(x, y)
+        model = GBMRegressor(
+            neutralization="per_round_gradient",
+            n_estimators=2,
+            seed=2,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, "neutralized warm-start training is not supported"
+        ):
+            model.fit(x, y, init_model=base, factor_exposures=f)
