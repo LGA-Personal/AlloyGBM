@@ -78,6 +78,10 @@ REQUIRED_ALLOY_INIT_PARAMS = (
     "col_subsample",
 )
 VALID_ALLOY_CONTINUOUS_BINNING_STRATEGIES = ("linear", "rank", "quantile")
+FACTOR_NEUTRAL_MODEL_NAMES = {
+    "alloygbm_factor_neutral",
+    "alloygbm_factor_neutral_dro",
+}
 
 
 @dataclass
@@ -500,12 +504,15 @@ def _run_model(
     nan = float("nan")
     try:
         model = factory()
+        fit_kwargs = {}
+        if model_name in FACTOR_NEUTRAL_MODEL_NAMES:
+            fit_kwargs["factor_exposures"] = _synthesize_factor_exposures(x_train)
 
         fit_start = time.perf_counter()
         if task_type == "ranking":
-            model.fit(x_train, y_train, group=group_train)
+            model.fit(x_train, y_train, group=group_train, **fit_kwargs)
         else:
-            model.fit(x_train, y_train)
+            model.fit(x_train, y_train, **fit_kwargs)
         fit_seconds = time.perf_counter() - fit_start
 
         fit_timing = getattr(model, "fit_timing_", None)
@@ -641,6 +648,13 @@ def _run_model(
         )
 
 
+def _synthesize_factor_exposures(x: np.ndarray) -> np.ndarray:
+    factor_count = min(5, int(x.shape[1]))
+    if factor_count <= 0:
+        raise ValueError("cannot synthesize factor_exposures from zero feature columns")
+    return np.ascontiguousarray(x[:, :factor_count], dtype=np.float32)
+
+
 def _make_alloygbm_morph(task_type, **kwargs):
     from alloygbm import GBMClassifier, GBMRanker, GBMRegressor
     cls = {"regression": GBMRegressor, "binary": GBMClassifier,
@@ -720,6 +734,16 @@ def _model_factories(
     factories = {
         "alloygbm": lambda: gbm_regressor_cls(**alloy_params),
         "alloygbm_dro": lambda: _make_alloygbm_dro("regression", **alloy_params),
+        "alloygbm_factor_neutral": lambda: gbm_regressor_cls(
+            neutralization="per_round_gradient",
+            **alloy_params,
+        ),
+        "alloygbm_factor_neutral_dro": lambda: gbm_regressor_cls(
+            neutralization="per_round_gradient",
+            leaf_solver="dro",
+            dro_radius=0.05,
+            **alloy_params,
+        ),
         "alloygbm_linear": lambda: _make_alloygbm_linear("regression", lambda_l2=linear_lambda_l2, **alloy_params),
         "alloygbm_morph": lambda: _make_alloygbm_morph("regression", **alloy_params),
         "alloygbm_morph_cosine": lambda: _make_alloygbm_morph_cosine("regression", **alloy_params),
@@ -1483,7 +1507,8 @@ def main(argv: list[str]) -> int:
         help=(
             "filter to only these model names (e.g. alloygbm alloygbm_linear lightgbm). "
             "Default: run all models. Valid names depend on task type but include: "
-            "alloygbm, alloygbm_dro, alloygbm_linear, alloygbm_morph, alloygbm_morph_cosine, "
+            "alloygbm, alloygbm_dro, alloygbm_factor_neutral, "
+            "alloygbm_factor_neutral_dro, alloygbm_linear, alloygbm_morph, alloygbm_morph_cosine, "
             "alloygbm_morph_linear, lightgbm, xgboost, catboost"
         ),
     )

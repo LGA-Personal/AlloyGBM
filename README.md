@@ -166,6 +166,82 @@ model.fit(X_train, y_train)
 solver. `dro_radius=0.0` preserves standard-leaf predictions while retaining
 DRO metadata in the artifact.
 
+### Factor-Neutral Boosting
+
+Use `neutralization="per_round_gradient"` with `fit(..., factor_exposures=F)` to project each boosting round's pseudo-residuals away from user-supplied nuisance factors. This is useful when common factors explain high-variance signal that you do not want the model to spend tree capacity learning.
+
+This is a training-time regularization tool. It does not guarantee prediction-time zero exposure unless predictions are neutralized against evaluation-time factors outside the model.
+
+Constructor parameters:
+
+```python
+GBMRegressor(
+    neutralization="none",                 # "none" | "pre_target" | "per_round_gradient" | "split_penalty"
+    factor_neutralization_lambda=1e-6,      # finite, >= 0 ridge added to F^T W F
+    factor_penalty=0.0,                     # finite, >= 0; only active for neutralization="split_penalty"
+)
+```
+
+`factor_exposures` is dense, row-major, finite, and shaped
+`(n_rows, n_factors)`. It is fit data, not constructor state, so sklearn
+cloning remains clean and large matrices are not embedded in estimator params.
+
+Mode semantics:
+
+`neutralization="none"` preserves current behavior and ignores
+`factor_exposures` unless a non-`None` matrix is provided with an inactive mode,
+in which case Python raises a clear validation error to prevent silent user
+mistakes.
+
+`neutralization="pre_target"` residualizes the regression target once before
+training:
+
+```text
+y_perp = y - F (F^T W F + lambda I)^-1 F^T W y
+```
+
+This mode is supported for `GBMRegressor` only. It is rejected for
+classification and ranking because target residualization is not well-defined
+for class labels or ranking relevance.
+
+`neutralization="per_round_gradient"` projects objective gradients before each
+boosting round:
+
+```text
+g_perp = g - F (F^T W F + lambda I)^-1 F^T W g
+```
+
+Hessians are unchanged. This mode is supported for regression, binary
+classification, multiclass, and ranking. For multiclass, each class-gradient
+column is projected independently against the same factor projector.
+
+`neutralization="split_penalty"` includes per-round gradient projection and
+subtracts a factor-load penalty from split gain:
+
+```text
+penalty = factor_penalty * || F_L^T update_L + F_R^T update_R ||^2 / max(row_count, 1)
+gain_final = gain_after_existing_modes - penalty
+```
+
+For scalar leaves, `update_L` and `update_R` are the candidate scalar leaf
+values before any final MorphBoost depth/iteration leaf scaling. For DRO
+leaves, the scalar values use the DRO effective gradients. For MorphBoost, the
+order is: project gradients, compute standard/DRO gradient gain, blend
+MorphBoost information score, subtract factor penalty, then apply MorphBoost
+leaf scaling when storing leaves.
+
+Compatibility:
+
+| Feature | pre_target | per_round_gradient | split_penalty |
+| --- | --- | --- | --- |
+| `GBMRegressor` | supported | supported | supported |
+| `GBMClassifier` | rejected | supported | supported |
+| `GBMRanker` | rejected | supported | supported |
+| `training_mode="morph"` | supported | supported | supported |
+| `leaf_solver="dro"` | supported | supported | supported |
+| `leaf_model="linear"` | supported | supported | rejected |
+| warm start | rejected for non-`none` in first release | rejected for non-`none` in first release | rejected for non-`none` in first release |
+
 ### Piecewise-Linear Leaves
 
 Set `leaf_model="linear"` on any estimator to replace scalar leaves with small

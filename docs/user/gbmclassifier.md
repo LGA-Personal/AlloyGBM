@@ -36,6 +36,11 @@ All parameters from `GBMRegressor` are accepted, including:
 - `leaf_solver="dro"` for robust scalar leaves (see
   [GBMRegressor — DRO Leaf Solver](gbmregressor.md#dro-leaf-solver)). It works
   for binary and multi-class classification and requires `leaf_model="constant"`.
+- `neutralization="per_round_gradient"` or `neutralization="split_penalty"` with
+  `fit(..., factor_exposures=F)` for training-time factor/gradient
+  neutralization. `neutralization="pre_target"` is rejected for classifiers
+  because target residualization is not well-defined for class labels. See
+  [GBMRegressor — Factor-Neutral Boosting](gbmregressor.md#factor-neutral-boosting).
 - `leaf_model="linear"` for piecewise-linear leaves (see
   [GBMRegressor — Piecewise-Linear Leaves](gbmregressor.md#piecewise-linear-leaves)).
   Multi-class softmax fits each per-class tree sequence with linear leaves
@@ -65,7 +70,7 @@ model = GBMClassifier(
 
 ## Methods
 
-### `fit(X, y, *, sample_weight=None, eval_set=None, ...)`
+### `fit(X, y, *, sample_weight=None, eval_set=None, factor_exposures=None, ...)`
 
 Trains the classifier. Accepts the same keyword arguments as
 `GBMRegressor.fit()`. Returns `self`.

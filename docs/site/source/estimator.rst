@@ -110,6 +110,116 @@ are stored directly in the artifact. ``leaf_solver="dro"`` works on all three
 estimators, composes with ``training_mode="morph"``, and requires
 ``leaf_model="constant"`` in v0.6.0.
 
+Factor-neutral boosting
+-----------------------
+
+- ``neutralization: str = "none"``
+
+  - one of ``"none"``, ``"pre_target"``, ``"per_round_gradient"``, or
+    ``"split_penalty"``
+
+- ``factor_neutralization_lambda: float = 1e-6`` -- finite, non-negative ridge
+  term added to ``F^T W F``.
+- ``factor_penalty: float = 0.0`` -- finite, non-negative split exposure penalty
+  scale. Only active for ``neutralization="split_penalty"``.
+
+Pass factors as fit-time data:
+
+.. code-block:: python
+
+   model = GBMRegressor(neutralization="per_round_gradient", seed=7)
+   model.fit(X_train, y_train, factor_exposures=F_train)
+
+``factor_exposures`` must be dense, row-major, finite, and shaped
+``(n_rows, n_factors)``. It is fit data, not constructor state, so sklearn
+cloning remains clean and large matrices are not embedded in estimator params.
+
+Mode semantics:
+
+``neutralization="none"`` preserves current behavior and ignores
+``factor_exposures`` unless a non-``None`` matrix is provided with an inactive
+mode, in which case Python raises a clear validation error to prevent silent
+user mistakes.
+
+``neutralization="pre_target"`` residualizes the regression target once before
+training:
+
+.. code-block:: text
+
+   y_perp = y - F (F^T W F + lambda I)^-1 F^T W y
+
+This mode is supported for ``GBMRegressor`` only. It is rejected for
+classification and ranking because target residualization is not well-defined
+for class labels or ranking relevance.
+
+``neutralization="per_round_gradient"`` projects objective gradients before
+each boosting round:
+
+.. code-block:: text
+
+   g_perp = g - F (F^T W F + lambda I)^-1 F^T W g
+
+Hessians are unchanged. This mode is supported for regression, binary
+classification, multiclass, and ranking. For multiclass, each class-gradient
+column is projected independently against the same factor projector.
+
+``neutralization="split_penalty"`` includes per-round gradient projection and
+subtracts a factor-load penalty from split gain:
+
+.. code-block:: text
+
+   penalty = factor_penalty * || F_L^T update_L + F_R^T update_R ||^2 / max(row_count, 1)
+   gain_final = gain_after_existing_modes - penalty
+
+For scalar leaves, ``update_L`` and ``update_R`` are the candidate scalar leaf
+values before any final MorphBoost depth/iteration leaf scaling. For DRO
+leaves, the scalar values use the DRO effective gradients. For MorphBoost, the
+order is: project gradients, compute standard/DRO gradient gain, blend
+MorphBoost information score, subtract factor penalty, then apply MorphBoost
+leaf scaling when storing leaves.
+
+Compatibility:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Feature
+     - pre_target
+     - per_round_gradient
+     - split_penalty
+   * - ``GBMRegressor``
+     - supported
+     - supported
+     - supported
+   * - ``GBMClassifier``
+     - rejected
+     - supported
+     - supported
+   * - ``GBMRanker``
+     - rejected
+     - supported
+     - supported
+   * - ``training_mode="morph"``
+     - supported
+     - supported
+     - supported
+   * - ``leaf_solver="dro"``
+     - supported
+     - supported
+     - supported
+   * - ``leaf_model="linear"``
+     - supported
+     - supported
+     - rejected
+   * - warm start
+     - rejected for non-``none`` in first release
+     - rejected for non-``none`` in first release
+     - rejected for non-``none`` in first release
+
+This is a training-time regularization tool. It does not guarantee
+prediction-time zero exposure unless predictions are neutralized against
+evaluation-time factors outside the model.
+
 Piecewise-linear leaves
 -----------------------
 
@@ -175,7 +285,7 @@ analysis. It is not required for ordinary prediction.
 Main methods
 ------------
 
-- ``fit(X, y, *, sample_weight=None, eval_set=None, eval_sample_weight=None, group=None, eval_group=None, eval_time_index=None, categorical_feature_values=None, time_index=None)``
+- ``fit(X, y, *, sample_weight=None, eval_set=None, eval_sample_weight=None, group=None, eval_group=None, eval_time_index=None, categorical_feature_values=None, time_index=None, factor_exposures=None)``
 - ``predict(X)``
 - ``shap_values(X, *, include_expected_value=False)``
 - ``feature_importances(X, *, method="shap")``

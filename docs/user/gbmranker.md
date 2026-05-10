@@ -49,6 +49,11 @@ regularization, etc.). This includes:
 - `leaf_solver="dro"` for robust scalar leaves (see
   [GBMRegressor — DRO Leaf Solver](gbmregressor.md#dro-leaf-solver)). It
   requires `leaf_model="constant"`.
+- `neutralization="per_round_gradient"` or `neutralization="split_penalty"` with
+  `fit(..., factor_exposures=F)` for training-time factor/gradient
+  neutralization. `neutralization="pre_target"` is rejected for rankers because
+  target residualization is not well-defined for ranking relevance. See
+  [GBMRegressor — Factor-Neutral Boosting](gbmregressor.md#factor-neutral-boosting).
 - `leaf_model="linear"` for piecewise-linear leaves (see
   [GBMRegressor — Piecewise-Linear Leaves](gbmregressor.md#piecewise-linear-leaves)).
   Pair with `lambda_l2 >= 0.01` for weight stability.
@@ -72,7 +77,7 @@ model.fit(X_train, y_train, group=query_ids_train)
 
 ## Methods
 
-### `fit(X, y, *, group, eval_set=None, eval_group=None, ...)`
+### `fit(X, y, *, group, eval_set=None, eval_group=None, factor_exposures=None, ...)`
 
 Trains the ranker.
 
@@ -81,6 +86,9 @@ Trains the ranker.
   binary.
 - `group` -- per-row query group identifiers. **Required.** All rows with the
   same group ID belong to the same query.
+- `factor_exposures` -- optional row-aligned factor matrix required when
+  neutralization is active. The ranker applies the same internal group sorting
+  to factor rows as it applies to `X`, `y`, and `group`.
 - `eval_set` -- optional validation data `(X_val, y_val)`
 - `eval_group` -- query group IDs for the validation set. Required when
   `eval_set` is provided.

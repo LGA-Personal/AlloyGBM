@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.7.0
+
+### New Features
+
+- **Factor-neutral boosting** via `neutralization` on `GBMRegressor`,
+  `GBMClassifier`, and `GBMRanker`, with row-aligned fit-time
+  `factor_exposures`. Supported modes are `none`, `pre_target`,
+  `per_round_gradient`, and `split_penalty`.
+- `neutralization="per_round_gradient"` projects each boosting round's
+  objective gradients away from user-supplied factors. `split_penalty` also
+  subtracts a factor-load penalty from split gain via `factor_penalty`.
+- `factor_neutralization_lambda` controls the ridge term added to the factor
+  Gram matrix used by target or gradient projection.
+
+### Compatibility And Limitations
+
+- `pre_target` is supported for `GBMRegressor` only and is rejected for
+  classification and ranking.
+- `per_round_gradient` supports `GBMRegressor`, `GBMClassifier`, and
+  `GBMRanker`; multiclass classification projects each class-gradient column
+  independently.
+- `split_penalty` supports constant leaves and rejects
+  `leaf_model="linear"`. It is compatible with `leaf_solver="dro"` and
+  `training_mode="morph"`.
+- This is training-time factor/gradient neutralization and split exposure
+  regularization. It does not guarantee live-market or prediction-time zero
+  exposure unless predictions are neutralized against evaluation-time factors
+  outside the model.
+
+### Benchmarks
+
+- Added `alloygbm_factor_neutral` and `alloygbm_factor_neutral_dro` arms to
+  `benchmarks/run_model_comparison.py`. For these arms, benchmark datasets
+  without explicit factors synthesize `factor_exposures` from the first
+  `min(5, n_features)` feature columns.
+
 ## 0.6.0
 
 ### New Features
