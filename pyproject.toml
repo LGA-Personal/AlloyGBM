@@ -55,3 +55,4 @@ Benchmarks = "https://github.com/LGA-Personal/AlloyGBM/tree/main/benchmarks"
 manifest-path = "bindings/python/Cargo.toml"
 python-source = "bindings/python"
 module-name = "alloygbm._alloygbm"
+features = ["extension-module"]

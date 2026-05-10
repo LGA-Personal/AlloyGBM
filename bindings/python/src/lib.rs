@@ -4477,6 +4477,7 @@ mod tests {
             targets,
             None, // sample_weights
             None, // group_id
+            None, // factor_exposures
             None,
             None,
             None,

@@ -13,8 +13,11 @@ documentation.workspace = true
 name = "_alloygbm"
 crate-type = ["cdylib"]
 
+[features]
+extension-module = ["pyo3/extension-module"]
+
 [dependencies]
-pyo3 = { version = "0.23.5", features = ["extension-module", "abi3-py311"] }
+pyo3 = { version = "0.23.5", features = ["abi3-py311"] }
 numpy = "0.23"
 rayon = "1.11"
 alloygbm-backend-cpu = { path = "../../crates/backend_cpu" }
