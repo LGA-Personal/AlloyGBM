@@ -1391,6 +1391,11 @@ pub enum ModelSectionKind {
     LinearLeafCoefficients,
     /// Metadata for DRO-style scalar leaf solving.
     DroMetadata,
+    /// Global per-feature training-set means.  Optional section written by
+    /// piecewise-linear (`leaf_model="linear"`) artifacts so that SHAP can
+    /// compute interventional attributions for linear leaves without needing
+    /// the original training data.  Length matches `metadata.feature_names`.
+    FeatureBaseline,
     Unknown(u32),
 }
 
@@ -1407,6 +1412,7 @@ impl ModelSectionKind {
             Self::MorphMetadata => 8,
             Self::LinearLeafCoefficients => 9,
             Self::DroMetadata => 10,
+            Self::FeatureBaseline => 11,
             Self::Unknown(value) => value,
         }
     }
@@ -1423,6 +1429,7 @@ impl ModelSectionKind {
             8 => Self::MorphMetadata,
             9 => Self::LinearLeafCoefficients,
             10 => Self::DroMetadata,
+            11 => Self::FeatureBaseline,
             other => Self::Unknown(other),
         }
     }
@@ -2178,6 +2185,80 @@ pub fn decode_optional_linear_leaf_coefficients_section(
         return Ok(None);
     };
     let payload = decode_linear_leaf_coefficients_payload(&section.payload)?;
+    Ok(Some(payload))
+}
+
+// ── Feature baseline section ─────────────────────────────────────────────────
+
+/// Payload for `ModelSectionKind::FeatureBaseline`.
+///
+/// Stores the global (training-set marginal) mean for each feature.  Length
+/// matches `ModelMetadata::feature_names`.  Used by SHAP for piecewise-linear
+/// leaves so that linear-leaf contributions can be decomposed into a
+/// path-attributed expected value plus per-feature deviations
+/// `wj * (xj - feature_means[j])`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FeatureBaselinePayload {
+    pub feature_means: Vec<f32>,
+}
+
+/// Encode a `FeatureBaselinePayload` to bytes.
+///
+/// Layout:
+/// ```text
+/// [u32 version=1] [u32 feature_count] [feature_count × f32 means]
+/// ```
+pub fn encode_feature_baseline_payload(payload: &FeatureBaselinePayload) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(8 + payload.feature_means.len() * 4);
+    buf.extend_from_slice(&1u32.to_le_bytes()); // version
+    buf.extend_from_slice(&(payload.feature_means.len() as u32).to_le_bytes());
+    for m in &payload.feature_means {
+        buf.extend_from_slice(&m.to_le_bytes());
+    }
+    buf
+}
+
+/// Decode a `FeatureBaselinePayload` from raw section bytes.
+pub fn decode_feature_baseline_payload(bytes: &[u8]) -> CoreResult<FeatureBaselinePayload> {
+    if bytes.len() < 8 {
+        return Err(CoreError::Validation(
+            "feature baseline section too short".to_string(),
+        ));
+    }
+    let version = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    if version != 1 {
+        return Err(CoreError::Validation(format!(
+            "unsupported feature baseline version: {version}"
+        )));
+    }
+    let feature_count = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+    let expected = 8 + feature_count * 4;
+    if bytes.len() < expected {
+        return Err(CoreError::Validation(format!(
+            "feature baseline section too short: need {expected} bytes, got {}",
+            bytes.len()
+        )));
+    }
+    let mut feature_means = Vec::with_capacity(feature_count);
+    let mut o = 8usize;
+    for _ in 0..feature_count {
+        let v = f32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
+        feature_means.push(v);
+        o += 4;
+    }
+    Ok(FeatureBaselinePayload { feature_means })
+}
+
+/// Decode an optional `FeatureBaseline` section from parsed artifact sections.
+/// Returns `None` if no such section exists (legacy artifact without baseline).
+pub fn decode_optional_feature_baseline_section(
+    sections: &[ModelArtifactSection],
+) -> CoreResult<Option<FeatureBaselinePayload>> {
+    let Some(section) = optional_single_section(sections, ModelSectionKind::FeatureBaseline)?
+    else {
+        return Ok(None);
+    };
+    let payload = decode_feature_baseline_payload(&section.payload)?;
     Ok(Some(payload))
 }
 
@@ -3942,5 +4023,49 @@ mod tests {
         assert!(new_path.mean.is_finite());
         assert!(new_path.std.is_finite());
         assert!(new_path.std >= 0.0);
+    }
+
+    #[test]
+    fn feature_baseline_payload_roundtrip() {
+        let payload = FeatureBaselinePayload {
+            feature_means: vec![0.1, -1.5, 2.0, 0.0],
+        };
+        let bytes = encode_feature_baseline_payload(&payload);
+        let decoded = decode_feature_baseline_payload(&bytes).expect("decode succeeds");
+        assert_eq!(decoded.feature_means.len(), 4);
+        for (a, b) in payload.feature_means.iter().zip(decoded.feature_means.iter()) {
+            assert!((a - b).abs() < 1e-6, "{a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn feature_baseline_payload_empty_decodes_cleanly() {
+        let payload = FeatureBaselinePayload {
+            feature_means: vec![],
+        };
+        let bytes = encode_feature_baseline_payload(&payload);
+        let decoded = decode_feature_baseline_payload(&bytes).expect("decode succeeds");
+        assert!(decoded.feature_means.is_empty());
+    }
+
+    #[test]
+    fn feature_baseline_payload_rejects_short_buffer() {
+        // Header-only — claims 5 features but no body.  Decode must fail
+        // cleanly rather than read past the end.
+        let mut bytes = 1u32.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&5u32.to_le_bytes());
+        let result = decode_feature_baseline_payload(&bytes);
+        assert!(matches!(result, Err(CoreError::Validation(_))));
+    }
+
+    #[test]
+    fn feature_baseline_section_kind_round_trips() {
+        // Variant-id stability is part of the on-disk contract; if this test
+        // fails, an existing artifact's section was renumbered.
+        assert_eq!(ModelSectionKind::FeatureBaseline.to_u32(), 11);
+        assert!(matches!(
+            ModelSectionKind::from_u32(11),
+            ModelSectionKind::FeatureBaseline
+        ));
     }
 }

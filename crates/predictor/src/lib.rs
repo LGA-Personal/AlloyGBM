@@ -1844,6 +1844,7 @@ mod tests {
             native_categorical_feature_indices: vec![0],
             morph_metadata: None,
             dro_metadata: None,
+            feature_baseline: None,
         };
         model.to_artifact_bytes().expect("serialize should succeed")
     }
@@ -1956,6 +1957,7 @@ mod tests {
             native_categorical_feature_indices: vec![0],
             morph_metadata: None,
             dro_metadata: None,
+            feature_baseline: None,
         };
         let artifact = model.to_artifact_bytes().expect("serialize should succeed");
         let predictor = Predictor::from_artifact_bytes(&artifact).unwrap();

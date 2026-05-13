@@ -1,23 +1,25 @@
 use alloygbm_categorical::{TargetEncoderConfig, fit_transform_target_encoder};
 use alloygbm_core::{
     BinnedMatrix, CategoricalStatePayloadV1, CoreError, DatasetMatrix, Device, DroConfig,
-    DroMetadataPayload, FactorExposureMatrix, FeatureTile, GradientEmaStats, GradientPair,
-    HistogramBundle, LeafModelKind, LeafSolverKind, LeafValue, LinearHistogramBundle, LinearLeaf,
-    LinearLeafCoefficientsPayload, LinearLeafEntry, LrSchedule, MAX_PL_REGRESSORS, MISSING_BIN_U8,
-    MODEL_FORMAT_V1, ModelArtifactSection, ModelMetadata, ModelSectionKind, MorphConfig,
-    MorphMetadataPayload, MorphPrecomputed, NativeCategoricalSplitsPayload, NeutralizationKind,
-    NodeSlice, NodeStats, PartitionResult, SplitCandidate, TrainParams, TrainingDataset,
-    TreeGrowth, decode_optional_categorical_state_section_v1,
-    decode_optional_dro_metadata_artifact_section,
+    DroMetadataPayload, FactorExposureMatrix, FeatureBaselinePayload, FeatureTile,
+    GradientEmaStats, GradientPair, HistogramBundle, LeafModelKind, LeafSolverKind, LeafValue,
+    LinearHistogramBundle, LinearLeaf, LinearLeafCoefficientsPayload, LinearLeafEntry, LrSchedule,
+    MAX_PL_REGRESSORS, MISSING_BIN_U8, MODEL_FORMAT_V1, ModelArtifactSection, ModelMetadata,
+    ModelSectionKind, MorphConfig, MorphMetadataPayload, MorphPrecomputed,
+    NativeCategoricalSplitsPayload, NeutralizationKind, NodeSlice, NodeStats, PartitionResult,
+    SplitCandidate, TrainParams, TrainingDataset, TreeGrowth,
+    decode_optional_categorical_state_section_v1, decode_optional_dro_metadata_artifact_section,
+    decode_optional_feature_baseline_section,
     decode_optional_linear_leaf_coefficients_section,
     decode_optional_morph_metadata_artifact_section,
     decode_optional_native_categorical_splits_section, deserialize_model_artifact_v1,
     encode_categorical_state_payload_v1, encode_dro_metadata_payload,
-    encode_linear_leaf_coefficients_payload, encode_morph_metadata_payload,
-    encode_native_categorical_splits_payload, format_required_section_auto_mode_error,
-    format_required_section_mode_error, leaf_effective_gradient,
-    required_section_compatibility_report, serialize_model_artifact_v1, validate_binned_matrix,
-    validate_categorical_state_payload_v1, validate_train_params, validate_training_dataset,
+    encode_feature_baseline_payload, encode_linear_leaf_coefficients_payload,
+    encode_morph_metadata_payload, encode_native_categorical_splits_payload,
+    format_required_section_auto_mode_error, format_required_section_mode_error,
+    leaf_effective_gradient, required_section_compatibility_report, serialize_model_artifact_v1,
+    validate_binned_matrix, validate_categorical_state_payload_v1, validate_train_params,
+    validate_training_dataset,
 };
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
@@ -1941,6 +1943,11 @@ pub struct TrainedModel {
     pub morph_metadata: Option<MorphMetadataPayload>,
     /// DRO leaf-solver metadata (None for standard leaf solving).
     pub dro_metadata: Option<DroMetadataPayload>,
+    /// Global per-feature training-set means.  `Some(_)` only when the model
+    /// uses piecewise-linear leaves and the feature baseline was recorded at
+    /// fit time.  Length equals `feature_count`.  Consumed by SHAP for
+    /// interventional decomposition of linear-leaf contributions.
+    pub feature_baseline: Option<Vec<f32>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2387,6 +2394,24 @@ impl TrainedModel {
                 ));
             }
         }
+        // FeatureBaseline section (optional — written only when linear leaves
+        // are present and the baseline was captured at fit time).  Provides
+        // global per-feature means so SHAP can decompose linear leaves
+        // interventionally without needing the original training data.
+        if let Some(baseline) = self.feature_baseline.as_ref()
+            && baseline.len() == self.feature_count
+            && self.stumps.iter().any(|s| {
+                matches!(s.left_leaf_value, LeafValue::Linear(_))
+                    || matches!(s.right_leaf_value, LeafValue::Linear(_))
+            })
+        {
+            sections.push((
+                ModelSectionKind::FeatureBaseline,
+                encode_feature_baseline_payload(&FeatureBaselinePayload {
+                    feature_means: baseline.clone(),
+                }),
+            ));
+        }
 
         serialize_model_artifact_v1(&metadata, &sections).map_err(EngineError::from)
     }
@@ -2512,6 +2537,15 @@ impl TrainedModel {
                 }
             }
         }
+
+        // Decode optional FeatureBaseline section.  Only retain when the
+        // length matches feature_count to defend against artifact corruption
+        // or schema drift; mismatches silently fall back to `None`, which
+        // SHAP treats as "no linear-leaf support recorded for this artifact".
+        model.feature_baseline = decode_optional_feature_baseline_section(&parsed.sections)
+            .map_err(EngineError::from)?
+            .map(|payload| payload.feature_means)
+            .filter(|means| means.len() == metadata_feature_count);
 
         model.feature_count = metadata_feature_count;
         model.objective = parsed.contract.metadata.objective.clone();
@@ -4275,6 +4309,18 @@ impl Trainer {
             .params
             .dro_config
             .map(|config| DroMetadataPayload { config });
+        // Record per-feature training-set means only for piecewise-linear
+        // artifacts.  SHAP consumes these as the interventional baseline for
+        // linear leaves; constant-leaf models have no use for it.
+        let feature_baseline = if self.params.leaf_model == LeafModelKind::Linear {
+            compute_feature_means_from_matrix(
+                &active_dataset.matrix.values,
+                active_dataset.matrix.feature_count,
+                active_dataset.row_count(),
+            )
+        } else {
+            None
+        };
         let model = TrainedModel {
             baseline_prediction,
             feature_count: active_dataset.matrix.feature_count,
@@ -4285,6 +4331,7 @@ impl Trainer {
             native_categorical_feature_indices: Vec::new(),
             morph_metadata,
             dro_metadata,
+            feature_baseline,
         };
         let final_loss = current_loss;
 
@@ -4319,6 +4366,39 @@ impl Trainer {
     ) -> EngineResult<TrainRoundSummary> {
         self.fit_one_round(dataset, binned_matrix, backend, objective)
     }
+}
+
+/// Compute per-feature column means from a row-major raw feature matrix.
+///
+/// Returns `None` when the matrix has no rows, no features, or its `values`
+/// vector is empty (metadata-only datasets).  Non-finite cells are skipped per
+/// column so a stray NaN/Inf doesn't poison the entire mean.
+fn compute_feature_means_from_matrix(
+    values: &[f32],
+    feature_count: usize,
+    row_count: usize,
+) -> Option<Vec<f32>> {
+    if feature_count == 0 || row_count == 0 || values.len() < row_count * feature_count {
+        return None;
+    }
+    let mut sums = vec![0.0_f64; feature_count];
+    let mut counts = vec![0_u64; feature_count];
+    for row in 0..row_count {
+        let base = row * feature_count;
+        for j in 0..feature_count {
+            let v = values[base + j];
+            if v.is_finite() {
+                sums[j] += v as f64;
+                counts[j] += 1;
+            }
+        }
+    }
+    let means: Vec<f32> = sums
+        .iter()
+        .zip(counts.iter())
+        .map(|(s, &c)| if c > 0 { (s / c as f64) as f32 } else { 0.0 })
+        .collect();
+    Some(means)
 }
 
 fn validate_neutralization_fit_contract<O: ObjectiveOps>(
@@ -6924,6 +7004,7 @@ fn decode_trained_model_payload(bytes: &[u8]) -> EngineResult<TrainedModel> {
         native_categorical_feature_indices: Vec::new(),
         morph_metadata: None,
         dro_metadata: None,
+        feature_baseline: None,
     })
 }
 
@@ -9491,6 +9572,7 @@ mod tests {
             native_categorical_feature_indices: Vec::new(),
             morph_metadata: None,
             dro_metadata: None,
+            feature_baseline: None,
         };
 
         let left = model.predict_row(&[0.0]).expect("left prediction succeeds");
@@ -10750,6 +10832,7 @@ mod tests {
             native_categorical_feature_indices: vec![0],
             morph_metadata: None,
             dro_metadata: None,
+            feature_baseline: None,
         };
 
         let bytes = model.to_artifact_bytes().expect("serialize should succeed");
@@ -10817,6 +10900,7 @@ mod tests {
             native_categorical_feature_indices: Vec::new(),
             morph_metadata: None,
             dro_metadata: None,
+            feature_baseline: None,
         };
 
         let bytes = model.to_artifact_bytes().expect("serialize should succeed");

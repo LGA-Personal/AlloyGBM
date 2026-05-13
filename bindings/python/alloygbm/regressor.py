@@ -2513,7 +2513,20 @@ class GBMRegressor(_GBMRegressorBase):
     def shap_values(
         self, X: object, *, include_expected_value: bool = False
     ) -> list[list[float]] | tuple[float, list[list[float]]]:
-        """Return SHAP values for the provided rows using the fitted artifact."""
+        """Return SHAP values for the provided rows using the fitted artifact.
+
+        For ``leaf_model="linear"`` (piecewise-linear) artifacts this is a
+        best-effort *interventional* decomposition: the path-based
+        attribution acts on each leaf's "constant part"
+        ``intercept + Σ wj·μj_global`` and per-feature deviations
+        ``wj · (xj − μj_global)`` are credited directly to each regressor.
+        ``Σ shap_values + expected_value == predict(x)`` holds exactly when
+        SHAP's internal path-walk matches the predictor's; on continuous
+        features it can drift slightly because SHAP currently compares raw
+        values against stored bin-index thresholds rather than the
+        predictor's converted float thresholds.  Tightening that alignment
+        is tracked for a follow-up release.
+        """
         if not self._is_fitted:
             raise RuntimeError("GBMRegressor must be fit before shap_values")
         if self._artifact_bytes is None:
