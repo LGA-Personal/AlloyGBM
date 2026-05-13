@@ -78,6 +78,10 @@ REQUIRED_ALLOY_INIT_PARAMS = (
     "col_subsample",
 )
 VALID_ALLOY_CONTINUOUS_BINNING_STRATEGIES = ("linear", "rank", "quantile")
+FACTOR_NEUTRAL_MODEL_NAMES = {
+    "alloygbm_factor_neutral",
+    "alloygbm_factor_neutral_dro",
+}
 
 
 @dataclass
@@ -500,12 +504,15 @@ def _run_model(
     nan = float("nan")
     try:
         model = factory()
+        fit_kwargs = {}
+        if model_name in FACTOR_NEUTRAL_MODEL_NAMES:
+            fit_kwargs["factor_exposures"] = _synthesize_factor_exposures(x_train)
 
         fit_start = time.perf_counter()
         if task_type == "ranking":
-            model.fit(x_train, y_train, group=group_train)
+            model.fit(x_train, y_train, group=group_train, **fit_kwargs)
         else:
-            model.fit(x_train, y_train)
+            model.fit(x_train, y_train, **fit_kwargs)
         fit_seconds = time.perf_counter() - fit_start
 
         fit_timing = getattr(model, "fit_timing_", None)
@@ -641,6 +648,16 @@ def _run_model(
         )
 
 
+def _synthesize_factor_exposures(x: np.ndarray) -> np.ndarray:
+    # Smoke-only fallback: these factors are also available as predictors, so
+    # factor-neutral benchmark arms should not be read as headline quality
+    # comparisons unless callers provide domain factor exposures explicitly.
+    factor_count = min(5, int(x.shape[1]))
+    if factor_count <= 0:
+        raise ValueError("cannot synthesize factor_exposures from zero feature columns")
+    return np.ascontiguousarray(x[:, :factor_count], dtype=np.float32)
+
+
 def _make_alloygbm_morph(task_type, **kwargs):
     from alloygbm import GBMClassifier, GBMRanker, GBMRegressor
     cls = {"regression": GBMRegressor, "binary": GBMClassifier,
@@ -660,6 +677,21 @@ def _make_alloygbm_dro(task_type, **kwargs):
     cls = {"regression": GBMRegressor, "binary": GBMClassifier,
            "multiclass": GBMClassifier, "ranking": GBMRanker}[task_type]
     return cls(leaf_solver="dro", dro_radius=0.05, dro_metric="wasserstein", **kwargs)
+
+
+def _make_alloygbm_factor_neutral(cls: type, dro: bool = False, **kwargs):
+    params = {"neutralization": "per_round_gradient", **kwargs}
+    if dro:
+        signature = inspect.signature(cls.__init__)
+        accepts_kwargs = any(
+            param.kind == inspect.Parameter.VAR_KEYWORD
+            for param in signature.parameters.values()
+        )
+        if "leaf_solver" in signature.parameters or accepts_kwargs:
+            params["leaf_solver"] = "dro"
+        if "dro_radius" in signature.parameters or accepts_kwargs:
+            params["dro_radius"] = 0.05
+    return cls(**params)
 
 
 def _make_alloygbm_linear(task_type, **kwargs):
@@ -720,6 +752,8 @@ def _model_factories(
     factories = {
         "alloygbm": lambda: gbm_regressor_cls(**alloy_params),
         "alloygbm_dro": lambda: _make_alloygbm_dro("regression", **alloy_params),
+        "alloygbm_factor_neutral": lambda: _make_alloygbm_factor_neutral(gbm_regressor_cls, **alloy_params),
+        "alloygbm_factor_neutral_dro": lambda: _make_alloygbm_factor_neutral(gbm_regressor_cls, dro=True, **alloy_params),
         "alloygbm_linear": lambda: _make_alloygbm_linear("regression", lambda_l2=linear_lambda_l2, **alloy_params),
         "alloygbm_morph": lambda: _make_alloygbm_morph("regression", **alloy_params),
         "alloygbm_morph_cosine": lambda: _make_alloygbm_morph_cosine("regression", **alloy_params),
@@ -817,6 +851,8 @@ def _classifier_factories(
     factories: dict[str, Callable[[], object]] = {
         "alloygbm": lambda: gbm_classifier_cls(**alloy_params),
         "alloygbm_dro": lambda: _make_alloygbm_dro("binary", **alloy_params),
+        "alloygbm_factor_neutral": lambda: _make_alloygbm_factor_neutral(gbm_classifier_cls, **alloy_params),
+        "alloygbm_factor_neutral_dro": lambda: _make_alloygbm_factor_neutral(gbm_classifier_cls, dro=True, **alloy_params),
         "alloygbm_linear": lambda: _make_alloygbm_linear("binary", lambda_l2=linear_lambda_l2, **alloy_params),
         "alloygbm_morph": lambda: _make_alloygbm_morph("binary", **alloy_params),
         "alloygbm_morph_cosine": lambda: _make_alloygbm_morph_cosine("binary", **alloy_params),
@@ -882,6 +918,8 @@ def _multiclass_classifier_factories(
     factories: dict[str, Callable[[], object]] = {
         "alloygbm": lambda: gbm_classifier_cls(**alloy_params),
         "alloygbm_dro": lambda: _make_alloygbm_dro("multiclass", **alloy_params),
+        "alloygbm_factor_neutral": lambda: _make_alloygbm_factor_neutral(gbm_classifier_cls, **alloy_params),
+        "alloygbm_factor_neutral_dro": lambda: _make_alloygbm_factor_neutral(gbm_classifier_cls, dro=True, **alloy_params),
         "alloygbm_linear": lambda: _make_alloygbm_linear("multiclass", lambda_l2=linear_lambda_l2, **alloy_params),
         "alloygbm_morph": lambda: _make_alloygbm_morph("multiclass", **alloy_params),
         "alloygbm_morph_cosine": lambda: _make_alloygbm_morph_cosine("multiclass", **alloy_params),
@@ -945,6 +983,8 @@ def _ranker_factories(
     factories: dict[str, Callable[[], object]] = {
         "alloygbm": lambda: gbm_ranker_cls(**alloy_params),
         "alloygbm_dro": lambda: _make_alloygbm_dro("ranking", **alloy_params),
+        "alloygbm_factor_neutral": lambda: _make_alloygbm_factor_neutral(gbm_ranker_cls, **alloy_params),
+        "alloygbm_factor_neutral_dro": lambda: _make_alloygbm_factor_neutral(gbm_ranker_cls, dro=True, **alloy_params),
         "alloygbm_linear": lambda: _make_alloygbm_linear("ranking", lambda_l2=linear_lambda_l2, **alloy_params),
         "alloygbm_morph": lambda: _make_alloygbm_morph("ranking", **alloy_params),
         "alloygbm_morph_cosine": lambda: _make_alloygbm_morph_cosine("ranking", **alloy_params),
@@ -1483,7 +1523,8 @@ def main(argv: list[str]) -> int:
         help=(
             "filter to only these model names (e.g. alloygbm alloygbm_linear lightgbm). "
             "Default: run all models. Valid names depend on task type but include: "
-            "alloygbm, alloygbm_dro, alloygbm_linear, alloygbm_morph, alloygbm_morph_cosine, "
+            "alloygbm, alloygbm_dro, alloygbm_factor_neutral, "
+            "alloygbm_factor_neutral_dro, alloygbm_linear, alloygbm_morph, alloygbm_morph_cosine, "
             "alloygbm_morph_linear, lightgbm, xgboost, catboost"
         ),
     )
@@ -1570,6 +1611,15 @@ def main(argv: list[str]) -> int:
             status="FAIL", error=error,
         )
 
+    def _apply_model_filter(
+        factories: dict[str, Callable[[], object]],
+    ) -> tuple[dict[str, Callable[[], object]], list[str]]:
+        if not args.models:
+            return factories, []
+        filtered = {k: v for k, v in factories.items() if k in args.models}
+        missing = [model_name for model_name in args.models if model_name not in factories]
+        return filtered, missing
+
     records: list[BenchmarkRecord] = []
 
     for profile_index, profile in enumerate(profiles, start=1):
@@ -1601,8 +1651,7 @@ def main(argv: list[str]) -> int:
                         catboost_classifier_cls=catboost_classifier_cls,
                         **common_factory_args,
                     )
-                    if args.models:
-                        factories = {k: v for k, v in factories.items() if k in args.models}
+                    factories, missing_models = _apply_model_filter(factories)
                 elif task_type == "multiclass_classification":
                     # Use a placeholder factory dict for error-record model names;
                     # real factories are built after _split_dataset below.
@@ -1612,24 +1661,31 @@ def main(argv: list[str]) -> int:
                         n_classes=2,  # placeholder; overwritten after split
                         **common_factory_args,
                     )
-                    if args.models:
-                        factories = {k: v for k, v in factories.items() if k in args.models}
+                    factories, missing_models = _apply_model_filter(factories)
                 elif task_type == "ranking":
                     factories = _ranker_factories(
                         gbm_ranker_cls=gbm_ranker_cls,
                         catboost_available=catboost_ranker_available,
                         **common_factory_args,
                     )
-                    if args.models:
-                        factories = {k: v for k, v in factories.items() if k in args.models}
+                    factories, missing_models = _apply_model_filter(factories)
                 else:
                     factories = _model_factories(
                         gbm_regressor_cls=gbm_regressor_cls,
                         catboost_regressor_cls=catboost_regressor_cls,
                         **common_factory_args,
                     )
-                    if args.models:
-                        factories = {k: v for k, v in factories.items() if k in args.models}
+                    factories, missing_models = _apply_model_filter(factories)
+
+                for model_name in missing_models:
+                    records.append(_make_fail_record(
+                        scenario, task_type, profile, profile_index,
+                        run_index, seed, model_name,
+                        f"model is not available for task_type='{task_type}'",
+                    ))
+
+                if not factories:
+                    continue
 
                 if scenario in dataset_errors:
                     error = dataset_errors[scenario]
@@ -1664,8 +1720,7 @@ def main(argv: list[str]) -> int:
                         n_classes=n_classes,
                         **common_factory_args,
                     )
-                    if args.models:
-                        factories = {k: v for k, v in factories.items() if k in args.models}
+                    factories, _ = _apply_model_filter(factories)
 
                 for model_name, factory in factories.items():
                     record = _run_model(

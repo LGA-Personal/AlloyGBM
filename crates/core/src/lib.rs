@@ -51,6 +51,94 @@ pub enum LeafSolverKind {
     Dro,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NeutralizationKind {
+    None,
+    PreTarget,
+    PerRoundGradient,
+    SplitPenalty,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FactorNeutralizationConfig {
+    pub kind: NeutralizationKind,
+    pub ridge_lambda: f32,
+    pub split_penalty: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FactorExposureMatrix {
+    pub row_count: usize,
+    pub factor_count: usize,
+    pub values: Vec<f32>,
+}
+
+impl FactorExposureMatrix {
+    pub fn new(row_count: usize, factor_count: usize, values: Vec<f32>) -> CoreResult<Self> {
+        if row_count == 0 {
+            return Err(CoreError::Validation(
+                "factor_exposures row_count must be greater than 0".to_string(),
+            ));
+        }
+        if factor_count == 0 {
+            return Err(CoreError::Validation(
+                "factor_exposures factor_count must be greater than 0".to_string(),
+            ));
+        }
+        let expected_len = row_count.checked_mul(factor_count).ok_or_else(|| {
+            CoreError::Validation("factor_exposures row_count * factor_count overflow".to_string())
+        })?;
+        if values.len() != expected_len {
+            return Err(CoreError::Validation(format!(
+                "factor_exposures values length {} does not match row_count * factor_count {}",
+                values.len(),
+                expected_len
+            )));
+        }
+        if values.iter().any(|v| !v.is_finite()) {
+            return Err(CoreError::Validation(
+                "factor_exposures must contain only finite values".to_string(),
+            ));
+        }
+        Ok(Self {
+            row_count,
+            factor_count,
+            values,
+        })
+    }
+
+    pub fn row(&self, row_index: usize) -> CoreResult<&[f32]> {
+        if row_index >= self.row_count {
+            return Err(CoreError::Validation(format!(
+                "factor_exposures row_index {row_index} is out of bounds for row_count {}",
+                self.row_count
+            )));
+        }
+        if self.factor_count == 0 {
+            return Err(CoreError::Validation(
+                "factor_exposures factor_count must be greater than 0".to_string(),
+            ));
+        }
+        let expected_len = self
+            .row_count
+            .checked_mul(self.factor_count)
+            .ok_or_else(|| {
+                CoreError::Validation(
+                    "factor_exposures row_count * factor_count overflow".to_string(),
+                )
+            })?;
+        if self.values.len() != expected_len {
+            return Err(CoreError::Validation(format!(
+                "factor_exposures values length {} does not match row_count * factor_count {}",
+                self.values.len(),
+                expected_len
+            )));
+        }
+        let start = row_index * self.factor_count;
+        Ok(&self.values[start..start + self.factor_count])
+    }
+}
+
 /// Uncertainty metric used by the DRO leaf solver.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum DroMetric {
@@ -314,6 +402,7 @@ pub struct TrainParams {
     pub leaf_solver: LeafSolverKind,
     /// Configuration for `leaf_solver == Dro`.
     pub dro_config: Option<DroConfig>,
+    pub neutralization_config: Option<FactorNeutralizationConfig>,
 }
 
 impl Default for TrainParams {
@@ -340,6 +429,7 @@ impl Default for TrainParams {
             leaf_model: LeafModelKind::Constant,
             leaf_solver: LeafSolverKind::Standard,
             dro_config: None,
+            neutralization_config: None,
         }
     }
 }
@@ -500,6 +590,7 @@ pub struct TrainingDataset {
     pub sample_weights: Option<Vec<f32>>,
     pub time_index: Option<Vec<i64>>,
     pub group_id: Option<Vec<u32>>,
+    pub factor_exposures: Option<FactorExposureMatrix>,
 }
 
 impl TrainingDataset {
@@ -2183,10 +2274,40 @@ pub fn validate_train_params(params: &TrainParams) -> CoreResult<()> {
         ));
     }
 
+    if let Some(config) = params.neutralization_config {
+        if config.kind == NeutralizationKind::None {
+            return Err(CoreError::InvalidConfig(
+                "neutralization_config must be None when neutralization kind is None".to_string(),
+            ));
+        }
+        if !config.ridge_lambda.is_finite() || config.ridge_lambda < 0.0 {
+            return Err(CoreError::InvalidConfig(
+                "factor_neutralization_lambda must be finite and >= 0".to_string(),
+            ));
+        }
+        if !config.split_penalty.is_finite() || config.split_penalty < 0.0 {
+            return Err(CoreError::InvalidConfig(
+                "factor_penalty must be finite and >= 0".to_string(),
+            ));
+        }
+        if config.kind != NeutralizationKind::SplitPenalty && config.split_penalty != 0.0 {
+            return Err(CoreError::InvalidConfig(
+                "factor_penalty is only valid with neutralization='split_penalty'".to_string(),
+            ));
+        }
+        if config.kind == NeutralizationKind::SplitPenalty
+            && params.leaf_model == LeafModelKind::Linear
+        {
+            return Err(CoreError::InvalidConfig(
+                "neutralization='split_penalty' requires leaf_model='constant'".to_string(),
+            ));
+        }
+    }
+
     if params.leaf_solver == LeafSolverKind::Dro {
         if params.leaf_model != LeafModelKind::Constant {
             return Err(CoreError::InvalidConfig(
-                "leaf_solver='dro' requires leaf_model='constant' in v0.6.0".to_string(),
+                "leaf_solver='dro' requires leaf_model='constant' in v0.7.0".to_string(),
             ));
         }
         let Some(cfg) = params.dro_config else {
@@ -2387,6 +2508,40 @@ pub fn validate_training_dataset(dataset: &TrainingDataset) -> CoreResult<()> {
             group_id.len(),
             dataset.matrix.row_count
         )));
+    }
+
+    if let Some(factor_exposures) = &dataset.factor_exposures {
+        if factor_exposures.row_count != dataset.matrix.row_count {
+            return Err(CoreError::Validation(format!(
+                "factor_exposures row_count {} does not match row_count {}",
+                factor_exposures.row_count, dataset.matrix.row_count
+            )));
+        }
+        if factor_exposures.factor_count == 0 {
+            return Err(CoreError::Validation(
+                "factor_exposures factor_count must be greater than 0".to_string(),
+            ));
+        }
+        let expected_len = factor_exposures
+            .row_count
+            .checked_mul(factor_exposures.factor_count)
+            .ok_or_else(|| {
+                CoreError::Validation(
+                    "factor_exposures row_count * factor_count overflow".to_string(),
+                )
+            })?;
+        if factor_exposures.values.len() != expected_len {
+            return Err(CoreError::Validation(format!(
+                "factor_exposures values length {} does not match row_count * factor_count {}",
+                factor_exposures.values.len(),
+                expected_len
+            )));
+        }
+        if factor_exposures.values.iter().any(|v| !v.is_finite()) {
+            return Err(CoreError::Validation(
+                "factor_exposures must contain only finite values".to_string(),
+            ));
+        }
     }
 
     Ok(())
@@ -2936,6 +3091,63 @@ mod tests {
     }
 
     #[test]
+    fn train_params_default_has_no_neutralization_config() {
+        let params = TrainParams::default();
+        assert!(params.neutralization_config.is_none());
+    }
+
+    #[test]
+    fn validates_factor_exposure_matrix_shape_and_finiteness() {
+        assert!(FactorExposureMatrix::new(2, 2, vec![1.0, 0.0, 0.0, 1.0]).is_ok());
+        assert!(FactorExposureMatrix::new(0, 2, vec![]).is_err());
+        assert!(FactorExposureMatrix::new(2, 0, vec![]).is_err());
+        assert!(FactorExposureMatrix::new(2, 2, vec![1.0, f32::NAN, 0.0, 1.0]).is_err());
+        assert!(FactorExposureMatrix::new(2, 2, vec![1.0, 0.0, 1.0]).is_err());
+    }
+
+    #[test]
+    fn factor_exposure_matrix_row_rejects_out_of_bounds_index() {
+        let exposures =
+            FactorExposureMatrix::new(2, 2, vec![1.0, 0.0, 0.0, 1.0]).expect("valid exposures");
+        assert_eq!(exposures.row(1).expect("row exists"), &[0.0, 1.0]);
+        assert!(exposures.row(2).is_err());
+
+        let malformed = FactorExposureMatrix {
+            row_count: 2,
+            factor_count: 2,
+            values: vec![1.0],
+        };
+        assert!(malformed.row(0).is_err());
+    }
+
+    #[test]
+    fn validates_neutralization_config_contract() {
+        let mut params = TrainParams {
+            neutralization_config: Some(FactorNeutralizationConfig {
+                kind: NeutralizationKind::PerRoundGradient,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            }),
+            ..TrainParams::default()
+        };
+        assert!(validate_train_params(&params).is_ok());
+
+        params.neutralization_config = Some(FactorNeutralizationConfig {
+            kind: NeutralizationKind::SplitPenalty,
+            ridge_lambda: 1e-6,
+            split_penalty: 0.1,
+        });
+        assert!(validate_train_params(&params).is_ok());
+
+        params.neutralization_config = Some(FactorNeutralizationConfig {
+            kind: NeutralizationKind::SplitPenalty,
+            ridge_lambda: 1e-6,
+            split_penalty: -0.1,
+        });
+        assert!(validate_train_params(&params).is_err());
+    }
+
+    #[test]
     fn rejects_invalid_learning_rate() {
         let params = TrainParams {
             learning_rate: 0.0,
@@ -3039,6 +3251,27 @@ mod tests {
             sample_weights: None,
             time_index: None,
             group_id: None,
+            factor_exposures: None,
+        };
+        assert!(matches!(
+            validate_training_dataset(&dataset),
+            Err(CoreError::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn validate_training_dataset_rejects_invalid_public_factor_exposures() {
+        let dataset = TrainingDataset {
+            matrix: DatasetMatrix::new(2, 2, vec![0.1, 0.2, 0.3, 0.4]).expect("valid matrix"),
+            targets: vec![1.0, 2.0],
+            sample_weights: None,
+            time_index: None,
+            group_id: None,
+            factor_exposures: Some(FactorExposureMatrix {
+                row_count: 1,
+                factor_count: 2,
+                values: vec![1.0, f32::NAN],
+            }),
         };
         assert!(matches!(
             validate_training_dataset(&dataset),

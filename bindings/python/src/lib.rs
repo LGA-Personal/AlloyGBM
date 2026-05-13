@@ -6,7 +6,8 @@ use alloygbm_categorical::{
 };
 use alloygbm_core::{
     BinnedMatrix, CATEGORICAL_STATE_FORMAT_V1, CategoricalStatePayloadV1, DatasetMatrix,
-    DenseMatrixView, GradientPair, MISSING_BIN_U8, TrainParams, TrainingDataset, TreeGrowth,
+    DenseMatrixView, FactorExposureMatrix, FactorNeutralizationConfig, GradientPair,
+    MISSING_BIN_U8, NeutralizationKind, TrainParams, TrainingDataset, TreeGrowth,
 };
 use alloygbm_engine::{
     ArtifactCompatibilityMode, BinaryCrossEntropyObjective, CategoricalFeatureInfo,
@@ -1232,6 +1233,7 @@ fn prepare_validation_matrices_from_dense_values(
                 sample_weights,
                 time_index,
                 group_id,
+                factor_exposures: None,
             };
             let binned_matrix = BinnedMatrix::new_u16(
                 row_count,
@@ -1281,6 +1283,7 @@ fn prepare_validation_matrices_from_dense_values(
                 sample_weights,
                 time_index,
                 group_id,
+                factor_exposures: None,
             };
             let binned_matrix = BinnedMatrix::new(
                 row_count,
@@ -1318,6 +1321,7 @@ fn prepare_validation_matrices_from_dense_values(
             sample_weights,
             time_index,
             group_id,
+            factor_exposures: None,
         };
         let binned_matrix = BinnedMatrix::new_u16(
             row_count,
@@ -1350,6 +1354,7 @@ fn prepare_validation_matrices_from_dense_values(
             sample_weights,
             time_index,
             group_id,
+            factor_exposures: None,
         };
         let binned_matrix = BinnedMatrix::new(
             row_count,
@@ -1864,6 +1869,7 @@ fn prepare_training_matrices_from_dense_values(
             sample_weights,
             time_index,
             group_id,
+            factor_exposures: None,
         };
         let binned_matrix = BinnedMatrix::new_u16(
             row_count,
@@ -1922,6 +1928,7 @@ fn prepare_training_matrices_from_dense_values(
             sample_weights,
             time_index,
             group_id,
+            factor_exposures: None,
         };
         let binned_matrix = BinnedMatrix::new(
             row_count,
@@ -2180,6 +2187,163 @@ fn encode_bins_from_encoded_values(encoded_values: &[f32]) -> Result<(Vec<u8>, u
     Ok((bins, (unique_values.len().saturating_sub(1)) as u16))
 }
 
+fn bridge_cholesky_lower(mut matrix: Vec<f64>, k: usize) -> Result<Vec<f64>, EngineError> {
+    for i in 0..k {
+        for j in 0..=i {
+            let mut sum = matrix[i * k + j];
+            for p in 0..j {
+                sum -= matrix[i * k + p] * matrix[j * k + p];
+            }
+            if i == j {
+                if sum <= 1e-12 {
+                    return Err(EngineError::ContractViolation(
+                        "factor exposure Gram matrix is singular; increase factor_neutralization_lambda"
+                            .to_string(),
+                    ));
+                }
+                matrix[i * k + j] = sum.sqrt();
+            } else {
+                matrix[i * k + j] = sum / matrix[j * k + j];
+            }
+        }
+        for j in i + 1..k {
+            matrix[i * k + j] = 0.0;
+        }
+    }
+    Ok(matrix)
+}
+
+fn bridge_solve_cholesky(lower: &[f64], rhs: &[f64], k: usize) -> Result<Vec<f64>, EngineError> {
+    if rhs.len() != k {
+        return Err(EngineError::ContractViolation(
+            "factor projection rhs length must match factor count".to_string(),
+        ));
+    }
+
+    let mut y = vec![0.0_f64; k];
+    for i in 0..k {
+        let mut sum = rhs[i];
+        for (j, y_j) in y.iter().enumerate().take(i) {
+            sum -= lower[i * k + j] * *y_j;
+        }
+        y[i] = sum / lower[i * k + i];
+    }
+
+    let mut x = vec![0.0_f64; k];
+    for i in (0..k).rev() {
+        let mut sum = y[i];
+        for (j, x_j) in x.iter().enumerate().take(k).skip(i + 1) {
+            sum -= lower[j * k + i] * *x_j;
+        }
+        x[i] = sum / lower[i * k + i];
+    }
+    Ok(x)
+}
+
+fn bridge_residualize_values_in_place(
+    values: &mut [f32],
+    exposures: &FactorExposureMatrix,
+    weights: Option<&[f32]>,
+    ridge_lambda: f32,
+) -> Result<(), EngineError> {
+    if values.len() != exposures.row_count {
+        return Err(EngineError::ContractViolation(
+            "value length must match factor_exposures row_count".to_string(),
+        ));
+    }
+    if let Some(weights) = weights
+        && weights.len() != exposures.row_count
+    {
+        return Err(EngineError::ContractViolation(
+            "sample_weight length must match factor_exposures row_count".to_string(),
+        ));
+    }
+
+    let k = exposures.factor_count;
+    let mut gram = vec![0.0_f64; k * k];
+    let mut rhs = vec![0.0_f64; k];
+    for (row, value) in values.iter().enumerate().take(exposures.row_count) {
+        let weight = weights.map_or(1.0_f64, |sample_weights| f64::from(sample_weights[row]));
+        let factors = exposures.row(row)?;
+        for a in 0..k {
+            rhs[a] += weight * f64::from(factors[a]) * f64::from(*value);
+            for b in 0..=a {
+                gram[a * k + b] += weight * f64::from(factors[a]) * f64::from(factors[b]);
+            }
+        }
+    }
+    for i in 0..k {
+        gram[i * k + i] += f64::from(ridge_lambda);
+    }
+    let lower = bridge_cholesky_lower(gram, k)?;
+    let coefficients = bridge_solve_cholesky(&lower, &rhs, k)?;
+
+    let mut residualized = Vec::with_capacity(values.len());
+    for (row, value) in values.iter().enumerate() {
+        let projected = exposures
+            .row(row)?
+            .iter()
+            .zip(coefficients.iter())
+            .map(|(factor, coefficient)| f64::from(*factor) * coefficient)
+            .sum::<f64>();
+        let residual = (f64::from(*value) - projected) as f32;
+        if !residual.is_finite() {
+            return Err(EngineError::ContractViolation(
+                "residualized value must be finite".to_string(),
+            ));
+        }
+        residualized.push(residual);
+    }
+    values.copy_from_slice(&residualized);
+    Ok(())
+}
+
+fn apply_bridge_pre_target_neutralization(
+    prepared: &mut PreparedTrainingMatrices,
+    config: FactorNeutralizationConfig,
+) -> Result<(), EngineError> {
+    if config.kind != NeutralizationKind::PreTarget {
+        return Ok(());
+    }
+    let exposures = prepared.dataset.factor_exposures.as_ref().ok_or_else(|| {
+        EngineError::ContractViolation(
+            "factor_exposures are required when neutralization is active".to_string(),
+        )
+    })?;
+    bridge_residualize_values_in_place(
+        &mut prepared.dataset.targets,
+        exposures,
+        prepared.dataset.sample_weights.as_deref(),
+        config.ridge_lambda,
+    )?;
+    prepared.dataset.factor_exposures = None;
+    Ok(())
+}
+
+fn validate_bridge_pre_target_neutralization_support(
+    params: &TrainParams,
+    objective: &str,
+    custom_objective_fn: Option<&Py<PyAny>>,
+    has_validation_targets: bool,
+) -> Result<(), EngineError> {
+    let is_pre_target = params
+        .neutralization_config
+        .is_some_and(|config| config.kind == NeutralizationKind::PreTarget);
+    if is_pre_target && (objective != "squared_error" || custom_objective_fn.is_some()) {
+        return Err(EngineError::ContractViolation(
+            "neutralization='pre_target' is only supported for GBMRegressor squared-error training"
+                .to_string(),
+        ));
+    }
+    if is_pre_target && has_validation_targets {
+        return Err(EngineError::ContractViolation(
+            "neutralization='pre_target' does not support validation targets in this release because validation factor_exposures are not accepted"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Encode multiple categorical features in the training matrices via target encoding.
 fn apply_categorical_encoding_to_training_matrices_multi(
     prepared: PreparedTrainingMatrices,
@@ -2252,6 +2416,7 @@ fn apply_categorical_encoding_to_training_matrices_multi(
                 sample_weights: prepared.dataset.sample_weights,
                 time_index: prepared.dataset.time_index,
                 group_id: prepared.dataset.group_id,
+                factor_exposures: prepared.dataset.factor_exposures,
             },
             binned_matrix: BinnedMatrix::new(row_count, feature_count, max_bin, bins)?,
             metadata: prepared.metadata,
@@ -2329,6 +2494,7 @@ fn apply_categorical_encoding_to_validation_matrices_multi(
             sample_weights: prepared.dataset.sample_weights,
             time_index: prepared.dataset.time_index,
             group_id: prepared.dataset.group_id,
+            factor_exposures: prepared.dataset.factor_exposures,
         },
         binned_matrix: BinnedMatrix::new(row_count, feature_count, max_bin, bins)?,
         metadata: prepared.metadata,
@@ -2411,12 +2577,13 @@ fn train_regression_artifact_with_summary_dense_impl(
     targets: &[f32],
     sample_weights: Option<Vec<f32>>,
     group_id: Option<Vec<u32>>,
+    factor_exposures: Option<FactorExposureMatrix>,
     validation_values: Option<&[f32]>,
     validation_row_count: Option<usize>,
     validation_targets: Option<&[f32]>,
     validation_sample_weights: Option<Vec<f32>>,
     validation_group_id: Option<Vec<u32>>,
-    params: TrainParams,
+    mut params: TrainParams,
     rounds: usize,
     time_index: Option<Vec<i64>>,
     validation_time_index: Option<Vec<i64>>,
@@ -2435,6 +2602,12 @@ fn train_regression_artifact_with_summary_dense_impl(
     max_cat_threshold: usize,
 ) -> Result<NativeTrainingResult, EngineError> {
     let bridge_start = Instant::now();
+    if init_artifact_bytes.is_some() && params.neutralization_config.is_some() {
+        return Err(EngineError::ContractViolation(
+            "neutralized warm-start training is not supported because model artifacts do not persist neutralization metadata yet"
+                .to_string(),
+        ));
+    }
     let is_linear_leaf = params.leaf_model == alloygbm_core::LeafModelKind::Linear;
     // Dense float values are needed for categorical target encoding.  For linear-leaf
     // training we need the raw feature values separately (see post-processing below).
@@ -2451,6 +2624,7 @@ fn train_regression_artifact_with_summary_dense_impl(
         continuous_binning_max_bins,
         need_dense_values,
     )?;
+    prepared.dataset.factor_exposures = factor_exposures;
 
     // For linear-leaf training the engine reads `dataset.matrix.values` as raw (float)
     // feature values inside `build_linear_histograms_cpu`.  The preparation step above
@@ -2459,6 +2633,19 @@ fn train_regression_artifact_with_summary_dense_impl(
     // Categorical encoding runs afterwards and will overwrite its own columns.
     if is_linear_leaf {
         prepared.dataset.matrix = DatasetMatrix::new(row_count, feature_count, values.to_vec())?;
+    }
+
+    if let Some(config) = params.neutralization_config
+        && config.kind == NeutralizationKind::PreTarget
+    {
+        validate_bridge_pre_target_neutralization_support(
+            &params,
+            objective,
+            custom_objective_fn.as_ref(),
+            validation_targets.is_some(),
+        )?;
+        apply_bridge_pre_target_neutralization(&mut prepared, config)?;
+        params.neutralization_config = None;
     }
 
     let training_targets_for_validation = prepared.dataset.targets.clone();
@@ -3063,6 +3250,7 @@ fn build_train_params(
     leaf_model: alloygbm_core::LeafModelKind,
     leaf_solver: alloygbm_core::LeafSolverKind,
     dro_config: Option<alloygbm_core::DroConfig>,
+    neutralization_config: Option<FactorNeutralizationConfig>,
 ) -> TrainParams {
     TrainParams {
         seed,
@@ -3086,6 +3274,85 @@ fn build_train_params(
         leaf_model,
         leaf_solver,
         dro_config,
+        neutralization_config,
+    }
+}
+
+fn parse_neutralization_config(
+    neutralization: &str,
+    factor_neutralization_lambda: f32,
+    factor_penalty: f32,
+) -> PyResult<Option<FactorNeutralizationConfig>> {
+    let kind = match neutralization {
+        "none" => NeutralizationKind::None,
+        "pre_target" => NeutralizationKind::PreTarget,
+        "per_round_gradient" => NeutralizationKind::PerRoundGradient,
+        "split_penalty" => NeutralizationKind::SplitPenalty,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "neutralization must be 'none', 'pre_target', 'per_round_gradient', or 'split_penalty', got '{other}'"
+            )));
+        }
+    };
+    if !factor_neutralization_lambda.is_finite() || factor_neutralization_lambda < 0.0 {
+        return Err(PyValueError::new_err(
+            "factor_neutralization_lambda must be finite and >= 0",
+        ));
+    }
+    if !factor_penalty.is_finite() || factor_penalty < 0.0 {
+        return Err(PyValueError::new_err(
+            "factor_penalty must be finite and >= 0",
+        ));
+    }
+    if kind != NeutralizationKind::SplitPenalty && factor_penalty != 0.0 {
+        return Err(PyValueError::new_err(
+            "factor_penalty is only valid with neutralization='split_penalty'",
+        ));
+    }
+    Ok(match kind {
+        NeutralizationKind::None => None,
+        _ => Some(FactorNeutralizationConfig {
+            kind,
+            ridge_lambda: factor_neutralization_lambda,
+            split_penalty: factor_penalty,
+        }),
+    })
+}
+
+fn validate_neutralization_leaf_model(
+    neutralization_config: Option<FactorNeutralizationConfig>,
+    leaf_model: alloygbm_core::LeafModelKind,
+) -> PyResult<()> {
+    if neutralization_config.is_some_and(|config| config.kind == NeutralizationKind::SplitPenalty)
+        && leaf_model == alloygbm_core::LeafModelKind::Linear
+    {
+        return Err(PyValueError::new_err(
+            "neutralization='split_penalty' requires leaf_model='constant'",
+        ));
+    }
+    Ok(())
+}
+
+fn parse_factor_exposure_matrix(
+    factor_exposure_values: Option<Vec<f32>>,
+    factor_exposure_row_count: Option<usize>,
+    factor_exposure_factor_count: Option<usize>,
+) -> PyResult<Option<FactorExposureMatrix>> {
+    match (
+        factor_exposure_values,
+        factor_exposure_row_count,
+        factor_exposure_factor_count,
+    ) {
+        (None, None, None) => Ok(None),
+        (Some(values), Some(row_count), Some(factor_count)) => {
+            FactorExposureMatrix::new(row_count, factor_count, values)
+                .map(Some)
+                .map_err(|err| PyValueError::new_err(err.to_string()))
+        }
+        _ => Err(PyValueError::new_err(
+            "factor_exposure_values, factor_exposure_row_count, and \
+             factor_exposure_factor_count must be provided together",
+        )),
     }
 }
 
@@ -3309,7 +3576,13 @@ fn shap_global_importance_dense(
     leaf_model="constant",
     leaf_solver="standard",
     dro_radius=0.05,
-    dro_metric="wasserstein"
+    dro_metric="wasserstein",
+    neutralization="none",
+    factor_neutralization_lambda=1e-6,
+    factor_penalty=0.0,
+    factor_exposure_values=None,
+    factor_exposure_row_count=None,
+    factor_exposure_factor_count=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact(
@@ -3340,6 +3613,12 @@ fn train_regression_artifact(
     leaf_solver: &str,
     dro_radius: f32,
     dro_metric: &str,
+    neutralization: &str,
+    factor_neutralization_lambda: f32,
+    factor_penalty: f32,
+    factor_exposure_values: Option<Vec<f32>>,
+    factor_exposure_row_count: Option<usize>,
+    factor_exposure_factor_count: Option<usize>,
 ) -> PyResult<Vec<u8>> {
     let parsed_morph_config = morph_config
         .map(|d| parse_morph_config_from_pydict(&d))
@@ -3347,6 +3626,14 @@ fn train_regression_artifact(
     let parsed_leaf_model = parse_leaf_model(leaf_model)?;
     let parsed_leaf_solver = parse_leaf_solver(leaf_solver)?;
     let parsed_dro_config = parse_dro_config(parsed_leaf_solver, dro_radius, dro_metric)?;
+    let parsed_neutralization_config =
+        parse_neutralization_config(neutralization, factor_neutralization_lambda, factor_penalty)?;
+    validate_neutralization_leaf_model(parsed_neutralization_config, parsed_leaf_model)?;
+    let factor_exposures = parse_factor_exposure_matrix(
+        factor_exposure_values,
+        factor_exposure_row_count,
+        factor_exposure_factor_count,
+    )?;
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
     }
@@ -3377,6 +3664,7 @@ fn train_regression_artifact(
         parsed_leaf_model,
         parsed_leaf_solver,
         parsed_dro_config,
+        parsed_neutralization_config,
     );
 
     let categorical_spec = resolve_categorical_spec(
@@ -3398,6 +3686,7 @@ fn train_regression_artifact(
         &targets,
         None, // sample_weights
         None, // group_id
+        factor_exposures,
         None,
         None,
         None,
@@ -3454,7 +3743,13 @@ fn train_regression_artifact(
     leaf_model="constant",
     leaf_solver="standard",
     dro_radius=0.05,
-    dro_metric="wasserstein"
+    dro_metric="wasserstein",
+    neutralization="none",
+    factor_neutralization_lambda=1e-6,
+    factor_penalty=0.0,
+    factor_exposure_values=None,
+    factor_exposure_row_count=None,
+    factor_exposure_factor_count=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense(
@@ -3487,6 +3782,12 @@ fn train_regression_artifact_dense(
     leaf_solver: &str,
     dro_radius: f32,
     dro_metric: &str,
+    neutralization: &str,
+    factor_neutralization_lambda: f32,
+    factor_penalty: f32,
+    factor_exposure_values: Option<Vec<f32>>,
+    factor_exposure_row_count: Option<usize>,
+    factor_exposure_factor_count: Option<usize>,
 ) -> PyResult<Vec<u8>> {
     let parsed_morph_config = morph_config
         .map(|d| parse_morph_config_from_pydict(&d))
@@ -3494,6 +3795,14 @@ fn train_regression_artifact_dense(
     let parsed_leaf_model = parse_leaf_model(leaf_model)?;
     let parsed_leaf_solver = parse_leaf_solver(leaf_solver)?;
     let parsed_dro_config = parse_dro_config(parsed_leaf_solver, dro_radius, dro_metric)?;
+    let parsed_neutralization_config =
+        parse_neutralization_config(neutralization, factor_neutralization_lambda, factor_penalty)?;
+    validate_neutralization_leaf_model(parsed_neutralization_config, parsed_leaf_model)?;
+    let factor_exposures = parse_factor_exposure_matrix(
+        factor_exposure_values,
+        factor_exposure_row_count,
+        factor_exposure_factor_count,
+    )?;
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
     }
@@ -3524,6 +3833,7 @@ fn train_regression_artifact_dense(
         parsed_leaf_model,
         parsed_leaf_solver,
         parsed_dro_config,
+        parsed_neutralization_config,
     );
     let categorical_spec = resolve_categorical_spec(
         categorical_feature_index,
@@ -3541,6 +3851,7 @@ fn train_regression_artifact_dense(
         &targets,
         None, // sample_weights
         None, // group_id
+        factor_exposures,
         None,
         None,
         None,
@@ -3621,7 +3932,13 @@ fn train_regression_artifact_dense(
     leaf_model="constant",
     leaf_solver="standard",
     dro_radius=0.05,
-    dro_metric="wasserstein"
+    dro_metric="wasserstein",
+    neutralization="none",
+    factor_neutralization_lambda=1e-6,
+    factor_penalty=0.0,
+    factor_exposure_values=None,
+    factor_exposure_row_count=None,
+    factor_exposure_factor_count=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_with_summary(
@@ -3678,6 +3995,12 @@ fn train_regression_artifact_with_summary(
     leaf_solver: &str,
     dro_radius: f32,
     dro_metric: &str,
+    neutralization: &str,
+    factor_neutralization_lambda: f32,
+    factor_penalty: f32,
+    factor_exposure_values: Option<Vec<f32>>,
+    factor_exposure_row_count: Option<usize>,
+    factor_exposure_factor_count: Option<usize>,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -3694,6 +4017,14 @@ fn train_regression_artifact_with_summary(
     let parsed_leaf_model = parse_leaf_model(leaf_model)?;
     let parsed_leaf_solver = parse_leaf_solver(leaf_solver)?;
     let parsed_dro_config = parse_dro_config(parsed_leaf_solver, dro_radius, dro_metric)?;
+    let parsed_neutralization_config =
+        parse_neutralization_config(neutralization, factor_neutralization_lambda, factor_penalty)?;
+    validate_neutralization_leaf_model(parsed_neutralization_config, parsed_leaf_model)?;
+    let factor_exposures = parse_factor_exposure_matrix(
+        factor_exposure_values,
+        factor_exposure_row_count,
+        factor_exposure_factor_count,
+    )?;
     let params = build_train_params(
         learning_rate,
         max_depth,
@@ -3716,6 +4047,7 @@ fn train_regression_artifact_with_summary(
         parsed_leaf_model,
         parsed_leaf_solver,
         parsed_dro_config,
+        parsed_neutralization_config,
     );
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
@@ -3755,6 +4087,7 @@ fn train_regression_artifact_with_summary(
         &targets,
         sample_weights,
         group_id,
+        factor_exposures,
         validation_payload
             .as_ref()
             .map(|(values, _, _)| values.as_slice()),
@@ -3839,7 +4172,13 @@ fn train_regression_artifact_with_summary(
     leaf_model="constant",
     leaf_solver="standard",
     dro_radius=0.05,
-    dro_metric="wasserstein"
+    dro_metric="wasserstein",
+    neutralization="none",
+    factor_neutralization_lambda=1e-6,
+    factor_penalty=0.0,
+    factor_exposure_values=None,
+    factor_exposure_row_count=None,
+    factor_exposure_factor_count=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary(
@@ -3899,6 +4238,12 @@ fn train_regression_artifact_dense_with_summary(
     leaf_solver: &str,
     dro_radius: f32,
     dro_metric: &str,
+    neutralization: &str,
+    factor_neutralization_lambda: f32,
+    factor_penalty: f32,
+    factor_exposure_values: Option<Vec<f32>>,
+    factor_exposure_row_count: Option<usize>,
+    factor_exposure_factor_count: Option<usize>,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -3915,6 +4260,14 @@ fn train_regression_artifact_dense_with_summary(
     let parsed_leaf_model = parse_leaf_model(leaf_model)?;
     let parsed_leaf_solver = parse_leaf_solver(leaf_solver)?;
     let parsed_dro_config = parse_dro_config(parsed_leaf_solver, dro_radius, dro_metric)?;
+    let parsed_neutralization_config =
+        parse_neutralization_config(neutralization, factor_neutralization_lambda, factor_penalty)?;
+    validate_neutralization_leaf_model(parsed_neutralization_config, parsed_leaf_model)?;
+    let factor_exposures = parse_factor_exposure_matrix(
+        factor_exposure_values,
+        factor_exposure_row_count,
+        factor_exposure_factor_count,
+    )?;
     let params = build_train_params(
         learning_rate,
         max_depth,
@@ -3937,6 +4290,7 @@ fn train_regression_artifact_dense_with_summary(
         parsed_leaf_model,
         parsed_leaf_solver,
         parsed_dro_config,
+        parsed_neutralization_config,
     );
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
@@ -3959,6 +4313,7 @@ fn train_regression_artifact_dense_with_summary(
         &targets,
         sample_weights,
         group_id,
+        factor_exposures,
         validation_values.as_deref(),
         validation_row_count,
         validation_targets.as_deref(),
@@ -4056,7 +4411,13 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> PyResult<Vec<f32>> {
     leaf_model="constant",
     leaf_solver="standard",
     dro_radius=0.05,
-    dro_metric="wasserstein"
+    dro_metric="wasserstein",
+    neutralization="none",
+    factor_neutralization_lambda=1e-6,
+    factor_penalty=0.0,
+    factor_exposure_values=None,
+    factor_exposure_row_count=None,
+    factor_exposure_factor_count=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary_bytes(
@@ -4116,6 +4477,12 @@ fn train_regression_artifact_dense_with_summary_bytes(
     leaf_solver: &str,
     dro_radius: f32,
     dro_metric: &str,
+    neutralization: &str,
+    factor_neutralization_lambda: f32,
+    factor_penalty: f32,
+    factor_exposure_values: Option<Vec<f32>>,
+    factor_exposure_row_count: Option<usize>,
+    factor_exposure_factor_count: Option<usize>,
 ) -> PyResult<NativeTrainingResult> {
     let values = bytes_to_f32_vec(values_bytes)?;
     let targets = bytes_to_f32_vec(targets_bytes)?;
@@ -4136,6 +4503,14 @@ fn train_regression_artifact_dense_with_summary_bytes(
     let parsed_leaf_model = parse_leaf_model(leaf_model)?;
     let parsed_leaf_solver = parse_leaf_solver(leaf_solver)?;
     let parsed_dro_config = parse_dro_config(parsed_leaf_solver, dro_radius, dro_metric)?;
+    let parsed_neutralization_config =
+        parse_neutralization_config(neutralization, factor_neutralization_lambda, factor_penalty)?;
+    validate_neutralization_leaf_model(parsed_neutralization_config, parsed_leaf_model)?;
+    let factor_exposures = parse_factor_exposure_matrix(
+        factor_exposure_values,
+        factor_exposure_row_count,
+        factor_exposure_factor_count,
+    )?;
     let params = build_train_params(
         learning_rate,
         max_depth,
@@ -4158,6 +4533,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
         parsed_leaf_model,
         parsed_leaf_solver,
         parsed_dro_config,
+        parsed_neutralization_config,
     );
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
@@ -4180,6 +4556,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
         &targets,
         sample_weights,
         group_id,
+        factor_exposures,
         validation_values.as_deref(),
         validation_row_count,
         validation_targets.as_deref(),
@@ -4250,7 +4627,8 @@ mod tests {
     use alloygbm_backend_cpu::CpuBackend;
     use alloygbm_categorical::TargetEncoderConfig;
     use alloygbm_core::{
-        BinnedMatrix, DatasetMatrix, LeafModelKind, ModelSectionKind, TrainParams, TrainingDataset,
+        BinnedMatrix, DatasetMatrix, FactorExposureMatrix, FactorNeutralizationConfig,
+        LeafModelKind, ModelSectionKind, NeutralizationKind, TrainParams, TrainingDataset,
         TreeGrowth, deserialize_model_artifact_v1, serialize_model_artifact_v1,
     };
     use alloygbm_engine::{
@@ -4276,6 +4654,7 @@ mod tests {
             targets,
             None, // sample_weights
             None, // group_id
+            None, // factor_exposures
             None,
             None,
             None,
@@ -4323,6 +4702,7 @@ mod tests {
             sample_weights: None,
             time_index: None,
             group_id: None,
+            factor_exposures: None,
         }
     }
 
@@ -4343,6 +4723,18 @@ mod tests {
             ],
         )
         .expect("binned matrix is valid")
+    }
+
+    fn binned_matrix_from_fixture_dataset(dataset: &TrainingDataset) -> BinnedMatrix {
+        let mut bins = Vec::with_capacity(dataset.row_count() * dataset.matrix.feature_count);
+        for row in 0..dataset.row_count() {
+            for feature in 0..dataset.matrix.feature_count {
+                let value = dataset.matrix.values[row * dataset.matrix.feature_count + feature];
+                bins.push(value as u8);
+            }
+        }
+        BinnedMatrix::new(dataset.row_count(), dataset.matrix.feature_count, 3, bins)
+            .expect("binned matrix is valid")
     }
 
     fn fixture_rows(dataset: &TrainingDataset) -> Vec<Vec<f32>> {
@@ -4377,6 +4769,7 @@ mod tests {
             leaf_model: LeafModelKind::Constant,
             leaf_solver: alloygbm_core::LeafSolverKind::Standard,
             dro_config: None,
+            neutralization_config: None,
         }
     }
 
@@ -4536,6 +4929,117 @@ mod tests {
         let bridge_model =
             alloygbm_engine::TrainedModel::from_artifact_bytes(&bridge_artifact).expect("parses");
         assert!(bridge_model.categorical_state.is_some());
+
+        let engine_predictions = engine_model.predict_batch(&rows).expect("engine predicts");
+        let bridge_predictions =
+            predictor_predict_batch_impl(&bridge_artifact, &rows).expect("bridge predicts");
+        assert_eq!(bridge_predictions, engine_predictions);
+    }
+
+    fn target_encoding_factor_loaded_dataset() -> TrainingDataset {
+        TrainingDataset {
+            matrix: DatasetMatrix::new(
+                8,
+                2,
+                vec![
+                    0.0, 0.0, //
+                    1.0, 0.0, //
+                    2.0, 0.0, //
+                    3.0, 0.0, //
+                    0.0, 1.0, //
+                    1.0, 1.0, //
+                    2.0, 1.0, //
+                    3.0, 1.0, //
+                ],
+            )
+            .expect("matrix is valid"),
+            targets: vec![-3.0, -2.0, -1.0, 0.0, 0.0, 1.0, 2.0, 3.0],
+            sample_weights: None,
+            time_index: None,
+            group_id: None,
+            factor_exposures: Some(
+                FactorExposureMatrix::new(8, 1, vec![-4.0, -3.0, -2.0, -1.0, 1.0, 2.0, 3.0, 4.0])
+                    .expect("factor exposures are valid"),
+            ),
+        }
+    }
+
+    #[test]
+    fn train_bridge_pre_target_categorical_encoding_matches_engine_residualized_targets() {
+        let dataset = target_encoding_factor_loaded_dataset();
+        let binned = binned_matrix_from_fixture_dataset(&dataset);
+        let rows = fixture_rows(&dataset);
+        let categorical_spec = CategoricalTargetEncodingSpec {
+            feature_index: 1,
+            values: vec![
+                "B".to_string(),
+                "B".to_string(),
+                "B".to_string(),
+                "B".to_string(),
+                "A".to_string(),
+                "A".to_string(),
+                "A".to_string(),
+                "A".to_string(),
+            ],
+            config: TargetEncoderConfig {
+                smoothing: 0.0,
+                min_samples_leaf: 1,
+                time_aware: false,
+            },
+        };
+        let params = TrainParams {
+            neutralization_config: Some(FactorNeutralizationConfig {
+                kind: NeutralizationKind::PreTarget,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            }),
+            ..fixture_params()
+        };
+
+        let engine_model = Trainer::new(params.clone())
+            .expect("params are valid")
+            .fit_iterations_with_single_target_encoded_feature(
+                &dataset,
+                &binned,
+                &categorical_spec,
+                &CpuBackend,
+                &SquaredErrorObjective,
+                DEFAULT_TRAIN_ROUNDS,
+            )
+            .expect("engine training succeeds");
+        let bridge_artifact = train_regression_artifact_with_summary_dense_impl(
+            &dataset.matrix.values,
+            dataset.row_count(),
+            dataset.matrix.feature_count,
+            &dataset.targets,
+            None,
+            None,
+            dataset.factor_exposures.clone(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            params,
+            DEFAULT_TRAIN_ROUNDS,
+            None,
+            None,
+            vec![categorical_spec],
+            Vec::new(),
+            TrainingPolicyMode::Manual,
+            false,
+            ContinuousBinningStrategy::Linear,
+            MAX_CONTINUOUS_QUANTIZED_BIN_U8 as usize + 1,
+            "squared_error",
+            None,
+            None,
+            None,
+            None,
+            None,
+            0,
+        )
+        .expect("bridge training succeeds")
+        .artifact_bytes;
 
         let engine_predictions = engine_model.predict_batch(&rows).expect("engine predicts");
         let bridge_predictions =

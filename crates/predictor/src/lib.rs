@@ -1354,6 +1354,7 @@ mod tests {
             sample_weights: None,
             time_index: None,
             group_id: None,
+            factor_exposures: None,
         }
     }
 
@@ -1408,6 +1409,7 @@ mod tests {
             leaf_solver: alloygbm_core::LeafSolverKind::Standard,
             dro_config: None,
             leaf_model: LeafModelKind::Constant,
+            neutralization_config: None,
         }
     }
 
@@ -1657,6 +1659,7 @@ mod tests {
             sample_weights: None,
             time_index: None,
             group_id: None,
+            factor_exposures: None,
         }
     }
 
@@ -2011,6 +2014,7 @@ mod tests {
             sample_weights: None,
             time_index: None,
             group_id: None,
+            factor_exposures: None,
         };
 
         // Build a 4-bin binned matrix.

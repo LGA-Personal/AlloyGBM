@@ -1,13 +1,14 @@
 use alloygbm_categorical::{TargetEncoderConfig, fit_transform_target_encoder};
 use alloygbm_core::{
     BinnedMatrix, CategoricalStatePayloadV1, CoreError, DatasetMatrix, Device, DroConfig,
-    DroMetadataPayload, FeatureTile, GradientEmaStats, GradientPair, HistogramBundle,
-    LeafModelKind, LeafSolverKind, LeafValue, LinearHistogramBundle, LinearLeaf,
+    DroMetadataPayload, FactorExposureMatrix, FeatureTile, GradientEmaStats, GradientPair,
+    HistogramBundle, LeafModelKind, LeafSolverKind, LeafValue, LinearHistogramBundle, LinearLeaf,
     LinearLeafCoefficientsPayload, LinearLeafEntry, LrSchedule, MAX_PL_REGRESSORS, MISSING_BIN_U8,
     MODEL_FORMAT_V1, ModelArtifactSection, ModelMetadata, ModelSectionKind, MorphConfig,
-    MorphMetadataPayload, MorphPrecomputed, NativeCategoricalSplitsPayload, NodeSlice, NodeStats,
-    PartitionResult, SplitCandidate, TrainParams, TrainingDataset, TreeGrowth,
-    decode_optional_categorical_state_section_v1, decode_optional_dro_metadata_artifact_section,
+    MorphMetadataPayload, MorphPrecomputed, NativeCategoricalSplitsPayload, NeutralizationKind,
+    NodeSlice, NodeStats, PartitionResult, SplitCandidate, TrainParams, TrainingDataset,
+    TreeGrowth, decode_optional_categorical_state_section_v1,
+    decode_optional_dro_metadata_artifact_section,
     decode_optional_linear_leaf_coefficients_section,
     decode_optional_morph_metadata_artifact_section,
     decode_optional_native_categorical_splits_section, deserialize_model_artifact_v1,
@@ -71,6 +72,205 @@ type LinearLeafPairSplit = (
     Option<(LinearLeaf, LinearLeaf)>,
 );
 
+#[allow(dead_code)]
+struct FactorProjector<'a> {
+    exposures: &'a FactorExposureMatrix,
+    weights: Option<&'a [f32]>,
+    cholesky_lower: Vec<f64>,
+}
+
+#[allow(dead_code)]
+impl<'a> FactorProjector<'a> {
+    fn new(
+        exposures: &'a FactorExposureMatrix,
+        weights: Option<&'a [f32]>,
+        ridge_lambda: f32,
+    ) -> EngineResult<Self> {
+        if let Some(w) = weights
+            && w.len() != exposures.row_count
+        {
+            return Err(EngineError::ContractViolation(
+                "sample_weight length must match factor_exposures row_count".to_string(),
+            ));
+        }
+        let k = exposures.factor_count;
+        let mut gram = vec![0.0_f64; k * k];
+        for row in 0..exposures.row_count {
+            let weight = weights.map_or(1.0_f64, |w| f64::from(w[row]));
+            let f = exposures.row(row)?;
+            for a in 0..k {
+                for b in 0..=a {
+                    gram[a * k + b] += weight * f64::from(f[a]) * f64::from(f[b]);
+                }
+            }
+        }
+        for i in 0..k {
+            gram[i * k + i] += f64::from(ridge_lambda);
+        }
+        let cholesky_lower = cholesky_lower(gram, k)?;
+        Ok(Self {
+            exposures,
+            weights,
+            cholesky_lower,
+        })
+    }
+
+    fn project_gradient_pairs_in_place(&self, gradients: &mut [GradientPair]) -> EngineResult<()> {
+        if gradients.len() != self.exposures.row_count {
+            return Err(EngineError::ContractViolation(
+                "gradient length must match factor_exposures row_count".to_string(),
+            ));
+        }
+        let coefficients = self.projection_coefficients(gradients.iter().map(|g| g.grad))?;
+        let mut residualized = Vec::with_capacity(gradients.len());
+        for (row, gradient) in gradients.iter().enumerate() {
+            let residual = f64::from(gradient.grad)
+                - projected_row_value(self.exposures.row(row)?, &coefficients);
+            let residual = residual as f32;
+            if !residual.is_finite() {
+                return Err(EngineError::ContractViolation(
+                    "projected gradient must be finite".to_string(),
+                ));
+            }
+            residualized.push(residual);
+        }
+        for (gradient, residual) in gradients.iter_mut().zip(residualized) {
+            gradient.grad = residual;
+        }
+        Ok(())
+    }
+
+    fn residualize_values_in_place(&self, values: &mut [f32]) -> EngineResult<()> {
+        if values.len() != self.exposures.row_count {
+            return Err(EngineError::ContractViolation(
+                "value length must match factor_exposures row_count".to_string(),
+            ));
+        }
+        let coefficients = self.projection_coefficients(values.iter().copied())?;
+        let mut residualized = Vec::with_capacity(values.len());
+        for (row, value) in values.iter().enumerate() {
+            let residual =
+                f64::from(*value) - projected_row_value(self.exposures.row(row)?, &coefficients);
+            let residual = residual as f32;
+            if !residual.is_finite() {
+                return Err(EngineError::ContractViolation(
+                    "residualized value must be finite".to_string(),
+                ));
+            }
+            residualized.push(residual);
+        }
+        for (value, residual) in values.iter_mut().zip(residualized) {
+            *value = residual;
+        }
+        Ok(())
+    }
+
+    fn projection_coefficients(
+        &self,
+        values: impl IntoIterator<Item = f32>,
+    ) -> EngineResult<Vec<f64>> {
+        let k = self.exposures.factor_count;
+        let mut rhs = vec![0.0_f64; k];
+        let mut value_count = 0;
+        for (row, value) in values.into_iter().enumerate() {
+            if row >= self.exposures.row_count {
+                return Err(EngineError::ContractViolation(
+                    "value length must match factor_exposures row_count".to_string(),
+                ));
+            }
+            value_count += 1;
+            let weight = self.weights.map_or(1.0_f64, |w| f64::from(w[row]));
+            let f = self.exposures.row(row)?;
+            for a in 0..k {
+                rhs[a] += weight * f64::from(f[a]) * f64::from(value);
+            }
+        }
+        if value_count != self.exposures.row_count {
+            return Err(EngineError::ContractViolation(
+                "value length must match factor_exposures row_count".to_string(),
+            ));
+        }
+        self.solve_cholesky(&rhs)
+    }
+
+    fn solve_cholesky(&self, rhs: &[f64]) -> EngineResult<Vec<f64>> {
+        let k = self.exposures.factor_count;
+        if rhs.len() != k {
+            return Err(EngineError::ContractViolation(
+                "factor projection rhs length must match factor count".to_string(),
+            ));
+        }
+
+        let mut y = vec![0.0_f64; k];
+        for i in 0..k {
+            let mut sum = rhs[i];
+            for (j, y_j) in y.iter().enumerate().take(i) {
+                sum -= self.cholesky_lower[i * k + j] * *y_j;
+            }
+            y[i] = sum / self.cholesky_lower[i * k + i];
+        }
+
+        let mut x = vec![0.0_f64; k];
+        for i in (0..k).rev() {
+            let mut sum = y[i];
+            for (j, x_j) in x.iter().enumerate().take(k).skip(i + 1) {
+                sum -= self.cholesky_lower[j * k + i] * *x_j;
+            }
+            x[i] = sum / self.cholesky_lower[i * k + i];
+        }
+        Ok(x)
+    }
+}
+
+#[allow(dead_code)]
+fn cholesky_lower(mut matrix: Vec<f64>, k: usize) -> EngineResult<Vec<f64>> {
+    for i in 0..k {
+        for j in 0..=i {
+            let mut sum = matrix[i * k + j];
+            for p in 0..j {
+                sum -= matrix[i * k + p] * matrix[j * k + p];
+            }
+            if i == j {
+                if sum <= 1e-12 {
+                    return Err(EngineError::ContractViolation(
+                        "factor exposure Gram matrix is singular; increase factor_neutralization_lambda"
+                            .to_string(),
+                    ));
+                }
+                matrix[i * k + j] = sum.sqrt();
+            } else {
+                matrix[i * k + j] = sum / matrix[j * k + j];
+            }
+        }
+        for j in i + 1..k {
+            matrix[i * k + j] = 0.0;
+        }
+    }
+    Ok(matrix)
+}
+
+#[allow(dead_code)]
+fn projected_row_value(exposures: &[f32], coefficients: &[f64]) -> f64 {
+    exposures
+        .iter()
+        .zip(coefficients.iter())
+        .map(|(factor, coefficient)| f64::from(*factor) * coefficient)
+        .sum::<f64>()
+}
+
+fn apply_pre_target_neutralization(
+    dataset: &mut TrainingDataset,
+    ridge_lambda: f32,
+) -> EngineResult<()> {
+    let exposures = dataset.factor_exposures.as_ref().ok_or_else(|| {
+        EngineError::ContractViolation(
+            "factor_exposures are required when neutralization is active".to_string(),
+        )
+    })?;
+    FactorProjector::new(exposures, dataset.sample_weights.as_deref(), ridge_lambda)?
+        .residualize_values_in_place(&mut dataset.targets)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SplitSelectionOptions {
     pub l2_lambda: f32,
@@ -103,6 +303,18 @@ impl Default for SplitSelectionOptions {
             missing_bin_index: MISSING_BIN_U8 as usize,
         }
     }
+}
+
+/// Per-node context for split exposure penalties over scalar leaves.
+///
+/// This is passed separately from [`SplitSelectionOptions`] so the hot no-penalty
+/// path can keep using small `Copy` options.
+#[derive(Debug, Clone, Copy)]
+pub struct FactorSplitContext<'a> {
+    pub binned_matrix: &'a BinnedMatrix,
+    pub exposures: &'a FactorExposureMatrix,
+    pub row_indices: &'a [u32],
+    pub factor_penalty: f32,
 }
 
 /// Per-round context for morph-gain split selection.
@@ -314,6 +526,21 @@ pub trait BackendOps {
     ) -> EngineResult<Option<SplitCandidate>> {
         self.best_split(histograms)
     }
+    fn best_split_with_factor_context(
+        &self,
+        histograms: &HistogramBundle,
+        options: SplitSelectionOptions,
+        feature_weights: &[f32],
+        categorical_features: &[CategoricalFeatureInfo],
+        factor_context: Option<&FactorSplitContext<'_>>,
+    ) -> EngineResult<Option<SplitCandidate>> {
+        if factor_context.is_some() {
+            return Err(EngineError::ContractViolation(
+                "factor split context is not supported by this backend".to_string(),
+            ));
+        }
+        self.best_split_with_options(histograms, options, feature_weights, categorical_features)
+    }
     /// Morph-mode split selection. Default implementation delegates to
     /// `best_split_with_options` (i.e. ignores morph context), so backends that
     /// don't implement morph fall back gracefully.
@@ -326,6 +553,28 @@ pub trait BackendOps {
         _morph: &MorphContext,
     ) -> EngineResult<Option<SplitCandidate>> {
         self.best_split_with_options(histograms, options, feature_weights, categorical_features)
+    }
+    fn best_split_morph_with_factor_context(
+        &self,
+        histograms: &HistogramBundle,
+        options: SplitSelectionOptions,
+        feature_weights: &[f32],
+        categorical_features: &[CategoricalFeatureInfo],
+        morph: &MorphContext,
+        factor_context: Option<&FactorSplitContext<'_>>,
+    ) -> EngineResult<Option<SplitCandidate>> {
+        if factor_context.is_some() {
+            return Err(EngineError::ContractViolation(
+                "factor split context is not supported by this backend".to_string(),
+            ));
+        }
+        self.best_split_morph(
+            histograms,
+            options,
+            feature_weights,
+            categorical_features,
+            morph,
+        )
     }
     fn apply_split(
         &self,
@@ -493,6 +742,11 @@ pub trait ObjectiveOps {
     fn supports_leaf_refinement(&self) -> bool {
         true
     }
+
+    /// Whether pre-target factor neutralization is valid for this objective.
+    fn supports_pre_target_neutralization(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -627,6 +881,10 @@ impl ObjectiveOps for SquaredErrorObjective {
         sample_weights: Option<&[f32]>,
     ) -> EngineResult<f32> {
         squared_error_loss(predictions, targets, sample_weights)
+    }
+
+    fn supports_pre_target_neutralization(&self) -> bool {
+        true
     }
 }
 
@@ -1793,6 +2051,7 @@ struct IterationExecutionContext<'a> {
     custom_metric_callback: Option<&'a dyn PerRoundMetricCallback>,
     /// Features that use native categorical splits (empty = all continuous).
     categorical_features: Vec<CategoricalFeatureInfo>,
+    pre_target_already_applied: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2292,22 +2551,49 @@ impl Trainer {
     ) -> EngineResult<FitContractEvaluation> {
         validate_train_params(&self.params)?;
         validate_training_dataset(dataset)?;
+        validate_neutralization_fit_contract(&self.params, dataset, objective)?;
 
-        let baseline_prediction =
-            objective.initial_prediction(&dataset.targets, dataset.sample_weights.as_deref())?;
+        let owned_dataset = prepare_pre_target_training_dataset(&self.params, dataset)?;
+        let active_dataset = owned_dataset.as_ref().unwrap_or(dataset);
+
+        self.evaluate_fit_contract_on_active_dataset(active_dataset, objective)
+    }
+
+    fn evaluate_fit_contract_on_active_dataset<O: ObjectiveOps>(
+        &self,
+        active_dataset: &TrainingDataset,
+        objective: &O,
+    ) -> EngineResult<FitContractEvaluation> {
+        let baseline_prediction = objective.initial_prediction(
+            &active_dataset.targets,
+            active_dataset.sample_weights.as_deref(),
+        )?;
         if !baseline_prediction.is_finite() {
             return Err(EngineError::ContractViolation(
                 "objective returned non-finite initial prediction".to_string(),
             ));
         }
 
-        let predictions = vec![baseline_prediction; dataset.row_count()];
-        let gradients = objective.compute_gradients(
+        let predictions = vec![baseline_prediction; active_dataset.row_count()];
+        let mut gradients = objective.compute_gradients(
             &predictions,
-            &dataset.targets,
-            dataset.sample_weights.as_deref(),
+            &active_dataset.targets,
+            active_dataset.sample_weights.as_deref(),
         )?;
-        validate_gradient_pairs(&gradients, dataset.row_count())?;
+        if let Some(config) = gradient_neutralization_config(&self.params) {
+            let exposures = active_dataset.factor_exposures.as_ref().ok_or_else(|| {
+                EngineError::ContractViolation(
+                    "factor_exposures are required when neutralization is active".to_string(),
+                )
+            })?;
+            FactorProjector::new(
+                exposures,
+                active_dataset.sample_weights.as_deref(),
+                config.ridge_lambda,
+            )?
+            .project_gradient_pairs_in_place(&mut gradients)?;
+        }
+        validate_gradient_pairs(&gradients, active_dataset.row_count())?;
 
         Ok(FitContractEvaluation {
             baseline_prediction,
@@ -2336,11 +2622,18 @@ impl Trainer {
             &root_node,
             &feature_tiles,
         )?;
-        let split_candidate = backend.best_split_with_options(
+        let factor_context = factor_split_context_for_node(
+            &self.params,
+            binned_matrix,
+            dataset.factor_exposures.as_ref(),
+            &root_node.row_indices,
+        );
+        let split_candidate = backend.best_split_with_factor_context(
             &histograms,
             split_options,
             &self.params.feature_weights,
             &[],
+            factor_context.as_ref(),
         )?;
         let root_stats = backend.reduce_sums(&fit_contract.gradients, &root_node.row_indices)?;
 
@@ -2432,15 +2725,38 @@ impl Trainer {
         objective: &O,
         request: PolicyFitRequest,
     ) -> EngineResult<TrainedModel> {
+        validate_training_alignment(dataset, binned_matrix)?;
+        validate_train_params(&self.params)?;
+        validate_training_dataset(dataset)?;
+        validate_neutralization_fit_contract(&self.params, dataset, objective)?;
+        let owned_dataset = prepare_pre_target_training_dataset(&self.params, dataset)?;
+        let active_dataset = owned_dataset.as_ref().unwrap_or(dataset);
+        self.fit_iterations_with_policy_request_active(
+            active_dataset,
+            binned_matrix,
+            backend,
+            objective,
+            request,
+        )
+    }
+
+    fn fit_iterations_with_policy_request_active<B: BackendOps, O: ObjectiveOps>(
+        &self,
+        active_dataset: &TrainingDataset,
+        binned_matrix: &BinnedMatrix,
+        backend: &B,
+        objective: &O,
+        request: PolicyFitRequest,
+    ) -> EngineResult<TrainedModel> {
         let controls = self.iteration_controls_for_policy_ext(
-            dataset,
+            active_dataset,
             binned_matrix,
             request.rounds,
             request.policy_mode,
             objective.requires_group_id(),
         )?;
         let summary = self.fit_iterations_with_optional_validation_summary(
-            dataset,
+            active_dataset,
             binned_matrix,
             backend,
             objective,
@@ -2451,6 +2767,7 @@ impl Trainer {
                 warm_start: None,
                 custom_metric_callback: None,
                 categorical_features: self.categorical_features.clone(),
+                pre_target_already_applied: true,
             },
         )?;
         let model = summary.model;
@@ -2502,14 +2819,20 @@ impl Trainer {
         objective: &O,
         request: PolicyFitRequest,
     ) -> EngineResult<TrainedModel> {
+        validate_training_alignment(dataset, binned_matrix)?;
+        validate_train_params(&self.params)?;
+        validate_training_dataset(dataset)?;
+        validate_neutralization_fit_contract(&self.params, dataset, objective)?;
+        let owned_dataset = prepare_pre_target_training_dataset(&self.params, dataset)?;
+        let active_dataset = owned_dataset.as_ref().unwrap_or(dataset);
         let (encoded_dataset, encoded_binned_matrix) =
-            apply_single_categorical_target_encoding(dataset, binned_matrix, spec)?;
+            apply_single_categorical_target_encoding(active_dataset, binned_matrix, spec)?;
         let categorical_state = CategoricalStatePayloadV1 {
             format_version: alloygbm_core::CATEGORICAL_STATE_FORMAT_V1,
             leakage_safe_target_encoding: spec.config.time_aware,
             categorical_feature_indices: vec![spec.feature_index as u32],
         };
-        let model = self.fit_iterations_with_policy_request(
+        let model = self.fit_iterations_with_policy_request_active(
             &encoded_dataset,
             &encoded_binned_matrix,
             backend,
@@ -2584,6 +2907,7 @@ impl Trainer {
                 warm_start: None,
                 custom_metric_callback: None,
                 categorical_features: self.categorical_features.clone(),
+                pre_target_already_applied: false,
             },
         )
     }
@@ -2609,6 +2933,7 @@ impl Trainer {
                 warm_start: None,
                 custom_metric_callback: None,
                 categorical_features: self.categorical_features.clone(),
+                pre_target_already_applied: false,
             },
         )
     }
@@ -2635,6 +2960,7 @@ impl Trainer {
                 warm_start: Some(warm_start),
                 custom_metric_callback: None,
                 categorical_features: self.categorical_features.clone(),
+                pre_target_already_applied: false,
             },
         )
     }
@@ -2663,6 +2989,7 @@ impl Trainer {
                 warm_start: Some(warm_start),
                 custom_metric_callback: None,
                 categorical_features: self.categorical_features.clone(),
+                pre_target_already_applied: false,
             },
         )
     }
@@ -2693,6 +3020,7 @@ impl Trainer {
                 warm_start: None,
                 custom_metric_callback: custom_metric,
                 categorical_features: self.categorical_features.clone(),
+                pre_target_already_applied: false,
             },
         )
     }
@@ -2722,6 +3050,7 @@ impl Trainer {
                 warm_start: Some(warm_start),
                 custom_metric_callback: custom_metric,
                 categorical_features: self.categorical_features.clone(),
+                pre_target_already_applied: false,
             },
         )
     }
@@ -2829,6 +3158,10 @@ impl Trainer {
                 "validation early stopping requires a validation dataset".to_string(),
             ));
         }
+        validate_train_params(&self.params)?;
+        validate_training_dataset(dataset)?;
+        validate_neutralization_fit_contract_for_support(&self.params, dataset, false)?;
+        validate_warm_start_neutralization_contract(&self.params, warm_start.is_some())?;
         validate_training_alignment(dataset, binned_matrix)?;
         if let Some(validation_ref) = validation {
             validate_training_alignment(validation_ref.dataset, validation_ref.binned_matrix)?;
@@ -2854,6 +3187,21 @@ impl Trainer {
         let split_options =
             split_selection_options_for_training(&self.params, None, dataset, binned_matrix)?;
         let feature_count = binned_matrix.feature_count;
+        let gradient_projector = if let Some(config) = gradient_neutralization_config(&self.params)
+        {
+            let exposures = dataset.factor_exposures.as_ref().ok_or_else(|| {
+                EngineError::ContractViolation(
+                    "factor_exposures are required when neutralization is active".to_string(),
+                )
+            })?;
+            Some(FactorProjector::new(
+                exposures,
+                dataset.sample_weights.as_deref(),
+                config.ridge_lambda,
+            )?)
+        } else {
+            None
+        };
 
         // Initialize K prediction arrays — from warm-start or fresh
         let (baselines, mut class_stumps, round_index_offset, initial_stump_counts) =
@@ -3011,6 +3359,9 @@ impl Trainer {
                     class_k,
                     &mut gradient_buffer,
                 )?;
+                if let Some(projector) = &gradient_projector {
+                    projector.project_gradient_pairs_in_place(&mut gradient_buffer)?;
+                }
 
                 // Update per-class EMA stats from this class's gradients.
                 if let Some(ms) = morph_state.as_mut() {
@@ -3043,6 +3394,7 @@ impl Trainer {
                         &self.categorical_features,
                         morph_tree_ctx,
                         raw_fv,
+                        dataset.factor_exposures.as_ref(),
                     )?
                 } else {
                     build_tree_level_wise(
@@ -3060,6 +3412,7 @@ impl Trainer {
                         &self.categorical_features,
                         morph_tree_ctx,
                         raw_fv,
+                        dataset.factor_exposures.as_ref(),
                     )?
                 };
 
@@ -3412,12 +3765,38 @@ impl Trainer {
                 ));
             }
         }
-        let fit_contract = self.validate_fit_contract(dataset, objective)?;
+        validate_train_params(&self.params)?;
+        validate_training_dataset(dataset)?;
+        validate_neutralization_fit_contract(&self.params, dataset, objective)?;
+        validate_warm_start_neutralization_contract(&self.params, execution.warm_start.is_some())?;
+        let owned_dataset = if execution.pre_target_already_applied {
+            None
+        } else {
+            prepare_pre_target_training_dataset(&self.params, dataset)?
+        };
+        let active_dataset = owned_dataset.as_ref().unwrap_or(dataset);
+        let fit_contract =
+            self.evaluate_fit_contract_on_active_dataset(active_dataset, objective)?;
+        let gradient_projector = if let Some(config) = gradient_neutralization_config(&self.params)
+        {
+            let exposures = active_dataset.factor_exposures.as_ref().ok_or_else(|| {
+                EngineError::ContractViolation(
+                    "factor_exposures are required when neutralization is active".to_string(),
+                )
+            })?;
+            Some(FactorProjector::new(
+                exposures,
+                active_dataset.sample_weights.as_deref(),
+                config.ridge_lambda,
+            )?)
+        } else {
+            None
+        };
         let sampling_seed_base = sampling_seed_base(self.params.seed, self.params.deterministic);
         let split_options = split_selection_options_for_training(
             &self.params,
             execution.policy_mode,
-            dataset,
+            active_dataset,
             binned_matrix,
         )?;
 
@@ -3433,10 +3812,10 @@ impl Trainer {
                 (fit_contract.baseline_prediction, Vec::new(), 0)
             };
         let raw_features_opt = Some((
-            &dataset.matrix.values as &[f32],
-            dataset.matrix.feature_count,
+            &active_dataset.matrix.values as &[f32],
+            active_dataset.matrix.feature_count,
         ));
-        let mut predictions = vec![baseline_prediction; dataset.row_count()];
+        let mut predictions = vec![baseline_prediction; active_dataset.row_count()];
         if !initial_stumps.is_empty() {
             apply_tree_to_binned_predictions(
                 &mut predictions,
@@ -3471,8 +3850,8 @@ impl Trainer {
         let mut stop_reason = IterationStopReason::CompletedRequestedRounds;
         let initial_loss = objective.loss(
             &predictions,
-            &dataset.targets,
-            dataset.sample_weights.as_deref(),
+            &active_dataset.targets,
+            active_dataset.sample_weights.as_deref(),
         )?;
         let initial_validation_loss = if let Some(validation_ref) = validation {
             let validation_predictions_ref = validation_predictions.as_ref().ok_or_else(|| {
@@ -3511,7 +3890,7 @@ impl Trainer {
         let mut best_custom_metric_round: Option<usize> = None;
         let mut custom_metric_no_improvement_rounds = 0_usize;
 
-        let mut gradient_buffer: Vec<GradientPair> = Vec::with_capacity(dataset.row_count());
+        let mut gradient_buffer: Vec<GradientPair> = Vec::with_capacity(active_dataset.row_count());
 
         // Build MorphState for the duration of training when morph_config is set.
         // `total_iterations` corresponds to the round cap (including any warm-start
@@ -3526,7 +3905,7 @@ impl Trainer {
             // Offset round_index for sampling seeds and tree IDs when warm-starting
             let effective_round_index = round_index + round_index_offset;
             let root_row_indices = sampled_row_indices(
-                dataset.row_count(),
+                active_dataset.row_count(),
                 controls.row_subsample,
                 sampling_seed_base,
                 effective_round_index as u64,
@@ -3540,14 +3919,17 @@ impl Trainer {
             let sampled_row_count = root_row_indices.len();
             objective.compute_gradients_into(
                 &predictions,
-                &dataset.targets,
-                dataset.sample_weights.as_deref(),
+                &active_dataset.targets,
+                active_dataset.sample_weights.as_deref(),
                 &mut gradient_buffer,
             )?;
+            if let Some(projector) = &gradient_projector {
+                projector.project_gradient_pairs_in_place(&mut gradient_buffer)?;
+            }
             let gradients = &gradient_buffer;
-            validate_gradient_pair_length(gradients, dataset.row_count())?;
+            validate_gradient_pair_length(gradients, active_dataset.row_count())?;
             if cfg!(debug_assertions) {
-                validate_gradient_pairs(gradients, dataset.row_count())?;
+                validate_gradient_pairs(gradients, active_dataset.row_count())?;
             }
 
             // Update EMA stats from this round's gradients before tree-building so
@@ -3567,7 +3949,7 @@ impl Trainer {
                     lr: ms.lr_for_iter(effective_round_index),
                 });
 
-            let raw_fv = &dataset.matrix.values;
+            let raw_fv = &active_dataset.matrix.values;
             let (candidate_round_stumps, round_rejection_reason) =
                 if self.params.tree_growth == TreeGrowth::Leaf {
                     build_tree_leaf_wise(
@@ -3585,6 +3967,7 @@ impl Trainer {
                         &execution.categorical_features,
                         morph_tree_ctx,
                         raw_fv,
+                        active_dataset.factor_exposures.as_ref(),
                     )?
                 } else {
                     build_tree_level_wise(
@@ -3602,6 +3985,7 @@ impl Trainer {
                         &execution.categorical_features,
                         morph_tree_ctx,
                         raw_fv,
+                        active_dataset.factor_exposures.as_ref(),
                     )?
                 };
 
@@ -3624,8 +4008,8 @@ impl Trainer {
 
             let candidate_loss = objective.loss(
                 &candidate_predictions,
-                &dataset.targets,
-                dataset.sample_weights.as_deref(),
+                &active_dataset.targets,
+                active_dataset.sample_weights.as_deref(),
             )?;
             let loss_improvement = current_loss - candidate_loss;
             // Ranking objectives (LambdaMART, pairwise, XeNDCG, YetiRank,
@@ -3827,18 +4211,24 @@ impl Trainer {
             };
         }
 
-        if experiment_leaf_refinement_enabled() && objective.supports_leaf_refinement() {
+        if experiment_leaf_refinement_enabled()
+            && objective.supports_leaf_refinement()
+            && gradient_neutralization_config(&self.params).is_none()
+        {
+            // Leaf refinement re-solves leaves against targets, so skip it for
+            // per-round factor-neutralized gradients until refinement can apply
+            // the same projection contract.
             refine_regression_leaf_values(
                 baseline_prediction,
-                &dataset.targets,
-                dataset.sample_weights.as_deref(),
+                &active_dataset.targets,
+                active_dataset.sample_weights.as_deref(),
                 binned_matrix,
                 &mut stumps,
                 &stumps_per_completed_round,
                 controls.max_abs_leaf_value,
             )?;
 
-            let mut refined_predictions = vec![baseline_prediction; dataset.row_count()];
+            let mut refined_predictions = vec![baseline_prediction; active_dataset.row_count()];
             apply_tree_to_binned_predictions(
                 &mut refined_predictions,
                 binned_matrix,
@@ -3847,8 +4237,8 @@ impl Trainer {
             )?;
             current_loss = objective.loss(
                 &refined_predictions,
-                &dataset.targets,
-                dataset.sample_weights.as_deref(),
+                &active_dataset.targets,
+                active_dataset.sample_weights.as_deref(),
             )?;
             if let Some(last_loss) = loss_per_completed_round.last_mut() {
                 *last_loss = current_loss;
@@ -3887,7 +4277,7 @@ impl Trainer {
             .map(|config| DroMetadataPayload { config });
         let model = TrainedModel {
             baseline_prediction,
-            feature_count: dataset.matrix.feature_count,
+            feature_count: active_dataset.matrix.feature_count,
             stumps,
             categorical_state: None,
             node_debug_stats: None,
@@ -3929,6 +4319,109 @@ impl Trainer {
     ) -> EngineResult<TrainRoundSummary> {
         self.fit_one_round(dataset, binned_matrix, backend, objective)
     }
+}
+
+fn validate_neutralization_fit_contract<O: ObjectiveOps>(
+    params: &TrainParams,
+    dataset: &TrainingDataset,
+    objective: &O,
+) -> EngineResult<()> {
+    validate_neutralization_fit_contract_for_support(
+        params,
+        dataset,
+        objective.supports_pre_target_neutralization(),
+    )
+}
+
+fn validate_neutralization_fit_contract_for_support(
+    params: &TrainParams,
+    dataset: &TrainingDataset,
+    supports_pre_target_neutralization: bool,
+) -> EngineResult<()> {
+    let Some(config) = params.neutralization_config else {
+        if dataset.factor_exposures.is_some() {
+            return Err(EngineError::ContractViolation(
+                "factor_exposures were provided but neutralization='none'".to_string(),
+            ));
+        }
+        return Ok(());
+    };
+    let exposures = dataset.factor_exposures.as_ref().ok_or_else(|| {
+        EngineError::ContractViolation(
+            "factor_exposures are required when neutralization is active".to_string(),
+        )
+    })?;
+    if exposures.row_count != dataset.row_count() {
+        return Err(EngineError::ContractViolation(format!(
+            "factor_exposures row_count {} does not match training row_count {}",
+            exposures.row_count,
+            dataset.row_count()
+        )));
+    }
+    if config.kind == NeutralizationKind::PreTarget && !supports_pre_target_neutralization {
+        return Err(EngineError::ContractViolation(
+            "neutralization='pre_target' is only supported for GBMRegressor squared-error training"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_warm_start_neutralization_contract(
+    params: &TrainParams,
+    has_warm_start: bool,
+) -> EngineResult<()> {
+    if has_warm_start && params.neutralization_config.is_some() {
+        return Err(EngineError::ContractViolation(
+            "neutralized warm-start training is not supported because WarmStartState does not carry neutralization metadata"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn prepare_pre_target_training_dataset(
+    params: &TrainParams,
+    dataset: &TrainingDataset,
+) -> EngineResult<Option<TrainingDataset>> {
+    let Some(config) = params.neutralization_config else {
+        return Ok(None);
+    };
+    if config.kind != NeutralizationKind::PreTarget {
+        return Ok(None);
+    }
+    let mut owned_dataset = dataset.clone();
+    apply_pre_target_neutralization(&mut owned_dataset, config.ridge_lambda)?;
+    Ok(Some(owned_dataset))
+}
+
+fn gradient_neutralization_config(
+    params: &TrainParams,
+) -> Option<alloygbm_core::FactorNeutralizationConfig> {
+    params.neutralization_config.filter(|config| {
+        matches!(
+            config.kind,
+            NeutralizationKind::PerRoundGradient | NeutralizationKind::SplitPenalty
+        )
+    })
+}
+
+fn factor_split_context_for_node<'a>(
+    params: &TrainParams,
+    binned_matrix: &'a BinnedMatrix,
+    exposures: Option<&'a FactorExposureMatrix>,
+    row_indices: &'a [u32],
+) -> Option<FactorSplitContext<'a>> {
+    let config = params.neutralization_config?;
+    if config.kind != NeutralizationKind::SplitPenalty || config.split_penalty == 0.0 {
+        return None;
+    }
+    Some(FactorSplitContext {
+        binned_matrix,
+        exposures: exposures?,
+        row_indices,
+        factor_penalty: config.split_penalty,
+    })
 }
 
 fn validate_gradient_pairs(gradients: &[GradientPair], row_count: usize) -> EngineResult<()> {
@@ -4115,6 +4608,7 @@ fn apply_single_categorical_target_encoding(
         sample_weights: dataset.sample_weights.clone(),
         time_index: dataset.time_index.clone(),
         group_id: dataset.group_id.clone(),
+        factor_exposures: dataset.factor_exposures.clone(),
     };
 
     let mut encoded_bins_payload = binned_matrix.bins.clone();
@@ -4277,20 +4771,28 @@ fn find_best_split_dispatch<B: BackendOps>(
     feature_weights: &[f32],
     categorical_features: &[CategoricalFeatureInfo],
     morph: Option<&MorphTreeContext<'_>>,
+    factor_context: Option<&FactorSplitContext<'_>>,
 ) -> EngineResult<Option<SplitCandidate>> {
     if let Some(m) = morph {
         let ctx = m
             .state
             .morph_context(m.iteration, m.total_iterations, m.class_idx);
-        backend.best_split_morph(
+        backend.best_split_morph_with_factor_context(
             histograms,
             options,
             feature_weights,
             categorical_features,
             &ctx,
+            factor_context,
         )
     } else {
-        backend.best_split_with_options(histograms, options, feature_weights, categorical_features)
+        backend.best_split_with_factor_context(
+            histograms,
+            options,
+            feature_weights,
+            categorical_features,
+            factor_context,
+        )
     }
 }
 
@@ -4313,6 +4815,7 @@ fn build_tree_level_wise<B: BackendOps>(
     categorical_features: &[CategoricalFeatureInfo],
     morph: Option<MorphTreeContext<'_>>,
     raw_feature_values: &[f32],
+    factor_exposures: Option<&FactorExposureMatrix>,
 ) -> EngineResult<(Vec<TrainedStump>, IterationStopReason)> {
     let mut candidate_round_stumps = Vec::new();
     let mut round_rejection_reason = IterationStopReason::NoSplitCandidate;
@@ -4338,6 +4841,12 @@ fn build_tree_level_wise<B: BackendOps>(
         {
             let node_id = encode_tree_node_id(round_index, local_node_id)?;
             let node = NodeSlice::new(node_id, node_rows)?;
+            let factor_context = factor_split_context_for_node(
+                params,
+                binned_matrix,
+                factor_exposures,
+                &node.row_indices,
+            );
             let Some(mut split) = find_best_split_dispatch(
                 backend,
                 &histograms,
@@ -4345,6 +4854,7 @@ fn build_tree_level_wise<B: BackendOps>(
                 feature_weights,
                 categorical_features,
                 morph.as_ref(),
+                factor_context.as_ref(),
             )?
             else {
                 continue;
@@ -4716,6 +5226,7 @@ fn build_tree_leaf_wise<B: BackendOps>(
     categorical_features: &[CategoricalFeatureInfo],
     morph: Option<MorphTreeContext<'_>>,
     raw_feature_values: &[f32],
+    factor_exposures: Option<&FactorExposureMatrix>,
 ) -> EngineResult<(Vec<TrainedStump>, IterationStopReason)> {
     let max_leaves = controls.max_leaves.unwrap_or(usize::MAX);
     let max_depth = params.max_depth as usize;
@@ -4725,6 +5236,12 @@ fn build_tree_leaf_wise<B: BackendOps>(
     let root_node = NodeSlice::new(root_node_id, root_row_indices)?;
     let root_histograms =
         backend.build_histograms(binned_matrix, gradients, &root_node, feature_tiles)?;
+    let root_factor_context = factor_split_context_for_node(
+        params,
+        binned_matrix,
+        factor_exposures,
+        &root_node.row_indices,
+    );
     let root_split = find_best_split_dispatch(
         backend,
         &root_histograms,
@@ -4732,6 +5249,7 @@ fn build_tree_leaf_wise<B: BackendOps>(
         feature_weights,
         categorical_features,
         morph.as_ref(),
+        root_factor_context.as_ref(),
     )?;
 
     let Some(root_split) = root_split else {
@@ -5052,6 +5570,12 @@ fn build_tree_leaf_wise<B: BackendOps>(
             )?;
 
             // Find best split for each child and enqueue if valid.
+            let smaller_factor_context = factor_split_context_for_node(
+                params,
+                binned_matrix,
+                factor_exposures,
+                &smaller_node.row_indices,
+            );
             if let Some(child_split) = find_best_split_dispatch(
                 backend,
                 &smaller_histograms,
@@ -5059,6 +5583,7 @@ fn build_tree_leaf_wise<B: BackendOps>(
                 feature_weights,
                 categorical_features,
                 morph.as_ref(),
+                smaller_factor_context.as_ref(),
             )? && child_split.gain.is_finite()
                 && child_split.gain > controls.min_split_gain
             {
@@ -5073,6 +5598,12 @@ fn build_tree_leaf_wise<B: BackendOps>(
                 });
             }
 
+            let larger_factor_context = factor_split_context_for_node(
+                params,
+                binned_matrix,
+                factor_exposures,
+                &larger_indices,
+            );
             if let Some(child_split) = find_best_split_dispatch(
                 backend,
                 &larger_histograms,
@@ -5080,6 +5611,7 @@ fn build_tree_leaf_wise<B: BackendOps>(
                 feature_weights,
                 categorical_features,
                 morph.as_ref(),
+                larger_factor_context.as_ref(),
             )? && child_split.gain.is_finite()
                 && child_split.gain > controls.min_split_gain
             {
@@ -6946,8 +7478,22 @@ pub struct MultiClassIterationRunSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     struct MockBackend;
+    struct GradientNeutralizationCheckingBackend {
+        exposures: FactorExposureMatrix,
+        weights: Option<Vec<f32>>,
+    }
+    struct MorphGradientNeutralizationCheckingBackend {
+        exposures: FactorExposureMatrix,
+        raw_factor_dot: f32,
+        saw_morph_split: Cell<bool>,
+    }
+    struct EncodedFeatureCheckingBackend {
+        feature_index: usize,
+        expected_bins: Vec<u16>,
+    }
     struct BadObjective;
 
     fn sample_dataset() -> TrainingDataset {
@@ -6967,6 +7513,7 @@ mod tests {
             sample_weights: None,
             time_index: None,
             group_id: None,
+            factor_exposures: None,
         }
     }
 
@@ -6983,6 +7530,140 @@ mod tests {
             ],
         )
         .expect("binned matrix is valid")
+    }
+
+    fn factor_dominated_dataset() -> TrainingDataset {
+        TrainingDataset {
+            matrix: alloygbm_core::DatasetMatrix::new(
+                8,
+                2,
+                vec![
+                    0.0, 0.0, //
+                    1.0, 0.0, //
+                    2.0, 0.0, //
+                    3.0, 0.0, //
+                    0.0, 1.0, //
+                    1.0, 1.0, //
+                    2.0, 1.0, //
+                    3.0, 1.0, //
+                ],
+            )
+            .expect("matrix is valid"),
+            targets: vec![-4.0, -3.0, -2.0, -1.0, 1.0, 2.0, 3.0, 4.0],
+            sample_weights: None,
+            time_index: None,
+            group_id: None,
+            factor_exposures: Some(
+                FactorExposureMatrix::new(8, 1, vec![-4.0, -3.0, -2.0, -1.0, 1.0, 2.0, 3.0, 4.0])
+                    .expect("factor exposures are valid"),
+            ),
+        }
+    }
+
+    fn weighted_factor_dominated_dataset() -> TrainingDataset {
+        let mut dataset = factor_dominated_dataset();
+        dataset.sample_weights = Some(vec![1.0, 3.0, 2.0, 4.0, 1.5, 2.5, 3.5, 4.5]);
+        dataset
+    }
+
+    fn target_encoding_factor_loaded_dataset() -> TrainingDataset {
+        TrainingDataset {
+            matrix: alloygbm_core::DatasetMatrix::new(
+                8,
+                2,
+                vec![
+                    0.0, 0.0, //
+                    1.0, 0.0, //
+                    2.0, 0.0, //
+                    3.0, 0.0, //
+                    0.0, 1.0, //
+                    1.0, 1.0, //
+                    2.0, 1.0, //
+                    3.0, 1.0, //
+                ],
+            )
+            .expect("matrix is valid"),
+            targets: vec![-3.0, -2.0, -1.0, 0.0, 0.0, 1.0, 2.0, 3.0],
+            sample_weights: None,
+            time_index: None,
+            group_id: None,
+            factor_exposures: Some(
+                FactorExposureMatrix::new(8, 1, vec![-4.0, -3.0, -2.0, -1.0, 1.0, 2.0, 3.0, 4.0])
+                    .expect("factor exposures are valid"),
+            ),
+        }
+    }
+
+    fn multiclass_factor_dominated_dataset() -> TrainingDataset {
+        TrainingDataset {
+            matrix: alloygbm_core::DatasetMatrix::new(
+                6,
+                2,
+                vec![
+                    0.0, 0.0, //
+                    1.0, 0.0, //
+                    2.0, 0.0, //
+                    0.0, 1.0, //
+                    1.0, 1.0, //
+                    2.0, 1.0, //
+                ],
+            )
+            .expect("matrix is valid"),
+            targets: vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0],
+            sample_weights: None,
+            time_index: None,
+            group_id: None,
+            factor_exposures: Some(
+                FactorExposureMatrix::new(6, 1, vec![-3.0, -2.0, -1.0, 1.0, 2.0, 3.0])
+                    .expect("factor exposures are valid"),
+            ),
+        }
+    }
+
+    fn sample_binned_matrix_for_dataset(dataset: &TrainingDataset) -> BinnedMatrix {
+        let mut bins = Vec::with_capacity(dataset.row_count() * dataset.matrix.feature_count);
+        for row in 0..dataset.row_count() {
+            for feature in 0..dataset.matrix.feature_count {
+                let value = dataset.matrix.values[row * dataset.matrix.feature_count + feature];
+                bins.push(value as u8);
+            }
+        }
+        BinnedMatrix::new(dataset.row_count(), dataset.matrix.feature_count, 3, bins)
+            .expect("binned matrix is valid")
+    }
+
+    fn factor_dot(exposures: &FactorExposureMatrix, values: &[f32]) -> f32 {
+        assert_eq!(exposures.factor_count, 1);
+        exposures
+            .values
+            .iter()
+            .zip(values.iter())
+            .map(|(factor, value)| *factor * *value)
+            .sum()
+    }
+
+    fn weighted_gradient_factor_dot(
+        exposures: &FactorExposureMatrix,
+        weights: Option<&[f32]>,
+        gradients: &[GradientPair],
+    ) -> f32 {
+        assert_eq!(exposures.factor_count, 1);
+        exposures
+            .values
+            .iter()
+            .zip(gradients.iter())
+            .enumerate()
+            .map(|(row, (factor, gradient))| {
+                weights.map_or(1.0, |sample_weights| sample_weights[row]) * *factor * gradient.grad
+            })
+            .sum()
+    }
+
+    fn apply_pre_target_neutralization_for_test(
+        dataset: &mut TrainingDataset,
+        ridge_lambda: f32,
+    ) -> EngineResult<()> {
+        apply_pre_target_neutralization(dataset, ridge_lambda)
     }
 
     fn sample_wide_small_dataset() -> TrainingDataset {
@@ -7002,6 +7683,7 @@ mod tests {
             sample_weights: None,
             time_index: None,
             group_id: None,
+            factor_exposures: None,
         }
     }
 
@@ -7037,6 +7719,7 @@ mod tests {
             sample_weights: None,
             time_index: None,
             group_id: None,
+            factor_exposures: None,
         }
     }
 
@@ -7152,6 +7835,143 @@ mod tests {
         }
     }
 
+    impl BackendOps for GradientNeutralizationCheckingBackend {
+        fn build_histograms(
+            &self,
+            binned_matrix: &BinnedMatrix,
+            gradients: &[GradientPair],
+            node: &NodeSlice,
+            feature_tiles: &[FeatureTile],
+        ) -> EngineResult<HistogramBundle> {
+            let dot =
+                weighted_gradient_factor_dot(&self.exposures, self.weights.as_deref(), gradients);
+            assert!(
+                dot.abs() < 1e-3,
+                "factor dot after per-round gradient projection was {dot}"
+            );
+            MockBackend.build_histograms(binned_matrix, gradients, node, feature_tiles)
+        }
+
+        fn best_split(&self, histograms: &HistogramBundle) -> EngineResult<Option<SplitCandidate>> {
+            MockBackend.best_split(histograms)
+        }
+
+        fn apply_split(
+            &self,
+            binned_matrix: &BinnedMatrix,
+            node: &NodeSlice,
+            split: &SplitCandidate,
+        ) -> EngineResult<PartitionResult> {
+            MockBackend.apply_split(binned_matrix, node, split)
+        }
+
+        fn reduce_sums(
+            &self,
+            gradients: &[GradientPair],
+            row_indices: &[u32],
+        ) -> EngineResult<NodeStats> {
+            MockBackend.reduce_sums(gradients, row_indices)
+        }
+    }
+
+    impl BackendOps for MorphGradientNeutralizationCheckingBackend {
+        fn build_histograms(
+            &self,
+            binned_matrix: &BinnedMatrix,
+            gradients: &[GradientPair],
+            node: &NodeSlice,
+            feature_tiles: &[FeatureTile],
+        ) -> EngineResult<HistogramBundle> {
+            assert!(
+                self.raw_factor_dot.abs() > 1.0,
+                "test fixture should start with factor-loaded gradients, got {}",
+                self.raw_factor_dot
+            );
+            let projected_dot = weighted_gradient_factor_dot(&self.exposures, None, gradients);
+            assert!(
+                projected_dot.abs() < self.raw_factor_dot.abs() * 0.001,
+                "Morph split path saw unprojected factor dot: before={}, after={}",
+                self.raw_factor_dot,
+                projected_dot
+            );
+            MockBackend.build_histograms(binned_matrix, gradients, node, feature_tiles)
+        }
+
+        fn best_split(&self, histograms: &HistogramBundle) -> EngineResult<Option<SplitCandidate>> {
+            MockBackend.best_split(histograms)
+        }
+
+        fn best_split_morph_with_factor_context(
+            &self,
+            histograms: &HistogramBundle,
+            _options: SplitSelectionOptions,
+            _feature_weights: &[f32],
+            _categorical_features: &[CategoricalFeatureInfo],
+            _morph: &MorphContext,
+            factor_context: Option<&FactorSplitContext<'_>>,
+        ) -> EngineResult<Option<SplitCandidate>> {
+            assert!(factor_context.is_none());
+            self.saw_morph_split.set(true);
+            MockBackend.best_split(histograms)
+        }
+
+        fn apply_split(
+            &self,
+            binned_matrix: &BinnedMatrix,
+            node: &NodeSlice,
+            split: &SplitCandidate,
+        ) -> EngineResult<PartitionResult> {
+            MockBackend.apply_split(binned_matrix, node, split)
+        }
+
+        fn reduce_sums(
+            &self,
+            gradients: &[GradientPair],
+            row_indices: &[u32],
+        ) -> EngineResult<NodeStats> {
+            MockBackend.reduce_sums(gradients, row_indices)
+        }
+    }
+
+    impl BackendOps for EncodedFeatureCheckingBackend {
+        fn build_histograms(
+            &self,
+            binned_matrix: &BinnedMatrix,
+            gradients: &[GradientPair],
+            node: &NodeSlice,
+            feature_tiles: &[FeatureTile],
+        ) -> EngineResult<HistogramBundle> {
+            let actual_bins = (0..binned_matrix.row_count)
+                .map(|row| {
+                    binned_matrix.row_bin(row * binned_matrix.feature_count + self.feature_index)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(actual_bins, self.expected_bins);
+            MockBackend.build_histograms(binned_matrix, gradients, node, feature_tiles)
+        }
+
+        fn best_split(&self, histograms: &HistogramBundle) -> EngineResult<Option<SplitCandidate>> {
+            MockBackend.best_split(histograms)
+        }
+
+        fn apply_split(
+            &self,
+            binned_matrix: &BinnedMatrix,
+            node: &NodeSlice,
+            split: &SplitCandidate,
+        ) -> EngineResult<PartitionResult> {
+            MockBackend.apply_split(binned_matrix, node, split)
+        }
+
+        fn reduce_sums(
+            &self,
+            gradients: &[GradientPair],
+            row_indices: &[u32],
+        ) -> EngineResult<NodeStats> {
+            MockBackend.reduce_sums(gradients, row_indices)
+        }
+    }
+
     impl ObjectiveOps for BadObjective {
         fn objective_name(&self) -> &str {
             "bad"
@@ -7210,6 +8030,493 @@ mod tests {
         let trainer = Trainer::new(TrainParams::default()).expect("valid default params");
         let result = trainer.validate_fit_contract(&sample_dataset(), &BadObjective);
         assert!(matches!(result, Err(EngineError::ContractViolation(_))));
+    }
+
+    #[test]
+    fn trainer_rejects_neutralization_without_factor_exposures() {
+        let trainer = Trainer::new(TrainParams {
+            neutralization_config: Some(alloygbm_core::FactorNeutralizationConfig {
+                kind: alloygbm_core::NeutralizationKind::PerRoundGradient,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            }),
+            ..TrainParams::default()
+        })
+        .expect("neutralization params are valid");
+        let result = trainer.validate_fit_contract(&sample_dataset(), &SquaredErrorObjective);
+        assert!(matches!(result, Err(EngineError::ContractViolation(_))));
+    }
+
+    #[test]
+    fn per_round_gradient_neutralization_trains_regression() {
+        let dataset = factor_dominated_dataset();
+        let binned = sample_binned_matrix_for_dataset(&dataset);
+        let backend = GradientNeutralizationCheckingBackend {
+            exposures: dataset.factor_exposures.as_ref().unwrap().clone(),
+            weights: None,
+        };
+        let params = TrainParams {
+            neutralization_config: Some(alloygbm_core::FactorNeutralizationConfig {
+                kind: alloygbm_core::NeutralizationKind::PerRoundGradient,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            }),
+            ..TrainParams::default()
+        };
+        let model = Trainer::new(params)
+            .unwrap()
+            .fit_iterations(&dataset, &binned, &backend, &SquaredErrorObjective, 5)
+            .unwrap();
+        assert_eq!(model.rounds_completed(), 5);
+    }
+
+    #[test]
+    fn pre_target_neutralization_fit_iterations_uses_residualized_targets_for_target_encoding() {
+        let dataset = target_encoding_factor_loaded_dataset();
+        let binned = sample_binned_matrix_for_dataset(&dataset);
+        let spec = CategoricalTargetEncodingSpec {
+            feature_index: 1,
+            values: vec![
+                "B".to_string(),
+                "B".to_string(),
+                "B".to_string(),
+                "B".to_string(),
+                "A".to_string(),
+                "A".to_string(),
+                "A".to_string(),
+                "A".to_string(),
+            ],
+            config: TargetEncoderConfig {
+                smoothing: 0.0,
+                min_samples_leaf: 1,
+                time_aware: false,
+            },
+        };
+
+        let mut residualized_dataset = dataset.clone();
+        apply_pre_target_neutralization_for_test(&mut residualized_dataset, 1e-6).unwrap();
+        let (_, residualized_encoded_binned) =
+            apply_single_categorical_target_encoding(&residualized_dataset, &binned, &spec)
+                .unwrap();
+        let (_, raw_encoded_binned) =
+            apply_single_categorical_target_encoding(&dataset, &binned, &spec).unwrap();
+        let residualized_expected_bins = (0..residualized_encoded_binned.row_count)
+            .map(|row| {
+                residualized_encoded_binned
+                    .row_bin(row * residualized_encoded_binned.feature_count + spec.feature_index)
+            })
+            .collect::<Vec<_>>();
+        let raw_bins = (0..raw_encoded_binned.row_count)
+            .map(|row| {
+                raw_encoded_binned
+                    .row_bin(row * raw_encoded_binned.feature_count + spec.feature_index)
+            })
+            .collect::<Vec<_>>();
+        assert_ne!(residualized_expected_bins, raw_bins);
+
+        let params = TrainParams {
+            neutralization_config: Some(alloygbm_core::FactorNeutralizationConfig {
+                kind: alloygbm_core::NeutralizationKind::PreTarget,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            }),
+            ..TrainParams::default()
+        };
+        let backend = EncodedFeatureCheckingBackend {
+            feature_index: spec.feature_index,
+            expected_bins: residualized_expected_bins,
+        };
+        let model = Trainer::new(params)
+            .unwrap()
+            .fit_iterations_with_single_target_encoded_feature(
+                &dataset,
+                &binned,
+                &spec,
+                &backend,
+                &SquaredErrorObjective,
+                1,
+            )
+            .unwrap();
+        assert_eq!(model.rounds_completed(), 1);
+    }
+
+    #[test]
+    fn weighted_per_round_gradient_neutralization_trains_regression() {
+        let dataset = weighted_factor_dominated_dataset();
+        let binned = sample_binned_matrix_for_dataset(&dataset);
+        let backend = GradientNeutralizationCheckingBackend {
+            exposures: dataset.factor_exposures.as_ref().unwrap().clone(),
+            weights: dataset.sample_weights.clone(),
+        };
+        let params = TrainParams {
+            neutralization_config: Some(alloygbm_core::FactorNeutralizationConfig {
+                kind: alloygbm_core::NeutralizationKind::PerRoundGradient,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            }),
+            ..TrainParams::default()
+        };
+        Trainer::new(params)
+            .unwrap()
+            .fit_iterations(&dataset, &binned, &backend, &SquaredErrorObjective, 5)
+            .unwrap();
+    }
+
+    #[test]
+    fn morph_neutralization_split_path_sees_per_round_projected_gradients() {
+        let dataset = factor_dominated_dataset();
+        let binned = sample_binned_matrix_for_dataset(&dataset);
+        let baseline = SquaredErrorObjective
+            .initial_prediction(&dataset.targets, dataset.sample_weights.as_deref())
+            .expect("baseline should compute");
+        let predictions = vec![baseline; dataset.row_count()];
+        let raw_gradients = SquaredErrorObjective
+            .compute_gradients(
+                &predictions,
+                &dataset.targets,
+                dataset.sample_weights.as_deref(),
+            )
+            .expect("raw gradients should compute");
+        let raw_factor_dot = weighted_gradient_factor_dot(
+            dataset.factor_exposures.as_ref().unwrap(),
+            dataset.sample_weights.as_deref(),
+            &raw_gradients,
+        );
+        let backend = MorphGradientNeutralizationCheckingBackend {
+            exposures: dataset.factor_exposures.as_ref().unwrap().clone(),
+            raw_factor_dot,
+            saw_morph_split: Cell::new(false),
+        };
+        let params = TrainParams {
+            neutralization_config: Some(alloygbm_core::FactorNeutralizationConfig {
+                kind: alloygbm_core::NeutralizationKind::PerRoundGradient,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            }),
+            morph_config: Some(MorphConfig::default()),
+            ..TrainParams::default()
+        };
+
+        let model = Trainer::new(params)
+            .unwrap()
+            .fit_iterations(&dataset, &binned, &backend, &SquaredErrorObjective, 3)
+            .unwrap();
+
+        assert!(
+            backend.saw_morph_split.get(),
+            "Morph split path was not used"
+        );
+        assert_eq!(model.rounds_completed(), 3);
+        assert!(model.morph_metadata.is_some());
+    }
+
+    #[test]
+    fn pre_target_neutralization_reduces_target_factor_dot() {
+        let mut dataset = factor_dominated_dataset();
+        let before = factor_dot(dataset.factor_exposures.as_ref().unwrap(), &dataset.targets);
+        apply_pre_target_neutralization_for_test(&mut dataset, 1e-6).unwrap();
+        let after = factor_dot(dataset.factor_exposures.as_ref().unwrap(), &dataset.targets);
+        assert!(after.abs() < before.abs() * 0.01);
+    }
+
+    #[test]
+    fn warm_start_rejects_active_neutralization_without_metadata() {
+        let dataset = factor_dominated_dataset();
+        let binned = sample_binned_matrix_for_dataset(&dataset);
+        let params = TrainParams {
+            neutralization_config: Some(alloygbm_core::FactorNeutralizationConfig {
+                kind: alloygbm_core::NeutralizationKind::PerRoundGradient,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            }),
+            ..TrainParams::default()
+        };
+        let warm_start = WarmStartState {
+            baseline_prediction: 0.0,
+            stumps: Vec::new(),
+            initial_rounds_completed: 1,
+        };
+        let controls = IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).unwrap();
+        let result = Trainer::new(params).unwrap().fit_iterations_warm_start(
+            &dataset,
+            &binned,
+            &MockBackend,
+            &SquaredErrorObjective,
+            controls,
+            warm_start,
+        );
+        assert!(matches!(result, Err(EngineError::ContractViolation(_))));
+    }
+
+    #[test]
+    fn multiclass_neutralization_rejects_inactive_factor_exposures() {
+        let dataset = multiclass_factor_dominated_dataset();
+        let binned = sample_binned_matrix_for_dataset(&dataset);
+        let objective = MultiClassSoftmaxObjective::new(2).unwrap();
+        let controls = IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).unwrap();
+        let result = Trainer::new(TrainParams::default())
+            .unwrap()
+            .fit_multiclass_iterations_with_summary(
+                &dataset,
+                &binned,
+                &MockBackend,
+                &objective,
+                controls,
+            );
+        assert!(matches!(result, Err(EngineError::ContractViolation(_))));
+    }
+
+    #[test]
+    fn multiclass_neutralization_rejects_active_without_factor_exposures() {
+        let mut dataset = multiclass_factor_dominated_dataset();
+        dataset.factor_exposures = None;
+        let binned = sample_binned_matrix_for_dataset(&dataset);
+        let objective = MultiClassSoftmaxObjective::new(2).unwrap();
+        let controls = IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).unwrap();
+        let params = TrainParams {
+            neutralization_config: Some(alloygbm_core::FactorNeutralizationConfig {
+                kind: alloygbm_core::NeutralizationKind::PerRoundGradient,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            }),
+            ..TrainParams::default()
+        };
+        let result = Trainer::new(params)
+            .unwrap()
+            .fit_multiclass_iterations_with_summary(
+                &dataset,
+                &binned,
+                &MockBackend,
+                &objective,
+                controls,
+            );
+        assert!(matches!(result, Err(EngineError::ContractViolation(_))));
+    }
+
+    #[test]
+    fn multiclass_neutralization_rejects_pre_target() {
+        let dataset = multiclass_factor_dominated_dataset();
+        let binned = sample_binned_matrix_for_dataset(&dataset);
+        let objective = MultiClassSoftmaxObjective::new(2).unwrap();
+        let controls = IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).unwrap();
+        let params = TrainParams {
+            neutralization_config: Some(alloygbm_core::FactorNeutralizationConfig {
+                kind: alloygbm_core::NeutralizationKind::PreTarget,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            }),
+            ..TrainParams::default()
+        };
+        let result = Trainer::new(params)
+            .unwrap()
+            .fit_multiclass_iterations_with_summary(
+                &dataset,
+                &binned,
+                &MockBackend,
+                &objective,
+                controls,
+            );
+        assert!(matches!(result, Err(EngineError::ContractViolation(_))));
+    }
+
+    #[test]
+    fn multiclass_warm_start_rejects_active_neutralization_without_metadata() {
+        let dataset = multiclass_factor_dominated_dataset();
+        let binned = sample_binned_matrix_for_dataset(&dataset);
+        let objective = MultiClassSoftmaxObjective::new(2).unwrap();
+        let controls = IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).unwrap();
+        let params = TrainParams {
+            neutralization_config: Some(alloygbm_core::FactorNeutralizationConfig {
+                kind: alloygbm_core::NeutralizationKind::PerRoundGradient,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            }),
+            ..TrainParams::default()
+        };
+        let warm_start = MultiClassWarmStartState {
+            baseline_predictions: vec![0.0, 0.0],
+            class_stumps: vec![Vec::new(), Vec::new()],
+            initial_rounds_completed: 1,
+        };
+        let result = Trainer::new(params)
+            .unwrap()
+            .fit_multiclass_iterations_warm_start_with_summary(
+                &dataset,
+                &binned,
+                &MockBackend,
+                &objective,
+                controls,
+                warm_start,
+            );
+        assert!(matches!(result, Err(EngineError::ContractViolation(_))));
+    }
+
+    #[test]
+    fn multiclass_per_round_gradient_neutralization_projects_each_class() {
+        let dataset = multiclass_factor_dominated_dataset();
+        let binned = sample_binned_matrix_for_dataset(&dataset);
+        let objective = MultiClassSoftmaxObjective::new(2).unwrap();
+        let controls = IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).unwrap();
+        let backend = GradientNeutralizationCheckingBackend {
+            exposures: dataset.factor_exposures.as_ref().unwrap().clone(),
+            weights: None,
+        };
+        let params = TrainParams {
+            neutralization_config: Some(alloygbm_core::FactorNeutralizationConfig {
+                kind: alloygbm_core::NeutralizationKind::PerRoundGradient,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            }),
+            ..TrainParams::default()
+        };
+        let summary = Trainer::new(params)
+            .unwrap()
+            .fit_multiclass_iterations_with_summary(
+                &dataset, &binned, &backend, &objective, controls,
+            )
+            .unwrap();
+        assert_eq!(summary.rounds_completed, 3);
+    }
+
+    #[test]
+    fn factor_projector_orthogonalizes_gradient() {
+        let exposures = FactorExposureMatrix::new(4, 1, vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        let projector = FactorProjector::new(&exposures, None, 1e-6).unwrap();
+        let mut gradients = vec![
+            GradientPair {
+                grad: 1.0,
+                hess: 1.0,
+            },
+            GradientPair {
+                grad: 2.0,
+                hess: 1.0,
+            },
+            GradientPair {
+                grad: 3.0,
+                hess: 1.0,
+            },
+            GradientPair {
+                grad: 4.0,
+                hess: 1.0,
+            },
+        ];
+        projector
+            .project_gradient_pairs_in_place(&mut gradients)
+            .unwrap();
+        let dot: f32 = exposures
+            .values
+            .iter()
+            .zip(gradients.iter())
+            .map(|(f, g)| *f * g.grad)
+            .sum();
+        assert!(dot.abs() < 1e-4, "factor dot after projection was {dot}");
+        assert!(gradients.iter().all(|g| g.hess == 1.0));
+    }
+
+    #[test]
+    fn factor_projector_ridge_handles_collinear_factors() {
+        let exposures =
+            FactorExposureMatrix::new(3, 2, vec![1.0, 2.0, 2.0, 4.0, 3.0, 6.0]).unwrap();
+        let projector = FactorProjector::new(&exposures, None, 1e-3).unwrap();
+        let mut values = vec![1.0, 2.0, 3.0];
+        projector.residualize_values_in_place(&mut values).unwrap();
+        assert!(values.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn factor_projector_rejects_projection_value_length_mismatch() {
+        let exposures = FactorExposureMatrix::new(3, 1, vec![1.0, 2.0, 3.0]).unwrap();
+        let projector = FactorProjector::new(&exposures, None, 1e-6).unwrap();
+        let err = projector
+            .projection_coefficients([1.0, 2.0])
+            .expect_err("value length mismatch should be rejected");
+        assert!(matches!(err, EngineError::ContractViolation(_)));
+    }
+
+    #[test]
+    fn factor_projector_weighted_projection_orthogonalizes_values_and_gradients() {
+        let exposures = FactorExposureMatrix::new(4, 1, vec![1.0, -1.0, 2.0, -2.0]).unwrap();
+        let weights = vec![1.0, 3.0, 2.0, 4.0];
+        let projector = FactorProjector::new(&exposures, Some(&weights), 1e-6).unwrap();
+
+        let mut values = vec![2.0, -1.0, 3.0, -2.0];
+        projector.residualize_values_in_place(&mut values).unwrap();
+        let weighted_value_dot: f32 = exposures
+            .values
+            .iter()
+            .zip(weights.iter())
+            .zip(values.iter())
+            .map(|((f, w), v)| *w * *f * *v)
+            .sum();
+        assert!(
+            weighted_value_dot.abs() < 1e-4,
+            "weighted factor dot after value projection was {weighted_value_dot}"
+        );
+
+        let mut gradients = vec![
+            GradientPair {
+                grad: 2.0,
+                hess: 1.0,
+            },
+            GradientPair {
+                grad: -1.0,
+                hess: 1.0,
+            },
+            GradientPair {
+                grad: 3.0,
+                hess: 1.0,
+            },
+            GradientPair {
+                grad: -2.0,
+                hess: 1.0,
+            },
+        ];
+        projector
+            .project_gradient_pairs_in_place(&mut gradients)
+            .unwrap();
+        let weighted_gradient_dot: f32 = exposures
+            .values
+            .iter()
+            .zip(weights.iter())
+            .zip(gradients.iter())
+            .map(|((f, w), g)| *w * *f * g.grad)
+            .sum();
+        assert!(
+            weighted_gradient_dot.abs() < 1e-4,
+            "weighted factor dot after gradient projection was {weighted_gradient_dot}"
+        );
+        assert!(gradients.iter().all(|g| g.hess == 1.0));
+    }
+
+    #[test]
+    fn factor_projector_rejects_non_finite_residualized_values() {
+        let exposures = FactorExposureMatrix::new(2, 1, vec![1.0, 2.0]).unwrap();
+        let projector = FactorProjector::new(&exposures, None, 1e-6).unwrap();
+        let mut values = vec![f32::INFINITY, 1.0];
+        let err = projector
+            .residualize_values_in_place(&mut values)
+            .expect_err("non-finite residualized values should be rejected");
+        assert!(matches!(err, EngineError::ContractViolation(_)));
+    }
+
+    #[test]
+    fn factor_projector_rejects_non_finite_projected_gradients() {
+        let exposures = FactorExposureMatrix::new(2, 1, vec![1.0, 2.0]).unwrap();
+        let projector = FactorProjector::new(&exposures, None, 1e-6).unwrap();
+        let mut gradients = vec![
+            GradientPair {
+                grad: f32::INFINITY,
+                hess: 1.0,
+            },
+            GradientPair {
+                grad: 1.0,
+                hess: 1.0,
+            },
+        ];
+        let err = projector
+            .project_gradient_pairs_in_place(&mut gradients)
+            .expect_err("non-finite projected gradients should be rejected");
+        assert!(matches!(err, EngineError::ContractViolation(_)));
     }
 
     #[test]
@@ -7429,6 +8736,64 @@ mod tests {
     }
 
     #[test]
+    fn split_penalty_neutralization_rejects_linear_leaves() {
+        let params = TrainParams {
+            neutralization_config: Some(alloygbm_core::FactorNeutralizationConfig {
+                kind: NeutralizationKind::SplitPenalty,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.1,
+            }),
+            leaf_model: LeafModelKind::Linear,
+            ..TrainParams::default()
+        };
+
+        let err = Trainer::new(params).expect_err("split penalty requires scalar leaves");
+        assert!(matches!(
+            err,
+            EngineError::Core(CoreError::InvalidConfig(_))
+        ));
+        assert!(
+            err.to_string()
+                .contains("neutralization='split_penalty' requires leaf_model='constant'"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn default_backend_neutralization_split_penalty_context_returns_error() {
+        let matrix = sample_binned_matrix();
+        let exposures = FactorExposureMatrix::new(4, 1, vec![1.0, 1.0, -1.0, -1.0])
+            .expect("factor exposures are valid");
+        let rows = vec![0, 1, 2, 3];
+        let context = FactorSplitContext {
+            binned_matrix: &matrix,
+            exposures: &exposures,
+            row_indices: &rows,
+            factor_penalty: 0.1,
+        };
+        let histograms = HistogramBundle {
+            node_id: 0,
+            feature_histograms: Vec::new(),
+        };
+
+        let err = MockBackend
+            .best_split_with_factor_context(
+                &histograms,
+                SplitSelectionOptions::default(),
+                &[],
+                &[],
+                Some(&context),
+            )
+            .expect_err("default backend must not ignore factor context");
+        assert!(matches!(err, EngineError::ContractViolation(_)));
+        assert!(
+            err.to_string()
+                .contains("factor split context is not supported"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn refine_regression_leaf_values_reduces_loss_for_fixed_structure() {
         let node_id = encode_tree_node_id(0, 0).expect("node id encodes");
         let mut stumps = vec![TrainedStump {
@@ -7545,6 +8910,7 @@ mod tests {
             sample_weights: None,
             time_index: None,
             group_id: None,
+            factor_exposures: None,
         }
     }
 

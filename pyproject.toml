@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "alloygbm"
-version = "0.6.0"
+version = "0.7.0"
 description = "Rust-first gradient boosting for regression, classification, and ranking with time-aware validation and Python bindings"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -55,3 +55,4 @@ Benchmarks = "https://github.com/LGA-Personal/AlloyGBM/tree/main/benchmarks"
 manifest-path = "bindings/python/Cargo.toml"
 python-source = "bindings/python"
 module-name = "alloygbm._alloygbm"
+features = ["extension-module"]

@@ -1,7 +1,55 @@
 Release and platform policy
 ===========================
 
-AlloyGBM ``0.5.0`` release notes and platform policy.
+AlloyGBM ``0.7.0`` release notes and platform policy.
+
+What's new in 0.7.0
+-------------------
+
+**Factor-neutral boosting:**
+
+- New ``neutralization`` parameter on :class:`~alloygbm.GBMRegressor`,
+  :class:`~alloygbm.GBMClassifier`, and :class:`~alloygbm.GBMRanker`, with
+  row-aligned fit-time ``factor_exposures``.
+- ``neutralization="per_round_gradient"`` projects each boosting round's
+  objective gradients away from user-supplied factors. Multiclass
+  classification projects each class-gradient column independently.
+- ``neutralization="pre_target"`` residualizes the target once before training
+  for built-in squared-error regression. Classification, ranking, custom
+  objectives, and validation sets are rejected for this mode in 0.7.0.
+- ``neutralization="split_penalty"`` also subtracts a factor-load penalty from
+  split gain via ``factor_penalty``. It supports constant leaves, composes with
+  ``leaf_solver="dro"`` and ``training_mode="morph"``, and rejects
+  ``leaf_model="linear"`` in 0.7.0.
+- Neutralized ``warm_start`` and ``init_model`` continuation are rejected in
+  0.7.0 because artifacts do not yet persist factor compatibility metadata.
+
+**Benchmarks:**
+
+- ``alloygbm_factor_neutral`` and ``alloygbm_factor_neutral_dro`` arms added to
+  ``benchmarks/run_model_comparison.py``.
+- Benchmark datasets without explicit factors synthesize ``factor_exposures``
+  from the first ``min(5, n_features)`` feature columns. These arms are smoke
+  and stability checks, not standalone quality claims, because the synthesized
+  factors are also present as model features.
+
+What's new in 0.6.0
+-------------------
+
+**DRO-style scalar leaves:**
+
+- New opt-in ``leaf_solver="dro"`` parameter on
+  :class:`~alloygbm.GBMRegressor`, :class:`~alloygbm.GBMClassifier`, and
+  :class:`~alloygbm.GBMRanker`. The solver is a fast, closed-form robust Newton
+  update over within-leaf gradient uncertainty.
+- ``dro_radius`` controls the gradient-uncertainty penalty and
+  ``dro_metric="wasserstein"`` names the Wasserstein-inspired robust
+  counterpart. This is not a full optimizer over raw feature/target
+  distributions.
+- ``leaf_solver="dro"`` requires ``leaf_model="constant"`` and composes with
+  ``training_mode="morph"``.
+- Inference speed is unchanged because robust scalar leaf values are stored
+  directly in the artifact.
 
 What's new in 0.5.0
 -------------------
@@ -206,7 +254,7 @@ series:
 Validated release surface
 -------------------------
 
-For ``0.5.0``, the intended release surface is:
+For ``0.7.0``, the intended release surface is:
 
 - macOS ``arm64`` wheel
 - Linux ``x86_64`` manylinux wheel

@@ -256,6 +256,9 @@ class GBMRegressor(_GBMRegressorBase):
         leaf_solver: str = "standard",
         dro_radius: float = 0.05,
         dro_metric: str = "wasserstein",
+        neutralization: str = "none",
+        factor_neutralization_lambda: float = 1e-6,
+        factor_penalty: float = 0.0,
     ) -> None:
         if not (0.0 < learning_rate <= 1.0):
             raise ValueError("learning_rate must be in (0.0, 1.0]")
@@ -413,7 +416,32 @@ class GBMRegressor(_GBMRegressorBase):
             )
         if str(leaf_solver) == "dro" and str(leaf_model) != "constant":
             raise ValueError(
-                "leaf_solver='dro' requires leaf_model='constant' in v0.6.0"
+                "leaf_solver='dro' requires leaf_model='constant' in v0.7.0"
+            )
+        if str(neutralization) not in (
+            "none",
+            "pre_target",
+            "per_round_gradient",
+            "split_penalty",
+        ):
+            raise ValueError(
+                "neutralization must be 'none', 'pre_target', "
+                "'per_round_gradient', or 'split_penalty'"
+            )
+        if (
+            not math.isfinite(float(factor_neutralization_lambda))
+            or float(factor_neutralization_lambda) < 0.0
+        ):
+            raise ValueError("factor_neutralization_lambda must be finite and >= 0")
+        if not math.isfinite(float(factor_penalty)) or float(factor_penalty) < 0.0:
+            raise ValueError("factor_penalty must be finite and >= 0")
+        if str(neutralization) != "split_penalty" and float(factor_penalty) != 0.0:
+            raise ValueError(
+                "factor_penalty is only valid with neutralization='split_penalty'"
+            )
+        if str(neutralization) == "split_penalty" and str(leaf_model) == "linear":
+            raise ValueError(
+                "neutralization='split_penalty' requires leaf_model='constant'"
             )
 
         self.learning_rate = float(learning_rate)
@@ -475,6 +503,12 @@ class GBMRegressor(_GBMRegressorBase):
         self.leaf_solver = str(leaf_solver)
         self.dro_radius = float(dro_radius)
         self.dro_metric = str(dro_metric)
+        self.neutralization = str(neutralization)
+        self.factor_neutralization_lambda = float(factor_neutralization_lambda)
+        self.factor_penalty = float(factor_penalty)
+        self._fit_neutralization: str | None = None
+        self._fit_factor_neutralization_lambda: float | None = None
+        self._fit_factor_penalty: float | None = None
         self._is_fitted = False
         self._artifact_bytes: bytes | None = None
         self._native_predictor_handle: object | None = None
@@ -539,11 +573,14 @@ class GBMRegressor(_GBMRegressorBase):
             f"leaf_model='{self.leaf_model}', "
             f"leaf_solver='{self.leaf_solver}', "
             f"dro_radius={self.dro_radius}, "
-            f"dro_metric='{self.dro_metric}'"
+            f"dro_metric='{self.dro_metric}', "
+            f"neutralization='{self.neutralization}', "
+            f"factor_neutralization_lambda={self.factor_neutralization_lambda}, "
+            f"factor_penalty={self.factor_penalty}"
             ")"
         )
 
-    def get_params(self, deep: bool = True) -> dict[str, float | int | bool | None]:
+    def get_params(self, deep: bool = True) -> dict:
         """Return estimator parameters in sklearn-compatible shape."""
         del deep  # Not used until nested estimators exist.
         return {
@@ -590,9 +627,12 @@ class GBMRegressor(_GBMRegressorBase):
             "leaf_solver": self.leaf_solver,
             "dro_radius": self.dro_radius,
             "dro_metric": self.dro_metric,
+            "neutralization": self.neutralization,
+            "factor_neutralization_lambda": self.factor_neutralization_lambda,
+            "factor_penalty": self.factor_penalty,
         }
 
-    def set_params(self, **params: float | int | bool | str | None) -> "GBMRegressor":
+    def set_params(self, **params: object) -> "GBMRegressor":
         """Set estimator parameters with constructor-equivalent validation."""
         allowed = {
             "learning_rate",
@@ -638,10 +678,67 @@ class GBMRegressor(_GBMRegressorBase):
             "leaf_solver",
             "dro_radius",
             "dro_metric",
+            "neutralization",
+            "factor_neutralization_lambda",
+            "factor_penalty",
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
             raise ValueError(f"Unknown parameter(s): {', '.join(unknown)}")
+
+        if (
+            "neutralization" in params
+            or "factor_neutralization_lambda" in params
+            or "factor_penalty" in params
+            or "leaf_model" in params
+        ):
+            candidate_neutralization = str(
+                params.get("neutralization", self.neutralization)
+            )
+            if candidate_neutralization not in (
+                "none",
+                "pre_target",
+                "per_round_gradient",
+                "split_penalty",
+            ):
+                raise ValueError(
+                    "neutralization must be 'none', 'pre_target', "
+                    "'per_round_gradient', or 'split_penalty'"
+                )
+            candidate_factor_neutralization_lambda = float(
+                params.get(
+                    "factor_neutralization_lambda",
+                    self.factor_neutralization_lambda,
+                )
+            )
+            if (
+                not math.isfinite(candidate_factor_neutralization_lambda)
+                or candidate_factor_neutralization_lambda < 0.0
+            ):
+                raise ValueError("factor_neutralization_lambda must be finite and >= 0")
+            candidate_factor_penalty = float(
+                params.get("factor_penalty", self.factor_penalty)
+            )
+            if (
+                not math.isfinite(candidate_factor_penalty)
+                or candidate_factor_penalty < 0.0
+            ):
+                raise ValueError("factor_penalty must be finite and >= 0")
+            candidate_leaf_model = str(params.get("leaf_model", self.leaf_model))
+            if (
+                candidate_neutralization != "split_penalty"
+                and candidate_factor_penalty != 0.0
+            ):
+                raise ValueError(
+                    "factor_penalty is only valid with neutralization='split_penalty'"
+                )
+            if (
+                candidate_neutralization == "split_penalty"
+                and candidate_leaf_model == "linear"
+            ):
+                raise ValueError(
+                    "neutralization='split_penalty' requires leaf_model='constant'"
+                )
 
         if "learning_rate" in params:
             learning_rate = float(params["learning_rate"])
@@ -945,6 +1042,27 @@ class GBMRegressor(_GBMRegressorBase):
                 raise ValueError(f"dro_metric must be 'wasserstein', got {dm!r}")
             self.dro_metric = dm
 
+        if "neutralization" in params:
+            nz = str(params["neutralization"])
+            if nz not in ("none", "pre_target", "per_round_gradient", "split_penalty"):
+                raise ValueError(
+                    "neutralization must be 'none', 'pre_target', "
+                    "'per_round_gradient', or 'split_penalty'"
+                )
+            self.neutralization = nz
+
+        if "factor_neutralization_lambda" in params:
+            fnl = float(params["factor_neutralization_lambda"])
+            if not math.isfinite(fnl) or fnl < 0.0:
+                raise ValueError("factor_neutralization_lambda must be finite and >= 0")
+            self.factor_neutralization_lambda = fnl
+
+        if "factor_penalty" in params:
+            fp = float(params["factor_penalty"])
+            if not math.isfinite(fp) or fp < 0.0:
+                raise ValueError("factor_penalty must be finite and >= 0")
+            self.factor_penalty = fp
+
         # Cross-field validation: leaf growth requires max_leaves
         if self.tree_growth == "leaf" and self.max_leaves is None:
             raise ValueError("max_leaves must be set when tree_growth='leaf'")
@@ -960,10 +1078,41 @@ class GBMRegressor(_GBMRegressorBase):
 
         if self.leaf_solver == "dro" and self.leaf_model != "constant":
             raise ValueError(
-                "leaf_solver='dro' requires leaf_model='constant' in v0.6.0"
+                "leaf_solver='dro' requires leaf_model='constant' in v0.7.0"
+            )
+        if self.neutralization != "split_penalty" and self.factor_penalty != 0.0:
+            raise ValueError(
+                "factor_penalty is only valid with neutralization='split_penalty'"
+            )
+        if self.neutralization == "split_penalty" and self.leaf_model == "linear":
+            raise ValueError(
+                "neutralization='split_penalty' requires leaf_model='constant'"
             )
 
         return self
+
+    def _prepare_factor_exposures(self, factor_exposures, n_rows: int):
+        if self.neutralization == "none":
+            if factor_exposures is not None:
+                raise ValueError("factor_exposures were provided but neutralization='none'")
+            return None, 0, 0
+        if factor_exposures is None:
+            raise ValueError("factor_exposures are required when neutralization is active")
+        import numpy as np
+
+        arr = np.asarray(factor_exposures, dtype=np.float32)
+        if arr.ndim != 2:
+            raise ValueError("factor_exposures must be a 2D array")
+        if arr.shape[0] != n_rows:
+            raise ValueError(
+                f"factor_exposures row count {arr.shape[0]} does not match X row count {n_rows}"
+            )
+        if arr.shape[1] == 0:
+            raise ValueError("factor_exposures must contain at least one factor")
+        if not np.all(np.isfinite(arr)):
+            raise ValueError("factor_exposures must contain only finite values")
+        arr = np.ascontiguousarray(arr, dtype=np.float32)
+        return arr.ravel().tolist(), int(arr.shape[0]), int(arr.shape[1])
 
     def _resolve_monotone_constraints(self, feature_count: int) -> list[int]:
         """Resolve monotone_constraints to a dense list[int] for the bridge."""
@@ -1014,6 +1163,33 @@ class GBMRegressor(_GBMRegressorBase):
         """Return the natural loss metric name for this estimator's objective."""
         return self._loss_metric_name_for(self._objective_name())
 
+    def _record_fit_neutralization_contract(self) -> None:
+        self._fit_neutralization = self.neutralization
+        self._fit_factor_neutralization_lambda = self.factor_neutralization_lambda
+        self._fit_factor_penalty = self.factor_penalty
+
+    def _fitted_neutralization_contract(self) -> tuple[str, float, float]:
+        fit_neutralization = getattr(self, "_fit_neutralization", None)
+        fit_lambda = getattr(self, "_fit_factor_neutralization_lambda", None)
+        fit_penalty = getattr(self, "_fit_factor_penalty", None)
+        if fit_neutralization is None:
+            fit_neutralization = getattr(self, "neutralization", "none")
+        if fit_lambda is None:
+            fit_lambda = getattr(self, "factor_neutralization_lambda", 1e-6)
+        if fit_penalty is None:
+            fit_penalty = getattr(self, "factor_penalty", 0.0)
+        return str(fit_neutralization), float(fit_lambda), float(fit_penalty)
+
+    @staticmethod
+    def _raise_if_neutralized_warm_start_contract(
+        fit_neutralization: str,
+    ) -> None:
+        if fit_neutralization != "none":
+            raise ValueError(
+                "neutralized warm-start training is not supported because model "
+                "artifacts do not persist neutralization metadata yet"
+            )
+
     @staticmethod
     def _build_evals_result(summary: object) -> dict:
         """Build ``evals_result_`` from a ``NativeTrainingSummary``.
@@ -1063,6 +1239,7 @@ class GBMRegressor(_GBMRegressorBase):
         time_index: object | None = None,
         init_model: "GBMRegressor | None" = None,
         eval_metric: object | None = None,
+        factor_exposures: object | None = None,
     ) -> "GBMRegressor":
         """Fit native-backed regression model artifact state.
 
@@ -1093,6 +1270,11 @@ class GBMRegressor(_GBMRegressorBase):
             raise TypeError("eval_metric must be a callable or None")
         if eval_metric is not None and eval_set is None:
             raise ValueError("eval_metric requires eval_set to be provided")
+        if self.neutralization == "pre_target" and eval_set is not None:
+            raise ValueError(
+                "neutralization='pre_target' does not support eval_set in this "
+                "release because validation factor_exposures are not accepted"
+            )
         if categorical_feature_values is not None and categorical_feature_values_list is not None:
             raise ValueError(
                 "categorical_feature_values and categorical_feature_values_list are "
@@ -1104,6 +1286,13 @@ class GBMRegressor(_GBMRegressorBase):
         if init_model is not None:
             if not hasattr(init_model, "_artifact_bytes") or init_model._artifact_bytes is None:
                 raise ValueError("init_model must be a fitted GBMRegressor with artifact bytes")
+            init_neutralization, _, _ = init_model._fitted_neutralization_contract()
+            self._raise_if_neutralized_warm_start_contract(init_neutralization)
+            if self.neutralization == "none" and init_neutralization != self.neutralization:
+                raise ValueError(
+                    "init_model neutralization settings do not match current estimator "
+                    "neutralization settings"
+                )
             if hasattr(init_model, "_objective_name"):
                 init_objective = init_model._objective_name()
                 current_objective = self._objective_name()
@@ -1114,7 +1303,19 @@ class GBMRegressor(_GBMRegressorBase):
                     )
             init_artifact_bytes = init_model._artifact_bytes
         elif self.warm_start and self._is_fitted and self._artifact_bytes is not None:
+            fit_neutralization, _, _ = self._fitted_neutralization_contract()
+            self._raise_if_neutralized_warm_start_contract(fit_neutralization)
+            if fit_neutralization != self.neutralization:
+                raise ValueError(
+                    "warm_start neutralization settings do not match current estimator "
+                    "neutralization settings"
+                )
             init_artifact_bytes = self._artifact_bytes
+        if init_artifact_bytes is not None and self.neutralization != "none":
+            raise ValueError(
+                "neutralized warm-start training is not supported because model artifacts "
+                "do not persist neutralization metadata yet"
+            )
 
         # ── Normalize categorical configuration to plural form ──────────
         # effective_categorical_indices: list of column indices (or None if no categoricals)
@@ -1184,6 +1385,11 @@ class GBMRegressor(_GBMRegressorBase):
             feature_count = len(training_rows[0])
         if row_count != len(targets):
             raise ValueError("X and y must contain the same number of rows")
+        (
+            factor_exposure_values,
+            factor_exposure_row_count,
+            factor_exposure_factor_count,
+        ) = self._prepare_factor_exposures(factor_exposures, row_count)
 
         if init_model is not None and hasattr(init_model, "_n_features_in"):
             if (
@@ -1469,6 +1675,20 @@ class GBMRegressor(_GBMRegressorBase):
                     leaf_solver=self.leaf_solver,
                     dro_radius=self.dro_radius,
                     dro_metric=self.dro_metric,
+                    neutralization=self.neutralization,
+                    factor_neutralization_lambda=self.factor_neutralization_lambda,
+                    factor_penalty=self.factor_penalty,
+                    factor_exposure_values=factor_exposure_values,
+                    factor_exposure_row_count=(
+                        factor_exposure_row_count
+                        if factor_exposure_values is not None
+                        else None
+                    ),
+                    factor_exposure_factor_count=(
+                        factor_exposure_factor_count
+                        if factor_exposure_values is not None
+                        else None
+                    ),
                 )
                 return self._finalize_training_result(native_result, input_adaptation_seconds, feature_count=feature_count)
             except (ImportError, AttributeError):
@@ -1497,6 +1717,9 @@ class GBMRegressor(_GBMRegressorBase):
                 time_index=validated_time_index,
                 eval_set=eval_set,
                 input_adaptation_seconds=input_adaptation_seconds,
+                factor_exposure_values=factor_exposure_values,
+                factor_exposure_row_count=factor_exposure_row_count,
+                factor_exposure_factor_count=factor_exposure_factor_count,
             )
 
         if dense_training_payload is not None:
@@ -1565,6 +1788,18 @@ class GBMRegressor(_GBMRegressorBase):
                 leaf_solver=self.leaf_solver,
                 dro_radius=self.dro_radius,
                 dro_metric=self.dro_metric,
+                neutralization=self.neutralization,
+                factor_neutralization_lambda=self.factor_neutralization_lambda,
+                factor_penalty=self.factor_penalty,
+                factor_exposure_values=factor_exposure_values,
+                factor_exposure_row_count=(
+                    factor_exposure_row_count if factor_exposure_values is not None else None
+                ),
+                factor_exposure_factor_count=(
+                    factor_exposure_factor_count
+                    if factor_exposure_values is not None
+                    else None
+                ),
             )
         else:
             assert training_rows is not None
@@ -1622,6 +1857,18 @@ class GBMRegressor(_GBMRegressorBase):
                 leaf_solver=self.leaf_solver,
                 dro_radius=self.dro_radius,
                 dro_metric=self.dro_metric,
+                neutralization=self.neutralization,
+                factor_neutralization_lambda=self.factor_neutralization_lambda,
+                factor_penalty=self.factor_penalty,
+                factor_exposure_values=factor_exposure_values,
+                factor_exposure_row_count=(
+                    factor_exposure_row_count if factor_exposure_values is not None else None
+                ),
+                factor_exposure_factor_count=(
+                    factor_exposure_factor_count
+                    if factor_exposure_values is not None
+                    else None
+                ),
             )
 
         self._apply_continuous_binning_metadata(native_result.continuous_binning_metadata)
@@ -1659,6 +1906,7 @@ class GBMRegressor(_GBMRegressorBase):
             "native_train_seconds": float(summary.native_train_seconds),
             "total_fit_seconds": float(total_fit_seconds),
         }
+        self._record_fit_neutralization_contract()
         self._is_fitted = True
         return self
 
@@ -1704,6 +1952,7 @@ class GBMRegressor(_GBMRegressorBase):
             "native_train_seconds": float(summary.native_train_seconds),
             "total_fit_seconds": float(total_fit_seconds),
         }
+        self._record_fit_neutralization_contract()
         self._is_fitted = True
         return self
 
@@ -1720,6 +1969,9 @@ class GBMRegressor(_GBMRegressorBase):
         time_index: list[int] | None,
         eval_set: tuple[object, object] | None,
         input_adaptation_seconds: float,
+        factor_exposure_values: list[float] | None,
+        factor_exposure_row_count: int,
+        factor_exposure_factor_count: int,
     ) -> "GBMRegressor":
         if eval_set is not None:
             raise RuntimeError(
@@ -1949,6 +2201,18 @@ class GBMRegressor(_GBMRegressorBase):
                 leaf_solver=self.leaf_solver,
                 dro_radius=self.dro_radius,
                 dro_metric=self.dro_metric,
+                neutralization=self.neutralization,
+                factor_neutralization_lambda=self.factor_neutralization_lambda,
+                factor_penalty=self.factor_penalty,
+                factor_exposure_values=factor_exposure_values,
+                factor_exposure_row_count=(
+                    factor_exposure_row_count if factor_exposure_values is not None else None
+                ),
+                factor_exposure_factor_count=(
+                    factor_exposure_factor_count
+                    if factor_exposure_values is not None
+                    else None
+                ),
             )
         else:
             train_regression_artifact = _load_native_train_regression_artifact()
@@ -1979,6 +2243,18 @@ class GBMRegressor(_GBMRegressorBase):
                 leaf_solver=self.leaf_solver,
                 dro_radius=self.dro_radius,
                 dro_metric=self.dro_metric,
+                neutralization=self.neutralization,
+                factor_neutralization_lambda=self.factor_neutralization_lambda,
+                factor_penalty=self.factor_penalty,
+                factor_exposure_values=factor_exposure_values,
+                factor_exposure_row_count=(
+                    factor_exposure_row_count if factor_exposure_values is not None else None
+                ),
+                factor_exposure_factor_count=(
+                    factor_exposure_factor_count
+                    if factor_exposure_values is not None
+                    else None
+                ),
             )
 
         self._n_features_in = feature_count
@@ -1999,6 +2275,7 @@ class GBMRegressor(_GBMRegressorBase):
             "native_train_seconds": float(total_fit_seconds),
             "total_fit_seconds": float(total_fit_seconds),
         }
+        self._record_fit_neutralization_contract()
         self._is_fitted = True
         return self
 
@@ -3306,6 +3583,9 @@ class GBMRegressor(_GBMRegressorBase):
         self.stop_reason_ = None
         self.evals_result_ = None
         self.fit_timing_ = None
+        self._fit_neutralization = None
+        self._fit_factor_neutralization_lambda = None
+        self._fit_factor_penalty = None
 
     # ── Serialization / persistence ──────────────────────────────────────
 
@@ -3363,6 +3643,9 @@ class GBMRegressor(_GBMRegressorBase):
             "n_estimators_actual": self.n_estimators_,
             "evals_result": self.evals_result_,
             "feature_names_in": self.feature_names_in_,
+            "fit_neutralization": self._fit_neutralization,
+            "fit_factor_neutralization_lambda": self._fit_factor_neutralization_lambda,
+            "fit_factor_penalty": self._fit_factor_penalty,
             "native_cat_mappings": (
                 {str(k): v for k, v in self._native_cat_mappings_.items()}
                 if self._native_cat_mappings_
@@ -3449,6 +3732,15 @@ class GBMRegressor(_GBMRegressorBase):
             }
         else:
             model._native_cat_mappings_ = None
+        model._fit_neutralization = metadata.get("fit_neutralization", model.neutralization)
+        model._fit_factor_neutralization_lambda = metadata.get(
+            "fit_factor_neutralization_lambda",
+            model.factor_neutralization_lambda,
+        )
+        model._fit_factor_penalty = metadata.get(
+            "fit_factor_penalty",
+            model.factor_penalty,
+        )
         model._is_fitted = True
         model._native_predictor_handle = None
         model._float_thresholds_converted = False

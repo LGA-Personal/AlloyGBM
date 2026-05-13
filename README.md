@@ -34,7 +34,7 @@ maturin develop --manifest-path bindings/python/Cargo.toml --release
 
 AlloyGBM targets Python `3.11+` and uses a native Rust extension module.
 
-Wheel targets for `0.5.0`:
+Wheel targets for `0.7.0`:
 
 - macOS `arm64`
 - Linux `x86_64` (manylinux)
@@ -161,10 +161,96 @@ model.fit(X_train, y_train)
 ```
 
 `leaf_solver="dro"` works with `GBMRegressor`, `GBMClassifier`, and
-`GBMRanker`, and composes with `training_mode="morph"`. In v0.6.0 it requires
+`GBMRanker`, and composes with `training_mode="morph"`. In v0.7.0 it requires
 `leaf_model="constant"`; piecewise-linear leaves still use the standard PL
 solver. `dro_radius=0.0` preserves standard-leaf predictions while retaining
 DRO metadata in the artifact.
+
+### Factor-Neutral Boosting
+
+Use `neutralization="per_round_gradient"` with `fit(..., factor_exposures=F)` to project each boosting round's pseudo-residuals away from user-supplied nuisance factors. This is useful when common factors explain high-variance signal that you do not want the model to spend tree capacity learning.
+
+This is a training-time regularization tool. It does not guarantee prediction-time zero exposure unless predictions are neutralized against evaluation-time factors outside the model.
+
+Constructor parameters:
+
+```python
+GBMRegressor(
+    neutralization="none",                 # "none" | "pre_target" | "per_round_gradient" | "split_penalty"
+    factor_neutralization_lambda=1e-6,      # finite, >= 0 ridge added to F^T W F
+    factor_penalty=0.0,                     # finite, >= 0; only active for neutralization="split_penalty"
+)
+```
+
+`factor_exposures` is dense, row-major, finite, and shaped
+`(n_rows, n_factors)`. It is fit data, not constructor state, so sklearn
+cloning remains clean and large matrices are not embedded in estimator params.
+
+Mode semantics:
+
+`neutralization="none"` preserves current behavior and ignores
+`factor_exposures` unless a non-`None` matrix is provided with an inactive mode,
+in which case Python raises a clear validation error to prevent silent user
+mistakes.
+
+`neutralization="pre_target"` residualizes the regression target once before
+training:
+
+```text
+y_perp = y - F (F^T W F + lambda I)^-1 F^T W y
+```
+
+This mode is supported for `GBMRegressor` only. It is rejected for
+classification and ranking because target residualization is not well-defined
+for class labels or ranking relevance. `eval_set` is also rejected for
+`pre_target` in this release because the public API does not yet accept
+validation-set factor exposures to residualize validation targets consistently.
+
+`neutralization="per_round_gradient"` projects objective gradients before each
+boosting round:
+
+```text
+g_perp = g - F (F^T W F + lambda I)^-1 F^T W g
+```
+
+Hessians are unchanged. This mode is supported for regression, binary
+classification, multiclass, and ranking. For multiclass, each class-gradient
+column is projected independently against the same factor projector.
+
+`neutralization="split_penalty"` includes per-round gradient projection and
+subtracts a factor-load penalty from split gain:
+
+```text
+penalty = factor_penalty * || F_L^T update_L + F_R^T update_R ||^2 / max(row_count, 1)
+gain_final = gain_after_existing_modes - penalty
+```
+
+For scalar leaves, `update_L` and `update_R` are the candidate scalar leaf
+values before any final MorphBoost depth/iteration leaf scaling. For DRO
+leaves, the scalar values use the DRO effective gradients. For MorphBoost, the
+order is: project gradients, compute standard/DRO gradient gain, blend
+MorphBoost information score, subtract factor penalty, then apply MorphBoost
+leaf scaling when storing leaves. `split_penalty` performs additional
+factor-exposure work during split search and should be treated as the slowest
+neutralization mode until production-scale benchmarks justify stronger claims.
+
+Compatibility:
+
+| Feature | pre_target | per_round_gradient | split_penalty |
+| --- | --- | --- | --- |
+| `GBMRegressor` | supported | supported | supported |
+| `GBMClassifier` | rejected | supported | supported |
+| `GBMRanker` | rejected | supported | supported |
+| `training_mode="morph"` | supported | supported | supported |
+| `leaf_solver="dro"` | supported | supported | supported |
+| `leaf_model="linear"` | supported | supported | rejected |
+| warm start | rejected in this release | rejected in this release | rejected in this release |
+
+Exposure matrices are not persisted in the estimator or artifact. For
+this release, neutralized warm-start and `init_model` continuation are rejected
+because artifacts do not yet persist neutralization metadata needed to prove
+that the previous model and current estimator have matching neutralization
+contracts.
 
 ### Piecewise-Linear Leaves
 

@@ -4,7 +4,36 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
-The `0.6.0` release introduces `leaf_solver="dro"`, a conservative DRO-style scalar leaf solver that penalizes within-leaf gradient uncertainty while preserving standard prediction-time artifacts. The `0.5.0` release introduced piecewise-linear (PL) tree leaves via `leaf_model="linear"` on all three estimators. The `0.4.0` release introduced the opt-in MorphBoost adaptive split criterion, per-iteration learning-rate schedules, and SIMD-accelerated histogram and EMA kernels.
+The `0.7.0` release introduces factor-neutral boosting, with fit-time factor
+exposures, pre-target residualization, per-round gradient projection, and an
+optional split exposure penalty. The `0.6.0` release introduced
+`leaf_solver="dro"`, a conservative DRO-style scalar leaf solver that penalizes
+within-leaf gradient uncertainty while preserving standard prediction-time
+artifacts. The `0.5.0` release introduced piecewise-linear (PL) tree leaves via
+`leaf_model="linear"` on all three estimators. The `0.4.0` release introduced
+the opt-in MorphBoost adaptive split criterion, per-iteration learning-rate
+schedules, and SIMD-accelerated histogram and EMA kernels.
+
+## What Shipped In 0.7.0
+
+- **Factor-neutral boosting** via `neutralization` on `GBMRegressor`,
+  `GBMClassifier`, and `GBMRanker`, with row-aligned fit-time
+  `factor_exposures`.
+- **Per-round gradient projection** via `neutralization="per_round_gradient"`,
+  projecting objective gradients away from user-supplied factors before each
+  boosting round. Multiclass classification projects each class-gradient column
+  independently.
+- **Pre-target residualization** via `neutralization="pre_target"` for built-in
+  squared-error `GBMRegressor` training. Classification, ranking, custom
+  objectives, and validation sets are rejected for this mode in 0.7.0.
+- **Split exposure penalty** via `neutralization="split_penalty"` and
+  `factor_penalty`, compatible with constant leaves, DRO leaves, and
+  MorphBoost. Piecewise-linear leaves are rejected for split-penalty mode in
+  0.7.0.
+- **Benchmark coverage**: `alloygbm_factor_neutral` and
+  `alloygbm_factor_neutral_dro` arms were added to the comparative benchmark
+  runner. Synthetic benchmark factors are smoke/stability checks unless callers
+  provide domain factor exposures explicitly.
 
 ## What Shipped In 0.6.0
 
@@ -14,7 +43,7 @@ The `0.6.0` release introduces `leaf_solver="dro"`, a conservative DRO-style sca
   `dro_metric="wasserstein"`.
 - **Conservative contract**: default `leaf_solver="standard"` preserves existing
   behavior; `dro_radius=0.0` preserves standard predictions while recording
-  optional DRO metadata; v0.6.0 does not claim full raw-distribution
+  optional DRO metadata; the DRO solver does not claim full raw-distribution
   Wasserstein DRO guarantees.
 - **Interactions**: `leaf_solver="dro"` composes with `training_mode="morph"`
   and requires `leaf_model="constant"` for this release.

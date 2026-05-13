@@ -44,6 +44,7 @@ catboost_info/
 .claude/
 
 # Development scratch / run artifacts
+.worktrees/
 nohup.out
 *.log
 benchmarks/data/
