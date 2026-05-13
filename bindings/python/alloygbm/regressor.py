@@ -1270,6 +1270,11 @@ class GBMRegressor(_GBMRegressorBase):
             raise TypeError("eval_metric must be a callable or None")
         if eval_metric is not None and eval_set is None:
             raise ValueError("eval_metric requires eval_set to be provided")
+        if self.neutralization == "pre_target" and eval_set is not None:
+            raise ValueError(
+                "neutralization='pre_target' does not support eval_set in this "
+                "release because validation factor_exposures are not accepted"
+            )
         if categorical_feature_values is not None and categorical_feature_values_list is not None:
             raise ValueError(
                 "categorical_feature_values and categorical_feature_values_list are "

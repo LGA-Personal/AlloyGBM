@@ -2324,14 +2324,20 @@ fn validate_bridge_pre_target_neutralization_support(
     params: &TrainParams,
     objective: &str,
     custom_objective_fn: Option<&Py<PyAny>>,
+    has_validation_targets: bool,
 ) -> Result<(), EngineError> {
-    if params
+    let is_pre_target = params
         .neutralization_config
-        .is_some_and(|config| config.kind == NeutralizationKind::PreTarget)
-        && (objective != "squared_error" || custom_objective_fn.is_some())
-    {
+        .is_some_and(|config| config.kind == NeutralizationKind::PreTarget);
+    if is_pre_target && (objective != "squared_error" || custom_objective_fn.is_some()) {
         return Err(EngineError::ContractViolation(
             "neutralization='pre_target' is only supported for GBMRegressor squared-error training"
+                .to_string(),
+        ));
+    }
+    if is_pre_target && has_validation_targets {
+        return Err(EngineError::ContractViolation(
+            "neutralization='pre_target' does not support validation targets in this release because validation factor_exposures are not accepted"
                 .to_string(),
         ));
     }
@@ -2636,6 +2642,7 @@ fn train_regression_artifact_with_summary_dense_impl(
             &params,
             objective,
             custom_objective_fn.as_ref(),
+            validation_targets.is_some(),
         )?;
         apply_bridge_pre_target_neutralization(&mut prepared, config)?;
         params.neutralization_config = None;

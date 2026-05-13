@@ -182,6 +182,17 @@ class FactorNeutralizationTests(unittest.TestCase):
                 n_estimators=2,
             ).fit(x, y, factor_exposures=f)
 
+    def test_pre_target_rejects_eval_set_without_validation_exposures(self):
+        x, y, f = factor_data()
+        with self.assertRaisesRegex(
+            ValueError, "pre_target.*eval_set.*validation factor_exposures"
+        ):
+            GBMRegressor(
+                neutralization="pre_target",
+                n_estimators=2,
+                early_stopping_rounds=1,
+            ).fit(x, y, eval_set=(x, y), factor_exposures=f)
+
     def test_bridge_rejects_pre_target_before_non_squared_error_dispatch(self):
         from alloygbm._alloygbm import train_regression_artifact_dense_with_summary
 
@@ -196,6 +207,25 @@ class FactorNeutralizationTests(unittest.TestCase):
                     factor_exposure_values=[1.0, 2.0, 3.0, 4.0],
                     factor_exposure_row_count=4,
                     factor_exposure_factor_count=1,
+                )
+            )
+
+    def test_bridge_rejects_pre_target_with_validation_targets(self):
+        from alloygbm._alloygbm import train_regression_artifact_dense_with_summary
+
+        with self.assertRaisesRegex(
+            ValueError, "pre_target.*validation targets.*validation factor_exposures"
+        ):
+            train_regression_artifact_dense_with_summary(
+                **bridge_train_kwargs(
+                    neutralization="pre_target",
+                    factor_exposure_values=[1.0, 2.0, 3.0, 4.0],
+                    factor_exposure_row_count=4,
+                    factor_exposure_factor_count=1,
+                    validation_values=[0.0, 0.0, 1.0, 1.0],
+                    validation_row_count=2,
+                    validation_targets=[0.0, 1.0],
+                    early_stopping_rounds=1,
                 )
             )
 

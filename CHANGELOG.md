@@ -24,6 +24,14 @@
 - `split_penalty` supports constant leaves and rejects
   `leaf_model="linear"`. It is compatible with `leaf_solver="dro"` and
   `training_mode="morph"`.
+- `pre_target` rejects `eval_set` in this release because the public API does
+  not yet accept validation-set factor exposures for consistent validation
+  target residualization.
+- `split_penalty` performs additional factor-exposure work during split search;
+  benchmark it on production-sized data before assuming standard training
+  throughput.
+- Estimator `repr(...)` output now includes `neutralization`,
+  `factor_neutralization_lambda`, and `factor_penalty`.
 - This is training-time factor/gradient neutralization and split exposure
   regularization. It does not guarantee live-market or prediction-time zero
   exposure unless predictions are neutralized against evaluation-time factors
@@ -34,7 +42,9 @@
 - Added `alloygbm_factor_neutral` and `alloygbm_factor_neutral_dro` arms to
   `benchmarks/run_model_comparison.py`. For these arms, benchmark datasets
   without explicit factors synthesize `factor_exposures` from the first
-  `min(5, n_features)` feature columns.
+  `min(5, n_features)` feature columns. These arms are smoke and stability
+  checks, not standalone quality claims, because the synthesized factors are
+  also present as model features.
 
 ## 0.6.0
 

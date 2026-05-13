@@ -175,7 +175,9 @@ y_perp = y - F (F^T W F + lambda I)^-1 F^T W y
 
 This mode is supported for `GBMRegressor` only. It is rejected for
 classification and ranking because target residualization is not well-defined
-for class labels or ranking relevance.
+for class labels or ranking relevance. `eval_set` is also rejected for
+`pre_target` in this release because the public API does not yet accept
+validation-set factor exposures to residualize validation targets consistently.
 
 `neutralization="per_round_gradient"` projects objective gradients before each
 boosting round:
@@ -201,7 +203,9 @@ values before any final MorphBoost depth/iteration leaf scaling. For DRO
 leaves, the scalar values use the DRO effective gradients. For MorphBoost, the
 order is: project gradients, compute standard/DRO gradient gain, blend
 MorphBoost information score, subtract factor penalty, then apply MorphBoost
-leaf scaling when storing leaves.
+leaf scaling when storing leaves. `split_penalty` performs additional
+factor-exposure work during split search and should be treated as the slowest
+neutralization mode until production-scale benchmarks justify stronger claims.
 
 Compatibility:
 

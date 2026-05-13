@@ -649,6 +649,9 @@ def _run_model(
 
 
 def _synthesize_factor_exposures(x: np.ndarray) -> np.ndarray:
+    # Smoke-only fallback: these factors are also available as predictors, so
+    # factor-neutral benchmark arms should not be read as headline quality
+    # comparisons unless callers provide domain factor exposures explicitly.
     factor_count = min(5, int(x.shape[1]))
     if factor_count <= 0:
         raise ValueError("cannot synthesize factor_exposures from zero feature columns")
