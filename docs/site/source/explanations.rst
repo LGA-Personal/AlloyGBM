@@ -71,10 +71,28 @@ SHAP explanations work with all three estimators:
 Leaf model compatibility
 ------------------------
 
-SHAP currently supports ``leaf_model="constant"`` only. Calling
-``shap_values(...)`` or ``feature_importances(...)`` on a model trained with
-``leaf_model="linear"`` raises an error. Use the default
-``leaf_model="constant"`` when SHAP explanations are required.
+``leaf_model="constant"`` artifacts produce exact SHAP attributions
+satisfying ``Σ shap_values + expected_value == predict(x)``.
+
+As of v0.7.1, ``shap_values(...)`` and ``feature_importances(...)`` also
+accept ``leaf_model="linear"`` (piecewise-linear) artifacts and return a
+*best-effort interventional* decomposition: the path-based machinery
+attributes each leaf's "constant part"
+``intercept + Σ wj · μj_global``, and per-leaf row deviations
+``wj · (xj − μj_global)`` are credited directly to the regressor features.
+Global per-feature means ``μj_global`` are captured at fit time and stored
+in the artifact, so SHAP is self-contained — the original training data is
+not required at explain time.
+
+Exact additivity holds when SHAP's internal path walker reaches the same
+leaf as the predictor. Currently SHAP compares raw feature values against
+stump ``threshold_bin`` indices cast to ``f32``, while the predictor crate
+converts those indices to float thresholds at load time. For scalar leaves
+the divergence is masked; for linear leaves on continuous-feature artifacts
+it can cause measurable additivity drift. The strict additivity check is
+therefore relaxed for linear-leaf models so explanations remain available;
+tightening path-walk alignment is queued for a follow-up release. See
+``docs/limitations.md`` for the full caveat.
 
 .. figure:: _static/shap_tree_path_example.png
    :alt: SHAP explanation example showing a highlighted decision-tree path and additive feature contributions to a prediction.

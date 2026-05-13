@@ -1,6 +1,6 @@
 # AlloyGBM Current Limitations
 
-Last updated for v0.5.0.
+Last updated for v0.7.1.
 
 ## Remaining Limitations
 
@@ -22,6 +22,31 @@ Only standard gradient boosting is supported. Dart (dropout) and GOSS
 ### 4. No Multi-Label Ranking
 
 `GBMRanker` supports single-label relevance only.
+
+### 5. SHAP for Piecewise-Linear Leaves — Best-Effort Decomposition
+
+As of v0.7.1, `shap_values()` accepts `leaf_model="linear"` artifacts and
+returns an *interventional* decomposition: the path-based TreeSHAP / brute
+force machinery attributes each leaf's "constant part"
+`intercept + Σ wj · μj_global`, then per-leaf row deviations
+`wj · (xj − μj_global)` are credited directly to the regressor features.
+Global per-feature means `μj_global` are captured at fit time and persisted
+in a new `FeatureBaseline` artifact section, so SHAP is self-contained — the
+original training data is not required at explain time.
+
+`Σ shap_values + expected_value == predict(x)` holds exactly when SHAP's
+internal path walker reaches the same leaf as the predictor. Today SHAP
+compares raw feature values against stump `threshold_bin` indices cast to
+`f32`, while the predictor crate converts those bin indices to float
+thresholds at load time using per-feature min/max. For scalar leaves this
+divergence is masked (the wrong-but-consistent path yields the same scalar
+sum from both sides); for linear leaves the leaf value depends on `xj`, so
+on continuous-feature artifacts the SHAP path and the predictor path can
+disagree and the additive reconstruction drifts. To avoid a hard failure
+mid-explain, the strict additivity check is relaxed for linear-leaf models;
+users get best-effort SHAP values plus an updated docstring describing the
+semantics. Tightening path-walk alignment (so SHAP also uses float
+thresholds) is queued for a follow-up release.
 
 ## Resolved (Previously Limitations)
 
