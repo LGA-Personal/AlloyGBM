@@ -1,4 +1,5 @@
 import pickle
+import tempfile
 import unittest
 
 import numpy as np
@@ -155,6 +156,49 @@ class FactorNeutralizationTests(unittest.TestCase):
                 x, y, group=np.repeat([0, 1, 2], 8), factor_exposures=f
             )
 
+    def test_pre_target_rejected_for_binary_crossentropy_regressor(self):
+        x, y, f = factor_data()
+        with self.assertRaisesRegex(
+            ValueError, "pre_target.*GBMRegressor squared-error"
+        ):
+            GBMRegressor(
+                objective="binary_crossentropy",
+                neutralization="pre_target",
+                n_estimators=2,
+            ).fit(x, (y > 0).astype(np.float32), factor_exposures=f)
+
+    def test_pre_target_rejected_for_custom_objective_regressor(self):
+        x, y, f = factor_data()
+
+        def custom_mse(y_true, y_pred):
+            return y_pred - y_true, np.ones_like(y_true)
+
+        with self.assertRaisesRegex(
+            ValueError, "pre_target.*GBMRegressor squared-error"
+        ):
+            GBMRegressor(
+                objective=custom_mse,
+                neutralization="pre_target",
+                n_estimators=2,
+            ).fit(x, y, factor_exposures=f)
+
+    def test_bridge_rejects_pre_target_before_non_squared_error_dispatch(self):
+        from alloygbm._alloygbm import train_regression_artifact_dense_with_summary
+
+        with self.assertRaisesRegex(
+            ValueError, "pre_target.*GBMRegressor squared-error"
+        ):
+            train_regression_artifact_dense_with_summary(
+                **bridge_train_kwargs(
+                    objective="binary_crossentropy",
+                    neutralization="pre_target",
+                    targets=[0.0, 1.0, 1.0, 0.0],
+                    factor_exposure_values=[1.0, 2.0, 3.0, 4.0],
+                    factor_exposure_row_count=4,
+                    factor_exposure_factor_count=1,
+                )
+            )
+
     def test_classifier_repr_includes_neutralization_params(self):
         model = GBMClassifier(
             neutralization="per_round_gradient",
@@ -215,3 +259,35 @@ class FactorNeutralizationTests(unittest.TestCase):
             ValueError, "neutralized warm-start training is not supported"
         ):
             model.fit(x, y, init_model=base, factor_exposures=f)
+
+    def test_neutralized_init_model_rejected_after_params_mutated_to_none(self):
+        x, y, f = factor_data()
+        base = GBMRegressor(
+            neutralization="per_round_gradient",
+            n_estimators=2,
+            seed=1,
+        ).fit(x, y, factor_exposures=f)
+        base.set_params(neutralization="none")
+
+        with self.assertRaisesRegex(
+            ValueError, "neutralized warm-start training is not supported"
+        ):
+            GBMRegressor(n_estimators=2, seed=2).fit(x, y, init_model=base)
+
+    def test_save_load_preserves_fitted_neutralization_after_params_mutation(self):
+        x, y, f = factor_data()
+        base = GBMRegressor(
+            neutralization="per_round_gradient",
+            n_estimators=2,
+            seed=1,
+        ).fit(x, y, factor_exposures=f)
+        base.set_params(neutralization="none")
+
+        with tempfile.NamedTemporaryFile(suffix=".agbm") as tmp:
+            base.save_model(tmp.name)
+            restored = GBMRegressor.load_model(tmp.name)
+
+        with self.assertRaisesRegex(
+            ValueError, "neutralized warm-start training is not supported"
+        ):
+            GBMRegressor(n_estimators=2, seed=2).fit(x, y, init_model=restored)

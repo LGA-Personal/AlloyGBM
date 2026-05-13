@@ -507,6 +507,8 @@ class GBMRegressor(_GBMRegressorBase):
         self.factor_neutralization_lambda = float(factor_neutralization_lambda)
         self.factor_penalty = float(factor_penalty)
         self._fit_neutralization: str | None = None
+        self._fit_factor_neutralization_lambda: float | None = None
+        self._fit_factor_penalty: float | None = None
         self._is_fitted = False
         self._artifact_bytes: bytes | None = None
         self._native_predictor_handle: object | None = None
@@ -1161,6 +1163,33 @@ class GBMRegressor(_GBMRegressorBase):
         """Return the natural loss metric name for this estimator's objective."""
         return self._loss_metric_name_for(self._objective_name())
 
+    def _record_fit_neutralization_contract(self) -> None:
+        self._fit_neutralization = self.neutralization
+        self._fit_factor_neutralization_lambda = self.factor_neutralization_lambda
+        self._fit_factor_penalty = self.factor_penalty
+
+    def _fitted_neutralization_contract(self) -> tuple[str, float, float]:
+        fit_neutralization = getattr(self, "_fit_neutralization", None)
+        fit_lambda = getattr(self, "_fit_factor_neutralization_lambda", None)
+        fit_penalty = getattr(self, "_fit_factor_penalty", None)
+        if fit_neutralization is None:
+            fit_neutralization = getattr(self, "neutralization", "none")
+        if fit_lambda is None:
+            fit_lambda = getattr(self, "factor_neutralization_lambda", 1e-6)
+        if fit_penalty is None:
+            fit_penalty = getattr(self, "factor_penalty", 0.0)
+        return str(fit_neutralization), float(fit_lambda), float(fit_penalty)
+
+    @staticmethod
+    def _raise_if_neutralized_warm_start_contract(
+        fit_neutralization: str,
+    ) -> None:
+        if fit_neutralization != "none":
+            raise ValueError(
+                "neutralized warm-start training is not supported because model "
+                "artifacts do not persist neutralization metadata yet"
+            )
+
     @staticmethod
     def _build_evals_result(summary: object) -> dict:
         """Build ``evals_result_`` from a ``NativeTrainingSummary``.
@@ -1252,7 +1281,8 @@ class GBMRegressor(_GBMRegressorBase):
         if init_model is not None:
             if not hasattr(init_model, "_artifact_bytes") or init_model._artifact_bytes is None:
                 raise ValueError("init_model must be a fitted GBMRegressor with artifact bytes")
-            init_neutralization = str(getattr(init_model, "neutralization", "none"))
+            init_neutralization, _, _ = init_model._fitted_neutralization_contract()
+            self._raise_if_neutralized_warm_start_contract(init_neutralization)
             if self.neutralization == "none" and init_neutralization != self.neutralization:
                 raise ValueError(
                     "init_model neutralization settings do not match current estimator "
@@ -1268,9 +1298,8 @@ class GBMRegressor(_GBMRegressorBase):
                     )
             init_artifact_bytes = init_model._artifact_bytes
         elif self.warm_start and self._is_fitted and self._artifact_bytes is not None:
-            fit_neutralization = str(
-                getattr(self, "_fit_neutralization", None) or self.neutralization
-            )
+            fit_neutralization, _, _ = self._fitted_neutralization_contract()
+            self._raise_if_neutralized_warm_start_contract(fit_neutralization)
             if fit_neutralization != self.neutralization:
                 raise ValueError(
                     "warm_start neutralization settings do not match current estimator "
@@ -1872,7 +1901,7 @@ class GBMRegressor(_GBMRegressorBase):
             "native_train_seconds": float(summary.native_train_seconds),
             "total_fit_seconds": float(total_fit_seconds),
         }
-        self._fit_neutralization = self.neutralization
+        self._record_fit_neutralization_contract()
         self._is_fitted = True
         return self
 
@@ -1918,7 +1947,7 @@ class GBMRegressor(_GBMRegressorBase):
             "native_train_seconds": float(summary.native_train_seconds),
             "total_fit_seconds": float(total_fit_seconds),
         }
-        self._fit_neutralization = self.neutralization
+        self._record_fit_neutralization_contract()
         self._is_fitted = True
         return self
 
@@ -2241,7 +2270,7 @@ class GBMRegressor(_GBMRegressorBase):
             "native_train_seconds": float(total_fit_seconds),
             "total_fit_seconds": float(total_fit_seconds),
         }
-        self._fit_neutralization = self.neutralization
+        self._record_fit_neutralization_contract()
         self._is_fitted = True
         return self
 
@@ -3549,6 +3578,9 @@ class GBMRegressor(_GBMRegressorBase):
         self.stop_reason_ = None
         self.evals_result_ = None
         self.fit_timing_ = None
+        self._fit_neutralization = None
+        self._fit_factor_neutralization_lambda = None
+        self._fit_factor_penalty = None
 
     # ── Serialization / persistence ──────────────────────────────────────
 
@@ -3606,6 +3638,9 @@ class GBMRegressor(_GBMRegressorBase):
             "n_estimators_actual": self.n_estimators_,
             "evals_result": self.evals_result_,
             "feature_names_in": self.feature_names_in_,
+            "fit_neutralization": self._fit_neutralization,
+            "fit_factor_neutralization_lambda": self._fit_factor_neutralization_lambda,
+            "fit_factor_penalty": self._fit_factor_penalty,
             "native_cat_mappings": (
                 {str(k): v for k, v in self._native_cat_mappings_.items()}
                 if self._native_cat_mappings_
@@ -3692,7 +3727,15 @@ class GBMRegressor(_GBMRegressorBase):
             }
         else:
             model._native_cat_mappings_ = None
-        model._fit_neutralization = model.neutralization
+        model._fit_neutralization = metadata.get("fit_neutralization", model.neutralization)
+        model._fit_factor_neutralization_lambda = metadata.get(
+            "fit_factor_neutralization_lambda",
+            model.factor_neutralization_lambda,
+        )
+        model._fit_factor_penalty = metadata.get(
+            "fit_factor_penalty",
+            model.factor_penalty,
+        )
         model._is_fitted = True
         model._native_predictor_handle = None
         model._float_thresholds_converted = False

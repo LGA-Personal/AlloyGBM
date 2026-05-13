@@ -2320,6 +2320,24 @@ fn apply_bridge_pre_target_neutralization(
     Ok(())
 }
 
+fn validate_bridge_pre_target_neutralization_support(
+    params: &TrainParams,
+    objective: &str,
+    custom_objective_fn: Option<&Py<PyAny>>,
+) -> Result<(), EngineError> {
+    if params
+        .neutralization_config
+        .is_some_and(|config| config.kind == NeutralizationKind::PreTarget)
+        && (objective != "squared_error" || custom_objective_fn.is_some())
+    {
+        return Err(EngineError::ContractViolation(
+            "neutralization='pre_target' is only supported for GBMRegressor squared-error training"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Encode multiple categorical features in the training matrices via target encoding.
 fn apply_categorical_encoding_to_training_matrices_multi(
     prepared: PreparedTrainingMatrices,
@@ -2614,6 +2632,11 @@ fn train_regression_artifact_with_summary_dense_impl(
     if let Some(config) = params.neutralization_config
         && config.kind == NeutralizationKind::PreTarget
     {
+        validate_bridge_pre_target_neutralization_support(
+            &params,
+            objective,
+            custom_objective_fn.as_ref(),
+        )?;
         apply_bridge_pre_target_neutralization(&mut prepared, config)?;
         params.neutralization_config = None;
     }

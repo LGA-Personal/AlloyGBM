@@ -3161,6 +3161,7 @@ impl Trainer {
         validate_train_params(&self.params)?;
         validate_training_dataset(dataset)?;
         validate_neutralization_fit_contract_for_support(&self.params, dataset, false)?;
+        validate_warm_start_neutralization_contract(&self.params, warm_start.is_some())?;
         validate_training_alignment(dataset, binned_matrix)?;
         if let Some(validation_ref) = validation {
             validate_training_alignment(validation_ref.dataset, validation_ref.binned_matrix)?;
@@ -3767,6 +3768,7 @@ impl Trainer {
         validate_train_params(&self.params)?;
         validate_training_dataset(dataset)?;
         validate_neutralization_fit_contract(&self.params, dataset, objective)?;
+        validate_warm_start_neutralization_contract(&self.params, execution.warm_start.is_some())?;
         let owned_dataset = if execution.pre_target_already_applied {
             None
         } else {
@@ -4359,6 +4361,19 @@ fn validate_neutralization_fit_contract_for_support(
     if config.kind == NeutralizationKind::PreTarget && !supports_pre_target_neutralization {
         return Err(EngineError::ContractViolation(
             "neutralization='pre_target' is only supported for GBMRegressor squared-error training"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_warm_start_neutralization_contract(
+    params: &TrainParams,
+    has_warm_start: bool,
+) -> EngineResult<()> {
+    if has_warm_start && params.neutralization_config.is_some() {
+        return Err(EngineError::ContractViolation(
+            "neutralized warm-start training is not supported because WarmStartState does not carry neutralization metadata"
                 .to_string(),
         ));
     }
@@ -8205,6 +8220,35 @@ mod tests {
     }
 
     #[test]
+    fn warm_start_rejects_active_neutralization_without_metadata() {
+        let dataset = factor_dominated_dataset();
+        let binned = sample_binned_matrix_for_dataset(&dataset);
+        let params = TrainParams {
+            neutralization_config: Some(alloygbm_core::FactorNeutralizationConfig {
+                kind: alloygbm_core::NeutralizationKind::PerRoundGradient,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            }),
+            ..TrainParams::default()
+        };
+        let warm_start = WarmStartState {
+            baseline_prediction: 0.0,
+            stumps: Vec::new(),
+            initial_rounds_completed: 1,
+        };
+        let controls = IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).unwrap();
+        let result = Trainer::new(params).unwrap().fit_iterations_warm_start(
+            &dataset,
+            &binned,
+            &MockBackend,
+            &SquaredErrorObjective,
+            controls,
+            warm_start,
+        );
+        assert!(matches!(result, Err(EngineError::ContractViolation(_))));
+    }
+
+    #[test]
     fn multiclass_neutralization_rejects_inactive_factor_exposures() {
         let dataset = multiclass_factor_dominated_dataset();
         let binned = sample_binned_matrix_for_dataset(&dataset);
@@ -8271,6 +8315,38 @@ mod tests {
                 &MockBackend,
                 &objective,
                 controls,
+            );
+        assert!(matches!(result, Err(EngineError::ContractViolation(_))));
+    }
+
+    #[test]
+    fn multiclass_warm_start_rejects_active_neutralization_without_metadata() {
+        let dataset = multiclass_factor_dominated_dataset();
+        let binned = sample_binned_matrix_for_dataset(&dataset);
+        let objective = MultiClassSoftmaxObjective::new(2).unwrap();
+        let controls = IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).unwrap();
+        let params = TrainParams {
+            neutralization_config: Some(alloygbm_core::FactorNeutralizationConfig {
+                kind: alloygbm_core::NeutralizationKind::PerRoundGradient,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            }),
+            ..TrainParams::default()
+        };
+        let warm_start = MultiClassWarmStartState {
+            baseline_predictions: vec![0.0, 0.0],
+            class_stumps: vec![Vec::new(), Vec::new()],
+            initial_rounds_completed: 1,
+        };
+        let result = Trainer::new(params)
+            .unwrap()
+            .fit_multiclass_iterations_warm_start_with_summary(
+                &dataset,
+                &binned,
+                &MockBackend,
+                &objective,
+                controls,
+                warm_start,
             );
         assert!(matches!(result, Err(EngineError::ContractViolation(_))));
     }
