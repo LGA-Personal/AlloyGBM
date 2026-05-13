@@ -416,7 +416,7 @@ class GBMRegressor(_GBMRegressorBase):
             )
         if str(leaf_solver) == "dro" and str(leaf_model) != "constant":
             raise ValueError(
-                "leaf_solver='dro' requires leaf_model='constant' in v0.6.0"
+                "leaf_solver='dro' requires leaf_model='constant' in v0.7.0"
             )
         if str(neutralization) not in (
             "none",
@@ -1078,7 +1078,7 @@ class GBMRegressor(_GBMRegressorBase):
 
         if self.leaf_solver == "dro" and self.leaf_model != "constant":
             raise ValueError(
-                "leaf_solver='dro' requires leaf_model='constant' in v0.6.0"
+                "leaf_solver='dro' requires leaf_model='constant' in v0.7.0"
             )
         if self.neutralization != "split_penalty" and self.factor_penalty != 0.0:
             raise ValueError(

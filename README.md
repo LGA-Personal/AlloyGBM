@@ -34,7 +34,7 @@ maturin develop --manifest-path bindings/python/Cargo.toml --release
 
 AlloyGBM targets Python `3.11+` and uses a native Rust extension module.
 
-Wheel targets for `0.5.0`:
+Wheel targets for `0.7.0`:
 
 - macOS `arm64`
 - Linux `x86_64` (manylinux)
@@ -161,7 +161,7 @@ model.fit(X_train, y_train)
 ```
 
 `leaf_solver="dro"` works with `GBMRegressor`, `GBMClassifier`, and
-`GBMRanker`, and composes with `training_mode="morph"`. In v0.6.0 it requires
+`GBMRanker`, and composes with `training_mode="morph"`. In v0.7.0 it requires
 `leaf_model="constant"`; piecewise-linear leaves still use the standard PL
 solver. `dro_radius=0.0` preserves standard-leaf predictions while retaining
 DRO metadata in the artifact.

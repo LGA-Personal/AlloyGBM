@@ -8,22 +8,20 @@ High-level component layout
 
 The repository is split into Rust workspace crates plus Python bindings:
 
-- ``crates/core``
-  - shared data contracts, matrices, gradients, artifacts, NaN handling
-- ``crates/engine``
-  - training logic, objective implementations, policy-driven iteration control
-- ``crates/backend_cpu``
-  - CPU histogram building, split evaluation, NaN-aware partitioning
-- ``crates/predictor``
-  - artifact-backed prediction with post-transform support (sigmoid for
-    classification)
-- ``crates/shap``
-  - TreeSHAP explanation support (polynomial-time exact Shapley values)
-- ``crates/categorical``
-  - categorical support helpers (target encoding, frequency encoding)
-- ``bindings/python``
-  - Python extension module and public package (GBMRegressor, GBMClassifier,
-    GBMRanker)
+- ``crates/core`` -- shared data contracts, matrices, gradients, artifacts, and
+  NaN handling.
+- ``crates/engine`` -- training logic, objective implementations, and
+  policy-driven iteration control.
+- ``crates/backend_cpu`` -- CPU histogram building, split evaluation, and
+  NaN-aware partitioning.
+- ``crates/predictor`` -- artifact-backed prediction with post-transform
+  support, including sigmoid for classification.
+- ``crates/shap`` -- TreeSHAP explanation support using polynomial-time exact
+  Shapley values.
+- ``crates/categorical`` -- categorical support helpers such as target encoding
+  and frequency encoding.
+- ``bindings/python`` -- Python extension module and public package
+  (``GBMRegressor``, ``GBMClassifier``, ``GBMRanker``).
 
 Objective implementations
 -------------------------

@@ -12,13 +12,12 @@ types.
 
 .. note::
 
-   AlloyGBM ``0.5.0`` introduces piecewise-linear (PL) tree leaves via
-   ``leaf_model="linear"`` on all three estimators, with closed-form
-   ridge-solved per-leaf linear models. ``0.4.0`` introduced the opt-in
-   MorphBoost adaptive split criterion (``training_mode="morph"``),
-   per-iteration learning-rate schedules, and SIMD-accelerated histogram
-   and EMA kernels. See :doc:`estimator` and :doc:`morphboost` for parameter
-   docs, and :doc:`release` for full notes.
+   AlloyGBM ``0.7.0`` introduces factor-neutral boosting via
+   ``neutralization`` and fit-time ``factor_exposures``. It also includes the
+   DRO scalar leaf solver, piecewise-linear leaves, MorphBoost adaptive split
+   criterion, per-iteration learning-rate schedules, and SIMD-accelerated
+   histogram and EMA kernels. See :doc:`estimator` and :doc:`morphboost` for
+   parameter docs, and :doc:`release` for full notes.
 
 Getting started
 ---------------
