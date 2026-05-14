@@ -389,6 +389,14 @@ pub struct TrainParams {
     /// Per-feature importance weights for split selection (gain is multiplied by weight).
     /// Empty means uniform weighting.
     pub feature_weights: Vec<f32>,
+    /// Interaction constraints (LightGBM-compatible semantics).  Each inner
+    /// `Vec` is a group of feature indices that are allowed to co-occur on
+    /// any root-to-leaf path.  Features that don't appear in any group are
+    /// unconstrained and may be used freely alongside any group.  Empty
+    /// outer `Vec` means no constraints — equivalent to the v0.7.0
+    /// behaviour.  Limit: up to 64 groups per fit (a u64 bitset tracks the
+    /// active set per node).
+    pub interaction_constraints: Vec<Vec<u32>>,
     /// Maximum number of leaves per tree. None means depth-limited only.
     pub max_leaves: Option<usize>,
     /// Tree growth strategy: level-wise (default) or leaf-wise (best-first).
@@ -423,6 +431,7 @@ impl Default for TrainParams {
             min_split_gain: 0.0,
             monotone_constraints: Vec::new(),
             feature_weights: Vec::new(),
+            interaction_constraints: Vec::new(),
             max_leaves: None,
             tree_growth: TreeGrowth::Level,
             morph_config: None,
@@ -2338,6 +2347,28 @@ pub fn validate_train_params(params: &TrainParams) -> CoreResult<()> {
             return Err(CoreError::InvalidConfig(
                 "feature_weights values must be finite and >= 0".to_string(),
             ));
+        }
+    }
+
+    if params.interaction_constraints.len() > 64 {
+        return Err(CoreError::InvalidConfig(format!(
+            "interaction_constraints supports at most 64 groups (got {})",
+            params.interaction_constraints.len()
+        )));
+    }
+    for (gi, group) in params.interaction_constraints.iter().enumerate() {
+        if group.is_empty() {
+            return Err(CoreError::InvalidConfig(format!(
+                "interaction_constraints group {gi} is empty; groups must contain at least one feature index"
+            )));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for &f in group {
+            if !seen.insert(f) {
+                return Err(CoreError::InvalidConfig(format!(
+                    "interaction_constraints group {gi} contains duplicate feature index {f}"
+                )));
+            }
         }
     }
 

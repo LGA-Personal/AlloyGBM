@@ -4578,6 +4578,130 @@ impl Trainer {
     }
 }
 
+/// Precomputed lookup driving interaction-constraint enforcement during
+/// tree growth.  Built once per fit from `TrainParams.interaction_constraints`.
+///
+/// Each feature carries a `u64` bitset of the constraint groups it belongs
+/// to.  Features outside every group ("unconstrained") have a `0` bitset and
+/// are always allowed at any node.  Constrained features are allowed only
+/// when at least one of their containing groups is still in the per-node
+/// `active_groups` bitset; once a path commits to a group, the active set
+/// narrows to the intersection of that feature's groups.
+#[derive(Debug, Clone)]
+pub(crate) struct InteractionConstraintIndex {
+    /// `feature_groups[f]` — bitset of constraint-group indices that contain
+    /// feature `f`.  `0` means the feature is unconstrained.
+    feature_groups: Vec<u64>,
+    /// Number of declared constraint groups (`≤ 64`).
+    group_count: u32,
+}
+
+impl InteractionConstraintIndex {
+    /// Build the lookup from `TrainParams.interaction_constraints`.  Returns
+    /// `None` when no constraints are configured so callers can skip the
+    /// per-node bookkeeping entirely.  Validation of group count / indices
+    /// happens earlier in `core::validate_train_params`; this routine just
+    /// re-checks bounds defensively (the engine doesn't always know the
+    /// feature count at param-validation time).
+    pub(crate) fn from_constraints(
+        constraints: &[Vec<u32>],
+        feature_count: usize,
+    ) -> EngineResult<Option<Self>> {
+        if constraints.is_empty() {
+            return Ok(None);
+        }
+        if constraints.len() > 64 {
+            return Err(EngineError::InvalidConfig(format!(
+                "interaction_constraints supports at most 64 groups (got {})",
+                constraints.len()
+            )));
+        }
+        let mut feature_groups = vec![0u64; feature_count];
+        for (gi, group) in constraints.iter().enumerate() {
+            let bit = 1u64 << gi;
+            for &f in group {
+                let fi = f as usize;
+                if fi >= feature_count {
+                    return Err(EngineError::InvalidConfig(format!(
+                        "interaction_constraints group {gi} references feature {f} which exceeds feature_count {feature_count}"
+                    )));
+                }
+                feature_groups[fi] |= bit;
+            }
+        }
+        Ok(Some(Self {
+            feature_groups,
+            group_count: constraints.len() as u32,
+        }))
+    }
+
+    /// Bitset of all groups marked active at the tree root.  All groups
+    /// start active and are intersected as a path descends through
+    /// constrained features.
+    pub(crate) fn root_active_groups(&self) -> u64 {
+        if self.group_count == 0 {
+            0
+        } else if self.group_count >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << self.group_count) - 1
+        }
+    }
+
+    /// Compute the `active_groups` bitset for a child node when the parent
+    /// splits on `split_feature`.  Splitting on an unconstrained feature
+    /// leaves the active set unchanged; splitting on a constrained feature
+    /// narrows the set to groups that *also* contain that feature.
+    #[inline]
+    pub(crate) fn descend(&self, active_groups: u64, split_feature: u32) -> u64 {
+        let f = split_feature as usize;
+        if f >= self.feature_groups.len() {
+            return active_groups;
+        }
+        let fg = self.feature_groups[f];
+        if fg == 0 {
+            active_groups
+        } else {
+            active_groups & fg
+        }
+    }
+
+    /// Whether `feature` is allowed at a node whose ancestors imply
+    /// `active_groups`.  Unconstrained features are always allowed; a
+    /// constrained feature is allowed iff some group containing it is still
+    /// active.
+    #[inline]
+    pub(crate) fn feature_allowed(&self, active_groups: u64, feature: u32) -> bool {
+        let f = feature as usize;
+        if f >= self.feature_groups.len() {
+            return true;
+        }
+        let fg = self.feature_groups[f];
+        fg == 0 || (active_groups & fg) != 0
+    }
+}
+
+/// Clone a [`HistogramBundle`] keeping only the per-feature histograms whose
+/// feature index satisfies `is_allowed`.  Used as a per-node filter for
+/// interaction constraints — child histograms are still built with the
+/// parent's tiles (so the subtraction trick keeps working), but the split
+/// search at a constrained node ignores feature columns that aren't allowed
+/// on this path.
+pub(crate) fn filter_histogram_bundle_by_features(
+    bundle: &HistogramBundle,
+    is_allowed: impl Fn(u32) -> bool,
+) -> HistogramBundle {
+    HistogramBundle {
+        node_id: bundle.node_id,
+        feature_histograms: bundle
+            .feature_histograms
+            .iter()
+            .filter(|fh| is_allowed(fh.feature_index))
+            .cloned()
+            .collect(),
+    }
+}
+
 /// Compute per-feature column means from a row-major raw feature matrix.
 ///
 /// Returns `None` when the matrix has no rows, no features, or its `values`
@@ -5137,6 +5261,17 @@ fn build_tree_level_wise<B: BackendOps>(
     let root_node = NodeSlice::new(root_node_id, root_row_indices)?;
     let root_histograms =
         backend.build_histograms(binned_matrix, gradients, &root_node, feature_tiles)?;
+    // Interaction-constraint bookkeeping (no-op when empty).  We track the
+    // bitset of still-active groups per node so that the split search can
+    // skip features that no surviving group allows on this path.
+    let constraint_index = InteractionConstraintIndex::from_constraints(
+        &params.interaction_constraints,
+        binned_matrix.feature_count,
+    )?;
+    let mut node_active_groups: HashMap<u32, u64> = HashMap::new();
+    if let Some(idx) = constraint_index.as_ref() {
+        node_active_groups.insert(0, idx.root_active_groups());
+    }
     // Maintain each active node's absolute leaf output so child updates
     // can replace parent contribution via deltas (tree semantics).
     // depth is the current tree level (0-indexed); all nodes at this level share the same depth.
@@ -5161,9 +5296,26 @@ fn build_tree_level_wise<B: BackendOps>(
                 factor_exposures,
                 &node.row_indices,
             );
+            // Filter histogram bundle by interaction constraints (no-op when
+            // no constraints are active).  Cloning the bundle here is the
+            // simplest way to plug filtering in without changing the
+            // `BackendOps` trait surface; the clone is `O(allowed_features
+            // × bins)` and only runs on constrained fits.
+            let node_active = node_active_groups.get(&local_node_id).copied();
+            let filtered_histograms_storage;
+            let histograms_for_split = match (constraint_index.as_ref(), node_active) {
+                (Some(idx), Some(active_groups)) => {
+                    filtered_histograms_storage = filter_histogram_bundle_by_features(
+                        &histograms,
+                        |f| idx.feature_allowed(active_groups, f),
+                    );
+                    &filtered_histograms_storage
+                }
+                _ => &histograms,
+            };
             let Some(mut split) = find_best_split_dispatch(
                 backend,
-                &histograms,
+                histograms_for_split,
                 split_options,
                 feature_weights,
                 categorical_features,
@@ -5390,6 +5542,17 @@ fn build_tree_level_wise<B: BackendOps>(
                 let left_node_id = encode_tree_node_id(round_index, left_local_node_id)?;
                 let right_node_id = encode_tree_node_id(round_index, right_local_node_id)?;
 
+                // Propagate interaction-constraint active groups to children.
+                // Splitting on an unconstrained feature leaves the active
+                // set unchanged; a constrained feature narrows it.
+                if let (Some(idx), Some(active_groups)) =
+                    (constraint_index.as_ref(), node_active)
+                {
+                    let child_groups = idx.descend(active_groups, split.feature_index);
+                    node_active_groups.insert(left_local_node_id, child_groups);
+                    node_active_groups.insert(right_local_node_id, child_groups);
+                }
+
                 // Determine the parent-leaf values to track for children.
                 // When we have linear leaves, the scalar parent value uses the intercept,
                 // and we also pass the full absolute linear leaf for weight delta computation.
@@ -5550,15 +5713,42 @@ fn build_tree_leaf_wise<B: BackendOps>(
     let root_node = NodeSlice::new(root_node_id, root_row_indices)?;
     let root_histograms =
         backend.build_histograms(binned_matrix, gradients, &root_node, feature_tiles)?;
+    // Interaction-constraint bookkeeping (no-op when empty).  See the
+    // matching block in `build_tree_level_wise` for the design rationale —
+    // we filter histograms per node at split-search time so constrained
+    // features can't appear on a path that already broke into a sibling
+    // group.
+    let constraint_index = InteractionConstraintIndex::from_constraints(
+        &params.interaction_constraints,
+        binned_matrix.feature_count,
+    )?;
+    let mut node_active_groups: HashMap<u32, u64> = HashMap::new();
+    if let Some(idx) = constraint_index.as_ref() {
+        node_active_groups.insert(0, idx.root_active_groups());
+    }
     let root_factor_context = factor_split_context_for_node(
         params,
         binned_matrix,
         factor_exposures,
         &root_node.row_indices,
     );
+    let root_filtered_storage;
+    let root_histograms_for_split = match (
+        constraint_index.as_ref(),
+        node_active_groups.get(&0).copied(),
+    ) {
+        (Some(idx), Some(ag)) => {
+            root_filtered_storage = filter_histogram_bundle_by_features(
+                &root_histograms,
+                |f| idx.feature_allowed(ag, f),
+            );
+            &root_filtered_storage
+        }
+        _ => &root_histograms,
+    };
     let root_split = find_best_split_dispatch(
         backend,
-        &root_histograms,
+        root_histograms_for_split,
         split_options,
         feature_weights,
         categorical_features,
@@ -5883,6 +6073,28 @@ fn build_tree_leaf_wise<B: BackendOps>(
                 larger_node_id,
             )?;
 
+            // Propagate interaction-constraint active groups to both
+            // children of the just-applied split.  Both children inherit the
+            // same descended bitset because the split feature is shared.
+            // (`split` itself was moved into `committed_split` above; we
+            // read the feature index off the just-pushed stump instead.)
+            let split_feature_for_descend = stumps
+                .last()
+                .map(|s| s.split.feature_index)
+                .unwrap_or(0);
+            let child_active_groups: Option<u64> = match (
+                constraint_index.as_ref(),
+                node_active_groups.get(&local_node_id).copied(),
+            ) {
+                (Some(idx), Some(ag)) => {
+                    let descended = idx.descend(ag, split_feature_for_descend);
+                    node_active_groups.insert(smaller_local, descended);
+                    node_active_groups.insert(larger_local, descended);
+                    Some(descended)
+                }
+                _ => None,
+            };
+
             // Find best split for each child and enqueue if valid.
             let smaller_factor_context = factor_split_context_for_node(
                 params,
@@ -5890,9 +6102,21 @@ fn build_tree_leaf_wise<B: BackendOps>(
                 factor_exposures,
                 &smaller_node.row_indices,
             );
+            let smaller_filtered_storage;
+            let smaller_histograms_for_split =
+                match (constraint_index.as_ref(), child_active_groups) {
+                    (Some(idx), Some(ag)) => {
+                        smaller_filtered_storage = filter_histogram_bundle_by_features(
+                            &smaller_histograms,
+                            |f| idx.feature_allowed(ag, f),
+                        );
+                        &smaller_filtered_storage
+                    }
+                    _ => &smaller_histograms,
+                };
             if let Some(child_split) = find_best_split_dispatch(
                 backend,
-                &smaller_histograms,
+                smaller_histograms_for_split,
                 split_options,
                 feature_weights,
                 categorical_features,
@@ -5918,9 +6142,21 @@ fn build_tree_leaf_wise<B: BackendOps>(
                 factor_exposures,
                 &larger_indices,
             );
+            let larger_filtered_storage;
+            let larger_histograms_for_split =
+                match (constraint_index.as_ref(), child_active_groups) {
+                    (Some(idx), Some(ag)) => {
+                        larger_filtered_storage = filter_histogram_bundle_by_features(
+                            &larger_histograms,
+                            |f| idx.feature_allowed(ag, f),
+                        );
+                        &larger_filtered_storage
+                    }
+                    _ => &larger_histograms,
+                };
             if let Some(child_split) = find_best_split_dispatch(
                 backend,
-                &larger_histograms,
+                larger_histograms_for_split,
                 split_options,
                 feature_weights,
                 categorical_features,
@@ -11305,6 +11541,113 @@ mod tests {
                 s_plain.right_leaf_value.as_scalar(),
                 s_morph.right_leaf_value.as_scalar(),
             );
+        }
+    }
+
+    #[test]
+    fn interaction_constraints_paths_never_mix_disjoint_groups() {
+        // Train a small synthetic regression model with two disjoint
+        // constraint groups and walk every tree's root-to-leaf path to
+        // verify the constraint is honoured.  The synthetic target depends
+        // on features from both groups so the model has incentive to use
+        // each — without the constraint we'd routinely see paths that mix.
+        use alloygbm_core::{DatasetMatrix, TrainingDataset};
+        let n = 64;
+        let feature_count = 4;
+        let mut values = Vec::with_capacity(n * feature_count);
+        let mut targets = Vec::with_capacity(n);
+        for i in 0..n {
+            // f0 takes 4 values, f1 takes 2 values, f2 takes 4 values, f3 takes 2.
+            let f0 = (i % 4) as f32;
+            let f1 = ((i / 4) % 2) as f32;
+            let f2 = ((i / 8) % 4) as f32;
+            let f3 = ((i / 32) % 2) as f32;
+            values.extend_from_slice(&[f0, f1, f2, f3]);
+            targets.push(f0 * 0.5 + f1 - f2 * 0.3 + f3 * 0.8);
+        }
+        let dataset = TrainingDataset {
+            matrix: DatasetMatrix::new(n, feature_count, values).expect("matrix"),
+            targets,
+            sample_weights: None,
+            time_index: None,
+            group_id: None,
+            factor_exposures: None,
+        };
+        let binned = sample_binned_matrix_for_dataset(&dataset);
+        let groups = vec![vec![0u32, 1], vec![2, 3]];
+        let params = TrainParams {
+            max_depth: 4,
+            interaction_constraints: groups.clone(),
+            seed: 0,
+            deterministic: true,
+            ..TrainParams::default()
+        };
+
+        let summary = Trainer::new(params)
+            .unwrap()
+            .fit_iterations_with_summary(
+                &dataset,
+                &binned,
+                &MockBackend,
+                &SquaredErrorObjective,
+                IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
+                    .unwrap()
+                    .with_subsample_rates(1.0, 1.0)
+                    .unwrap(),
+            )
+            .expect("fit succeeds");
+        assert!(summary.rounds_completed > 0);
+
+        // Group stumps by tree_id then walk every path.
+        let mut by_tree: std::collections::HashMap<u32, std::collections::HashMap<u32, &TrainedStump>> =
+            std::collections::HashMap::new();
+        for stump in &summary.model.stumps {
+            let (tree_id, local_id) = decode_tree_node_id(stump.split.node_id);
+            by_tree.entry(tree_id).or_default().insert(local_id, stump);
+        }
+
+        fn feature_groups_of(feat: u32, groups: &[Vec<u32>]) -> Vec<usize> {
+            groups
+                .iter()
+                .enumerate()
+                .filter_map(|(gi, g)| if g.contains(&feat) { Some(gi) } else { None })
+                .collect()
+        }
+
+        fn walk(
+            nodes: &std::collections::HashMap<u32, &TrainedStump>,
+            local_id: u32,
+            mut active_groups: std::collections::BTreeSet<usize>,
+            groups: &[Vec<u32>],
+        ) {
+            let Some(stump) = nodes.get(&local_id) else {
+                return;
+            };
+            let feat_groups = feature_groups_of(stump.split.feature_index, groups);
+            if !feat_groups.is_empty() {
+                let feat_set: std::collections::BTreeSet<usize> =
+                    feat_groups.into_iter().collect();
+                if active_groups.is_empty() {
+                    active_groups = feat_set;
+                } else {
+                    let intersection: std::collections::BTreeSet<usize> =
+                        active_groups.intersection(&feat_set).copied().collect();
+                    assert!(
+                        !intersection.is_empty(),
+                        "tree-path violated interaction constraints at feature {} (prior active groups {:?}, feature groups {:?})",
+                        stump.split.feature_index,
+                        active_groups,
+                        feat_set,
+                    );
+                    active_groups = intersection;
+                }
+            }
+            walk(nodes, local_id * 2 + 1, active_groups.clone(), groups);
+            walk(nodes, local_id * 2 + 2, active_groups, groups);
+        }
+
+        for nodes in by_tree.values() {
+            walk(nodes, 0, std::collections::BTreeSet::new(), &groups);
         }
     }
 

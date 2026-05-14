@@ -61,6 +61,13 @@ Constraints
   unconstrained (0)
 - ``feature_weights: list[float] | dict[int, float] | None = None`` --
   per-feature importance weights influencing split selection
+- ``interaction_constraints: list[list[int]] | None = None`` --
+  LightGBM-compatible interaction constraints.  Each inner list is a group
+  of feature indices; any root-to-leaf path is restricted to splits on
+  features from a single allowed group.  Features outside every group are
+  unconstrained and may appear alongside any group.  Up to 64 groups per
+  fit; enforced in both level-wise and leaf-wise growth.  ``None``
+  disables the constraint (default).
 
 Reproducibility
 ---------------

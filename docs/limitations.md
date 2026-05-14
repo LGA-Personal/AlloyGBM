@@ -10,20 +10,16 @@ The `BackendOps` trait is designed for hardware abstraction, but only
 `CpuBackend` exists. GPU/accelerator support is architecturally planned but
 not implemented.
 
-### 2. No Interaction Constraints
-
-There is no way to constrain which features can interact within the same tree.
-
-### 3. No Dart / GOSS Boosting Modes
+### 2. No Dart / GOSS Boosting Modes
 
 Only standard gradient boosting is supported. Dart (dropout) and GOSS
 (gradient-based one-side sampling) modes are not available.
 
-### 4. No Multi-Label Ranking
+### 3. No Multi-Label Ranking
 
 `GBMRanker` supports single-label relevance only.
 
-### 5. MorphBoost Warm-Start Restarts EMA Cold
+### 4. MorphBoost Warm-Start Restarts EMA Cold
 
 MorphBoost's adaptive split criterion tracks a per-class exponential moving
 average over gradient statistics that shapes the gain function across
@@ -41,7 +37,7 @@ holds.
 Persisting the EMA snapshot inside the artifact is queued for a follow-up
 release.
 
-### 6. SHAP for Piecewise-Linear Leaves — Best-Effort Decomposition
+### 5. SHAP for Piecewise-Linear Leaves — Best-Effort Decomposition
 
 As of v0.7.1, `shap_values()` accepts `leaf_model="linear"` artifacts and
 returns an *interventional* decomposition: the path-based TreeSHAP / brute
@@ -90,8 +86,11 @@ The following were limitations in prior versions and have been addressed:
 - Multiclass warm-start unsupported (now: `warm_start=True` works for multiclass with round-offset continuity)
 - Neutralized warm-start unsupported (now: v0.7.1 — `init_model` / `warm_start=True`
   with `neutralization=*` is supported as long as the caller supplies the
-  same `factor_exposures` matrix used for the initial fit; see Limitation 5
+  same `factor_exposures` matrix used for the initial fit; see Limitation 4
   for the MorphBoost EMA caveat that still applies)
+- No interaction constraints (now: v0.7.1 — `interaction_constraints=[[...]]`
+  on every estimator, LightGBM-compatible semantics, up to 64 groups per
+  fit; enforced through both the level-wise and leaf-wise tree builders)
 - Multiclass prediction per-row allocation (now: zero-copy dense slice prediction)
 - Single fixed split criterion (now: opt-in MorphBoost adaptive criterion via
   `training_mode="morph"`, including EMA-driven gain shaping, depth/iteration

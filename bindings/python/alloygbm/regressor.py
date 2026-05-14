@@ -267,6 +267,7 @@ class GBMRegressor(_GBMRegressorBase):
         categorical_time_aware: bool = False,
         monotone_constraints: list[int] | dict[int, int] | None = None,
         feature_weights: list[float] | dict[int, float] | None = None,
+        interaction_constraints: list[list[int]] | None = None,
         max_leaves: int | None = None,
         tree_growth: str = "level",
         warm_start: bool = False,
@@ -378,6 +379,36 @@ class GBMRegressor(_GBMRegressorBase):
                     raise ValueError(
                         "feature_weights values must be finite and >= 0"
                     )
+        if interaction_constraints is not None:
+            if not isinstance(interaction_constraints, (list, tuple)):
+                raise TypeError(
+                    "interaction_constraints must be a sequence of feature-index groups"
+                )
+            if len(interaction_constraints) > 64:
+                raise ValueError(
+                    "interaction_constraints supports at most 64 groups "
+                    f"(got {len(interaction_constraints)})"
+                )
+            for gi, group in enumerate(interaction_constraints):
+                if not isinstance(group, (list, tuple)) or len(group) == 0:
+                    raise ValueError(
+                        f"interaction_constraints group {gi} must be a non-empty "
+                        "sequence of feature indices"
+                    )
+                seen: set[int] = set()
+                for f in group:
+                    fi = int(f)
+                    if fi < 0:
+                        raise ValueError(
+                            f"interaction_constraints group {gi} contains negative "
+                            f"feature index {fi}"
+                        )
+                    if fi in seen:
+                        raise ValueError(
+                            f"interaction_constraints group {gi} contains duplicate "
+                            f"feature index {fi}"
+                        )
+                    seen.add(fi)
         if max_leaves is not None:
             if int(max_leaves) < 2:
                 raise ValueError(
@@ -514,6 +545,11 @@ class GBMRegressor(_GBMRegressorBase):
         self.feature_weights = (
             feature_weights if feature_weights is not None else None
         )
+        self.interaction_constraints = (
+            [list(map(int, g)) for g in interaction_constraints]
+            if interaction_constraints is not None
+            else None
+        )
         self.max_leaves = int(max_leaves) if max_leaves is not None else None
         self.tree_growth = str(tree_growth)
         self.warm_start = bool(warm_start)
@@ -586,6 +622,7 @@ class GBMRegressor(_GBMRegressorBase):
             f"categorical_time_aware={self.categorical_time_aware}, "
             f"monotone_constraints={self.monotone_constraints}, "
             f"feature_weights={self.feature_weights}, "
+            f"interaction_constraints={self.interaction_constraints}, "
             f"max_leaves={self.max_leaves}, "
             f"tree_growth='{self.tree_growth}', "
             f"warm_start={self.warm_start}, "
@@ -639,6 +676,7 @@ class GBMRegressor(_GBMRegressorBase):
             "categorical_time_aware": self.categorical_time_aware,
             "monotone_constraints": self.monotone_constraints,
             "feature_weights": self.feature_weights,
+            "interaction_constraints": self.interaction_constraints,
             "max_leaves": self.max_leaves,
             "tree_growth": self.tree_growth,
             "warm_start": self.warm_start,
@@ -690,6 +728,7 @@ class GBMRegressor(_GBMRegressorBase):
             "categorical_time_aware",
             "monotone_constraints",
             "feature_weights",
+            "interaction_constraints",
             "max_leaves",
             "tree_growth",
             "warm_start",
@@ -959,6 +998,46 @@ class GBMRegressor(_GBMRegressorBase):
                         )
             self.feature_weights = fw
 
+        if "interaction_constraints" in params:
+            ic = params["interaction_constraints"]
+            if ic is None:
+                self.interaction_constraints = None
+            else:
+                if not isinstance(ic, (list, tuple)):
+                    raise TypeError(
+                        "interaction_constraints must be a sequence of feature-index groups"
+                    )
+                if len(ic) > 64:
+                    raise ValueError(
+                        "interaction_constraints supports at most 64 groups "
+                        f"(got {len(ic)})"
+                    )
+                normalized: list[list[int]] = []
+                for gi, group in enumerate(ic):
+                    if not isinstance(group, (list, tuple)) or len(group) == 0:
+                        raise ValueError(
+                            f"interaction_constraints group {gi} must be a non-empty "
+                            "sequence of feature indices"
+                        )
+                    seen: set[int] = set()
+                    canonical: list[int] = []
+                    for f in group:
+                        fi = int(f)
+                        if fi < 0:
+                            raise ValueError(
+                                f"interaction_constraints group {gi} contains negative "
+                                f"feature index {fi}"
+                            )
+                        if fi in seen:
+                            raise ValueError(
+                                f"interaction_constraints group {gi} contains duplicate "
+                                f"feature index {fi}"
+                            )
+                        seen.add(fi)
+                        canonical.append(fi)
+                    normalized.append(canonical)
+                self.interaction_constraints = normalized
+
         if "max_leaves" in params:
             if params["max_leaves"] is None:
                 self.max_leaves = None
@@ -1167,6 +1246,17 @@ class GBMRegressor(_GBMRegressorBase):
                     dense[int(idx)] = float(val)
             return dense
         return [float(w) for w in self.feature_weights]
+
+    def _resolve_interaction_constraints(self, feature_count: int) -> list[list[int]]:
+        """Resolve ``interaction_constraints`` to a ``list[list[int]]`` for the
+        native bridge.  Any feature index that exceeds ``feature_count`` is
+        skipped (defensive — input is already validated).  Empty list when
+        unset.
+        """
+        del feature_count  # bridge validates against the dataset shape itself
+        if self.interaction_constraints is None:
+            return []
+        return [[int(f) for f in group] for group in self.interaction_constraints]
 
     def _objective_name(self) -> str:
         """Return the objective function name passed to the native training bridge."""
@@ -1702,6 +1792,7 @@ class GBMRegressor(_GBMRegressorBase):
                     objective=self._objective_name(),
                     monotone_constraints=self._resolve_monotone_constraints(feature_count),
                     feature_weights=self._resolve_feature_weights(feature_count),
+                    interaction_constraints=self._resolve_interaction_constraints(feature_count),
                     max_leaves=self.max_leaves,
                     tree_growth=self.tree_growth,
                     categorical_feature_indices=effective_categorical_indices if has_categorical else None,
@@ -1815,6 +1906,7 @@ class GBMRegressor(_GBMRegressorBase):
                 objective=self._objective_name(),
                 monotone_constraints=self._resolve_monotone_constraints(feature_count),
                 feature_weights=self._resolve_feature_weights(feature_count),
+                interaction_constraints=self._resolve_interaction_constraints(feature_count),
                 max_leaves=self.max_leaves,
                 tree_growth=self.tree_growth,
                 categorical_feature_indices=effective_categorical_indices if has_categorical else None,
@@ -1884,6 +1976,7 @@ class GBMRegressor(_GBMRegressorBase):
                 objective=self._objective_name(),
                 monotone_constraints=self._resolve_monotone_constraints(feature_count),
                 feature_weights=self._resolve_feature_weights(feature_count),
+                interaction_constraints=self._resolve_interaction_constraints(feature_count),
                 max_leaves=self.max_leaves,
                 tree_growth=self.tree_growth,
                 categorical_feature_indices=effective_categorical_indices if has_categorical else None,
