@@ -4,6 +4,19 @@ on:
   pull_request:
   push:
 
+# When a branch has both a `push` and a `pull_request` event open against it
+# (typical during PR development), GitHub schedules two parallel CI runs for
+# the same commit.  On macOS those concurrent runs occasionally collide on
+# `~/.cargo/bin/cargo`, leaving one of them with a stale `rustup-init` shim
+# that exits immediately on `cargo check`.  Grouping by ref so only one run
+# is active per branch (and cancelling older ones) eliminates the race and
+# halves CI minutes on this repo for free.  The group never touches `main`
+# pushes — `cancel-in-progress` is false there so release-tag pipelines and
+# the main-branch badge stay deterministic.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   rust:
     name: Rust (${{ matrix.os }})
