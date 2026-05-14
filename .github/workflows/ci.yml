@@ -21,6 +21,15 @@ jobs:
           toolchain: 1.92.0
           components: rustfmt, clippy
 
+      # Belt-and-braces: on macOS GitHub Actions runners `~/.cargo/bin/cargo`
+      # can occasionally resolve to the bootstrapping `rustup-init` shim
+      # after the toolchain action runs, which makes `cargo check` exit
+      # immediately with "unexpected argument 'check' found".  Explicitly
+      # selecting the installed toolchain replaces the shim with the real
+      # cargo/rustc symlinks before any subsequent step runs.
+      - name: Select toolchain
+        run: rustup default 1.92.0
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Cargo check
@@ -59,6 +68,9 @@ jobs:
         with:
           toolchain: 1.92.0
           components: rustfmt, clippy
+
+      - name: Select toolchain
+        run: rustup default 1.92.0
 
       - name: Install build tooling
         run: python -m pip install --upgrade pip maturin
