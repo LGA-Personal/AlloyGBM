@@ -207,6 +207,35 @@ except ImportError:
     _SKLEARN_AVAILABLE = False
 
 
+def _diagnostics_to_dicts(diagnostics):
+    """Convert a list of native ``IterationDiagnostics`` objects into a list
+    of plain Python dicts.
+
+    The dict keys mirror the Rust struct field names one-to-one. Returns
+    ``None`` when ``diagnostics`` is missing/empty so unfitted models surface
+    ``diagnostics_per_round_ is None`` cleanly.
+    """
+    if not diagnostics:
+        return None
+
+    def _opt(value):
+        return float(value) if value is not None else None
+
+    return [
+        {
+            "gradient_l2_norm": float(d.gradient_l2_norm),
+            "gradient_variance": float(d.gradient_variance),
+            "hessian_l2_norm": float(d.hessian_l2_norm),
+            "original_gradient_l2_norm": _opt(d.original_gradient_l2_norm),
+            "projected_gradient_l2_norm": _opt(d.projected_gradient_l2_norm),
+            "neutralization_effectiveness": _opt(d.neutralization_effectiveness),
+            "n_active_rows": int(d.n_active_rows),
+            "n_active_features": int(d.n_active_features),
+        }
+        for d in diagnostics
+    ]
+
+
 class GBMRegressor(_GBMRegressorBase):
     """Gradient Boosted Decision Tree regressor with sklearn-compatible API."""
 
@@ -238,6 +267,7 @@ class GBMRegressor(_GBMRegressorBase):
         categorical_time_aware: bool = False,
         monotone_constraints: list[int] | dict[int, int] | None = None,
         feature_weights: list[float] | dict[int, float] | None = None,
+        interaction_constraints: list[list[int]] | None = None,
         max_leaves: int | None = None,
         tree_growth: str = "level",
         warm_start: bool = False,
@@ -349,6 +379,36 @@ class GBMRegressor(_GBMRegressorBase):
                     raise ValueError(
                         "feature_weights values must be finite and >= 0"
                     )
+        if interaction_constraints is not None:
+            if not isinstance(interaction_constraints, (list, tuple)):
+                raise TypeError(
+                    "interaction_constraints must be a sequence of feature-index groups"
+                )
+            if len(interaction_constraints) > 64:
+                raise ValueError(
+                    "interaction_constraints supports at most 64 groups "
+                    f"(got {len(interaction_constraints)})"
+                )
+            for gi, group in enumerate(interaction_constraints):
+                if not isinstance(group, (list, tuple)) or len(group) == 0:
+                    raise ValueError(
+                        f"interaction_constraints group {gi} must be a non-empty "
+                        "sequence of feature indices"
+                    )
+                seen: set[int] = set()
+                for f in group:
+                    fi = int(f)
+                    if fi < 0:
+                        raise ValueError(
+                            f"interaction_constraints group {gi} contains negative "
+                            f"feature index {fi}"
+                        )
+                    if fi in seen:
+                        raise ValueError(
+                            f"interaction_constraints group {gi} contains duplicate "
+                            f"feature index {fi}"
+                        )
+                    seen.add(fi)
         if max_leaves is not None:
             if int(max_leaves) < 2:
                 raise ValueError(
@@ -416,7 +476,7 @@ class GBMRegressor(_GBMRegressorBase):
             )
         if str(leaf_solver) == "dro" and str(leaf_model) != "constant":
             raise ValueError(
-                "leaf_solver='dro' requires leaf_model='constant' in v0.7.0"
+                "leaf_solver='dro' requires leaf_model='constant' in v0.7.1"
             )
         if str(neutralization) not in (
             "none",
@@ -485,6 +545,11 @@ class GBMRegressor(_GBMRegressorBase):
         self.feature_weights = (
             feature_weights if feature_weights is not None else None
         )
+        self.interaction_constraints = (
+            [list(map(int, g)) for g in interaction_constraints]
+            if interaction_constraints is not None
+            else None
+        )
         self.max_leaves = int(max_leaves) if max_leaves is not None else None
         self.tree_growth = str(tree_growth)
         self.warm_start = bool(warm_start)
@@ -527,6 +592,7 @@ class GBMRegressor(_GBMRegressorBase):
         self.n_estimators_: int | None = None
         self.evals_result_: dict[str, dict[str, list[float]]] | None = None
         self.fit_timing_: dict[str, float] | None = None
+        self.diagnostics_per_round_: list[dict] | None = None
 
     def __repr__(self) -> str:
         return (
@@ -556,6 +622,7 @@ class GBMRegressor(_GBMRegressorBase):
             f"categorical_time_aware={self.categorical_time_aware}, "
             f"monotone_constraints={self.monotone_constraints}, "
             f"feature_weights={self.feature_weights}, "
+            f"interaction_constraints={self.interaction_constraints}, "
             f"max_leaves={self.max_leaves}, "
             f"tree_growth='{self.tree_growth}', "
             f"warm_start={self.warm_start}, "
@@ -609,6 +676,7 @@ class GBMRegressor(_GBMRegressorBase):
             "categorical_time_aware": self.categorical_time_aware,
             "monotone_constraints": self.monotone_constraints,
             "feature_weights": self.feature_weights,
+            "interaction_constraints": self.interaction_constraints,
             "max_leaves": self.max_leaves,
             "tree_growth": self.tree_growth,
             "warm_start": self.warm_start,
@@ -660,6 +728,7 @@ class GBMRegressor(_GBMRegressorBase):
             "categorical_time_aware",
             "monotone_constraints",
             "feature_weights",
+            "interaction_constraints",
             "max_leaves",
             "tree_growth",
             "warm_start",
@@ -929,6 +998,46 @@ class GBMRegressor(_GBMRegressorBase):
                         )
             self.feature_weights = fw
 
+        if "interaction_constraints" in params:
+            ic = params["interaction_constraints"]
+            if ic is None:
+                self.interaction_constraints = None
+            else:
+                if not isinstance(ic, (list, tuple)):
+                    raise TypeError(
+                        "interaction_constraints must be a sequence of feature-index groups"
+                    )
+                if len(ic) > 64:
+                    raise ValueError(
+                        "interaction_constraints supports at most 64 groups "
+                        f"(got {len(ic)})"
+                    )
+                normalized: list[list[int]] = []
+                for gi, group in enumerate(ic):
+                    if not isinstance(group, (list, tuple)) or len(group) == 0:
+                        raise ValueError(
+                            f"interaction_constraints group {gi} must be a non-empty "
+                            "sequence of feature indices"
+                        )
+                    seen: set[int] = set()
+                    canonical: list[int] = []
+                    for f in group:
+                        fi = int(f)
+                        if fi < 0:
+                            raise ValueError(
+                                f"interaction_constraints group {gi} contains negative "
+                                f"feature index {fi}"
+                            )
+                        if fi in seen:
+                            raise ValueError(
+                                f"interaction_constraints group {gi} contains duplicate "
+                                f"feature index {fi}"
+                            )
+                        seen.add(fi)
+                        canonical.append(fi)
+                    normalized.append(canonical)
+                self.interaction_constraints = normalized
+
         if "max_leaves" in params:
             if params["max_leaves"] is None:
                 self.max_leaves = None
@@ -1078,7 +1187,7 @@ class GBMRegressor(_GBMRegressorBase):
 
         if self.leaf_solver == "dro" and self.leaf_model != "constant":
             raise ValueError(
-                "leaf_solver='dro' requires leaf_model='constant' in v0.7.0"
+                "leaf_solver='dro' requires leaf_model='constant' in v0.7.1"
             )
         if self.neutralization != "split_penalty" and self.factor_penalty != 0.0:
             raise ValueError(
@@ -1138,6 +1247,17 @@ class GBMRegressor(_GBMRegressorBase):
             return dense
         return [float(w) for w in self.feature_weights]
 
+    def _resolve_interaction_constraints(self, feature_count: int) -> list[list[int]]:
+        """Resolve ``interaction_constraints`` to a ``list[list[int]]`` for the
+        native bridge.  Any feature index that exceeds ``feature_count`` is
+        skipped (defensive — input is already validated).  Empty list when
+        unset.
+        """
+        del feature_count  # bridge validates against the dataset shape itself
+        if self.interaction_constraints is None:
+            return []
+        return [[int(f) for f in group] for group in self.interaction_constraints]
+
     def _objective_name(self) -> str:
         """Return the objective function name passed to the native training bridge."""
         if self.objective is not None:
@@ -1183,11 +1303,75 @@ class GBMRegressor(_GBMRegressorBase):
     @staticmethod
     def _raise_if_neutralized_warm_start_contract(
         fit_neutralization: str,
+        factor_exposures: object,
     ) -> None:
-        if fit_neutralization != "none":
+        """Validate the warm-start contract for neutralized models.
+
+        As of v0.7.1, warm-starting a neutralized model is supported, but the
+        caller must supply the same ``factor_exposures`` matrix used for the
+        initial fit so the projection has a consistent column space.  We
+        cannot persist the exposures matrix on the artifact (would balloon
+        the model size and surface a sensitive dataset), so the contract is
+        positional — passing a different matrix changes which directions are
+        projected away and breaks numerical equivalence to fresh training.
+        """
+        if fit_neutralization == "none":
+            return
+        if factor_exposures is None:
             raise ValueError(
-                "neutralized warm-start training is not supported because model "
-                "artifacts do not persist neutralization metadata yet"
+                "warm-start training of a neutralized model requires "
+                "factor_exposures to be supplied; pass the same matrix used "
+                "for the initial fit"
+            )
+
+    def _raise_if_neutralization_settings_mismatch(
+        self,
+        init_neutralization: str,
+        init_lambda: float | None,
+        init_penalty: float | None,
+        *,
+        origin: str,
+    ) -> None:
+        """Reject warm-start when the init model's neutralization mode (or
+        its ``factor_neutralization_lambda`` / ``factor_penalty``) does not
+        match the current estimator.
+
+        Resuming training under a different mode silently changes the
+        boosting path (e.g. ``per_round_gradient`` projects gradients each
+        round while ``pre_target`` residualizes the targets once), so the
+        resumed model is not equivalent to a fresh ``N+M``-round fit under
+        either configuration.  We therefore require an exact match for
+        ``neutralization``, ``factor_neutralization_lambda``, and
+        ``factor_penalty``.
+
+        ``origin`` is ``"init_model"`` or ``"warm_start"`` and is used to
+        produce a user-facing error message that names the offending
+        source.
+        """
+        if init_neutralization != self.neutralization:
+            raise ValueError(
+                f"{origin} neutralization '{init_neutralization}' does not "
+                f"match current estimator neutralization '{self.neutralization}'; "
+                "warm-start requires the same mode so resumed training stays "
+                "equivalent to a fresh fit"
+            )
+        if init_neutralization == "none":
+            return
+        # Lambda comparison — None matches None; otherwise require numerical
+        # equality (these are user-supplied floats, so an exact match is the
+        # correct contract).
+        if init_lambda != self.factor_neutralization_lambda:
+            raise ValueError(
+                f"{origin} factor_neutralization_lambda={init_lambda!r} does not "
+                f"match current estimator factor_neutralization_lambda="
+                f"{self.factor_neutralization_lambda!r}"
+            )
+        # split_penalty only consumes factor_penalty; other modes ignore it,
+        # so the mismatch only matters when both sides are split_penalty.
+        if init_neutralization == "split_penalty" and init_penalty != self.factor_penalty:
+            raise ValueError(
+                f"{origin} factor_penalty={init_penalty!r} does not match "
+                f"current estimator factor_penalty={self.factor_penalty!r}"
             )
 
     @staticmethod
@@ -1286,13 +1470,23 @@ class GBMRegressor(_GBMRegressorBase):
         if init_model is not None:
             if not hasattr(init_model, "_artifact_bytes") or init_model._artifact_bytes is None:
                 raise ValueError("init_model must be a fitted GBMRegressor with artifact bytes")
-            init_neutralization, _, _ = init_model._fitted_neutralization_contract()
-            self._raise_if_neutralized_warm_start_contract(init_neutralization)
-            if self.neutralization == "none" and init_neutralization != self.neutralization:
-                raise ValueError(
-                    "init_model neutralization settings do not match current estimator "
-                    "neutralization settings"
-                )
+            init_neutralization, init_lambda, init_penalty = (
+                init_model._fitted_neutralization_contract()
+            )
+            # Settings-mismatch fires first so dropping/changing the
+            # neutralization mode produces a clear "does not match" error
+            # instead of a misleading "factor_exposures required" one (the
+            # latter would otherwise win when the user passes None on a
+            # mode-switch to "none").
+            self._raise_if_neutralization_settings_mismatch(
+                init_neutralization,
+                init_lambda,
+                init_penalty,
+                origin="init_model",
+            )
+            self._raise_if_neutralized_warm_start_contract(
+                init_neutralization, factor_exposures
+            )
             if hasattr(init_model, "_objective_name"):
                 init_objective = init_model._objective_name()
                 current_objective = self._objective_name()
@@ -1303,19 +1497,19 @@ class GBMRegressor(_GBMRegressorBase):
                     )
             init_artifact_bytes = init_model._artifact_bytes
         elif self.warm_start and self._is_fitted and self._artifact_bytes is not None:
-            fit_neutralization, _, _ = self._fitted_neutralization_contract()
-            self._raise_if_neutralized_warm_start_contract(fit_neutralization)
-            if fit_neutralization != self.neutralization:
-                raise ValueError(
-                    "warm_start neutralization settings do not match current estimator "
-                    "neutralization settings"
-                )
-            init_artifact_bytes = self._artifact_bytes
-        if init_artifact_bytes is not None and self.neutralization != "none":
-            raise ValueError(
-                "neutralized warm-start training is not supported because model artifacts "
-                "do not persist neutralization metadata yet"
+            fit_neutralization, fit_lambda, fit_penalty = (
+                self._fitted_neutralization_contract()
             )
+            self._raise_if_neutralization_settings_mismatch(
+                fit_neutralization,
+                fit_lambda,
+                fit_penalty,
+                origin="warm_start",
+            )
+            self._raise_if_neutralized_warm_start_contract(
+                fit_neutralization, factor_exposures
+            )
+            init_artifact_bytes = self._artifact_bytes
 
         # ── Normalize categorical configuration to plural form ──────────
         # effective_categorical_indices: list of column indices (or None if no categoricals)
@@ -1659,6 +1853,7 @@ class GBMRegressor(_GBMRegressorBase):
                     objective=self._objective_name(),
                     monotone_constraints=self._resolve_monotone_constraints(feature_count),
                     feature_weights=self._resolve_feature_weights(feature_count),
+                    interaction_constraints=self._resolve_interaction_constraints(feature_count),
                     max_leaves=self.max_leaves,
                     tree_growth=self.tree_growth,
                     categorical_feature_indices=effective_categorical_indices if has_categorical else None,
@@ -1772,6 +1967,7 @@ class GBMRegressor(_GBMRegressorBase):
                 objective=self._objective_name(),
                 monotone_constraints=self._resolve_monotone_constraints(feature_count),
                 feature_weights=self._resolve_feature_weights(feature_count),
+                interaction_constraints=self._resolve_interaction_constraints(feature_count),
                 max_leaves=self.max_leaves,
                 tree_growth=self.tree_growth,
                 categorical_feature_indices=effective_categorical_indices if has_categorical else None,
@@ -1841,6 +2037,7 @@ class GBMRegressor(_GBMRegressorBase):
                 objective=self._objective_name(),
                 monotone_constraints=self._resolve_monotone_constraints(feature_count),
                 feature_weights=self._resolve_feature_weights(feature_count),
+                interaction_constraints=self._resolve_interaction_constraints(feature_count),
                 max_leaves=self.max_leaves,
                 tree_growth=self.tree_growth,
                 categorical_feature_indices=effective_categorical_indices if has_categorical else None,
@@ -1898,6 +2095,9 @@ class GBMRegressor(_GBMRegressorBase):
         self.stop_reason_ = (
             str(summary.stop_reason) if summary.stop_reason is not None else None
         )
+        self.diagnostics_per_round_ = _diagnostics_to_dicts(
+            getattr(summary, "diagnostics_per_round", None)
+        )
         self.evals_result_ = self._build_evals_result(summary)
         total_fit_seconds = time.perf_counter() - fit_start
         self.fit_timing_ = {
@@ -1943,6 +2143,9 @@ class GBMRegressor(_GBMRegressorBase):
         self.rounds_completed_ = int(summary.rounds_completed)
         self.stop_reason_ = (
             str(summary.stop_reason) if summary.stop_reason is not None else None
+        )
+        self.diagnostics_per_round_ = _diagnostics_to_dicts(
+            getattr(summary, "diagnostics_per_round", None)
         )
         self.evals_result_ = self._build_evals_result(summary)
         total_fit_seconds = time.perf_counter() - self._fit_start_time
@@ -2513,7 +2716,20 @@ class GBMRegressor(_GBMRegressorBase):
     def shap_values(
         self, X: object, *, include_expected_value: bool = False
     ) -> list[list[float]] | tuple[float, list[list[float]]]:
-        """Return SHAP values for the provided rows using the fitted artifact."""
+        """Return SHAP values for the provided rows using the fitted artifact.
+
+        For ``leaf_model="linear"`` (piecewise-linear) artifacts this is a
+        best-effort *interventional* decomposition: the path-based
+        attribution acts on each leaf's "constant part"
+        ``intercept + Σ wj·μj_global`` and per-feature deviations
+        ``wj · (xj − μj_global)`` are credited directly to each regressor.
+        ``Σ shap_values + expected_value == predict(x)`` holds exactly when
+        SHAP's internal path-walk matches the predictor's; on continuous
+        features it can drift slightly because SHAP currently compares raw
+        values against stored bin-index thresholds rather than the
+        predictor's converted float thresholds.  Tightening that alignment
+        is tracked for a follow-up release.
+        """
         if not self._is_fitted:
             raise RuntimeError("GBMRegressor must be fit before shap_values")
         if self._artifact_bytes is None:
@@ -3581,6 +3797,7 @@ class GBMRegressor(_GBMRegressorBase):
         self.n_estimators_ = None
         self.rounds_completed_ = None
         self.stop_reason_ = None
+        self.diagnostics_per_round_ = None
         self.evals_result_ = None
         self.fit_timing_ = None
         self._fit_neutralization = None

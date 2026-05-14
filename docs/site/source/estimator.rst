@@ -61,6 +61,13 @@ Constraints
   unconstrained (0)
 - ``feature_weights: list[float] | dict[int, float] | None = None`` --
   per-feature importance weights influencing split selection
+- ``interaction_constraints: list[list[int]] | None = None`` --
+  LightGBM-compatible interaction constraints.  Each inner list is a group
+  of feature indices; any root-to-leaf path is restricted to splits on
+  features from a single allowed group.  Features outside every group are
+  unconstrained and may appear alongside any group.  Up to 64 groups per
+  fit; enforced in both level-wise and leaf-wise growth.  ``None``
+  disables the constraint (default).
 
 Reproducibility
 ---------------
@@ -100,7 +107,7 @@ DRO leaf solver
   penalizes weak leaf signal by within-leaf gradient dispersion.
 - ``dro_radius: float = 0.05`` -- non-negative penalty scale. ``0.0`` preserves
   standard-leaf predictions while recording DRO metadata.
-- ``dro_metric: str = "wasserstein"`` -- the only accepted v0.7.0 value. It
+- ``dro_metric: str = "wasserstein"`` -- the only accepted v0.7.1 value. It
   denotes a Wasserstein-inspired closed-form robust counterpart over leaf
   gradient uncertainty.
 
@@ -108,7 +115,7 @@ This is not a full Wasserstein optimizer over raw feature/target
 distributions. Inference speed is unchanged because robust scalar leaf values
 are stored directly in the artifact. ``leaf_solver="dro"`` works on all three
 estimators, composes with ``training_mode="morph"``, and requires
-``leaf_model="constant"`` in v0.7.0.
+``leaf_model="constant"`` in v0.7.1.
 
 Factor-neutral boosting
 -----------------------
@@ -224,9 +231,17 @@ This is a training-time regularization tool. It does not guarantee
 prediction-time zero exposure unless predictions are neutralized against
 evaluation-time factors outside the model.
 
-Exposure matrices are not persisted in the estimator or artifact. Because the
-artifact cannot prove factor compatibility yet, neutralized warm-start and
-``init_model`` continuation are rejected in this release.
+Exposure matrices are not persisted in the estimator or artifact (they
+would balloon the model size and surface sensitive data). As of v0.7.1
+neutralized warm-start and ``init_model`` continuation are supported: the
+caller must supply the same ``factor_exposures`` matrix used for the
+initial fit so the projection has the same column space. Omitting
+``factor_exposures`` on a resumed fit raises a contract error.
+
+``pre_target`` neutralization is idempotent under repeated residualization
+against the same exposures, so warm-start continuation residualizes the
+original targets again on the resumed fit and trains on the same
+target stream as a fresh ``N + M``-round fit.
 
 Piecewise-linear leaves
 -----------------------
@@ -238,7 +253,7 @@ Piecewise-linear leaves
   - ``"linear"`` -- each leaf stores a small linear model
     ``f_s(x) = b_s + Σ α_j x_j`` (up to 8 regressors per leaf, inherited from
     the split path's feature indices; the per-leaf cap is internal and not
-    user-tunable in v0.7.0). Optimal weights are solved in closed form via the
+    user-tunable in v0.7.1). Optimal weights are solved in closed form via the
     ridge regression ``α* = -(XᵀHX + λI)⁻¹ Xᵀg``, regularised by ``lambda_l2``.
 
 Empirically, ``"linear"`` converges in fewer rounds on data with linear
@@ -252,9 +267,33 @@ Limitations:
 - Native-bitset categorical splits (``max_cat_threshold > 0``) fall back to
   constant leaves at the categorical split node; descendant leaves below the
   split use linear leaves on remaining numeric regressors.
-- SHAP (``shap_values``, ``feature_importances``) currently raises an error for
-  ``leaf_model="linear"`` artifacts. Use ``"constant"`` if you need SHAP.
+- SHAP (``shap_values``, ``feature_importances``) supports ``leaf_model="linear"``
+  as of v0.7.1, returning a best-effort interventional decomposition. Exact
+  additivity holds for path-walk-aligned artifacts; on continuous-feature
+  models the reconstruction can drift slightly because SHAP's internal path
+  walker still compares against bin-index thresholds. See
+  :doc:`explanations` and ``docs/limitations.md`` for details.
 - ``leaf_model="linear"`` composes with ``training_mode="morph"``.
+
+Multi-label ranking
+-------------------
+
+``MultiLabelGBMRanker`` is a unified multi-output ranking estimator: ``y``
+has shape ``(n_rows, n_labels)`` and ``predict`` returns scores with the
+same column layout.  As of v0.7.1 the wrapper trains one independent
+:class:`GBMRanker` per label using a shared ``group`` (and optional shared
+``factor_exposures``) so every per-label fit observes the same query
+structure.  Each per-label ranker independently picks up every existing
+:class:`GBMRanker` feature (warm-start, neutralization, MorphBoost, PL
+leaves, DRO, interaction constraints, custom eval metrics).
+
+``ranking_objective`` may be a single string (applied to every label) or
+a list of length ``n_labels`` for heterogeneous objectives.  ``save_model``
+serialises every per-label ranker into a single ``.mlrk`` bundle via
+``pickle.HIGHEST_PROTOCOL``.
+
+Joint shared-tree multi-label boosting is a v0.7.2 follow-up; see
+``docs/limitations.md`` for the upgrade-path caveat.
 
 MorphBoost (Adaptive Split Criterion)
 -------------------------------------
@@ -319,7 +358,16 @@ After fitting, the estimator may expose:
 - ``best_iteration_``
 - ``best_score_``
 - ``n_estimators_``
+- ``rounds_completed_``
+- ``stop_reason_``
 - ``evals_result_`` -- shaped like ``{"train": {"rmse": [...]}, "validation": {"rmse": [...]}}``
+- ``diagnostics_per_round_`` -- list of per-round dicts containing
+  ``gradient_l2_norm``, ``gradient_variance``, ``hessian_l2_norm``,
+  ``original_gradient_l2_norm``, ``projected_gradient_l2_norm``,
+  ``neutralization_effectiveness``, ``n_active_rows``, ``n_active_features``.
+  The three projection-related entries are ``None`` unless factor
+  neutralization (``per_round_gradient`` or ``split_penalty``) is configured;
+  ``pre_target`` mode never projects per round and therefore omits them.
 - ``fit_timing_``
 - ``feature_names_`` -- captured from training data or auto-generated
 

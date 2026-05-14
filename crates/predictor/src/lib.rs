@@ -1403,6 +1403,7 @@ mod tests {
             min_split_gain: 0.0,
             monotone_constraints: Vec::new(),
             feature_weights: Vec::new(),
+            interaction_constraints: Vec::new(),
             max_leaves: None,
             tree_growth: TreeGrowth::Level,
             morph_config: None,
@@ -1844,6 +1845,7 @@ mod tests {
             native_categorical_feature_indices: vec![0],
             morph_metadata: None,
             dro_metadata: None,
+            feature_baseline: None,
         };
         model.to_artifact_bytes().expect("serialize should succeed")
     }
@@ -1956,6 +1958,7 @@ mod tests {
             native_categorical_feature_indices: vec![0],
             morph_metadata: None,
             dro_metadata: None,
+            feature_baseline: None,
         };
         let artifact = model.to_artifact_bytes().expect("serialize should succeed");
         let predictor = Predictor::from_artifact_bytes(&artifact).unwrap();

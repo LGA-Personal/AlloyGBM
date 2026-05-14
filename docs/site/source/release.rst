@@ -1,7 +1,65 @@
 Release and platform policy
 ===========================
 
-AlloyGBM ``0.7.0`` release notes and platform policy.
+AlloyGBM ``0.7.1`` release notes and platform policy.
+
+What's new in 0.7.1
+-------------------
+
+**SHAP for piecewise-linear leaves:**
+
+- ``shap_values()`` now accepts ``leaf_model="linear"`` artifacts and
+  returns an interventional decomposition: the path-based TreeSHAP /
+  brute-force machinery attributes each leaf's "constant part"
+  (``intercept + Σ wⱼ·μⱼ_global``) while per-leaf row deviations
+  ``wⱼ · (xⱼ − μⱼ_global)`` are credited directly to each regressor.
+  Global feature means are persisted in a new ``FeatureBaseline``
+  artifact section so SHAP is self-contained at explain time.
+
+**Per-round training diagnostics:**
+
+- Every estimator exposes ``diagnostics_per_round_`` — a list of dicts
+  containing ``gradient_l2_norm``, ``gradient_variance``,
+  ``hessian_l2_norm``, sampling counts, and (when factor neutralization
+  is active) ``neutralization_effectiveness`` ``= 1 − ‖projₘ‖ / ‖origₘ‖``.
+
+**Neutralized warm-start:**
+
+- ``init_model`` / ``warm_start=True`` with ``neutralization=*`` is
+  supported across ``pre_target``, ``per_round_gradient``, and
+  ``split_penalty`` provided the caller supplies the same
+  ``factor_exposures`` matrix used for the initial fit. Mode,
+  ``factor_neutralization_lambda``, and (for ``split_penalty``)
+  ``factor_penalty`` must match; mismatches raise a clear "does not
+  match" error.
+
+**Interaction constraints:**
+
+- LightGBM-compatible ``interaction_constraints=[[…]]`` on every
+  estimator. Each group is a set of feature indices; any root-to-leaf
+  path is restricted to splits on features from a single still-active
+  group. Up to 64 groups per fit; enforced through both the level-wise
+  and leaf-wise tree builders.
+
+**Multi-label ranking:**
+
+- New :class:`~alloygbm.MultiLabelGBMRanker` exposes a unified
+  multi-output ranking API. ``y`` is shaped ``(n_rows, n_labels)`` and
+  ``predict`` returns the same shape. Trains one independent
+  :class:`~alloygbm.GBMRanker` per label sharing ``group`` /
+  ``factor_exposures`` / kwargs, supports per-label
+  ``ranking_objective`` lists, and slices ``eval_set`` y-columns per
+  label so early stopping and custom eval metrics work end-to-end.
+
+**Limitations documented for the next release:**
+
+- SHAP path-walker still compares feature values against bin-index
+  thresholds; strict additivity is relaxed for PL-leaf artifacts.
+  Tightening this is queued for v0.7.2.
+- MorphBoost warm-start does not restore the EMA snapshot from the
+  artifact, so resumed training starts EMA cold.
+- ``MultiLabelGBMRanker`` trains K independent per-label rankers.
+  Joint shared-tree multi-label boosting is queued for v0.7.2.
 
 What's new in 0.7.0
 -------------------
@@ -22,7 +80,8 @@ What's new in 0.7.0
   ``leaf_solver="dro"`` and ``training_mode="morph"``, and rejects
   ``leaf_model="linear"`` in 0.7.0.
 - Neutralized ``warm_start`` and ``init_model`` continuation are rejected in
-  0.7.0 because artifacts do not yet persist factor compatibility metadata.
+  0.7.0 — this restriction was lifted in v0.7.1 with the same-exposures
+  contract documented above.
 
 **Benchmarks:**
 
@@ -254,7 +313,7 @@ series:
 Validated release surface
 -------------------------
 
-For ``0.7.0``, the intended release surface is:
+For ``0.7.1``, the intended release surface is:
 
 - macOS ``arm64`` wheel
 - Linux ``x86_64`` manylinux wheel

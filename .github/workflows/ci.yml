@@ -2,7 +2,23 @@ name: CI
 
 on:
   pull_request:
+  # Only run push-triggered CI on `main`.  Feature branches rely on the
+  # `pull_request` trigger above so PR runs aren't shadowed by a
+  # duplicate push run on the same commit — that duplicate would either
+  # double CI minutes or get cancelled by the concurrency group below
+  # and show up as 8 spurious "failing" cancelled checks on the PR
+  # rollup.  Tag-triggered release pipelines live in `publish.yml`.
   push:
+    branches:
+      - main
+
+# Cancel older runs for the same branch when a new commit lands, so
+# force-pushes to a feature branch don't leave a half-finished prior
+# run consuming runners.  `main` is exempt so release pipelines stay
+# deterministic.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   rust:
@@ -21,7 +37,16 @@ jobs:
           toolchain: 1.92.0
           components: rustfmt, clippy
 
+      # `cache-bin: false` keeps `~/.cargo/bin` out of the cache.  On macOS
+      # the default (`cache-bin: true`) occasionally restores a stale
+      # hardlink that makes `cargo` resolve to the `rustup-init` bootstrap
+      # binary, producing "unexpected argument 'check' found" failures —
+      # reproduced multiple times on PR #12 and confirmed by the run log
+      # trace.  We still cache the workspace `target/` and the cargo
+      # registry (the expensive parts), so build times are unaffected.
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
 
       - name: Cargo check
         run: cargo check --workspace --exclude alloygbm-python
@@ -59,6 +84,9 @@ jobs:
         with:
           toolchain: 1.92.0
           components: rustfmt, clippy
+
+      - name: Select toolchain
+        run: rustup default 1.92.0
 
       - name: Install build tooling
         run: python -m pip install --upgrade pip maturin

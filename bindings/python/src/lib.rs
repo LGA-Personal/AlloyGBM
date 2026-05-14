@@ -11,11 +11,11 @@ use alloygbm_core::{
 };
 use alloygbm_engine::{
     ArtifactCompatibilityMode, BinaryCrossEntropyObjective, CategoricalFeatureInfo,
-    CategoricalTargetEncodingSpec, EngineError, IterationRunSummary, LambdaMARTObjective,
-    MultiClassIterationRunSummary, MultiClassSoftmaxObjective, MultiClassTrainedModel,
-    MultiClassWarmStartState, ObjectiveOps, PairwiseRankingObjective, PerRoundMetricCallback,
-    QueryRMSEObjective, SquaredErrorObjective, TrainedModel, Trainer, TrainingPolicyMode,
-    WarmStartState, XeNDCGObjective, YetiRankObjective,
+    CategoricalTargetEncodingSpec, EngineError, IterationDiagnostics, IterationRunSummary,
+    LambdaMARTObjective, MultiClassIterationRunSummary, MultiClassSoftmaxObjective,
+    MultiClassTrainedModel, MultiClassWarmStartState, ObjectiveOps, PairwiseRankingObjective,
+    PerRoundMetricCallback, QueryRMSEObjective, SquaredErrorObjective, TrainedModel, Trainer,
+    TrainingPolicyMode, WarmStartState, XeNDCGObjective, YetiRankObjective,
 };
 use alloygbm_predictor::{Predictor, PredictorError};
 use alloygbm_shap::{
@@ -829,6 +829,61 @@ struct NativeTrainingSummary {
     /// Custom eval metric name (None when no custom metric).
     #[pyo3(get)]
     custom_metric_name: Option<String>,
+    /// Per-round diagnostic snapshot.  Each entry is a `NativeIterationDiagnostics`
+    /// pyclass exposing the fields of `engine::IterationDiagnostics`.  Length
+    /// equals `rounds_completed` after a successful fit.
+    #[pyo3(get)]
+    diagnostics_per_round: Vec<NativeIterationDiagnostics>,
+}
+
+/// Python-visible view of an `engine::IterationDiagnostics` snapshot.  Field
+/// names mirror the Rust struct one-to-one.  Projection-related fields are
+/// `None` when factor neutralization isn't active for the fit.
+#[pyclass]
+#[derive(Debug, Clone)]
+struct NativeIterationDiagnostics {
+    #[pyo3(get)]
+    gradient_l2_norm: f32,
+    #[pyo3(get)]
+    gradient_variance: f32,
+    #[pyo3(get)]
+    hessian_l2_norm: f32,
+    #[pyo3(get)]
+    original_gradient_l2_norm: Option<f32>,
+    #[pyo3(get)]
+    projected_gradient_l2_norm: Option<f32>,
+    /// `1 - projected_l2 / original_l2`, clamped to `[0, 1]`.  Higher means
+    /// more gradient signal was projected away.
+    #[pyo3(get)]
+    neutralization_effectiveness: Option<f32>,
+    #[pyo3(get)]
+    n_active_rows: usize,
+    #[pyo3(get)]
+    n_active_features: usize,
+}
+
+impl From<&IterationDiagnostics> for NativeIterationDiagnostics {
+    fn from(value: &IterationDiagnostics) -> Self {
+        Self {
+            gradient_l2_norm: value.gradient_l2_norm,
+            gradient_variance: value.gradient_variance,
+            hessian_l2_norm: value.hessian_l2_norm,
+            original_gradient_l2_norm: value.original_gradient_l2_norm,
+            projected_gradient_l2_norm: value.projected_gradient_l2_norm,
+            neutralization_effectiveness: value.neutralization_effectiveness,
+            n_active_rows: value.n_active_rows,
+            n_active_features: value.n_active_features,
+        }
+    }
+}
+
+/// Convert a slice of engine diagnostics into the Python-visible pyclass
+/// vector.  Used by both `build_native_training_summary` variants.
+fn diagnostics_to_native(entries: &[IterationDiagnostics]) -> Vec<NativeIterationDiagnostics> {
+    entries
+        .iter()
+        .map(NativeIterationDiagnostics::from)
+        .collect()
 }
 
 #[pyclass]
@@ -2532,6 +2587,7 @@ fn build_native_training_summary_from_multiclass(
         native_train_seconds,
         custom_metric_values: summary.custom_metric_per_round.clone(),
         custom_metric_name: summary.custom_metric_name.clone(),
+        diagnostics_per_round: diagnostics_to_native(&summary.diagnostics_per_round),
     }
 }
 
@@ -2566,6 +2622,7 @@ fn build_native_training_summary(
         native_train_seconds,
         custom_metric_values: summary.custom_metric_per_round.clone(),
         custom_metric_name: summary.custom_metric_name.clone(),
+        diagnostics_per_round: diagnostics_to_native(&summary.diagnostics_per_round),
     }
 }
 
@@ -2602,12 +2659,14 @@ fn train_regression_artifact_with_summary_dense_impl(
     max_cat_threshold: usize,
 ) -> Result<NativeTrainingResult, EngineError> {
     let bridge_start = Instant::now();
-    if init_artifact_bytes.is_some() && params.neutralization_config.is_some() {
-        return Err(EngineError::ContractViolation(
-            "neutralized warm-start training is not supported because model artifacts do not persist neutralization metadata yet"
-                .to_string(),
-        ));
-    }
+    // Warm-start with neutralization is supported as of v0.7.1.  The Python
+    // wrapper enforces that callers supply the same `factor_exposures`
+    // matrix used for the initial fit, and the engine re-checks via
+    // `validate_warm_start_neutralization_contract` that the dataset carries
+    // exposures.  `pre_target` is handled below by residualizing the
+    // (already-original) targets again — idempotent against the same
+    // exposures — so resumed training sees the same residualized target
+    // stream as a fresh fit of `N + M` rounds.
     let is_linear_leaf = params.leaf_model == alloygbm_core::LeafModelKind::Linear;
     // Dense float values are needed for categorical target encoding.  For linear-leaf
     // training we need the raw feature values separately (see post-processing below).
@@ -3244,6 +3303,7 @@ fn build_train_params(
     min_split_gain: f32,
     monotone_constraints: Vec<i8>,
     feature_weights: Vec<f32>,
+    interaction_constraints: Vec<Vec<u32>>,
     max_leaves: Option<usize>,
     tree_growth: TreeGrowth,
     morph_config: Option<alloygbm_core::MorphConfig>,
@@ -3268,6 +3328,7 @@ fn build_train_params(
         min_split_gain,
         monotone_constraints,
         feature_weights,
+        interaction_constraints,
         max_leaves,
         tree_growth,
         morph_config,
@@ -3658,6 +3719,7 @@ fn train_regression_artifact(
         0.0, // min_split_gain
         Vec::new(),
         Vec::new(),
+        Vec::new(),
         None,
         TreeGrowth::Level,
         parsed_morph_config,
@@ -3827,6 +3889,7 @@ fn train_regression_artifact_dense(
         0.0, // min_split_gain
         Vec::new(),
         Vec::new(),
+        Vec::new(),
         None,
         TreeGrowth::Level,
         parsed_morph_config,
@@ -3917,6 +3980,7 @@ fn train_regression_artifact_dense(
     objective="squared_error",
     monotone_constraints=Vec::new(),
     feature_weights=Vec::new(),
+    interaction_constraints=Vec::new(),
     max_leaves=None,
     tree_growth="level",
     categorical_feature_indices=None,
@@ -3979,6 +4043,7 @@ fn train_regression_artifact_with_summary(
     objective: &str,
     monotone_constraints: Vec<i8>,
     feature_weights: Vec<f32>,
+    interaction_constraints: Vec<Vec<u32>>,
     max_leaves: Option<usize>,
     tree_growth: &str,
     categorical_feature_indices: Option<Vec<usize>>,
@@ -4041,6 +4106,7 @@ fn train_regression_artifact_with_summary(
         min_split_gain,
         monotone_constraints,
         feature_weights,
+        interaction_constraints,
         max_leaves,
         tree_growth,
         parsed_morph_config,
@@ -4157,6 +4223,7 @@ fn train_regression_artifact_with_summary(
     objective="squared_error",
     monotone_constraints=Vec::new(),
     feature_weights=Vec::new(),
+    interaction_constraints=Vec::new(),
     max_leaves=None,
     tree_growth="level",
     categorical_feature_indices=None,
@@ -4222,6 +4289,7 @@ fn train_regression_artifact_dense_with_summary(
     objective: &str,
     monotone_constraints: Vec<i8>,
     feature_weights: Vec<f32>,
+    interaction_constraints: Vec<Vec<u32>>,
     max_leaves: Option<usize>,
     tree_growth: &str,
     categorical_feature_indices: Option<Vec<usize>>,
@@ -4284,6 +4352,7 @@ fn train_regression_artifact_dense_with_summary(
         min_split_gain,
         monotone_constraints,
         feature_weights,
+        interaction_constraints,
         max_leaves,
         tree_growth,
         parsed_morph_config,
@@ -4396,6 +4465,7 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> PyResult<Vec<f32>> {
     objective="squared_error",
     monotone_constraints=Vec::new(),
     feature_weights=Vec::new(),
+    interaction_constraints=Vec::new(),
     max_leaves=None,
     tree_growth="level",
     categorical_feature_indices=None,
@@ -4461,6 +4531,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
     objective: &str,
     monotone_constraints: Vec<i8>,
     feature_weights: Vec<f32>,
+    interaction_constraints: Vec<Vec<u32>>,
     max_leaves: Option<usize>,
     tree_growth: &str,
     categorical_feature_indices: Option<Vec<usize>>,
@@ -4527,6 +4598,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
         min_split_gain,
         monotone_constraints,
         feature_weights,
+        interaction_constraints,
         max_leaves,
         tree_growth,
         parsed_morph_config,
@@ -4590,6 +4662,7 @@ fn _alloygbm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<NativeContinuousBinningMetadata>()?;
     m.add_class::<NativeTrainingSummary>()?;
     m.add_class::<NativeTrainingResult>()?;
+    m.add_class::<NativeIterationDiagnostics>()?;
     m.add_function(wrap_pyfunction!(native_runtime_info, m)?)?;
     m.add_function(wrap_pyfunction!(predictor_predict_batch, m)?)?;
     m.add_function(wrap_pyfunction!(predictor_predict_batch_dense, m)?)?;
@@ -4763,6 +4836,7 @@ mod tests {
             min_split_gain: 0.0,
             monotone_constraints: Vec::new(),
             feature_weights: Vec::new(),
+            interaction_constraints: Vec::new(),
             max_leaves: None,
             tree_growth: TreeGrowth::Level,
             morph_config: None,

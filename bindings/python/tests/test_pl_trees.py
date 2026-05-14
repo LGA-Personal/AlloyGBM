@@ -223,15 +223,22 @@ class TestPLRanker:
         np.testing.assert_allclose(scores_before, scores_after, atol=1e-4)
 
 
-class TestPlTreesShapNotSupported:
-    """SHAP currently raises a clear error for `leaf_model='linear'` artifacts."""
+class TestPlTreesShap:
+    """SHAP now supports `leaf_model='linear'` artifacts.  As of v0.7.1 this
+    is a best-effort interventional decomposition (path-attribution on the
+    leaf "constant part" `intercept + Σ wj·μj_global` plus per-leaf row
+    deviations `wj · (xj − μj_global)`).  Exact additivity holds when SHAP's
+    bin-index-based path-walk agrees with the predictor's float-threshold
+    path-walk; on continuous-feature artifacts the two can diverge — that
+    tighter alignment is tracked as a v0.7.2 follow-up.
+    """
 
-    def test_shap_raises_on_linear_leaf_regressor(self):
+    def test_shap_values_return_for_linear_leaf_regressor(self):
         rng = np.random.default_rng(0)
         X = rng.standard_normal((60, 4)).astype("float32")
         y = X @ np.array([0.5, -0.3, 0.2, 0.1]).astype("float32") + 0.1 * rng.standard_normal(60).astype("float32")
         m = GBMRegressor(n_estimators=5, leaf_model="linear", max_depth=2).fit(X, y)
-        with pytest.raises(Exception) as excinfo:
-            m.shap_values(X[:3])
-        msg = str(excinfo.value).lower()
-        assert "linear" in msg or "not supported" in msg, f"Expected an explanatory error, got: {excinfo.value}"
+        ev, shap_values = m.shap_values(X[:3], include_expected_value=True)
+        assert np.shape(shap_values) == (3, 4)
+        assert np.isfinite(ev)
+        assert np.all(np.isfinite(shap_values))

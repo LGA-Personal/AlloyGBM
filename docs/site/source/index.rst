@@ -12,11 +12,15 @@ types.
 
 .. note::
 
-   AlloyGBM ``0.7.0`` introduces factor-neutral boosting via
-   ``neutralization`` and fit-time ``factor_exposures``. It also includes the
-   DRO scalar leaf solver, piecewise-linear leaves, MorphBoost adaptive split
-   criterion, per-iteration learning-rate schedules, and SIMD-accelerated
-   histogram and EMA kernels. See :doc:`estimator` and :doc:`morphboost` for
+   AlloyGBM ``0.7.1`` enables SHAP for piecewise-linear leaves, ships
+   per-round training diagnostics, lifts the neutralized-warm-start
+   rejection, adds LightGBM-compatible interaction constraints, and
+   introduces ``MultiLabelGBMRanker`` for multi-output ranking.  The
+   ``0.7.0`` factor-neutral boosting surface (``neutralization``,
+   fit-time ``factor_exposures``), DRO scalar leaf solver, piecewise-linear
+   leaves, MorphBoost adaptive split criterion, per-iteration
+   learning-rate schedules, and SIMD-accelerated histogram and EMA kernels
+   are all still available. See :doc:`estimator` and :doc:`morphboost` for
    parameter docs, and :doc:`release` for full notes.
 
 Getting started

@@ -15,6 +15,7 @@ from .evaluation import (
     rank_ic,
     rmse,
 )
+from .multi_label_ranker import MultiLabelGBMRanker
 from .ranker import GBMRanker
 from .regressor import GBMRegressor
 from .validation import purged_panel_splits, purged_time_series_splits
@@ -23,6 +24,7 @@ __all__ = [
     "GBMClassifier",
     "GBMRanker",
     "GBMRegressor",
+    "MultiLabelGBMRanker",
     "accuracy",
     "hit_rate",
     "icir",

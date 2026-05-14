@@ -1,6 +1,6 @@
 # AlloyGBM Current Limitations
 
-Last updated for v0.5.0.
+Last updated for v0.7.1.
 
 ## Remaining Limitations
 
@@ -10,18 +10,73 @@ The `BackendOps` trait is designed for hardware abstraction, but only
 `CpuBackend` exists. GPU/accelerator support is architecturally planned but
 not implemented.
 
-### 2. No Interaction Constraints
-
-There is no way to constrain which features can interact within the same tree.
-
-### 3. No Dart / GOSS Boosting Modes
+### 2. No Dart / GOSS Boosting Modes
 
 Only standard gradient boosting is supported. Dart (dropout) and GOSS
 (gradient-based one-side sampling) modes are not available.
 
-### 4. No Multi-Label Ranking
+### 3. Multi-Label Ranking — Independent Per-Label Trees
 
-`GBMRanker` supports single-label relevance only.
+As of v0.7.1, ``MultiLabelGBMRanker`` exposes a unified multi-output
+ranking API: ``y`` is shaped ``(n_rows, n_labels)`` and ``predict``
+returns scores with the same column layout.  Internally, the wrapper
+trains one independent :class:`GBMRanker` per label, sharing the same
+``group`` (and optional ``factor_exposures``) so the per-label fits
+remain comparable.  This makes the implementation a thin orchestration
+layer that reuses every existing :class:`GBMRanker` feature
+(warm-start, neutralization, MorphBoost, PL leaves, DRO, interaction
+constraints).
+
+Numerically the wrapper is equivalent to training each label
+separately.  Joint shared-tree multi-label boosting — where a single
+ensemble updates all label predictions simultaneously via shared splits
+— would let correlated labels share split information across trees and
+typically reduces total model size for related tasks.  That is queued
+for v0.7.2 alongside the ``MulticlassSoftmaxObjective``-style K-tree-
+per-round engine plumbing for ranking objectives.
+
+### 4. MorphBoost Warm-Start Restarts EMA Cold
+
+MorphBoost's adaptive split criterion tracks a per-class exponential moving
+average over gradient statistics that shapes the gain function across
+rounds. v0.7.1 supports warm-starting MorphBoost-trained models (training
+continues without error and the predictor stitches old and new trees
+correctly), but the EMA state is **not** restored from the saved
+artifact — resumed training starts the EMA fresh. This means the
+"morphed" gain shaping in the resumed rounds doesn't see the gradient
+history from the original fit, and a resumed `N + M`-round model is not
+numerically equivalent to a fresh `N + M`-round fit when
+`training_mode="morph"` is active. For other modes (constant leaves,
+linear leaves, DRO leaves, factor neutralization) warm-start equivalence
+holds.
+
+Persisting the EMA snapshot inside the artifact is queued for a follow-up
+release.
+
+### 5. SHAP for Piecewise-Linear Leaves — Best-Effort Decomposition
+
+As of v0.7.1, `shap_values()` accepts `leaf_model="linear"` artifacts and
+returns an *interventional* decomposition: the path-based TreeSHAP / brute
+force machinery attributes each leaf's "constant part"
+`intercept + Σ wj · μj_global`, then per-leaf row deviations
+`wj · (xj − μj_global)` are credited directly to the regressor features.
+Global per-feature means `μj_global` are captured at fit time and persisted
+in a new `FeatureBaseline` artifact section, so SHAP is self-contained — the
+original training data is not required at explain time.
+
+`Σ shap_values + expected_value == predict(x)` holds exactly when SHAP's
+internal path walker reaches the same leaf as the predictor. Today SHAP
+compares raw feature values against stump `threshold_bin` indices cast to
+`f32`, while the predictor crate converts those bin indices to float
+thresholds at load time using per-feature min/max. For scalar leaves this
+divergence is masked (the wrong-but-consistent path yields the same scalar
+sum from both sides); for linear leaves the leaf value depends on `xj`, so
+on continuous-feature artifacts the SHAP path and the predictor path can
+disagree and the additive reconstruction drifts. To avoid a hard failure
+mid-explain, the strict additivity check is relaxed for linear-leaf models;
+users get best-effort SHAP values plus an updated docstring describing the
+semantics. Tightening path-walk alignment (so SHAP also uses float
+thresholds) is queued for a follow-up release.
 
 ## Resolved (Previously Limitations)
 
@@ -45,6 +100,18 @@ The following were limitations in prior versions and have been addressed:
 - No native categorical splits (now: `max_cat_threshold` enables Fisher-sort optimal binary partitions with O(1) bitset prediction)
 - No custom objective/metric callbacks (now: `objective` callable and `eval_metric` callable)
 - Multiclass warm-start unsupported (now: `warm_start=True` works for multiclass with round-offset continuity)
+- Neutralized warm-start unsupported (now: v0.7.1 — `init_model` / `warm_start=True`
+  with `neutralization=*` is supported as long as the caller supplies the
+  same `factor_exposures` matrix used for the initial fit; see Limitation 4
+  for the MorphBoost EMA caveat that still applies)
+- No interaction constraints (now: v0.7.1 — `interaction_constraints=[[...]]`
+  on every estimator, LightGBM-compatible semantics, up to 64 groups per
+  fit; enforced through both the level-wise and leaf-wise tree builders)
+- Single-label ranking only (partially resolved: v0.7.1 — `MultiLabelGBMRanker`
+  exposes a unified `fit`/`predict` for K ranking labels per item, trained
+  as K independent per-label `GBMRanker` instances sharing `group` and
+  `factor_exposures`.  Joint shared-tree training is a v0.7.2 follow-up;
+  see Limitation 3)
 - Multiclass prediction per-row allocation (now: zero-copy dense slice prediction)
 - Single fixed split criterion (now: opt-in MorphBoost adaptive criterion via
   `training_mode="morph"`, including EMA-driven gain shaping, depth/iteration

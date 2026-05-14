@@ -1,23 +1,24 @@
 use alloygbm_categorical::{TargetEncoderConfig, fit_transform_target_encoder};
 use alloygbm_core::{
     BinnedMatrix, CategoricalStatePayloadV1, CoreError, DatasetMatrix, Device, DroConfig,
-    DroMetadataPayload, FactorExposureMatrix, FeatureTile, GradientEmaStats, GradientPair,
-    HistogramBundle, LeafModelKind, LeafSolverKind, LeafValue, LinearHistogramBundle, LinearLeaf,
-    LinearLeafCoefficientsPayload, LinearLeafEntry, LrSchedule, MAX_PL_REGRESSORS, MISSING_BIN_U8,
-    MODEL_FORMAT_V1, ModelArtifactSection, ModelMetadata, ModelSectionKind, MorphConfig,
-    MorphMetadataPayload, MorphPrecomputed, NativeCategoricalSplitsPayload, NeutralizationKind,
-    NodeSlice, NodeStats, PartitionResult, SplitCandidate, TrainParams, TrainingDataset,
-    TreeGrowth, decode_optional_categorical_state_section_v1,
-    decode_optional_dro_metadata_artifact_section,
-    decode_optional_linear_leaf_coefficients_section,
+    DroMetadataPayload, FactorExposureMatrix, FeatureBaselinePayload, FeatureTile,
+    GradientEmaStats, GradientPair, HistogramBundle, LeafModelKind, LeafSolverKind, LeafValue,
+    LinearHistogramBundle, LinearLeaf, LinearLeafCoefficientsPayload, LinearLeafEntry, LrSchedule,
+    MAX_PL_REGRESSORS, MISSING_BIN_U8, MODEL_FORMAT_V1, ModelArtifactSection, ModelMetadata,
+    ModelSectionKind, MorphConfig, MorphMetadataPayload, MorphPrecomputed,
+    NativeCategoricalSplitsPayload, NeutralizationKind, NodeSlice, NodeStats, PartitionResult,
+    SplitCandidate, TrainParams, TrainingDataset, TreeGrowth,
+    decode_optional_categorical_state_section_v1, decode_optional_dro_metadata_artifact_section,
+    decode_optional_feature_baseline_section, decode_optional_linear_leaf_coefficients_section,
     decode_optional_morph_metadata_artifact_section,
     decode_optional_native_categorical_splits_section, deserialize_model_artifact_v1,
     encode_categorical_state_payload_v1, encode_dro_metadata_payload,
-    encode_linear_leaf_coefficients_payload, encode_morph_metadata_payload,
-    encode_native_categorical_splits_payload, format_required_section_auto_mode_error,
-    format_required_section_mode_error, leaf_effective_gradient,
-    required_section_compatibility_report, serialize_model_artifact_v1, validate_binned_matrix,
-    validate_categorical_state_payload_v1, validate_train_params, validate_training_dataset,
+    encode_feature_baseline_payload, encode_linear_leaf_coefficients_payload,
+    encode_morph_metadata_payload, encode_native_categorical_splits_payload,
+    format_required_section_auto_mode_error, format_required_section_mode_error,
+    leaf_effective_gradient, required_section_compatibility_report, serialize_model_artifact_v1,
+    validate_binned_matrix, validate_categorical_state_payload_v1, validate_train_params,
+    validate_training_dataset,
 };
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
@@ -1941,6 +1942,11 @@ pub struct TrainedModel {
     pub morph_metadata: Option<MorphMetadataPayload>,
     /// DRO leaf-solver metadata (None for standard leaf solving).
     pub dro_metadata: Option<DroMetadataPayload>,
+    /// Global per-feature training-set means.  `Some(_)` only when the model
+    /// uses piecewise-linear leaves and the feature baseline was recorded at
+    /// fit time.  Length equals `feature_count`.  Consumed by SHAP for
+    /// interventional decomposition of linear-leaf contributions.
+    pub feature_baseline: Option<Vec<f32>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2004,6 +2010,163 @@ pub struct IterationRunSummary {
     pub custom_metric_per_round: Vec<f32>,
     /// Name of the custom metric (None when no custom metric callback is used).
     pub custom_metric_name: Option<String>,
+    /// Per-round diagnostic snapshot: gradient stats, hessian magnitude, and —
+    /// when factor neutralization runs per round — a "neutralization
+    /// effectiveness" score `1 - ||g_proj|| / ||g_orig||` bounded in [0, 1].
+    /// Length equals `rounds_completed` after a successful fit.
+    pub diagnostics_per_round: Vec<IterationDiagnostics>,
+}
+
+/// Per-round training telemetry recorded by the fit loop.
+///
+/// Capturing this is intentionally cheap: each value is one or two reductions
+/// over the gradient/hessian buffer that the trainer already owns.  The data
+/// is exposed on every estimator (regressor / classifier / ranker) so callers
+/// can inspect gradient trajectories, confirm convergence, and — for
+/// neutralized fits — verify how much signal the factor projection removed.
+///
+/// For multiclass training, the per-round entry is an aggregate across the
+/// K class buffers: mean-of-class for gradient/hessian norms and variance,
+/// max-of-class for `neutralization_effectiveness` (the worst-projected
+/// class is the most informative statistic).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct IterationDiagnostics {
+    /// L2 norm of the per-row gradient buffer the trees consumed for this
+    /// round (post-projection when factor neutralization is active).
+    pub gradient_l2_norm: f32,
+    /// Sample variance of the per-row gradient values for this round.
+    pub gradient_variance: f32,
+    /// L2 norm of the per-row hessian buffer for this round.
+    pub hessian_l2_norm: f32,
+    /// Pre-projection L2 norm.  `Some(_)` only when per-round factor
+    /// neutralization (`per_round_gradient` or `split_penalty`) is enabled
+    /// — `pre_target` mode residualizes targets once and never projects
+    /// gradients, so this stays `None` there.
+    pub original_gradient_l2_norm: Option<f32>,
+    /// Post-projection L2 norm.  Mirrors `original_gradient_l2_norm`'s
+    /// availability rules.
+    pub projected_gradient_l2_norm: Option<f32>,
+    /// `1 - projected_l2 / original_l2`, clamped to `[0, 1]`.  Higher means
+    /// more gradient signal was removed by the factor projection.  `None`
+    /// when projection isn't active (constant-leaf, `pre_target`, or no
+    /// neutralization configured) or when `original_l2 == 0`.
+    pub neutralization_effectiveness: Option<f32>,
+    /// Number of training rows sampled for this round (after row_subsample).
+    pub n_active_rows: usize,
+    /// Number of split-feature tiles available for this round (after
+    /// col_subsample).
+    pub n_active_features: usize,
+}
+
+impl IterationDiagnostics {
+    /// Construct a diagnostics record from a gradient buffer pre- and
+    /// post-projection.  `original` is `Some(&original_buffer)` only when a
+    /// per-round projection was applied; otherwise pass `None` and the
+    /// projection-related fields stay `None`.
+    pub fn from_gradient_snapshot(
+        post_projection_gradients: &[GradientPair],
+        original_gradient_norm: Option<f32>,
+        n_active_rows: usize,
+        n_active_features: usize,
+    ) -> Self {
+        let (g_norm, g_var, h_norm) = gradient_buffer_stats(post_projection_gradients);
+        let projected = original_gradient_norm.map(|_| g_norm);
+        let effectiveness = match (original_gradient_norm, projected) {
+            (Some(orig), Some(proj)) if orig > 0.0 => {
+                let raw = 1.0 - proj / orig;
+                Some(raw.clamp(0.0, 1.0))
+            }
+            _ => None,
+        };
+        Self {
+            gradient_l2_norm: g_norm,
+            gradient_variance: g_var,
+            hessian_l2_norm: h_norm,
+            original_gradient_l2_norm: original_gradient_norm,
+            projected_gradient_l2_norm: projected,
+            neutralization_effectiveness: effectiveness,
+            n_active_rows,
+            n_active_features,
+        }
+    }
+
+    /// Aggregate per-class diagnostics into a single per-round record for
+    /// multiclass training.  Norms / variance are mean-of-class; effectiveness
+    /// is max-of-class (so users see the worst-projected class).
+    pub fn aggregate_per_class(class_entries: &[IterationDiagnostics]) -> Self {
+        if class_entries.is_empty() {
+            return Self::default();
+        }
+        let k = class_entries.len() as f32;
+        let mean = |f: fn(&IterationDiagnostics) -> f32| -> f32 {
+            class_entries.iter().map(f).sum::<f32>() / k
+        };
+        let max_opt = |f: fn(&IterationDiagnostics) -> Option<f32>| -> Option<f32> {
+            class_entries
+                .iter()
+                .filter_map(f)
+                .fold(None, |acc, v| Some(acc.map_or(v, |a: f32| a.max(v))))
+        };
+        Self {
+            gradient_l2_norm: mean(|d| d.gradient_l2_norm),
+            gradient_variance: mean(|d| d.gradient_variance),
+            hessian_l2_norm: mean(|d| d.hessian_l2_norm),
+            original_gradient_l2_norm: max_opt(|d| d.original_gradient_l2_norm),
+            projected_gradient_l2_norm: max_opt(|d| d.projected_gradient_l2_norm),
+            neutralization_effectiveness: max_opt(|d| d.neutralization_effectiveness),
+            n_active_rows: class_entries[0].n_active_rows,
+            n_active_features: class_entries[0].n_active_features,
+        }
+    }
+}
+
+/// Compute `(L2_norm_of_grads, variance_of_grads, L2_norm_of_hessians)` over
+/// a gradient/hessian buffer in a single pass.  Skips non-finite entries so a
+/// stray NaN doesn't poison the telemetry.
+fn gradient_buffer_stats(gradients: &[GradientPair]) -> (f32, f32, f32) {
+    if gradients.is_empty() {
+        return (0.0, 0.0, 0.0);
+    }
+    let mut g_sq_sum = 0.0f64;
+    let mut g_sum = 0.0f64;
+    let mut g_finite_count = 0u64;
+    let mut h_sq_sum = 0.0f64;
+    for gp in gradients {
+        if gp.grad.is_finite() {
+            let g = gp.grad as f64;
+            g_sq_sum += g * g;
+            g_sum += g;
+            g_finite_count += 1;
+        }
+        if gp.hess.is_finite() {
+            let h = gp.hess as f64;
+            h_sq_sum += h * h;
+        }
+    }
+    let g_norm = g_sq_sum.sqrt() as f32;
+    let h_norm = h_sq_sum.sqrt() as f32;
+    let g_var = if g_finite_count > 1 {
+        let mean = g_sum / g_finite_count as f64;
+        let variance = (g_sq_sum / g_finite_count as f64) - mean * mean;
+        variance.max(0.0) as f32
+    } else {
+        0.0
+    };
+    (g_norm, g_var, h_norm)
+}
+
+/// L2 norm of the gradient channel of a `GradientPair` buffer.  Used as a
+/// "pre-projection snapshot" before `FactorProjector::project_gradient_pairs_in_place`
+/// mutates the buffer in-place.
+fn gradient_l2_norm_only(gradients: &[GradientPair]) -> f32 {
+    let mut sq = 0.0f64;
+    for gp in gradients {
+        if gp.grad.is_finite() {
+            let g = gp.grad as f64;
+            sq += g * g;
+        }
+    }
+    (sq.sqrt()) as f32
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2387,6 +2550,24 @@ impl TrainedModel {
                 ));
             }
         }
+        // FeatureBaseline section (optional — written only when linear leaves
+        // are present and the baseline was captured at fit time).  Provides
+        // global per-feature means so SHAP can decompose linear leaves
+        // interventionally without needing the original training data.
+        if let Some(baseline) = self.feature_baseline.as_ref()
+            && baseline.len() == self.feature_count
+            && self.stumps.iter().any(|s| {
+                matches!(s.left_leaf_value, LeafValue::Linear(_))
+                    || matches!(s.right_leaf_value, LeafValue::Linear(_))
+            })
+        {
+            sections.push((
+                ModelSectionKind::FeatureBaseline,
+                encode_feature_baseline_payload(&FeatureBaselinePayload {
+                    feature_means: baseline.clone(),
+                }),
+            ));
+        }
 
         serialize_model_artifact_v1(&metadata, &sections).map_err(EngineError::from)
     }
@@ -2512,6 +2693,15 @@ impl TrainedModel {
                 }
             }
         }
+
+        // Decode optional FeatureBaseline section.  Only retain when the
+        // length matches feature_count to defend against artifact corruption
+        // or schema drift; mismatches silently fall back to `None`, which
+        // SHAP treats as "no linear-leaf support recorded for this artifact".
+        model.feature_baseline = decode_optional_feature_baseline_section(&parsed.sections)
+            .map_err(EngineError::from)?
+            .map(|payload| payload.feature_means)
+            .filter(|means| means.len() == metadata_feature_count);
 
         model.feature_count = metadata_feature_count;
         model.objective = parsed.contract.metadata.objective.clone();
@@ -3161,7 +3351,7 @@ impl Trainer {
         validate_train_params(&self.params)?;
         validate_training_dataset(dataset)?;
         validate_neutralization_fit_contract_for_support(&self.params, dataset, false)?;
-        validate_warm_start_neutralization_contract(&self.params, warm_start.is_some())?;
+        validate_warm_start_neutralization_contract(&self.params, warm_start.is_some(), dataset)?;
         validate_training_alignment(dataset, binned_matrix)?;
         if let Some(validation_ref) = validation {
             validate_training_alignment(validation_ref.dataset, validation_ref.binned_matrix)?;
@@ -3306,6 +3496,7 @@ impl Trainer {
         let mut validation_loss_per_completed_round = Vec::new();
         let mut sampled_rows_per_completed_round = Vec::new();
         let mut sampled_features_per_completed_round = Vec::new();
+        let mut diagnostics_per_round: Vec<IterationDiagnostics> = Vec::new();
         let mut best_validation_loss = initial_validation_loss;
         let mut best_validation_round = initial_validation_loss.map(|_| 0_usize);
         let mut validation_no_improvement_rounds = 0_usize;
@@ -3351,6 +3542,9 @@ impl Trainer {
 
             // Build K trees
             let mut any_tree_produced = false;
+            // Per-class diagnostics for this round; aggregated to a single
+            // `IterationDiagnostics` after the class loop completes.
+            let mut per_class_diagnostics: Vec<IterationDiagnostics> = Vec::with_capacity(k);
             for class_k in 0..k {
                 objective.compute_gradients_for_class(
                     &class_predictions,
@@ -3359,9 +3553,20 @@ impl Trainer {
                     class_k,
                     &mut gradient_buffer,
                 )?;
+                let original_gradient_norm = if gradient_projector.is_some() {
+                    Some(gradient_l2_norm_only(&gradient_buffer))
+                } else {
+                    None
+                };
                 if let Some(projector) = &gradient_projector {
                     projector.project_gradient_pairs_in_place(&mut gradient_buffer)?;
                 }
+                per_class_diagnostics.push(IterationDiagnostics::from_gradient_snapshot(
+                    &gradient_buffer,
+                    original_gradient_norm,
+                    sampled_row_count,
+                    feature_tiles.len(),
+                ));
 
                 // Update per-class EMA stats from this class's gradients.
                 if let Some(ms) = morph_state.as_mut() {
@@ -3547,6 +3752,9 @@ impl Trainer {
                     .map(|c| class_stumps[c].len() - pre_round_counts[c])
                     .collect(),
             );
+            diagnostics_per_round.push(IterationDiagnostics::aggregate_per_class(
+                &per_class_diagnostics,
+            ));
             rounds_completed += 1;
 
             if stop_for_validation_plateau {
@@ -3570,6 +3778,11 @@ impl Trainer {
                         .sum::<usize>();
                 class_stumps[class_k].truncate(keep_count);
             }
+            loss_per_completed_round.truncate(best_round);
+            validation_loss_per_completed_round.truncate(best_round);
+            sampled_rows_per_completed_round.truncate(best_round);
+            sampled_features_per_completed_round.truncate(best_round);
+            diagnostics_per_round.truncate(best_round);
             rounds_completed = best_round;
         }
 
@@ -3613,6 +3826,7 @@ impl Trainer {
             final_validation_loss,
             custom_metric_per_round: Vec::new(),
             custom_metric_name: None,
+            diagnostics_per_round,
         })
     }
 
@@ -3768,7 +3982,11 @@ impl Trainer {
         validate_train_params(&self.params)?;
         validate_training_dataset(dataset)?;
         validate_neutralization_fit_contract(&self.params, dataset, objective)?;
-        validate_warm_start_neutralization_contract(&self.params, execution.warm_start.is_some())?;
+        validate_warm_start_neutralization_contract(
+            &self.params,
+            execution.warm_start.is_some(),
+            dataset,
+        )?;
         let owned_dataset = if execution.pre_target_already_applied {
             None
         } else {
@@ -3873,6 +4091,7 @@ impl Trainer {
         let mut validation_loss_per_completed_round = Vec::new();
         let mut sampled_rows_per_completed_round = Vec::new();
         let mut sampled_features_per_completed_round = Vec::new();
+        let mut diagnostics_per_round: Vec<IterationDiagnostics> = Vec::new();
         let mut best_validation_loss = initial_validation_loss;
         let mut best_validation_round = initial_validation_loss.map(|_| 0_usize);
         let mut validation_no_improvement_rounds = 0_usize;
@@ -3923,6 +4142,15 @@ impl Trainer {
                 active_dataset.sample_weights.as_deref(),
                 &mut gradient_buffer,
             )?;
+            // Capture the pre-projection L2 norm so neutralization
+            // effectiveness can be reported alongside the post-projection
+            // gradient stats below.  Only allocated when a per-round
+            // projection is actually configured for this fit.
+            let original_gradient_norm = if gradient_projector.is_some() {
+                Some(gradient_l2_norm_only(&gradient_buffer))
+            } else {
+                None
+            };
             if let Some(projector) = &gradient_projector {
                 projector.project_gradient_pairs_in_place(&mut gradient_buffer)?;
             }
@@ -3931,6 +4159,18 @@ impl Trainer {
             if cfg!(debug_assertions) {
                 validate_gradient_pairs(gradients, active_dataset.row_count())?;
             }
+            // Capture per-round telemetry from the *post-projection* gradient
+            // buffer — i.e., the values the tree-building code actually
+            // consumes.  Push happens further below, conditional on the
+            // round being committed, so we stay in lockstep with the other
+            // per-round vecs (loss_per_completed_round, etc.).  Round-level
+            // cost: a single linear pass over the gradient buffer.
+            let round_diagnostics = IterationDiagnostics::from_gradient_snapshot(
+                gradients,
+                original_gradient_norm,
+                sampled_row_count,
+                feature_tiles.len(),
+            );
 
             // Update EMA stats from this round's gradients before tree-building so
             // morph split selection sees the latest mean/std.
@@ -4153,6 +4393,7 @@ impl Trainer {
             loss_per_completed_round.push(candidate_loss);
             sampled_rows_per_completed_round.push(sampled_row_count);
             sampled_features_per_completed_round.push(sampled_feature_count);
+            diagnostics_per_round.push(round_diagnostics);
             if let Some(next_validation_predictions) = candidate_validation_predictions {
                 validation_predictions = Some(next_validation_predictions);
             }
@@ -4196,6 +4437,7 @@ impl Trainer {
             custom_metric_per_round.truncate(best_round);
             sampled_rows_per_completed_round.truncate(best_round);
             sampled_features_per_completed_round.truncate(best_round);
+            diagnostics_per_round.truncate(best_round);
             rounds_completed = best_round;
             weak_improvement_rounds_committed =
                 weak_improvement_rounds_committed.min(rounds_completed);
@@ -4275,6 +4517,18 @@ impl Trainer {
             .params
             .dro_config
             .map(|config| DroMetadataPayload { config });
+        // Record per-feature training-set means only for piecewise-linear
+        // artifacts.  SHAP consumes these as the interventional baseline for
+        // linear leaves; constant-leaf models have no use for it.
+        let feature_baseline = if self.params.leaf_model == LeafModelKind::Linear {
+            compute_feature_means_from_matrix(
+                &active_dataset.matrix.values,
+                active_dataset.matrix.feature_count,
+                active_dataset.row_count(),
+            )
+        } else {
+            None
+        };
         let model = TrainedModel {
             baseline_prediction,
             feature_count: active_dataset.matrix.feature_count,
@@ -4285,6 +4539,7 @@ impl Trainer {
             native_categorical_feature_indices: Vec::new(),
             morph_metadata,
             dro_metadata,
+            feature_baseline,
         };
         let final_loss = current_loss;
 
@@ -4307,6 +4562,7 @@ impl Trainer {
             final_validation_loss: current_validation_loss,
             custom_metric_per_round,
             custom_metric_name,
+            diagnostics_per_round,
         })
     }
 
@@ -4319,6 +4575,163 @@ impl Trainer {
     ) -> EngineResult<TrainRoundSummary> {
         self.fit_one_round(dataset, binned_matrix, backend, objective)
     }
+}
+
+/// Precomputed lookup driving interaction-constraint enforcement during
+/// tree growth.  Built once per fit from `TrainParams.interaction_constraints`.
+///
+/// Each feature carries a `u64` bitset of the constraint groups it belongs
+/// to.  Features outside every group ("unconstrained") have a `0` bitset and
+/// are always allowed at any node.  Constrained features are allowed only
+/// when at least one of their containing groups is still in the per-node
+/// `active_groups` bitset; once a path commits to a group, the active set
+/// narrows to the intersection of that feature's groups.
+#[derive(Debug, Clone)]
+pub(crate) struct InteractionConstraintIndex {
+    /// `feature_groups[f]` — bitset of constraint-group indices that contain
+    /// feature `f`.  `0` means the feature is unconstrained.
+    feature_groups: Vec<u64>,
+    /// Number of declared constraint groups (`≤ 64`).
+    group_count: u32,
+}
+
+impl InteractionConstraintIndex {
+    /// Build the lookup from `TrainParams.interaction_constraints`.  Returns
+    /// `None` when no constraints are configured so callers can skip the
+    /// per-node bookkeeping entirely.  Validation of group count / indices
+    /// happens earlier in `core::validate_train_params`; this routine just
+    /// re-checks bounds defensively (the engine doesn't always know the
+    /// feature count at param-validation time).
+    pub(crate) fn from_constraints(
+        constraints: &[Vec<u32>],
+        feature_count: usize,
+    ) -> EngineResult<Option<Self>> {
+        if constraints.is_empty() {
+            return Ok(None);
+        }
+        if constraints.len() > 64 {
+            return Err(EngineError::InvalidConfig(format!(
+                "interaction_constraints supports at most 64 groups (got {})",
+                constraints.len()
+            )));
+        }
+        let mut feature_groups = vec![0u64; feature_count];
+        for (gi, group) in constraints.iter().enumerate() {
+            let bit = 1u64 << gi;
+            for &f in group {
+                let fi = f as usize;
+                if fi >= feature_count {
+                    return Err(EngineError::InvalidConfig(format!(
+                        "interaction_constraints group {gi} references feature {f} which exceeds feature_count {feature_count}"
+                    )));
+                }
+                feature_groups[fi] |= bit;
+            }
+        }
+        Ok(Some(Self {
+            feature_groups,
+            group_count: constraints.len() as u32,
+        }))
+    }
+
+    /// Bitset of all groups marked active at the tree root.  All groups
+    /// start active and are intersected as a path descends through
+    /// constrained features.
+    pub(crate) fn root_active_groups(&self) -> u64 {
+        if self.group_count == 0 {
+            0
+        } else if self.group_count >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << self.group_count) - 1
+        }
+    }
+
+    /// Compute the `active_groups` bitset for a child node when the parent
+    /// splits on `split_feature`.  Splitting on an unconstrained feature
+    /// leaves the active set unchanged; splitting on a constrained feature
+    /// narrows the set to groups that *also* contain that feature.
+    #[inline]
+    pub(crate) fn descend(&self, active_groups: u64, split_feature: u32) -> u64 {
+        let f = split_feature as usize;
+        if f >= self.feature_groups.len() {
+            return active_groups;
+        }
+        let fg = self.feature_groups[f];
+        if fg == 0 {
+            active_groups
+        } else {
+            active_groups & fg
+        }
+    }
+
+    /// Whether `feature` is allowed at a node whose ancestors imply
+    /// `active_groups`.  Unconstrained features are always allowed; a
+    /// constrained feature is allowed iff some group containing it is still
+    /// active.
+    #[inline]
+    pub(crate) fn feature_allowed(&self, active_groups: u64, feature: u32) -> bool {
+        let f = feature as usize;
+        if f >= self.feature_groups.len() {
+            return true;
+        }
+        let fg = self.feature_groups[f];
+        fg == 0 || (active_groups & fg) != 0
+    }
+}
+
+/// Clone a [`HistogramBundle`] keeping only the per-feature histograms whose
+/// feature index satisfies `is_allowed`.  Used as a per-node filter for
+/// interaction constraints — child histograms are still built with the
+/// parent's tiles (so the subtraction trick keeps working), but the split
+/// search at a constrained node ignores feature columns that aren't allowed
+/// on this path.
+pub(crate) fn filter_histogram_bundle_by_features(
+    bundle: &HistogramBundle,
+    is_allowed: impl Fn(u32) -> bool,
+) -> HistogramBundle {
+    HistogramBundle {
+        node_id: bundle.node_id,
+        feature_histograms: bundle
+            .feature_histograms
+            .iter()
+            .filter(|fh| is_allowed(fh.feature_index))
+            .cloned()
+            .collect(),
+    }
+}
+
+/// Compute per-feature column means from a row-major raw feature matrix.
+///
+/// Returns `None` when the matrix has no rows, no features, or its `values`
+/// vector is empty (metadata-only datasets).  Non-finite cells are skipped per
+/// column so a stray NaN/Inf doesn't poison the entire mean.
+fn compute_feature_means_from_matrix(
+    values: &[f32],
+    feature_count: usize,
+    row_count: usize,
+) -> Option<Vec<f32>> {
+    if feature_count == 0 || row_count == 0 || values.len() < row_count * feature_count {
+        return None;
+    }
+    let mut sums = vec![0.0_f64; feature_count];
+    let mut counts = vec![0_u64; feature_count];
+    for row in 0..row_count {
+        let base = row * feature_count;
+        for j in 0..feature_count {
+            let v = values[base + j];
+            if v.is_finite() {
+                sums[j] += v as f64;
+                counts[j] += 1;
+            }
+        }
+    }
+    let means: Vec<f32> = sums
+        .iter()
+        .zip(counts.iter())
+        .map(|(s, &c)| if c > 0 { (s / c as f64) as f32 } else { 0.0 })
+        .collect();
+    Some(means)
 }
 
 fn validate_neutralization_fit_contract<O: ObjectiveOps>(
@@ -4370,14 +4783,38 @@ fn validate_neutralization_fit_contract_for_support(
 fn validate_warm_start_neutralization_contract(
     params: &TrainParams,
     has_warm_start: bool,
+    dataset: &TrainingDataset,
 ) -> EngineResult<()> {
-    if has_warm_start && params.neutralization_config.is_some() {
-        return Err(EngineError::ContractViolation(
-            "neutralized warm-start training is not supported because WarmStartState does not carry neutralization metadata"
-                .to_string(),
-        ));
+    if !has_warm_start {
+        return Ok(());
     }
-    Ok(())
+    let Some(config) = params.neutralization_config else {
+        return Ok(());
+    };
+    // Per-round and split-penalty modes project the gradient (or its split
+    // contribution) against the factor space on every round.  Continuing
+    // training without supplying the same exposures would silently change
+    // which directions are projected away — almost certainly not what the
+    // caller wants, and not equivalent to fitting `N+M` rounds from scratch.
+    // We therefore require an exposures matrix; the caller is responsible
+    // for passing the same one used for the initial fit (the Python wrapper
+    // surfaces this contract).  `pre_target` is idempotent under repeated
+    // residualization against the same exposures so it falls under the same
+    // requirement.
+    match config.kind {
+        NeutralizationKind::None => Ok(()),
+        NeutralizationKind::PreTarget
+        | NeutralizationKind::PerRoundGradient
+        | NeutralizationKind::SplitPenalty => {
+            if dataset.factor_exposures.is_none() {
+                return Err(EngineError::ContractViolation(
+                    "neutralized warm-start training requires factor_exposures to be supplied; pass the same matrix used for the initial fit"
+                        .to_string(),
+                ));
+            }
+            Ok(())
+        }
+    }
 }
 
 fn prepare_pre_target_training_dataset(
@@ -4823,6 +5260,17 @@ fn build_tree_level_wise<B: BackendOps>(
     let root_node = NodeSlice::new(root_node_id, root_row_indices)?;
     let root_histograms =
         backend.build_histograms(binned_matrix, gradients, &root_node, feature_tiles)?;
+    // Interaction-constraint bookkeeping (no-op when empty).  We track the
+    // bitset of still-active groups per node so that the split search can
+    // skip features that no surviving group allows on this path.
+    let constraint_index = InteractionConstraintIndex::from_constraints(
+        &params.interaction_constraints,
+        binned_matrix.feature_count,
+    )?;
+    let mut node_active_groups: HashMap<u32, u64> = HashMap::new();
+    if let Some(idx) = constraint_index.as_ref() {
+        node_active_groups.insert(0, idx.root_active_groups());
+    }
     // Maintain each active node's absolute leaf output so child updates
     // can replace parent contribution via deltas (tree semantics).
     // depth is the current tree level (0-indexed); all nodes at this level share the same depth.
@@ -4847,9 +5295,26 @@ fn build_tree_level_wise<B: BackendOps>(
                 factor_exposures,
                 &node.row_indices,
             );
+            // Filter histogram bundle by interaction constraints (no-op when
+            // no constraints are active).  Cloning the bundle here is the
+            // simplest way to plug filtering in without changing the
+            // `BackendOps` trait surface; the clone is `O(allowed_features
+            // × bins)` and only runs on constrained fits.
+            let node_active = node_active_groups.get(&local_node_id).copied();
+            let filtered_histograms_storage;
+            let histograms_for_split = match (constraint_index.as_ref(), node_active) {
+                (Some(idx), Some(active_groups)) => {
+                    filtered_histograms_storage =
+                        filter_histogram_bundle_by_features(&histograms, |f| {
+                            idx.feature_allowed(active_groups, f)
+                        });
+                    &filtered_histograms_storage
+                }
+                _ => &histograms,
+            };
             let Some(mut split) = find_best_split_dispatch(
                 backend,
-                &histograms,
+                histograms_for_split,
                 split_options,
                 feature_weights,
                 categorical_features,
@@ -5076,6 +5541,15 @@ fn build_tree_level_wise<B: BackendOps>(
                 let left_node_id = encode_tree_node_id(round_index, left_local_node_id)?;
                 let right_node_id = encode_tree_node_id(round_index, right_local_node_id)?;
 
+                // Propagate interaction-constraint active groups to children.
+                // Splitting on an unconstrained feature leaves the active
+                // set unchanged; a constrained feature narrows it.
+                if let (Some(idx), Some(active_groups)) = (constraint_index.as_ref(), node_active) {
+                    let child_groups = idx.descend(active_groups, split.feature_index);
+                    node_active_groups.insert(left_local_node_id, child_groups);
+                    node_active_groups.insert(right_local_node_id, child_groups);
+                }
+
                 // Determine the parent-leaf values to track for children.
                 // When we have linear leaves, the scalar parent value uses the intercept,
                 // and we also pass the full absolute linear leaf for weight delta computation.
@@ -5236,15 +5710,41 @@ fn build_tree_leaf_wise<B: BackendOps>(
     let root_node = NodeSlice::new(root_node_id, root_row_indices)?;
     let root_histograms =
         backend.build_histograms(binned_matrix, gradients, &root_node, feature_tiles)?;
+    // Interaction-constraint bookkeeping (no-op when empty).  See the
+    // matching block in `build_tree_level_wise` for the design rationale —
+    // we filter histograms per node at split-search time so constrained
+    // features can't appear on a path that already broke into a sibling
+    // group.
+    let constraint_index = InteractionConstraintIndex::from_constraints(
+        &params.interaction_constraints,
+        binned_matrix.feature_count,
+    )?;
+    let mut node_active_groups: HashMap<u32, u64> = HashMap::new();
+    if let Some(idx) = constraint_index.as_ref() {
+        node_active_groups.insert(0, idx.root_active_groups());
+    }
     let root_factor_context = factor_split_context_for_node(
         params,
         binned_matrix,
         factor_exposures,
         &root_node.row_indices,
     );
+    let root_filtered_storage;
+    let root_histograms_for_split = match (
+        constraint_index.as_ref(),
+        node_active_groups.get(&0).copied(),
+    ) {
+        (Some(idx), Some(ag)) => {
+            root_filtered_storage = filter_histogram_bundle_by_features(&root_histograms, |f| {
+                idx.feature_allowed(ag, f)
+            });
+            &root_filtered_storage
+        }
+        _ => &root_histograms,
+    };
     let root_split = find_best_split_dispatch(
         backend,
-        &root_histograms,
+        root_histograms_for_split,
         split_options,
         feature_weights,
         categorical_features,
@@ -5569,6 +6069,26 @@ fn build_tree_leaf_wise<B: BackendOps>(
                 larger_node_id,
             )?;
 
+            // Propagate interaction-constraint active groups to both
+            // children of the just-applied split.  Both children inherit the
+            // same descended bitset because the split feature is shared.
+            // (`split` itself was moved into `committed_split` above; we
+            // read the feature index off the just-pushed stump instead.)
+            let split_feature_for_descend =
+                stumps.last().map(|s| s.split.feature_index).unwrap_or(0);
+            let child_active_groups: Option<u64> = match (
+                constraint_index.as_ref(),
+                node_active_groups.get(&local_node_id).copied(),
+            ) {
+                (Some(idx), Some(ag)) => {
+                    let descended = idx.descend(ag, split_feature_for_descend);
+                    node_active_groups.insert(smaller_local, descended);
+                    node_active_groups.insert(larger_local, descended);
+                    Some(descended)
+                }
+                _ => None,
+            };
+
             // Find best split for each child and enqueue if valid.
             let smaller_factor_context = factor_split_context_for_node(
                 params,
@@ -5576,9 +6096,21 @@ fn build_tree_leaf_wise<B: BackendOps>(
                 factor_exposures,
                 &smaller_node.row_indices,
             );
+            let smaller_filtered_storage;
+            let smaller_histograms_for_split =
+                match (constraint_index.as_ref(), child_active_groups) {
+                    (Some(idx), Some(ag)) => {
+                        smaller_filtered_storage =
+                            filter_histogram_bundle_by_features(&smaller_histograms, |f| {
+                                idx.feature_allowed(ag, f)
+                            });
+                        &smaller_filtered_storage
+                    }
+                    _ => &smaller_histograms,
+                };
             if let Some(child_split) = find_best_split_dispatch(
                 backend,
-                &smaller_histograms,
+                smaller_histograms_for_split,
                 split_options,
                 feature_weights,
                 categorical_features,
@@ -5604,9 +6136,21 @@ fn build_tree_leaf_wise<B: BackendOps>(
                 factor_exposures,
                 &larger_indices,
             );
+            let larger_filtered_storage;
+            let larger_histograms_for_split = match (constraint_index.as_ref(), child_active_groups)
+            {
+                (Some(idx), Some(ag)) => {
+                    larger_filtered_storage =
+                        filter_histogram_bundle_by_features(&larger_histograms, |f| {
+                            idx.feature_allowed(ag, f)
+                        });
+                    &larger_filtered_storage
+                }
+                _ => &larger_histograms,
+            };
             if let Some(child_split) = find_best_split_dispatch(
                 backend,
-                &larger_histograms,
+                larger_histograms_for_split,
                 split_options,
                 feature_weights,
                 categorical_features,
@@ -6924,6 +7468,7 @@ fn decode_trained_model_payload(bytes: &[u8]) -> EngineResult<TrainedModel> {
         native_categorical_feature_indices: Vec::new(),
         morph_metadata: None,
         dro_metadata: None,
+        feature_baseline: None,
     })
 }
 
@@ -7473,6 +8018,10 @@ pub struct MultiClassIterationRunSummary {
     pub custom_metric_per_round: Vec<f32>,
     /// Name of the custom metric (None when no custom metric callback is used).
     pub custom_metric_name: Option<String>,
+    /// Per-round diagnostic snapshot aggregated across the K class buffers
+    /// (mean-of-class for norms / variance, max-of-class for
+    /// `neutralization_effectiveness`).  See [`IterationDiagnostics`].
+    pub diagnostics_per_round: Vec<IterationDiagnostics>,
 }
 
 #[cfg(test)]
@@ -8220,8 +8769,13 @@ mod tests {
     }
 
     #[test]
-    fn warm_start_rejects_active_neutralization_without_metadata() {
-        let dataset = factor_dominated_dataset();
+    fn warm_start_neutralization_requires_factor_exposures_to_be_supplied() {
+        // v0.7.1 contract: warm-start with neutralization is allowed, but the
+        // caller must pass `factor_exposures` so the projection has the same
+        // column space as the initial fit.  Dropping the exposures must be
+        // rejected with a contract-violation error.
+        let mut dataset = factor_dominated_dataset();
+        dataset.factor_exposures = None;
         let binned = sample_binned_matrix_for_dataset(&dataset);
         let params = TrainParams {
             neutralization_config: Some(alloygbm_core::FactorNeutralizationConfig {
@@ -8320,8 +8874,11 @@ mod tests {
     }
 
     #[test]
-    fn multiclass_warm_start_rejects_active_neutralization_without_metadata() {
-        let dataset = multiclass_factor_dominated_dataset();
+    fn multiclass_warm_start_neutralization_requires_factor_exposures_to_be_supplied() {
+        // v0.7.1: dropping factor_exposures on a neutralized multiclass
+        // warm-start must be rejected (mirrors the single-output contract).
+        let mut dataset = multiclass_factor_dominated_dataset();
+        dataset.factor_exposures = None;
         let binned = sample_binned_matrix_for_dataset(&dataset);
         let objective = MultiClassSoftmaxObjective::new(2).unwrap();
         let controls = IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).unwrap();
@@ -9491,6 +10048,7 @@ mod tests {
             native_categorical_feature_indices: Vec::new(),
             morph_metadata: None,
             dro_metadata: None,
+            feature_baseline: None,
         };
 
         let left = model.predict_row(&[0.0]).expect("left prediction succeeds");
@@ -10750,6 +11308,7 @@ mod tests {
             native_categorical_feature_indices: vec![0],
             morph_metadata: None,
             dro_metadata: None,
+            feature_baseline: None,
         };
 
         let bytes = model.to_artifact_bytes().expect("serialize should succeed");
@@ -10817,6 +11376,7 @@ mod tests {
             native_categorical_feature_indices: Vec::new(),
             morph_metadata: None,
             dro_metadata: None,
+            feature_baseline: None,
         };
 
         let bytes = model.to_artifact_bytes().expect("serialize should succeed");
@@ -10975,6 +11535,146 @@ mod tests {
                 s_plain.right_leaf_value.as_scalar(),
                 s_morph.right_leaf_value.as_scalar(),
             );
+        }
+    }
+
+    #[test]
+    fn interaction_constraints_paths_never_mix_disjoint_groups() {
+        // Train a small synthetic regression model with two disjoint
+        // constraint groups and walk every tree's root-to-leaf path to
+        // verify the constraint is honoured.  The synthetic target depends
+        // on features from both groups so the model has incentive to use
+        // each — without the constraint we'd routinely see paths that mix.
+        use alloygbm_core::{DatasetMatrix, TrainingDataset};
+        let n = 64;
+        let feature_count = 4;
+        let mut values = Vec::with_capacity(n * feature_count);
+        let mut targets = Vec::with_capacity(n);
+        for i in 0..n {
+            // f0 takes 4 values, f1 takes 2 values, f2 takes 4 values, f3 takes 2.
+            let f0 = (i % 4) as f32;
+            let f1 = ((i / 4) % 2) as f32;
+            let f2 = ((i / 8) % 4) as f32;
+            let f3 = ((i / 32) % 2) as f32;
+            values.extend_from_slice(&[f0, f1, f2, f3]);
+            targets.push(f0 * 0.5 + f1 - f2 * 0.3 + f3 * 0.8);
+        }
+        let dataset = TrainingDataset {
+            matrix: DatasetMatrix::new(n, feature_count, values).expect("matrix"),
+            targets,
+            sample_weights: None,
+            time_index: None,
+            group_id: None,
+            factor_exposures: None,
+        };
+        let binned = sample_binned_matrix_for_dataset(&dataset);
+        let groups = vec![vec![0u32, 1], vec![2, 3]];
+        let params = TrainParams {
+            max_depth: 4,
+            interaction_constraints: groups.clone(),
+            seed: 0,
+            deterministic: true,
+            ..TrainParams::default()
+        };
+
+        let summary = Trainer::new(params)
+            .unwrap()
+            .fit_iterations_with_summary(
+                &dataset,
+                &binned,
+                &MockBackend,
+                &SquaredErrorObjective,
+                IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
+                    .unwrap()
+                    .with_subsample_rates(1.0, 1.0)
+                    .unwrap(),
+            )
+            .expect("fit succeeds");
+        assert!(summary.rounds_completed > 0);
+
+        // Group stumps by tree_id then walk every path.
+        let mut by_tree: std::collections::HashMap<
+            u32,
+            std::collections::HashMap<u32, &TrainedStump>,
+        > = std::collections::HashMap::new();
+        for stump in &summary.model.stumps {
+            let (tree_id, local_id) = decode_tree_node_id(stump.split.node_id);
+            by_tree.entry(tree_id).or_default().insert(local_id, stump);
+        }
+
+        fn feature_groups_of(feat: u32, groups: &[Vec<u32>]) -> Vec<usize> {
+            groups
+                .iter()
+                .enumerate()
+                .filter_map(|(gi, g)| if g.contains(&feat) { Some(gi) } else { None })
+                .collect()
+        }
+
+        fn walk(
+            nodes: &std::collections::HashMap<u32, &TrainedStump>,
+            local_id: u32,
+            mut active_groups: std::collections::BTreeSet<usize>,
+            groups: &[Vec<u32>],
+        ) {
+            let Some(stump) = nodes.get(&local_id) else {
+                return;
+            };
+            let feat_groups = feature_groups_of(stump.split.feature_index, groups);
+            if !feat_groups.is_empty() {
+                let feat_set: std::collections::BTreeSet<usize> = feat_groups.into_iter().collect();
+                if active_groups.is_empty() {
+                    active_groups = feat_set;
+                } else {
+                    let intersection: std::collections::BTreeSet<usize> =
+                        active_groups.intersection(&feat_set).copied().collect();
+                    assert!(
+                        !intersection.is_empty(),
+                        "tree-path violated interaction constraints at feature {} (prior active groups {:?}, feature groups {:?})",
+                        stump.split.feature_index,
+                        active_groups,
+                        feat_set,
+                    );
+                    active_groups = intersection;
+                }
+            }
+            walk(nodes, local_id * 2 + 1, active_groups.clone(), groups);
+            walk(nodes, local_id * 2 + 2, active_groups, groups);
+        }
+
+        for nodes in by_tree.values() {
+            walk(nodes, 0, std::collections::BTreeSet::new(), &groups);
+        }
+    }
+
+    #[test]
+    fn iteration_run_summary_populates_diagnostics_per_round() {
+        // End-to-end check: a regression fit records one IterationDiagnostics
+        // entry per completed round.  No factor neutralization is configured,
+        // so the projection-related fields must remain `None`.
+        let trainer = Trainer::new(TrainParams::default()).expect("valid params");
+        let controls = trainer
+            .default_iteration_controls(3)
+            .expect("controls valid");
+        let summary = trainer
+            .fit_iterations_with_summary(
+                &sample_dataset(),
+                &sample_binned_matrix(),
+                &MockBackend,
+                &SquaredErrorObjective,
+                controls,
+            )
+            .expect("training succeeds");
+        assert_eq!(
+            summary.diagnostics_per_round.len(),
+            summary.rounds_completed,
+            "one diagnostics entry per completed round"
+        );
+        for d in &summary.diagnostics_per_round {
+            assert!(d.gradient_l2_norm >= 0.0);
+            assert!(d.hessian_l2_norm >= 0.0);
+            assert!(d.original_gradient_l2_norm.is_none());
+            assert!(d.projected_gradient_l2_norm.is_none());
+            assert!(d.neutralization_effectiveness.is_none());
         }
     }
 }
@@ -11188,5 +11888,89 @@ mod morph_state_tests {
         let state = MorphState::new(cfg, 1, 1, 0.01);
         assert!(state.is_in_warmup_phase(0));
         assert!(!state.is_in_warmup_phase(1));
+    }
+
+    // ── IterationDiagnostics tests ──────────────────────────────────────────
+
+    #[test]
+    fn iteration_diagnostics_from_gradient_snapshot_without_projection_omits_effectiveness() {
+        let grads = vec![
+            GradientPair {
+                grad: 1.0,
+                hess: 1.0,
+            },
+            GradientPair {
+                grad: -2.0,
+                hess: 0.5,
+            },
+            GradientPair {
+                grad: 0.0,
+                hess: 1.0,
+            },
+        ];
+        let d = IterationDiagnostics::from_gradient_snapshot(&grads, None, 3, 1);
+        // ||g||_2 = sqrt(1 + 4 + 0) = sqrt(5)
+        assert!((d.gradient_l2_norm - 5.0_f32.sqrt()).abs() < 1e-5);
+        assert!(d.gradient_variance >= 0.0);
+        // No projection configured → both pre and post stay None.
+        assert!(d.original_gradient_l2_norm.is_none());
+        assert!(d.projected_gradient_l2_norm.is_none());
+        assert!(d.neutralization_effectiveness.is_none());
+        assert_eq!(d.n_active_rows, 3);
+        assert_eq!(d.n_active_features, 1);
+    }
+
+    #[test]
+    fn iteration_diagnostics_effectiveness_in_unit_interval_when_projection_active() {
+        // Simulate: pre-projection ||g|| = 4.0, post-projection ||g|| = 1.0.
+        // Effectiveness = 1 - 1/4 = 0.75.
+        let post = vec![GradientPair {
+            grad: 1.0,
+            hess: 0.0,
+        }];
+        let d = IterationDiagnostics::from_gradient_snapshot(&post, Some(4.0), 1, 1);
+        assert_eq!(d.original_gradient_l2_norm, Some(4.0));
+        assert_eq!(d.projected_gradient_l2_norm, Some(1.0));
+        let eff = d
+            .neutralization_effectiveness
+            .expect("effectiveness present");
+        assert!((eff - 0.75).abs() < 1e-5, "expected 0.75, got {eff}");
+        assert!((0.0..=1.0).contains(&eff));
+    }
+
+    #[test]
+    fn iteration_diagnostics_aggregate_per_class_takes_max_effectiveness() {
+        // Three classes: two with effectiveness, one without.  Aggregation
+        // should report the maximum effectiveness across classes.
+        let a = IterationDiagnostics {
+            gradient_l2_norm: 1.0,
+            gradient_variance: 0.0,
+            hessian_l2_norm: 1.0,
+            original_gradient_l2_norm: Some(2.0),
+            projected_gradient_l2_norm: Some(1.0),
+            neutralization_effectiveness: Some(0.5),
+            n_active_rows: 10,
+            n_active_features: 2,
+        };
+        let b = IterationDiagnostics {
+            gradient_l2_norm: 2.0,
+            gradient_variance: 0.0,
+            hessian_l2_norm: 1.0,
+            original_gradient_l2_norm: Some(4.0),
+            projected_gradient_l2_norm: Some(1.0),
+            neutralization_effectiveness: Some(0.75),
+            n_active_rows: 10,
+            n_active_features: 2,
+        };
+        let c = IterationDiagnostics {
+            gradient_l2_norm: 3.0,
+            gradient_variance: 0.0,
+            hessian_l2_norm: 1.0,
+            ..Default::default()
+        };
+        let agg = IterationDiagnostics::aggregate_per_class(&[a, b, c]);
+        assert!((agg.gradient_l2_norm - 2.0).abs() < 1e-5); // mean(1, 2, 3) = 2
+        assert_eq!(agg.neutralization_effectiveness, Some(0.75));
+        assert_eq!(agg.n_active_rows, 10);
     }
 }

@@ -260,7 +260,11 @@ class FactorNeutralizationTests(unittest.TestCase):
         np.testing.assert_allclose(restored.predict(x), model.predict(x), atol=1e-6)
         self.assertEqual(restored.neutralization, "per_round_gradient")
 
-    def test_neutralized_warm_start_rejected_without_artifact_metadata(self):
+    def test_neutralized_warm_start_succeeds_when_exposures_supplied(self):
+        # v0.7.1: warm-starting a neutralized model is supported as long as
+        # the caller supplies the same `factor_exposures` matrix.  Without it
+        # we fail loudly so the caller doesn't accidentally project against
+        # a different column space mid-training.
         x, y, f = factor_data()
         model = GBMRegressor(
             neutralization="per_round_gradient",
@@ -270,27 +274,52 @@ class FactorNeutralizationTests(unittest.TestCase):
         )
         model.fit(x, y, factor_exposures=f)
         model.n_estimators = 3
-
+        # Re-fitting with exposures should succeed and add the requested rounds.
+        model.fit(x, y, factor_exposures=f)
+        # Missing exposures must raise per the v0.7.1 contract.
         with self.assertRaisesRegex(
-            ValueError, "neutralized warm-start training is not supported"
+            ValueError,
+            "warm-start training of a neutralized model requires factor_exposures",
         ):
-            model.fit(x, y, factor_exposures=f)
+            model.fit(x, y)
 
-    def test_neutralized_init_model_rejected_without_artifact_metadata(self):
+    def test_neutralized_init_model_warm_start_succeeds_when_exposures_supplied(self):
+        # An init_model carrying neutralization metadata can be resumed by a
+        # new estimator instance, again contingent on factor_exposures being
+        # supplied.
         x, y, f = factor_data()
-        base = GBMRegressor(n_estimators=2, seed=1).fit(x, y)
+        base = GBMRegressor(
+            neutralization="per_round_gradient",
+            n_estimators=2,
+            seed=1,
+        ).fit(x, y, factor_exposures=f)
         model = GBMRegressor(
             neutralization="per_round_gradient",
             n_estimators=2,
             seed=2,
         )
-
+        # Success path.
+        model.fit(x, y, init_model=base, factor_exposures=f)
+        # Missing exposures is rejected even when init_model has neutralization
+        # metadata, because we can't reconstruct the original exposures from
+        # the artifact alone (they're not persisted).
+        model2 = GBMRegressor(
+            neutralization="per_round_gradient",
+            n_estimators=2,
+            seed=2,
+        )
         with self.assertRaisesRegex(
-            ValueError, "neutralized warm-start training is not supported"
+            ValueError,
+            "warm-start training of a neutralized model requires factor_exposures",
         ):
-            model.fit(x, y, init_model=base, factor_exposures=f)
+            model2.fit(x, y, init_model=base)
 
     def test_neutralized_init_model_rejected_after_params_mutated_to_none(self):
+        # Even if the caller mutates `neutralization` to "none" on the init
+        # model, the persisted fit contract still says the original training
+        # used neutralization — so the contract check is driven from the
+        # *fitted* neutralization, not the current params.  The warm-start
+        # mode-mismatch guard rejects the resume with a clear error.
         x, y, f = factor_data()
         base = GBMRegressor(
             neutralization="per_round_gradient",
@@ -300,11 +329,15 @@ class FactorNeutralizationTests(unittest.TestCase):
         base.set_params(neutralization="none")
 
         with self.assertRaisesRegex(
-            ValueError, "neutralized warm-start training is not supported"
+            ValueError,
+            r"init_model neutralization 'per_round_gradient' does not match",
         ):
             GBMRegressor(n_estimators=2, seed=2).fit(x, y, init_model=base)
 
     def test_save_load_preserves_fitted_neutralization_after_params_mutation(self):
+        # Same contract holds across save/load: the persisted fit
+        # neutralization mode is what drives the warm-start contract check,
+        # regardless of subsequent param mutations.
         x, y, f = factor_data()
         base = GBMRegressor(
             neutralization="per_round_gradient",
@@ -318,6 +351,7 @@ class FactorNeutralizationTests(unittest.TestCase):
             restored = GBMRegressor.load_model(tmp.name)
 
         with self.assertRaisesRegex(
-            ValueError, "neutralized warm-start training is not supported"
+            ValueError,
+            r"init_model neutralization 'per_round_gradient' does not match",
         ):
             GBMRegressor(n_estimators=2, seed=2).fit(x, y, init_model=restored)

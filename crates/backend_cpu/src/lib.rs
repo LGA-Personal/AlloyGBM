@@ -2371,6 +2371,7 @@ mod tests {
             min_split_gain: 0.0,
             monotone_constraints: Vec::new(),
             feature_weights: Vec::new(),
+            interaction_constraints: Vec::new(),
             max_leaves: None,
             tree_growth: TreeGrowth::Level,
             morph_config: None,

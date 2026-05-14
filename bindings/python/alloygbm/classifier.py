@@ -338,6 +338,7 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
             f"categorical_time_aware={self.categorical_time_aware}, "
             f"monotone_constraints={self.monotone_constraints}, "
             f"feature_weights={self.feature_weights}, "
+            f"interaction_constraints={self.interaction_constraints}, "
             f"max_leaves={self.max_leaves}, "
             f"tree_growth='{self.tree_growth}', "
             f"warm_start={self.warm_start}, "
