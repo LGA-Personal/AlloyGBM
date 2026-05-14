@@ -4,7 +4,13 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
-The `0.7.0` release introduces factor-neutral boosting, with fit-time factor
+The `0.7.1` release builds on the v0.7.0 factor-neutral boosting surface
+with five additions: SHAP support for piecewise-linear leaves, per-round
+training diagnostics on every estimator, neutralized warm-start (with a
+matching-exposures contract), LightGBM-compatible feature interaction
+constraints, and `MultiLabelGBMRanker` for multi-output ranking.
+
+The `0.7.0` release introduced factor-neutral boosting, with fit-time factor
 exposures, pre-target residualization, per-round gradient projection, and an
 optional split exposure penalty. The `0.6.0` release introduced
 `leaf_solver="dro"`, a conservative DRO-style scalar leaf solver that penalizes
@@ -13,6 +19,31 @@ artifacts. The `0.5.0` release introduced piecewise-linear (PL) tree leaves via
 `leaf_model="linear"` on all three estimators. The `0.4.0` release introduced
 the opt-in MorphBoost adaptive split criterion, per-iteration learning-rate
 schedules, and SIMD-accelerated histogram and EMA kernels.
+
+## What Shipped In 0.7.1
+
+- **SHAP for piecewise-linear leaves** — `shap_values()` accepts
+  `leaf_model="linear"` artifacts and returns an interventional
+  decomposition (path-attributed leaf "constant part" plus per-leaf
+  row deviations); global feature means are persisted in a new
+  `FeatureBaseline` artifact section so SHAP is self-contained at
+  explain time.
+- **Per-round training diagnostics** — every estimator exposes
+  `diagnostics_per_round_`: gradient L2 norm / variance, hessian L2
+  norm, sampling counts, and (when factor neutralization is active)
+  the `neutralization_effectiveness` score in `[0, 1]`.
+- **Neutralized warm-start** — `init_model` / `warm_start=True` works
+  across `pre_target`, `per_round_gradient`, and `split_penalty`
+  provided the caller supplies the same `factor_exposures` matrix used
+  for the initial fit; mode + lambda + (where applicable) penalty must
+  match.
+- **Feature interaction constraints** — LightGBM-compatible
+  `interaction_constraints=[[…]]` on every estimator, up to 64 groups
+  per fit, enforced in both level-wise and leaf-wise tree builders.
+- **`MultiLabelGBMRanker`** — unified multi-output ranking estimator:
+  `y` shaped `(n_rows, n_labels)`, `predict` returns the same shape.
+  Trains one independent `GBMRanker` per label sharing `group` and
+  `factor_exposures`; supports per-label `ranking_objective` lists.
 
 ## What Shipped In 0.7.0
 

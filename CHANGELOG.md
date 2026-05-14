@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.7.1
+
+### New Features
+
+- **SHAP for piecewise-linear leaves.**  `shap_values()` now accepts
+  `leaf_model="linear"` artifacts and returns an interventional
+  decomposition: the path-based TreeSHAP / brute-force machinery
+  attributes each leaf's "constant part" (`intercept + Σ wⱼ·μⱼ_global`)
+  while per-leaf row deviations `wⱼ·(xⱼ − μⱼ_global)` are credited
+  directly to each regressor.  Global feature means are persisted in a
+  new `FeatureBaseline` artifact section so SHAP is self-contained at
+  explain time.
+- **Per-round training diagnostics.**  Every estimator now exposes
+  `diagnostics_per_round_` — a list of dicts containing
+  `gradient_l2_norm`, `gradient_variance`, `hessian_l2_norm`, sampling
+  counts, and (when factor neutralization is active) the
+  `neutralization_effectiveness` score `1 − ‖projₘ‖ / ‖origₘ‖` clamped
+  to `[0, 1]`.
+- **Neutralized warm-start.**  `init_model` / `warm_start=True` with
+  `neutralization=*` is now supported across `pre_target`,
+  `per_round_gradient`, and `split_penalty` provided the caller supplies
+  the same `factor_exposures` matrix used for the initial fit.  Mode,
+  `factor_neutralization_lambda`, and (for `split_penalty`)
+  `factor_penalty` must match the persisted contract; mismatches raise
+  a clear "does not match" error.
+- **Interaction constraints.**  LightGBM-compatible
+  `interaction_constraints=[[…]]` on every estimator.  Each group is a
+  set of feature indices; any root-to-leaf path is restricted to splits
+  on features from a single still-active group.  Up to 64 groups per
+  fit; enforced through both the level-wise and leaf-wise tree
+  builders.
+- **`MultiLabelGBMRanker`.**  Unified multi-output ranking estimator
+  with `y` shaped `(n_rows, n_labels)` and `predict` returning the same
+  shape.  Trains one independent `GBMRanker` per label sharing `group`
+  / `factor_exposures` / kwargs, supports per-label
+  `ranking_objective` lists, and slices `eval_set` y-columns per label
+  so early stopping and custom eval metrics work end-to-end.
+
+### Limitations Documented For The Next Release
+
+- SHAP path-walker still compares feature values against bin-index
+  thresholds; strict additivity is relaxed for PL-leaf artifacts.
+  Path-walk alignment with the predictor's float thresholds is queued
+  for v0.7.2.
+- MorphBoost warm-start does not restore the EMA snapshot from the
+  artifact, so resumed training starts EMA cold.  Persisting EMA is
+  queued for v0.7.2.
+- `MultiLabelGBMRanker` trains K independent per-label rankers.  Joint
+  shared-tree multi-label boosting (one ensemble, K-tree-per-round
+  ranking objective) is queued for v0.7.2.
+
 ## 0.7.0
 
 ### New Features

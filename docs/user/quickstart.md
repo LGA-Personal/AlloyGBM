@@ -140,7 +140,7 @@ model = GBMRegressor(
 model.fit(X_train, y_train)
 ```
 
-`dro_metric="wasserstein"` is the v0.7.0 metric name for this
+`dro_metric="wasserstein"` is the v0.7.1 metric name for this
 Wasserstein-inspired gradient-uncertainty counterpart. It is not a full
 raw-distribution Wasserstein DRO guarantee. `leaf_solver="dro"` requires
 `leaf_model="constant"` and composes with `training_mode="morph"`.
