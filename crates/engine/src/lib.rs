@@ -2011,6 +2011,164 @@ pub struct IterationRunSummary {
     pub custom_metric_per_round: Vec<f32>,
     /// Name of the custom metric (None when no custom metric callback is used).
     pub custom_metric_name: Option<String>,
+    /// Per-round diagnostic snapshot: gradient stats, hessian magnitude, and —
+    /// when factor neutralization runs per round — a "neutralization
+    /// effectiveness" score `1 - ||g_proj|| / ||g_orig||` bounded in [0, 1].
+    /// Length equals `rounds_completed` after a successful fit.
+    pub diagnostics_per_round: Vec<IterationDiagnostics>,
+}
+
+/// Per-round training telemetry recorded by the fit loop.
+///
+/// Capturing this is intentionally cheap: each value is one or two reductions
+/// over the gradient/hessian buffer that the trainer already owns.  The data
+/// is exposed on every estimator (regressor / classifier / ranker) so callers
+/// can inspect gradient trajectories, confirm convergence, and — for
+/// neutralized fits — verify how much signal the factor projection removed.
+///
+/// For multiclass training, the per-round entry is an aggregate across the
+/// K class buffers: mean-of-class for gradient/hessian norms and variance,
+/// max-of-class for `neutralization_effectiveness` (the worst-projected
+/// class is the most informative statistic).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct IterationDiagnostics {
+    /// L2 norm of the per-row gradient buffer the trees consumed for this
+    /// round (post-projection when factor neutralization is active).
+    pub gradient_l2_norm: f32,
+    /// Sample variance of the per-row gradient values for this round.
+    pub gradient_variance: f32,
+    /// L2 norm of the per-row hessian buffer for this round.
+    pub hessian_l2_norm: f32,
+    /// Pre-projection L2 norm.  `Some(_)` only when per-round factor
+    /// neutralization (`per_round_gradient` or `split_penalty`) is enabled
+    /// — `pre_target` mode residualizes targets once and never projects
+    /// gradients, so this stays `None` there.
+    pub original_gradient_l2_norm: Option<f32>,
+    /// Post-projection L2 norm.  Mirrors `original_gradient_l2_norm`'s
+    /// availability rules.
+    pub projected_gradient_l2_norm: Option<f32>,
+    /// `1 - projected_l2 / original_l2`, clamped to `[0, 1]`.  Higher means
+    /// more gradient signal was removed by the factor projection.  `None`
+    /// when projection isn't active (constant-leaf, `pre_target`, or no
+    /// neutralization configured) or when `original_l2 == 0`.
+    pub neutralization_effectiveness: Option<f32>,
+    /// Number of training rows sampled for this round (after row_subsample).
+    pub n_active_rows: usize,
+    /// Number of split-feature tiles available for this round (after
+    /// col_subsample).
+    pub n_active_features: usize,
+}
+
+impl IterationDiagnostics {
+    /// Construct a diagnostics record from a gradient buffer pre- and
+    /// post-projection.  `original` is `Some(&original_buffer)` only when a
+    /// per-round projection was applied; otherwise pass `None` and the
+    /// projection-related fields stay `None`.
+    pub fn from_gradient_snapshot(
+        post_projection_gradients: &[GradientPair],
+        original_gradient_norm: Option<f32>,
+        n_active_rows: usize,
+        n_active_features: usize,
+    ) -> Self {
+        let (g_norm, g_var, h_norm) = gradient_buffer_stats(post_projection_gradients);
+        let projected = original_gradient_norm.map(|_| g_norm);
+        let effectiveness = match (original_gradient_norm, projected) {
+            (Some(orig), Some(proj)) if orig > 0.0 => {
+                let raw = 1.0 - proj / orig;
+                Some(raw.clamp(0.0, 1.0))
+            }
+            _ => None,
+        };
+        Self {
+            gradient_l2_norm: g_norm,
+            gradient_variance: g_var,
+            hessian_l2_norm: h_norm,
+            original_gradient_l2_norm: original_gradient_norm,
+            projected_gradient_l2_norm: projected,
+            neutralization_effectiveness: effectiveness,
+            n_active_rows,
+            n_active_features,
+        }
+    }
+
+    /// Aggregate per-class diagnostics into a single per-round record for
+    /// multiclass training.  Norms / variance are mean-of-class; effectiveness
+    /// is max-of-class (so users see the worst-projected class).
+    pub fn aggregate_per_class(class_entries: &[IterationDiagnostics]) -> Self {
+        if class_entries.is_empty() {
+            return Self::default();
+        }
+        let k = class_entries.len() as f32;
+        let mean = |f: fn(&IterationDiagnostics) -> f32| -> f32 {
+            class_entries.iter().map(f).sum::<f32>() / k
+        };
+        let max_opt = |f: fn(&IterationDiagnostics) -> Option<f32>| -> Option<f32> {
+            class_entries
+                .iter()
+                .filter_map(f)
+                .fold(None, |acc, v| Some(acc.map_or(v, |a: f32| a.max(v))))
+        };
+        Self {
+            gradient_l2_norm: mean(|d| d.gradient_l2_norm),
+            gradient_variance: mean(|d| d.gradient_variance),
+            hessian_l2_norm: mean(|d| d.hessian_l2_norm),
+            original_gradient_l2_norm: max_opt(|d| d.original_gradient_l2_norm),
+            projected_gradient_l2_norm: max_opt(|d| d.projected_gradient_l2_norm),
+            neutralization_effectiveness: max_opt(|d| d.neutralization_effectiveness),
+            n_active_rows: class_entries[0].n_active_rows,
+            n_active_features: class_entries[0].n_active_features,
+        }
+    }
+}
+
+/// Compute `(L2_norm_of_grads, variance_of_grads, L2_norm_of_hessians)` over
+/// a gradient/hessian buffer in a single pass.  Skips non-finite entries so a
+/// stray NaN doesn't poison the telemetry.
+fn gradient_buffer_stats(gradients: &[GradientPair]) -> (f32, f32, f32) {
+    if gradients.is_empty() {
+        return (0.0, 0.0, 0.0);
+    }
+    let mut g_sq_sum = 0.0f64;
+    let mut g_sum = 0.0f64;
+    let mut g_finite_count = 0u64;
+    let mut h_sq_sum = 0.0f64;
+    for gp in gradients {
+        if gp.grad.is_finite() {
+            let g = gp.grad as f64;
+            g_sq_sum += g * g;
+            g_sum += g;
+            g_finite_count += 1;
+        }
+        if gp.hess.is_finite() {
+            let h = gp.hess as f64;
+            h_sq_sum += h * h;
+        }
+    }
+    let g_norm = g_sq_sum.sqrt() as f32;
+    let h_norm = h_sq_sum.sqrt() as f32;
+    let g_var = if g_finite_count > 1 {
+        let mean = g_sum / g_finite_count as f64;
+        let variance =
+            (g_sq_sum / g_finite_count as f64) - mean * mean;
+        variance.max(0.0) as f32
+    } else {
+        0.0
+    };
+    (g_norm, g_var, h_norm)
+}
+
+/// L2 norm of the gradient channel of a `GradientPair` buffer.  Used as a
+/// "pre-projection snapshot" before `FactorProjector::project_gradient_pairs_in_place`
+/// mutates the buffer in-place.
+fn gradient_l2_norm_only(gradients: &[GradientPair]) -> f32 {
+    let mut sq = 0.0f64;
+    for gp in gradients {
+        if gp.grad.is_finite() {
+            let g = gp.grad as f64;
+            sq += g * g;
+        }
+    }
+    (sq.sqrt()) as f32
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3340,6 +3498,7 @@ impl Trainer {
         let mut validation_loss_per_completed_round = Vec::new();
         let mut sampled_rows_per_completed_round = Vec::new();
         let mut sampled_features_per_completed_round = Vec::new();
+        let mut diagnostics_per_round: Vec<IterationDiagnostics> = Vec::new();
         let mut best_validation_loss = initial_validation_loss;
         let mut best_validation_round = initial_validation_loss.map(|_| 0_usize);
         let mut validation_no_improvement_rounds = 0_usize;
@@ -3385,6 +3544,9 @@ impl Trainer {
 
             // Build K trees
             let mut any_tree_produced = false;
+            // Per-class diagnostics for this round; aggregated to a single
+            // `IterationDiagnostics` after the class loop completes.
+            let mut per_class_diagnostics: Vec<IterationDiagnostics> = Vec::with_capacity(k);
             for class_k in 0..k {
                 objective.compute_gradients_for_class(
                     &class_predictions,
@@ -3393,9 +3555,20 @@ impl Trainer {
                     class_k,
                     &mut gradient_buffer,
                 )?;
+                let original_gradient_norm = if gradient_projector.is_some() {
+                    Some(gradient_l2_norm_only(&gradient_buffer))
+                } else {
+                    None
+                };
                 if let Some(projector) = &gradient_projector {
                     projector.project_gradient_pairs_in_place(&mut gradient_buffer)?;
                 }
+                per_class_diagnostics.push(IterationDiagnostics::from_gradient_snapshot(
+                    &gradient_buffer,
+                    original_gradient_norm,
+                    sampled_row_count,
+                    feature_tiles.len(),
+                ));
 
                 // Update per-class EMA stats from this class's gradients.
                 if let Some(ms) = morph_state.as_mut() {
@@ -3581,6 +3754,8 @@ impl Trainer {
                     .map(|c| class_stumps[c].len() - pre_round_counts[c])
                     .collect(),
             );
+            diagnostics_per_round
+                .push(IterationDiagnostics::aggregate_per_class(&per_class_diagnostics));
             rounds_completed += 1;
 
             if stop_for_validation_plateau {
@@ -3604,6 +3779,11 @@ impl Trainer {
                         .sum::<usize>();
                 class_stumps[class_k].truncate(keep_count);
             }
+            loss_per_completed_round.truncate(best_round);
+            validation_loss_per_completed_round.truncate(best_round);
+            sampled_rows_per_completed_round.truncate(best_round);
+            sampled_features_per_completed_round.truncate(best_round);
+            diagnostics_per_round.truncate(best_round);
             rounds_completed = best_round;
         }
 
@@ -3647,6 +3827,7 @@ impl Trainer {
             final_validation_loss,
             custom_metric_per_round: Vec::new(),
             custom_metric_name: None,
+            diagnostics_per_round,
         })
     }
 
@@ -3907,6 +4088,7 @@ impl Trainer {
         let mut validation_loss_per_completed_round = Vec::new();
         let mut sampled_rows_per_completed_round = Vec::new();
         let mut sampled_features_per_completed_round = Vec::new();
+        let mut diagnostics_per_round: Vec<IterationDiagnostics> = Vec::new();
         let mut best_validation_loss = initial_validation_loss;
         let mut best_validation_round = initial_validation_loss.map(|_| 0_usize);
         let mut validation_no_improvement_rounds = 0_usize;
@@ -3957,6 +4139,15 @@ impl Trainer {
                 active_dataset.sample_weights.as_deref(),
                 &mut gradient_buffer,
             )?;
+            // Capture the pre-projection L2 norm so neutralization
+            // effectiveness can be reported alongside the post-projection
+            // gradient stats below.  Only allocated when a per-round
+            // projection is actually configured for this fit.
+            let original_gradient_norm = if gradient_projector.is_some() {
+                Some(gradient_l2_norm_only(&gradient_buffer))
+            } else {
+                None
+            };
             if let Some(projector) = &gradient_projector {
                 projector.project_gradient_pairs_in_place(&mut gradient_buffer)?;
             }
@@ -3965,6 +4156,18 @@ impl Trainer {
             if cfg!(debug_assertions) {
                 validate_gradient_pairs(gradients, active_dataset.row_count())?;
             }
+            // Capture per-round telemetry from the *post-projection* gradient
+            // buffer — i.e., the values the tree-building code actually
+            // consumes.  Push happens further below, conditional on the
+            // round being committed, so we stay in lockstep with the other
+            // per-round vecs (loss_per_completed_round, etc.).  Round-level
+            // cost: a single linear pass over the gradient buffer.
+            let round_diagnostics = IterationDiagnostics::from_gradient_snapshot(
+                gradients,
+                original_gradient_norm,
+                sampled_row_count,
+                feature_tiles.len(),
+            );
 
             // Update EMA stats from this round's gradients before tree-building so
             // morph split selection sees the latest mean/std.
@@ -4187,6 +4390,7 @@ impl Trainer {
             loss_per_completed_round.push(candidate_loss);
             sampled_rows_per_completed_round.push(sampled_row_count);
             sampled_features_per_completed_round.push(sampled_feature_count);
+            diagnostics_per_round.push(round_diagnostics);
             if let Some(next_validation_predictions) = candidate_validation_predictions {
                 validation_predictions = Some(next_validation_predictions);
             }
@@ -4230,6 +4434,7 @@ impl Trainer {
             custom_metric_per_round.truncate(best_round);
             sampled_rows_per_completed_round.truncate(best_round);
             sampled_features_per_completed_round.truncate(best_round);
+            diagnostics_per_round.truncate(best_round);
             rounds_completed = best_round;
             weak_improvement_rounds_committed =
                 weak_improvement_rounds_committed.min(rounds_completed);
@@ -4354,6 +4559,7 @@ impl Trainer {
             final_validation_loss: current_validation_loss,
             custom_metric_per_round,
             custom_metric_name,
+            diagnostics_per_round,
         })
     }
 
@@ -7554,6 +7760,10 @@ pub struct MultiClassIterationRunSummary {
     pub custom_metric_per_round: Vec<f32>,
     /// Name of the custom metric (None when no custom metric callback is used).
     pub custom_metric_name: Option<String>,
+    /// Per-round diagnostic snapshot aggregated across the K class buffers
+    /// (mean-of-class for norms / variance, max-of-class for
+    /// `neutralization_effectiveness`).  See [`IterationDiagnostics`].
+    pub diagnostics_per_round: Vec<IterationDiagnostics>,
 }
 
 #[cfg(test)]
@@ -11061,6 +11271,38 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn iteration_run_summary_populates_diagnostics_per_round() {
+        // End-to-end check: a regression fit records one IterationDiagnostics
+        // entry per completed round.  No factor neutralization is configured,
+        // so the projection-related fields must remain `None`.
+        let trainer = Trainer::new(TrainParams::default()).expect("valid params");
+        let controls = trainer
+            .default_iteration_controls(3)
+            .expect("controls valid");
+        let summary = trainer
+            .fit_iterations_with_summary(
+                &sample_dataset(),
+                &sample_binned_matrix(),
+                &MockBackend,
+                &SquaredErrorObjective,
+                controls,
+            )
+            .expect("training succeeds");
+        assert_eq!(
+            summary.diagnostics_per_round.len(),
+            summary.rounds_completed,
+            "one diagnostics entry per completed round"
+        );
+        for d in &summary.diagnostics_per_round {
+            assert!(d.gradient_l2_norm >= 0.0);
+            assert!(d.hessian_l2_norm >= 0.0);
+            assert!(d.original_gradient_l2_norm.is_none());
+            assert!(d.projected_gradient_l2_norm.is_none());
+            assert!(d.neutralization_effectiveness.is_none());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -11273,4 +11515,87 @@ mod morph_state_tests {
         assert!(state.is_in_warmup_phase(0));
         assert!(!state.is_in_warmup_phase(1));
     }
+
+    // ── IterationDiagnostics tests ──────────────────────────────────────────
+
+    #[test]
+    fn iteration_diagnostics_from_gradient_snapshot_without_projection_omits_effectiveness() {
+        let grads = vec![
+            GradientPair {
+                grad: 1.0,
+                hess: 1.0,
+            },
+            GradientPair {
+                grad: -2.0,
+                hess: 0.5,
+            },
+            GradientPair {
+                grad: 0.0,
+                hess: 1.0,
+            },
+        ];
+        let d = IterationDiagnostics::from_gradient_snapshot(&grads, None, 3, 1);
+        // ||g||_2 = sqrt(1 + 4 + 0) = sqrt(5)
+        assert!((d.gradient_l2_norm - 5.0_f32.sqrt()).abs() < 1e-5);
+        assert!(d.gradient_variance >= 0.0);
+        // No projection configured → both pre and post stay None.
+        assert!(d.original_gradient_l2_norm.is_none());
+        assert!(d.projected_gradient_l2_norm.is_none());
+        assert!(d.neutralization_effectiveness.is_none());
+        assert_eq!(d.n_active_rows, 3);
+        assert_eq!(d.n_active_features, 1);
+    }
+
+    #[test]
+    fn iteration_diagnostics_effectiveness_in_unit_interval_when_projection_active() {
+        // Simulate: pre-projection ||g|| = 4.0, post-projection ||g|| = 1.0.
+        // Effectiveness = 1 - 1/4 = 0.75.
+        let post = vec![GradientPair {
+            grad: 1.0,
+            hess: 0.0,
+        }];
+        let d = IterationDiagnostics::from_gradient_snapshot(&post, Some(4.0), 1, 1);
+        assert_eq!(d.original_gradient_l2_norm, Some(4.0));
+        assert_eq!(d.projected_gradient_l2_norm, Some(1.0));
+        let eff = d.neutralization_effectiveness.expect("effectiveness present");
+        assert!((eff - 0.75).abs() < 1e-5, "expected 0.75, got {eff}");
+        assert!((0.0..=1.0).contains(&eff));
+    }
+
+    #[test]
+    fn iteration_diagnostics_aggregate_per_class_takes_max_effectiveness() {
+        // Three classes: two with effectiveness, one without.  Aggregation
+        // should report the maximum effectiveness across classes.
+        let a = IterationDiagnostics {
+            gradient_l2_norm: 1.0,
+            gradient_variance: 0.0,
+            hessian_l2_norm: 1.0,
+            original_gradient_l2_norm: Some(2.0),
+            projected_gradient_l2_norm: Some(1.0),
+            neutralization_effectiveness: Some(0.5),
+            n_active_rows: 10,
+            n_active_features: 2,
+        };
+        let b = IterationDiagnostics {
+            gradient_l2_norm: 2.0,
+            gradient_variance: 0.0,
+            hessian_l2_norm: 1.0,
+            original_gradient_l2_norm: Some(4.0),
+            projected_gradient_l2_norm: Some(1.0),
+            neutralization_effectiveness: Some(0.75),
+            n_active_rows: 10,
+            n_active_features: 2,
+        };
+        let c = IterationDiagnostics {
+            gradient_l2_norm: 3.0,
+            gradient_variance: 0.0,
+            hessian_l2_norm: 1.0,
+            ..Default::default()
+        };
+        let agg = IterationDiagnostics::aggregate_per_class(&[a, b, c]);
+        assert!((agg.gradient_l2_norm - 2.0).abs() < 1e-5); // mean(1, 2, 3) = 2
+        assert_eq!(agg.neutralization_effectiveness, Some(0.75));
+        assert_eq!(agg.n_active_rows, 10);
+    }
+
 }

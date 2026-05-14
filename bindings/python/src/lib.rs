@@ -11,11 +11,11 @@ use alloygbm_core::{
 };
 use alloygbm_engine::{
     ArtifactCompatibilityMode, BinaryCrossEntropyObjective, CategoricalFeatureInfo,
-    CategoricalTargetEncodingSpec, EngineError, IterationRunSummary, LambdaMARTObjective,
-    MultiClassIterationRunSummary, MultiClassSoftmaxObjective, MultiClassTrainedModel,
-    MultiClassWarmStartState, ObjectiveOps, PairwiseRankingObjective, PerRoundMetricCallback,
-    QueryRMSEObjective, SquaredErrorObjective, TrainedModel, Trainer, TrainingPolicyMode,
-    WarmStartState, XeNDCGObjective, YetiRankObjective,
+    CategoricalTargetEncodingSpec, EngineError, IterationDiagnostics, IterationRunSummary,
+    LambdaMARTObjective, MultiClassIterationRunSummary, MultiClassSoftmaxObjective,
+    MultiClassTrainedModel, MultiClassWarmStartState, ObjectiveOps, PairwiseRankingObjective,
+    PerRoundMetricCallback, QueryRMSEObjective, SquaredErrorObjective, TrainedModel, Trainer,
+    TrainingPolicyMode, WarmStartState, XeNDCGObjective, YetiRankObjective,
 };
 use alloygbm_predictor::{Predictor, PredictorError};
 use alloygbm_shap::{
@@ -829,6 +829,58 @@ struct NativeTrainingSummary {
     /// Custom eval metric name (None when no custom metric).
     #[pyo3(get)]
     custom_metric_name: Option<String>,
+    /// Per-round diagnostic snapshot.  Each entry is a `NativeIterationDiagnostics`
+    /// pyclass exposing the fields of `engine::IterationDiagnostics`.  Length
+    /// equals `rounds_completed` after a successful fit.
+    #[pyo3(get)]
+    diagnostics_per_round: Vec<NativeIterationDiagnostics>,
+}
+
+/// Python-visible view of an `engine::IterationDiagnostics` snapshot.  Field
+/// names mirror the Rust struct one-to-one.  Projection-related fields are
+/// `None` when factor neutralization isn't active for the fit.
+#[pyclass]
+#[derive(Debug, Clone)]
+struct NativeIterationDiagnostics {
+    #[pyo3(get)]
+    gradient_l2_norm: f32,
+    #[pyo3(get)]
+    gradient_variance: f32,
+    #[pyo3(get)]
+    hessian_l2_norm: f32,
+    #[pyo3(get)]
+    original_gradient_l2_norm: Option<f32>,
+    #[pyo3(get)]
+    projected_gradient_l2_norm: Option<f32>,
+    /// `1 - projected_l2 / original_l2`, clamped to `[0, 1]`.  Higher means
+    /// more gradient signal was projected away.
+    #[pyo3(get)]
+    neutralization_effectiveness: Option<f32>,
+    #[pyo3(get)]
+    n_active_rows: usize,
+    #[pyo3(get)]
+    n_active_features: usize,
+}
+
+impl From<&IterationDiagnostics> for NativeIterationDiagnostics {
+    fn from(value: &IterationDiagnostics) -> Self {
+        Self {
+            gradient_l2_norm: value.gradient_l2_norm,
+            gradient_variance: value.gradient_variance,
+            hessian_l2_norm: value.hessian_l2_norm,
+            original_gradient_l2_norm: value.original_gradient_l2_norm,
+            projected_gradient_l2_norm: value.projected_gradient_l2_norm,
+            neutralization_effectiveness: value.neutralization_effectiveness,
+            n_active_rows: value.n_active_rows,
+            n_active_features: value.n_active_features,
+        }
+    }
+}
+
+/// Convert a slice of engine diagnostics into the Python-visible pyclass
+/// vector.  Used by both `build_native_training_summary` variants.
+fn diagnostics_to_native(entries: &[IterationDiagnostics]) -> Vec<NativeIterationDiagnostics> {
+    entries.iter().map(NativeIterationDiagnostics::from).collect()
 }
 
 #[pyclass]
@@ -2532,6 +2584,7 @@ fn build_native_training_summary_from_multiclass(
         native_train_seconds,
         custom_metric_values: summary.custom_metric_per_round.clone(),
         custom_metric_name: summary.custom_metric_name.clone(),
+        diagnostics_per_round: diagnostics_to_native(&summary.diagnostics_per_round),
     }
 }
 
@@ -2566,6 +2619,7 @@ fn build_native_training_summary(
         native_train_seconds,
         custom_metric_values: summary.custom_metric_per_round.clone(),
         custom_metric_name: summary.custom_metric_name.clone(),
+        diagnostics_per_round: diagnostics_to_native(&summary.diagnostics_per_round),
     }
 }
 
@@ -4590,6 +4644,7 @@ fn _alloygbm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<NativeContinuousBinningMetadata>()?;
     m.add_class::<NativeTrainingSummary>()?;
     m.add_class::<NativeTrainingResult>()?;
+    m.add_class::<NativeIterationDiagnostics>()?;
     m.add_function(wrap_pyfunction!(native_runtime_info, m)?)?;
     m.add_function(wrap_pyfunction!(predictor_predict_batch, m)?)?;
     m.add_function(wrap_pyfunction!(predictor_predict_batch_dense, m)?)?;

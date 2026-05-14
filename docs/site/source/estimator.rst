@@ -323,7 +323,16 @@ After fitting, the estimator may expose:
 - ``best_iteration_``
 - ``best_score_``
 - ``n_estimators_``
+- ``rounds_completed_``
+- ``stop_reason_``
 - ``evals_result_`` -- shaped like ``{"train": {"rmse": [...]}, "validation": {"rmse": [...]}}``
+- ``diagnostics_per_round_`` -- list of per-round dicts containing
+  ``gradient_l2_norm``, ``gradient_variance``, ``hessian_l2_norm``,
+  ``original_gradient_l2_norm``, ``projected_gradient_l2_norm``,
+  ``neutralization_effectiveness``, ``n_active_rows``, ``n_active_features``.
+  The three projection-related entries are ``None`` unless factor
+  neutralization (``per_round_gradient`` or ``split_penalty``) is configured;
+  ``pre_target`` mode never projects per round and therefore omits them.
 - ``fit_timing_``
 - ``feature_names_`` -- captured from training data or auto-generated
 

@@ -207,6 +207,35 @@ except ImportError:
     _SKLEARN_AVAILABLE = False
 
 
+def _diagnostics_to_dicts(diagnostics):
+    """Convert a list of native ``IterationDiagnostics`` objects into a list
+    of plain Python dicts.
+
+    The dict keys mirror the Rust struct field names one-to-one. Returns
+    ``None`` when ``diagnostics`` is missing/empty so unfitted models surface
+    ``diagnostics_per_round_ is None`` cleanly.
+    """
+    if not diagnostics:
+        return None
+
+    def _opt(value):
+        return float(value) if value is not None else None
+
+    return [
+        {
+            "gradient_l2_norm": float(d.gradient_l2_norm),
+            "gradient_variance": float(d.gradient_variance),
+            "hessian_l2_norm": float(d.hessian_l2_norm),
+            "original_gradient_l2_norm": _opt(d.original_gradient_l2_norm),
+            "projected_gradient_l2_norm": _opt(d.projected_gradient_l2_norm),
+            "neutralization_effectiveness": _opt(d.neutralization_effectiveness),
+            "n_active_rows": int(d.n_active_rows),
+            "n_active_features": int(d.n_active_features),
+        }
+        for d in diagnostics
+    ]
+
+
 class GBMRegressor(_GBMRegressorBase):
     """Gradient Boosted Decision Tree regressor with sklearn-compatible API."""
 
@@ -527,6 +556,7 @@ class GBMRegressor(_GBMRegressorBase):
         self.n_estimators_: int | None = None
         self.evals_result_: dict[str, dict[str, list[float]]] | None = None
         self.fit_timing_: dict[str, float] | None = None
+        self.diagnostics_per_round_: list[dict] | None = None
 
     def __repr__(self) -> str:
         return (
@@ -1898,6 +1928,9 @@ class GBMRegressor(_GBMRegressorBase):
         self.stop_reason_ = (
             str(summary.stop_reason) if summary.stop_reason is not None else None
         )
+        self.diagnostics_per_round_ = _diagnostics_to_dicts(
+            getattr(summary, "diagnostics_per_round", None)
+        )
         self.evals_result_ = self._build_evals_result(summary)
         total_fit_seconds = time.perf_counter() - fit_start
         self.fit_timing_ = {
@@ -1943,6 +1976,9 @@ class GBMRegressor(_GBMRegressorBase):
         self.rounds_completed_ = int(summary.rounds_completed)
         self.stop_reason_ = (
             str(summary.stop_reason) if summary.stop_reason is not None else None
+        )
+        self.diagnostics_per_round_ = _diagnostics_to_dicts(
+            getattr(summary, "diagnostics_per_round", None)
         )
         self.evals_result_ = self._build_evals_result(summary)
         total_fit_seconds = time.perf_counter() - self._fit_start_time
@@ -3594,6 +3630,7 @@ class GBMRegressor(_GBMRegressorBase):
         self.n_estimators_ = None
         self.rounds_completed_ = None
         self.stop_reason_ = None
+        self.diagnostics_per_round_ = None
         self.evals_result_ = None
         self.fit_timing_ = None
         self._fit_neutralization = None
