@@ -3353,7 +3353,7 @@ impl Trainer {
         validate_train_params(&self.params)?;
         validate_training_dataset(dataset)?;
         validate_neutralization_fit_contract_for_support(&self.params, dataset, false)?;
-        validate_warm_start_neutralization_contract(&self.params, warm_start.is_some())?;
+        validate_warm_start_neutralization_contract(&self.params, warm_start.is_some(), dataset)?;
         validate_training_alignment(dataset, binned_matrix)?;
         if let Some(validation_ref) = validation {
             validate_training_alignment(validation_ref.dataset, validation_ref.binned_matrix)?;
@@ -3983,7 +3983,11 @@ impl Trainer {
         validate_train_params(&self.params)?;
         validate_training_dataset(dataset)?;
         validate_neutralization_fit_contract(&self.params, dataset, objective)?;
-        validate_warm_start_neutralization_contract(&self.params, execution.warm_start.is_some())?;
+        validate_warm_start_neutralization_contract(
+            &self.params,
+            execution.warm_start.is_some(),
+            dataset,
+        )?;
         let owned_dataset = if execution.pre_target_already_applied {
             None
         } else {
@@ -4656,14 +4660,38 @@ fn validate_neutralization_fit_contract_for_support(
 fn validate_warm_start_neutralization_contract(
     params: &TrainParams,
     has_warm_start: bool,
+    dataset: &TrainingDataset,
 ) -> EngineResult<()> {
-    if has_warm_start && params.neutralization_config.is_some() {
-        return Err(EngineError::ContractViolation(
-            "neutralized warm-start training is not supported because WarmStartState does not carry neutralization metadata"
-                .to_string(),
-        ));
+    if !has_warm_start {
+        return Ok(());
     }
-    Ok(())
+    let Some(config) = params.neutralization_config else {
+        return Ok(());
+    };
+    // Per-round and split-penalty modes project the gradient (or its split
+    // contribution) against the factor space on every round.  Continuing
+    // training without supplying the same exposures would silently change
+    // which directions are projected away — almost certainly not what the
+    // caller wants, and not equivalent to fitting `N+M` rounds from scratch.
+    // We therefore require an exposures matrix; the caller is responsible
+    // for passing the same one used for the initial fit (the Python wrapper
+    // surfaces this contract).  `pre_target` is idempotent under repeated
+    // residualization against the same exposures so it falls under the same
+    // requirement.
+    match config.kind {
+        NeutralizationKind::None => Ok(()),
+        NeutralizationKind::PreTarget
+        | NeutralizationKind::PerRoundGradient
+        | NeutralizationKind::SplitPenalty => {
+            if dataset.factor_exposures.is_none() {
+                return Err(EngineError::ContractViolation(
+                    "neutralized warm-start training requires factor_exposures to be supplied; pass the same matrix used for the initial fit"
+                        .to_string(),
+                ));
+            }
+            Ok(())
+        }
+    }
 }
 
 fn prepare_pre_target_training_dataset(
@@ -8511,8 +8539,13 @@ mod tests {
     }
 
     #[test]
-    fn warm_start_rejects_active_neutralization_without_metadata() {
-        let dataset = factor_dominated_dataset();
+    fn warm_start_neutralization_requires_factor_exposures_to_be_supplied() {
+        // v0.7.1 contract: warm-start with neutralization is allowed, but the
+        // caller must pass `factor_exposures` so the projection has the same
+        // column space as the initial fit.  Dropping the exposures must be
+        // rejected with a contract-violation error.
+        let mut dataset = factor_dominated_dataset();
+        dataset.factor_exposures = None;
         let binned = sample_binned_matrix_for_dataset(&dataset);
         let params = TrainParams {
             neutralization_config: Some(alloygbm_core::FactorNeutralizationConfig {
@@ -8611,8 +8644,11 @@ mod tests {
     }
 
     #[test]
-    fn multiclass_warm_start_rejects_active_neutralization_without_metadata() {
-        let dataset = multiclass_factor_dominated_dataset();
+    fn multiclass_warm_start_neutralization_requires_factor_exposures_to_be_supplied() {
+        // v0.7.1: dropping factor_exposures on a neutralized multiclass
+        // warm-start must be rejected (mirrors the single-output contract).
+        let mut dataset = multiclass_factor_dominated_dataset();
+        dataset.factor_exposures = None;
         let binned = sample_binned_matrix_for_dataset(&dataset);
         let objective = MultiClassSoftmaxObjective::new(2).unwrap();
         let controls = IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).unwrap();

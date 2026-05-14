@@ -1213,11 +1213,25 @@ class GBMRegressor(_GBMRegressorBase):
     @staticmethod
     def _raise_if_neutralized_warm_start_contract(
         fit_neutralization: str,
+        factor_exposures: object,
     ) -> None:
-        if fit_neutralization != "none":
+        """Validate the warm-start contract for neutralized models.
+
+        As of v0.7.1, warm-starting a neutralized model is supported, but the
+        caller must supply the same ``factor_exposures`` matrix used for the
+        initial fit so the projection has a consistent column space.  We
+        cannot persist the exposures matrix on the artifact (would balloon
+        the model size and surface a sensitive dataset), so the contract is
+        positional — passing a different matrix changes which directions are
+        projected away and breaks numerical equivalence to fresh training.
+        """
+        if fit_neutralization == "none":
+            return
+        if factor_exposures is None:
             raise ValueError(
-                "neutralized warm-start training is not supported because model "
-                "artifacts do not persist neutralization metadata yet"
+                "warm-start training of a neutralized model requires "
+                "factor_exposures to be supplied; pass the same matrix used "
+                "for the initial fit"
             )
 
     @staticmethod
@@ -1317,7 +1331,9 @@ class GBMRegressor(_GBMRegressorBase):
             if not hasattr(init_model, "_artifact_bytes") or init_model._artifact_bytes is None:
                 raise ValueError("init_model must be a fitted GBMRegressor with artifact bytes")
             init_neutralization, _, _ = init_model._fitted_neutralization_contract()
-            self._raise_if_neutralized_warm_start_contract(init_neutralization)
+            self._raise_if_neutralized_warm_start_contract(
+                init_neutralization, factor_exposures
+            )
             if self.neutralization == "none" and init_neutralization != self.neutralization:
                 raise ValueError(
                     "init_model neutralization settings do not match current estimator "
@@ -1334,18 +1350,15 @@ class GBMRegressor(_GBMRegressorBase):
             init_artifact_bytes = init_model._artifact_bytes
         elif self.warm_start and self._is_fitted and self._artifact_bytes is not None:
             fit_neutralization, _, _ = self._fitted_neutralization_contract()
-            self._raise_if_neutralized_warm_start_contract(fit_neutralization)
+            self._raise_if_neutralized_warm_start_contract(
+                fit_neutralization, factor_exposures
+            )
             if fit_neutralization != self.neutralization:
                 raise ValueError(
                     "warm_start neutralization settings do not match current estimator "
                     "neutralization settings"
                 )
             init_artifact_bytes = self._artifact_bytes
-        if init_artifact_bytes is not None and self.neutralization != "none":
-            raise ValueError(
-                "neutralized warm-start training is not supported because model artifacts "
-                "do not persist neutralization metadata yet"
-            )
 
         # ── Normalize categorical configuration to plural form ──────────
         # effective_categorical_indices: list of column indices (or None if no categoricals)

@@ -224,9 +224,17 @@ This is a training-time regularization tool. It does not guarantee
 prediction-time zero exposure unless predictions are neutralized against
 evaluation-time factors outside the model.
 
-Exposure matrices are not persisted in the estimator or artifact. Because the
-artifact cannot prove factor compatibility yet, neutralized warm-start and
-``init_model`` continuation are rejected in this release.
+Exposure matrices are not persisted in the estimator or artifact (they
+would balloon the model size and surface sensitive data). As of v0.7.1
+neutralized warm-start and ``init_model`` continuation are supported: the
+caller must supply the same ``factor_exposures`` matrix used for the
+initial fit so the projection has the same column space. Omitting
+``factor_exposures`` on a resumed fit raises a contract error.
+
+``pre_target`` neutralization is idempotent under repeated residualization
+against the same exposures, so warm-start continuation residualizes the
+original targets again on the resumed fit and trains on the same
+target stream as a fresh ``N + M``-round fit.
 
 Piecewise-linear leaves
 -----------------------

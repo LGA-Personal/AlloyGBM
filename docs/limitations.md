@@ -23,7 +23,25 @@ Only standard gradient boosting is supported. Dart (dropout) and GOSS
 
 `GBMRanker` supports single-label relevance only.
 
-### 5. SHAP for Piecewise-Linear Leaves — Best-Effort Decomposition
+### 5. MorphBoost Warm-Start Restarts EMA Cold
+
+MorphBoost's adaptive split criterion tracks a per-class exponential moving
+average over gradient statistics that shapes the gain function across
+rounds. v0.7.1 supports warm-starting MorphBoost-trained models (training
+continues without error and the predictor stitches old and new trees
+correctly), but the EMA state is **not** restored from the saved
+artifact — resumed training starts the EMA fresh. This means the
+"morphed" gain shaping in the resumed rounds doesn't see the gradient
+history from the original fit, and a resumed `N + M`-round model is not
+numerically equivalent to a fresh `N + M`-round fit when
+`training_mode="morph"` is active. For other modes (constant leaves,
+linear leaves, DRO leaves, factor neutralization) warm-start equivalence
+holds.
+
+Persisting the EMA snapshot inside the artifact is queued for a follow-up
+release.
+
+### 6. SHAP for Piecewise-Linear Leaves — Best-Effort Decomposition
 
 As of v0.7.1, `shap_values()` accepts `leaf_model="linear"` artifacts and
 returns an *interventional* decomposition: the path-based TreeSHAP / brute
@@ -70,6 +88,10 @@ The following were limitations in prior versions and have been addressed:
 - No native categorical splits (now: `max_cat_threshold` enables Fisher-sort optimal binary partitions with O(1) bitset prediction)
 - No custom objective/metric callbacks (now: `objective` callable and `eval_metric` callable)
 - Multiclass warm-start unsupported (now: `warm_start=True` works for multiclass with round-offset continuity)
+- Neutralized warm-start unsupported (now: v0.7.1 — `init_model` / `warm_start=True`
+  with `neutralization=*` is supported as long as the caller supplies the
+  same `factor_exposures` matrix used for the initial fit; see Limitation 5
+  for the MorphBoost EMA caveat that still applies)
 - Multiclass prediction per-row allocation (now: zero-copy dense slice prediction)
 - Single fixed split criterion (now: opt-in MorphBoost adaptive criterion via
   `training_mode="morph"`, including EMA-driven gain shaping, depth/iteration

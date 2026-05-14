@@ -2656,12 +2656,14 @@ fn train_regression_artifact_with_summary_dense_impl(
     max_cat_threshold: usize,
 ) -> Result<NativeTrainingResult, EngineError> {
     let bridge_start = Instant::now();
-    if init_artifact_bytes.is_some() && params.neutralization_config.is_some() {
-        return Err(EngineError::ContractViolation(
-            "neutralized warm-start training is not supported because model artifacts do not persist neutralization metadata yet"
-                .to_string(),
-        ));
-    }
+    // Warm-start with neutralization is supported as of v0.7.1.  The Python
+    // wrapper enforces that callers supply the same `factor_exposures`
+    // matrix used for the initial fit, and the engine re-checks via
+    // `validate_warm_start_neutralization_contract` that the dataset carries
+    // exposures.  `pre_target` is handled below by residualizing the
+    // (already-original) targets again — idempotent against the same
+    // exposures — so resumed training sees the same residualized target
+    // stream as a fresh fit of `N + M` rounds.
     let is_linear_leaf = params.leaf_model == alloygbm_core::LeafModelKind::Linear;
     // Dense float values are needed for categorical target encoding.  For linear-leaf
     // training we need the raw feature values separately (see post-processing below).
