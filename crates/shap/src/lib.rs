@@ -44,19 +44,19 @@ fn leaf_constant_part(leaf: &LeafValue, baseline: Option<&[f32]>) -> f64 {
 /// additivity (`Σ phi + expected_value == predict(x)`) but biases the
 /// path-attribution baseline.  Callers should prefer running with a baseline
 /// recorded at fit time for the cleanest decomposition.
-fn linear_leaf_row_terms(
-    leaf: &LeafValue,
-    row: &[f32],
-    baseline: Option<&[f32]>,
-    phi: &mut [f64],
-) {
+fn linear_leaf_row_terms(leaf: &LeafValue, row: &[f32], baseline: Option<&[f32]>, phi: &mut [f64]) {
     let LeafValue::Linear(ll) = leaf else {
         return;
     };
     accumulate_linear_terms(ll, row, baseline, phi);
 }
 
-fn accumulate_linear_terms(ll: &LinearLeaf, row: &[f32], baseline: Option<&[f32]>, phi: &mut [f64]) {
+fn accumulate_linear_terms(
+    ll: &LinearLeaf,
+    row: &[f32],
+    baseline: Option<&[f32]>,
+    phi: &mut [f64],
+) {
     for (w, &feat) in ll.weights.iter().zip(ll.regressor_features.iter()) {
         let feat_idx = feat as usize;
         if feat_idx >= phi.len() {
@@ -292,18 +292,12 @@ fn explain_rows_brute_force(
 ) -> ShapResult<ShapExplanationBatch> {
     let model_structure = build_model_structure(model)?;
     let baseline = model.feature_baseline.as_deref();
-    let expected_value = expected_prediction_for_subset(
-        model,
-        rows[0].as_slice(),
-        0,
-        &model_structure,
-        baseline,
-    )?;
+    let expected_value =
+        expected_prediction_for_subset(model, rows[0].as_slice(), 0, &model_structure, baseline)?;
 
     let mut row_contributions = Vec::with_capacity(rows.len());
     for (row_index, row) in rows.iter().enumerate() {
-        let values_by_subset =
-            compute_subset_expectations(model, row, &model_structure, baseline)?;
+        let values_by_subset = compute_subset_expectations(model, row, &model_structure, baseline)?;
         let row_expected_value = values_by_subset[0];
 
         if (row_expected_value - expected_value).abs() > ADDITIVITY_TOLERANCE {
@@ -312,13 +306,8 @@ fn explain_rows_brute_force(
             )));
         }
 
-        let mut contributions_f64 = shapley_values_for_row_f64(
-            model,
-            row,
-            &values_by_subset,
-            &model_structure,
-            row_index,
-        )?;
+        let mut contributions_f64 =
+            shapley_values_for_row_f64(model, row, &values_by_subset, &model_structure, row_index)?;
 
         // Linear-leaf interventional decomposition: the brute-force path
         // attribution above is computed on the "constant part" of each leaf
@@ -508,14 +497,7 @@ fn expected_prediction_for_subset(
 ) -> ShapResult<f32> {
     let mut prediction = model.baseline_prediction;
     for tree_id in &model_structure.tree_root_ids {
-        prediction += expected_subtree(
-            *tree_id,
-            0,
-            row,
-            subset_mask,
-            model_structure,
-            baseline,
-        )?;
+        prediction += expected_subtree(*tree_id, 0, row, subset_mask, model_structure, baseline)?;
     }
     Ok(prediction)
 }
@@ -2127,8 +2109,8 @@ mod tests {
         let predictor = Predictor::from_artifact_bytes(&artifact).expect("predictor builds");
 
         let rows = vec![
-            vec![0.0_f32, 0.5_f32, 0.0_f32], // left scalar leaf
-            vec![3.0_f32, 1.0_f32, 0.0_f32], // right→left linear leaf
+            vec![0.0_f32, 0.5_f32, 0.0_f32],  // left scalar leaf
+            vec![3.0_f32, 1.0_f32, 0.0_f32],  // right→left linear leaf
             vec![3.0_f32, -0.5_f32, 2.0_f32], // right→right linear leaf
         ];
         let explanation =

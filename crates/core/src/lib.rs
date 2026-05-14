@@ -4064,7 +4064,11 @@ mod tests {
         let bytes = encode_feature_baseline_payload(&payload);
         let decoded = decode_feature_baseline_payload(&bytes).expect("decode succeeds");
         assert_eq!(decoded.feature_means.len(), 4);
-        for (a, b) in payload.feature_means.iter().zip(decoded.feature_means.iter()) {
+        for (a, b) in payload
+            .feature_means
+            .iter()
+            .zip(decoded.feature_means.iter())
+        {
             assert!((a - b).abs() < 1e-6, "{a} vs {b}");
         }
     }

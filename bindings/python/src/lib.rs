@@ -880,7 +880,10 @@ impl From<&IterationDiagnostics> for NativeIterationDiagnostics {
 /// Convert a slice of engine diagnostics into the Python-visible pyclass
 /// vector.  Used by both `build_native_training_summary` variants.
 fn diagnostics_to_native(entries: &[IterationDiagnostics]) -> Vec<NativeIterationDiagnostics> {
-    entries.iter().map(NativeIterationDiagnostics::from).collect()
+    entries
+        .iter()
+        .map(NativeIterationDiagnostics::from)
+        .collect()
 }
 
 #[pyclass]

@@ -9,8 +9,7 @@ use alloygbm_core::{
     NativeCategoricalSplitsPayload, NeutralizationKind, NodeSlice, NodeStats, PartitionResult,
     SplitCandidate, TrainParams, TrainingDataset, TreeGrowth,
     decode_optional_categorical_state_section_v1, decode_optional_dro_metadata_artifact_section,
-    decode_optional_feature_baseline_section,
-    decode_optional_linear_leaf_coefficients_section,
+    decode_optional_feature_baseline_section, decode_optional_linear_leaf_coefficients_section,
     decode_optional_morph_metadata_artifact_section,
     decode_optional_native_categorical_splits_section, deserialize_model_artifact_v1,
     encode_categorical_state_payload_v1, encode_dro_metadata_payload,
@@ -2148,8 +2147,7 @@ fn gradient_buffer_stats(gradients: &[GradientPair]) -> (f32, f32, f32) {
     let h_norm = h_sq_sum.sqrt() as f32;
     let g_var = if g_finite_count > 1 {
         let mean = g_sum / g_finite_count as f64;
-        let variance =
-            (g_sq_sum / g_finite_count as f64) - mean * mean;
+        let variance = (g_sq_sum / g_finite_count as f64) - mean * mean;
         variance.max(0.0) as f32
     } else {
         0.0
@@ -3754,8 +3752,9 @@ impl Trainer {
                     .map(|c| class_stumps[c].len() - pre_round_counts[c])
                     .collect(),
             );
-            diagnostics_per_round
-                .push(IterationDiagnostics::aggregate_per_class(&per_class_diagnostics));
+            diagnostics_per_round.push(IterationDiagnostics::aggregate_per_class(
+                &per_class_diagnostics,
+            ));
             rounds_completed += 1;
 
             if stop_for_validation_plateau {
@@ -5305,10 +5304,10 @@ fn build_tree_level_wise<B: BackendOps>(
             let filtered_histograms_storage;
             let histograms_for_split = match (constraint_index.as_ref(), node_active) {
                 (Some(idx), Some(active_groups)) => {
-                    filtered_histograms_storage = filter_histogram_bundle_by_features(
-                        &histograms,
-                        |f| idx.feature_allowed(active_groups, f),
-                    );
+                    filtered_histograms_storage =
+                        filter_histogram_bundle_by_features(&histograms, |f| {
+                            idx.feature_allowed(active_groups, f)
+                        });
                     &filtered_histograms_storage
                 }
                 _ => &histograms,
@@ -5545,9 +5544,7 @@ fn build_tree_level_wise<B: BackendOps>(
                 // Propagate interaction-constraint active groups to children.
                 // Splitting on an unconstrained feature leaves the active
                 // set unchanged; a constrained feature narrows it.
-                if let (Some(idx), Some(active_groups)) =
-                    (constraint_index.as_ref(), node_active)
-                {
+                if let (Some(idx), Some(active_groups)) = (constraint_index.as_ref(), node_active) {
                     let child_groups = idx.descend(active_groups, split.feature_index);
                     node_active_groups.insert(left_local_node_id, child_groups);
                     node_active_groups.insert(right_local_node_id, child_groups);
@@ -5738,10 +5735,9 @@ fn build_tree_leaf_wise<B: BackendOps>(
         node_active_groups.get(&0).copied(),
     ) {
         (Some(idx), Some(ag)) => {
-            root_filtered_storage = filter_histogram_bundle_by_features(
-                &root_histograms,
-                |f| idx.feature_allowed(ag, f),
-            );
+            root_filtered_storage = filter_histogram_bundle_by_features(&root_histograms, |f| {
+                idx.feature_allowed(ag, f)
+            });
             &root_filtered_storage
         }
         _ => &root_histograms,
@@ -6078,10 +6074,8 @@ fn build_tree_leaf_wise<B: BackendOps>(
             // same descended bitset because the split feature is shared.
             // (`split` itself was moved into `committed_split` above; we
             // read the feature index off the just-pushed stump instead.)
-            let split_feature_for_descend = stumps
-                .last()
-                .map(|s| s.split.feature_index)
-                .unwrap_or(0);
+            let split_feature_for_descend =
+                stumps.last().map(|s| s.split.feature_index).unwrap_or(0);
             let child_active_groups: Option<u64> = match (
                 constraint_index.as_ref(),
                 node_active_groups.get(&local_node_id).copied(),
@@ -6106,10 +6100,10 @@ fn build_tree_leaf_wise<B: BackendOps>(
             let smaller_histograms_for_split =
                 match (constraint_index.as_ref(), child_active_groups) {
                     (Some(idx), Some(ag)) => {
-                        smaller_filtered_storage = filter_histogram_bundle_by_features(
-                            &smaller_histograms,
-                            |f| idx.feature_allowed(ag, f),
-                        );
+                        smaller_filtered_storage =
+                            filter_histogram_bundle_by_features(&smaller_histograms, |f| {
+                                idx.feature_allowed(ag, f)
+                            });
                         &smaller_filtered_storage
                     }
                     _ => &smaller_histograms,
@@ -6143,17 +6137,17 @@ fn build_tree_leaf_wise<B: BackendOps>(
                 &larger_indices,
             );
             let larger_filtered_storage;
-            let larger_histograms_for_split =
-                match (constraint_index.as_ref(), child_active_groups) {
-                    (Some(idx), Some(ag)) => {
-                        larger_filtered_storage = filter_histogram_bundle_by_features(
-                            &larger_histograms,
-                            |f| idx.feature_allowed(ag, f),
-                        );
-                        &larger_filtered_storage
-                    }
-                    _ => &larger_histograms,
-                };
+            let larger_histograms_for_split = match (constraint_index.as_ref(), child_active_groups)
+            {
+                (Some(idx), Some(ag)) => {
+                    larger_filtered_storage =
+                        filter_histogram_bundle_by_features(&larger_histograms, |f| {
+                            idx.feature_allowed(ag, f)
+                        });
+                    &larger_filtered_storage
+                }
+                _ => &larger_histograms,
+            };
             if let Some(child_split) = find_best_split_dispatch(
                 backend,
                 larger_histograms_for_split,
@@ -11599,8 +11593,10 @@ mod tests {
         assert!(summary.rounds_completed > 0);
 
         // Group stumps by tree_id then walk every path.
-        let mut by_tree: std::collections::HashMap<u32, std::collections::HashMap<u32, &TrainedStump>> =
-            std::collections::HashMap::new();
+        let mut by_tree: std::collections::HashMap<
+            u32,
+            std::collections::HashMap<u32, &TrainedStump>,
+        > = std::collections::HashMap::new();
         for stump in &summary.model.stumps {
             let (tree_id, local_id) = decode_tree_node_id(stump.split.node_id);
             by_tree.entry(tree_id).or_default().insert(local_id, stump);
@@ -11625,8 +11621,7 @@ mod tests {
             };
             let feat_groups = feature_groups_of(stump.split.feature_index, groups);
             if !feat_groups.is_empty() {
-                let feat_set: std::collections::BTreeSet<usize> =
-                    feat_groups.into_iter().collect();
+                let feat_set: std::collections::BTreeSet<usize> = feat_groups.into_iter().collect();
                 if active_groups.is_empty() {
                     active_groups = feat_set;
                 } else {
@@ -11936,7 +11931,9 @@ mod morph_state_tests {
         let d = IterationDiagnostics::from_gradient_snapshot(&post, Some(4.0), 1, 1);
         assert_eq!(d.original_gradient_l2_norm, Some(4.0));
         assert_eq!(d.projected_gradient_l2_norm, Some(1.0));
-        let eff = d.neutralization_effectiveness.expect("effectiveness present");
+        let eff = d
+            .neutralization_effectiveness
+            .expect("effectiveness present");
         assert!((eff - 0.75).abs() < 1e-5, "expected 0.75, got {eff}");
         assert!((0.0..=1.0).contains(&eff));
     }
@@ -11976,5 +11973,4 @@ mod morph_state_tests {
         assert_eq!(agg.neutralization_effectiveness, Some(0.75));
         assert_eq!(agg.n_active_rows, 10);
     }
-
 }
