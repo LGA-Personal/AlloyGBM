@@ -2,20 +2,20 @@ name: CI
 
 on:
   pull_request:
+  # Only run push-triggered CI on `main`.  Feature branches rely on the
+  # `pull_request` trigger above so PR runs aren't shadowed by a
+  # duplicate push run on the same commit — that duplicate would either
+  # double CI minutes or get cancelled by the concurrency group below
+  # and show up as 8 spurious "failing" cancelled checks on the PR
+  # rollup.  Tag-triggered release pipelines live in `publish.yml`.
   push:
+    branches:
+      - main
 
-# When a branch has both a `push` and a `pull_request` event open against it
-# (typical during PR development), GitHub schedules two parallel CI runs for
-# the same commit.  On macOS those concurrent runs occasionally collide on
-# `~/.cargo/bin/cargo`, leaving one of them with a stale `rustup-init` shim
-# that exits immediately on `cargo check`.  We dedupe by the **branch name**
-# rather than `github.ref` because on pull_request events `github.ref` is
-# `refs/pull/<n>/merge` while on push events it's `refs/heads/<branch>` —
-# different keys, no dedupe.  Using `github.head_ref || github.ref_name`
-# yields the source branch name in both cases (head_ref is set on PR events,
-# ref_name on push), so push + PR for the same branch share a group and
-# cancel each other.  `main` pushes keep their un-cancelled behaviour so
-# release-tag pipelines and the main-branch badge stay deterministic.
+# Cancel older runs for the same branch when a new commit lands, so
+# force-pushes to a feature branch don't leave a half-finished prior
+# run consuming runners.  `main` is exempt so release pipelines stay
+# deterministic.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
