@@ -121,6 +121,85 @@ class TestWarmStartFactorNeutralization:
         with pytest.raises(ValueError, match="requires factor_exposures"):
             m2.fit(X, y, init_model=m1)
 
+    @pytest.mark.parametrize(
+        "init_mode,new_mode",
+        [
+            # Same exposures + a different mode silently switched the
+            # boosting path before v0.7.1; verify every cross-mode pair
+            # is now rejected up front.
+            ("per_round_gradient", "pre_target"),
+            ("per_round_gradient", "split_penalty"),
+            ("split_penalty", "per_round_gradient"),
+            ("pre_target", "per_round_gradient"),
+            ("none", "per_round_gradient"),
+            ("per_round_gradient", "none"),
+        ],
+    )
+    def test_resume_with_mismatched_mode_is_rejected(
+        self, init_mode: str, new_mode: str
+    ) -> None:
+        X, y = _data(seed=37)
+        exposures = X[:, 2:3].copy()
+        init_kwargs: dict[str, object] = {"n_estimators": 2}
+        if init_mode != "none":
+            init_kwargs["neutralization"] = init_mode
+            init_kwargs["factor_neutralization_lambda"] = 1e-4
+            if init_mode == "split_penalty":
+                init_kwargs["factor_penalty"] = 1e-2
+        m1_kwargs = dict(init_kwargs)
+        fit_exposures = exposures if init_mode != "none" else None
+        m1 = GBMRegressor(**m1_kwargs).fit(
+            X, y, factor_exposures=fit_exposures
+        )
+        new_kwargs: dict[str, object] = {"n_estimators": 2}
+        if new_mode != "none":
+            new_kwargs["neutralization"] = new_mode
+            new_kwargs["factor_neutralization_lambda"] = 1e-4
+            if new_mode == "split_penalty":
+                new_kwargs["factor_penalty"] = 1e-2
+        m2 = GBMRegressor(**new_kwargs)
+        with pytest.raises(ValueError, match="does not match"):
+            m2.fit(
+                X,
+                y,
+                init_model=m1,
+                factor_exposures=exposures if new_mode != "none" else None,
+            )
+
+    def test_resume_with_mismatched_lambda_is_rejected(self) -> None:
+        X, y = _data(seed=41)
+        exposures = X[:, 2:3].copy()
+        m1 = GBMRegressor(
+            n_estimators=2,
+            neutralization="per_round_gradient",
+            factor_neutralization_lambda=1e-4,
+        ).fit(X, y, factor_exposures=exposures)
+        m2 = GBMRegressor(
+            n_estimators=2,
+            neutralization="per_round_gradient",
+            factor_neutralization_lambda=1e-3,  # different λ
+        )
+        with pytest.raises(ValueError, match="factor_neutralization_lambda"):
+            m2.fit(X, y, init_model=m1, factor_exposures=exposures)
+
+    def test_resume_with_mismatched_split_penalty_is_rejected(self) -> None:
+        X, y = _data(seed=43)
+        exposures = X[:, 2:3].copy()
+        m1 = GBMRegressor(
+            n_estimators=2,
+            neutralization="split_penalty",
+            factor_neutralization_lambda=1e-4,
+            factor_penalty=1e-2,
+        ).fit(X, y, factor_exposures=exposures)
+        m2 = GBMRegressor(
+            n_estimators=2,
+            neutralization="split_penalty",
+            factor_neutralization_lambda=1e-4,
+            factor_penalty=5e-2,  # different penalty
+        )
+        with pytest.raises(ValueError, match="factor_penalty"):
+            m2.fit(X, y, init_model=m1, factor_exposures=exposures)
+
     def test_resume_with_warm_start_flag(self) -> None:
         # The other entry point: warm_start=True reuses the estimator's own
         # state across successive fit calls.  Same exposures contract.

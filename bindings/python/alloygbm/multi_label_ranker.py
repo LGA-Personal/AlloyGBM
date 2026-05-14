@@ -167,6 +167,17 @@ class MultiLabelGBMRanker:
         objectives = self._resolve_objectives(n_labels)
         names = self._resolve_label_names(n_labels)
 
+        # `eval_set=(X_val, y_val)` arrives with a 2-D ``y_val`` shaped
+        # ``(m, n_labels)`` so callers can use validation-dependent features
+        # like ``early_stopping_rounds`` / ``eval_metric``.  Each per-label
+        # ``GBMRanker`` only sees its slice of the target, so we must slice
+        # the validation target column-wise too — otherwise ``GBMRegressor``
+        # tries to cast each row vector to ``float`` and raises during
+        # ``_validate_targets``.  Sample weights / group / time index on the
+        # validation set are shape-preserving across labels so they pass
+        # through unchanged.
+        eval_set = fit_kwargs.pop("eval_set", None)
+
         self._sub_rankers = []
         self.rounds_completed_ = []
         for label_idx in range(n_labels):
@@ -175,12 +186,36 @@ class MultiLabelGBMRanker:
                 **copy.deepcopy(self._per_label_kwargs),
             )
             label_targets = np.asarray(y_arr[:, label_idx], dtype=np.float32)
+            label_fit_kwargs = dict(fit_kwargs)
+            if eval_set is not None:
+                X_val, y_val = eval_set
+                y_val_arr = np.asarray(y_val)
+                if y_val_arr.ndim == 2:
+                    if y_val_arr.shape[1] != n_labels:
+                        raise ValueError(
+                            f"eval_set y has {y_val_arr.shape[1]} label columns "
+                            f"but training y has {n_labels}; columns must match"
+                        )
+                    label_y_val = np.asarray(
+                        y_val_arr[:, label_idx], dtype=np.float32
+                    )
+                else:
+                    # Permit a 1-D ``y_val`` when ``n_labels == 1`` — same
+                    # column for every sub-ranker is the only sensible
+                    # interpretation otherwise.
+                    if n_labels != 1:
+                        raise ValueError(
+                            "eval_set y must be 2-D with shape "
+                            "(m, n_labels) when training has multiple labels"
+                        )
+                    label_y_val = np.asarray(y_val_arr, dtype=np.float32)
+                label_fit_kwargs["eval_set"] = (X_val, label_y_val)
             ranker.fit(
                 X,
                 label_targets,
                 group=group,
                 factor_exposures=factor_exposures,
-                **fit_kwargs,
+                **label_fit_kwargs,
             )
             self._sub_rankers.append(ranker)
             self.rounds_completed_.append(int(ranker.rounds_completed_ or 0))
@@ -260,7 +295,27 @@ class MultiLabelGBMRanker:
                 (blob_len,) = struct.unpack("<Q", f.read(8))
                 blob = f.read(blob_len)
                 rankers.append(pickle.loads(blob))
-        inst = cls(ranking_labels=names)
+        # Reconstruct wrapper-level configuration from the sub-rankers so
+        # `get_params` after load matches the original.  At fit time every
+        # sub-ranker was configured with the same ``_per_label_kwargs``
+        # modulo ``ranking_objective``, so lifting params from sub_rankers[0]
+        # and collapsing the per-label objective is enough.
+        first_params = rankers[0].get_params()
+        per_label_objectives = [r.ranking_objective for r in rankers]
+        ranking_objective: str | list[str]
+        if len(set(per_label_objectives)) == 1:
+            ranking_objective = per_label_objectives[0]
+        else:
+            ranking_objective = list(per_label_objectives)
+        # Drop the per-label objective from the shared kwargs — it's
+        # represented separately on `ranking_objective` and must not leak
+        # back into `_per_label_kwargs` (where it would override at fit time).
+        first_params.pop("ranking_objective", None)
+        inst = cls(
+            ranking_labels=names,
+            ranking_objective=ranking_objective,
+            **first_params,
+        )
         inst._sub_rankers = rankers
         inst.ranking_labels_ = names
         inst.n_labels_ = n_labels

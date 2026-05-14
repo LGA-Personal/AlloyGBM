@@ -318,8 +318,8 @@ class FactorNeutralizationTests(unittest.TestCase):
         # Even if the caller mutates `neutralization` to "none" on the init
         # model, the persisted fit contract still says the original training
         # used neutralization — so the contract check is driven from the
-        # *fitted* neutralization, not the current params.  Without exposures
-        # this must still be rejected.
+        # *fitted* neutralization, not the current params.  The warm-start
+        # mode-mismatch guard rejects the resume with a clear error.
         x, y, f = factor_data()
         base = GBMRegressor(
             neutralization="per_round_gradient",
@@ -330,7 +330,7 @@ class FactorNeutralizationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ValueError,
-            "warm-start training of a neutralized model requires factor_exposures",
+            r"init_model neutralization 'per_round_gradient' does not match",
         ):
             GBMRegressor(n_estimators=2, seed=2).fit(x, y, init_model=base)
 
@@ -352,6 +352,6 @@ class FactorNeutralizationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ValueError,
-            "warm-start training of a neutralized model requires factor_exposures",
+            r"init_model neutralization 'per_round_gradient' does not match",
         ):
             GBMRegressor(n_estimators=2, seed=2).fit(x, y, init_model=restored)

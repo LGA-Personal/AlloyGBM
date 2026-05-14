@@ -175,3 +175,89 @@ class TestMultiLabelRankerParamsRoundTrip:
         m.set_params(n_estimators=10, ranking_objective="rank:pairwise")
         assert m._per_label_kwargs["n_estimators"] == 10
         assert m.ranking_objective == "rank:pairwise"
+
+
+class TestMultiLabelRankerEvalSet:
+    """`eval_set=(X_val, y_val)` is per-label-sliced inside the wrapper so
+    every per-label fit sees a 1-D validation target.  Without slicing,
+    ``GBMRegressor._validate_targets`` would try to cast each row vector to
+    a float and reject the 2-D ``y_val``."""
+
+    def test_eval_set_with_2d_y_val_enables_early_stopping(self) -> None:
+        X, y, group = _ranking_data(seed=51)
+        X_val, y_val, val_group = _ranking_data(seed=52)
+        m = MultiLabelGBMRanker(
+            n_estimators=5,
+            early_stopping_rounds=2,
+            min_validation_improvement=0.0,
+        ).fit(
+            X,
+            y,
+            group=group,
+            eval_set=(X_val, y_val),
+            eval_group=val_group,
+        )
+        # Each sub-ranker honored its own early-stopping signal, so per-label
+        # round counts can differ but must be > 0 and ≤ n_estimators.
+        for rounds in m.rounds_completed_ or []:
+            assert 0 < rounds <= 5
+
+    def test_eval_set_column_count_mismatch_raises(self) -> None:
+        X, y, group = _ranking_data(seed=53)
+        X_val, _, val_group = _ranking_data(seed=54)
+        bad_y_val = np.zeros((X_val.shape[0], 3), dtype="float32")  # 3 ≠ 2
+        m = MultiLabelGBMRanker(
+            n_estimators=3,
+            early_stopping_rounds=1,
+            min_validation_improvement=0.0,
+        )
+        with pytest.raises(ValueError, match="label columns"):
+            m.fit(X, y, group=group, eval_set=(X_val, bad_y_val), eval_group=val_group)
+
+
+class TestMultiLabelRankerLoadRestoresWrapperConfig:
+    """``load_model`` must restore the wrapper-level configuration
+    (``ranking_objective``, the per-label kwargs) so sklearn-style
+    introspection / clone behavior matches the saved model.  Before the
+    v0.7.1 fix this dropped everything except ``ranking_labels``."""
+
+    def test_load_preserves_heterogeneous_ranking_objectives(self) -> None:
+        X, y, group = _ranking_data(seed=61)
+        m = MultiLabelGBMRanker(
+            ranking_objective=["rank:ndcg", "rank:pairwise"],
+            n_estimators=2,
+            max_depth=2,
+            seed=7,
+        ).fit(X, y, group=group)
+        with tempfile.NamedTemporaryFile(suffix=".mlrk", delete=False) as f:
+            path = f.name
+        try:
+            m.save_model(path)
+            restored = MultiLabelGBMRanker.load_model(path)
+        finally:
+            os.unlink(path)
+        params = restored.get_params()
+        assert params["ranking_objective"] == ["rank:ndcg", "rank:pairwise"]
+        assert params["n_estimators"] == 2
+        assert params["max_depth"] == 2
+        assert params["seed"] == 7
+
+    def test_load_collapses_homogeneous_objectives_to_string(self) -> None:
+        X, y, group = _ranking_data(seed=63)
+        m = MultiLabelGBMRanker(
+            ranking_objective="rank:pairwise",
+            n_estimators=2,
+            max_depth=3,
+        ).fit(X, y, group=group)
+        with tempfile.NamedTemporaryFile(suffix=".mlrk", delete=False) as f:
+            path = f.name
+        try:
+            m.save_model(path)
+            restored = MultiLabelGBMRanker.load_model(path)
+        finally:
+            os.unlink(path)
+        params = restored.get_params()
+        # All sub-rankers share the same objective so the load collapses to
+        # a single string (matches the original constructor input).
+        assert params["ranking_objective"] == "rank:pairwise"
+        assert params["max_depth"] == 3

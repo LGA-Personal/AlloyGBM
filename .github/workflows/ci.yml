@@ -8,13 +8,16 @@ on:
 # (typical during PR development), GitHub schedules two parallel CI runs for
 # the same commit.  On macOS those concurrent runs occasionally collide on
 # `~/.cargo/bin/cargo`, leaving one of them with a stale `rustup-init` shim
-# that exits immediately on `cargo check`.  Grouping by ref so only one run
-# is active per branch (and cancelling older ones) eliminates the race and
-# halves CI minutes on this repo for free.  The group never touches `main`
-# pushes — `cancel-in-progress` is false there so release-tag pipelines and
-# the main-branch badge stay deterministic.
+# that exits immediately on `cargo check`.  We dedupe by the **branch name**
+# rather than `github.ref` because on pull_request events `github.ref` is
+# `refs/pull/<n>/merge` while on push events it's `refs/heads/<branch>` —
+# different keys, no dedupe.  Using `github.head_ref || github.ref_name`
+# yields the source branch name in both cases (head_ref is set on PR events,
+# ref_name on push), so push + PR for the same branch share a group and
+# cancel each other.  `main` pushes keep their un-cancelled behaviour so
+# release-tag pipelines and the main-branch badge stay deterministic.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:

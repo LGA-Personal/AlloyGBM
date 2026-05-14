@@ -1324,6 +1324,56 @@ class GBMRegressor(_GBMRegressorBase):
                 "for the initial fit"
             )
 
+    def _raise_if_neutralization_settings_mismatch(
+        self,
+        init_neutralization: str,
+        init_lambda: float | None,
+        init_penalty: float | None,
+        *,
+        origin: str,
+    ) -> None:
+        """Reject warm-start when the init model's neutralization mode (or
+        its ``factor_neutralization_lambda`` / ``factor_penalty``) does not
+        match the current estimator.
+
+        Resuming training under a different mode silently changes the
+        boosting path (e.g. ``per_round_gradient`` projects gradients each
+        round while ``pre_target`` residualizes the targets once), so the
+        resumed model is not equivalent to a fresh ``N+M``-round fit under
+        either configuration.  We therefore require an exact match for
+        ``neutralization``, ``factor_neutralization_lambda``, and
+        ``factor_penalty``.
+
+        ``origin`` is ``"init_model"`` or ``"warm_start"`` and is used to
+        produce a user-facing error message that names the offending
+        source.
+        """
+        if init_neutralization != self.neutralization:
+            raise ValueError(
+                f"{origin} neutralization '{init_neutralization}' does not "
+                f"match current estimator neutralization '{self.neutralization}'; "
+                "warm-start requires the same mode so resumed training stays "
+                "equivalent to a fresh fit"
+            )
+        if init_neutralization == "none":
+            return
+        # Lambda comparison — None matches None; otherwise require numerical
+        # equality (these are user-supplied floats, so an exact match is the
+        # correct contract).
+        if init_lambda != self.factor_neutralization_lambda:
+            raise ValueError(
+                f"{origin} factor_neutralization_lambda={init_lambda!r} does not "
+                f"match current estimator factor_neutralization_lambda="
+                f"{self.factor_neutralization_lambda!r}"
+            )
+        # split_penalty only consumes factor_penalty; other modes ignore it,
+        # so the mismatch only matters when both sides are split_penalty.
+        if init_neutralization == "split_penalty" and init_penalty != self.factor_penalty:
+            raise ValueError(
+                f"{origin} factor_penalty={init_penalty!r} does not match "
+                f"current estimator factor_penalty={self.factor_penalty!r}"
+            )
+
     @staticmethod
     def _build_evals_result(summary: object) -> dict:
         """Build ``evals_result_`` from a ``NativeTrainingSummary``.
@@ -1420,15 +1470,23 @@ class GBMRegressor(_GBMRegressorBase):
         if init_model is not None:
             if not hasattr(init_model, "_artifact_bytes") or init_model._artifact_bytes is None:
                 raise ValueError("init_model must be a fitted GBMRegressor with artifact bytes")
-            init_neutralization, _, _ = init_model._fitted_neutralization_contract()
+            init_neutralization, init_lambda, init_penalty = (
+                init_model._fitted_neutralization_contract()
+            )
+            # Settings-mismatch fires first so dropping/changing the
+            # neutralization mode produces a clear "does not match" error
+            # instead of a misleading "factor_exposures required" one (the
+            # latter would otherwise win when the user passes None on a
+            # mode-switch to "none").
+            self._raise_if_neutralization_settings_mismatch(
+                init_neutralization,
+                init_lambda,
+                init_penalty,
+                origin="init_model",
+            )
             self._raise_if_neutralized_warm_start_contract(
                 init_neutralization, factor_exposures
             )
-            if self.neutralization == "none" and init_neutralization != self.neutralization:
-                raise ValueError(
-                    "init_model neutralization settings do not match current estimator "
-                    "neutralization settings"
-                )
             if hasattr(init_model, "_objective_name"):
                 init_objective = init_model._objective_name()
                 current_objective = self._objective_name()
@@ -1439,15 +1497,18 @@ class GBMRegressor(_GBMRegressorBase):
                     )
             init_artifact_bytes = init_model._artifact_bytes
         elif self.warm_start and self._is_fitted and self._artifact_bytes is not None:
-            fit_neutralization, _, _ = self._fitted_neutralization_contract()
+            fit_neutralization, fit_lambda, fit_penalty = (
+                self._fitted_neutralization_contract()
+            )
+            self._raise_if_neutralization_settings_mismatch(
+                fit_neutralization,
+                fit_lambda,
+                fit_penalty,
+                origin="warm_start",
+            )
             self._raise_if_neutralized_warm_start_contract(
                 fit_neutralization, factor_exposures
             )
-            if fit_neutralization != self.neutralization:
-                raise ValueError(
-                    "warm_start neutralization settings do not match current estimator "
-                    "neutralization settings"
-                )
             init_artifact_bytes = self._artifact_bytes
 
         # ── Normalize categorical configuration to plural form ──────────
