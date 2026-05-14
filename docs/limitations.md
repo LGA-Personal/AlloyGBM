@@ -15,9 +15,25 @@ not implemented.
 Only standard gradient boosting is supported. Dart (dropout) and GOSS
 (gradient-based one-side sampling) modes are not available.
 
-### 3. No Multi-Label Ranking
+### 3. Multi-Label Ranking — Independent Per-Label Trees
 
-`GBMRanker` supports single-label relevance only.
+As of v0.7.1, ``MultiLabelGBMRanker`` exposes a unified multi-output
+ranking API: ``y`` is shaped ``(n_rows, n_labels)`` and ``predict``
+returns scores with the same column layout.  Internally, the wrapper
+trains one independent :class:`GBMRanker` per label, sharing the same
+``group`` (and optional ``factor_exposures``) so the per-label fits
+remain comparable.  This makes the implementation a thin orchestration
+layer that reuses every existing :class:`GBMRanker` feature
+(warm-start, neutralization, MorphBoost, PL leaves, DRO, interaction
+constraints).
+
+Numerically the wrapper is equivalent to training each label
+separately.  Joint shared-tree multi-label boosting — where a single
+ensemble updates all label predictions simultaneously via shared splits
+— would let correlated labels share split information across trees and
+typically reduces total model size for related tasks.  That is queued
+for v0.7.2 alongside the ``MulticlassSoftmaxObjective``-style K-tree-
+per-round engine plumbing for ranking objectives.
 
 ### 4. MorphBoost Warm-Start Restarts EMA Cold
 
@@ -91,6 +107,11 @@ The following were limitations in prior versions and have been addressed:
 - No interaction constraints (now: v0.7.1 — `interaction_constraints=[[...]]`
   on every estimator, LightGBM-compatible semantics, up to 64 groups per
   fit; enforced through both the level-wise and leaf-wise tree builders)
+- Single-label ranking only (partially resolved: v0.7.1 — `MultiLabelGBMRanker`
+  exposes a unified `fit`/`predict` for K ranking labels per item, trained
+  as K independent per-label `GBMRanker` instances sharing `group` and
+  `factor_exposures`.  Joint shared-tree training is a v0.7.2 follow-up;
+  see Limitation 3)
 - Multiclass prediction per-row allocation (now: zero-copy dense slice prediction)
 - Single fixed split criterion (now: opt-in MorphBoost adaptive criterion via
   `training_mode="morph"`, including EMA-driven gain shaping, depth/iteration

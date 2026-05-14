@@ -275,6 +275,26 @@ Limitations:
   :doc:`explanations` and ``docs/limitations.md`` for details.
 - ``leaf_model="linear"`` composes with ``training_mode="morph"``.
 
+Multi-label ranking
+-------------------
+
+``MultiLabelGBMRanker`` is a unified multi-output ranking estimator: ``y``
+has shape ``(n_rows, n_labels)`` and ``predict`` returns scores with the
+same column layout.  As of v0.7.1 the wrapper trains one independent
+:class:`GBMRanker` per label using a shared ``group`` (and optional shared
+``factor_exposures``) so every per-label fit observes the same query
+structure.  Each per-label ranker independently picks up every existing
+:class:`GBMRanker` feature (warm-start, neutralization, MorphBoost, PL
+leaves, DRO, interaction constraints, custom eval metrics).
+
+``ranking_objective`` may be a single string (applied to every label) or
+a list of length ``n_labels`` for heterogeneous objectives.  ``save_model``
+serialises every per-label ranker into a single ``.mlrk`` bundle via
+``pickle.HIGHEST_PROTOCOL``.
+
+Joint shared-tree multi-label boosting is a v0.7.2 follow-up; see
+``docs/limitations.md`` for the upgrade-path caveat.
+
 MorphBoost (Adaptive Split Criterion)
 -------------------------------------
 
