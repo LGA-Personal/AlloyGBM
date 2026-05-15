@@ -1,7 +1,62 @@
 Release and platform policy
 ===========================
 
-AlloyGBM ``0.7.1`` release notes and platform policy.
+AlloyGBM ``0.7.2`` release notes and platform policy.
+
+What's new in 0.7.2
+-------------------
+
+Documentation, supply-chain, and repo-hygiene release.  No user-facing
+Python API surface changes.
+
+**Documentation:**
+
+- Multiple docs still claimed warm-start was rejected, SHAP required
+  ``leaf_model="constant"``, interaction constraints did not exist, or
+  rankers were single-label only after v0.7.1 actually shipped those
+  features.  README, ``docs/user/*.md``, the Sphinx mirror under
+  ``docs/site/source/*.rst``, ``docs/roadmap/current.md``,
+  ``CLAUDE.md``, ``AGENTS.md``, and ``benchmarks/README.md`` are now
+  consistent with the v0.7.1 surface that actually shipped.
+- ``docs/reference/release_checklist.md`` is now a top-to-bottom
+  operating manual covering version bumps, doc updates, verification,
+  tag/publish, and post-release bookkeeping.
+- ``docs/site/source/api.rst`` now auto-documents
+  :class:`~alloygbm.MultiLabelGBMRanker` (was missing in v0.7.1).
+- New ``examples/`` directory with 8 self-contained end-to-end scripts.
+
+**Repo hygiene & supply chain:**
+
+- CI now runs the full pytest suite (455 tests) on every PR.  v0.7.1
+  built the wheel and ran a handful of smoke snippets but never
+  invoked ``pytest bindings/python/tests/`` — the Python test suite
+  was not enforced on merge.
+- ``Cargo.lock`` is tracked.
+- ``maturin`` pinned in ``publish.yml`` to the same SemVer range
+  declared in ``pyproject.toml``.
+- ``cargo-audit`` + ``cargo-deny`` run weekly and on every PR that
+  touches Cargo manifests, configured via the new ``deny.toml``.
+- Coverage reporting via ``cargo-llvm-cov`` + ``pytest-cov`` →
+  Codecov.
+- ``publish = false`` on every workspace crate.
+- New ``CONTRIBUTING.md``, ``SECURITY.md``, GitHub issue / PR /
+  CODEOWNERS / Dependabot configs, ``.editorconfig``,
+  ``requirements-dev.txt``, README badges.
+
+**Limitations documented for the next release:**
+
+- SHAP path-walker still compares against bin-index thresholds (carried
+  over from v0.7.1).
+- MorphBoost warm-start does not restore the EMA snapshot (carried
+  over from v0.7.1).
+- ``MultiLabelGBMRanker`` trains K independent per-label rankers;
+  joint shared-tree multi-label boosting (carried over from v0.7.1).
+- **NEW**: SHAP additivity check has a 1e-5 absolute tolerance that
+  f32 round-off can exceed across larger evaluation samples; loosening
+  to ``atol + rtol * |predict(x)|`` is queued.
+- **NEW**: ``pyo3 = 0.23.5`` has RUSTSEC-2025-0020; not exploitable in
+  AlloyGBM's code path.  Upgrading to ``pyo3 0.24+`` requires migrating
+  the bindings to the ``Bound<>``-first API.
 
 What's new in 0.7.1
 -------------------

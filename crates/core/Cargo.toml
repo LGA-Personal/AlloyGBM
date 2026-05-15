@@ -8,6 +8,7 @@ description = "Core data contracts and artifact structures for AlloyGBM"
 homepage.workspace = true
 repository.workspace = true
 documentation.workspace = true
+publish = false
 
 [dependencies]
 wide = "0.7"

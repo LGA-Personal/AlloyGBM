@@ -4,7 +4,6 @@
 # Rust
 /target/
 **/*.rs.bk
-Cargo.lock
 
 # Python
 __pycache__/
@@ -52,3 +51,9 @@ benchmarks/results/numerai/
 benchmarks/results/*.log
 benchmarks/results/*.json
 docs/site/build/
+docs/plans/
+docs/superpowers/
+
+#AI
+CLAUDE.md
+AGENTS.md

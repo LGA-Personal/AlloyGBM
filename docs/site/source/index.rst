@@ -12,16 +12,16 @@ types.
 
 .. note::
 
-   AlloyGBM ``0.7.1`` enables SHAP for piecewise-linear leaves, ships
-   per-round training diagnostics, lifts the neutralized-warm-start
-   rejection, adds LightGBM-compatible interaction constraints, and
-   introduces ``MultiLabelGBMRanker`` for multi-output ranking.  The
-   ``0.7.0`` factor-neutral boosting surface (``neutralization``,
-   fit-time ``factor_exposures``), DRO scalar leaf solver, piecewise-linear
-   leaves, MorphBoost adaptive split criterion, per-iteration
-   learning-rate schedules, and SIMD-accelerated histogram and EMA kernels
-   are all still available. See :doc:`estimator` and :doc:`morphboost` for
-   parameter docs, and :doc:`release` for full notes.
+   AlloyGBM ``0.7.2`` is a documentation, supply-chain, and repo-hygiene
+   release — no user-facing Python API changes.  It aligns the docs
+   with the v0.7.1 surface that actually shipped (SHAP for
+   piecewise-linear leaves, per-round training diagnostics, neutralized
+   warm-start, LightGBM-compatible interaction constraints, and
+   :class:`~alloygbm.MultiLabelGBMRanker`), hardens CI (full pytest
+   suite + weekly ``cargo-audit`` / ``cargo-deny``), adds an
+   ``examples/`` library, and rewrites the release operating manual.
+   See :doc:`estimator` and :doc:`morphboost` for parameter docs, and
+   :doc:`release` for full notes.
 
 Getting started
 ---------------

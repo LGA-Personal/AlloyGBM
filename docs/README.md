@@ -35,8 +35,8 @@ and repository evolution:
 - `archive/`
   - Legacy material from the previous planning/documentation system.
   - Includes `v0.1_plans/` with pre-v0.2.0 limitation analysis and implementation plans.
-- `architecture/`
-  - Transitional notes that have not yet been fully moved or retired.
+- `limitations.md`
+  - Current limitations, the resolved-since-v0.1 list, and v0.7.2+ follow-ups.
 
 If you are trying to understand the project as a maintainer, start here:
 
@@ -50,5 +50,7 @@ If you are working on the hosted documentation site itself, start here:
 2. `docs/site/source/index.rst`
 3. `docs/site/source/conf.py`
 
-The old nested architecture tree is intentionally kept only for historical
-context. It is not the active planning model for the repository.
+If you are cutting a release, follow:
+
+1. `docs/reference/release_checklist.md` (top-to-bottom — version bumps,
+   doc updates, verification, tag/publish, post-release bookkeeping)

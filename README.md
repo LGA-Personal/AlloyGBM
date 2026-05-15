@@ -1,5 +1,12 @@
 # AlloyGBM
 
+[![CI](https://github.com/LGA-Personal/AlloyGBM/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/LGA-Personal/AlloyGBM/actions/workflows/ci.yml)
+[![PyPI version](https://img.shields.io/pypi/v/alloygbm.svg)](https://pypi.org/project/alloygbm/)
+[![Python versions](https://img.shields.io/pypi/pyversions/alloygbm.svg)](https://pypi.org/project/alloygbm/)
+[![Documentation Status](https://readthedocs.org/projects/alloygbm/badge/?version=latest)](https://alloygbm.readthedocs.io/en/latest/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Rust 1.92+](https://img.shields.io/badge/rust-1.92%2B-orange.svg)](https://www.rust-lang.org/)
+
 AlloyGBM is a Rust-first gradient boosting library with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is built for fast native execution, deterministic training, and time-aware tabular workflows.
 
 AlloyGBM is strongest on panel and finance-style problems where leakage-aware validation and practical iteration speed matter. It also performs competitively on general tabular benchmarks and includes native artifact prediction, TreeSHAP explanations, and purged time-series split helpers.
@@ -34,7 +41,7 @@ maturin develop --manifest-path bindings/python/Cargo.toml --release
 
 AlloyGBM targets Python `3.11+` and uses a native Rust extension module.
 
-Wheel targets for `0.7.1`:
+Wheel targets for `0.7.2`:
 
 - macOS `arm64`
 - Linux `x86_64` (manylinux)
@@ -161,7 +168,7 @@ model.fit(X_train, y_train)
 ```
 
 `leaf_solver="dro"` works with `GBMRegressor`, `GBMClassifier`, and
-`GBMRanker`, and composes with `training_mode="morph"`. In v0.7.1 it requires
+`GBMRanker`, and composes with `training_mode="morph"`. In v0.7.2 it requires
 `leaf_model="constant"`; piecewise-linear leaves still use the standard PL
 solver. `dro_radius=0.0` preserves standard-leaf predictions while retaining
 DRO metadata in the artifact.
@@ -244,13 +251,15 @@ Compatibility:
 | `training_mode="morph"` | supported | supported | supported |
 | `leaf_solver="dro"` | supported | supported | supported |
 | `leaf_model="linear"` | supported | supported | rejected |
-| warm start | rejected in this release | rejected in this release | rejected in this release |
+| warm start | supported | supported | supported |
 
-Exposure matrices are not persisted in the estimator or artifact. For
-this release, neutralized warm-start and `init_model` continuation are rejected
-because artifacts do not yet persist neutralization metadata needed to prove
-that the previous model and current estimator have matching neutralization
-contracts.
+Exposure matrices are not persisted in the estimator or artifact. As of
+v0.7.1, neutralized warm-start and `init_model` continuation are supported
+across all three modes provided the caller supplies the same
+`factor_exposures` matrix used for the initial fit; `neutralization`,
+`factor_neutralization_lambda`, and (for `split_penalty`) `factor_penalty`
+must match the persisted contract — mismatches raise a clear "does not
+match" error.
 
 ### Piecewise-Linear Leaves
 
@@ -275,7 +284,10 @@ model.fit(X_train, y_train)
 ```
 
 `leaf_model="linear"` works with `GBMClassifier` and `GBMRanker`, and composes
-with `training_mode="morph"`. SHAP currently requires `leaf_model="constant"`.
+with `training_mode="morph"`. As of v0.7.1, SHAP works on `leaf_model="linear"`
+artifacts as a best-effort interventional decomposition (exact additivity is
+relaxed for continuous-feature PL artifacts; see
+[docs/limitations.md](docs/limitations.md)).
 
 ### Time-Aware Validation
 
@@ -324,6 +336,7 @@ artifact_bytes = model.artifact_bytes
 - **`GBMRegressor`** -- squared-error regression with dataset-aware `training_policy`
 - **`GBMClassifier`** -- binary classification with log-loss objective, `predict_proba`, sklearn `ClassifierMixin`
 - **`GBMRanker`** -- learning-to-rank with 5 objectives: `rank:pairwise`, `rank:ndcg`, `rank:xendcg`, `queryrmse`, `yetirank`
+- **`MultiLabelGBMRanker`** -- multi-output ranking: `y` shaped `(n_rows, n_labels)`, `predict` returns the same shape, per-label `ranking_objective` lists supported
 - All estimators are sklearn-compatible (`get_params`, `set_params`, `score`, pipeline integration)
 
 ### Training Features
@@ -342,11 +355,15 @@ artifact_bytes = model.artifact_bytes
 - Per-iteration learning-rate schedules: `lr_schedule="constant"` (default) or `"warmup_cosine"`
 - DRO-style robust scalar leaves via `leaf_solver="dro"` (closed-form gradient-uncertainty penalty)
 - Piecewise-linear leaves via `leaf_model="linear"` (closed-form ridge solve, faster convergence on linear-trend data)
+- Factor-neutral boosting via `neutralization` + fit-time `factor_exposures` (`pre_target`, `per_round_gradient`, `split_penalty`)
+- LightGBM-compatible feature interaction constraints via `interaction_constraints=[[...]]` (up to 64 groups, level-wise and leaf-wise enforcement)
+- Neutralized warm-start / `init_model` continuation with matching-exposures contract
+- Per-round training diagnostics via `diagnostics_per_round_` (gradient stats, sampling counts, `neutralization_effectiveness`)
 
 ### Inference and Explanations
 
 - Zero-copy numpy prediction from native artifacts
-- TreeSHAP explanations via `shap_values(...)` (polynomial-time, no feature limit)
+- TreeSHAP explanations via `shap_values(...)` (polynomial-time, no feature limit, also supports `leaf_model="linear"` as a best-effort interventional decomposition)
 - Global feature importance via `feature_importances(...)`
 - Artifact-backed prediction via `predict_from_artifact(...)`
 
@@ -385,17 +402,30 @@ Benchmark tooling and methodology live in [benchmarks/README.md](benchmarks/READ
 ## Current Limitations
 
 - CPU-only runtime (GPU backend is architecturally planned but not implemented)
-- No interaction constraints
 - No dart/goss boosting modes
-- SHAP not yet supported with `leaf_model="linear"` (use `"constant"` for now)
+- SHAP on `leaf_model="linear"` returns a best-effort interventional decomposition; strict additivity is relaxed for continuous-feature PL artifacts (path-walker alignment queued for v0.7.3)
+- `MultiLabelGBMRanker` trains K independent per-label rankers (joint shared-tree multi-label boosting queued for v0.7.3)
+- MorphBoost warm-start does not restore the EMA snapshot from the artifact (resumed training starts the EMA cold; queued for v0.7.3)
+- SHAP additivity tolerance is f32-tight (`1e-5` absolute); `feature_importances()` over large samples can exceed it by a few ulps. Workaround: subsample to ≤500 rows. Queued for v0.7.3.
 - `leaf_solver="dro"` is a robust scalar leaf update, not a full raw-distribution Wasserstein DRO guarantee
+
+See [docs/limitations.md](docs/limitations.md) for the full list.
 
 ## Documentation
 
 - Docs index: [docs/README.md](docs/README.md)
+- Hosted Sphinx docs: [alloygbm.readthedocs.io](https://alloygbm.readthedocs.io/en/latest/)
+- Runnable examples: [examples/](examples/) (8 end-to-end scripts)
 - Benchmark guide: [benchmarks/README.md](benchmarks/README.md)
 - Current roadmap: [docs/roadmap/current.md](docs/roadmap/current.md)
+- Current limitations: [docs/limitations.md](docs/limitations.md)
 - Archive: [docs/archive/README.md](docs/archive/README.md)
+
+## Contributing
+
+- [Contributing guide](CONTRIBUTING.md) (dev setup, coding standards, test commands)
+- [Security policy](SECURITY.md) (private vulnerability reporting)
+- [Release operating manual](docs/reference/release_checklist.md)
 
 ## License
 

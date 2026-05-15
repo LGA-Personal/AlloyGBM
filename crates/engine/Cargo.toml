@@ -8,6 +8,7 @@ description = "Training engine and policy-controlled boosting loop for AlloyGBM"
 homepage.workspace = true
 repository.workspace = true
 documentation.workspace = true
+publish = false
 
 [dependencies]
 alloygbm-core = { path = "../core" }

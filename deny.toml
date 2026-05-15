@@ -1,0 +1,77 @@
+# cargo-deny configuration for AlloyGBM.
+# Run locally: `cargo install cargo-deny && cargo deny check`
+# CI runs `cargo deny check bans licenses advisories sources`.
+
+[graph]
+# Cover the standard tier-1 targets we ship wheels for, plus a couple
+# of dev hosts.  Adding a target here makes `cargo-deny` consider deps
+# that are conditionally pulled in for that target.
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-apple-darwin" },
+]
+
+all-features = false
+no-default-features = false
+
+[advisories]
+# Treat all unmaintained / unsound / yanked advisories as errors so
+# `cargo deny check advisories` is a real gate, not a warning rollup.
+version = 2
+yanked = "deny"
+ignore = [
+    # RUSTSEC-2025-0020: `PyString::from_object` buffer-overflow risk
+    # in pyo3 < 0.24.1.  AlloyGBM 0.7.2 pins pyo3 0.23.5; the upgrade
+    # to 0.24 has breaking API changes (Bound<> migration) and is
+    # tracked as a v0.7.3 task in docs/limitations.md / docs/roadmap/
+    # current.md.  We do not call `PyString::from_object` in the
+    # bindings code path.
+    "RUSTSEC-2025-0020",
+]
+
+[licenses]
+# Licenses we are willing to ship.  AlloyGBM itself is MIT; permissive
+# deps are fine, copyleft is not.
+version = 2
+# Keep the allow list narrow — only licenses actually present in the
+# current dep tree.  Add to it explicitly when a new dep needs it, with
+# a comment.  This makes a future copyleft / commercial-incompatible
+# dep impossible to accidentally pull in.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.93
+
+[bans]
+# `multiple-versions` warns when two semver-incompatible versions of
+# the same crate end up in the dependency graph (a common source of
+# bloat).  Bump to "deny" once the graph is clean.
+multiple-versions = "warn"
+wildcards = "deny"
+# Workspace-internal path deps (e.g. alloygbm-core = { path = "../core" })
+# show up as "wildcard" without this flag — those are not the
+# unbounded crates.io wildcards `wildcards = "deny"` is meant to catch.
+allow-wildcard-paths = true
+highlight = "all"
+
+# Crates we explicitly do not want in the dep tree, even transitively.
+deny = []
+
+# Crates that are okay to skip multi-version checking for (e.g. proc-
+# macro pinning).  Empty by default.
+skip = []
+skip-tree = []
+
+[sources]
+# Reject deps coming from anywhere other than the standard crates.io
+# registry.  Add `allow-git` if AlloyGBM ever needs a git dep.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

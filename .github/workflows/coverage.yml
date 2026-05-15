@@ -1,0 +1,108 @@
+name: Coverage
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coverage-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  rust-coverage:
+    name: Rust coverage (cargo-llvm-cov)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.92.0
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate coverage (Rust workspace)
+        run: |
+          cargo llvm-cov --workspace --exclude alloygbm-python \
+            --lcov --output-path lcov-rust.info
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov-rust.info
+          flags: rust
+          # Codecov tolerates missing tokens on public repos; set
+          # CODECOV_TOKEN as a repo secret if uploads start being
+          # rate-limited.
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+  python-coverage:
+    name: Python coverage (pytest-cov)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.92.0
+          # Match the components requested in rust-toolchain.toml so
+          # the dtolnay step's preinstall covers everything maturin's
+          # `cargo metadata` will pull in.  Without this, rustup tries
+          # to add rustfmt at metadata-load time and collides with the
+          # already-installed `cargo-fmt` binary, killing the build.
+          components: rustfmt, clippy
+
+      - name: Select toolchain
+        run: rustup default 1.92.0
+
+      - name: Install build + test tooling
+        run: |
+          python -m pip install --upgrade pip "maturin>=1.7,<2.0"
+          python -m pip install pytest pytest-subtests pytest-cov coverage \
+            numpy scikit-learn pandas
+
+      # `maturin develop` requires an active virtualenv that the
+      # GitHub-hosted runner doesn't provide.  Build a wheel and
+      # `pip install` it instead, mirroring the python-smoke job in
+      # ci.yml.
+      - name: Build wheel
+        run: maturin build --manifest-path bindings/python/Cargo.toml --release --interpreter python --out dist
+
+      - name: Install wheel
+        run: python -m pip install --force-reinstall dist/*.whl
+
+      - name: Run pytest with coverage
+        # Coverage targets the installed package so paths resolve to the
+        # site-packages location of `alloygbm`.
+        run: |
+          python -m pytest bindings/python/tests/ -q \
+            --cov=alloygbm \
+            --cov-report=xml:coverage-python.xml \
+            --cov-report=term-missing
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage-python.xml
+          flags: python
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false

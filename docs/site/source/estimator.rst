@@ -107,7 +107,7 @@ DRO leaf solver
   penalizes weak leaf signal by within-leaf gradient dispersion.
 - ``dro_radius: float = 0.05`` -- non-negative penalty scale. ``0.0`` preserves
   standard-leaf predictions while recording DRO metadata.
-- ``dro_metric: str = "wasserstein"`` -- the only accepted v0.7.1 value. It
+- ``dro_metric: str = "wasserstein"`` -- the only accepted v0.7.2 value. It
   denotes a Wasserstein-inspired closed-form robust counterpart over leaf
   gradient uncertainty.
 
@@ -115,7 +115,7 @@ This is not a full Wasserstein optimizer over raw feature/target
 distributions. Inference speed is unchanged because robust scalar leaf values
 are stored directly in the artifact. ``leaf_solver="dro"`` works on all three
 estimators, composes with ``training_mode="morph"``, and requires
-``leaf_model="constant"`` in v0.7.1.
+``leaf_model="constant"`` in v0.7.2.
 
 Factor-neutral boosting
 -----------------------
@@ -223,9 +223,9 @@ Compatibility:
      - supported
      - rejected
    * - warm start
-     - rejected in this release
-     - rejected in this release
-     - rejected in this release
+     - supported
+     - supported
+     - supported
 
 This is a training-time regularization tool. It does not guarantee
 prediction-time zero exposure unless predictions are neutralized against
@@ -253,7 +253,7 @@ Piecewise-linear leaves
   - ``"linear"`` -- each leaf stores a small linear model
     ``f_s(x) = b_s + Σ α_j x_j`` (up to 8 regressors per leaf, inherited from
     the split path's feature indices; the per-leaf cap is internal and not
-    user-tunable in v0.7.1). Optimal weights are solved in closed form via the
+    user-tunable in v0.7.2). Optimal weights are solved in closed form via the
     ridge regression ``α* = -(XᵀHX + λI)⁻¹ Xᵀg``, regularised by ``lambda_l2``.
 
 Empirically, ``"linear"`` converges in fewer rounds on data with linear
@@ -292,7 +292,7 @@ a list of length ``n_labels`` for heterogeneous objectives.  ``save_model``
 serialises every per-label ranker into a single ``.mlrk`` bundle via
 ``pickle.HIGHEST_PROTOCOL``.
 
-Joint shared-tree multi-label boosting is a v0.7.2 follow-up; see
+Joint shared-tree multi-label boosting is a v0.7.3 follow-up; see
 ``docs/limitations.md`` for the upgrade-path caveat.
 
 MorphBoost (Adaptive Split Criterion)

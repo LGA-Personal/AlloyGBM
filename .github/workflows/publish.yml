@@ -63,7 +63,10 @@ jobs:
           python-version: "3.11"
 
       - name: Install build tooling
-        run: python -m pip install --upgrade pip maturin
+        # Pin maturin to the same major series declared in pyproject.toml's
+        # build-system.requires so sdist builds don't silently pick up a
+        # maturin major bump between releases.
+        run: python -m pip install --upgrade pip "maturin>=1.7,<2.0"
 
       - name: Build source distribution
         run: maturin sdist --manifest-path bindings/python/Cargo.toml --out dist

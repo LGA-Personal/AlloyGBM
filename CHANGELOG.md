@@ -1,5 +1,92 @@
 # Changelog
 
+## 0.7.2
+
+Documentation, supply-chain, and repo-hygiene release.  No user-facing
+Python API surface changes.
+
+### Documentation
+
+- **Docs re-alignment with the v0.7.1 surface.**  Multiple docs still
+  said "warm-start is rejected", "SHAP requires `leaf_model='constant'`",
+  "no interaction constraints", or "single-label only" after v0.7.1
+  shipped those features.  README, `docs/user/*.md`, the Sphinx mirror
+  under `docs/site/source/*.rst`, `docs/roadmap/current.md`,
+  `CLAUDE.md`, `AGENTS.md`, and `benchmarks/README.md` are now
+  consistent with the actually-shipped v0.7.1 API.
+- **Release guide & checklist.**  `docs/reference/release_checklist.md`
+  is now a top-to-bottom operating manual: the authoritative inventory
+  of every file that needs a version bump or content update, the stale-
+  content `git grep` queries, the local + CI verification matrix, the
+  tag/publish commands, and post-release bookkeeping.
+- **API reference.**  `docs/site/source/api.rst` now auto-documents
+  `MultiLabelGBMRanker` (missing in v0.7.1).
+- **Runnable examples.**  New `examples/` directory with 8
+  self-contained end-to-end scripts covering every public estimator,
+  factor-neutral boosting, interaction constraints, warm-start
+  continuation, and SHAP explanations.
+
+### Repo hygiene & supply chain
+
+- **CI now runs the full pytest suite.**  v0.7.1's `python-smoke` CI
+  job built a wheel and ran 7 hand-written smoke snippets, but never
+  invoked `pytest bindings/python/tests/` — meaning the 455-test
+  Python suite was not enforced on merge.  It is now.
+- **Cargo.lock is tracked.**  Reproducible builds between CI / local
+  dev / release builds; standard guidance for workspaces that produce
+  binaries (the Python extension cdylib).
+- **`maturin` pinned in publish.yml** to the `>=1.7,<2.0` range
+  declared in `pyproject.toml`'s build-system.requires, so a maturin
+  major bump can't silently break a release.
+- **`cargo-audit` + `cargo-deny` weekly + on every PR that touches
+  Cargo manifests** via `.github/workflows/security-audit.yml`.
+  Configured via the new `deny.toml` (narrow license allowlist,
+  banned/duplicate dep checks, `crates.io`-only source restriction).
+- **Coverage reporting** via `.github/workflows/coverage.yml`
+  (`cargo-llvm-cov` + `pytest-cov`, both uploaded to Codecov).
+- **`publish = false` on every workspace crate.**  None of them ship
+  to crates.io; this prevents an accidental `cargo publish` from
+  fragmenting the release surface and clears `cargo-deny`'s wildcard-
+  dep warnings on workspace-internal `path` deps.
+- **Repo metadata.**  New `CONTRIBUTING.md`, `SECURITY.md`,
+  `.github/ISSUE_TEMPLATE/{bug_report,feature_request,config}.yml`,
+  `.github/PULL_REQUEST_TEMPLATE.md`, `.github/CODEOWNERS`,
+  `.github/dependabot.yml`, `.editorconfig`, `requirements-dev.txt`.
+- **README badges:** CI status, PyPI version, Python versions, RTD
+  docs, MIT license, Rust 1.92+.
+
+### Documented for the next release (v0.7.3)
+
+These are the limitations carried over from v0.7.1 plus two new ones
+surfaced during this release's work:
+
+- **SHAP path-walker still compares feature values against bin-index
+  thresholds**; strict additivity is relaxed for PL-leaf artifacts.
+  Path-walk alignment with the predictor's float thresholds.
+- **MorphBoost warm-start does not restore the EMA snapshot** from the
+  artifact, so resumed training starts EMA cold.
+- **`MultiLabelGBMRanker` trains K independent per-label rankers.**
+  Joint shared-tree multi-label boosting (one ensemble, K-tree-per-round
+  ranking objective).
+- **SHAP additivity tolerance is f32-tight (NEW).**  `shap_values()` and
+  `feature_importances()` enforce
+  `|predict(x) - (sum(shap) + expected_value)| <= 1e-5` per row.
+  Accumulated f32 round-off across larger evaluation samples (e.g.
+  `feature_importances()` over ~1000 rows of California Housing with
+  `n_estimators=200`) exceeds it by a few ulps even on healthy
+  `leaf_model="constant"` artifacts.  The arithmetic is correct; the
+  tolerance is the issue.  Loosening to a relative-plus-absolute bound
+  (`atol + rtol * |predict(x)|`) is queued.  Workaround: call
+  `feature_importances()` on a representative subsample (≤500 rows).
+- **PyO3 0.23 pinned — known advisory (NEW).**
+  RUSTSEC-2025-0020 documents a buffer-overflow risk in
+  `PyString::from_object` for `pyo3 < 0.24.1`.  AlloyGBM does not call
+  `PyString::from_object`, so the advisory is not exploitable through
+  the public Python API.  The upgrade to `pyo3 0.24+` (and matching
+  `numpy` crate version) requires migrating the ~5,300-line bindings
+  to the `Bound<>`-first API.  Ignored in `deny.toml` until the
+  migration lands.
+
 ## 0.7.1
 
 ### New Features

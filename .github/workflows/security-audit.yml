@@ -1,0 +1,59 @@
+name: Security audit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".github/workflows/security-audit.yml"
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".github/workflows/security-audit.yml"
+  schedule:
+    # Run every Monday at 09:00 UTC so RUSTSEC advisories published
+    # against AlloyGBM's deps surface as a CI failure within a week
+    # rather than waiting for the next user-driven change.
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # `actions: write` lets the audit action open / update issues on the
+  # repository describing new advisories — comment out if you don't
+  # want automated issues.
+  issues: write
+
+concurrency:
+  group: security-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-audit:
+    name: cargo-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # RUSTSEC-2025-0020: pyo3 < 0.24.1 PyString::from_object
+          # overflow.  Not exploitable in AlloyGBM's code path; pyo3
+          # 0.24 upgrade is tracked as a v0.7.3 task.  Mirrors the
+          # same ignore in deny.toml.
+          ignore: RUSTSEC-2025-0020
+
+  cargo-deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          # `bans` catches duplicate / banned dependencies.
+          # `licenses` enforces the license allowlist in deny.toml.
+          # `advisories` cross-checks RustSec like cargo-audit.
+          # `sources` rejects deps from non-allowed registries.
+          command: check bans licenses advisories sources

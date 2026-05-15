@@ -97,6 +97,12 @@ jobs:
       - name: Install wheel
         run: python -m pip install --force-reinstall dist/*.whl
 
+      - name: Install test dependencies
+        run: python -m pip install pytest pytest-subtests numpy scikit-learn pandas
+
+      - name: Run pytest suite
+        run: python -m pytest bindings/python/tests/ -q
+
       - name: Import smoke
         run: python -c "import alloygbm; print(alloygbm.native_runtime_info())"
 
