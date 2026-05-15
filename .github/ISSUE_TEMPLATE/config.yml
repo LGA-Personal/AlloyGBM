@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://alloygbm.readthedocs.io/en/latest/
+    about: Read the published user guide and API reference.
+  - name: Benchmarks
+    url: https://github.com/LGA-Personal/AlloyGBM/tree/main/benchmarks
+    about: Compare AlloyGBM against other gradient boosting libraries.

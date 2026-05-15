@@ -1,0 +1,79 @@
+name: Bug report
+description: Report something that's not working as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. To make this actionable, please fill in
+        every section. If a section doesn't apply, write "N/A" — don't
+        delete it.
+  - type: input
+    id: alloygbm_version
+    attributes:
+      label: AlloyGBM version
+      description: Output of `python -c "import alloygbm; print(alloygbm.__version__)"`.
+      placeholder: "0.7.1"
+    validations:
+      required: true
+  - type: input
+    id: python_version
+    attributes:
+      label: Python version
+      placeholder: "3.11.7"
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS arm64
+        - macOS x86_64
+        - Linux x86_64 (manylinux wheel)
+        - Linux x86_64 (built from source)
+        - Other (describe below)
+    validations:
+      required: true
+  - type: dropdown
+    id: install_source
+    attributes:
+      label: How did you install AlloyGBM?
+      options:
+        - pip install alloygbm (PyPI)
+        - maturin develop (from source)
+        - Custom build
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: |
+        A self-contained Python snippet that reproduces the bug. Smaller
+        is better — strip irrelevant features. If the bug needs a
+        specific dataset, link to the smallest version that triggers it.
+      render: python
+      placeholder: |
+        from alloygbm import GBMRegressor
+        ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the full traceback if there's an exception.
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Anything else relevant — model size, dataset shape, training mode flags.

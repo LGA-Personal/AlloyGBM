@@ -1,5 +1,12 @@
 # AlloyGBM
 
+[![CI](https://github.com/LGA-Personal/AlloyGBM/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/LGA-Personal/AlloyGBM/actions/workflows/ci.yml)
+[![PyPI version](https://img.shields.io/pypi/v/alloygbm.svg)](https://pypi.org/project/alloygbm/)
+[![Python versions](https://img.shields.io/pypi/pyversions/alloygbm.svg)](https://pypi.org/project/alloygbm/)
+[![Documentation Status](https://readthedocs.org/projects/alloygbm/badge/?version=latest)](https://alloygbm.readthedocs.io/en/latest/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Rust 1.92+](https://img.shields.io/badge/rust-1.92%2B-orange.svg)](https://www.rust-lang.org/)
+
 AlloyGBM is a Rust-first gradient boosting library with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is built for fast native execution, deterministic training, and time-aware tabular workflows.
 
 AlloyGBM is strongest on panel and finance-style problems where leakage-aware validation and practical iteration speed matter. It also performs competitively on general tabular benchmarks and includes native artifact prediction, TreeSHAP explanations, and purged time-series split helpers.
