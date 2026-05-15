@@ -1870,16 +1870,34 @@ pub fn decode_optional_native_categorical_splits_section(
 /// Optional artifact section recording the MorphConfig used during training.
 /// Metadata only — predictions are deterministic from baked-in leaf values.
 /// Section is omitted entirely for non-morph artifacts.
+///
+/// **Version history.**
+///
+/// * v1 (v0.4.0+): `config` + `final_iteration` + `final_total`.  Fixed
+///   36-byte payload.
+/// * v2 (v0.7.3+): appends a length-prefixed `ema_stats: Vec<GradientEmaStats>`
+///   so MorphBoost warm-starts can resume with the EMA state from the
+///   previous fit rather than restarting it cold.  Legacy v1 artifacts
+///   decode with `ema_stats = Vec::new()` and the warm-start path
+///   falls back to a cold EMA (current v0.7.1/v0.7.2 behavior).
 #[derive(Debug, Clone, PartialEq)]
 pub struct MorphMetadataPayload {
     pub config: MorphConfig,
     pub final_iteration: u32,
     pub final_total: u32,
+    /// EMA snapshot captured at training-finalize time.  Empty when the
+    /// payload was decoded from a pre-v0.7.3 (version 1) artifact, in
+    /// which case warm-start initializes the EMA cold.  Indexed by
+    /// class for multiclass models (length 1 for single-output).
+    pub ema_stats: Vec<GradientEmaStats>,
 }
 
 pub fn encode_morph_metadata_payload(payload: &MorphMetadataPayload) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(36);
-    buf.extend_from_slice(&1u16.to_le_bytes());
+    // v2 layout: 36 bytes header (same as v1) + 4 bytes count +
+    // 12 bytes per GradientEmaStats (mean, std, alpha as little-endian f32).
+    let ema_section_len = 4 + payload.ema_stats.len() * 12;
+    let mut buf = Vec::with_capacity(36 + ema_section_len);
+    buf.extend_from_slice(&2u16.to_le_bytes());
     buf.extend_from_slice(&payload.config.morph_rate.to_le_bytes());
     buf.extend_from_slice(&payload.config.evolution_pressure.to_le_bytes());
     buf.extend_from_slice(&payload.config.morph_warmup_iters.to_le_bytes());
@@ -1894,6 +1912,14 @@ pub fn encode_morph_metadata_payload(payload: &MorphMetadataPayload) -> Vec<u8> 
     buf.extend_from_slice(&warmup_frac.to_le_bytes());
     buf.extend_from_slice(&payload.final_iteration.to_le_bytes());
     buf.extend_from_slice(&payload.final_total.to_le_bytes());
+    // v2 EMA tail.
+    let ema_count = payload.ema_stats.len() as u32;
+    buf.extend_from_slice(&ema_count.to_le_bytes());
+    for stats in &payload.ema_stats {
+        buf.extend_from_slice(&stats.mean.to_le_bytes());
+        buf.extend_from_slice(&stats.std.to_le_bytes());
+        buf.extend_from_slice(&stats.alpha.to_le_bytes());
+    }
     buf
 }
 
@@ -1904,7 +1930,7 @@ pub fn decode_optional_morph_metadata_section(bytes: &[u8]) -> CoreResult<MorphM
         ));
     }
     let version = u16::from_le_bytes([bytes[0], bytes[1]]);
-    if version != 1 {
+    if version != 1 && version != 2 {
         return Err(CoreError::Validation(format!(
             "unsupported morph metadata version: {version}"
         )));
@@ -1936,6 +1962,7 @@ pub fn decode_optional_morph_metadata_section(bytes: &[u8]) -> CoreResult<MorphM
     let warmup_frac = read_f32!();
     let final_iteration = read_u32!();
     let final_total = u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
+    o += 4;
     let lr_schedule = match lr_kind {
         0 => LrSchedule::Constant,
         1 => LrSchedule::WarmupCosine { warmup_frac },
@@ -1944,6 +1971,33 @@ pub fn decode_optional_morph_metadata_section(bytes: &[u8]) -> CoreResult<MorphM
                 "unknown lr_schedule kind: {lr_kind}"
             )));
         }
+    };
+    // v2 tail: optional EMA stats.  v1 artifacts have no tail and
+    // decode with `ema_stats = Vec::new()`.
+    let ema_stats = if version >= 2 && o + 4 <= bytes.len() {
+        let count =
+            u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]) as usize;
+        o += 4;
+        let expected_tail = count.checked_mul(12).ok_or_else(|| {
+            CoreError::Validation("morph metadata ema count overflow".to_string())
+        })?;
+        if o + expected_tail > bytes.len() {
+            return Err(CoreError::Validation(format!(
+                "morph metadata ema tail truncated: expected {} bytes after header, got {}",
+                expected_tail,
+                bytes.len() - o
+            )));
+        }
+        let mut stats = Vec::with_capacity(count);
+        for _ in 0..count {
+            let mean = read_f32!();
+            let std = read_f32!();
+            let alpha = read_f32!();
+            stats.push(GradientEmaStats { mean, std, alpha });
+        }
+        stats
+    } else {
+        Vec::new()
     };
     Ok(MorphMetadataPayload {
         config: MorphConfig {
@@ -1957,6 +2011,7 @@ pub fn decode_optional_morph_metadata_section(bytes: &[u8]) -> CoreResult<MorphM
         },
         final_iteration,
         final_total,
+        ema_stats,
     })
 }
 
@@ -3920,11 +3975,78 @@ mod tests {
             },
             final_iteration: 42,
             final_total: 100,
+            ema_stats: Vec::new(),
         };
         let bytes = encode_morph_metadata_payload(&payload);
-        assert_eq!(bytes.len(), 36);
+        // v2 envelope: 36 byte header + 4 byte EMA count (= 0) = 40 bytes.
+        assert_eq!(bytes.len(), 40);
         let decoded = decode_optional_morph_metadata_section(&bytes).unwrap();
         assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn morph_metadata_round_trip_with_ema_state() {
+        // v0.7.3 EMA persistence: payload encodes/decodes multi-class
+        // EMA stats round-trip-clean so warm-start can resume the
+        // exact EMA state from the previous fit.
+        let payload = MorphMetadataPayload {
+            config: MorphConfig::default(),
+            final_iteration: 50,
+            final_total: 50,
+            ema_stats: vec![
+                GradientEmaStats {
+                    mean: 0.012,
+                    std: 0.85,
+                    alpha: 0.05,
+                },
+                GradientEmaStats {
+                    mean: -0.003,
+                    std: 1.12,
+                    alpha: 0.05,
+                },
+                GradientEmaStats {
+                    mean: 0.007,
+                    std: 0.93,
+                    alpha: 0.05,
+                },
+            ],
+        };
+        let bytes = encode_morph_metadata_payload(&payload);
+        // 36 header + 4 count + 3 * 12 stats = 76 bytes.
+        assert_eq!(bytes.len(), 76);
+        let decoded = decode_optional_morph_metadata_section(&bytes).unwrap();
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn morph_metadata_v1_backcompat_decodes_with_empty_ema() {
+        // Pre-v0.7.3 (version 1) MorphMetadata payloads have no EMA
+        // tail.  Decoder must accept them and return an empty EMA Vec
+        // so the warm-start path falls back to a cold EMA (matches
+        // pre-v0.7.3 behaviour).
+        let v1_bytes = {
+            let mut buf = Vec::with_capacity(36);
+            buf.extend_from_slice(&1u16.to_le_bytes()); // version = 1
+            buf.extend_from_slice(&0.1f32.to_le_bytes()); // morph_rate
+            buf.extend_from_slice(&0.2f32.to_le_bytes()); // evolution_pressure
+            buf.extend_from_slice(&5u32.to_le_bytes()); // morph_warmup_iters
+            buf.extend_from_slice(&0.3f32.to_le_bytes()); // info_score_weight
+            buf.extend_from_slice(&0.9f32.to_le_bytes()); // depth_penalty_base
+            buf.push(1); // balance_penalty
+            buf.push(0); // lr_kind = Constant
+            buf.extend_from_slice(&0.0f32.to_le_bytes()); // warmup_frac
+            buf.extend_from_slice(&10u32.to_le_bytes()); // final_iteration
+            buf.extend_from_slice(&10u32.to_le_bytes()); // final_total
+            buf
+        };
+        assert_eq!(v1_bytes.len(), 36);
+        let decoded = decode_optional_morph_metadata_section(&v1_bytes).unwrap();
+        assert!(
+            decoded.ema_stats.is_empty(),
+            "v1 payload must decode with empty ema_stats"
+        );
+        assert_eq!(decoded.config.morph_rate, 0.1);
+        assert_eq!(decoded.final_iteration, 10);
     }
 
     #[test]
@@ -3947,6 +4069,7 @@ mod tests {
             config: MorphConfig::default(),
             final_iteration: 0,
             final_total: 1,
+            ema_stats: Vec::new(),
         };
         let mut bytes = encode_morph_metadata_payload(&payload);
         bytes[23] = 99; // lr_schedule_kind at offset 2+5*4+1=23
@@ -3969,6 +4092,7 @@ mod tests {
             },
             final_iteration: 10,
             final_total: 10,
+            ema_stats: Vec::new(),
         };
         let morph_bytes = encode_morph_metadata_payload(&morph_payload);
         let sections = vec![

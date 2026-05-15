@@ -2197,6 +2197,12 @@ pub struct WarmStartState {
     pub stumps: Vec<TrainedStump>,
     /// Number of rounds already completed in the initial model.
     pub initial_rounds_completed: usize,
+    /// MorphBoost EMA snapshot from the previous fit (v0.7.3+).  When
+    /// `Some` and the current fit also uses `training_mode="morph"`,
+    /// the engine seeds `MorphState::ema_stats` from this snapshot so a
+    /// resumed `N + M`-round model matches a fresh `N + M`-round fit.
+    /// Empty / missing → EMA starts cold (legacy v0.7.1/v0.7.2 behaviour).
+    pub initial_ema_stats: Option<Vec<GradientEmaStats>>,
 }
 
 /// State needed to continue multiclass training from a prior model.
@@ -2204,6 +2210,9 @@ pub struct MultiClassWarmStartState {
     pub baseline_predictions: Vec<f32>,
     pub class_stumps: Vec<Vec<TrainedStump>>,
     pub initial_rounds_completed: usize,
+    /// MorphBoost EMA snapshot from the previous fit (v0.7.3+).  See
+    /// `WarmStartState::initial_ema_stats`.
+    pub initial_ema_stats: Option<Vec<GradientEmaStats>>,
 }
 
 struct IterationExecutionContext<'a> {
@@ -3393,8 +3402,11 @@ impl Trainer {
             None
         };
 
-        // Initialize K prediction arrays — from warm-start or fresh
-        let (baselines, mut class_stumps, round_index_offset, initial_stump_counts) =
+        // Initialize K prediction arrays — from warm-start or fresh.
+        // `warm_ema_stats` captures the optional MorphBoost EMA
+        // snapshot for the v0.7.3 warm-start-equivalence fix; consumed
+        // below after `MorphState::new` constructs the fresh EMA.
+        let (baselines, mut class_stumps, round_index_offset, initial_stump_counts, warm_ema_stats) =
             if let Some(ws) = warm_start {
                 if ws.baseline_predictions.len() != k {
                     return Err(EngineError::ContractViolation(format!(
@@ -3415,11 +3427,12 @@ impl Trainer {
                     ws.class_stumps,
                     offset,
                     initial_counts,
+                    ws.initial_ema_stats,
                 )
             } else {
                 let baselines = objective.initial_predictions();
                 let class_stumps: Vec<Vec<TrainedStump>> = vec![Vec::new(); k];
-                (baselines, class_stumps, 0_usize, vec![0_usize; k])
+                (baselines, class_stumps, 0_usize, vec![0_usize; k], None)
             };
 
         let n = dataset.row_count();
@@ -3514,6 +3527,17 @@ impl Trainer {
             .params
             .morph_config
             .map(|cfg| MorphState::new(cfg, k, total_iterations, self.params.learning_rate));
+
+        // v0.7.3 EMA warm-start: when the multiclass warm-start state
+        // carries an EMA snapshot from the previous fit, seed the
+        // current `MorphState` with it.  Length mismatch (class count
+        // changed across fits) silently falls back to the cold EMA
+        // from `MorphState::new`.
+        if let (Some(ms), Some(snapshot)) = (morph_state.as_mut(), warm_ema_stats.as_ref())
+            && ms.ema_stats.len() == snapshot.len()
+        {
+            ms.ema_stats.copy_from_slice(snapshot);
+        }
 
         for round_index in 0..effective_round_cap {
             let effective_round = round_index + round_index_offset;
@@ -3793,6 +3817,9 @@ impl Trainer {
             config: ms.config,
             final_iteration: rounds_completed as u32,
             final_total: total_iterations,
+            // v0.7.3: persist EMA so warm-start can resume from the
+            // exact same EMA state rather than restarting cold.
+            ema_stats: ms.ema_stats.clone(),
         });
         let dro_metadata = self
             .params
@@ -3947,7 +3974,7 @@ impl Trainer {
         binned_matrix: &BinnedMatrix,
         backend: &B,
         objective: &O,
-        execution: IterationExecutionContext<'_>,
+        mut execution: IterationExecutionContext<'_>,
     ) -> EngineResult<IterationRunSummary> {
         let controls = execution.controls;
         let validation = execution.validation;
@@ -4018,16 +4045,20 @@ impl Trainer {
             binned_matrix,
         )?;
 
-        // Warm-start: use existing model's baseline + apply existing trees
-        let (baseline_prediction, initial_stumps, round_index_offset) =
-            if let Some(warm_start) = execution.warm_start {
+        // Warm-start: use existing model's baseline + apply existing
+        // trees.  `warm_ema_stats` captures the MorphBoost EMA snapshot
+        // for the v0.7.3 warm-start-equivalence fix (consumed below
+        // when `MorphState::new` builds the fresh EMA).
+        let (baseline_prediction, initial_stumps, round_index_offset, warm_ema_stats) =
+            if let Some(warm_start) = execution.warm_start.take() {
                 (
                     warm_start.baseline_prediction,
                     warm_start.stumps,
                     warm_start.initial_rounds_completed,
+                    warm_start.initial_ema_stats,
                 )
             } else {
-                (fit_contract.baseline_prediction, Vec::new(), 0)
+                (fit_contract.baseline_prediction, Vec::new(), 0, None)
             };
         let raw_features_opt = Some((
             &active_dataset.matrix.values as &[f32],
@@ -4119,6 +4150,15 @@ impl Trainer {
             .params
             .morph_config
             .map(|cfg| MorphState::new(cfg, 1, total_iterations, self.params.learning_rate));
+
+        // v0.7.3 EMA warm-start: seed the fresh `MorphState` with the
+        // EMA snapshot from the previous fit when the warm-start state
+        // carries one.  Single-class MorphState has `ema_stats.len() = 1`.
+        if let (Some(ms), Some(snapshot)) = (morph_state.as_mut(), warm_ema_stats.as_ref())
+            && ms.ema_stats.len() == snapshot.len()
+        {
+            ms.ema_stats.copy_from_slice(snapshot);
+        }
 
         for round_index in 0..effective_round_cap {
             // Offset round_index for sampling seeds and tree IDs when warm-starting
@@ -4512,6 +4552,9 @@ impl Trainer {
             config: ms.config,
             final_iteration: rounds_completed as u32,
             final_total: total_iterations,
+            // v0.7.3: persist EMA so warm-start can resume from the
+            // exact same EMA state rather than restarting cold.
+            ema_stats: ms.ema_stats.clone(),
         });
         let dro_metadata = self
             .params
@@ -8789,6 +8832,7 @@ mod tests {
             baseline_prediction: 0.0,
             stumps: Vec::new(),
             initial_rounds_completed: 1,
+            initial_ema_stats: None,
         };
         let controls = IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).unwrap();
         let result = Trainer::new(params).unwrap().fit_iterations_warm_start(
@@ -8894,6 +8938,7 @@ mod tests {
             baseline_predictions: vec![0.0, 0.0],
             class_stumps: vec![Vec::new(), Vec::new()],
             initial_rounds_completed: 1,
+            initial_ema_stats: None,
         };
         let result = Trainer::new(params)
             .unwrap()

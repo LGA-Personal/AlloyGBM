@@ -2895,10 +2895,22 @@ fn train_regression_artifact_with_summary_dense_impl(
                 )));
             }
             let initial_rounds = init_model.rounds_completed();
+            // v0.7.3: pull the persisted EMA snapshot (if any) so a
+            // MorphBoost warm-start resumes from the previous fit's
+            // EMA state rather than restarting it cold.  v1 artifacts
+            // (pre-v0.7.3) decode with empty `ema_stats`; we keep
+            // `initial_ema_stats = None` for that case so the engine
+            // falls back to a cold EMA (preserving prior behaviour).
+            let initial_ema_stats = init_model
+                .morph_metadata
+                .as_ref()
+                .filter(|m| !m.ema_stats.is_empty())
+                .map(|m| m.ema_stats.clone());
             Some(WarmStartState {
                 baseline_prediction: init_model.baseline_prediction,
                 stumps: init_model.stumps,
                 initial_rounds_completed: initial_rounds,
+                initial_ema_stats,
             })
         } else {
             None
@@ -3068,10 +3080,21 @@ fn train_regression_artifact_with_summary_dense_impl(
                     )));
                 }
                 let initial_rounds = init_mc_model.rounds_completed();
+                // v0.7.3: pull the persisted EMA snapshot (one entry
+                // per class) so MorphBoost warm-start resumes from
+                // the previous fit's EMA.  v1 artifacts decode with
+                // empty `ema_stats`; treat that as "no snapshot" so
+                // the engine falls back to a cold EMA.
+                let initial_ema_stats = init_mc_model
+                    .morph_metadata
+                    .as_ref()
+                    .filter(|m| !m.ema_stats.is_empty())
+                    .map(|m| m.ema_stats.clone());
                 Some(MultiClassWarmStartState {
                     baseline_predictions: init_mc_model.baseline_predictions,
                     class_stumps: init_mc_model.class_stumps,
                     initial_rounds_completed: initial_rounds,
+                    initial_ema_stats,
                 })
             } else {
                 None
@@ -3292,10 +3315,11 @@ fn shap_global_importance_dense_impl(
 /// SHAP path-walker.
 ///
 /// `binning_kind`:
-///   - `"linear"`   → `BinningContext::Linear` (needs `feature_mins`,
-///                    `feature_maxs`, `max_data_bin`).
-///   - `"quantile"` → `BinningContext::Quantile` (needs `feature_cuts`).
-///   - `"prebinned"` → `BinningContext::PreBinned` (no aux args).
+///
+/// - `"linear"`: `BinningContext::Linear`. Needs `feature_mins`,
+///   `feature_maxs`, `max_data_bin`.
+/// - `"quantile"`: `BinningContext::Quantile`. Needs `feature_cuts`.
+/// - `"prebinned"`: `BinningContext::PreBinned`. No aux args.
 ///
 /// On invalid combinations returns a `ShapError::InvalidInput`.
 fn build_binning_context(
