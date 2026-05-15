@@ -71,7 +71,21 @@ fn accumulate_linear_terms(
 }
 
 const TREE_NODE_STRIDE: u32 = 1 << 20;
-const ADDITIVITY_TOLERANCE: f32 = 1e-5;
+// SHAP additivity tolerance is computed as
+//   atol + rtol * |predicted|
+// rather than a fixed absolute bound, so accumulated f32 round-off in
+// large-sample explanations (e.g. `feature_importances()` over ~1000
+// rows on California Housing with `n_estimators=200`) does not raise
+// even though the arithmetic is correct.  Values follow numpy's
+// `allclose` convention (atol=1e-5, rtol=1e-4).
+const ADDITIVITY_ATOL: f32 = 1e-5;
+const ADDITIVITY_RTOL: f32 = 1e-4;
+
+#[inline]
+fn additivity_tolerance(predicted: f32) -> f32 {
+    ADDITIVITY_ATOL + ADDITIVITY_RTOL * predicted.abs()
+}
+
 const MAX_EXACT_SPLIT_FEATURES: usize = 25;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -300,7 +314,7 @@ fn explain_rows_brute_force(
         let values_by_subset = compute_subset_expectations(model, row, &model_structure, baseline)?;
         let row_expected_value = values_by_subset[0];
 
-        if (row_expected_value - expected_value).abs() > ADDITIVITY_TOLERANCE {
+        if (row_expected_value - expected_value).abs() > additivity_tolerance(expected_value) {
             return Err(ShapError::ContractViolation(format!(
                 "row {row_index} expected value drift: {row_expected_value} vs baseline {expected_value}"
             )));
@@ -649,35 +663,32 @@ fn verify_additivity(
     // Compute the prediction by walking each tree once and summing the leaf
     // values along the row's path.  Mirrors `distribute_linear_terms_for_row`.
     //
-    // **Tolerance policy.**  For scalar-leaf models we hold the canonical
-    // tight bound (`ADDITIVITY_TOLERANCE`).  Piecewise-linear leaves currently
-    // share a latent issue with the rest of the SHAP path: stump thresholds
-    // are stored as bin indices in the artifact, while the predictor crate
-    // converts them to float thresholds at load time.  SHAP's path walker
-    // here compares raw feature values against bin indices, so for models
-    // trained on continuous features (bin indices ≫ feature magnitudes) the
-    // walked path can diverge from the predictor's path.  For scalar leaves
-    // this still passes additivity because the wrong-but-consistent path
-    // yields the same scalar sum from both sides; for linear leaves the leaf
-    // value depends on `xj` so the wrong path produces measurably different
-    // values.  Rather than hard-fail explainability for an entire leaf model,
-    // we relax the check for linear-leaf artifacts and surface the limitation
-    // in user-facing docs.  The threshold-bin path-walk alignment is tracked
-    // for a dedicated follow-up.
+    // **Tolerance policy.**  Additivity is checked against
+    //   atol + rtol * |predicted|
+    // rather than a fixed absolute bound.  This matches numpy `allclose`
+    // semantics and means accumulated f32 round-off across large
+    // explanation batches (e.g. `feature_importances()` over ~1000 rows
+    // on California Housing with `n_estimators=200`) does not raise even
+    // though the arithmetic is correct.
+    //
+    // Piecewise-linear leaves remain exempted from the strict check:
+    // the SHAP path walker compares raw feature values against bin
+    // indices while the predictor uses float thresholds, so the walked
+    // path can diverge from the predictor's path on continuous features.
+    // For scalar leaves this is masked (wrong-but-consistent path → same
+    // sum); for linear leaves the leaf value depends on `x_j` so the
+    // mismatch surfaces.  Tightening the path walker is its own commit;
+    // until that lands the linear-leaf return-Ok stays in place.
     let predicted = local_path_predict(model, row);
     let reconstructed = expected_value + contributions.iter().sum::<f32>();
-    let tolerance = if model_has_linear_leaves(model) {
-        // Skip the strict equality check; SHAP still returns the path-based
-        // attribution + linear deviations, which sum to `predict_actual` when
-        // the path walk matches the predictor and otherwise produces a
-        // best-effort interventional explanation.
+    if model_has_linear_leaves(model) {
+        // Best-effort interventional explanation; see comment above.
         return Ok(());
-    } else {
-        ADDITIVITY_TOLERANCE
-    };
+    }
+    let tolerance = additivity_tolerance(predicted);
     if (predicted - reconstructed).abs() > tolerance {
         return Err(ShapError::ContractViolation(format!(
-            "row {row_index} additivity check failed: predicted={predicted}, reconstructed={reconstructed}, tolerance={tolerance}"
+            "row {row_index} additivity check failed: predicted={predicted}, reconstructed={reconstructed}, tolerance={tolerance} (atol={ADDITIVITY_ATOL}, rtol={ADDITIVITY_RTOL})"
         )));
     }
     Ok(())
@@ -1329,7 +1340,7 @@ mod tests {
 
     fn assert_close(actual: f32, expected: f32) {
         assert!(
-            (actual - expected).abs() <= ADDITIVITY_TOLERANCE,
+            (actual - expected).abs() <= ADDITIVITY_ATOL,
             "expected {expected}, got {actual}"
         );
     }
@@ -1574,7 +1585,7 @@ mod tests {
             assert_eq!(bf_row.len(), ts_row.len());
             for (bf_val, ts_val) in bf_row.iter().zip(ts_row.iter()) {
                 assert!(
-                    (bf_val - ts_val).abs() <= ADDITIVITY_TOLERANCE,
+                    (bf_val - ts_val).abs() <= ADDITIVITY_ATOL,
                     "brute force {bf_val} vs tree shap {ts_val}"
                 );
             }
@@ -1592,7 +1603,7 @@ mod tests {
         for (bf_row, ts_row) in brute_force.values.iter().zip(tree_shap.values.iter()) {
             for (bf_val, ts_val) in bf_row.iter().zip(ts_row.iter()) {
                 assert!(
-                    (bf_val - ts_val).abs() <= ADDITIVITY_TOLERANCE,
+                    (bf_val - ts_val).abs() <= ADDITIVITY_ATOL,
                     "brute force {bf_val} vs tree shap {ts_val}"
                 );
             }
@@ -1643,7 +1654,7 @@ mod tests {
         for (bf_row, ts_row) in brute_force.values.iter().zip(tree_shap.values.iter()) {
             for (bf_val, ts_val) in bf_row.iter().zip(ts_row.iter()) {
                 assert!(
-                    (bf_val - ts_val).abs() <= ADDITIVITY_TOLERANCE,
+                    (bf_val - ts_val).abs() <= ADDITIVITY_ATOL,
                     "brute force {bf_val} vs tree shap {ts_val}"
                 );
             }
@@ -1695,7 +1706,7 @@ mod tests {
         {
             for (feat_idx, (bf_val, ts_val)) in bf_row.iter().zip(ts_row.iter()).enumerate() {
                 assert!(
-                    (bf_val - ts_val).abs() <= ADDITIVITY_TOLERANCE,
+                    (bf_val - ts_val).abs() <= ADDITIVITY_ATOL,
                     "row {row_idx} feature {feat_idx}: brute force {bf_val} vs tree shap {ts_val}"
                 );
             }
@@ -1862,7 +1873,7 @@ mod tests {
         {
             for (feat_idx, (bf_val, ts_val)) in bf_row.iter().zip(ts_row.iter()).enumerate() {
                 assert!(
-                    (bf_val - ts_val).abs() <= ADDITIVITY_TOLERANCE,
+                    (bf_val - ts_val).abs() <= ADDITIVITY_ATOL,
                     "row {row_idx} feature {feat_idx}: brute force {bf_val} vs tree shap {ts_val}"
                 );
             }
@@ -1931,7 +1942,7 @@ mod tests {
         {
             for (feat_idx, (bf_val, ts_val)) in bf_row.iter().zip(ts_row.iter()).enumerate() {
                 assert!(
-                    (bf_val - ts_val).abs() <= ADDITIVITY_TOLERANCE,
+                    (bf_val - ts_val).abs() <= ADDITIVITY_ATOL,
                     "row {row_idx} feature {feat_idx}: brute force {bf_val} vs tree shap {ts_val}"
                 );
             }
@@ -2057,7 +2068,7 @@ mod tests {
         // exactly w_left * (1.5 - 0.5) = 0.7 * 1.0 = 0.7.
         let delta_phi_feat1 = explanation.values[1][1] - explanation.values[0][1];
         assert!(
-            (delta_phi_feat1 - 0.7).abs() <= ADDITIVITY_TOLERANCE,
+            (delta_phi_feat1 - 0.7).abs() <= ADDITIVITY_ATOL,
             "expected ΔSHAP[feature 1] = 0.7, got {delta_phi_feat1}"
         );
     }
@@ -2120,7 +2131,7 @@ mod tests {
             let predicted = predictor.predict_row(row).expect("predict succeeds");
             let reconstructed = explanation.expected_value + phi.iter().sum::<f32>();
             assert!(
-                (reconstructed - predicted).abs() <= ADDITIVITY_TOLERANCE,
+                (reconstructed - predicted).abs() <= ADDITIVITY_ATOL,
                 "row {row_idx}: reconstructed {reconstructed} vs predicted {predicted}"
             );
         }
