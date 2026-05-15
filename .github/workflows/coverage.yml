@@ -64,6 +64,15 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.92.0
+          # Match the components requested in rust-toolchain.toml so
+          # the dtolnay step's preinstall covers everything maturin's
+          # `cargo metadata` will pull in.  Without this, rustup tries
+          # to add rustfmt at metadata-load time and collides with the
+          # already-installed `cargo-fmt` binary, killing the build.
+          components: rustfmt, clippy
+
+      - name: Select toolchain
+        run: rustup default 1.92.0
 
       - name: Install build + test tooling
         run: |
