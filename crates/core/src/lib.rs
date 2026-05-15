@@ -2419,7 +2419,7 @@ pub fn validate_train_params(params: &TrainParams) -> CoreResult<()> {
     if params.leaf_solver == LeafSolverKind::Dro {
         if params.leaf_model != LeafModelKind::Constant {
             return Err(CoreError::InvalidConfig(
-                "leaf_solver='dro' requires leaf_model='constant' in v0.7.1".to_string(),
+                "leaf_solver='dro' requires leaf_model='constant' in v0.7.2".to_string(),
             ));
         }
         let Some(cfg) = params.dro_config else {

@@ -128,10 +128,10 @@ provided, they are merged.
   - Non-negative radius scaling the gradient-uncertainty penalty. `0.0`
     preserves standard-leaf predictions while recording DRO metadata.
 - `dro_metric: str = "wasserstein"`
-  - Accepted value for v0.7.1. It denotes the Wasserstein-inspired
+  - Accepted value for v0.7.2. It denotes the Wasserstein-inspired
     closed-form robust counterpart over leaf gradient uncertainty.
 
-The v0.7.1 DRO solver is intentionally conservative: it is not a full
+The v0.7.2 DRO solver is intentionally conservative: it is not a full
 Wasserstein optimizer over raw feature/target distributions and does not claim
 guaranteed live-market stability. It modifies split gain and final scalar leaf
 values consistently using the same robust effective gradient. Inference speed is
@@ -139,7 +139,7 @@ unchanged because leaf values are baked into the artifact.
 
 `leaf_solver="dro"` works on `GBMRegressor`, `GBMClassifier`, and `GBMRanker`,
 and composes with `training_mode="morph"`. It requires
-`leaf_model="constant"` in v0.7.1; `leaf_model="linear"` continues to use the PL
+`leaf_model="constant"` in v0.7.2; `leaf_model="linear"` continues to use the PL
 leaf solver.
 
 ## Factor-Neutral Boosting
@@ -248,7 +248,7 @@ the same target stream as a fresh `N + M`-round fit.
   - `"linear"`: each leaf stores a small linear model
     `f_s(x) = b_s + Σ α_j x_j` (up to 8 regressors per leaf, inherited from the
     split path's feature indices; the per-leaf cap is internal and not
-    user-tunable in v0.7.1). Optimal weights are solved in closed form:
+    user-tunable in v0.7.2). Optimal weights are solved in closed form:
     `α* = -(XᵀHX + λI)⁻¹ Xᵀg`, regularised by the same `lambda_l2` you pass to
     the estimator.
 
@@ -280,7 +280,7 @@ the same target stream as a fresh `N + M`-round fit.
     per-leaf row deviations against persisted global feature means). Strict
     additivity is relaxed for continuous-feature PL artifacts because SHAP's
     internal path walker still compares feature values against bin-index
-    thresholds; tightening this is queued for v0.7.2. See
+    thresholds; tightening is queued for v0.7.3. See
     [explanations.md](explanations.md) and
     [../limitations.md](../limitations.md) for details.
 

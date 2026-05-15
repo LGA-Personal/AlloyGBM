@@ -107,7 +107,7 @@ Multi-output ranking
 ``MultiLabelGBMRanker`` trains one independent :class:`GBMRanker` per
 label sharing ``group`` and optional ``factor_exposures``; see
 :doc:`estimator` for the full reference. Joint shared-tree multi-label
-boosting is queued for v0.7.2.
+boosting is queued for v0.7.3.
 
 Interaction constraints
 -----------------------

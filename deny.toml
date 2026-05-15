@@ -22,9 +22,9 @@ version = 2
 yanked = "deny"
 ignore = [
     # RUSTSEC-2025-0020: `PyString::from_object` buffer-overflow risk
-    # in pyo3 < 0.24.1.  AlloyGBM 0.7.1 pins pyo3 0.23.5; the upgrade
+    # in pyo3 < 0.24.1.  AlloyGBM 0.7.2 pins pyo3 0.23.5; the upgrade
     # to 0.24 has breaking API changes (Bound<> migration) and is
-    # tracked as a v0.7.2 task in docs/limitations.md / docs/roadmap/
+    # tracked as a v0.7.3 task in docs/limitations.md / docs/roadmap/
     # current.md.  We do not call `PyString::from_object` in the
     # bindings code path.
     "RUSTSEC-2025-0020",

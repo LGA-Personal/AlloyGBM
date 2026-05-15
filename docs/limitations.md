@@ -1,6 +1,6 @@
 # AlloyGBM Current Limitations
 
-Last updated for v0.7.1.
+Last updated for v0.7.2.
 
 ## Remaining Limitations
 
@@ -32,7 +32,7 @@ separately.  Joint shared-tree multi-label boosting — where a single
 ensemble updates all label predictions simultaneously via shared splits
 — would let correlated labels share split information across trees and
 typically reduces total model size for related tasks.  That is queued
-for v0.7.2 alongside the ``MulticlassSoftmaxObjective``-style K-tree-
+for v0.7.3 alongside the ``MulticlassSoftmaxObjective``-style K-tree-
 per-round engine plumbing for ranking objectives.
 
 ### 4. MorphBoost Warm-Start Restarts EMA Cold
@@ -91,19 +91,19 @@ California Housing with `n_estimators=200`.
 
 The arithmetic is correct; the tolerance is the issue.  Loosening it to
 a relative-plus-absolute bound (`atol + rtol * |predict(x)|`) is queued
-for v0.7.2.  Workaround: call `feature_importances()` on a
+for v0.7.3.  Workaround: call `feature_importances()` on a
 representative subsample (≤500 rows) until the fix lands.
 
 ### 7. PyO3 0.23 Pinned — Known Advisory
 
-v0.7.1 pins `pyo3 = "0.23.5"`. RUSTSEC-2025-0020 documents a
+v0.7.2 pins `pyo3 = "0.23.5"`. RUSTSEC-2025-0020 documents a
 buffer-overflow risk in `PyString::from_object` for `pyo3 < 0.24.1`.
 AlloyGBM does not call `PyString::from_object` in its bindings, so the
 advisory is not exploitable through the public Python API today.
 
 Upgrading to `pyo3 0.24+` (and the matching `numpy` crate version)
 requires migrating the bindings (`bindings/python/src/lib.rs`, ~5,300
-lines) to the `Bound<>`-first API. That work is queued for v0.7.2.
+lines) to the `Bound<>`-first API. That work is queued for v0.7.3.
 The CI security audit (`.github/workflows/security-audit.yml`) ignores
 this specific advisory via `deny.toml` until the migration lands.
 
@@ -139,7 +139,7 @@ The following were limitations in prior versions and have been addressed:
 - Single-label ranking only (partially resolved: v0.7.1 — `MultiLabelGBMRanker`
   exposes a unified `fit`/`predict` for K ranking labels per item, trained
   as K independent per-label `GBMRanker` instances sharing `group` and
-  `factor_exposures`.  Joint shared-tree training is a v0.7.2 follow-up;
+  `factor_exposures`.  Joint shared-tree training is a v0.7.3 follow-up;
   see Limitation 3)
 - Multiclass prediction per-row allocation (now: zero-copy dense slice prediction)
 - Single fixed split criterion (now: opt-in MorphBoost adaptive criterion via

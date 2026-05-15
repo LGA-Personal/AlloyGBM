@@ -88,5 +88,5 @@ scalar leaves this divergence is masked. For linear leaves the leaf value
 depends on `xⱼ`, so on continuous-feature artifacts the SHAP path and the
 predictor path can disagree slightly. The strict additivity check is
 relaxed for linear-leaf models; users get best-effort SHAP values.
-Tightening path-walk alignment is queued for v0.7.2. See
+Tightening path-walk alignment is queued for v0.7.3. See
 [../limitations.md](../limitations.md) for the full caveat.

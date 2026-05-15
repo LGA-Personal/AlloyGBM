@@ -41,7 +41,7 @@ maturin develop --manifest-path bindings/python/Cargo.toml --release
 
 AlloyGBM targets Python `3.11+` and uses a native Rust extension module.
 
-Wheel targets for `0.7.1`:
+Wheel targets for `0.7.2`:
 
 - macOS `arm64`
 - Linux `x86_64` (manylinux)
@@ -168,7 +168,7 @@ model.fit(X_train, y_train)
 ```
 
 `leaf_solver="dro"` works with `GBMRegressor`, `GBMClassifier`, and
-`GBMRanker`, and composes with `training_mode="morph"`. In v0.7.1 it requires
+`GBMRanker`, and composes with `training_mode="morph"`. In v0.7.2 it requires
 `leaf_model="constant"`; piecewise-linear leaves still use the standard PL
 solver. `dro_radius=0.0` preserves standard-leaf predictions while retaining
 DRO metadata in the artifact.
@@ -403,9 +403,10 @@ Benchmark tooling and methodology live in [benchmarks/README.md](benchmarks/READ
 
 - CPU-only runtime (GPU backend is architecturally planned but not implemented)
 - No dart/goss boosting modes
-- SHAP on `leaf_model="linear"` returns a best-effort interventional decomposition; strict additivity is relaxed for continuous-feature PL artifacts (path-walker alignment queued for v0.7.2)
-- `MultiLabelGBMRanker` trains K independent per-label rankers (joint shared-tree multi-label boosting queued for v0.7.2)
-- MorphBoost warm-start does not restore the EMA snapshot from the artifact (resumed training starts the EMA cold; queued for v0.7.2)
+- SHAP on `leaf_model="linear"` returns a best-effort interventional decomposition; strict additivity is relaxed for continuous-feature PL artifacts (path-walker alignment queued for v0.7.3)
+- `MultiLabelGBMRanker` trains K independent per-label rankers (joint shared-tree multi-label boosting queued for v0.7.3)
+- MorphBoost warm-start does not restore the EMA snapshot from the artifact (resumed training starts the EMA cold; queued for v0.7.3)
+- SHAP additivity tolerance is f32-tight (`1e-5` absolute); `feature_importances()` over large samples can exceed it by a few ulps. Workaround: subsample to ≤500 rows. Queued for v0.7.3.
 - `leaf_solver="dro"` is a robust scalar leaf update, not a full raw-distribution Wasserstein DRO guarantee
 
 See [docs/limitations.md](docs/limitations.md) for the full list.
@@ -413,9 +414,18 @@ See [docs/limitations.md](docs/limitations.md) for the full list.
 ## Documentation
 
 - Docs index: [docs/README.md](docs/README.md)
+- Hosted Sphinx docs: [alloygbm.readthedocs.io](https://alloygbm.readthedocs.io/en/latest/)
+- Runnable examples: [examples/](examples/) (8 end-to-end scripts)
 - Benchmark guide: [benchmarks/README.md](benchmarks/README.md)
 - Current roadmap: [docs/roadmap/current.md](docs/roadmap/current.md)
+- Current limitations: [docs/limitations.md](docs/limitations.md)
 - Archive: [docs/archive/README.md](docs/archive/README.md)
+
+## Contributing
+
+- [Contributing guide](CONTRIBUTING.md) (dev setup, coding standards, test commands)
+- [Security policy](SECURITY.md) (private vulnerability reporting)
+- [Release operating manual](docs/reference/release_checklist.md)
 
 ## License
 

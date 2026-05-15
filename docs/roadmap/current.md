@@ -4,7 +4,14 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
-The `0.7.1` release builds on the v0.7.0 factor-neutral boosting surface
+The `0.7.2` release is documentation, supply-chain, and repo-hygiene
+only — no user-facing Python API changes.  It aligns the docs with
+the v0.7.1 surface that actually shipped, hardens CI (full pytest
+suite gated on every PR, `cargo-audit` + `cargo-deny` weekly), adds an
+`examples/` library, and rewrites `docs/reference/release_checklist.md`
+as a top-to-bottom operating manual.
+
+The `0.7.1` release built on the v0.7.0 factor-neutral boosting surface
 with five additions: SHAP support for piecewise-linear leaves, per-round
 training diagnostics on every estimator, neutralized warm-start (with a
 matching-exposures contract), LightGBM-compatible feature interaction
@@ -19,6 +26,37 @@ artifacts. The `0.5.0` release introduced piecewise-linear (PL) tree leaves via
 `leaf_model="linear"` on all three estimators. The `0.4.0` release introduced
 the opt-in MorphBoost adaptive split criterion, per-iteration learning-rate
 schedules, and SIMD-accelerated histogram and EMA kernels.
+
+## What Shipped In 0.7.2
+
+Documentation, supply-chain, and repo-hygiene release.  No user-facing
+Python API surface changes.
+
+- **Doc accuracy.**  Multiple docs that still claimed warm-start was
+  rejected, SHAP required `leaf_model="constant"`, interaction
+  constraints did not exist, or rankers were single-label only — even
+  though v0.7.1 shipped all four — are now consistent with the
+  actual API.  Touches README, `docs/user/*.md`, the Sphinx mirror
+  under `docs/site/source/*.rst`, `docs/roadmap/current.md`,
+  `CLAUDE.md`, `AGENTS.md`, and `benchmarks/README.md`.
+- **Release operating manual.**
+  `docs/reference/release_checklist.md` is now the authoritative
+  inventory of version-pin files, content updates, audit `git grep`
+  queries, verification matrix, tag/publish commands, and
+  post-release bookkeeping.
+- **Runnable examples.**  New `examples/` directory with 8 end-to-end
+  scripts covering every public estimator and feature.
+- **CI now runs the full pytest suite.**  v0.7.1 built the wheel and
+  ran 7 smoke snippets but never invoked
+  `pytest bindings/python/tests/` — meaning the 455-test Python suite
+  was not enforced on merge.
+- **Cargo.lock tracked**, `maturin` pinned in `publish.yml`,
+  `cargo-audit` + `cargo-deny` weekly + on every Cargo-manifest PR,
+  coverage reporting via Codecov, `publish = false` on every workspace
+  crate.
+- **Repo metadata.**  `CONTRIBUTING.md`, `SECURITY.md`, GitHub issue /
+  PR / CODEOWNERS / Dependabot configs, `.editorconfig`,
+  `requirements-dev.txt`, README badges.
 
 ## What Shipped In 0.7.1
 
