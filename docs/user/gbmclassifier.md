@@ -50,6 +50,15 @@ All parameters from `GBMRegressor` are accepted, including:
   `depth_penalty_base`, `balance_penalty`, `lr_schedule`, `lr_warmup_frac`).
   `leaf_model="linear"` and `training_mode="morph"` can be combined.
   See [MorphBoost](morphboost.md) for the full reference.
+- `interaction_constraints=[[...]]` for LightGBM-compatible interaction
+  constraints across both level-wise and leaf-wise tree builders (see
+  [GBMRegressor — Constraints](gbmregressor.md#constraints)).
+- `warm_start=True` / `init_model` for incremental training. Neutralized
+  warm-start is supported when the caller resupplies the same
+  `factor_exposures` matrix used for the initial fit.
+- `diagnostics_per_round_` is populated after `fit()` with per-round gradient
+  statistics, sampling counts, and (when factor neutralization is active)
+  the `neutralization_effectiveness` score.
 
 The objective is always binary cross-entropy and is not configurable.
 

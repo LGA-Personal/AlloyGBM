@@ -85,6 +85,49 @@ Learning-to-rank
 Supported ranking objectives: ``rank:pairwise``, ``rank:ndcg``,
 ``rank:xendcg``, ``queryrmse``, ``yetirank``.
 
+Multi-output ranking
+--------------------
+
+.. code-block:: python
+
+   from alloygbm import MultiLabelGBMRanker
+   import numpy as np
+
+   y_train = np.column_stack([clicks_train, conversions_train])
+   model = MultiLabelGBMRanker(
+       ranking_objective=["rank:ndcg", "rank:pairwise"],
+       learning_rate=0.05,
+       n_estimators=300,
+       seed=7,
+   )
+   model.fit(X_train, y_train, group=query_ids_train)
+
+   scores = model.predict(X_test)   # shape (n_rows, n_labels)
+
+``MultiLabelGBMRanker`` trains one independent :class:`GBMRanker` per
+label sharing ``group`` and optional ``factor_exposures``; see
+:doc:`estimator` for the full reference. Joint shared-tree multi-label
+boosting is queued for v0.7.2.
+
+Interaction constraints
+-----------------------
+
+.. code-block:: python
+
+   from alloygbm import GBMRegressor
+
+   # Splits along any root-to-leaf path may only use features within ONE group.
+   # Features outside all groups are unrestricted (LightGBM semantics).
+   model = GBMRegressor(
+       n_estimators=500,
+       interaction_constraints=[[0, 1, 2], [3, 4]],
+       seed=7,
+   )
+   model.fit(X_train, y_train)
+
+Up to 64 groups per fit; enforced through both level-wise and leaf-wise
+tree builders. Available on every estimator.
+
 MorphBoost (optional adaptive mode)
 -----------------------------------
 

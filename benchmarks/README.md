@@ -61,9 +61,12 @@ python3 benchmarks/histogram_stress/prepare.py --rows 100000 --features 48
 
 ### Cross-library model comparison
 
-The runner registers eight model arms by default per task type:
+The runner registers the following model arms by default per task type:
 
 - `alloygbm` (auto training mode)
+- `alloygbm_dro` (`leaf_solver="dro"`)
+- `alloygbm_factor_neutral` (`neutralization="per_round_gradient"` with synthetic factor exposures unless real exposures are provided)
+- `alloygbm_factor_neutral_dro` (factor-neutral + DRO leaves)
 - `alloygbm_morph` (`training_mode="morph"`, constant LR)
 - `alloygbm_morph_cosine` (`training_mode="morph"`, `lr_schedule="warmup_cosine"`)
 - `alloygbm_linear` (`leaf_model="linear"`, auto training mode)

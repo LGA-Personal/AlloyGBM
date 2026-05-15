@@ -84,6 +84,49 @@ parameter accepts per-row group identifiers; data is sorted by group internally.
 Supported ranking objectives: `rank:pairwise`, `rank:ndcg`, `rank:xendcg`,
 `queryrmse`, `yetirank`.
 
+## Multi-Output Ranking
+
+```python
+from alloygbm import MultiLabelGBMRanker
+import numpy as np
+
+# y shaped (n_rows, n_labels), one column per label
+y_train = np.column_stack([clicks_train, conversions_train])
+
+model = MultiLabelGBMRanker(
+    ranking_objective=["rank:ndcg", "rank:pairwise"],
+    learning_rate=0.05,
+    n_estimators=300,
+    seed=7,
+)
+model.fit(X_train, y_train, group=query_ids_train)
+
+scores = model.predict(X_test)  # shape (n_rows, n_labels)
+```
+
+`MultiLabelGBMRanker` trains one independent `GBMRanker` per label sharing
+`group` / `factor_exposures` / kwargs. See
+[GBMRanker — Multi-Output Ranking](gbmranker.md#multi-output-ranking--multilabelgbmranker)
+for details.
+
+## Interaction Constraints
+
+```python
+from alloygbm import GBMRegressor
+
+# Splits along any root-to-leaf path may only use features within ONE group.
+# Features outside all groups are unrestricted (LightGBM semantics).
+model = GBMRegressor(
+    n_estimators=500,
+    interaction_constraints=[[0, 1, 2], [3, 4]],
+    seed=7,
+)
+model.fit(X_train, y_train)
+```
+
+Up to 64 groups per fit; enforced through both level-wise and leaf-wise
+tree builders. Available on every estimator.
+
 ## MorphBoost (Optional Adaptive Mode)
 
 Any of the three estimators supports an opt-in MorphBoost training mode
@@ -167,8 +210,10 @@ model.fit(X_train, y_train)
 ```
 
 `leaf_model="linear"` works on `GBMClassifier` and `GBMRanker` too, and
-composes with `training_mode="morph"`. SHAP currently requires
-`leaf_model="constant"`. Full reference:
+composes with `training_mode="morph"`. As of v0.7.1 SHAP also accepts
+`leaf_model="linear"` artifacts as a best-effort interventional
+decomposition; strict additivity is relaxed for continuous-feature PL
+artifacts (see [explanations.md](explanations.md)). Full reference:
 [GBMRegressor — Piecewise-Linear Leaves](gbmregressor.md#piecewise-linear-leaves).
 
 ## Validation And Early Stopping

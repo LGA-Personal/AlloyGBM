@@ -223,9 +223,9 @@ Compatibility:
      - supported
      - rejected
    * - warm start
-     - rejected in this release
-     - rejected in this release
-     - rejected in this release
+     - supported
+     - supported
+     - supported
 
 This is a training-time regularization tool. It does not guarantee
 prediction-time zero exposure unless predictions are neutralized against

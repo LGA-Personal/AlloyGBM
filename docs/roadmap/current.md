@@ -164,11 +164,15 @@ schedules, and SIMD-accelerated histogram and EMA kernels.
 
 ## Longer-Term Themes
 
-- Multi-label ranking.
-- Interaction constraints.
+- Joint shared-tree multi-label ranking (one ensemble updating all label
+  predictions simultaneously) — the v0.7.1 `MultiLabelGBMRanker` is a
+  K-independent-rankers wrapper; a shared-tree engine is a v0.7.2+ follow-up.
+- Path-walk alignment between SHAP and the predictor for piecewise-linear
+  leaves (so strict additivity holds on continuous-feature artifacts).
+- MorphBoost EMA snapshot persisted in the warm-start artifact so resumed
+  training does not restart the EMA cold.
 - Dart / GOSS boosting modes.
 - GPU backend.
-- Better operational diagnostics and model introspection.
 
 ## Planning Style
 

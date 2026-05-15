@@ -244,13 +244,15 @@ Compatibility:
 | `training_mode="morph"` | supported | supported | supported |
 | `leaf_solver="dro"` | supported | supported | supported |
 | `leaf_model="linear"` | supported | supported | rejected |
-| warm start | rejected in this release | rejected in this release | rejected in this release |
+| warm start | supported | supported | supported |
 
-Exposure matrices are not persisted in the estimator or artifact. For
-this release, neutralized warm-start and `init_model` continuation are rejected
-because artifacts do not yet persist neutralization metadata needed to prove
-that the previous model and current estimator have matching neutralization
-contracts.
+Exposure matrices are not persisted in the estimator or artifact. As of
+v0.7.1, neutralized warm-start and `init_model` continuation are supported
+across all three modes provided the caller supplies the same
+`factor_exposures` matrix used for the initial fit; `neutralization`,
+`factor_neutralization_lambda`, and (for `split_penalty`) `factor_penalty`
+must match the persisted contract — mismatches raise a clear "does not
+match" error.
 
 ### Piecewise-Linear Leaves
 
@@ -275,7 +277,10 @@ model.fit(X_train, y_train)
 ```
 
 `leaf_model="linear"` works with `GBMClassifier` and `GBMRanker`, and composes
-with `training_mode="morph"`. SHAP currently requires `leaf_model="constant"`.
+with `training_mode="morph"`. As of v0.7.1, SHAP works on `leaf_model="linear"`
+artifacts as a best-effort interventional decomposition (exact additivity is
+relaxed for continuous-feature PL artifacts; see
+[docs/limitations.md](docs/limitations.md)).
 
 ### Time-Aware Validation
 
@@ -324,6 +329,7 @@ artifact_bytes = model.artifact_bytes
 - **`GBMRegressor`** -- squared-error regression with dataset-aware `training_policy`
 - **`GBMClassifier`** -- binary classification with log-loss objective, `predict_proba`, sklearn `ClassifierMixin`
 - **`GBMRanker`** -- learning-to-rank with 5 objectives: `rank:pairwise`, `rank:ndcg`, `rank:xendcg`, `queryrmse`, `yetirank`
+- **`MultiLabelGBMRanker`** -- multi-output ranking: `y` shaped `(n_rows, n_labels)`, `predict` returns the same shape, per-label `ranking_objective` lists supported
 - All estimators are sklearn-compatible (`get_params`, `set_params`, `score`, pipeline integration)
 
 ### Training Features
@@ -342,11 +348,15 @@ artifact_bytes = model.artifact_bytes
 - Per-iteration learning-rate schedules: `lr_schedule="constant"` (default) or `"warmup_cosine"`
 - DRO-style robust scalar leaves via `leaf_solver="dro"` (closed-form gradient-uncertainty penalty)
 - Piecewise-linear leaves via `leaf_model="linear"` (closed-form ridge solve, faster convergence on linear-trend data)
+- Factor-neutral boosting via `neutralization` + fit-time `factor_exposures` (`pre_target`, `per_round_gradient`, `split_penalty`)
+- LightGBM-compatible feature interaction constraints via `interaction_constraints=[[...]]` (up to 64 groups, level-wise and leaf-wise enforcement)
+- Neutralized warm-start / `init_model` continuation with matching-exposures contract
+- Per-round training diagnostics via `diagnostics_per_round_` (gradient stats, sampling counts, `neutralization_effectiveness`)
 
 ### Inference and Explanations
 
 - Zero-copy numpy prediction from native artifacts
-- TreeSHAP explanations via `shap_values(...)` (polynomial-time, no feature limit)
+- TreeSHAP explanations via `shap_values(...)` (polynomial-time, no feature limit, also supports `leaf_model="linear"` as a best-effort interventional decomposition)
 - Global feature importance via `feature_importances(...)`
 - Artifact-backed prediction via `predict_from_artifact(...)`
 
@@ -385,10 +395,13 @@ Benchmark tooling and methodology live in [benchmarks/README.md](benchmarks/READ
 ## Current Limitations
 
 - CPU-only runtime (GPU backend is architecturally planned but not implemented)
-- No interaction constraints
 - No dart/goss boosting modes
-- SHAP not yet supported with `leaf_model="linear"` (use `"constant"` for now)
+- SHAP on `leaf_model="linear"` returns a best-effort interventional decomposition; strict additivity is relaxed for continuous-feature PL artifacts (path-walker alignment queued for v0.7.2)
+- `MultiLabelGBMRanker` trains K independent per-label rankers (joint shared-tree multi-label boosting queued for v0.7.2)
+- MorphBoost warm-start does not restore the EMA snapshot from the artifact (resumed training starts the EMA cold; queued for v0.7.2)
 - `leaf_solver="dro"` is a robust scalar leaf update, not a full raw-distribution Wasserstein DRO guarantee
+
+See [docs/limitations.md](docs/limitations.md) for the full list.
 
 ## Documentation
 

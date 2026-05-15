@@ -68,7 +68,25 @@ SHAP explanations work with all three estimators:
 
 ## Leaf Model Compatibility
 
-SHAP currently supports `leaf_model="constant"` only. Calling `shap_values(...)`
-or `feature_importances(...)` on a model trained with `leaf_model="linear"`
-raises an error. Train with the default `leaf_model="constant"` if you need
-SHAP explanations.
+`leaf_model="constant"` artifacts produce exact SHAP attributions satisfying
+`Σ shap_values + expected_value == predict(x)`.
+
+As of v0.7.1, `shap_values(...)` and `feature_importances(...)` also accept
+`leaf_model="linear"` artifacts and return an *interventional* decomposition:
+the path-based TreeSHAP / brute-force machinery attributes each leaf's
+"constant part" (`intercept + Σ wⱼ · μⱼ_global`), then per-leaf row
+deviations `wⱼ · (xⱼ − μⱼ_global)` are credited directly to the regressor
+features. Global per-feature means `μⱼ_global` are captured at fit time and
+persisted in a new `FeatureBaseline` artifact section, so SHAP is
+self-contained — the original training data is not required at explain time.
+
+Exact additivity holds when SHAP's internal path walker reaches the same leaf
+as the predictor. Today SHAP compares raw feature values against stump
+`threshold_bin` indices cast to `f32`, while the predictor converts bin
+indices to float thresholds at load time using per-feature min/max. For
+scalar leaves this divergence is masked. For linear leaves the leaf value
+depends on `xⱼ`, so on continuous-feature artifacts the SHAP path and the
+predictor path can disagree slightly. The strict additivity check is
+relaxed for linear-leaf models; users get best-effort SHAP values.
+Tightening path-walk alignment is queued for v0.7.2. See
+[../limitations.md](../limitations.md) for the full caveat.

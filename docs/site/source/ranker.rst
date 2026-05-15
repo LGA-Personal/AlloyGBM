@@ -102,5 +102,7 @@ Current scope
 -------------
 
 - 5 ranking objectives implemented natively in Rust
-- Single-label relevance only
+- Single-label per ``GBMRanker``. For multi-output ranking, see
+  :class:`~alloygbm.MultiLabelGBMRanker` (also covered in :doc:`estimator`).
+  Joint shared-tree multi-label boosting is queued for v0.7.2.
 - Group identifiers must be unsigned integers

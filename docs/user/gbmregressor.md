@@ -67,6 +67,12 @@ call `fit(..., eval_set=(X_valid, y_valid))`.
 - `feature_weights: list[float] | dict[int, float] | None = None`
   - Per-feature importance weights that influence split selection. Higher
     weights make a feature more likely to be chosen as a split candidate.
+- `interaction_constraints: list[list[int]] | None = None`
+  - LightGBM-compatible interaction constraints. Each inner list is a group
+    of feature indices; any root-to-leaf path is restricted to splits on
+    features from a single still-active group. Up to 64 groups per fit;
+    enforced through both the level-wise and leaf-wise tree builders.
+    Features that appear in no group are allowed everywhere.
 
 ## Reproducibility
 
@@ -217,16 +223,22 @@ Compatibility:
 | `training_mode="morph"` | supported | supported | supported |
 | `leaf_solver="dro"` | supported | supported | supported |
 | `leaf_model="linear"` | supported | supported | rejected |
-| warm start | rejected in this release | rejected in this release | rejected in this release |
+| warm start | supported | supported | supported |
 
 This is a training-time regularization tool. It does not guarantee
 prediction-time zero exposure unless predictions are neutralized against
 evaluation-time factors outside the model.
 
-Exposure matrices and neutralization metadata are not persisted in artifacts
-yet. For this release, neutralized warm-start and `init_model` continuation are
-rejected because the previous model and current estimator cannot prove matching
-neutralization contracts.
+Exposure matrices are not persisted in the estimator or artifact. As of
+v0.7.1, neutralized warm-start and `init_model` continuation are supported
+across all three modes: the caller must supply the same `factor_exposures`
+matrix used for the initial fit, and `neutralization`,
+`factor_neutralization_lambda`, and (for `split_penalty`) `factor_penalty`
+must match the persisted contract. Mismatches raise a clear "does not
+match" error. `pre_target` neutralization is idempotent under repeated
+residualization against the same exposures, so warm-start continuation
+residualizes the original targets again on the resumed fit and trains on
+the same target stream as a fresh `N + M`-round fit.
 
 ## Piecewise-Linear Leaves
 
@@ -262,9 +274,15 @@ neutralization contracts.
     (`max_cat_threshold > 0`) fall back to constant leaves for that split node;
     descendant leaves below such a split use linear leaves on all remaining
     numeric regressors.
-  - SHAP (`shap_values`, `feature_importances`) currently raises an error for
-    `leaf_model="linear"` artifacts. Train with `leaf_model="constant"` if you
-    need SHAP explanations.
+  - SHAP (`shap_values`, `feature_importances`) supports
+    `leaf_model="linear"` as of v0.7.1, returning a best-effort
+    interventional decomposition (path-attributed leaf "constant part" +
+    per-leaf row deviations against persisted global feature means). Strict
+    additivity is relaxed for continuous-feature PL artifacts because SHAP's
+    internal path walker still compares feature values against bin-index
+    thresholds; tightening this is queued for v0.7.2. See
+    [explanations.md](explanations.md) and
+    [../limitations.md](../limitations.md) for details.
 
 ## MorphBoost (Adaptive Split Criterion)
 
@@ -353,5 +371,12 @@ After `fit(...)`, `GBMRegressor` may expose:
 - `feature_names_`
   - Feature names captured from the training data (when available), or
     auto-generated as `f0`, `f1`, etc.
+- `diagnostics_per_round_`
+  - List of per-round dicts containing `gradient_l2_norm`,
+    `gradient_variance`, `hessian_l2_norm`, sampling counts
+    (`n_active_rows`, `n_active_features`), and (when factor neutralization
+    is active) `neutralization_effectiveness` in `[0, 1]`.
+- `stop_reason_` / `rounds_completed_`
+  - Engine's early-stop reason and actual committed round count.
 
 See [Quickstart](quickstart.md) for an end-to-end example.

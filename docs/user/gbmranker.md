@@ -62,6 +62,12 @@ regularization, etc.). This includes:
   `depth_penalty_base`, `balance_penalty`, `lr_schedule`, `lr_warmup_frac`).
   `leaf_model="linear"` and `training_mode="morph"` can be combined.
   See [MorphBoost](morphboost.md) for the full reference.
+- `interaction_constraints=[[...]]` for LightGBM-compatible interaction
+  constraints across both level-wise and leaf-wise tree builders (see
+  [GBMRegressor — Constraints](gbmregressor.md#constraints)).
+- `warm_start=True` / `init_model` for incremental training. Neutralized
+  warm-start is supported when the caller resupplies the same
+  `factor_exposures` matrix used for the initial fit.
 
 ```python
 # MorphBoost on ranking
@@ -149,5 +155,35 @@ group = [0, 0, 0, 1, 1, 2, 2, 2, 2]
 ## Current Scope
 
 - 5 ranking objectives implemented natively in Rust
-- Single-label relevance only (no multi-label)
+- Single-label per `GBMRanker`. For multi-output ranking
+  (`y` shaped `(n_rows, n_labels)`, `predict` returns the same shape) use
+  `MultiLabelGBMRanker`, which trains one independent `GBMRanker` per label
+  sharing `group` / `factor_exposures` / kwargs and supports per-label
+  `ranking_objective` lists. Joint shared-tree multi-label boosting is
+  queued for v0.7.2 — see [../limitations.md](../limitations.md).
 - Group identifiers must be unsigned integers
+
+## Multi-Output Ranking — `MultiLabelGBMRanker`
+
+```python
+from alloygbm import MultiLabelGBMRanker, ndcg
+import numpy as np
+
+# y shaped (n_rows, n_labels), one column per label
+y_train = np.column_stack([clicks_train, conversions_train])
+
+model = MultiLabelGBMRanker(
+    ranking_objective=["rank:ndcg", "rank:pairwise"],
+    learning_rate=0.05,
+    n_estimators=300,
+    seed=7,
+)
+model.fit(X_train, y_train, group=query_ids_train)
+
+scores = model.predict(X_test)  # shape (n_rows, n_labels)
+```
+
+`ranking_objective` may be a single string (broadcast to every label) or a
+list with one objective per label. `save_model` / `load_model` round-trip
+the wrapper, and `eval_set` y-columns are sliced per label so early
+stopping and custom eval metrics work end-to-end.

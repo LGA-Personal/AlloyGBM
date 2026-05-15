@@ -8,26 +8,29 @@ AlloyGBM is a Rust-first Gradient Boosted Decision Tree (GBDT) library with Pyth
 
 ```
 AlloyGBM/
-  Cargo.toml              # Workspace root (7 crates, edition 2024, Rust 1.92.0)
+  Cargo.toml              # Workspace root (6 crates, edition 2024, Rust 1.92.0)
   crates/
-    core/src/lib.rs        # Data structures: TrainParams, BinnedMatrix, ModelMetadata, artifact serde, NaN handling
-    engine/src/lib.rs      # Training loop, ObjectiveOps trait (8 objectives), Trainer, IterationControls
+    core/src/lib.rs        # Data structures: TrainParams, BinnedMatrix, ModelMetadata, artifact serde, NaN handling, FeatureBaseline section
+    engine/src/lib.rs      # Training loop, ObjectiveOps trait (8 objectives), Trainer, IterationControls, IterationDiagnostics, interaction constraints, WarmStartState
     backend_cpu/src/lib.rs # Histogram kernels, split finding, NaN-aware partitioning (Rayon parallelism)
     predictor/src/lib.rs   # Prediction from trained artifacts (post-transforms: identity, sigmoid)
-    shap/src/lib.rs        # TreeSHAP (polynomial-time) + legacy brute-force Shapley values
+    shap/src/lib.rs        # TreeSHAP (polynomial-time) + legacy brute-force Shapley; PL-leaf interventional decomposition
     categorical/src/lib.rs # Target encoding, frequency encoding (multi-column support)
   bindings/python/
     src/lib.rs             # PyO3 bridge: training pyfunctions for all objectives, NativePredictorHandle
     alloygbm/
-      __init__.py          # Public API: GBMRegressor, GBMClassifier, GBMRanker, metrics, validation
-      regressor.py         # GBMRegressor (sklearn-compatible, ~3400 lines)
-      classifier.py        # GBMClassifier (binary cross-entropy, predict_proba, ClassifierMixin)
-      ranker.py            # GBMRanker (5 ranking objectives, group-sorted training)
-      evaluation.py        # Metrics: rmse, mae, r2_score, accuracy, log_loss, ndcg, etc.
-      validation.py        # Purged time-series and panel cross-validation splits
+      __init__.py             # Public API: GBMRegressor, GBMClassifier, GBMRanker, MultiLabelGBMRanker, metrics, validation
+      regressor.py            # GBMRegressor (sklearn-compatible, ~3400 lines)
+      classifier.py           # GBMClassifier (binary cross-entropy, predict_proba, ClassifierMixin)
+      ranker.py               # GBMRanker (5 ranking objectives, group-sorted training)
+      multi_label_ranker.py   # MultiLabelGBMRanker (K independent per-label GBMRankers)
+      evaluation.py           # Metrics: rmse, mae, r2_score, accuracy, log_loss, ndcg, etc.
+      validation.py           # Purged time-series and panel cross-validation splits
   docs/
-    limitations.md         # Current limitation analysis (v0.4.0)
-    plans/                 # Implementation plans (historical, archived copy in docs/archive/v0.1_plans/)
+    limitations.md         # Current limitation analysis (v0.7.1, with v0.7.2 follow-ups)
+    roadmap/current.md     # Active roadmap and per-release history
+    user/                  # User-facing Markdown docs (mirrored by docs/site/source/*.rst)
+    site/                  # Sphinx site (Read the Docs)
   benchmarks/              # Cross-library comparison (regression, classification, ranking)
 ```
 
@@ -47,6 +50,7 @@ maturin develop --release      # Build and install Python extension
 .venv/bin/python -c "from alloygbm import GBMRegressor; m = GBMRegressor(n_estimators=3); m.fit([[1],[2],[3]], [1,2,3]); print(m.predict([[2]]))"
 .venv/bin/python -c "from alloygbm import GBMClassifier; m = GBMClassifier(n_estimators=3); m.fit([[1],[2],[3],[4]], [0,0,1,1]); print(m.predict([[2]]))"
 .venv/bin/python -c "from alloygbm import GBMRanker; m = GBMRanker(n_estimators=3); m.fit([[1],[2],[3],[4]], [0,1,0,1], group=[0,0,1,1]); print(m.predict([[2]]))"
+.venv/bin/python -c "from alloygbm import MultiLabelGBMRanker; import numpy as np; m = MultiLabelGBMRanker(n_estimators=3); m.fit([[1],[2],[3],[4]], np.array([[0,1],[1,0],[0,1],[1,0]]), group=[0,0,1,1]); print(m.predict([[2]]))"
 ```
 
 ## Critical Conventions
@@ -56,7 +60,7 @@ maturin develop --release      # Build and install Python extension
 - **Newton-Raphson leaf values**: `leaf = -lr * grad_sum / (hess_sum + lambda + eps)` -- general-purpose for any objective
 - **Hand-rolled JSON serde** for `ModelMetadata` in `core/src/lib.rs` -- positional parser, very brittle. Adding fields requires careful ordering.
 - **`BinnedMatrix`** uses adaptive `Vec<u8>` or `Vec<u16>` -- up to 65,535 bins, column-major duplicate for cache-friendly histograms
-- **Artifact format**: Binary with magic bytes `AGBM`, versioned sections (Trees, PredictorLayout, CategoricalState, NativeCategoricalSplits), JSON metadata header. Includes objective type for post-transform dispatch.
+- **Artifact format**: Binary with magic bytes `AGBM`, versioned sections (Trees, PredictorLayout, CategoricalState, NativeCategoricalSplits, LinearLeafCoefficients, FeatureBaseline), JSON metadata header. Includes objective type for post-transform dispatch.
 
 ## Key Architectural Patterns
 
