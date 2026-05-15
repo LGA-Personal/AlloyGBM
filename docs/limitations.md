@@ -78,6 +78,35 @@ users get best-effort SHAP values plus an updated docstring describing the
 semantics. Tightening path-walk alignment (so SHAP also uses float
 thresholds) is queued for a follow-up release.
 
+### 6. SHAP Additivity Tolerance Is f32-Tight
+
+`shap_values()` and `feature_importances()` enforce
+`|predict(x) - (sum(shap) + expected_value)| <= 1e-5` per row.  That
+tolerance is correct for individual rows on small ensembles, but
+accumulated f32 round-off across large evaluation samples
+(`feature_importances()` aggregates per-row attributions across the
+entire input) can exceed it by a few ulps for individual rows even on
+healthy `leaf_model="constant"` artifacts — observed at ~1000 rows on
+California Housing with `n_estimators=200`.
+
+The arithmetic is correct; the tolerance is the issue.  Loosening it to
+a relative-plus-absolute bound (`atol + rtol * |predict(x)|`) is queued
+for v0.7.2.  Workaround: call `feature_importances()` on a
+representative subsample (≤500 rows) until the fix lands.
+
+### 7. PyO3 0.23 Pinned — Known Advisory
+
+v0.7.1 pins `pyo3 = "0.23.5"`. RUSTSEC-2025-0020 documents a
+buffer-overflow risk in `PyString::from_object` for `pyo3 < 0.24.1`.
+AlloyGBM does not call `PyString::from_object` in its bindings, so the
+advisory is not exploitable through the public Python API today.
+
+Upgrading to `pyo3 0.24+` (and the matching `numpy` crate version)
+requires migrating the bindings (`bindings/python/src/lib.rs`, ~5,300
+lines) to the `Bound<>`-first API. That work is queued for v0.7.2.
+The CI security audit (`.github/workflows/security-audit.yml`) ignores
+this specific advisory via `deny.toml` until the migration lands.
+
 ## Resolved (Previously Limitations)
 
 The following were limitations in prior versions and have been addressed:

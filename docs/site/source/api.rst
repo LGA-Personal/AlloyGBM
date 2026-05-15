@@ -29,6 +29,11 @@ Estimators
    :undoc-members:
    :show-inheritance:
 
+.. automodule:: alloygbm.multi_label_ranker
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 Validation utilities
 --------------------
 

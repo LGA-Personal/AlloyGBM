@@ -1,0 +1,90 @@
+name: Coverage
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coverage-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  rust-coverage:
+    name: Rust coverage (cargo-llvm-cov)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.92.0
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate coverage (Rust workspace)
+        run: |
+          cargo llvm-cov --workspace --exclude alloygbm-python \
+            --lcov --output-path lcov-rust.info
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov-rust.info
+          flags: rust
+          # Codecov tolerates missing tokens on public repos; set
+          # CODECOV_TOKEN as a repo secret if uploads start being
+          # rate-limited.
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+  python-coverage:
+    name: Python coverage (pytest-cov)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.92.0
+
+      - name: Install build + test tooling
+        run: |
+          python -m pip install --upgrade pip "maturin>=1.7,<2.0"
+          python -m pip install pytest pytest-subtests pytest-cov coverage \
+            numpy scikit-learn pandas
+
+      - name: Build extension in-place
+        run: maturin develop --release --manifest-path bindings/python/Cargo.toml
+
+      - name: Run pytest with coverage
+        run: |
+          python -m pytest bindings/python/tests/ -q \
+            --cov=bindings/python/alloygbm \
+            --cov-report=xml:coverage-python.xml \
+            --cov-report=term-missing
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage-python.xml
+          flags: python
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false

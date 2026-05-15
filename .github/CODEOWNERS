@@ -1,0 +1,33 @@
+# CODEOWNERS — automatic review requests on PRs.
+# Syntax: pattern  @owner-or-team
+# Last-match-wins.
+#
+# This is the explicit owner map.  Anything not listed defaults to the
+# repository owner.
+
+# Repository-wide fallback.
+* @LGA-Personal
+
+# Rust workspace
+/crates/                      @LGA-Personal
+/bindings/python/src/         @LGA-Personal
+
+# Python bindings
+/bindings/python/alloygbm/    @LGA-Personal
+/bindings/python/tests/       @LGA-Personal
+
+# Build / release / supply chain — extra scrutiny.
+/.github/workflows/           @LGA-Personal
+/.github/dependabot.yml       @LGA-Personal
+/deny.toml                    @LGA-Personal
+/Cargo.toml                   @LGA-Personal
+/Cargo.lock                   @LGA-Personal
+/pyproject.toml               @LGA-Personal
+/rust-toolchain.toml          @LGA-Personal
+
+# Documentation
+/docs/                        @LGA-Personal
+/README.md                    @LGA-Personal
+/CHANGELOG.md                 @LGA-Personal
+/CONTRIBUTING.md              @LGA-Personal
+/SECURITY.md                  @LGA-Personal
