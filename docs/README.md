@@ -49,3 +49,8 @@ If you are working on the hosted documentation site itself, start here:
 1. `.readthedocs.yaml`
 2. `docs/site/source/index.rst`
 3. `docs/site/source/conf.py`
+
+If you are cutting a release, follow:
+
+1. `docs/reference/release_checklist.md` (top-to-bottom — version bumps,
+   doc updates, verification, tag/publish, post-release bookkeeping)
