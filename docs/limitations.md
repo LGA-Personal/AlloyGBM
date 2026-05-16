@@ -1,6 +1,6 @@
 # AlloyGBM Current Limitations
 
-Last updated for v0.7.2.
+Last updated for v0.7.3.
 
 ## Remaining Limitations
 
@@ -31,81 +31,39 @@ Numerically the wrapper is equivalent to training each label
 separately.  Joint shared-tree multi-label boosting — where a single
 ensemble updates all label predictions simultaneously via shared splits
 — would let correlated labels share split information across trees and
-typically reduces total model size for related tasks.  That is queued
-for v0.7.3 alongside the ``MulticlassSoftmaxObjective``-style K-tree-
-per-round engine plumbing for ranking objectives.
+typically reduces total model size for related tasks.  That is the
+remaining v0.7.x follow-up, alongside the
+``MulticlassSoftmaxObjective``-style K-tree-per-round engine plumbing
+for ranking objectives.
 
-### 4. MorphBoost Warm-Start Restarts EMA Cold
+### 4. SHAP for Piecewise-Linear Leaves — Best-Effort Decomposition (Narrowed)
 
-MorphBoost's adaptive split criterion tracks a per-class exponential moving
-average over gradient statistics that shapes the gain function across
-rounds. v0.7.1 supports warm-starting MorphBoost-trained models (training
-continues without error and the predictor stitches old and new trees
-correctly), but the EMA state is **not** restored from the saved
-artifact — resumed training starts the EMA fresh. This means the
-"morphed" gain shaping in the resumed rounds doesn't see the gradient
-history from the original fit, and a resumed `N + M`-round model is not
-numerically equivalent to a fresh `N + M`-round fit when
-`training_mode="morph"` is active. For other modes (constant leaves,
-linear leaves, DRO leaves, factor neutralization) warm-start equivalence
-holds.
-
-Persisting the EMA snapshot inside the artifact is queued for a follow-up
-release.
-
-### 5. SHAP for Piecewise-Linear Leaves — Best-Effort Decomposition
-
-As of v0.7.1, `shap_values()` accepts `leaf_model="linear"` artifacts and
-returns an *interventional* decomposition: the path-based TreeSHAP / brute
-force machinery attributes each leaf's "constant part"
+`shap_values()` accepts `leaf_model="linear"` artifacts and returns an
+*interventional* decomposition: the path-based TreeSHAP / brute force
+machinery attributes each leaf's "constant part"
 `intercept + Σ wj · μj_global`, then per-leaf row deviations
-`wj · (xj − μj_global)` are credited directly to the regressor features.
-Global per-feature means `μj_global` are captured at fit time and persisted
-in a new `FeatureBaseline` artifact section, so SHAP is self-contained — the
-original training data is not required at explain time.
+`wj · (xj − μj_global)` are credited directly to the regressor
+features.  Global per-feature means `μj_global` are captured at fit
+time and persisted in the `FeatureBaseline` artifact section.
 
-`Σ shap_values + expected_value == predict(x)` holds exactly when SHAP's
-internal path walker reaches the same leaf as the predictor. Today SHAP
-compares raw feature values against stump `threshold_bin` indices cast to
-`f32`, while the predictor crate converts those bin indices to float
-thresholds at load time using per-feature min/max. For scalar leaves this
-divergence is masked (the wrong-but-consistent path yields the same scalar
-sum from both sides); for linear leaves the leaf value depends on `xj`, so
-on continuous-feature artifacts the SHAP path and the predictor path can
-disagree and the additive reconstruction drifts. To avoid a hard failure
-mid-explain, the strict additivity check is relaxed for linear-leaf models;
-users get best-effort SHAP values plus an updated docstring describing the
-semantics. Tightening path-walk alignment (so SHAP also uses float
-thresholds) is queued for a follow-up release.
+v0.7.3 fixed the SHAP path-walker so it uses the same float thresholds
+the predictor uses (see `shap::BinningContext` + the new
+`shap_explain_rows_with_binning` PyO3 entry points), eliminating the
+path-walk vs. predict-path divergence for *scalar*-leaf artifacts on
+continuous features.
 
-### 6. SHAP Additivity Tolerance Is f32-Tight
+What remains:  linear-leaf *weights* and the `feature_baseline` are
+still computed in bin space at fit time, so the per-leaf row deviation
+`wj · (xj − μj)` SHAP attributes is computed against bin-quantized
+quantities while the predictor evaluates the leaf against raw feature
+values.  Strict additivity (`Σ shap + expected_value == predict(x)`)
+therefore still does not hold for `leaf_model="linear"` on continuous
+features, and the linear-leaf return-Ok exemption in
+`verify_additivity` remains in place when `binning=None`.
 
-`shap_values()` and `feature_importances()` enforce
-`|predict(x) - (sum(shap) + expected_value)| <= 1e-5` per row.  That
-tolerance is correct for individual rows on small ensembles, but
-accumulated f32 round-off across large evaluation samples
-(`feature_importances()` aggregates per-row attributions across the
-entire input) can exceed it by a few ulps for individual rows even on
-healthy `leaf_model="constant"` artifacts — observed at ~1000 rows on
-California Housing with `n_estimators=200`.
-
-The arithmetic is correct; the tolerance is the issue.  Loosening it to
-a relative-plus-absolute bound (`atol + rtol * |predict(x)|`) is queued
-for v0.7.3.  Workaround: call `feature_importances()` on a
-representative subsample (≤500 rows) until the fix lands.
-
-### 7. PyO3 0.23 Pinned — Known Advisory
-
-v0.7.2 pins `pyo3 = "0.23.5"`. RUSTSEC-2025-0020 documents a
-buffer-overflow risk in `PyString::from_object` for `pyo3 < 0.24.1`.
-AlloyGBM does not call `PyString::from_object` in its bindings, so the
-advisory is not exploitable through the public Python API today.
-
-Upgrading to `pyo3 0.24+` (and the matching `numpy` crate version)
-requires migrating the bindings (`bindings/python/src/lib.rs`, ~5,300
-lines) to the `Bound<>`-first API. That work is queued for v0.7.3.
-The CI security audit (`.github/workflows/security-audit.yml`) ignores
-this specific advisory via `deny.toml` until the migration lands.
+Fixing this requires migrating PL weight training to raw feature
+space, which is a larger leaf-solver change.  Queued for a follow-up
+release.
 
 ## Resolved (Previously Limitations)
 
@@ -131,16 +89,30 @@ The following were limitations in prior versions and have been addressed:
 - Multiclass warm-start unsupported (now: `warm_start=True` works for multiclass with round-offset continuity)
 - Neutralized warm-start unsupported (now: v0.7.1 — `init_model` / `warm_start=True`
   with `neutralization=*` is supported as long as the caller supplies the
-  same `factor_exposures` matrix used for the initial fit; see Limitation 4
-  for the MorphBoost EMA caveat that still applies)
+  same `factor_exposures` matrix used for the initial fit)
 - No interaction constraints (now: v0.7.1 — `interaction_constraints=[[...]]`
   on every estimator, LightGBM-compatible semantics, up to 64 groups per
   fit; enforced through both the level-wise and leaf-wise tree builders)
 - Single-label ranking only (partially resolved: v0.7.1 — `MultiLabelGBMRanker`
   exposes a unified `fit`/`predict` for K ranking labels per item, trained
   as K independent per-label `GBMRanker` instances sharing `group` and
-  `factor_exposures`.  Joint shared-tree training is a v0.7.3 follow-up;
-  see Limitation 3)
+  `factor_exposures`.  Joint shared-tree training is a follow-up; see
+  Limitation 3)
+- MorphBoost warm-start restarts EMA cold (now: v0.7.3 — MorphMetadata
+  artifact section bumped to v2 with appended `Vec<GradientEmaStats>`;
+  `WarmStartState` / `MultiClassWarmStartState` carry the snapshot and
+  the engine seeds `MorphState.ema_stats` from it on resumed fits)
+- SHAP additivity tolerance was f32-tight at `1e-5` absolute (now:
+  v0.7.3 — `atol + rtol * |predicted|`, numpy `allclose` semantics)
+- SHAP path-walker used bin-index thresholds instead of float
+  thresholds (now: v0.7.3 — `shap::BinningContext` + new PyO3 entry
+  points pass per-feature mins / maxs / cuts so the walker compares
+  against the same float thresholds the predictor uses; resolved for
+  scalar-leaf artifacts on continuous features, see Limitation 4 for
+  the remaining PL-leaf piece)
+- RUSTSEC-2025-0020 in `pyo3 < 0.24.1` (now: v0.7.3 — pyo3 0.23.5 →
+  0.24, `deny.toml` and the cargo-audit CI step no longer ignore the
+  advisory)
 - Multiclass prediction per-row allocation (now: zero-copy dense slice prediction)
 - Single fixed split criterion (now: opt-in MorphBoost adaptive criterion via
   `training_mode="morph"`, including EMA-driven gain shaping, depth/iteration

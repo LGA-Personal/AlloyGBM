@@ -3,8 +3,8 @@
 The wrapper trains one :class:`GBMRanker` per label using a shared ``group``
 and (optional) ``factor_exposures``, then stacks predictions to match the
 ``(n_rows, n_labels)`` shape.  Joint shared-tree multi-label training is a
-v0.7.2 follow-up; this test suite asserts the wrapper API contract and
-documents the per-label independence semantics.
+remaining v0.7.x follow-up; this test suite asserts the wrapper API
+contract and documents the per-label independence semantics.
 """
 
 from __future__ import annotations

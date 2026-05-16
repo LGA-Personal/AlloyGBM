@@ -12,8 +12,8 @@ leaves, interaction constraints, custom eval metrics).  The labels share
 ``group`` and ``factor_exposures`` so the per-label fits remain comparable.
 
 Numerically this is equivalent to training each label separately; joint
-shared-tree multi-label training is queued for v0.7.2.  Users get the
-ergonomic API today and a clean upgrade path tomorrow.
+shared-tree multi-label training is a remaining v0.7.x follow-up.
+Users get the ergonomic API today and a clean upgrade path tomorrow.
 """
 
 from __future__ import annotations

@@ -1,5 +1,69 @@
 # Changelog
 
+## 0.7.3
+
+Bug-fix release.  Closes the four limitations queued in v0.7.2 and
+clears RUSTSEC-2025-0020.  No user-visible API breakage.
+
+### Bug fixes
+
+- **SHAP additivity tolerance.**  The check now uses
+  `atol + rtol * |predicted|` (numpy `allclose` convention with
+  `atol=1e-5`, `rtol=1e-4`) instead of a fixed `1e-5` absolute bound.
+  Accumulated f32 round-off across larger explanation batches —
+  `feature_importances()` over ~1000 rows of California Housing with
+  `n_estimators=200` was the public-facing reproducer — no longer
+  raises spurious "additivity check failed" `RuntimeError`s on healthy
+  `leaf_model="constant"` artifacts.
+- **SHAP path-walker uses predictor-aligned float thresholds.**
+  Introduces `shap::BinningContext` (`Linear`, `Quantile`, `PreBinned`)
+  and four new PyO3 entry points (`shap_explain_rows_with_binning`,
+  `shap_global_importance_with_binning`, plus the `_dense` variants).
+  When a binning context is provided, the path walkers compare
+  `feature_value < float_threshold` with strict less-than (matching
+  `convert_bin_thresholds_to_float*` in the predictor), eliminating
+  the path-walk vs. predict-path divergence on continuous features.
+  The Python regressor / classifier / ranker estimators now pass
+  feature mins / maxs / cuts / binning kind into SHAP automatically,
+  so `model.shap_values()` and `model.feature_importances()` Just Work
+  for constant-leaf artifacts on continuous data.  The linear-leaf
+  `model_has_linear_leaves` exemption stays in place for
+  `binning=None` callers and is now only triggered for that legacy
+  path.
+- **MorphBoost warm-start now persists EMA.**  The MorphMetadata
+  artifact section is bumped from v1 to v2 with an appended
+  `Vec<GradientEmaStats>` (one entry per class).  `WarmStartState`
+  and `MultiClassWarmStartState` gain an
+  `initial_ema_stats: Option<Vec<GradientEmaStats>>` field; both
+  single-class and multiclass training loops seed the fresh
+  `MorphState.ema_stats` from this snapshot when warm-starting.
+  Resuming a MorphBoost-trained model with `init_model=` now produces
+  numerically meaningful continuations rather than starting the EMA
+  cold.  v1 artifacts (pre-v0.7.3) decode with `ema_stats: Vec::new()`
+  and the PyO3 bridge translates that into `initial_ema_stats: None`,
+  preserving prior cold-EMA behaviour for legacy artifacts.
+- **PyO3 0.23 → 0.24 (clears RUSTSEC-2025-0020).**  Bumps
+  `pyo3 = "0.24"` and `numpy = "0.24"` in `bindings/python/Cargo.toml`.
+  The bindings were already on the `Bound<>`-first API — zero
+  `&PyAny`, zero `IntoPy`, no source changes needed.  The ignore
+  entries in `deny.toml` and the cargo-audit CI step are removed; the
+  advisory list is now intentionally empty.
+
+### Documented for the next release (v0.7.4)
+
+- **SHAP additivity for piecewise-linear leaves on continuous
+  features.**  The bin-index vs. float-threshold mismatch in the path
+  walker is fixed in v0.7.3, but linear-leaf weights and the
+  `feature_baseline` are still trained in bin space, so SHAP's
+  decomposition of `wⱼ · (xⱼ − μⱼ)` for `leaf_model="linear"`
+  artifacts can still drift on continuous features.  Until a follow-up
+  release switches PL weight training to raw feature space, the
+  linear-leaf additivity check stays exempted.
+- **Joint shared-tree multi-label boosting.**  `MultiLabelGBMRanker`
+  still trains K independent per-label rankers.  A K-tree-per-round
+  shared-ensemble objective for ranking is the remaining v0.7.x
+  follow-up.
+
 ## 0.7.2
 
 Documentation, supply-chain, and repo-hygiene release.  No user-facing

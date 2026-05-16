@@ -36,7 +36,7 @@ and repository evolution:
   - Legacy material from the previous planning/documentation system.
   - Includes `v0.1_plans/` with pre-v0.2.0 limitation analysis and implementation plans.
 - `limitations.md`
-  - Current limitations, the resolved-since-v0.1 list, and v0.7.2+ follow-ups.
+  - Current limitations, the resolved-since-v0.1 list, and v0.7.x follow-ups.
 
 If you are trying to understand the project as a maintainer, start here:
 

@@ -4,12 +4,20 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
-The `0.7.2` release is documentation, supply-chain, and repo-hygiene
-only — no user-facing Python API changes.  It aligns the docs with
-the v0.7.1 surface that actually shipped, hardens CI (full pytest
-suite gated on every PR, `cargo-audit` + `cargo-deny` weekly), adds an
-`examples/` library, and rewrites `docs/reference/release_checklist.md`
-as a top-to-bottom operating manual.
+The `0.7.3` release closes the four limitations queued in v0.7.2:
+SHAP additivity tolerance (`atol + rtol * |p|`), SHAP path-walker
+alignment with predictor float thresholds (new `BinningContext`),
+MorphBoost warm-start EMA persistence (MorphMetadata artifact section
+v2), and the pyo3 0.23 → 0.24 upgrade (clears RUSTSEC-2025-0020).
+No user-visible API breakage.
+
+The `0.7.2` release was documentation, supply-chain, and repo-hygiene
+only — no user-facing Python API changes.  It aligned the docs with
+the v0.7.1 surface that actually shipped, hardened CI (full pytest
+suite gated on every PR, `cargo-audit` + `cargo-deny` weekly), added
+an `examples/` library, and rewrote
+`docs/reference/release_checklist.md` as a top-to-bottom operating
+manual.
 
 The `0.7.1` release built on the v0.7.0 factor-neutral boosting surface
 with five additions: SHAP support for piecewise-linear leaves, per-round
@@ -26,6 +34,36 @@ artifacts. The `0.5.0` release introduced piecewise-linear (PL) tree leaves via
 `leaf_model="linear"` on all three estimators. The `0.4.0` release introduced
 the opt-in MorphBoost adaptive split criterion, per-iteration learning-rate
 schedules, and SIMD-accelerated histogram and EMA kernels.
+
+## What Shipped In 0.7.3
+
+Bug-fix release.  Closes the four limitations queued in v0.7.2 and
+clears RUSTSEC-2025-0020.
+
+- **SHAP additivity tolerance.**  `atol + rtol * |predicted|` (numpy
+  `allclose` semantics) replaces the fixed `1e-5` absolute bound.
+  Larger explanation batches on healthy `leaf_model="constant"`
+  artifacts no longer raise spurious additivity-check `RuntimeError`s
+  due to accumulated f32 round-off.
+- **SHAP path-walker uses predictor-aligned float thresholds.**  New
+  `shap::BinningContext` enum (`Linear` / `Quantile` / `PreBinned`)
+  plus four PyO3 entry points with binning kwargs.  Path walkers
+  compare against the same float thresholds the predictor uses, with
+  the predictor's strict-`<` semantics.  Eliminates the path-walk vs.
+  predict-path divergence on continuous features for scalar-leaf
+  artifacts.  The Python estimators automatically thread feature
+  mins / maxs / cuts into SHAP, so `model.shap_values()` and
+  `model.feature_importances()` Just Work on continuous data.
+- **MorphBoost warm-start persists EMA.**  MorphMetadata artifact
+  section bumped to v2 with appended `Vec<GradientEmaStats>` per
+  class.  `WarmStartState` and `MultiClassWarmStartState` carry an
+  optional EMA snapshot; both training loops seed the fresh
+  `MorphState.ema_stats` from it.  Legacy v1 artifacts decode with
+  empty `ema_stats` and fall back to the cold-EMA initialization.
+- **PyO3 0.23 → 0.24 (clears RUSTSEC-2025-0020).**  Zero source
+  changes — bindings were already on the `Bound<>`-first API.
+  `deny.toml` and the cargo-audit CI step no longer ignore the
+  advisory.
 
 ## What Shipped In 0.7.2
 

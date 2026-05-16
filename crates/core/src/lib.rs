@@ -1879,7 +1879,7 @@ pub fn decode_optional_native_categorical_splits_section(
 ///   so MorphBoost warm-starts can resume with the EMA state from the
 ///   previous fit rather than restarting it cold.  Legacy v1 artifacts
 ///   decode with `ema_stats = Vec::new()` and the warm-start path
-///   falls back to a cold EMA (current v0.7.1/v0.7.2 behavior).
+///   falls back to a cold EMA (legacy v0.7.1/v0.7.2 behavior).
 #[derive(Debug, Clone, PartialEq)]
 pub struct MorphMetadataPayload {
     pub config: MorphConfig,
@@ -2474,7 +2474,7 @@ pub fn validate_train_params(params: &TrainParams) -> CoreResult<()> {
     if params.leaf_solver == LeafSolverKind::Dro {
         if params.leaf_model != LeafModelKind::Constant {
             return Err(CoreError::InvalidConfig(
-                "leaf_solver='dro' requires leaf_model='constant' in v0.7.2".to_string(),
+                "leaf_solver='dro' requires leaf_model='constant' in v0.7.3".to_string(),
             ));
         }
         let Some(cfg) = params.dro_config else {

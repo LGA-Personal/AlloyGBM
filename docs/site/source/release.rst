@@ -1,7 +1,68 @@
 Release and platform policy
 ===========================
 
-AlloyGBM ``0.7.2`` release notes and platform policy.
+AlloyGBM ``0.7.3`` release notes and platform policy.
+
+What's new in 0.7.3
+-------------------
+
+Bug-fix release.  Closes the four limitations queued in v0.7.2 and
+clears RUSTSEC-2025-0020.  No user-visible API breakage.
+
+**SHAP additivity tolerance:**
+
+- The internal additivity check now uses
+  ``atol + rtol * |predicted|`` (atol=1e-5, rtol=1e-4) instead of a
+  fixed ``1e-5`` absolute bound.  Larger explanation batches —
+  ``feature_importances()`` over ~1000 rows of California Housing with
+  ``n_estimators=200`` was the public-facing reproducer — no longer
+  raise spurious ``RuntimeError`` on healthy ``leaf_model="constant"``
+  artifacts.
+
+**SHAP path-walker uses predictor-aligned float thresholds:**
+
+- New ``shap::BinningContext`` (``Linear``, ``Quantile``, ``PreBinned``)
+  plus four PyO3 entry points (``shap_explain_rows_with_binning``,
+  ``shap_global_importance_with_binning``, plus dense variants).  When
+  a binning context is provided, the path walker compares
+  ``feature_value < float_threshold`` (matching the predictor's
+  ``convert_bin_thresholds_to_float*``) instead of the legacy
+  ``feature_value <= split.threshold_bin as f32``.  Eliminates the
+  path-walk vs. predict-path divergence on continuous features for
+  scalar-leaf artifacts.
+- :class:`~alloygbm.GBMRegressor`, :class:`~alloygbm.GBMClassifier`,
+  and :class:`~alloygbm.GBMRanker` now pass feature mins / maxs / cuts
+  / binning kind into SHAP automatically.
+
+**MorphBoost warm-start now persists EMA:**
+
+- MorphMetadata artifact section bumped to v2 with appended
+  ``Vec<GradientEmaStats>`` per class.  :class:`WarmStartState` and
+  :class:`MultiClassWarmStartState` gain
+  ``initial_ema_stats: Option<Vec<GradientEmaStats>>``.  Both
+  single-class and multiclass training loops seed the fresh
+  ``MorphState.ema_stats`` from this snapshot, so resuming a
+  MorphBoost-trained model via ``init_model=`` no longer restarts the
+  EMA cold.
+- v1 artifacts decode with empty ``ema_stats``; the engine falls back
+  to ``MorphState::new`` cold initialization, preserving prior
+  behaviour for legacy artifacts.
+
+**PyO3 0.23 → 0.24 (clears RUSTSEC-2025-0020):**
+
+- Bumps ``pyo3 = "0.24"`` and ``numpy = "0.24"``.  The bindings were
+  already on the ``Bound<>``-first API — zero source changes needed.
+  ``deny.toml`` and ``.github/workflows/security-audit.yml`` no longer
+  ignore RUSTSEC-2025-0020.
+
+**Limitations documented for the next release:**
+
+- SHAP additivity for piecewise-linear leaves on continuous features
+  remains exempted from the strict check (linear weights and
+  ``feature_baseline`` are still trained in bin space).
+- Joint shared-tree multi-label boosting is still pending; the
+  :class:`~alloygbm.MultiLabelGBMRanker` wrapper trains K independent
+  per-label rankers.
 
 What's new in 0.7.2
 -------------------
