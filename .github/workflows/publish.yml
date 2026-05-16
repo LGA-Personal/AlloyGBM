@@ -45,7 +45,7 @@ jobs:
           args: --release --manifest-path bindings/python/Cargo.toml --out dist --interpreter ${{ matrix.interpreter }}
 
       - name: Upload wheel artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact_name }}
           path: dist/*.whl
@@ -72,7 +72,7 @@ jobs:
         run: maturin sdist --manifest-path bindings/python/Cargo.toml --out dist
 
       - name: Upload sdist artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sdist
           path: dist/*.tar.gz
