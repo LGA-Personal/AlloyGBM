@@ -19,7 +19,9 @@ use alloygbm_engine::{
 };
 use alloygbm_predictor::{Predictor, PredictorError};
 use alloygbm_shap::{
-    ShapError, explain_rows_from_artifact_bytes, global_importance_from_artifact_bytes,
+    BinningContext, ShapError, explain_rows_from_artifact_bytes,
+    explain_rows_from_artifact_bytes_with_binning, global_importance_from_artifact_bytes,
+    global_importance_from_artifact_bytes_with_binning,
 };
 use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -2893,10 +2895,22 @@ fn train_regression_artifact_with_summary_dense_impl(
                 )));
             }
             let initial_rounds = init_model.rounds_completed();
+            // v0.7.3: pull the persisted EMA snapshot (if any) so a
+            // MorphBoost warm-start resumes from the previous fit's
+            // EMA state rather than restarting it cold.  v1 artifacts
+            // (pre-v0.7.3) decode with empty `ema_stats`; we keep
+            // `initial_ema_stats = None` for that case so the engine
+            // falls back to a cold EMA (preserving prior behaviour).
+            let initial_ema_stats = init_model
+                .morph_metadata
+                .as_ref()
+                .filter(|m| !m.ema_stats.is_empty())
+                .map(|m| m.ema_stats.clone());
             Some(WarmStartState {
                 baseline_prediction: init_model.baseline_prediction,
                 stumps: init_model.stumps,
                 initial_rounds_completed: initial_rounds,
+                initial_ema_stats,
             })
         } else {
             None
@@ -3066,10 +3080,21 @@ fn train_regression_artifact_with_summary_dense_impl(
                     )));
                 }
                 let initial_rounds = init_mc_model.rounds_completed();
+                // v0.7.3: pull the persisted EMA snapshot (one entry
+                // per class) so MorphBoost warm-start resumes from
+                // the previous fit's EMA.  v1 artifacts decode with
+                // empty `ema_stats`; treat that as "no snapshot" so
+                // the engine falls back to a cold EMA.
+                let initial_ema_stats = init_mc_model
+                    .morph_metadata
+                    .as_ref()
+                    .filter(|m| !m.ema_stats.is_empty())
+                    .map(|m| m.ema_stats.clone());
                 Some(MultiClassWarmStartState {
                     baseline_predictions: init_mc_model.baseline_predictions,
                     class_stumps: init_mc_model.class_stumps,
                     initial_rounds_completed: initial_rounds,
+                    initial_ema_stats,
                 })
             } else {
                 None
@@ -3284,6 +3309,54 @@ fn shap_global_importance_dense_impl(
     let rows = dense_rows_from_flat_values(values, row_count, feature_count)
         .map_err(ShapError::InvalidInput)?;
     shap_global_importance_impl(artifact_bytes, &rows)
+}
+
+/// Translate Python-side binning kwargs into a `BinningContext` for the
+/// SHAP path-walker.
+///
+/// `binning_kind`:
+///
+/// - `"linear"`: `BinningContext::Linear`. Needs `feature_mins`,
+///   `feature_maxs`, `max_data_bin`.
+/// - `"quantile"`: `BinningContext::Quantile`. Needs `feature_cuts`.
+/// - `"prebinned"`: `BinningContext::PreBinned`. No aux args.
+///
+/// On invalid combinations returns a `ShapError::InvalidInput`.
+fn build_binning_context(
+    binning_kind: &str,
+    feature_mins: Option<Vec<f32>>,
+    feature_maxs: Option<Vec<f32>>,
+    max_data_bin: Option<u16>,
+    feature_cuts: Option<Vec<Vec<f32>>>,
+) -> Result<BinningContext, ShapError> {
+    match binning_kind {
+        "linear" => {
+            let mins = feature_mins.ok_or_else(|| {
+                ShapError::InvalidInput("binning_kind='linear' requires feature_mins".to_string())
+            })?;
+            let maxs = feature_maxs.ok_or_else(|| {
+                ShapError::InvalidInput("binning_kind='linear' requires feature_maxs".to_string())
+            })?;
+            let max_bin = max_data_bin.ok_or_else(|| {
+                ShapError::InvalidInput("binning_kind='linear' requires max_data_bin".to_string())
+            })?;
+            Ok(BinningContext::Linear {
+                feature_mins: mins,
+                feature_maxs: maxs,
+                max_data_bin: max_bin,
+            })
+        }
+        "quantile" => {
+            let cuts = feature_cuts.ok_or_else(|| {
+                ShapError::InvalidInput("binning_kind='quantile' requires feature_cuts".to_string())
+            })?;
+            Ok(BinningContext::Quantile { feature_cuts: cuts })
+        }
+        "prebinned" => Ok(BinningContext::PreBinned),
+        other => Err(ShapError::InvalidInput(format!(
+            "unknown binning_kind '{other}' (expected linear|quantile|prebinned)"
+        ))),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3607,6 +3680,157 @@ fn shap_global_importance_dense(
     feature_count: usize,
 ) -> PyResult<Vec<(String, f32)>> {
     shap_global_importance_dense_impl(artifact_bytes, row_count, feature_count, &values)
+        .map_err(shap_error_to_pyerr)
+}
+
+// Predictor-aligned SHAP entry points (v0.7.3).  When the caller passes
+// the binning info already used by the prediction-time threshold
+// conversion (`feature_mins` / `feature_maxs` / `max_data_bin` for
+// linear binning, `feature_cuts` for quantile, neither for pre-binned),
+// SHAP walks paths the same way the predictor does — strict `<`
+// comparison against per-stump float thresholds.  This makes SHAP on
+// `leaf_model="linear"` artifacts trained over continuous features
+// strictly additive, lifting the legacy best-effort exemption.
+
+#[pyfunction]
+#[pyo3(signature = (
+    artifact_bytes,
+    rows,
+    binning_kind,
+    feature_mins=None,
+    feature_maxs=None,
+    max_data_bin=None,
+    feature_cuts=None,
+))]
+#[allow(clippy::too_many_arguments)]
+fn shap_explain_rows_with_binning(
+    artifact_bytes: &[u8],
+    rows: Vec<Vec<f32>>,
+    binning_kind: &str,
+    feature_mins: Option<Vec<f32>>,
+    feature_maxs: Option<Vec<f32>>,
+    max_data_bin: Option<u16>,
+    feature_cuts: Option<Vec<Vec<f32>>>,
+) -> PyResult<(f32, Vec<Vec<f32>>)> {
+    let ctx = build_binning_context(
+        binning_kind,
+        feature_mins,
+        feature_maxs,
+        max_data_bin,
+        feature_cuts,
+    )
+    .map_err(shap_error_to_pyerr)?;
+    let explanation = explain_rows_from_artifact_bytes_with_binning(artifact_bytes, &rows, &ctx)
+        .map_err(shap_error_to_pyerr)?;
+    Ok((explanation.expected_value, explanation.values))
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    artifact_bytes,
+    values,
+    row_count,
+    feature_count,
+    binning_kind,
+    feature_mins=None,
+    feature_maxs=None,
+    max_data_bin=None,
+    feature_cuts=None,
+))]
+#[allow(clippy::too_many_arguments)]
+fn shap_explain_rows_dense_with_binning(
+    artifact_bytes: &[u8],
+    values: Vec<f32>,
+    row_count: usize,
+    feature_count: usize,
+    binning_kind: &str,
+    feature_mins: Option<Vec<f32>>,
+    feature_maxs: Option<Vec<f32>>,
+    max_data_bin: Option<u16>,
+    feature_cuts: Option<Vec<Vec<f32>>>,
+) -> PyResult<(f32, Vec<Vec<f32>>)> {
+    let rows = dense_rows_from_flat_values(&values, row_count, feature_count)
+        .map_err(|msg| shap_error_to_pyerr(ShapError::InvalidInput(msg)))?;
+    let ctx = build_binning_context(
+        binning_kind,
+        feature_mins,
+        feature_maxs,
+        max_data_bin,
+        feature_cuts,
+    )
+    .map_err(shap_error_to_pyerr)?;
+    let explanation = explain_rows_from_artifact_bytes_with_binning(artifact_bytes, &rows, &ctx)
+        .map_err(shap_error_to_pyerr)?;
+    Ok((explanation.expected_value, explanation.values))
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    artifact_bytes,
+    rows,
+    binning_kind,
+    feature_mins=None,
+    feature_maxs=None,
+    max_data_bin=None,
+    feature_cuts=None,
+))]
+#[allow(clippy::too_many_arguments)]
+fn shap_global_importance_with_binning(
+    artifact_bytes: &[u8],
+    rows: Vec<Vec<f32>>,
+    binning_kind: &str,
+    feature_mins: Option<Vec<f32>>,
+    feature_maxs: Option<Vec<f32>>,
+    max_data_bin: Option<u16>,
+    feature_cuts: Option<Vec<Vec<f32>>>,
+) -> PyResult<Vec<(String, f32)>> {
+    let ctx = build_binning_context(
+        binning_kind,
+        feature_mins,
+        feature_maxs,
+        max_data_bin,
+        feature_cuts,
+    )
+    .map_err(shap_error_to_pyerr)?;
+    global_importance_from_artifact_bytes_with_binning(artifact_bytes, &rows, &ctx)
+        .map_err(shap_error_to_pyerr)
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    artifact_bytes,
+    values,
+    row_count,
+    feature_count,
+    binning_kind,
+    feature_mins=None,
+    feature_maxs=None,
+    max_data_bin=None,
+    feature_cuts=None,
+))]
+#[allow(clippy::too_many_arguments)]
+fn shap_global_importance_dense_with_binning(
+    artifact_bytes: &[u8],
+    values: Vec<f32>,
+    row_count: usize,
+    feature_count: usize,
+    binning_kind: &str,
+    feature_mins: Option<Vec<f32>>,
+    feature_maxs: Option<Vec<f32>>,
+    max_data_bin: Option<u16>,
+    feature_cuts: Option<Vec<Vec<f32>>>,
+) -> PyResult<Vec<(String, f32)>> {
+    let rows = dense_rows_from_flat_values(&values, row_count, feature_count)
+        .map_err(|msg| shap_error_to_pyerr(ShapError::InvalidInput(msg)))?;
+    let ctx = build_binning_context(
+        binning_kind,
+        feature_mins,
+        feature_maxs,
+        max_data_bin,
+        feature_cuts,
+    )
+    .map_err(shap_error_to_pyerr)?;
+    global_importance_from_artifact_bytes_with_binning(artifact_bytes, &rows, &ctx)
         .map_err(shap_error_to_pyerr)
 }
 
@@ -4675,6 +4899,13 @@ fn _alloygbm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(shap_explain_rows_dense, m)?)?;
     m.add_function(wrap_pyfunction!(shap_global_importance, m)?)?;
     m.add_function(wrap_pyfunction!(shap_global_importance_dense, m)?)?;
+    m.add_function(wrap_pyfunction!(shap_explain_rows_with_binning, m)?)?;
+    m.add_function(wrap_pyfunction!(shap_explain_rows_dense_with_binning, m)?)?;
+    m.add_function(wrap_pyfunction!(shap_global_importance_with_binning, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        shap_global_importance_dense_with_binning,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(train_regression_artifact, m)?)?;
     m.add_function(wrap_pyfunction!(train_regression_artifact_dense, m)?)?;
     m.add_function(wrap_pyfunction!(train_regression_artifact_with_summary, m)?)?;

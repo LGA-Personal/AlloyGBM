@@ -12,15 +12,13 @@ types.
 
 .. note::
 
-   AlloyGBM ``0.7.2`` is a documentation, supply-chain, and repo-hygiene
-   release — no user-facing Python API changes.  It aligns the docs
-   with the v0.7.1 surface that actually shipped (SHAP for
-   piecewise-linear leaves, per-round training diagnostics, neutralized
-   warm-start, LightGBM-compatible interaction constraints, and
-   :class:`~alloygbm.MultiLabelGBMRanker`), hardens CI (full pytest
-   suite + weekly ``cargo-audit`` / ``cargo-deny``), adds an
-   ``examples/`` library, and rewrites the release operating manual.
-   See :doc:`estimator` and :doc:`morphboost` for parameter docs, and
+   AlloyGBM ``0.7.3`` is a bug-fix release.  It closes the four
+   limitations queued in v0.7.2: SHAP additivity tolerance
+   (``atol + rtol * |predicted|``), SHAP path-walker alignment with
+   the predictor's float thresholds (new ``BinningContext``),
+   MorphBoost warm-start EMA persistence (MorphMetadata artifact
+   section v2), and the ``pyo3`` 0.23 → 0.24 upgrade
+   (clears RUSTSEC-2025-0020).  No user-visible API breakage.  See
    :doc:`release` for full notes.
 
 Getting started

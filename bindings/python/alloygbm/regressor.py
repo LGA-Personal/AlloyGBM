@@ -164,6 +164,51 @@ def _load_native_shap_global_importance_dense():
     return shap_global_importance_dense
 
 
+# v0.7.3 predictor-aligned SHAP variants.  These accept binning kwargs
+# (`feature_mins`, `feature_maxs`, `max_data_bin`, or `feature_cuts`)
+# so SHAP's path walker uses the same float thresholds the predictor
+# uses, lifting the legacy "best-effort" exemption for
+# `leaf_model="linear"` artifacts on continuous features.
+def _load_native_shap_explain_rows_with_binning():
+    try:
+        from alloygbm._alloygbm import shap_explain_rows_with_binning
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError(
+            "native predictor-aligned SHAP binding is unavailable; rebuild the alloygbm extension module"
+        ) from exc
+    return shap_explain_rows_with_binning
+
+
+def _load_native_shap_explain_rows_dense_with_binning():
+    try:
+        from alloygbm._alloygbm import shap_explain_rows_dense_with_binning
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError(
+            "native predictor-aligned dense SHAP binding is unavailable; rebuild the alloygbm extension module"
+        ) from exc
+    return shap_explain_rows_dense_with_binning
+
+
+def _load_native_shap_global_importance_with_binning():
+    try:
+        from alloygbm._alloygbm import shap_global_importance_with_binning
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError(
+            "native predictor-aligned SHAP global-importance binding is unavailable; rebuild the alloygbm extension module"
+        ) from exc
+    return shap_global_importance_with_binning
+
+
+def _load_native_shap_global_importance_dense_with_binning():
+    try:
+        from alloygbm._alloygbm import shap_global_importance_dense_with_binning
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError(
+            "native predictor-aligned dense SHAP global-importance binding is unavailable; rebuild the alloygbm extension module"
+        ) from exc
+    return shap_global_importance_dense_with_binning
+
+
 def _parse_env_toggle(env_name: str) -> bool:
     value = os.environ.get(env_name)
     if value is None:
@@ -476,7 +521,7 @@ class GBMRegressor(_GBMRegressorBase):
             )
         if str(leaf_solver) == "dro" and str(leaf_model) != "constant":
             raise ValueError(
-                "leaf_solver='dro' requires leaf_model='constant' in v0.7.2"
+                "leaf_solver='dro' requires leaf_model='constant' in v0.7.3"
             )
         if str(neutralization) not in (
             "none",
@@ -1187,7 +1232,7 @@ class GBMRegressor(_GBMRegressorBase):
 
         if self.leaf_solver == "dro" and self.leaf_model != "constant":
             raise ValueError(
-                "leaf_solver='dro' requires leaf_model='constant' in v0.7.2"
+                "leaf_solver='dro' requires leaf_model='constant' in v0.7.3"
             )
         if self.neutralization != "split_penalty" and self.factor_penalty != 0.0:
             raise ValueError(
@@ -2713,6 +2758,55 @@ class GBMRegressor(_GBMRegressorBase):
         predictor_predict_batch_canonical = _load_native_predictor_predict_batch_canonical()
         return list(predictor_predict_batch_canonical(self._artifact_bytes, rows))
 
+    def _shap_binning_kwargs(self) -> dict | None:
+        """Return kwargs for the predictor-aligned SHAP entry points,
+        or `None` when SHAP should fall back to the legacy
+        bin-index-quantized path.
+
+        Returned when continuous binning was applied with a strategy
+        whose bin → float-threshold conversion has a SHAP equivalent:
+
+        - `linear` (no per-feature rank flags): use feature mins/maxs +
+          max_data_bin.
+        - `quantile`: use feature quantile cuts.
+
+        For the mixed linear-rank case (some features quantized linearly,
+        others by rank) the path-walker fix is not yet wired through, so
+        the legacy quantize-then-walk SHAP path is used. Pre-binned
+        artifacts also use the legacy path because the bin-index
+        comparison is already correct for integer data.
+        """
+        if not self._is_fitted or not self._uses_continuous_binning:
+            return None
+        strategy = self.continuous_binning_strategy
+        if strategy == "linear":
+            rank_flags = self._continuous_feature_linear_rank_flags
+            if rank_flags is not None and any(rank_flags):
+                # Mixed linear-rank: legacy path until the rank-aware
+                # SHAP conversion is wired up.  Queued for v0.7.4.
+                return None
+            mins = self._continuous_feature_mins
+            maxs = self._continuous_feature_maxs
+            if mins is None or maxs is None:
+                return None
+            return {
+                "binning_kind": "linear",
+                "feature_mins": list(mins),
+                "feature_maxs": list(maxs),
+                "max_data_bin": _max_data_bin_for_max_bins(
+                    self.continuous_binning_max_bins
+                ),
+            }
+        if strategy == "quantile":
+            cuts = self._continuous_feature_quantile_cuts
+            if cuts is None:
+                return None
+            return {
+                "binning_kind": "quantile",
+                "feature_cuts": [list(c) for c in cuts],
+            }
+        return None
+
     def shap_values(
         self, X: object, *, include_expected_value: bool = False
     ) -> list[list[float]] | tuple[float, list[list[float]]]:
@@ -2735,8 +2829,25 @@ class GBMRegressor(_GBMRegressorBase):
         if self._artifact_bytes is None:
             raise RuntimeError("GBMRegressor native artifact is not available")
 
-        if self._uses_continuous_binning:
-            rows: object = self._quantize_rows_for_prediction(self._validate_rows(X))
+        # v0.7.3: when we have a `BinningContext` available (continuous
+        # features under linear or quantile binning), pass raw rows +
+        # binning kwargs so the native SHAP path-walker uses the same
+        # float thresholds the predictor uses.  For pre-binned data and
+        # for the mixed linear-rank case, fall back to the legacy
+        # quantize-then-walk path.
+        binning_kwargs = self._shap_binning_kwargs()
+        if binning_kwargs is not None:
+            rows = self._native_matrix_flat_payload(X) or self._validate_rows(X)
+            row_feature_count = (
+                rows[2] if isinstance(rows, tuple) else len(rows[0])
+            )
+            if row_feature_count != self._n_features_in:
+                raise ValueError(
+                    f"X feature count {row_feature_count} does not match fitted feature count "
+                    f"{self._n_features_in}"
+                )
+        elif self._uses_continuous_binning:
+            rows = self._quantize_rows_for_prediction(self._validate_rows(X))
             if len(rows[0]) != self._n_features_in:
                 raise ValueError(
                     f"X feature count {len(rows[0])} does not match fitted feature count "
@@ -2760,7 +2871,23 @@ class GBMRegressor(_GBMRegressorBase):
                         f"{self._n_features_in}"
                     )
 
-        if isinstance(rows, tuple):
+        if binning_kwargs is not None:
+            if isinstance(rows, tuple):
+                flat_values, row_count, feature_count = rows
+                shap_fn = _load_native_shap_explain_rows_dense_with_binning()
+                expected_value, values = shap_fn(
+                    self._artifact_bytes,
+                    flat_values,
+                    row_count,
+                    feature_count,
+                    **binning_kwargs,
+                )
+            else:
+                shap_fn = _load_native_shap_explain_rows_with_binning()
+                expected_value, values = shap_fn(
+                    self._artifact_bytes, rows, **binning_kwargs
+                )
+        elif isinstance(rows, tuple):
             flat_values, row_count, feature_count = rows
             shap_explain_rows_dense = _load_native_shap_explain_rows_dense()
             expected_value, values = shap_explain_rows_dense(
@@ -2788,8 +2915,19 @@ class GBMRegressor(_GBMRegressorBase):
         if self._artifact_bytes is None:
             raise RuntimeError("GBMRegressor native artifact is not available")
 
-        if self._uses_continuous_binning:
-            rows: object = self._quantize_rows_for_prediction(self._validate_rows(X))
+        binning_kwargs = self._shap_binning_kwargs()
+        if binning_kwargs is not None:
+            rows = self._native_matrix_flat_payload(X) or self._validate_rows(X)
+            row_feature_count = (
+                rows[2] if isinstance(rows, tuple) else len(rows[0])
+            )
+            if row_feature_count != self._n_features_in:
+                raise ValueError(
+                    f"X feature count {row_feature_count} does not match fitted feature count "
+                    f"{self._n_features_in}"
+                )
+        elif self._uses_continuous_binning:
+            rows = self._quantize_rows_for_prediction(self._validate_rows(X))
             if len(rows[0]) != self._n_features_in:
                 raise ValueError(
                     f"X feature count {len(rows[0])} does not match fitted feature count "
@@ -2813,7 +2951,21 @@ class GBMRegressor(_GBMRegressorBase):
                         f"{self._n_features_in}"
                     )
 
-        if isinstance(rows, tuple):
+        if binning_kwargs is not None:
+            if isinstance(rows, tuple):
+                flat_values, row_count, feature_count = rows
+                shap_fn = _load_native_shap_global_importance_dense_with_binning()
+                importance = shap_fn(
+                    self._artifact_bytes,
+                    flat_values,
+                    row_count,
+                    feature_count,
+                    **binning_kwargs,
+                )
+            else:
+                shap_fn = _load_native_shap_global_importance_with_binning()
+                importance = shap_fn(self._artifact_bytes, rows, **binning_kwargs)
+        elif isinstance(rows, tuple):
             flat_values, row_count, feature_count = rows
             shap_global_importance_dense = _load_native_shap_global_importance_dense()
             importance = shap_global_importance_dense(

@@ -71,7 +71,119 @@ fn accumulate_linear_terms(
 }
 
 const TREE_NODE_STRIDE: u32 = 1 << 20;
-const ADDITIVITY_TOLERANCE: f32 = 1e-5;
+// SHAP additivity tolerance is computed as
+//   atol + rtol * |predicted|
+// rather than a fixed absolute bound, so accumulated f32 round-off in
+// large-sample explanations (e.g. `feature_importances()` over ~1000
+// rows on California Housing with `n_estimators=200`) does not raise
+// even though the arithmetic is correct.  Values follow numpy's
+// `allclose` convention (atol=1e-5, rtol=1e-4).
+const ADDITIVITY_ATOL: f32 = 1e-5;
+const ADDITIVITY_RTOL: f32 = 1e-4;
+
+/// Per-feature binning state needed to translate a stump's
+/// `threshold_bin: u16` (a bin index in the artifact) to the float
+/// threshold the predictor uses at inference time.  Mirrors the three
+/// conversion modes implemented by `crates/predictor/src/lib.rs`
+/// (`convert_bin_thresholds_to_float`,
+/// `convert_bin_thresholds_to_float_quantile`, and
+/// `convert_bin_thresholds_to_float_prebinned`).
+///
+/// When a `BinningContext` is threaded through SHAP, the path walker
+/// compares `feature_value < float_threshold` instead of the legacy
+/// `feature_value <= split.threshold_bin as f32`.  For
+/// `leaf_model="constant"` artifacts the two paths usually reach the
+/// same leaf so the legacy comparison sums to a consistent value; for
+/// `leaf_model="linear"` artifacts the leaf value depends on `x_j`
+/// directly, so disagreement between SHAP's path and the predictor's
+/// path produces measurable additivity drift.  This context aligns the
+/// two paths.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BinningContext {
+    /// Linear-spaced bins between per-feature `[min, max]`.
+    /// Float threshold = `min + ((bin + 0.5) / max_data_bin) * (max - min)`.
+    Linear {
+        feature_mins: Vec<f32>,
+        feature_maxs: Vec<f32>,
+        max_data_bin: u16,
+    },
+    /// Quantile bins. Float threshold = `cuts[bin]` (or `f32::MAX` past
+    /// the last cut).
+    Quantile { feature_cuts: Vec<Vec<f32>> },
+    /// Pre-binned integer features. Float threshold = `bin + 0.5`.
+    PreBinned,
+}
+
+impl BinningContext {
+    /// Return the float threshold for a split, matching the predictor's
+    /// conversion math exactly.  Panics if the feature index is out of
+    /// range — callers must validate before calling.
+    #[inline]
+    fn float_threshold(&self, feature_index: usize, bin: u16) -> f32 {
+        match self {
+            BinningContext::Linear {
+                feature_mins,
+                feature_maxs,
+                max_data_bin,
+            } => {
+                let min_val = feature_mins[feature_index];
+                let max_val = feature_maxs[feature_index];
+                let span = max_val - min_val;
+                if span <= f32::EPSILON {
+                    min_val + f32::EPSILON
+                } else {
+                    min_val + ((bin as f32 + 0.5) / *max_data_bin as f32) * span
+                }
+            }
+            BinningContext::Quantile { feature_cuts } => {
+                let cuts = &feature_cuts[feature_index];
+                let idx = bin as usize;
+                if idx < cuts.len() {
+                    cuts[idx]
+                } else {
+                    f32::MAX
+                }
+            }
+            BinningContext::PreBinned => bin as f32 + 0.5,
+        }
+    }
+
+    /// Validate against an expected feature count; returns a
+    /// human-readable error otherwise.
+    fn validate(&self, feature_count: usize) -> ShapResult<()> {
+        match self {
+            BinningContext::Linear {
+                feature_mins,
+                feature_maxs,
+                ..
+            } => {
+                if feature_mins.len() != feature_count || feature_maxs.len() != feature_count {
+                    return Err(ShapError::InvalidInput(format!(
+                        "BinningContext::Linear: feature_mins/feature_maxs length ({}/{}) must match feature_count {feature_count}",
+                        feature_mins.len(),
+                        feature_maxs.len(),
+                    )));
+                }
+            }
+            BinningContext::Quantile { feature_cuts } => {
+                if feature_cuts.len() != feature_count {
+                    return Err(ShapError::InvalidInput(format!(
+                        "BinningContext::Quantile: feature_cuts length {} must match feature_count {feature_count}",
+                        feature_cuts.len(),
+                    )));
+                }
+            }
+            BinningContext::PreBinned => {}
+        }
+        Ok(())
+    }
+}
+
+#[inline]
+fn additivity_tolerance(predicted: f32) -> f32 {
+    ADDITIVITY_ATOL + ADDITIVITY_RTOL * predicted.abs()
+}
+
 const MAX_EXACT_SPLIT_FEATURES: usize = 25;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,7 +232,28 @@ pub fn explain_rows_from_artifact_bytes(
     rows: &[Vec<f32>],
 ) -> ShapResult<ShapExplanationBatch> {
     let context = load_artifact_context(artifact_bytes)?;
-    explain_rows_from_model(&context.model, rows)
+    explain_rows_from_model(&context.model, rows, None)
+}
+
+/// Predictor-aligned variant of `explain_rows_from_artifact_bytes`.
+///
+/// When the caller supplies a `BinningContext`, the SHAP path walker
+/// uses the same float-threshold-and-strict-less-than semantics as the
+/// predictor's `convert_bin_thresholds_to_float*` family, so per-row
+/// attributions reach the same leaf the predictor reaches.  This is
+/// required for `leaf_model="linear"` artifacts trained on continuous
+/// features — the legacy bin-index path-walker diverges and produces
+/// best-effort attributions that fail strict additivity.
+///
+/// Callers without a `BinningContext` should keep using the legacy
+/// entry point above; behavior is unchanged.
+pub fn explain_rows_from_artifact_bytes_with_binning(
+    artifact_bytes: &[u8],
+    rows: &[Vec<f32>],
+    binning: &BinningContext,
+) -> ShapResult<ShapExplanationBatch> {
+    let context = load_artifact_context(artifact_bytes)?;
+    explain_rows_from_model(&context.model, rows, Some(binning))
 }
 
 pub fn global_importance_from_shap_values(
@@ -185,7 +318,19 @@ pub fn global_importance_from_artifact_bytes(
     rows: &[Vec<f32>],
 ) -> ShapResult<Vec<(String, f32)>> {
     let context = load_artifact_context(artifact_bytes)?;
-    let explanation = explain_rows_from_model(&context.model, rows)?;
+    let explanation = explain_rows_from_model(&context.model, rows, None)?;
+    global_importance_from_shap_values(&context.feature_names, &explanation.values)
+}
+
+/// Predictor-aligned variant of `global_importance_from_artifact_bytes`.
+/// See `explain_rows_from_artifact_bytes_with_binning` for the contract.
+pub fn global_importance_from_artifact_bytes_with_binning(
+    artifact_bytes: &[u8],
+    rows: &[Vec<f32>],
+    binning: &BinningContext,
+) -> ShapResult<Vec<(String, f32)>> {
+    let context = load_artifact_context(artifact_bytes)?;
+    let explanation = explain_rows_from_model(&context.model, rows, Some(binning))?;
     global_importance_from_shap_values(&context.feature_names, &explanation.values)
 }
 
@@ -262,8 +407,12 @@ fn load_artifact_context(artifact_bytes: &[u8]) -> ShapResult<ArtifactShapContex
 fn explain_rows_from_model(
     model: &TrainedModel,
     rows: &[Vec<f32>],
+    binning: Option<&BinningContext>,
 ) -> ShapResult<ShapExplanationBatch> {
     validate_rows(rows, model.feature_count)?;
+    if let Some(ctx) = binning {
+        ctx.validate(model.feature_count)?;
+    }
 
     // Count distinct split features to choose algorithm.
     let distinct_split_feature_count = {
@@ -279,28 +428,36 @@ fn explain_rows_from_model(
 
     if distinct_split_feature_count > MAX_EXACT_SPLIT_FEATURES {
         // Too many features for brute-force O(2^N); use TreeSHAP O(TLD^2).
-        return explain_rows_tree_shap(model, rows);
+        return explain_rows_tree_shap(model, rows, binning);
     }
 
     // Brute-force exact Shapley values for models with few split features.
-    explain_rows_brute_force(model, rows)
+    explain_rows_brute_force(model, rows, binning)
 }
 
 fn explain_rows_brute_force(
     model: &TrainedModel,
     rows: &[Vec<f32>],
+    binning: Option<&BinningContext>,
 ) -> ShapResult<ShapExplanationBatch> {
     let model_structure = build_model_structure(model)?;
     let baseline = model.feature_baseline.as_deref();
-    let expected_value =
-        expected_prediction_for_subset(model, rows[0].as_slice(), 0, &model_structure, baseline)?;
+    let expected_value = expected_prediction_for_subset(
+        model,
+        rows[0].as_slice(),
+        0,
+        &model_structure,
+        baseline,
+        binning,
+    )?;
 
     let mut row_contributions = Vec::with_capacity(rows.len());
     for (row_index, row) in rows.iter().enumerate() {
-        let values_by_subset = compute_subset_expectations(model, row, &model_structure, baseline)?;
+        let values_by_subset =
+            compute_subset_expectations(model, row, &model_structure, baseline, binning)?;
         let row_expected_value = values_by_subset[0];
 
-        if (row_expected_value - expected_value).abs() > ADDITIVITY_TOLERANCE {
+        if (row_expected_value - expected_value).abs() > additivity_tolerance(expected_value) {
             return Err(ShapError::ContractViolation(format!(
                 "row {row_index} expected value drift: {row_expected_value} vs baseline {expected_value}"
             )));
@@ -315,11 +472,18 @@ fn explain_rows_brute_force(
         // for the leaf each row reaches restores `predict(x)` exactly while
         // attributing the row's deviation directly to the relevant features.
         if model_has_linear_leaves(model) {
-            distribute_linear_terms_for_row(model, row, baseline, &mut contributions_f64);
+            distribute_linear_terms_for_row(model, row, baseline, binning, &mut contributions_f64);
         }
 
         let contributions: Vec<f32> = contributions_f64.iter().map(|v| *v as f32).collect();
-        verify_additivity(model, row, &contributions, row_index, expected_value)?;
+        verify_additivity(
+            model,
+            row,
+            &contributions,
+            row_index,
+            expected_value,
+            binning,
+        )?;
         row_contributions.push(contributions);
     }
 
@@ -343,6 +507,7 @@ fn distribute_linear_terms_for_row(
     model: &TrainedModel,
     row: &[f32],
     baseline: Option<&[f32]>,
+    binning: Option<&BinningContext>,
     phi: &mut [f64],
 ) {
     // Build a (tree_id, local_id) → stump map once per row is overkill, but
@@ -371,7 +536,7 @@ fn distribute_linear_terms_for_row(
             };
             let feat = stump.split.feature_index as usize;
             let feature_value = row.get(feat).copied().unwrap_or(f32::NAN);
-            let goes_left = stump_goes_left(&stump.split, feature_value);
+            let goes_left = stump_goes_left(&stump.split, feature_value, binning);
             let leaf_value = if goes_left {
                 &stump.left_leaf_value
             } else {
@@ -446,6 +611,7 @@ fn compute_subset_expectations(
     row: &[f32],
     model_structure: &ModelStructure<'_>,
     baseline: Option<&[f32]>,
+    binning: Option<&BinningContext>,
 ) -> ShapResult<Vec<f32>> {
     let split_feature_count = model_structure.split_features.len();
     let subset_count = 1_usize
@@ -460,6 +626,7 @@ fn compute_subset_expectations(
             subset_mask as u64,
             model_structure,
             baseline,
+            binning,
         )?;
         values_by_subset.push(value);
     }
@@ -469,22 +636,39 @@ fn compute_subset_expectations(
 /// Determine whether a feature value goes to the left child of a split.
 /// Uses bitset membership for categorical splits and threshold comparison
 /// for numeric splits.
-fn stump_goes_left(split: &alloygbm_core::SplitCandidate, feature_value: f32) -> bool {
+fn stump_goes_left(
+    split: &alloygbm_core::SplitCandidate,
+    feature_value: f32,
+    binning: Option<&BinningContext>,
+) -> bool {
     if feature_value.is_nan() {
         return split.default_left;
     }
     if split.is_categorical {
         let cat_id = feature_value as u16;
-        split
+        return split
             .categorical_bitset
             .as_ref()
             .map_or(split.default_left, |bs| {
                 let byte_idx = (cat_id / 8) as usize;
                 let bit_idx = (cat_id % 8) as usize;
                 byte_idx < bs.len() && (bs[byte_idx] & (1 << bit_idx)) != 0
-            })
-    } else {
-        feature_value <= split.threshold_bin as f32
+            });
+    }
+    match binning {
+        // Float-threshold path: matches the predictor's strict `<`
+        // comparison after `convert_bin_thresholds_to_float*`.  When a
+        // binning context is provided, SHAP walks paths the same way
+        // the predictor does, so linear-leaf attribution stays
+        // additive on continuous features.
+        Some(ctx) => {
+            let threshold = ctx.float_threshold(split.feature_index as usize, split.threshold_bin);
+            feature_value < threshold
+        }
+        // Legacy bin-index path.  Preserved for callers that don't
+        // (or can't) provide a `BinningContext` — categorical-only
+        // and pre-binned-integer artifacts predominantly.
+        None => feature_value <= split.threshold_bin as f32,
     }
 }
 
@@ -494,10 +678,19 @@ fn expected_prediction_for_subset(
     subset_mask: u64,
     model_structure: &ModelStructure<'_>,
     baseline: Option<&[f32]>,
+    binning: Option<&BinningContext>,
 ) -> ShapResult<f32> {
     let mut prediction = model.baseline_prediction;
     for tree_id in &model_structure.tree_root_ids {
-        prediction += expected_subtree(*tree_id, 0, row, subset_mask, model_structure, baseline)?;
+        prediction += expected_subtree(
+            *tree_id,
+            0,
+            row,
+            subset_mask,
+            model_structure,
+            baseline,
+            binning,
+        )?;
     }
     Ok(prediction)
 }
@@ -509,6 +702,7 @@ fn expected_subtree(
     subset_mask: u64,
     model_structure: &ModelStructure<'_>,
     baseline: Option<&[f32]>,
+    binning: Option<&BinningContext>,
 ) -> ShapResult<f32> {
     let node_key = tree_local_key(tree_id, local_node_id);
     let Some(stump) = model_structure.nodes_by_tree_local_id.get(&node_key) else {
@@ -537,7 +731,7 @@ fn expected_subtree(
     if let Some(bit_position) = model_structure.split_feature_bit_positions[split_feature_index] {
         let is_known = (subset_mask & (1_u64 << bit_position)) != 0;
         if is_known {
-            let goes_left = stump_goes_left(&stump.split, row[split_feature_index]);
+            let goes_left = stump_goes_left(&stump.split, row[split_feature_index], binning);
             if goes_left {
                 return Ok(left_const
                     + expected_subtree(
@@ -547,6 +741,7 @@ fn expected_subtree(
                         subset_mask,
                         model_structure,
                         baseline,
+                        binning,
                     )?);
             }
             return Ok(right_const
@@ -557,6 +752,7 @@ fn expected_subtree(
                     subset_mask,
                     model_structure,
                     baseline,
+                    binning,
                 )?);
         }
     }
@@ -579,6 +775,7 @@ fn expected_subtree(
             subset_mask,
             model_structure,
             baseline,
+            binning,
         )?;
     let right_expected = right_const
         + expected_subtree(
@@ -588,6 +785,7 @@ fn expected_subtree(
             subset_mask,
             model_structure,
             baseline,
+            binning,
         )?;
 
     Ok(left_probability * left_expected + right_probability * right_expected)
@@ -645,39 +843,57 @@ fn verify_additivity(
     contributions: &[f32],
     row_index: usize,
     expected_value: f32,
+    binning: Option<&BinningContext>,
 ) -> ShapResult<()> {
     // Compute the prediction by walking each tree once and summing the leaf
     // values along the row's path.  Mirrors `distribute_linear_terms_for_row`.
     //
-    // **Tolerance policy.**  For scalar-leaf models we hold the canonical
-    // tight bound (`ADDITIVITY_TOLERANCE`).  Piecewise-linear leaves currently
-    // share a latent issue with the rest of the SHAP path: stump thresholds
-    // are stored as bin indices in the artifact, while the predictor crate
-    // converts them to float thresholds at load time.  SHAP's path walker
-    // here compares raw feature values against bin indices, so for models
-    // trained on continuous features (bin indices ≫ feature magnitudes) the
-    // walked path can diverge from the predictor's path.  For scalar leaves
-    // this still passes additivity because the wrong-but-consistent path
-    // yields the same scalar sum from both sides; for linear leaves the leaf
-    // value depends on `xj` so the wrong path produces measurably different
-    // values.  Rather than hard-fail explainability for an entire leaf model,
-    // we relax the check for linear-leaf artifacts and surface the limitation
-    // in user-facing docs.  The threshold-bin path-walk alignment is tracked
-    // for a dedicated follow-up.
-    let predicted = local_path_predict(model, row);
+    // **Tolerance policy.**  Additivity is checked against
+    //   atol + rtol * |predicted|
+    // rather than a fixed absolute bound.  This matches numpy `allclose`
+    // semantics and means accumulated f32 round-off across large
+    // explanation batches (e.g. `feature_importances()` over ~1000 rows
+    // on California Housing with `n_estimators=200`) does not raise even
+    // though the arithmetic is correct.
+    //
+    // Piecewise-linear leaves stay exempted from the strict check.
+    //
+    // Two distinct things are tangled here:
+    //
+    // 1. **Path walking.**  Legacy SHAP compared raw feature values
+    //    against bin-index thresholds while the predictor uses float
+    //    thresholds.  The `BinningContext` plumbing fixes this:
+    //    when supplied, the SHAP walker now uses the same float
+    //    thresholds and strict `<` comparison the predictor uses.
+    //    Constant-leaf artifacts under continuous binning now satisfy
+    //    strict additivity end-to-end.
+    //
+    // 2. **Linear-leaf training space.**  The engine trains
+    //    `LinearLeaf` weights and the persisted `feature_baseline`
+    //    over the bin-quantized matrix (`active_dataset.matrix.values`
+    //    is the bin-indexed payload, not raw float features).  At
+    //    predict time the Python path quantizes the row to bin indices
+    //    before calling the native predictor, so leaf eval stays in
+    //    bin-index space.  SHAP cannot mix raw features into
+    //    `wj * (xj - μj)` because both `wj` and `μj` are in bin-index
+    //    units.  This is a deeper redesign (train linear leaves on raw
+    //    features, or persist a raw-feature-space conversion of the
+    //    weights) tracked separately from the path-walker fix.
+    //
+    // Until (2) lands, SHAP on linear-leaf artifacts under continuous
+    // binning remains a best-effort interventional explanation and the
+    // strict additivity check is skipped.  Constant-leaf artifacts get
+    // the tightened check unconditionally.
+    let predicted = local_path_predict(model, row, binning);
     let reconstructed = expected_value + contributions.iter().sum::<f32>();
-    let tolerance = if model_has_linear_leaves(model) {
-        // Skip the strict equality check; SHAP still returns the path-based
-        // attribution + linear deviations, which sum to `predict_actual` when
-        // the path walk matches the predictor and otherwise produces a
-        // best-effort interventional explanation.
+    if model_has_linear_leaves(model) {
+        // Best-effort interventional explanation; see comment above.
         return Ok(());
-    } else {
-        ADDITIVITY_TOLERANCE
-    };
+    }
+    let tolerance = additivity_tolerance(predicted);
     if (predicted - reconstructed).abs() > tolerance {
         return Err(ShapError::ContractViolation(format!(
-            "row {row_index} additivity check failed: predicted={predicted}, reconstructed={reconstructed}, tolerance={tolerance}"
+            "row {row_index} additivity check failed: predicted={predicted}, reconstructed={reconstructed}, tolerance={tolerance} (atol={ADDITIVITY_ATOL}, rtol={ADDITIVITY_RTOL})"
         )));
     }
     Ok(())
@@ -688,7 +904,7 @@ fn verify_additivity(
 /// internally by `verify_additivity`.  This is the same path-walking logic as
 /// `distribute_linear_terms_for_row`, but here it accumulates the *full* leaf
 /// value (`eval_row`) rather than just the linear deviation.
-fn local_path_predict(model: &TrainedModel, row: &[f32]) -> f32 {
+fn local_path_predict(model: &TrainedModel, row: &[f32], binning: Option<&BinningContext>) -> f32 {
     let mut nodes_by_key: HashMap<u64, &TrainedStump> = HashMap::with_capacity(model.stumps.len());
     let mut tree_roots: Vec<u32> = Vec::new();
     for stump in &model.stumps {
@@ -707,7 +923,7 @@ fn local_path_predict(model: &TrainedModel, row: &[f32]) -> f32 {
         while let Some(stump) = nodes_by_key.get(&tree_local_key(tree_id, local_id)) {
             let feat = stump.split.feature_index as usize;
             let feature_value = row.get(feat).copied().unwrap_or(f32::NAN);
-            let goes_left = stump_goes_left(&stump.split, feature_value);
+            let goes_left = stump_goes_left(&stump.split, feature_value, binning);
             let leaf = if goes_left {
                 &stump.left_leaf_value
             } else {
@@ -854,6 +1070,7 @@ fn build_std_tree(
     parent_cover: f64,
     nodes: &HashMap<u64, &TrainedStump>,
     baseline: Option<&[f32]>,
+    binning: Option<&BinningContext>,
 ) -> StdTreeNode {
     let key = tree_local_key(tree_id, local_id);
     match nodes.get(&key) {
@@ -864,9 +1081,22 @@ fn build_std_tree(
         Some(stump) => {
             let left_cover = stump.split.left_stats.row_count as f64;
             let right_cover = stump.split.right_stats.row_count as f64;
+            // When a binning context is provided we bake the predictor-
+            // matching float threshold directly into the StdTreeNode; the
+            // TreeSHAP recursion (`ts_recurse`) consumes this field as the
+            // decision boundary and now compares with `<` instead of `<=`
+            // (see `goes_left_with_threshold`).  When `binning` is None
+            // we fall back to the legacy bin-index encoding.
+            let threshold = match binning {
+                Some(ctx) if !stump.split.is_categorical => ctx.float_threshold(
+                    stump.split.feature_index as usize,
+                    stump.split.threshold_bin,
+                ),
+                _ => stump.split.threshold_bin as f32,
+            };
             StdTreeNode::Internal {
                 feature_index: stump.split.feature_index as usize,
-                threshold: stump.split.threshold_bin as f32,
+                threshold,
                 default_left: stump.split.default_left,
                 is_categorical: stump.split.is_categorical,
                 categorical_bitset: stump.split.categorical_bitset.clone(),
@@ -877,6 +1107,7 @@ fn build_std_tree(
                     left_cover,
                     nodes,
                     baseline,
+                    binning,
                 )),
                 right: Box::new(build_std_tree(
                     tree_id,
@@ -885,6 +1116,7 @@ fn build_std_tree(
                     right_cover,
                     nodes,
                     baseline,
+                    binning,
                 )),
             }
         }
@@ -975,6 +1207,10 @@ fn ts_recurse(
     zero_fraction: f64,
     one_fraction: f64,
     feature_index: usize,
+    // When true, the tree's `threshold` fields hold float thresholds and
+    // the decision uses strict `<` (predictor-aligned).  When false the
+    // legacy bin-index encoding is used with `<=`.
+    use_float_compare: bool,
 ) {
     // Ensure the path vector has room for this depth.
     while path.len() <= depth {
@@ -1018,7 +1254,12 @@ fn ts_recurse(
                             let bit_idx = (cat_id % 8) as usize;
                             byte_idx < bs.len() && (bs[byte_idx] & (1 << bit_idx)) != 0
                         })
+                    } else if use_float_compare {
+                        // Predictor-aligned strict less-than against the
+                        // float threshold baked in by `build_std_tree`.
+                        *v < *threshold
                     } else {
+                        // Legacy bin-index comparison.
                         *v <= *threshold
                     }
                 })
@@ -1068,6 +1309,7 @@ fn ts_recurse(
                     incoming_zero * hot_zero,
                     incoming_one,
                     *node_feature,
+                    use_float_compare,
                 );
                 ts_recurse(
                     cold,
@@ -1078,6 +1320,7 @@ fn ts_recurse(
                     incoming_zero * cold_zero,
                     0.0,
                     *node_feature,
+                    use_float_compare,
                 );
             } else {
                 ts_recurse(
@@ -1089,6 +1332,7 @@ fn ts_recurse(
                     hot_zero,
                     1.0,
                     *node_feature,
+                    use_float_compare,
                 );
                 ts_recurse(
                     cold,
@@ -1099,6 +1343,7 @@ fn ts_recurse(
                     cold_zero,
                     0.0,
                     *node_feature,
+                    use_float_compare,
                 );
             }
         }
@@ -1106,11 +1351,26 @@ fn ts_recurse(
 }
 
 /// Compute SHAP values for a single row using pre-built standard trees.
-fn tree_shap_row(trees: &[StdTreeNode], row: &[f32], feature_count: usize) -> Vec<f64> {
+fn tree_shap_row(
+    trees: &[StdTreeNode],
+    row: &[f32],
+    feature_count: usize,
+    use_float_compare: bool,
+) -> Vec<f64> {
     let mut phi = vec![0.0_f64; feature_count];
     for tree in trees {
         let mut path = Vec::with_capacity(32);
-        ts_recurse(tree, row, &mut path, 0, &mut phi, 1.0, 1.0, usize::MAX);
+        ts_recurse(
+            tree,
+            row,
+            &mut path,
+            0,
+            &mut phi,
+            1.0,
+            1.0,
+            usize::MAX,
+            use_float_compare,
+        );
     }
     phi
 }
@@ -1119,6 +1379,7 @@ fn tree_shap_row(trees: &[StdTreeNode], row: &[f32], feature_count: usize) -> Ve
 fn explain_rows_tree_shap(
     model: &TrainedModel,
     rows: &[Vec<f32>],
+    binning: Option<&BinningContext>,
 ) -> ShapResult<ShapExplanationBatch> {
     validate_rows(rows, model.feature_count)?;
 
@@ -1149,7 +1410,7 @@ fn explain_rows_tree_shap(
         let root_cover = root_stump.split.left_stats.row_count as f64
             + root_stump.split.right_stats.row_count as f64;
 
-        let tree = build_std_tree(tree_id, 0, 0.0, root_cover, &nodes_map, baseline);
+        let tree = build_std_tree(tree_id, 0, 0.0, root_cover, &nodes_map, baseline, binning);
 
         // E[f_tree(x)] = cover-weighted average leaf value (computed on the
         // constant-part tree).  For linear leaves, the row-dependent
@@ -1164,15 +1425,23 @@ fn explain_rows_tree_shap(
     }
 
     let expected_value = expected_value_f64 as f32;
+    let use_float_compare = binning.is_some();
 
     let mut row_contributions = Vec::with_capacity(rows.len());
     for (row_index, row) in rows.iter().enumerate() {
-        let mut phi = tree_shap_row(&std_trees, row, model.feature_count);
+        let mut phi = tree_shap_row(&std_trees, row, model.feature_count, use_float_compare);
         if has_linear {
-            distribute_linear_terms_for_row(model, row, baseline, &mut phi);
+            distribute_linear_terms_for_row(model, row, baseline, binning, &mut phi);
         }
         let contributions: Vec<f32> = phi.iter().map(|v| *v as f32).collect();
-        verify_additivity(model, row, &contributions, row_index, expected_value)?;
+        verify_additivity(
+            model,
+            row,
+            &contributions,
+            row_index,
+            expected_value,
+            binning,
+        )?;
         row_contributions.push(contributions);
     }
 
@@ -1329,7 +1598,7 @@ mod tests {
 
     fn assert_close(actual: f32, expected: f32) {
         assert!(
-            (actual - expected).abs() <= ADDITIVITY_TOLERANCE,
+            (actual - expected).abs() <= ADDITIVITY_ATOL,
             "expected {expected}, got {actual}"
         );
     }
@@ -1480,6 +1749,86 @@ mod tests {
     }
 
     #[test]
+    fn binning_context_linear_matches_predictor_conversion() {
+        // The float threshold SHAP computes must equal the float
+        // threshold the predictor would compute via
+        // `convert_bin_thresholds_to_float`.  Spot-check a few bins.
+        let ctx = BinningContext::Linear {
+            feature_mins: vec![-2.0, 0.0],
+            feature_maxs: vec![3.0, 10.0],
+            max_data_bin: 254,
+        };
+        // Predictor formula: min + ((bin + 0.5) / 254) * (max - min).
+        for &bin in &[0u16, 1, 64, 127, 254] {
+            let shap_thr_f0 = ctx.float_threshold(0, bin);
+            let expected_f0 = -2.0 + ((bin as f32 + 0.5) / 254.0) * 5.0;
+            assert!((shap_thr_f0 - expected_f0).abs() < 1e-6);
+            let shap_thr_f1 = ctx.float_threshold(1, bin);
+            let expected_f1 = 0.0 + ((bin as f32 + 0.5) / 254.0) * 10.0;
+            assert!((shap_thr_f1 - expected_f1).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn binning_context_prebinned_matches_predictor_conversion() {
+        let ctx = BinningContext::PreBinned;
+        for &bin in &[0u16, 1, 64, 127, 254] {
+            // Predictor pre-binned: float threshold = bin + 0.5.
+            assert!((ctx.float_threshold(0, bin) - (bin as f32 + 0.5)).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn binning_context_quantile_matches_predictor_conversion() {
+        let ctx = BinningContext::Quantile {
+            feature_cuts: vec![vec![0.1, 0.5, 0.9], vec![1.0, 2.0, 3.0, 4.0]],
+        };
+        assert!((ctx.float_threshold(0, 0) - 0.1).abs() < 1e-6);
+        assert!((ctx.float_threshold(0, 2) - 0.9).abs() < 1e-6);
+        // Past the last cut → f32::MAX.
+        assert_eq!(ctx.float_threshold(0, 3), f32::MAX);
+        assert_eq!(ctx.float_threshold(1, 4), f32::MAX);
+    }
+
+    #[test]
+    fn binning_context_explanation_matches_predictor_on_constant_leaves() {
+        // Build a simple two-tree constant-leaf model with bin-index
+        // thresholds.  SHAP without binning would compare raw values
+        // against bin indices and reach a different leaf than the
+        // predictor (which uses float thresholds).  With binning, SHAP
+        // must reach the same leaf and produce strict additivity.
+        let model = fixture_model();
+        let artifact = model.to_artifact_bytes().expect("serializes");
+
+        // Feature mins/maxs that put raw input values within the
+        // float-threshold-converted decision region.  fixture_model
+        // splits on feature 0 at bin 2 and feature 1 at bin 1.
+        let binning = BinningContext::Linear {
+            feature_mins: vec![0.0, 0.0],
+            feature_maxs: vec![10.0, 10.0],
+            max_data_bin: 254,
+        };
+        let rows = vec![
+            vec![0.05_f32, 0.05_f32], // both below thresholds
+            vec![5.0_f32, 5.0_f32],   // both above
+        ];
+
+        let explanation = explain_rows_from_artifact_bytes_with_binning(&artifact, &rows, &binning)
+            .expect("with-binning explains");
+        // Additivity check inside explain enforces strict tolerance
+        // when binning is provided and leaves are scalar — if this
+        // returns Ok the path walker matched the predictor's path.
+        for (row_index, row) in rows.iter().enumerate() {
+            let reconstructed =
+                explanation.expected_value + explanation.values[row_index].iter().sum::<f32>();
+            // Validate against a hand walk via local_path_predict —
+            // same code path the verify_additivity call uses internally.
+            let predicted = local_path_predict(&model, row, Some(&binning));
+            assert!((reconstructed - predicted).abs() < 1e-4);
+        }
+    }
+
+    #[test]
     fn explain_rows_from_artifact_assigns_zero_to_unused_features() {
         let model = fixture_model_with_unused_feature();
         let artifact = model.to_artifact_bytes().expect("artifact serializes");
@@ -1564,8 +1913,8 @@ mod tests {
         let model = fixture_model();
         let rows = fixture_rows();
 
-        let brute_force = explain_rows_brute_force(&model, &rows).expect("brute force works");
-        let tree_shap = explain_rows_tree_shap(&model, &rows).expect("tree shap works");
+        let brute_force = explain_rows_brute_force(&model, &rows, None).expect("brute force works");
+        let tree_shap = explain_rows_tree_shap(&model, &rows, None).expect("tree shap works");
 
         assert_close(brute_force.expected_value, tree_shap.expected_value);
         assert_eq!(brute_force.values.len(), tree_shap.values.len());
@@ -1574,7 +1923,7 @@ mod tests {
             assert_eq!(bf_row.len(), ts_row.len());
             for (bf_val, ts_val) in bf_row.iter().zip(ts_row.iter()) {
                 assert!(
-                    (bf_val - ts_val).abs() <= ADDITIVITY_TOLERANCE,
+                    (bf_val - ts_val).abs() <= ADDITIVITY_ATOL,
                     "brute force {bf_val} vs tree shap {ts_val}"
                 );
             }
@@ -1586,13 +1935,13 @@ mod tests {
         let model = fixture_model_with_unused_feature();
         let rows = vec![vec![0.0, 0.0, 5.0], vec![3.0, 2.0, 9.0]];
 
-        let brute_force = explain_rows_brute_force(&model, &rows).expect("brute force works");
-        let tree_shap = explain_rows_tree_shap(&model, &rows).expect("tree shap works");
+        let brute_force = explain_rows_brute_force(&model, &rows, None).expect("brute force works");
+        let tree_shap = explain_rows_tree_shap(&model, &rows, None).expect("tree shap works");
 
         for (bf_row, ts_row) in brute_force.values.iter().zip(tree_shap.values.iter()) {
             for (bf_val, ts_val) in bf_row.iter().zip(ts_row.iter()) {
                 assert!(
-                    (bf_val - ts_val).abs() <= ADDITIVITY_TOLERANCE,
+                    (bf_val - ts_val).abs() <= ADDITIVITY_ATOL,
                     "brute force {bf_val} vs tree shap {ts_val}"
                 );
             }
@@ -1606,7 +1955,7 @@ mod tests {
     fn tree_shap_additivity_holds_for_all_rows() {
         let model = fixture_model();
         let rows = fixture_rows();
-        let explanation = explain_rows_tree_shap(&model, &rows).expect("tree shap works");
+        let explanation = explain_rows_tree_shap(&model, &rows, None).expect("tree shap works");
 
         for (row, values) in rows.iter().zip(explanation.values.iter()) {
             let predicted = model.predict_row(row).expect("predicts");
@@ -1637,13 +1986,13 @@ mod tests {
 
         let rows = vec![vec![3.0, 0.0], vec![8.0, 0.0]];
 
-        let brute_force = explain_rows_brute_force(&model, &rows).expect("brute force works");
-        let tree_shap = explain_rows_tree_shap(&model, &rows).expect("tree shap works");
+        let brute_force = explain_rows_brute_force(&model, &rows, None).expect("brute force works");
+        let tree_shap = explain_rows_tree_shap(&model, &rows, None).expect("tree shap works");
 
         for (bf_row, ts_row) in brute_force.values.iter().zip(tree_shap.values.iter()) {
             for (bf_val, ts_val) in bf_row.iter().zip(ts_row.iter()) {
                 assert!(
-                    (bf_val - ts_val).abs() <= ADDITIVITY_TOLERANCE,
+                    (bf_val - ts_val).abs() <= ADDITIVITY_ATOL,
                     "brute force {bf_val} vs tree shap {ts_val}"
                 );
             }
@@ -1684,8 +2033,8 @@ mod tests {
             vec![3.0, 5.0, 0.0],
         ];
 
-        let brute_force = explain_rows_brute_force(&model, &rows).expect("brute force works");
-        let tree_shap = explain_rows_tree_shap(&model, &rows).expect("tree shap works");
+        let brute_force = explain_rows_brute_force(&model, &rows, None).expect("brute force works");
+        let tree_shap = explain_rows_tree_shap(&model, &rows, None).expect("tree shap works");
 
         for (row_idx, (bf_row, ts_row)) in brute_force
             .values
@@ -1695,7 +2044,7 @@ mod tests {
         {
             for (feat_idx, (bf_val, ts_val)) in bf_row.iter().zip(ts_row.iter()).enumerate() {
                 assert!(
-                    (bf_val - ts_val).abs() <= ADDITIVITY_TOLERANCE,
+                    (bf_val - ts_val).abs() <= ADDITIVITY_ATOL,
                     "row {row_idx} feature {feat_idx}: brute force {bf_val} vs tree shap {ts_val}"
                 );
             }
@@ -1763,7 +2112,7 @@ mod tests {
             vec![3.0, 5.0], // cat 3 -> right
         ];
 
-        let explanation = explain_rows_brute_force(&model, &rows).expect("brute force works");
+        let explanation = explain_rows_brute_force(&model, &rows, None).expect("brute force works");
 
         // Verify additivity: sum of SHAP values + expected_value == prediction
         for (row, values) in rows.iter().zip(explanation.values.iter()) {
@@ -1800,7 +2149,7 @@ mod tests {
             vec![3.0, 5.0],
         ];
 
-        let explanation = explain_rows_tree_shap(&model, &rows).expect("tree shap works");
+        let explanation = explain_rows_tree_shap(&model, &rows, None).expect("tree shap works");
 
         for (row, values) in rows.iter().zip(explanation.values.iter()) {
             let predicted = model.predict_row(row).expect("predicts");
@@ -1849,8 +2198,8 @@ mod tests {
             vec![3.0, 5.0], // cat 3 right, numeric right
         ];
 
-        let brute_force = explain_rows_brute_force(&model, &rows).expect("brute force works");
-        let tree_shap = explain_rows_tree_shap(&model, &rows).expect("tree shap works");
+        let brute_force = explain_rows_brute_force(&model, &rows, None).expect("brute force works");
+        let tree_shap = explain_rows_tree_shap(&model, &rows, None).expect("tree shap works");
 
         assert_close(brute_force.expected_value, tree_shap.expected_value);
 
@@ -1862,7 +2211,7 @@ mod tests {
         {
             for (feat_idx, (bf_val, ts_val)) in bf_row.iter().zip(ts_row.iter()).enumerate() {
                 assert!(
-                    (bf_val - ts_val).abs() <= ADDITIVITY_TOLERANCE,
+                    (bf_val - ts_val).abs() <= ADDITIVITY_ATOL,
                     "row {row_idx} feature {feat_idx}: brute force {bf_val} vs tree shap {ts_val}"
                 );
             }
@@ -1920,8 +2269,8 @@ mod tests {
             vec![8.0, 5.0],
         ];
 
-        let brute_force = explain_rows_brute_force(&model, &rows).expect("brute force works");
-        let tree_shap = explain_rows_tree_shap(&model, &rows).expect("tree shap works");
+        let brute_force = explain_rows_brute_force(&model, &rows, None).expect("brute force works");
+        let tree_shap = explain_rows_tree_shap(&model, &rows, None).expect("tree shap works");
 
         for (row_idx, (bf_row, ts_row)) in brute_force
             .values
@@ -1931,7 +2280,7 @@ mod tests {
         {
             for (feat_idx, (bf_val, ts_val)) in bf_row.iter().zip(ts_row.iter()).enumerate() {
                 assert!(
-                    (bf_val - ts_val).abs() <= ADDITIVITY_TOLERANCE,
+                    (bf_val - ts_val).abs() <= ADDITIVITY_ATOL,
                     "row {row_idx} feature {feat_idx}: brute force {bf_val} vs tree shap {ts_val}"
                 );
             }
@@ -2057,7 +2406,7 @@ mod tests {
         // exactly w_left * (1.5 - 0.5) = 0.7 * 1.0 = 0.7.
         let delta_phi_feat1 = explanation.values[1][1] - explanation.values[0][1];
         assert!(
-            (delta_phi_feat1 - 0.7).abs() <= ADDITIVITY_TOLERANCE,
+            (delta_phi_feat1 - 0.7).abs() <= ADDITIVITY_ATOL,
             "expected ΔSHAP[feature 1] = 0.7, got {delta_phi_feat1}"
         );
     }
@@ -2120,7 +2469,7 @@ mod tests {
             let predicted = predictor.predict_row(row).expect("predict succeeds");
             let reconstructed = explanation.expected_value + phi.iter().sum::<f32>();
             assert!(
-                (reconstructed - predicted).abs() <= ADDITIVITY_TOLERANCE,
+                (reconstructed - predicted).abs() <= ADDITIVITY_ATOL,
                 "row {row_idx}: reconstructed {reconstructed} vs predicted {predicted}"
             );
         }
