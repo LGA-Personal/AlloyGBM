@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.7.4 (unreleased)
+## 0.7.4
 
 Bug-fix release.  Closes the remaining v0.7.x carryover documented in
 `docs/limitations.md` for SHAP strict additivity on
@@ -32,6 +32,16 @@ Bug-fix release.  Closes the remaining v0.7.x carryover documented in
   (via the internal Rust check, since the raw margin isn't exposed in
   Python), `feature_importances()` (TreeSHAP polynomial path), and
   mixed scalar+linear-leaf artifacts.
+
+### Documented for v0.7.x follow-ups (deferred to 0.8.0)
+
+- Joint shared-tree multi-label ranking.  The current
+  `MultiLabelGBMRanker` trains K independent per-label rankers under a
+  unified API; this is numerically equivalent to training each label
+  separately.  Joint shared-tree training (where a single ensemble
+  updates all label predictions simultaneously) lands alongside the
+  v0.8.0 shared-histogram speedup, where the architectural change has
+  a real performance story.
 
 ## 0.7.3
 

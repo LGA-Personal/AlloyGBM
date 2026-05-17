@@ -12,14 +12,14 @@ types.
 
 .. note::
 
-   AlloyGBM ``0.7.3`` is a bug-fix release.  It closes the four
-   limitations queued in v0.7.2: SHAP additivity tolerance
-   (``atol + rtol * |predicted|``), SHAP path-walker alignment with
-   the predictor's float thresholds (new ``BinningContext``),
-   MorphBoost warm-start EMA persistence (MorphMetadata artifact
-   section v2), and the ``pyo3`` 0.23 → 0.24 upgrade
-   (clears RUSTSEC-2025-0020).  No user-visible API breakage.  See
-   :doc:`release` for full notes.
+   AlloyGBM ``0.7.4`` is a bug-fix release.  It closes the remaining
+   v0.7.x SHAP-additivity carryover: strict additivity
+   (``atol + rtol·|predict(x)|``) now holds for ``leaf_model="linear"``
+   artifacts on the default predictor-aligned binning path.  The fix
+   walks the row's full path and credits ``Σⱼ wⱼ·(xⱼ − μⱼ)`` at every
+   visited node — matching how ``predict`` accumulates
+   ``leaf.eval_row(row)`` at each visited node.  No user-visible API
+   breakage.  See :doc:`release` for full notes.
 
 Getting started
 ---------------
