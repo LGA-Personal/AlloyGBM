@@ -521,7 +521,7 @@ class GBMRegressor(_GBMRegressorBase):
             )
         if str(leaf_solver) == "dro" and str(leaf_model) != "constant":
             raise ValueError(
-                "leaf_solver='dro' requires leaf_model='constant' in v0.7.3"
+                "leaf_solver='dro' requires leaf_model='constant' in v0.7.4"
             )
         if str(neutralization) not in (
             "none",
@@ -1232,7 +1232,7 @@ class GBMRegressor(_GBMRegressorBase):
 
         if self.leaf_solver == "dro" and self.leaf_model != "constant":
             raise ValueError(
-                "leaf_solver='dro' requires leaf_model='constant' in v0.7.3"
+                "leaf_solver='dro' requires leaf_model='constant' in v0.7.4"
             )
         if self.neutralization != "split_penalty" and self.factor_penalty != 0.0:
             raise ValueError(
@@ -2812,17 +2812,18 @@ class GBMRegressor(_GBMRegressorBase):
     ) -> list[list[float]] | tuple[float, list[list[float]]]:
         """Return SHAP values for the provided rows using the fitted artifact.
 
-        For ``leaf_model="linear"`` (piecewise-linear) artifacts this is a
-        best-effort *interventional* decomposition: the path-based
-        attribution acts on each leaf's "constant part"
-        ``intercept + Σ wj·μj_global`` and per-feature deviations
-        ``wj · (xj − μj_global)`` are credited directly to each regressor.
-        ``Σ shap_values + expected_value == predict(x)`` holds exactly when
-        SHAP's internal path-walk matches the predictor's; on continuous
-        features it can drift slightly because SHAP currently compares raw
-        values against stored bin-index thresholds rather than the
-        predictor's converted float thresholds.  Tightening that alignment
-        is tracked for a follow-up release.
+        For ``leaf_model="linear"`` (piecewise-linear) artifacts this is an
+        *interventional* decomposition: the path-based attribution acts on
+        each leaf's "constant part" ``intercept + Σ wj·μj_global`` and
+        per-feature deviations ``wj · (xj − μj_global)`` are credited
+        directly to each regressor at every visited node along the row's
+        path through each tree.
+
+        As of v0.7.4, ``Σ shap_values + expected_value == predict(x)``
+        holds within ``atol + rtol · |predict(x)|`` (default
+        ``atol=1e-5, rtol=1e-4``) for every leaf model on the default
+        predictor-aligned binning path.  The legacy non-binning path
+        retains the best-effort exemption for linear leaves only.
         """
         if not self._is_fitted:
             raise RuntimeError("GBMRegressor must be fit before shap_values")

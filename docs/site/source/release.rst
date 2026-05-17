@@ -1,7 +1,52 @@
 Release and platform policy
 ===========================
 
-AlloyGBM ``0.7.3`` release notes and platform policy.
+AlloyGBM ``0.7.4`` release notes and platform policy.
+
+What's new in 0.7.4
+-------------------
+
+Bug-fix release.  Closes the remaining v0.7.x carryover documented in
+``docs/limitations.md`` for SHAP strict additivity on
+``leaf_model="linear"`` artifacts.  No user-visible API breakage.
+
+**SHAP strict additivity for piecewise-linear leaves:**
+
+- Pre-v0.7.4 ``distribute_linear_terms_for_row`` credited the per-feature
+  deviation ``Σⱼ wⱼ·(xⱼ − μⱼ)`` only at each tree's terminal leaf.  The
+  predictor accumulates ``leaf.eval_row(row)`` at **every visited node**
+  along the row's path, so SHAP was uncrediting one
+  ``Σⱼ wⱼ·(xⱼ − μⱼ)`` per internal node per tree per row — producing
+  additivity gaps on the order of the predictions themselves
+  (~3.85 on linear-data predictions of magnitude ~10 with
+  ``n_estimators=100, max_depth=6``).
+- v0.7.4 walks the full row path and credits the linear deviation at
+  every visited leaf.  The brute-force Shapley and TreeSHAP polynomial
+  paths share the helper so both get the fix.
+- The ``model_has_linear_leaves`` exemption in ``verify_additivity`` is
+  now gated on ``binning.is_none()``, so the predictor-aligned
+  ``BinningContext`` callers — i.e. the default Python path for
+  continuous features — get the strict
+  ``atol + rtol·|predicted|`` tolerance check.
+- Coverage: 44 new regression tests in
+  ``bindings/python/tests/test_shap_pl_strict_additivity.py``
+  exercising every binning strategy × max-bin width × ``lambda_l2`` ×
+  ``max_depth`` × ``n_estimators`` combination, plus
+  ``training_mode="manual"`` and ``"morph"``,
+  ``interaction_constraints``, :class:`~alloygbm.GBMRanker`,
+  :class:`~alloygbm.GBMClassifier` (via the internal Rust check, since
+  the raw margin is not exposed in Python),
+  ``feature_importances`` (TreeSHAP polynomial path), and mixed
+  scalar+linear-leaf artifacts.
+
+**Documented for v0.7.x follow-ups (deferred to 0.8.0):**
+
+- Joint shared-tree multi-label ranking.  The current
+  :class:`~alloygbm.MultiLabelGBMRanker` trains K independent per-label
+  rankers under a unified API and is numerically equivalent to training
+  each label separately.  Joint shared-tree training lands alongside
+  the v0.8.0 shared-histogram speedup where the architectural change
+  has a real performance story.
 
 What's new in 0.7.3
 -------------------

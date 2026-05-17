@@ -41,7 +41,7 @@ maturin develop --manifest-path bindings/python/Cargo.toml --release
 
 AlloyGBM targets Python `3.11+` and uses a native Rust extension module.
 
-Wheel targets for `0.7.3`:
+Wheel targets for `0.7.4`:
 
 - macOS `arm64`
 - Linux `x86_64` (manylinux)
@@ -168,7 +168,7 @@ model.fit(X_train, y_train)
 ```
 
 `leaf_solver="dro"` works with `GBMRegressor`, `GBMClassifier`, and
-`GBMRanker`, and composes with `training_mode="morph"`. In v0.7.3 it requires
+`GBMRanker`, and composes with `training_mode="morph"`. It requires
 `leaf_model="constant"`; piecewise-linear leaves still use the standard PL
 solver. `dro_radius=0.0` preserves standard-leaf predictions while retaining
 DRO metadata in the artifact.
@@ -403,8 +403,7 @@ Benchmark tooling and methodology live in [benchmarks/README.md](benchmarks/READ
 
 - CPU-only runtime (GPU backend is architecturally planned but not implemented)
 - No dart/goss boosting modes
-- SHAP additivity for `leaf_model="linear"` on continuous features is still relaxed — v0.7.3 fixed the path walker for *scalar*-leaf artifacts, but linear-leaf weights and the feature baseline are still computed in bin space at fit time, so the per-leaf row-deviation decomposition can drift on continuous data. Migrating PL weight training to raw feature space is queued for a follow-up release.
-- `MultiLabelGBMRanker` trains K independent per-label rankers; joint shared-tree multi-label boosting is queued.
+- `MultiLabelGBMRanker` trains K independent per-label rankers; joint shared-tree multi-label boosting lands alongside the v0.8.0 shared-histogram speedup.
 - `leaf_solver="dro"` is a robust scalar leaf update, not a full raw-distribution Wasserstein DRO guarantee
 
 See [docs/limitations.md](docs/limitations.md) for the full list.

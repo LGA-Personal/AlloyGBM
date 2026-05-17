@@ -4,6 +4,16 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
+The `0.7.4` release closes the remaining v0.7.x SHAP-additivity
+carryover: strict additivity (`atol + rtol·|predict(x)|`) now holds for
+`leaf_model="linear"` artifacts on the default predictor-aligned binning
+path.  The fix walks the row's full path and credits
+`Σⱼ wⱼ·(xⱼ − μⱼ)` at every visited node — matching how `predict`
+accumulates `leaf.eval_row(row)` — across `GBMRegressor`,
+`GBMClassifier`, `GBMRanker`, `training_mode="manual"` and `"morph"`,
+both binning strategies, with or without `interaction_constraints`.
+No user-visible API breakage.
+
 The `0.7.3` release closes the four limitations queued in v0.7.2:
 SHAP additivity tolerance (`atol + rtol * |p|`), SHAP path-walker
 alignment with predictor float thresholds (new `BinningContext`),
@@ -34,6 +44,27 @@ artifacts. The `0.5.0` release introduced piecewise-linear (PL) tree leaves via
 `leaf_model="linear"` on all three estimators. The `0.4.0` release introduced
 the opt-in MorphBoost adaptive split criterion, per-iteration learning-rate
 schedules, and SIMD-accelerated histogram and EMA kernels.
+
+## What Shipped In 0.7.4
+
+Bug-fix release.  Closes the remaining v0.7.x carryover documented in
+`docs/limitations.md` for SHAP strict additivity on `leaf_model="linear"`
+artifacts.
+
+- **SHAP strict additivity for PL leaves.**  Pre-v0.7.4,
+  `distribute_linear_terms_for_row` credited the per-feature deviation
+  `Σⱼ wⱼ·(xⱼ − μⱼ)` only at each tree's terminal leaf.  The predictor
+  accumulates `leaf.eval_row(row)` at **every visited node** along the
+  row's path, so SHAP was uncrediting one `Σⱼ wⱼ·(xⱼ − μⱼ)` per internal
+  node per tree per row — producing additivity gaps on the order of the
+  predictions themselves.  v0.7.4 walks the full path and credits the
+  linear deviation at every visited leaf; the brute-force Shapley and
+  TreeSHAP polynomial paths share the same helper so both get the fix.
+  The `model_has_linear_leaves` exemption in `verify_additivity` is now
+  gated on `binning.is_none()` — the predictor-aligned `BinningContext`
+  callers (default Python path for continuous features) get the strict
+  tolerance check.  Coverage: 44 new regression tests in
+  `bindings/python/tests/test_shap_pl_strict_additivity.py`.
 
 ## What Shipped In 0.7.3
 

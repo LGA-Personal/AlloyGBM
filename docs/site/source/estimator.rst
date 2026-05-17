@@ -107,7 +107,7 @@ DRO leaf solver
   penalizes weak leaf signal by within-leaf gradient dispersion.
 - ``dro_radius: float = 0.05`` -- non-negative penalty scale. ``0.0`` preserves
   standard-leaf predictions while recording DRO metadata.
-- ``dro_metric: str = "wasserstein"`` -- the only accepted v0.7.3 value. It
+- ``dro_metric: str = "wasserstein"`` -- the only accepted v0.7.4 value. It
   denotes a Wasserstein-inspired closed-form robust counterpart over leaf
   gradient uncertainty.
 
@@ -115,7 +115,7 @@ This is not a full Wasserstein optimizer over raw feature/target
 distributions. Inference speed is unchanged because robust scalar leaf values
 are stored directly in the artifact. ``leaf_solver="dro"`` works on all three
 estimators, composes with ``training_mode="morph"``, and requires
-``leaf_model="constant"`` in v0.7.3.
+``leaf_model="constant"`` in v0.7.4.
 
 Factor-neutral boosting
 -----------------------
@@ -253,7 +253,7 @@ Piecewise-linear leaves
   - ``"linear"`` -- each leaf stores a small linear model
     ``f_s(x) = b_s + Σ α_j x_j`` (up to 8 regressors per leaf, inherited from
     the split path's feature indices; the per-leaf cap is internal and not
-    user-tunable in v0.7.3). Optimal weights are solved in closed form via the
+    user-tunable in v0.7.4). Optimal weights are solved in closed form via the
     ridge regression ``α* = -(XᵀHX + λI)⁻¹ Xᵀg``, regularised by ``lambda_l2``.
 
 Empirically, ``"linear"`` converges in fewer rounds on data with linear
@@ -267,12 +267,12 @@ Limitations:
 - Native-bitset categorical splits (``max_cat_threshold > 0``) fall back to
   constant leaves at the categorical split node; descendant leaves below the
   split use linear leaves on remaining numeric regressors.
-- SHAP (``shap_values``, ``feature_importances``) supports ``leaf_model="linear"``
-  as of v0.7.1, returning a best-effort interventional decomposition. Exact
-  additivity holds for path-walk-aligned artifacts; on continuous-feature
-  models the reconstruction can drift slightly because SHAP's internal path
-  walker still compares against bin-index thresholds. See
-  :doc:`explanations` and ``docs/limitations.md`` for details.
+- SHAP (``shap_values``, ``feature_importances``) supports
+  ``leaf_model="linear"`` with strict additivity as of v0.7.4: the
+  reconstruction satisfies ``atol + rtol·|predict(x)|`` (default
+  ``1e-5 + 1e-4·|predict(x)|``) on the default predictor-aligned binning
+  path.  See :doc:`explanations` for the decomposition and
+  ``docs/limitations.md`` for the legacy-non-binning exemption.
 - ``leaf_model="linear"`` composes with ``training_mode="morph"``.
 
 Multi-label ranking
@@ -292,7 +292,8 @@ a list of length ``n_labels`` for heterogeneous objectives.  ``save_model``
 serialises every per-label ranker into a single ``.mlrk`` bundle via
 ``pickle.HIGHEST_PROTOCOL``.
 
-Joint shared-tree multi-label boosting is a v0.7.3 follow-up; see
+Joint shared-tree multi-label boosting is deferred to v0.8.0
+(paired with the shared-histogram speedup); see
 ``docs/limitations.md`` for the upgrade-path caveat.
 
 MorphBoost (Adaptive Split Criterion)

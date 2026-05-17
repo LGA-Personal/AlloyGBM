@@ -75,24 +75,24 @@ Leaf model compatibility
 satisfying ``Σ shap_values + expected_value == predict(x)``.
 
 As of v0.7.1, ``shap_values(...)`` and ``feature_importances(...)`` also
-accept ``leaf_model="linear"`` (piecewise-linear) artifacts and return a
-*best-effort interventional* decomposition: the path-based machinery
-attributes each leaf's "constant part"
-``intercept + Σ wj · μj_global``, and per-leaf row deviations
-``wj · (xj − μj_global)`` are credited directly to the regressor features.
-Global per-feature means ``μj_global`` are captured at fit time and stored
-in the artifact, so SHAP is self-contained — the original training data is
-not required at explain time.
+accept ``leaf_model="linear"`` (piecewise-linear) artifacts and return an
+*interventional* decomposition: the path-based machinery attributes each
+leaf's "constant part" ``intercept + Σ wj · μj_global``, and per-leaf row
+deviations ``wj · (xj − μj_global)`` are credited directly to the regressor
+features along the row's path.  Global per-feature means ``μj_global`` are
+captured at fit time and stored in the artifact, so SHAP is self-contained
+— the original training data is not required at explain time.
 
-Exact additivity holds when SHAP's internal path walker reaches the same
-leaf as the predictor. Currently SHAP compares raw feature values against
-stump ``threshold_bin`` indices cast to ``f32``, while the predictor crate
-converts those indices to float thresholds at load time. For scalar leaves
-the divergence is masked; for linear leaves on continuous-feature artifacts
-it can cause measurable additivity drift. The strict additivity check is
-therefore relaxed for linear-leaf models so explanations remain available;
-tightening path-walk alignment is queued for a follow-up release. See
-``docs/limitations.md`` for the full caveat.
+As of v0.7.4, strict additivity
+(``Σ shap_values + expected_value == predict(x)`` within
+``atol + rtol·|predict(x)|``, default ``1e-5 + 1e-4·|predict(x)|``) also
+holds for ``leaf_model="linear"`` artifacts on the default
+predictor-aligned binning path.  v0.7.3's ``BinningContext`` aligns the
+SHAP path walker to the predictor's float thresholds; v0.7.4 credits
+``Σⱼ wⱼ·(xⱼ − μⱼ)`` at every visited node along the row's path (matching
+how ``predict`` accumulates ``leaf.eval_row(row)`` at each visited node).
+The legacy non-binning SHAP path retains a best-effort exemption for
+linear leaves only.
 
 .. figure:: _static/shap_tree_path_example.png
    :alt: SHAP explanation example showing a highlighted decision-tree path and additive feature contributions to a prediction.

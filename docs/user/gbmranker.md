@@ -160,7 +160,8 @@ group = [0, 0, 0, 1, 1, 2, 2, 2, 2]
   `MultiLabelGBMRanker`, which trains one independent `GBMRanker` per label
   sharing `group` / `factor_exposures` / kwargs and supports per-label
   `ranking_objective` lists. Joint shared-tree multi-label boosting is
-  queued for v0.7.3 — see [../limitations.md](../limitations.md).
+  deferred to v0.8.0 (paired with the shared-histogram speedup) — see
+  [../limitations.md](../limitations.md).
 - Group identifiers must be unsigned integers
 
 ## Multi-Output Ranking — `MultiLabelGBMRanker`

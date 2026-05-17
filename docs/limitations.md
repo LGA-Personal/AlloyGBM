@@ -1,6 +1,6 @@
 # AlloyGBM Current Limitations
 
-Last updated for v0.7.3.
+Last updated for v0.7.4.
 
 ## Remaining Limitations
 
@@ -35,35 +35,6 @@ typically reduces total model size for related tasks.  That is the
 remaining v0.7.x follow-up, alongside the
 ``MulticlassSoftmaxObjective``-style K-tree-per-round engine plumbing
 for ranking objectives.
-
-### 4. SHAP for Piecewise-Linear Leaves — Best-Effort Decomposition (Narrowed)
-
-`shap_values()` accepts `leaf_model="linear"` artifacts and returns an
-*interventional* decomposition: the path-based TreeSHAP / brute force
-machinery attributes each leaf's "constant part"
-`intercept + Σ wj · μj_global`, then per-leaf row deviations
-`wj · (xj − μj_global)` are credited directly to the regressor
-features.  Global per-feature means `μj_global` are captured at fit
-time and persisted in the `FeatureBaseline` artifact section.
-
-v0.7.3 fixed the SHAP path-walker so it uses the same float thresholds
-the predictor uses (see `shap::BinningContext` + the new
-`shap_explain_rows_with_binning` PyO3 entry points), eliminating the
-path-walk vs. predict-path divergence for *scalar*-leaf artifacts on
-continuous features.
-
-What remains:  linear-leaf *weights* and the `feature_baseline` are
-still computed in bin space at fit time, so the per-leaf row deviation
-`wj · (xj − μj)` SHAP attributes is computed against bin-quantized
-quantities while the predictor evaluates the leaf against raw feature
-values.  Strict additivity (`Σ shap + expected_value == predict(x)`)
-therefore still does not hold for `leaf_model="linear"` on continuous
-features, and the linear-leaf return-Ok exemption in
-`verify_additivity` remains in place when `binning=None`.
-
-Fixing this requires migrating PL weight training to raw feature
-space, which is a larger leaf-solver change.  Queued for a follow-up
-release.
 
 ## Resolved (Previously Limitations)
 
@@ -113,6 +84,19 @@ The following were limitations in prior versions and have been addressed:
 - RUSTSEC-2025-0020 in `pyo3 < 0.24.1` (now: v0.7.3 — pyo3 0.23.5 →
   0.24, `deny.toml` and the cargo-audit CI step no longer ignore the
   advisory)
+- Strict SHAP additivity for `leaf_model="linear"` on continuous
+  features (now: v0.7.4 — `distribute_linear_terms_for_row` credits
+  `wⱼ · (xⱼ − μⱼ)` at every visited node along the row's path,
+  matching how `predict` accumulates `leaf.eval_row(row)` at each
+  visited node; the linear-leaf exemption in `verify_additivity` was
+  removed when a `BinningContext` is supplied — i.e. for the default
+  Python path on continuous features.  Strict additivity now holds
+  for `GBMRegressor`, `GBMClassifier`, and `GBMRanker` under
+  `leaf_model="linear"`, with `training_mode="manual"` or
+  `"morph"`, on both `quantile` and `linear` binning, with or without
+  `interaction_constraints`, across `lambda_l2`, `max_depth`,
+  `n_estimators` and skewed-scale features.  The legacy non-binning
+  path retains the exemption.)
 - Multiclass prediction per-row allocation (now: zero-copy dense slice prediction)
 - Single fixed split criterion (now: opt-in MorphBoost adaptive criterion via
   `training_mode="morph"`, including EMA-driven gain shaping, depth/iteration

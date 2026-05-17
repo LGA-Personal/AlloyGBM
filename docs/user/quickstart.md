@@ -183,7 +183,7 @@ model = GBMRegressor(
 model.fit(X_train, y_train)
 ```
 
-`dro_metric="wasserstein"` is the v0.7.3 metric name for this
+`dro_metric="wasserstein"` is the v0.7.4 metric name for this
 Wasserstein-inspired gradient-uncertainty counterpart. It is not a full
 raw-distribution Wasserstein DRO guarantee. `leaf_solver="dro"` requires
 `leaf_model="constant"` and composes with `training_mode="morph"`.
@@ -210,10 +210,10 @@ model.fit(X_train, y_train)
 ```
 
 `leaf_model="linear"` works on `GBMClassifier` and `GBMRanker` too, and
-composes with `training_mode="morph"`. As of v0.7.1 SHAP also accepts
-`leaf_model="linear"` artifacts as a best-effort interventional
-decomposition; strict additivity is relaxed for continuous-feature PL
-artifacts (see [explanations.md](explanations.md)). Full reference:
+composes with `training_mode="morph"`. As of v0.7.4, SHAP also satisfies
+strict additivity (`atol + rtol·|predict(x)|`) for `leaf_model="linear"`
+artifacts on the default predictor-aligned binning path; see
+[explanations.md](explanations.md) for details. Full reference:
 [GBMRegressor — Piecewise-Linear Leaves](gbmregressor.md#piecewise-linear-leaves).
 
 ## Validation And Early Stopping

@@ -469,8 +469,11 @@ fn explain_rows_brute_force(
         // Linear-leaf interventional decomposition: the brute-force path
         // attribution above is computed on the "constant part" of each leaf
         // (`intercept + Σ wj * μj`).  Adding `wj * (xj - μj)` per regressor
-        // for the leaf each row reaches restores `predict(x)` exactly while
-        // attributing the row's deviation directly to the relevant features.
+        // at *every visited node along the row's path* restores `predict(x)`
+        // exactly (matching how `predict` accumulates `leaf.eval_row(row)`
+        // at each visited node) while attributing the row's deviation
+        // directly to the relevant features.  See
+        // `distribute_linear_terms_for_row` for the full path walk.
         if model_has_linear_leaves(model) {
             distribute_linear_terms_for_row(model, row, baseline, binning, &mut contributions_f64);
         }
@@ -500,9 +503,27 @@ fn model_has_linear_leaves(model: &TrainedModel) -> bool {
     })
 }
 
-/// Walk each tree for `row`, find the leaf the row reaches, and add the
-/// linear-leaf row deviations into `phi`.  Trees with only scalar leaves are
-/// no-ops because `linear_leaf_row_terms` does nothing for `LeafValue::Scalar`.
+/// Walk each tree for `row` and credit `wj · (xj − μj)` for every linear leaf
+/// the row visits along its path.
+///
+/// **This must visit every node on the row's path, not just the terminal**
+/// — `predict(x)` and `local_path_predict` both accumulate
+/// `leaf.eval_row(row)` at every visited node (the predictor loops as long
+/// as `nodes_by_local_id.get(child)` returns a stump).  The brute-force
+/// SHAP and TreeSHAP polynomial paths already handle the per-visited-node
+/// **constant** contribution `intercept + Σⱼ wⱼ·μⱼ` through
+/// `leaf_constant_part`.  The per-visited-node **deviation**
+/// `Σⱼ wⱼ·(xⱼ − μⱼ)` is uncredited unless we add it here.
+///
+/// Crediting only the terminal leaf was the pre-v0.7.4 bug: for a row whose
+/// path through a tree visits N internal nodes plus a terminal, the SHAP
+/// reconstruction was missing N nodes' worth of `Σⱼ wⱼ·(xⱼ − μⱼ)`, scaling
+/// with `n_estimators` and `max_depth` and producing additivity drifts on
+/// the order of the predictions themselves.
+///
+/// Trees with only scalar leaves remain no-ops because
+/// `linear_leaf_row_terms` does nothing for `LeafValue::Scalar`, so scalar-
+/// leaf-only models pay no overhead for the broader walk.
 fn distribute_linear_terms_for_row(
     model: &TrainedModel,
     row: &[f32],
@@ -529,11 +550,7 @@ fn distribute_linear_terms_for_row(
 
     for tree_id in tree_roots {
         let mut local_id = 0u32;
-        loop {
-            let key = tree_local_key(tree_id, local_id);
-            let Some(stump) = nodes_by_key.get(&key) else {
-                break;
-            };
+        while let Some(stump) = nodes_by_key.get(&tree_local_key(tree_id, local_id)) {
             let feat = stump.split.feature_index as usize;
             let feature_value = row.get(feat).copied().unwrap_or(f32::NAN);
             let goes_left = stump_goes_left(&stump.split, feature_value, binning);
@@ -542,18 +559,14 @@ fn distribute_linear_terms_for_row(
             } else {
                 &stump.right_leaf_value
             };
-            // Probe the child first; if no child stump exists, this side is a
-            // terminal leaf and we credit its linear deviations to `phi`.
-            let child_local = if goes_left {
+            // Credit the visited leaf's linear deviation, whether it's an
+            // internal-node side or the terminal.  No-op for scalar leaves.
+            linear_leaf_row_terms(leaf_value, row, baseline, phi);
+            local_id = if goes_left {
                 local_id.saturating_mul(2).saturating_add(1)
             } else {
                 local_id.saturating_mul(2).saturating_add(2)
             };
-            if !nodes_by_key.contains_key(&tree_local_key(tree_id, child_local)) {
-                linear_leaf_row_terms(leaf_value, row, baseline, phi);
-                break;
-            }
-            local_id = child_local;
         }
     }
 }
@@ -856,38 +869,25 @@ fn verify_additivity(
     // on California Housing with `n_estimators=200`) does not raise even
     // though the arithmetic is correct.
     //
-    // Piecewise-linear leaves stay exempted from the strict check.
+    // **Linear leaves.**  As of v0.7.4, `leaf_model="linear"` artifacts
+    // satisfy strict additivity end-to-end when called with a
+    // `BinningContext` (the predictor-aligned path).  The fix combines
+    // v0.7.3's float-threshold path walker with crediting
+    // `Σⱼ wⱼ·(xⱼ − μⱼ)` at every visited node along the row's path —
+    // matching how `predict` accumulates `leaf.eval_row(row)` at each
+    // visited node.  See `distribute_linear_terms_for_row` for the path
+    // walk and `leaf_constant_part` for the constant-part flow through
+    // `expected_subtree` / `build_std_tree`.
     //
-    // Two distinct things are tangled here:
-    //
-    // 1. **Path walking.**  Legacy SHAP compared raw feature values
-    //    against bin-index thresholds while the predictor uses float
-    //    thresholds.  The `BinningContext` plumbing fixes this:
-    //    when supplied, the SHAP walker now uses the same float
-    //    thresholds and strict `<` comparison the predictor uses.
-    //    Constant-leaf artifacts under continuous binning now satisfy
-    //    strict additivity end-to-end.
-    //
-    // 2. **Linear-leaf training space.**  The engine trains
-    //    `LinearLeaf` weights and the persisted `feature_baseline`
-    //    over the bin-quantized matrix (`active_dataset.matrix.values`
-    //    is the bin-indexed payload, not raw float features).  At
-    //    predict time the Python path quantizes the row to bin indices
-    //    before calling the native predictor, so leaf eval stays in
-    //    bin-index space.  SHAP cannot mix raw features into
-    //    `wj * (xj - μj)` because both `wj` and `μj` are in bin-index
-    //    units.  This is a deeper redesign (train linear leaves on raw
-    //    features, or persist a raw-feature-space conversion of the
-    //    weights) tracked separately from the path-walker fix.
-    //
-    // Until (2) lands, SHAP on linear-leaf artifacts under continuous
-    // binning remains a best-effort interventional explanation and the
-    // strict additivity check is skipped.  Constant-leaf artifacts get
-    // the tightened check unconditionally.
+    // When `binning=None`, the SHAP walker uses the legacy `<=` bin-index
+    // comparison and may take a different path than the predictor, so
+    // strict additivity is not guaranteed for linear leaves on that
+    // legacy path.  The exemption is retained only in that case.
     let predicted = local_path_predict(model, row, binning);
     let reconstructed = expected_value + contributions.iter().sum::<f32>();
-    if model_has_linear_leaves(model) {
-        // Best-effort interventional explanation; see comment above.
+    if binning.is_none() && model_has_linear_leaves(model) {
+        // Legacy path-walker — best-effort interventional explanation.
+        // Predictor-aligned (BinningContext) callers get the strict check.
         return Ok(());
     }
     let tolerance = additivity_tolerance(predicted);

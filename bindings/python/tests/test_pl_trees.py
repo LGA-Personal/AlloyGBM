@@ -224,21 +224,25 @@ class TestPLRanker:
 
 
 class TestPlTreesShap:
-    """SHAP supports `leaf_model='linear'` artifacts as a best-effort
-    interventional decomposition (path-attribution on the leaf "constant
-    part" `intercept + Σ wj·μj_global` plus per-leaf row deviations
+    """SHAP supports `leaf_model='linear'` artifacts as an interventional
+    decomposition (path-attribution on the leaf "constant part"
+    `intercept + Σ wj·μj_global` plus per-visited-node row deviations
     `wj · (xj − μj_global)`).
 
     v0.7.3 fixed the SHAP path walker so it uses the same float
     thresholds the predictor uses (`shap::BinningContext` +
     `shap_explain_rows_with_binning`), eliminating the path-walk vs.
     predict-path divergence on continuous features for *scalar*-leaf
-    artifacts.  For linear-leaf artifacts the per-leaf row deviation
-    `wj · (xj − μj_global)` is still computed against bin-quantized
-    quantities (PL weight training itself happens in bin space), so
-    strict additivity is still relaxed for `leaf_model="linear"` on
-    continuous features.  Migrating PL weight training to raw feature
-    space is queued.
+    artifacts.
+
+    v0.7.4 closed the linear-leaf gap by walking the row's full path and
+    crediting `Σⱼ wⱼ·(xⱼ − μⱼ)` at every visited node — matching how
+    `predict` accumulates `leaf.eval_row(row)` at each visited node.
+    Strict additivity (`atol + rtol·|predict(x)|`) now holds for
+    `leaf_model="linear"` on the default predictor-aligned binning path
+    (see `test_shap_pl_strict_additivity.py` for the full coverage
+    matrix).  This class only smoke-checks shape and finiteness; the
+    strict-additivity contract is enforced in the dedicated test.
     """
 
     def test_shap_values_return_for_linear_leaf_regressor(self):
