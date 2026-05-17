@@ -210,10 +210,10 @@ model.fit(X_train, y_train)
 ```
 
 `leaf_model="linear"` works on `GBMClassifier` and `GBMRanker` too, and
-composes with `training_mode="morph"`. As of v0.7.1 SHAP also accepts
-`leaf_model="linear"` artifacts as a best-effort interventional
-decomposition; strict additivity is relaxed for continuous-feature PL
-artifacts (see [explanations.md](explanations.md)). Full reference:
+composes with `training_mode="morph"`. As of v0.7.4, SHAP also satisfies
+strict additivity (`atol + rtol·|predict(x)|`) for `leaf_model="linear"`
+artifacts on the default predictor-aligned binning path; see
+[explanations.md](explanations.md) for details. Full reference:
 [GBMRegressor — Piecewise-Linear Leaves](gbmregressor.md#piecewise-linear-leaves).
 
 ## Validation And Early Stopping

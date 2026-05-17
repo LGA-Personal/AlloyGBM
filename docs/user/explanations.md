@@ -76,17 +76,16 @@ As of v0.7.1, `shap_values(...)` and `feature_importances(...)` also accept
 the path-based TreeSHAP / brute-force machinery attributes each leaf's
 "constant part" (`intercept + Σ wⱼ · μⱼ_global`), then per-leaf row
 deviations `wⱼ · (xⱼ − μⱼ_global)` are credited directly to the regressor
-features. Global per-feature means `μⱼ_global` are captured at fit time and
-persisted in a new `FeatureBaseline` artifact section, so SHAP is
-self-contained — the original training data is not required at explain time.
+features along the row's path. Global per-feature means `μⱼ_global` are
+captured at fit time and persisted in a new `FeatureBaseline` artifact
+section, so SHAP is self-contained — the original training data is not
+required at explain time.
 
-Exact additivity holds when SHAP's internal path walker reaches the same leaf
-as the predictor. Today SHAP compares raw feature values against stump
-`threshold_bin` indices cast to `f32`, while the predictor converts bin
-indices to float thresholds at load time using per-feature min/max. For
-scalar leaves this divergence is masked. For linear leaves the leaf value
-depends on `xⱼ`, so on continuous-feature artifacts the SHAP path and the
-predictor path can disagree slightly. The strict additivity check is
-relaxed for linear-leaf models; users get best-effort SHAP values.
-Tightening path-walk alignment is queued for v0.7.3. See
-[../limitations.md](../limitations.md) for the full caveat.
+As of v0.7.4, strict additivity (`Σ shap_values + expected_value == predict(x)`
+within `atol + rtol·|predict(x)|`, default `1e-5 + 1e-4·|predict(x)|`) also
+holds for `leaf_model="linear"` artifacts on the default predictor-aligned
+binning path. v0.7.3's `BinningContext` aligns the SHAP path walker to the
+predictor's float thresholds; v0.7.4 credits `Σⱼ wⱼ·(xⱼ − μⱼ)` at every
+visited node along the row's path (matching how `predict` accumulates
+`leaf.eval_row(row)` at each visited node). The legacy non-binning
+SHAP path retains a best-effort exemption for linear leaves only.

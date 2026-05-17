@@ -275,14 +275,14 @@ the same target stream as a fresh `N + M`-round fit.
     descendant leaves below such a split use linear leaves on all remaining
     numeric regressors.
   - SHAP (`shap_values`, `feature_importances`) supports
-    `leaf_model="linear"` as of v0.7.1, returning a best-effort
-    interventional decomposition (path-attributed leaf "constant part" +
-    per-leaf row deviations against persisted global feature means). Strict
-    additivity is relaxed for continuous-feature PL artifacts because SHAP's
-    internal path walker still compares feature values against bin-index
-    thresholds; tightening is queued for v0.7.3. See
-    [explanations.md](explanations.md) and
-    [../limitations.md](../limitations.md) for details.
+    `leaf_model="linear"` with strict additivity as of v0.7.4: the
+    path-attributed leaf "constant part" plus per-visited-node row
+    deviations against persisted global feature means reconstruct
+    `predict(x)` within `atol + rtol·|predict(x)|` on the default
+    predictor-aligned binning path. See
+    [explanations.md](explanations.md) for the full decomposition and
+    [../limitations.md](../limitations.md) for the legacy-non-binning
+    exemption.
 
 ## MorphBoost (Adaptive Split Criterion)
 

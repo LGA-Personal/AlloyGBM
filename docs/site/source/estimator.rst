@@ -267,12 +267,12 @@ Limitations:
 - Native-bitset categorical splits (``max_cat_threshold > 0``) fall back to
   constant leaves at the categorical split node; descendant leaves below the
   split use linear leaves on remaining numeric regressors.
-- SHAP (``shap_values``, ``feature_importances``) supports ``leaf_model="linear"``
-  as of v0.7.1, returning a best-effort interventional decomposition. Exact
-  additivity holds for path-walk-aligned artifacts; on continuous-feature
-  models the reconstruction can drift slightly because SHAP's internal path
-  walker still compares against bin-index thresholds. See
-  :doc:`explanations` and ``docs/limitations.md`` for details.
+- SHAP (``shap_values``, ``feature_importances``) supports
+  ``leaf_model="linear"`` with strict additivity as of v0.7.4: the
+  reconstruction satisfies ``atol + rtol·|predict(x)|`` (default
+  ``1e-5 + 1e-4·|predict(x)|``) on the default predictor-aligned binning
+  path.  See :doc:`explanations` for the decomposition and
+  ``docs/limitations.md`` for the legacy-non-binning exemption.
 - ``leaf_model="linear"`` composes with ``training_mode="morph"``.
 
 Multi-label ranking
