@@ -1,6 +1,6 @@
 # AlloyGBM Current Limitations
 
-Last updated for v0.8.0 (Commit 1 — Mixed linear-rank SHAP).
+Last updated for v0.8.0.
 
 ## Remaining Limitations
 
@@ -10,21 +10,23 @@ The `BackendOps` trait is designed for hardware abstraction, but only
 `CpuBackend` exists. GPU/accelerator support is architecturally planned but
 not implemented.
 
-### 2. No Dart Boosting Mode (GOSS Resolved In v0.8.0)
+### 2. No DART Boosting Mode (GOSS Resolved In v0.8.0)
 
 GOSS (gradient-based one-side sampling, LightGBM-style) is supported
 as of v0.8.0 via `boosting_mode="goss"`, `goss_top_rate`, and
 `goss_other_rate` on `GBMRegressor`, `GBMClassifier` (binary), and
 `GBMRanker`.  The multiclass softmax path explicitly rejects
 non-Standard boosting modes with a clear error message — multiclass
-GOSS requires per-class gradient scoring, tracked as a v0.8.1
+GOSS requires per-class gradient scoring, tracked as a v0.9.x
 follow-up.
 
 DART (dropouts meet MART) is still unavailable.  Calling
 `boosting_mode="dart"` raises `NotImplementedError` in Python and is
-rejected at the Rust validation layer.  DART requires per-stump
-`tree_weight` plumbing through the artifact format and the predictor;
-tracked as the next v0.8.x feature commit.
+rejected at the Rust single-output trainer entry point with
+`"boosting_mode='dart' is not yet implemented in the single-output
+trainer; only 'standard' and 'goss' are wired through"`.  DART
+requires per-stump `tree_weight` plumbing through the artifact format
+and the predictor; **targeted at v0.9.0**.
 
 ### 3. Multi-Label Ranking — Independent Per-Label Trees
 
@@ -42,10 +44,42 @@ Numerically the wrapper is equivalent to training each label
 separately.  Joint shared-tree multi-label boosting — where a single
 ensemble updates all label predictions simultaneously via shared splits
 — would let correlated labels share split information across trees and
-typically reduces total model size for related tasks.  Deferred to
-v0.8.0, paired with the shared-histogram speedup where the
-``MulticlassSoftmaxObjective``-style K-tree-per-round engine plumbing
-for ranking objectives has a real performance story.
+typically reduces total model size for related tasks.  **Targeted at
+v0.10.0**, paired with the K-output shared-histogram engine primitive
+where the ``MulticlassSoftmaxObjective``-style K-tree-per-round engine
+plumbing for ranking objectives has a real performance story.
+
+### 4. NaN Handling On The Rank-Binning Predict Path (Narrow)
+
+When `continuous_binning_strategy="linear"` triggers per-feature
+rank-based binning on at least one column, the predict-time helper
+`quantize_dense_values_linear_rank_inplace_wide` in
+`bindings/python/src/lib.rs` doesn't preserve `NaN` through the
+quantize step: `quantize_rank_value_wide` falls through to bin `0`
+(because `*probe <= NaN` is always false) and `quantize_linear_value_wide`
+produces `NaN → 0` via the IEEE-NaN-to-integer cast.  The predictor's
+`predictor_went_left` check at `crates/predictor/src/lib.rs:142`
+detects NaN via `feature_value.is_nan()` for default_left routing,
+but by the time it sees the row the bin index is finite, so the
+learned-missing-direction never fires for rank-binned columns.
+
+The pure linear path (no rank flags) is unaffected — it uses the
+`convert_thresholds_to_float` path which feeds raw floats directly
+to the predictor, so the `is_nan` check fires normally.  Pure
+quantile binning is similarly unaffected.
+
+SHAP rejects NaN/Inf inputs outright via `validate_rows` in
+`crates/shap/src/lib.rs` (`"row N feature M contains NaN/Inf...
+impute them before calling shap_values()"`) so the bug is not
+reachable from the SHAP path; impacts predict-only.
+
+Resolving end-to-end requires updating both the predict-time
+quantize helper and the predictor's tree walker to coordinate on
+either a `max_data_bin + 1` sentinel or NaN-preservation, plus a
+consistent `LinearLeaf::eval` policy (which currently propagates
+NaN through `intercept + Σ w·NaN = NaN` for any regressor feature).
+Tracked alongside the v0.9.0 DART work where the broader artifact /
+predict-path NaN audit can land coherently.
 
 ## Resolved (Previously Limitations)
 

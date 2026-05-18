@@ -48,6 +48,14 @@ combined. Multi-class softmax fits each per-class tree sequence with linear
 leaves independently. The objective is always cross-entropy and is not
 configurable.
 
+``boosting_mode="goss"`` with ``goss_top_rate`` / ``goss_other_rate`` is
+supported on **binary** classification (see
+:doc:`estimator` "Boosting mode" for the full semantics).  Multi-class
+softmax explicitly rejects non-``"standard"`` boosting modes pending
+per-class gradient scoring (v0.9.x follow-up).
+``boosting_mode="dart"`` raises ``NotImplementedError`` in v0.8.0;
+full DART implementation is targeted at v0.9.0.
+
 Target requirements:
 
 - ``y`` must contain only values in ``{0, 1}`` (or ``{0.0, 1.0}``)

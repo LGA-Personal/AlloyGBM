@@ -6,9 +6,17 @@ AlloyGBM ``0.8.0`` release notes and platform policy.
 What's new in 0.8.0
 -------------------
 
-Feature release rolling up the three remaining v0.7.x carry-forward
-items.  This section grows commit by commit on the ``v0.8.0-features``
-branch.
+Minor feature release: closes the mixed linear-rank SHAP carry-forward
+from v0.7.4 (Limitation 4) and adds LightGBM-style GOSS sampling as a
+new opt-in boosting mode.  Default behaviour is byte-identical to
+v0.7.5 on every API surface.  The other two original v0.8.0 targets —
+DART boosting mode and joint shared-tree multi-label ranking — were
+scope-split out to v0.9.0 and v0.10.0 respectively so this release
+could ship on a reviewable surface.  ``BoostingMode::Dart`` is reserved
+in the API (Python ``boosting_mode="dart"`` raises
+``NotImplementedError``; the Rust trainer rejects it with a clear error
+message) so v0.9.0 can land DART training without further
+``TrainParams`` churn.
 
 **GOSS sampling (gradient-based one-side sampling):**
 

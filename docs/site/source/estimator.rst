@@ -13,9 +13,47 @@ Core parameters
 - ``n_estimators: int = 6``
   - requested boosting rounds
 - ``row_subsample: float = 1.0``
-  - per-round row sampling fraction
+  - per-round row sampling fraction; ignored when
+    ``boosting_mode="goss"`` (GOSS uses gradient-based sampling
+    instead).
 - ``col_subsample: float = 1.0``
   - per-round feature sampling fraction
+
+Boosting mode
+-------------
+
+- ``boosting_mode: str = "standard"`` -- per-round sample-selection
+  strategy.  Three values are accepted:
+
+  - ``"standard"`` (default) -- uniform row subsampling under
+    ``row_subsample``.  Byte-identical to v0.7.5 on every API
+    surface.
+  - ``"goss"`` -- LightGBM-style **G**\ radient-based **O**\ ne-**S**\ ide
+    **S**\ ampling.  Each round, score rows by ``|gradient|``, keep
+    the top ``goss_top_rate`` fraction, uniformly sample
+    ``goss_other_rate`` fraction from the rest, and amplify the
+    sampled-low rows' gradient and hessian by
+    ``(n - top_n) / other_n`` (realized counts) so the histogram
+    statistics remain an unbiased estimator of the full-data
+    gradient sums.  Convergence is typically faster on data with a
+    long-tailed gradient distribution (the canonical LightGBM
+    advantage).
+  - ``"dart"`` -- placeholder, currently rejected.  Calling this in
+    v0.8.0 raises ``NotImplementedError`` from
+    :class:`GBMRegressor.__init__`; the Rust trainer rejects it
+    with a matching error.  Full DART (dropouts meet MART) lands in
+    v0.9.0.
+
+- ``goss_top_rate: float = 0.2`` -- top-by-gradient kept fraction
+  when ``boosting_mode="goss"``.  Must be in ``(0, 1)``.
+- ``goss_other_rate: float = 0.1`` -- random-sample fraction from
+  the remaining rows when ``boosting_mode="goss"``.  Must be in
+  ``(0, 1)`` and ``goss_top_rate + goss_other_rate <= 1.0``.
+
+GOSS is supported on the binary classifier / regression / ranking
+single-output objective.  The multiclass softmax path explicitly
+rejects non-``"standard"`` boosting modes pending per-class gradient
+scoring (v0.9.x follow-up).
 
 Stopping and policy controls
 ----------------------------
@@ -107,7 +145,7 @@ DRO leaf solver
   penalizes weak leaf signal by within-leaf gradient dispersion.
 - ``dro_radius: float = 0.05`` -- non-negative penalty scale. ``0.0`` preserves
   standard-leaf predictions while recording DRO metadata.
-- ``dro_metric: str = "wasserstein"`` -- the only accepted v0.7.4 value. It
+- ``dro_metric: str = "wasserstein"`` -- the only accepted v0.8.0 value. It
   denotes a Wasserstein-inspired closed-form robust counterpart over leaf
   gradient uncertainty.
 
@@ -115,7 +153,7 @@ This is not a full Wasserstein optimizer over raw feature/target
 distributions. Inference speed is unchanged because robust scalar leaf values
 are stored directly in the artifact. ``leaf_solver="dro"`` works on all three
 estimators, composes with ``training_mode="morph"``, and requires
-``leaf_model="constant"`` in v0.7.4.
+``leaf_model="constant"`` in v0.8.0.
 
 Factor-neutral boosting
 -----------------------
@@ -253,7 +291,7 @@ Piecewise-linear leaves
   - ``"linear"`` -- each leaf stores a small linear model
     ``f_s(x) = b_s + Σ α_j x_j`` (up to 8 regressors per leaf, inherited from
     the split path's feature indices; the per-leaf cap is internal and not
-    user-tunable in v0.7.4). Optimal weights are solved in closed form via the
+    user-tunable in v0.8.0). Optimal weights are solved in closed form via the
     ridge regression ``α* = -(XᵀHX + λI)⁻¹ Xᵀg``, regularised by ``lambda_l2``.
 
 Empirically, ``"linear"`` converges in fewer rounds on data with linear
