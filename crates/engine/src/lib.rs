@@ -3997,6 +3997,24 @@ impl Trainer {
                 "validation early stopping requires a validation dataset".to_string(),
             ));
         }
+        // v0.8.0: DART support is gated behind the per-stump
+        // `tree_weight` artifact-format extension that hasn't landed
+        // yet.  `BoostingMode::Dart` parses + passes
+        // `validate_train_params` so its parameter ranges remain
+        // testable end-to-end, but the single-output trainer would
+        // silently fall back to standard row-subsampled boosting via
+        // `select_row_indices_for_round`'s `Standard | Dart` arm.
+        // Reject loudly here so Rust callers don't get a quiet
+        // misconfiguration — mirrors the multiclass non-Standard
+        // rejection in `fit_multiclass_iterations_impl`.
+        if matches!(self.params.boosting_mode, BoostingMode::Dart { .. }) {
+            return Err(EngineError::InvalidConfig(format!(
+                "boosting_mode='{}' is not yet implemented in the single-output trainer; \
+                 only 'standard' and 'goss' are wired through (DART is tracked as a \
+                 v0.8.x follow-up commit)",
+                self.params.boosting_mode.label()
+            )));
+        }
         validate_training_alignment(dataset, binned_matrix)?;
         if objective.requires_group_id() && dataset.group_id.is_none() {
             return Err(EngineError::ContractViolation(
@@ -6548,13 +6566,21 @@ fn sampled_row_indices(
 /// * `BoostingMode::Goss` — gradient-based one-side sampling.
 ///   `gradients` MUST already be the post-projection gradient buffer
 ///   for this round; the function mutates it in place to apply the
-///   `(1 - top_rate) / other_rate` amplification on the sampled-low
-///   rows (top-by-magnitude rows are *not* amplified — they appear
-///   with their original gradient/hessian, exactly as in the
-///   reference LightGBM implementation).
-/// * `BoostingMode::Dart` — uniform subsampling (DART affects the
-///   prediction buffer and per-stump weights, not row selection per
-///   se).  Future work may combine DART with non-uniform sampling.
+///   `(n - top_n) / other_n` amplification on the sampled-low rows
+///   (top-by-magnitude rows are *not* amplified — they appear with
+///   their original gradient/hessian, exactly as in the reference
+///   LightGBM implementation).  We use realized counts rather than
+///   the configured `(1 - top_rate) / other_rate` symbolic form so
+///   that `ceil()` rounding and the `other_n <= n - top_n` cap don't
+///   bias the unbiasedness contract at small `n` (see
+///   `goss_sample_indices` for details).
+/// * `BoostingMode::Dart` — unreachable in practice (v0.8.0): the
+///   single-output trainer entry point
+///   (`fit_iterations_with_optional_validation_summary`) rejects DART
+///   upstream so callers can't silently get standard row-subsampled
+///   boosting.  The fallback arm here is kept as a defensive
+///   no-op until DART training lands; future work will replace it
+///   with the real DART row-selection semantics.
 ///
 /// Returns the sorted set of row indices used as `root_row_indices`
 /// for tree construction this round.
@@ -6601,9 +6627,15 @@ fn select_row_indices_for_round(
 /// Strategy: keep the top `top_rate` fraction of rows by
 /// `|gradient_magnitude|`, then uniformly sample `other_rate` fraction
 /// from the rest.  Sampled-low-gradient rows are *amplified* by
-/// `(1 - top_rate) / other_rate` at the gradient-accumulation stage so
+/// `(n - top_n) / other_n` at the gradient-accumulation stage so the
 /// histogram statistics remain an unbiased estimator of the full-data
-/// gradient sums.
+/// gradient sums.  We use realized counts rather than the configured
+/// `(1 - top_rate) / other_rate` symbolic form because `ceil()`
+/// rounding (and the `other_n <= n - top_n` cap) shifts the realized
+/// fractions away from the configured ones at small `n` — the rate
+/// form would double the sampled-low contribution in those edge
+/// cases.  For large `n` the two forms agree (since `top_n ≈ top_rate
+/// · n` and `other_n ≈ other_rate · n`).
 ///
 /// Returns `(sampled_row_indices, amplification, top_kept_count)`:
 ///
@@ -6671,8 +6703,18 @@ pub(crate) fn goss_sample_indices(
         Vec::new()
     };
 
-    let amplification = if other_n > 0 && other_rate > f32::EPSILON {
-        (1.0 - top_rate) / other_rate
+    // Amplification uses **realized** counts (`(n - top_n) / other_n`)
+    // rather than the configured rates (`(1 - top_rate) / other_rate`).
+    // When `ceil()` rounding or the `other_n <= n - top_n` cap shifts the
+    // realized fractions away from the configured ones — common at small
+    // `n` — the rate-based form double-counts (or under-counts) the
+    // sampled-low rows.  Example: `n=5`, `top_rate=0.2`, `other_rate=0.1`
+    // gives `top_n=1`, `other_n=1`.  The unbiased multiplier for the
+    // remaining pool of 4 rows sampled at size 1 is `4 / 1 = 4`, not
+    // `(1 - 0.2) / 0.1 = 8`.  See `goss_amplification_uses_realized_counts`
+    // for the contract test.
+    let amplification = if other_n > 0 && top_n < n {
+        (n - top_n) as f32 / other_n as f32
     } else {
         1.0
     };
@@ -9499,6 +9541,53 @@ mod tests {
     }
 
     #[test]
+    fn dart_boosting_mode_is_rejected_by_single_output_trainer() {
+        // DART parses + passes `validate_train_params` so its
+        // parameter ranges remain testable end-to-end, but the
+        // single-output training loop doesn't yet implement the
+        // per-round dropout + per-stump tree_weight semantics.  The
+        // trainer must reject DART loudly at fit time to prevent
+        // silent fallback to standard row-subsampled boosting.
+        let dataset = sample_dataset();
+        let binned = sample_binned_matrix_for_dataset(&dataset);
+        let params = TrainParams {
+            boosting_mode: BoostingMode::Dart {
+                drop_rate: 0.1,
+                max_drop: 1,
+                normalize_type: alloygbm_core::DartNormalize::Tree,
+                sample_type: alloygbm_core::DartSampleType::Uniform,
+            },
+            ..TrainParams::default()
+        };
+        let trainer = Trainer::new(params).expect("DART params pass validation");
+        // The rejection fires at the top of
+        // `fit_iterations_with_optional_validation_summary`, before
+        // the backend is invoked — so we can use any test backend
+        // that implements `BackendOps`.
+        let backend = GradientNeutralizationCheckingBackend {
+            exposures: dataset
+                .factor_exposures
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| FactorExposureMatrix {
+                    row_count: dataset.row_count(),
+                    factor_count: 1,
+                    values: vec![0.0; dataset.row_count()],
+                }),
+            weights: None,
+        };
+        let err = trainer
+            .fit_iterations(&dataset, &binned, &backend, &SquaredErrorObjective, 3)
+            .expect_err("DART must be rejected by the single-output trainer");
+        assert!(matches!(err, EngineError::InvalidConfig(_)));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("dart") && msg.contains("not yet implemented"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
     fn split_penalty_neutralization_rejects_linear_leaves() {
         let params = TrainParams {
             neutralization_config: Some(alloygbm_core::FactorNeutralizationConfig {
@@ -10030,6 +10119,51 @@ mod tests {
         let grads: Vec<f32> = (0..10).map(|i| i as f32).collect();
         let (top, other, _amp) = goss_sample_indices(&grads, 0.6, 0.6, 1, 0);
         assert!(top.len() + other.len() <= 10);
+    }
+
+    #[test]
+    fn goss_amplification_uses_realized_counts() {
+        // Contract: amplification must compute `(n - top_n) / other_n`
+        // from the realized counts after `ceil()` + `min()`, not the
+        // configured `(1 - top_rate) / other_rate`.  Small-n regimes
+        // (and any case where rounding shifts realized fractions) hit
+        // the difference.  Example: n=5, top_rate=0.2 ⇒ top_n=1,
+        // other_rate=0.1 ⇒ other_n=1.  Pool of remaining rows = 4.
+        // Unbiased multiplier = 4 / 1 = 4.0.  The rate form would
+        // produce (1 - 0.2) / 0.1 = 8.0 — doubling the sampled-low
+        // contribution.
+        let grads: Vec<f32> = (0..5).map(|i| i as f32).collect();
+        let (top, other, amp) = goss_sample_indices(&grads, 0.2, 0.1, 1, 0);
+        assert_eq!(top.len(), 1);
+        assert_eq!(other.len(), 1);
+        assert!(
+            (amp - 4.0).abs() < 1e-5,
+            "expected realized-count amplification 4.0, got {amp}"
+        );
+
+        // Another small case: n=7, top_rate=0.15 (top_n=2),
+        // other_rate=0.15 (other_n=2).  Realized amp = (7 - 2) / 2 = 2.5.
+        // Rate form would give (1 - 0.15) / 0.15 ≈ 5.6667.
+        let grads_7: Vec<f32> = (0..7).map(|i| i as f32).collect();
+        let (_top7, _other7, amp7) = goss_sample_indices(&grads_7, 0.15, 0.15, 1, 0);
+        assert!(
+            (amp7 - 2.5).abs() < 1e-5,
+            "expected realized-count amplification 2.5, got {amp7}"
+        );
+
+        // For large n where rounding is immaterial the realized-count
+        // form and the rate form agree.  n=1000, top_rate=0.2,
+        // other_rate=0.1 ⇒ top_n=200, other_n=100.  Realized amp =
+        // 800 / 100 = 8.0.  Rate form = 8.0.  This case is a
+        // regression guard: when n is large the two formulas must
+        // numerically coincide so existing
+        // tuning/benchmarks don't shift.
+        let grads_1000: Vec<f32> = (0..1000).map(|i| (i as f32).sin()).collect();
+        let (_t1000, _o1000, amp1000) = goss_sample_indices(&grads_1000, 0.2, 0.1, 1, 0);
+        assert!(
+            (amp1000 - 8.0).abs() < 1e-5,
+            "expected large-n amplification ≈ 8.0, got {amp1000}"
+        );
     }
 
     #[test]
