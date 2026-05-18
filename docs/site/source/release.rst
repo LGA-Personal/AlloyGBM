@@ -1,7 +1,49 @@
 Release and platform policy
 ===========================
 
-AlloyGBM ``0.7.4`` release notes and platform policy.
+AlloyGBM ``0.7.5`` release notes and platform policy.
+
+What's new in 0.7.5
+-------------------
+
+Bug-fix release.  Closes Limitation 5 from v0.7.4 — the pre-existing
+TreeSHAP polynomial-path additivity drift on trees with a feature
+appearing more than once on a root-to-leaf path.  No user-visible API
+breakage.
+
+**TreeSHAP polynomial-path strict additivity:**
+
+- The Rust port of TreeSHAP's polynomial-time algorithm in
+  ``crates/shap/src/lib.rs::ts_unextend_path`` was shifting the entire
+  ``PathElement`` struct (including ``pweight``) when removing a
+  duplicate feature from the path.  This clobbered the pweights that
+  the unwind loop had just carefully recomputed in place.  The
+  reference implementation in ``slundberg/shap``
+  (``shap/explainers/pytree.py``) stores the four path fields as four
+  parallel arrays and only shifts the first three
+  (``feature_index``, ``zero_fraction``, ``one_fraction``),
+  preserving pweights.  Pre-existing in v0.7.3 and earlier; uncovered
+  during v0.7.4 PR #27 review and pinned with an ``@xfail(strict=True)``
+  test at that time pending this v0.7.x follow-up.
+- The fix shifts the three fields explicitly and leaves ``pweight``
+  alone.  Strict additivity now holds end-to-end on the polynomial
+  path.
+- Coverage: a synthetic full-tree sweep
+  (``tree_shap_polynomial_path_matches_brute_force_on_full_trees``)
+  covers depths 2-7 × n_features {2,3,5,8,12} including all
+  configurations that force path-duplicate features, asserting
+  polynomial matches brute-force per-feature within 1e-5.  The
+  formerly ``@xfail(strict=True)`` regression
+  ``test_strict_additivity_via_tree_shap_polynomial_path`` in
+  ``bindings/python/tests/test_shap_pl_strict_additivity.py`` now
+  passes as a regular test.
+
+**Documentation:**
+
+- ``docs/limitations.md``: Limitation 5 promoted to Resolved.
+- Other documented v0.7.x follow-ups (mixed linear-rank SHAP path,
+  GOSS+DART, joint multi-label ranking, shared-histogram engine)
+  remain deferred to v0.8.0.
 
 What's new in 0.7.4
 -------------------

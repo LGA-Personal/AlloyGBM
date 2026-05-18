@@ -4,6 +4,18 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
+The `0.7.5` release closes the last pre-existing v0.7.x SHAP
+correctness gap — Limitation 5 from v0.7.4 (TreeSHAP polynomial-path
+additivity drift on trees with a feature appearing more than once on a
+root-to-leaf path).  Root cause: the Rust port of `ts_unextend_path`
+shifted the entire `PathElement` struct (including `pweight`) when
+removing a duplicate from the path; the reference implementation in
+`slundberg/shap` uses four parallel arrays and only shifts the first
+three, preserving the post-unwind pweights computed in place by the
+unwind loop.  The fix shifts only `feature_index`, `zero_fraction`,
+and `one_fraction` and leaves `pweight` alone.  No user-visible API
+breakage.
+
 The `0.7.4` release closes the remaining v0.7.x SHAP-additivity
 carryover: strict additivity (`atol + rtol·|predict(x)|`) now holds for
 `leaf_model="linear"` artifacts on the default predictor-aligned binning
@@ -44,6 +56,30 @@ artifacts. The `0.5.0` release introduced piecewise-linear (PL) tree leaves via
 `leaf_model="linear"` on all three estimators. The `0.4.0` release introduced
 the opt-in MorphBoost adaptive split criterion, per-iteration learning-rate
 schedules, and SIMD-accelerated histogram and EMA kernels.
+
+## What Shipped In 0.7.5
+
+Bug-fix release.  Closes Limitation 5 from v0.7.4 — the pre-existing
+TreeSHAP polynomial-path additivity drift.
+
+- **TreeSHAP polynomial-path strict additivity.**  `ts_unextend_path`
+  in `crates/shap/src/lib.rs` previously shifted the entire
+  `PathElement` struct (`feature_index`, `zero_fraction`,
+  `one_fraction`, **`pweight`**) when removing a duplicate feature
+  from the path.  The `pweight` shift clobbered the values the
+  unwind loop had just recomputed in place.  The reference Python
+  implementation in `slundberg/shap/explainers/pytree.py` stores the
+  four fields as four parallel arrays and only shifts the first
+  three, preserving pweights.  The Rust fix shifts those three
+  fields explicitly and leaves `pweight` alone.  The formerly
+  `@xfail(strict=True)` regression
+  `test_strict_additivity_via_tree_shap_polynomial_path` in
+  `bindings/python/tests/test_shap_pl_strict_additivity.py` now
+  passes as a regular test.  In-crate coverage:
+  `tree_shap_polynomial_path_matches_brute_force_on_full_trees`
+  sweeps depths 2-7 × n_features {2,3,5,8,12}, including all
+  configurations that force path-duplicate features, and asserts
+  polynomial matches brute-force per-feature within 1e-5.
 
 ## What Shipped In 0.7.4
 

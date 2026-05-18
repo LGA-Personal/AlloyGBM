@@ -1,6 +1,6 @@
 # AlloyGBM Current Limitations
 
-Last updated for v0.7.4.
+Last updated for v0.7.5.
 
 ## Remaining Limitations
 
@@ -57,38 +57,6 @@ interventional explanations rather than strict additivity.
 Deferred to v0.8.0.  Users who need strict PL-leaf additivity in the
 meantime can pick `continuous_binning_strategy="quantile"` or use the
 pure-`linear` mode (no per-feature rank flags set).
-
-### 5. TreeSHAP Polynomial Path Additivity Drift (Pre-existing)
-
-For models with `distinct_split_feature_count > MAX_EXACT_SPLIT_FEATURES`
-(=25 — see `crates/shap/src/lib.rs`), SHAP's dispatcher switches from
-the brute-force exact Shapley path to the polynomial-time TreeSHAP
-implementation (`explain_rows_tree_shap`).  On large gradient-trained
-trees of depth ≥ 6 with ≥ 30 distinct split features the TreeSHAP
-polynomial path drifts from strict additivity by ~0.5–1% of
-`|predict(x)|`.  This affects both `leaf_model="constant"` and
-`leaf_model="linear"` artifacts (it is independent of the v0.7.4
-linear-leaf fix).
-
-The bug is **pre-existing in v0.7.3** and earlier; it was uncovered by
-the v0.7.4 PR #27 review.  Minimal Rust reproductions (asymmetric
-2-stump and 4-stump spine trees) do not trigger it, so it requires
-specific topological conditions met only by full gradient-boosting
-output.
-
-The internal Rust `verify_additivity` is the ground truth: when a
-model triggers the polynomial path on these conditions, `shap_values()`
-will raise `RuntimeError: row N additivity check failed`.  Users
-encountering this can:
-
-- Pin `n_estimators` or `max_depth` smaller so the tree uses ≤ 25
-  distinct split features (brute-force path is correct).
-- Use the legacy SHAP entry points without a `BinningContext` if
-  best-effort interventional explanations are acceptable.
-- Wait for the v0.7.x / v0.8.0 follow-up — coverage is pinned by an
-  `@xfail(strict=True)` regression test in
-  `bindings/python/tests/test_shap_pl_strict_additivity.py` so the fix
-  will land with that test flipping to a regular pass.
 
 ## Resolved (Previously Limitations)
 
@@ -170,3 +138,18 @@ The following were limitations in prior versions and have been addressed:
   `leaf_solver="dro"` provides a fast Wasserstein-inspired robust scalar leaf
   update over gradient uncertainty; exact distributional DRO is still research
   work)
+- TreeSHAP polynomial-path additivity drift on trees with a feature
+  appearing more than once on a root-to-leaf path (now: v0.7.5 —
+  `ts_unextend_path` in `crates/shap/src/lib.rs` now shifts only
+  the `feature_index`, `zero_fraction`, and `one_fraction` fields
+  when removing a duplicate from the path, preserving the `pweight`
+  values that the unwind loop has just computed in place.  The
+  previous implementation shifted the entire `PathElement` struct,
+  clobbering the post-unwind pweights with values from the elements
+  being shifted down.  The reference implementation in
+  `slundberg/shap` uses four parallel arrays and only shifts the
+  first three.  Closes the pre-existing Limitation 5 from v0.7.3 /
+  v0.7.4.  The Python regression
+  `test_strict_additivity_via_tree_shap_polynomial_path` in
+  `bindings/python/tests/test_shap_pl_strict_additivity.py` is no
+  longer `@xfail(strict=True)`.)
