@@ -2051,6 +2051,166 @@ mod tests {
         }
     }
 
+    /// Regression test for asymmetric-depth TreeSHAP attribution
+    /// (added while reviewing PR #27).
+    ///
+    /// `explain_rows_tree_shap` must match the brute-force exact Shapley
+    /// path even when leaves are at varying depths (the common case for
+    /// any real model with `min_data_in_leaf`, `min_split_gain`, or
+    /// early-stop).  This test holds today on the minimal asymmetric
+    /// topology but the polynomial path has a separate, pre-existing
+    /// additivity drift on much larger / deeper variable-depth trees
+    /// (see Limitation 5 in `docs/limitations.md`).
+    #[test]
+    fn tree_shap_asymmetric_depth_tree_matches_brute_force_and_predict() {
+        // Stumps:
+        //   id 0 (root):         feat 0, threshold 1, leaves {1.0, 2.0}, counts l=80 r=20
+        //   id 1 (left child):   feat 1, threshold 2, leaves {3.0, 4.0}, counts l=50 r=30 (sum=80)
+        //   id 2 (right child):  DOES NOT EXIST — depth-1 early-stop on the right
+        let model = TrainedModel {
+            baseline_prediction: 0.5,
+            feature_count: 2,
+            stumps: vec![
+                TrainedStump {
+                    split: split_with_counts(0, 0, 1, 80, 20),
+                    left_leaf_value: LeafValue::Scalar(1.0),
+                    right_leaf_value: LeafValue::Scalar(2.0),
+                },
+                TrainedStump {
+                    split: split_with_counts(1, 1, 2, 50, 30),
+                    left_leaf_value: LeafValue::Scalar(3.0),
+                    right_leaf_value: LeafValue::Scalar(4.0),
+                },
+            ],
+            categorical_state: None,
+            node_debug_stats: None,
+            objective: "squared_error".to_string(),
+            native_categorical_feature_indices: Vec::new(),
+            morph_metadata: None,
+            dro_metadata: None,
+            feature_baseline: None,
+        };
+
+        let rows = vec![
+            vec![0.0, 0.0], // L at root → L at stump 1 → adds 1.0 + 3.0 → predict = 4.5
+            vec![0.0, 5.0], // L at root → R at stump 1 → adds 1.0 + 4.0 → predict = 5.5
+            vec![5.0, 0.0], // R at root → stump 2 missing → adds 2.0 → predict = 2.5
+            vec![5.0, 5.0], // R at root → stump 2 missing → adds 2.0 → predict = 2.5
+        ];
+
+        let brute_force = explain_rows_brute_force(&model, &rows, None).expect("brute force works");
+        let tree_shap = explain_rows_tree_shap(&model, &rows, None).expect("tree shap works");
+
+        // Brute-force gives the reference (exact 2^N Shapley).
+        for (row_idx, (bf_row, ts_row)) in brute_force
+            .values
+            .iter()
+            .zip(tree_shap.values.iter())
+            .enumerate()
+        {
+            for (feat_idx, (bf_val, ts_val)) in bf_row.iter().zip(ts_row.iter()).enumerate() {
+                assert!(
+                    (bf_val - ts_val).abs() <= 1e-5,
+                    "row {row_idx} feature {feat_idx}: brute force {bf_val} vs tree shap {ts_val} \
+                     (this asymmetric-depth tree is what TreeSHAP gets wrong without the v0.7.4 fix)"
+                );
+            }
+        }
+
+        // Independent additivity check against TrainedModel::predict_row.
+        for (row_idx, (row, ts_values)) in rows.iter().zip(tree_shap.values.iter()).enumerate() {
+            let predicted = model.predict_row(row).expect("predicts");
+            let reconstructed = tree_shap.expected_value + ts_values.iter().sum::<f32>();
+            assert!(
+                (predicted - reconstructed).abs() <= 1e-5,
+                "row {row_idx}: predict_row={predicted}, expected_value+Σphi={reconstructed}, \
+                 gap={}",
+                (predicted - reconstructed).abs()
+            );
+        }
+    }
+
+    /// Spine-tree reproducer: every level only goes deeper on the left
+    /// (stumps at 0, 1, 3, 7), missing all right-side and inner descendant
+    /// stumps.  Rows reach leaves at depths 1, 2, 3, 4 depending on where
+    /// they branch off the spine.  This is the topology most real models
+    /// produce when one branch is dominant and others early-stop.
+    #[test]
+    fn tree_shap_spine_tree_matches_brute_force() {
+        let model = TrainedModel {
+            baseline_prediction: 0.0,
+            feature_count: 4,
+            stumps: vec![
+                TrainedStump {
+                    split: split_with_counts(0, 0, 1, 70, 30),
+                    left_leaf_value: LeafValue::Scalar(0.1),
+                    right_leaf_value: LeafValue::Scalar(0.2),
+                },
+                TrainedStump {
+                    split: split_with_counts(1, 1, 1, 50, 20),
+                    left_leaf_value: LeafValue::Scalar(0.3),
+                    right_leaf_value: LeafValue::Scalar(0.4),
+                },
+                TrainedStump {
+                    split: split_with_counts(3, 2, 1, 30, 20),
+                    left_leaf_value: LeafValue::Scalar(0.5),
+                    right_leaf_value: LeafValue::Scalar(0.6),
+                },
+                TrainedStump {
+                    split: split_with_counts(7, 3, 1, 20, 10),
+                    left_leaf_value: LeafValue::Scalar(0.7),
+                    right_leaf_value: LeafValue::Scalar(0.8),
+                },
+            ],
+            categorical_state: None,
+            node_debug_stats: None,
+            objective: "squared_error".to_string(),
+            native_categorical_feature_indices: Vec::new(),
+            morph_metadata: None,
+            dro_metadata: None,
+            feature_baseline: None,
+        };
+
+        let rows = vec![
+            vec![0.0, 0.0, 0.0, 0.0], // LLLL → visits 0,1,3,7 → pred=baseline+0.1+0.3+0.5+0.7
+            vec![0.0, 0.0, 0.0, 5.0], // LLLR → visits 0,1,3,7 → pred=baseline+0.1+0.3+0.5+0.8
+            vec![0.0, 0.0, 5.0, 0.0], // LLR_ → visits 0,1,3 → pred=baseline+0.1+0.3+0.6
+            vec![0.0, 5.0, 0.0, 0.0], // LR__ → visits 0,1 → pred=baseline+0.1+0.4
+            vec![5.0, 0.0, 0.0, 0.0], // R___ → visits 0 → pred=baseline+0.2
+        ];
+
+        let brute_force = explain_rows_brute_force(&model, &rows, None).expect("brute force works");
+        let tree_shap = explain_rows_tree_shap(&model, &rows, None).expect("tree shap works");
+
+        for (row_idx, (bf_row, ts_row)) in brute_force
+            .values
+            .iter()
+            .zip(tree_shap.values.iter())
+            .enumerate()
+        {
+            for (feat_idx, (bf_val, ts_val)) in bf_row.iter().zip(ts_row.iter()).enumerate() {
+                assert!(
+                    (bf_val - ts_val).abs() <= 1e-5,
+                    "row {row_idx} feature {feat_idx}: bf={bf_val:.6} ts={ts_val:.6} \
+                     gap={:.3e} — TreeSHAP must match brute force on asymmetric spine trees",
+                    (bf_val - ts_val).abs()
+                );
+            }
+        }
+
+        // Additivity vs predict_row for each row.
+        for (row_idx, (row, ts_values)) in rows.iter().zip(tree_shap.values.iter()).enumerate() {
+            let predicted = model.predict_row(row).expect("predicts");
+            let reconstructed = tree_shap.expected_value + ts_values.iter().sum::<f32>();
+            assert!(
+                (predicted - reconstructed).abs() <= 1e-5,
+                "row {row_idx}: predict_row={predicted:.6}, expected_value+Σphi={reconstructed:.6}, \
+                 gap={:.3e}",
+                (predicted - reconstructed).abs()
+            );
+        }
+    }
+
     /// Build a SplitCandidate with a categorical bitset.
     fn categorical_split_with_counts(
         node_id: u32,

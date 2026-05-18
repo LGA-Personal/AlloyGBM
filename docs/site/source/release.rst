@@ -36,8 +36,29 @@ Bug-fix release.  Closes the remaining v0.7.x carryover documented in
   ``interaction_constraints``, :class:`~alloygbm.GBMRanker`,
   :class:`~alloygbm.GBMClassifier` (via the internal Rust check, since
   the raw margin is not exposed in Python),
-  ``feature_importances`` (TreeSHAP polynomial path), and mixed
-  scalar+linear-leaf artifacts.
+  ``feature_importances`` (brute-force exact path), and mixed
+  scalar+linear-leaf artifacts.  Strict additivity holds on the default
+  predictor-aligned binning path for any model that dispatches to the
+  brute-force exact Shapley path
+  (``distinct_split_feature_count <= MAX_EXACT_SPLIT_FEATURES = 25``).
+  Larger models that trigger the polynomial-TreeSHAP path are subject
+  to a pre-existing additivity drift documented as Limitation 5 (also
+  present in v0.7.3 and earlier).
+
+**Documentation:**
+
+- Limitation 4 (new): SHAP on the mixed linear-rank binning path —
+  ``continuous_binning_strategy="linear"`` with per-feature rank-based
+  binning falls back to the legacy non-binning SHAP entry point,
+  triggering the ``leaf_model="linear"`` exemption.  Narrow edge case;
+  deferred to v0.8.0.
+- Limitation 5 (new): pre-existing TreeSHAP polynomial-path additivity
+  drift on large gradient-trained trees (>= 30 distinct split features,
+  depth >= 6).  Uncovered during PR #27 review; investigated but not
+  isolated in minimal Rust reproductions.  Coverage pinned by
+  ``@xfail(strict=True)`` regression test
+  (``test_strict_additivity_via_tree_shap_polynomial_path``) so the
+  eventual fix flips the xfail to a regular pass.
 
 **Documented for v0.7.x follow-ups (deferred to 0.8.0):**
 
