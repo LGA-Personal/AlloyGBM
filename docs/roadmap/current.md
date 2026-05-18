@@ -4,6 +4,22 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
+The `0.8.0` release closes Limitation 4 (mixed linear-rank SHAP
+strict additivity) and adds LightGBM-style GOSS (gradient-based
+one-side sampling) as a new opt-in `boosting_mode="goss"` on all three
+estimators (binary classifier path; multiclass softmax explicitly
+rejects non-Standard modes pending per-class gradient scoring).
+Default `boosting_mode="standard"` is byte-identical to v0.7.5.
+
+The original v0.8.0 plan also targeted DART boosting mode and joint
+shared-tree multi-label ranking, but both were scope-split out to
+v0.9.0 and v0.10.0 respectively so this release could ship on a
+reviewable surface.  `BoostingMode::Dart` is reserved in the API
+(Python `boosting_mode="dart"` raises `NotImplementedError`; the Rust
+trainer rejects it with a clear error) so v0.9.0 can land the
+per-stump `tree_weight` artifact-format change + per-round dropout
+state without further `TrainParams` churn.
+
 The `0.7.5` release closes the last pre-existing v0.7.x SHAP
 correctness gap — Limitation 5 from v0.7.4 (TreeSHAP polynomial-path
 additivity drift on trees with a feature appearing more than once on a
@@ -56,6 +72,50 @@ artifacts. The `0.5.0` release introduced piecewise-linear (PL) tree leaves via
 `leaf_model="linear"` on all three estimators. The `0.4.0` release introduced
 the opt-in MorphBoost adaptive split criterion, per-iteration learning-rate
 schedules, and SIMD-accelerated histogram and EMA kernels.
+
+## What Shipped In 0.8.0
+
+Minor feature release.  Closes Limitation 4 (mixed linear-rank SHAP
+strict additivity) and adds GOSS as a new opt-in boosting mode.
+
+- **Mixed linear-rank SHAP strict additivity (Limitation 4).**  When
+  `continuous_binning_strategy="linear"` triggers per-feature
+  rank-based binning on at least one column, `shap_values()`
+  previously fell back to the legacy quantize-then-walk path that
+  exempts `leaf_model="linear"` artifacts from strict additivity.
+  v0.8.0 adds a `BinningContext::LinearRank` variant carrying
+  per-feature sorted unique values + global mins/maxs +
+  `max_data_bin`.  At the `explain_rows_from_model` entry point SHAP
+  internally quantizes raw rows to bin indices (matching exactly the
+  predict-time helper `predict_dense_quantized_linear_rank`) and
+  dispatches the remainder with `BinningContext::PreBinned` semantics
+  so tree traversal and PL-leaf evaluation share the same bin-index
+  space the predictor evaluates in.  Strict additivity now holds for
+  `leaf_model="linear"` on this path; the architectural contract is
+  pinned by
+  `test_shap_linear_rank_strict_additivity.py::test_mixed_linear_rank_uses_predictor_aligned_binning`
+  (binning_kind must be `linear_rank` when rank flags fire) and
+  `test_mixed_linear_rank_strict_additivity` for both
+  `leaf_model="constant"` and `leaf_model="linear"`.
+- **GOSS sampling (gradient-based one-side sampling).**  New
+  `boosting_mode="goss"` opt-in on `GBMRegressor`, `GBMClassifier`
+  (binary), and `GBMRanker` with `goss_top_rate` (default `0.2`) and
+  `goss_other_rate` (default `0.1`) controlling kept-top and
+  sampled-low fractions.  Implements the LightGBM algorithm: score
+  rows by `|gradient|`, keep the top fraction, sample from the rest,
+  amplify sampled-low rows by `(n - top_n) / other_n` (using
+  realized counts so `ceil()` rounding and the `other_n <= n - top_n`
+  cap don't bias the gradient-sum estimator at small `n`).  Engine
+  `crates/engine/src/sampling.rs`-style logic lives inline in the
+  engine crate's lib.rs as `goss_sample_indices` +
+  `select_row_indices_for_round`.  Multiclass softmax explicitly
+  rejects non-Standard boosting modes pending per-class gradient
+  scoring (v0.9.x follow-up).  DART (`boosting_mode="dart"`) is a
+  placeholder in v0.8.0: parses + passes `validate_train_params` so
+  parameter ranges remain testable, but the Python `__init__` raises
+  `NotImplementedError` and the Rust single-output trainer rejects
+  it at the entry point.  Full DART implementation targeted at
+  v0.9.0.
 
 ## What Shipped In 0.7.5
 

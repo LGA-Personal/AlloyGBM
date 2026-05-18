@@ -53,6 +53,12 @@ and the MorphBoost / LR-schedule parameters
 ``lr_schedule``, ``lr_warmup_frac``). See :doc:`morphboost`.
 ``leaf_model="linear"`` and ``training_mode="morph"`` can be combined.
 
+``boosting_mode="goss"`` with ``goss_top_rate`` / ``goss_other_rate`` is
+supported on the ranking objective (see :doc:`estimator` "Boosting mode"
+for the full semantics).  ``boosting_mode="dart"`` raises
+``NotImplementedError`` in v0.8.0; full DART implementation is
+targeted at v0.9.0.
+
 Methods
 -------
 

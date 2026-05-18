@@ -11,9 +11,40 @@
 - `n_estimators: int = 6`
   - Number of boosting rounds requested.
 - `row_subsample: float = 1.0`
-  - Fraction of rows sampled per round.
+  - Fraction of rows sampled per round.  Ignored when
+    `boosting_mode="goss"` (GOSS uses gradient-based sampling instead).
 - `col_subsample: float = 1.0`
   - Fraction of features sampled per round.
+
+## Boosting Mode
+
+- `boosting_mode: str = "standard"`
+  - Per-round sample-selection strategy.  Three values are accepted:
+    - `"standard"` (default) — uniform row subsampling under
+      `row_subsample`.  Byte-identical to v0.7.5.
+    - `"goss"` — LightGBM-style **G**radient-based **O**ne-**S**ide
+      **S**ampling.  Each round, score rows by `|gradient|`, keep
+      the top `goss_top_rate` fraction, uniformly sample
+      `goss_other_rate` from the rest, and amplify the sampled-low
+      rows' gradient and hessian by `(n - top_n) / other_n` so the
+      histogram statistics remain an unbiased estimator of the
+      full-data gradient sums.  Convergence is typically faster on
+      data with a long-tailed gradient distribution.
+    - `"dart"` — placeholder, currently rejected.  Calling this in
+      v0.8.0 raises `NotImplementedError`; full DART implementation
+      lands in v0.9.0.
+- `goss_top_rate: float = 0.2`
+  - Top-by-gradient kept fraction when `boosting_mode="goss"`.  Must
+    be in `(0, 1)`.
+- `goss_other_rate: float = 0.1`
+  - Random-sample fraction from remaining rows when
+    `boosting_mode="goss"`.  Must be in `(0, 1)` and
+    `goss_top_rate + goss_other_rate <= 1.0`.
+
+GOSS is supported on the binary classifier / regression / ranking
+single-output objective.  The multiclass softmax path explicitly
+rejects non-`"standard"` boosting modes pending per-class gradient
+scoring (v0.9.x follow-up).
 
 ## Stopping And Training Policy
 

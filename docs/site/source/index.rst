@@ -12,14 +12,14 @@ types.
 
 .. note::
 
-   AlloyGBM ``0.7.4`` is a bug-fix release.  It closes the remaining
-   v0.7.x SHAP-additivity carryover: strict additivity
-   (``atol + rtol·|predict(x)|``) now holds for ``leaf_model="linear"``
-   artifacts on the default predictor-aligned binning path.  The fix
-   walks the row's full path and credits ``Σⱼ wⱼ·(xⱼ − μⱼ)`` at every
-   visited node — matching how ``predict`` accumulates
-   ``leaf.eval_row(row)`` at each visited node.  No user-visible API
-   breakage.  See :doc:`release` for full notes.
+   AlloyGBM ``0.8.0`` is a minor feature release.  It closes
+   Limitation 4 (mixed linear-rank SHAP strict additivity) and adds
+   LightGBM-style GOSS sampling as a new opt-in
+   ``boosting_mode="goss"`` on ``GBMRegressor``, ``GBMClassifier``
+   (binary), and ``GBMRanker``.  Default ``boosting_mode="standard"``
+   is byte-identical to v0.7.5.  DART and joint multi-label ranking
+   were scope-split out to v0.9.0 and v0.10.0 respectively to keep
+   this release reviewable.  See :doc:`release` for full notes.
 
 Getting started
 ---------------

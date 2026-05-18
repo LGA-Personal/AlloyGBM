@@ -346,6 +346,77 @@ impl GradientEmaStats {
     }
 }
 
+/// DART tree-weight normalization policy.  Mirrors LightGBM/MART
+/// terminology — see `crates/engine/src/dart.rs` for how the policy
+/// affects per-round leaf-weight rescaling.
+///
+/// * `Tree`: each new tree is scaled by `1 / (K + 1)` and each of the
+///   K dropped trees by `K / (K + 1)`.  Keeps the cumulative ensemble
+///   prediction unbiased after the per-round dropout swap.
+/// * `Forest`: applies a forest-wide rescaling factor; commonly used
+///   when the user expects DART to behave more like a random-forest
+///   ensemble than a boosted ensemble.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DartNormalize {
+    Tree,
+    Forest,
+}
+
+/// DART dropout sampling strategy.
+///
+/// * `Uniform`: each of the existing K trees is dropped with
+///   probability `drop_rate`, capped at `max_drop`.
+/// * `Weighted`: drop probability is weighted by per-tree contribution
+///   magnitude so larger-impact trees are more likely to be dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DartSampleType {
+    Uniform,
+    Weighted,
+}
+
+/// Per-round boosting strategy.
+///
+/// * `Standard` (default): byte-identical to v0.7.5 behaviour —
+///   uniform row subsampling under `row_subsample`, no per-round
+///   tree dropout.
+/// * `Goss { top_rate, other_rate }`: gradient-based one-side
+///   sampling — keep the top `top_rate` rows by `|gradient|`, sample
+///   `other_rate` from the rest, and amplify the small-gradient rows
+///   by `(1 - top_rate) / other_rate` to maintain unbiased gradient
+///   sums.  See `crates/engine/src/sampling.rs`.
+/// * `Dart { drop_rate, max_drop, normalize_type, sample_type }`:
+///   per-round tree dropout — drop K existing trees before computing
+///   gradients, fit a new tree, then rescale per `normalize_type`.
+///   Requires per-stump `tree_weight: f32` in the artifact (back-compat:
+///   missing field defaults to 1.0).  See `crates/engine/src/dart.rs`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BoostingMode {
+    Standard,
+    Goss {
+        top_rate: f32,
+        other_rate: f32,
+    },
+    Dart {
+        drop_rate: f32,
+        max_drop: usize,
+        normalize_type: DartNormalize,
+        sample_type: DartSampleType,
+    },
+}
+
+impl BoostingMode {
+    /// Stable string label for artifact metadata and Python-side error
+    /// messages.  Matches the `boosting_mode=` ctor strings on the
+    /// estimators.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Goss { .. } => "goss",
+            Self::Dart { .. } => "dart",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Device {
     Cpu,
@@ -411,6 +482,10 @@ pub struct TrainParams {
     /// Configuration for `leaf_solver == Dro`.
     pub dro_config: Option<DroConfig>,
     pub neutralization_config: Option<FactorNeutralizationConfig>,
+    /// v0.8.0: per-round boosting strategy.  Default `Standard`
+    /// preserves v0.7.5 behaviour exactly.  See [`BoostingMode`] for
+    /// the GOSS / DART semantics.
+    pub boosting_mode: BoostingMode,
 }
 
 impl Default for TrainParams {
@@ -439,6 +514,7 @@ impl Default for TrainParams {
             leaf_solver: LeafSolverKind::Standard,
             dro_config: None,
             neutralization_config: None,
+            boosting_mode: BoostingMode::Standard,
         }
     }
 }
@@ -2474,7 +2550,7 @@ pub fn validate_train_params(params: &TrainParams) -> CoreResult<()> {
     if params.leaf_solver == LeafSolverKind::Dro {
         if params.leaf_model != LeafModelKind::Constant {
             return Err(CoreError::InvalidConfig(
-                "leaf_solver='dro' requires leaf_model='constant' in v0.7.4".to_string(),
+                "leaf_solver='dro' requires leaf_model='constant' in v0.8.0".to_string(),
             ));
         }
         let Some(cfg) = params.dro_config else {
@@ -2528,6 +2604,49 @@ pub fn validate_train_params(params: &TrainParams) -> CoreResult<()> {
                 "morph_config.lr_schedule.warmup_frac must be in [0, 1], got {}",
                 warmup_frac
             )));
+        }
+    }
+
+    match params.boosting_mode {
+        BoostingMode::Standard => {}
+        BoostingMode::Goss {
+            top_rate,
+            other_rate,
+        } => {
+            if !top_rate.is_finite() || !(0.0..1.0).contains(&top_rate) || top_rate == 0.0 {
+                return Err(CoreError::InvalidConfig(format!(
+                    "boosting_mode='goss' requires goss_top_rate in (0, 1), got {top_rate}"
+                )));
+            }
+            if !other_rate.is_finite() || !(0.0..1.0).contains(&other_rate) || other_rate == 0.0 {
+                return Err(CoreError::InvalidConfig(format!(
+                    "boosting_mode='goss' requires goss_other_rate in (0, 1), got {other_rate}"
+                )));
+            }
+            if top_rate + other_rate > 1.0 + f32::EPSILON {
+                return Err(CoreError::InvalidConfig(format!(
+                    "boosting_mode='goss' requires goss_top_rate + goss_other_rate <= 1.0 (got {} + {} = {})",
+                    top_rate,
+                    other_rate,
+                    top_rate + other_rate
+                )));
+            }
+        }
+        BoostingMode::Dart {
+            drop_rate,
+            max_drop,
+            ..
+        } => {
+            if !drop_rate.is_finite() || !(0.0..1.0).contains(&drop_rate) || drop_rate == 0.0 {
+                return Err(CoreError::InvalidConfig(format!(
+                    "boosting_mode='dart' requires dart_drop_rate in (0, 1), got {drop_rate}"
+                )));
+            }
+            if max_drop == 0 {
+                return Err(CoreError::InvalidConfig(
+                    "boosting_mode='dart' requires dart_max_drop >= 1".to_string(),
+                ));
+            }
         }
     }
 

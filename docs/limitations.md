@@ -1,6 +1,6 @@
 # AlloyGBM Current Limitations
 
-Last updated for v0.7.5.
+Last updated for v0.8.0.
 
 ## Remaining Limitations
 
@@ -10,10 +10,23 @@ The `BackendOps` trait is designed for hardware abstraction, but only
 `CpuBackend` exists. GPU/accelerator support is architecturally planned but
 not implemented.
 
-### 2. No Dart / GOSS Boosting Modes
+### 2. No DART Boosting Mode (GOSS Resolved In v0.8.0)
 
-Only standard gradient boosting is supported. Dart (dropout) and GOSS
-(gradient-based one-side sampling) modes are not available.
+GOSS (gradient-based one-side sampling, LightGBM-style) is supported
+as of v0.8.0 via `boosting_mode="goss"`, `goss_top_rate`, and
+`goss_other_rate` on `GBMRegressor`, `GBMClassifier` (binary), and
+`GBMRanker`.  The multiclass softmax path explicitly rejects
+non-Standard boosting modes with a clear error message — multiclass
+GOSS requires per-class gradient scoring, tracked as a v0.9.x
+follow-up.
+
+DART (dropouts meet MART) is still unavailable.  Calling
+`boosting_mode="dart"` raises `NotImplementedError` in Python and is
+rejected at the Rust single-output trainer entry point with
+`"boosting_mode='dart' is not yet implemented in the single-output
+trainer; only 'standard' and 'goss' are wired through"`.  DART
+requires per-stump `tree_weight` plumbing through the artifact format
+and the predictor; **targeted at v0.9.0**.
 
 ### 3. Multi-Label Ranking — Independent Per-Label Trees
 
@@ -31,32 +44,42 @@ Numerically the wrapper is equivalent to training each label
 separately.  Joint shared-tree multi-label boosting — where a single
 ensemble updates all label predictions simultaneously via shared splits
 — would let correlated labels share split information across trees and
-typically reduces total model size for related tasks.  Deferred to
-v0.8.0, paired with the shared-histogram speedup where the
-``MulticlassSoftmaxObjective``-style K-tree-per-round engine plumbing
-for ranking objectives has a real performance story.
+typically reduces total model size for related tasks.  **Targeted at
+v0.10.0**, paired with the K-output shared-histogram engine primitive
+where the ``MulticlassSoftmaxObjective``-style K-tree-per-round engine
+plumbing for ranking objectives has a real performance story.
 
-### 4. SHAP On The Mixed Linear-Rank Binning Path (Narrow)
+### 4. NaN Handling On The Rank-Binning Predict Path (Narrow)
 
-When `continuous_binning_strategy="linear"` is combined with
-per-feature *rank-based* linear binning enabled on at least one feature
-(`_continuous_feature_linear_rank_flags` has any `True` entry), the
-Python `shap_values()` path falls back to the legacy
-quantize-then-walk SHAP entry point (`shap_explain_rows` /
-`shap_explain_rows_dense`) instead of the predictor-aligned
-`shap_explain_rows_with_binning` variants.  This is because the
-rank-aware `BinningContext` conversion is not yet wired through.
+When `continuous_binning_strategy="linear"` triggers per-feature
+rank-based binning on at least one column, the predict-time helper
+`quantize_dense_values_linear_rank_inplace_wide` in
+`bindings/python/src/lib.rs` doesn't preserve `NaN` through the
+quantize step: `quantize_rank_value_wide` falls through to bin `0`
+(because `*probe <= NaN` is always false) and `quantize_linear_value_wide`
+produces `NaN → 0` via the IEEE-NaN-to-integer cast.  The predictor's
+`predictor_went_left` check at `crates/predictor/src/lib.rs:142`
+detects NaN via `feature_value.is_nan()` for default_left routing,
+but by the time it sees the row the bin index is finite, so the
+learned-missing-direction never fires for rank-binned columns.
 
-For `leaf_model="constant"` artifacts the legacy path is still correct
-under the usual round-off tolerance, so this path is largely benign.
-For `leaf_model="linear"` artifacts it triggers the
-`binning.is_none() && model_has_linear_leaves(model)` exemption in
-`crates/shap/src/lib.rs::verify_additivity` and you get best-effort
-interventional explanations rather than strict additivity.
+The pure linear path (no rank flags) is unaffected — it uses the
+`convert_thresholds_to_float` path which feeds raw floats directly
+to the predictor, so the `is_nan` check fires normally.  Pure
+quantile binning is similarly unaffected.
 
-Deferred to v0.8.0.  Users who need strict PL-leaf additivity in the
-meantime can pick `continuous_binning_strategy="quantile"` or use the
-pure-`linear` mode (no per-feature rank flags set).
+SHAP rejects NaN/Inf inputs outright via `validate_rows` in
+`crates/shap/src/lib.rs` (`"row N feature M contains NaN/Inf...
+impute them before calling shap_values()"`) so the bug is not
+reachable from the SHAP path; impacts predict-only.
+
+Resolving end-to-end requires updating both the predict-time
+quantize helper and the predictor's tree walker to coordinate on
+either a `max_data_bin + 1` sentinel or NaN-preservation, plus a
+consistent `LinearLeaf::eval` policy (which currently propagates
+NaN through `intercept + Σ w·NaN = NaN` for any regressor feature).
+Tracked alongside the v0.9.0 DART work where the broader artifact /
+predict-path NaN audit can land coherently.
 
 ## Resolved (Previously Limitations)
 
@@ -106,6 +129,20 @@ The following were limitations in prior versions and have been addressed:
 - RUSTSEC-2025-0020 in `pyo3 < 0.24.1` (now: v0.7.3 — pyo3 0.23.5 →
   0.24, `deny.toml` and the cargo-audit CI step no longer ignore the
   advisory)
+- SHAP on the mixed linear-rank binning path (now: v0.8.0 — new
+  `BinningContext::LinearRank` variant carries per-feature sorted
+  unique values + global mins/maxs + `max_data_bin`.  At the
+  `explain_rows_from_model` entry point SHAP internally quantizes
+  rows to bin indices (linear-quantize unflagged features,
+  rank-quantize flagged features — exactly matching
+  `predict_dense_quantized_linear_rank`) and dispatches the
+  remainder with `BinningContext::PreBinned` semantics, so tree
+  traversal and PL-leaf evaluation share the same bin-index space
+  as the predictor.  Strict additivity now holds for
+  `leaf_model="linear"` on the mixed linear-rank path; the
+  predictor-aligned binning kwargs `_shap_binning_kwargs()`
+  returns include `binning_kind="linear_rank"` whenever any
+  per-feature rank flag is set.  Closes Limitation 4.)
 - Strict SHAP additivity for `leaf_model="linear"` on continuous
   features (now: v0.7.4 — `distribute_linear_terms_for_row` credits
   `wⱼ · (xⱼ − μⱼ)` at every visited node along the row's path,

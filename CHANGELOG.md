@@ -1,5 +1,74 @@
 # Changelog
 
+## 0.8.0
+
+Minor feature release: closes the mixed linear-rank SHAP carry-forward
+from v0.7.4 (Limitation 4) and adds LightGBM-style GOSS sampling as a
+new opt-in boosting mode.  Default behaviour is byte-identical to v0.7.5
+on every API surface.
+
+The other two original v0.8.0 targets — DART boosting mode and joint
+shared-tree multi-label ranking — were scope-split out to v0.9.0 and
+v0.10.0 respectively to keep this release reviewable.  `BoostingMode::Dart`
+is reserved in the API (Python `boosting_mode="dart"` raises
+`NotImplementedError`; the Rust trainer rejects it with a clear error
+message) so v0.9.0 can land DART training without further `TrainParams`
+changes.
+
+### Added
+
+- **GOSS sampling (gradient-based one-side sampling).**  New
+  `boosting_mode="goss"` opt-in on `GBMRegressor`, `GBMClassifier`
+  (binary), and `GBMRanker`, with `goss_top_rate` (default `0.2`) and
+  `goss_other_rate` (default `0.1`) controlling the kept-top fraction
+  and sampled-low fraction respectively.  Implements the LightGBM
+  algorithm: score rows by `|gradient|`, keep the top `top_rate`,
+  sample `other_rate` from the rest, and multiply the sampled-low
+  rows' gradient + hessian by `(1 - top_rate) / other_rate` so the
+  histogram statistics remain an unbiased estimator of the full-data
+  gradient sums.  See `engine::goss_sample_indices` and
+  `engine::select_row_indices_for_round`.  Multiclass softmax rejects
+  non-Standard boosting modes with a clear error message
+  ("...not yet supported for multiclass objectives...") — a v0.8.1
+  follow-up will add per-class gradient scoring.
+- `BoostingMode` enum and validation in `alloygbm-core` covering
+  Standard / Goss / Dart.  DART is a placeholder in v0.8.0: the
+  Python `__init__` raises `NotImplementedError("dart is reserved
+  for a v0.8.0 follow-up commit")` and the Rust validation layer
+  passes through the placeholder so DART implementation work can
+  proceed incrementally without further core changes.
+
+### Fixed
+
+- **SHAP strict additivity on the mixed linear-rank binning path
+  (Limitation 4).**  When `continuous_binning_strategy="linear"` is
+  combined with per-feature *rank-based* linear binning on at least
+  one column (`_continuous_feature_linear_rank_flags` has any `True`
+  entry), `shap_values()` previously fell back to the legacy
+  quantize-then-walk SHAP path, which exempts `leaf_model="linear"`
+  artifacts from strict additivity via the
+  `binning.is_none() && model_has_linear_leaves(model)` rule in
+  `crates/shap/src/lib.rs::verify_additivity`.
+  v0.8.0 adds `BinningContext::LinearRank`, a new variant carrying
+  per-feature sorted unique values, global `feature_mins` /
+  `feature_maxs`, and `max_data_bin`.  At the
+  `explain_rows_from_model` entry point SHAP internally quantizes
+  raw rows to bin indices using exactly the same rules as
+  `predict_dense_quantized_linear_rank`
+  (linear-quantize unflagged features, rank-quantize flagged
+  features, both following `round_half_away_from_zero` clamped to
+  `[0, max_data_bin]`) and dispatches the remainder of the
+  path-walker with `BinningContext::PreBinned` semantics.  Both
+  tree traversal and PL-leaf evaluation now share the bin-index
+  space the predictor evaluates in, so strict additivity holds for
+  `leaf_model="linear"` (and constant leaves stay correct).
+  The Python `_shap_binning_kwargs()` helper returns
+  `{"binning_kind": "linear_rank", "feature_mins": …,
+  "feature_maxs": …, "max_data_bin": …,
+  "linear_rank_per_feature": …}` whenever any per-feature rank
+  flag fires; `GBMClassifier` and `GBMRanker` inherit the fix via
+  the shared `GBMRegressor._shap_binning_kwargs` implementation.
+
 ## 0.7.5
 
 Bug-fix release.  Closes Limitation 5 from v0.7.4 — the pre-existing

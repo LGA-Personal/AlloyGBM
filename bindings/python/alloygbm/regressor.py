@@ -29,6 +29,9 @@ def _nan_bin_for_max_bins(max_bins):
     return max_bins - 1
 _MIN_CONTINUOUS_QUANTIZED_BINS = 2
 _VALID_CONTINUOUS_BINNING_STRATEGIES = {"linear", "rank", "quantile"}
+# v0.8.0: per-round boosting strategies.  "dart" is reserved for a
+# follow-up commit — see crates/core/src/lib.rs::BoostingMode.
+_VALID_BOOSTING_MODES = {"standard", "goss", "dart"}
 _LINEAR_TAIL_RANK_ENV_VAR = "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK"
 _LINEAR_TAIL_CORE_SPAN_RATIO_ENV_VAR = "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_CORE_SPAN_RATIO"
 _DEFAULT_LINEAR_TAIL_CORE_SPAN_RATIO_THRESHOLD = 0.10
@@ -334,6 +337,9 @@ class GBMRegressor(_GBMRegressorBase):
         neutralization: str = "none",
         factor_neutralization_lambda: float = 1e-6,
         factor_penalty: float = 0.0,
+        boosting_mode: str = "standard",
+        goss_top_rate: float = 0.2,
+        goss_other_rate: float = 0.1,
     ) -> None:
         if not (0.0 < learning_rate <= 1.0):
             raise ValueError("learning_rate must be in (0.0, 1.0]")
@@ -521,7 +527,7 @@ class GBMRegressor(_GBMRegressorBase):
             )
         if str(leaf_solver) == "dro" and str(leaf_model) != "constant":
             raise ValueError(
-                "leaf_solver='dro' requires leaf_model='constant' in v0.7.5"
+                "leaf_solver='dro' requires leaf_model='constant' in v0.8.0"
             )
         if str(neutralization) not in (
             "none",
@@ -547,6 +553,35 @@ class GBMRegressor(_GBMRegressorBase):
         if str(neutralization) == "split_penalty" and str(leaf_model) == "linear":
             raise ValueError(
                 "neutralization='split_penalty' requires leaf_model='constant'"
+            )
+        if str(boosting_mode) not in _VALID_BOOSTING_MODES:
+            raise ValueError(
+                "boosting_mode must be one of: "
+                + ", ".join(sorted(_VALID_BOOSTING_MODES))
+                + f", got {boosting_mode!r}"
+            )
+        if str(boosting_mode) == "goss":
+            if not (0.0 < float(goss_top_rate) < 1.0):
+                raise ValueError(
+                    "boosting_mode='goss' requires goss_top_rate in (0, 1)"
+                )
+            if not (0.0 < float(goss_other_rate) < 1.0):
+                raise ValueError(
+                    "boosting_mode='goss' requires goss_other_rate in (0, 1)"
+                )
+            if float(goss_top_rate) + float(goss_other_rate) > 1.0:
+                raise ValueError(
+                    "boosting_mode='goss' requires goss_top_rate + goss_other_rate <= 1.0"
+                )
+        if str(boosting_mode) == "dart":
+            # DART is reserved for a follow-up commit on v0.8.0-features;
+            # the Rust engine doesn't yet implement the per-round dropout
+            # and per-stump weight bookkeeping.  Reject loudly so users
+            # don't silently get standard boosting.
+            raise NotImplementedError(
+                "boosting_mode='dart' is reserved for a v0.8.0 follow-up "
+                "commit; only 'standard' and 'goss' are wired through in "
+                "the current build"
             )
 
         self.learning_rate = float(learning_rate)
@@ -616,6 +651,13 @@ class GBMRegressor(_GBMRegressorBase):
         self.neutralization = str(neutralization)
         self.factor_neutralization_lambda = float(factor_neutralization_lambda)
         self.factor_penalty = float(factor_penalty)
+        # v0.8.0: per-round boosting strategy.  Default "standard" is
+        # byte-identical to v0.7.5 behaviour.  "goss" enables
+        # gradient-based one-side sampling.  "dart" is reserved for a
+        # v0.8.0 follow-up commit (NotImplementedError above).
+        self.boosting_mode = str(boosting_mode)
+        self.goss_top_rate = float(goss_top_rate)
+        self.goss_other_rate = float(goss_other_rate)
         self._fit_neutralization: str | None = None
         self._fit_factor_neutralization_lambda: float | None = None
         self._fit_factor_penalty: float | None = None
@@ -688,7 +730,10 @@ class GBMRegressor(_GBMRegressorBase):
             f"dro_metric='{self.dro_metric}', "
             f"neutralization='{self.neutralization}', "
             f"factor_neutralization_lambda={self.factor_neutralization_lambda}, "
-            f"factor_penalty={self.factor_penalty}"
+            f"factor_penalty={self.factor_penalty}, "
+            f"boosting_mode='{self.boosting_mode}', "
+            f"goss_top_rate={self.goss_top_rate}, "
+            f"goss_other_rate={self.goss_other_rate}"
             ")"
         )
 
@@ -743,6 +788,9 @@ class GBMRegressor(_GBMRegressorBase):
             "neutralization": self.neutralization,
             "factor_neutralization_lambda": self.factor_neutralization_lambda,
             "factor_penalty": self.factor_penalty,
+            "boosting_mode": self.boosting_mode,
+            "goss_top_rate": self.goss_top_rate,
+            "goss_other_rate": self.goss_other_rate,
         }
 
     def set_params(self, **params: object) -> "GBMRegressor":
@@ -795,6 +843,9 @@ class GBMRegressor(_GBMRegressorBase):
             "neutralization",
             "factor_neutralization_lambda",
             "factor_penalty",
+            "boosting_mode",
+            "goss_top_rate",
+            "goss_other_rate",
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
@@ -1217,6 +1268,36 @@ class GBMRegressor(_GBMRegressorBase):
                 raise ValueError("factor_penalty must be finite and >= 0")
             self.factor_penalty = fp
 
+        if "boosting_mode" in params:
+            bm = str(params["boosting_mode"])
+            if bm not in _VALID_BOOSTING_MODES:
+                raise ValueError(
+                    "boosting_mode must be one of: "
+                    + ", ".join(sorted(_VALID_BOOSTING_MODES))
+                )
+            if bm == "dart":
+                raise NotImplementedError(
+                    "boosting_mode='dart' is reserved for a v0.8.0 follow-up commit"
+                )
+            self.boosting_mode = bm
+        if "goss_top_rate" in params:
+            r = float(params["goss_top_rate"])
+            if not (0.0 < r < 1.0):
+                raise ValueError("goss_top_rate must be in (0, 1)")
+            self.goss_top_rate = r
+        if "goss_other_rate" in params:
+            r = float(params["goss_other_rate"])
+            if not (0.0 < r < 1.0):
+                raise ValueError("goss_other_rate must be in (0, 1)")
+            self.goss_other_rate = r
+        # Cross-field validation for goss top+other rates.
+        if self.boosting_mode == "goss" and (
+            self.goss_top_rate + self.goss_other_rate > 1.0
+        ):
+            raise ValueError(
+                "boosting_mode='goss' requires goss_top_rate + goss_other_rate <= 1.0"
+            )
+
         # Cross-field validation: leaf growth requires max_leaves
         if self.tree_growth == "leaf" and self.max_leaves is None:
             raise ValueError("max_leaves must be set when tree_growth='leaf'")
@@ -1232,7 +1313,7 @@ class GBMRegressor(_GBMRegressorBase):
 
         if self.leaf_solver == "dro" and self.leaf_model != "constant":
             raise ValueError(
-                "leaf_solver='dro' requires leaf_model='constant' in v0.7.5"
+                "leaf_solver='dro' requires leaf_model='constant' in v0.8.0"
             )
         if self.neutralization != "split_penalty" and self.factor_penalty != 0.0:
             raise ValueError(
@@ -1929,6 +2010,13 @@ class GBMRegressor(_GBMRegressorBase):
                         if factor_exposure_values is not None
                         else None
                     ),
+                    boosting_mode=self.boosting_mode,
+                    goss_top_rate=(
+                        self.goss_top_rate if self.boosting_mode == "goss" else None
+                    ),
+                    goss_other_rate=(
+                        self.goss_other_rate if self.boosting_mode == "goss" else None
+                    ),
                 )
                 return self._finalize_training_result(native_result, input_adaptation_seconds, feature_count=feature_count)
             except (ImportError, AttributeError):
@@ -2041,6 +2129,13 @@ class GBMRegressor(_GBMRegressorBase):
                     if factor_exposure_values is not None
                     else None
                 ),
+                boosting_mode=self.boosting_mode,
+                goss_top_rate=(
+                    self.goss_top_rate if self.boosting_mode == "goss" else None
+                ),
+                goss_other_rate=(
+                    self.goss_other_rate if self.boosting_mode == "goss" else None
+                ),
             )
         else:
             assert training_rows is not None
@@ -2110,6 +2205,13 @@ class GBMRegressor(_GBMRegressorBase):
                     factor_exposure_factor_count
                     if factor_exposure_values is not None
                     else None
+                ),
+                boosting_mode=self.boosting_mode,
+                goss_top_rate=(
+                    self.goss_top_rate if self.boosting_mode == "goss" else None
+                ),
+                goss_other_rate=(
+                    self.goss_other_rate if self.boosting_mode == "goss" else None
                 ),
             )
 
@@ -2461,6 +2563,13 @@ class GBMRegressor(_GBMRegressorBase):
                     if factor_exposure_values is not None
                     else None
                 ),
+                boosting_mode=self.boosting_mode,
+                goss_top_rate=(
+                    self.goss_top_rate if self.boosting_mode == "goss" else None
+                ),
+                goss_other_rate=(
+                    self.goss_other_rate if self.boosting_mode == "goss" else None
+                ),
             )
         else:
             train_regression_artifact = _load_native_train_regression_artifact()
@@ -2502,6 +2611,13 @@ class GBMRegressor(_GBMRegressorBase):
                     factor_exposure_factor_count
                     if factor_exposure_values is not None
                     else None
+                ),
+                boosting_mode=self.boosting_mode,
+                goss_top_rate=(
+                    self.goss_top_rate if self.boosting_mode == "goss" else None
+                ),
+                goss_other_rate=(
+                    self.goss_other_rate if self.boosting_mode == "goss" else None
                 ),
             )
 
@@ -2768,32 +2884,48 @@ class GBMRegressor(_GBMRegressorBase):
 
         - `linear` (no per-feature rank flags): use feature mins/maxs +
           max_data_bin.
+        - `linear` with at least one per-feature rank flag set: use the
+          mixed-mode `linear_rank` context (per-feature sorted unique
+          values for rank-flagged columns, fall back to linear binning
+          for the rest).  v0.8.0 closed Limitation 4 by wiring this
+          through.
         - `quantile`: use feature quantile cuts.
 
-        For the mixed linear-rank case (some features quantized linearly,
-        others by rank) the path-walker fix is not yet wired through, so
-        the legacy quantize-then-walk SHAP path is used. Pre-binned
-        artifacts also use the legacy path because the bin-index
+        Pre-binned artifacts use the legacy path because the bin-index
         comparison is already correct for integer data.
         """
         if not self._is_fitted or not self._uses_continuous_binning:
             return None
         strategy = self.continuous_binning_strategy
         if strategy == "linear":
-            rank_flags = self._continuous_feature_linear_rank_flags
-            if rank_flags is not None and any(rank_flags):
-                # Mixed linear-rank: the rank-aware SHAP conversion is
-                # not yet wired through, so we fall back to the legacy
-                # quantize-then-walk path.  For `leaf_model="linear"`
-                # users this means the strict-additivity check is
-                # exempted on this narrow code path (the linear-leaf
-                # exemption in `verify_additivity` triggers when
-                # `binning.is_none()`).  Deferred to v0.8.0.
-                return None
             mins = self._continuous_feature_mins
             maxs = self._continuous_feature_maxs
             if mins is None or maxs is None:
                 return None
+            rank_flags = self._continuous_feature_linear_rank_flags
+            if rank_flags is not None and any(rank_flags):
+                sorted_values = self._continuous_feature_sorted_values
+                if sorted_values is None:
+                    # Defensive: rank flags fired but sorted values were
+                    # not persisted.  Fall back to the legacy path
+                    # rather than mis-route SHAP to an inconsistent
+                    # context.
+                    return None
+                per_feature: list[list[float] | None] = []
+                for flag, column in zip(rank_flags, sorted_values):
+                    if flag and column is not None:
+                        per_feature.append(list(column))
+                    else:
+                        per_feature.append(None)
+                return {
+                    "binning_kind": "linear_rank",
+                    "feature_mins": list(mins),
+                    "feature_maxs": list(maxs),
+                    "max_data_bin": _max_data_bin_for_max_bins(
+                        self.continuous_binning_max_bins
+                    ),
+                    "linear_rank_per_feature": per_feature,
+                }
             return {
                 "binning_kind": "linear",
                 "feature_mins": list(mins),
@@ -2827,20 +2959,26 @@ class GBMRegressor(_GBMRegressorBase):
         As of v0.7.4, ``Σ shap_values + expected_value == predict(x)``
         holds within ``atol + rtol · |predict(x)|`` (default
         ``atol=1e-5, rtol=1e-4``) for every leaf model on the default
-        predictor-aligned binning path.  The legacy non-binning path
-        retains the best-effort exemption for linear leaves only.
+        predictor-aligned binning path.  v0.8.0 extends this guarantee
+        to the mixed linear-rank binning path
+        (``continuous_binning_strategy="linear"`` combined with
+        per-feature rank-based binning on at least one column) via the
+        new ``BinningContext::LinearRank`` variant — see
+        ``docs/limitations.md`` "Resolved" entry for v0.8.0.
+        The legacy non-binning path retains the best-effort exemption
+        for linear leaves only.
         """
         if not self._is_fitted:
             raise RuntimeError("GBMRegressor must be fit before shap_values")
         if self._artifact_bytes is None:
             raise RuntimeError("GBMRegressor native artifact is not available")
 
-        # v0.7.3: when we have a `BinningContext` available (continuous
-        # features under linear or quantile binning), pass raw rows +
-        # binning kwargs so the native SHAP path-walker uses the same
-        # float thresholds the predictor uses.  For pre-binned data and
-        # for the mixed linear-rank case, fall back to the legacy
-        # quantize-then-walk path.
+        # v0.7.3+: when we have a `BinningContext` available (continuous
+        # features under linear, quantile, or — as of v0.8.0 — mixed
+        # linear-rank binning), pass raw rows + binning kwargs so the
+        # native SHAP path-walker matches the predictor.  Pre-binned
+        # integer data and unbinned float artifacts fall back to the
+        # legacy quantize-then-walk path.
         binning_kwargs = self._shap_binning_kwargs()
         if binning_kwargs is not None:
             rows = self._native_matrix_flat_payload(X) or self._validate_rows(X)

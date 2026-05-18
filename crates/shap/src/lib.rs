@@ -112,6 +112,66 @@ pub enum BinningContext {
     Quantile { feature_cuts: Vec<Vec<f32>> },
     /// Pre-binned integer features. Float threshold = `bin + 0.5`.
     PreBinned,
+    /// Mixed linear / rank-based linear bins.  Features whose
+    /// `per_feature` entry is `Some(sorted_values)` were quantized by
+    /// rank (sorted unique values → bin = round(rank * max_data_bin /
+    /// (N - 1))).  Features whose entry is `None` fall back to standard
+    /// linear binning using the global `feature_mins`/`feature_maxs`.
+    ///
+    /// **Predictor parity.** For mixed linear-rank artifacts the
+    /// predictor evaluates *both* tree traversal and piecewise-linear
+    /// leaves in bin-index space (see
+    /// `predict_dense_quantized_linear_rank` in
+    /// `bindings/python/src/lib.rs` — raw floats are quantized once,
+    /// then bin indices feed splits and `LinearLeaf::eval_row` alike).
+    /// SHAP matches this by quantizing rows internally at the
+    /// `explain_rows_from_model` entry point and then dispatching the
+    /// rest of the path-walker on `BinningContext::PreBinned`
+    /// semantics (`bin_value < bin + 0.5` ⟺ `bin_value ≤ bin`).
+    /// `BinningContext::LinearRank` therefore acts as a carrier for the
+    /// quantization parameters; its `float_threshold` is not invoked at
+    /// runtime — the transformation happens earlier.  Tests against
+    /// `float_threshold` document the boundary math for completeness.
+    LinearRank {
+        per_feature: Vec<Option<Vec<f32>>>,
+        feature_mins: Vec<f32>,
+        feature_maxs: Vec<f32>,
+        max_data_bin: u16,
+    },
+}
+
+/// Quantize a single value with the predictor's rank-quantize rule,
+/// matching `quantize_rank_value_wide` in `bindings/python/src/lib.rs`.
+fn quantize_rank_value(value: f32, sorted_values: &[f32], max_data_bin: u16) -> f32 {
+    if sorted_values.len() <= 1 {
+        return 0.0;
+    }
+    let insertion = sorted_values.partition_point(|probe| *probe <= value);
+    let rank = insertion.saturating_sub(1).min(sorted_values.len() - 1);
+    let scaled =
+        (rank as f32 * max_data_bin as f32) / (sorted_values.len().saturating_sub(1) as f32);
+    let rounded = if scaled >= 0.0 {
+        (scaled + 0.5).floor()
+    } else {
+        (scaled - 0.5).ceil()
+    };
+    rounded.clamp(0.0, max_data_bin as f32)
+}
+
+/// Quantize a single value with the predictor's linear-quantize rule,
+/// matching `quantize_linear_value_wide` in `bindings/python/src/lib.rs`.
+fn quantize_linear_value(value: f32, min_val: f32, max_val: f32, max_data_bin: u16) -> f32 {
+    let span = max_val - min_val;
+    if span <= f32::EPSILON {
+        return 0.0;
+    }
+    let scaled = ((value - min_val) / span) * max_data_bin as f32;
+    let rounded = if scaled >= 0.0 {
+        (scaled + 0.5).floor()
+    } else {
+        (scaled - 0.5).ceil()
+    };
+    rounded.clamp(0.0, max_data_bin as f32)
 }
 
 impl BinningContext {
@@ -145,6 +205,34 @@ impl BinningContext {
                 }
             }
             BinningContext::PreBinned => bin as f32 + 0.5,
+            BinningContext::LinearRank {
+                per_feature,
+                feature_mins,
+                feature_maxs,
+                max_data_bin,
+            } => match &per_feature[feature_index] {
+                Some(sorted_values) => {
+                    let n = sorted_values.len();
+                    if n <= 1 {
+                        return f32::MAX;
+                    }
+                    let n_minus_1 = (n - 1) as f32;
+                    let denom = *max_data_bin as f32;
+                    let r_crit = (bin as f32 + 0.5) * n_minus_1 / denom;
+                    let r_star = (r_crit.ceil() as usize).min(n - 1);
+                    sorted_values[r_star]
+                }
+                None => {
+                    let min_val = feature_mins[feature_index];
+                    let max_val = feature_maxs[feature_index];
+                    let span = max_val - min_val;
+                    if span <= f32::EPSILON {
+                        min_val + f32::EPSILON
+                    } else {
+                        min_val + ((bin as f32 + 0.5) / *max_data_bin as f32) * span
+                    }
+                }
+            },
         }
     }
 
@@ -174,8 +262,57 @@ impl BinningContext {
                 }
             }
             BinningContext::PreBinned => {}
+            BinningContext::LinearRank {
+                per_feature,
+                feature_mins,
+                feature_maxs,
+                ..
+            } => {
+                if per_feature.len() != feature_count
+                    || feature_mins.len() != feature_count
+                    || feature_maxs.len() != feature_count
+                {
+                    return Err(ShapError::InvalidInput(format!(
+                        "BinningContext::LinearRank: per_feature/feature_mins/feature_maxs lengths ({}/{}/{}) must all match feature_count {feature_count}",
+                        per_feature.len(),
+                        feature_mins.len(),
+                        feature_maxs.len(),
+                    )));
+                }
+            }
         }
         Ok(())
+    }
+
+    /// Apply `BinningContext::LinearRank` quantization to a single row,
+    /// returning the bin-index representation that the predictor uses
+    /// at inference (linear quantize for unflagged features, rank
+    /// quantize for `Some(sorted)` features).  Returns `None` for any
+    /// other variant — only `LinearRank` triggers internal
+    /// quantization.
+    fn quantize_row_for_linear_rank(&self, row: &[f32]) -> Option<Vec<f32>> {
+        match self {
+            BinningContext::LinearRank {
+                per_feature,
+                feature_mins,
+                feature_maxs,
+                max_data_bin,
+            } => {
+                let mdb = *max_data_bin;
+                let mut out = Vec::with_capacity(row.len());
+                for (fi, &value) in row.iter().enumerate() {
+                    let bin = match per_feature.get(fi).and_then(|opt| opt.as_ref()) {
+                        Some(sorted) => quantize_rank_value(value, sorted, mdb),
+                        None => {
+                            quantize_linear_value(value, feature_mins[fi], feature_maxs[fi], mdb)
+                        }
+                    };
+                    out.push(bin);
+                }
+                Some(out)
+            }
+            _ => None,
+        }
     }
 }
 
@@ -412,6 +549,22 @@ fn explain_rows_from_model(
     validate_rows(rows, model.feature_count)?;
     if let Some(ctx) = binning {
         ctx.validate(model.feature_count)?;
+    }
+
+    // LinearRank: the predictor evaluates both tree traversal and PL
+    // leaves in bin-index space, so quantize rows once at the entry
+    // point and dispatch with PreBinned semantics for the remainder.
+    // See the `BinningContext::LinearRank` doc comment for the parity
+    // rationale.
+    if let Some(ctx @ BinningContext::LinearRank { .. }) = binning {
+        let quantized: Vec<Vec<f32>> = rows
+            .iter()
+            .map(|row| {
+                ctx.quantize_row_for_linear_rank(row)
+                    .expect("LinearRank quantize_row_for_linear_rank returns Some")
+            })
+            .collect();
+        return explain_rows_from_model(model, &quantized, Some(&BinningContext::PreBinned));
     }
 
     // Count distinct split features to choose algorithm.
@@ -879,6 +1032,12 @@ fn verify_additivity(
     // walk and `leaf_constant_part` for the constant-part flow through
     // `expected_subtree` / `build_std_tree`.
     //
+    // **v0.8.0:** the `BinningContext::LinearRank` variant joins
+    // `Linear`, `Quantile`, and `PreBinned` as a fully strict-additivity
+    // context.  When a caller passes any `BinningContext` variant the
+    // SHAP path walker matches the predictor's path exactly, so the
+    // linear-leaf exemption MUST NOT trigger.
+    //
     // When `binning=None`, the SHAP walker uses the legacy `<=` bin-index
     // comparison and may take a different path than the predictor, so
     // strict additivity is not guaranteed for linear leaves on that
@@ -887,7 +1046,8 @@ fn verify_additivity(
     let reconstructed = expected_value + contributions.iter().sum::<f32>();
     if binning.is_none() && model_has_linear_leaves(model) {
         // Legacy path-walker — best-effort interventional explanation.
-        // Predictor-aligned (BinningContext) callers get the strict check.
+        // Predictor-aligned (BinningContext) callers (Linear, Quantile,
+        // PreBinned, LinearRank) get the strict check.
         return Ok(());
     }
     let tolerance = additivity_tolerance(predicted);
@@ -1808,6 +1968,100 @@ mod tests {
         // Past the last cut → f32::MAX.
         assert_eq!(ctx.float_threshold(0, 3), f32::MAX);
         assert_eq!(ctx.float_threshold(1, 4), f32::MAX);
+    }
+
+    #[test]
+    fn binning_context_linear_rank_inverts_rank_mapping() {
+        // For a rank-flagged feature with 5 unique sorted values and
+        // max_data_bin = 4, the rank-to-bin formula is bin = round(rank).
+        // Threshold conversion: float_threshold(bin) = sorted[r*] where
+        // r* = ceil((bin + 0.5) * (N-1) / max_data_bin).
+        let sorted = vec![1.0_f32, 2.0, 3.0, 4.0, 5.0];
+        let ctx = BinningContext::LinearRank {
+            per_feature: vec![Some(sorted.clone())],
+            feature_mins: vec![1.0],
+            feature_maxs: vec![5.0],
+            max_data_bin: 4,
+        };
+        // r* = ceil(0.5 * 4 / 4) = ceil(0.5) = 1 → sorted[1] = 2.0
+        assert!((ctx.float_threshold(0, 0) - 2.0).abs() < 1e-6);
+        // r* = ceil(1.5 * 4 / 4) = ceil(1.5) = 2 → sorted[2] = 3.0
+        assert!((ctx.float_threshold(0, 1) - 3.0).abs() < 1e-6);
+        // r* = ceil(2.5 * 4 / 4) = ceil(2.5) = 3 → sorted[3] = 4.0
+        assert!((ctx.float_threshold(0, 2) - 4.0).abs() < 1e-6);
+        // r* = ceil(3.5 * 4 / 4) = ceil(3.5) = 4 → sorted[4] = 5.0
+        assert!((ctx.float_threshold(0, 3) - 5.0).abs() < 1e-6);
+        // Bin past the data range clamps to the last sorted value.
+        assert!((ctx.float_threshold(0, 4) - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn binning_context_linear_rank_falls_back_to_linear_for_non_rank_features() {
+        // Feature 0 uses rank binning, feature 1 falls back to standard
+        // linear (per_feature[1] is None).
+        let sorted = vec![0.0_f32, 1.0, 2.0, 3.0, 4.0];
+        let ctx = BinningContext::LinearRank {
+            per_feature: vec![Some(sorted), None],
+            feature_mins: vec![0.0, -2.0],
+            feature_maxs: vec![4.0, 3.0],
+            max_data_bin: 254,
+        };
+        // Feature 1 (None) must match the existing Linear formula
+        // exactly.
+        for &bin in &[0u16, 1, 64, 127, 254] {
+            let got = ctx.float_threshold(1, bin);
+            let expected = -2.0 + ((bin as f32 + 0.5) / 254.0) * 5.0;
+            assert!(
+                (got - expected).abs() < 1e-6,
+                "bin {bin}: got {got}, expected {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn binning_context_linear_rank_matches_predictor_on_round_trip() {
+        // Generate a small sorted-values fixture; for each unique value
+        // compute the bin via the predictor's rank-quantize formula,
+        // then convert the bin back to a float via float_threshold,
+        // and assert the predictor's `value < float_threshold` decision
+        // matches the integer-bin comparison `quantized_bin <= bin - 1`.
+        let sorted: Vec<f32> = (0..16).map(|i| i as f32 * 1.5).collect();
+        let max_data_bin: u16 = 8;
+        let ctx = BinningContext::LinearRank {
+            per_feature: vec![Some(sorted.clone())],
+            feature_mins: vec![sorted[0]],
+            feature_maxs: vec![*sorted.last().unwrap()],
+            max_data_bin,
+        };
+        let n = sorted.len();
+        // Mimic quantize_rank_value_wide(value, sorted, max_data_bin).
+        let quantize = |value: f32| -> u16 {
+            let insertion = sorted.partition_point(|probe| *probe <= value);
+            let rank = insertion.saturating_sub(1).min(n - 1);
+            let scaled = (rank as f32 * max_data_bin as f32) / (n - 1) as f32;
+            let rounded = if scaled >= 0.0 {
+                (scaled + 0.5).floor() as i32
+            } else {
+                (scaled - 0.5).ceil() as i32
+            };
+            rounded.clamp(0, max_data_bin as i32) as u16
+        };
+        for &threshold_bin in &[0u16, 1, 3, 4, 6, 7] {
+            let float_threshold = ctx.float_threshold(0, threshold_bin);
+            // Every sorted value should agree on side: the predictor's
+            // bin comparison `quantize(v) <= threshold_bin` must equal
+            // SHAP's `v < float_threshold`.
+            for &value in &sorted {
+                let predictor_left = quantize(value) <= threshold_bin;
+                let shap_left = value < float_threshold;
+                assert_eq!(
+                    predictor_left,
+                    shap_left,
+                    "threshold_bin={threshold_bin}, value={value}, float_threshold={float_threshold}, quantize={}",
+                    quantize(value),
+                );
+            }
+        }
     }
 
     #[test]
