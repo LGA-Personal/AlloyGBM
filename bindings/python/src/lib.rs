@@ -3320,14 +3320,21 @@ fn shap_global_importance_dense_impl(
 ///   `feature_maxs`, `max_data_bin`.
 /// - `"quantile"`: `BinningContext::Quantile`. Needs `feature_cuts`.
 /// - `"prebinned"`: `BinningContext::PreBinned`. No aux args.
+/// - `"linear_rank"`: `BinningContext::LinearRank`. Needs
+///   `feature_mins`, `feature_maxs`, `max_data_bin`, plus
+///   `linear_rank_per_feature` (a per-feature list where each entry is
+///   either `None` for the linear fallback or `Some(sorted_unique_values)`
+///   for rank-based binning).
 ///
 /// On invalid combinations returns a `ShapError::InvalidInput`.
+#[allow(clippy::too_many_arguments)]
 fn build_binning_context(
     binning_kind: &str,
     feature_mins: Option<Vec<f32>>,
     feature_maxs: Option<Vec<f32>>,
     max_data_bin: Option<u16>,
     feature_cuts: Option<Vec<Vec<f32>>>,
+    linear_rank_per_feature: Option<Vec<Option<Vec<f32>>>>,
 ) -> Result<BinningContext, ShapError> {
     match binning_kind {
         "linear" => {
@@ -3353,8 +3360,36 @@ fn build_binning_context(
             Ok(BinningContext::Quantile { feature_cuts: cuts })
         }
         "prebinned" => Ok(BinningContext::PreBinned),
+        "linear_rank" => {
+            let per_feature = linear_rank_per_feature.ok_or_else(|| {
+                ShapError::InvalidInput(
+                    "binning_kind='linear_rank' requires linear_rank_per_feature".to_string(),
+                )
+            })?;
+            let mins = feature_mins.ok_or_else(|| {
+                ShapError::InvalidInput(
+                    "binning_kind='linear_rank' requires feature_mins".to_string(),
+                )
+            })?;
+            let maxs = feature_maxs.ok_or_else(|| {
+                ShapError::InvalidInput(
+                    "binning_kind='linear_rank' requires feature_maxs".to_string(),
+                )
+            })?;
+            let max_bin = max_data_bin.ok_or_else(|| {
+                ShapError::InvalidInput(
+                    "binning_kind='linear_rank' requires max_data_bin".to_string(),
+                )
+            })?;
+            Ok(BinningContext::LinearRank {
+                per_feature,
+                feature_mins: mins,
+                feature_maxs: maxs,
+                max_data_bin: max_bin,
+            })
+        }
         other => Err(ShapError::InvalidInput(format!(
-            "unknown binning_kind '{other}' (expected linear|quantile|prebinned)"
+            "unknown binning_kind '{other}' (expected linear|quantile|prebinned|linear_rank)"
         ))),
     }
 }
@@ -3701,6 +3736,7 @@ fn shap_global_importance_dense(
     feature_maxs=None,
     max_data_bin=None,
     feature_cuts=None,
+    linear_rank_per_feature=None,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn shap_explain_rows_with_binning(
@@ -3711,6 +3747,7 @@ fn shap_explain_rows_with_binning(
     feature_maxs: Option<Vec<f32>>,
     max_data_bin: Option<u16>,
     feature_cuts: Option<Vec<Vec<f32>>>,
+    linear_rank_per_feature: Option<Vec<Option<Vec<f32>>>>,
 ) -> PyResult<(f32, Vec<Vec<f32>>)> {
     let ctx = build_binning_context(
         binning_kind,
@@ -3718,6 +3755,7 @@ fn shap_explain_rows_with_binning(
         feature_maxs,
         max_data_bin,
         feature_cuts,
+        linear_rank_per_feature,
     )
     .map_err(shap_error_to_pyerr)?;
     let explanation = explain_rows_from_artifact_bytes_with_binning(artifact_bytes, &rows, &ctx)
@@ -3736,6 +3774,7 @@ fn shap_explain_rows_with_binning(
     feature_maxs=None,
     max_data_bin=None,
     feature_cuts=None,
+    linear_rank_per_feature=None,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn shap_explain_rows_dense_with_binning(
@@ -3748,6 +3787,7 @@ fn shap_explain_rows_dense_with_binning(
     feature_maxs: Option<Vec<f32>>,
     max_data_bin: Option<u16>,
     feature_cuts: Option<Vec<Vec<f32>>>,
+    linear_rank_per_feature: Option<Vec<Option<Vec<f32>>>>,
 ) -> PyResult<(f32, Vec<Vec<f32>>)> {
     let rows = dense_rows_from_flat_values(&values, row_count, feature_count)
         .map_err(|msg| shap_error_to_pyerr(ShapError::InvalidInput(msg)))?;
@@ -3757,6 +3797,7 @@ fn shap_explain_rows_dense_with_binning(
         feature_maxs,
         max_data_bin,
         feature_cuts,
+        linear_rank_per_feature,
     )
     .map_err(shap_error_to_pyerr)?;
     let explanation = explain_rows_from_artifact_bytes_with_binning(artifact_bytes, &rows, &ctx)
@@ -3773,6 +3814,7 @@ fn shap_explain_rows_dense_with_binning(
     feature_maxs=None,
     max_data_bin=None,
     feature_cuts=None,
+    linear_rank_per_feature=None,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn shap_global_importance_with_binning(
@@ -3783,6 +3825,7 @@ fn shap_global_importance_with_binning(
     feature_maxs: Option<Vec<f32>>,
     max_data_bin: Option<u16>,
     feature_cuts: Option<Vec<Vec<f32>>>,
+    linear_rank_per_feature: Option<Vec<Option<Vec<f32>>>>,
 ) -> PyResult<Vec<(String, f32)>> {
     let ctx = build_binning_context(
         binning_kind,
@@ -3790,6 +3833,7 @@ fn shap_global_importance_with_binning(
         feature_maxs,
         max_data_bin,
         feature_cuts,
+        linear_rank_per_feature,
     )
     .map_err(shap_error_to_pyerr)?;
     global_importance_from_artifact_bytes_with_binning(artifact_bytes, &rows, &ctx)
@@ -3807,6 +3851,7 @@ fn shap_global_importance_with_binning(
     feature_maxs=None,
     max_data_bin=None,
     feature_cuts=None,
+    linear_rank_per_feature=None,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn shap_global_importance_dense_with_binning(
@@ -3819,6 +3864,7 @@ fn shap_global_importance_dense_with_binning(
     feature_maxs: Option<Vec<f32>>,
     max_data_bin: Option<u16>,
     feature_cuts: Option<Vec<Vec<f32>>>,
+    linear_rank_per_feature: Option<Vec<Option<Vec<f32>>>>,
 ) -> PyResult<Vec<(String, f32)>> {
     let rows = dense_rows_from_flat_values(&values, row_count, feature_count)
         .map_err(|msg| shap_error_to_pyerr(ShapError::InvalidInput(msg)))?;
@@ -3828,6 +3874,7 @@ fn shap_global_importance_dense_with_binning(
         feature_maxs,
         max_data_bin,
         feature_cuts,
+        linear_rank_per_feature,
     )
     .map_err(shap_error_to_pyerr)?;
     global_importance_from_artifact_bytes_with_binning(artifact_bytes, &rows, &ctx)

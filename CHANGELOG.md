@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.8.0 (Unreleased)
+
+Feature release rolling up the three remaining v0.7.x carry-forward
+items: mixed linear-rank SHAP, GOSS + DART boosting modes, and joint
+multi-label ranking on top of a generalized K-output shared-histogram
+engine primitive.  Cut as a long-lived feature branch with per-feature
+PRs; this section grows commit by commit.
+
+### Fixed
+
+- **SHAP strict additivity on the mixed linear-rank binning path
+  (Limitation 4).**  When `continuous_binning_strategy="linear"` is
+  combined with per-feature *rank-based* linear binning on at least
+  one column (`_continuous_feature_linear_rank_flags` has any `True`
+  entry), `shap_values()` previously fell back to the legacy
+  quantize-then-walk SHAP path, which exempts `leaf_model="linear"`
+  artifacts from strict additivity via the
+  `binning.is_none() && model_has_linear_leaves(model)` rule in
+  `crates/shap/src/lib.rs::verify_additivity`.
+  v0.8.0 adds `BinningContext::LinearRank`, a new variant carrying
+  per-feature sorted unique values, global `feature_mins` /
+  `feature_maxs`, and `max_data_bin`.  At the
+  `explain_rows_from_model` entry point SHAP internally quantizes
+  raw rows to bin indices using exactly the same rules as
+  `predict_dense_quantized_linear_rank`
+  (linear-quantize unflagged features, rank-quantize flagged
+  features, both following `round_half_away_from_zero` clamped to
+  `[0, max_data_bin]`) and dispatches the remainder of the
+  path-walker with `BinningContext::PreBinned` semantics.  Both
+  tree traversal and PL-leaf evaluation now share the bin-index
+  space the predictor evaluates in, so strict additivity holds for
+  `leaf_model="linear"` (and constant leaves stay correct).
+  The Python `_shap_binning_kwargs()` helper returns
+  `{"binning_kind": "linear_rank", "feature_mins": …,
+  "feature_maxs": …, "max_data_bin": …,
+  "linear_rank_per_feature": …}` whenever any per-feature rank
+  flag fires; `GBMClassifier` and `GBMRanker` inherit the fix via
+  the shared `GBMRegressor._shap_binning_kwargs` implementation.
+
 ## 0.7.5
 
 Bug-fix release.  Closes Limitation 5 from v0.7.4 — the pre-existing

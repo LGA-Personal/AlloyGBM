@@ -1,7 +1,47 @@
 Release and platform policy
 ===========================
 
-AlloyGBM ``0.7.5`` release notes and platform policy.
+AlloyGBM ``0.8.0`` release notes and platform policy.
+
+What's new in 0.8.0
+-------------------
+
+Feature release rolling up the three remaining v0.7.x carry-forward
+items.  This section grows commit by commit on the ``v0.8.0-features``
+branch.
+
+**SHAP strict additivity on the mixed linear-rank binning path
+(Limitation 4):**
+
+- When ``continuous_binning_strategy="linear"`` triggered per-feature
+  rank-based binning on at least one column (gated by the
+  ``ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK`` experiment flag), the
+  Python ``shap_values()`` flow used to fall back to the legacy
+  quantize-then-walk SHAP path which exempts ``leaf_model="linear"``
+  artifacts from strict additivity.
+- v0.8.0 adds a new ``BinningContext::LinearRank`` variant to
+  ``crates/shap/src/lib.rs``.  It carries per-feature sorted unique
+  values, global ``feature_mins`` / ``feature_maxs``, and
+  ``max_data_bin``.  At the ``explain_rows_from_model`` entry point
+  SHAP internally quantizes the raw input rows to bin indices using
+  exactly the same rules as
+  ``predict_dense_quantized_linear_rank`` (linear quantize for
+  unflagged features, rank quantize for flagged features, both with
+  ``round_half_away_from_zero`` clamped to ``[0, max_data_bin]``) and
+  dispatches the remainder of the path-walker with
+  ``BinningContext::PreBinned`` semantics.  Both tree traversal and
+  PL-leaf evaluation now operate in the same bin-index space the
+  predictor uses, so strict additivity holds for
+  ``leaf_model="linear"`` (and constant leaves stay correct).
+- The Python ``_shap_binning_kwargs()`` helper returns
+  ``binning_kind="linear_rank"`` whenever any per-feature rank flag is
+  set; ``GBMClassifier`` and ``GBMRanker`` inherit the fix from
+  ``GBMRegressor._shap_binning_kwargs``.
+- Verified by
+  ``bindings/python/tests/test_shap_linear_rank_strict_additivity.py``
+  (architectural contract + strict additivity for both
+  ``leaf_model="constant"`` and ``leaf_model="linear"``).  Closes
+  Limitation 4.
 
 What's new in 0.7.5
 -------------------

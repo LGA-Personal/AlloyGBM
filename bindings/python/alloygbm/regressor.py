@@ -2768,32 +2768,48 @@ class GBMRegressor(_GBMRegressorBase):
 
         - `linear` (no per-feature rank flags): use feature mins/maxs +
           max_data_bin.
+        - `linear` with at least one per-feature rank flag set: use the
+          mixed-mode `linear_rank` context (per-feature sorted unique
+          values for rank-flagged columns, fall back to linear binning
+          for the rest).  v0.8.0 closed Limitation 4 by wiring this
+          through.
         - `quantile`: use feature quantile cuts.
 
-        For the mixed linear-rank case (some features quantized linearly,
-        others by rank) the path-walker fix is not yet wired through, so
-        the legacy quantize-then-walk SHAP path is used. Pre-binned
-        artifacts also use the legacy path because the bin-index
+        Pre-binned artifacts use the legacy path because the bin-index
         comparison is already correct for integer data.
         """
         if not self._is_fitted or not self._uses_continuous_binning:
             return None
         strategy = self.continuous_binning_strategy
         if strategy == "linear":
-            rank_flags = self._continuous_feature_linear_rank_flags
-            if rank_flags is not None and any(rank_flags):
-                # Mixed linear-rank: the rank-aware SHAP conversion is
-                # not yet wired through, so we fall back to the legacy
-                # quantize-then-walk path.  For `leaf_model="linear"`
-                # users this means the strict-additivity check is
-                # exempted on this narrow code path (the linear-leaf
-                # exemption in `verify_additivity` triggers when
-                # `binning.is_none()`).  Deferred to v0.8.0.
-                return None
             mins = self._continuous_feature_mins
             maxs = self._continuous_feature_maxs
             if mins is None or maxs is None:
                 return None
+            rank_flags = self._continuous_feature_linear_rank_flags
+            if rank_flags is not None and any(rank_flags):
+                sorted_values = self._continuous_feature_sorted_values
+                if sorted_values is None:
+                    # Defensive: rank flags fired but sorted values were
+                    # not persisted.  Fall back to the legacy path
+                    # rather than mis-route SHAP to an inconsistent
+                    # context.
+                    return None
+                per_feature: list[list[float] | None] = []
+                for flag, column in zip(rank_flags, sorted_values):
+                    if flag and column is not None:
+                        per_feature.append(list(column))
+                    else:
+                        per_feature.append(None)
+                return {
+                    "binning_kind": "linear_rank",
+                    "feature_mins": list(mins),
+                    "feature_maxs": list(maxs),
+                    "max_data_bin": _max_data_bin_for_max_bins(
+                        self.continuous_binning_max_bins
+                    ),
+                    "linear_rank_per_feature": per_feature,
+                }
             return {
                 "binning_kind": "linear",
                 "feature_mins": list(mins),
@@ -2827,20 +2843,26 @@ class GBMRegressor(_GBMRegressorBase):
         As of v0.7.4, ``Σ shap_values + expected_value == predict(x)``
         holds within ``atol + rtol · |predict(x)|`` (default
         ``atol=1e-5, rtol=1e-4``) for every leaf model on the default
-        predictor-aligned binning path.  The legacy non-binning path
-        retains the best-effort exemption for linear leaves only.
+        predictor-aligned binning path.  v0.8.0 extends this guarantee
+        to the mixed linear-rank binning path
+        (``continuous_binning_strategy="linear"`` combined with
+        per-feature rank-based binning on at least one column) via the
+        new ``BinningContext::LinearRank`` variant — see
+        ``docs/limitations.md`` "Resolved" entry for v0.8.0.
+        The legacy non-binning path retains the best-effort exemption
+        for linear leaves only.
         """
         if not self._is_fitted:
             raise RuntimeError("GBMRegressor must be fit before shap_values")
         if self._artifact_bytes is None:
             raise RuntimeError("GBMRegressor native artifact is not available")
 
-        # v0.7.3: when we have a `BinningContext` available (continuous
-        # features under linear or quantile binning), pass raw rows +
-        # binning kwargs so the native SHAP path-walker uses the same
-        # float thresholds the predictor uses.  For pre-binned data and
-        # for the mixed linear-rank case, fall back to the legacy
-        # quantize-then-walk path.
+        # v0.7.3+: when we have a `BinningContext` available (continuous
+        # features under linear, quantile, or — as of v0.8.0 — mixed
+        # linear-rank binning), pass raw rows + binning kwargs so the
+        # native SHAP path-walker matches the predictor.  Pre-binned
+        # integer data and unbinned float artifacts fall back to the
+        # legacy quantize-then-walk path.
         binning_kwargs = self._shap_binning_kwargs()
         if binning_kwargs is not None:
             rows = self._native_matrix_flat_payload(X) or self._validate_rows(X)

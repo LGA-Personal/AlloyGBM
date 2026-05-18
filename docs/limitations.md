@@ -1,6 +1,6 @@
 # AlloyGBM Current Limitations
 
-Last updated for v0.7.5.
+Last updated for v0.8.0 (Commit 1 — Mixed linear-rank SHAP).
 
 ## Remaining Limitations
 
@@ -35,28 +35,6 @@ typically reduces total model size for related tasks.  Deferred to
 v0.8.0, paired with the shared-histogram speedup where the
 ``MulticlassSoftmaxObjective``-style K-tree-per-round engine plumbing
 for ranking objectives has a real performance story.
-
-### 4. SHAP On The Mixed Linear-Rank Binning Path (Narrow)
-
-When `continuous_binning_strategy="linear"` is combined with
-per-feature *rank-based* linear binning enabled on at least one feature
-(`_continuous_feature_linear_rank_flags` has any `True` entry), the
-Python `shap_values()` path falls back to the legacy
-quantize-then-walk SHAP entry point (`shap_explain_rows` /
-`shap_explain_rows_dense`) instead of the predictor-aligned
-`shap_explain_rows_with_binning` variants.  This is because the
-rank-aware `BinningContext` conversion is not yet wired through.
-
-For `leaf_model="constant"` artifacts the legacy path is still correct
-under the usual round-off tolerance, so this path is largely benign.
-For `leaf_model="linear"` artifacts it triggers the
-`binning.is_none() && model_has_linear_leaves(model)` exemption in
-`crates/shap/src/lib.rs::verify_additivity` and you get best-effort
-interventional explanations rather than strict additivity.
-
-Deferred to v0.8.0.  Users who need strict PL-leaf additivity in the
-meantime can pick `continuous_binning_strategy="quantile"` or use the
-pure-`linear` mode (no per-feature rank flags set).
 
 ## Resolved (Previously Limitations)
 
@@ -106,6 +84,20 @@ The following were limitations in prior versions and have been addressed:
 - RUSTSEC-2025-0020 in `pyo3 < 0.24.1` (now: v0.7.3 — pyo3 0.23.5 →
   0.24, `deny.toml` and the cargo-audit CI step no longer ignore the
   advisory)
+- SHAP on the mixed linear-rank binning path (now: v0.8.0 — new
+  `BinningContext::LinearRank` variant carries per-feature sorted
+  unique values + global mins/maxs + `max_data_bin`.  At the
+  `explain_rows_from_model` entry point SHAP internally quantizes
+  rows to bin indices (linear-quantize unflagged features,
+  rank-quantize flagged features — exactly matching
+  `predict_dense_quantized_linear_rank`) and dispatches the
+  remainder with `BinningContext::PreBinned` semantics, so tree
+  traversal and PL-leaf evaluation share the same bin-index space
+  as the predictor.  Strict additivity now holds for
+  `leaf_model="linear"` on the mixed linear-rank path; the
+  predictor-aligned binning kwargs `_shap_binning_kwargs()`
+  returns include `binning_kind="linear_rank"` whenever any
+  per-feature rank flag is set.  Closes Limitation 4.)
 - Strict SHAP additivity for `leaf_model="linear"` on continuous
   features (now: v0.7.4 — `distribute_linear_terms_for_row` credits
   `wⱼ · (xⱼ − μⱼ)` at every visited node along the row's path,
