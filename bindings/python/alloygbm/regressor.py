@@ -2782,8 +2782,13 @@ class GBMRegressor(_GBMRegressorBase):
         if strategy == "linear":
             rank_flags = self._continuous_feature_linear_rank_flags
             if rank_flags is not None and any(rank_flags):
-                # Mixed linear-rank: legacy path until the rank-aware
-                # SHAP conversion is wired up.  Queued for v0.7.4.
+                # Mixed linear-rank: the rank-aware SHAP conversion is
+                # not yet wired through, so we fall back to the legacy
+                # quantize-then-walk path.  For `leaf_model="linear"`
+                # users this means the strict-additivity check is
+                # exempted on this narrow code path (the linear-leaf
+                # exemption in `verify_additivity` triggers when
+                # `binning.is_none()`).  Deferred to v0.8.0.
                 return None
             mins = self._continuous_feature_mins
             maxs = self._continuous_feature_maxs

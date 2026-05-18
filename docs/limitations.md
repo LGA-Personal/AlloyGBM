@@ -31,10 +31,64 @@ Numerically the wrapper is equivalent to training each label
 separately.  Joint shared-tree multi-label boosting — where a single
 ensemble updates all label predictions simultaneously via shared splits
 — would let correlated labels share split information across trees and
-typically reduces total model size for related tasks.  That is the
-remaining v0.7.x follow-up, alongside the
+typically reduces total model size for related tasks.  Deferred to
+v0.8.0, paired with the shared-histogram speedup where the
 ``MulticlassSoftmaxObjective``-style K-tree-per-round engine plumbing
-for ranking objectives.
+for ranking objectives has a real performance story.
+
+### 4. SHAP On The Mixed Linear-Rank Binning Path (Narrow)
+
+When `continuous_binning_strategy="linear"` is combined with
+per-feature *rank-based* linear binning enabled on at least one feature
+(`_continuous_feature_linear_rank_flags` has any `True` entry), the
+Python `shap_values()` path falls back to the legacy
+quantize-then-walk SHAP entry point (`shap_explain_rows` /
+`shap_explain_rows_dense`) instead of the predictor-aligned
+`shap_explain_rows_with_binning` variants.  This is because the
+rank-aware `BinningContext` conversion is not yet wired through.
+
+For `leaf_model="constant"` artifacts the legacy path is still correct
+under the usual round-off tolerance, so this path is largely benign.
+For `leaf_model="linear"` artifacts it triggers the
+`binning.is_none() && model_has_linear_leaves(model)` exemption in
+`crates/shap/src/lib.rs::verify_additivity` and you get best-effort
+interventional explanations rather than strict additivity.
+
+Deferred to v0.8.0.  Users who need strict PL-leaf additivity in the
+meantime can pick `continuous_binning_strategy="quantile"` or use the
+pure-`linear` mode (no per-feature rank flags set).
+
+### 5. TreeSHAP Polynomial Path Additivity Drift (Pre-existing)
+
+For models with `distinct_split_feature_count > MAX_EXACT_SPLIT_FEATURES`
+(=25 — see `crates/shap/src/lib.rs`), SHAP's dispatcher switches from
+the brute-force exact Shapley path to the polynomial-time TreeSHAP
+implementation (`explain_rows_tree_shap`).  On large gradient-trained
+trees of depth ≥ 6 with ≥ 30 distinct split features the TreeSHAP
+polynomial path drifts from strict additivity by ~0.5–1% of
+`|predict(x)|`.  This affects both `leaf_model="constant"` and
+`leaf_model="linear"` artifacts (it is independent of the v0.7.4
+linear-leaf fix).
+
+The bug is **pre-existing in v0.7.3** and earlier; it was uncovered by
+the v0.7.4 PR #27 review.  Minimal Rust reproductions (asymmetric
+2-stump and 4-stump spine trees) do not trigger it, so it requires
+specific topological conditions met only by full gradient-boosting
+output.
+
+The internal Rust `verify_additivity` is the ground truth: when a
+model triggers the polynomial path on these conditions, `shap_values()`
+will raise `RuntimeError: row N additivity check failed`.  Users
+encountering this can:
+
+- Pin `n_estimators` or `max_depth` smaller so the tree uses ≤ 25
+  distinct split features (brute-force path is correct).
+- Use the legacy SHAP entry points without a `BinningContext` if
+  best-effort interventional explanations are acceptable.
+- Wait for the v0.7.x / v0.8.0 follow-up — coverage is pinned by an
+  `@xfail(strict=True)` regression test in
+  `bindings/python/tests/test_shap_pl_strict_additivity.py` so the fix
+  will land with that test flipping to a regular pass.
 
 ## Resolved (Previously Limitations)
 
@@ -79,8 +133,8 @@ The following were limitations in prior versions and have been addressed:
   thresholds (now: v0.7.3 — `shap::BinningContext` + new PyO3 entry
   points pass per-feature mins / maxs / cuts so the walker compares
   against the same float thresholds the predictor uses; resolved for
-  scalar-leaf artifacts on continuous features, see Limitation 4 for
-  the remaining PL-leaf piece)
+  scalar-leaf artifacts on continuous features.  The PL-leaf piece
+  was finished in v0.7.4 — see the dedicated entry below)
 - RUSTSEC-2025-0020 in `pyo3 < 0.24.1` (now: v0.7.3 — pyo3 0.23.5 →
   0.24, `deny.toml` and the cargo-audit CI step no longer ignore the
   advisory)

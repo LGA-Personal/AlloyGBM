@@ -166,11 +166,13 @@ def test_regressor_with_interaction_constraints():
     _assert_strict_additivity(model, X, label="interaction-constraints")
 
 
-def test_feature_importances_exercises_tree_shap_polynomial():
-    """``feature_importances`` calls the TreeSHAP polynomial path which
-    shares ``distribute_linear_terms_for_row`` with the brute-force path.
-    Reproduces the (now-fixed) pre-v0.7.4 path that would silently drop
-    internal-node deviations."""
+def test_feature_importances_smoke_brute_force_path():
+    """``feature_importances`` invokes the SHAP machinery; for models with
+    distinct split features <= ``MAX_EXACT_SPLIT_FEATURES`` (=25, see
+    ``crates/shap/src/lib.rs``) this exercises the brute-force exact
+    path.  This case keeps n_features small (6) so we stay on
+    brute-force; the TreeSHAP polynomial path is exercised by
+    ``test_strict_additivity_via_tree_shap_polynomial_path`` below."""
     X, y = _make_linear_data(seed=7)
     model = GBMRegressor(
         leaf_model="linear",
@@ -186,6 +188,51 @@ def test_feature_importances_exercises_tree_shap_polynomial():
     assert len(importance) == X.shape[1]
     # Importances are non-negative by construction.
     assert all(score >= 0.0 for _, score in importance)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Pre-existing TreeSHAP polynomial-path additivity bug — present in "
+        "v0.7.3 as well.  When `distinct_split_feature_count > "
+        "MAX_EXACT_SPLIT_FEATURES (=25)`, `explain_rows_from_model` "
+        "dispatches to `explain_rows_tree_shap` which has an internal-state "
+        "bug that drifts additivity by ~0.5-1% of |predict(x)| on large, "
+        "deep, feature-rich trees.  Affects both scalar and linear leaves. "
+        "Minimal Rust unit-test reproductions do not trigger it "
+        "(see tree_shap_asymmetric_depth_tree_matches_brute_force_and_predict "
+        "and tree_shap_spine_tree_matches_brute_force which both pass); the "
+        "bug requires specific topological conditions met only by "
+        "gradient-trained trees of depth >= 6 with >= 30 distinct split "
+        "features.  Investigated during v0.7.4 PR #27 review; deferred to "
+        "its own follow-up.  See Limitation 5 in docs/limitations.md.  When "
+        "the underlying bug is fixed this test starts passing and the "
+        "strict=True xfail will report XPASS = test failure to flag removal."
+    ),
+)
+def test_strict_additivity_via_tree_shap_polynomial_path():
+    """Drive the polynomial TreeSHAP path by training on more than
+    ``MAX_EXACT_SPLIT_FEATURES`` (=25) distinct split features.
+    ``explain_rows_from_model`` switches to ``explain_rows_tree_shap``
+    when ``distinct_split_feature_count > MAX_EXACT_SPLIT_FEATURES``;
+    with 32 features and a deep enough ensemble every feature shows up
+    as a split at least once.
+
+    Xfails today on the pre-existing TreeSHAP polynomial bug — see
+    decorator and Limitation 5 in docs/limitations.md."""
+    n_features = 32  # > MAX_EXACT_SPLIT_FEATURES = 25
+    X, y = _make_linear_data(n_features=n_features, seed=7)
+    model = GBMRegressor(
+        leaf_model="linear",
+        learning_rate=0.05,
+        max_depth=6,
+        n_estimators=100,
+        lambda_l2=0.01,
+        seed=7,
+        deterministic=True,
+    )
+    model.fit(X, y)
+    _assert_strict_additivity(model, X, label="tree-shap-polynomial-path")
 
 
 # ── Classifier: internal check is the ground truth ───────────────────────────
