@@ -190,26 +190,6 @@ def test_feature_importances_smoke_brute_force_path():
     assert all(score >= 0.0 for _, score in importance)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Pre-existing TreeSHAP polynomial-path additivity bug — present in "
-        "v0.7.3 as well.  When `distinct_split_feature_count > "
-        "MAX_EXACT_SPLIT_FEATURES (=25)`, `explain_rows_from_model` "
-        "dispatches to `explain_rows_tree_shap` which has an internal-state "
-        "bug that drifts additivity by ~0.5-1% of |predict(x)| on large, "
-        "deep, feature-rich trees.  Affects both scalar and linear leaves. "
-        "Minimal Rust unit-test reproductions do not trigger it "
-        "(see tree_shap_asymmetric_depth_tree_matches_brute_force_and_predict "
-        "and tree_shap_spine_tree_matches_brute_force which both pass); the "
-        "bug requires specific topological conditions met only by "
-        "gradient-trained trees of depth >= 6 with >= 30 distinct split "
-        "features.  Investigated during v0.7.4 PR #27 review; deferred to "
-        "its own follow-up.  See Limitation 5 in docs/limitations.md.  When "
-        "the underlying bug is fixed this test starts passing and the "
-        "strict=True xfail will report XPASS = test failure to flag removal."
-    ),
-)
 def test_strict_additivity_via_tree_shap_polynomial_path():
     """Drive the polynomial TreeSHAP path by training on more than
     ``MAX_EXACT_SPLIT_FEATURES`` (=25) distinct split features.
@@ -218,8 +198,15 @@ def test_strict_additivity_via_tree_shap_polynomial_path():
     with 32 features and a deep enough ensemble every feature shows up
     as a split at least once.
 
-    Xfails today on the pre-existing TreeSHAP polynomial bug — see
-    decorator and Limitation 5 in docs/limitations.md."""
+    Pinned by an ``@xfail(strict=True)`` regression test in v0.7.4 to
+    flag a pre-existing TreeSHAP polynomial-path additivity drift
+    (Limitation 5).  Closed in v0.7.5 — the bug was in
+    ``ts_unextend_path`` which incorrectly shifted ``pweight`` along
+    with the feature_index / zero_fraction / one_fraction tuple when
+    a duplicate feature was removed from the path.  The reference
+    implementation in slundberg/shap stores those four fields as four
+    parallel arrays and only shifts the first three, preserving the
+    post-unwind pweights computed in place by the unwind loop."""
     n_features = 32  # > MAX_EXACT_SPLIT_FEATURES = 25
     X, y = _make_linear_data(n_features=n_features, seed=7)
     model = GBMRegressor(

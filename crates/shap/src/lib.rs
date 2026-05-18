@@ -1145,6 +1145,23 @@ fn ts_extend_path(
 
 /// Remove a feature from the path and shift remaining elements
 /// (Algorithm 3, Lundberg et al.).
+///
+/// **Critical**: the shift at the end moves only `feature_index`,
+/// `zero_fraction`, and `one_fraction` — NOT `pweight`.  The unwind
+/// loop above has already computed the correct post-unwind pweights
+/// in place; shifting them would clobber those values with the
+/// pweights of the elements being shifted down (whose pweights were
+/// computed when the duplicate was still in the path, not after its
+/// removal).
+///
+/// The reference Python implementation in slundberg/shap uses four
+/// parallel arrays (`feature_indexes`, `zero_fractions`,
+/// `one_fractions`, `pweights`) and only shifts the first three.
+/// The original AlloyGBM port stored all four in a single
+/// `PathElement` struct and shifted the entire struct, which broke
+/// the TreeSHAP polynomial path for any tree where a feature
+/// appeared more than once on a root-to-leaf path (Limitation 5,
+/// closed in v0.7.5).
 fn ts_unextend_path(path: &mut [PathElement], depth: usize, path_index: usize) {
     let one_fraction = path[path_index].one_fraction;
     let zero_fraction = path[path_index].zero_fraction;
@@ -1163,9 +1180,12 @@ fn ts_unextend_path(path: &mut [PathElement], depth: usize, path_index: usize) {
         }
     }
 
-    // Shift elements to fill the gap at path_index.
+    // Shift feature_index / zero_fraction / one_fraction only.
+    // pweights are NOT shifted — see the function comment above.
     for i in path_index..depth {
-        path[i] = path[i + 1];
+        path[i].feature_index = path[i + 1].feature_index;
+        path[i].zero_fraction = path[i + 1].zero_fraction;
+        path[i].one_fraction = path[i + 1].one_fraction;
     }
 }
 
@@ -2632,6 +2652,191 @@ mod tests {
                 (reconstructed - predicted).abs() <= ADDITIVITY_ATOL,
                 "row {row_idx}: reconstructed {reconstructed} vs predicted {predicted}"
             );
+        }
+    }
+
+    // ── TreeSHAP polynomial-path diagnostic: synthetic deep trees ────────────
+    //
+    // Used to localize Limitation 5 (TreeSHAP polynomial-path additivity
+    // drift on deep trees with many distinct splits).  The strategy:
+    // build a synthetic depth-D tree using only F (≤25) distinct features
+    // so the brute-force exact path remains tractable, then call BOTH
+    // `explain_rows_brute_force` and `explain_rows_tree_shap` directly
+    // and require they agree per-feature.  Brute-force is the ground
+    // truth (it enumerates all 2^F subsets).
+    //
+    // We sweep over depth and feature-pattern strategies to find the
+    // minimal topology that triggers the polynomial-path bug.
+
+    /// Build a full binary tree of depth `depth` with stumps at every
+    /// internal node.  Each stump's feature is chosen via `feature_for`.
+    /// Each stump's leaves are scalar values: `leaf_value_for(node_id,
+    /// goes_left)`.  Per-stump cover is `cover_for(node_id)`.  Threshold
+    /// is `node_id as u16 % 4` (arbitrary; rows below choose splits that
+    /// always go a deterministic direction).
+    fn build_full_tree(
+        feature_count: usize,
+        depth: usize,
+        feature_for: impl Fn(u32) -> u32,
+        leaf_value_for: impl Fn(u32, bool) -> f32,
+        cover_for: impl Fn(u32) -> u32,
+    ) -> Vec<TrainedStump> {
+        // Pre-compute per-leaf covers, then propagate up so each parent's
+        // left_stats/right_stats == sum of its descendant leaf covers.
+        // Without this consistency, `node.cover()` recursion and the
+        // per-stump left_stats.row_count would disagree.
+        // node_id convention: children of n are 2n+1 and 2n+2.  For a
+        // full tree of depth D: internal nodes have ids [0, 2^D - 1),
+        // leaves have ids [2^D - 1, 2^(D+1) - 1).
+        let n_leaves = 1u32 << depth; // count
+        let leaf_id_start = n_leaves - 1; // first leaf node_id
+        let total_nodes = (1u32 << (depth + 1)) - 1; // = internal + leaves
+        let mut subtree_cover = vec![0u32; total_nodes as usize];
+        for leaf_node_id in leaf_id_start..total_nodes {
+            subtree_cover[leaf_node_id as usize] = cover_for(leaf_node_id).max(1);
+        }
+        // Bottom-up propagation: internal node count = leaf_id_start.
+        for node_id in (0..leaf_id_start).rev() {
+            let l = subtree_cover[(2 * node_id + 1) as usize];
+            let r = subtree_cover[(2 * node_id + 2) as usize];
+            subtree_cover[node_id as usize] = l + r;
+        }
+
+        let mut stumps = Vec::new();
+        for node_id in 0..leaf_id_start {
+            let feat = feature_for(node_id);
+            let left_count = subtree_cover[(2 * node_id + 1) as usize];
+            let right_count = subtree_cover[(2 * node_id + 2) as usize];
+            let _ = feature_count; // sanity argument; not used directly
+            stumps.push(TrainedStump {
+                split: split_with_counts(
+                    node_id,
+                    feat,
+                    (node_id as u16) & 0x3,
+                    left_count,
+                    right_count,
+                ),
+                left_leaf_value: LeafValue::Scalar(leaf_value_for(node_id, true)),
+                right_leaf_value: LeafValue::Scalar(leaf_value_for(node_id, false)),
+            });
+        }
+        stumps
+    }
+
+    /// Compute the depth of a node_id in a full binary tree
+    /// (root = 0, children of n = 2n+1, 2n+2).
+    fn node_depth(mut node_id: u32) -> u32 {
+        let mut depth = 0;
+        while node_id > 0 {
+            node_id = (node_id - 1) / 2;
+            depth += 1;
+        }
+        depth
+    }
+
+    fn synthetic_deep_model(depth: usize, n_features: usize, _seed: u64) -> TrainedModel {
+        let stumps = build_full_tree(
+            n_features,
+            depth,
+            // Feature pattern: feature index = node's depth in the tree.
+            // Guarantees every root-to-leaf path uses DISTINCT features
+            // (no duplicates), as long as n_features > depth.  This
+            // isolates the duplicate-handling code path from other
+            // potential bugs.  When n_features <= depth, paths cycle
+            // through features (forces duplicates).
+            |node_id| node_depth(node_id) % n_features as u32,
+            // Leaf value: deterministic pseudo-random in [-1, 1].
+            |node_id, goes_left| {
+                let h = ((node_id as u64).wrapping_mul(0xD6E8_FD50_89A4_7A4D)
+                    ^ if goes_left { 0xAAAA } else { 0x5555 }) as u32;
+                ((h as f32) / (u32::MAX as f32) - 0.5) * 2.0
+            },
+            // Cover: weight by node depth so deep nodes have small cover.
+            |node_id| {
+                // Approximate row count: total / (2^subtree_depth)
+                // for node at depth d in a full tree of depth `depth`.
+                // For diagnosis we don't need realism, just non-zero.
+                let h = ((node_id as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)) as u32;
+                (h % 100) + 1
+            },
+        );
+        TrainedModel {
+            baseline_prediction: 0.0,
+            feature_count: n_features,
+            stumps,
+            categorical_state: None,
+            node_debug_stats: None,
+            objective: "squared_error".to_string(),
+            native_categorical_feature_indices: Vec::new(),
+            morph_metadata: None,
+            dro_metadata: None,
+            feature_baseline: None,
+        }
+    }
+
+    fn deterministic_rows(feature_count: usize, n_rows: usize, seed: u64) -> Vec<Vec<f32>> {
+        let mut out = Vec::with_capacity(n_rows);
+        let mut state = seed;
+        for _ in 0..n_rows {
+            let row = (0..feature_count)
+                .map(|_| {
+                    state = state
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    // Choose values in [0, 5) so any threshold <= 3 splits.
+                    (((state >> 32) as f32) / (u32::MAX as f32 + 1.0)) * 5.0
+                })
+                .collect::<Vec<_>>();
+            out.push(row);
+        }
+        out
+    }
+
+    /// Regression test for the TreeSHAP polynomial-path additivity drift
+    /// closed in v0.7.5 (formerly Limitation 5).
+    ///
+    /// The bug was in `ts_unextend_path`: when removing a duplicate feature
+    /// entry from the path, the function shifted the entire `PathElement`
+    /// struct (including `pweight`), clobbering the pweights that the
+    /// unwind loop had just carefully computed in place.  The reference
+    /// implementation in slundberg/shap stores the four path fields as
+    /// four parallel arrays and only shifts the first three (feature_index,
+    /// zero_fraction, one_fraction), preserving pweights.
+    ///
+    /// This sweep builds synthetic full binary trees of varying depth and
+    /// distinct-feature count, then asserts that the polynomial TreeSHAP
+    /// path agrees with the brute-force exact path per-feature within
+    /// floating-point tolerance.  Both `n_features < depth` (forced
+    /// path-duplicates) and `n_features >= depth` (no duplicates) are
+    /// covered, so the unwind path is exercised across the full matrix.
+    ///
+    /// Brute-force is the ground truth (it enumerates 2^N subsets).
+    /// Capped at depth 7 to keep brute-force tractable.
+    #[test]
+    fn tree_shap_polynomial_path_matches_brute_force_on_full_trees() {
+        for &depth in &[2_usize, 3, 4, 5, 6, 7] {
+            for &n_features in &[2_usize, 3, 5, 8, 12] {
+                let model = synthetic_deep_model(depth, n_features, 0xABCD_EF01);
+                let rows = deterministic_rows(n_features, 4, 0x1234_5678);
+                let bf = explain_rows_brute_force(&model, &rows, None)
+                    .expect("brute-force exact path succeeds");
+                let poly = explain_rows_tree_shap(&model, &rows, None)
+                    .expect("polynomial path succeeds (no additivity drift)");
+
+                for (row_idx, (bf_row, poly_row)) in
+                    bf.values.iter().zip(poly.values.iter()).enumerate()
+                {
+                    for (feat_idx, (a, b)) in bf_row.iter().zip(poly_row.iter()).enumerate() {
+                        assert!(
+                            (a - b).abs() <= 1e-5,
+                            "depth={depth} n_features={n_features} row={row_idx} \
+                             feat={feat_idx}: brute_force={a}, polynomial={b}, \
+                             |diff|={}",
+                            (a - b).abs(),
+                        );
+                    }
+                }
+            }
         }
     }
 }
