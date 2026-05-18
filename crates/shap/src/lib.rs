@@ -2092,14 +2092,13 @@ mod tests {
         };
 
         let rows = vec![
-            vec![0.0, 0.0],  // L at root → L at stump 1 → adds 1.0 + 3.0 → predict = 4.5
-            vec![0.0, 5.0],  // L at root → R at stump 1 → adds 1.0 + 4.0 → predict = 5.5
-            vec![5.0, 0.0],  // R at root → stump 2 missing → adds 2.0 → predict = 2.5
-            vec![5.0, 5.0],  // R at root → stump 2 missing → adds 2.0 → predict = 2.5
+            vec![0.0, 0.0], // L at root → L at stump 1 → adds 1.0 + 3.0 → predict = 4.5
+            vec![0.0, 5.0], // L at root → R at stump 1 → adds 1.0 + 4.0 → predict = 5.5
+            vec![5.0, 0.0], // R at root → stump 2 missing → adds 2.0 → predict = 2.5
+            vec![5.0, 5.0], // R at root → stump 2 missing → adds 2.0 → predict = 2.5
         ];
 
-        let brute_force =
-            explain_rows_brute_force(&model, &rows, None).expect("brute force works");
+        let brute_force = explain_rows_brute_force(&model, &rows, None).expect("brute force works");
         let tree_shap = explain_rows_tree_shap(&model, &rows, None).expect("tree shap works");
 
         // Brute-force gives the reference (exact 2^N Shapley).
