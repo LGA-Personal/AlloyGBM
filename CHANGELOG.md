@@ -8,6 +8,29 @@ multi-label ranking on top of a generalized K-output shared-histogram
 engine primitive.  Cut as a long-lived feature branch with per-feature
 PRs; this section grows commit by commit.
 
+### Added
+
+- **GOSS sampling (gradient-based one-side sampling).**  New
+  `boosting_mode="goss"` opt-in on `GBMRegressor`, `GBMClassifier`
+  (binary), and `GBMRanker`, with `goss_top_rate` (default `0.2`) and
+  `goss_other_rate` (default `0.1`) controlling the kept-top fraction
+  and sampled-low fraction respectively.  Implements the LightGBM
+  algorithm: score rows by `|gradient|`, keep the top `top_rate`,
+  sample `other_rate` from the rest, and multiply the sampled-low
+  rows' gradient + hessian by `(1 - top_rate) / other_rate` so the
+  histogram statistics remain an unbiased estimator of the full-data
+  gradient sums.  See `engine::goss_sample_indices` and
+  `engine::select_row_indices_for_round`.  Multiclass softmax rejects
+  non-Standard boosting modes with a clear error message
+  ("...not yet supported for multiclass objectives...") — a v0.8.1
+  follow-up will add per-class gradient scoring.
+- `BoostingMode` enum and validation in `alloygbm-core` covering
+  Standard / Goss / Dart.  DART is a placeholder in v0.8.0: the
+  Python `__init__` raises `NotImplementedError("dart is reserved
+  for a v0.8.0 follow-up commit")` and the Rust validation layer
+  passes through the placeholder so DART implementation work can
+  proceed incrementally without further core changes.
+
 ### Fixed
 
 - **SHAP strict additivity on the mixed linear-rank binning path

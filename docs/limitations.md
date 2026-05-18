@@ -10,10 +10,21 @@ The `BackendOps` trait is designed for hardware abstraction, but only
 `CpuBackend` exists. GPU/accelerator support is architecturally planned but
 not implemented.
 
-### 2. No Dart / GOSS Boosting Modes
+### 2. No Dart Boosting Mode (GOSS Resolved In v0.8.0)
 
-Only standard gradient boosting is supported. Dart (dropout) and GOSS
-(gradient-based one-side sampling) modes are not available.
+GOSS (gradient-based one-side sampling, LightGBM-style) is supported
+as of v0.8.0 via `boosting_mode="goss"`, `goss_top_rate`, and
+`goss_other_rate` on `GBMRegressor`, `GBMClassifier` (binary), and
+`GBMRanker`.  The multiclass softmax path explicitly rejects
+non-Standard boosting modes with a clear error message — multiclass
+GOSS requires per-class gradient scoring, tracked as a v0.8.1
+follow-up.
+
+DART (dropouts meet MART) is still unavailable.  Calling
+`boosting_mode="dart"` raises `NotImplementedError` in Python and is
+rejected at the Rust validation layer.  DART requires per-stump
+`tree_weight` plumbing through the artifact format and the predictor;
+tracked as the next v0.8.x feature commit.
 
 ### 3. Multi-Label Ranking — Independent Per-Label Trees
 

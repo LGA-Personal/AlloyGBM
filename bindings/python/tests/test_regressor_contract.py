@@ -371,6 +371,9 @@ class GBMRegressorContractTests(unittest.TestCase):
                         "factor_exposure_values": None,
                         "factor_exposure_row_count": None,
                         "factor_exposure_factor_count": None,
+                        "boosting_mode": "standard",
+                        "goss_top_rate": None,
+                        "goss_other_rate": None,
                     }
                 ],
             )

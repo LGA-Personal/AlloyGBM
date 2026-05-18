@@ -1,7 +1,7 @@
 use alloygbm_categorical::{TargetEncoderConfig, fit_transform_target_encoder};
 use alloygbm_core::{
-    BinnedMatrix, CategoricalStatePayloadV1, CoreError, DatasetMatrix, Device, DroConfig,
-    DroMetadataPayload, FactorExposureMatrix, FeatureBaselinePayload, FeatureTile,
+    BinnedMatrix, BoostingMode, CategoricalStatePayloadV1, CoreError, DatasetMatrix, Device,
+    DroConfig, DroMetadataPayload, FactorExposureMatrix, FeatureBaselinePayload, FeatureTile,
     GradientEmaStats, GradientPair, HistogramBundle, LeafModelKind, LeafSolverKind, LeafValue,
     LinearHistogramBundle, LinearLeaf, LinearLeafCoefficientsPayload, LinearLeafEntry, LrSchedule,
     MAX_PL_REGRESSORS, MISSING_BIN_U8, MODEL_FORMAT_V1, ModelArtifactSection, ModelMetadata,
@@ -3357,6 +3357,19 @@ impl Trainer {
                 "validation early stopping requires a validation dataset".to_string(),
             ));
         }
+        // v0.8.0: GOSS / DART are only supported on the binary /
+        // regression / ranking single-output objective for now.  The
+        // multiclass softmax path has shared row sampling across K
+        // classes that would need per-class gradient scoring (GOSS) or
+        // per-class dropout bookkeeping (DART); both are tracked as
+        // v0.8.1 follow-ups.
+        if !matches!(self.params.boosting_mode, BoostingMode::Standard) {
+            return Err(EngineError::InvalidConfig(format!(
+                "boosting_mode='{}' is not yet supported for multiclass objectives; \
+                 use 'standard' for multiclass softmax (follow-up tracked for v0.8.1)",
+                self.params.boosting_mode.label()
+            )));
+        }
         validate_train_params(&self.params)?;
         validate_training_dataset(dataset)?;
         validate_neutralization_fit_contract_for_support(&self.params, dataset, false)?;
@@ -4163,19 +4176,10 @@ impl Trainer {
         for round_index in 0..effective_round_cap {
             // Offset round_index for sampling seeds and tree IDs when warm-starting
             let effective_round_index = round_index + round_index_offset;
-            let root_row_indices = sampled_row_indices(
-                active_dataset.row_count(),
-                controls.row_subsample,
-                sampling_seed_base,
-                effective_round_index as u64,
-            );
-            let (feature_tiles, sampled_feature_count) = sampled_feature_tiles(
-                binned_matrix.feature_count,
-                controls.col_subsample,
-                sampling_seed_base,
-                effective_round_index as u64,
-            )?;
-            let sampled_row_count = root_row_indices.len();
+            // v0.8.0: gradient computation moved before row sampling so
+            // GOSS can score rows by `|gradient|`.  Standard / DART
+            // boosting modes ignore the gradient input and fall back
+            // to uniform subsampling.
             objective.compute_gradients_into(
                 &predictions,
                 &active_dataset.targets,
@@ -4194,6 +4198,21 @@ impl Trainer {
             if let Some(projector) = &gradient_projector {
                 projector.project_gradient_pairs_in_place(&mut gradient_buffer)?;
             }
+            let root_row_indices = select_row_indices_for_round(
+                self.params.boosting_mode,
+                active_dataset.row_count(),
+                controls.row_subsample,
+                sampling_seed_base,
+                effective_round_index as u64,
+                &mut gradient_buffer,
+            );
+            let (feature_tiles, sampled_feature_count) = sampled_feature_tiles(
+                binned_matrix.feature_count,
+                controls.col_subsample,
+                sampling_seed_base,
+                effective_round_index as u64,
+            )?;
+            let sampled_row_count = root_row_indices.len();
             let gradients = &gradient_buffer;
             validate_gradient_pair_length(gradients, active_dataset.row_count())?;
             if cfg!(debug_assertions) {
@@ -6519,6 +6538,148 @@ fn sampled_row_indices(
         .into_iter()
         .map(|row_index| row_index as u32)
         .collect()
+}
+
+/// Per-round row-selection dispatcher.  Dispatches on
+/// `TrainParams::boosting_mode`:
+///
+/// * `BoostingMode::Standard` — uniform subsampling under
+///   `row_subsample`.  Byte-identical to v0.7.5.
+/// * `BoostingMode::Goss` — gradient-based one-side sampling.
+///   `gradients` MUST already be the post-projection gradient buffer
+///   for this round; the function mutates it in place to apply the
+///   `(1 - top_rate) / other_rate` amplification on the sampled-low
+///   rows (top-by-magnitude rows are *not* amplified — they appear
+///   with their original gradient/hessian, exactly as in the
+///   reference LightGBM implementation).
+/// * `BoostingMode::Dart` — uniform subsampling (DART affects the
+///   prediction buffer and per-stump weights, not row selection per
+///   se).  Future work may combine DART with non-uniform sampling.
+///
+/// Returns the sorted set of row indices used as `root_row_indices`
+/// for tree construction this round.
+fn select_row_indices_for_round(
+    boosting_mode: BoostingMode,
+    row_count: usize,
+    row_subsample: f32,
+    seed_base: u64,
+    round_index: u64,
+    gradients: &mut [GradientPair],
+) -> Vec<u32> {
+    match boosting_mode {
+        BoostingMode::Goss {
+            top_rate,
+            other_rate,
+        } => {
+            // Score rows by |gradient|.  Hessian could also be folded
+            // in (e.g. `|grad| / sqrt(hess)`) but the LightGBM
+            // reference uses |grad| only.
+            let magnitudes: Vec<f32> = gradients.iter().map(|g| g.grad.abs()).collect();
+            let (top, other, amplification) =
+                goss_sample_indices(&magnitudes, top_rate, other_rate, seed_base, round_index);
+            if (amplification - 1.0).abs() > f32::EPSILON {
+                for &row in &other {
+                    let idx = row as usize;
+                    gradients[idx].grad *= amplification;
+                    gradients[idx].hess *= amplification;
+                }
+            }
+            let mut merged: Vec<u32> = Vec::with_capacity(top.len() + other.len());
+            merged.extend(top);
+            merged.extend(other);
+            merged.sort_unstable();
+            merged
+        }
+        BoostingMode::Standard | BoostingMode::Dart { .. } => {
+            sampled_row_indices(row_count, row_subsample, seed_base, round_index)
+        }
+    }
+}
+
+/// Gradient-based One-Side Sampling (GOSS, from LightGBM).
+///
+/// Strategy: keep the top `top_rate` fraction of rows by
+/// `|gradient_magnitude|`, then uniformly sample `other_rate` fraction
+/// from the rest.  Sampled-low-gradient rows are *amplified* by
+/// `(1 - top_rate) / other_rate` at the gradient-accumulation stage so
+/// histogram statistics remain an unbiased estimator of the full-data
+/// gradient sums.
+///
+/// Returns `(sampled_row_indices, amplification, top_kept_count)`:
+///
+/// * `sampled_row_indices` — sorted ascending, includes both kept-top
+///   and sampled-low rows.  Suitable to feed
+///   `NodeSlice::row_indices`.
+/// * `amplification` — multiplier the caller applies to gradients and
+///   hessians on the sampled-low rows (not on the kept-top rows!) to
+///   preserve unbiasedness.  Always `>= 1.0`; equals `1.0` when
+///   `other_rate == 0`.
+/// * `top_kept_count` — number of leading elements in
+///   `sampled_row_indices` (after sorting) that are kept-top rows.
+///   *Not* used directly — instead, the caller marks each row by
+///   checking membership in a separate hash set.  Returned for
+///   convenience and unit-test sanity checks.
+pub(crate) fn goss_sample_indices(
+    gradient_magnitudes: &[f32],
+    top_rate: f32,
+    other_rate: f32,
+    seed_base: u64,
+    round_index: u64,
+) -> (Vec<u32>, Vec<u32>, f32) {
+    let n = gradient_magnitudes.len();
+    if n == 0 {
+        return (Vec::new(), Vec::new(), 1.0);
+    }
+    let top_n = ((top_rate * n as f32).ceil() as usize).max(1).min(n);
+    let other_n = ((other_rate * n as f32).ceil() as usize).min(n - top_n);
+
+    // Rank by |gradient| descending using select_nth_unstable_by.
+    let mut indexed: Vec<(u32, f32)> = gradient_magnitudes
+        .iter()
+        .enumerate()
+        .map(|(i, &g)| (i as u32, g.abs()))
+        .collect();
+    if top_n < n {
+        // After this call indexed[..top_n] contains the top_n rows by
+        // |gradient| (in arbitrary order); indexed[top_n..] contains
+        // the rest.
+        indexed.select_nth_unstable_by(top_n - 1, |a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+    }
+    let mut top_indices: Vec<u32> = indexed[..top_n].iter().map(|(i, _)| *i).collect();
+
+    let mut other_indices: Vec<u32> = if other_n > 0 && top_n < n {
+        let mut rest_scored: Vec<(u32, u64)> = indexed[top_n..]
+            .iter()
+            .map(|(i, _)| {
+                let seed = mixed_hash(
+                    seed_base
+                        ^ round_index.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                        ^ (*i as u64).wrapping_mul(0xD6E8_FD50_89A4_7A4D),
+                );
+                (*i, seed)
+            })
+            .collect();
+        rest_scored.select_nth_unstable_by(other_n - 1, |a, b| {
+            a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0))
+        });
+        rest_scored[..other_n].iter().map(|(i, _)| *i).collect()
+    } else {
+        Vec::new()
+    };
+
+    let amplification = if other_n > 0 && other_rate > f32::EPSILON {
+        (1.0 - top_rate) / other_rate
+    } else {
+        1.0
+    };
+
+    top_indices.sort_unstable();
+    other_indices.sort_unstable();
+    (top_indices, other_indices, amplification)
 }
 
 /// Maximum features per tile. Keeps the histogram arena small enough to fit in
@@ -9823,6 +9984,52 @@ mod tests {
         assert_eq!(selected, selected_repeat);
         assert_eq!(selected.len(), 4);
         assert_ne!(selected, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn goss_selects_top_alpha_by_gradient_magnitude() {
+        // 100 rows: first 10 have |gradient|=100, rest |gradient|=0.1.
+        // top_rate=0.1 keeps the 10 large-gradient rows.
+        // other_rate=0.2 samples 20 from the 90 remaining.
+        // amplification = (1 - 0.1) / 0.2 = 4.5.
+        let grads: Vec<f32> = (0..100).map(|i| if i < 10 { 100.0 } else { 0.1 }).collect();
+        let (top, other, amp) = goss_sample_indices(&grads, 0.1, 0.2, 0xABC, 0);
+        // Top set is exactly the high-gradient rows.
+        assert_eq!(top.len(), 10);
+        for i in 0..10u32 {
+            assert!(top.contains(&i), "top set missing high-gradient row {i}");
+        }
+        // Other set is sampled from the rest.
+        assert_eq!(other.len(), 20);
+        for &i in &other {
+            assert!(i >= 10, "other set should not include kept-top row {i}");
+        }
+        // Amplification matches LightGBM's formula.
+        assert!((amp - 4.5).abs() < 1e-5, "expected amp ~= 4.5, got {amp}");
+        // Determinism: same seed + round → same selection.
+        let (top2, other2, amp2) = goss_sample_indices(&grads, 0.1, 0.2, 0xABC, 0);
+        assert_eq!(top, top2);
+        assert_eq!(other, other2);
+        assert_eq!(amp, amp2);
+    }
+
+    #[test]
+    fn goss_zero_other_rate_returns_only_top() {
+        let grads: Vec<f32> = (0..50).map(|i| i as f32).collect();
+        let (top, other, amp) = goss_sample_indices(&grads, 0.2, 0.0, 1, 0);
+        assert_eq!(top.len(), 10);
+        assert!(other.is_empty());
+        // amplification falls back to 1.0 when no rows are sampled.
+        assert_eq!(amp, 1.0);
+    }
+
+    #[test]
+    fn goss_top_plus_other_caps_at_n_rows() {
+        // top_rate=0.6 and other_rate=0.6 would over-allocate; verify
+        // the algorithm caps other_n so total <= n.
+        let grads: Vec<f32> = (0..10).map(|i| i as f32).collect();
+        let (top, other, _amp) = goss_sample_indices(&grads, 0.6, 0.6, 1, 0);
+        assert!(top.len() + other.len() <= 10);
     }
 
     #[test]

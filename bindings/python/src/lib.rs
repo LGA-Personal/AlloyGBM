@@ -3419,6 +3419,7 @@ fn build_train_params(
     leaf_solver: alloygbm_core::LeafSolverKind,
     dro_config: Option<alloygbm_core::DroConfig>,
     neutralization_config: Option<FactorNeutralizationConfig>,
+    boosting_mode: alloygbm_core::BoostingMode,
 ) -> TrainParams {
     TrainParams {
         seed,
@@ -3444,6 +3445,80 @@ fn build_train_params(
         leaf_solver,
         dro_config,
         neutralization_config,
+        boosting_mode,
+    }
+}
+
+/// Parse Python-side boosting_mode strings + parameters into a
+/// [`alloygbm_core::BoostingMode`].  Validation of parameter ranges is
+/// deferred to `validate_train_params`, which produces a uniform error
+/// message regardless of where the BoostingMode was constructed.
+///
+/// * `"standard"` — `BoostingMode::Standard`.  Ignores all rate args.
+/// * `"goss"` — requires `goss_top_rate` and `goss_other_rate`.
+/// * `"dart"` — requires `dart_drop_rate`, `dart_max_drop`,
+///   `dart_normalize_type`, `dart_sample_type` (rejected by the
+///   engine in v0.8.0 — DART implementation is a v0.8.x follow-up
+///   item).
+#[allow(clippy::too_many_arguments)]
+fn parse_boosting_mode(
+    boosting_mode: &str,
+    goss_top_rate: Option<f32>,
+    goss_other_rate: Option<f32>,
+    dart_drop_rate: Option<f32>,
+    dart_max_drop: Option<usize>,
+    dart_normalize_type: Option<&str>,
+    dart_sample_type: Option<&str>,
+) -> PyResult<alloygbm_core::BoostingMode> {
+    match boosting_mode {
+        "standard" => Ok(alloygbm_core::BoostingMode::Standard),
+        "goss" => {
+            let top_rate = goss_top_rate.ok_or_else(|| {
+                PyValueError::new_err("boosting_mode='goss' requires goss_top_rate")
+            })?;
+            let other_rate = goss_other_rate.ok_or_else(|| {
+                PyValueError::new_err("boosting_mode='goss' requires goss_other_rate")
+            })?;
+            Ok(alloygbm_core::BoostingMode::Goss {
+                top_rate,
+                other_rate,
+            })
+        }
+        "dart" => {
+            let drop_rate = dart_drop_rate.ok_or_else(|| {
+                PyValueError::new_err("boosting_mode='dart' requires dart_drop_rate")
+            })?;
+            let max_drop = dart_max_drop.ok_or_else(|| {
+                PyValueError::new_err("boosting_mode='dart' requires dart_max_drop")
+            })?;
+            let normalize_type = match dart_normalize_type.unwrap_or("tree") {
+                "tree" => alloygbm_core::DartNormalize::Tree,
+                "forest" => alloygbm_core::DartNormalize::Forest,
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "dart_normalize_type must be 'tree' or 'forest', got {other:?}"
+                    )));
+                }
+            };
+            let sample_type = match dart_sample_type.unwrap_or("uniform") {
+                "uniform" => alloygbm_core::DartSampleType::Uniform,
+                "weighted" => alloygbm_core::DartSampleType::Weighted,
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "dart_sample_type must be 'uniform' or 'weighted', got {other:?}"
+                    )));
+                }
+            };
+            Ok(alloygbm_core::BoostingMode::Dart {
+                drop_rate,
+                max_drop,
+                normalize_type,
+                sample_type,
+            })
+        }
+        other => Err(PyValueError::new_err(format!(
+            "boosting_mode must be 'standard', 'goss', or 'dart', got {other:?}"
+        ))),
     }
 }
 
@@ -3914,7 +3989,10 @@ fn shap_global_importance_dense_with_binning(
     factor_penalty=0.0,
     factor_exposure_values=None,
     factor_exposure_row_count=None,
-    factor_exposure_factor_count=None
+    factor_exposure_factor_count=None,
+    boosting_mode="standard",
+    goss_top_rate=None,
+    goss_other_rate=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact(
@@ -3951,6 +4029,9 @@ fn train_regression_artifact(
     factor_exposure_values: Option<Vec<f32>>,
     factor_exposure_row_count: Option<usize>,
     factor_exposure_factor_count: Option<usize>,
+    boosting_mode: &str,
+    goss_top_rate: Option<f32>,
+    goss_other_rate: Option<f32>,
 ) -> PyResult<Vec<u8>> {
     let parsed_morph_config = morph_config
         .map(|d| parse_morph_config_from_pydict(&d))
@@ -3974,6 +4055,15 @@ fn train_regression_artifact(
     let continuous_binning_strategy =
         parse_continuous_binning_strategy(continuous_binning_strategy)
             .map_err(engine_error_to_pyerr)?;
+    let parsed_boosting_mode = parse_boosting_mode(
+        boosting_mode,
+        goss_top_rate,
+        goss_other_rate,
+        None,
+        None,
+        None,
+        None,
+    )?;
     let params = build_train_params(
         learning_rate,
         max_depth,
@@ -3998,6 +4088,7 @@ fn train_regression_artifact(
         parsed_leaf_solver,
         parsed_dro_config,
         parsed_neutralization_config,
+        parsed_boosting_mode,
     );
 
     let categorical_spec = resolve_categorical_spec(
@@ -4082,7 +4173,10 @@ fn train_regression_artifact(
     factor_penalty=0.0,
     factor_exposure_values=None,
     factor_exposure_row_count=None,
-    factor_exposure_factor_count=None
+    factor_exposure_factor_count=None,
+    boosting_mode="standard",
+    goss_top_rate=None,
+    goss_other_rate=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense(
@@ -4121,6 +4215,9 @@ fn train_regression_artifact_dense(
     factor_exposure_values: Option<Vec<f32>>,
     factor_exposure_row_count: Option<usize>,
     factor_exposure_factor_count: Option<usize>,
+    boosting_mode: &str,
+    goss_top_rate: Option<f32>,
+    goss_other_rate: Option<f32>,
 ) -> PyResult<Vec<u8>> {
     let parsed_morph_config = morph_config
         .map(|d| parse_morph_config_from_pydict(&d))
@@ -4144,6 +4241,15 @@ fn train_regression_artifact_dense(
     let continuous_binning_strategy =
         parse_continuous_binning_strategy(continuous_binning_strategy)
             .map_err(engine_error_to_pyerr)?;
+    let parsed_boosting_mode = parse_boosting_mode(
+        boosting_mode,
+        goss_top_rate,
+        goss_other_rate,
+        None,
+        None,
+        None,
+        None,
+    )?;
     let params = build_train_params(
         learning_rate,
         max_depth,
@@ -4168,6 +4274,7 @@ fn train_regression_artifact_dense(
         parsed_leaf_solver,
         parsed_dro_config,
         parsed_neutralization_config,
+        parsed_boosting_mode,
     );
     let categorical_spec = resolve_categorical_spec(
         categorical_feature_index,
@@ -4273,7 +4380,10 @@ fn train_regression_artifact_dense(
     factor_penalty=0.0,
     factor_exposure_values=None,
     factor_exposure_row_count=None,
-    factor_exposure_factor_count=None
+    factor_exposure_factor_count=None,
+    boosting_mode="standard",
+    goss_top_rate=None,
+    goss_other_rate=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_with_summary(
@@ -4337,6 +4447,9 @@ fn train_regression_artifact_with_summary(
     factor_exposure_values: Option<Vec<f32>>,
     factor_exposure_row_count: Option<usize>,
     factor_exposure_factor_count: Option<usize>,
+    boosting_mode: &str,
+    goss_top_rate: Option<f32>,
+    goss_other_rate: Option<f32>,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -4360,6 +4473,15 @@ fn train_regression_artifact_with_summary(
         factor_exposure_values,
         factor_exposure_row_count,
         factor_exposure_factor_count,
+    )?;
+    let parsed_boosting_mode = parse_boosting_mode(
+        boosting_mode,
+        goss_top_rate,
+        goss_other_rate,
+        None,
+        None,
+        None,
+        None,
     )?;
     let params = build_train_params(
         learning_rate,
@@ -4385,6 +4507,7 @@ fn train_regression_artifact_with_summary(
         parsed_leaf_solver,
         parsed_dro_config,
         parsed_neutralization_config,
+        parsed_boosting_mode,
     );
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
@@ -4516,7 +4639,10 @@ fn train_regression_artifact_with_summary(
     factor_penalty=0.0,
     factor_exposure_values=None,
     factor_exposure_row_count=None,
-    factor_exposure_factor_count=None
+    factor_exposure_factor_count=None,
+    boosting_mode="standard",
+    goss_top_rate=None,
+    goss_other_rate=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary(
@@ -4583,6 +4709,9 @@ fn train_regression_artifact_dense_with_summary(
     factor_exposure_values: Option<Vec<f32>>,
     factor_exposure_row_count: Option<usize>,
     factor_exposure_factor_count: Option<usize>,
+    boosting_mode: &str,
+    goss_top_rate: Option<f32>,
+    goss_other_rate: Option<f32>,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -4606,6 +4735,15 @@ fn train_regression_artifact_dense_with_summary(
         factor_exposure_values,
         factor_exposure_row_count,
         factor_exposure_factor_count,
+    )?;
+    let parsed_boosting_mode = parse_boosting_mode(
+        boosting_mode,
+        goss_top_rate,
+        goss_other_rate,
+        None,
+        None,
+        None,
+        None,
     )?;
     let params = build_train_params(
         learning_rate,
@@ -4631,6 +4769,7 @@ fn train_regression_artifact_dense_with_summary(
         parsed_leaf_solver,
         parsed_dro_config,
         parsed_neutralization_config,
+        parsed_boosting_mode,
     );
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
@@ -4758,7 +4897,10 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> PyResult<Vec<f32>> {
     factor_penalty=0.0,
     factor_exposure_values=None,
     factor_exposure_row_count=None,
-    factor_exposure_factor_count=None
+    factor_exposure_factor_count=None,
+    boosting_mode="standard",
+    goss_top_rate=None,
+    goss_other_rate=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary_bytes(
@@ -4825,6 +4967,9 @@ fn train_regression_artifact_dense_with_summary_bytes(
     factor_exposure_values: Option<Vec<f32>>,
     factor_exposure_row_count: Option<usize>,
     factor_exposure_factor_count: Option<usize>,
+    boosting_mode: &str,
+    goss_top_rate: Option<f32>,
+    goss_other_rate: Option<f32>,
 ) -> PyResult<NativeTrainingResult> {
     let values = bytes_to_f32_vec(values_bytes)?;
     let targets = bytes_to_f32_vec(targets_bytes)?;
@@ -4853,6 +4998,15 @@ fn train_regression_artifact_dense_with_summary_bytes(
         factor_exposure_row_count,
         factor_exposure_factor_count,
     )?;
+    let parsed_boosting_mode = parse_boosting_mode(
+        boosting_mode,
+        goss_top_rate,
+        goss_other_rate,
+        None,
+        None,
+        None,
+        None,
+    )?;
     let params = build_train_params(
         learning_rate,
         max_depth,
@@ -4877,6 +5031,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
         parsed_leaf_solver,
         parsed_dro_config,
         parsed_neutralization_config,
+        parsed_boosting_mode,
     );
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
@@ -5122,6 +5277,7 @@ mod tests {
             leaf_solver: alloygbm_core::LeafSolverKind::Standard,
             dro_config: None,
             neutralization_config: None,
+            boosting_mode: alloygbm_core::BoostingMode::Standard,
         }
     }
 

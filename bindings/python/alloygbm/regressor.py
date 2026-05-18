@@ -29,6 +29,9 @@ def _nan_bin_for_max_bins(max_bins):
     return max_bins - 1
 _MIN_CONTINUOUS_QUANTIZED_BINS = 2
 _VALID_CONTINUOUS_BINNING_STRATEGIES = {"linear", "rank", "quantile"}
+# v0.8.0: per-round boosting strategies.  "dart" is reserved for a
+# follow-up commit — see crates/core/src/lib.rs::BoostingMode.
+_VALID_BOOSTING_MODES = {"standard", "goss", "dart"}
 _LINEAR_TAIL_RANK_ENV_VAR = "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK"
 _LINEAR_TAIL_CORE_SPAN_RATIO_ENV_VAR = "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_CORE_SPAN_RATIO"
 _DEFAULT_LINEAR_TAIL_CORE_SPAN_RATIO_THRESHOLD = 0.10
@@ -334,6 +337,9 @@ class GBMRegressor(_GBMRegressorBase):
         neutralization: str = "none",
         factor_neutralization_lambda: float = 1e-6,
         factor_penalty: float = 0.0,
+        boosting_mode: str = "standard",
+        goss_top_rate: float = 0.2,
+        goss_other_rate: float = 0.1,
     ) -> None:
         if not (0.0 < learning_rate <= 1.0):
             raise ValueError("learning_rate must be in (0.0, 1.0]")
@@ -548,6 +554,35 @@ class GBMRegressor(_GBMRegressorBase):
             raise ValueError(
                 "neutralization='split_penalty' requires leaf_model='constant'"
             )
+        if str(boosting_mode) not in _VALID_BOOSTING_MODES:
+            raise ValueError(
+                "boosting_mode must be one of: "
+                + ", ".join(sorted(_VALID_BOOSTING_MODES))
+                + f", got {boosting_mode!r}"
+            )
+        if str(boosting_mode) == "goss":
+            if not (0.0 < float(goss_top_rate) < 1.0):
+                raise ValueError(
+                    "boosting_mode='goss' requires goss_top_rate in (0, 1)"
+                )
+            if not (0.0 < float(goss_other_rate) < 1.0):
+                raise ValueError(
+                    "boosting_mode='goss' requires goss_other_rate in (0, 1)"
+                )
+            if float(goss_top_rate) + float(goss_other_rate) > 1.0:
+                raise ValueError(
+                    "boosting_mode='goss' requires goss_top_rate + goss_other_rate <= 1.0"
+                )
+        if str(boosting_mode) == "dart":
+            # DART is reserved for a follow-up commit on v0.8.0-features;
+            # the Rust engine doesn't yet implement the per-round dropout
+            # and per-stump weight bookkeeping.  Reject loudly so users
+            # don't silently get standard boosting.
+            raise NotImplementedError(
+                "boosting_mode='dart' is reserved for a v0.8.0 follow-up "
+                "commit; only 'standard' and 'goss' are wired through in "
+                "the current build"
+            )
 
         self.learning_rate = float(learning_rate)
         self.max_depth = int(max_depth)
@@ -616,6 +651,13 @@ class GBMRegressor(_GBMRegressorBase):
         self.neutralization = str(neutralization)
         self.factor_neutralization_lambda = float(factor_neutralization_lambda)
         self.factor_penalty = float(factor_penalty)
+        # v0.8.0: per-round boosting strategy.  Default "standard" is
+        # byte-identical to v0.7.5 behaviour.  "goss" enables
+        # gradient-based one-side sampling.  "dart" is reserved for a
+        # v0.8.0 follow-up commit (NotImplementedError above).
+        self.boosting_mode = str(boosting_mode)
+        self.goss_top_rate = float(goss_top_rate)
+        self.goss_other_rate = float(goss_other_rate)
         self._fit_neutralization: str | None = None
         self._fit_factor_neutralization_lambda: float | None = None
         self._fit_factor_penalty: float | None = None
@@ -688,7 +730,10 @@ class GBMRegressor(_GBMRegressorBase):
             f"dro_metric='{self.dro_metric}', "
             f"neutralization='{self.neutralization}', "
             f"factor_neutralization_lambda={self.factor_neutralization_lambda}, "
-            f"factor_penalty={self.factor_penalty}"
+            f"factor_penalty={self.factor_penalty}, "
+            f"boosting_mode='{self.boosting_mode}', "
+            f"goss_top_rate={self.goss_top_rate}, "
+            f"goss_other_rate={self.goss_other_rate}"
             ")"
         )
 
@@ -743,6 +788,9 @@ class GBMRegressor(_GBMRegressorBase):
             "neutralization": self.neutralization,
             "factor_neutralization_lambda": self.factor_neutralization_lambda,
             "factor_penalty": self.factor_penalty,
+            "boosting_mode": self.boosting_mode,
+            "goss_top_rate": self.goss_top_rate,
+            "goss_other_rate": self.goss_other_rate,
         }
 
     def set_params(self, **params: object) -> "GBMRegressor":
@@ -795,6 +843,9 @@ class GBMRegressor(_GBMRegressorBase):
             "neutralization",
             "factor_neutralization_lambda",
             "factor_penalty",
+            "boosting_mode",
+            "goss_top_rate",
+            "goss_other_rate",
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
@@ -1216,6 +1267,36 @@ class GBMRegressor(_GBMRegressorBase):
             if not math.isfinite(fp) or fp < 0.0:
                 raise ValueError("factor_penalty must be finite and >= 0")
             self.factor_penalty = fp
+
+        if "boosting_mode" in params:
+            bm = str(params["boosting_mode"])
+            if bm not in _VALID_BOOSTING_MODES:
+                raise ValueError(
+                    "boosting_mode must be one of: "
+                    + ", ".join(sorted(_VALID_BOOSTING_MODES))
+                )
+            if bm == "dart":
+                raise NotImplementedError(
+                    "boosting_mode='dart' is reserved for a v0.8.0 follow-up commit"
+                )
+            self.boosting_mode = bm
+        if "goss_top_rate" in params:
+            r = float(params["goss_top_rate"])
+            if not (0.0 < r < 1.0):
+                raise ValueError("goss_top_rate must be in (0, 1)")
+            self.goss_top_rate = r
+        if "goss_other_rate" in params:
+            r = float(params["goss_other_rate"])
+            if not (0.0 < r < 1.0):
+                raise ValueError("goss_other_rate must be in (0, 1)")
+            self.goss_other_rate = r
+        # Cross-field validation for goss top+other rates.
+        if self.boosting_mode == "goss" and (
+            self.goss_top_rate + self.goss_other_rate > 1.0
+        ):
+            raise ValueError(
+                "boosting_mode='goss' requires goss_top_rate + goss_other_rate <= 1.0"
+            )
 
         # Cross-field validation: leaf growth requires max_leaves
         if self.tree_growth == "leaf" and self.max_leaves is None:
@@ -1929,6 +2010,13 @@ class GBMRegressor(_GBMRegressorBase):
                         if factor_exposure_values is not None
                         else None
                     ),
+                    boosting_mode=self.boosting_mode,
+                    goss_top_rate=(
+                        self.goss_top_rate if self.boosting_mode == "goss" else None
+                    ),
+                    goss_other_rate=(
+                        self.goss_other_rate if self.boosting_mode == "goss" else None
+                    ),
                 )
                 return self._finalize_training_result(native_result, input_adaptation_seconds, feature_count=feature_count)
             except (ImportError, AttributeError):
@@ -2041,6 +2129,13 @@ class GBMRegressor(_GBMRegressorBase):
                     if factor_exposure_values is not None
                     else None
                 ),
+                boosting_mode=self.boosting_mode,
+                goss_top_rate=(
+                    self.goss_top_rate if self.boosting_mode == "goss" else None
+                ),
+                goss_other_rate=(
+                    self.goss_other_rate if self.boosting_mode == "goss" else None
+                ),
             )
         else:
             assert training_rows is not None
@@ -2110,6 +2205,13 @@ class GBMRegressor(_GBMRegressorBase):
                     factor_exposure_factor_count
                     if factor_exposure_values is not None
                     else None
+                ),
+                boosting_mode=self.boosting_mode,
+                goss_top_rate=(
+                    self.goss_top_rate if self.boosting_mode == "goss" else None
+                ),
+                goss_other_rate=(
+                    self.goss_other_rate if self.boosting_mode == "goss" else None
                 ),
             )
 
@@ -2461,6 +2563,13 @@ class GBMRegressor(_GBMRegressorBase):
                     if factor_exposure_values is not None
                     else None
                 ),
+                boosting_mode=self.boosting_mode,
+                goss_top_rate=(
+                    self.goss_top_rate if self.boosting_mode == "goss" else None
+                ),
+                goss_other_rate=(
+                    self.goss_other_rate if self.boosting_mode == "goss" else None
+                ),
             )
         else:
             train_regression_artifact = _load_native_train_regression_artifact()
@@ -2502,6 +2611,13 @@ class GBMRegressor(_GBMRegressorBase):
                     factor_exposure_factor_count
                     if factor_exposure_values is not None
                     else None
+                ),
+                boosting_mode=self.boosting_mode,
+                goss_top_rate=(
+                    self.goss_top_rate if self.boosting_mode == "goss" else None
+                ),
+                goss_other_rate=(
+                    self.goss_other_rate if self.boosting_mode == "goss" else None
                 ),
             )
 

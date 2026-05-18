@@ -10,6 +10,29 @@ Feature release rolling up the three remaining v0.7.x carry-forward
 items.  This section grows commit by commit on the ``v0.8.0-features``
 branch.
 
+**GOSS sampling (gradient-based one-side sampling):**
+
+- New ``boosting_mode="goss"`` opt-in on ``GBMRegressor``,
+  ``GBMClassifier`` (binary), and ``GBMRanker``, with companion
+  ``goss_top_rate`` (default ``0.2``) and ``goss_other_rate``
+  (default ``0.1``) parameters.  Default ``boosting_mode="standard"``
+  is byte-identical to v0.7.5.
+- Implements LightGBM's GOSS algorithm: at the start of each round
+  rows are scored by ``|gradient|``, the top ``goss_top_rate``
+  fraction is kept, ``goss_other_rate`` fraction is uniformly
+  sampled from the rest, and the sampled-low rows' gradient +
+  hessian are multiplied by ``(1 - goss_top_rate) / goss_other_rate``
+  to preserve unbiased histogram statistics.
+- Reorders the per-round training loop so gradient computation
+  happens *before* row sampling — required because GOSS scores by
+  gradient magnitude.  Standard and DART modes get the same
+  pre-computed gradient buffer and fall back to uniform subsampling.
+- Multiclass softmax explicitly rejects ``boosting_mode != "standard"``
+  with a clear error message — per-class gradient scoring is tracked
+  as a v0.8.1 follow-up.  DART is reserved for the next feature
+  commit on ``v0.8.0-features`` and currently raises
+  ``NotImplementedError`` in Python.
+
 **SHAP strict additivity on the mixed linear-rank binning path
 (Limitation 4):**
 
