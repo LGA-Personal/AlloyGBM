@@ -126,10 +126,11 @@ def test_multiclass_goss_rejected_at_python_layer():
         m.fit(X, y)
 
 
-# ----- Warm-start rejection -----
+# ----- Warm-start support (v0.10.0+) -----
 
 
-def test_dart_warm_start_rejected_at_second_fit():
+def test_dart_warm_start_continues_at_second_fit():
+    """v0.9.0 rejected this combination; v0.10.0 enables it."""
     rng = np.random.default_rng(4)
     X = rng.normal(size=(100, 3)).astype(np.float32)
     y = rng.normal(size=100).astype(np.float32)
@@ -141,12 +142,13 @@ def test_dart_warm_start_rejected_at_second_fit():
         seed=42,
     )
     m.fit(X, y)
-    # Second fit triggers the warm-start path. The Rust engine
-    # rejects DART + warm_start; the Python layer surfaces this as
-    # an exception (the specific type depends on whether the engine
-    # error reaches us as RuntimeError or ValueError, so accept both).
-    with pytest.raises((RuntimeError, ValueError), match=r"warm_start|dart"):
-        m.fit(X, y)
+    # Second fit triggers the warm-start path. v0.10.0 accepts this
+    # combination — the engine seeds dart_state.tree_weights from the
+    # prior fit's per-stump weights and continues new rounds forward.
+    m.fit(X, y)
+    # Predictions should still be producible.
+    preds = m.predict(X)
+    assert len(preds) == X.shape[0]
 
 
 # ----- Persistence -----

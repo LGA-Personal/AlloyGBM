@@ -2250,6 +2250,14 @@ pub struct WarmStartState {
     /// resumed `N + M`-round model matches a fresh `N + M`-round fit.
     /// Empty / missing → EMA starts cold (legacy v0.7.1/v0.7.2 behaviour).
     pub initial_ema_stats: Option<Vec<GradientEmaStats>>,
+    /// v0.10.0+: When the prior fit used DART, the per-stump `tree_weight`
+    /// array (length = `stumps.len()`). `None` for non-DART warm-starts.
+    /// On a DART warm-start continuation, the engine seeds
+    /// `dart_state.tree_weights` from this snapshot so prior-tree dropouts
+    /// during new rounds use the correct accumulated weights. Historical
+    /// `dropped_per_round` arrays do *not* round-trip — new rounds start
+    /// fresh dropout bookkeeping going forward.
+    pub initial_dart_tree_weights: Option<Vec<f32>>,
 }
 
 /// State needed to continue multiclass training from a prior model.
@@ -4166,14 +4174,13 @@ impl Trainer {
             } => Some((drop_rate, max_drop, normalize_type, sample_type)),
             _ => None,
         };
-        if dart_params.is_some() && execution.warm_start.is_some() {
-            return Err(EngineError::InvalidConfig(
-                "boosting_mode='dart' + warm_start is not yet supported \
-                 (tracked as a v0.10.x follow-up). Use boosting_mode='standard' \
-                 or boosting_mode='goss' for warm-started fits."
-                    .to_string(),
-            ));
-        }
+        // v0.10.0: DART + warm_start is now supported. See the dart_state
+        // seeding logic below — `dart_state.tree_weights` is initialized from
+        // `warm_start.initial_dart_tree_weights` when present, falling back
+        // to all-1.0s. Historical `dropped_per_round` is not persisted; new
+        // rounds start fresh dropout bookkeeping going forward, which is
+        // the natural semantics for continuation (RNG-driven dropout
+        // history cannot be replayed from the prior fit).
         validate_training_alignment(dataset, binned_matrix)?;
         if objective.requires_group_id() && dataset.group_id.is_none() {
             return Err(EngineError::ContractViolation(
@@ -4342,11 +4349,36 @@ impl Trainer {
         // `tree_weight = 1.0`.
         let mut dart_state = DartState::default();
         if dart_params.is_some() {
-            // Each previously-committed tree (warm-start trees, if any —
-            // we already rejected that combo above, so this is always
-            // empty for now) starts at weight 1.0.
+            // v0.10.0: When continuing a DART fit, seed tree_weights from the
+            // warm-start snapshot. Length must equal `stumps.len()` (one
+            // weight per warm-start stump). Falls back to all-1.0s when the
+            // prior fit did not use DART or no snapshot was provided.
             let initial_tree_count = stumps_per_completed_round.len();
-            dart_state.tree_weights = vec![1.0; initial_tree_count];
+            if let Some(saved_weights) = execution
+                .warm_start
+                .as_ref()
+                .and_then(|ws| ws.initial_dart_tree_weights.as_ref())
+            {
+                // Caller supplies one weight per stump; we need one weight
+                // per tree. Take the first weight of each tree (all stumps
+                // in a tree share the same tree_weight after DART
+                // normalization, so this is well-defined).
+                let mut per_tree = Vec::with_capacity(initial_tree_count);
+                let mut stump_offset = 0usize;
+                for &count in &stumps_per_completed_round {
+                    let weight = saved_weights.get(stump_offset).copied().unwrap_or(1.0);
+                    per_tree.push(weight);
+                    stump_offset += count;
+                }
+                dart_state.tree_weights = per_tree;
+            } else {
+                dart_state.tree_weights = vec![1.0; initial_tree_count];
+            }
+            // Historical `dropped_per_round` is initialized empty per warm
+            // round — RNG-driven dropout history cannot be replayed.
+            for _ in 0..initial_tree_count {
+                dart_state.dropped_per_round.push(Vec::new());
+            }
         }
         // DART-only parallel arrays indexed by `effective_round_index`
         // (= `tree_id` encoded in stump.node_id). Both grow together at
@@ -4364,6 +4396,19 @@ impl Trainer {
         // `retained_stump_count_for_rounds`.
         let mut round_start_offsets: Vec<usize> = Vec::new();
         let mut dart_round_counts: Vec<usize> = Vec::new();
+
+        // v0.10.0: DART + warm_start — pre-populate round_start_offsets +
+        // dart_round_counts from the warm-start tree shapes so the dropout
+        // step can correctly slice into `stumps` for each prior tree. Stays
+        // a no-op for non-DART or cold fits.
+        if dart_params.is_some() {
+            let mut offset = 0usize;
+            for &count in &stumps_per_completed_round {
+                round_start_offsets.push(offset);
+                dart_round_counts.push(count);
+                offset += count;
+            }
+        }
 
         // Build MorphState for the duration of training when morph_config is set.
         // `total_iterations` corresponds to the round cap (including any warm-start
@@ -9610,6 +9655,7 @@ mod tests {
             stumps: Vec::new(),
             initial_rounds_completed: 1,
             initial_ema_stats: None,
+            initial_dart_tree_weights: None,
         };
         let controls = IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).unwrap();
         let result = Trainer::new(params).unwrap().fit_iterations_warm_start(
@@ -10159,10 +10205,11 @@ mod tests {
     }
 
     #[test]
-    fn dart_boosting_mode_rejects_warm_start() {
-        // DART + warm_start is rejected with a clear error
-        // (v0.10.x follow-up; would require persisting tree_weights
-        // and dropped_per_round in WarmStartState).
+    fn dart_boosting_mode_supports_warm_start() {
+        // v0.10.0+: DART + warm_start is now supported. The continuation
+        // seeds dart_state.tree_weights from
+        // warm_start.initial_dart_tree_weights and continues new-round
+        // dropouts forward.
         let dataset = sample_dataset();
         let binned = sample_binned_matrix_for_dataset(&dataset);
         let dart_params = TrainParams {
@@ -10197,9 +10244,10 @@ mod tests {
             stumps: cold_model.stumps.clone(),
             initial_rounds_completed: 2,
             initial_ema_stats: None,
+            initial_dart_tree_weights: None,
         };
         let dart_trainer = Trainer::new(dart_params).expect("DART params pass validation");
-        let err = dart_trainer
+        let continued = dart_trainer
             .fit_iterations_warm_start(
                 &dataset,
                 &binned,
@@ -10208,11 +10256,12 @@ mod tests {
                 IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).unwrap(),
                 warm_start,
             )
-            .expect_err("DART + warm_start must be rejected");
-        assert!(matches!(err, EngineError::InvalidConfig(_)));
+            .expect("DART + warm_start must now succeed");
+        // The continuation should include the warm-start stumps plus the new
+        // DART rounds.
         assert!(
-            err.to_string().contains("dart") && err.to_string().contains("warm_start"),
-            "unexpected error: {err}"
+            continued.model.stumps.len() >= cold_model.stumps.len(),
+            "continuation lost warm-start stumps"
         );
     }
 
