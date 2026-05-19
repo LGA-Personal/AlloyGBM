@@ -12,6 +12,7 @@ AlloyGBM/
   crates/
     core/src/lib.rs        # Data structures: TrainParams, BinnedMatrix, ModelMetadata, artifact serde, NaN handling, FeatureBaseline section
     engine/src/lib.rs      # Training loop, ObjectiveOps trait (8 objectives), Trainer, IterationControls, IterationDiagnostics, interaction constraints, WarmStartState
+    engine/src/dart.rs     # DART dropout + normalize helpers (v0.9.0)
     backend_cpu/src/lib.rs # Histogram kernels, split finding, NaN-aware partitioning (Rayon parallelism)
     predictor/src/lib.rs   # Prediction from trained artifacts (post-transforms: identity, sigmoid)
     shap/src/lib.rs        # TreeSHAP (polynomial-time) + legacy brute-force Shapley; PL-leaf interventional decomposition
@@ -27,7 +28,7 @@ AlloyGBM/
       evaluation.py           # Metrics: rmse, mae, r2_score, accuracy, log_loss, ndcg, etc.
       validation.py           # Purged time-series and panel cross-validation splits
   docs/
-    limitations.md         # Current limitation analysis (v0.8.0, with v0.9.x/v0.10.x follow-ups)
+    limitations.md         # Current limitation analysis (v0.9.0, with v0.10.x follow-ups)
     roadmap/current.md     # Active roadmap and per-release history
     user/                  # User-facing Markdown docs (mirrored by docs/site/source/*.rst)
     site/                  # Sphinx site (Read the Docs)
@@ -60,7 +61,7 @@ maturin develop --release      # Build and install Python extension
 - **Newton-Raphson leaf values**: `leaf = -lr * grad_sum / (hess_sum + lambda + eps)` -- general-purpose for any objective
 - **Hand-rolled JSON serde** for `ModelMetadata` in `core/src/lib.rs` -- positional parser, very brittle. Adding fields requires careful ordering.
 - **`BinnedMatrix`** uses adaptive `Vec<u8>` or `Vec<u16>` -- up to 65,535 bins, column-major duplicate for cache-friendly histograms
-- **Artifact format**: Binary with magic bytes `AGBM`, versioned sections (Trees, PredictorLayout, CategoricalState, NativeCategoricalSplits, LinearLeafCoefficients, FeatureBaseline), JSON metadata header. Includes objective type for post-transform dispatch.
+- **Artifact format**: Binary with magic bytes `AGBM`, versioned sections (Trees, PredictorLayout, CategoricalState, NativeCategoricalSplits, LinearLeafCoefficients, FeatureBaseline, DartTreeWeights), JSON metadata header. Includes objective type for post-transform dispatch.
 
 ## Key Architectural Patterns
 

@@ -41,7 +41,7 @@ maturin develop --manifest-path bindings/python/Cargo.toml --release
 
 AlloyGBM targets Python `3.11+` and uses a native Rust extension module.
 
-Wheel targets for `0.8.0`:
+Wheel targets for `0.9.0`:
 
 - macOS `arm64`
 - Linux `x86_64` (manylinux)
@@ -355,6 +355,7 @@ artifact_bytes = model.artifact_bytes
 - Per-iteration learning-rate schedules: `lr_schedule="constant"` (default) or `"warmup_cosine"`
 - DRO-style robust scalar leaves via `leaf_solver="dro"` (closed-form gradient-uncertainty penalty)
 - GOSS (gradient-based one-side sampling, LightGBM-style) via `boosting_mode="goss"` + `goss_top_rate` / `goss_other_rate` on regression, binary classification, and ranking. Default `boosting_mode="standard"` is byte-identical to v0.7.5.
+- DART (Dropouts meet MART) via `boosting_mode="dart"` + `dart_drop_rate` / `dart_max_drop` / `dart_normalize_type` (`"tree"` or `"forest"`) / `dart_sample_type` (`"uniform"` or `"weighted"`) on regression, binary classification, and ranking. Per-stump weights ride in a new `DartTreeWeights` artifact section emitted only when at least one stump diverges from `tree_weight = 1.0`, so Standard / GOSS artifacts stay byte-identical to v0.8.0.
 - Piecewise-linear leaves via `leaf_model="linear"` (closed-form ridge solve, faster convergence on linear-trend data)
 - Factor-neutral boosting via `neutralization` + fit-time `factor_exposures` (`pre_target`, `per_round_gradient`, `split_penalty`)
 - LightGBM-compatible feature interaction constraints via `interaction_constraints=[[...]]` (up to 64 groups, level-wise and leaf-wise enforcement)
@@ -403,10 +404,9 @@ Benchmark tooling and methodology live in [benchmarks/README.md](benchmarks/READ
 ## Current Limitations
 
 - CPU-only runtime (GPU backend is architecturally planned but not implemented)
-- DART (dropouts meet MART) is a placeholder — `boosting_mode="dart"` raises `NotImplementedError`; full implementation targeted at **v0.9.0**.  GOSS shipped in v0.8.0.
 - `MultiLabelGBMRanker` trains K independent per-label rankers; joint shared-tree multi-label boosting on top of a K-output shared-histogram primitive is targeted at **v0.10.0**.
-- Multiclass softmax rejects non-`"standard"` boosting modes pending per-class gradient scoring (v0.9.x follow-up).
-- Rank-binning predict-time NaN handling drops the learned-missing-direction signal (pre-existing; affects rank-binning only — pure linear and quantile binning unaffected).  Audited and tracked alongside DART for v0.9.x where the broader artifact / predict-path NaN audit can land coherently.
+- Multiclass softmax rejects non-`"standard"` boosting modes pending per-class gradient scoring (v0.10.x follow-up — applies to both GOSS and DART).
+- DART + `warm_start` is rejected pending `WarmStartState` extension to carry `tree_weights` and `dropped_per_round` (v0.10.x follow-up).
 - `leaf_solver="dro"` is a robust scalar leaf update, not a full raw-distribution Wasserstein DRO guarantee
 
 See [docs/limitations.md](docs/limitations.md) for the full list.

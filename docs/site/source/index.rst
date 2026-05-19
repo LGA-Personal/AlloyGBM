@@ -12,14 +12,14 @@ types.
 
 .. note::
 
-   AlloyGBM ``0.8.0`` is a minor feature release.  It closes
-   Limitation 4 (mixed linear-rank SHAP strict additivity) and adds
-   LightGBM-style GOSS sampling as a new opt-in
-   ``boosting_mode="goss"`` on ``GBMRegressor``, ``GBMClassifier``
-   (binary), and ``GBMRanker``.  Default ``boosting_mode="standard"``
-   is byte-identical to v0.7.5.  DART and joint multi-label ranking
-   were scope-split out to v0.9.0 and v0.10.0 respectively to keep
-   this release reviewable.  See :doc:`release` for full notes.
+   AlloyGBM ``0.9.0`` is a minor feature release.  It adds DART
+   (Dropouts meet MART) as a new opt-in ``boosting_mode="dart"`` on
+   ``GBMRegressor``, binary ``GBMClassifier``, and ``GBMRanker``, and
+   resolves the linear-rank predict-path NaN routing bug
+   (Limitation 4 from v0.8.0).  Default ``boosting_mode="standard"``
+   is byte-identical to v0.8.0.  Joint shared-tree multi-label
+   ranking remains scoped for v0.10.0.  See :doc:`release` for full
+   notes.
 
 Getting started
 ---------------

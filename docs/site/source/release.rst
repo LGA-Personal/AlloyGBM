@@ -1,7 +1,70 @@
 Release and platform policy
 ===========================
 
-AlloyGBM ``0.8.0`` release notes and platform policy.
+AlloyGBM ``0.9.0`` release notes and platform policy.
+
+What's new in 0.9.0
+-------------------
+
+Minor feature release: closes the v0.8.0 DART placeholder
+(Limitation 2) and resolves the linear-rank predict-path NaN routing
+bug (Limitation 4).  Default behaviour is byte-identical to v0.8.0 on
+every API surface — the new ``DartTreeWeights`` artifact section is
+only emitted when at least one stump has a non-1.0 weight, which
+never happens under ``boosting_mode="standard"`` (the default) or
+``boosting_mode="goss"``.
+
+**DART boosting mode (Dropouts meet MART):**
+
+- New ``boosting_mode="dart"`` opt-in on ``GBMRegressor``, binary
+  ``GBMClassifier``, and ``GBMRanker``, with four companion
+  parameters: ``dart_drop_rate`` (default ``0.1``), ``dart_max_drop``
+  (default ``50``), ``dart_normalize_type`` (``"tree"`` or
+  ``"forest"``, default ``"tree"``), and ``dart_sample_type``
+  (``"uniform"`` or ``"weighted"``, default ``"uniform"``).
+- Per-round dropout + normalization cycle lives in a new module
+  ``crates/engine/src/dart.rs``.  No new crate dependencies — uses
+  the existing ``mixed_hash`` splitmix64 derivative so per-stump
+  drop decisions are deterministic given ``seed`` + round index.
+- Per-stump ``tree_weight: f32`` is plumbed through ``TrainedStump``
+  and persisted via a new ``DartTreeWeights`` artifact section
+  (``ModelSectionKind`` index 12).  Emitted only when at least one
+  weight diverges from 1.0; pre-v0.9.0 artifacts continue to load
+  with all weights defaulting to 1.0.
+- The single-output training loop rejects ``boosting_mode="dart"``
+  + ``warm_start`` with a clear error (tracked as a v0.10.x
+  follow-up: would require persisting ``tree_weights`` and
+  ``dropped_per_round`` in ``WarmStartState``).
+- Multiclass softmax continues to reject ``boosting_mode != "standard"``
+  with a clear error message; per-class gradient scoring during the
+  dropout step is tracked as a v0.10.x follow-up.
+
+**NaN routing on the linear-rank predict path (Limitation 4
+resolved):**
+
+- The predict-time quantize helpers in ``bindings/python/src/lib.rs``
+  (``quantize_dense_values_linear_inplace_wide``,
+  ``quantize_dense_values_linear_rank_inplace_wide``, and the inline
+  loop in ``predict_dense_quantized_with_summary_bytes``) now preserve
+  ``f32::NAN`` through the f32 cast instead of casting a finite bin
+  index.  The predictor's existing
+  ``feature_value.is_nan() -> default_left`` short-circuit at
+  ``crates/predictor/src/lib.rs:148`` then fires automatically.
+- ``LinearLeaf::eval`` (in ``alloygbm-core``) and
+  ``LinearLeafCompact::eval`` (in ``alloygbm-predictor``) now skip
+  NaN regressor features when accumulating the linear sum, so
+  PL-leaf predictions don't NaN-poison on a ``w * NaN`` step.
+- Pure-linear, pure-quantile, and rank-binning paths now share
+  consistent NaN semantics: missing values always route through the
+  learned ``default_left`` direction.
+
+Known limitations carried forward to v0.10.0
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+- Multiclass softmax + DART is still rejected.
+- DART + ``warm_start`` is rejected.
+- Joint shared-tree multi-label ranking and the K-output
+  shared-histogram engine primitive remain v0.10.0 targets.
 
 What's new in 0.8.0
 -------------------

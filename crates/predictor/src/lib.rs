@@ -1,7 +1,7 @@
 use alloygbm_core::{
     CategoricalStatePayloadV1, CoreError, MODEL_FORMAT_V1, ModelArtifactSection, ModelMetadata,
     ModelSectionKind, decode_optional_categorical_state_section_v1,
-    decode_optional_linear_leaf_coefficients_section,
+    decode_optional_dart_tree_weights_section, decode_optional_linear_leaf_coefficients_section,
     decode_optional_native_categorical_splits_section, deserialize_model_artifact_v1,
     format_required_section_mode_error, required_section_compatibility_report,
 };
@@ -54,12 +54,18 @@ struct LinearLeafCompact {
 }
 
 impl LinearLeafCompact {
+    /// PL-leaf evaluation with v0.9.0 NaN policy: NaN feature values
+    /// contribute 0.0 to the linear sum. Matches `LinearLeaf::eval` in
+    /// `alloygbm_core`. See Limitation 4 in `docs/limitations.md`.
     #[inline]
     fn eval(&self, features: &[f32]) -> f32 {
         let mut v = self.intercept;
         for (w, &fi) in self.weights.iter().zip(self.feature_indices.iter()) {
             if fi < features.len() {
-                v += w * features[fi];
+                let x = features[fi];
+                if !x.is_nan() {
+                    v += w * x;
+                }
             }
         }
         v
@@ -119,6 +125,11 @@ impl PredictorTreeNode {
 #[derive(Debug, Clone, PartialEq)]
 struct PredictorTree {
     nodes_by_local_id: Vec<Option<PredictorTreeNode>>,
+    /// DART per-tree multiplicative weight. `1.0` for non-DART models
+    /// and for any tree where the loader didn't find a `DartTreeWeights`
+    /// entry. Applied multiplicatively to every leaf accumulation when
+    /// traversing this tree.
+    tree_weight: f32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -255,9 +266,15 @@ impl Predictor {
                 }
             }
 
+            // Multiclass does not yet support DART (see v0.9.0 rejection in
+            // engine fit_multiclass_iterations_impl), so even if a future
+            // artifact carries DartTreeWeights here we keep the per-tree
+            // weight at 1.0 across classes. This is forward-compatible:
+            // when multiclass DART lands we can apply the overlay below.
             let mut class_trees = Vec::with_capacity(num_classes);
             for stumps in &per_class_stumps {
-                class_trees.push(build_predictor_trees(stumps)?);
+                let (trees, _tree_ids) = build_predictor_trees(stumps)?;
+                class_trees.push(trees);
             }
 
             return Ok(Self {
@@ -314,7 +331,14 @@ impl Predictor {
             }
         }
 
-        let trees = build_predictor_trees(&stumps)?;
+        let (mut trees, tree_ids) = build_predictor_trees(&stumps)?;
+
+        // Decode optional DartTreeWeights and apply per-tree weights.
+        if let Some(dart_payload) = decode_optional_dart_tree_weights_section(&parsed.sections)
+            .map_err(PredictorError::from)?
+        {
+            apply_dart_tree_weights(&mut trees, &tree_ids, &stumps, &dart_payload.weights)?;
+        }
 
         if predictor_layout.feature_count != metadata_feature_count {
             return Err(PredictorError::ContractViolation(format!(
@@ -511,11 +535,12 @@ impl Predictor {
                 }
                 let feature_value = features[node.feature_index];
                 let went_left = predictor_went_left(node, feature_value, use_float);
-                prediction += if went_left {
+                let leaf = if went_left {
                     node.eval_left_leaf(features)
                 } else {
                     node.eval_right_leaf(features)
                 };
+                prediction += tree.tree_weight * leaf;
                 local_node_id = if went_left {
                     local_node_id.saturating_mul(2).saturating_add(1)
                 } else {
@@ -637,11 +662,12 @@ impl Predictor {
                 }
                 let feature_value = features[node.feature_index];
                 let went_left = predictor_went_left(node, feature_value, use_float);
-                prediction += if went_left {
+                let leaf = if went_left {
                     node.eval_left_leaf(features)
                 } else {
                     node.eval_right_leaf(features)
                 };
+                prediction += tree.tree_weight * leaf;
                 local_node_id = if went_left {
                     local_node_id * 2 + 1
                 } else {
@@ -797,11 +823,12 @@ impl Predictor {
                         let feature_value = features[node.feature_index];
                         let went_left =
                             predictor_went_left(node, feature_value, self.use_float_thresholds);
-                        logits[class_k] += if went_left {
+                        let leaf = if went_left {
                             node.eval_left_leaf(features)
                         } else {
                             node.eval_right_leaf(features)
                         };
+                        logits[class_k] += tree.tree_weight * leaf;
                         local_node_id = if went_left {
                             local_node_id * 2 + 1
                         } else {
@@ -882,11 +909,12 @@ impl Predictor {
                         }
                         let feature_value = features[node.feature_index];
                         let went_left = predictor_went_left(node, feature_value, use_float);
-                        logits[class_k] += if went_left {
+                        let leaf = if went_left {
                             node.eval_left_leaf(features)
                         } else {
                             node.eval_right_leaf(features)
                         };
+                        logits[class_k] += tree.tree_weight * leaf;
                         local_node_id = if went_left {
                             local_node_id * 2 + 1
                         } else {
@@ -1123,10 +1151,18 @@ fn linear_leaf_to_compact(ll: &alloygbm_core::LinearLeaf) -> LinearLeafCompact {
     }
 }
 
-fn build_predictor_trees(stumps: &[PredictorStump]) -> PredictorResult<Vec<PredictorTree>> {
+/// Build predictor trees and a parallel `Vec<u32>` of source tree_ids
+/// (one per built tree, in the same order). The tree_ids let callers
+/// overlay per-tree-id state — most notably DART tree weights —
+/// without re-grouping stumps.
+fn build_predictor_trees(
+    stumps: &[PredictorStump],
+) -> PredictorResult<(Vec<PredictorTree>, Vec<u32>)> {
     let mut grouped_by_tree: BTreeMap<u32, Vec<(u32, PredictorTreeNode)>> = BTreeMap::new();
-    for stump in stumps {
+    let mut first_stump_idx_per_tree: BTreeMap<u32, usize> = BTreeMap::new();
+    for (stump_idx, stump) in stumps.iter().enumerate() {
         let (tree_id, local_node_id) = decode_tree_node_id(stump.node_id);
+        first_stump_idx_per_tree.entry(tree_id).or_insert(stump_idx);
         grouped_by_tree.entry(tree_id).or_default().push((
             local_node_id,
             PredictorTreeNode {
@@ -1144,6 +1180,7 @@ fn build_predictor_trees(stumps: &[PredictorStump]) -> PredictorResult<Vec<Predi
     }
 
     let mut trees = Vec::with_capacity(grouped_by_tree.len());
+    let mut tree_ids = Vec::with_capacity(grouped_by_tree.len());
     for (tree_id, nodes) in grouped_by_tree {
         let max_local_node_id = nodes
             .iter()
@@ -1160,10 +1197,50 @@ fn build_predictor_trees(stumps: &[PredictorStump]) -> PredictorResult<Vec<Predi
             }
             nodes_by_local_id[local_node_id] = Some(node);
         }
-        trees.push(PredictorTree { nodes_by_local_id });
+        trees.push(PredictorTree {
+            nodes_by_local_id,
+            tree_weight: 1.0,
+        });
+        tree_ids.push(tree_id);
     }
 
-    Ok(trees)
+    Ok((trees, tree_ids))
+}
+
+/// Apply a `DartTreeWeights` payload (length parallel to `stumps`) onto
+/// the per-tree weights of `trees`. Each tree gets the weight of the
+/// first stump that maps to it. Returns an error if the payload length
+/// doesn't match `stumps`.
+fn apply_dart_tree_weights(
+    trees: &mut [PredictorTree],
+    tree_ids: &[u32],
+    stumps: &[PredictorStump],
+    weights: &[f32],
+) -> PredictorResult<()> {
+    if weights.len() != stumps.len() {
+        return Err(PredictorError::ContractViolation(format!(
+            "DartTreeWeights length {} != stump count {}",
+            weights.len(),
+            stumps.len()
+        )));
+    }
+    // tree_id -> position in `trees`/`tree_ids`
+    let mut tree_index: BTreeMap<u32, usize> = BTreeMap::new();
+    for (i, &tid) in tree_ids.iter().enumerate() {
+        tree_index.insert(tid, i);
+    }
+    // First stump for each tree_id — its weight is the per-tree weight.
+    let mut seen: BTreeMap<u32, ()> = BTreeMap::new();
+    for (stump_idx, stump) in stumps.iter().enumerate() {
+        let (tid, _) = decode_tree_node_id(stump.node_id);
+        if seen.insert(tid, ()).is_some() {
+            continue;
+        }
+        if let Some(&ti) = tree_index.get(&tid) {
+            trees[ti].tree_weight = weights[stump_idx];
+        }
+    }
+    Ok(())
 }
 
 fn read_u32_le(bytes: &[u8], start: usize) -> PredictorResult<u32> {
@@ -1839,6 +1916,7 @@ mod tests {
                 },
                 left_leaf_value: LeafValue::Scalar(-0.1),
                 right_leaf_value: LeafValue::Scalar(0.1),
+                tree_weight: 1.0,
             }],
             categorical_state: None,
             node_debug_stats: None,
@@ -1924,6 +2002,7 @@ mod tests {
                     },
                     left_leaf_value: LeafValue::Scalar(-0.2),
                     right_leaf_value: LeafValue::Scalar(0.2),
+                    tree_weight: 1.0,
                 },
                 // Continuous split on feature 1: threshold_bin 3 (i.e. <=3 left, >3 right)
                 // node_id in tree 1 (tree_id=1, local=0 → 1 * 1048576 + 0)
@@ -1951,6 +2030,7 @@ mod tests {
                     },
                     left_leaf_value: LeafValue::Scalar(0.1),
                     right_leaf_value: LeafValue::Scalar(-0.1),
+                    tree_weight: 1.0,
                 },
             ],
             categorical_state: None,

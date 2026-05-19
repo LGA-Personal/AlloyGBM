@@ -53,11 +53,11 @@ and the MorphBoost / LR-schedule parameters
 ``lr_schedule``, ``lr_warmup_frac``). See :doc:`morphboost`.
 ``leaf_model="linear"`` and ``training_mode="morph"`` can be combined.
 
-``boosting_mode="goss"`` with ``goss_top_rate`` / ``goss_other_rate`` is
-supported on the ranking objective (see :doc:`estimator` "Boosting mode"
-for the full semantics).  ``boosting_mode="dart"`` raises
-``NotImplementedError`` in v0.8.0; full DART implementation is
-targeted at v0.9.0.
+``boosting_mode="goss"`` with ``goss_top_rate`` / ``goss_other_rate``
+and ``boosting_mode="dart"`` with ``dart_drop_rate`` /
+``dart_max_drop`` / ``dart_normalize_type`` / ``dart_sample_type`` are
+both supported on the ranking objective (see :doc:`estimator`
+"Boosting mode" for the full semantics).
 
 Methods
 -------
@@ -110,6 +110,6 @@ Current scope
 - 5 ranking objectives implemented natively in Rust
 - Single-label per ``GBMRanker``. For multi-output ranking, see
   :class:`~alloygbm.MultiLabelGBMRanker` (also covered in :doc:`estimator`).
-  Joint shared-tree multi-label boosting is deferred to v0.8.0
-  (paired with the shared-histogram speedup).
+  Joint shared-tree multi-label boosting is deferred to v0.10.0
+  (paired with the K-output shared-histogram primitive).
 - Group identifiers must be unsigned integers

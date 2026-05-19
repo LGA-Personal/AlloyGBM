@@ -29,8 +29,10 @@ def _nan_bin_for_max_bins(max_bins):
     return max_bins - 1
 _MIN_CONTINUOUS_QUANTIZED_BINS = 2
 _VALID_CONTINUOUS_BINNING_STRATEGIES = {"linear", "rank", "quantile"}
-# v0.8.0: per-round boosting strategies.  "dart" is reserved for a
-# follow-up commit — see crates/core/src/lib.rs::BoostingMode.
+# Per-round boosting strategies.  "standard" is the default v0.7.5
+# behaviour, "goss" (v0.8.0+) is LightGBM-style gradient-based one-side
+# sampling, "dart" (v0.9.0+) is Dropouts-meet-MART.  See
+# crates/core/src/lib.rs::BoostingMode.
 _VALID_BOOSTING_MODES = {"standard", "goss", "dart"}
 _LINEAR_TAIL_RANK_ENV_VAR = "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK"
 _LINEAR_TAIL_CORE_SPAN_RATIO_ENV_VAR = "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_CORE_SPAN_RATIO"
@@ -340,6 +342,10 @@ class GBMRegressor(_GBMRegressorBase):
         boosting_mode: str = "standard",
         goss_top_rate: float = 0.2,
         goss_other_rate: float = 0.1,
+        dart_drop_rate: float = 0.1,
+        dart_max_drop: int = 50,
+        dart_normalize_type: str = "tree",
+        dart_sample_type: str = "uniform",
     ) -> None:
         if not (0.0 < learning_rate <= 1.0):
             raise ValueError("learning_rate must be in (0.0, 1.0]")
@@ -527,7 +533,7 @@ class GBMRegressor(_GBMRegressorBase):
             )
         if str(leaf_solver) == "dro" and str(leaf_model) != "constant":
             raise ValueError(
-                "leaf_solver='dro' requires leaf_model='constant' in v0.8.0"
+                "leaf_solver='dro' requires leaf_model='constant'"
             )
         if str(neutralization) not in (
             "none",
@@ -574,15 +580,32 @@ class GBMRegressor(_GBMRegressorBase):
                     "boosting_mode='goss' requires goss_top_rate + goss_other_rate <= 1.0"
                 )
         if str(boosting_mode) == "dart":
-            # DART is reserved for a follow-up commit on v0.8.0-features;
-            # the Rust engine doesn't yet implement the per-round dropout
-            # and per-stump weight bookkeeping.  Reject loudly so users
-            # don't silently get standard boosting.
-            raise NotImplementedError(
-                "boosting_mode='dart' is reserved for a v0.8.0 follow-up "
-                "commit; only 'standard' and 'goss' are wired through in "
-                "the current build"
-            )
+            # v0.9.0: DART is fully wired through the single-output trainer
+            # (regression / binary classification / single-label ranking).
+            # Multiclass DART is rejected at fit time; warm-start + DART
+            # is rejected at fit time.
+            if not (0.0 < float(dart_drop_rate) < 1.0):
+                raise ValueError(
+                    "boosting_mode='dart' requires dart_drop_rate in (0, 1), "
+                    f"got {dart_drop_rate}"
+                )
+            if int(dart_max_drop) < 1:
+                raise ValueError(
+                    "boosting_mode='dart' requires dart_max_drop >= 1, "
+                    f"got {dart_max_drop}"
+                )
+            if str(dart_normalize_type) not in {"tree", "forest"}:
+                raise ValueError(
+                    "boosting_mode='dart' requires "
+                    "dart_normalize_type in {'tree', 'forest'}, "
+                    f"got {dart_normalize_type!r}"
+                )
+            if str(dart_sample_type) not in {"uniform", "weighted"}:
+                raise ValueError(
+                    "boosting_mode='dart' requires "
+                    "dart_sample_type in {'uniform', 'weighted'}, "
+                    f"got {dart_sample_type!r}"
+                )
 
         self.learning_rate = float(learning_rate)
         self.max_depth = int(max_depth)
@@ -651,13 +674,17 @@ class GBMRegressor(_GBMRegressorBase):
         self.neutralization = str(neutralization)
         self.factor_neutralization_lambda = float(factor_neutralization_lambda)
         self.factor_penalty = float(factor_penalty)
-        # v0.8.0: per-round boosting strategy.  Default "standard" is
+        # v0.8.0+: per-round boosting strategy.  Default "standard" is
         # byte-identical to v0.7.5 behaviour.  "goss" enables
-        # gradient-based one-side sampling.  "dart" is reserved for a
-        # v0.8.0 follow-up commit (NotImplementedError above).
+        # gradient-based one-side sampling.  v0.9.0+: "dart" enables
+        # Dropouts-meet-MART for single-output objectives.
         self.boosting_mode = str(boosting_mode)
         self.goss_top_rate = float(goss_top_rate)
         self.goss_other_rate = float(goss_other_rate)
+        self.dart_drop_rate = float(dart_drop_rate)
+        self.dart_max_drop = int(dart_max_drop)
+        self.dart_normalize_type = str(dart_normalize_type)
+        self.dart_sample_type = str(dart_sample_type)
         self._fit_neutralization: str | None = None
         self._fit_factor_neutralization_lambda: float | None = None
         self._fit_factor_penalty: float | None = None
@@ -733,7 +760,11 @@ class GBMRegressor(_GBMRegressorBase):
             f"factor_penalty={self.factor_penalty}, "
             f"boosting_mode='{self.boosting_mode}', "
             f"goss_top_rate={self.goss_top_rate}, "
-            f"goss_other_rate={self.goss_other_rate}"
+            f"goss_other_rate={self.goss_other_rate}, "
+            f"dart_drop_rate={self.dart_drop_rate}, "
+            f"dart_max_drop={self.dart_max_drop}, "
+            f"dart_normalize_type='{self.dart_normalize_type}', "
+            f"dart_sample_type='{self.dart_sample_type}'"
             ")"
         )
 
@@ -791,6 +822,10 @@ class GBMRegressor(_GBMRegressorBase):
             "boosting_mode": self.boosting_mode,
             "goss_top_rate": self.goss_top_rate,
             "goss_other_rate": self.goss_other_rate,
+            "dart_drop_rate": self.dart_drop_rate,
+            "dart_max_drop": self.dart_max_drop,
+            "dart_normalize_type": self.dart_normalize_type,
+            "dart_sample_type": self.dart_sample_type,
         }
 
     def set_params(self, **params: object) -> "GBMRegressor":
@@ -846,6 +881,10 @@ class GBMRegressor(_GBMRegressorBase):
             "boosting_mode",
             "goss_top_rate",
             "goss_other_rate",
+            "dart_drop_rate",
+            "dart_max_drop",
+            "dart_normalize_type",
+            "dart_sample_type",
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
@@ -1275,10 +1314,6 @@ class GBMRegressor(_GBMRegressorBase):
                     "boosting_mode must be one of: "
                     + ", ".join(sorted(_VALID_BOOSTING_MODES))
                 )
-            if bm == "dart":
-                raise NotImplementedError(
-                    "boosting_mode='dart' is reserved for a v0.8.0 follow-up commit"
-                )
             self.boosting_mode = bm
         if "goss_top_rate" in params:
             r = float(params["goss_top_rate"])
@@ -1290,6 +1325,32 @@ class GBMRegressor(_GBMRegressorBase):
             if not (0.0 < r < 1.0):
                 raise ValueError("goss_other_rate must be in (0, 1)")
             self.goss_other_rate = r
+        if "dart_drop_rate" in params:
+            r = float(params["dart_drop_rate"])
+            if not (0.0 < r < 1.0):
+                raise ValueError("dart_drop_rate must be in (0, 1)")
+            self.dart_drop_rate = r
+        if "dart_max_drop" in params:
+            d = int(params["dart_max_drop"])
+            if d < 1:
+                raise ValueError("dart_max_drop must be >= 1")
+            self.dart_max_drop = d
+        if "dart_normalize_type" in params:
+            n = str(params["dart_normalize_type"])
+            if n not in {"tree", "forest"}:
+                raise ValueError(
+                    "dart_normalize_type must be 'tree' or 'forest', "
+                    f"got {n!r}"
+                )
+            self.dart_normalize_type = n
+        if "dart_sample_type" in params:
+            s = str(params["dart_sample_type"])
+            if s not in {"uniform", "weighted"}:
+                raise ValueError(
+                    "dart_sample_type must be 'uniform' or 'weighted', "
+                    f"got {s!r}"
+                )
+            self.dart_sample_type = s
         # Cross-field validation for goss top+other rates.
         if self.boosting_mode == "goss" and (
             self.goss_top_rate + self.goss_other_rate > 1.0
@@ -1313,7 +1374,7 @@ class GBMRegressor(_GBMRegressorBase):
 
         if self.leaf_solver == "dro" and self.leaf_model != "constant":
             raise ValueError(
-                "leaf_solver='dro' requires leaf_model='constant' in v0.8.0"
+                "leaf_solver='dro' requires leaf_model='constant'"
             )
         if self.neutralization != "split_penalty" and self.factor_penalty != 0.0:
             raise ValueError(
@@ -2017,6 +2078,18 @@ class GBMRegressor(_GBMRegressorBase):
                     goss_other_rate=(
                         self.goss_other_rate if self.boosting_mode == "goss" else None
                     ),
+                    dart_drop_rate=(
+                        self.dart_drop_rate if self.boosting_mode == "dart" else None
+                    ),
+                    dart_max_drop=(
+                        self.dart_max_drop if self.boosting_mode == "dart" else None
+                    ),
+                    dart_normalize_type=(
+                        self.dart_normalize_type if self.boosting_mode == "dart" else None
+                    ),
+                    dart_sample_type=(
+                        self.dart_sample_type if self.boosting_mode == "dart" else None
+                    ),
                 )
                 return self._finalize_training_result(native_result, input_adaptation_seconds, feature_count=feature_count)
             except (ImportError, AttributeError):
@@ -2136,6 +2209,18 @@ class GBMRegressor(_GBMRegressorBase):
                 goss_other_rate=(
                     self.goss_other_rate if self.boosting_mode == "goss" else None
                 ),
+                dart_drop_rate=(
+                    self.dart_drop_rate if self.boosting_mode == "dart" else None
+                ),
+                dart_max_drop=(
+                    self.dart_max_drop if self.boosting_mode == "dart" else None
+                ),
+                dart_normalize_type=(
+                    self.dart_normalize_type if self.boosting_mode == "dart" else None
+                ),
+                dart_sample_type=(
+                    self.dart_sample_type if self.boosting_mode == "dart" else None
+                ),
             )
         else:
             assert training_rows is not None
@@ -2212,6 +2297,18 @@ class GBMRegressor(_GBMRegressorBase):
                 ),
                 goss_other_rate=(
                     self.goss_other_rate if self.boosting_mode == "goss" else None
+                ),
+                dart_drop_rate=(
+                    self.dart_drop_rate if self.boosting_mode == "dart" else None
+                ),
+                dart_max_drop=(
+                    self.dart_max_drop if self.boosting_mode == "dart" else None
+                ),
+                dart_normalize_type=(
+                    self.dart_normalize_type if self.boosting_mode == "dart" else None
+                ),
+                dart_sample_type=(
+                    self.dart_sample_type if self.boosting_mode == "dart" else None
                 ),
             )
 
@@ -2570,6 +2667,18 @@ class GBMRegressor(_GBMRegressorBase):
                 goss_other_rate=(
                     self.goss_other_rate if self.boosting_mode == "goss" else None
                 ),
+                dart_drop_rate=(
+                    self.dart_drop_rate if self.boosting_mode == "dart" else None
+                ),
+                dart_max_drop=(
+                    self.dart_max_drop if self.boosting_mode == "dart" else None
+                ),
+                dart_normalize_type=(
+                    self.dart_normalize_type if self.boosting_mode == "dart" else None
+                ),
+                dart_sample_type=(
+                    self.dart_sample_type if self.boosting_mode == "dart" else None
+                ),
             )
         else:
             train_regression_artifact = _load_native_train_regression_artifact()
@@ -2618,6 +2727,18 @@ class GBMRegressor(_GBMRegressorBase):
                 ),
                 goss_other_rate=(
                     self.goss_other_rate if self.boosting_mode == "goss" else None
+                ),
+                dart_drop_rate=(
+                    self.dart_drop_rate if self.boosting_mode == "dart" else None
+                ),
+                dart_max_drop=(
+                    self.dart_max_drop if self.boosting_mode == "dart" else None
+                ),
+                dart_normalize_type=(
+                    self.dart_normalize_type if self.boosting_mode == "dart" else None
+                ),
+                dart_sample_type=(
+                    self.dart_sample_type if self.boosting_mode == "dart" else None
                 ),
             )
 

@@ -30,9 +30,12 @@
       histogram statistics remain an unbiased estimator of the
       full-data gradient sums.  Convergence is typically faster on
       data with a long-tailed gradient distribution.
-    - `"dart"` — placeholder, currently rejected.  Calling this in
-      v0.8.0 raises `NotImplementedError`; full DART implementation
-      lands in v0.9.0.
+    - `"dart"` — **D**ropouts meet **MART**.  Each round, drop a
+      random subset of previously-trained trees, fit a new tree on
+      the residuals of the dropped-out ensemble, and rescale the
+      dropped trees + the new tree so the prediction sum stays
+      unbiased.  Reduces over-specialization of late trees; can
+      improve generalization on noisy data.
 - `goss_top_rate: float = 0.2`
   - Top-by-gradient kept fraction when `boosting_mode="goss"`.  Must
     be in `(0, 1)`.
@@ -40,11 +43,26 @@
   - Random-sample fraction from remaining rows when
     `boosting_mode="goss"`.  Must be in `(0, 1)` and
     `goss_top_rate + goss_other_rate <= 1.0`.
+- `dart_drop_rate: float = 0.1`
+  - Per-tree drop probability per round when `boosting_mode="dart"`.
+    Must be in `(0, 1)`.
+- `dart_max_drop: int = 50`
+  - Cap on the number of trees dropped per round.  Must be `>= 1`.
+- `dart_normalize_type: str = "tree"`
+  - Rescale policy after the new tree is fit.  `"tree"` mode sets
+    new-tree weight to `1/(K+1)` and dropped-tree weights to
+    `K/(K+1)`; `"forest"` mode sets both to `1/(K+1)` (more
+    aggressive rescale).
+- `dart_sample_type: str = "uniform"`
+  - Dropout sampling strategy.  `"uniform"` picks each tree
+    independently with probability `dart_drop_rate`.  `"weighted"`
+    biases dropout probability toward heavier-weight trees.
 
-GOSS is supported on the binary classifier / regression / ranking
-single-output objective.  The multiclass softmax path explicitly
-rejects non-`"standard"` boosting modes pending per-class gradient
-scoring (v0.9.x follow-up).
+GOSS and DART are supported on the binary classifier / regression /
+ranking single-output objective.  The multiclass softmax path
+explicitly rejects non-`"standard"` boosting modes pending per-class
+gradient scoring (v0.10.x follow-up).  DART + `warm_start` is
+rejected pending `WarmStartState` extension (v0.10.x follow-up).
 
 ## Stopping And Training Policy
 

@@ -38,22 +38,39 @@ Boosting mode
     gradient sums.  Convergence is typically faster on data with a
     long-tailed gradient distribution (the canonical LightGBM
     advantage).
-  - ``"dart"`` -- placeholder, currently rejected.  Calling this in
-    v0.8.0 raises ``NotImplementedError`` from
-    :class:`GBMRegressor.__init__`; the Rust trainer rejects it
-    with a matching error.  Full DART (dropouts meet MART) lands in
-    v0.9.0.
+  - ``"dart"`` -- **D**\ ropouts meet **MART**.  Each round, drop a
+    random subset of previously-trained trees, fit a new tree on the
+    residuals of the dropped-out ensemble, then rescale the dropped
+    trees + the new tree so the prediction sum stays unbiased.
+    Reduces over-specialization of late trees; can improve
+    generalization on noisy data.  Per-stump ``tree_weight: f32`` is
+    persisted via a new ``DartTreeWeights`` artifact section.
 
 - ``goss_top_rate: float = 0.2`` -- top-by-gradient kept fraction
   when ``boosting_mode="goss"``.  Must be in ``(0, 1)``.
 - ``goss_other_rate: float = 0.1`` -- random-sample fraction from
   the remaining rows when ``boosting_mode="goss"``.  Must be in
   ``(0, 1)`` and ``goss_top_rate + goss_other_rate <= 1.0``.
+- ``dart_drop_rate: float = 0.1`` -- per-tree drop probability per
+  round when ``boosting_mode="dart"``.  Must be in ``(0, 1)``.
+- ``dart_max_drop: int = 50`` -- cap on the number of trees dropped
+  per round.  Must be ``>= 1``.
+- ``dart_normalize_type: str = "tree"`` -- rescale policy after the
+  new tree is fit.  ``"tree"`` mode sets new-tree weight to
+  ``1 / (K + 1)`` and each dropped-tree weight to ``K / (K + 1)``;
+  ``"forest"`` mode sets both to ``1 / (K + 1)`` (more aggressive
+  rescale).
+- ``dart_sample_type: str = "uniform"`` -- dropout sampling strategy.
+  ``"uniform"`` picks each tree independently with probability
+  ``dart_drop_rate``.  ``"weighted"`` biases dropout probability
+  toward heavier-weight trees.
 
-GOSS is supported on the binary classifier / regression / ranking
-single-output objective.  The multiclass softmax path explicitly
-rejects non-``"standard"`` boosting modes pending per-class gradient
-scoring (v0.9.x follow-up).
+GOSS and DART are supported on the binary classifier / regression /
+ranking single-output objective.  The multiclass softmax path
+explicitly rejects non-``"standard"`` boosting modes pending
+per-class gradient scoring (v0.10.x follow-up — applies to both
+GOSS and DART).  DART + ``warm_start`` is rejected pending
+``WarmStartState`` extension (v0.10.x follow-up).
 
 Stopping and policy controls
 ----------------------------
@@ -145,7 +162,7 @@ DRO leaf solver
   penalizes weak leaf signal by within-leaf gradient dispersion.
 - ``dro_radius: float = 0.05`` -- non-negative penalty scale. ``0.0`` preserves
   standard-leaf predictions while recording DRO metadata.
-- ``dro_metric: str = "wasserstein"`` -- the only accepted v0.8.0 value. It
+- ``dro_metric: str = "wasserstein"`` -- the only accepted value today. It
   denotes a Wasserstein-inspired closed-form robust counterpart over leaf
   gradient uncertainty.
 
@@ -153,7 +170,7 @@ This is not a full Wasserstein optimizer over raw feature/target
 distributions. Inference speed is unchanged because robust scalar leaf values
 are stored directly in the artifact. ``leaf_solver="dro"`` works on all three
 estimators, composes with ``training_mode="morph"``, and requires
-``leaf_model="constant"`` in v0.8.0.
+``leaf_model="constant"``.
 
 Factor-neutral boosting
 -----------------------
@@ -291,7 +308,7 @@ Piecewise-linear leaves
   - ``"linear"`` -- each leaf stores a small linear model
     ``f_s(x) = b_s + Σ α_j x_j`` (up to 8 regressors per leaf, inherited from
     the split path's feature indices; the per-leaf cap is internal and not
-    user-tunable in v0.8.0). Optimal weights are solved in closed form via the
+    currently user-tunable). Optimal weights are solved in closed form via the
     ridge regression ``α* = -(XᵀHX + λI)⁻¹ Xᵀg``, regularised by ``lambda_l2``.
 
 Empirically, ``"linear"`` converges in fewer rounds on data with linear
@@ -330,8 +347,8 @@ a list of length ``n_labels`` for heterogeneous objectives.  ``save_model``
 serialises every per-label ranker into a single ``.mlrk`` bundle via
 ``pickle.HIGHEST_PROTOCOL``.
 
-Joint shared-tree multi-label boosting is deferred to v0.8.0
-(paired with the shared-histogram speedup); see
+Joint shared-tree multi-label boosting is deferred to v0.10.0
+(paired with the K-output shared-histogram primitive); see
 ``docs/limitations.md`` for the upgrade-path caveat.
 
 MorphBoost (Adaptive Split Criterion)

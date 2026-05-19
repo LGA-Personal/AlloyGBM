@@ -4,6 +4,18 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
+The `0.9.0` release closes the v0.8.0 DART placeholder (Limitation 2)
+and resolves the linear-rank predict-path NaN routing bug
+(Limitation 4 from v0.8.0).  `boosting_mode="dart"` is fully wired
+through the single-output trainer (`GBMRegressor`, binary
+`GBMClassifier`, `GBMRanker`) with four LightGBM-style parameters:
+`dart_drop_rate`, `dart_max_drop`, `dart_normalize_type`,
+`dart_sample_type`.  Per-stump `tree_weight: f32` is persisted via a
+new `DartTreeWeights` artifact section (kind=12), emitted only when
+DART is active — Standard/GOSS artifacts stay byte-identical to
+v0.8.0.  Multiclass softmax + DART and DART + `warm_start` are
+rejected with clear errors; both are tracked as v0.10.x follow-ups.
+
 The `0.8.0` release closes Limitation 4 (mixed linear-rank SHAP
 strict additivity) and adds LightGBM-style GOSS (gradient-based
 one-side sampling) as a new opt-in `boosting_mode="goss"` on all three
@@ -14,11 +26,8 @@ Default `boosting_mode="standard"` is byte-identical to v0.7.5.
 The original v0.8.0 plan also targeted DART boosting mode and joint
 shared-tree multi-label ranking, but both were scope-split out to
 v0.9.0 and v0.10.0 respectively so this release could ship on a
-reviewable surface.  `BoostingMode::Dart` is reserved in the API
-(Python `boosting_mode="dart"` raises `NotImplementedError`; the Rust
-trainer rejects it with a clear error) so v0.9.0 can land the
-per-stump `tree_weight` artifact-format change + per-round dropout
-state without further `TrainParams` churn.
+reviewable surface.  v0.9.0 lands DART (above); v0.10.0 lands joint
+multi-label.
 
 The `0.7.5` release closes the last pre-existing v0.7.x SHAP
 correctness gap — Limitation 5 from v0.7.4 (TreeSHAP polynomial-path

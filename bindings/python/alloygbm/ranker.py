@@ -287,7 +287,11 @@ class GBMRanker(GBMRegressor):
             f"factor_penalty={self.factor_penalty}, "
             f"boosting_mode='{self.boosting_mode}', "
             f"goss_top_rate={self.goss_top_rate}, "
-            f"goss_other_rate={self.goss_other_rate}"
+            f"goss_other_rate={self.goss_other_rate}, "
+            f"dart_drop_rate={self.dart_drop_rate}, "
+            f"dart_max_drop={self.dart_max_drop}, "
+            f"dart_normalize_type='{self.dart_normalize_type}', "
+            f"dart_sample_type='{self.dart_sample_type}'"
             ")"
         )
 

@@ -1,6 +1,6 @@
 # AlloyGBM Current Limitations
 
-Last updated for v0.8.0.
+Last updated for v0.9.0.
 
 ## Remaining Limitations
 
@@ -10,25 +10,7 @@ The `BackendOps` trait is designed for hardware abstraction, but only
 `CpuBackend` exists. GPU/accelerator support is architecturally planned but
 not implemented.
 
-### 2. No DART Boosting Mode (GOSS Resolved In v0.8.0)
-
-GOSS (gradient-based one-side sampling, LightGBM-style) is supported
-as of v0.8.0 via `boosting_mode="goss"`, `goss_top_rate`, and
-`goss_other_rate` on `GBMRegressor`, `GBMClassifier` (binary), and
-`GBMRanker`.  The multiclass softmax path explicitly rejects
-non-Standard boosting modes with a clear error message — multiclass
-GOSS requires per-class gradient scoring, tracked as a v0.9.x
-follow-up.
-
-DART (dropouts meet MART) is still unavailable.  Calling
-`boosting_mode="dart"` raises `NotImplementedError` in Python and is
-rejected at the Rust single-output trainer entry point with
-`"boosting_mode='dart' is not yet implemented in the single-output
-trainer; only 'standard' and 'goss' are wired through"`.  DART
-requires per-stump `tree_weight` plumbing through the artifact format
-and the predictor; **targeted at v0.9.0**.
-
-### 3. Multi-Label Ranking — Independent Per-Label Trees
+### 2. Multi-Label Ranking — Independent Per-Label Trees
 
 As of v0.7.1, ``MultiLabelGBMRanker`` exposes a unified multi-output
 ranking API: ``y`` is shaped ``(n_rows, n_labels)`` and ``predict``
@@ -49,42 +31,36 @@ v0.10.0**, paired with the K-output shared-histogram engine primitive
 where the ``MulticlassSoftmaxObjective``-style K-tree-per-round engine
 plumbing for ranking objectives has a real performance story.
 
-### 4. NaN Handling On The Rank-Binning Predict Path (Narrow)
-
-When `continuous_binning_strategy="linear"` triggers per-feature
-rank-based binning on at least one column, the predict-time helper
-`quantize_dense_values_linear_rank_inplace_wide` in
-`bindings/python/src/lib.rs` doesn't preserve `NaN` through the
-quantize step: `quantize_rank_value_wide` falls through to bin `0`
-(because `*probe <= NaN` is always false) and `quantize_linear_value_wide`
-produces `NaN → 0` via the IEEE-NaN-to-integer cast.  The predictor's
-`predictor_went_left` check at `crates/predictor/src/lib.rs:142`
-detects NaN via `feature_value.is_nan()` for default_left routing,
-but by the time it sees the row the bin index is finite, so the
-learned-missing-direction never fires for rank-binned columns.
-
-The pure linear path (no rank flags) is unaffected — it uses the
-`convert_thresholds_to_float` path which feeds raw floats directly
-to the predictor, so the `is_nan` check fires normally.  Pure
-quantile binning is similarly unaffected.
-
-SHAP rejects NaN/Inf inputs outright via `validate_rows` in
-`crates/shap/src/lib.rs` (`"row N feature M contains NaN/Inf...
-impute them before calling shap_values()"`) so the bug is not
-reachable from the SHAP path; impacts predict-only.
-
-Resolving end-to-end requires updating both the predict-time
-quantize helper and the predictor's tree walker to coordinate on
-either a `max_data_bin + 1` sentinel or NaN-preservation, plus a
-consistent `LinearLeaf::eval` policy (which currently propagates
-NaN through `intercept + Σ w·NaN = NaN` for any regressor feature).
-Tracked alongside the v0.9.0 DART work where the broader artifact /
-predict-path NaN audit can land coherently.
-
 ## Resolved (Previously Limitations)
 
 The following were limitations in prior versions and have been addressed:
 
+- No DART boosting mode (now: v0.9.0 — `boosting_mode="dart"` is
+  fully supported for `GBMRegressor`, binary `GBMClassifier`, and
+  `GBMRanker`. Four DART parameters expose the LightGBM-style API:
+  `dart_drop_rate` (default 0.1), `dart_max_drop` (default 50),
+  `dart_normalize_type` (`"tree"` or `"forest"`, default `"tree"`),
+  and `dart_sample_type` (`"uniform"` or `"weighted"`, default
+  `"uniform"`). The per-round dropout + normalization cycle lives in
+  `crates/engine/src/dart.rs`; per-stump `tree_weight: f32` is
+  persisted via a new `DartTreeWeights` artifact section (kind index
+  12) that is only emitted when DART is active, keeping Standard /
+  GOSS artifacts byte-identical to v0.8.0. Multiclass DART and DART +
+  warm_start are still rejected with clear errors — tracked as
+  v0.10.x follow-ups.)
+- NaN routing on the linear-rank predict path (now: v0.9.0 — the
+  predict-time quantize helpers
+  (`quantize_dense_values_linear_inplace_wide`,
+  `quantize_dense_values_linear_rank_inplace_wide`, and the inline
+  loop in `predict_dense_quantized_with_summary_bytes`) now preserve
+  `f32::NAN` through the f32 cast instead of falling through to bin
+  0. The predictor's existing `feature_value.is_nan() → default_left`
+  short-circuit at `crates/predictor/src/lib.rs:148` then fires
+  automatically. `LinearLeaf::eval` and `LinearLeafCompact::eval`
+  also skip NaN regressor features when accumulating the linear sum,
+  preventing `w · NaN` poisoning of PL-leaf predictions. Pure-linear
+  and pure-quantile paths now share consistent NaN semantics with
+  the rank-binning path. Closes Limitation 4 from v0.8.0.)
 - Regression-only (now: classification + ranking)
 - Single categorical column only (now: multiple via `categorical_feature_indices`)
 - Limited configurability (now: `min_split_gain`, monotone constraints, feature weights, `max_leaves`, leaf-wise growth)

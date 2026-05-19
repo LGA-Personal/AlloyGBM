@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.9.0
+
+Minor feature release: closes the v0.8.0 DART placeholder (Limitation 2)
+and resolves the carry-forward NaN routing bug on the linear-rank
+predict path (Limitation 4). Default behaviour is byte-identical to
+v0.8.0 on every API surface — DART artifacts only emit the new
+`DartTreeWeights` section when at least one stump has a non-1.0 weight,
+which never happens under `boosting_mode="standard"` (the default) or
+`boosting_mode="goss"`.
+
+### Added
+
+- **DART boosting mode (Dropouts meet MART).** New `boosting_mode="dart"`
+  on `GBMRegressor`, binary `GBMClassifier`, and `GBMRanker`. Four
+  parameters expose the LightGBM-style API:
+  - `dart_drop_rate` (default `0.1`) — per-tree drop probability per round
+  - `dart_max_drop` (default `50`) — cap on the number of trees dropped
+    per round
+  - `dart_normalize_type` (`"tree"` or `"forest"`, default `"tree"`) —
+    rescale policy after the new tree is fit
+  - `dart_sample_type` (`"uniform"` or `"weighted"`, default
+    `"uniform"`) — uniform sampling or `|tree_weight|`-weighted sampling
+  The per-round dropout + normalization cycle lives in a new module
+  `crates/engine/src/dart.rs` (no new dependencies — uses the existing
+  `mixed_hash` splitmix64 derivative for deterministic per-stump
+  decisions). Per-stump `tree_weight: f32` is plumbed through
+  `TrainedStump` and persisted via a new `DartTreeWeights` artifact
+  section (kind index 12), emitted only when at least one weight
+  diverges from 1.0. Multiclass DART and DART + `warm_start` are
+  rejected with clear errors — tracked as v0.10.x follow-ups.
+
+### Fixed
+
+- **NaN routing on the linear-rank predict path (Limitation 4
+  resolved).** The predict-time quantize helpers
+  (`quantize_dense_values_linear_inplace_wide`,
+  `quantize_dense_values_linear_rank_inplace_wide`, and the inline
+  loop in `predict_dense_quantized_with_summary_bytes`) now preserve
+  `f32::NAN` through the f32 cast instead of falling through to bin 0.
+  The predictor's existing `feature_value.is_nan() → default_left`
+  short-circuit at `crates/predictor/src/lib.rs:148` then fires
+  automatically, restoring the learned-missing-direction routing on
+  rank-binned columns. Additionally, `LinearLeaf::eval` and
+  `LinearLeafCompact::eval` now skip NaN regressor features when
+  accumulating the linear sum so PL-leaf predictions don't NaN-poison
+  on a `w · NaN` step. Pure-linear, pure-quantile, and linear-rank
+  paths now share consistent NaN semantics.
+
+### Known limitations carried forward to v0.10.0
+
+- Multiclass softmax + DART is still rejected — requires per-class
+  gradient bookkeeping during the dropout step.
+- DART + `warm_start` is rejected — requires persisting
+  `tree_weights` and `dropped_per_round` in `WarmStartState`.
+- Joint shared-tree multi-label ranking and the K-output
+  shared-histogram engine primitive remain v0.10.0 targets.
+
 ## 0.8.0
 
 Minor feature release: closes the mixed linear-rank SHAP carry-forward
