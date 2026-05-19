@@ -2462,11 +2462,10 @@ pub struct MultiOutputLeafValuesPayload {
 /// For each stump:
 ///   [u32 len] [len × f32 LE values]
 /// ```
-pub fn encode_multi_output_leaf_values_payload(
-    payload: &MultiOutputLeafValuesPayload,
-) -> Vec<u8> {
+pub fn encode_multi_output_leaf_values_payload(payload: &MultiOutputLeafValuesPayload) -> Vec<u8> {
     let total_values: usize = payload.per_stump_leaf_values.iter().map(|v| v.len()).sum();
-    let mut buf = Vec::with_capacity(12 + 4 * payload.per_stump_leaf_values.len() + 4 * total_values);
+    let mut buf =
+        Vec::with_capacity(12 + 4 * payload.per_stump_leaf_values.len() + 4 * total_values);
     buf.extend_from_slice(&1u32.to_le_bytes()); // version
     buf.extend_from_slice(&payload.n_outputs.to_le_bytes());
     buf.extend_from_slice(&(payload.per_stump_leaf_values.len() as u32).to_le_bytes());
@@ -2541,8 +2540,7 @@ pub fn decode_multi_output_leaf_values_payload(
 pub fn decode_optional_multi_output_leaf_values_section(
     sections: &[ModelArtifactSection],
 ) -> CoreResult<Option<MultiOutputLeafValuesPayload>> {
-    let Some(section) =
-        optional_single_section(sections, ModelSectionKind::MultiOutputLeafValues)?
+    let Some(section) = optional_single_section(sections, ModelSectionKind::MultiOutputLeafValues)?
     else {
         return Ok(None);
     };
@@ -4599,8 +4597,7 @@ mod tests {
             ],
         };
         let bytes = encode_multi_output_leaf_values_payload(&payload);
-        let decoded =
-            decode_multi_output_leaf_values_payload(&bytes).expect("decode");
+        let decoded = decode_multi_output_leaf_values_payload(&bytes).expect("decode");
         assert_eq!(decoded, payload);
     }
 
@@ -4611,8 +4608,7 @@ mod tests {
             per_stump_leaf_values: vec![],
         };
         let bytes = encode_multi_output_leaf_values_payload(&payload);
-        let decoded =
-            decode_multi_output_leaf_values_payload(&bytes).expect("decode");
+        let decoded = decode_multi_output_leaf_values_payload(&bytes).expect("decode");
         assert_eq!(decoded, payload);
     }
 

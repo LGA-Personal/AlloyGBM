@@ -106,9 +106,8 @@ impl JointObjective {
                     .map_err(|e| e.to_string())
             }
             Self::QueryRmse => {
-                let group_ids = group.ok_or_else(|| {
-                    "queryrmse objective requires group identifiers".to_string()
-                })?;
+                let group_ids = group
+                    .ok_or_else(|| "queryrmse objective requires group identifiers".to_string())?;
                 let obj = QueryRMSEObjective::new(group_ids);
                 obj.compute_gradients(predictions, targets, None)
                     .map_err(|e| e.to_string())
@@ -122,9 +121,8 @@ impl JointObjective {
                     .map_err(|e| e.to_string())
             }
             Self::RankNdcg => {
-                let group_ids = group.ok_or_else(|| {
-                    "rank:ndcg objective requires group identifiers".to_string()
-                })?;
+                let group_ids = group
+                    .ok_or_else(|| "rank:ndcg objective requires group identifiers".to_string())?;
                 let obj = LambdaMARTObjective::new(group_ids);
                 obj.compute_gradients(predictions, targets, None)
                     .map_err(|e| e.to_string())
@@ -215,7 +213,7 @@ pub fn build_joint_round(
 
     let max_depth = params.max_depth.max(1) as usize;
     let min_rows_per_leaf = params.min_data_in_leaf.max(1) as usize;
-    let lambda_l2 = params.lambda_l2 as f32;
+    let lambda_l2 = params.lambda_l2;
 
     let mut stumps: Vec<TrainedStump> = Vec::new();
     let mut active: Vec<JointLeafNode> = vec![JointLeafNode {
@@ -254,10 +252,8 @@ pub fn build_joint_round(
                     subset_bins.push(binned_matrix.bins[idx]);
                 }
                 // Subset packed_grads/hess for these rows.
-                let mut subset_g: Vec<f32> =
-                    Vec::with_capacity(node.row_indices.len() * n_outputs);
-                let mut subset_h: Vec<f32> =
-                    Vec::with_capacity(node.row_indices.len() * n_outputs);
+                let mut subset_g: Vec<f32> = Vec::with_capacity(node.row_indices.len() * n_outputs);
+                let mut subset_h: Vec<f32> = Vec::with_capacity(node.row_indices.len() * n_outputs);
                 for &row in &node.row_indices {
                     for k in 0..n_outputs {
                         subset_g.push(packed_grads[row as usize * n_outputs + k]);
@@ -322,9 +318,9 @@ pub fn build_joint_round(
             // A smarter learned-direction policy is a v0.10.x follow-up.
             let default_left = left_rows.len() >= right_rows.len();
             if default_left {
-                left_rows.extend(missing_rows.drain(..));
+                left_rows.append(&mut missing_rows);
             } else {
-                right_rows.extend(missing_rows.drain(..));
+                right_rows.append(&mut missing_rows);
             }
 
             if left_rows.len() < min_rows_per_leaf || right_rows.len() < min_rows_per_leaf {
@@ -332,21 +328,20 @@ pub fn build_joint_round(
             }
 
             // Compute K-output leaf values via Newton-Raphson per output.
-            let leaf_values =
-                |rows: &[u32]| -> Vec<f32> {
-                    let mut out = vec![0.0_f32; n_outputs];
-                    for k in 0..n_outputs {
-                        let mut g_sum = 0.0_f32;
-                        let mut h_sum = 0.0_f32;
-                        for &row in rows {
-                            let gp = grads_per_output[k][row as usize];
-                            g_sum += gp.grad;
-                            h_sum += gp.hess;
-                        }
-                        out[k] = -g_sum / (h_sum + lambda_l2 + crate::LEAF_EPSILON);
+            let leaf_values = |rows: &[u32]| -> Vec<f32> {
+                let mut out = vec![0.0_f32; n_outputs];
+                for k in 0..n_outputs {
+                    let mut g_sum = 0.0_f32;
+                    let mut h_sum = 0.0_f32;
+                    for &row in rows {
+                        let gp = grads_per_output[k][row as usize];
+                        g_sum += gp.grad;
+                        h_sum += gp.hess;
                     }
-                    out
-                };
+                    out[k] = -g_sum / (h_sum + lambda_l2 + crate::LEAF_EPSILON);
+                }
+                out
+            };
             let left_k = leaf_values(&left_rows);
             let right_k = leaf_values(&right_rows);
 
@@ -356,9 +351,9 @@ pub fn build_joint_round(
             let summarize = |rows: &[u32]| -> NodeStats {
                 let mut g = 0.0_f32;
                 let mut h = 0.0_f32;
-                for k in 0..n_outputs {
+                for grad_vec in grads_per_output.iter().take(n_outputs) {
                     for &row in rows {
-                        let gp = grads_per_output[k][row as usize];
+                        let gp = grad_vec[row as usize];
                         g += gp.grad;
                         h += gp.hess;
                     }
@@ -415,13 +410,15 @@ pub fn build_joint_round(
 }
 
 /// Run the full joint multi-output training loop and return a `TrainedModel`
-/// + per-output baselines. The model's stumps carry `multi_output_leaf_values`
-/// and serialize into both the `Trees` and `MultiOutputLeafValues` sections.
+/// plus per-output baselines. The model's stumps carry
+/// `multi_output_leaf_values` and serialize into both the `Trees` and
+/// `MultiOutputLeafValues` sections.
 ///
-/// `targets_per_output[k]` is the target vector for output `k` (length n_rows).
-/// `per_output_objective[k]` selects the objective used for output `k`. The
-/// `group_id` argument is required when any objective in
-/// `per_output_objective` is a ranking objective.
+/// Arguments:
+///   `targets_per_output[k]` is the target vector for output `k` (length n_rows).
+///   `per_output_objective[k]` selects the objective used for output `k`.
+///   `group_id` is required when any objective in `per_output_objective` is a
+///     ranking objective.
 pub fn fit_joint_multi_output(
     params: &TrainParams,
     feature_count: usize,
@@ -458,10 +455,7 @@ pub fn fit_joint_multi_output(
         .collect();
 
     // Per-output prediction vectors, seeded from baselines.
-    let mut predictions: Vec<Vec<f32>> = baselines
-        .iter()
-        .map(|&b| vec![b; n_rows])
-        .collect();
+    let mut predictions: Vec<Vec<f32>> = baselines.iter().map(|&b| vec![b; n_rows]).collect();
 
     let learning_rate = params.learning_rate;
     let mut all_stumps: Vec<TrainedStump> = Vec::new();
@@ -507,8 +501,8 @@ pub fn fit_joint_multi_output(
                     (bin as usize) <= threshold_bin
                 };
                 let delta = if went_left { &left_k } else { &right_k };
-                for k in 0..n_outputs {
-                    predictions[k][row] += learning_rate * delta[k];
+                for (k, pred_vec) in predictions.iter_mut().enumerate().take(n_outputs) {
+                    pred_vec[row] += learning_rate * delta[k];
                 }
             }
 
@@ -769,11 +763,13 @@ mod tests {
             vec![0.5, 0.5, 0.5, 0.5, -0.5, -0.5, -0.5, -0.5],
         ];
 
-        let mut params = TrainParams::default();
-        params.max_depth = 1;
-        params.min_data_in_leaf = 1;
-        params.lambda_l2 = 0.0;
-        params.learning_rate = 1.0;
+        let params = TrainParams {
+            max_depth: 1,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            learning_rate: 1.0,
+            ..TrainParams::default()
+        };
 
         let summary = fit_joint_multi_output(
             &params,
@@ -792,7 +788,11 @@ mod tests {
         assert_eq!(summary.model.stumps.len(), 1);
 
         // Serialize → deserialize → predict
-        let bytes = summary.model.clone().to_artifact_bytes().expect("serialize");
+        let bytes = summary
+            .model
+            .clone()
+            .to_artifact_bytes()
+            .expect("serialize");
         let predictor =
             JointPredictor::from_artifact_bytes(&bytes, summary.baselines.clone()).expect("load");
 
@@ -806,10 +806,26 @@ mod tests {
         // We just sanity-check the sign pattern:
         // output 0: left should be near -1, right should be near +1
         // output 1: left should be near +0.5, right should be near -0.5
-        assert!(preds_left[0] < 0.0, "expected output 0 left < 0, got {:?}", preds_left);
-        assert!(preds_right[0] > 0.0, "expected output 0 right > 0, got {:?}", preds_right);
-        assert!(preds_left[1] > 0.0, "expected output 1 left > 0, got {:?}", preds_left);
-        assert!(preds_right[1] < 0.0, "expected output 1 right < 0, got {:?}", preds_right);
+        assert!(
+            preds_left[0] < 0.0,
+            "expected output 0 left < 0, got {:?}",
+            preds_left
+        );
+        assert!(
+            preds_right[0] > 0.0,
+            "expected output 0 right > 0, got {:?}",
+            preds_right
+        );
+        assert!(
+            preds_left[1] > 0.0,
+            "expected output 1 left > 0, got {:?}",
+            preds_left
+        );
+        assert!(
+            preds_right[1] < 0.0,
+            "expected output 1 right < 0, got {:?}",
+            preds_right
+        );
     }
 
     #[test]
@@ -836,10 +852,12 @@ mod tests {
                 .collect(),
         ];
 
-        let mut params = TrainParams::default();
-        params.max_depth = 1;
-        params.min_data_in_leaf = 1;
-        params.lambda_l2 = 0.0;
+        let params = TrainParams {
+            max_depth: 1,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            ..TrainParams::default()
+        };
 
         let result = build_joint_round(&params, &binned, &grads_per_output, 2).expect("build");
         assert_eq!(result.stumps.len(), 1, "should emit one root split");

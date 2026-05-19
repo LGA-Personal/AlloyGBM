@@ -185,7 +185,14 @@ mod tests {
         assert!((h.data()[i] - 20.0).abs() < 1e-6);
     }
 
-    fn set(h: &mut MultiOutputHistogram, f: usize, b: usize, k: usize, comp: HistComponent, v: f32) {
+    fn set(
+        h: &mut MultiOutputHistogram,
+        f: usize,
+        b: usize,
+        k: usize,
+        comp: HistComponent,
+        v: f32,
+    ) {
         let i = h.idx(f, b, k, comp);
         h.data_mut()[i] = v;
     }
@@ -198,10 +205,31 @@ mod tests {
         // Populate parent and left with synthetic data.
         for b in 0..4 {
             for k in 0..2 {
-                set(&mut parent, 0, b, k, HistComponent::Grad, (b * 10 + k + 1) as f32);
-                set(&mut parent, 0, b, k, HistComponent::Hess, (b + k + 1) as f32 * 0.5);
+                set(
+                    &mut parent,
+                    0,
+                    b,
+                    k,
+                    HistComponent::Grad,
+                    (b * 10 + k + 1) as f32,
+                );
+                set(
+                    &mut parent,
+                    0,
+                    b,
+                    k,
+                    HistComponent::Hess,
+                    (b + k + 1) as f32 * 0.5,
+                );
                 set(&mut left, 0, b, k, HistComponent::Grad, (b * 3 + k) as f32);
-                set(&mut left, 0, b, k, HistComponent::Hess, (b + k) as f32 * 0.2);
+                set(
+                    &mut left,
+                    0,
+                    b,
+                    k,
+                    HistComponent::Hess,
+                    (b + k) as f32 * 0.2,
+                );
             }
         }
 
@@ -233,7 +261,8 @@ mod tests {
         set(&mut h, 0, 1, 1, HistComponent::Hess, 1.0);
 
         let total_gain = compute_multi_output_split_gain(
-            &h, /*feature=*/ 0, /*threshold_bin=*/ 0, /*lambda_l2=*/ 0.0, /*eps=*/ 0.0,
+            &h, /*feature=*/ 0, /*threshold_bin=*/ 0, /*lambda_l2=*/ 0.0,
+            /*eps=*/ 0.0,
         );
         assert!((total_gain - 16.0).abs() < 1e-5, "got {total_gain}");
     }
