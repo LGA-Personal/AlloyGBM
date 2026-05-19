@@ -11105,6 +11105,62 @@ mod tests {
     }
 
     #[test]
+    fn dart_tree_weight_round_trips_through_artifact() {
+        // Hand-craft a model with a non-1.0 tree_weight on one stump.
+        // Serialize → emit DartTreeWeights section. Deserialize → apply
+        // overlay → predict matches the original.
+        let mut model = sample_trained_model();
+        // Set a deliberately non-default weight on every stump.
+        for (i, stump) in model.stumps.iter_mut().enumerate() {
+            stump.tree_weight = if i == 0 { 0.25 } else { 0.5 };
+        }
+        let bytes = model.to_artifact_bytes().expect("artifact serializes");
+        let restored =
+            TrainedModel::from_artifact_bytes_with_mode(&bytes, ArtifactCompatibilityMode::Strict)
+                .expect("artifact decodes");
+
+        // tree_weight survives the round-trip.
+        for (orig, dec) in model.stumps.iter().zip(restored.stumps.iter()) {
+            assert!(
+                (orig.tree_weight - dec.tree_weight).abs() < 1e-6,
+                "tree_weight drifted: original={}, decoded={}",
+                orig.tree_weight,
+                dec.tree_weight
+            );
+        }
+
+        // Predictions also reflect the round-tripped weights — sanity
+        // check via the engine's predict_batch.
+        let rows = vec![vec![0.0, 0.0], vec![3.0, 1.0]];
+        let original_preds = model.predict_batch(&rows).expect("predicts");
+        let restored_preds = restored.predict_batch(&rows).expect("predicts");
+        for (a, b) in original_preds.iter().zip(restored_preds.iter()) {
+            assert!((a - b).abs() < 1e-5, "prediction drift: {} vs {}", a, b);
+        }
+    }
+
+    #[test]
+    fn non_dart_artifact_omits_dart_tree_weights_section() {
+        // Standard / GOSS models keep `tree_weight = 1.0` for every stump,
+        // so the artifact write path must not emit a DartTreeWeights
+        // section. Verifies the byte-identical-to-v0.8.0 invariant.
+        let model = sample_trained_model();
+        // sample_trained_model uses the default 1.0 weights.
+        assert!(model.stumps.iter().all(|s| (s.tree_weight - 1.0).abs() < f32::EPSILON));
+        let bytes = model.to_artifact_bytes().expect("artifact serializes");
+        let parsed =
+            alloygbm_core::deserialize_model_artifact_v1(&bytes).expect("artifact parses");
+        let has_dart_section = parsed
+            .sections
+            .iter()
+            .any(|s| matches!(s.descriptor.kind, ModelSectionKind::DartTreeWeights));
+        assert!(
+            !has_dart_section,
+            "non-DART artifacts must not emit a DartTreeWeights section"
+        );
+    }
+
+    #[test]
     fn artifact_compatibility_report_classifies_dual_section_payload() {
         let model = sample_trained_model();
         let bytes = model.to_artifact_bytes().expect("artifact serializes");
