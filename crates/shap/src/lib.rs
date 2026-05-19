@@ -551,6 +551,28 @@ fn explain_rows_from_model(
         ctx.validate(model.feature_count)?;
     }
 
+    // v0.9.0: DART artifacts carry a per-stump `tree_weight` that the
+    // predictor multiplies into the leaf contribution.  All downstream
+    // SHAP attribution code (brute-force, TreeSHAP, PL-leaf
+    // interventional decomposition, additivity check) operates on
+    // unweighted leaf values, so for DART models we fold `tree_weight`
+    // into the leaf values up-front and reset weights to 1.0 on a
+    // clone.  Folding preserves additivity because the scaling is
+    // applied to every leaf and every interventional term
+    // uniformly — `predict(x) = Σ tree_weight · leaf` becomes
+    // `predict(x) = Σ (tree_weight · leaf)` on the scaled model,
+    // which the existing additivity check handles natively.  Non-DART
+    // models all have `tree_weight = 1.0`; the clone is bit-identical
+    // and adds one allocation but no other overhead.
+    let has_non_unit_weights = model
+        .stumps
+        .iter()
+        .any(|s| (s.tree_weight - 1.0).abs() > f32::EPSILON);
+    if has_non_unit_weights {
+        let scaled = scale_model_by_tree_weight(model);
+        return explain_rows_from_model(&scaled, rows, binning);
+    }
+
     // LinearRank: the predictor evaluates both tree traversal and PL
     // leaves in bin-index space, so quantize rows once at the entry
     // point and dispatch with PreBinned semantics for the remainder.
@@ -654,6 +676,42 @@ fn model_has_linear_leaves(model: &TrainedModel) -> bool {
         matches!(s.left_leaf_value, LeafValue::Linear(_))
             || matches!(s.right_leaf_value, LeafValue::Linear(_))
     })
+}
+
+/// Fold `stump.tree_weight` into each stump's leaf values so downstream
+/// SHAP attribution code can ignore per-tree weighting. Returns a clone
+/// of `model` with leaves pre-scaled and `tree_weight = 1.0` on every
+/// stump.
+///
+/// For `LeafValue::Scalar(v)` the scaled value is `tree_weight · v`.
+/// For `LeafValue::Linear { intercept, weights, .. }` both `intercept`
+/// and every entry of `weights` are scaled by `tree_weight`, since
+/// `tree_weight · (intercept + Σ w · x) = (tree_weight · intercept) +
+/// Σ (tree_weight · w) · x`. The regressor feature indices are
+/// preserved.
+fn scale_model_by_tree_weight(model: &TrainedModel) -> TrainedModel {
+    let mut scaled = model.clone();
+    for stump in scaled.stumps.iter_mut() {
+        let w = stump.tree_weight;
+        if (w - 1.0).abs() <= f32::EPSILON {
+            continue;
+        }
+        stump.left_leaf_value = scale_leaf_value(&stump.left_leaf_value, w);
+        stump.right_leaf_value = scale_leaf_value(&stump.right_leaf_value, w);
+        stump.tree_weight = 1.0;
+    }
+    scaled
+}
+
+fn scale_leaf_value(leaf: &LeafValue, factor: f32) -> LeafValue {
+    match leaf {
+        LeafValue::Scalar(v) => LeafValue::Scalar(factor * *v),
+        LeafValue::Linear(ll) => LeafValue::Linear(alloygbm_core::LinearLeaf {
+            intercept: factor * ll.intercept,
+            weights: ll.weights.iter().map(|w| factor * *w).collect(),
+            regressor_features: ll.regressor_features.clone(),
+        }),
+    }
 }
 
 /// Walk each tree for `row` and credit `wj · (xj − μj)` for every linear leaf
@@ -1784,6 +1842,43 @@ mod tests {
             (actual - expected).abs() <= ADDITIVITY_ATOL,
             "expected {expected}, got {actual}"
         );
+    }
+
+    fn fixture_model_with_dart_weights() -> TrainedModel {
+        // Mirror `fixture_model` but stamp a non-unit tree_weight so the
+        // SHAP pre-scaling path in `explain_rows_from_model` is
+        // exercised. In real DART artifacts every stump in a tree
+        // shares the same tree_weight; `fixture_model`'s three stumps
+        // all encode tree_id=0 (raw node_ids 0/1/2 with the default
+        // TREE_NODE_STRIDE), so a uniform weight here matches that
+        // invariant.
+        let mut model = fixture_model();
+        for stump in model.stumps.iter_mut() {
+            stump.tree_weight = 0.25;
+        }
+        model
+    }
+
+    #[test]
+    fn shap_additivity_holds_on_dart_artifact() {
+        // Regression test for the v0.9.0 PR review (#5): SHAP must
+        // apply per-stump tree_weight so the sum of contributions plus
+        // expected_value reconstructs the predictor's output. Pre-fix,
+        // SHAP summed unweighted leaf values and additivity broke for
+        // any DART artifact with non-1.0 weights.
+        let model = fixture_model_with_dart_weights();
+        let rows = fixture_rows();
+        let explanation = explain_rows_from_model(&model, &rows, None).expect("explain succeeds");
+        for (row_idx, row) in rows.iter().enumerate() {
+            let predicted = model.predict_row(row).expect("predict_row");
+            let reconstructed: f32 =
+                explanation.expected_value + explanation.values[row_idx].iter().sum::<f32>();
+            let tol = ADDITIVITY_ATOL + ADDITIVITY_RTOL * predicted.abs();
+            assert!(
+                (predicted - reconstructed).abs() <= tol,
+                "row {row_idx}: predict={predicted}, expected+sum(shap)={reconstructed}, tol={tol}"
+            );
+        }
     }
 
     #[test]

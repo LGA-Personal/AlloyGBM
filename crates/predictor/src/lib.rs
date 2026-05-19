@@ -334,9 +334,8 @@ impl Predictor {
         let (mut trees, tree_ids) = build_predictor_trees(&stumps)?;
 
         // Decode optional DartTreeWeights and apply per-tree weights.
-        if let Some(dart_payload) =
-            decode_optional_dart_tree_weights_section(&parsed.sections)
-                .map_err(PredictorError::from)?
+        if let Some(dart_payload) = decode_optional_dart_tree_weights_section(&parsed.sections)
+            .map_err(PredictorError::from)?
         {
             apply_dart_tree_weights(&mut trees, &tree_ids, &stumps, &dart_payload.weights)?;
         }

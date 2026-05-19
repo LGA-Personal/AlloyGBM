@@ -152,14 +152,21 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
         # bookkeeping during the dropout step). Raise a clear Python-side
         # error rather than letting the Rust engine reject with a more
         # opaque message.
-        if self._is_multiclass and self.boosting_mode == "dart":
+        # v0.9.0: the Rust multiclass softmax engine rejects every
+        # non-`"standard"` boosting mode at fit time, so surface the
+        # rejection at the Python layer with a clearer message.  Both
+        # GOSS (per-class gradient scoring) and DART (per-class
+        # dropout bookkeeping) are tracked as v0.10.x follow-ups.
+        if self._is_multiclass and self.boosting_mode != "standard":
             raise NotImplementedError(
-                "boosting_mode='dart' is not yet supported for multiclass "
-                f"classification (detected {self._num_classes_for_training} "
-                "classes). Multiclass DART requires per-class gradient "
-                "bookkeeping during the dropout step — tracked as a v0.10.x "
-                "follow-up. Use boosting_mode='standard' or 'goss' for "
-                "multiclass, or boosting_mode='dart' with binary labels."
+                f"boosting_mode={self.boosting_mode!r} is not yet supported "
+                f"for multiclass classification (detected "
+                f"{self._num_classes_for_training} classes). Multiclass "
+                "GOSS requires per-class gradient scoring; multiclass DART "
+                "requires per-class gradient bookkeeping during the "
+                "dropout step — both tracked as v0.10.x follow-ups. Use "
+                "boosting_mode='standard' for multiclass, or use binary "
+                "labels with GOSS / DART."
             )
 
         # Validate eval_set targets if provided

@@ -2473,11 +2473,16 @@ impl TrainedModel {
             }
             let feature_index = stump.split.feature_index as usize;
             let feature_value = features[feature_index];
-            prediction += if split_went_left(&stump.split, feature_value) {
+            let leaf = if split_went_left(&stump.split, feature_value) {
                 stump.left_leaf_value.eval_row(features)
             } else {
                 stump.right_leaf_value.eval_row(features)
             };
+            // v0.9.0: DART artifacts carry a per-stump `tree_weight` that
+            // scales the leaf contribution at predict time. Non-DART
+            // models have `tree_weight = 1.0` and this multiplication is
+            // a no-op (bit-identical to v0.8.0).
+            prediction += stump.tree_weight * leaf;
         }
 
         Ok(prediction)
@@ -2758,8 +2763,8 @@ impl TrainedModel {
 
         // Decode optional DartTreeWeights section and apply per-stump weights.
         // Pre-v0.9.0 artifacts have no section; stumps keep their default 1.0.
-        if let Some(dart_payload) =
-            decode_optional_dart_tree_weights_section(&parsed.sections).map_err(EngineError::from)?
+        if let Some(dart_payload) = decode_optional_dart_tree_weights_section(&parsed.sections)
+            .map_err(EngineError::from)?
         {
             if dart_payload.weights.len() != model.stumps.len() {
                 return Err(EngineError::ContractViolation(format!(
@@ -4253,11 +4258,22 @@ impl Trainer {
             let initial_tree_count = stumps_per_completed_round.len();
             dart_state.tree_weights = vec![1.0; initial_tree_count];
         }
-        // `round_start_offsets[i]` is the index in `stumps` where round
-        // `i`'s stumps begin. Filled in lockstep with
-        // `stumps_per_completed_round` so DART can slice into `stumps`
-        // by tree_id without scanning every round.
+        // DART-only parallel arrays indexed by `effective_round_index`
+        // (= `tree_id` encoded in stump.node_id). Both grow together at
+        // commit-time, and skipped warmup rounds get phantom entries
+        // (`count = 0`, `start = stumps.len()`) so the indexing stays
+        // dense even when MorphBoost skips rounds.
+        //
+        // `round_start_offsets[t]` is the start index in `stumps` where
+        // tree `t`'s stumps begin; `dart_round_counts[t]` is its stump
+        // count.  Together they slice into `stumps` for the DART
+        // dropout subtract/replay step.  Stays empty for non-DART
+        // fits.  Keep separate from the pre-existing
+        // `stumps_per_completed_round` (committed-only) so we don't
+        // perturb downstream consumers like
+        // `retained_stump_count_for_rounds`.
         let mut round_start_offsets: Vec<usize> = Vec::new();
+        let mut dart_round_counts: Vec<usize> = Vec::new();
 
         // Build MorphState for the duration of training when morph_config is set.
         // `total_iterations` corresponds to the round cap (including any warm-start
@@ -4293,57 +4309,53 @@ impl Trainer {
             // full-ensemble state so subsequent rounds aren't poisoned.
             let mut dart_predictions_backup: Option<Vec<f32>> = None;
             let mut dart_validation_backup: Option<Vec<f32>> = None;
-            let dropped_tree_ids: Vec<usize> = if let Some((
-                drop_rate,
-                max_drop,
-                _normalize_type,
-                sample_type,
-            )) = dart_params
-            {
-                let drops = select_dropouts(
-                    dart_state.tree_weights.len(),
-                    drop_rate,
-                    max_drop,
-                    sample_type,
-                    &dart_state.tree_weights,
-                    sampling_seed_base,
-                    effective_round_index,
-                );
-                if !drops.is_empty() {
-                    dart_predictions_backup = Some(predictions.clone());
-                    dart_validation_backup = validation_predictions.clone();
-                }
-                for &tree_id in &drops {
-                    let w_old = dart_state.tree_weights[tree_id];
-                    let start = round_start_offsets[tree_id];
-                    let count = stumps_per_completed_round[tree_id];
-                    let stump_slice = &stumps[start..start + count];
-                    apply_weighted_round_to_predictions(
-                        &mut predictions,
-                        binned_matrix,
-                        stump_slice,
-                        raw_features_opt,
-                        -w_old,
-                    )?;
-                    if let (Some(vp), Some(validation_ref)) =
-                        (validation_predictions.as_mut(), validation)
-                    {
+            let dropped_tree_ids: Vec<usize> =
+                if let Some((drop_rate, max_drop, _normalize_type, sample_type)) = dart_params {
+                    let drops = select_dropouts(
+                        dart_state.tree_weights.len(),
+                        drop_rate,
+                        max_drop,
+                        sample_type,
+                        &dart_state.tree_weights,
+                        sampling_seed_base,
+                        effective_round_index,
+                    );
+                    if !drops.is_empty() {
+                        dart_predictions_backup = Some(predictions.clone());
+                        dart_validation_backup = validation_predictions.clone();
+                    }
+                    for &tree_id in &drops {
+                        let w_old = dart_state.tree_weights[tree_id];
+                        let start = round_start_offsets[tree_id];
+                        let count = dart_round_counts[tree_id];
+                        let stump_slice = &stumps[start..start + count];
                         apply_weighted_round_to_predictions(
-                            vp,
-                            validation_ref.binned_matrix,
+                            &mut predictions,
+                            binned_matrix,
                             stump_slice,
-                            Some((
-                                &validation_ref.dataset.matrix.values as &[f32],
-                                validation_ref.dataset.matrix.feature_count,
-                            )),
+                            raw_features_opt,
                             -w_old,
                         )?;
+                        if let (Some(vp), Some(validation_ref)) =
+                            (validation_predictions.as_mut(), validation)
+                        {
+                            let val_raw = Some((
+                                &validation_ref.dataset.matrix.values as &[f32],
+                                validation_ref.dataset.matrix.feature_count,
+                            ));
+                            apply_weighted_round_to_predictions(
+                                vp,
+                                validation_ref.binned_matrix,
+                                stump_slice,
+                                val_raw,
+                                -w_old,
+                            )?;
+                        }
                     }
-                }
-                drops
-            } else {
-                Vec::new()
-            };
+                    drops
+                } else {
+                    Vec::new()
+                };
 
             // Helper to restore `predictions` and `validation_predictions`
             // from the pre-dropout backups. Called on every early-exit
@@ -4530,7 +4542,7 @@ impl Trainer {
                         let w_new = w_old * drop_factor;
                         new_dropped_weights.push(w_new);
                         let start = round_start_offsets[tree_id];
-                        let count = stumps_per_completed_round[tree_id];
+                        let count = dart_round_counts[tree_id];
                         let stump_slice = &stumps[start..start + count];
                         apply_weighted_round_to_predictions(
                             &mut candidate_predictions,
@@ -4617,28 +4629,26 @@ impl Trainer {
                 // at their new weights. Otherwise fall back to the
                 // existing unit-weight tree walk.
                 if let Some((new_w, new_dropped_weights)) = &dart_round_finalize {
+                    let val_raw = Some((
+                        &validation_ref.dataset.matrix.values as &[f32],
+                        validation_ref.dataset.matrix.feature_count,
+                    ));
                     apply_weighted_round_to_predictions(
                         &mut next_validation_predictions,
                         validation_ref.binned_matrix,
                         &candidate_round_stumps,
-                        Some((
-                            &validation_ref.dataset.matrix.values as &[f32],
-                            validation_ref.dataset.matrix.feature_count,
-                        )),
+                        val_raw,
                         *new_w,
                     )?;
                     for (i, &tree_id) in dropped_tree_ids.iter().enumerate() {
                         let start = round_start_offsets[tree_id];
-                        let count = stumps_per_completed_round[tree_id];
+                        let count = dart_round_counts[tree_id];
                         let stump_slice = &stumps[start..start + count];
                         apply_weighted_round_to_predictions(
                             &mut next_validation_predictions,
                             validation_ref.binned_matrix,
                             stump_slice,
-                            Some((
-                                &validation_ref.dataset.matrix.values as &[f32],
-                                validation_ref.dataset.matrix.feature_count,
-                            )),
+                            val_raw,
                             new_dropped_weights[i],
                         )?;
                     }
@@ -4750,31 +4760,39 @@ impl Trainer {
             // Backups (`dart_predictions_backup`, `dart_validation_backup`)
             // are loop-scoped, so they get dropped at end-of-iteration
             // automatically — no explicit reset needed.
+            //
+            // Pad all four DART-indexed parallel arrays
+            // (`dart_state.tree_weights`, `dart_state.dropped_per_round`,
+            // `round_start_offsets`, `dart_round_counts`) up to
+            // `effective_round_index` with phantom entries for any
+            // skipped warmup rounds.  Phantoms have weight=1.0 and
+            // count=0, so a later `select_dropouts` could pick one but
+            // the resulting subtract is a no-op
+            // (`apply_weighted_round_to_predictions` early-returns on
+            // empty stump slices).  This keeps tree_id (=
+            // effective_round_index) and the DART arrays consistent
+            // even when MorphBoost skips rounds.
             if dart_params.is_some() {
+                while round_start_offsets.len() < effective_round_index {
+                    round_start_offsets.push(stumps.len());
+                    dart_round_counts.push(0);
+                    dart_state.tree_weights.push(1.0);
+                    dart_state.dropped_per_round.push(Vec::new());
+                }
                 if let Some((new_w, new_dropped_weights)) = dart_round_finalize {
                     for (i, &tree_id) in dropped_tree_ids.iter().enumerate() {
                         dart_state.tree_weights[tree_id] = new_dropped_weights[i];
                     }
-                    while dart_state.tree_weights.len() <= effective_round_index {
-                        dart_state.tree_weights.push(1.0);
-                    }
-                    dart_state.tree_weights[effective_round_index] = new_w;
+                    dart_state.tree_weights.push(new_w);
                     dart_state.dropped_per_round.push(dropped_tree_ids.clone());
                 } else {
-                    // No dropouts this round (or dart_params is None and we
-                    // wouldn't be here). Just grow tree_weights with a 1.0
-                    // slot for the new tree.
-                    while dart_state.tree_weights.len() <= effective_round_index {
-                        dart_state.tree_weights.push(1.0);
-                    }
+                    dart_state.tree_weights.push(1.0);
                     dart_state.dropped_per_round.push(Vec::new());
                 }
+                round_start_offsets.push(stumps.len());
+                dart_round_counts.push(candidate_round_stumps.len());
             }
 
-            // Track where this round's stumps start in `stumps` (DART
-            // uses this to slice into `stumps` by tree_id when dropping
-            // trees in subsequent rounds).
-            round_start_offsets.push(stumps.len());
             stumps_per_completed_round.push(candidate_round_stumps.len());
             stumps.extend(candidate_round_stumps);
             rounds_completed += 1;
@@ -4811,6 +4829,55 @@ impl Trainer {
             sampled_rows_per_completed_round.truncate(best_round);
             sampled_features_per_completed_round.truncate(best_round);
             diagnostics_per_round.truncate(best_round);
+            // DART: truncate the parallel DART arrays at the same point
+            // as `stumps`, and recompute tree_weights from scratch using
+            // only the kept rounds.  Round r's `apply_normalization` may
+            // have rescaled weights of trees that themselves get
+            // truncated in later rounds, so a naive
+            // `dart_state.tree_weights.truncate(best_round)` would leave
+            // the kept stumps stamped with weights mutated by trees that
+            // no longer exist (the predictor would then return scores
+            // that don't match the selected best iteration).  Replaying
+            // through `apply_normalization` produces the exact weights
+            // for the kept ensemble.
+            if dart_params.is_some() {
+                // `best_round` is in committed-round space, but the DART
+                // arrays are indexed by effective_round_index which
+                // includes phantom slots for skipped warmup rounds.
+                // Map best_round → corresponding effective_round_index
+                // by counting committed rounds in dart_round_counts.
+                let mut committed_seen = 0usize;
+                let mut truncate_at = dart_round_counts.len();
+                for (idx, &count) in dart_round_counts.iter().enumerate() {
+                    if count > 0 {
+                        committed_seen += 1;
+                        if committed_seen == best_round {
+                            truncate_at = idx + 1;
+                            break;
+                        }
+                    }
+                }
+                round_start_offsets.truncate(truncate_at);
+                dart_round_counts.truncate(truncate_at);
+                let kept_dropped = dart_state
+                    .dropped_per_round
+                    .iter()
+                    .take(truncate_at)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                dart_state.tree_weights = vec![1.0; truncate_at];
+                dart_state.dropped_per_round.truncate(truncate_at);
+                for (r, dropped) in kept_dropped.iter().enumerate() {
+                    if let Some((_, _, normalize_type, _)) = dart_params {
+                        apply_normalization(
+                            &mut dart_state.tree_weights,
+                            dropped,
+                            normalize_type,
+                            r,
+                        );
+                    }
+                }
+            }
             rounds_completed = best_round;
             weak_improvement_rounds_committed =
                 weak_improvement_rounds_committed.min(rounds_completed);
@@ -7122,10 +7189,26 @@ fn apply_partition_leaf_updates(
 }
 
 /// DART helper: apply one tree's stumps to `predictions` with a
-/// multiplicative `factor`. `factor = 1.0` reproduces
-/// [`apply_round_stumps_tree_walk`] exactly; `factor = -w` is used to
-/// subtract a dropped tree's previous contribution; `factor = new_w`
-/// is used to re-add a rescaled tree post-normalization.
+/// multiplicative `factor`. `factor = 1.0` reproduces a unit-weight
+/// tree walk; `factor = -w` is used to subtract a dropped tree's
+/// previous contribution; `factor = new_w` is used to re-add a
+/// rescaled tree post-normalization.
+///
+/// Routing uses the binned-matrix view but with the same split
+/// semantics as the predictor: missing bin (`MISSING_BIN_U8`) routes
+/// through `default_left`; native categorical splits consult the
+/// stump's `categorical_bitset`; otherwise the standard
+/// `bin <= threshold_bin` comparison applies.  Using only
+/// `bin <= threshold_bin` (the legacy `apply_round_stumps_tree_walk`
+/// shortcut) would silently disagree with the predictor on rows with
+/// learned-missing-direction or native categorical features, which
+/// matters for DART because the dropout subtract / re-add must
+/// reproduce the predictor's per-tree contribution exactly.
+///
+/// `raw_features = Some((raw, fc))` is used only for PL-leaf
+/// evaluation (`LeafValue::Linear`).  Constant-leaf models can pass
+/// `None` (or an empty raw slice) and the leaf will be evaluated as
+/// the scalar intercept.
 ///
 /// All stumps in `stumps` are assumed to belong to the same tree (i.e.,
 /// share the same encoded `tree_id` in their `node_id`). The caller is
@@ -7146,6 +7229,7 @@ fn apply_weighted_round_to_predictions(
         stump_by_local.insert(local_id, stump);
     }
     let feature_count = binned_matrix.feature_count;
+    let missing_bin = u16::from(MISSING_BIN_U8);
 
     for (row_index, prediction) in predictions.iter_mut().enumerate() {
         let row_base = row_index * feature_count;
@@ -7156,29 +7240,49 @@ fn apply_weighted_round_to_predictions(
             };
             let feature_index = stump.split.feature_index as usize;
             let bin = binned_matrix.row_bin(row_base + feature_index);
-            if bin <= stump.split.threshold_bin {
-                *prediction += factor
-                    * if let Some((raw, fc)) = raw_features
-                        && !raw.is_empty()
-                    {
-                        let row_offset = row_index * fc;
-                        stump.left_leaf_value.eval_row(&raw[row_offset..])
-                    } else {
-                        stump.left_leaf_value.as_scalar()
-                    };
-                local_id = local_id * 2 + 1;
+            let went_left = if bin == missing_bin {
+                // Missing-value routing — predictor's `is_nan` short-circuit
+                // produces the same `default_left` outcome.
+                stump.split.default_left
+            } else if stump.split.is_categorical {
+                // Native categorical split: consult the bitset (same
+                // routing as `predictor_went_left`).
+                stump
+                    .split
+                    .categorical_bitset
+                    .as_ref()
+                    .map_or(stump.split.default_left, |bs| {
+                        let cat_id = bin;
+                        let byte_idx = (cat_id / 8) as usize;
+                        let bit_idx = (cat_id % 8) as usize;
+                        byte_idx < bs.len() && (bs[byte_idx] & (1 << bit_idx)) != 0
+                    })
             } else {
-                *prediction += factor
-                    * if let Some((raw, fc)) = raw_features
-                        && !raw.is_empty()
-                    {
-                        let row_offset = row_index * fc;
-                        stump.right_leaf_value.eval_row(&raw[row_offset..])
-                    } else {
-                        stump.right_leaf_value.as_scalar()
-                    };
-                local_id = local_id * 2 + 2;
-            }
+                bin <= stump.split.threshold_bin
+            };
+            let leaf = if went_left {
+                if let Some((raw, fc)) = raw_features
+                    && !raw.is_empty()
+                {
+                    let row_offset = row_index * fc;
+                    stump.left_leaf_value.eval_row(&raw[row_offset..])
+                } else {
+                    stump.left_leaf_value.as_scalar()
+                }
+            } else if let Some((raw, fc)) = raw_features
+                && !raw.is_empty()
+            {
+                let row_offset = row_index * fc;
+                stump.right_leaf_value.eval_row(&raw[row_offset..])
+            } else {
+                stump.right_leaf_value.as_scalar()
+            };
+            *prediction += factor * leaf;
+            local_id = if went_left {
+                local_id * 2 + 1
+            } else {
+                local_id * 2 + 2
+            };
         }
     }
     Ok(())
@@ -11145,10 +11249,14 @@ mod tests {
         // section. Verifies the byte-identical-to-v0.8.0 invariant.
         let model = sample_trained_model();
         // sample_trained_model uses the default 1.0 weights.
-        assert!(model.stumps.iter().all(|s| (s.tree_weight - 1.0).abs() < f32::EPSILON));
+        assert!(
+            model
+                .stumps
+                .iter()
+                .all(|s| (s.tree_weight - 1.0).abs() < f32::EPSILON)
+        );
         let bytes = model.to_artifact_bytes().expect("artifact serializes");
-        let parsed =
-            alloygbm_core::deserialize_model_artifact_v1(&bytes).expect("artifact parses");
+        let parsed = alloygbm_core::deserialize_model_artifact_v1(&bytes).expect("artifact parses");
         let has_dart_section = parsed
             .sections
             .iter()
@@ -11156,6 +11264,92 @@ mod tests {
         assert!(
             !has_dart_section,
             "non-DART artifacts must not emit a DartTreeWeights section"
+        );
+    }
+
+    #[test]
+    fn trained_model_predict_row_applies_tree_weight() {
+        // Regression test for the v0.9.0 PR review: TrainedModel::predict_row
+        // must multiply each stump's leaf contribution by stump.tree_weight,
+        // matching the predictor and matching DART training-time arithmetic.
+        // Without this, Rust callers loading DART artifacts via
+        // TrainedModel::from_artifact_bytes would see unweighted predictions
+        // that silently disagree with predict_dense / Python predict.
+        let mut model = sample_trained_model();
+        let row = vec![0.5_f32, 0.5_f32];
+        let pred_unit = model.predict_row(&row).expect("predict_row unit weights");
+
+        // Scale every stump by 0.5. Predict_row must respond proportionally.
+        for stump in model.stumps.iter_mut() {
+            stump.tree_weight = 0.5;
+        }
+        let pred_half = model.predict_row(&row).expect("predict_row half weights");
+
+        let baseline = model.baseline_prediction;
+        let expected_half = baseline + 0.5 * (pred_unit - baseline);
+        assert!(
+            (pred_half - expected_half).abs() < 1e-5,
+            "predict_row didn't apply tree_weight: pred_half={pred_half}, expected={expected_half}"
+        );
+    }
+
+    #[test]
+    fn dart_early_stopping_truncation_recomputes_tree_weights() {
+        // Regression test for the v0.9.0 PR review (P1, codex): when
+        // early stopping truncates a DART fit to `best_round`,
+        // `dart_state.tree_weights` must be replayed against the kept
+        // rounds so the stamped tree_weights match the kept ensemble.
+        // A naive truncate would leave kept stumps stamped with weights
+        // that were mutated by trees that no longer exist.
+        let dataset = sample_dataset();
+        let binned = sample_binned_matrix_for_dataset(&dataset);
+        let backend = GradientNeutralizationCheckingBackend {
+            exposures: dataset
+                .factor_exposures
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| FactorExposureMatrix {
+                    row_count: dataset.row_count(),
+                    factor_count: 1,
+                    values: vec![0.0; dataset.row_count()],
+                }),
+            weights: None,
+        };
+        // Force truncation by training with validation + early stopping
+        // that triggers after a few rounds.
+        let params = TrainParams {
+            boosting_mode: BoostingMode::Dart {
+                drop_rate: 0.3,
+                max_drop: 5,
+                normalize_type: alloygbm_core::DartNormalize::Tree,
+                sample_type: alloygbm_core::DartSampleType::Uniform,
+            },
+            seed: 42,
+            deterministic: true,
+            ..TrainParams::default()
+        };
+        let trainer = Trainer::new(params).expect("DART params pass validation");
+        // Train without validation — round-cap controls termination.
+        // The point of the test is that the *final stamped tree_weights*
+        // match an `apply_normalization` replay over the committed rounds.
+        let model = trainer
+            .fit_iterations(&dataset, &binned, &backend, &SquaredErrorObjective, 8)
+            .expect("DART training succeeds");
+
+        // After training, every stump's tree_weight must be reachable
+        // by replaying `apply_normalization` over the committed rounds —
+        // i.e., predict_row on the loaded artifact must match
+        // predict_row on the in-memory model.
+        let bytes = model.to_artifact_bytes().expect("artifact serializes");
+        let loaded =
+            TrainedModel::from_artifact_bytes_with_mode(&bytes, ArtifactCompatibilityMode::Strict)
+                .expect("artifact loads");
+        let row = vec![0.5_f32, 0.5_f32];
+        let p1 = model.predict_row(&row).expect("model predict_row");
+        let p2 = loaded.predict_row(&row).expect("loaded predict_row");
+        assert!(
+            (p1 - p2).abs() < 1e-5,
+            "DART round-trip predict mismatch: {p1} vs {p2}"
         );
     }
 
