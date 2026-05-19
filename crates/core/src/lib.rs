@@ -1481,6 +1481,11 @@ pub enum ModelSectionKind {
     /// compute interventional attributions for linear leaves without needing
     /// the original training data.  Length matches `metadata.feature_names`.
     FeatureBaseline,
+    /// v0.9.0+: Per-stump `tree_weight: f32` (one entry per `TrainedStump`,
+    /// in stump order). Emitted only when the model was trained with
+    /// `BoostingMode::Dart { .. }`. Absent for standard / GOSS artifacts —
+    /// readers must default to 1.0 for back-compat.
+    DartTreeWeights,
     Unknown(u32),
 }
 
@@ -1498,6 +1503,7 @@ impl ModelSectionKind {
             Self::LinearLeafCoefficients => 9,
             Self::DroMetadata => 10,
             Self::FeatureBaseline => 11,
+            Self::DartTreeWeights => 12,
             Self::Unknown(value) => value,
         }
     }
@@ -1515,6 +1521,7 @@ impl ModelSectionKind {
             9 => Self::LinearLeafCoefficients,
             10 => Self::DroMetadata,
             11 => Self::FeatureBaseline,
+            12 => Self::DartTreeWeights,
             other => Self::Unknown(other),
         }
     }
@@ -2325,6 +2332,86 @@ pub fn decode_optional_linear_leaf_coefficients_section(
         return Ok(None);
     };
     let payload = decode_linear_leaf_coefficients_payload(&section.payload)?;
+    Ok(Some(payload))
+}
+
+// ── DART tree weights section ────────────────────────────────────────────────
+
+/// Payload for `ModelSectionKind::DartTreeWeights`.
+///
+/// One entry per `TrainedStump`, in stump order. Emitted only by
+/// DART-trained models; readers must default to `tree_weight = 1.0`
+/// for stumps not covered by this section (back-compat with v0.8.0).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DartTreeWeightsPayload {
+    /// One entry per stump, in stump order. Length must equal
+    /// `model.stumps.len()` at load time.
+    pub weights: Vec<f32>,
+}
+
+/// Encode a `DartTreeWeightsPayload` to bytes.
+///
+/// Layout:
+/// ```text
+/// [u32 version=1] [u32 weight_count] [weight_count × f32 LE weights]
+/// ```
+pub fn encode_dart_tree_weights_payload(payload: &DartTreeWeightsPayload) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(8 + 4 * payload.weights.len());
+    buf.extend_from_slice(&1u32.to_le_bytes()); // version
+    buf.extend_from_slice(&(payload.weights.len() as u32).to_le_bytes());
+    for w in &payload.weights {
+        buf.extend_from_slice(&w.to_le_bytes());
+    }
+    buf
+}
+
+/// Decode a `DartTreeWeightsPayload` from raw section bytes.
+pub fn decode_dart_tree_weights_payload(bytes: &[u8]) -> CoreResult<DartTreeWeightsPayload> {
+    if bytes.len() < 8 {
+        return Err(CoreError::Validation(
+            "DartTreeWeights section too short for header".to_string(),
+        ));
+    }
+    let version = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    if version != 1 {
+        return Err(CoreError::Validation(format!(
+            "unsupported DartTreeWeights version: {version}"
+        )));
+    }
+    let count = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+    let expected = 8 + 4 * count;
+    if bytes.len() != expected {
+        return Err(CoreError::Validation(format!(
+            "DartTreeWeights payload length {} != expected {} ({} weights)",
+            bytes.len(),
+            expected,
+            count
+        )));
+    }
+    let mut weights = Vec::with_capacity(count);
+    for i in 0..count {
+        let off = 8 + 4 * i;
+        weights.push(f32::from_le_bytes([
+            bytes[off],
+            bytes[off + 1],
+            bytes[off + 2],
+            bytes[off + 3],
+        ]));
+    }
+    Ok(DartTreeWeightsPayload { weights })
+}
+
+/// Decode an optional `DartTreeWeights` section. Returns `Ok(None)` for
+/// pre-v0.9.0 artifacts (no section present) — the caller must default
+/// to `tree_weight = 1.0` for every stump in that case.
+pub fn decode_optional_dart_tree_weights_section(
+    sections: &[ModelArtifactSection],
+) -> CoreResult<Option<DartTreeWeightsPayload>> {
+    let Some(section) = optional_single_section(sections, ModelSectionKind::DartTreeWeights)?
+    else {
+        return Ok(None);
+    };
+    let payload = decode_dart_tree_weights_payload(&section.payload)?;
     Ok(Some(payload))
 }
 
@@ -4344,6 +4431,60 @@ mod tests {
         assert!(matches!(
             ModelSectionKind::from_u32(11),
             ModelSectionKind::FeatureBaseline
+        ));
+    }
+
+    #[test]
+    fn dart_tree_weights_payload_round_trips() {
+        let payload = DartTreeWeightsPayload {
+            weights: vec![1.0, 0.5, 0.25, 1.0 / 3.0],
+        };
+        let bytes = encode_dart_tree_weights_payload(&payload);
+        let decoded = decode_dart_tree_weights_payload(&bytes).expect("decode");
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn dart_tree_weights_payload_empty_round_trips() {
+        let payload = DartTreeWeightsPayload { weights: vec![] };
+        let bytes = encode_dart_tree_weights_payload(&payload);
+        let decoded = decode_dart_tree_weights_payload(&bytes).expect("decode");
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn dart_tree_weights_payload_truncated_header_errors() {
+        let bytes = vec![1u8, 0, 0]; // shorter than 8-byte header
+        let err = decode_dart_tree_weights_payload(&bytes).unwrap_err();
+        assert!(matches!(err, CoreError::Validation(_)));
+    }
+
+    #[test]
+    fn dart_tree_weights_payload_bad_version_errors() {
+        // version=2 is unsupported
+        let mut bytes = 2u32.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        let err = decode_dart_tree_weights_payload(&bytes).unwrap_err();
+        assert!(matches!(err, CoreError::Validation(_)));
+    }
+
+    #[test]
+    fn dart_tree_weights_payload_length_mismatch_errors() {
+        // version=1, count=2, but only one weight present
+        let mut bytes = 1u32.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&1.0f32.to_le_bytes());
+        let err = decode_dart_tree_weights_payload(&bytes).unwrap_err();
+        assert!(matches!(err, CoreError::Validation(_)));
+    }
+
+    #[test]
+    fn dart_tree_weights_section_kind_round_trips() {
+        // Variant-id stability is part of the on-disk contract.
+        assert_eq!(ModelSectionKind::DartTreeWeights.to_u32(), 12);
+        assert!(matches!(
+            ModelSectionKind::from_u32(12),
+            ModelSectionKind::DartTreeWeights
         ));
     }
 }
