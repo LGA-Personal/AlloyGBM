@@ -30,6 +30,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub mod dart;
 pub use dart::{DartState, apply_normalization, select_dropouts};
 
+pub mod shared_histogram;
+pub use shared_histogram::{
+    HistComponent, MultiOutputHistogram, build_multi_output_histogram_inplace,
+    compute_multi_output_split_gain, subtract_multi_output_histogram,
+};
+
+pub mod joint;
+pub use joint::{JointObjective, JointRoundResult, build_joint_round};
+
 /// Small epsilon added to leaf value denominators to prevent division by zero.
 const LEAF_EPSILON: f32 = 1e-6;
 

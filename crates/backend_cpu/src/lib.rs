@@ -18,8 +18,6 @@ pub use pl_histogram::build_linear_histograms_cpu;
 
 mod pl;
 
-pub mod shared_histogram;
-
 pub use alloygbm_core::simd;
 
 thread_local! {
