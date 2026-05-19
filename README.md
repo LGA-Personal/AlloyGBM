@@ -355,7 +355,7 @@ artifact_bytes = model.artifact_bytes
 - Per-iteration learning-rate schedules: `lr_schedule="constant"` (default) or `"warmup_cosine"`
 - DRO-style robust scalar leaves via `leaf_solver="dro"` (closed-form gradient-uncertainty penalty)
 - GOSS (gradient-based one-side sampling, LightGBM-style) via `boosting_mode="goss"` + `goss_top_rate` / `goss_other_rate` on regression, binary classification, and ranking. Default `boosting_mode="standard"` is byte-identical to v0.7.5.
-- DART (Dropouts meet MART) via `boosting_mode="dart"` + `dart_drop_rate` / `dart_max_drop` / `dart_normalize_type` (`"tree"` or `"forest"`) / `dart_sample_type` (`"uniform"` or `"weighted"`) on regression, binary classification, and ranking. Per-stump weights ride in a new `DartTreeWeights` artifact section emitted only when at least one stump diverges from `tree_weight = 1.0`, so Standard / GOSS artifacts stay byte-identical to v0.8.0.
+- DART (Dropouts meet MART) via `boosting_mode="dart"` + `dart_drop_rate` / `dart_max_drop` / `dart_normalize_type` (`"tree"` or `"forest"`) / `dart_sample_type` (`"uniform"` or `"weighted"`) on regression, binary classification, and ranking. Per-stump weights ride in a new `DartTreeWeights` artifact section emitted only when at least one stump diverges from `tree_weight = 1.0`, so Standard / GOSS artifacts stay byte-identical to v0.8.0. As of v0.10.0, **DART + `warm_start` continuation** is supported — pass a fitted DART model via `fit(..., init_model=prior_model)` to add more rounds on top.
 - Piecewise-linear leaves via `leaf_model="linear"` (closed-form ridge solve, faster convergence on linear-trend data)
 - Factor-neutral boosting via `neutralization` + fit-time `factor_exposures` (`pre_target`, `per_round_gradient`, `split_penalty`)
 - LightGBM-compatible feature interaction constraints via `interaction_constraints=[[...]]` (up to 64 groups, level-wise and leaf-wise enforcement)
@@ -404,9 +404,8 @@ Benchmark tooling and methodology live in [benchmarks/README.md](benchmarks/READ
 ## Current Limitations
 
 - CPU-only runtime (GPU backend is architecturally planned but not implemented)
-- `MultiLabelGBMRanker` trains K independent per-label rankers; joint shared-tree multi-label boosting on top of a K-output shared-histogram primitive is targeted at **v0.10.0**.
+- `MultiLabelGBMRanker` currently routes through the independent-per-label fallback. The Rust-level joint trainer (K-output shared-histogram primitive + `MultiOutputLeafValues` artifact section + `fit_joint_multi_output` + `JointPredictor`) is **shipped in v0.10.0**; the Python user-facing surface (`training_mode="joint"` wiring) is targeted at **v0.10.1**.
 - Multiclass softmax rejects non-`"standard"` boosting modes pending per-class gradient scoring (v0.10.x follow-up — applies to both GOSS and DART).
-- DART + `warm_start` is rejected pending `WarmStartState` extension to carry `tree_weights` and `dropped_per_round` (v0.10.x follow-up).
 - `leaf_solver="dro"` is a robust scalar leaf update, not a full raw-distribution Wasserstein DRO guarantee
 
 See [docs/limitations.md](docs/limitations.md) for the full list.

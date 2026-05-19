@@ -61,8 +61,35 @@
 GOSS and DART are supported on the binary classifier / regression /
 ranking single-output objective.  The multiclass softmax path
 explicitly rejects non-`"standard"` boosting modes pending per-class
-gradient scoring (v0.10.x follow-up).  DART + `warm_start` is
-rejected pending `WarmStartState` extension (v0.10.x follow-up).
+gradient scoring (v0.10.x follow-up).
+
+As of v0.10.0, **DART + `warm_start`** is supported on
+`GBMRegressor`, binary `GBMClassifier`, and `GBMRanker`. The
+continuation seeds `dart_state.tree_weights` from the prior model's
+per-stump `tree_weight` snapshot and pre-populates the dropout
+bookkeeping arrays so new-round dropouts can correctly subtract /
+replay prior trees. Historical RNG-driven `dropped_per_round` is
+intentionally not persisted; new rounds start fresh dropout
+bookkeeping going forward.
+
+```python
+base = GBMRegressor(
+    n_estimators=10,
+    boosting_mode="dart",
+    dart_drop_rate=0.1,
+    seed=7,
+)
+base.fit(X, y)
+
+cont = GBMRegressor(
+    n_estimators=10,                # 10 additional rounds on top of base
+    boosting_mode="dart",
+    dart_drop_rate=0.1,
+    warm_start=True,
+    seed=7,
+)
+cont.fit(X, y, init_model=base)
+```
 
 ## Stopping And Training Policy
 
