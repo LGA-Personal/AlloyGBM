@@ -4246,17 +4246,27 @@ impl Trainer {
         // trees.  `warm_ema_stats` captures the MorphBoost EMA snapshot
         // for the v0.7.3 warm-start-equivalence fix (consumed below
         // when `MorphState::new` builds the fresh EMA).
-        let (baseline_prediction, initial_stumps, round_index_offset, warm_ema_stats) =
-            if let Some(warm_start) = execution.warm_start.take() {
-                (
-                    warm_start.baseline_prediction,
-                    warm_start.stumps,
-                    warm_start.initial_rounds_completed,
-                    warm_start.initial_ema_stats,
-                )
-            } else {
-                (fit_contract.baseline_prediction, Vec::new(), 0, None)
-            };
+        // v0.10.0 review fix (Comment 1): also capture
+        // `initial_dart_tree_weights` here BEFORE `take()` consumes the
+        // warm_start; the dart_state seeding step below reads this local
+        // variable rather than re-querying `execution.warm_start`.
+        let (
+            baseline_prediction,
+            initial_stumps,
+            round_index_offset,
+            warm_ema_stats,
+            initial_dart_tree_weights,
+        ) = if let Some(warm_start) = execution.warm_start.take() {
+            (
+                warm_start.baseline_prediction,
+                warm_start.stumps,
+                warm_start.initial_rounds_completed,
+                warm_start.initial_ema_stats,
+                warm_start.initial_dart_tree_weights,
+            )
+        } else {
+            (fit_contract.baseline_prediction, Vec::new(), 0, None, None)
+        };
         let raw_features_opt = Some((
             &active_dataset.matrix.values as &[f32],
             active_dataset.matrix.feature_count,
@@ -4290,7 +4300,26 @@ impl Trainer {
         };
         let mut stumps = initial_stumps;
         let initial_stump_count = stumps.len();
-        let mut stumps_per_completed_round = Vec::new();
+        // v0.10.0 review fix (Comment 1): reconstruct per-round stump counts
+        // from the warm-start stumps by grouping consecutive stumps with the
+        // same encoded tree_id. Used by the DART seeding step below to slice
+        // into `stumps` for prior-tree dropout subtract/replay. For a cold
+        // fit this stays empty and gets populated as new rounds commit.
+        let mut stumps_per_completed_round: Vec<usize> = Vec::new();
+        if !stumps.is_empty() {
+            let mut current_tree_id = decode_tree_node_id(stumps[0].split.node_id).0;
+            let mut current_count = 0usize;
+            for stump in &stumps {
+                let tree_id = decode_tree_node_id(stump.split.node_id).0;
+                if tree_id != current_tree_id {
+                    stumps_per_completed_round.push(current_count);
+                    current_tree_id = tree_id;
+                    current_count = 0;
+                }
+                current_count += 1;
+            }
+            stumps_per_completed_round.push(current_count);
+        }
         let mut rounds_completed = 0_usize;
         let effective_round_cap = controls.rounds;
         let mut stop_reason = IterationStopReason::CompletedRequestedRounds;
@@ -4350,15 +4379,12 @@ impl Trainer {
         let mut dart_state = DartState::default();
         if dart_params.is_some() {
             // v0.10.0: When continuing a DART fit, seed tree_weights from the
-            // warm-start snapshot. Length must equal `stumps.len()` (one
-            // weight per warm-start stump). Falls back to all-1.0s when the
-            // prior fit did not use DART or no snapshot was provided.
+            // warm-start snapshot captured above (BEFORE the take()). Length
+            // must equal `stumps.len()` (one weight per warm-start stump).
+            // Falls back to all-1.0s when the prior fit did not use DART
+            // or no snapshot was provided.
             let initial_tree_count = stumps_per_completed_round.len();
-            if let Some(saved_weights) = execution
-                .warm_start
-                .as_ref()
-                .and_then(|ws| ws.initial_dart_tree_weights.as_ref())
-            {
+            if let Some(saved_weights) = initial_dart_tree_weights.as_ref() {
                 // Caller supplies one weight per stump; we need one weight
                 // per tree. Take the first weight of each tree (all stumps
                 // in a tree share the same tree_weight after DART
@@ -7450,8 +7476,14 @@ fn apply_round_stumps_tree_walk(
             };
             let feature_index = stump.split.feature_index as usize;
             let bin = binned_matrix.row_bin(row_base + feature_index);
+            // v0.10.0 review fix (Comment 1): multiply leaf contribution by
+            // `stump.tree_weight` so warm-start prior predictions reflect
+            // saved DART weights. For non-DART stumps tree_weight == 1.0,
+            // so this is a no-op and preserves byte-identical numerics for
+            // every existing caller (Standard/GOSS/Morph/DRO/linear).
+            let tree_weight = stump.tree_weight;
             if bin <= stump.split.threshold_bin {
-                *prediction += if let Some((raw, fc)) = raw_features
+                let leaf_value = if let Some((raw, fc)) = raw_features
                     && !raw.is_empty()
                 {
                     let row_offset = row_index * fc;
@@ -7459,9 +7491,10 @@ fn apply_round_stumps_tree_walk(
                 } else {
                     stump.left_leaf_value.as_scalar()
                 };
+                *prediction += tree_weight * leaf_value;
                 local_id = local_id * 2 + 1; // left child
             } else {
-                *prediction += if let Some((raw, fc)) = raw_features
+                let leaf_value = if let Some((raw, fc)) = raw_features
                     && !raw.is_empty()
                 {
                     let row_offset = row_index * fc;
@@ -7469,6 +7502,7 @@ fn apply_round_stumps_tree_walk(
                 } else {
                     stump.right_leaf_value.as_scalar()
                 };
+                *prediction += tree_weight * leaf_value;
                 local_id = local_id * 2 + 2; // right child
             }
         }

@@ -63,3 +63,87 @@ def test_dart_warm_start_predictions_change_after_extra_rounds():
     cont_preds = np.asarray(cont.predict(X), dtype=np.float32)
     # Extra rounds should change predictions noticeably.
     assert np.linalg.norm(cont_preds - base_preds) > 1e-4
+
+
+def test_dart_warm_start_preserves_prior_ensemble_contributions():
+    """Review fix (Comment 1): a DART continuation must start from the prior
+    model's weighted prediction surface, not from an all-weights-1 ensemble
+    (or worse, an empty ensemble).
+
+    We verify this by training a base DART model with enough rounds that
+    several stumps end up with non-unit ``tree_weight`` after dropout
+    normalization. Then we continue with a tiny ``learning_rate`` and a
+    single new round so the new round's contribution is negligible (~lr per
+    leaf). The continuation's predictions must equal ``base.predict(X)`` to
+    within that negligible delta.
+
+    If the warm-start path failed to seed ``dart_state.tree_weights`` from
+    the prior fit (or if ``apply_round_stumps_tree_walk`` ignored
+    ``stump.tree_weight``), the continuation's initial prediction surface
+    would be the unweighted sum of prior leaves and the parity gap would
+    be far larger than the lr-scaled new contribution.
+    """
+    X, y = _toy_regression(n_rows=120, seed=11)
+
+    # Use settings that almost guarantee some non-unit DART tree weights:
+    # higher drop_rate + enough rounds.
+    base = GBMRegressor(
+        n_estimators=30,
+        boosting_mode="dart",
+        dart_drop_rate=0.3,
+        dart_max_drop=5,
+        seed=11,
+    )
+    base.fit(X, y)
+    base_preds = np.asarray(base.predict(X), dtype=np.float32)
+
+    # Sanity: at least one stump should carry a non-1.0 tree weight after
+    # dropout normalization. (Otherwise this test cannot distinguish the bug
+    # from correct behaviour.) We can't probe the internal artifact directly
+    # from Python, but we can probe indirectly: if all weights were 1.0,
+    # base predictions for a deterministic seeded fit would equal a Standard
+    # fit on the same seed. They typically diverge.
+    standard_baseline = GBMRegressor(
+        n_estimators=30, boosting_mode="standard", seed=11
+    )
+    standard_baseline.fit(X, y)
+    std_preds = np.asarray(standard_baseline.predict(X), dtype=np.float32)
+    assert np.linalg.norm(base_preds - std_preds) > 1e-3, (
+        "test fixture failure: DART base did not produce a different "
+        "prediction surface than Standard; cannot validate warm-start parity"
+    )
+
+    # Continue with 1 extra round at a tiny LR so the new contribution is
+    # ~tiny_lr * one_leaf_value per row. The total delta from base must be
+    # tiny if warm-start correctly carries over the prior weighted ensemble.
+    # Use boosting_mode="standard" for the continuation to isolate the
+    # warm-start prediction-seeding code path (which uses
+    # `apply_round_stumps_tree_walk` and must multiply leaf values by the
+    # prior stumps' `tree_weight`). The new round adds a single
+    # tree_weight=1.0 stump scaled by tiny_lr.
+    tiny_lr = 1e-6
+    cont = GBMRegressor(
+        n_estimators=1,
+        boosting_mode="standard",
+        warm_start=True,
+        learning_rate=tiny_lr,
+        seed=11,
+    )
+    cont.fit(X, y, init_model=base)
+    cont_preds = np.asarray(cont.predict(X), dtype=np.float32)
+
+    # The per-row delta from base should be dominated by the tiny-lr new
+    # round contribution. Absolute target magnitudes are ~O(1) for the
+    # synthetic dataset, so leaf values are bounded by O(1) and the delta
+    # bound is roughly `tiny_lr * O(1) = 1e-6`. Allow a generous tolerance
+    # to absorb numerical noise but reject the obviously-broken case where
+    # cont_preds collapses toward zero (which is what would happen if the
+    # warm-start prior were ignored).
+    per_row_delta = np.abs(cont_preds - base_preds)
+    max_delta = per_row_delta.max()
+    assert max_delta < 1e-3, (
+        f"DART warm-start lost prior ensemble contribution: "
+        f"max |cont - base| = {max_delta:.6f} but expected << 1e-3 "
+        f"(would be O(|base_preds|) if warm-start were broken; "
+        f"base_preds range = [{base_preds.min():.3f}, {base_preds.max():.3f}])"
+    )
