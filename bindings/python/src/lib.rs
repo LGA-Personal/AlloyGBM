@@ -3499,9 +3499,9 @@ fn build_train_params(
 /// * `"standard"` — `BoostingMode::Standard`.  Ignores all rate args.
 /// * `"goss"` — requires `goss_top_rate` and `goss_other_rate`.
 /// * `"dart"` — requires `dart_drop_rate`, `dart_max_drop`,
-///   `dart_normalize_type`, `dart_sample_type` (rejected by the
-///   engine in v0.8.0 — DART implementation is a v0.8.x follow-up
-///   item).
+///   `dart_normalize_type`, `dart_sample_type`.  Fully supported by
+///   the single-output trainer as of v0.9.0; multiclass softmax + DART
+///   and DART + warm-start are still rejected (v0.10.x follow-ups).
 #[allow(clippy::too_many_arguments)]
 fn parse_boosting_mode(
     boosting_mode: &str,

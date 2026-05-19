@@ -29,8 +29,10 @@ def _nan_bin_for_max_bins(max_bins):
     return max_bins - 1
 _MIN_CONTINUOUS_QUANTIZED_BINS = 2
 _VALID_CONTINUOUS_BINNING_STRATEGIES = {"linear", "rank", "quantile"}
-# v0.8.0: per-round boosting strategies.  "dart" is reserved for a
-# follow-up commit — see crates/core/src/lib.rs::BoostingMode.
+# Per-round boosting strategies.  "standard" is the default v0.7.5
+# behaviour, "goss" (v0.8.0+) is LightGBM-style gradient-based one-side
+# sampling, "dart" (v0.9.0+) is Dropouts-meet-MART.  See
+# crates/core/src/lib.rs::BoostingMode.
 _VALID_BOOSTING_MODES = {"standard", "goss", "dart"}
 _LINEAR_TAIL_RANK_ENV_VAR = "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK"
 _LINEAR_TAIL_CORE_SPAN_RATIO_ENV_VAR = "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_CORE_SPAN_RATIO"
@@ -531,7 +533,7 @@ class GBMRegressor(_GBMRegressorBase):
             )
         if str(leaf_solver) == "dro" and str(leaf_model) != "constant":
             raise ValueError(
-                "leaf_solver='dro' requires leaf_model='constant' in v0.8.0"
+                "leaf_solver='dro' requires leaf_model='constant'"
             )
         if str(neutralization) not in (
             "none",
@@ -1372,7 +1374,7 @@ class GBMRegressor(_GBMRegressorBase):
 
         if self.leaf_solver == "dro" and self.leaf_model != "constant":
             raise ValueError(
-                "leaf_solver='dro' requires leaf_model='constant' in v0.8.0"
+                "leaf_solver='dro' requires leaf_model='constant'"
             )
         if self.neutralization != "split_penalty" and self.factor_penalty != 0.0:
             raise ValueError(

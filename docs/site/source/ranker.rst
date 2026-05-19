@@ -110,6 +110,6 @@ Current scope
 - 5 ranking objectives implemented natively in Rust
 - Single-label per ``GBMRanker``. For multi-output ranking, see
   :class:`~alloygbm.MultiLabelGBMRanker` (also covered in :doc:`estimator`).
-  Joint shared-tree multi-label boosting is deferred to v0.8.0
-  (paired with the shared-histogram speedup).
+  Joint shared-tree multi-label boosting is deferred to v0.10.0
+  (paired with the K-output shared-histogram primitive).
 - Group identifiers must be unsigned integers

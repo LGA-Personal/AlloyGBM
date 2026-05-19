@@ -355,6 +355,7 @@ artifact_bytes = model.artifact_bytes
 - Per-iteration learning-rate schedules: `lr_schedule="constant"` (default) or `"warmup_cosine"`
 - DRO-style robust scalar leaves via `leaf_solver="dro"` (closed-form gradient-uncertainty penalty)
 - GOSS (gradient-based one-side sampling, LightGBM-style) via `boosting_mode="goss"` + `goss_top_rate` / `goss_other_rate` on regression, binary classification, and ranking. Default `boosting_mode="standard"` is byte-identical to v0.7.5.
+- DART (Dropouts meet MART) via `boosting_mode="dart"` + `dart_drop_rate` / `dart_max_drop` / `dart_normalize_type` (`"tree"` or `"forest"`) / `dart_sample_type` (`"uniform"` or `"weighted"`) on regression, binary classification, and ranking. Per-stump weights ride in a new `DartTreeWeights` artifact section emitted only when at least one stump diverges from `tree_weight = 1.0`, so Standard / GOSS artifacts stay byte-identical to v0.8.0.
 - Piecewise-linear leaves via `leaf_model="linear"` (closed-form ridge solve, faster convergence on linear-trend data)
 - Factor-neutral boosting via `neutralization` + fit-time `factor_exposures` (`pre_target`, `per_round_gradient`, `split_penalty`)
 - LightGBM-compatible feature interaction constraints via `interaction_constraints=[[...]]` (up to 64 groups, level-wise and leaf-wise enforcement)

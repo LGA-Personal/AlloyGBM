@@ -6954,13 +6954,11 @@ fn sampled_row_indices(
 ///   that `ceil()` rounding and the `other_n <= n - top_n` cap don't
 ///   bias the unbiasedness contract at small `n` (see
 ///   `goss_sample_indices` for details).
-/// * `BoostingMode::Dart` — unreachable in practice (v0.8.0): the
-///   single-output trainer entry point
-///   (`fit_iterations_with_optional_validation_summary`) rejects DART
-///   upstream so callers can't silently get standard row-subsampled
-///   boosting.  The fallback arm here is kept as a defensive
-///   no-op until DART training lands; future work will replace it
-///   with the real DART row-selection semantics.
+/// * `BoostingMode::Dart` — row-selection itself is uniform (same as
+///   Standard); the dropout + normalize cycle that makes DART distinct
+///   is applied separately in the iteration loop
+///   (`fit_iterations_with_optional_validation_summary`) before
+///   gradient computation.  See `crates/engine/src/dart.rs`.
 ///
 /// Returns the sorted set of row indices used as `root_row_indices`
 /// for tree construction this round.
