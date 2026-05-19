@@ -568,8 +568,14 @@ impl NativePredictorHandle {
                             values_bytes[bi + 2],
                             values_bytes[bi + 3],
                         ]);
-                        out_chunk[out_base + fi] =
-                            quantize_linear_value(value, feature_mins[fi], feature_maxs[fi]) as f32;
+                        // v0.9.0 Limitation 4 fix: preserve NaN through the
+                        // f32 cast so the predictor's `is_nan` check fires
+                        // and routes through `default_left`.
+                        out_chunk[out_base + fi] = if value.is_nan() {
+                            f32::NAN
+                        } else {
+                            quantize_linear_value(value, feature_mins[fi], feature_maxs[fi]) as f32
+                        };
                     }
                 }
             });
@@ -984,6 +990,17 @@ fn quantize_rank_value(value: f32, sorted_values: &[f32]) -> u8 {
 }
 
 /// Parameterized linear quantization that supports arbitrary max_data_bin (u16).
+///
+/// **NaN handling:** callers that feed the result directly to the
+/// predictor (as a quantized f32 bin index) must check `value.is_nan()`
+/// themselves and emit `f32::NAN` to the output buffer instead of
+/// casting this function's return. The predictor's `predictor_went_left`
+/// short-circuits to `default_left` on NaN feature values, matching the
+/// pure-linear / pure-quantile paths. See
+/// `quantize_dense_values_linear_inplace_wide` and
+/// `quantize_dense_values_linear_rank_inplace_wide` for the v0.9.0 NaN
+/// preservation pattern — this addresses Limitation 4 in
+/// `docs/limitations.md` (v0.8.0).
 fn quantize_linear_value_wide(
     value: f32,
     min_value: f32,
@@ -1005,6 +1022,9 @@ fn quantize_linear_value_wide(
 }
 
 /// Parameterized rank quantization that supports arbitrary max_data_bin (u16).
+///
+/// **NaN handling:** see `quantize_linear_value_wide` — callers feeding
+/// the result to the predictor must preserve NaN through the f32 cast.
 fn quantize_rank_value_wide(value: f32, sorted_values: &[f32], max_data_bin: u16) -> u16 {
     if sorted_values.len() <= 1 {
         return 0;
@@ -1017,6 +1037,11 @@ fn quantize_rank_value_wide(value: f32, sorted_values: &[f32], max_data_bin: u16
 }
 
 /// Parameterized linear quantize for predict-time: supports arbitrary max_data_bin.
+///
+/// v0.9.0: NaN inputs are passed through as `f32::NAN` instead of
+/// being cast to a finite bin. The predictor's `predictor_went_left`
+/// detects NaN and routes through `default_left`. See Limitation 4 in
+/// `docs/limitations.md` (resolved in v0.9.0).
 fn quantize_dense_values_linear_inplace_wide(
     values: &[f32],
     row_count: usize,
@@ -1040,12 +1065,16 @@ fn quantize_dense_values_linear_inplace_wide(
                 let out_base = local_row * feature_count;
                 for fi in 0..feature_count {
                     let value = values[base + fi];
-                    out_chunk[out_base + fi] = quantize_linear_value_wide(
-                        value,
-                        feature_mins[fi],
-                        feature_maxs[fi],
-                        max_data_bin,
-                    ) as f32;
+                    out_chunk[out_base + fi] = if value.is_nan() {
+                        f32::NAN
+                    } else {
+                        quantize_linear_value_wide(
+                            value,
+                            feature_mins[fi],
+                            feature_maxs[fi],
+                            max_data_bin,
+                        ) as f32
+                    };
                 }
             }
         });
@@ -1078,17 +1107,30 @@ fn quantize_dense_values_linear_rank_inplace_wide(
                 let out_base = local_row * feature_count;
                 for fi in 0..feature_count {
                     let value = values[base + fi];
-                    let bin = if rank_flags[fi] {
-                        quantize_rank_value_wide(value, &feature_sorted_values[fi], max_data_bin)
+                    // v0.9.0 Limitation 4 fix: preserve NaN through the
+                    // f32 cast so the predictor's `is_nan` check fires
+                    // and routes through `default_left` even on
+                    // rank-binned features (which previously silently
+                    // fell through to bin 0).
+                    out_chunk[out_base + fi] = if value.is_nan() {
+                        f32::NAN
                     } else {
-                        quantize_linear_value_wide(
-                            value,
-                            feature_mins[fi],
-                            feature_maxs[fi],
-                            max_data_bin,
-                        )
+                        let bin = if rank_flags[fi] {
+                            quantize_rank_value_wide(
+                                value,
+                                &feature_sorted_values[fi],
+                                max_data_bin,
+                            )
+                        } else {
+                            quantize_linear_value_wide(
+                                value,
+                                feature_mins[fi],
+                                feature_maxs[fi],
+                                max_data_bin,
+                            )
+                        };
+                        bin as f32
                     };
-                    out_chunk[out_base + fi] = bin as f32;
                 }
             }
         });

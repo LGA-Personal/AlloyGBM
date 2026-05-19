@@ -54,12 +54,18 @@ struct LinearLeafCompact {
 }
 
 impl LinearLeafCompact {
+    /// PL-leaf evaluation with v0.9.0 NaN policy: NaN feature values
+    /// contribute 0.0 to the linear sum. Matches `LinearLeaf::eval` in
+    /// `alloygbm_core`. See Limitation 4 in `docs/limitations.md`.
     #[inline]
     fn eval(&self, features: &[f32]) -> f32 {
         let mut v = self.intercept;
         for (w, &fi) in self.weights.iter().zip(self.feature_indices.iter()) {
             if fi < features.len() {
-                v += w * features[fi];
+                let x = features[fi];
+                if !x.is_nan() {
+                    v += w * x;
+                }
             }
         }
         v

@@ -1315,13 +1315,26 @@ impl LinearLeaf {
     ///
     /// `raw_features` is the full flat row-major feature matrix; `row_offset` is
     /// `row_index * feature_count`.
+    ///
+    /// **NaN policy (v0.9.0):** NaN feature values contribute 0.0 to the
+    /// linear sum rather than propagating through `w · NaN = NaN`. This
+    /// prevents NaN-poisoning of the final prediction when the predictor
+    /// routes through `default_left` on a missing feature — the
+    /// constant-leaf path treats missing values as "absent contribution"
+    /// (the path's leaf eval is independent of the feature), and the
+    /// PL-leaf path now does the same for any regressor feature that
+    /// happens to be NaN on that row. See Limitation 4 in
+    /// `docs/limitations.md` (resolved in v0.9.0).
     #[inline]
     pub fn eval(&self, raw_features: &[f32], row_offset: usize) -> f32 {
         let mut val = self.intercept;
         for (w, &feat) in self.weights.iter().zip(self.regressor_features.iter()) {
             let idx = row_offset + feat as usize;
             if idx < raw_features.len() {
-                val += w * raw_features[idx];
+                let x = raw_features[idx];
+                if !x.is_nan() {
+                    val += w * x;
+                }
             }
         }
         val
