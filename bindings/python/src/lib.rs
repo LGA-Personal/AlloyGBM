@@ -3992,7 +3992,11 @@ fn shap_global_importance_dense_with_binning(
     factor_exposure_factor_count=None,
     boosting_mode="standard",
     goss_top_rate=None,
-    goss_other_rate=None
+    goss_other_rate=None,
+    dart_drop_rate=None,
+    dart_max_drop=None,
+    dart_normalize_type=None,
+    dart_sample_type=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact(
@@ -4032,6 +4036,10 @@ fn train_regression_artifact(
     boosting_mode: &str,
     goss_top_rate: Option<f32>,
     goss_other_rate: Option<f32>,
+    dart_drop_rate: Option<f32>,
+    dart_max_drop: Option<usize>,
+    dart_normalize_type: Option<&str>,
+    dart_sample_type: Option<&str>,
 ) -> PyResult<Vec<u8>> {
     let parsed_morph_config = morph_config
         .map(|d| parse_morph_config_from_pydict(&d))
@@ -4059,10 +4067,10 @@ fn train_regression_artifact(
         boosting_mode,
         goss_top_rate,
         goss_other_rate,
-        None,
-        None,
-        None,
-        None,
+        dart_drop_rate,
+        dart_max_drop,
+        dart_normalize_type,
+        dart_sample_type,
     )?;
     let params = build_train_params(
         learning_rate,
@@ -4176,7 +4184,11 @@ fn train_regression_artifact(
     factor_exposure_factor_count=None,
     boosting_mode="standard",
     goss_top_rate=None,
-    goss_other_rate=None
+    goss_other_rate=None,
+    dart_drop_rate=None,
+    dart_max_drop=None,
+    dart_normalize_type=None,
+    dart_sample_type=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense(
@@ -4218,6 +4230,10 @@ fn train_regression_artifact_dense(
     boosting_mode: &str,
     goss_top_rate: Option<f32>,
     goss_other_rate: Option<f32>,
+    dart_drop_rate: Option<f32>,
+    dart_max_drop: Option<usize>,
+    dart_normalize_type: Option<&str>,
+    dart_sample_type: Option<&str>,
 ) -> PyResult<Vec<u8>> {
     let parsed_morph_config = morph_config
         .map(|d| parse_morph_config_from_pydict(&d))
@@ -4245,10 +4261,10 @@ fn train_regression_artifact_dense(
         boosting_mode,
         goss_top_rate,
         goss_other_rate,
-        None,
-        None,
-        None,
-        None,
+        dart_drop_rate,
+        dart_max_drop,
+        dart_normalize_type,
+        dart_sample_type,
     )?;
     let params = build_train_params(
         learning_rate,
@@ -4383,7 +4399,11 @@ fn train_regression_artifact_dense(
     factor_exposure_factor_count=None,
     boosting_mode="standard",
     goss_top_rate=None,
-    goss_other_rate=None
+    goss_other_rate=None,
+    dart_drop_rate=None,
+    dart_max_drop=None,
+    dart_normalize_type=None,
+    dart_sample_type=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_with_summary(
@@ -4450,6 +4470,10 @@ fn train_regression_artifact_with_summary(
     boosting_mode: &str,
     goss_top_rate: Option<f32>,
     goss_other_rate: Option<f32>,
+    dart_drop_rate: Option<f32>,
+    dart_max_drop: Option<usize>,
+    dart_normalize_type: Option<&str>,
+    dart_sample_type: Option<&str>,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -4478,10 +4502,10 @@ fn train_regression_artifact_with_summary(
         boosting_mode,
         goss_top_rate,
         goss_other_rate,
-        None,
-        None,
-        None,
-        None,
+        dart_drop_rate,
+        dart_max_drop,
+        dart_normalize_type,
+        dart_sample_type,
     )?;
     let params = build_train_params(
         learning_rate,
@@ -4642,7 +4666,11 @@ fn train_regression_artifact_with_summary(
     factor_exposure_factor_count=None,
     boosting_mode="standard",
     goss_top_rate=None,
-    goss_other_rate=None
+    goss_other_rate=None,
+    dart_drop_rate=None,
+    dart_max_drop=None,
+    dart_normalize_type=None,
+    dart_sample_type=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary(
@@ -4712,6 +4740,10 @@ fn train_regression_artifact_dense_with_summary(
     boosting_mode: &str,
     goss_top_rate: Option<f32>,
     goss_other_rate: Option<f32>,
+    dart_drop_rate: Option<f32>,
+    dart_max_drop: Option<usize>,
+    dart_normalize_type: Option<&str>,
+    dart_sample_type: Option<&str>,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -4740,10 +4772,10 @@ fn train_regression_artifact_dense_with_summary(
         boosting_mode,
         goss_top_rate,
         goss_other_rate,
-        None,
-        None,
-        None,
-        None,
+        dart_drop_rate,
+        dart_max_drop,
+        dart_normalize_type,
+        dart_sample_type,
     )?;
     let params = build_train_params(
         learning_rate,
@@ -4900,7 +4932,11 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> PyResult<Vec<f32>> {
     factor_exposure_factor_count=None,
     boosting_mode="standard",
     goss_top_rate=None,
-    goss_other_rate=None
+    goss_other_rate=None,
+    dart_drop_rate=None,
+    dart_max_drop=None,
+    dart_normalize_type=None,
+    dart_sample_type=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary_bytes(
@@ -4970,6 +5006,10 @@ fn train_regression_artifact_dense_with_summary_bytes(
     boosting_mode: &str,
     goss_top_rate: Option<f32>,
     goss_other_rate: Option<f32>,
+    dart_drop_rate: Option<f32>,
+    dart_max_drop: Option<usize>,
+    dart_normalize_type: Option<&str>,
+    dart_sample_type: Option<&str>,
 ) -> PyResult<NativeTrainingResult> {
     let values = bytes_to_f32_vec(values_bytes)?;
     let targets = bytes_to_f32_vec(targets_bytes)?;
@@ -5002,10 +5042,10 @@ fn train_regression_artifact_dense_with_summary_bytes(
         boosting_mode,
         goss_top_rate,
         goss_other_rate,
-        None,
-        None,
-        None,
-        None,
+        dart_drop_rate,
+        dart_max_drop,
+        dart_normalize_type,
+        dart_sample_type,
     )?;
     let params = build_train_params(
         learning_rate,
