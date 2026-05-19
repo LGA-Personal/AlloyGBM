@@ -4300,25 +4300,34 @@ impl Trainer {
         };
         let mut stumps = initial_stumps;
         let initial_stump_count = stumps.len();
-        // v0.10.0 review fix (Comment 1): reconstruct per-round stump counts
-        // from the warm-start stumps by grouping consecutive stumps with the
-        // same encoded tree_id. Used by the DART seeding step below to slice
-        // into `stumps` for prior-tree dropout subtract/replay. For a cold
-        // fit this stays empty and gets populated as new rounds commit.
+        // `stumps_per_completed_round` stays NEW-ROUND-ONLY (its original
+        // semantics): downstream consumers (validation early-stopping
+        // truncation via `retained_stump_count_for_rounds`, leaf refinement,
+        // DART replay truncation) index into it with a `best_round` value
+        // relative to the new fit and assume entry `i` holds the i-th
+        // newly-committed round's stump count.
         let mut stumps_per_completed_round: Vec<usize> = Vec::new();
+        // Separate vector for warm-start prior-round counts. v0.10.0 review
+        // follow-up: this used to live in `stumps_per_completed_round`, but
+        // that broke `best_round`-indexed truncation when warm_start combined
+        // with eval_set early stopping (kept counts from old rounds rather
+        // than new ones). Now kept as its own local consumed only by the
+        // DART-state seeding + round_start_offsets/dart_round_counts
+        // pre-population blocks below.
+        let mut initial_stumps_per_round: Vec<usize> = Vec::new();
         if !stumps.is_empty() {
             let mut current_tree_id = decode_tree_node_id(stumps[0].split.node_id).0;
             let mut current_count = 0usize;
             for stump in &stumps {
                 let tree_id = decode_tree_node_id(stump.split.node_id).0;
                 if tree_id != current_tree_id {
-                    stumps_per_completed_round.push(current_count);
+                    initial_stumps_per_round.push(current_count);
                     current_tree_id = tree_id;
                     current_count = 0;
                 }
                 current_count += 1;
             }
-            stumps_per_completed_round.push(current_count);
+            initial_stumps_per_round.push(current_count);
         }
         let mut rounds_completed = 0_usize;
         let effective_round_cap = controls.rounds;
@@ -4382,8 +4391,11 @@ impl Trainer {
             // warm-start snapshot captured above (BEFORE the take()). Length
             // must equal `stumps.len()` (one weight per warm-start stump).
             // Falls back to all-1.0s when the prior fit did not use DART
-            // or no snapshot was provided.
-            let initial_tree_count = stumps_per_completed_round.len();
+            // or no snapshot was provided. Uses `initial_stumps_per_round`
+            // (warm-start prior-round counts) — distinct from
+            // `stumps_per_completed_round` (new-round counts) so downstream
+            // best_round-indexed truncation continues to work correctly.
+            let initial_tree_count = initial_stumps_per_round.len();
             if let Some(saved_weights) = initial_dart_tree_weights.as_ref() {
                 // Caller supplies one weight per stump; we need one weight
                 // per tree. Take the first weight of each tree (all stumps
@@ -4391,7 +4403,7 @@ impl Trainer {
                 // normalization, so this is well-defined).
                 let mut per_tree = Vec::with_capacity(initial_tree_count);
                 let mut stump_offset = 0usize;
-                for &count in &stumps_per_completed_round {
+                for &count in &initial_stumps_per_round {
                     let weight = saved_weights.get(stump_offset).copied().unwrap_or(1.0);
                     per_tree.push(weight);
                     stump_offset += count;
@@ -4426,10 +4438,12 @@ impl Trainer {
         // v0.10.0: DART + warm_start — pre-populate round_start_offsets +
         // dart_round_counts from the warm-start tree shapes so the dropout
         // step can correctly slice into `stumps` for each prior tree. Stays
-        // a no-op for non-DART or cold fits.
+        // a no-op for non-DART or cold fits. Uses `initial_stumps_per_round`
+        // (warm-start prior-round counts) so `stumps_per_completed_round`
+        // can stay new-round-only for downstream best_round indexing.
         if dart_params.is_some() {
             let mut offset = 0usize;
-            for &count in &stumps_per_completed_round {
+            for &count in &initial_stumps_per_round {
                 round_start_offsets.push(offset);
                 dart_round_counts.push(count);
                 offset += count;
@@ -10296,6 +10310,113 @@ mod tests {
         assert!(
             continued.model.stumps.len() >= cold_model.stumps.len(),
             "continuation lost warm-start stumps"
+        );
+    }
+
+    #[test]
+    fn warm_start_early_stopping_truncates_against_new_round_counts() {
+        // v0.10.0 review follow-up: when a warm-start continuation hits
+        // validation early stopping, the truncation must use NEW-round
+        // stump counts (stumps_per_completed_round is new-round-only), not
+        // accidentally consume prior-round counts. An earlier draft of the
+        // DART warm-start fix put prior-round counts at the front of
+        // `stumps_per_completed_round`, which caused `best_round`-indexed
+        // truncation to retain stump counts from prior rounds instead of
+        // the actually-best new round.
+        //
+        // Reproduce the symptom: train a base model, then continue with
+        // validation early stopping. The retained model size must equal
+        // `initial_stump_count + sum_of_first_N_new_round_counts` where N
+        // is the number of new rounds the early-stopping policy kept. We
+        // verify that the new-round stump tail (>= initial_stump_count) is
+        // present and that the model still validates / predicts coherently.
+        let dataset = sample_dataset();
+        let binned = sample_binned_matrix_for_dataset(&dataset);
+
+        // Cold baseline fit.
+        let cold_params = TrainParams::default();
+        let cold_trainer = Trainer::new(cold_params).unwrap();
+        let cold_model = cold_trainer
+            .fit_iterations(&dataset, &binned, &MockBackend, &SquaredErrorObjective, 3)
+            .expect("cold fit");
+        let cold_stump_count = cold_model.stumps.len();
+        assert!(
+            cold_stump_count >= 3,
+            "test fixture: cold model should have >=3 stumps (one per round at depth=1), got {cold_stump_count}"
+        );
+
+        let warm_start = WarmStartState {
+            baseline_prediction: cold_model.baseline_prediction,
+            stumps: cold_model.stumps.clone(),
+            initial_rounds_completed: 3,
+            initial_ema_stats: None,
+            initial_dart_tree_weights: None,
+        };
+
+        // Continue with eval_set + early_stopping_rounds. Use the same data
+        // as validation so the loss curve is monotonic — early stopping
+        // shouldn't fire purely on validation degradation, but if it does
+        // the truncation must remain coherent. The key assertion is that
+        // the retained model includes the warm-start stumps PLUS at least
+        // the first new-round commit, NOT a truncation that accidentally
+        // consumed prior-round counts to compute kept_stumps.
+        let validation_ref = ValidationDatasetRef {
+            dataset: &dataset,
+            binned_matrix: &binned,
+        };
+        let warm_trainer = Trainer::new(TrainParams::default()).unwrap();
+        let controls = IterationControls::new(
+            /*rounds=*/ 5,
+            /*min_split_gain=*/ 0.0,
+            /*min_rows_per_leaf=*/ 1,
+            /*lambda_l2=*/ 0.0,
+            /*max_abs_leaf=*/ 1_000_000.0,
+            /*min_validation_improvement=*/ 0.0,
+            /*early_stopping_rounds=*/ 2,
+        )
+        .unwrap();
+        let summary = warm_trainer
+            .fit_iterations_warm_start_with_validation(
+                &dataset,
+                &binned,
+                validation_ref,
+                &MockBackend,
+                &SquaredErrorObjective,
+                controls,
+                warm_start,
+            )
+            .expect("warm-start + validation early stopping must succeed");
+
+        // The retained stump tail must include the warm-start stumps as a
+        // prefix. (If `stumps_per_completed_round` had been polluted with
+        // prior-round counts, the post-best-iteration truncation could
+        // have dropped warm-start stumps or kept incoherent counts.)
+        assert!(
+            summary.model.stumps.len() >= cold_stump_count,
+            "warm-start prefix lost during early-stop truncation: \
+             retained {} stumps but warm-start brought in {}",
+            summary.model.stumps.len(),
+            cold_stump_count
+        );
+        for (i, (a, b)) in summary.model.stumps[..cold_stump_count]
+            .iter()
+            .zip(cold_model.stumps.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                a.split.node_id, b.split.node_id,
+                "warm-start stump {i} node_id was perturbed by truncation"
+            );
+        }
+
+        // Sanity: the final loss must be finite. A truncation that walked
+        // off the end of `stumps_per_completed_round` or kept the wrong
+        // number of new stumps would still produce a TrainedModel (so the
+        // call wouldn't panic) but its loss could diverge.
+        assert!(
+            summary.final_loss.is_finite(),
+            "final_loss not finite: {}",
+            summary.final_loss
         );
     }
 

@@ -147,3 +147,65 @@ def test_dart_warm_start_preserves_prior_ensemble_contributions():
         f"(would be O(|base_preds|) if warm-start were broken; "
         f"base_preds range = [{base_preds.min():.3f}, {base_preds.max():.3f}])"
     )
+
+
+def test_dart_warm_start_with_eval_set_early_stopping_stays_coherent():
+    """Review follow-up: warm_start + eval_set + early_stopping_rounds must
+    truncate against NEW-round stump counts, not prior-round counts. An
+    earlier draft of the warm-start fix placed prior-round counts at the
+    front of ``stumps_per_completed_round``, which made
+    ``best_round``-indexed truncation consume the wrong counts and silently
+    keep the wrong stumps. With the correct fix, this combination produces
+    a coherent model that round-trips through pickle and predicts sanely.
+    """
+    import pickle
+
+    X, y = _toy_regression(n_rows=120, seed=13)
+    X_val = X[:40]
+    y_val = y[:40]
+
+    base = GBMRegressor(
+        n_estimators=15,
+        boosting_mode="dart",
+        dart_drop_rate=0.2,
+        seed=13,
+    )
+    base.fit(X, y)
+    base_preds_before = np.asarray(base.predict(X[:5]), dtype=np.float32)
+
+    cont = GBMRegressor(
+        n_estimators=10,
+        boosting_mode="dart",
+        dart_drop_rate=0.2,
+        warm_start=True,
+        early_stopping_rounds=3,
+        seed=13,
+    )
+    cont.fit(X, y, init_model=base, eval_set=(X_val, y_val))
+
+    # Continuation must produce finite, non-pathological predictions —
+    # a broken truncation would either panic above (no model emitted) or
+    # produce a corrupted model whose predictions degrade obviously.
+    cont_preds = np.asarray(cont.predict(X[:5]), dtype=np.float32)
+    assert np.all(np.isfinite(cont_preds)), "continuation predictions not finite"
+
+    # Round-trip through pickle: would expose any stump-count mismatch
+    # between in-memory model and serialized artifact (a broken truncation
+    # could keep extra/missing stumps that the artifact format rejects).
+    blob = pickle.dumps(cont)
+    restored = pickle.loads(blob)
+    restored_preds = np.asarray(restored.predict(X[:5]), dtype=np.float32)
+    np.testing.assert_allclose(cont_preds, restored_preds, rtol=1e-5)
+
+    # Best-iteration bookkeeping should be sane. n_estimators_ reflects the
+    # number of new rounds actually kept after early stopping; should be in
+    # [0, 10] (we asked for up to 10 new rounds; early stopping may keep
+    # zero if the base model already won validation). The key check is just
+    # that the field is a plausible non-negative integer.
+    assert 0 <= cont.n_estimators_ <= 10, (
+        f"n_estimators_={cont.n_estimators_} out of expected [0, 10] range"
+    )
+
+    # Base model was not mutated.
+    base_preds_after = np.asarray(base.predict(X[:5]), dtype=np.float32)
+    np.testing.assert_allclose(base_preds_before, base_preds_after, rtol=1e-7)
