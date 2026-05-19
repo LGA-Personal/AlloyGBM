@@ -146,6 +146,22 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
                 "multiclass prediction. Use binary classification or a built-in objective."
             )
 
+        # v0.9.0: multiclass + DART is not yet supported — the multiclass
+        # softmax engine path rejects non-Standard boosting modes at fit
+        # time (tracked as a v0.10.x follow-up: requires per-class gradient
+        # bookkeeping during the dropout step). Raise a clear Python-side
+        # error rather than letting the Rust engine reject with a more
+        # opaque message.
+        if self._is_multiclass and self.boosting_mode == "dart":
+            raise NotImplementedError(
+                "boosting_mode='dart' is not yet supported for multiclass "
+                f"classification (detected {self._num_classes_for_training} "
+                "classes). Multiclass DART requires per-class gradient "
+                "bookkeeping during the dropout step — tracked as a v0.10.x "
+                "follow-up. Use boosting_mode='standard' or 'goss' for "
+                "multiclass, or boosting_mode='dart' with binary labels."
+            )
+
         # Validate eval_set targets if provided
         if eval_set is not None:
             _eval_X, eval_y = eval_set
@@ -358,7 +374,11 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
             f"factor_penalty={self.factor_penalty}, "
             f"boosting_mode='{self.boosting_mode}', "
             f"goss_top_rate={self.goss_top_rate}, "
-            f"goss_other_rate={self.goss_other_rate}"
+            f"goss_other_rate={self.goss_other_rate}, "
+            f"dart_drop_rate={self.dart_drop_rate}, "
+            f"dart_max_drop={self.dart_max_drop}, "
+            f"dart_normalize_type='{self.dart_normalize_type}', "
+            f"dart_sample_type='{self.dart_sample_type}'"
             ")"
         )
 
