@@ -78,9 +78,10 @@ The following were limitations in prior versions and have been addressed:
   `crates/engine/src/dart.rs`; per-stump `tree_weight: f32` is
   persisted via a new `DartTreeWeights` artifact section (kind index
   12) that is only emitted when DART is active, keeping Standard /
-  GOSS artifacts byte-identical to v0.8.0. Multiclass DART and DART +
-  warm_start are still rejected with clear errors — tracked as
-  v0.10.x follow-ups.)
+  GOSS artifacts byte-identical to v0.8.0. At v0.9.0 ship time,
+  multiclass DART and DART + warm_start were still rejected with
+  clear errors; v0.10.0 resolves DART + warm_start, and multiclass
+  DART remains a v0.10.x follow-up.)
 - NaN routing on the linear-rank predict path (now: v0.9.0 — the
   predict-time quantize helpers
   (`quantize_dense_values_linear_inplace_wide`,
