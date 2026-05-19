@@ -2646,6 +2646,43 @@ impl TrainedModel {
             ));
         }
 
+        // Multi-output leaf values section (v0.10.0+). Emitted only when at
+        // least one stump carries K-output leaves (joint multi-label
+        // trainer). One Vec<f32> per stump: [left_K_values..., right_K_values...].
+        if self
+            .stumps
+            .iter()
+            .any(|s| s.multi_output_leaf_values.is_some())
+        {
+            let n_outputs = self
+                .stumps
+                .iter()
+                .find_map(|s| s.multi_output_leaf_values.as_ref().map(|v| v.0.len()))
+                .unwrap_or(0) as u32;
+            let per_stump_leaf_values: Vec<Vec<f32>> = self
+                .stumps
+                .iter()
+                .map(|s| match s.multi_output_leaf_values.as_ref() {
+                    Some((left, right)) => {
+                        let mut packed = Vec::with_capacity(left.len() + right.len());
+                        packed.extend_from_slice(left);
+                        packed.extend_from_slice(right);
+                        packed
+                    }
+                    None => Vec::new(),
+                })
+                .collect();
+            sections.push((
+                ModelSectionKind::MultiOutputLeafValues,
+                alloygbm_core::encode_multi_output_leaf_values_payload(
+                    &alloygbm_core::MultiOutputLeafValuesPayload {
+                        n_outputs,
+                        per_stump_leaf_values,
+                    },
+                ),
+            ));
+        }
+
         serialize_model_artifact_v1(&metadata, &sections).map_err(EngineError::from)
     }
 
@@ -2794,6 +2831,40 @@ impl TrainedModel {
             }
             for (stump, w) in model.stumps.iter_mut().zip(dart_payload.weights.iter()) {
                 stump.tree_weight = *w;
+            }
+        }
+
+        // Decode optional MultiOutputLeafValues section (v0.10.0+) and attach
+        // K-output leaf values to stumps. Pre-v0.10.0 artifacts have no section.
+        if let Some(mo_payload) =
+            alloygbm_core::decode_optional_multi_output_leaf_values_section(&parsed.sections)
+                .map_err(EngineError::from)?
+        {
+            if mo_payload.per_stump_leaf_values.len() != model.stumps.len() {
+                return Err(EngineError::ContractViolation(format!(
+                    "MultiOutputLeafValues length {} != stump count {}",
+                    mo_payload.per_stump_leaf_values.len(),
+                    model.stumps.len()
+                )));
+            }
+            let k = mo_payload.n_outputs as usize;
+            for (stump, packed) in model
+                .stumps
+                .iter_mut()
+                .zip(mo_payload.per_stump_leaf_values.into_iter())
+            {
+                if packed.is_empty() {
+                    continue;
+                }
+                if packed.len() != 2 * k {
+                    return Err(EngineError::ContractViolation(format!(
+                        "MultiOutputLeafValues stump entry has {} values, expected 2 × n_outputs = {}",
+                        packed.len(),
+                        2 * k
+                    )));
+                }
+                let (left, right) = packed.split_at(k);
+                stump.multi_output_leaf_values = Some((left.to_vec(), right.to_vec()));
             }
         }
 
