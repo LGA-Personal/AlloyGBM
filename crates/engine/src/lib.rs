@@ -27,6 +27,9 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub mod dart;
+pub use dart::{DartState, apply_normalization, select_dropouts};
+
 /// Small epsilon added to leaf value denominators to prevent division by zero.
 const LEAF_EPSILON: f32 = 1e-6;
 
@@ -6558,7 +6561,7 @@ fn sampling_seed_base(seed: u64, deterministic: bool) -> u64 {
     seed ^ now_nanos
 }
 
-fn mixed_hash(mut value: u64) -> u64 {
+pub(crate) fn mixed_hash(mut value: u64) -> u64 {
     value = value.wrapping_add(0x9E37_79B9_7F4A_7C15);
     value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
