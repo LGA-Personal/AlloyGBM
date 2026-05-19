@@ -1,5 +1,79 @@
 # Changelog
 
+## 0.10.0
+
+Infrastructure release: lays the Rust-level foundation for joint
+multi-output learning and closes the v0.9.0 `DART + warm_start`
+follow-up. Default behaviour for every existing user-facing API
+(`GBMRegressor`, `GBMClassifier`, `GBMRanker`, `MultiLabelGBMRanker`)
+remains byte-identical to v0.9.0 — the new artifact section is only
+emitted when the (currently Rust-only) joint trainer produces a model.
+
+### Added
+
+- **DART + `warm_start` continuation.** `GBMRegressor`,
+  `GBMClassifier`, and `GBMRanker` now accept the combination
+  `boosting_mode="dart"` + `warm_start=True` (or `fit(..., init_model=prior_model)`).
+  `WarmStartState` gains an optional `initial_dart_tree_weights`
+  field that captures the per-stump `tree_weight` snapshot from the
+  prior fit. The engine seeds `dart_state.tree_weights` from this
+  snapshot and pre-populates the `round_start_offsets` /
+  `dart_round_counts` arrays from the warm-start tree shapes so
+  new-round dropouts can correctly subtract/replay prior trees.
+  Historical RNG-driven `dropped_per_round` is intentionally not
+  persisted; new rounds start fresh dropout bookkeeping going
+  forward, matching the natural semantics of resuming an arbitrary
+  DART continuation. The v0.9.0 rejection error is removed.
+- **K-output shared-histogram primitive** (`crates/engine/src/shared_histogram.rs`).
+  `MultiOutputHistogram` accumulates K (grad, hess) pairs per
+  (feature, bin) in one sweep. Layout:
+  `feature-major → bin-major → output-major → (grad, hess) interleaved`.
+  Includes `build_multi_output_histogram_inplace`,
+  `subtract_multi_output_histogram` (subtraction trick for K
+  outputs), and `compute_multi_output_split_gain` (sums per-output
+  Newton/XGBoost gain across K outputs). Foundation for joint
+  multi-label boosting (v0.10.1) and multiclass DART/GOSS (v0.10.1+).
+- **`MultiOutputLeafValues` artifact section** (kind index 13). New
+  optional artifact section storing per-stump K-output leaf values
+  (`Vec<f32>` of length `2 * n_outputs` per stump). `TrainedStump`
+  gains an optional `multi_output_leaf_values: Option<(Vec<f32>, Vec<f32>)>`
+  field carrying the K-vector for each child. Emitted only when a
+  joint trainer is used; scalar / linear-leaf / multiclass-softmax
+  artifacts remain byte-identical to v0.9.0.
+- **Rust-level joint multi-output trainer.**
+  `crates/engine/src/joint.rs` exposes:
+  - `JointObjective` enum (`squared_error`, `queryrmse`, `rank:pairwise`,
+    `rank:ndcg`, `rank:xendcg`) for per-output gradient dispatch.
+  - `build_joint_round(params, binned_matrix, grads_per_output, n_outputs)` —
+    one shared-tree level-wise round that uses the K-output histogram
+    primitive and emits stumps carrying K-output leaf values.
+  - `fit_joint_multi_output(params, feature_count, binned_matrix,
+    targets_per_output, group_id, per_output_objective, n_estimators)` —
+    full training loop returning a `JointTrainingSummary { baselines,
+    model, per_output_objective_names }`. Each model serializes
+    cleanly through the existing `TrainedModel::to_artifact_bytes`
+    pipeline.
+  - `JointPredictor` — compact joint-mode predictor that decodes a
+    joint artifact and exposes `predict_row` / `predict_batch`
+    returning shape `(n_outputs,)` / `(n_rows, n_outputs)`.
+  Scope is intentionally minimal for v0.10.0: level-wise growth
+  only, no MorphBoost / DRO / neutralization / leaf-wise /
+  native-categorical / GOSS / DART / warm-start on the joint path.
+
+### Deferred to v0.10.x
+
+- **Python `MultiLabelGBMRanker(training_mode="joint")` user-facing surface** —
+  the Rust infrastructure is complete; the Python wrapper is targeted
+  for v0.10.1.
+- **Multiclass softmax + DART / GOSS** — engine plumbing into the
+  K-output histogram primitive is targeted for v0.10.1+.
+- **Leaf-wise / MorphBoost / DRO / neutralization on the joint path** —
+  feature parity with the single-output trainer is targeted for v0.10.x.
+
+### Resolved limitations
+
+- v0.9.0 "DART + warm_start not yet supported" → resolved.
+
 ## 0.9.0
 
 Minor feature release: closes the v0.8.0 DART placeholder (Limitation 2)

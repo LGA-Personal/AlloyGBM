@@ -4,6 +4,41 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
+The `0.10.0` release is an **infrastructure release**: it lays the
+Rust-level foundation for joint multi-output learning and closes the
+v0.9.0 `DART + warm_start` follow-up. The new
+`MultiOutputHistogram` primitive (`crates/engine/src/shared_histogram.rs`),
+`MultiOutputLeafValues` artifact section (kind=13), and the joint
+trainer in `crates/engine/src/joint.rs` (`fit_joint_multi_output` +
+`JointPredictor`) are all in place. Default user-facing behaviour is
+byte-identical to v0.9.0 — joint mode is currently Rust-only and the
+new artifact section is only emitted when the joint trainer is used.
+DART + `warm_start` is now supported on `GBMRegressor`, binary
+`GBMClassifier`, and `GBMRanker`: `WarmStartState` carries an
+optional `initial_dart_tree_weights` snapshot and the engine seeds
+`dart_state.tree_weights` from it. Deferred to v0.10.x: Python
+`MultiLabelGBMRanker(training_mode="joint")` surface, multiclass +
+DART/GOSS, and feature parity (MorphBoost, DRO, neutralization,
+leaf-wise) on the joint path.
+
+### v0.10.x follow-ups
+
+- **v0.10.1**: Python `MultiLabelGBMRanker(training_mode="joint")`
+  user-facing surface wired through to the v0.10.0 Rust joint trainer.
+  Includes new PyO3 entry point + Python wrapper integration
+  (`__init__`, `fit`, `predict`, `save_model`, pickle round-trip,
+  `get_params` / `set_params` / `__repr__`).
+- **v0.10.1+**: Multiclass softmax + DART. Engine plumbing inside
+  `fit_multiclass_iterations_impl` to consume the K-output histogram
+  primitive for per-class gradient bookkeeping during DART dropouts.
+- **v0.10.1+**: Multiclass softmax + GOSS. Per-row score
+  `s_i = Σₖ |g_{i,k}|` (LightGBM convention) drives the sampling mask
+  applied to all K class-gradient vectors.
+- **v0.10.x**: Joint-path feature parity with the single-output
+  trainer — leaf-wise growth, MorphBoost, DRO, neutralization,
+  native-categorical splits, GOSS, DART, warm-start, interaction
+  constraints.
+
 The `0.9.0` release closes the v0.8.0 DART placeholder (Limitation 2)
 and resolves the linear-rank predict-path NaN routing bug
 (Limitation 4 from v0.8.0).  `boosting_mode="dart"` is fully wired

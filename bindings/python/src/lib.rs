@@ -2948,11 +2948,24 @@ fn train_regression_artifact_with_summary_dense_impl(
                 .as_ref()
                 .filter(|m| !m.ema_stats.is_empty())
                 .map(|m| m.ema_stats.clone());
+            // v0.10.0+: when the prior fit used DART, capture per-stump
+            // tree_weight so the continuation can seed dart_state.tree_weights.
+            // Detected by any stump carrying a non-default weight.
+            let initial_dart_tree_weights = if init_model
+                .stumps
+                .iter()
+                .any(|s| (s.tree_weight - 1.0).abs() > f32::EPSILON)
+            {
+                Some(init_model.stumps.iter().map(|s| s.tree_weight).collect())
+            } else {
+                None
+            };
             Some(WarmStartState {
                 baseline_prediction: init_model.baseline_prediction,
                 stumps: init_model.stumps,
                 initial_rounds_completed: initial_rounds,
                 initial_ema_stats,
+                initial_dart_tree_weights,
             })
         } else {
             None

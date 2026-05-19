@@ -30,6 +30,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub mod dart;
 pub use dart::{DartState, apply_normalization, select_dropouts};
 
+pub mod shared_histogram;
+pub use shared_histogram::{
+    HistComponent, MultiOutputHistogram, build_multi_output_histogram_inplace,
+    compute_multi_output_split_gain, subtract_multi_output_histogram,
+};
+
+pub mod joint;
+pub use joint::{JointObjective, JointRoundResult, build_joint_round};
+
 /// Small epsilon added to leaf value denominators to prevent division by zero.
 const LEAF_EPSILON: f32 = 1e-6;
 
@@ -1924,12 +1933,21 @@ pub struct TrainedStump {
     /// numerics bit-for-bit). DART rounds emit stumps with `tree_weight`
     /// determined by the dropout-normalization step — see [`crate::dart`].
     pub tree_weight: f32,
+    /// v0.10.0+: K-output leaf values for the joint multi-label trainer.
+    /// `Some((left_k_values, right_k_values))` where both Vec<f32> have
+    /// length `n_outputs`. `None` for scalar / linear-leaf models — in
+    /// that case `left_leaf_value` / `right_leaf_value` are authoritative.
+    /// When `Some`, `left_leaf_value` / `right_leaf_value` still carry a
+    /// `LeafValue::Scalar(_)` placeholder (typically `0.0`) so the
+    /// existing scalar code paths remain well-typed.
+    pub multi_output_leaf_values: Option<(Vec<f32>, Vec<f32>)>,
 }
 
 impl TrainedStump {
-    /// Default constructor that sets `tree_weight = 1.0`. Use this anywhere
-    /// the boosting mode is known to be Standard or GOSS, or for tests that
-    /// don't exercise DART semantics.
+    /// Default constructor that sets `tree_weight = 1.0` and
+    /// `multi_output_leaf_values = None`. Use this anywhere the boosting mode
+    /// is known to be Standard or GOSS, or for tests that don't exercise
+    /// DART or joint multi-output semantics.
     pub fn new_unweighted(
         split: SplitCandidate,
         left_leaf_value: LeafValue,
@@ -1940,6 +1958,7 @@ impl TrainedStump {
             left_leaf_value,
             right_leaf_value,
             tree_weight: 1.0,
+            multi_output_leaf_values: None,
         }
     }
 }
@@ -2231,6 +2250,14 @@ pub struct WarmStartState {
     /// resumed `N + M`-round model matches a fresh `N + M`-round fit.
     /// Empty / missing → EMA starts cold (legacy v0.7.1/v0.7.2 behaviour).
     pub initial_ema_stats: Option<Vec<GradientEmaStats>>,
+    /// v0.10.0+: When the prior fit used DART, the per-stump `tree_weight`
+    /// array (length = `stumps.len()`). `None` for non-DART warm-starts.
+    /// On a DART warm-start continuation, the engine seeds
+    /// `dart_state.tree_weights` from this snapshot so prior-tree dropouts
+    /// during new rounds use the correct accumulated weights. Historical
+    /// `dropped_per_round` arrays do *not* round-trip — new rounds start
+    /// fresh dropout bookkeeping going forward.
+    pub initial_dart_tree_weights: Option<Vec<f32>>,
 }
 
 /// State needed to continue multiclass training from a prior model.
@@ -2627,6 +2654,43 @@ impl TrainedModel {
             ));
         }
 
+        // Multi-output leaf values section (v0.10.0+). Emitted only when at
+        // least one stump carries K-output leaves (joint multi-label
+        // trainer). One Vec<f32> per stump: [left_K_values..., right_K_values...].
+        if self
+            .stumps
+            .iter()
+            .any(|s| s.multi_output_leaf_values.is_some())
+        {
+            let n_outputs = self
+                .stumps
+                .iter()
+                .find_map(|s| s.multi_output_leaf_values.as_ref().map(|v| v.0.len()))
+                .unwrap_or(0) as u32;
+            let per_stump_leaf_values: Vec<Vec<f32>> = self
+                .stumps
+                .iter()
+                .map(|s| match s.multi_output_leaf_values.as_ref() {
+                    Some((left, right)) => {
+                        let mut packed = Vec::with_capacity(left.len() + right.len());
+                        packed.extend_from_slice(left);
+                        packed.extend_from_slice(right);
+                        packed
+                    }
+                    None => Vec::new(),
+                })
+                .collect();
+            sections.push((
+                ModelSectionKind::MultiOutputLeafValues,
+                alloygbm_core::encode_multi_output_leaf_values_payload(
+                    &alloygbm_core::MultiOutputLeafValuesPayload {
+                        n_outputs,
+                        per_stump_leaf_values,
+                    },
+                ),
+            ));
+        }
+
         serialize_model_artifact_v1(&metadata, &sections).map_err(EngineError::from)
     }
 
@@ -2775,6 +2839,40 @@ impl TrainedModel {
             }
             for (stump, w) in model.stumps.iter_mut().zip(dart_payload.weights.iter()) {
                 stump.tree_weight = *w;
+            }
+        }
+
+        // Decode optional MultiOutputLeafValues section (v0.10.0+) and attach
+        // K-output leaf values to stumps. Pre-v0.10.0 artifacts have no section.
+        if let Some(mo_payload) =
+            alloygbm_core::decode_optional_multi_output_leaf_values_section(&parsed.sections)
+                .map_err(EngineError::from)?
+        {
+            if mo_payload.per_stump_leaf_values.len() != model.stumps.len() {
+                return Err(EngineError::ContractViolation(format!(
+                    "MultiOutputLeafValues length {} != stump count {}",
+                    mo_payload.per_stump_leaf_values.len(),
+                    model.stumps.len()
+                )));
+            }
+            let k = mo_payload.n_outputs as usize;
+            for (stump, packed) in model
+                .stumps
+                .iter_mut()
+                .zip(mo_payload.per_stump_leaf_values.into_iter())
+            {
+                if packed.is_empty() {
+                    continue;
+                }
+                if packed.len() != 2 * k {
+                    return Err(EngineError::ContractViolation(format!(
+                        "MultiOutputLeafValues stump entry has {} values, expected 2 × n_outputs = {}",
+                        packed.len(),
+                        2 * k
+                    )));
+                }
+                let (left, right) = packed.split_at(k);
+                stump.multi_output_leaf_values = Some((left.to_vec(), right.to_vec()));
             }
         }
 
@@ -4076,14 +4174,13 @@ impl Trainer {
             } => Some((drop_rate, max_drop, normalize_type, sample_type)),
             _ => None,
         };
-        if dart_params.is_some() && execution.warm_start.is_some() {
-            return Err(EngineError::InvalidConfig(
-                "boosting_mode='dart' + warm_start is not yet supported \
-                 (tracked as a v0.10.x follow-up). Use boosting_mode='standard' \
-                 or boosting_mode='goss' for warm-started fits."
-                    .to_string(),
-            ));
-        }
+        // v0.10.0: DART + warm_start is now supported. See the dart_state
+        // seeding logic below — `dart_state.tree_weights` is initialized from
+        // `warm_start.initial_dart_tree_weights` when present, falling back
+        // to all-1.0s. Historical `dropped_per_round` is not persisted; new
+        // rounds start fresh dropout bookkeeping going forward, which is
+        // the natural semantics for continuation (RNG-driven dropout
+        // history cannot be replayed from the prior fit).
         validate_training_alignment(dataset, binned_matrix)?;
         if objective.requires_group_id() && dataset.group_id.is_none() {
             return Err(EngineError::ContractViolation(
@@ -4149,17 +4246,27 @@ impl Trainer {
         // trees.  `warm_ema_stats` captures the MorphBoost EMA snapshot
         // for the v0.7.3 warm-start-equivalence fix (consumed below
         // when `MorphState::new` builds the fresh EMA).
-        let (baseline_prediction, initial_stumps, round_index_offset, warm_ema_stats) =
-            if let Some(warm_start) = execution.warm_start.take() {
-                (
-                    warm_start.baseline_prediction,
-                    warm_start.stumps,
-                    warm_start.initial_rounds_completed,
-                    warm_start.initial_ema_stats,
-                )
-            } else {
-                (fit_contract.baseline_prediction, Vec::new(), 0, None)
-            };
+        // v0.10.0 review fix (Comment 1): also capture
+        // `initial_dart_tree_weights` here BEFORE `take()` consumes the
+        // warm_start; the dart_state seeding step below reads this local
+        // variable rather than re-querying `execution.warm_start`.
+        let (
+            baseline_prediction,
+            initial_stumps,
+            round_index_offset,
+            warm_ema_stats,
+            initial_dart_tree_weights,
+        ) = if let Some(warm_start) = execution.warm_start.take() {
+            (
+                warm_start.baseline_prediction,
+                warm_start.stumps,
+                warm_start.initial_rounds_completed,
+                warm_start.initial_ema_stats,
+                warm_start.initial_dart_tree_weights,
+            )
+        } else {
+            (fit_contract.baseline_prediction, Vec::new(), 0, None, None)
+        };
         let raw_features_opt = Some((
             &active_dataset.matrix.values as &[f32],
             active_dataset.matrix.feature_count,
@@ -4193,7 +4300,35 @@ impl Trainer {
         };
         let mut stumps = initial_stumps;
         let initial_stump_count = stumps.len();
-        let mut stumps_per_completed_round = Vec::new();
+        // `stumps_per_completed_round` stays NEW-ROUND-ONLY (its original
+        // semantics): downstream consumers (validation early-stopping
+        // truncation via `retained_stump_count_for_rounds`, leaf refinement,
+        // DART replay truncation) index into it with a `best_round` value
+        // relative to the new fit and assume entry `i` holds the i-th
+        // newly-committed round's stump count.
+        let mut stumps_per_completed_round: Vec<usize> = Vec::new();
+        // Separate vector for warm-start prior-round counts. v0.10.0 review
+        // follow-up: this used to live in `stumps_per_completed_round`, but
+        // that broke `best_round`-indexed truncation when warm_start combined
+        // with eval_set early stopping (kept counts from old rounds rather
+        // than new ones). Now kept as its own local consumed only by the
+        // DART-state seeding + round_start_offsets/dart_round_counts
+        // pre-population blocks below.
+        let mut initial_stumps_per_round: Vec<usize> = Vec::new();
+        if !stumps.is_empty() {
+            let mut current_tree_id = decode_tree_node_id(stumps[0].split.node_id).0;
+            let mut current_count = 0usize;
+            for stump in &stumps {
+                let tree_id = decode_tree_node_id(stump.split.node_id).0;
+                if tree_id != current_tree_id {
+                    initial_stumps_per_round.push(current_count);
+                    current_tree_id = tree_id;
+                    current_count = 0;
+                }
+                current_count += 1;
+            }
+            initial_stumps_per_round.push(current_count);
+        }
         let mut rounds_completed = 0_usize;
         let effective_round_cap = controls.rounds;
         let mut stop_reason = IterationStopReason::CompletedRequestedRounds;
@@ -4252,11 +4387,36 @@ impl Trainer {
         // `tree_weight = 1.0`.
         let mut dart_state = DartState::default();
         if dart_params.is_some() {
-            // Each previously-committed tree (warm-start trees, if any —
-            // we already rejected that combo above, so this is always
-            // empty for now) starts at weight 1.0.
-            let initial_tree_count = stumps_per_completed_round.len();
-            dart_state.tree_weights = vec![1.0; initial_tree_count];
+            // v0.10.0: When continuing a DART fit, seed tree_weights from the
+            // warm-start snapshot captured above (BEFORE the take()). Length
+            // must equal `stumps.len()` (one weight per warm-start stump).
+            // Falls back to all-1.0s when the prior fit did not use DART
+            // or no snapshot was provided. Uses `initial_stumps_per_round`
+            // (warm-start prior-round counts) — distinct from
+            // `stumps_per_completed_round` (new-round counts) so downstream
+            // best_round-indexed truncation continues to work correctly.
+            let initial_tree_count = initial_stumps_per_round.len();
+            if let Some(saved_weights) = initial_dart_tree_weights.as_ref() {
+                // Caller supplies one weight per stump; we need one weight
+                // per tree. Take the first weight of each tree (all stumps
+                // in a tree share the same tree_weight after DART
+                // normalization, so this is well-defined).
+                let mut per_tree = Vec::with_capacity(initial_tree_count);
+                let mut stump_offset = 0usize;
+                for &count in &initial_stumps_per_round {
+                    let weight = saved_weights.get(stump_offset).copied().unwrap_or(1.0);
+                    per_tree.push(weight);
+                    stump_offset += count;
+                }
+                dart_state.tree_weights = per_tree;
+            } else {
+                dart_state.tree_weights = vec![1.0; initial_tree_count];
+            }
+            // Historical `dropped_per_round` is initialized empty per warm
+            // round — RNG-driven dropout history cannot be replayed.
+            for _ in 0..initial_tree_count {
+                dart_state.dropped_per_round.push(Vec::new());
+            }
         }
         // DART-only parallel arrays indexed by `effective_round_index`
         // (= `tree_id` encoded in stump.node_id). Both grow together at
@@ -4274,6 +4434,21 @@ impl Trainer {
         // `retained_stump_count_for_rounds`.
         let mut round_start_offsets: Vec<usize> = Vec::new();
         let mut dart_round_counts: Vec<usize> = Vec::new();
+
+        // v0.10.0: DART + warm_start — pre-populate round_start_offsets +
+        // dart_round_counts from the warm-start tree shapes so the dropout
+        // step can correctly slice into `stumps` for each prior tree. Stays
+        // a no-op for non-DART or cold fits. Uses `initial_stumps_per_round`
+        // (warm-start prior-round counts) so `stumps_per_completed_round`
+        // can stay new-round-only for downstream best_round indexing.
+        if dart_params.is_some() {
+            let mut offset = 0usize;
+            for &count in &initial_stumps_per_round {
+                round_start_offsets.push(offset);
+                dart_round_counts.push(count);
+                offset += count;
+            }
+        }
 
         // Build MorphState for the duration of training when morph_config is set.
         // `total_iterations` corresponds to the round cap (including any warm-start
@@ -6084,6 +6259,7 @@ fn build_tree_level_wise<B: BackendOps>(
                 left_leaf_value: final_left_leaf,
                 right_leaf_value: final_right_leaf,
                 tree_weight: 1.0,
+                multi_output_leaf_values: None,
             });
         }
         active_nodes = next_nodes;
@@ -6459,6 +6635,7 @@ fn build_tree_leaf_wise<B: BackendOps>(
             left_leaf_value: final_left_leaf,
             right_leaf_value: final_right_leaf,
             tree_weight: 1.0,
+            multi_output_leaf_values: None,
         });
         leaves_used += 1;
 
@@ -7313,8 +7490,14 @@ fn apply_round_stumps_tree_walk(
             };
             let feature_index = stump.split.feature_index as usize;
             let bin = binned_matrix.row_bin(row_base + feature_index);
+            // v0.10.0 review fix (Comment 1): multiply leaf contribution by
+            // `stump.tree_weight` so warm-start prior predictions reflect
+            // saved DART weights. For non-DART stumps tree_weight == 1.0,
+            // so this is a no-op and preserves byte-identical numerics for
+            // every existing caller (Standard/GOSS/Morph/DRO/linear).
+            let tree_weight = stump.tree_weight;
             if bin <= stump.split.threshold_bin {
-                *prediction += if let Some((raw, fc)) = raw_features
+                let leaf_value = if let Some((raw, fc)) = raw_features
                     && !raw.is_empty()
                 {
                     let row_offset = row_index * fc;
@@ -7322,9 +7505,10 @@ fn apply_round_stumps_tree_walk(
                 } else {
                     stump.left_leaf_value.as_scalar()
                 };
+                *prediction += tree_weight * leaf_value;
                 local_id = local_id * 2 + 1; // left child
             } else {
-                *prediction += if let Some((raw, fc)) = raw_features
+                let leaf_value = if let Some((raw, fc)) = raw_features
                     && !raw.is_empty()
                 {
                     let row_offset = row_index * fc;
@@ -7332,6 +7516,7 @@ fn apply_round_stumps_tree_walk(
                 } else {
                     stump.right_leaf_value.as_scalar()
                 };
+                *prediction += tree_weight * leaf_value;
                 local_id = local_id * 2 + 2; // right child
             }
         }
@@ -8180,6 +8365,7 @@ fn decode_trained_model_payload(bytes: &[u8]) -> EngineResult<TrainedModel> {
             left_leaf_value: LeafValue::Scalar(left_leaf_value),
             right_leaf_value: LeafValue::Scalar(right_leaf_value),
             tree_weight: 1.0,
+            multi_output_leaf_values: None,
         });
     }
 
@@ -8666,6 +8852,7 @@ impl MultiClassTrainedModel {
                     left_leaf_value: LeafValue::Scalar(left_leaf_value),
                     right_leaf_value: LeafValue::Scalar(right_leaf_value),
                     tree_weight: 1.0,
+                    multi_output_leaf_values: None,
                 });
                 offset += STUMP_SIZE;
             }
@@ -9516,6 +9703,7 @@ mod tests {
             stumps: Vec::new(),
             initial_rounds_completed: 1,
             initial_ema_stats: None,
+            initial_dart_tree_weights: None,
         };
         let controls = IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).unwrap();
         let result = Trainer::new(params).unwrap().fit_iterations_warm_start(
@@ -10065,10 +10253,11 @@ mod tests {
     }
 
     #[test]
-    fn dart_boosting_mode_rejects_warm_start() {
-        // DART + warm_start is rejected with a clear error
-        // (v0.10.x follow-up; would require persisting tree_weights
-        // and dropped_per_round in WarmStartState).
+    fn dart_boosting_mode_supports_warm_start() {
+        // v0.10.0+: DART + warm_start is now supported. The continuation
+        // seeds dart_state.tree_weights from
+        // warm_start.initial_dart_tree_weights and continues new-round
+        // dropouts forward.
         let dataset = sample_dataset();
         let binned = sample_binned_matrix_for_dataset(&dataset);
         let dart_params = TrainParams {
@@ -10103,9 +10292,10 @@ mod tests {
             stumps: cold_model.stumps.clone(),
             initial_rounds_completed: 2,
             initial_ema_stats: None,
+            initial_dart_tree_weights: None,
         };
         let dart_trainer = Trainer::new(dart_params).expect("DART params pass validation");
-        let err = dart_trainer
+        let continued = dart_trainer
             .fit_iterations_warm_start(
                 &dataset,
                 &binned,
@@ -10114,11 +10304,119 @@ mod tests {
                 IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).unwrap(),
                 warm_start,
             )
-            .expect_err("DART + warm_start must be rejected");
-        assert!(matches!(err, EngineError::InvalidConfig(_)));
+            .expect("DART + warm_start must now succeed");
+        // The continuation should include the warm-start stumps plus the new
+        // DART rounds.
         assert!(
-            err.to_string().contains("dart") && err.to_string().contains("warm_start"),
-            "unexpected error: {err}"
+            continued.model.stumps.len() >= cold_model.stumps.len(),
+            "continuation lost warm-start stumps"
+        );
+    }
+
+    #[test]
+    fn warm_start_early_stopping_truncates_against_new_round_counts() {
+        // v0.10.0 review follow-up: when a warm-start continuation hits
+        // validation early stopping, the truncation must use NEW-round
+        // stump counts (stumps_per_completed_round is new-round-only), not
+        // accidentally consume prior-round counts. An earlier draft of the
+        // DART warm-start fix put prior-round counts at the front of
+        // `stumps_per_completed_round`, which caused `best_round`-indexed
+        // truncation to retain stump counts from prior rounds instead of
+        // the actually-best new round.
+        //
+        // Reproduce the symptom: train a base model, then continue with
+        // validation early stopping. The retained model size must equal
+        // `initial_stump_count + sum_of_first_N_new_round_counts` where N
+        // is the number of new rounds the early-stopping policy kept. We
+        // verify that the new-round stump tail (>= initial_stump_count) is
+        // present and that the model still validates / predicts coherently.
+        let dataset = sample_dataset();
+        let binned = sample_binned_matrix_for_dataset(&dataset);
+
+        // Cold baseline fit.
+        let cold_params = TrainParams::default();
+        let cold_trainer = Trainer::new(cold_params).unwrap();
+        let cold_model = cold_trainer
+            .fit_iterations(&dataset, &binned, &MockBackend, &SquaredErrorObjective, 3)
+            .expect("cold fit");
+        let cold_stump_count = cold_model.stumps.len();
+        assert!(
+            cold_stump_count >= 3,
+            "test fixture: cold model should have >=3 stumps (one per round at depth=1), got {cold_stump_count}"
+        );
+
+        let warm_start = WarmStartState {
+            baseline_prediction: cold_model.baseline_prediction,
+            stumps: cold_model.stumps.clone(),
+            initial_rounds_completed: 3,
+            initial_ema_stats: None,
+            initial_dart_tree_weights: None,
+        };
+
+        // Continue with eval_set + early_stopping_rounds. Use the same data
+        // as validation so the loss curve is monotonic — early stopping
+        // shouldn't fire purely on validation degradation, but if it does
+        // the truncation must remain coherent. The key assertion is that
+        // the retained model includes the warm-start stumps PLUS at least
+        // the first new-round commit, NOT a truncation that accidentally
+        // consumed prior-round counts to compute kept_stumps.
+        let validation_ref = ValidationDatasetRef {
+            dataset: &dataset,
+            binned_matrix: &binned,
+        };
+        let warm_trainer = Trainer::new(TrainParams::default()).unwrap();
+        let controls = IterationControls::new(
+            /*rounds=*/ 5,
+            /*min_split_gain=*/ 0.0,
+            /*min_rows_per_leaf=*/ 1,
+            /*lambda_l2=*/ 0.0,
+            /*max_abs_leaf=*/ 1_000_000.0,
+            /*min_validation_improvement=*/ 0.0,
+            /*early_stopping_rounds=*/ 2,
+        )
+        .unwrap();
+        let summary = warm_trainer
+            .fit_iterations_warm_start_with_validation(
+                &dataset,
+                &binned,
+                validation_ref,
+                &MockBackend,
+                &SquaredErrorObjective,
+                controls,
+                warm_start,
+            )
+            .expect("warm-start + validation early stopping must succeed");
+
+        // The retained stump tail must include the warm-start stumps as a
+        // prefix. (If `stumps_per_completed_round` had been polluted with
+        // prior-round counts, the post-best-iteration truncation could
+        // have dropped warm-start stumps or kept incoherent counts.)
+        assert!(
+            summary.model.stumps.len() >= cold_stump_count,
+            "warm-start prefix lost during early-stop truncation: \
+             retained {} stumps but warm-start brought in {}",
+            summary.model.stumps.len(),
+            cold_stump_count
+        );
+        for (i, (a, b)) in summary.model.stumps[..cold_stump_count]
+            .iter()
+            .zip(cold_model.stumps.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                a.split.node_id, b.split.node_id,
+                "warm-start stump {i} node_id was perturbed by truncation"
+            );
+        }
+
+        // Sanity: the final loss must be finite. A truncation that walked
+        // off the end of `stumps_per_completed_round` or kept the wrong
+        // number of new stumps would still produce a TrainedModel (so the
+        // call wouldn't panic) but its loss could diverge.
+        assert!(
+            summary.final_loss.is_finite(),
+            "final_loss not finite: {}",
+            summary.final_loss
         );
     }
 
@@ -10208,6 +10506,7 @@ mod tests {
             left_leaf_value: LeafValue::Scalar(0.0),
             right_leaf_value: LeafValue::Scalar(0.0),
             tree_weight: 1.0,
+            multi_output_leaf_values: None,
         }];
         let matrix = sample_binned_matrix();
         let targets = sample_dataset().targets;
@@ -10938,6 +11237,7 @@ mod tests {
                     left_leaf_value: LeafValue::Scalar(0.0),
                     right_leaf_value: LeafValue::Scalar(1.0),
                     tree_weight: 1.0,
+                    multi_output_leaf_values: None,
                 },
                 TrainedStump {
                     split: SplitCandidate {
@@ -10964,6 +11264,7 @@ mod tests {
                     left_leaf_value: LeafValue::Scalar(10.0),
                     right_leaf_value: LeafValue::Scalar(20.0),
                     tree_weight: 1.0,
+                    multi_output_leaf_values: None,
                 },
             ],
             categorical_state: None,
@@ -11958,6 +12259,7 @@ mod tests {
                     left_leaf_value: LeafValue::Scalar(-0.1),
                     right_leaf_value: LeafValue::Scalar(0.1),
                     tree_weight: 1.0,
+                    multi_output_leaf_values: None,
                 }],
                 vec![TrainedStump {
                     split: SplitCandidate {
@@ -11984,6 +12286,7 @@ mod tests {
                     left_leaf_value: LeafValue::Scalar(0.2),
                     right_leaf_value: LeafValue::Scalar(-0.05),
                     tree_weight: 1.0,
+                    multi_output_leaf_values: None,
                 }],
                 vec![], // class 2 has no stumps
             ],
@@ -12043,6 +12346,7 @@ mod tests {
                         left_leaf_value: LeafValue::Scalar(-0.1),
                         right_leaf_value: LeafValue::Scalar(0.1),
                         tree_weight: 1.0,
+                        multi_output_leaf_values: None,
                     },
                     TrainedStump {
                         split: SplitCandidate {
@@ -12069,6 +12373,7 @@ mod tests {
                         left_leaf_value: LeafValue::Scalar(-0.05),
                         right_leaf_value: LeafValue::Scalar(0.05),
                         tree_weight: 1.0,
+                        multi_output_leaf_values: None,
                     },
                 ],
                 // Class 1: same structure
@@ -12097,6 +12402,7 @@ mod tests {
                     left_leaf_value: LeafValue::Scalar(0.1),
                     right_leaf_value: LeafValue::Scalar(-0.1),
                     tree_weight: 1.0,
+                    multi_output_leaf_values: None,
                 }],
             ],
             categorical_state: None,
@@ -12351,6 +12657,7 @@ mod tests {
                     left_leaf_value: LeafValue::Scalar(-0.1),
                     right_leaf_value: LeafValue::Scalar(0.1),
                     tree_weight: 1.0,
+                    multi_output_leaf_values: None,
                 },
                 TrainedStump {
                     split: SplitCandidate {
@@ -12377,6 +12684,7 @@ mod tests {
                     left_leaf_value: LeafValue::Scalar(0.05),
                     right_leaf_value: LeafValue::Scalar(-0.05),
                     tree_weight: 1.0,
+                    multi_output_leaf_values: None,
                 },
             ],
             categorical_state: None,
@@ -12447,6 +12755,7 @@ mod tests {
                 left_leaf_value: LeafValue::Scalar(-0.2),
                 right_leaf_value: LeafValue::Scalar(0.2),
                 tree_weight: 1.0,
+                multi_output_leaf_values: None,
             }],
             categorical_state: None,
             node_debug_stats: None,
@@ -12754,6 +13063,47 @@ mod tests {
             assert!(d.projected_gradient_l2_norm.is_none());
             assert!(d.neutralization_effectiveness.is_none());
         }
+    }
+
+    #[test]
+    fn trained_stump_carries_multi_output_leaf_values_for_joint_trainer() {
+        // Construct a stump with sensible defaults via new_unweighted.
+        let stump = TrainedStump::new_unweighted(
+            SplitCandidate {
+                node_id: 0,
+                feature_index: 0,
+                threshold_bin: 0,
+                gain: 0.0,
+                default_left: false,
+                is_categorical: false,
+                categorical_bitset: None,
+                left_stats: NodeStats {
+                    grad_sum: 0.0,
+                    hess_sum: 0.0,
+                    grad_sq_sum: 0.0,
+                    row_count: 0,
+                },
+                right_stats: NodeStats {
+                    grad_sum: 0.0,
+                    hess_sum: 0.0,
+                    grad_sq_sum: 0.0,
+                    row_count: 0,
+                },
+            },
+            LeafValue::Scalar(0.0),
+            LeafValue::Scalar(0.0),
+        );
+        // Default for scalar / linear paths.
+        assert!(stump.multi_output_leaf_values.is_none());
+
+        // Joint multi-output stump: 2 outputs, distinct values per child.
+        let mut stump = stump;
+        stump.multi_output_leaf_values = Some((vec![1.0_f32, 2.0], vec![3.0, 4.0]));
+        let (left_k, right_k) = stump.multi_output_leaf_values.as_ref().unwrap();
+        assert_eq!(left_k.len(), 2);
+        assert_eq!(right_k.len(), 2);
+        assert_eq!(left_k[1], 2.0);
+        assert_eq!(right_k[0], 3.0);
     }
 }
 

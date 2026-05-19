@@ -1,7 +1,58 @@
 Release and platform policy
 ===========================
 
-AlloyGBM ``0.9.0`` release notes and platform policy.
+AlloyGBM ``0.10.0`` release notes and platform policy.
+
+What's new in 0.10.0
+--------------------
+
+Infrastructure release: lays the Rust-level foundation for joint
+multi-output learning and closes the v0.9.0 ``DART + warm_start``
+follow-up. Default behaviour for every existing user-facing API
+(``GBMRegressor``, ``GBMClassifier``, ``GBMRanker``,
+``MultiLabelGBMRanker``) remains byte-identical to v0.9.0 — the new
+``MultiOutputLeafValues`` artifact section is only emitted when the
+(currently Rust-only) joint trainer produces a model.
+
+**DART + warm_start continuation:**
+
+- ``GBMRegressor``, ``GBMClassifier``, and ``GBMRanker`` now accept
+  ``boosting_mode="dart"`` + ``warm_start=True`` (or
+  ``fit(..., init_model=prior_model)``). The v0.9.0 rejection error
+  is removed.
+- ``WarmStartState`` gains an optional ``initial_dart_tree_weights``
+  field that captures the per-stump ``tree_weight`` snapshot from the
+  prior fit. The engine seeds ``dart_state.tree_weights`` from this
+  snapshot and pre-populates the ``round_start_offsets`` /
+  ``dart_round_counts`` arrays from the warm-start tree shapes.
+- Historical RNG-driven ``dropped_per_round`` is intentionally not
+  persisted; new rounds start fresh dropout bookkeeping going forward.
+
+**Joint multi-output infrastructure (Rust):**
+
+- ``MultiOutputHistogram`` (``crates/engine/src/shared_histogram.rs``)
+  accumulates K (grad, hess) pairs per (feature, bin) in one sweep,
+  with subtraction trick and multi-output split-gain helpers.
+- ``MultiOutputLeafValues`` artifact section (kind index 13) stores
+  per-stump K-output leaf values. ``TrainedStump`` gains optional
+  ``multi_output_leaf_values: Option<(Vec<f32>, Vec<f32>)>``.
+- Rust-level joint trainer (``crates/engine/src/joint.rs``):
+  ``fit_joint_multi_output`` runs the full training loop with K
+  per-output objectives (``squared_error``, ``queryrmse``,
+  ``rank:pairwise``, ``rank:ndcg``, ``rank:xendcg``); ``JointPredictor``
+  decodes the artifact and predicts K outputs per row.
+- Scope intentionally minimal for v0.10.0: level-wise growth only,
+  no MorphBoost / DRO / neutralization / leaf-wise / native-categorical
+  / GOSS / DART / warm-start on the joint path.
+
+**Deferred to v0.10.x:**
+
+- Python ``MultiLabelGBMRanker(training_mode="joint")`` user-facing
+  surface (Rust infrastructure complete; targeted for v0.10.1).
+- Multiclass softmax + DART / GOSS (engine plumbing into the K-output
+  histogram primitive is targeted for v0.10.1+).
+- Leaf-wise / MorphBoost / DRO / neutralization on the joint path
+  (feature parity with the single-output trainer is targeted for v0.10.x).
 
 What's new in 0.9.0
 -------------------
