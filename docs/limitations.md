@@ -1,6 +1,6 @@
 # AlloyGBM Current Limitations
 
-Last updated for v0.9.0.
+Last updated for v0.10.0.
 
 ## Remaining Limitations
 
@@ -10,28 +10,61 @@ The `BackendOps` trait is designed for hardware abstraction, but only
 `CpuBackend` exists. GPU/accelerator support is architecturally planned but
 not implemented.
 
-### 2. Multi-Label Ranking — Independent Per-Label Trees
+### 2. Multi-Label Ranking — Joint mode lacks Python surface
 
-As of v0.7.1, ``MultiLabelGBMRanker`` exposes a unified multi-output
-ranking API: ``y`` is shaped ``(n_rows, n_labels)`` and ``predict``
-returns scores with the same column layout.  Internally, the wrapper
-trains one independent :class:`GBMRanker` per label, sharing the same
-``group`` (and optional ``factor_exposures``) so the per-label fits
-remain comparable.  This makes the implementation a thin orchestration
-layer that reuses every existing :class:`GBMRanker` feature
-(warm-start, neutralization, MorphBoost, PL leaves, DRO, interaction
-constraints).
+As of v0.10.0, the K-output shared-histogram primitive
+(`crates/engine/src/shared_histogram.rs`), the `MultiOutputLeafValues`
+artifact section (kind index 13), and the Rust-level joint trainer
+(`crates/engine/src/joint.rs`: `fit_joint_multi_output` +
+`JointPredictor`) are all in place. `TrainedStump` carries an
+optional `multi_output_leaf_values: Option<(Vec<f32>, Vec<f32>)>`
+field for K-output leaves.
 
-Numerically the wrapper is equivalent to training each label
-separately.  Joint shared-tree multi-label boosting — where a single
-ensemble updates all label predictions simultaneously via shared splits
-— would let correlated labels share split information across trees and
-typically reduces total model size for related tasks.  **Targeted at
-v0.10.0**, paired with the K-output shared-histogram engine primitive
-where the ``MulticlassSoftmaxObjective``-style K-tree-per-round engine
-plumbing for ranking objectives has a real performance story.
+What's still pending is the **Python user-facing surface**:
+`MultiLabelGBMRanker(training_mode="joint")` currently still routes
+to the independent-per-label fallback (which already supplies every
+existing per-label feature: warm-start, neutralization, MorphBoost,
+PL leaves, DRO, interaction constraints). Wiring the Rust joint
+trainer through to the Python wrapper (new PyO3 entry point + Python
+`__init__` / `fit` / `predict` integration) is targeted for **v0.10.1**.
+
+### 3. Multiclass softmax + DART / GOSS
+
+Multiclass classification (`GBMClassifier` with ≥3 classes) still
+rejects `boosting_mode="dart"` and `boosting_mode="goss"` at the
+Python layer. The engine's multiclass training path needs to consume
+the new K-output histogram primitive for per-class gradient
+bookkeeping (DART dropout-restore on K predictions; GOSS row scoring
+with `sum_k |g_k|`). Targeted at **v0.10.1+**.
+
+### 4. Joint-path feature parity (Rust-level)
+
+The v0.10.0 joint trainer is intentionally minimal:
+
+- Level-wise tree growth only (no leaf-wise / best-first).
+- No MorphBoost, no DRO, no neutralization, no native-categorical
+  splits, no GOSS, no DART, no warm-start, no interaction constraints
+  on the joint path.
+
+Adding these capabilities to joint multi-output is targeted incrementally
+across the **v0.10.x** point releases.
 
 ## Resolved (Previously Limitations)
+
+### v0.10.0
+
+- **DART + warm_start not yet supported (was a v0.9.0 follow-up):**
+  v0.10.0 enables the combination. `WarmStartState` carries an
+  optional `initial_dart_tree_weights` field; the engine seeds
+  `dart_state.tree_weights` from this snapshot and pre-populates
+  `round_start_offsets` / `dart_round_counts` so new-round dropouts
+  correctly subtract/replay prior trees. The Python `init_model`
+  warm-start path automatically detects when the prior fit used DART
+  and forwards the per-stump weights through. Historical RNG-driven
+  `dropped_per_round` is intentionally not persisted; new rounds
+  start fresh dropout bookkeeping going forward.
+
+### Previously resolved
 
 The following were limitations in prior versions and have been addressed:
 
