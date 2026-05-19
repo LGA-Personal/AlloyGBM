@@ -1924,12 +1924,21 @@ pub struct TrainedStump {
     /// numerics bit-for-bit). DART rounds emit stumps with `tree_weight`
     /// determined by the dropout-normalization step — see [`crate::dart`].
     pub tree_weight: f32,
+    /// v0.10.0+: K-output leaf values for the joint multi-label trainer.
+    /// `Some((left_k_values, right_k_values))` where both Vec<f32> have
+    /// length `n_outputs`. `None` for scalar / linear-leaf models — in
+    /// that case `left_leaf_value` / `right_leaf_value` are authoritative.
+    /// When `Some`, `left_leaf_value` / `right_leaf_value` still carry a
+    /// `LeafValue::Scalar(_)` placeholder (typically `0.0`) so the
+    /// existing scalar code paths remain well-typed.
+    pub multi_output_leaf_values: Option<(Vec<f32>, Vec<f32>)>,
 }
 
 impl TrainedStump {
-    /// Default constructor that sets `tree_weight = 1.0`. Use this anywhere
-    /// the boosting mode is known to be Standard or GOSS, or for tests that
-    /// don't exercise DART semantics.
+    /// Default constructor that sets `tree_weight = 1.0` and
+    /// `multi_output_leaf_values = None`. Use this anywhere the boosting mode
+    /// is known to be Standard or GOSS, or for tests that don't exercise
+    /// DART or joint multi-output semantics.
     pub fn new_unweighted(
         split: SplitCandidate,
         left_leaf_value: LeafValue,
@@ -1940,6 +1949,7 @@ impl TrainedStump {
             left_leaf_value,
             right_leaf_value,
             tree_weight: 1.0,
+            multi_output_leaf_values: None,
         }
     }
 }
@@ -6084,6 +6094,7 @@ fn build_tree_level_wise<B: BackendOps>(
                 left_leaf_value: final_left_leaf,
                 right_leaf_value: final_right_leaf,
                 tree_weight: 1.0,
+                multi_output_leaf_values: None,
             });
         }
         active_nodes = next_nodes;
@@ -6459,6 +6470,7 @@ fn build_tree_leaf_wise<B: BackendOps>(
             left_leaf_value: final_left_leaf,
             right_leaf_value: final_right_leaf,
             tree_weight: 1.0,
+            multi_output_leaf_values: None,
         });
         leaves_used += 1;
 
@@ -8180,6 +8192,7 @@ fn decode_trained_model_payload(bytes: &[u8]) -> EngineResult<TrainedModel> {
             left_leaf_value: LeafValue::Scalar(left_leaf_value),
             right_leaf_value: LeafValue::Scalar(right_leaf_value),
             tree_weight: 1.0,
+            multi_output_leaf_values: None,
         });
     }
 
@@ -8666,6 +8679,7 @@ impl MultiClassTrainedModel {
                     left_leaf_value: LeafValue::Scalar(left_leaf_value),
                     right_leaf_value: LeafValue::Scalar(right_leaf_value),
                     tree_weight: 1.0,
+                    multi_output_leaf_values: None,
                 });
                 offset += STUMP_SIZE;
             }
@@ -10208,6 +10222,7 @@ mod tests {
             left_leaf_value: LeafValue::Scalar(0.0),
             right_leaf_value: LeafValue::Scalar(0.0),
             tree_weight: 1.0,
+            multi_output_leaf_values: None,
         }];
         let matrix = sample_binned_matrix();
         let targets = sample_dataset().targets;
@@ -10938,6 +10953,7 @@ mod tests {
                     left_leaf_value: LeafValue::Scalar(0.0),
                     right_leaf_value: LeafValue::Scalar(1.0),
                     tree_weight: 1.0,
+                    multi_output_leaf_values: None,
                 },
                 TrainedStump {
                     split: SplitCandidate {
@@ -10964,6 +10980,7 @@ mod tests {
                     left_leaf_value: LeafValue::Scalar(10.0),
                     right_leaf_value: LeafValue::Scalar(20.0),
                     tree_weight: 1.0,
+                    multi_output_leaf_values: None,
                 },
             ],
             categorical_state: None,
@@ -11958,6 +11975,7 @@ mod tests {
                     left_leaf_value: LeafValue::Scalar(-0.1),
                     right_leaf_value: LeafValue::Scalar(0.1),
                     tree_weight: 1.0,
+                    multi_output_leaf_values: None,
                 }],
                 vec![TrainedStump {
                     split: SplitCandidate {
@@ -11984,6 +12002,7 @@ mod tests {
                     left_leaf_value: LeafValue::Scalar(0.2),
                     right_leaf_value: LeafValue::Scalar(-0.05),
                     tree_weight: 1.0,
+                    multi_output_leaf_values: None,
                 }],
                 vec![], // class 2 has no stumps
             ],
@@ -12043,6 +12062,7 @@ mod tests {
                         left_leaf_value: LeafValue::Scalar(-0.1),
                         right_leaf_value: LeafValue::Scalar(0.1),
                         tree_weight: 1.0,
+                        multi_output_leaf_values: None,
                     },
                     TrainedStump {
                         split: SplitCandidate {
@@ -12069,6 +12089,7 @@ mod tests {
                         left_leaf_value: LeafValue::Scalar(-0.05),
                         right_leaf_value: LeafValue::Scalar(0.05),
                         tree_weight: 1.0,
+                        multi_output_leaf_values: None,
                     },
                 ],
                 // Class 1: same structure
@@ -12097,6 +12118,7 @@ mod tests {
                     left_leaf_value: LeafValue::Scalar(0.1),
                     right_leaf_value: LeafValue::Scalar(-0.1),
                     tree_weight: 1.0,
+                    multi_output_leaf_values: None,
                 }],
             ],
             categorical_state: None,
@@ -12351,6 +12373,7 @@ mod tests {
                     left_leaf_value: LeafValue::Scalar(-0.1),
                     right_leaf_value: LeafValue::Scalar(0.1),
                     tree_weight: 1.0,
+                    multi_output_leaf_values: None,
                 },
                 TrainedStump {
                     split: SplitCandidate {
@@ -12377,6 +12400,7 @@ mod tests {
                     left_leaf_value: LeafValue::Scalar(0.05),
                     right_leaf_value: LeafValue::Scalar(-0.05),
                     tree_weight: 1.0,
+                    multi_output_leaf_values: None,
                 },
             ],
             categorical_state: None,
@@ -12447,6 +12471,7 @@ mod tests {
                 left_leaf_value: LeafValue::Scalar(-0.2),
                 right_leaf_value: LeafValue::Scalar(0.2),
                 tree_weight: 1.0,
+                multi_output_leaf_values: None,
             }],
             categorical_state: None,
             node_debug_stats: None,
@@ -12754,6 +12779,47 @@ mod tests {
             assert!(d.projected_gradient_l2_norm.is_none());
             assert!(d.neutralization_effectiveness.is_none());
         }
+    }
+
+    #[test]
+    fn trained_stump_carries_multi_output_leaf_values_for_joint_trainer() {
+        // Construct a stump with sensible defaults via new_unweighted.
+        let stump = TrainedStump::new_unweighted(
+            SplitCandidate {
+                node_id: 0,
+                feature_index: 0,
+                threshold_bin: 0,
+                gain: 0.0,
+                default_left: false,
+                is_categorical: false,
+                categorical_bitset: None,
+                left_stats: NodeStats {
+                    grad_sum: 0.0,
+                    hess_sum: 0.0,
+                    grad_sq_sum: 0.0,
+                    row_count: 0,
+                },
+                right_stats: NodeStats {
+                    grad_sum: 0.0,
+                    hess_sum: 0.0,
+                    grad_sq_sum: 0.0,
+                    row_count: 0,
+                },
+            },
+            LeafValue::Scalar(0.0),
+            LeafValue::Scalar(0.0),
+        );
+        // Default for scalar / linear paths.
+        assert!(stump.multi_output_leaf_values.is_none());
+
+        // Joint multi-output stump: 2 outputs, distinct values per child.
+        let mut stump = stump;
+        stump.multi_output_leaf_values = Some((vec![1.0_f32, 2.0], vec![3.0, 4.0]));
+        let (left_k, right_k) = stump.multi_output_leaf_values.as_ref().unwrap();
+        assert_eq!(left_k.len(), 2);
+        assert_eq!(right_k.len(), 2);
+        assert_eq!(left_k[1], 2.0);
+        assert_eq!(right_k[0], 3.0);
     }
 }
 
