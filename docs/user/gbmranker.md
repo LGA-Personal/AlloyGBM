@@ -69,10 +69,10 @@ regularization, etc.). This includes:
   warm-start is supported when the caller resupplies the same
   `factor_exposures` matrix used for the initial fit.
 - `boosting_mode="goss"` with `goss_top_rate` / `goss_other_rate` for
-  LightGBM-style gradient-based one-side sampling (see
-  [GBMRegressor — Boosting Mode](gbmregressor.md#boosting-mode)).
-  `boosting_mode="dart"` is reserved (raises `NotImplementedError` in
-  v0.8.0; full implementation targeted at v0.9.0).
+  LightGBM-style gradient-based one-side sampling, or
+  `boosting_mode="dart"` with `dart_drop_rate` / `dart_max_drop` /
+  `dart_normalize_type` / `dart_sample_type` for Dropouts-meet-MART
+  (see [GBMRegressor — Boosting Mode](gbmregressor.md#boosting-mode)).
 
 ```python
 # MorphBoost on ranking

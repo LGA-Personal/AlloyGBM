@@ -38,22 +38,39 @@ Boosting mode
     gradient sums.  Convergence is typically faster on data with a
     long-tailed gradient distribution (the canonical LightGBM
     advantage).
-  - ``"dart"`` -- placeholder, currently rejected.  Calling this in
-    v0.8.0 raises ``NotImplementedError`` from
-    :class:`GBMRegressor.__init__`; the Rust trainer rejects it
-    with a matching error.  Full DART (dropouts meet MART) lands in
-    v0.9.0.
+  - ``"dart"`` -- **D**\ ropouts meet **MART**.  Each round, drop a
+    random subset of previously-trained trees, fit a new tree on the
+    residuals of the dropped-out ensemble, then rescale the dropped
+    trees + the new tree so the prediction sum stays unbiased.
+    Reduces over-specialization of late trees; can improve
+    generalization on noisy data.  Per-stump ``tree_weight: f32`` is
+    persisted via a new ``DartTreeWeights`` artifact section.
 
 - ``goss_top_rate: float = 0.2`` -- top-by-gradient kept fraction
   when ``boosting_mode="goss"``.  Must be in ``(0, 1)``.
 - ``goss_other_rate: float = 0.1`` -- random-sample fraction from
   the remaining rows when ``boosting_mode="goss"``.  Must be in
   ``(0, 1)`` and ``goss_top_rate + goss_other_rate <= 1.0``.
+- ``dart_drop_rate: float = 0.1`` -- per-tree drop probability per
+  round when ``boosting_mode="dart"``.  Must be in ``(0, 1)``.
+- ``dart_max_drop: int = 50`` -- cap on the number of trees dropped
+  per round.  Must be ``>= 1``.
+- ``dart_normalize_type: str = "tree"`` -- rescale policy after the
+  new tree is fit.  ``"tree"`` mode sets new-tree weight to
+  ``1 / (K + 1)`` and each dropped-tree weight to ``K / (K + 1)``;
+  ``"forest"`` mode sets both to ``1 / (K + 1)`` (more aggressive
+  rescale).
+- ``dart_sample_type: str = "uniform"`` -- dropout sampling strategy.
+  ``"uniform"`` picks each tree independently with probability
+  ``dart_drop_rate``.  ``"weighted"`` biases dropout probability
+  toward heavier-weight trees.
 
-GOSS is supported on the binary classifier / regression / ranking
-single-output objective.  The multiclass softmax path explicitly
-rejects non-``"standard"`` boosting modes pending per-class gradient
-scoring (v0.9.x follow-up).
+GOSS and DART are supported on the binary classifier / regression /
+ranking single-output objective.  The multiclass softmax path
+explicitly rejects non-``"standard"`` boosting modes pending
+per-class gradient scoring (v0.10.x follow-up — applies to both
+GOSS and DART).  DART + ``warm_start`` is rejected pending
+``WarmStartState`` extension (v0.10.x follow-up).
 
 Stopping and policy controls
 ----------------------------

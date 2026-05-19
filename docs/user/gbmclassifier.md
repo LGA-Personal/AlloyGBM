@@ -60,12 +60,12 @@ All parameters from `GBMRegressor` are accepted, including:
   statistics, sampling counts, and (when factor neutralization is active)
   the `neutralization_effectiveness` score.
 - `boosting_mode="goss"` with `goss_top_rate` / `goss_other_rate` for
-  LightGBM-style gradient-based one-side sampling on **binary** targets
-  (see [GBMRegressor — Boosting Mode](gbmregressor.md#boosting-mode)).
+  LightGBM-style gradient-based one-side sampling or DART (Dropouts
+  meet MART) on **binary** targets (see
+  [GBMRegressor — Boosting Mode](gbmregressor.md#boosting-mode)).
   Multi-class softmax rejects non-`"standard"` boosting modes with a
-  clear error (per-class gradient scoring is tracked as a v0.9.x
-  follow-up).  `boosting_mode="dart"` is reserved (raises
-  `NotImplementedError` in v0.8.0).
+  clear error (per-class gradient scoring is tracked as a v0.10.x
+  follow-up for both GOSS and DART).
 
 The objective is always binary cross-entropy and is not configurable.
 
