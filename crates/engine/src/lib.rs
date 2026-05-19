@@ -4910,7 +4910,6 @@ impl Trainer {
         // leave tree_weight at its 1.0 default. This is what the
         // artifact write path (`TrainedModel::to_artifact_bytes`) inspects
         // to decide whether to emit a DartTreeWeights section.
-        let mut stumps = stumps;
         if dart_params.is_some() {
             for stump in stumps.iter_mut() {
                 let (tree_id, _) = decode_tree_node_id(stump.split.node_id);
