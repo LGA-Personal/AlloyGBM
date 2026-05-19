@@ -1499,6 +1499,13 @@ pub enum ModelSectionKind {
     /// `BoostingMode::Dart { .. }`. Absent for standard / GOSS artifacts —
     /// readers must default to 1.0 for back-compat.
     DartTreeWeights,
+    /// v0.10.0+: Per-stump multi-output leaf values for joint multi-label
+    /// trainers. Layout per stump: `Vec<f32>` of length `n_leaves * n_outputs`
+    /// (row-major, leaf-major with output as inner axis). The payload also
+    /// stores `n_outputs` once at the start. Emitted only when the model was
+    /// trained with the joint multi-output entry point; absent for scalar /
+    /// linear-leaf / multiclass-softmax artifacts.
+    MultiOutputLeafValues,
     Unknown(u32),
 }
 
@@ -1517,6 +1524,7 @@ impl ModelSectionKind {
             Self::DroMetadata => 10,
             Self::FeatureBaseline => 11,
             Self::DartTreeWeights => 12,
+            Self::MultiOutputLeafValues => 13,
             Self::Unknown(value) => value,
         }
     }
@@ -1535,6 +1543,7 @@ impl ModelSectionKind {
             10 => Self::DroMetadata,
             11 => Self::FeatureBaseline,
             12 => Self::DartTreeWeights,
+            13 => Self::MultiOutputLeafValues,
             other => Self::Unknown(other),
         }
     }
@@ -2425,6 +2434,119 @@ pub fn decode_optional_dart_tree_weights_section(
         return Ok(None);
     };
     let payload = decode_dart_tree_weights_payload(&section.payload)?;
+    Ok(Some(payload))
+}
+
+// ── Multi-output leaf values section ─────────────────────────────────────────
+
+/// Payload for `ModelSectionKind::MultiOutputLeafValues`.
+///
+/// Stores K leaf values per leaf for joint multi-output trainers. One outer
+/// `Vec<f32>` per stump (in stump order); inner length must equal
+/// `n_leaves(stump) * n_outputs`, row-major with leaf-major outer axis and
+/// output-major inner axis (so `inner[leaf_idx * n_outputs + k]` is leaf
+/// `leaf_idx`'s value for output `k`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MultiOutputLeafValuesPayload {
+    pub n_outputs: u32,
+    /// One entry per stump in tree order. Each inner `Vec<f32>` has length
+    /// `n_leaves * n_outputs`.
+    pub per_stump_leaf_values: Vec<Vec<f32>>,
+}
+
+/// Encode a `MultiOutputLeafValuesPayload` to bytes.
+///
+/// Layout:
+/// ```text
+/// [u32 version=1] [u32 n_outputs] [u32 n_stumps]
+/// For each stump:
+///   [u32 len] [len × f32 LE values]
+/// ```
+pub fn encode_multi_output_leaf_values_payload(
+    payload: &MultiOutputLeafValuesPayload,
+) -> Vec<u8> {
+    let total_values: usize = payload.per_stump_leaf_values.iter().map(|v| v.len()).sum();
+    let mut buf = Vec::with_capacity(12 + 4 * payload.per_stump_leaf_values.len() + 4 * total_values);
+    buf.extend_from_slice(&1u32.to_le_bytes()); // version
+    buf.extend_from_slice(&payload.n_outputs.to_le_bytes());
+    buf.extend_from_slice(&(payload.per_stump_leaf_values.len() as u32).to_le_bytes());
+    for stump in &payload.per_stump_leaf_values {
+        buf.extend_from_slice(&(stump.len() as u32).to_le_bytes());
+        for &v in stump {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    buf
+}
+
+/// Decode a `MultiOutputLeafValuesPayload` from raw section bytes.
+pub fn decode_multi_output_leaf_values_payload(
+    bytes: &[u8],
+) -> CoreResult<MultiOutputLeafValuesPayload> {
+    if bytes.len() < 12 {
+        return Err(CoreError::Validation(
+            "MultiOutputLeafValues section too short for header".to_string(),
+        ));
+    }
+    let version = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    if version != 1 {
+        return Err(CoreError::Validation(format!(
+            "unsupported MultiOutputLeafValues version: {version}"
+        )));
+    }
+    let n_outputs = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+    let n_stumps = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
+    let mut cursor = 12usize;
+    let mut per_stump_leaf_values = Vec::with_capacity(n_stumps);
+    for _ in 0..n_stumps {
+        if cursor + 4 > bytes.len() {
+            return Err(CoreError::Validation(
+                "MultiOutputLeafValues: truncated stump length".to_string(),
+            ));
+        }
+        let len = u32::from_le_bytes([
+            bytes[cursor],
+            bytes[cursor + 1],
+            bytes[cursor + 2],
+            bytes[cursor + 3],
+        ]) as usize;
+        cursor += 4;
+        if cursor + len * 4 > bytes.len() {
+            return Err(CoreError::Validation(
+                "MultiOutputLeafValues: truncated leaf values".to_string(),
+            ));
+        }
+        let mut values = Vec::with_capacity(len);
+        for _ in 0..len {
+            let v = f32::from_le_bytes([
+                bytes[cursor],
+                bytes[cursor + 1],
+                bytes[cursor + 2],
+                bytes[cursor + 3],
+            ]);
+            cursor += 4;
+            values.push(v);
+        }
+        per_stump_leaf_values.push(values);
+    }
+    Ok(MultiOutputLeafValuesPayload {
+        n_outputs,
+        per_stump_leaf_values,
+    })
+}
+
+/// Decode an optional `MultiOutputLeafValues` section. Returns `Ok(None)` for
+/// pre-v0.10.0 artifacts (no section present) — only joint multi-output
+/// trainers emit this section.
+pub fn decode_optional_multi_output_leaf_values_section(
+    sections: &[ModelArtifactSection],
+) -> CoreResult<Option<MultiOutputLeafValuesPayload>> {
+    let Some(section) =
+        optional_single_section(sections, ModelSectionKind::MultiOutputLeafValues)?
+    else {
+        return Ok(None);
+    };
+    let payload = decode_multi_output_leaf_values_payload(&section.payload)?;
     Ok(Some(payload))
 }
 
@@ -4455,6 +4577,60 @@ mod tests {
         let bytes = encode_dart_tree_weights_payload(&payload);
         let decoded = decode_dart_tree_weights_payload(&bytes).expect("decode");
         assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn multi_output_leaf_values_section_kind_roundtrips_as_13() {
+        assert_eq!(ModelSectionKind::MultiOutputLeafValues.to_u32(), 13);
+        assert!(matches!(
+            ModelSectionKind::from_u32(13),
+            ModelSectionKind::MultiOutputLeafValues
+        ));
+    }
+
+    #[test]
+    fn multi_output_leaf_values_payload_round_trips() {
+        // 2 stumps, K=2 outputs. Stump 0: 3 leaves; stump 1: 2 leaves.
+        let payload = MultiOutputLeafValuesPayload {
+            n_outputs: 2,
+            per_stump_leaf_values: vec![
+                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                vec![7.0, 8.0, 9.0, 10.0],
+            ],
+        };
+        let bytes = encode_multi_output_leaf_values_payload(&payload);
+        let decoded =
+            decode_multi_output_leaf_values_payload(&bytes).expect("decode");
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn multi_output_leaf_values_payload_empty_round_trips() {
+        let payload = MultiOutputLeafValuesPayload {
+            n_outputs: 3,
+            per_stump_leaf_values: vec![],
+        };
+        let bytes = encode_multi_output_leaf_values_payload(&payload);
+        let decoded =
+            decode_multi_output_leaf_values_payload(&bytes).expect("decode");
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn multi_output_leaf_values_truncated_header_errors() {
+        let bytes = vec![1u8, 0, 0]; // shorter than 12-byte header
+        let err = decode_multi_output_leaf_values_payload(&bytes).unwrap_err();
+        assert!(matches!(err, CoreError::Validation(_)));
+    }
+
+    #[test]
+    fn multi_output_leaf_values_bad_version_errors() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&2u32.to_le_bytes()); // unsupported version
+        bytes.extend_from_slice(&2u32.to_le_bytes()); // n_outputs
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // n_stumps
+        let err = decode_multi_output_leaf_values_payload(&bytes).unwrap_err();
+        assert!(matches!(err, CoreError::Validation(_)));
     }
 
     #[test]
