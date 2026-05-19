@@ -374,6 +374,10 @@ class GBMRegressorContractTests(unittest.TestCase):
                         "boosting_mode": "standard",
                         "goss_top_rate": None,
                         "goss_other_rate": None,
+                        "dart_drop_rate": None,
+                        "dart_max_drop": None,
+                        "dart_normalize_type": None,
+                        "dart_sample_type": None,
                     }
                 ],
             )

@@ -120,10 +120,12 @@ def test_goss_rejects_invalid_rate_ranges():
         GBMRegressor(boosting_mode="goss", goss_top_rate=0.7, goss_other_rate=0.5)
 
 
-def test_dart_currently_rejected_as_not_implemented():
-    """DART is reserved for a v0.8.0 follow-up commit."""
-    with pytest.raises(NotImplementedError, match=r"dart"):
-        GBMRegressor(boosting_mode="dart")
+def test_dart_basic_construction_works():
+    """v0.9.0: DART is fully wired through for the single-output trainer."""
+    m = GBMRegressor(boosting_mode="dart", dart_drop_rate=0.1, dart_max_drop=5)
+    assert m.boosting_mode == "dart"
+    assert m.dart_drop_rate == 0.1
+    assert m.dart_max_drop == 5
 
 
 def test_unknown_boosting_mode_rejected():
