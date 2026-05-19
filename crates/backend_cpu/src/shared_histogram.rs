@@ -88,6 +88,63 @@ pub fn build_multi_output_histogram_inplace(
     }
 }
 
+/// Compute the right-child histogram as `parent - left`, element-wise across
+/// all (feature, bin, output, component) slots. Used to skip a full sweep when
+/// only the smaller child has been built.
+pub fn subtract_multi_output_histogram(
+    parent: &MultiOutputHistogram,
+    left: &MultiOutputHistogram,
+) -> MultiOutputHistogram {
+    debug_assert_eq!(parent.n_features, left.n_features);
+    debug_assert_eq!(parent.n_bins, left.n_bins);
+    debug_assert_eq!(parent.n_outputs, left.n_outputs);
+    let mut right = MultiOutputHistogram::new(parent.n_features, parent.n_bins, parent.n_outputs);
+    for i in 0..parent.data.len() {
+        right.data[i] = parent.data[i] - left.data[i];
+    }
+    right
+}
+
+/// Compute the total split gain summed across all K outputs for a single
+/// (feature, threshold_bin) candidate. The left child = bins `[0, threshold_bin]`,
+/// the right child = bins `(threshold_bin, n_bins)`.
+///
+/// Per-output gain follows the standard Newton/XGBoost formulation:
+///   gain_k = G_L_k² / (H_L_k + λ) + G_R_k² / (H_R_k + λ) − G_k² / (H_k + λ)
+///
+/// Total split gain is `Σₖ gain_k`. NaN bin handling is the caller's
+/// responsibility (route via the missing-bin direction before calling).
+pub fn compute_multi_output_split_gain(
+    histogram: &MultiOutputHistogram,
+    feature: usize,
+    threshold_bin: usize,
+    lambda_l2: f32,
+    eps: f32,
+) -> f32 {
+    let n_outputs = histogram.n_outputs;
+    let mut total = 0.0_f32;
+    for k in 0..n_outputs {
+        let (mut g_l, mut h_l) = (0.0_f32, 0.0_f32);
+        let (mut g_r, mut h_r) = (0.0_f32, 0.0_f32);
+        for b in 0..histogram.n_bins {
+            let g = histogram.data[histogram.idx(feature, b, k, HistComponent::Grad)];
+            let h = histogram.data[histogram.idx(feature, b, k, HistComponent::Hess)];
+            if b <= threshold_bin {
+                g_l += g;
+                h_l += h;
+            } else {
+                g_r += g;
+                h_r += h;
+            }
+        }
+        let g_total = g_l + g_r;
+        let h_total = h_l + h_r;
+        let term = |g: f32, h: f32| (g * g) / (h + lambda_l2 + eps);
+        total += term(g_l, h_l) + term(g_r, h_r) - term(g_total, h_total);
+    }
+    total
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,5 +183,58 @@ mod tests {
         // Output 1, bin 1 should aggregate row 1 only → g=20.0, h=2.0
         let i = h.idx(0, 1, 1, HistComponent::Grad);
         assert!((h.data()[i] - 20.0).abs() < 1e-6);
+    }
+
+    fn set(h: &mut MultiOutputHistogram, f: usize, b: usize, k: usize, comp: HistComponent, v: f32) {
+        let i = h.idx(f, b, k, comp);
+        h.data_mut()[i] = v;
+    }
+
+    #[test]
+    fn subtract_yields_other_child_for_all_outputs() {
+        let mut parent = MultiOutputHistogram::new(1, 4, 2);
+        let mut left = MultiOutputHistogram::new(1, 4, 2);
+
+        // Populate parent and left with synthetic data.
+        for b in 0..4 {
+            for k in 0..2 {
+                set(&mut parent, 0, b, k, HistComponent::Grad, (b * 10 + k + 1) as f32);
+                set(&mut parent, 0, b, k, HistComponent::Hess, (b + k + 1) as f32 * 0.5);
+                set(&mut left, 0, b, k, HistComponent::Grad, (b * 3 + k) as f32);
+                set(&mut left, 0, b, k, HistComponent::Hess, (b + k) as f32 * 0.2);
+            }
+        }
+
+        let right = subtract_multi_output_histogram(&parent, &left);
+
+        // Spot-check: right.grad[b=2, k=1] = parent - left
+        //   parent = b*10 + k + 1 = 22, left = b*3 + k = 7 → 15
+        let i = right.idx(0, 2, 1, HistComponent::Grad);
+        let v = right.data()[i];
+        assert!((v - 15.0).abs() < 1e-6, "got {v}");
+    }
+
+    #[test]
+    fn multi_output_split_gain_sums_per_output_scalar_gain() {
+        // Single feature, 2 bins, 2 outputs.
+        // Each output: G_L=2, H_L=1, G_R=-2, H_R=1, λ=0
+        //   gain = 2²/1 + (-2)²/1 − 0²/2 = 4 + 4 - 0 = 8 per output
+        // total = 16
+        let mut h = MultiOutputHistogram::new(1, 2, 2);
+        // bin 0
+        set(&mut h, 0, 0, 0, HistComponent::Grad, 2.0);
+        set(&mut h, 0, 0, 0, HistComponent::Hess, 1.0);
+        set(&mut h, 0, 0, 1, HistComponent::Grad, 2.0);
+        set(&mut h, 0, 0, 1, HistComponent::Hess, 1.0);
+        // bin 1
+        set(&mut h, 0, 1, 0, HistComponent::Grad, -2.0);
+        set(&mut h, 0, 1, 0, HistComponent::Hess, 1.0);
+        set(&mut h, 0, 1, 1, HistComponent::Grad, -2.0);
+        set(&mut h, 0, 1, 1, HistComponent::Hess, 1.0);
+
+        let total_gain = compute_multi_output_split_gain(
+            &h, /*feature=*/ 0, /*threshold_bin=*/ 0, /*lambda_l2=*/ 0.0, /*eps=*/ 0.0,
+        );
+        assert!((total_gain - 16.0).abs() < 1e-5, "got {total_gain}");
     }
 }
