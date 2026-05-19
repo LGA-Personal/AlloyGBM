@@ -1,24 +1,25 @@
 use alloygbm_categorical::{TargetEncoderConfig, fit_transform_target_encoder};
 use alloygbm_core::{
-    BinnedMatrix, BoostingMode, CategoricalStatePayloadV1, CoreError, DatasetMatrix, Device,
-    DroConfig, DroMetadataPayload, FactorExposureMatrix, FeatureBaselinePayload, FeatureTile,
-    GradientEmaStats, GradientPair, HistogramBundle, LeafModelKind, LeafSolverKind, LeafValue,
-    LinearHistogramBundle, LinearLeaf, LinearLeafCoefficientsPayload, LinearLeafEntry, LrSchedule,
-    MAX_PL_REGRESSORS, MISSING_BIN_U8, MODEL_FORMAT_V1, ModelArtifactSection, ModelMetadata,
-    ModelSectionKind, MorphConfig, MorphMetadataPayload, MorphPrecomputed,
-    NativeCategoricalSplitsPayload, NeutralizationKind, NodeSlice, NodeStats, PartitionResult,
-    SplitCandidate, TrainParams, TrainingDataset, TreeGrowth,
-    decode_optional_categorical_state_section_v1, decode_optional_dro_metadata_artifact_section,
+    BinnedMatrix, BoostingMode, CategoricalStatePayloadV1, CoreError, DartTreeWeightsPayload,
+    DatasetMatrix, Device, DroConfig, DroMetadataPayload, FactorExposureMatrix,
+    FeatureBaselinePayload, FeatureTile, GradientEmaStats, GradientPair, HistogramBundle,
+    LeafModelKind, LeafSolverKind, LeafValue, LinearHistogramBundle, LinearLeaf,
+    LinearLeafCoefficientsPayload, LinearLeafEntry, LrSchedule, MAX_PL_REGRESSORS, MISSING_BIN_U8,
+    MODEL_FORMAT_V1, ModelArtifactSection, ModelMetadata, ModelSectionKind, MorphConfig,
+    MorphMetadataPayload, MorphPrecomputed, NativeCategoricalSplitsPayload, NeutralizationKind,
+    NodeSlice, NodeStats, PartitionResult, SplitCandidate, TrainParams, TrainingDataset,
+    TreeGrowth, decode_optional_categorical_state_section_v1,
+    decode_optional_dart_tree_weights_section, decode_optional_dro_metadata_artifact_section,
     decode_optional_feature_baseline_section, decode_optional_linear_leaf_coefficients_section,
     decode_optional_morph_metadata_artifact_section,
     decode_optional_native_categorical_splits_section, deserialize_model_artifact_v1,
-    encode_categorical_state_payload_v1, encode_dro_metadata_payload,
-    encode_feature_baseline_payload, encode_linear_leaf_coefficients_payload,
-    encode_morph_metadata_payload, encode_native_categorical_splits_payload,
-    format_required_section_auto_mode_error, format_required_section_mode_error,
-    leaf_effective_gradient, required_section_compatibility_report, serialize_model_artifact_v1,
-    validate_binned_matrix, validate_categorical_state_payload_v1, validate_train_params,
-    validate_training_dataset,
+    encode_categorical_state_payload_v1, encode_dart_tree_weights_payload,
+    encode_dro_metadata_payload, encode_feature_baseline_payload,
+    encode_linear_leaf_coefficients_payload, encode_morph_metadata_payload,
+    encode_native_categorical_splits_payload, format_required_section_auto_mode_error,
+    format_required_section_mode_error, leaf_effective_gradient,
+    required_section_compatibility_report, serialize_model_artifact_v1, validate_binned_matrix,
+    validate_categorical_state_payload_v1, validate_train_params, validate_training_dataset,
 };
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
@@ -2602,6 +2603,22 @@ impl TrainedModel {
             ));
         }
 
+        // DART per-stump tree weights (optional). Emitted only when at least
+        // one stump has a non-default weight, which keeps Standard/GOSS
+        // artifacts byte-identical to v0.8.0.
+        if self
+            .stumps
+            .iter()
+            .any(|s| (s.tree_weight - 1.0).abs() > f32::EPSILON)
+        {
+            sections.push((
+                ModelSectionKind::DartTreeWeights,
+                encode_dart_tree_weights_payload(&DartTreeWeightsPayload {
+                    weights: self.stumps.iter().map(|s| s.tree_weight).collect(),
+                }),
+            ));
+        }
+
         serialize_model_artifact_v1(&metadata, &sections).map_err(EngineError::from)
     }
 
@@ -2735,6 +2752,23 @@ impl TrainedModel {
             .map_err(EngineError::from)?
             .map(|payload| payload.feature_means)
             .filter(|means| means.len() == metadata_feature_count);
+
+        // Decode optional DartTreeWeights section and apply per-stump weights.
+        // Pre-v0.9.0 artifacts have no section; stumps keep their default 1.0.
+        if let Some(dart_payload) =
+            decode_optional_dart_tree_weights_section(&parsed.sections).map_err(EngineError::from)?
+        {
+            if dart_payload.weights.len() != model.stumps.len() {
+                return Err(EngineError::ContractViolation(format!(
+                    "DartTreeWeights length {} != stump count {}",
+                    dart_payload.weights.len(),
+                    model.stumps.len()
+                )));
+            }
+            for (stump, w) in model.stumps.iter_mut().zip(dart_payload.weights.iter()) {
+                stump.tree_weight = *w;
+            }
+        }
 
         model.feature_count = metadata_feature_count;
         model.objective = parsed.contract.metadata.objective.clone();
