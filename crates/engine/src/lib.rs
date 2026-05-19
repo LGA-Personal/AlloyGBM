@@ -1914,6 +1914,30 @@ pub struct TrainedStump {
     pub split: SplitCandidate,
     pub left_leaf_value: LeafValue,
     pub right_leaf_value: LeafValue,
+    /// Multiplicative weight applied to this stump's leaf contributions at
+    /// predict time. `1.0` for every stump trained under
+    /// `BoostingMode::Standard` or `BoostingMode::Goss` (this preserves v0.8.0
+    /// numerics bit-for-bit). DART rounds emit stumps with `tree_weight`
+    /// determined by the dropout-normalization step — see [`crate::dart`].
+    pub tree_weight: f32,
+}
+
+impl TrainedStump {
+    /// Default constructor that sets `tree_weight = 1.0`. Use this anywhere
+    /// the boosting mode is known to be Standard or GOSS, or for tests that
+    /// don't exercise DART semantics.
+    pub fn new_unweighted(
+        split: SplitCandidate,
+        left_leaf_value: LeafValue,
+        right_leaf_value: LeafValue,
+    ) -> Self {
+        Self {
+            split,
+            left_leaf_value,
+            right_leaf_value,
+            tree_weight: 1.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -5705,6 +5729,7 @@ fn build_tree_level_wise<B: BackendOps>(
                 split,
                 left_leaf_value: final_left_leaf,
                 right_leaf_value: final_right_leaf,
+                tree_weight: 1.0,
             });
         }
         active_nodes = next_nodes;
@@ -6079,6 +6104,7 @@ fn build_tree_leaf_wise<B: BackendOps>(
             split: committed_split,
             left_leaf_value: final_left_leaf,
             right_leaf_value: final_right_leaf,
+            tree_weight: 1.0,
         });
         leaves_used += 1;
 
@@ -7701,6 +7727,7 @@ fn decode_trained_model_payload(bytes: &[u8]) -> EngineResult<TrainedModel> {
             },
             left_leaf_value: LeafValue::Scalar(left_leaf_value),
             right_leaf_value: LeafValue::Scalar(right_leaf_value),
+            tree_weight: 1.0,
         });
     }
 
@@ -8186,6 +8213,7 @@ impl MultiClassTrainedModel {
                     },
                     left_leaf_value: LeafValue::Scalar(left_leaf_value),
                     right_leaf_value: LeafValue::Scalar(right_leaf_value),
+                    tree_weight: 1.0,
                 });
                 offset += STUMP_SIZE;
             }
@@ -9672,6 +9700,7 @@ mod tests {
             },
             left_leaf_value: LeafValue::Scalar(0.0),
             right_leaf_value: LeafValue::Scalar(0.0),
+            tree_weight: 1.0,
         }];
         let matrix = sample_binned_matrix();
         let targets = sample_dataset().targets;
@@ -10401,6 +10430,7 @@ mod tests {
                     },
                     left_leaf_value: LeafValue::Scalar(0.0),
                     right_leaf_value: LeafValue::Scalar(1.0),
+                    tree_weight: 1.0,
                 },
                 TrainedStump {
                     split: SplitCandidate {
@@ -10426,6 +10456,7 @@ mod tests {
                     },
                     left_leaf_value: LeafValue::Scalar(10.0),
                     right_leaf_value: LeafValue::Scalar(20.0),
+                    tree_weight: 1.0,
                 },
             ],
             categorical_state: None,
@@ -11273,6 +11304,7 @@ mod tests {
                     },
                     left_leaf_value: LeafValue::Scalar(-0.1),
                     right_leaf_value: LeafValue::Scalar(0.1),
+                    tree_weight: 1.0,
                 }],
                 vec![TrainedStump {
                     split: SplitCandidate {
@@ -11298,6 +11330,7 @@ mod tests {
                     },
                     left_leaf_value: LeafValue::Scalar(0.2),
                     right_leaf_value: LeafValue::Scalar(-0.05),
+                    tree_weight: 1.0,
                 }],
                 vec![], // class 2 has no stumps
             ],
@@ -11356,6 +11389,7 @@ mod tests {
                         },
                         left_leaf_value: LeafValue::Scalar(-0.1),
                         right_leaf_value: LeafValue::Scalar(0.1),
+                        tree_weight: 1.0,
                     },
                     TrainedStump {
                         split: SplitCandidate {
@@ -11381,6 +11415,7 @@ mod tests {
                         },
                         left_leaf_value: LeafValue::Scalar(-0.05),
                         right_leaf_value: LeafValue::Scalar(0.05),
+                        tree_weight: 1.0,
                     },
                 ],
                 // Class 1: same structure
@@ -11408,6 +11443,7 @@ mod tests {
                     },
                     left_leaf_value: LeafValue::Scalar(0.1),
                     right_leaf_value: LeafValue::Scalar(-0.1),
+                    tree_weight: 1.0,
                 }],
             ],
             categorical_state: None,
@@ -11661,6 +11697,7 @@ mod tests {
                     },
                     left_leaf_value: LeafValue::Scalar(-0.1),
                     right_leaf_value: LeafValue::Scalar(0.1),
+                    tree_weight: 1.0,
                 },
                 TrainedStump {
                     split: SplitCandidate {
@@ -11686,6 +11723,7 @@ mod tests {
                     },
                     left_leaf_value: LeafValue::Scalar(0.05),
                     right_leaf_value: LeafValue::Scalar(-0.05),
+                    tree_weight: 1.0,
                 },
             ],
             categorical_state: None,
@@ -11755,6 +11793,7 @@ mod tests {
                 },
                 left_leaf_value: LeafValue::Scalar(-0.2),
                 right_leaf_value: LeafValue::Scalar(0.2),
+                tree_weight: 1.0,
             }],
             categorical_state: None,
             node_debug_stats: None,

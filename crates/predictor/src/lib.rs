@@ -1839,6 +1839,7 @@ mod tests {
                 },
                 left_leaf_value: LeafValue::Scalar(-0.1),
                 right_leaf_value: LeafValue::Scalar(0.1),
+                tree_weight: 1.0,
             }],
             categorical_state: None,
             node_debug_stats: None,
@@ -1924,6 +1925,7 @@ mod tests {
                     },
                     left_leaf_value: LeafValue::Scalar(-0.2),
                     right_leaf_value: LeafValue::Scalar(0.2),
+                    tree_weight: 1.0,
                 },
                 // Continuous split on feature 1: threshold_bin 3 (i.e. <=3 left, >3 right)
                 // node_id in tree 1 (tree_id=1, local=0 → 1 * 1048576 + 0)
@@ -1951,6 +1953,7 @@ mod tests {
                     },
                     left_leaf_value: LeafValue::Scalar(0.1),
                     right_leaf_value: LeafValue::Scalar(-0.1),
+                    tree_weight: 1.0,
                 },
             ],
             categorical_state: None,
