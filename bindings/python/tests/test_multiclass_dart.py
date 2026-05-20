@@ -141,6 +141,69 @@ def test_multiclass_dart_pickle_round_trip_with_multi_stump_trees():
     np.testing.assert_allclose(p1, p2, rtol=1e-5, atol=1e-6)
 
 
+def test_multiclass_dart_warm_start_with_multi_stump_trees():
+    """Regression test for the v0.10.1 PR follow-up: the PyO3
+    bridge's ``MultiClassWarmStartState.initial_dart_tree_weights``
+    seeding indexed ``class_stumps[class_k][r]`` as if it were the
+    r-th *tree*, but a depth>=2 level-wise tree contributes multiple
+    *stumps* per round so the flat ``class_stumps[k]`` vec is denser
+    than the per-tree array the engine expects.
+
+    For a model with multi-stump trees, the buggy seeding would:
+
+    - Pick wrong weights for trees after the first (e.g. with 3-stump
+      trees and 5 prior rounds, only trees 0 and 1 would be probed
+      at all — the other rounds' weights would silently default
+      to a wrong value or the length check would mismatch).
+    - Either trigger the engine's
+      ``length {} != initial_rounds * K`` ContractViolation, OR
+      seed the wrong weights and silently produce a corrupted
+      continuation model whose predictions diverge from one fitted
+      end-to-end in a single ``fit()`` call.
+
+    This test trains a multi-stump multiclass DART model, splits the
+    fit across two ``fit()`` calls (base + warm-start continuation),
+    and asserts the continuation produces a finite, well-formed
+    model that round-trips through pickle.
+    """
+    import pickle
+
+    rng = np.random.default_rng(53)
+    X = rng.standard_normal((300, 5)).astype(np.float32)
+    y = rng.integers(0, 3, size=300).astype(np.int64)
+    base = GBMClassifier(
+        n_estimators=10,
+        boosting_mode="dart",
+        dart_drop_rate=0.25,
+        dart_max_drop=5,
+        max_depth=4,            # depth>=2 ⇒ multi-stump trees
+        min_data_in_leaf=8,
+        seed=53,
+    )
+    base.fit(X, y)
+    cont = GBMClassifier(
+        n_estimators=10,
+        boosting_mode="dart",
+        dart_drop_rate=0.25,
+        dart_max_drop=5,
+        max_depth=4,
+        min_data_in_leaf=8,
+        warm_start=True,
+        seed=53,
+    )
+    cont.fit(X, y, init_model=base)
+    proba = cont.predict_proba(X)
+    assert proba.shape == (300, 3)
+    assert np.allclose(proba.sum(axis=1), 1.0, atol=1e-5)
+    assert np.all(np.isfinite(proba))
+    # Round-trip through pickle — exposes any tree_weight mismatch
+    # between in-memory and serialized state.
+    restored = pickle.loads(pickle.dumps(cont))
+    np.testing.assert_allclose(
+        proba, restored.predict_proba(X), rtol=1e-5, atol=1e-6
+    )
+
+
 def test_multiclass_dart_with_validation_early_stopping():
     """Regression test for the v0.10.1 PR review (C6): the DART
     transition (dropout subtract + new_w scale + dropped re-add) must

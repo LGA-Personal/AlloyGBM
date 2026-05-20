@@ -3145,25 +3145,69 @@ fn train_regression_artifact_with_summary_dense_impl(
                     .as_ref()
                     .filter(|m| !m.ema_stats.is_empty())
                     .map(|m| m.ema_stats.clone());
-                // v0.10.1: capture multiclass DART tree_weights from the
-                // prior fit, if any.  Flat layout: round-major × class-k
-                // (matches `MultiClassWarmStartState::initial_dart_tree_weights`).
+                // v0.10.1: capture multiclass DART tree_weights from
+                // the prior fit, if any.  Flat layout: round-major ×
+                // class-k (matches
+                // `MultiClassWarmStartState::initial_dart_tree_weights`).
+                //
+                // PR review follow-up: each class's stumps are stored
+                // FLAT across all rounds (a level-wise tree with
+                // depth>=2 contributes multiple stumps per round), so
+                // `class_stumps[class_k][r]` is the r-th *stump* —
+                // NOT the r-th *tree*. Walk each class's stump list
+                // grouping by `tree_id` (decoded from
+                // `stump.split.node_id`) to recover one weight per
+                // (round, class) tree.  This mirrors the engine-side
+                // warm-start reconstruction in
+                // `fit_multiclass_iterations_impl` so the flat
+                // `r * K + class_k` indexing the engine consumes
+                // stays consistent.
                 let k_for_warm = init_mc_model.num_classes;
+                const TREE_NODE_STRIDE: u32 = 1 << 20;
                 let any_dart_weight = init_mc_model
                     .class_stumps
                     .iter()
                     .flat_map(|s| s.iter())
                     .any(|s| (s.tree_weight - 1.0).abs() > f32::EPSILON);
                 let initial_dart_tree_weights = if any_dart_weight {
+                    // Per-class list of per-tree weights, in
+                    // round-order (which matches the encounter order
+                    // of distinct `tree_id`s in `class_stumps[k]`).
+                    let mut per_class_tree_weights: Vec<Vec<f32>> = vec![Vec::new(); k_for_warm];
+                    for (tree_weights, stumps) in per_class_tree_weights
+                        .iter_mut()
+                        .take(k_for_warm)
+                        .zip(init_mc_model.class_stumps.iter())
+                    {
+                        let n = stumps.len();
+                        let mut i = 0_usize;
+                        while i < n {
+                            let tid_first = stumps[i].split.node_id / TREE_NODE_STRIDE;
+                            // Take the first stump's weight as the
+                            // per-tree weight (the engine's
+                            // `apply_dart_tree_weights` predictor
+                            // helper uses the same convention).
+                            tree_weights.push(stumps[i].tree_weight);
+                            // Advance past every stump that shares
+                            // this tree_id.
+                            let mut j = i + 1;
+                            while j < n && stumps[j].split.node_id / TREE_NODE_STRIDE == tid_first {
+                                j += 1;
+                            }
+                            i = j;
+                        }
+                    }
+                    // Assemble the flat round-major × class-k array.
+                    // Phantom (zero-tree) rounds get a placeholder
+                    // weight of 1.0 so the array length equals
+                    // `initial_rounds * K` — matches the engine
+                    // contract and is consistent with how the
+                    // single-output DART path treats phantom
+                    // rounds-skipped-during-warmup.
                     let mut flat: Vec<f32> = Vec::with_capacity(initial_rounds * k_for_warm);
                     for r in 0..initial_rounds {
-                        for class_k in 0..k_for_warm {
-                            let w = init_mc_model
-                                .class_stumps
-                                .get(class_k)
-                                .and_then(|cs| cs.get(r))
-                                .map(|s| s.tree_weight)
-                                .unwrap_or(1.0);
+                        for tree_weights in per_class_tree_weights.iter().take(k_for_warm) {
+                            let w = tree_weights.get(r).copied().unwrap_or(1.0);
                             flat.push(w);
                         }
                     }
