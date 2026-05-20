@@ -41,7 +41,7 @@ maturin develop --manifest-path bindings/python/Cargo.toml --release
 
 AlloyGBM targets Python `3.11+` and uses a native Rust extension module.
 
-Wheel targets for `0.10.0`:
+Wheel targets for `0.10.1`:
 
 - macOS `arm64`
 - Linux `x86_64` (manylinux)
@@ -404,8 +404,7 @@ Benchmark tooling and methodology live in [benchmarks/README.md](benchmarks/READ
 ## Current Limitations
 
 - CPU-only runtime (GPU backend is architecturally planned but not implemented)
-- `MultiLabelGBMRanker` currently routes through the independent-per-label fallback. The Rust-level joint trainer (K-output shared-histogram primitive + `MultiOutputLeafValues` artifact section + `fit_joint_multi_output` + `JointPredictor`) is **shipped in v0.10.0**; the Python user-facing surface (`training_mode="joint"` wiring) is targeted at **v0.10.1**.
-- Multiclass softmax rejects non-`"standard"` boosting modes pending per-class gradient scoring (v0.10.x follow-up — applies to both GOSS and DART).
+- `MultiLabelGBMRanker(multi_label_mode="joint")` (v0.10.1+) is intentionally minimal: level-wise growth, standard boosting only, and built-in `squared_error` / `queryrmse` / `rank:*` objectives. Joint-path feature parity (MorphBoost, neutralization, DRO, interaction constraints, leaf-wise, GOSS, DART, warm-start) is targeted incrementally across the v0.10.x point releases.
 - `leaf_solver="dro"` is a robust scalar leaf update, not a full raw-distribution Wasserstein DRO guarantee
 
 See [docs/limitations.md](docs/limitations.md) for the full list.

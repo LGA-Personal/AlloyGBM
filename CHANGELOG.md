@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.10.1
+
+Closes the three v0.10.x deferred limitations from v0.10.0: joint
+`MultiLabelGBMRanker` Python surface, multiclass softmax + GOSS, and
+multiclass softmax + DART (including warm-start). Default behaviour
+for every existing user-facing API remains byte-identical to v0.10.0
+when the new features are not opted into.
+
+### Added
+
+- **`MultiLabelGBMRanker(multi_label_mode="joint")` Python surface.**
+  New PyO3 entry point `train_joint_multi_label_ranker` wraps
+  `engine::joint::fit_joint_multi_output` (v0.10.0 infra); new
+  `JointPredictorHandle` py-class wraps `engine::joint::JointPredictor`
+  for K-output prediction. Default mode is still `"independent"` (the
+  K-per-label `GBMRanker` fallback from v0.7.1) — joint is opt-in.
+  Bundle format (`.alloy` files written via `save_model`) bumped to
+  v2 with an explicit mode byte; v1 bundles still load as independent
+  mode. Joint mode in v0.10.1 supports level-wise growth, the
+  standard boosting mode, and the built-in `squared_error` /
+  `queryrmse` / `rank:pairwise` / `rank:ndcg` / `rank:xendcg`
+  objectives. Joint-path feature parity (MorphBoost, neutralization,
+  DRO, interaction constraints, leaf-wise, GOSS, DART, warm-start)
+  is targeted for later v0.10.x releases.
+- **`GBMClassifier(boosting_mode="goss")` for K ≥ 3 classes.** Per-row
+  score `s_i = Σₖ |g_{i,k}|` (LightGBM convention) drives a shared
+  sampling mask across all K class gradient buffers; the
+  amplification factor is applied identically to every class's grad
+  and hess. The multiclass round loop was refactored so the K
+  gradient buffers are pre-computed before sampling (every class
+  channel must be visible to the scorer before deciding which rows
+  to keep / amplify).
+- **`GBMClassifier(boosting_mode="dart")` for K ≥ 3 classes.** Per-
+  class prediction vectors get per-round subtract/readd of dropped
+  tree contributions scaled by `dart_state.tree_weights`. Dropout
+  flat index `prior_round * K + class_k` resolves to a single stump
+  in `class_stumps[class_k][prior_round]`. After K new trees are
+  built each round they are rescaled to `new_w = 1/(n_dropped + 1)`,
+  the dropped trees are re-added at their rescaled weights, and
+  `stump.tree_weight = new_w` is stamped on each new stump. Requires
+  `tree_growth="level"` in v0.10.1.
+- **Multiclass DART warm-start.**
+  `MultiClassWarmStartState.initial_dart_tree_weights` carries the
+  flat round-major × class-k per-tree weights from the prior fit so
+  continuation seeds `dart_state.tree_weights` correctly. Historical
+  RNG-driven dropouts are intentionally not persisted; new rounds
+  start fresh dropout bookkeeping (matching the v0.10.0 binary path).
+
+### Changed
+
+- **`MultiLabelGBMRanker.__init__` accepts `multi_label_mode`.**
+  Defaults to `"independent"`; `"joint"` opts into the new shared
+  tree training. The kwarg name avoids collision with
+  `GBMRanker.training_mode` (MorphBoost selector `"manual"` /
+  `"morph"`) that would have broken v0.7.1 callers passing
+  `training_mode="morph"` through the multi-label wrapper.
+- **`JointTrainingSummary`** gains a `rounds_completed: usize` field
+  for parity with single-output training summaries.
+
 ## 0.10.0
 
 Infrastructure release: lays the Rust-level foundation for joint

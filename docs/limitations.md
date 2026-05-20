@@ -1,6 +1,6 @@
 # AlloyGBM Current Limitations
 
-Last updated for v0.10.0.
+Last updated for v0.10.1.
 
 ## Remaining Limitations
 
@@ -10,16 +10,7 @@ The `BackendOps` trait is designed for hardware abstraction, but only
 `CpuBackend` exists. GPU/accelerator support is architecturally planned but
 not implemented.
 
-### 2. Multiclass softmax + DART / GOSS
-
-Multiclass classification (`GBMClassifier` with ≥3 classes) still
-rejects `boosting_mode="dart"` and `boosting_mode="goss"` at the
-Python layer. The engine's multiclass training path needs to consume
-the new K-output histogram primitive for per-class gradient
-bookkeeping (DART dropout-restore on K predictions; GOSS row scoring
-with `sum_k |g_k|`). Targeted at **v0.10.1+**.
-
-### 3. Joint-path feature parity (Rust-level)
+### 2. Joint-path feature parity (Rust-level)
 
 The v0.10.0 joint trainer is intentionally minimal:
 
@@ -46,6 +37,24 @@ across the **v0.10.x** point releases.
   passing `training_mode="morph"` through the wrapper. Bundle format
   bumped to v2 with an explicit mode byte; v1 bundles still load as
   independent mode.
+- **Multiclass softmax + GOSS (was a v0.10.x follow-up):** per-row
+  score `s_i = Σₖ |g_{i,k}|` (LightGBM convention) drives a shared
+  sampling mask across all K class gradient buffers. New helper
+  `select_row_indices_for_round_multiclass` in
+  `crates/engine/src/lib.rs`. The multiclass round loop was refactored
+  to pre-compute K gradient buffers BEFORE row sampling so the
+  multiclass scorer can see every class channel before deciding which
+  rows to keep / amplify.
+- **Multiclass softmax + DART (was a v0.10.x follow-up):** per-class
+  prediction vectors get per-round subtract/readd of dropped tree
+  contributions scaled by `dart_state.tree_weights`. Dropout flat
+  index `prior_round * K + class_k` resolves to a single stump in
+  `class_stumps[class_k][prior_round]`. After K new trees are built
+  each round they are rescaled to `new_w = 1/(n_dropped + 1)` and
+  `stamp_tree_weight` is committed onto each new stump.
+  `MultiClassWarmStartState.initial_dart_tree_weights` (flat
+  round-major × class-k) enables warm-start continuation. Requires
+  `tree_growth="level"`.
 
 ### v0.10.0
 

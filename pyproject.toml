@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "alloygbm"
-version = "0.10.0"
+version = "0.10.1"
 description = "Rust-first gradient boosting for regression, classification, and ranking with time-aware validation and Python bindings"
 readme = "README.md"
 requires-python = ">=3.11"
