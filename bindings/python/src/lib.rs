@@ -3145,11 +3145,38 @@ fn train_regression_artifact_with_summary_dense_impl(
                     .as_ref()
                     .filter(|m| !m.ema_stats.is_empty())
                     .map(|m| m.ema_stats.clone());
+                // v0.10.1: capture multiclass DART tree_weights from the
+                // prior fit, if any.  Flat layout: round-major × class-k
+                // (matches `MultiClassWarmStartState::initial_dart_tree_weights`).
+                let k_for_warm = init_mc_model.num_classes;
+                let any_dart_weight = init_mc_model
+                    .class_stumps
+                    .iter()
+                    .flat_map(|s| s.iter())
+                    .any(|s| (s.tree_weight - 1.0).abs() > f32::EPSILON);
+                let initial_dart_tree_weights = if any_dart_weight {
+                    let mut flat: Vec<f32> = Vec::with_capacity(initial_rounds * k_for_warm);
+                    for r in 0..initial_rounds {
+                        for class_k in 0..k_for_warm {
+                            let w = init_mc_model
+                                .class_stumps
+                                .get(class_k)
+                                .and_then(|cs| cs.get(r))
+                                .map(|s| s.tree_weight)
+                                .unwrap_or(1.0);
+                            flat.push(w);
+                        }
+                    }
+                    Some(flat)
+                } else {
+                    None
+                };
                 Some(MultiClassWarmStartState {
                     baseline_predictions: init_mc_model.baseline_predictions,
                     class_stumps: init_mc_model.class_stumps,
                     initial_rounds_completed: initial_rounds,
                     initial_ema_stats,
+                    initial_dart_tree_weights,
                 })
             } else {
                 None

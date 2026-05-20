@@ -94,17 +94,20 @@ def test_dart_invalid_params_rejected(kwargs, match):
 # ----- Multiclass rejection -----
 
 
-def test_multiclass_dart_rejected():
+def test_multiclass_dart_now_supported():
+    """v0.10.1 enabled multiclass DART. The v0.9.0 rejection test was
+    inverted in v0.10.1; the new positive coverage lives in
+    `test_multiclass_dart.py`."""
     rng = np.random.default_rng(3)
     X = rng.normal(size=(60, 3)).astype(np.float32)
     y = rng.integers(0, 3, size=60).tolist()  # 3 classes -> softmax path
     m = GBMClassifier(
-        n_estimators=10,
+        n_estimators=4,
         boosting_mode="dart",
         dart_drop_rate=0.1,
     )
-    with pytest.raises(NotImplementedError, match=r"multiclass"):
-        m.fit(X, y)
+    m.fit(X, y)  # Should NOT raise.
+    assert m.predict_proba(X).shape == (60, 3)
 
 
 def test_multiclass_goss_now_supported():

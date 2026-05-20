@@ -95,20 +95,22 @@ def test_goss_ranker_trains_and_predicts():
     assert np.all(np.isfinite(arr))
 
 
-def test_goss_rejects_multiclass_with_clear_error():
+def test_goss_now_supported_on_multiclass():
+    """v0.10.1 enabled multiclass softmax + GOSS using per-row scoring
+    `s_i = sum_k |g_{i,k}|` (LightGBM convention). The v0.8.0 rejection
+    test was inverted in v0.10.1; the new positive coverage lives in
+    `test_multiclass_goss.py`."""
     rng = np.random.default_rng(20260518)
     X = rng.normal(size=(300, 4)).astype("float32")
     y = rng.integers(0, 3, size=300).astype(int)
     model = GBMClassifier(
-        n_estimators=20,
+        n_estimators=4,
         boosting_mode="goss",
         goss_top_rate=0.2,
         goss_other_rate=0.1,
     )
-    with pytest.raises(Exception) as excinfo:
-        model.fit(X, y)
-    # Either Rust engine or Python wrapper raises; message must mention multiclass.
-    assert "multiclass" in str(excinfo.value).lower() or "follow-up" in str(excinfo.value).lower()
+    model.fit(X, y)  # Should NOT raise.
+    assert model.predict_proba(X).shape == (300, 3)
 
 
 def test_goss_rejects_invalid_rate_ranges():

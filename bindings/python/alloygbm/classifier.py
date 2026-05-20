@@ -146,21 +146,11 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
                 "multiclass prediction. Use binary classification or a built-in objective."
             )
 
-        # v0.10.1: multiclass GOSS is now supported (per-row score
-        # `s_i = sum_k |g_{i,k}|`, LightGBM convention).  Multiclass DART
-        # is still pending (requires per-class dropout bookkeeping across
-        # the K-stumps-per-round pool); reject it explicitly so callers
-        # get a clear Python-side error rather than the opaque Rust one.
-        if self._is_multiclass and self.boosting_mode == "dart":
-            raise NotImplementedError(
-                f"boosting_mode='dart' is not yet supported for multiclass "
-                f"classification (detected "
-                f"{self._num_classes_for_training} classes).  Multiclass "
-                f"DART requires per-class dropout bookkeeping across the "
-                f"K trees committed each round; tracked as a remaining "
-                f"v0.10.x follow-up.  Use boosting_mode='standard' or "
-                f"'goss' for multiclass."
-            )
+        # v0.10.1: multiclass GOSS (per-row score `s_i = sum_k |g_{i,k}|`,
+        # LightGBM convention) and multiclass DART (per-class dropout
+        # bookkeeping across the K-stumps-per-round pool) are now both
+        # supported. No Python-layer rejection here; the engine handles
+        # the dispatch.
 
         # Validate eval_set targets if provided
         if eval_set is not None:
