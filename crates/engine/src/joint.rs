@@ -167,6 +167,49 @@ struct JointLeafNode {
     row_indices: Vec<u32>,
 }
 
+/// A candidate split for leaf-wise (best-first) growth on the joint trainer.
+/// Held in a `BinaryHeap` keyed by `gain` (max-heap). The candidate carries
+/// the resolved split decision (feature, threshold_bin, row partition, K-output
+/// leaf values) so popping the best candidate immediately commits a stump
+/// without re-running the histogram sweep.
+///
+/// `parent_active_groups` carries the parent node's interaction-constraint
+/// active group bitset so descendants of a split node propagate the
+/// constraint set correctly.
+#[derive(Debug)]
+struct JointLeafCandidate {
+    node: JointLeafNode,
+    feature: u32,
+    threshold_bin: u16,
+    default_left: bool,
+    gain: f32,
+    left_rows: Vec<u32>,
+    right_rows: Vec<u32>,
+    left_k: Vec<f32>,
+    right_k: Vec<f32>,
+    left_stats: NodeStats,
+    right_stats: NodeStats,
+    parent_active_groups: Option<u64>,
+}
+
+impl PartialEq for JointLeafCandidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.gain == other.gain
+    }
+}
+impl Eq for JointLeafCandidate {}
+impl PartialOrd for JointLeafCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        // f32 max-heap: NaN treated as least via `unwrap_or(Equal)` in Ord.
+        self.gain.partial_cmp(&other.gain)
+    }
+}
+impl Ord for JointLeafCandidate {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.partial_cmp(other).unwrap_or(std::cmp::Ordering::Equal)
+    }
+}
+
 /// Output of a single joint training round: one shared tree expressed as a
 /// sequence of stumps with K-output leaf values populated.
 #[derive(Debug, Clone)]
