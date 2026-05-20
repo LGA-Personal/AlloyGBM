@@ -27,7 +27,10 @@ import numpy as np
 from .ranker import GBMRanker
 
 _MULTI_LABEL_RANKER_MAGIC = b"MLRK"
-_MULTI_LABEL_RANKER_VERSION = 1
+# v2 (v0.10.1+) bundles include a `mode` byte after the version word so
+# joint-mode and independent-mode bundles can coexist. v1 bundles always
+# implied independent mode and load through a back-compat branch.
+_MULTI_LABEL_RANKER_VERSION = 2
 
 
 class MultiLabelGBMRanker:
@@ -57,8 +60,15 @@ class MultiLabelGBMRanker:
         *,
         ranking_labels: list[str] | None = None,
         ranking_objective: str | list[str] = "rank:ndcg",
+        multi_label_mode: str = "independent",
         **kwargs: Any,
     ) -> None:
+        if multi_label_mode not in ("independent", "joint"):
+            raise ValueError(
+                f"multi_label_mode must be 'independent' or 'joint', got "
+                f"{multi_label_mode!r}"
+            )
+        self.multi_label_mode = multi_label_mode
         self.ranking_labels = (
             [str(label) for label in ranking_labels]
             if ranking_labels is not None
@@ -72,9 +82,14 @@ class MultiLabelGBMRanker:
         self._per_label_kwargs: dict[str, Any] = dict(kwargs)
         self._is_fitted = False
         self._sub_rankers: list[GBMRanker] = []
+        # Joint-mode state (populated only when multi_label_mode == "joint")
+        self._joint_handle = None  # JointPredictorHandle
+        self._joint_artifact_bytes: bytes | None = None
+        self._joint_baselines: list[float] | None = None
+        self._joint_feature_count: int | None = None
         self.ranking_labels_: list[str] | None = None
         self.n_labels_: int | None = None
-        self.rounds_completed_: list[int] | None = None
+        self.rounds_completed_: list[int] | int | None = None
 
     # ── Configuration ──────────────────────────────────────────────────
 
@@ -111,9 +126,17 @@ class MultiLabelGBMRanker:
         params["ranking_labels"] = (
             list(self.ranking_labels) if self.ranking_labels is not None else None
         )
+        params["multi_label_mode"] = self.multi_label_mode
         return params
 
     def set_params(self, **params: object) -> "MultiLabelGBMRanker":
+        if "multi_label_mode" in params:
+            tm = params.pop("multi_label_mode")
+            if tm not in ("independent", "joint"):
+                raise ValueError(
+                    f"multi_label_mode must be 'independent' or 'joint', got {tm!r}"
+                )
+            self.multi_label_mode = tm  # type: ignore[assignment]
         if "ranking_objective" in params:
             self.ranking_objective = params.pop("ranking_objective")  # type: ignore[assignment]
         if "ranking_labels" in params:
@@ -178,6 +201,20 @@ class MultiLabelGBMRanker:
         # through unchanged.
         eval_set = fit_kwargs.pop("eval_set", None)
 
+        if self.multi_label_mode == "joint":
+            self._fit_joint(
+                X,
+                y_arr,
+                group=group,
+                factor_exposures=factor_exposures,
+                objectives=objectives,
+                names=names,
+                n_labels=n_labels,
+                fit_kwargs=fit_kwargs,
+                eval_set=eval_set,
+            )
+            return self
+
         self._sub_rankers = []
         self.rounds_completed_ = []
         for label_idx in range(n_labels):
@@ -225,6 +262,114 @@ class MultiLabelGBMRanker:
         self._is_fitted = True
         return self
 
+    # ── Joint shared-tree training (v0.10.1) ───────────────────────────
+
+    def _fit_joint(
+        self,
+        X: object,
+        y_arr: np.ndarray,
+        *,
+        group: object | None,
+        factor_exposures: object | None,
+        objectives: list[str],
+        names: list[str],
+        n_labels: int,
+        fit_kwargs: dict[str, Any],
+        eval_set: object | None,
+    ) -> None:
+        """Train one shared tree ensemble for all K labels via the joint
+        multi-output trainer.
+
+        Routes through ``alloygbm._alloygbm.train_joint_multi_label_ranker``
+        which calls ``engine::joint::fit_joint_multi_output``.  Per-label
+        features that the joint trainer does NOT yet support are rejected
+        here with a clear pointer back to ``multi_label_mode='independent'``.
+        """
+        if factor_exposures is not None:
+            raise NotImplementedError(
+                "multi_label_mode='joint' does not support factor_exposures "
+                "in v0.10.1 (joint-path feature parity is tracked in "
+                "docs/limitations.md). Use multi_label_mode='independent'."
+            )
+        if eval_set is not None:
+            raise NotImplementedError(
+                "multi_label_mode='joint' does not support eval_set / "
+                "early_stopping_rounds in v0.10.1"
+            )
+        if fit_kwargs:
+            raise NotImplementedError(
+                f"multi_label_mode='joint' rejects fit kwargs "
+                f"{sorted(fit_kwargs.keys())} in v0.10.1; pass them via "
+                f"__init__ instead, or use multi_label_mode='independent'."
+            )
+        unsupported = {
+            "warm_start", "neutralization", "interaction_constraints",
+            "max_cat_threshold", "monotone_constraints", "leaf_model",
+            "boosting_mode",
+        }
+        rejected = unsupported.intersection(self._per_label_kwargs.keys())
+        if rejected:
+            raise NotImplementedError(
+                f"multi_label_mode='joint' rejects per-label kwargs "
+                f"{sorted(rejected)} in v0.10.1; use "
+                f"multi_label_mode='independent' for those (joint-path "
+                f"feature parity tracked in docs/limitations.md)."
+            )
+
+        from . import _alloygbm as _native
+
+        x_arr = np.ascontiguousarray(np.asarray(X), dtype=np.float32)
+        row_count = int(x_arr.shape[0])
+        feature_count = int(x_arr.shape[1])
+        x_flat = x_arr.reshape(-1).tolist()
+
+        targets_per_output: list[list[float]] = [
+            np.ascontiguousarray(y_arr[:, k], dtype=np.float32).tolist()
+            for k in range(n_labels)
+        ]
+
+        # JointObjective::parse in Rust accepts: "squared_error" | "queryrmse"
+        # | "rank:pairwise" | "rank:ndcg" | "rank:xendcg". GBMRanker's
+        # ranking_objective strings already use that style, so pass through.
+        per_output_objective_names = list(objectives)
+
+        group_arr = (
+            np.ascontiguousarray(np.asarray(group), dtype=np.uint32).tolist()
+            if group is not None
+            else None
+        )
+
+        kw = self._per_label_kwargs
+        artifact, baselines, _fc, rounds_completed = _native.train_joint_multi_label_ranker(
+            x_flat,
+            row_count,
+            feature_count,
+            targets_per_output,
+            n_labels,
+            per_output_objective_names,
+            group_arr,
+            int(kw.get("n_estimators", 100)),
+            float(kw.get("learning_rate", 0.1)),
+            int(kw.get("seed", 0)),
+            int(kw.get("max_depth", 6)),
+            int(kw.get("min_data_in_leaf", 20)),
+            float(kw.get("lambda_l2", 1.0)),
+            int(kw.get("max_bin", 255)),
+        )
+
+        self._joint_artifact_bytes = bytes(artifact)
+        self._joint_baselines = list(baselines)
+        self._joint_feature_count = feature_count
+        self._joint_handle = _native.JointPredictorHandle(
+            self._joint_artifact_bytes,
+            self._joint_baselines,
+            feature_count,
+        )
+        self.ranking_labels_ = names
+        self.n_labels_ = n_labels
+        self.rounds_completed_ = int(rounds_completed)
+        self._is_fitted = True
+
     # ── Prediction ─────────────────────────────────────────────────────
 
     def predict(self, X: object) -> np.ndarray:
@@ -238,40 +383,100 @@ class MultiLabelGBMRanker:
         """
         if not self._is_fitted:
             raise RuntimeError("MultiLabelGBMRanker must be fit before predict")
+        if self.multi_label_mode == "joint":
+            assert self._joint_handle is not None
+            assert self.n_labels_ is not None
+            x_arr = np.ascontiguousarray(np.asarray(X), dtype=np.float32)
+            n_rows = int(x_arr.shape[0])
+            flat = self._joint_handle.predict_dense(x_arr.reshape(-1).tolist())
+            return np.asarray(flat, dtype=np.float64).reshape(n_rows, self.n_labels_)
         cols = [np.asarray(ranker.predict(X), dtype=np.float64) for ranker in self._sub_rankers]
         return np.stack(cols, axis=1)
+
+    # ── Pickle ─────────────────────────────────────────────────────────
+
+    def __getstate__(self) -> dict:
+        state = self.__dict__.copy()
+        # JointPredictorHandle is a PyO3 class with no Python pickle support.
+        # Drop it; reconstruct from `_joint_artifact_bytes` + `_joint_baselines`
+        # + `_joint_feature_count` on `__setstate__`.
+        state["_joint_handle"] = None
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update(state)
+        if (
+            getattr(self, "multi_label_mode", "independent") == "joint"
+            and self._joint_artifact_bytes is not None
+        ):
+            from . import _alloygbm as _native
+
+            self._joint_handle = _native.JointPredictorHandle(
+                self._joint_artifact_bytes,
+                self._joint_baselines,
+                self._joint_feature_count,
+            )
 
     # ── Persistence ────────────────────────────────────────────────────
 
     def save_model(self, path: str) -> None:
-        """Serialise every per-label ranker into a single bundle.
+        """Serialise a multi-label ranker into a self-describing bundle.
 
-        Uses :mod:`pickle` for the per-ranker payloads so the bundle picks
-        up all of :class:`GBMRanker`'s ``__getstate__`` / ``__setstate__``
-        plumbing — meaning the same set of features that survive a
-        ``pickle.dumps(ranker)`` survive the multi-label save/load.  The
-        outer container is a small framed format with a magic word, version,
-        label count, and label names so the file is self-describing.
+        Format v2 (v0.10.1+):
+            magic[4]      = b"MLRK"
+            version[u32]  = 2
+            mode[u32]     = 0 (independent) | 1 (joint)
+            n_labels[u32]
+            n_labels × (name_len[u32], name[name_len bytes])
+            mode == 0:
+                n_labels × (blob_len[u64], pickle(sub_ranker))
+            mode == 1:
+                feature_count[u32]
+                n_baselines[u32]
+                n_baselines × baseline[f32]
+                artifact_len[u64]
+                artifact[artifact_len bytes]
         """
         if not self._is_fitted:
             raise RuntimeError("MultiLabelGBMRanker must be fit before save_model")
         import pickle
 
+        mode_int = 1 if self.multi_label_mode == "joint" else 0
+        n_labels = int(self.n_labels_ or 0)
+        names = self.ranking_labels_ or [f"label_{i}" for i in range(n_labels)]
+
         with open(path, "wb") as f:
             f.write(_MULTI_LABEL_RANKER_MAGIC)
-            f.write(struct.pack("<II", _MULTI_LABEL_RANKER_VERSION, len(self._sub_rankers)))
-            names = self.ranking_labels_ or [f"label_{i}" for i in range(len(self._sub_rankers))]
+            f.write(
+                struct.pack("<III", _MULTI_LABEL_RANKER_VERSION, mode_int, n_labels)
+            )
             for name in names:
                 encoded = name.encode("utf-8")
                 f.write(struct.pack("<I", len(encoded)))
                 f.write(encoded)
-            for ranker in self._sub_rankers:
-                blob = pickle.dumps(ranker, protocol=pickle.HIGHEST_PROTOCOL)
-                f.write(struct.pack("<Q", len(blob)))
-                f.write(blob)
+            if mode_int == 0:
+                for ranker in self._sub_rankers:
+                    blob = pickle.dumps(ranker, protocol=pickle.HIGHEST_PROTOCOL)
+                    f.write(struct.pack("<Q", len(blob)))
+                    f.write(blob)
+            else:
+                assert self._joint_artifact_bytes is not None
+                assert self._joint_baselines is not None
+                assert self._joint_feature_count is not None
+                f.write(struct.pack("<I", int(self._joint_feature_count)))
+                f.write(struct.pack("<I", len(self._joint_baselines)))
+                for b in self._joint_baselines:
+                    f.write(struct.pack("<f", float(b)))
+                f.write(struct.pack("<Q", len(self._joint_artifact_bytes)))
+                f.write(self._joint_artifact_bytes)
 
     @classmethod
     def load_model(cls, path: str) -> "MultiLabelGBMRanker":
+        """Load a bundle written by :meth:`save_model`.
+
+        Accepts both v1 (pre-v0.10.1, always independent mode) and v2
+        (v0.10.1+, explicit mode byte) on-disk layouts.
+        """
         import pickle
 
         with open(path, "rb") as f:
@@ -281,47 +486,79 @@ class MultiLabelGBMRanker:
                     "file is not a MultiLabelGBMRanker bundle "
                     f"(magic {magic!r} != {_MULTI_LABEL_RANKER_MAGIC!r})"
                 )
-            version, n_labels = struct.unpack("<II", f.read(8))
-            if version != _MULTI_LABEL_RANKER_VERSION:
+            # v1 header: version[u32], n_labels[u32]
+            # v2 header: version[u32], mode[u32], n_labels[u32]
+            (version,) = struct.unpack("<I", f.read(4))
+            if version == 1:
+                mode_int = 0
+                (n_labels,) = struct.unpack("<I", f.read(4))
+            elif version == 2:
+                mode_int, n_labels = struct.unpack("<II", f.read(8))
+            else:
                 raise ValueError(
                     f"unsupported MultiLabelGBMRanker bundle version {version}"
                 )
+
             names: list[str] = []
             for _ in range(n_labels):
                 (name_len,) = struct.unpack("<I", f.read(4))
                 names.append(f.read(name_len).decode("utf-8"))
-            rankers: list[GBMRanker] = []
-            for _ in range(n_labels):
-                (blob_len,) = struct.unpack("<Q", f.read(8))
-                blob = f.read(blob_len)
-                rankers.append(pickle.loads(blob))
-        # Reconstruct wrapper-level configuration from the sub-rankers so
-        # `get_params` after load matches the original.  At fit time every
-        # sub-ranker was configured with the same ``_per_label_kwargs``
-        # modulo ``ranking_objective``, so lifting params from sub_rankers[0]
-        # and collapsing the per-label objective is enough.
-        first_params = rankers[0].get_params()
-        per_label_objectives = [r.ranking_objective for r in rankers]
-        ranking_objective: str | list[str]
-        if len(set(per_label_objectives)) == 1:
-            ranking_objective = per_label_objectives[0]
-        else:
-            ranking_objective = list(per_label_objectives)
-        # Drop the per-label objective from the shared kwargs — it's
-        # represented separately on `ranking_objective` and must not leak
-        # back into `_per_label_kwargs` (where it would override at fit time).
-        first_params.pop("ranking_objective", None)
-        inst = cls(
-            ranking_labels=names,
-            ranking_objective=ranking_objective,
-            **first_params,
-        )
-        inst._sub_rankers = rankers
-        inst.ranking_labels_ = names
-        inst.n_labels_ = n_labels
-        inst._is_fitted = True
-        inst.rounds_completed_ = [int(r.rounds_completed_ or 0) for r in rankers]
-        return inst
+
+            if mode_int == 0:
+                rankers: list[GBMRanker] = []
+                for _ in range(n_labels):
+                    (blob_len,) = struct.unpack("<Q", f.read(8))
+                    blob = f.read(blob_len)
+                    rankers.append(pickle.loads(blob))
+                first_params = rankers[0].get_params()
+                per_label_objectives = [r.ranking_objective for r in rankers]
+                ranking_objective: str | list[str]
+                if len(set(per_label_objectives)) == 1:
+                    ranking_objective = per_label_objectives[0]
+                else:
+                    ranking_objective = list(per_label_objectives)
+                first_params.pop("ranking_objective", None)
+                inst = cls(
+                    ranking_labels=names,
+                    ranking_objective=ranking_objective,
+                    multi_label_mode="independent",
+                    **first_params,
+                )
+                inst._sub_rankers = rankers
+                inst.ranking_labels_ = names
+                inst.n_labels_ = n_labels
+                inst._is_fitted = True
+                inst.rounds_completed_ = [
+                    int(r.rounds_completed_ or 0) for r in rankers
+                ]
+                return inst
+
+            # Joint mode (mode_int == 1)
+            (feature_count,) = struct.unpack("<I", f.read(4))
+            (n_baselines,) = struct.unpack("<I", f.read(4))
+            baselines = list(struct.unpack(f"<{n_baselines}f", f.read(4 * n_baselines)))
+            (artifact_len,) = struct.unpack("<Q", f.read(8))
+            artifact = f.read(artifact_len)
+
+            from . import _alloygbm as _native
+
+            inst = cls(
+                ranking_labels=names,
+                ranking_objective="rank:ndcg",  # placeholder; joint predict ignores it
+                multi_label_mode="joint",
+            )
+            inst._joint_artifact_bytes = bytes(artifact)
+            inst._joint_baselines = baselines
+            inst._joint_feature_count = int(feature_count)
+            inst._joint_handle = _native.JointPredictorHandle(
+                inst._joint_artifact_bytes,
+                inst._joint_baselines,
+                inst._joint_feature_count,
+            )
+            inst.ranking_labels_ = names
+            inst.n_labels_ = n_labels
+            inst._is_fitted = True
+            return inst
 
     # ── Introspection ──────────────────────────────────────────────────
 
@@ -333,6 +570,7 @@ class MultiLabelGBMRanker:
     def __repr__(self) -> str:
         return (
             f"MultiLabelGBMRanker(n_labels={self.n_labels_}, "
+            f"multi_label_mode={self.multi_label_mode!r}, "
             f"ranking_labels={self.ranking_labels_}, "
             f"ranking_objective={self.ranking_objective!r}, "
             f"fitted={self._is_fitted})"
