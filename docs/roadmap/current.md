@@ -4,40 +4,82 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
-The `0.10.0` release is an **infrastructure release**: it lays the
-Rust-level foundation for joint multi-output learning and closes the
-v0.9.0 `DART + warm_start` follow-up. The new
-`MultiOutputHistogram` primitive (`crates/engine/src/shared_histogram.rs`),
-`MultiOutputLeafValues` artifact section (kind=13), and the joint
-trainer in `crates/engine/src/joint.rs` (`fit_joint_multi_output` +
-`JointPredictor`) are all in place. Default user-facing behaviour is
-byte-identical to v0.9.0 — joint mode is currently Rust-only and the
-new artifact section is only emitted when the joint trainer is used.
-DART + `warm_start` is now supported on `GBMRegressor`, binary
-`GBMClassifier`, and `GBMRanker`: `WarmStartState` carries an
-optional `initial_dart_tree_weights` snapshot and the engine seeds
-`dart_state.tree_weights` from it. Deferred to v0.10.x: Python
-`MultiLabelGBMRanker(training_mode="joint")` surface, multiclass +
-DART/GOSS, and feature parity (MorphBoost, DRO, neutralization,
-leaf-wise) on the joint path.
+The `0.10.1` release closes the three v0.10.x-deferred limitations
+from v0.10.0 (`MultiLabelGBMRanker` joint mode Python surface,
+multiclass softmax + GOSS, multiclass softmax + DART including
+warm-start). Default behaviour for every existing user-facing API
+remains byte-identical to v0.10.0 when the new features are not
+opted into.
 
-### v0.10.x follow-ups
+## What Shipped In v0.10.1
 
-- **v0.10.1**: Python `MultiLabelGBMRanker(training_mode="joint")`
-  user-facing surface wired through to the v0.10.0 Rust joint trainer.
-  Includes new PyO3 entry point + Python wrapper integration
-  (`__init__`, `fit`, `predict`, `save_model`, pickle round-trip,
-  `get_params` / `set_params` / `__repr__`).
-- **v0.10.1+**: Multiclass softmax + DART. Engine plumbing inside
-  `fit_multiclass_iterations_impl` to consume the K-output histogram
-  primitive for per-class gradient bookkeeping during DART dropouts.
-- **v0.10.1+**: Multiclass softmax + GOSS. Per-row score
-  `s_i = Σₖ |g_{i,k}|` (LightGBM convention) drives the sampling mask
-  applied to all K class-gradient vectors.
+- **`MultiLabelGBMRanker(multi_label_mode="joint")`**: new PyO3 entry
+  point `train_joint_multi_label_ranker` + `JointPredictorHandle`
+  py-class wrap the v0.10.0 Rust joint trainer
+  (`engine::joint::fit_joint_multi_output`). Default mode remains
+  `"independent"`; joint is opt-in. The new kwarg is named
+  `multi_label_mode` (not `training_mode`) to avoid colliding with
+  `GBMRanker.training_mode` (MorphBoost selector). Bundle format
+  bumped to v2 with an explicit mode byte; v1 bundles still load as
+  independent. Strict allow-list (`n_estimators`, `learning_rate`,
+  `seed`, `max_depth`, `min_data_in_leaf`, `lambda_l2`, `max_bin`)
+  rejects every other kwarg until joint-path feature parity lands.
+  `_normalize_group_for_joint` accepts both LightGBM group-sizes and
+  per-row IDs, stable-sorts rows by group before fitting.
+- **Multiclass softmax + GOSS** (`GBMClassifier(boosting_mode="goss")`
+  with K ≥ 3 classes): per-row score `s_i = Σₖ |g_{i,k}|` (LightGBM
+  convention) drives a shared sampling mask across all K class
+  gradient buffers. The multiclass round loop was refactored to
+  pre-compute K gradient buffers before sampling.
+- **Multiclass softmax + DART** (`GBMClassifier(boosting_mode="dart")`
+  with K ≥ 3 classes): per-class prediction vectors get per-round
+  subtract/readd of dropped tree contributions scaled by
+  `dart_state.tree_weights`. Per-class `dart_round_start_offsets[k]` +
+  `dart_round_counts[k]` arrays index the full stump slice each
+  (round, class) tree occupies in `class_stumps[k]`. After K new
+  trees are built each round they are rescaled to
+  `new_w = 1/(n_dropped + 1)` and dropped trees are re-added at
+  their rescaled weights; `stump.tree_weight = new_w` is stamped on
+  every stump in the new round's per-class slice. Requires
+  `tree_growth="level"`.
+- **Multiclass DART warm-start**:
+  `MultiClassWarmStartState.initial_dart_tree_weights` carries flat
+  round-major × class-k per-tree weights from the prior fit. The
+  PyO3 bridge reconstructs the per-tree weights by grouping
+  `class_stumps[k]` by `tree_id` decoded from
+  `node_id / TREE_NODE_STRIDE` (matching the predictor's
+  `apply_dart_tree_weights` convention).
+- **DART round acceptance correctness**: `dart_state` mutations and
+  `tree_weight` stamping are now deferred to the round-accept branch
+  (previously committed before loss check, which desynced state on
+  rejection). Rejection paths restore `class_predictions` from
+  `dart_predictions_backup`.
+- **Validation DART parity**: multiclass DART now mirrors the
+  single-output validation transition (subtract dropped at w_old →
+  add new K trees at new_w → re-add dropped at w_new) on
+  `validation_class_predictions`, so `next_validation_loss` and
+  early-stopping decisions are computed against the same full
+  ensemble the model is training against.
+
+### v0.10.x follow-ups (deferred)
+
 - **v0.10.x**: Joint-path feature parity with the single-output
   trainer — leaf-wise growth, MorphBoost, DRO, neutralization,
   native-categorical splits, GOSS, DART, warm-start, interaction
-  constraints.
+  constraints, `row_subsample`, `col_subsample`, `min_split_gain`.
+- **v0.10.x**: Leaf-wise multiclass DART (dropout indexing across K
+  class trees in best-first growth).
+
+## What Shipped In v0.10.0
+
+Infrastructure release: laid the Rust-level foundation for joint
+multi-output learning and closed the v0.9.0 `DART + warm_start`
+follow-up. The new `MultiOutputHistogram` primitive
+(`crates/engine/src/shared_histogram.rs`), `MultiOutputLeafValues`
+artifact section (kind=13), and the joint trainer in
+`crates/engine/src/joint.rs` (`fit_joint_multi_output` +
+`JointPredictor`) all landed; v0.10.1 (above) wired the Python
+surface.
 
 The `0.9.0` release closes the v0.8.0 DART placeholder (Limitation 2)
 and resolves the linear-rank predict-path NaN routing bug

@@ -1,7 +1,69 @@
 Release and platform policy
 ===========================
 
-AlloyGBM ``0.10.0`` release notes and platform policy.
+AlloyGBM ``0.10.1`` release notes and platform policy.
+
+What's new in 0.10.1
+--------------------
+
+Closes the three v0.10.x-deferred limitations from v0.10.0:
+``MultiLabelGBMRanker`` joint mode Python surface, multiclass softmax
++ GOSS, and multiclass softmax + DART (including warm-start). Default
+behaviour for every existing user-facing API remains byte-identical
+to v0.10.0 when the new features are not opted into.
+
+**MultiLabelGBMRanker joint mode (Python surface):**
+
+- ``MultiLabelGBMRanker(multi_label_mode="joint")`` now routes through
+  a new PyO3 entry point (``train_joint_multi_label_ranker``) and
+  ``JointPredictorHandle`` py-class to the v0.10.0 Rust joint trainer
+  ``engine::joint::fit_joint_multi_output``. Default mode is still
+  ``"independent"`` (the K-per-label ``GBMRanker`` fallback from
+  v0.7.1) — joint is opt-in. Bundle format bumped to v2 with an
+  explicit mode byte; v1 bundles still load as independent.
+
+**Multiclass softmax + GOSS:**
+
+- ``GBMClassifier(boosting_mode="goss")`` for K >= 3 classes. Per-row
+  score :math:`s_i = \\sum_k |g_{i,k}|` (LightGBM convention) drives a
+  shared sampling mask across all K class gradient buffers; the
+  amplification factor is applied identically to every class's grad
+  and hess. The multiclass round loop was refactored so the K gradient
+  buffers are pre-computed before sampling.
+
+**Multiclass softmax + DART (+ warm-start):**
+
+- ``GBMClassifier(boosting_mode="dart")`` for K >= 3 classes. Per-class
+  prediction vectors get per-round subtract/readd of dropped tree
+  contributions scaled by ``dart_state.tree_weights``. Per-class
+  ``dart_round_start_offsets`` / ``dart_round_counts`` arrays track the
+  contiguous stump slice each (round, class) tree occupies in
+  ``class_stumps[k]`` so dropout subtracts the WHOLE class tree, not
+  just its root stump. After K new trees are built each round they are
+  rescaled to ``new_w = 1/(n_dropped + 1)`` and the dropped trees are
+  re-added at their rescaled weights. ``stump.tree_weight = new_w`` is
+  stamped on every stump in the new round's per-class slice. Requires
+  ``tree_growth="level"`` in v0.10.1.
+- ``MultiClassWarmStartState.initial_dart_tree_weights`` carries the
+  flat round-major × class-k per-tree weights from the prior fit, so
+  continuation seeds ``dart_state.tree_weights`` correctly. The PyO3
+  bridge reconstructs the per-tree weights by grouping
+  ``class_stumps[k]`` by ``tree_id`` (decoded from
+  ``node_id / TREE_NODE_STRIDE``) — taking the first stump's
+  ``tree_weight`` per tree group, mirroring the predictor's
+  ``apply_dart_tree_weights`` convention.
+
+**Constraints:**
+
+- Multiclass DART requires ``tree_growth="level"``; leaf-wise dropout
+  indexing across K class trees is tracked as a follow-up.
+- Joint mode supports level-wise growth, standard boosting, and the
+  built-in ``squared_error`` / ``queryrmse`` / ``rank:pairwise`` /
+  ``rank:ndcg`` / ``rank:xendcg`` objectives only. Joint-path feature
+  parity (MorphBoost, neutralization, DRO, interaction constraints,
+  leaf-wise, GOSS, DART, warm-start, ``row_subsample``,
+  ``col_subsample``, ``min_split_gain``) is targeted for later v0.10.x
+  releases — see ``docs/limitations.md``.
 
 What's new in 0.10.0
 --------------------
