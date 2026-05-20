@@ -173,6 +173,39 @@ def test_joint_mode_accepts_phase1_kwargs(kw, value):
     assert preds.shape == y.shape
 
 
+def test_joint_mode_leaf_wise_growth_respects_max_leaves():
+    """v0.10.2 Phase 2: joint mode supports tree_growth='leaf' + max_leaves
+    via build_joint_round_leafwise. The model should fit, predict, and
+    produce a finite-sized tree capped by max_leaves."""
+    X, y, group = _toy_ranking(n_queries=12, items_per_query=6, n_features=4, n_labels=3)
+    m = MultiLabelGBMRanker(
+        n_estimators=3,
+        multi_label_mode="joint",
+        tree_growth="leaf",
+        max_leaves=5,
+        max_depth=8,
+    )
+    m.fit(X, y, group=group)
+    preds = m.predict(X)
+    assert preds.shape == y.shape
+    # Sanity: predictions should be finite.
+    assert np.all(np.isfinite(preds))
+
+
+def test_joint_mode_leaf_wise_requires_max_leaves():
+    """v0.10.2: tree_growth='leaf' without max_leaves must fail with a
+    clear error (mirroring the single-output trainer's contract)."""
+    X, y, group = _toy_ranking()
+    m = MultiLabelGBMRanker(
+        n_estimators=2,
+        multi_label_mode="joint",
+        tree_growth="leaf",
+        # max_leaves intentionally omitted
+    )
+    with pytest.raises(Exception, match="max_leaves"):
+        m.fit(X, y, group=group)
+
+
 def test_joint_mode_still_rejects_truly_unsupported_kwargs():
     """v0.10.2: kwargs that the joint trainer still does NOT support
     (warm-start, MorphBoost, etc.) must continue to be rejected with

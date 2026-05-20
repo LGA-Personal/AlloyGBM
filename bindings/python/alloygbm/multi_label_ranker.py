@@ -287,6 +287,9 @@ class MultiLabelGBMRanker:
         "row_subsample",
         "col_subsample",
         "interaction_constraints",
+        # v0.10.2 Phase 2: leaf-wise growth.
+        "tree_growth",
+        "max_leaves",
     })
 
     @staticmethod
@@ -453,6 +456,11 @@ class MultiLabelGBMRanker:
             row_subsample=float(kw.get("row_subsample", 1.0)),
             col_subsample=float(kw.get("col_subsample", 1.0)),
             interaction_constraints=ic_list,
+            # v0.10.2 Phase 2 kwargs.
+            tree_growth=str(kw.get("tree_growth", "level")),
+            max_leaves=(
+                int(kw["max_leaves"]) if kw.get("max_leaves") is not None else None
+            ),
         )
 
         self._joint_artifact_bytes = bytes(artifact)

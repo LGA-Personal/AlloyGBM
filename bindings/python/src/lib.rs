@@ -5327,6 +5327,8 @@ impl JointPredictorHandle {
     row_subsample=1.0_f32,
     col_subsample=1.0_f32,
     interaction_constraints=Vec::<Vec<u32>>::new(),
+    tree_growth="level".to_string(),
+    max_leaves=None::<usize>,
 ))]
 fn train_joint_multi_label_ranker(
     x_values: Vec<f32>,
@@ -5347,6 +5349,8 @@ fn train_joint_multi_label_ranker(
     row_subsample: f32,
     col_subsample: f32,
     interaction_constraints: Vec<Vec<u32>>,
+    tree_growth: String,
+    max_leaves: Option<usize>,
 ) -> PyResult<(Vec<u8>, Vec<f32>, usize, usize)> {
     use alloygbm_engine::joint::{JointObjective, fit_joint_multi_output};
 
@@ -5404,6 +5408,15 @@ fn train_joint_multi_label_ranker(
     )
     .map_err(engine_error_to_pyerr)?;
 
+    let tg = match tree_growth.as_str() {
+        "level" => TreeGrowth::Level,
+        "leaf" => TreeGrowth::Leaf,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "unknown tree_growth {other:?}; expected 'level' or 'leaf'"
+            )));
+        }
+    };
     let params = TrainParams {
         learning_rate,
         seed,
@@ -5414,6 +5427,8 @@ fn train_joint_multi_label_ranker(
         row_subsample,
         col_subsample,
         interaction_constraints,
+        tree_growth: tg,
+        max_leaves,
         ..TrainParams::default()
     };
 
