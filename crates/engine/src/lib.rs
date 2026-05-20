@@ -3961,8 +3961,7 @@ impl Trainer {
             // in lockstep so the round-commit copies them consistently.
             // Then stamp `tree_weight` on each new stump and push the
             // new weights into `dart_state.tree_weights`.
-            let dart_new_weight: Option<f32> = if let Some((_, _, normalize_type, _)) =
-                dart_params
+            let dart_new_weight: Option<f32> = if let Some((_, _, normalize_type, _)) = dart_params
             {
                 let n_dropped = dropped_tree_indices.len() as f32;
                 let new_w = 1.0 / (n_dropped + 1.0);
@@ -3977,8 +3976,8 @@ impl Trainer {
                 for class_k in 0..k {
                     let n_rows = class_candidate_predictions[class_k].len();
                     for r in 0..n_rows {
-                        let f_t = class_candidate_predictions[class_k][r]
-                            - class_predictions[class_k][r];
+                        let f_t =
+                            class_candidate_predictions[class_k][r] - class_predictions[class_k][r];
                         class_candidate_predictions[class_k][r] =
                             class_predictions[class_k][r] + new_w * f_t;
                     }

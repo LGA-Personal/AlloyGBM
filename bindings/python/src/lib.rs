@@ -5220,11 +5220,7 @@ struct JointPredictorHandle {
 #[pymethods]
 impl JointPredictorHandle {
     #[new]
-    fn new(
-        artifact_bytes: &[u8],
-        baselines: Vec<f32>,
-        feature_count: usize,
-    ) -> PyResult<Self> {
+    fn new(artifact_bytes: &[u8], baselines: Vec<f32>, feature_count: usize) -> PyResult<Self> {
         let predictor =
             alloygbm_engine::joint::JointPredictor::from_artifact_bytes(artifact_bytes, baselines)
                 .map_err(PyValueError::new_err)?;
@@ -5327,9 +5323,8 @@ fn train_joint_multi_label_ranker(
 
     let mut per_output_objective: Vec<JointObjective> = Vec::with_capacity(n_outputs);
     for name in &per_output_objective_names {
-        let obj = JointObjective::parse(name).map_err(|e| {
-            PyValueError::new_err(format!("invalid objective {name:?}: {e}"))
-        })?;
+        let obj = JointObjective::parse(name)
+            .map_err(|e| PyValueError::new_err(format!("invalid objective {name:?}: {e}")))?;
         per_output_objective.push(obj);
     }
     if per_output_objective.iter().any(|o| o.requires_group()) && group_id.is_none() {
@@ -5374,9 +5369,17 @@ fn train_joint_multi_label_ranker(
     )
     .map_err(PyValueError::new_err)?;
 
-    let bytes = summary.model.to_artifact_bytes().map_err(engine_error_to_pyerr)?;
+    let bytes = summary
+        .model
+        .to_artifact_bytes()
+        .map_err(engine_error_to_pyerr)?;
 
-    Ok((bytes, summary.baselines, feature_count, summary.rounds_completed))
+    Ok((
+        bytes,
+        summary.baselines,
+        feature_count,
+        summary.rounds_completed,
+    ))
 }
 
 #[pymodule]
