@@ -150,6 +150,10 @@ pub struct JointTrainingSummary {
     pub model: TrainedModel,
     /// Per-output objective names that were used (for metadata round-trip).
     pub per_output_objective_names: Vec<String>,
+    /// Number of boosting rounds actually completed. In v0.10.x the joint
+    /// trainer always runs to `n_estimators` (no early stopping yet), so
+    /// `rounds_completed == n_estimators` for every successful fit.
+    pub rounds_completed: usize,
 }
 
 /// Per-leaf bookkeeping during level-wise tree growth on the joint trainer.
@@ -593,6 +597,7 @@ pub fn fit_joint_multi_output(
             .iter()
             .map(|o| o.name().to_string())
             .collect(),
+        rounds_completed,
     })
 }
 

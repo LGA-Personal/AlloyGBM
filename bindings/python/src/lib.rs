@@ -5176,10 +5176,187 @@ fn train_regression_artifact_dense_with_summary_bytes(
     .map_err(engine_error_to_pyerr)
 }
 
+// ---------------------------------------------------------------------------
+// Joint multi-output trainer + predictor handle (v0.10.1)
+// ---------------------------------------------------------------------------
+
+/// PyO3 handle that wraps `alloygbm_engine::joint::JointPredictor` for K-output
+/// prediction from Python. `MultiLabelGBMRanker(training_mode="joint")` is the
+/// primary consumer.
+#[pyclass]
+#[derive(Debug, Clone)]
+struct JointPredictorHandle {
+    predictor: alloygbm_engine::joint::JointPredictor,
+    feature_count: usize,
+}
+
+#[pymethods]
+impl JointPredictorHandle {
+    #[new]
+    fn new(
+        artifact_bytes: &[u8],
+        baselines: Vec<f32>,
+        feature_count: usize,
+    ) -> PyResult<Self> {
+        let predictor =
+            alloygbm_engine::joint::JointPredictor::from_artifact_bytes(artifact_bytes, baselines)
+                .map_err(PyValueError::new_err)?;
+        Ok(Self {
+            predictor,
+            feature_count,
+        })
+    }
+
+    /// Predict K outputs for each row. Returns a flat row-major Vec<f32> of
+    /// length `n_rows * n_outputs`; the Python wrapper reshapes.
+    fn predict_dense(&self, values: Vec<f32>) -> PyResult<Vec<f32>> {
+        if self.feature_count == 0 {
+            return Err(PyValueError::new_err("feature_count must be > 0"));
+        }
+        if values.len() % self.feature_count != 0 {
+            return Err(PyValueError::new_err(format!(
+                "values length {} not divisible by feature_count {}",
+                values.len(),
+                self.feature_count
+            )));
+        }
+        Ok(self.predictor.predict_batch(&values, self.feature_count))
+    }
+
+    #[getter]
+    fn n_outputs(&self) -> usize {
+        self.predictor.n_outputs
+    }
+
+    #[getter]
+    fn baselines(&self) -> Vec<f32> {
+        self.predictor.baselines.clone()
+    }
+}
+
+/// Train a joint multi-output model that shares trees across K outputs.
+///
+/// v0.10.1 minimum-viable wiring: pre-bins dense `x_values` using the existing
+/// `prepare_training_matrices_from_dense_values` helper (using y[:, 0] as a
+/// throwaway target — binning is target-independent), then dispatches to
+/// `alloygbm_engine::joint::fit_joint_multi_output`. Returns the artifact
+/// bytes (with `MultiOutputLeafValues` section) along with per-output
+/// baselines + the feature count for the `JointPredictorHandle` constructor.
+#[pyfunction]
+#[pyo3(signature = (
+    x_values, row_count, feature_count,
+    targets_per_output, n_outputs,
+    per_output_objective_names,
+    group_id,
+    n_estimators,
+    learning_rate,
+    seed,
+    max_depth,
+    min_data_in_leaf,
+    lambda_l2,
+    max_bin,
+))]
+fn train_joint_multi_label_ranker(
+    x_values: Vec<f32>,
+    row_count: usize,
+    feature_count: usize,
+    targets_per_output: Vec<Vec<f32>>,
+    n_outputs: usize,
+    per_output_objective_names: Vec<String>,
+    group_id: Option<Vec<u32>>,
+    n_estimators: usize,
+    learning_rate: f32,
+    seed: u64,
+    max_depth: u16,
+    min_data_in_leaf: u32,
+    lambda_l2: f32,
+    max_bin: usize,
+) -> PyResult<(Vec<u8>, Vec<f32>, usize, usize)> {
+    use alloygbm_engine::joint::{JointObjective, fit_joint_multi_output};
+
+    if targets_per_output.len() != n_outputs {
+        return Err(PyValueError::new_err(format!(
+            "targets_per_output length {} != n_outputs {n_outputs}",
+            targets_per_output.len()
+        )));
+    }
+    if per_output_objective_names.len() != n_outputs {
+        return Err(PyValueError::new_err(format!(
+            "per_output_objective_names length {} != n_outputs {n_outputs}",
+            per_output_objective_names.len()
+        )));
+    }
+    if n_outputs == 0 {
+        return Err(PyValueError::new_err("n_outputs must be > 0"));
+    }
+    for (k, tg) in targets_per_output.iter().enumerate() {
+        if tg.len() != row_count {
+            return Err(PyValueError::new_err(format!(
+                "targets[{k}] length {} != row_count {row_count}",
+                tg.len()
+            )));
+        }
+    }
+
+    let mut per_output_objective: Vec<JointObjective> = Vec::with_capacity(n_outputs);
+    for name in &per_output_objective_names {
+        let obj = JointObjective::parse(name).map_err(|e| {
+            PyValueError::new_err(format!("invalid objective {name:?}: {e}"))
+        })?;
+        per_output_objective.push(obj);
+    }
+    if per_output_objective.iter().any(|o| o.requires_group()) && group_id.is_none() {
+        return Err(PyValueError::new_err(
+            "at least one ranking objective requires group_id",
+        ));
+    }
+
+    // Build the binned matrix. The joint trainer needs only `binned_matrix`;
+    // use y[:, 0] as a throwaway target since binning is target-independent
+    // for the linear and rank strategies.
+    let throwaway_targets = targets_per_output[0].clone();
+    let prepared = prepare_training_matrices_from_dense_values(
+        &x_values,
+        row_count,
+        feature_count,
+        &throwaway_targets,
+        None,
+        None,
+        group_id.clone(),
+        ContinuousBinningStrategy::Linear,
+        max_bin,
+        false,
+    )
+    .map_err(engine_error_to_pyerr)?;
+
+    let mut params = TrainParams::default();
+    params.learning_rate = learning_rate;
+    params.seed = seed;
+    params.max_depth = max_depth;
+    params.min_data_in_leaf = min_data_in_leaf;
+    params.lambda_l2 = lambda_l2;
+
+    let summary = fit_joint_multi_output(
+        &params,
+        feature_count,
+        &prepared.binned_matrix,
+        &targets_per_output,
+        group_id.as_deref(),
+        &per_output_objective,
+        n_estimators,
+    )
+    .map_err(PyValueError::new_err)?;
+
+    let bytes = summary.model.to_artifact_bytes().map_err(engine_error_to_pyerr)?;
+
+    Ok((bytes, summary.baselines, feature_count, summary.rounds_completed))
+}
+
 #[pymodule]
 fn _alloygbm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<NativeRuntimeInfo>()?;
     m.add_class::<NativePredictorHandle>()?;
+    m.add_class::<JointPredictorHandle>()?;
     m.add_class::<NativeContinuousBinningMetadata>()?;
     m.add_class::<NativeTrainingSummary>()?;
     m.add_class::<NativeTrainingResult>()?;
@@ -5214,6 +5391,7 @@ fn _alloygbm(m: &Bound<'_, PyModule>) -> PyResult<()> {
         train_regression_artifact_dense_with_summary_bytes,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(train_joint_multi_label_ranker, m)?)?;
     Ok(())
 }
 
