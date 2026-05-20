@@ -23,13 +23,15 @@ use crate::shared_histogram::{
     MultiOutputHistogram, build_multi_output_histogram_inplace, compute_multi_output_split_gain,
 };
 use crate::{
-    Device, LambdaMARTObjective, ObjectiveOps, PairwiseRankingObjective, QueryRMSEObjective,
-    SquaredErrorObjective, TrainedModel, TrainedStump, XeNDCGObjective, encode_tree_node_id,
+    Device, InteractionConstraintIndex, LambdaMARTObjective, ObjectiveOps,
+    PairwiseRankingObjective, QueryRMSEObjective, SquaredErrorObjective, TrainedModel,
+    TrainedStump, XeNDCGObjective, encode_tree_node_id,
 };
 use alloygbm_core::{
     BinnedMatrix, GradientPair, LeafValue, MISSING_BIN_U8, ModelMetadata, NodeStats,
     SplitCandidate, TrainParams,
 };
+use std::collections::HashMap;
 
 /// Runtime selector for per-output objective on the joint trainer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,6 +256,19 @@ pub fn build_joint_round(
         vec![true; feature_count]
     };
 
+    // interaction_constraints (v0.10.2): build the constraint index (returns
+    // None if the user didn't configure any constraints). Per-node bookkeeping
+    // tracks the active group bitset for each local_node_id; the root starts
+    // with all groups active, and descendants narrow the set via `descend`
+    // each time their parent splits on a constrained feature.
+    let constraint_index =
+        InteractionConstraintIndex::from_constraints(&params.interaction_constraints, feature_count)
+            .map_err(|e| format!("interaction_constraints: {e:?}"))?;
+    let mut node_active_groups: HashMap<u32, u64> = HashMap::new();
+    if let Some(idx) = constraint_index.as_ref() {
+        node_active_groups.insert(0, idx.root_active_groups());
+    }
+
     let mut stumps: Vec<TrainedStump> = Vec::new();
     let mut active: Vec<JointLeafNode> = vec![JointLeafNode {
         local_node_id: 0,
@@ -318,10 +333,20 @@ pub fn build_joint_round(
             // BinnedMatrix exposes max_bin globally; iterate candidate
             // thresholds across the full bin range minus the NaN slot.
             let max_threshold = (binned_matrix.max_bin as usize).min(MISSING_BIN_U8 as usize - 1);
+            // interaction_constraints (v0.10.2): look up this node's active
+            // group set once outside the feature loop.
+            let node_ag = node_active_groups.get(&node.local_node_id).copied();
             for feature in 0..feature_count {
                 // col_subsample (v0.10.2): skip masked-out features in split search.
                 if !feature_allowed[feature] {
                     continue;
+                }
+                // interaction_constraints (v0.10.2): skip features outside the
+                // active group set for this node.
+                if let (Some(idx), Some(ag)) = (constraint_index.as_ref(), node_ag) {
+                    if !idx.feature_allowed(ag, feature as u32) {
+                        continue;
+                    }
                 }
                 for threshold_bin in 0..max_threshold {
                     let gain = compute_multi_output_split_gain(
@@ -444,6 +469,19 @@ pub fn build_joint_round(
                 multi_output_leaf_values: Some((left_k, right_k)),
             };
             stumps.push(stump);
+
+            // interaction_constraints (v0.10.2): propagate the active group
+            // set to both children. `descend` returns the intersection of
+            // the parent's active groups with the groups containing the
+            // split feature (or leaves it unchanged for unconstrained
+            // features).
+            if let (Some(idx), Some(parent_ag)) =
+                (constraint_index.as_ref(), node_ag)
+            {
+                let child_ag = idx.descend(parent_ag, feature as u32);
+                node_active_groups.insert(node.local_node_id * 2 + 1, child_ag);
+                node_active_groups.insert(node.local_node_id * 2 + 2, child_ag);
+            }
 
             // Schedule child nodes (local_node_id * 2 + 1 and + 2 per predictor
             // traversal convention).
@@ -1408,6 +1446,87 @@ mod tests {
         assert!(
             saw_non_zero,
             "col_subsample=0.25 should sometimes exclude feature 0 from the split-search mask"
+        );
+    }
+
+    #[test]
+    fn joint_interaction_constraints_forbid_feature_outside_active_group() {
+        // 12 rows, 3 features, 2 outputs. With constraints {[0,1], [2]},
+        // feature 2 is in its own group; once the tree splits on feature 0
+        // (group 0), feature 2 (group 1) becomes unreachable on that path.
+        //
+        // We use a fixture where feature 2 is in fact the second-best split
+        // candidate, so we can detect whether the constraint is honored:
+        // without the constraint, feature 2 would appear in some stump;
+        // with the constraint, it must not.
+        let bins: Vec<u8> = vec![
+            // f0, f1, f2
+            0, 0, 0, // row 0
+            0, 0, 1, // row 1
+            0, 1, 0, // row 2
+            0, 1, 1, // row 3
+            4, 0, 0, // row 4
+            4, 0, 1, // row 5
+            4, 1, 0, // row 6
+            4, 1, 1, // row 7
+            0, 0, 0, // row 8
+            0, 1, 1, // row 9
+            4, 0, 1, // row 10
+            4, 1, 0, // row 11
+        ];
+        let binned = BinnedMatrix::new(12, 3, 4, bins).expect("binned");
+        let targets_per_output: Vec<Vec<f32>> = vec![
+            // f0 splits the major signal; f1 refines within each half.
+            vec![
+                -2.0, -1.0, -2.0, -1.0, 1.0, 2.0, 1.0, 2.0, -2.0, -1.0, 1.0, 2.0,
+            ],
+            vec![
+                1.0, 0.5, 1.0, 0.5, -0.5, -1.0, -0.5, -1.0, 1.0, 0.5, -0.5, -1.0,
+            ],
+        ];
+        let params = TrainParams {
+            max_depth: 2,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            learning_rate: 1.0,
+            interaction_constraints: vec![vec![0, 1], vec![2]],
+            ..TrainParams::default()
+        };
+        let summary = fit_joint_multi_output(
+            &params,
+            3,
+            &binned,
+            &targets_per_output,
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            3,
+        )
+        .expect("fit");
+
+        // No stump may ever split on feature 2 once a path has used a
+        // feature from group {0,1}. Since the root is constrained-free
+        // (both groups active), feature 2 is *technically* allowed at
+        // the root — but as soon as a stump on feature 0 or 1 appears,
+        // descendants on that path must not use feature 2. The simplest
+        // assertion: if the model contains feature-2 stumps AND
+        // feature-{0,1} stumps, the feature-2 stumps must be at the root
+        // (local_node_id 0) of their tree.
+        let mut group01_used = false;
+        let mut group2_non_root = false;
+        for stump in &summary.model.stumps {
+            let f = stump.split.feature_index;
+            let local_node_id = stump.split.node_id % (1u32 << 20); // strip tree_id
+            if f == 0 || f == 1 {
+                group01_used = true;
+            }
+            if f == 2 && local_node_id != 0 {
+                group2_non_root = true;
+            }
+        }
+        assert!(group01_used, "expected at least one f0/f1 stump");
+        assert!(
+            !group2_non_root,
+            "interaction_constraints violated: feature 2 used as a non-root stump (would cross groups)"
         );
     }
 }
