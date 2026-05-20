@@ -1196,6 +1196,15 @@ pub fn fit_joint_multi_output_with_categorical(
                 let bin = binned_matrix.bins[row * feature_count + feature];
                 let went_left = if bin == MISSING_BIN_U8 {
                     stump.split.default_left
+                } else if stump.split.is_categorical {
+                    // Categorical stump: route by bitset bit.
+                    let bs = stump
+                        .split
+                        .categorical_bitset
+                        .as_ref()
+                        .map(|b| bitset_bytes_to_u64(b))
+                        .unwrap_or(0);
+                    bin < 64 && (bs & (1u64 << bin)) != 0
                 } else {
                     (bin as usize) <= threshold_bin
                 };
@@ -1300,6 +1309,14 @@ struct JointPredictorStump {
     feature_index: u32,
     threshold_bin: u16,
     default_left: bool,
+    /// True if this stump uses a categorical bitset (Fisher-sort) instead of
+    /// a numeric threshold compare.
+    is_categorical: bool,
+    /// Categorical left-bitset (bit `k` = 1 means category `k` is routed
+    /// left). Populated only when `is_categorical` is true. Single u64
+    /// supports up to 64 categories per feature (the joint trainer's
+    /// per-feature cap from the Fisher-sort helper).
+    cat_bitset: u64,
     left_k: Vec<f32>,
     right_k: Vec<f32>,
 }
@@ -1342,11 +1359,19 @@ impl JointPredictor {
             let tree_id = (stump.split.node_id / TREE_NODE_STRIDE) as usize;
             let local_node_id = stump.split.node_id % TREE_NODE_STRIDE;
             let new_idx = stumps.len();
+            let cat_bitset = stump
+                .split
+                .categorical_bitset
+                .as_ref()
+                .map(|b| bitset_bytes_to_u64(b))
+                .unwrap_or(0);
             stumps.push(JointPredictorStump {
                 local_node_id,
                 feature_index: stump.split.feature_index,
                 threshold_bin: stump.split.threshold_bin,
                 default_left: stump.split.default_left,
+                is_categorical: stump.split.is_categorical,
+                cat_bitset,
                 left_k: mo.0.clone(),
                 right_k: mo.1.clone(),
             });
@@ -1395,6 +1420,16 @@ impl JointPredictor {
                 let v = features.get(f).copied().unwrap_or(f32::NAN);
                 let went_left = if v.is_nan() {
                     stump.default_left
+                } else if stump.is_categorical {
+                    // Categorical stump: route by bitset. The raw feature
+                    // value is interpreted as the category ID; bit `cat_id`
+                    // of `cat_bitset` decides the direction.
+                    let cat_id = v as i64;
+                    if cat_id < 0 || cat_id >= 64 {
+                        stump.default_left
+                    } else {
+                        (stump.cat_bitset & (1u64 << cat_id)) != 0
+                    }
                 } else {
                     (v as i32) <= stump.threshold_bin as i32
                 };
@@ -2210,5 +2245,61 @@ mod tests {
         // Cats 0 and 2 should be on the same side; cat 1 on the other.
         assert_eq!(bit0, bit2, "cats 0 and 2 should share a side, got bitset=0b{:08b}", bs0);
         assert_ne!(bit0, bit1, "cat 1 should be opposite of cat 0");
+    }
+
+    #[test]
+    fn joint_predictor_evaluates_categorical_stumps_correctly() {
+        // Same fixture as joint_native_categorical_split_produces_bitset_stump.
+        // After fit, JointPredictor must route raw category values via the
+        // bitset (not via threshold compare) and produce sign-correct
+        // predictions for each category.
+        let bins: Vec<u8> = vec![0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2];
+        let binned = BinnedMatrix::new(12, 1, 2, bins).expect("binned");
+        let targets_per_output: Vec<Vec<f32>> = vec![
+            vec![-1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0, -1.0, -1.0, -1.0, -1.0],
+            vec![0.5, 0.5, 0.5, 0.5, -0.5, -0.5, -0.5, -0.5, 0.5, 0.5, 0.5, 0.5],
+        ];
+        let params = TrainParams {
+            max_depth: 1,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            learning_rate: 1.0,
+            ..TrainParams::default()
+        };
+        let cat_features = vec![crate::CategoricalFeatureInfo {
+            feature_index: 0,
+            num_categories: 3,
+        }];
+        let summary = fit_joint_multi_output_with_categorical(
+            &params,
+            1,
+            &binned,
+            &targets_per_output,
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            1,
+            &cat_features,
+        )
+        .expect("fit");
+        let bytes = summary
+            .model
+            .clone()
+            .to_artifact_bytes()
+            .expect("serialize");
+        let predictor =
+            JointPredictor::from_artifact_bytes(&bytes, summary.baselines.clone()).expect("load");
+
+        // Predict each category. Cat 1 should produce output 0 > 0 and
+        // output 1 < 0 (since cat 1 wants y=+1 for output 0, y=-0.5 for output 1).
+        // Cats 0 and 2 (paired side) should produce the opposite signs.
+        let p0 = predictor.predict_row(&[0.0_f32]); // cat 0
+        let p1 = predictor.predict_row(&[1.0_f32]); // cat 1
+        let p2 = predictor.predict_row(&[2.0_f32]); // cat 2
+        assert!(p1[0] > 0.0, "cat 1 output 0 should be > 0, got {}", p1[0]);
+        assert!(p0[0] < 0.0, "cat 0 output 0 should be < 0, got {}", p0[0]);
+        assert!(p2[0] < 0.0, "cat 2 output 0 should be < 0, got {}", p2[0]);
+        assert!(p1[1] < 0.0, "cat 1 output 1 should be < 0, got {}", p1[1]);
+        assert!(p0[1] > 0.0, "cat 0 output 1 should be > 0, got {}", p0[1]);
+        assert!(p2[1] > 0.0, "cat 2 output 1 should be > 0, got {}", p2[1]);
     }
 }
