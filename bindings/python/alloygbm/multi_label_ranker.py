@@ -264,6 +264,59 @@ class MultiLabelGBMRanker:
 
     # ── Joint shared-tree training (v0.10.1) ───────────────────────────
 
+    # Per-label kwargs that the v0.10.1 joint trainer actually consumes
+    # (`engine::joint::fit_joint_multi_output` reads
+    # `learning_rate`, `seed`, `max_depth`, `min_data_in_leaf`,
+    # `lambda_l2`; `max_bin` is consumed by `prepare_training_matrices`
+    # one layer up; `n_estimators` is the round count).  Anything
+    # outside this set is rejected by `_fit_joint` so callers never
+    # silently lose a configured knob — joint-path feature parity
+    # (row/col subsample, min_split_gain, MorphBoost, neutralization,
+    # interaction constraints, etc.) is tracked as v0.10.x follow-ups
+    # in docs/limitations.md.
+    _JOINT_SUPPORTED_KWARGS = frozenset({
+        "n_estimators",
+        "learning_rate",
+        "seed",
+        "max_depth",
+        "min_data_in_leaf",
+        "lambda_l2",
+        "max_bin",
+    })
+
+    @staticmethod
+    def _normalize_group_for_joint(group: object, n_rows: int) -> list[int]:
+        """Normalize ``group`` to a length-``n_rows`` per-row group ID
+        list as the joint trainer (and the underlying ranking
+        objectives) require.
+
+        Accepts two LightGBM-compatible input shapes:
+
+        * **per-row IDs** — ``len(group) == n_rows``.  Returned as-is
+          (after dtype coercion).
+        * **group sizes** — ``len(group) < n_rows`` AND
+          ``sum(group) == n_rows``.  Expanded via ``np.repeat`` so
+          group ``i`` becomes ``size[i]`` consecutive copies of ``i``.
+
+        Anything else raises ``ValueError`` with a clear message.
+        """
+        g_arr = np.asarray(group)
+        if g_arr.ndim != 1:
+            raise ValueError("group must be 1-D")
+        g_arr = g_arr.astype(np.int64, copy=False)
+        if len(g_arr) == n_rows:
+            return g_arr.astype(np.uint32).tolist()
+        if len(g_arr) < n_rows and int(g_arr.sum()) == n_rows:
+            ids = np.repeat(np.arange(len(g_arr), dtype=np.uint32), g_arr.tolist())
+            return ids.tolist()
+        raise ValueError(
+            f"multi_label_mode='joint' could not interpret group: length "
+            f"{len(g_arr)} matches neither per-row IDs (n_rows={n_rows}) "
+            f"nor group sizes summing to n_rows (sum={int(g_arr.sum())}). "
+            f"Pass either a length-{n_rows} array of per-row group IDs, or "
+            f"a shorter array of contiguous group sizes."
+        )
+
     def _fit_joint(
         self,
         X: object,
@@ -284,6 +337,20 @@ class MultiLabelGBMRanker:
         which calls ``engine::joint::fit_joint_multi_output``.  Per-label
         features that the joint trainer does NOT yet support are rejected
         here with a clear pointer back to ``multi_label_mode='independent'``.
+
+        PR review (C2): rows are sorted by group ID before fitting,
+        mirroring ``GBMRanker._sort_by_group``, because ranking
+        objectives derive query boundaries from `compute_group_boundaries`
+        which requires equal group IDs to be adjacent.
+
+        PR review (C3, C7): every kwarg in ``_per_label_kwargs`` must
+        be in ``_JOINT_SUPPORTED_KWARGS`` or this method raises.
+        Defaults (when a kwarg is missing) match ``GBMRanker`` /
+        ``GBMRegressor``'s public Python defaults rather than the
+        engine's internal ``TrainParams::default()`` values, so
+        ``MultiLabelGBMRanker(multi_label_mode='joint', n_estimators=20)``
+        trains the same number of rounds as
+        ``MultiLabelGBMRanker(multi_label_mode='independent', n_estimators=20)``.
         """
         if factor_exposures is not None:
             raise NotImplementedError(
@@ -302,18 +369,20 @@ class MultiLabelGBMRanker:
                 f"{sorted(fit_kwargs.keys())} in v0.10.1; pass them via "
                 f"__init__ instead, or use multi_label_mode='independent'."
             )
-        unsupported = {
-            "warm_start", "neutralization", "interaction_constraints",
-            "max_cat_threshold", "monotone_constraints", "leaf_model",
-            "boosting_mode",
-        }
-        rejected = unsupported.intersection(self._per_label_kwargs.keys())
-        if rejected:
+
+        # Strict allow-list: every per-label kwarg must be in the set
+        # that `train_joint_multi_label_ranker` actually forwards into
+        # `TrainParams`.  Silently dropping a knob is a reproducibility
+        # bug (e.g. setting `row_subsample=0.5` and then training on
+        # the full dataset would be a debugging nightmare).
+        unsupported = set(self._per_label_kwargs.keys()) - self._JOINT_SUPPORTED_KWARGS
+        if unsupported:
             raise NotImplementedError(
                 f"multi_label_mode='joint' rejects per-label kwargs "
-                f"{sorted(rejected)} in v0.10.1; use "
-                f"multi_label_mode='independent' for those (joint-path "
-                f"feature parity tracked in docs/limitations.md)."
+                f"{sorted(unsupported)} in v0.10.1; either pass only "
+                f"{sorted(self._JOINT_SUPPORTED_KWARGS)} or use "
+                f"multi_label_mode='independent' (joint-path feature "
+                f"parity is tracked in docs/limitations.md)."
             )
 
         from . import _alloygbm as _native
@@ -321,6 +390,20 @@ class MultiLabelGBMRanker:
         x_arr = np.ascontiguousarray(np.asarray(X), dtype=np.float32)
         row_count = int(x_arr.shape[0])
         feature_count = int(x_arr.shape[1])
+
+        # PR review (C2): joint mode must reorder rows so per-query
+        # group IDs are contiguous before handing the data to the
+        # engine's ranking objectives.  Done here (not in the wrapper
+        # of the predictor) so prediction order is preserved.
+        group_arr: list[int] | None = None
+        if group is not None:
+            per_row_ids = self._normalize_group_for_joint(group, row_count)
+            ids_np = np.asarray(per_row_ids, dtype=np.uint32)
+            sort_idx = np.argsort(ids_np, kind="stable")
+            x_arr = x_arr[sort_idx]
+            y_arr = y_arr[sort_idx]
+            group_arr = ids_np[sort_idx].tolist()
+
         x_flat = x_arr.reshape(-1).tolist()
 
         targets_per_output: list[list[float]] = [
@@ -333,12 +416,6 @@ class MultiLabelGBMRanker:
         # ranking_objective strings already use that style, so pass through.
         per_output_objective_names = list(objectives)
 
-        group_arr = (
-            np.ascontiguousarray(np.asarray(group), dtype=np.uint32).tolist()
-            if group is not None
-            else None
-        )
-
         kw = self._per_label_kwargs
         artifact, baselines, _fc, rounds_completed = _native.train_joint_multi_label_ranker(
             x_flat,
@@ -348,13 +425,15 @@ class MultiLabelGBMRanker:
             n_labels,
             per_output_objective_names,
             group_arr,
-            int(kw.get("n_estimators", 100)),
+            # Defaults below match GBMRegressor / GBMRanker's public
+            # Python defaults (NOT the engine's TrainParams::default()).
+            int(kw.get("n_estimators", 6)),
             float(kw.get("learning_rate", 0.1)),
             int(kw.get("seed", 0)),
             int(kw.get("max_depth", 6)),
-            int(kw.get("min_data_in_leaf", 20)),
-            float(kw.get("lambda_l2", 1.0)),
-            int(kw.get("max_bin", 255)),
+            int(kw.get("min_data_in_leaf", 1)),
+            float(kw.get("lambda_l2", 0.0)),
+            int(kw.get("max_bin", 256)),
         )
 
         self._joint_artifact_bytes = bytes(artifact)
@@ -377,9 +456,9 @@ class MultiLabelGBMRanker:
                 raise RuntimeError(
                     "multi_label_mode='joint' produced an empty ensemble: "
                     "no valid split candidate was found in any of "
-                    f"n_estimators={kw.get('n_estimators', 100)} rounds. "
+                    f"n_estimators={kw.get('n_estimators', 6)} rounds. "
                     "Try lowering `min_data_in_leaf` (currently "
-                    f"{int(kw.get('min_data_in_leaf', 20))}), increasing "
+                    f"{int(kw.get('min_data_in_leaf', 1))}), increasing "
                     "the training row count, or using "
                     "multi_label_mode='independent'."
                 ) from e

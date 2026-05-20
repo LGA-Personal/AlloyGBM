@@ -114,3 +114,52 @@ def test_joint_mode_rejects_warm_start_kwarg():
     )
     with pytest.raises(NotImplementedError, match="warm_start"):
         m.fit(X, y, group=group)
+
+
+def test_joint_mode_accepts_group_sizes_and_per_row_ids():
+    """PR review (C2): the joint path normalizes group input to per-row
+    IDs (length n_rows) and stable-sorts rows by group ID before
+    fitting. Both LightGBM-style group sizes and per-row IDs must
+    produce identical models for the same data."""
+    rng = np.random.default_rng(101)
+    n_queries, items_per_query = 6, 7
+    n_rows = n_queries * items_per_query
+    X = rng.standard_normal((n_rows, 4)).astype(np.float32)
+    y = rng.integers(0, 4, size=(n_rows, 2)).astype(np.float32)
+
+    group_sizes = np.full(n_queries, items_per_query, dtype=np.int32)
+    group_per_row = np.repeat(np.arange(n_queries), items_per_query).astype(np.int32)
+
+    m_sizes = MultiLabelGBMRanker(n_estimators=4, multi_label_mode="joint", seed=101)
+    m_sizes.fit(X, y, group=group_sizes)
+    m_ids = MultiLabelGBMRanker(n_estimators=4, multi_label_mode="joint", seed=101)
+    m_ids.fit(X, y, group=group_per_row)
+
+    np.testing.assert_allclose(m_sizes.predict(X), m_ids.predict(X), rtol=1e-6)
+
+
+def test_joint_mode_rejects_unsupported_kwarg():
+    """PR review (C3, C7): kwargs that aren't in the strict allow-list
+    are rejected with a clear NotImplementedError rather than silently
+    ignored."""
+    X, y, group = _toy_ranking()
+    m = MultiLabelGBMRanker(
+        n_estimators=2, multi_label_mode="joint", monotone_constraints=[1, 0, 0, 0]
+    )
+    with pytest.raises(NotImplementedError, match="monotone_constraints"):
+        m.fit(X, y, group=group)
+
+
+def test_joint_mode_rejects_row_subsample_until_supported():
+    """PR review (C3, C7): the v0.10.1 joint trainer does not yet
+    consume `row_subsample` / `col_subsample` / `min_split_gain`, so
+    these are explicitly rejected rather than silently ignored. They
+    will land alongside the rest of joint-path feature parity in a
+    later v0.10.x release (see docs/limitations.md)."""
+    X, y, group = _toy_ranking()
+    for unsupported in ("row_subsample", "col_subsample", "min_split_gain"):
+        m = MultiLabelGBMRanker(
+            n_estimators=2, multi_label_mode="joint", **{unsupported: 0.5}
+        )
+        with pytest.raises(NotImplementedError, match=unsupported):
+            m.fit(X, y, group=group)
