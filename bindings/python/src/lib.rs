@@ -5236,7 +5236,7 @@ impl JointPredictorHandle {
         if self.feature_count == 0 {
             return Err(PyValueError::new_err("feature_count must be > 0"));
         }
-        if values.len() % self.feature_count != 0 {
+        if !values.len().is_multiple_of(self.feature_count) {
             return Err(PyValueError::new_err(format!(
                 "values length {} not divisible by feature_count {}",
                 values.len(),
@@ -5351,12 +5351,14 @@ fn train_joint_multi_label_ranker(
     )
     .map_err(engine_error_to_pyerr)?;
 
-    let mut params = TrainParams::default();
-    params.learning_rate = learning_rate;
-    params.seed = seed;
-    params.max_depth = max_depth;
-    params.min_data_in_leaf = min_data_in_leaf;
-    params.lambda_l2 = lambda_l2;
+    let params = TrainParams {
+        learning_rate,
+        seed,
+        max_depth,
+        min_data_in_leaf,
+        lambda_l2,
+        ..TrainParams::default()
+    };
 
     let summary = fit_joint_multi_output(
         &params,

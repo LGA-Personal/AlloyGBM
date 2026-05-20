@@ -3792,35 +3792,35 @@ impl Trainer {
             // subtract `w_old * leaf_contribution` from the
             // corresponding `class_predictions[class_k]` so the new
             // round's gradients are computed on the dropped-out residual.
-            let dropped_tree_indices: Vec<usize> = if dart_params.is_some() {
-                let (drop_rate, max_drop, _normalize_type, sample_type) = dart_params.unwrap();
-                let drops = select_dropouts(
-                    dart_state.tree_weights.len(),
-                    drop_rate,
-                    max_drop,
-                    sample_type,
-                    &dart_state.tree_weights,
-                    sampling_seed_base,
-                    effective_round,
-                );
-                for &flat_idx in &drops {
-                    let prior_round = flat_idx / k;
-                    let class_k = flat_idx % k;
-                    if let Some(stump) = class_stumps[class_k].get(prior_round).cloned() {
-                        let w_old = dart_state.tree_weights[flat_idx];
-                        apply_weighted_round_to_predictions(
-                            &mut class_predictions[class_k],
-                            binned_matrix,
-                            std::slice::from_ref(&stump),
-                            Some((&dataset.matrix.values, dataset.matrix.feature_count)),
-                            -w_old,
-                        )?;
+            let dropped_tree_indices: Vec<usize> =
+                if let Some((drop_rate, max_drop, _normalize_type, sample_type)) = dart_params {
+                    let drops = select_dropouts(
+                        dart_state.tree_weights.len(),
+                        drop_rate,
+                        max_drop,
+                        sample_type,
+                        &dart_state.tree_weights,
+                        sampling_seed_base,
+                        effective_round,
+                    );
+                    for &flat_idx in &drops {
+                        let prior_round = flat_idx / k;
+                        let class_k = flat_idx % k;
+                        if let Some(stump) = class_stumps[class_k].get(prior_round).cloned() {
+                            let w_old = dart_state.tree_weights[flat_idx];
+                            apply_weighted_round_to_predictions(
+                                &mut class_predictions[class_k],
+                                binned_matrix,
+                                std::slice::from_ref(&stump),
+                                Some((&dataset.matrix.values, dataset.matrix.feature_count)),
+                                -w_old,
+                            )?;
+                        }
                     }
-                }
-                drops
-            } else {
-                Vec::new()
-            };
+                    drops
+                } else {
+                    Vec::new()
+                };
 
             // v0.10.1: pre-compute per-class gradient buffers BEFORE sampling
             // so the multiclass GOSS scorer can see all K gradient channels
@@ -4024,8 +4024,8 @@ impl Trainer {
                     .push(dropped_tree_indices.clone());
                 // Stamp tree_weight on each of the K newly-committed
                 // stumps (the most-recent entries of class_stumps[k]).
-                for class_k in 0..k {
-                    if let Some(stump) = class_stumps[class_k].last_mut() {
+                for class_bucket in class_stumps.iter_mut().take(k) {
+                    if let Some(stump) = class_bucket.last_mut() {
                         stump.tree_weight = new_w;
                     }
                 }
@@ -7421,11 +7421,11 @@ fn select_row_indices_for_round_multiclass(
             );
             let magnitudes: Vec<f32> = (0..row_count)
                 .map(|i| {
-                    let mut s = 0.0_f32;
-                    for class_k in 0..k {
-                        s += class_gradient_buffers[class_k][i].grad.abs();
-                    }
-                    s
+                    class_gradient_buffers
+                        .iter()
+                        .take(k)
+                        .map(|buf| buf[i].grad.abs())
+                        .sum::<f32>()
                 })
                 .collect();
             let (top, other, amplification) =
@@ -7433,8 +7433,8 @@ fn select_row_indices_for_round_multiclass(
             if (amplification - 1.0).abs() > f32::EPSILON {
                 for &row in &other {
                     let idx = row as usize;
-                    for class_k in 0..k {
-                        let pair = &mut class_gradient_buffers[class_k][idx];
+                    for class_buf in class_gradient_buffers.iter_mut().take(k) {
+                        let pair = &mut class_buf[idx];
                         pair.grad *= amplification;
                         pair.hess *= amplification;
                     }

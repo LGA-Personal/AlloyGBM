@@ -360,11 +360,30 @@ class MultiLabelGBMRanker:
         self._joint_artifact_bytes = bytes(artifact)
         self._joint_baselines = list(baselines)
         self._joint_feature_count = feature_count
-        self._joint_handle = _native.JointPredictorHandle(
-            self._joint_artifact_bytes,
-            self._joint_baselines,
-            feature_count,
-        )
+        try:
+            self._joint_handle = _native.JointPredictorHandle(
+                self._joint_artifact_bytes,
+                self._joint_baselines,
+                feature_count,
+            )
+        except ValueError as e:
+            # The joint trainer returns an artifact without
+            # MultiOutputLeafValues when every round was rejected
+            # (e.g. no valid split candidate under the current
+            # min_data_in_leaf / max_depth / min_split_gain settings).
+            # Surface a user-actionable message rather than the raw
+            # PyO3 ValueError.
+            if "MultiOutputLeafValues" in str(e):
+                raise RuntimeError(
+                    "multi_label_mode='joint' produced an empty ensemble: "
+                    "no valid split candidate was found in any of "
+                    f"n_estimators={kw.get('n_estimators', 100)} rounds. "
+                    "Try lowering `min_data_in_leaf` (currently "
+                    f"{int(kw.get('min_data_in_leaf', 20))}), increasing "
+                    "the training row count, or using "
+                    "multi_label_mode='independent'."
+                ) from e
+            raise
         self.ranking_labels_ = names
         self.n_labels_ = n_labels
         self.rounds_completed_ = int(rounds_completed)
