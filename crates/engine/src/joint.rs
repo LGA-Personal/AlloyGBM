@@ -219,6 +219,41 @@ pub fn build_joint_round(
     let min_rows_per_leaf = params.min_data_in_leaf.max(1) as usize;
     let lambda_l2 = params.lambda_l2;
 
+    // col_subsample (v0.10.2): per-tree feature mask, seeded by params.seed.
+    // One mask per call to build_joint_round (the joint trainer emits one
+    // tree per round, so per-tree == per-round). Deterministically derived
+    // via xorshift64*. If RNG masks every feature, fall back to all-allowed
+    // for this round so the tree doesn't become empty for purely RNG reasons
+    // (matches LightGBM's `feature_fraction` behavior).
+    let feature_allowed: Vec<bool> = if params.col_subsample < 1.0 {
+        let mut s: u64 = params.seed.wrapping_mul(0xBF58476D1CE4E5B9);
+        s ^= s >> 30;
+        s = s.wrapping_mul(0x94D049BB133111EB);
+        if s == 0 {
+            s = 0xDEADBEEFCAFEBABE;
+        }
+        let rate = params.col_subsample;
+        let mut mask: Vec<bool> = (0..feature_count)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                let u01 =
+                    ((s >> 11) & ((1u64 << 24) - 1)) as f32 / ((1u64 << 24) as f32);
+                u01 < rate
+            })
+            .collect();
+        if !mask.iter().any(|&b| b) {
+            // All-zero edge case: fall back to all-allowed.
+            for f in mask.iter_mut() {
+                *f = true;
+            }
+        }
+        mask
+    } else {
+        vec![true; feature_count]
+    };
+
     let mut stumps: Vec<TrainedStump> = Vec::new();
     let mut active: Vec<JointLeafNode> = vec![JointLeafNode {
         local_node_id: 0,
@@ -248,6 +283,10 @@ pub fn build_joint_round(
             //
             // We accumulate per-feature column.
             for feature in 0..feature_count {
+                // col_subsample (v0.10.2): skip histogram build for masked-out features.
+                if !feature_allowed[feature] {
+                    continue;
+                }
                 // Subset the bin column for this feature.
                 let mut subset_bins: Vec<u8> = Vec::with_capacity(node.row_indices.len());
                 for &row in &node.row_indices {
@@ -280,6 +319,10 @@ pub fn build_joint_round(
             // thresholds across the full bin range minus the NaN slot.
             let max_threshold = (binned_matrix.max_bin as usize).min(MISSING_BIN_U8 as usize - 1);
             for feature in 0..feature_count {
+                // col_subsample (v0.10.2): skip masked-out features in split search.
+                if !feature_allowed[feature] {
+                    continue;
+                }
                 for threshold_bin in 0..max_threshold {
                     let gain = compute_multi_output_split_gain(
                         &node_hist,
@@ -1292,6 +1335,79 @@ mod tests {
             (leaf_a.0[0] - leaf_full.0[0]).abs() > 1e-6
                 || (leaf_a.1[0] - leaf_full.1[0]).abs() > 1e-6,
             "row_subsample=0.5 should produce different leaves from row_subsample=1.0"
+        );
+    }
+
+    #[test]
+    fn joint_col_subsample_restricts_features_in_split_search() {
+        // 8 rows, 4 features, 2 outputs. Feature 0 is the best split
+        // (target perfectly separates by f0). col_subsample=0.25 with some
+        // seed should sometimes mask out feature 0 and force the model to
+        // either split on a different feature OR produce zero stumps.
+        let bins: Vec<u8> = vec![
+            // f0, f1, f2, f3
+            0, 0, 0, 0, // row 0
+            0, 0, 0, 0, // row 1
+            0, 1, 1, 1, // row 2
+            0, 1, 1, 1, // row 3
+            4, 0, 0, 0, // row 4
+            4, 0, 0, 0, // row 5
+            4, 1, 1, 1, // row 6
+            4, 1, 1, 1, // row 7
+        ];
+        let binned = BinnedMatrix::new(8, 4, 4, bins).expect("binned");
+        let targets_per_output: Vec<Vec<f32>> = vec![
+            vec![-1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0],
+            vec![0.5, 0.5, 0.5, 0.5, -0.5, -0.5, -0.5, -0.5],
+        ];
+        let mk = |col_subsample: f32, seed: u64| {
+            let params = TrainParams {
+                max_depth: 1,
+                min_data_in_leaf: 1,
+                lambda_l2: 0.0,
+                learning_rate: 1.0,
+                col_subsample,
+                seed,
+                ..TrainParams::default()
+            };
+            fit_joint_multi_output(
+                &params,
+                4,
+                &binned,
+                &targets_per_output,
+                None,
+                &[JointObjective::SquaredError, JointObjective::SquaredError],
+                1,
+            )
+            .expect("fit")
+        };
+
+        // Sanity: col_subsample=1.0 picks feature 0 (the best).
+        let full = mk(1.0, 0);
+        assert_eq!(
+            full.model.stumps[0].split.feature_index, 0,
+            "best feature is 0 when all features available"
+        );
+
+        // col_subsample=0.25 → only ~1 of 4 features sampled per round.
+        // Sweep seeds; at least one should exclude feature 0 from the mask
+        // and force the model to either pick a different feature or
+        // produce no stumps.
+        let mut saw_non_zero = false;
+        for seed in 0..64u64 {
+            let m = mk(0.25, seed);
+            if m.model.stumps.is_empty() {
+                saw_non_zero = true;
+                break;
+            }
+            if m.model.stumps[0].split.feature_index != 0 {
+                saw_non_zero = true;
+                break;
+            }
+        }
+        assert!(
+            saw_non_zero,
+            "col_subsample=0.25 should sometimes exclude feature 0 from the split-search mask"
         );
     }
 }
