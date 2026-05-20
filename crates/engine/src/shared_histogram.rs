@@ -145,6 +145,110 @@ pub fn compute_multi_output_split_gain(
     total
 }
 
+/// Result of a multi-output categorical (Fisher-sort) split search.
+///
+/// `left_bitset` has bit `k` set iff category `k` is on the left side of
+/// the split (i.e. routed to the left child). Up to 64 categories are
+/// supported per feature (one u64 bitset).
+#[derive(Debug, Clone)]
+pub struct MultiOutputCategoricalSplit {
+    pub gain: f32,
+    pub left_bitset: u64,
+    pub n_categories: u32,
+}
+
+/// Find the best binary partition of categories for a single feature on the
+/// multi-output joint trainer using Fisher-sort. Bin indices `0..num_categories`
+/// are treated as category IDs (the binning layer maps raw categorical
+/// values to these slots).
+///
+/// **Ordering choice (v0.10.2):** categories are sorted by their output-0
+/// Newton-Raphson score `grad/(hess + λ + ε)` ascending, mirroring the
+/// single-output Fisher-sort. The "primary output" convention follows
+/// `MultiOutputLeafValues` where index 0 is the placeholder scalar leaf
+/// used by single-output prediction paths.
+///
+/// The gain is summed across K outputs:
+///   `Σₖ G_L_k² / (H_L_k + λ) + G_R_k² / (H_R_k + λ) − G_total_k² / (H_total_k + λ)`
+///
+/// Returns `None` when no positive-gain partition exists, or when
+/// `num_categories < 2` (a single category can't be split), or when
+/// `num_categories > 64` (bitset overflow).
+pub fn find_best_multi_output_categorical_split(
+    hist: &MultiOutputHistogram,
+    feature: usize,
+    num_categories: usize,
+    lambda_l2: f32,
+    eps: f32,
+) -> Option<MultiOutputCategoricalSplit> {
+    if num_categories < 2 || num_categories > 64 {
+        return None;
+    }
+    let k = hist.n_outputs;
+
+    // Per-output totals across all categories (for symmetric gain).
+    let mut total_g = vec![0.0_f32; k];
+    let mut total_h = vec![0.0_f32; k];
+    for cat in 0..num_categories {
+        for ko in 0..k {
+            total_g[ko] += hist.data()[hist.idx(feature, cat, ko, HistComponent::Grad)];
+            total_h[ko] += hist.data()[hist.idx(feature, cat, ko, HistComponent::Hess)];
+        }
+    }
+
+    // Sort categories by output-0 Newton score ascending (Fisher-sort).
+    let mut order: Vec<usize> = (0..num_categories).collect();
+    order.sort_by(|&a, &b| {
+        let sa = hist.data()[hist.idx(feature, a, 0, HistComponent::Grad)]
+            / (hist.data()[hist.idx(feature, a, 0, HistComponent::Hess)] + lambda_l2 + eps);
+        let sb = hist.data()[hist.idx(feature, b, 0, HistComponent::Grad)]
+            / (hist.data()[hist.idx(feature, b, 0, HistComponent::Hess)] + lambda_l2 + eps);
+        sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Prefix scan over sorted order. At each split position, evaluate the
+    // K-output gain for "categories[0..=prefix_len] go left, rest go right".
+    let mut left_g = vec![0.0_f32; k];
+    let mut left_h = vec![0.0_f32; k];
+    let mut best_gain = 0.0_f32;
+    let mut best_prefix: i32 = -1;
+    for prefix_len in 0..(num_categories - 1) {
+        let cat = order[prefix_len];
+        for ko in 0..k {
+            left_g[ko] += hist.data()[hist.idx(feature, cat, ko, HistComponent::Grad)];
+            left_h[ko] += hist.data()[hist.idx(feature, cat, ko, HistComponent::Hess)];
+        }
+        let term = |g: f32, h: f32| (g * g) / (h + lambda_l2 + eps);
+        let mut gain = 0.0_f32;
+        for ko in 0..k {
+            let gl = left_g[ko];
+            let gr = total_g[ko] - gl;
+            let hl = left_h[ko];
+            let hr = total_h[ko] - hl;
+            gain += term(gl, hl) + term(gr, hr) - term(total_g[ko], total_h[ko]);
+        }
+        if gain > best_gain {
+            best_gain = gain;
+            best_prefix = prefix_len as i32;
+        }
+    }
+    if best_prefix < 0 {
+        return None;
+    }
+
+    // Build the bitset for the best partition (categories `order[0..=best_prefix]` are left).
+    let mut left_bitset: u64 = 0;
+    for &cat in order.iter().take((best_prefix as usize) + 1) {
+        // Bounded by num_categories <= 64 (checked above).
+        left_bitset |= 1u64 << cat;
+    }
+    Some(MultiOutputCategoricalSplit {
+        gain: best_gain,
+        left_bitset,
+        n_categories: num_categories as u32,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,5 +369,70 @@ mod tests {
             /*eps=*/ 0.0,
         );
         assert!((total_gain - 16.0).abs() < 1e-5, "got {total_gain}");
+    }
+
+    #[test]
+    fn multi_output_fisher_sort_finds_optimal_binary_partition() {
+        // 3 categories, 2 outputs. Categories 0 and 2 share the same
+        // output-0 score (-2 / 1 = -2.0); category 1 has a different
+        // score (+2 / 1 = +2.0). Fisher-sort places [0, 2] on the
+        // low-score side (left) and [1] on the high-score side (right).
+        let mut h = MultiOutputHistogram::new(1, 4, 2); // 1 feature, 4 bins, 2 outputs
+        let writes = [
+            (0_usize, 0_usize, -2.0_f32, 1.0_f32),
+            (0, 1, 1.0, 1.0),
+            (1, 0, 2.0, 1.0),
+            (1, 1, -1.0, 1.0),
+            (2, 0, -2.0, 1.0),
+            (2, 1, 1.0, 1.0),
+        ];
+        for (bin, k, g, hess) in writes {
+            let gi = h.idx(0, bin, k, HistComponent::Grad);
+            let hi = h.idx(0, bin, k, HistComponent::Hess);
+            h.data_mut()[gi] = g;
+            h.data_mut()[hi] = hess;
+        }
+        let result = find_best_multi_output_categorical_split(
+            &h, /*feature=*/ 0, /*num_categories=*/ 3, /*lambda_l2=*/ 0.0,
+            /*eps=*/ 1e-6,
+        )
+        .expect("split found");
+        // The Fisher partition must put 0 and 2 together (same output-0 score).
+        let bit0 = (result.left_bitset >> 0) & 1;
+        let bit1 = (result.left_bitset >> 1) & 1;
+        let bit2 = (result.left_bitset >> 2) & 1;
+        assert_eq!(bit0, bit2, "cats 0 and 2 must share a side");
+        assert_ne!(bit0, bit1, "cat 1 must be on the opposite side from cat 0");
+        assert!(result.gain > 0.0, "expected positive gain, got {}", result.gain);
+        assert_eq!(result.n_categories, 3);
+    }
+
+    #[test]
+    fn multi_output_fisher_sort_returns_none_for_single_category() {
+        let h = MultiOutputHistogram::new(1, 4, 2);
+        assert!(
+            find_best_multi_output_categorical_split(&h, 0, 1, 0.0, 1e-6).is_none(),
+            "single-category feature can't be split"
+        );
+    }
+
+    #[test]
+    fn multi_output_fisher_sort_returns_none_when_no_signal() {
+        // All categories have identical (g, h) per output → no gain.
+        let mut h = MultiOutputHistogram::new(1, 4, 2);
+        for cat in 0..3 {
+            for ko in 0..2 {
+                let gi = h.idx(0, cat, ko, HistComponent::Grad);
+                let hi = h.idx(0, cat, ko, HistComponent::Hess);
+                h.data_mut()[gi] = 1.0;
+                h.data_mut()[hi] = 1.0;
+            }
+        }
+        // All categories have same score → any partition has zero gain.
+        let result = find_best_multi_output_categorical_split(&h, 0, 3, 0.0, 1e-6);
+        // Either None (best_prefix never updated) or gain exactly 0.0.
+        if let Some(r) = result {
+            assert!(r.gain.abs() < 1e-5, "expected ~0 gain on uniform fixture, got {}", r.gain);
+        }
     }
 }
