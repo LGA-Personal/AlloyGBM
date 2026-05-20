@@ -41,7 +41,7 @@ maturin develop --manifest-path bindings/python/Cargo.toml --release
 
 AlloyGBM targets Python `3.11+` and uses a native Rust extension module.
 
-Wheel targets for `0.10.0`:
+Wheel targets for `0.10.1`:
 
 - macOS `arm64`
 - Linux `x86_64` (manylinux)
@@ -336,7 +336,7 @@ artifact_bytes = model.artifact_bytes
 - **`GBMRegressor`** -- squared-error regression with dataset-aware `training_policy`
 - **`GBMClassifier`** -- binary classification with log-loss objective, `predict_proba`, sklearn `ClassifierMixin`
 - **`GBMRanker`** -- learning-to-rank with 5 objectives: `rank:pairwise`, `rank:ndcg`, `rank:xendcg`, `queryrmse`, `yetirank`
-- **`MultiLabelGBMRanker`** -- multi-output ranking: `y` shaped `(n_rows, n_labels)`, `predict` returns the same shape, per-label `ranking_objective` lists supported
+- **`MultiLabelGBMRanker`** -- multi-output ranking: `y` shaped `(n_rows, n_labels)`, `predict` returns the same shape, per-label `ranking_objective` lists supported. As of v0.10.1 also supports `multi_label_mode="joint"` for shared-tree training across all K labels via `engine::joint::fit_joint_multi_output` (default `"independent"` preserves the K-per-label `GBMRanker` fallback)
 - All estimators are sklearn-compatible (`get_params`, `set_params`, `score`, pipeline integration)
 
 ### Training Features
@@ -354,8 +354,8 @@ artifact_bytes = model.artifact_bytes
 - Adaptive split criterion via `training_mode="morph"` ([MorphBoost](https://arxiv.org/pdf/2511.13234))
 - Per-iteration learning-rate schedules: `lr_schedule="constant"` (default) or `"warmup_cosine"`
 - DRO-style robust scalar leaves via `leaf_solver="dro"` (closed-form gradient-uncertainty penalty)
-- GOSS (gradient-based one-side sampling, LightGBM-style) via `boosting_mode="goss"` + `goss_top_rate` / `goss_other_rate` on regression, binary classification, and ranking. Default `boosting_mode="standard"` is byte-identical to v0.7.5.
-- DART (Dropouts meet MART) via `boosting_mode="dart"` + `dart_drop_rate` / `dart_max_drop` / `dart_normalize_type` (`"tree"` or `"forest"`) / `dart_sample_type` (`"uniform"` or `"weighted"`) on regression, binary classification, and ranking. Per-stump weights ride in a new `DartTreeWeights` artifact section emitted only when at least one stump diverges from `tree_weight = 1.0`, so Standard / GOSS artifacts stay byte-identical to v0.8.0. As of v0.10.0, **DART + `warm_start` continuation** is supported — pass a fitted DART model via `fit(..., init_model=prior_model)` to add more rounds on top.
+- GOSS (gradient-based one-side sampling, LightGBM-style) via `boosting_mode="goss"` + `goss_top_rate` / `goss_other_rate` on regression, binary classification, and ranking. As of v0.10.1, GOSS is also supported on **multiclass classification** (K ≥ 3 classes) — per-row score `s_i = Σₖ |g_{i,k}|` (LightGBM convention) drives a shared sampling mask across all K class gradient buffers. Default `boosting_mode="standard"` is byte-identical to v0.7.5.
+- DART (Dropouts meet MART) via `boosting_mode="dart"` + `dart_drop_rate` / `dart_max_drop` / `dart_normalize_type` (`"tree"` or `"forest"`) / `dart_sample_type` (`"uniform"` or `"weighted"`) on regression, binary classification, and ranking. Per-stump weights ride in a new `DartTreeWeights` artifact section emitted only when at least one stump diverges from `tree_weight = 1.0`, so Standard / GOSS artifacts stay byte-identical to v0.8.0. **DART + `warm_start` continuation** is supported (v0.10.0+) — pass a fitted DART model via `fit(..., init_model=prior_model)` to add more rounds on top. As of v0.10.1, DART is also supported on **multiclass classification** (K ≥ 3 classes) including warm-start; requires `tree_growth="level"`.
 - Piecewise-linear leaves via `leaf_model="linear"` (closed-form ridge solve, faster convergence on linear-trend data)
 - Factor-neutral boosting via `neutralization` + fit-time `factor_exposures` (`pre_target`, `per_round_gradient`, `split_penalty`)
 - LightGBM-compatible feature interaction constraints via `interaction_constraints=[[...]]` (up to 64 groups, level-wise and leaf-wise enforcement)
@@ -404,8 +404,7 @@ Benchmark tooling and methodology live in [benchmarks/README.md](benchmarks/READ
 ## Current Limitations
 
 - CPU-only runtime (GPU backend is architecturally planned but not implemented)
-- `MultiLabelGBMRanker` currently routes through the independent-per-label fallback. The Rust-level joint trainer (K-output shared-histogram primitive + `MultiOutputLeafValues` artifact section + `fit_joint_multi_output` + `JointPredictor`) is **shipped in v0.10.0**; the Python user-facing surface (`training_mode="joint"` wiring) is targeted at **v0.10.1**.
-- Multiclass softmax rejects non-`"standard"` boosting modes pending per-class gradient scoring (v0.10.x follow-up — applies to both GOSS and DART).
+- `MultiLabelGBMRanker(multi_label_mode="joint")` (v0.10.1+) is intentionally minimal: level-wise growth, standard boosting only, and built-in `squared_error` / `queryrmse` / `rank:*` objectives. Joint-path feature parity (MorphBoost, neutralization, DRO, interaction constraints, leaf-wise, GOSS, DART, warm-start) is targeted incrementally across the v0.10.x point releases.
 - `leaf_solver="dro"` is a robust scalar leaf update, not a full raw-distribution Wasserstein DRO guarantee
 
 See [docs/limitations.md](docs/limitations.md) for the full list.

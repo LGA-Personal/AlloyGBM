@@ -2268,6 +2268,13 @@ pub struct MultiClassWarmStartState {
     /// MorphBoost EMA snapshot from the previous fit (v0.7.3+).  See
     /// `WarmStartState::initial_ema_stats`.
     pub initial_ema_stats: Option<Vec<GradientEmaStats>>,
+    /// v0.10.1+: per-tree weights for multiclass DART warm-start.  Flat
+    /// layout `[round 0 class 0, round 0 class 1, ..., round 0 class
+    /// K-1, round 1 class 0, ...]` — round-major × class-k.  Length
+    /// must equal `initial_rounds_completed * K`.  `None` means the
+    /// prior fit was not multiclass DART; the engine falls back to a
+    /// fresh DART state in that case.
+    pub initial_dart_tree_weights: Option<Vec<f32>>,
 }
 
 struct IterationExecutionContext<'a> {
@@ -3521,18 +3528,31 @@ impl Trainer {
                 "validation early stopping requires a validation dataset".to_string(),
             ));
         }
-        // v0.8.0: GOSS / DART are only supported on the binary /
-        // regression / ranking single-output objective for now.  The
-        // multiclass softmax path has shared row sampling across K
-        // classes that would need per-class gradient scoring (GOSS) or
-        // per-class dropout bookkeeping (DART); both are tracked as
-        // v0.8.1 follow-ups.
-        if !matches!(self.params.boosting_mode, BoostingMode::Standard) {
-            return Err(EngineError::InvalidConfig(format!(
-                "boosting_mode='{}' is not yet supported for multiclass objectives; \
-                 use 'standard' for multiclass softmax (follow-up tracked for v0.8.1)",
-                self.params.boosting_mode.label()
-            )));
+        // v0.10.1: GOSS supported via
+        // `select_row_indices_for_round_multiclass` (per-row score
+        // `s_i = sum_k |g_{i,k}|`, LightGBM convention). DART supported
+        // via per-round dropout/normalize across a flat
+        // `round_index * K + class_k` tree pool — see the DART blocks
+        // inside the round loop below.
+        let dart_params = match self.params.boosting_mode {
+            BoostingMode::Dart {
+                drop_rate,
+                max_drop,
+                normalize_type,
+                sample_type,
+            } => Some((drop_rate, max_drop, normalize_type, sample_type)),
+            _ => None,
+        };
+        // v0.10.1: multiclass DART requires level-wise tree growth.
+        // Leaf-wise dropout indexing across K class trees per round is
+        // a follow-up.
+        if dart_params.is_some() && self.params.tree_growth == TreeGrowth::Leaf {
+            return Err(EngineError::InvalidConfig(
+                "multiclass DART requires tree_growth='level' in v0.10.1; \
+                 leaf-wise dropout bookkeeping across K class trees per \
+                 round is tracked as a follow-up."
+                    .to_string(),
+            ));
         }
         validate_train_params(&self.params)?;
         validate_training_dataset(dataset)?;
@@ -3583,34 +3603,51 @@ impl Trainer {
         // `warm_ema_stats` captures the optional MorphBoost EMA
         // snapshot for the v0.7.3 warm-start-equivalence fix; consumed
         // below after `MorphState::new` constructs the fresh EMA.
-        let (baselines, mut class_stumps, round_index_offset, initial_stump_counts, warm_ema_stats) =
-            if let Some(ws) = warm_start {
-                if ws.baseline_predictions.len() != k {
-                    return Err(EngineError::ContractViolation(format!(
-                        "warm-start baseline count {} != num_classes {k}",
-                        ws.baseline_predictions.len()
-                    )));
-                }
-                if ws.class_stumps.len() != k {
-                    return Err(EngineError::ContractViolation(format!(
-                        "warm-start class_stumps count {} != num_classes {k}",
-                        ws.class_stumps.len()
-                    )));
-                }
-                let offset = ws.initial_rounds_completed;
-                let initial_counts: Vec<usize> = ws.class_stumps.iter().map(|s| s.len()).collect();
-                (
-                    ws.baseline_predictions,
-                    ws.class_stumps,
-                    offset,
-                    initial_counts,
-                    ws.initial_ema_stats,
-                )
-            } else {
-                let baselines = objective.initial_predictions();
-                let class_stumps: Vec<Vec<TrainedStump>> = vec![Vec::new(); k];
-                (baselines, class_stumps, 0_usize, vec![0_usize; k], None)
-            };
+        // `warm_dart_tree_weights` (v0.10.1+) carries the flat
+        // round-major × class-k per-tree weights from the prior DART
+        // fit; consumed below where `dart_state` is seeded.
+        let (
+            baselines,
+            mut class_stumps,
+            round_index_offset,
+            initial_stump_counts,
+            warm_ema_stats,
+            warm_dart_tree_weights,
+        ) = if let Some(ws) = warm_start {
+            if ws.baseline_predictions.len() != k {
+                return Err(EngineError::ContractViolation(format!(
+                    "warm-start baseline count {} != num_classes {k}",
+                    ws.baseline_predictions.len()
+                )));
+            }
+            if ws.class_stumps.len() != k {
+                return Err(EngineError::ContractViolation(format!(
+                    "warm-start class_stumps count {} != num_classes {k}",
+                    ws.class_stumps.len()
+                )));
+            }
+            let offset = ws.initial_rounds_completed;
+            let initial_counts: Vec<usize> = ws.class_stumps.iter().map(|s| s.len()).collect();
+            (
+                ws.baseline_predictions,
+                ws.class_stumps,
+                offset,
+                initial_counts,
+                ws.initial_ema_stats,
+                ws.initial_dart_tree_weights,
+            )
+        } else {
+            let baselines = objective.initial_predictions();
+            let class_stumps: Vec<Vec<TrainedStump>> = vec![Vec::new(); k];
+            (
+                baselines,
+                class_stumps,
+                0_usize,
+                vec![0_usize; k],
+                None,
+                None,
+            )
+        };
 
         let n = dataset.row_count();
         let mut class_predictions: Vec<Vec<f32>> = baselines.iter().map(|&b| vec![b; n]).collect();
@@ -3716,14 +3753,195 @@ impl Trainer {
             ms.ema_stats.copy_from_slice(snapshot);
         }
 
+        // v0.10.1: DART state for multiclass. The flat per-tree weight
+        // pool is indexed by `round_index * K + class_k` and committed
+        // in lockstep with `class_stumps[class_k]` during the round
+        // loop. Warm-start seeds the weights from
+        // `warm_dart_tree_weights`; historical RNG-driven dropouts are
+        // NOT persisted (same as the binary path).
+        //
+        // Multiclass-specific bookkeeping (mirrors the binary path's
+        // `round_start_offsets` / `dart_round_counts` but tracks each
+        // class-tree separately because level-wise trees span multiple
+        // stumps per (round, class)):
+        //
+        // * `dart_round_start_offsets[class_k][r]` — starting index in
+        //   `class_stumps[class_k]` for class `class_k`'s tree in round
+        //   `r`. Length == `effective_round_index + 1` (with phantom
+        //   slots for skipped warmup rounds, matching the binary path).
+        // * `dart_round_counts[class_k][r]` — number of stumps in class
+        //   `class_k`'s tree at round `r`. `0` means no tree committed
+        //   that round (e.g. zero-stump class during warmup).
+        //
+        // The flat dropout index `flat_idx = r * K + class_k` maps to
+        // `&class_stumps[class_k][start..start+count]` via these arrays.
+        let mut dart_state = DartState::default();
+        let mut dart_round_start_offsets: Vec<Vec<usize>> = vec![Vec::new(); k];
+        let mut dart_round_counts: Vec<Vec<usize>> = vec![Vec::new(); k];
+        if dart_params.is_some() {
+            let initial_tree_count = round_index_offset * k;
+            if let Some(per_tree) = warm_dart_tree_weights.as_ref() {
+                if per_tree.len() != initial_tree_count {
+                    return Err(EngineError::ContractViolation(format!(
+                        "warm-start initial_dart_tree_weights length {} != \
+                         initial_rounds_completed * K = {} * {} = {}",
+                        per_tree.len(),
+                        round_index_offset,
+                        k,
+                        initial_tree_count,
+                    )));
+                }
+                dart_state.tree_weights = per_tree.clone();
+            } else {
+                dart_state.tree_weights = vec![1.0; initial_tree_count];
+            }
+            for _ in 0..round_index_offset {
+                dart_state.dropped_per_round.push(Vec::new());
+            }
+            // Reconstruct per-class `dart_round_start_offsets` and
+            // `dart_round_counts` for warm-start by grouping
+            // `class_stumps[class_k]` by tree_id (decoded from
+            // `stump.split.node_id`). All stumps of the same class-tree
+            // share a tree_id, and distinct tree_ids appear in
+            // round-order, so this gives the contiguous slice
+            // boundaries the dropout/normalize code needs.
+            for class_k in 0..k {
+                let class_total = class_stumps[class_k].len();
+                let mut i = 0_usize;
+                while i < class_total {
+                    let (tid_first, _) =
+                        decode_tree_node_id(class_stumps[class_k][i].split.node_id);
+                    let start = i;
+                    let mut j = i + 1;
+                    while j < class_total {
+                        let (tid, _) = decode_tree_node_id(class_stumps[class_k][j].split.node_id);
+                        if tid != tid_first {
+                            break;
+                        }
+                        j += 1;
+                    }
+                    dart_round_start_offsets[class_k].push(start);
+                    dart_round_counts[class_k].push(j - start);
+                    i = j;
+                }
+                // Pad with phantom (count=0) entries up to
+                // round_index_offset so the array length matches the
+                // warm-start round count.
+                while dart_round_start_offsets[class_k].len() < round_index_offset {
+                    dart_round_start_offsets[class_k].push(class_total);
+                    dart_round_counts[class_k].push(0);
+                }
+            }
+        }
+
         for round_index in 0..effective_round_cap {
             let effective_round = round_index + round_index_offset;
-            // Shared sampling for all K classes
-            let root_row_indices = sampled_row_indices(
+
+            // v0.10.1 DART: drop a random subset of previously-committed
+            // class-trees BEFORE computing gradients. The flat pool
+            // `dart_state.tree_weights` is indexed by
+            // `prior_round * K + class_k`. For each dropped flat index,
+            // subtract `w_old * tree_contribution` from the
+            // corresponding `class_predictions[class_k]` so the new
+            // round's gradients are computed on the dropped-out
+            // residual.
+            //
+            // PR review (C4): a level-wise tree spans MULTIPLE stumps,
+            // not one stump per (round, class). Use the per-class
+            // `dart_round_start_offsets` / `dart_round_counts` arrays
+            // (built from tree_id grouping) to subtract the WHOLE class
+            // tree's contribution, mirroring the single-output DART
+            // path's `apply_weighted_round_to_predictions(&stumps[start..start+count], ...)`.
+            //
+            // Backups of `class_predictions` are recorded BEFORE
+            // mutation so an early-exit (`!any_tree_produced`, loss
+            // regression, etc.) can restore the full pre-dropout
+            // ensemble — matching the single-output DART semantics
+            // (PR review C1).
+            let mut dart_predictions_backup: Option<Vec<Vec<f32>>> = None;
+            let dropped_tree_indices: Vec<usize> =
+                if let Some((drop_rate, max_drop, _normalize_type, sample_type)) = dart_params {
+                    let drops = select_dropouts(
+                        dart_state.tree_weights.len(),
+                        drop_rate,
+                        max_drop,
+                        sample_type,
+                        &dart_state.tree_weights,
+                        sampling_seed_base,
+                        effective_round,
+                    );
+                    if !drops.is_empty() {
+                        dart_predictions_backup = Some(class_predictions.clone());
+                    }
+                    for &flat_idx in &drops {
+                        let prior_round = flat_idx / k;
+                        let class_k = flat_idx % k;
+                        let count = dart_round_counts[class_k]
+                            .get(prior_round)
+                            .copied()
+                            .unwrap_or(0);
+                        if count == 0 {
+                            continue;
+                        }
+                        let start = dart_round_start_offsets[class_k][prior_round];
+                        let w_old = dart_state.tree_weights[flat_idx];
+                        // Snapshot the class-tree slice to a Vec so we can
+                        // safely re-borrow `class_predictions[class_k]` as
+                        // mutable. (Stumps don't change between subtract
+                        // and re-add — the slice can be reused later.)
+                        let stump_slice = class_stumps[class_k][start..start + count].to_vec();
+                        apply_weighted_round_to_predictions(
+                            &mut class_predictions[class_k],
+                            binned_matrix,
+                            &stump_slice,
+                            Some((&dataset.matrix.values, dataset.matrix.feature_count)),
+                            -w_old,
+                        )?;
+                    }
+                    drops
+                } else {
+                    Vec::new()
+                };
+
+            // v0.10.1: pre-compute per-class gradient buffers BEFORE sampling
+            // so the multiclass GOSS scorer can see all K gradient channels
+            // when ranking rows by `s_i = sum_k |g_{i,k}|`. The original
+            // gradient norms (for diagnostics) and the projected buffers are
+            // both captured up front.
+            let mut class_gradient_buffers: Vec<Vec<GradientPair>> = Vec::with_capacity(k);
+            let mut class_original_gradient_norms: Vec<Option<f32>> = Vec::with_capacity(k);
+            {
+                let mut tmp_buf: Vec<GradientPair> = Vec::with_capacity(n);
+                for class_k in 0..k {
+                    objective.compute_gradients_for_class(
+                        &class_predictions,
+                        &dataset.targets,
+                        dataset.sample_weights.as_deref(),
+                        class_k,
+                        &mut tmp_buf,
+                    )?;
+                    let original_norm = if gradient_projector.is_some() {
+                        Some(gradient_l2_norm_only(&tmp_buf))
+                    } else {
+                        None
+                    };
+                    if let Some(projector) = &gradient_projector {
+                        projector.project_gradient_pairs_in_place(&mut tmp_buf)?;
+                    }
+                    class_gradient_buffers.push(tmp_buf.clone());
+                    class_original_gradient_norms.push(original_norm);
+                }
+            }
+
+            // Shared row sampling across all K classes. In GOSS mode this
+            // amplifies the sampled-low rows in every class buffer.
+            let root_row_indices = select_row_indices_for_round_multiclass(
+                self.params.boosting_mode,
                 n,
                 controls.row_subsample,
                 sampling_seed_base,
                 effective_round as u64,
+                &mut class_gradient_buffers,
             );
             let (feature_tiles, sampled_feature_count) = sampled_feature_tiles(
                 feature_count,
@@ -3747,21 +3965,10 @@ impl Trainer {
             // `IterationDiagnostics` after the class loop completes.
             let mut per_class_diagnostics: Vec<IterationDiagnostics> = Vec::with_capacity(k);
             for class_k in 0..k {
-                objective.compute_gradients_for_class(
-                    &class_predictions,
-                    &dataset.targets,
-                    dataset.sample_weights.as_deref(),
-                    class_k,
-                    &mut gradient_buffer,
-                )?;
-                let original_gradient_norm = if gradient_projector.is_some() {
-                    Some(gradient_l2_norm_only(&gradient_buffer))
-                } else {
-                    None
-                };
-                if let Some(projector) = &gradient_projector {
-                    projector.project_gradient_pairs_in_place(&mut gradient_buffer)?;
-                }
+                // Use the pre-computed (and possibly GOSS-amplified) buffer.
+                gradient_buffer.clear();
+                gradient_buffer.extend_from_slice(&class_gradient_buffers[class_k]);
+                let original_gradient_norm = class_original_gradient_norms[class_k];
                 per_class_diagnostics.push(IterationDiagnostics::from_gradient_snapshot(
                     &gradient_buffer,
                     original_gradient_norm,
@@ -3828,20 +4035,114 @@ impl Trainer {
                 class_stumps[class_k].extend(round_stumps);
             }
 
+            // v0.10.1 DART post-build: rescale the K new trees to
+            // `new_w = 1/(num_dropped + 1)` and re-add each dropped
+            // tree's contribution at its post-normalize weight to BOTH
+            // `class_predictions` and `class_candidate_predictions`.
+            //
+            // PR review (C1): `dart_state.tree_weights` mutation and
+            // per-stump `tree_weight` stamping are DEFERRED to the
+            // round-commit branch below. Rejecting the round
+            // (`!any_tree_produced`, loss regression, etc.) restores
+            // `class_predictions` from `dart_predictions_backup` so
+            // the pre-dropout ensemble is preserved for the next round.
+            //
+            // PR review (C4, C5): use per-class
+            // `dart_round_counts[class_k][prior_round]` to re-add the
+            // WHOLE dropped class-tree (not just its root); compute
+            // `new_dropped_weights` here but commit them only on
+            // round acceptance.
+            //
+            // `dart_round_finalize` carries the per-round normalization
+            // bookkeeping into the commit branch; `None` when DART is
+            // off or the round had no dropouts (in which case new
+            // trees get `tree_weight = 1.0`).
+            let dart_round_finalize: Option<(f32, Vec<f32>)> =
+                if let Some((_, _, normalize_type, _)) = dart_params {
+                    let n_dropped = dropped_tree_indices.len() as f32;
+                    let new_w = 1.0 / (n_dropped + 1.0);
+                    let drop_factor = match normalize_type {
+                        alloygbm_core::DartNormalize::Tree => n_dropped / (n_dropped + 1.0),
+                        alloygbm_core::DartNormalize::Forest => 1.0 / (n_dropped + 1.0),
+                    };
+                    // Scale each class's new-tree contribution from w=1
+                    // (as built into candidate) to w=new_w.
+                    // class_candidate[k] = class_predictions[k] + new_w * f_T_k.
+                    for class_k in 0..k {
+                        let n_rows = class_candidate_predictions[class_k].len();
+                        for r in 0..n_rows {
+                            let f_t = class_candidate_predictions[class_k][r]
+                                - class_predictions[class_k][r];
+                            class_candidate_predictions[class_k][r] =
+                                class_predictions[class_k][r] + new_w * f_t;
+                        }
+                    }
+                    let new_dropped_weights: Vec<f32> = dropped_tree_indices
+                        .iter()
+                        .map(|&fi| dart_state.tree_weights[fi] * drop_factor)
+                        .collect();
+                    // Re-add each dropped tree's WHOLE slice at the rescaled
+                    // weight to BOTH class_predictions (so post-round
+                    // commit captures the full ensemble) AND
+                    // class_candidate_predictions (so candidate_loss is
+                    // computed against the correct full ensemble).
+                    for (i, &flat_idx) in dropped_tree_indices.iter().enumerate() {
+                        let prior_round = flat_idx / k;
+                        let class_k = flat_idx % k;
+                        let count = dart_round_counts[class_k]
+                            .get(prior_round)
+                            .copied()
+                            .unwrap_or(0);
+                        if count == 0 {
+                            continue;
+                        }
+                        let start = dart_round_start_offsets[class_k][prior_round];
+                        let stump_slice = class_stumps[class_k][start..start + count].to_vec();
+                        let w_new = new_dropped_weights[i];
+                        apply_weighted_round_to_predictions(
+                            &mut class_predictions[class_k],
+                            binned_matrix,
+                            &stump_slice,
+                            Some((&dataset.matrix.values, dataset.matrix.feature_count)),
+                            w_new,
+                        )?;
+                        apply_weighted_round_to_predictions(
+                            &mut class_candidate_predictions[class_k],
+                            binned_matrix,
+                            &stump_slice,
+                            Some((&dataset.matrix.values, dataset.matrix.feature_count)),
+                            w_new,
+                        )?;
+                    }
+                    Some((new_w, new_dropped_weights))
+                } else {
+                    None
+                };
+
             let in_warmup_phase = morph_state
                 .as_ref()
                 .is_some_and(|ms| ms.is_in_warmup_phase(effective_round));
 
+            // PR review (C1): rejection paths must restore
+            // `class_predictions` from `dart_predictions_backup` so the
+            // next round sees the full pre-dropout ensemble.
+            // `dart_state.tree_weights` was NOT mutated above, so no
+            // weight rollback is needed.
             if !any_tree_produced {
                 if in_warmup_phase {
                     // Empty rounds during warmup are expected: tiny LR produces
                     // leaves below `min_abs_leaf_value`, so all splits get
-                    // rejected. This is benign — LR will ramp up. Skip this
-                    // round and continue.
+                    // rejected. This is benign — LR will ramp up. Restore
+                    // class_predictions and skip this round.
+                    if let Some(backup) = dart_predictions_backup.take() {
+                        class_predictions = backup;
+                    }
                     rounds_completed += 1;
                     continue;
                 }
                 // Past warmup: an empty round indicates no useful split exists.
+                // Break path: predictions aren't read again after the loop.
+                let _ = dart_predictions_backup.take();
                 for class_k in 0..k {
                     class_stumps[class_k].truncate(pre_round_counts[class_k]);
                 }
@@ -3867,10 +4168,16 @@ impl Trainer {
                     // During warmup, slightly-negative loss improvements arise from
                     // numerical noise at tiny LR (e.g., row-subsample variance over
                     // mostly-zero gradient updates). The model is not broken — LR will
-                    // ramp up. Skip this round and continue.
+                    // ramp up. Restore class_predictions and skip this round.
+                    if let Some(backup) = dart_predictions_backup.take() {
+                        class_predictions = backup;
+                    }
                     rounds_completed += 1;
                     continue;
                 }
+                // Break path: predictions aren't read again after the
+                // loop, so backup restore is unnecessary.
+                let _ = dart_predictions_backup.take();
                 stop_reason = IterationStopReason::LossImprovementBelowThreshold;
                 break;
             }
@@ -3885,6 +4192,10 @@ impl Trainer {
                         for class_k in 0..k {
                             class_stumps[class_k].truncate(pre_round_counts[class_k]);
                         }
+                        // Break path: predictions aren't read again
+                        // after the loop, so backup restore is
+                        // unnecessary; let it drop silently.
+                        let _ = dart_predictions_backup.take();
                         stop_reason = IterationStopReason::LossImprovementBelowThreshold;
                         break;
                     }
@@ -3896,6 +4207,13 @@ impl Trainer {
             }
 
             // Validation early stopping
+            //
+            // PR review (C6): when DART is active, mirror the training
+            // transition on `validation_class_predictions` so the
+            // validation loss is computed against the same full
+            // ensemble (post-dropout, scaled new tree, re-added dropped
+            // trees). Without this the early-stopping decision is made
+            // against an inconsistent ensemble.
             let mut stop_for_validation_plateau = false;
             if let Some(validation_ref) = validation {
                 let val_preds = validation_class_predictions.as_mut().unwrap();
@@ -3903,15 +4221,78 @@ impl Trainer {
                     &validation_ref.dataset.matrix.values as &[f32],
                     validation_ref.dataset.matrix.feature_count,
                 ));
-                for class_k in 0..k {
-                    let round_stumps = &class_stumps[class_k][pre_round_counts[class_k]..];
-                    if !round_stumps.is_empty() {
-                        apply_round_stumps_tree_walk(
+                if let Some((new_w, new_dropped_weights)) = dart_round_finalize.as_ref() {
+                    // 1. Subtract each dropped class-tree at w_old.
+                    for &flat_idx in &dropped_tree_indices {
+                        let prior_round = flat_idx / k;
+                        let class_k = flat_idx % k;
+                        let count = dart_round_counts[class_k]
+                            .get(prior_round)
+                            .copied()
+                            .unwrap_or(0);
+                        if count == 0 {
+                            continue;
+                        }
+                        let start = dart_round_start_offsets[class_k][prior_round];
+                        let stump_slice = class_stumps[class_k][start..start + count].to_vec();
+                        let w_old = dart_state.tree_weights[flat_idx];
+                        apply_weighted_round_to_predictions(
+                            &mut val_preds[class_k],
+                            validation_ref.binned_matrix,
+                            &stump_slice,
+                            val_raw,
+                            -w_old,
+                        )?;
+                    }
+                    // 2. Add the new K class-trees at new_w.
+                    for class_k in 0..k {
+                        let round_stumps = &class_stumps[class_k][pre_round_counts[class_k]..];
+                        if round_stumps.is_empty() {
+                            continue;
+                        }
+                        apply_weighted_round_to_predictions(
                             &mut val_preds[class_k],
                             validation_ref.binned_matrix,
                             round_stumps,
                             val_raw,
+                            *new_w,
                         )?;
+                    }
+                    // 3. Re-add each dropped class-tree at its new weight.
+                    for (i, &flat_idx) in dropped_tree_indices.iter().enumerate() {
+                        let prior_round = flat_idx / k;
+                        let class_k = flat_idx % k;
+                        let count = dart_round_counts[class_k]
+                            .get(prior_round)
+                            .copied()
+                            .unwrap_or(0);
+                        if count == 0 {
+                            continue;
+                        }
+                        let start = dart_round_start_offsets[class_k][prior_round];
+                        let stump_slice = class_stumps[class_k][start..start + count].to_vec();
+                        let w_new = new_dropped_weights[i];
+                        apply_weighted_round_to_predictions(
+                            &mut val_preds[class_k],
+                            validation_ref.binned_matrix,
+                            &stump_slice,
+                            val_raw,
+                            w_new,
+                        )?;
+                    }
+                } else {
+                    // Non-DART (or DART with no dropouts AND new trees
+                    // not yet rescaled): plain unit-weight tree walk.
+                    for class_k in 0..k {
+                        let round_stumps = &class_stumps[class_k][pre_round_counts[class_k]..];
+                        if !round_stumps.is_empty() {
+                            apply_round_stumps_tree_walk(
+                                &mut val_preds[class_k],
+                                validation_ref.binned_matrix,
+                                round_stumps,
+                                val_raw,
+                            )?;
+                        }
                     }
                 }
                 let next_validation_loss = objective.loss(
@@ -3948,14 +4329,58 @@ impl Trainer {
             loss_per_completed_round.push(candidate_loss);
             sampled_rows_per_completed_round.push(sampled_row_count);
             sampled_features_per_completed_round.push(sampled_feature_count);
-            stumps_per_round_per_class.push(
-                (0..k)
-                    .map(|c| class_stumps[c].len() - pre_round_counts[c])
-                    .collect(),
-            );
+            let stump_counts_this_round: Vec<usize> = (0..k)
+                .map(|c| class_stumps[c].len() - pre_round_counts[c])
+                .collect();
+            stumps_per_round_per_class.push(stump_counts_this_round.clone());
             diagnostics_per_round.push(IterationDiagnostics::aggregate_per_class(
                 &per_class_diagnostics,
             ));
+
+            // v0.10.1 DART: commit per-tree-weight state for this round
+            // ONLY after acceptance (PR review C1). On rejection we
+            // never reach this point and `dart_state.tree_weights` /
+            // `dart_round_start_offsets` / `dart_round_counts` keep
+            // their pre-round shape, so the flat dropout index ↔
+            // tree-slice mapping stays consistent.
+            //
+            // PR review (C5): stamp `stump.tree_weight = new_w` on
+            // EVERY stump in `class_stumps[class_k][pre_round_counts[class_k]..]`,
+            // not just `last_mut()`. Only push DART slots for class
+            // trees that actually produced stumps this round (so
+            // zero-stump class trees stay as phantom slots and
+            // `dart_round_counts` reflects 0 for them).
+            if let Some((new_w, new_dropped_weights)) = dart_round_finalize.as_ref() {
+                // Rescale dropped trees' weights in place.
+                for (i, &flat_idx) in dropped_tree_indices.iter().enumerate() {
+                    dart_state.tree_weights[flat_idx] = new_dropped_weights[i];
+                }
+                // Record this round in `dropped_per_round` (one entry
+                // per multiclass round even though K trees are
+                // committed).
+                dart_state
+                    .dropped_per_round
+                    .push(dropped_tree_indices.clone());
+                // Per-class round bookkeeping + tree_weight stamping.
+                for class_k in 0..k {
+                    let count = stump_counts_this_round[class_k];
+                    let start = pre_round_counts[class_k];
+                    dart_round_start_offsets[class_k].push(start);
+                    dart_round_counts[class_k].push(count);
+                    if count > 0 {
+                        for stump in class_stumps[class_k][start..start + count].iter_mut() {
+                            stump.tree_weight = *new_w;
+                        }
+                    }
+                    // Push the per-tree weight regardless of count so
+                    // the flat layout `r * K + class_k` is preserved.
+                    // Phantom (count=0) trees get weight=new_w too;
+                    // they contribute nothing to predictions but the
+                    // flat indexing stays consistent across rounds.
+                    dart_state.tree_weights.push(*new_w);
+                }
+            }
+
             rounds_completed += 1;
 
             if stop_for_validation_plateau {
@@ -7177,6 +7602,74 @@ fn select_row_indices_for_round(
     }
 }
 
+/// Multiclass variant of [`select_row_indices_for_round`].
+///
+/// For multiclass GOSS the per-row score is the L1 norm of the per-class
+/// gradient vector: `s_i = sum_k |g_{i,k}|` (LightGBM convention).  A single
+/// row mask is shared across all K class gradient buffers, and the
+/// amplification factor is applied identically to every class's gradient and
+/// hessian.
+///
+/// `class_gradient_buffers[k]` is the gradient/hessian buffer for class `k`;
+/// every buffer must have length `row_count`.  Mutated in place to apply
+/// amplification when GOSS is active.
+fn select_row_indices_for_round_multiclass(
+    boosting_mode: BoostingMode,
+    row_count: usize,
+    row_subsample: f32,
+    seed_base: u64,
+    round_index: u64,
+    class_gradient_buffers: &mut [Vec<GradientPair>],
+) -> Vec<u32> {
+    match boosting_mode {
+        BoostingMode::Goss {
+            top_rate,
+            other_rate,
+        } => {
+            let k = class_gradient_buffers.len();
+            assert!(
+                k > 0,
+                "multiclass GOSS requires at least one class gradient buffer"
+            );
+            debug_assert!(
+                class_gradient_buffers
+                    .iter()
+                    .all(|buf| buf.len() == row_count),
+                "every class gradient buffer must have length row_count"
+            );
+            let magnitudes: Vec<f32> = (0..row_count)
+                .map(|i| {
+                    class_gradient_buffers
+                        .iter()
+                        .take(k)
+                        .map(|buf| buf[i].grad.abs())
+                        .sum::<f32>()
+                })
+                .collect();
+            let (top, other, amplification) =
+                goss_sample_indices(&magnitudes, top_rate, other_rate, seed_base, round_index);
+            if (amplification - 1.0).abs() > f32::EPSILON {
+                for &row in &other {
+                    let idx = row as usize;
+                    for class_buf in class_gradient_buffers.iter_mut().take(k) {
+                        let pair = &mut class_buf[idx];
+                        pair.grad *= amplification;
+                        pair.hess *= amplification;
+                    }
+                }
+            }
+            let mut merged: Vec<u32> = Vec::with_capacity(top.len() + other.len());
+            merged.extend(top);
+            merged.extend(other);
+            merged.sort_unstable();
+            merged
+        }
+        BoostingMode::Standard | BoostingMode::Dart { .. } => {
+            sampled_row_indices(row_count, row_subsample, seed_base, round_index)
+        }
+    }
+}
+
 /// Gradient-based One-Side Sampling (GOSS, from LightGBM).
 ///
 /// Strategy: keep the top `top_rate` fraction of rows by
@@ -9810,6 +10303,7 @@ mod tests {
             class_stumps: vec![Vec::new(), Vec::new()],
             initial_rounds_completed: 1,
             initial_ema_stats: None,
+            initial_dart_tree_weights: None,
         };
         let result = Trainer::new(params)
             .unwrap()

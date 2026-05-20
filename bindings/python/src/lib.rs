@@ -3145,11 +3145,82 @@ fn train_regression_artifact_with_summary_dense_impl(
                     .as_ref()
                     .filter(|m| !m.ema_stats.is_empty())
                     .map(|m| m.ema_stats.clone());
+                // v0.10.1: capture multiclass DART tree_weights from
+                // the prior fit, if any.  Flat layout: round-major ×
+                // class-k (matches
+                // `MultiClassWarmStartState::initial_dart_tree_weights`).
+                //
+                // PR review follow-up: each class's stumps are stored
+                // FLAT across all rounds (a level-wise tree with
+                // depth>=2 contributes multiple stumps per round), so
+                // `class_stumps[class_k][r]` is the r-th *stump* —
+                // NOT the r-th *tree*. Walk each class's stump list
+                // grouping by `tree_id` (decoded from
+                // `stump.split.node_id`) to recover one weight per
+                // (round, class) tree.  This mirrors the engine-side
+                // warm-start reconstruction in
+                // `fit_multiclass_iterations_impl` so the flat
+                // `r * K + class_k` indexing the engine consumes
+                // stays consistent.
+                let k_for_warm = init_mc_model.num_classes;
+                const TREE_NODE_STRIDE: u32 = 1 << 20;
+                let any_dart_weight = init_mc_model
+                    .class_stumps
+                    .iter()
+                    .flat_map(|s| s.iter())
+                    .any(|s| (s.tree_weight - 1.0).abs() > f32::EPSILON);
+                let initial_dart_tree_weights = if any_dart_weight {
+                    // Per-class list of per-tree weights, in
+                    // round-order (which matches the encounter order
+                    // of distinct `tree_id`s in `class_stumps[k]`).
+                    let mut per_class_tree_weights: Vec<Vec<f32>> = vec![Vec::new(); k_for_warm];
+                    for (tree_weights, stumps) in per_class_tree_weights
+                        .iter_mut()
+                        .take(k_for_warm)
+                        .zip(init_mc_model.class_stumps.iter())
+                    {
+                        let n = stumps.len();
+                        let mut i = 0_usize;
+                        while i < n {
+                            let tid_first = stumps[i].split.node_id / TREE_NODE_STRIDE;
+                            // Take the first stump's weight as the
+                            // per-tree weight (the engine's
+                            // `apply_dart_tree_weights` predictor
+                            // helper uses the same convention).
+                            tree_weights.push(stumps[i].tree_weight);
+                            // Advance past every stump that shares
+                            // this tree_id.
+                            let mut j = i + 1;
+                            while j < n && stumps[j].split.node_id / TREE_NODE_STRIDE == tid_first {
+                                j += 1;
+                            }
+                            i = j;
+                        }
+                    }
+                    // Assemble the flat round-major × class-k array.
+                    // Phantom (zero-tree) rounds get a placeholder
+                    // weight of 1.0 so the array length equals
+                    // `initial_rounds * K` — matches the engine
+                    // contract and is consistent with how the
+                    // single-output DART path treats phantom
+                    // rounds-skipped-during-warmup.
+                    let mut flat: Vec<f32> = Vec::with_capacity(initial_rounds * k_for_warm);
+                    for r in 0..initial_rounds {
+                        for tree_weights in per_class_tree_weights.iter().take(k_for_warm) {
+                            let w = tree_weights.get(r).copied().unwrap_or(1.0);
+                            flat.push(w);
+                        }
+                    }
+                    Some(flat)
+                } else {
+                    None
+                };
                 Some(MultiClassWarmStartState {
                     baseline_predictions: init_mc_model.baseline_predictions,
                     class_stumps: init_mc_model.class_stumps,
                     initial_rounds_completed: initial_rounds,
                     initial_ema_stats,
+                    initial_dart_tree_weights,
                 })
             } else {
                 None
@@ -5176,10 +5247,192 @@ fn train_regression_artifact_dense_with_summary_bytes(
     .map_err(engine_error_to_pyerr)
 }
 
+// ---------------------------------------------------------------------------
+// Joint multi-output trainer + predictor handle (v0.10.1)
+// ---------------------------------------------------------------------------
+
+/// PyO3 handle that wraps `alloygbm_engine::joint::JointPredictor` for K-output
+/// prediction from Python. `MultiLabelGBMRanker(training_mode="joint")` is the
+/// primary consumer.
+#[pyclass]
+#[derive(Debug, Clone)]
+struct JointPredictorHandle {
+    predictor: alloygbm_engine::joint::JointPredictor,
+    feature_count: usize,
+}
+
+#[pymethods]
+impl JointPredictorHandle {
+    #[new]
+    fn new(artifact_bytes: &[u8], baselines: Vec<f32>, feature_count: usize) -> PyResult<Self> {
+        let predictor =
+            alloygbm_engine::joint::JointPredictor::from_artifact_bytes(artifact_bytes, baselines)
+                .map_err(PyValueError::new_err)?;
+        Ok(Self {
+            predictor,
+            feature_count,
+        })
+    }
+
+    /// Predict K outputs for each row. Returns a flat row-major Vec<f32> of
+    /// length `n_rows * n_outputs`; the Python wrapper reshapes.
+    fn predict_dense(&self, values: Vec<f32>) -> PyResult<Vec<f32>> {
+        if self.feature_count == 0 {
+            return Err(PyValueError::new_err("feature_count must be > 0"));
+        }
+        if !values.len().is_multiple_of(self.feature_count) {
+            return Err(PyValueError::new_err(format!(
+                "values length {} not divisible by feature_count {}",
+                values.len(),
+                self.feature_count
+            )));
+        }
+        Ok(self.predictor.predict_batch(&values, self.feature_count))
+    }
+
+    #[getter]
+    fn n_outputs(&self) -> usize {
+        self.predictor.n_outputs
+    }
+
+    #[getter]
+    fn baselines(&self) -> Vec<f32> {
+        self.predictor.baselines.clone()
+    }
+}
+
+/// Train a joint multi-output model that shares trees across K outputs.
+///
+/// v0.10.1 minimum-viable wiring: pre-bins dense `x_values` using the existing
+/// `prepare_training_matrices_from_dense_values` helper (using y[:, 0] as a
+/// throwaway target — binning is target-independent), then dispatches to
+/// `alloygbm_engine::joint::fit_joint_multi_output`. Returns the artifact
+/// bytes (with `MultiOutputLeafValues` section) along with per-output
+/// baselines + the feature count for the `JointPredictorHandle` constructor.
+#[pyfunction]
+#[pyo3(signature = (
+    x_values, row_count, feature_count,
+    targets_per_output, n_outputs,
+    per_output_objective_names,
+    group_id,
+    n_estimators,
+    learning_rate,
+    seed,
+    max_depth,
+    min_data_in_leaf,
+    lambda_l2,
+    max_bin,
+))]
+fn train_joint_multi_label_ranker(
+    x_values: Vec<f32>,
+    row_count: usize,
+    feature_count: usize,
+    targets_per_output: Vec<Vec<f32>>,
+    n_outputs: usize,
+    per_output_objective_names: Vec<String>,
+    group_id: Option<Vec<u32>>,
+    n_estimators: usize,
+    learning_rate: f32,
+    seed: u64,
+    max_depth: u16,
+    min_data_in_leaf: u32,
+    lambda_l2: f32,
+    max_bin: usize,
+) -> PyResult<(Vec<u8>, Vec<f32>, usize, usize)> {
+    use alloygbm_engine::joint::{JointObjective, fit_joint_multi_output};
+
+    if targets_per_output.len() != n_outputs {
+        return Err(PyValueError::new_err(format!(
+            "targets_per_output length {} != n_outputs {n_outputs}",
+            targets_per_output.len()
+        )));
+    }
+    if per_output_objective_names.len() != n_outputs {
+        return Err(PyValueError::new_err(format!(
+            "per_output_objective_names length {} != n_outputs {n_outputs}",
+            per_output_objective_names.len()
+        )));
+    }
+    if n_outputs == 0 {
+        return Err(PyValueError::new_err("n_outputs must be > 0"));
+    }
+    for (k, tg) in targets_per_output.iter().enumerate() {
+        if tg.len() != row_count {
+            return Err(PyValueError::new_err(format!(
+                "targets[{k}] length {} != row_count {row_count}",
+                tg.len()
+            )));
+        }
+    }
+
+    let mut per_output_objective: Vec<JointObjective> = Vec::with_capacity(n_outputs);
+    for name in &per_output_objective_names {
+        let obj = JointObjective::parse(name)
+            .map_err(|e| PyValueError::new_err(format!("invalid objective {name:?}: {e}")))?;
+        per_output_objective.push(obj);
+    }
+    if per_output_objective.iter().any(|o| o.requires_group()) && group_id.is_none() {
+        return Err(PyValueError::new_err(
+            "at least one ranking objective requires group_id",
+        ));
+    }
+
+    // Build the binned matrix. The joint trainer needs only `binned_matrix`;
+    // use y[:, 0] as a throwaway target since binning is target-independent
+    // for the linear and rank strategies.
+    let throwaway_targets = targets_per_output[0].clone();
+    let prepared = prepare_training_matrices_from_dense_values(
+        &x_values,
+        row_count,
+        feature_count,
+        &throwaway_targets,
+        None,
+        None,
+        group_id.clone(),
+        ContinuousBinningStrategy::Linear,
+        max_bin,
+        false,
+    )
+    .map_err(engine_error_to_pyerr)?;
+
+    let params = TrainParams {
+        learning_rate,
+        seed,
+        max_depth,
+        min_data_in_leaf,
+        lambda_l2,
+        ..TrainParams::default()
+    };
+
+    let summary = fit_joint_multi_output(
+        &params,
+        feature_count,
+        &prepared.binned_matrix,
+        &targets_per_output,
+        group_id.as_deref(),
+        &per_output_objective,
+        n_estimators,
+    )
+    .map_err(PyValueError::new_err)?;
+
+    let bytes = summary
+        .model
+        .to_artifact_bytes()
+        .map_err(engine_error_to_pyerr)?;
+
+    Ok((
+        bytes,
+        summary.baselines,
+        feature_count,
+        summary.rounds_completed,
+    ))
+}
+
 #[pymodule]
 fn _alloygbm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<NativeRuntimeInfo>()?;
     m.add_class::<NativePredictorHandle>()?;
+    m.add_class::<JointPredictorHandle>()?;
     m.add_class::<NativeContinuousBinningMetadata>()?;
     m.add_class::<NativeTrainingSummary>()?;
     m.add_class::<NativeTrainingResult>()?;
@@ -5214,6 +5467,7 @@ fn _alloygbm(m: &Bound<'_, PyModule>) -> PyResult<()> {
         train_regression_artifact_dense_with_summary_bytes,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(train_joint_multi_label_ranker, m)?)?;
     Ok(())
 }
 

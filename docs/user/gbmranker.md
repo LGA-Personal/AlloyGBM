@@ -163,10 +163,10 @@ group = [0, 0, 0, 1, 1, 2, 2, 2, 2]
 - Single-label per `GBMRanker`. For multi-output ranking
   (`y` shaped `(n_rows, n_labels)`, `predict` returns the same shape) use
   `MultiLabelGBMRanker`, which trains one independent `GBMRanker` per label
-  sharing `group` / `factor_exposures` / kwargs and supports per-label
-  `ranking_objective` lists. Joint shared-tree multi-label boosting is
-  deferred to v0.10.0 (paired with the K-output shared-histogram primitive)
-  — see [../limitations.md](../limitations.md).
+  by default (sharing `group` / `factor_exposures` / kwargs and supporting
+  per-label `ranking_objective` lists), and can opt into joint shared-tree
+  training with `multi_label_mode="joint"` (v0.10.1+). See the
+  *Multi-Output Ranking* section below for both modes.
 - Group identifiers must be unsigned integers
 
 ## Multi-Output Ranking — `MultiLabelGBMRanker`
@@ -193,3 +193,36 @@ scores = model.predict(X_test)  # shape (n_rows, n_labels)
 list with one objective per label. `save_model` / `load_model` round-trip
 the wrapper, and `eval_set` y-columns are sliced per label so early
 stopping and custom eval metrics work end-to-end.
+
+### Training modes
+
+The `multi_label_mode` constructor argument selects the shared-tree
+strategy:
+
+- **`"independent"`** (default, ≥ v0.7.1) — K separate `GBMRanker`
+  instances share `group` and `factor_exposures`. Every per-label
+  feature (warm-start, neutralization, MorphBoost, PL leaves, DRO,
+  interaction constraints, custom eval metrics) flows through unchanged.
+- **`"joint"`** (≥ v0.10.1) — single shared tree ensemble with per-leaf
+  K-output values, trained by `engine::joint::fit_joint_multi_output`.
+  Splits are chosen using the per-output sum-of-gains
+  `Σₖ (G_L_k²/(H_L_k+λ) + G_R_k²/(H_R_k+λ) − G_k²/(H_k+λ))`. Joint
+  mode is more efficient when labels share signal, but v0.10.1 only
+  supports level-wise growth, `boosting_mode="standard"`, and the
+  built-in `squared_error` / `queryrmse` / `rank:pairwise` /
+  `rank:ndcg` / `rank:xendcg` objectives. Joint-path feature parity
+  (MorphBoost, neutralization, DRO, interaction constraints,
+  leaf-wise, GOSS, DART, warm-start) is targeted for later v0.10.x
+  releases — see [../limitations.md](../limitations.md).
+
+```python
+model = MultiLabelGBMRanker(
+    multi_label_mode="joint",
+    ranking_objective="rank:ndcg",
+    n_estimators=300,
+    learning_rate=0.05,
+    seed=7,
+)
+model.fit(X_train, y_train, group=query_ids_train)
+scores = model.predict(X_test)  # shape (n_rows, n_labels)
+```

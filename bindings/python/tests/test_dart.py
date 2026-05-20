@@ -94,36 +94,37 @@ def test_dart_invalid_params_rejected(kwargs, match):
 # ----- Multiclass rejection -----
 
 
-def test_multiclass_dart_rejected():
+def test_multiclass_dart_now_supported():
+    """v0.10.1 enabled multiclass DART. The v0.9.0 rejection test was
+    inverted in v0.10.1; the new positive coverage lives in
+    `test_multiclass_dart.py`."""
     rng = np.random.default_rng(3)
     X = rng.normal(size=(60, 3)).astype(np.float32)
     y = rng.integers(0, 3, size=60).tolist()  # 3 classes -> softmax path
     m = GBMClassifier(
-        n_estimators=10,
+        n_estimators=4,
         boosting_mode="dart",
         dart_drop_rate=0.1,
     )
-    with pytest.raises(NotImplementedError, match=r"multiclass"):
-        m.fit(X, y)
+    m.fit(X, y)  # Should NOT raise.
+    assert m.predict_proba(X).shape == (60, 3)
 
 
-def test_multiclass_goss_rejected_at_python_layer():
-    """Regression test for the v0.9.0 PR review (#6): the multiclass
-    softmax engine path rejects every non-`"standard"` boosting mode, so
-    the Python GBMClassifier must reject multiclass + GOSS too (not just
-    multiclass + DART). Pre-fix, the Python layer let multiclass + GOSS
-    fall through and the user got an opaque Rust-side error."""
+def test_multiclass_goss_now_supported():
+    """v0.10.1 enabled multiclass softmax + GOSS using per-row scoring
+    `s_i = sum_k |g_{i,k}|` (LightGBM convention). The v0.9.0 rejection
+    test was inverted in v0.10.1."""
     rng = np.random.default_rng(31)
     X = rng.normal(size=(60, 3)).astype(np.float32)
     y = rng.integers(0, 3, size=60).tolist()  # 3 classes -> softmax path
     m = GBMClassifier(
-        n_estimators=10,
+        n_estimators=4,
         boosting_mode="goss",
         goss_top_rate=0.2,
         goss_other_rate=0.1,
     )
-    with pytest.raises(NotImplementedError, match=r"multiclass"):
-        m.fit(X, y)
+    m.fit(X, y)  # Should NOT raise.
+    assert m.predict_proba(X).shape == (60, 3)
 
 
 # ----- Warm-start support (v0.10.0+) -----

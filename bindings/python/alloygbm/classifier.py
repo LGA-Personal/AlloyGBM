@@ -146,28 +146,11 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
                 "multiclass prediction. Use binary classification or a built-in objective."
             )
 
-        # v0.9.0: multiclass + DART is not yet supported — the multiclass
-        # softmax engine path rejects non-Standard boosting modes at fit
-        # time (tracked as a v0.10.x follow-up: requires per-class gradient
-        # bookkeeping during the dropout step). Raise a clear Python-side
-        # error rather than letting the Rust engine reject with a more
-        # opaque message.
-        # v0.9.0: the Rust multiclass softmax engine rejects every
-        # non-`"standard"` boosting mode at fit time, so surface the
-        # rejection at the Python layer with a clearer message.  Both
-        # GOSS (per-class gradient scoring) and DART (per-class
-        # dropout bookkeeping) are tracked as v0.10.x follow-ups.
-        if self._is_multiclass and self.boosting_mode != "standard":
-            raise NotImplementedError(
-                f"boosting_mode={self.boosting_mode!r} is not yet supported "
-                f"for multiclass classification (detected "
-                f"{self._num_classes_for_training} classes). Multiclass "
-                "GOSS requires per-class gradient scoring; multiclass DART "
-                "requires per-class gradient bookkeeping during the "
-                "dropout step — both tracked as v0.10.x follow-ups. Use "
-                "boosting_mode='standard' for multiclass, or use binary "
-                "labels with GOSS / DART."
-            )
+        # v0.10.1: multiclass GOSS (per-row score `s_i = sum_k |g_{i,k}|`,
+        # LightGBM convention) and multiclass DART (per-class dropout
+        # bookkeeping across the K-stumps-per-round pool) are now both
+        # supported. No Python-layer rejection here; the engine handles
+        # the dispatch.
 
         # Validate eval_set targets if provided
         if eval_set is not None:
