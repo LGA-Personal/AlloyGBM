@@ -3521,18 +3521,19 @@ impl Trainer {
                 "validation early stopping requires a validation dataset".to_string(),
             ));
         }
-        // v0.8.0: GOSS / DART are only supported on the binary /
-        // regression / ranking single-output objective for now.  The
-        // multiclass softmax path has shared row sampling across K
-        // classes that would need per-class gradient scoring (GOSS) or
-        // per-class dropout bookkeeping (DART); both are tracked as
-        // v0.8.1 follow-ups.
-        if !matches!(self.params.boosting_mode, BoostingMode::Standard) {
-            return Err(EngineError::InvalidConfig(format!(
-                "boosting_mode='{}' is not yet supported for multiclass objectives; \
-                 use 'standard' for multiclass softmax (follow-up tracked for v0.8.1)",
-                self.params.boosting_mode.label()
-            )));
+        // v0.10.1: GOSS is now supported on multiclass softmax via
+        // `select_row_indices_for_round_multiclass` (per-row score
+        // `s_i = sum_k |g_{i,k}|`, LightGBM convention). DART for
+        // multiclass softmax is still pending (requires per-class
+        // dropout bookkeeping across the K-stumps-per-round pool);
+        // tracked as a remaining v0.10.x follow-up.
+        if matches!(self.params.boosting_mode, BoostingMode::Dart { .. }) {
+            return Err(EngineError::InvalidConfig(
+                "boosting_mode='dart' is not yet supported for multiclass \
+                 softmax (requires per-class dropout bookkeeping across K \
+                 trees per round). Tracked as a v0.10.x follow-up."
+                    .to_string(),
+            ));
         }
         validate_train_params(&self.params)?;
         validate_training_dataset(dataset)?;
@@ -3718,12 +3719,46 @@ impl Trainer {
 
         for round_index in 0..effective_round_cap {
             let effective_round = round_index + round_index_offset;
-            // Shared sampling for all K classes
-            let root_row_indices = sampled_row_indices(
+
+            // v0.10.1: pre-compute per-class gradient buffers BEFORE sampling
+            // so the multiclass GOSS scorer can see all K gradient channels
+            // when ranking rows by `s_i = sum_k |g_{i,k}|`. The original
+            // gradient norms (for diagnostics) and the projected buffers are
+            // both captured up front.
+            let mut class_gradient_buffers: Vec<Vec<GradientPair>> = Vec::with_capacity(k);
+            let mut class_original_gradient_norms: Vec<Option<f32>> = Vec::with_capacity(k);
+            {
+                let mut tmp_buf: Vec<GradientPair> = Vec::with_capacity(n);
+                for class_k in 0..k {
+                    objective.compute_gradients_for_class(
+                        &class_predictions,
+                        &dataset.targets,
+                        dataset.sample_weights.as_deref(),
+                        class_k,
+                        &mut tmp_buf,
+                    )?;
+                    let original_norm = if gradient_projector.is_some() {
+                        Some(gradient_l2_norm_only(&tmp_buf))
+                    } else {
+                        None
+                    };
+                    if let Some(projector) = &gradient_projector {
+                        projector.project_gradient_pairs_in_place(&mut tmp_buf)?;
+                    }
+                    class_gradient_buffers.push(tmp_buf.clone());
+                    class_original_gradient_norms.push(original_norm);
+                }
+            }
+
+            // Shared row sampling across all K classes. In GOSS mode this
+            // amplifies the sampled-low rows in every class buffer.
+            let root_row_indices = select_row_indices_for_round_multiclass(
+                self.params.boosting_mode,
                 n,
                 controls.row_subsample,
                 sampling_seed_base,
                 effective_round as u64,
+                &mut class_gradient_buffers,
             );
             let (feature_tiles, sampled_feature_count) = sampled_feature_tiles(
                 feature_count,
@@ -3747,21 +3782,10 @@ impl Trainer {
             // `IterationDiagnostics` after the class loop completes.
             let mut per_class_diagnostics: Vec<IterationDiagnostics> = Vec::with_capacity(k);
             for class_k in 0..k {
-                objective.compute_gradients_for_class(
-                    &class_predictions,
-                    &dataset.targets,
-                    dataset.sample_weights.as_deref(),
-                    class_k,
-                    &mut gradient_buffer,
-                )?;
-                let original_gradient_norm = if gradient_projector.is_some() {
-                    Some(gradient_l2_norm_only(&gradient_buffer))
-                } else {
-                    None
-                };
-                if let Some(projector) = &gradient_projector {
-                    projector.project_gradient_pairs_in_place(&mut gradient_buffer)?;
-                }
+                // Use the pre-computed (and possibly GOSS-amplified) buffer.
+                gradient_buffer.clear();
+                gradient_buffer.extend_from_slice(&class_gradient_buffers[class_k]);
+                let original_gradient_norm = class_original_gradient_norms[class_k];
                 per_class_diagnostics.push(IterationDiagnostics::from_gradient_snapshot(
                     &gradient_buffer,
                     original_gradient_norm,
@@ -7163,6 +7187,74 @@ fn select_row_indices_for_round(
                     let idx = row as usize;
                     gradients[idx].grad *= amplification;
                     gradients[idx].hess *= amplification;
+                }
+            }
+            let mut merged: Vec<u32> = Vec::with_capacity(top.len() + other.len());
+            merged.extend(top);
+            merged.extend(other);
+            merged.sort_unstable();
+            merged
+        }
+        BoostingMode::Standard | BoostingMode::Dart { .. } => {
+            sampled_row_indices(row_count, row_subsample, seed_base, round_index)
+        }
+    }
+}
+
+/// Multiclass variant of [`select_row_indices_for_round`].
+///
+/// For multiclass GOSS the per-row score is the L1 norm of the per-class
+/// gradient vector: `s_i = sum_k |g_{i,k}|` (LightGBM convention).  A single
+/// row mask is shared across all K class gradient buffers, and the
+/// amplification factor is applied identically to every class's gradient and
+/// hessian.
+///
+/// `class_gradient_buffers[k]` is the gradient/hessian buffer for class `k`;
+/// every buffer must have length `row_count`.  Mutated in place to apply
+/// amplification when GOSS is active.
+fn select_row_indices_for_round_multiclass(
+    boosting_mode: BoostingMode,
+    row_count: usize,
+    row_subsample: f32,
+    seed_base: u64,
+    round_index: u64,
+    class_gradient_buffers: &mut [Vec<GradientPair>],
+) -> Vec<u32> {
+    match boosting_mode {
+        BoostingMode::Goss {
+            top_rate,
+            other_rate,
+        } => {
+            let k = class_gradient_buffers.len();
+            assert!(
+                k > 0,
+                "multiclass GOSS requires at least one class gradient buffer"
+            );
+            debug_assert!(
+                class_gradient_buffers
+                    .iter()
+                    .all(|buf| buf.len() == row_count),
+                "every class gradient buffer must have length row_count"
+            );
+            let magnitudes: Vec<f32> = (0..row_count)
+                .map(|i| {
+                    let mut s = 0.0_f32;
+                    for class_k in 0..k {
+                        s += class_gradient_buffers[class_k][i].grad.abs();
+                    }
+                    s
+                })
+                .collect();
+            let (top, other, amplification) =
+                goss_sample_indices(&magnitudes, top_rate, other_rate, seed_base, round_index);
+            if (amplification - 1.0).abs() > f32::EPSILON {
+                for &row in &other {
+                    let idx = row as usize;
+                    for class_k in 0..k {
+                        let pair = &mut class_gradient_buffers[class_k][idx];
+                        pair.grad *= amplification;
+                        pair.hess *= amplification;
+                    }
                 }
             }
             let mut merged: Vec<u32> = Vec::with_capacity(top.len() + other.len());
