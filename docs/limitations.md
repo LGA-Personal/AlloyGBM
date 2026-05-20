@@ -10,25 +10,7 @@ The `BackendOps` trait is designed for hardware abstraction, but only
 `CpuBackend` exists. GPU/accelerator support is architecturally planned but
 not implemented.
 
-### 2. Multi-Label Ranking — Joint mode lacks Python surface
-
-As of v0.10.0, the K-output shared-histogram primitive
-(`crates/engine/src/shared_histogram.rs`), the `MultiOutputLeafValues`
-artifact section (kind index 13), and the Rust-level joint trainer
-(`crates/engine/src/joint.rs`: `fit_joint_multi_output` +
-`JointPredictor`) are all in place. `TrainedStump` carries an
-optional `multi_output_leaf_values: Option<(Vec<f32>, Vec<f32>)>`
-field for K-output leaves.
-
-What's still pending is the **Python user-facing surface**:
-`MultiLabelGBMRanker(training_mode="joint")` currently still routes
-to the independent-per-label fallback (which already supplies every
-existing per-label feature: warm-start, neutralization, MorphBoost,
-PL leaves, DRO, interaction constraints). Wiring the Rust joint
-trainer through to the Python wrapper (new PyO3 entry point + Python
-`__init__` / `fit` / `predict` integration) is targeted for **v0.10.1**.
-
-### 3. Multiclass softmax + DART / GOSS
+### 2. Multiclass softmax + DART / GOSS
 
 Multiclass classification (`GBMClassifier` with ≥3 classes) still
 rejects `boosting_mode="dart"` and `boosting_mode="goss"` at the
@@ -37,7 +19,7 @@ the new K-output histogram primitive for per-class gradient
 bookkeeping (DART dropout-restore on K predictions; GOSS row scoring
 with `sum_k |g_k|`). Targeted at **v0.10.1+**.
 
-### 4. Joint-path feature parity (Rust-level)
+### 3. Joint-path feature parity (Rust-level)
 
 The v0.10.0 joint trainer is intentionally minimal:
 
@@ -50,6 +32,20 @@ Adding these capabilities to joint multi-output is targeted incrementally
 across the **v0.10.x** point releases.
 
 ## Resolved (Previously Limitations)
+
+### v0.10.1
+
+- **Multi-Label Ranking joint mode — Python surface (was a v0.10.0
+  follow-up):** `MultiLabelGBMRanker(multi_label_mode="joint")` now
+  routes through the new PyO3 entry point
+  `train_joint_multi_label_ranker` and `JointPredictorHandle` py-class
+  to `engine::joint::fit_joint_multi_output`. The kwarg is named
+  `multi_label_mode` (not the originally-planned `training_mode`) to
+  avoid colliding with `GBMRanker.training_mode` (MorphBoost selector
+  `"manual"` / `"morph"`), which would have broken v0.7.1 callers
+  passing `training_mode="morph"` through the wrapper. Bundle format
+  bumped to v2 with an explicit mode byte; v1 bundles still load as
+  independent mode.
 
 ### v0.10.0
 
