@@ -206,6 +206,41 @@ def test_joint_mode_leaf_wise_requires_max_leaves():
         m.fit(X, y, group=group)
 
 
+def test_joint_mode_accepts_categorical_features_with_max_cat_threshold():
+    """v0.10.2 Phase 3: joint mode supports native-categorical splits via
+    multi-output Fisher-sort. Feature 0 is integer-valued (3 categories);
+    `categorical_feature_indices=[0]` + `max_cat_threshold=8` should route
+    it through the native path."""
+    rng = np.random.default_rng(0)
+    n_queries, items_per_query = 8, 5
+    n = n_queries * items_per_query
+    # Feature 0: 3 categorical levels (0, 1, 2).
+    f0 = rng.integers(0, 3, n).astype(np.float32)
+    # Features 1-2: continuous.
+    f1 = rng.standard_normal(n).astype(np.float32)
+    f2 = rng.standard_normal(n).astype(np.float32)
+    X = np.column_stack([f0, f1, f2])
+    # Targets: 3 labels driven by f0 and noise.
+    y = np.stack(
+        [
+            (f0 == k).astype(np.float32) + 0.1 * rng.standard_normal(n).astype(np.float32)
+            for k in range(3)
+        ],
+        axis=1,
+    )
+    group = np.full(n_queries, items_per_query, dtype=np.int32)
+    m = MultiLabelGBMRanker(
+        n_estimators=3,
+        multi_label_mode="joint",
+        categorical_feature_indices=[0],
+        max_cat_threshold=8,
+    )
+    m.fit(X, y, group=group)
+    preds = m.predict(X)
+    assert preds.shape == y.shape
+    assert np.all(np.isfinite(preds))
+
+
 def test_joint_mode_still_rejects_truly_unsupported_kwargs():
     """v0.10.2: kwargs that the joint trainer still does NOT support
     (warm-start, MorphBoost, etc.) must continue to be rejected with

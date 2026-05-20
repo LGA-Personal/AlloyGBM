@@ -290,6 +290,9 @@ class MultiLabelGBMRanker:
         # v0.10.2 Phase 2: leaf-wise growth.
         "tree_growth",
         "max_leaves",
+        # v0.10.2 Phase 3: native-categorical splits.
+        "categorical_feature_indices",
+        "max_cat_threshold",
     })
 
     @staticmethod
@@ -461,6 +464,11 @@ class MultiLabelGBMRanker:
             max_leaves=(
                 int(kw["max_leaves"]) if kw.get("max_leaves") is not None else None
             ),
+            # v0.10.2 Phase 3 kwargs.
+            categorical_feature_indices=[
+                int(fi) for fi in (kw.get("categorical_feature_indices") or [])
+            ],
+            max_cat_threshold=int(kw.get("max_cat_threshold", 0)),
         )
 
         self._joint_artifact_bytes = bytes(artifact)

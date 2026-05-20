@@ -5329,6 +5329,8 @@ impl JointPredictorHandle {
     interaction_constraints=Vec::<Vec<u32>>::new(),
     tree_growth="level".to_string(),
     max_leaves=None::<usize>,
+    categorical_feature_indices=Vec::<usize>::new(),
+    max_cat_threshold=0_usize,
 ))]
 fn train_joint_multi_label_ranker(
     x_values: Vec<f32>,
@@ -5351,6 +5353,8 @@ fn train_joint_multi_label_ranker(
     interaction_constraints: Vec<Vec<u32>>,
     tree_growth: String,
     max_leaves: Option<usize>,
+    categorical_feature_indices: Vec<usize>,
+    max_cat_threshold: usize,
 ) -> PyResult<(Vec<u8>, Vec<f32>, usize, usize)> {
     use alloygbm_engine::joint::{JointObjective, fit_joint_multi_output};
 
@@ -5432,7 +5436,43 @@ fn train_joint_multi_label_ranker(
         ..TrainParams::default()
     };
 
-    let summary = fit_joint_multi_output(
+    // v0.10.2 Phase 3: derive CategoricalFeatureInfo for each requested
+    // categorical feature. `num_categories` is the highest non-missing bin
+    // index + 1 observed in the binned column. If `max_cat_threshold == 0`
+    // OR num_categories exceeds the threshold, fall back to numeric for
+    // that feature (matches single-output behavior).
+    let mut cat_features: Vec<CategoricalFeatureInfo> = Vec::new();
+    if !categorical_feature_indices.is_empty() && max_cat_threshold > 0 {
+        for &fi in &categorical_feature_indices {
+            if fi >= feature_count {
+                return Err(PyValueError::new_err(format!(
+                    "categorical_feature_indices contains {fi} which exceeds feature_count {feature_count}"
+                )));
+            }
+            // Scan the binned column for max non-missing bin.
+            let mut max_bin: u8 = 0;
+            for row in 0..row_count {
+                let b = prepared.binned_matrix.bins[row * feature_count + fi];
+                if b != MISSING_BIN_U8 && b > max_bin {
+                    max_bin = b;
+                }
+            }
+            let num_categories = (max_bin as usize) + 1;
+            if num_categories >= 2
+                && num_categories <= max_cat_threshold
+                && num_categories <= 64
+            {
+                cat_features.push(CategoricalFeatureInfo {
+                    feature_index: fi,
+                    num_categories,
+                });
+            }
+            // else: silently fall back to numeric for this feature (LightGBM
+            // semantics — too many categories or threshold disabled).
+        }
+    }
+
+    let summary = alloygbm_engine::joint::fit_joint_multi_output_with_categorical(
         &params,
         feature_count,
         &prepared.binned_matrix,
@@ -5440,6 +5480,7 @@ fn train_joint_multi_label_ranker(
         group_id.as_deref(),
         &per_output_objective,
         n_estimators,
+        &cat_features,
     )
     .map_err(PyValueError::new_err)?;
 
