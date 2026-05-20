@@ -158,6 +158,33 @@ pub struct JointTrainingSummary {
     pub rounds_completed: usize,
 }
 
+/// Convert a u64 categorical bitset (bit `k` = 1 means category `k` goes
+/// left) into the byte-packed Vec<u8> format used by the single-output
+/// trainer's `SplitCandidate::categorical_bitset`. Bit `K` of byte `K/8`
+/// represents category `K`; trailing bytes that contain only zeros are
+/// trimmed (single-output convention).
+fn u64_to_bitset_bytes(bs: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8);
+    for byte_idx in 0..8 {
+        let byte = ((bs >> (byte_idx * 8)) & 0xFF) as u8;
+        out.push(byte);
+    }
+    while out.len() > 1 && *out.last().unwrap() == 0 {
+        out.pop();
+    }
+    out
+}
+
+/// Inverse of `u64_to_bitset_bytes`: decodes a Vec<u8> bitset back into a
+/// u64. Used by JointPredictor when evaluating categorical stumps.
+fn bitset_bytes_to_u64(bytes: &[u8]) -> u64 {
+    let mut out: u64 = 0;
+    for (byte_idx, &byte) in bytes.iter().enumerate().take(8) {
+        out |= (byte as u64) << (byte_idx * 8);
+    }
+    out
+}
+
 /// Per-leaf bookkeeping during level-wise tree growth on the joint trainer.
 #[derive(Debug)]
 struct JointLeafNode {
@@ -190,6 +217,10 @@ struct JointLeafCandidate {
     left_stats: NodeStats,
     right_stats: NodeStats,
     parent_active_groups: Option<u64>,
+    /// Categorical bitset (Some when this is a Fisher-sort categorical
+    /// split, None for numeric threshold splits). Bit `k` = 1 means
+    /// category `k` is routed to the left child.
+    cat_bitset: Option<u64>,
 }
 
 impl PartialEq for JointLeafCandidate {
@@ -226,6 +257,7 @@ pub fn build_joint_round(
     binned_matrix: &BinnedMatrix,
     grads_per_output: &[Vec<GradientPair>],
     n_outputs: usize,
+    categorical_features: &[crate::CategoricalFeatureInfo],
 ) -> Result<JointRoundResult, String> {
     if grads_per_output.len() != n_outputs {
         return Err(format!(
@@ -312,6 +344,18 @@ pub fn build_joint_round(
         node_active_groups.insert(0, idx.root_active_groups());
     }
 
+    // Native-categorical lookup (v0.10.2): feature_index → num_categories.
+    // Built once per call. `None` means the feature is numeric.
+    let cat_num_categories: Vec<Option<usize>> = {
+        let mut v = vec![None; feature_count];
+        for cf in categorical_features {
+            if cf.feature_index < feature_count {
+                v[cf.feature_index] = Some(cf.num_categories);
+            }
+        }
+        v
+    };
+
     let mut stumps: Vec<TrainedStump> = Vec::new();
     let mut active: Vec<JointLeafNode> = vec![JointLeafNode {
         local_node_id: 0,
@@ -372,7 +416,9 @@ pub fn build_joint_round(
             }
 
             // Find best split across all (feature, threshold_bin) pairs.
-            let mut best: Option<(usize, usize, f32)> = None; // (feature, threshold_bin, gain)
+            // For categorical features, the threshold_bin slot is unused
+            // (set to 0) and the bitset is carried in the 4th element.
+            let mut best: Option<(usize, usize, f32, Option<u64>)> = None;
             // BinnedMatrix exposes max_bin globally; iterate candidate
             // thresholds across the full bin range minus the NaN slot.
             let max_threshold = (binned_matrix.max_bin as usize).min(MISSING_BIN_U8 as usize - 1);
@@ -391,6 +437,24 @@ pub fn build_joint_round(
                         continue;
                     }
                 }
+                // Native-categorical (v0.10.2): if the feature is in the
+                // categorical_features list, use Fisher-sort over the K
+                // outputs instead of a threshold sweep. The result carries
+                // a `left_bitset: u64` which the partition path consumes.
+                if let Some(num_cats) = cat_num_categories[feature] {
+                    if let Some(cat_split) = crate::shared_histogram::find_best_multi_output_categorical_split(
+                        &node_hist,
+                        feature,
+                        num_cats,
+                        lambda_l2,
+                        crate::LEAF_EPSILON,
+                    ) {
+                        if cat_split.gain > best.map(|(_, _, g, _)| g).unwrap_or(0.0) {
+                            best = Some((feature, 0, cat_split.gain, Some(cat_split.left_bitset)));
+                        }
+                    }
+                    continue; // skip numeric threshold sweep for categorical features
+                }
                 for threshold_bin in 0..max_threshold {
                     let gain = compute_multi_output_split_gain(
                         &node_hist,
@@ -402,13 +466,13 @@ pub fn build_joint_round(
                     if gain <= 0.0 {
                         continue;
                     }
-                    if best.map(|(_, _, g)| gain > g).unwrap_or(true) {
-                        best = Some((feature, threshold_bin, gain));
+                    if best.map(|(_, _, g, _)| gain > g).unwrap_or(true) {
+                        best = Some((feature, threshold_bin, gain, None));
                     }
                 }
             }
 
-            let Some((feature, threshold_bin, gain)) = best else {
+            let Some((feature, threshold_bin, gain, cat_bitset)) = best else {
                 continue; // No positive-gain split — leave node as terminal leaf
             };
 
@@ -419,9 +483,10 @@ pub fn build_joint_round(
                 continue;
             }
 
-            // Partition rows by the chosen split. NaN rows (bin == MISSING_BIN_U8)
-            // route per default_left below; we pick the direction yielding more
-            // rows on either side (simple v0.10.0 default).
+            // Partition rows by the chosen split. For categorical splits the
+            // bin index is interpreted as a category ID and routed via the
+            // bitset; for numeric splits, by threshold_bin. NaN rows
+            // (bin == MISSING_BIN_U8) route per default_left below.
             let mut left_rows: Vec<u32> = Vec::new();
             let mut right_rows: Vec<u32> = Vec::new();
             let mut missing_rows: Vec<u32> = Vec::new();
@@ -429,6 +494,13 @@ pub fn build_joint_round(
                 let bin = binned_matrix.bins[row as usize * feature_count + feature];
                 if bin == MISSING_BIN_U8 {
                     missing_rows.push(row);
+                } else if let Some(bs) = cat_bitset {
+                    // Categorical: bit `bin` set → left.
+                    if bin < 64 && (bs & (1u64 << bin)) != 0 {
+                        left_rows.push(row);
+                    } else {
+                        right_rows.push(row);
+                    }
                 } else if (bin as usize) <= threshold_bin {
                     left_rows.push(row);
                 } else {
@@ -497,8 +569,8 @@ pub fn build_joint_round(
                     threshold_bin: threshold_bin as u16,
                     gain,
                     default_left,
-                    is_categorical: false,
-                    categorical_bitset: None,
+                    is_categorical: cat_bitset.is_some(),
+                    categorical_bitset: cat_bitset.map(u64_to_bitset_bytes),
                     left_stats,
                     right_stats,
                 },
@@ -564,6 +636,7 @@ fn build_joint_round_leafwise(
     grads_per_output: &[Vec<GradientPair>],
     n_outputs: usize,
     max_leaves: usize,
+    categorical_features: &[crate::CategoricalFeatureInfo],
 ) -> Result<JointRoundResult, String> {
     use std::collections::BinaryHeap;
 
@@ -631,6 +704,17 @@ fn build_joint_round_leafwise(
             .map_err(|e| format!("interaction_constraints: {e:?}"))?;
     let root_active_groups = constraint_index.as_ref().map(|idx| idx.root_active_groups());
 
+    // Native-categorical lookup (v0.10.2): same as build_joint_round.
+    let cat_num_categories: Vec<Option<usize>> = {
+        let mut v = vec![None; feature_count];
+        for cf in categorical_features {
+            if cf.feature_index < feature_count {
+                v[cf.feature_index] = Some(cf.num_categories);
+            }
+        }
+        v
+    };
+
     // Per-node candidate evaluator. Builds the multi-output histogram for
     // `node.row_indices`, sweeps features (respecting `feature_allowed` and
     // the active interaction-constraint group set), picks the best split,
@@ -680,8 +764,9 @@ fn build_joint_round_leafwise(
             );
         }
 
-        // Sweep features and threshold bins for the best split.
-        let mut best: Option<(usize, usize, f32)> = None;
+        // Sweep features for the best split. Categorical features dispatch
+        // to Fisher-sort and carry a u64 bitset in the 4th slot of `best`.
+        let mut best: Option<(usize, usize, f32, Option<u64>)> = None;
         let max_threshold = (binned_matrix.max_bin as usize).min(MISSING_BIN_U8 as usize - 1);
         for feature in 0..feature_count {
             if !feature_allowed[feature] {
@@ -691,6 +776,16 @@ fn build_joint_round_leafwise(
                 if !idx.feature_allowed(ag, feature as u32) {
                     continue;
                 }
+            }
+            if let Some(num_cats) = cat_num_categories[feature] {
+                if let Some(cat_split) = crate::shared_histogram::find_best_multi_output_categorical_split(
+                    &node_hist, feature, num_cats, lambda_l2, crate::LEAF_EPSILON,
+                ) {
+                    if cat_split.gain > best.map(|(_, _, g, _)| g).unwrap_or(0.0) {
+                        best = Some((feature, 0, cat_split.gain, Some(cat_split.left_bitset)));
+                    }
+                }
+                continue;
             }
             for threshold_bin in 0..max_threshold {
                 let gain = compute_multi_output_split_gain(
@@ -703,12 +798,12 @@ fn build_joint_round_leafwise(
                 if gain <= 0.0 {
                     continue;
                 }
-                if best.map(|(_, _, g)| gain > g).unwrap_or(true) {
-                    best = Some((feature, threshold_bin, gain));
+                if best.map(|(_, _, g, _)| gain > g).unwrap_or(true) {
+                    best = Some((feature, threshold_bin, gain, None));
                 }
             }
         }
-        let (feature, threshold_bin, gain) = best?;
+        let (feature, threshold_bin, gain, cat_bitset) = best?;
         if gain < params.min_split_gain {
             return None;
         }
@@ -721,6 +816,12 @@ fn build_joint_round_leafwise(
             let bin = binned_matrix.bins[row as usize * feature_count + feature];
             if bin == MISSING_BIN_U8 {
                 missing_rows.push(row);
+            } else if let Some(bs) = cat_bitset {
+                if bin < 64 && (bs & (1u64 << bin)) != 0 {
+                    left_rows.push(row);
+                } else {
+                    right_rows.push(row);
+                }
             } else if (bin as usize) <= threshold_bin {
                 left_rows.push(row);
             } else {
@@ -790,6 +891,7 @@ fn build_joint_round_leafwise(
             left_stats,
             right_stats,
             parent_active_groups: active_groups,
+            cat_bitset,
         })
     };
 
@@ -836,8 +938,8 @@ fn build_joint_round_leafwise(
                 threshold_bin: cand.threshold_bin,
                 gain: cand.gain,
                 default_left: cand.default_left,
-                is_categorical: false,
-                categorical_bitset: None,
+                is_categorical: cand.cat_bitset.is_some(),
+                categorical_bitset: cand.cat_bitset.map(u64_to_bitset_bytes),
                 left_stats: cand.left_stats,
                 right_stats: cand.right_stats,
             },
@@ -889,6 +991,33 @@ pub fn fit_joint_multi_output(
     group_id: Option<&[u32]>,
     per_output_objective: &[JointObjective],
     n_estimators: usize,
+) -> Result<JointTrainingSummary, String> {
+    fit_joint_multi_output_with_categorical(
+        params,
+        feature_count,
+        binned_matrix,
+        targets_per_output,
+        group_id,
+        per_output_objective,
+        n_estimators,
+        /*categorical_features=*/ &[],
+    )
+}
+
+/// Same as [`fit_joint_multi_output`] but accepts a slice of
+/// [`CategoricalFeatureInfo`] specifying which features should be treated
+/// as native-categorical via multi-output Fisher-sort partitioning. An
+/// empty slice means all features are numeric (byte-identical to
+/// `fit_joint_multi_output`).
+pub fn fit_joint_multi_output_with_categorical(
+    params: &TrainParams,
+    feature_count: usize,
+    binned_matrix: &BinnedMatrix,
+    targets_per_output: &[Vec<f32>],
+    group_id: Option<&[u32]>,
+    per_output_objective: &[JointObjective],
+    n_estimators: usize,
+    categorical_features: &[crate::CategoricalFeatureInfo],
 ) -> Result<JointTrainingSummary, String> {
     let n_outputs = targets_per_output.len();
     if per_output_objective.len() != n_outputs {
@@ -991,9 +1120,16 @@ pub fn fit_joint_multi_output(
                 &active_grads,
                 n_outputs,
                 max_leaves,
+                categorical_features,
             )?
         } else {
-            build_joint_round(params, binned_matrix, &active_grads, n_outputs)?
+            build_joint_round(
+                params,
+                binned_matrix,
+                &active_grads,
+                n_outputs,
+                categorical_features,
+            )?
         };
         if round_result.stumps.is_empty() {
             break;
@@ -1588,7 +1724,7 @@ mod tests {
             ..TrainParams::default()
         };
 
-        let result = build_joint_round(&params, &binned, &grads_per_output, 2).expect("build");
+        let result = build_joint_round(&params, &binned, &grads_per_output, 2, &[]).expect("build");
         assert_eq!(result.stumps.len(), 1, "should emit one root split");
         let stump = &result.stumps[0];
         let (left_k, right_k) = stump
@@ -2023,5 +2159,56 @@ mod tests {
             (p0[0] - p15[0]).abs() > 1e-4,
             "leaf-wise must produce different predictions across the fixture; got p0={p0:?}, p15={p15:?}"
         );
+    }
+
+    #[test]
+    fn joint_native_categorical_split_produces_bitset_stump() {
+        // 12 rows, 1 categorical feature with 3 categories, 2 outputs.
+        // Target pattern: category 1 wants output 0 = +1; categories 0 and 2
+        // want output 0 = -1. Fisher-sort must partition {0, 2} vs {1}.
+        let bins: Vec<u8> = vec![0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2];
+        let binned = BinnedMatrix::new(12, 1, 2, bins).expect("binned");
+        let targets_per_output: Vec<Vec<f32>> = vec![
+            vec![-1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0, -1.0, -1.0, -1.0, -1.0],
+            vec![0.5, 0.5, 0.5, 0.5, -0.5, -0.5, -0.5, -0.5, 0.5, 0.5, 0.5, 0.5],
+        ];
+        let params = TrainParams {
+            max_depth: 1,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            learning_rate: 1.0,
+            ..TrainParams::default()
+        };
+        let cat_features = vec![crate::CategoricalFeatureInfo {
+            feature_index: 0,
+            num_categories: 3,
+        }];
+        let summary = fit_joint_multi_output_with_categorical(
+            &params,
+            1,
+            &binned,
+            &targets_per_output,
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            1,
+            &cat_features,
+        )
+        .expect("fit");
+        assert_eq!(summary.model.stumps.len(), 1, "expected one root split");
+        let stump = &summary.model.stumps[0];
+        assert!(stump.split.is_categorical, "should produce categorical split");
+        let bitset = stump
+            .split
+            .categorical_bitset
+            .as_ref()
+            .expect("bitset present");
+        // Decode bit 0 (cat 0), bit 1 (cat 1), bit 2 (cat 2) from the first byte.
+        let bs0 = bitset[0];
+        let bit0 = (bs0 >> 0) & 1;
+        let bit1 = (bs0 >> 1) & 1;
+        let bit2 = (bs0 >> 2) & 1;
+        // Cats 0 and 2 should be on the same side; cat 1 on the other.
+        assert_eq!(bit0, bit2, "cats 0 and 2 should share a side, got bitset=0b{:08b}", bs0);
+        assert_ne!(bit0, bit1, "cat 1 should be opposite of cat 0");
     }
 }
