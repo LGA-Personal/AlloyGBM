@@ -94,3 +94,89 @@ def test_multiclass_dart_first_round_no_dropouts():
     proba = m.predict_proba(X)
     assert proba.shape == (50, 3)
     assert np.allclose(proba.sum(axis=1), 1.0, atol=1e-5)
+
+
+def test_multiclass_dart_pickle_round_trip_with_multi_stump_trees():
+    """Regression test for the v0.10.1 PR review (C4, C5): the previous
+    implementation indexed `class_stumps[class_k][prior_round]` as if
+    each class-round produced exactly one stump, and stamped
+    `tree_weight` only on `last_mut()`.  Level-wise trees with depth>=2
+    produce multiple stumps per (round, class), so:
+
+    - Dropout subtracts only the root of a prior tree from
+      class_predictions (leaves the rest in place) → next-round
+      gradients are computed against the wrong ensemble.
+    - Only the deepest stump of a new class-round gets stamped with
+      `new_w`; the shallower stumps keep `tree_weight = 1.0` and the
+      predictor (which folds `tree_weight` into every leaf) returns
+      a different ensemble than training.
+
+    Concretely: pickle round-trip + predict must equal an in-memory
+    predict on the *same* model.  Pre-fix this was broken because the
+    artifact's per-stump `tree_weight` values do not match the
+    in-memory bookkeeping the engine used during training.
+    """
+    import pickle
+
+    # Big enough data to force depth>=2 trees (so multi-stump rounds).
+    rng = np.random.default_rng(41)
+    X = rng.standard_normal((400, 6)).astype(np.float32)
+    y = rng.integers(0, 3, size=400).astype(np.int64)
+    m = GBMClassifier(
+        n_estimators=20,
+        boosting_mode="dart",
+        dart_drop_rate=0.3,
+        dart_max_drop=8,
+        max_depth=4,
+        min_data_in_leaf=8,
+        seed=41,
+    )
+    m.fit(X, y)
+    p1 = m.predict_proba(X)
+    restored = pickle.loads(pickle.dumps(m))
+    p2 = restored.predict_proba(X)
+    # Strict equality (within f32 noise) — the artifact carries every
+    # `tree_weight` the predictor needs, so a round-trip must reproduce
+    # in-memory predictions exactly.
+    np.testing.assert_allclose(p1, p2, rtol=1e-5, atol=1e-6)
+
+
+def test_multiclass_dart_with_validation_early_stopping():
+    """Regression test for the v0.10.1 PR review (C6): the DART
+    transition (dropout subtract + new_w scale + dropped re-add) must
+    also apply to `validation_class_predictions`, otherwise the
+    validation loss tracked for early stopping is computed against an
+    inconsistent ensemble (training sees dropout, validation does not)
+    and the `best_validation_round` decision is corrupted.
+
+    Smoke-level: this just verifies that DART + multiclass + eval_set
+    + early_stopping_rounds runs to completion and produces a
+    well-formed model.  A broken validation transition typically
+    manifests as NaN/inf validation losses or a model that won't
+    pickle round-trip.
+    """
+    import pickle
+
+    rng = np.random.default_rng(43)
+    X = rng.standard_normal((300, 5)).astype(np.float32)
+    y = rng.integers(0, 3, size=300).astype(np.int64)
+    X_val = X[:60]
+    y_val = y[:60]
+    m = GBMClassifier(
+        n_estimators=20,
+        boosting_mode="dart",
+        dart_drop_rate=0.25,
+        max_depth=4,
+        min_data_in_leaf=8,
+        early_stopping_rounds=3,
+        seed=43,
+    )
+    m.fit(X, y, eval_set=(X_val, y_val))
+    proba = m.predict_proba(X)
+    assert proba.shape == (300, 3)
+    assert np.allclose(proba.sum(axis=1), 1.0, atol=1e-5)
+    # Round-trip equality after early stopping has truncated the model.
+    p1 = proba
+    restored = pickle.loads(pickle.dumps(m))
+    p2 = restored.predict_proba(X)
+    np.testing.assert_allclose(p1, p2, rtol=1e-5, atol=1e-6)
