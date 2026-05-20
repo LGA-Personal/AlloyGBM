@@ -150,16 +150,51 @@ def test_joint_mode_rejects_unsupported_kwarg():
         m.fit(X, y, group=group)
 
 
-def test_joint_mode_rejects_row_subsample_until_supported():
-    """PR review (C3, C7): the v0.10.1 joint trainer does not yet
-    consume `row_subsample` / `col_subsample` / `min_split_gain`, so
-    these are explicitly rejected rather than silently ignored. They
-    will land alongside the rest of joint-path feature parity in a
-    later v0.10.x release (see docs/limitations.md)."""
+@pytest.mark.parametrize(
+    "kw,value",
+    [
+        ("min_split_gain", 0.0),
+        ("row_subsample", 0.7),
+        ("col_subsample", 0.8),
+        ("interaction_constraints", [[0, 1], [2, 3]]),
+    ],
+)
+def test_joint_mode_accepts_phase1_kwargs(kw, value):
+    """v0.10.2 Phase 1: joint mode now plumbs `min_split_gain`,
+    `row_subsample`, `col_subsample`, `interaction_constraints` into
+    the engine's `TrainParams`. Each kwarg should round-trip through
+    `train_joint_multi_label_ranker` without raising."""
     X, y, group = _toy_ranking()
-    for unsupported in ("row_subsample", "col_subsample", "min_split_gain"):
+    m = MultiLabelGBMRanker(
+        n_estimators=2, multi_label_mode="joint", **{kw: value}
+    )
+    m.fit(X, y, group=group)
+    preds = m.predict(X)
+    assert preds.shape == y.shape
+
+
+def test_joint_mode_still_rejects_truly_unsupported_kwargs():
+    """v0.10.2: kwargs that the joint trainer still does NOT support
+    (warm-start, MorphBoost, etc.) must continue to be rejected with
+    a clear NotImplementedError. Only Phase 1 kwargs were added to
+    the allow-list."""
+    X, y, group = _toy_ranking()
+    for unsupported in (
+        "leaf_model",
+        "monotone_constraints",
+        "boosting_mode",
+        "training_mode",
+    ):
+        # Some of these collide with __init__ signature in odd ways; we
+        # use a generic plausible-value-per-kwarg map.
+        value = {
+            "leaf_model": "linear",
+            "monotone_constraints": [1, 0, 0, 0],
+            "boosting_mode": "goss",
+            "training_mode": "morph",
+        }[unsupported]
         m = MultiLabelGBMRanker(
-            n_estimators=2, multi_label_mode="joint", **{unsupported: 0.5}
+            n_estimators=2, multi_label_mode="joint", **{unsupported: value}
         )
         with pytest.raises(NotImplementedError, match=unsupported):
             m.fit(X, y, group=group)

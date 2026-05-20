@@ -5309,6 +5309,7 @@ impl JointPredictorHandle {
 /// `alloygbm_engine::joint::fit_joint_multi_output`. Returns the artifact
 /// bytes (with `MultiOutputLeafValues` section) along with per-output
 /// baselines + the feature count for the `JointPredictorHandle` constructor.
+#[allow(clippy::too_many_arguments)]
 #[pyfunction]
 #[pyo3(signature = (
     x_values, row_count, feature_count,
@@ -5322,6 +5323,10 @@ impl JointPredictorHandle {
     min_data_in_leaf,
     lambda_l2,
     max_bin,
+    min_split_gain=0.0_f32,
+    row_subsample=1.0_f32,
+    col_subsample=1.0_f32,
+    interaction_constraints=Vec::<Vec<u32>>::new(),
 ))]
 fn train_joint_multi_label_ranker(
     x_values: Vec<f32>,
@@ -5338,6 +5343,10 @@ fn train_joint_multi_label_ranker(
     min_data_in_leaf: u32,
     lambda_l2: f32,
     max_bin: usize,
+    min_split_gain: f32,
+    row_subsample: f32,
+    col_subsample: f32,
+    interaction_constraints: Vec<Vec<u32>>,
 ) -> PyResult<(Vec<u8>, Vec<f32>, usize, usize)> {
     use alloygbm_engine::joint::{JointObjective, fit_joint_multi_output};
 
@@ -5401,6 +5410,10 @@ fn train_joint_multi_label_ranker(
         max_depth,
         min_data_in_leaf,
         lambda_l2,
+        min_split_gain,
+        row_subsample,
+        col_subsample,
+        interaction_constraints,
         ..TrainParams::default()
     };
 

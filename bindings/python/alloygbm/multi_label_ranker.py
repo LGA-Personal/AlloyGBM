@@ -282,6 +282,11 @@ class MultiLabelGBMRanker:
         "min_data_in_leaf",
         "lambda_l2",
         "max_bin",
+        # v0.10.2 Phase 1: small/medium joint-trainer features.
+        "min_split_gain",
+        "row_subsample",
+        "col_subsample",
+        "interaction_constraints",
     })
 
     @staticmethod
@@ -417,6 +422,14 @@ class MultiLabelGBMRanker:
         per_output_objective_names = list(objectives)
 
         kw = self._per_label_kwargs
+        # interaction_constraints: accept list[list[int]] | list[list[np.int*]] |
+        # np.array-of-objects; coerce to a strict list[list[int]] for the
+        # PyO3 bridge (it wants Vec<Vec<u32>>).
+        ic_raw = kw.get("interaction_constraints", [])
+        if ic_raw is None:
+            ic_list: list[list[int]] = []
+        else:
+            ic_list = [[int(x) for x in group] for group in ic_raw]
         artifact, baselines, _fc, rounds_completed = _native.train_joint_multi_label_ranker(
             x_flat,
             row_count,
@@ -434,6 +447,12 @@ class MultiLabelGBMRanker:
             int(kw.get("min_data_in_leaf", 1)),
             float(kw.get("lambda_l2", 0.0)),
             int(kw.get("max_bin", 256)),
+            # v0.10.2 Phase 1 kwargs (keyword args so the order in the PyO3
+            # signature can keep evolving across point releases).
+            min_split_gain=float(kw.get("min_split_gain", 0.0)),
+            row_subsample=float(kw.get("row_subsample", 1.0)),
+            col_subsample=float(kw.get("col_subsample", 1.0)),
+            interaction_constraints=ic_list,
         )
 
         self._joint_artifact_bytes = bytes(artifact)
