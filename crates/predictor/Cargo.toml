@@ -12,7 +12,7 @@ publish = false
 
 [dependencies]
 alloygbm-core = { path = "../core" }
-rayon = "1.11"
+rayon = "1.12"
 
 [dev-dependencies]
 alloygbm-backend-cpu = { path = "../backend_cpu" }

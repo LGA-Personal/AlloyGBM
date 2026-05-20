@@ -20,7 +20,7 @@ extension-module = ["pyo3/extension-module"]
 [dependencies]
 pyo3 = { version = "0.24", features = ["abi3-py311"] }
 numpy = "0.24"
-rayon = "1.11"
+rayon = "1.12"
 alloygbm-backend-cpu = { path = "../../crates/backend_cpu" }
 alloygbm-categorical = { path = "../../crates/categorical" }
 alloygbm-core = { path = "../../crates/core" }
