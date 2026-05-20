@@ -484,9 +484,51 @@ pub fn fit_joint_multi_output(
             grads_per_output.push(g);
         }
 
+        // row_subsample (v0.10.2): seeded Bernoulli row mask. When
+        // row_subsample < 1.0, the build_joint_round call sees a
+        // row-restricted view of the gradient buffers (other rows get
+        // zeroed gradients so they contribute nothing to histogram /
+        // split gain). We don't subset the BinnedMatrix (it's shared);
+        // zeroing gradients is equivalent for histogram math. The
+        // post-build per-row prediction walk still uses the un-masked
+        // `grads_per_output` indirectly via `predictions` — sampled rows
+        // still receive the leaf delta they traverse to, matching
+        // LightGBM's `bagging_fraction` semantics.
+        let active_grads: Vec<Vec<GradientPair>> = if params.row_subsample < 1.0 {
+            let mut rng_state: u64 = params
+                .seed
+                .wrapping_mul(0x9E3779B97F4A7C15)
+                ^ ((round as u64).wrapping_mul(0xBF58476D1CE4E5B9));
+            // Ensure the state is non-zero (xorshift requires non-zero seed).
+            if rng_state == 0 {
+                rng_state = 0xDEADBEEFCAFEBABE;
+            }
+            let rate = params.row_subsample;
+            let mut masked: Vec<Vec<GradientPair>> = grads_per_output.clone();
+            for row in 0..n_rows {
+                // xorshift64* for cheap deterministic Bernoulli.
+                rng_state ^= rng_state << 13;
+                rng_state ^= rng_state >> 7;
+                rng_state ^= rng_state << 17;
+                let u01 = ((rng_state >> 11) & ((1u64 << 24) - 1)) as f32
+                    / ((1u64 << 24) as f32);
+                if u01 >= rate {
+                    for k in 0..n_outputs {
+                        masked[k][row] = GradientPair {
+                            grad: 0.0,
+                            hess: 0.0,
+                        };
+                    }
+                }
+            }
+            masked
+        } else {
+            grads_per_output.clone()
+        };
+
         // Build one shared tree.
         let mut round_result =
-            build_joint_round(params, binned_matrix, &grads_per_output, n_outputs)?;
+            build_joint_round(params, binned_matrix, &active_grads, n_outputs)?;
         if round_result.stumps.is_empty() {
             break;
         }
@@ -1156,6 +1198,100 @@ mod tests {
             0,
             "min_split_gain=1e6 must suppress all splits; got {} stumps",
             summary_strict.model.stumps.len()
+        );
+    }
+
+    #[test]
+    fn joint_row_subsample_changes_trees_deterministically_per_seed() {
+        // 64 rows, 1 feature, 2 outputs. row_subsample=0.5 should produce a
+        // different model than row_subsample=1.0, but identical across two
+        // calls with the same seed.
+        //
+        // CRITICAL: within-side target variance is required to make the test
+        // sensitive to which rows are sampled. With uniform per-side targets
+        // (e.g. all left=-1, all right=+1), Newton-Raphson leaves collapse
+        // to constants independent of the sampled subset.
+        let mut bins: Vec<u8> = Vec::with_capacity(64);
+        for i in 0..64 {
+            bins.push(if i < 32 { 0 } else { 4 });
+        }
+        let binned = BinnedMatrix::new(64, 1, 4, bins).expect("binned");
+        // Deterministic noisy targets keyed on row index so different sampled
+        // subsets produce different per-leaf gradient/hessian sums.
+        let targets_per_output: Vec<Vec<f32>> = vec![
+            (0..64)
+                .map(|i| {
+                    let base = if i < 32 { -1.0 } else { 1.0 };
+                    let noise = ((i as f32) * 0.137).sin() * 0.4;
+                    base + noise
+                })
+                .collect(),
+            (0..64)
+                .map(|i| {
+                    let base = if i < 32 { 0.5 } else { -0.5 };
+                    let noise = ((i as f32) * 0.241).cos() * 0.3;
+                    base + noise
+                })
+                .collect(),
+        ];
+
+        let mk = |row_subsample: f32, seed: u64| {
+            let params = TrainParams {
+                max_depth: 2,
+                min_data_in_leaf: 1,
+                lambda_l2: 0.0,
+                learning_rate: 1.0,
+                row_subsample,
+                seed,
+                ..TrainParams::default()
+            };
+            fit_joint_multi_output(
+                &params,
+                1,
+                &binned,
+                &targets_per_output,
+                None,
+                &[JointObjective::SquaredError, JointObjective::SquaredError],
+                5,
+            )
+            .expect("fit")
+        };
+
+        let s_full = mk(1.0, 42);
+        let s_half_a = mk(0.5, 42);
+        let s_half_b = mk(0.5, 42);
+        let s_half_c = mk(0.5, 99);
+
+        // Determinism: same seed + same row_subsample → identical stump count.
+        assert_eq!(
+            s_half_a.model.stumps.len(),
+            s_half_b.model.stumps.len(),
+            "same (seed, row_subsample) must produce identical stump counts"
+        );
+
+        // Different seed should differ in at least one leaf value.
+        let leaf_a = s_half_a.model.stumps[0]
+            .multi_output_leaf_values
+            .as_ref()
+            .unwrap();
+        let leaf_c = s_half_c.model.stumps[0]
+            .multi_output_leaf_values
+            .as_ref()
+            .unwrap();
+        assert!(
+            (leaf_a.0[0] - leaf_c.0[0]).abs() > 1e-6
+                || (leaf_a.1[0] - leaf_c.1[0]).abs() > 1e-6,
+            "different seeds should produce different leaves under row_subsample=0.5"
+        );
+        // row_subsample=0.5 should differ from row_subsample=1.0 in at least one leaf.
+        let leaf_full = s_full.model.stumps[0]
+            .multi_output_leaf_values
+            .as_ref()
+            .unwrap();
+        assert!(
+            (leaf_a.0[0] - leaf_full.0[0]).abs() > 1e-6
+                || (leaf_a.1[0] - leaf_full.1[0]).abs() > 1e-6,
+            "row_subsample=0.5 should produce different leaves from row_subsample=1.0"
         );
     }
 }
