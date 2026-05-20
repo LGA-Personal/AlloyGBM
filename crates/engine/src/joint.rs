@@ -301,6 +301,13 @@ pub fn build_joint_round(
                 continue; // No positive-gain split — leave node as terminal leaf
             };
 
+            // min_split_gain (v0.10.2): reject splits whose K-output sum-of-gains
+            // falls below the user-specified threshold. Mirrors the single-output
+            // trainer.
+            if gain < params.min_split_gain {
+                continue;
+            }
+
             // Partition rows by the chosen split. NaN rows (bin == MISSING_BIN_U8)
             // route per default_left below; we pick the direction yielding more
             // rows on either side (simple v0.10.0 default).
@@ -1090,5 +1097,65 @@ mod tests {
         assert!((left_k[1] - 0.5).abs() < 0.01, "left[1]={}", left_k[1]);
         // Output 1: right grad sum = 2, hess sum = 4 → leaf = -0.5
         assert!((right_k[1] + 0.5).abs() < 0.01, "right[1]={}", right_k[1]);
+    }
+
+    #[test]
+    fn joint_min_split_gain_rejects_low_gain_splits() {
+        // 8 rows, 1 feature, 2 outputs. With a real (left ≠ right) signal,
+        // min_split_gain=0 yields a split; setting min_split_gain to a huge
+        // value (1e6) must suppress it.
+        let bins: Vec<u8> = vec![0, 0, 0, 0, 4, 4, 4, 4];
+        let binned = BinnedMatrix::new(8, 1, 4, bins).expect("binned");
+        let targets_per_output: Vec<Vec<f32>> = vec![
+            vec![-1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0],
+            vec![0.5, 0.5, 0.5, 0.5, -0.5, -0.5, -0.5, -0.5],
+        ];
+
+        // Baseline: min_split_gain=0 → trains 1 stump.
+        let params_baseline = TrainParams {
+            max_depth: 1,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            learning_rate: 1.0,
+            min_split_gain: 0.0,
+            ..TrainParams::default()
+        };
+        let summary_baseline = fit_joint_multi_output(
+            &params_baseline,
+            1,
+            &binned,
+            &targets_per_output,
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            1,
+        )
+        .expect("fit baseline");
+        assert!(
+            summary_baseline.model.stumps.len() >= 1,
+            "baseline fixture must produce >=1 stump; got {}",
+            summary_baseline.model.stumps.len()
+        );
+
+        // With min_split_gain=1e6, no split should survive.
+        let params_strict = TrainParams {
+            min_split_gain: 1e6,
+            ..params_baseline
+        };
+        let summary_strict = fit_joint_multi_output(
+            &params_strict,
+            1,
+            &binned,
+            &targets_per_output,
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            1,
+        )
+        .expect("fit strict");
+        assert_eq!(
+            summary_strict.model.stumps.len(),
+            0,
+            "min_split_gain=1e6 must suppress all splits; got {} stumps",
+            summary_strict.model.stumps.len()
+        );
     }
 }
