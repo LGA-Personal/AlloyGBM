@@ -395,12 +395,56 @@ class MultiLabelGBMRanker:
                 f"__init__ instead, or use multi_label_mode='independent'."
             )
 
+        # v0.10.3: joint warm-start. `init_model` is a previously fit
+        # MultiLabelGBMRanker (joint mode); we crack open its artifact
+        # + baselines + rounds_completed and feed them to the engine
+        # entry point. These are "managed" kwargs — not part of
+        # `_JOINT_SUPPORTED_KWARGS` because they map to a separate
+        # warm-start argument on the bridge.
+        init_model = self._per_label_kwargs.get("init_model")
+        warm_start_flag = bool(self._per_label_kwargs.get("warm_start", False))
+        if init_model is not None and not warm_start_flag:
+            raise ValueError("init_model requires warm_start=True")
+        if warm_start_flag and init_model is None:
+            raise ValueError(
+                "warm_start=True requires init_model=<fitted MultiLabelGBMRanker>"
+            )
+        init_artifact: bytes | None = None
+        init_baselines: list[float] | None = None
+        init_rounds: int | None = None
+        if init_model is not None:
+            if not isinstance(init_model, MultiLabelGBMRanker):
+                raise TypeError(
+                    "joint warm-start expects init_model to be a "
+                    f"MultiLabelGBMRanker (got {type(init_model).__name__})"
+                )
+            if init_model.multi_label_mode != "joint":
+                raise ValueError(
+                    "joint warm-start requires init_model.multi_label_mode == 'joint'"
+                )
+            if not init_model._is_fitted:
+                raise ValueError("init_model must be fitted")
+            if init_model._joint_artifact_bytes is None:
+                raise ValueError("init_model is missing joint artifact bytes")
+            init_artifact = init_model._joint_artifact_bytes
+            init_baselines = list(init_model._joint_baselines or [])
+            init_rounds = int(init_model.rounds_completed_ or 0)
+
         # Strict allow-list: every per-label kwarg must be in the set
         # that `train_joint_multi_label_ranker` actually forwards into
         # `TrainParams`.  Silently dropping a knob is a reproducibility
         # bug (e.g. setting `row_subsample=0.5` and then training on
         # the full dataset would be a debugging nightmare).
-        unsupported = set(self._per_label_kwargs.keys()) - self._JOINT_SUPPORTED_KWARGS
+        #
+        # `init_model` and `warm_start` are managed separately above
+        # so they're allowed in `_per_label_kwargs` without appearing
+        # in the bridge-forwarded set.
+        _MANAGED_KWARGS = {"init_model", "warm_start"}
+        unsupported = (
+            set(self._per_label_kwargs.keys())
+            - self._JOINT_SUPPORTED_KWARGS
+            - _MANAGED_KWARGS
+        )
         if unsupported:
             raise NotImplementedError(
                 f"multi_label_mode='joint' rejects per-label kwargs "
@@ -506,6 +550,10 @@ class MultiLabelGBMRanker:
             dart_sample_type=(
                 str(kw["dart_sample_type"]) if "dart_sample_type" in kw else None
             ),
+            # v0.10.3: joint warm-start.
+            init_artifact_bytes=init_artifact,
+            init_baselines=init_baselines,
+            init_rounds_completed=init_rounds,
         )
 
         self._joint_artifact_bytes = bytes(artifact)

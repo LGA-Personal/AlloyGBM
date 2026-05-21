@@ -107,15 +107,6 @@ def test_joint_mode_rejects_factor_exposures():
         m.fit(X, y, group=group, factor_exposures=exposures)
 
 
-def test_joint_mode_rejects_warm_start_kwarg():
-    X, y, group = _toy_ranking()
-    m = MultiLabelGBMRanker(
-        n_estimators=2, multi_label_mode="joint", warm_start=True
-    )
-    with pytest.raises(NotImplementedError, match="warm_start"):
-        m.fit(X, y, group=group)
-
-
 def test_joint_mode_accepts_group_sizes_and_per_row_ids():
     """PR review (C2): the joint path normalizes group input to per-row
     IDs (length n_rows) and stable-sorts rows by group ID before
@@ -387,6 +378,114 @@ def test_joint_dart_save_load_round_trip(tmp_path):
     pred_after = m2.predict(X)
 
     np.testing.assert_allclose(pred_after, pred_before, rtol=1e-5, atol=1e-5)
+
+
+def test_joint_warm_start_matches_fresh_fit():
+    """v0.10.3: a 6+4 warm-resumed joint fit must produce the same
+    predictions as a fresh 10-round fit with the same seed and
+    hyperparameters."""
+    rng = np.random.default_rng(2)
+    n = 240
+    groups = np.repeat(np.arange(n // 24), 24).astype(np.int64)
+    X = rng.normal(size=(n, 3)).astype(np.float32)
+    y = np.column_stack([
+        (X[:, 0] + rng.normal(0, 0.1, size=n)).astype(np.float32),
+        (X[:, 1] + rng.normal(0, 0.1, size=n)).astype(np.float32),
+    ])
+
+    fresh = MultiLabelGBMRanker(
+        n_estimators=10,
+        learning_rate=0.1,
+        multi_label_mode="joint",
+        ranking_objective="squared_error",
+        seed=7,
+    )
+    fresh.fit(X, y, group=groups)
+    pred_fresh = fresh.predict(X)
+
+    first = MultiLabelGBMRanker(
+        n_estimators=6,
+        learning_rate=0.1,
+        multi_label_mode="joint",
+        ranking_objective="squared_error",
+        seed=7,
+    )
+    first.fit(X, y, group=groups)
+    resumed = MultiLabelGBMRanker(
+        n_estimators=4,
+        learning_rate=0.1,
+        multi_label_mode="joint",
+        ranking_objective="squared_error",
+        seed=7,
+        warm_start=True,
+        init_model=first,
+    )
+    resumed.fit(X, y, group=groups)
+    pred_resumed = resumed.predict(X)
+    np.testing.assert_allclose(pred_resumed, pred_fresh, rtol=1e-4, atol=1e-4)
+
+
+def test_joint_warm_start_dart_matches_fresh_fit():
+    """v0.10.3: DART warm-start parity. Same logic as the standard
+    warm-start but verifies the `DartTreeWeights` round-trip too."""
+    rng = np.random.default_rng(3)
+    n = 240
+    groups = np.repeat(np.arange(n // 24), 24).astype(np.int64)
+    X = rng.normal(size=(n, 3)).astype(np.float32)
+    y = np.column_stack([
+        (X[:, 0] + rng.normal(0, 0.1, size=n)).astype(np.float32),
+        (X[:, 1] + rng.normal(0, 0.1, size=n)).astype(np.float32),
+    ])
+
+    common = dict(
+        learning_rate=0.1,
+        multi_label_mode="joint",
+        ranking_objective="squared_error",
+        boosting_mode="dart",
+        dart_drop_rate=0.3,
+        dart_max_drop=2,
+        dart_normalize_type="tree",
+        dart_sample_type="uniform",
+        seed=11,
+    )
+    fresh = MultiLabelGBMRanker(n_estimators=10, **common)
+    fresh.fit(X, y, group=groups)
+    pred_fresh = fresh.predict(X)
+
+    first = MultiLabelGBMRanker(n_estimators=6, **common)
+    first.fit(X, y, group=groups)
+    resumed = MultiLabelGBMRanker(
+        n_estimators=4, warm_start=True, init_model=first, **common,
+    )
+    resumed.fit(X, y, group=groups)
+    pred_resumed = resumed.predict(X)
+    np.testing.assert_allclose(pred_resumed, pred_fresh, rtol=1e-4, atol=1e-4)
+
+
+def test_joint_warm_start_validates_init_model():
+    """v0.10.3: surface-level validation — `init_model` must be a
+    fitted joint MultiLabelGBMRanker. We don't try to enumerate every
+    error path; just the most likely user mistakes."""
+    X, y, group = _toy_ranking()
+    # warm_start=True without init_model
+    m = MultiLabelGBMRanker(n_estimators=2, multi_label_mode="joint", warm_start=True)
+    with pytest.raises(ValueError, match="init_model"):
+        m.fit(X, y, group=group)
+    # init_model without warm_start=True
+    other = MultiLabelGBMRanker(n_estimators=2, multi_label_mode="joint")
+    other.fit(X, y, group=group)
+    m = MultiLabelGBMRanker(n_estimators=2, multi_label_mode="joint", init_model=other)
+    with pytest.raises(ValueError, match="warm_start"):
+        m.fit(X, y, group=group)
+    # init_model from independent mode rejected.
+    indep = MultiLabelGBMRanker(n_estimators=2, multi_label_mode="independent")
+    indep.fit(X, y, group=group)
+    m = MultiLabelGBMRanker(
+        n_estimators=2, multi_label_mode="joint",
+        warm_start=True, init_model=indep,
+    )
+    with pytest.raises(ValueError, match="multi_label_mode"):
+        m.fit(X, y, group=group)
 
 
 def test_joint_mode_still_rejects_truly_unsupported_kwargs():

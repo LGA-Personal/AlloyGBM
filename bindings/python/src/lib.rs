@@ -5338,6 +5338,9 @@ impl JointPredictorHandle {
     dart_max_drop=None::<usize>,
     dart_normalize_type=None::<String>,
     dart_sample_type=None::<String>,
+    init_artifact_bytes=None::<Vec<u8>>,
+    init_baselines=None::<Vec<f32>>,
+    init_rounds_completed=None::<usize>,
 ))]
 fn train_joint_multi_label_ranker(
     x_values: Vec<f32>,
@@ -5369,6 +5372,9 @@ fn train_joint_multi_label_ranker(
     dart_max_drop: Option<usize>,
     dart_normalize_type: Option<String>,
     dart_sample_type: Option<String>,
+    init_artifact_bytes: Option<Vec<u8>>,
+    init_baselines: Option<Vec<f32>>,
+    init_rounds_completed: Option<usize>,
 ) -> PyResult<(Vec<u8>, Vec<f32>, usize, usize)> {
     use alloygbm_engine::joint::JointObjective;
 
@@ -5496,10 +5502,7 @@ fn train_joint_multi_label_ranker(
             // Bail out (silently fall back to numeric) if cardinality
             // exceeds `max_cat_threshold` or the 64-category Fisher-sort
             // cap. This mirrors single-output LightGBM semantics.
-            if num_categories < 2
-                || num_categories > max_cat_threshold
-                || num_categories > 64
-            {
+            if num_categories < 2 || num_categories > max_cat_threshold || num_categories > 64 {
                 continue;
             }
             // Guard: category IDs must not collide with the missing-value
@@ -5519,9 +5522,7 @@ fn train_joint_multi_label_ranker(
             for row in 0..row_count {
                 let v = x_values[row * feature_count + fi];
                 let bin_val = if v.is_finite() {
-                    *cat_to_id
-                        .get(&(v.round() as i64))
-                        .unwrap_or(&missing_bin)
+                    *cat_to_id.get(&(v.round() as i64)).unwrap_or(&missing_bin)
                 } else {
                     missing_bin
                 };
@@ -5538,7 +5539,33 @@ fn train_joint_multi_label_ranker(
         }
     }
 
-    let summary = alloygbm_engine::joint::fit_joint_multi_output_with_categorical(
+    // v0.10.3: joint warm-start. When `init_artifact_bytes` is
+    // provided, rebuild the prior `TrainedModel` from artifact bytes
+    // and construct a `JointWarmStartState`. The trainer prepends
+    // prior stumps to `all_stumps`, replays their contributions onto
+    // `predictions`, and re-encodes new-round `node_id` starting at
+    // `initial_rounds_completed` so global tree IDs don't collide.
+    let warm_start = if let Some(bytes) = init_artifact_bytes {
+        let baselines = init_baselines.ok_or_else(|| {
+            PyValueError::new_err("init_baselines is required when init_artifact_bytes is provided")
+        })?;
+        let rounds = init_rounds_completed.unwrap_or(0);
+        let prior_model = alloygbm_engine::TrainedModel::from_artifact_bytes(&bytes)
+            .map_err(|e| PyValueError::new_err(format!("init_artifact_bytes decode: {e:?}")))?;
+        Some(alloygbm_engine::joint::JointWarmStartState {
+            baselines,
+            stumps: prior_model.stumps,
+            initial_rounds_completed: rounds,
+            // Pass None — when DART is active, the engine reconstructs
+            // per-tree weights from per-stump `tree_weight` (mirrors
+            // the multiclass warm-start path).
+            initial_dart_tree_weights: None,
+        })
+    } else {
+        None
+    };
+
+    let summary = alloygbm_engine::joint::fit_joint_multi_output_with_warm_start(
         &params,
         feature_count,
         &prepared.binned_matrix,
@@ -5547,6 +5574,7 @@ fn train_joint_multi_label_ranker(
         &per_output_objective,
         n_estimators,
         &cat_features,
+        warm_start,
     )
     .map_err(PyValueError::new_err)?;
 
