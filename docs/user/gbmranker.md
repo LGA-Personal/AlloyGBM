@@ -209,13 +209,13 @@ strategy:
   `Σₖ (G_L_k²/(H_L_k+λ) + G_R_k²/(H_R_k+λ) − G_k²/(H_k+λ))`. Joint
   mode is more efficient when labels share signal. As of v0.10.2,
   joint mode supports `tree_growth="leaf"` + `max_leaves`,
-  native-categorical splits (`categorical_feature_indices` +
-  `max_cat_threshold`), `interaction_constraints`, `min_split_gain`,
-  `row_subsample`, `col_subsample`, and the built-in `squared_error` /
+  `interaction_constraints`, `min_split_gain`, `row_subsample`,
+  `col_subsample`, and the built-in `squared_error` /
   `queryrmse` / `rank:pairwise` / `rank:ndcg` / `rank:xendcg`
-  objectives. **Still deferred to v0.10.3** (joint GOSS, DART,
-  warm-start) and **v0.10.4** (joint MorphBoost, neutralization, DRO)
-  — see [../limitations.md](../limitations.md).
+  objectives. **Still deferred to v0.10.3** (native-categorical
+  Python wiring, joint GOSS, DART, warm-start) and **v0.10.4**
+  (joint MorphBoost, neutralization, DRO) — see
+  [../limitations.md](../limitations.md).
 
 ```python
 model = MultiLabelGBMRanker(

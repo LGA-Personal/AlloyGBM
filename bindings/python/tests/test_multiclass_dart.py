@@ -275,7 +275,7 @@ def test_multiclass_dart_leaf_wise_warm_start_round_trip():
     assert np.all(np.isfinite(p_cont))
 
 
-def test_multiclass_dart_with_validation_early_stopping():
+def test_multiclass_dart_leaf_wise_validation_early_stopping_works():
     """v0.10.2 Phase 4: validation DART transition (subtract dropped →
     scale new at new_w → re-add dropped) applies under leaf-wise growth
     too. A broken transition typically manifests as NaN/inf validation

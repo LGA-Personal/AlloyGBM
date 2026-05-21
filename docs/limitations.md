@@ -13,11 +13,17 @@ not implemented.
 ### 2. Joint-path advanced feature parity (Rust-level) — v0.10.3 / v0.10.4
 
 The joint trainer covers leaf-wise growth + `max_leaves`,
-native-categorical splits via multi-output Fisher-sort,
 `interaction_constraints`, `min_split_gain`, `row_subsample`, and
-`col_subsample` as of v0.10.2. Still pending:
+`col_subsample` as of v0.10.2. The Rust-level native-categorical
+support (`find_best_multi_output_categorical_split` +
+`fit_joint_multi_output_with_categorical`) is in place but **not yet
+reachable from Python** — the wrapper rejects
+`categorical_feature_indices` and `max_cat_threshold` in joint mode
+because the current Python binning bridge doesn't preserve
+`bin_index == category_id` for joint-mode fits. Still pending:
 
-- **v0.10.3:** GOSS, DART, and warm-start on the joint path.
+- **v0.10.3:** wire the proper categorical preparation through the
+  joint Python bridge; GOSS, DART, and warm-start on the joint path.
 - **v0.10.4:** MorphBoost, DRO, and neutralization on the joint path.
 
 ## Resolved (Previously Limitations)
@@ -28,16 +34,17 @@ native-categorical splits via multi-output Fisher-sort,
   joint multi-output trainer (`engine::joint::fit_joint_multi_output`) now
   supports `tree_growth="leaf"` + `max_leaves` (via the new
   `build_joint_round_leafwise` priority-queue best-first growth),
-  native-categorical splits via the new
-  `find_best_multi_output_categorical_split` Fisher-sort helper,
   `interaction_constraints` (reusing the single-output
   `InteractionConstraintIndex`), `min_split_gain`, `row_subsample`,
-  and `col_subsample`. All six features are exposed through the
+  and `col_subsample`. All five features are exposed through the
   `MultiLabelGBMRanker(multi_label_mode="joint")` Python surface; the
-  `_JOINT_SUPPORTED_KWARGS` allow-list grew accordingly. Still
-  deferred to **v0.10.3**: GOSS, DART, warm-start on the joint
-  path. Still deferred to **v0.10.4**: MorphBoost, DRO,
-  neutralization on the joint path.
+  `_JOINT_SUPPORTED_KWARGS` allow-list grew accordingly. Native-categorical
+  is partially shipped (Rust-level `find_best_multi_output_categorical_split`
+  + `fit_joint_multi_output_with_categorical` are in place; Python
+  surface deferred to v0.10.3 — see Limitation 2 above). Still
+  deferred to **v0.10.3**: native-cat Python wiring, GOSS, DART,
+  warm-start on the joint path. Still deferred to **v0.10.4**:
+  MorphBoost, DRO, neutralization on the joint path.
 - **Leaf-wise multiclass DART (was a v0.10.x follow-up):**
   `GBMClassifier(boosting_mode="dart")` with K ≥ 3 classes now works
   under `tree_growth="leaf"` + `max_leaves`. The v0.10.1 level-wise

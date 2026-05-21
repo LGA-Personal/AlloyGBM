@@ -18,16 +18,25 @@ byte-identical to v0.10.1 when the new features are not opted into.
 ``engine::joint::fit_joint_multi_output`` now supports
 ``tree_growth="leaf"`` + ``max_leaves`` (via the new
 ``build_joint_round_leafwise`` priority-queue best-first growth),
-native-categorical splits via the new
-``find_best_multi_output_categorical_split`` Fisher-sort helper,
 ``interaction_constraints`` (reusing the single-output
 ``InteractionConstraintIndex``), ``min_split_gain``, ``row_subsample``,
-and ``col_subsample``. All six are exposed through
+and ``col_subsample``. All five are exposed through
 ``MultiLabelGBMRanker(multi_label_mode="joint")`` Python surface;
 ``_JOINT_SUPPORTED_KWARGS`` grew to permit
 ``min_split_gain``, ``row_subsample``, ``col_subsample``,
-``interaction_constraints``, ``tree_growth``, ``max_leaves``,
-``categorical_feature_indices``, and ``max_cat_threshold``.
+``interaction_constraints``, ``tree_growth``, ``max_leaves``.
+
+Native-categorical splits on the joint path are partially shipped:
+the Rust-level
+``find_best_multi_output_categorical_split`` Fisher-sort helper +
+``fit_joint_multi_output_with_categorical`` entry point are in place
+and sound when given bins where ``bin_index == category_id``. The
+Python surface is intentionally *not* wired in v0.10.2 because the
+current bridge bins all features with
+``ContinuousBinningStrategy::Linear`` which doesn't preserve that
+invariant for joint mode — ``categorical_feature_indices`` and
+``max_cat_threshold`` are rejected in joint mode and tracked for
+v0.10.3.
 
 **Leaf-wise multiclass DART:**
 ``GBMClassifier(boosting_mode="dart")`` with K ≥ 3 classes now works

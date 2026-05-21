@@ -254,13 +254,25 @@ pub struct JointRoundResult {
 /// stumps (already updated to carry K-output leaf values). The caller is
 /// responsible for accumulating leaf contributions into per-output prediction
 /// vectors using `predictions[k][row] += learning_rate * leaf_value_k`.
+///
+/// `round_index` is mixed into the `col_subsample` RNG seed so each tree
+/// samples a different feature subset (matches LightGBM `feature_fraction`
+/// semantics and the single-output trainer's per-round behavior).
+///
+/// `sampled_root_rows` is the optional row subset to use as the tree's root
+/// (used by row_subsample / bagging_fraction). When `None`, the root contains
+/// all `n_rows`. Filtering rows at the root means `min_data_in_leaf` operates
+/// on the sampled set, matching the single-output trainer (v0.10.2.1 fix).
 #[allow(clippy::needless_range_loop)]
+#[allow(clippy::too_many_arguments)]
 pub fn build_joint_round(
     params: &TrainParams,
     binned_matrix: &BinnedMatrix,
     grads_per_output: &[Vec<GradientPair>],
     n_outputs: usize,
     categorical_features: &[crate::CategoricalFeatureInfo],
+    round_index: usize,
+    sampled_root_rows: Option<&[u32]>,
 ) -> Result<JointRoundResult, String> {
     if grads_per_output.len() != n_outputs {
         return Err(format!(
@@ -299,14 +311,15 @@ pub fn build_joint_round(
     let min_rows_per_leaf = params.min_data_in_leaf.max(1) as usize;
     let lambda_l2 = params.lambda_l2;
 
-    // col_subsample (v0.10.2): per-tree feature mask, seeded by params.seed.
-    // One mask per call to build_joint_round (the joint trainer emits one
-    // tree per round, so per-tree == per-round). Deterministically derived
-    // via xorshift64*. If RNG masks every feature, fall back to all-allowed
-    // for this round so the tree doesn't become empty for purely RNG reasons
-    // (matches LightGBM's `feature_fraction` behavior).
+    // col_subsample (v0.10.2): per-tree feature mask, seeded by
+    // `(params.seed, round_index)`. v0.10.2.1 fix: mixing the round index
+    // into the seed makes each tree sample a different feature subset, matching
+    // LightGBM `feature_fraction` and the single-output trainer's per-round
+    // behavior. Without this, every tree saw the same feature subset which
+    // defeats the point of column sampling.
     let feature_allowed: Vec<bool> = if params.col_subsample < 1.0 {
-        let mut s: u64 = params.seed.wrapping_mul(0xBF58476D1CE4E5B9);
+        let mut s: u64 = params.seed.wrapping_mul(0xBF58476D1CE4E5B9)
+            ^ ((round_index as u64).wrapping_mul(0x94D049BB133111EB));
         s ^= s >> 30;
         s = s.wrapping_mul(0x94D049BB133111EB);
         if s == 0 {
@@ -361,9 +374,13 @@ pub fn build_joint_round(
     };
 
     let mut stumps: Vec<TrainedStump> = Vec::new();
+    let root_rows: Vec<u32> = match sampled_root_rows {
+        Some(rows) => rows.to_vec(),
+        None => (0..n_rows as u32).collect(),
+    };
     let mut active: Vec<JointLeafNode> = vec![JointLeafNode {
         local_node_id: 0,
-        row_indices: (0..n_rows as u32).collect(),
+        row_indices: root_rows,
     }];
 
     for _depth in 0..max_depth {
@@ -634,6 +651,7 @@ pub fn build_joint_round(
 /// applied at the outer round level via `fit_joint_multi_output` (the
 /// gradients passed in are already row-masked when sampling is enabled).
 #[allow(clippy::needless_range_loop)]
+#[allow(clippy::too_many_arguments)]
 fn build_joint_round_leafwise(
     params: &TrainParams,
     binned_matrix: &BinnedMatrix,
@@ -641,6 +659,8 @@ fn build_joint_round_leafwise(
     n_outputs: usize,
     max_leaves: usize,
     categorical_features: &[crate::CategoricalFeatureInfo],
+    round_index: usize,
+    sampled_root_rows: Option<&[u32]>,
 ) -> Result<JointRoundResult, String> {
     use std::collections::BinaryHeap;
 
@@ -673,9 +693,12 @@ fn build_joint_round_leafwise(
     let min_rows_per_leaf = params.min_data_in_leaf.max(1) as usize;
     let lambda_l2 = params.lambda_l2;
 
-    // col_subsample (same logic as build_joint_round).
+    // col_subsample (same logic as build_joint_round; v0.10.2.1 fix
+    // mixes round_index into the seed so each tree samples a different
+    // feature subset).
     let feature_allowed: Vec<bool> = if params.col_subsample < 1.0 {
-        let mut s: u64 = params.seed.wrapping_mul(0xBF58476D1CE4E5B9);
+        let mut s: u64 = params.seed.wrapping_mul(0xBF58476D1CE4E5B9)
+            ^ ((round_index as u64).wrapping_mul(0x94D049BB133111EB));
         s ^= s >> 30;
         s = s.wrapping_mul(0x94D049BB133111EB);
         if s == 0 {
@@ -904,11 +927,17 @@ fn build_joint_round_leafwise(
             })
         };
 
-    // Initialize heap with the root candidate.
+    // Initialize heap with the root candidate. v0.10.2.1 fix: use the
+    // sampled row subset (when row_subsample < 1.0) so min_data_in_leaf
+    // operates on the sampled training set, matching single-output.
+    let root_rows: Vec<u32> = match sampled_root_rows {
+        Some(rows) => rows.to_vec(),
+        None => (0..n_rows as u32).collect(),
+    };
     let mut heap: BinaryHeap<JointLeafCandidate> = BinaryHeap::new();
     let root_node = JointLeafNode {
         local_node_id: 0,
-        row_indices: (0..n_rows as u32).collect(),
+        row_indices: root_rows,
     };
     if let Some(root_cand) = evaluate_node(root_node, root_active_groups) {
         heap.push(root_cand);
@@ -1074,45 +1103,51 @@ pub fn fit_joint_multi_output_with_categorical(
             grads_per_output.push(g);
         }
 
-        // row_subsample (v0.10.2): seeded Bernoulli row mask. When
-        // row_subsample < 1.0, the build_joint_round call sees a
-        // row-restricted view of the gradient buffers (other rows get
-        // zeroed gradients so they contribute nothing to histogram /
-        // split gain). We don't subset the BinnedMatrix (it's shared);
-        // zeroing gradients is equivalent for histogram math. The
-        // post-build per-row prediction walk still uses the un-masked
-        // `grads_per_output` indirectly via `predictions` — sampled rows
-        // still receive the leaf delta they traverse to, matching
-        // LightGBM's `bagging_fraction` semantics.
-        let active_grads: Vec<Vec<GradientPair>> = if params.row_subsample < 1.0 {
+        // row_subsample (v0.10.2, fixed v0.10.2.1): seeded Bernoulli row
+        // mask. When row_subsample < 1.0, the round's tree builder works
+        // on the SAMPLED rows only — `sampled_rows: Vec<u32>` is passed
+        // as the root's `row_indices`. This means `min_data_in_leaf`
+        // operates on the sampled set, matching single-output semantics
+        // (v0.10.2 zeroed gradients but left rows in the index, so a
+        // split could create a leaf with enough rows but too few
+        // sampled rows).
+        //
+        // The post-build prediction-update walk below operates on all
+        // `n_rows` via the BinnedMatrix tree walk (not row_indices), so
+        // un-sampled rows still receive their tree-walked leaf delta —
+        // matching LightGBM's `bagging_fraction` semantics where every
+        // row's predictions are updated each round, but the tree itself
+        // is fit on the sampled subset.
+        let sampled_rows_opt: Option<Vec<u32>> = if params.row_subsample < 1.0 {
             let mut rng_state: u64 = params.seed.wrapping_mul(0x9E3779B97F4A7C15)
                 ^ ((round as u64).wrapping_mul(0xBF58476D1CE4E5B9));
-            // Ensure the state is non-zero (xorshift requires non-zero seed).
             if rng_state == 0 {
                 rng_state = 0xDEADBEEFCAFEBABE;
             }
             let rate = params.row_subsample;
-            let mut masked: Vec<Vec<GradientPair>> = grads_per_output.clone();
-            let zero_gp = GradientPair {
-                grad: 0.0,
-                hess: 0.0,
-            };
+            let mut sampled: Vec<u32> = Vec::with_capacity(n_rows / 2 + 1);
             for row in 0..n_rows {
-                // xorshift64* for cheap deterministic Bernoulli.
                 rng_state ^= rng_state << 13;
                 rng_state ^= rng_state >> 7;
                 rng_state ^= rng_state << 17;
                 let u01 = ((rng_state >> 11) & ((1u64 << 24) - 1)) as f32 / ((1u64 << 24) as f32);
-                if u01 >= rate {
-                    for vec in masked.iter_mut().take(n_outputs) {
-                        vec[row] = zero_gp;
-                    }
+                if u01 < rate {
+                    sampled.push(row as u32);
                 }
             }
-            masked
+            // Edge case: nothing sampled. Fall back to all-rows for this
+            // round so the trainer doesn't produce a degenerate empty tree.
+            if sampled.is_empty() {
+                None
+            } else {
+                Some(sampled)
+            }
         } else {
-            grads_per_output.clone()
+            None
         };
+        // Gradients pass through unchanged; the trainer indexes them by
+        // row id from the (potentially filtered) row_indices list.
+        let active_grads: &[Vec<GradientPair>] = grads_per_output.as_slice();
 
         // Build one shared tree. Dispatch on tree_growth: leaf-wise uses
         // the priority-queue best-first builder gated by `max_leaves`;
@@ -1124,18 +1159,22 @@ pub fn fit_joint_multi_output_with_categorical(
             build_joint_round_leafwise(
                 params,
                 binned_matrix,
-                &active_grads,
+                active_grads,
                 n_outputs,
                 max_leaves,
                 categorical_features,
+                round,
+                sampled_rows_opt.as_deref(),
             )?
         } else {
             build_joint_round(
                 params,
                 binned_matrix,
-                &active_grads,
+                active_grads,
                 n_outputs,
                 categorical_features,
+                round,
+                sampled_rows_opt.as_deref(),
             )?
         };
         if round_result.stumps.is_empty() {
@@ -1766,7 +1805,8 @@ mod tests {
             ..TrainParams::default()
         };
 
-        let result = build_joint_round(&params, &binned, &grads_per_output, 2, &[]).expect("build");
+        let result =
+            build_joint_round(&params, &binned, &grads_per_output, 2, &[], 0, None).expect("build");
         assert_eq!(result.stumps.len(), 1, "should emit one root split");
         let stump = &result.stumps[0];
         let (left_k, right_k) = stump
@@ -2008,6 +2048,72 @@ mod tests {
         assert!(
             saw_non_zero,
             "col_subsample=0.25 should sometimes exclude feature 0 from the split-search mask"
+        );
+    }
+
+    #[test]
+    fn joint_col_subsample_samples_different_features_each_round() {
+        // v0.10.2.1 fix regression: col_subsample's RNG must mix the round
+        // index into its seed so each tree samples a different feature
+        // subset (LightGBM `feature_fraction` semantics). Without the fix,
+        // every round picked the same masked-in features and the same
+        // feature drove every split.
+        //
+        // Fixture: 8 features that are individually strong predictors,
+        // n_estimators=8 rounds with col_subsample=0.25. Across the 8
+        // rounds we should see >2 distinct split features (otherwise the
+        // RNG is producing the same mask every round).
+        let mut bins: Vec<u8> = Vec::with_capacity(40 * 8);
+        for row in 0..40 {
+            for f in 0..8 {
+                // Each feature carries its own signal but with row-level noise
+                // so any single feature alone supports a positive-gain split.
+                let bin = if (row + f) % 2 == 0 { 0 } else { 4 };
+                bins.push(bin);
+            }
+        }
+        let binned = BinnedMatrix::new(40, 8, 4, bins).expect("binned");
+        let targets_per_output: Vec<Vec<f32>> = vec![
+            (0..40)
+                .map(|i| if i % 2 == 0 { -1.0 } else { 1.0 })
+                .collect(),
+            (0..40)
+                .map(|i| if i % 2 == 0 { 0.5 } else { -0.5 })
+                .collect(),
+        ];
+        let params = TrainParams {
+            max_depth: 1,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            learning_rate: 1.0,
+            col_subsample: 0.25,
+            seed: 7,
+            ..TrainParams::default()
+        };
+        let summary = fit_joint_multi_output(
+            &params,
+            8,
+            &binned,
+            &targets_per_output,
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            8,
+        )
+        .expect("fit");
+
+        let distinct_split_features: std::collections::HashSet<u32> = summary
+            .model
+            .stumps
+            .iter()
+            .map(|s| s.split.feature_index)
+            .collect();
+        assert!(
+            distinct_split_features.len() > 1,
+            "col_subsample with multi-round training should sample different \
+             feature subsets per round; got only {} distinct split feature(s) \
+             across {} stumps",
+            distinct_split_features.len(),
+            summary.model.stumps.len()
         );
     }
 
