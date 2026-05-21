@@ -21,17 +21,20 @@ into.
   `engine::joint::fit_joint_multi_output` now supports
   `tree_growth="leaf"` + `max_leaves` via the new
   `build_joint_round_leafwise` (priority-queue best-first growth
-  keyed by K-output split gain), native-categorical splits via the
-  new `find_best_multi_output_categorical_split` (Fisher-sort over
-  K outputs, ordering by output-0 Newton score),
-  `interaction_constraints` (reusing the single-output
-  `InteractionConstraintIndex`), `min_split_gain`, `row_subsample`,
-  and `col_subsample`. All six are exposed through
+  keyed by K-output split gain), `interaction_constraints` (reusing
+  the single-output `InteractionConstraintIndex`), `min_split_gain`,
+  `row_subsample`, and `col_subsample`. All five are exposed through
   `MultiLabelGBMRanker(multi_label_mode="joint")` Python surface;
   `_JOINT_SUPPORTED_KWARGS` grew to permit `min_split_gain`,
   `row_subsample`, `col_subsample`, `interaction_constraints`,
-  `tree_growth`, `max_leaves`, `categorical_feature_indices`, and
-  `max_cat_threshold`.
+  `tree_growth`, and `max_leaves`. Native-categorical splits land
+  at the Rust level (`find_best_multi_output_categorical_split` +
+  `fit_joint_multi_output_with_categorical`) but the Python surface
+  is intentionally not wired in v0.10.2 — the current bridge bins
+  with `ContinuousBinningStrategy::Linear` which doesn't preserve
+  `bin_index == category_id` for joint mode, so
+  `categorical_feature_indices` / `max_cat_threshold` are rejected
+  in joint mode and tracked for v0.10.3.
 - **Leaf-wise multiclass DART (closes the v0.10.x leaf-wise
   multiclass DART follow-up):** the v0.10.1 `tree_growth='level'`
   restriction in `fit_multiclass_iterations_impl` was lifted.
@@ -46,7 +49,9 @@ into.
 
 ### v0.10.x follow-ups (deferred)
 
-- **v0.10.3**: GOSS, DART, and warm-start on the joint path.
+- **v0.10.3**: wire native-categorical preparation through the joint
+  Python bridge (Rust side is already in place); GOSS, DART, and
+  warm-start on the joint path.
 - **v0.10.4**: MorphBoost, DRO, and neutralization on the joint path.
 
 ## What Shipped In v0.10.1

@@ -17,17 +17,23 @@ are not opted into.
   `max_leaves` via new `build_joint_round_leafwise` (priority-queue
   best-first growth keyed by K-output split gain). Same constraints as
   level-wise (`min_data_in_leaf`, `min_split_gain`, etc.) apply.
-- Native-categorical splits on the joint path via
-  `find_best_multi_output_categorical_split` in
+- Native-categorical splits on the joint path (Rust-level only). The
+  new `find_best_multi_output_categorical_split` in
   `crates/engine/src/shared_histogram.rs` (Fisher-sort over K outputs,
-  ordering by output-0 Newton score, ≤ 64 categories per feature).
-  Exposed through Python as `categorical_feature_indices` +
-  `max_cat_threshold` on
-  `MultiLabelGBMRanker(multi_label_mode="joint")`. New entry point
-  `fit_joint_multi_output_with_categorical` accepts a
-  `&[CategoricalFeatureInfo]` slice; the original `fit_joint_multi_output`
-  remains as a thin wrapper passing an empty slice (byte-identical to
-  v0.10.1).
+  ordering by output-0 Newton score, ≤ 64 categories per feature) is
+  sound when fed bins where `bin_index == category_id`. The new entry
+  point `fit_joint_multi_output_with_categorical` accepts a
+  `&[CategoricalFeatureInfo]` slice; the original
+  `fit_joint_multi_output` remains as a thin wrapper passing an empty
+  slice (byte-identical to v0.10.1).
+  **Python surface is NOT yet wired in v0.10.2** — the
+  `MultiLabelGBMRanker(multi_label_mode="joint")` wrapper rejects
+  `categorical_feature_indices` and `max_cat_threshold` because the
+  current Python bridge bins all features with
+  `ContinuousBinningStrategy::Linear`, which doesn't preserve the
+  `bin_index == category_id` invariant the JointPredictor relies on.
+  Wiring the proper categorical preparation path through the joint
+  bridge is tracked for v0.10.3.
 - `interaction_constraints` on the joint trainer — reuses the
   single-output `InteractionConstraintIndex` via `pub(crate)` visibility.
   `HashMap<u32, u64>` tracks per-node active group bitset; descent
@@ -42,8 +48,30 @@ are not opted into.
   `feature_fraction` behavior).
 - Python `_JOINT_SUPPORTED_KWARGS` expanded to permit
   `min_split_gain`, `row_subsample`, `col_subsample`,
-  `interaction_constraints`, `tree_growth`, `max_leaves`,
-  `categorical_feature_indices`, `max_cat_threshold`.
+  `interaction_constraints`, `tree_growth`, `max_leaves`.
+  `categorical_feature_indices` and `max_cat_threshold` are *not*
+  permitted in joint mode in v0.10.2 (see native-categorical bullet
+  above); they remain rejected with a clear `NotImplementedError`.
+
+### Fixed in v0.10.2 (post-merge review)
+
+- **Joint `col_subsample`**: the per-round feature mask was seeded by
+  `params.seed` alone, so every tree sampled the identical feature
+  subset (defeating column sampling's purpose). The seed now also
+  mixes in the round index, matching LightGBM `feature_fraction` and
+  the single-output trainer's per-round behavior.
+- **Joint `row_subsample`**: previously zeroed gradients of unsampled
+  rows but kept them in `node.row_indices`, which meant
+  `min_data_in_leaf` could be satisfied by rows that didn't actually
+  contribute to the histogram. The root node now contains only the
+  sampled row subset, so `min_data_in_leaf` operates on the sampled
+  set (matching the single-output trainer).
+- **Test rename**: `test_multiclass_dart_leaf_wise_validation_early_stopping_works`
+  was accidentally defined under the same name as the existing
+  `test_multiclass_dart_with_validation_early_stopping`, so Python
+  silently kept only the second and the v0.10.2 leaf-wise validation
+  case wasn't running. Renamed to its intended name and re-verified
+  it exercises the new code path.
 
 ### Added — leaf-wise multiclass DART
 

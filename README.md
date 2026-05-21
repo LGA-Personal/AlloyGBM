@@ -336,7 +336,7 @@ artifact_bytes = model.artifact_bytes
 - **`GBMRegressor`** -- squared-error regression with dataset-aware `training_policy`
 - **`GBMClassifier`** -- binary classification with log-loss objective, `predict_proba`, sklearn `ClassifierMixin`
 - **`GBMRanker`** -- learning-to-rank with 5 objectives: `rank:pairwise`, `rank:ndcg`, `rank:xendcg`, `queryrmse`, `yetirank`
-- **`MultiLabelGBMRanker`** -- multi-output ranking: `y` shaped `(n_rows, n_labels)`, `predict` returns the same shape, per-label `ranking_objective` lists supported. As of v0.10.1 also supports `multi_label_mode="joint"` for shared-tree training across all K labels via `engine::joint::fit_joint_multi_output` (default `"independent"` preserves the K-per-label `GBMRanker` fallback). v0.10.2 expands joint-mode kwargs to include `tree_growth="leaf"` + `max_leaves`, native-categorical splits (`categorical_feature_indices` + `max_cat_threshold`), `interaction_constraints`, `min_split_gain`, `row_subsample`, and `col_subsample`
+- **`MultiLabelGBMRanker`** -- multi-output ranking: `y` shaped `(n_rows, n_labels)`, `predict` returns the same shape, per-label `ranking_objective` lists supported. As of v0.10.1 also supports `multi_label_mode="joint"` for shared-tree training across all K labels via `engine::joint::fit_joint_multi_output` (default `"independent"` preserves the K-per-label `GBMRanker` fallback). v0.10.2 expands joint-mode kwargs to include `tree_growth="leaf"` + `max_leaves`, `interaction_constraints`, `min_split_gain`, `row_subsample`, and `col_subsample` (native-categorical Python wiring deferred to v0.10.3)
 - All estimators are sklearn-compatible (`get_params`, `set_params`, `score`, pipeline integration)
 
 ### Training Features
