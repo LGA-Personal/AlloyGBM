@@ -204,6 +204,36 @@ def test_multiclass_dart_warm_start_with_multi_stump_trees():
     )
 
 
+def test_multiclass_dart_works_with_leaf_wise_growth():
+    """v0.10.2 Phase 4: lift the level-wise restriction for multiclass DART.
+
+    Per-class `dart_round_start_offsets[k]` + `dart_round_counts[k]`
+    bookkeeping snapshots `class_stumps[k].len()` around each
+    `build_tree_*` call. The bookkeeping is growth-mode-agnostic
+    (a tree's stump count is variable under leaf-wise but the round
+    boundaries are still correctly captured).
+    """
+    rng = np.random.default_rng(0)
+    X = rng.standard_normal((250, 4)).astype(np.float32)
+    y = (X[:, 0] + X[:, 1] * 2 + X[:, 2] * 3).round().astype(int) % 3
+    m = GBMClassifier(
+        n_estimators=10,
+        boosting_mode="dart",
+        tree_growth="leaf",
+        max_leaves=8,
+        dart_drop_rate=0.2,
+        seed=42,
+    )
+    m.fit(X, y)
+    proba = m.predict_proba(X)
+    assert proba.shape == (250, 3)
+    assert np.allclose(proba.sum(axis=1), 1.0, atol=1e-5)
+    # All probabilities finite and in [0, 1].
+    assert np.all(np.isfinite(proba))
+    assert np.all(proba >= 0.0)
+    assert np.all(proba <= 1.0)
+
+
 def test_multiclass_dart_with_validation_early_stopping():
     """Regression test for the v0.10.1 PR review (C6): the DART
     transition (dropout subtract + new_w scale + dropped re-add) must
