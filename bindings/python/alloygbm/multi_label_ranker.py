@@ -460,6 +460,50 @@ class MultiLabelGBMRanker:
         row_count = int(x_arr.shape[0])
         feature_count = int(x_arr.shape[1])
 
+        # PR #36 review (C4): validate init_model schema before sending
+        # the artifact to Rust. Without these checks, a mismatched prior
+        # fit can panic the Rust side (e.g. out-of-bounds feature index
+        # in `walk_tree_into_predictions`) instead of raising a clean
+        # Python ValueError. C2 added defense-in-depth on the Rust side;
+        # this is the corresponding defense-in-depth on the Python side.
+        if init_model is not None:
+            prior_features = int(init_model._joint_feature_count or 0)
+            if prior_features != feature_count:
+                raise ValueError(
+                    f"joint warm-start: init_model was trained on "
+                    f"{prior_features} features, but X has {feature_count}. "
+                    f"Schemas must match exactly."
+                )
+            prior_n_labels = int(init_model.n_labels_ or 0)
+            if prior_n_labels != n_labels:
+                raise ValueError(
+                    f"joint warm-start: init_model has {prior_n_labels} "
+                    f"labels, but y has {n_labels}. Schemas must match."
+                )
+            # DART <-> non-DART mode mismatch: a DART prior resumed as
+            # standard is replayed at weight 1.0 (the per-tree weight
+            # is discarded for non-DART training), which silently
+            # changes the residual stream the new rounds see. A
+            # non-DART prior resumed as DART is also surprising — the
+            # new fit starts with `dart_state.tree_weights` reconstructed
+            # from `tree_weight=1.0` for every prior tree, which is
+            # numerically correct but means dropouts in early new rounds
+            # only ever drop prior trees with equal weight (no real
+            # dropout asymmetry until new DART rounds run). Both are
+            # confusing footguns; reject explicitly.
+            prior_bm = init_model._per_label_kwargs.get("boosting_mode", "standard")
+            curr_bm = self._per_label_kwargs.get("boosting_mode", "standard")
+            prior_is_dart = prior_bm == "dart"
+            curr_is_dart = curr_bm == "dart"
+            if prior_is_dart != curr_is_dart:
+                raise ValueError(
+                    f"joint warm-start: boosting_mode mismatch — init_model used "
+                    f"{prior_bm!r}, current fit uses {curr_bm!r}. DART <-> non-DART "
+                    f"transitions across warm-resume are rejected because the per-tree "
+                    f"`tree_weight` semantics differ. Use the same `boosting_mode` "
+                    f"for both fits, or fit fresh without `warm_start=True`."
+                )
+
         # PR review (C2): joint mode must reorder rows so per-query
         # group IDs are contiguous before handing the data to the
         # engine's ranking objectives.  Done here (not in the wrapper

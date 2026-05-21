@@ -5489,14 +5489,41 @@ fn train_joint_multi_label_ranker(
                     "categorical_feature_indices contains {fi} which exceeds feature_count {feature_count}"
                 )));
             }
-            // Collect unique non-NaN integer category values from the
-            // dense `x_values` column.
+            // PR #36 review (C1, C3): the JointPredictor reads the raw
+            // feature value as a category ID via `v as i64`
+            // (truncation toward zero — see `JointPredictor::predict_row`
+            // in `crates/engine/src/joint.rs`). For training and
+            // inference to agree, two invariants must hold for every
+            // requested categorical column:
+            //   (a) values must already be dense zero-based integer
+            //       IDs in `{0, 1, ..., K-1}`. A non-dense set like
+            //       {10, 20, 30} cannot be remapped to dense
+            //       {0, 1, 2} at training time without also remapping
+            //       at predict time (the trained bitset is keyed by
+            //       the dense ID but predict reads the raw 10/20/30).
+            //   (b) values must be exact integer-valued floats. A
+            //       value like 0.6 would `round()` to 1 at training
+            //       but truncate to 0 at predict.
+            // Persisting and reapplying a per-feature `cat_to_id`
+            // mapping in the joint artifact path is tracked for
+            // v0.10.4 alongside `categorical_state` plumbing on the
+            // joint predictor. For v0.10.3 we reject inputs that
+            // violate either invariant with a clear actionable error.
             let mut uniq: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
             for row in 0..row_count {
                 let v = x_values[row * feature_count + fi];
-                if v.is_finite() {
-                    uniq.insert(v.round() as i64);
+                if !v.is_finite() {
+                    continue;
                 }
+                let truncated = v as i64;
+                if (v - truncated as f32).abs() > f32::EPSILON {
+                    return Err(PyValueError::new_err(format!(
+                        "Native categorical feature {fi} contains non-integer value {v}; \
+                         joint mode requires dense integer category IDs in {{0, 1, ..., K-1}}. \
+                         Pre-encode the column (e.g. sklearn LabelEncoder) before fitting."
+                    )));
+                }
+                uniq.insert(truncated);
             }
             let num_categories = uniq.len();
             // Bail out (silently fall back to numeric) if cardinality
@@ -5505,6 +5532,21 @@ fn train_joint_multi_label_ranker(
             if num_categories < 2 || num_categories > max_cat_threshold || num_categories > 64 {
                 continue;
             }
+            // Invariant (a): values must be exactly {0, 1, ..., K-1}.
+            // BTreeSet iterates in sorted order, so the first element
+            // must be 0 and the last must be K-1 (with no gaps).
+            let min_val = *uniq.iter().next().unwrap();
+            let max_val = *uniq.iter().next_back().unwrap();
+            if min_val != 0 || max_val != (num_categories as i64) - 1 {
+                return Err(PyValueError::new_err(format!(
+                    "Native categorical feature {fi} has {num_categories} unique values \
+                     ranging from {min_val} to {max_val}; joint mode requires dense \
+                     zero-based integer IDs in {{0, 1, ..., K-1}}. Pre-encode the column \
+                     (e.g. sklearn LabelEncoder) before fitting. Non-dense category IDs \
+                     are tracked for v0.10.4 alongside `categorical_state` plumbing on \
+                     the joint predictor."
+                )));
+            }
             // Guard: category IDs must not collide with the missing-value
             // sentinel.
             if (num_categories as u16) > missing_bin {
@@ -5512,17 +5554,14 @@ fn train_joint_multi_label_ranker(
                     "Native categorical feature {fi} has {num_categories} categories which would collide with the missing-value sentinel (bin {missing_bin}). Reduce max_cat_threshold or increase max_bin."
                 )));
             }
-            // Build cat_value -> id mapping.
-            let cat_to_id: std::collections::HashMap<i64, u16> = uniq
-                .iter()
-                .enumerate()
-                .map(|(i, &v)| (v, i as u16))
-                .collect();
-            // Re-bin the column: bin_index == category_id, missing -> sentinel.
+            // Re-bin the column: `bin_index == category_id` (which
+            // equals the raw value here since we've validated dense
+            // 0..K-1). Use truncation `v as i64` to match
+            // `JointPredictor::predict_row` (PR #36 review C1).
             for row in 0..row_count {
                 let v = x_values[row * feature_count + fi];
                 let bin_val = if v.is_finite() {
-                    *cat_to_id.get(&(v.round() as i64)).unwrap_or(&missing_bin)
+                    v as i64 as u16
                 } else {
                     missing_bin
                 };

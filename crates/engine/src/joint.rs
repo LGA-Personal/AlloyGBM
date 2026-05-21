@@ -1358,6 +1358,25 @@ fn fit_joint_inner(
     // residual. Group prior stumps by `tree_id` and walk each tree at
     // its DART weight (1.0 for non-DART warm-starts).
     if !all_stumps.is_empty() {
+        // PR #36 review (C2): validate that every prior stump's
+        // `feature_index` is `< feature_count` BEFORE replay. Without
+        // this check `walk_tree_into_predictions` indexes
+        // `binned_matrix.bins[row * feature_count + feature]` which
+        // panics across the PyO3 boundary if the prior fit was trained
+        // on more features than the current one. Surface a clean
+        // validation error instead.
+        for (idx, s) in all_stumps.iter().enumerate() {
+            let fi = s.split.feature_index as usize;
+            if fi >= feature_count {
+                return Err(format!(
+                    "warm-start: prior stump {idx} references feature_index {fi} \
+                     which is >= the current feature_count {feature_count}. The \
+                     init_model appears to have been trained on a wider feature \
+                     set than the current X; either pad X to match the prior \
+                     schema or fit fresh without `warm_start=True`."
+                ));
+            }
+        }
         let mut grouped: std::collections::BTreeMap<u32, Vec<usize>> =
             std::collections::BTreeMap::new();
         for (idx, s) in all_stumps.iter().enumerate() {

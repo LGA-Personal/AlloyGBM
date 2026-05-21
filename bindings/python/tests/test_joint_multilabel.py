@@ -462,6 +462,147 @@ def test_joint_warm_start_dart_matches_fresh_fit():
     np.testing.assert_allclose(pred_resumed, pred_fresh, rtol=1e-4, atol=1e-4)
 
 
+def test_joint_native_categorical_rejects_non_dense_ids():
+    """PR #36 review fix (C3): the joint rebinner maps requested
+    columns to `bin_index == category_id`, but JointPredictor reads
+    the raw feature value at predict time. A non-dense set like
+    {10, 20, 30} would silently route to the wrong bitset bit. v0.10.3
+    rejects with a clear error pointing users at sklearn LabelEncoder
+    (proper persisted mapping is v0.10.4 work)."""
+    rng = np.random.default_rng(0)
+    n = 80
+    groups = np.repeat(np.arange(n // 8), 8).astype(np.int64)
+    # Non-dense category IDs: {10, 20, 30}.
+    cat = rng.choice([10.0, 20.0, 30.0], size=n).astype(np.float32)
+    other = rng.normal(size=n).astype(np.float32)
+    X = np.column_stack([cat, other])
+    y = np.column_stack([
+        rng.integers(0, 4, size=n).astype(np.float32),
+        rng.integers(0, 4, size=n).astype(np.float32),
+    ])
+    m = MultiLabelGBMRanker(
+        n_estimators=2,
+        multi_label_mode="joint",
+        categorical_feature_indices=[0],
+        max_cat_threshold=40,
+    )
+    with pytest.raises(Exception, match="dense"):
+        m.fit(X, y, group=groups)
+
+
+def test_joint_native_categorical_rejects_non_integer_values():
+    """PR #36 review fix (C1): the joint rebinner uses truncation
+    (`v as i64`) to match JointPredictor's predict-time cast. Pure
+    non-integer floats like 0.6 would round at training but truncate
+    at predict, silently disagreeing. v0.10.3 rejects with a clear
+    error pointing users at pre-encoding."""
+    rng = np.random.default_rng(0)
+    n = 60
+    groups = np.repeat(np.arange(n // 6), 6).astype(np.int64)
+    # 0.6 and 1.6 are not exact integer-valued floats.
+    cat = rng.choice([0.6, 1.6, 2.6], size=n).astype(np.float32)
+    X = np.column_stack([cat, rng.normal(size=n).astype(np.float32)])
+    y = np.column_stack([
+        rng.integers(0, 4, size=n).astype(np.float32),
+        rng.integers(0, 4, size=n).astype(np.float32),
+    ])
+    m = MultiLabelGBMRanker(
+        n_estimators=2,
+        multi_label_mode="joint",
+        categorical_feature_indices=[0],
+        max_cat_threshold=8,
+    )
+    with pytest.raises(Exception, match="non-integer"):
+        m.fit(X, y, group=groups)
+
+
+def test_joint_warm_start_rejects_feature_count_mismatch():
+    """PR #36 review fix (C2, C4): a wider prior schema must be
+    rejected with a clean Python ValueError, not a Rust panic from
+    out-of-bounds feature indexing in `walk_tree_into_predictions`."""
+    rng = np.random.default_rng(0)
+    n = 60
+    groups = np.repeat(np.arange(n // 6), 6).astype(np.int64)
+    X_wide = rng.normal(size=(n, 5)).astype(np.float32)
+    X_narrow = X_wide[:, :3]
+    y = np.column_stack([
+        rng.integers(0, 4, size=n).astype(np.float32),
+        rng.integers(0, 4, size=n).astype(np.float32),
+    ])
+
+    prior = MultiLabelGBMRanker(
+        n_estimators=3,
+        multi_label_mode="joint",
+        ranking_objective="squared_error",
+    )
+    prior.fit(X_wide, y, group=groups)
+    resumed = MultiLabelGBMRanker(
+        n_estimators=2,
+        multi_label_mode="joint",
+        ranking_objective="squared_error",
+        warm_start=True,
+        init_model=prior,
+    )
+    with pytest.raises(ValueError, match="features"):
+        resumed.fit(X_narrow, y, group=groups)
+
+
+def test_joint_warm_start_rejects_n_labels_mismatch():
+    """PR #36 review fix (C4): n_labels mismatch between init_model
+    and the current fit must be rejected with a clear error."""
+    rng = np.random.default_rng(0)
+    n = 60
+    groups = np.repeat(np.arange(n // 6), 6).astype(np.int64)
+    X = rng.normal(size=(n, 3)).astype(np.float32)
+    y2 = np.column_stack([
+        rng.integers(0, 4, size=n).astype(np.float32),
+        rng.integers(0, 4, size=n).astype(np.float32),
+    ])
+    y3 = np.column_stack([y2, rng.integers(0, 4, size=n).astype(np.float32)])
+
+    prior = MultiLabelGBMRanker(
+        n_estimators=3, multi_label_mode="joint", ranking_objective="squared_error",
+    )
+    prior.fit(X, y2, group=groups)
+    resumed = MultiLabelGBMRanker(
+        n_estimators=2, multi_label_mode="joint",
+        ranking_objective="squared_error",
+        warm_start=True, init_model=prior,
+    )
+    with pytest.raises(ValueError, match="labels"):
+        resumed.fit(X, y3, group=groups)
+
+
+def test_joint_warm_start_rejects_dart_mode_mismatch():
+    """PR #36 review fix (C4): a DART prior resumed as standard (or
+    vice versa) silently mishandles per-tree weights. Reject both
+    transitions explicitly."""
+    rng = np.random.default_rng(0)
+    n = 60
+    groups = np.repeat(np.arange(n // 6), 6).astype(np.int64)
+    X = rng.normal(size=(n, 3)).astype(np.float32)
+    y = np.column_stack([
+        rng.integers(0, 4, size=n).astype(np.float32),
+        rng.integers(0, 4, size=n).astype(np.float32),
+    ])
+
+    # DART prior, standard resume — rejected.
+    dart_prior = MultiLabelGBMRanker(
+        n_estimators=3, multi_label_mode="joint",
+        ranking_objective="squared_error",
+        boosting_mode="dart", dart_drop_rate=0.3, dart_max_drop=2,
+        dart_normalize_type="tree", dart_sample_type="uniform",
+    )
+    dart_prior.fit(X, y, group=groups)
+    standard_resumed = MultiLabelGBMRanker(
+        n_estimators=2, multi_label_mode="joint",
+        ranking_objective="squared_error",
+        warm_start=True, init_model=dart_prior,
+    )
+    with pytest.raises(ValueError, match="boosting_mode"):
+        standard_resumed.fit(X, y, group=groups)
+
+
 def test_joint_warm_start_validates_init_model():
     """v0.10.3: surface-level validation — `init_model` must be a
     fitted joint MultiLabelGBMRanker. We don't try to enumerate every

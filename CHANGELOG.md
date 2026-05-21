@@ -102,6 +102,37 @@ remains byte-identical to v0.10.2 when the new knobs are not opted into.
   `init_artifact_bytes`, `init_baselines`, `init_rounds_completed`)
   via PyO3's `#[pyo3(signature = ...)]` defaults.
 
+### Fixed in v0.10.3 (PR #36 review)
+
+- **C1 + C3 — joint native-categorical rebinner**: the v0.10.3 rebinner
+  initially used `v.round() as i64` for category ID extraction and
+  remapped raw values to dense `0..K-1` IDs in the binned matrix.
+  `JointPredictor::predict_row` reads the raw feature value via `v as i64`
+  (truncation) and treats it directly as the category ID, so two
+  invariants must hold for train/predict agreement: (a) values must be
+  exact integer-valued floats (round vs truncate disagree on `0.6`);
+  (b) values must already be dense zero-based IDs (the dense remapping
+  isn't reflected at predict time). The rebinner now uses truncation
+  consistently AND validates both invariants up front, raising a clean
+  `ValueError` pointing users at sklearn `LabelEncoder` when violated.
+  Persisting and applying a per-feature `cat_to_id` mapping in the
+  joint artifact path (so arbitrary numeric category IDs work without
+  user pre-encoding) is tracked for v0.10.4 alongside
+  `categorical_state` plumbing on the joint predictor.
+- **C2 — warm-start stump feature_index validation**: the joint
+  warm-start replay path (`walk_tree_into_predictions`) indexes
+  `binned_matrix.bins[row * feature_count + feature]`. Without
+  validation, a prior fit trained on a wider feature set would panic
+  the Rust side via out-of-bounds indexing instead of surfacing a
+  clean error. `fit_joint_inner` now validates every prior stump's
+  `feature_index < feature_count` before replay and returns a
+  user-actionable error.
+- **C4 — `_fit_joint` init_model schema validation**: defense in depth
+  on the Python boundary so we never trigger the Rust panic from C2.
+  Validates `init_model._joint_feature_count == feature_count`,
+  `init_model.n_labels_ == n_labels`, and rejects DART <-> non-DART
+  warm-resume transitions (silently mishandles per-tree weights).
+
 ## 0.10.2
 
 Closes the leaf-wise multiclass DART limitation and the first slice of
