@@ -4,13 +4,59 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
-The `0.10.3` release closes four follow-ups carved out of the
-v0.10.2 joint-trainer parity work: native-categorical Python
-wiring, joint GOSS, joint DART, and joint warm-start. The final
-remaining joint-path features (MorphBoost, DRO, factor
-neutralization) are tracked for v0.10.4. Default behaviour for
-every existing user-facing API remains byte-identical to v0.10.2
-when the new knobs are not opted into.
+The `0.10.4` release adds MorphBoost to the joint multi-output
+trainer used by `MultiLabelGBMRanker(multi_label_mode="joint")` —
+the first of three deferred joint-path follow-ups from
+`docs/limitations.md` Limitation 2. DRO leaves on the joint
+trainer are tracked for v0.10.5; factor neutralization on the
+joint trainer is tracked for v0.10.6. Default behaviour for every
+existing user-facing API remains byte-identical to v0.10.3 when
+MorphBoost is not opted into.
+
+## What Shipped In v0.10.4
+
+- **Joint MorphBoost (closes the v0.10.4 MorphBoost follow-up):**
+  `MultiLabelGBMRanker(multi_label_mode="joint",
+  training_mode="morph", …)` now activates MorphBoost on the
+  shared-tree multi-output trainer. The full single-output morph
+  surface is honored — `morph_rate`, `evolution_pressure`,
+  `morph_warmup_iters`, `info_score_weight`, `depth_penalty_base`,
+  `balance_penalty`, `lr_schedule`, `lr_warmup_frac`. Two new
+  helpers in `crates/engine/src/shared_histogram.rs`
+  (`compute_multi_output_split_gain_morph`,
+  `find_best_multi_output_categorical_split_morph`) sum per-output
+  morph gain across K outputs, each using its own EMA snapshot
+  from `MorphState::ema_stats[k]`. `JointMorphContext` (private to
+  `joint.rs`) carries the per-round morph snapshot through
+  `build_joint_round*`. Per-iteration LR schedule, per-leaf depth
+  penalty (`depth_penalty_base ^ (depth/3)`, depth derived from
+  `local_node_id.ilog2()`), and per-iteration leaf shrinkage
+  (`1 − morph_rate * round/total`) all apply uniformly across the
+  K-output leaf values.
+- **Joint MorphBoost warm-start (EMA continuity, not byte-equivalence):**
+  `JointWarmStartState.initial_ema_stats: Option<Vec<GradientEmaStats>>`
+  re-seeds `MorphState::ema_stats` on warm-resume so gradient-statistics
+  smoothing is continuous across the resume boundary. **Not byte-
+  equivalent to a fresh longer fit** (PR #37 review C3): per-iteration
+  leaf shrinkage and LR schedule are resolved against the
+  `total_iterations` horizon at training time, so a `6+4` warm-resume
+  does not match a fresh `n_estimators=10` MorphBoost fit — the prior
+  six trees keep their original 6-round shrinkage. Mirrors the single-
+  output MorphBoost warm-start behavior. The PyO3 bridge extracts the
+  EMA snapshot automatically from `init_artifact_bytes` via
+  `TrainedModel::from_artifact_bytes(…).morph_metadata`.
+
+### v0.10.x follow-ups (deferred)
+
+- **v0.10.5**: DRO leaves on the joint trainer
+  (`leaf_solver="dro"`). Per-output Wasserstein-style robust
+  Newton leaf solve, applied post-build via `core::leaf_effective_gradient`.
+  Requires `JointRoundResult` to carry per-stump child row indices.
+- **v0.10.6**: factor neutralization on the joint trainer
+  (`neutralization="pre_target" | "per_round_gradient" |
+  "split_penalty"` + `factor_exposures=`). The PyO3 bridge
+  currently rejects `factor_exposures` unconditionally under
+  `multi_label_mode="joint"`.
 
 ## What Shipped In v0.10.3
 
@@ -63,12 +109,6 @@ when the new knobs are not opted into.
   replay. `fit_joint_multi_output_with_categorical` now delegates to a
   private `fit_joint_inner`, matching the single-output engine's
   `fit_iterations*` → inner-impl pattern.
-
-### v0.10.x follow-ups (deferred)
-
-- **v0.10.4**: MorphBoost, DRO, and factor neutralization on the
-  joint path. These touch the per-row gradient pipeline more
-  invasively than GOSS/DART/warm-start and need their own design pass.
 
 ## What Shipped In v0.10.2
 

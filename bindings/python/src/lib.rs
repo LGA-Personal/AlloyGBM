@@ -5341,6 +5341,7 @@ impl JointPredictorHandle {
     init_artifact_bytes=None::<Vec<u8>>,
     init_baselines=None::<Vec<f32>>,
     init_rounds_completed=None::<usize>,
+    morph_config=None::<pyo3::Bound<'_, pyo3::types::PyDict>>,
 ))]
 fn train_joint_multi_label_ranker(
     x_values: Vec<f32>,
@@ -5375,6 +5376,7 @@ fn train_joint_multi_label_ranker(
     init_artifact_bytes: Option<Vec<u8>>,
     init_baselines: Option<Vec<f32>>,
     init_rounds_completed: Option<usize>,
+    morph_config: Option<pyo3::Bound<'_, pyo3::types::PyDict>>,
 ) -> PyResult<(Vec<u8>, Vec<f32>, usize, usize)> {
     use alloygbm_engine::joint::JointObjective;
 
@@ -5450,6 +5452,14 @@ fn train_joint_multi_label_ranker(
         dart_normalize_type.as_deref(),
         dart_sample_type.as_deref(),
     )?;
+    // v0.10.4: MorphBoost — parse the per-label `morph_config` dict
+    // (built by `alloygbm._morph.build_morph_config_dict`) into a
+    // `MorphConfig`. `None` means non-morph training. Validation runs in
+    // `parse_morph_config_from_pydict` (mirrors single-output path).
+    let parsed_morph_config = match morph_config.as_ref() {
+        Some(dict) => Some(parse_morph_config_from_pydict(dict)?),
+        None => None,
+    };
     let params = TrainParams {
         learning_rate,
         seed,
@@ -5463,6 +5473,7 @@ fn train_joint_multi_label_ranker(
         tree_growth: tg,
         max_leaves,
         boosting_mode: parsed_boosting_mode,
+        morph_config: parsed_morph_config,
         ..TrainParams::default()
     };
 
@@ -5591,6 +5602,16 @@ fn train_joint_multi_label_ranker(
         let rounds = init_rounds_completed.unwrap_or(0);
         let prior_model = alloygbm_engine::TrainedModel::from_artifact_bytes(&bytes)
             .map_err(|e| PyValueError::new_err(format!("init_artifact_bytes decode: {e:?}")))?;
+        // v0.10.4: extract MorphBoost EMA snapshot from the prior artifact's
+        // `morph_metadata` section. The engine writes this whenever
+        // MorphBoost is active and warm-resume requires it to byte-match a
+        // fresh longer fit. When the prior fit didn't use MorphBoost,
+        // `morph_metadata` is None and the new fit re-seeds with defaults.
+        let initial_ema_stats = prior_model
+            .morph_metadata
+            .as_ref()
+            .map(|m| m.ema_stats.clone())
+            .filter(|stats| !stats.is_empty());
         Some(alloygbm_engine::joint::JointWarmStartState {
             baselines,
             stumps: prior_model.stumps,
@@ -5599,6 +5620,7 @@ fn train_joint_multi_label_ranker(
             // per-tree weights from per-stump `tree_weight` (mirrors
             // the multiclass warm-start path).
             initial_dart_tree_weights: None,
+            initial_ema_stats,
         })
     } else {
         None

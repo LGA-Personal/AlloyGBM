@@ -1,5 +1,119 @@
 # Changelog
 
+## 0.10.4
+
+Adds MorphBoost (Kriuk 2025, arXiv:2511.13234) to the joint multi-output
+trainer used by `MultiLabelGBMRanker(multi_label_mode="joint")`. This is
+the first of three deferred items from `docs/limitations.md` Limitation 2
+to ship; DRO leaves and factor neutralization on the joint trainer land
+in v0.10.5 and v0.10.6 respectively. Default behaviour for every existing
+user-facing API remains byte-identical to v0.10.3 when MorphBoost is not
+opted into (the engine skips morph plumbing entirely when
+`params.morph_config.is_none()`).
+
+### Added — MorphBoost on the joint trainer
+
+- `MultiLabelGBMRanker(multi_label_mode="joint", training_mode="morph", …)`
+  now activates MorphBoost on the shared-tree multi-output trainer.
+  Honors the full single-output MorphBoost surface:
+  `morph_rate`, `evolution_pressure`, `morph_warmup_iters`,
+  `info_score_weight`, `depth_penalty_base`, `balance_penalty`,
+  `lr_schedule`, `lr_warmup_frac`. Per-iteration LR schedule (constant
+  or warmup-cosine), per-leaf depth penalty
+  (`depth_penalty_base ^ (depth/3)` where
+  `depth = (local_node_id + 1).ilog2()`), and per-iteration leaf
+  shrinkage (`1 − morph_rate * round/total`) all apply uniformly across
+  the K-output leaf values.
+
+- Multi-output split-gain dispatch: two new helpers in
+  `crates/engine/src/shared_histogram.rs` —
+  `compute_multi_output_split_gain_morph` and
+  `find_best_multi_output_categorical_split_morph` — sum per-output
+  morph gain across K outputs. Each output uses its own
+  `(grad_mean, grad_std)` snapshot from `MorphState::ema_stats[k]`. The
+  morph formula (`crates/backend_cpu/src/morph.rs::compute_morph_gain`)
+  is inlined per-output rather than depended on through the backend
+  crate (engine cannot depend on backend-cpu).
+
+- Per-side row count for the info-gain term is approximated via
+  `hess.max(0.0) as u32` (multi-output histogram doesn't carry exact
+  counts). Exact for objectives where hessian ≡ 1 per row
+  (`squared_error`, `queryrmse`) and a monotone proxy for ranking. The
+  dominant post-warmup signal is the gradient-gain term (weighted by
+  `1 - info_score_weight`) which uses `(g, h)` directly. Threading
+  exact per-bin counts would require a 1.5× expansion of
+  `MultiOutputHistogram` and is deferred. Warmup byte-equivalence with
+  the standard K-output gain is guaranteed regardless.
+
+- MorphBoost EMA persists through the artifact's `MorphMetadata`
+  section. `JointWarmStartState.initial_ema_stats: Option<Vec<GradientEmaStats>>`
+  re-seeds `MorphState::ema_stats` on warm-resume so the gradient-
+  statistics smoothing is continuous across the resume boundary — new
+  rounds see the same per-output `(mean, std)` they would have seen
+  had training never been interrupted. The PyO3 bridge auto-extracts
+  the snapshot from `init_artifact_bytes` via
+  `TrainedModel::from_artifact_bytes(...).morph_metadata` and threads
+  it through.
+
+  **MorphBoost warm-resume is NOT byte-equivalent to a fresh longer fit
+  (PR #37 review C3).** Per-iteration leaf shrinkage
+  (`1 − morph_rate * round/total`) and LR schedule are resolved against
+  the `total_iterations` horizon at training time. A prior fit with
+  `n_estimators=6` baked its first six trees against a 6-round horizon;
+  resuming with `n_estimators=4` runs the new four rounds against a
+  10-round horizon but the prior six trees keep their original
+  shrinkage. So a `6+4` warm-resumed MorphBoost fit does not match a
+  fresh `n_estimators=10` MorphBoost fit; the prior trees can't be
+  retroactively re-scaled. The EMA continuity is the practical
+  guarantee; byte-level reproducibility across a horizon change is
+  intentionally out of scope. This mirrors the single-output MorphBoost
+  warm-start behavior. The regression
+  `joint_morph_warm_resume_preserves_ema_continuity_not_byte_equivalence`
+  pins both invariants.
+
+### Internal
+
+- New `JointMorphContext` (private to `crates/engine/src/joint.rs`)
+  carries the per-round morph snapshot needed by `build_joint_round*`:
+  K per-output `(grad_mean, grad_std)` extracted from
+  `MorphState::ema_stats`, the precomputed per-iteration constants,
+  and the iteration / total horizon. Distinct from the `pub(crate)`
+  `crate::MorphTreeContext` which is tied to single-output `MorphState`.
+
+- `build_joint_round` factored into a public no-morph wrapper + a
+  private `build_joint_round_inner` that takes
+  `Option<&JointMorphContext>` and routes both the numeric threshold
+  sweep and the Fisher-sort categorical scan through the morph
+  variants when present. `build_joint_round_leafwise` gains the same
+  `morph_ctx` parameter.
+
+- `fit_joint_inner` constructs `MorphState::new(cfg, K,
+  total_iterations, learning_rate)` when `params.morph_config.is_some()`.
+  `total_iterations` covers warm-start prefix + new rounds so the LR
+  schedule + leaf-shrink curve see the full horizon, mirroring the
+  single-output multiclass path. EMA stats are updated per-round from
+  freshly computed gradients BEFORE GOSS / row-subsample / tree-building
+  so morph split selection sees the latest snapshot.
+
+- `_JOINT_SUPPORTED_KWARGS` now contains 31 entries — 9 MorphBoost
+  kwargs added. New `_build_joint_morph_config` helper in
+  `bindings/python/alloygbm/multi_label_ranker.py` reuses the existing
+  `alloygbm._morph.build_morph_config_dict` so defaults match
+  `GBMRegressor` / `GBMRanker`.
+
+### Deferred to v0.10.5 / v0.10.6
+
+- **Joint DRO leaves** — `leaf_solver="dro"` on the joint trainer.
+  Tracked for v0.10.5.
+
+- **Joint factor neutralization** — `neutralization="pre_target" |
+  "per_round_gradient" | "split_penalty"` + `factor_exposures=`. The
+  PyO3 bridge currently rejects `factor_exposures` unconditionally
+  under `multi_label_mode="joint"`. Tracked for v0.10.6.
+
+Both deferred items remain in `docs/limitations.md` Limitation 2 with
+explicit version markers.
+
 ## 0.10.3
 
 Closes the four "v0.10.3" follow-ups carved out of the v0.10.2 joint-trainer

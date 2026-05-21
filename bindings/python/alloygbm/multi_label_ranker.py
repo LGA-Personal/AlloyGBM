@@ -33,6 +33,45 @@ _MULTI_LABEL_RANKER_MAGIC = b"MLRK"
 _MULTI_LABEL_RANKER_VERSION = 2
 
 
+def _build_joint_morph_config(kw: dict[str, Any]) -> dict[str, Any] | None:
+    """Build the ``morph_config`` dict for the joint PyO3 bridge.
+
+    Returns ``None`` when ``training_mode != 'morph'`` so the bridge skips
+    MorphBoost wiring entirely. When ``training_mode == 'morph'``, calls
+    ``alloygbm._morph.build_morph_config_dict`` with the per-label kwargs
+    using ``GBMRegressor`` / ``GBMRanker`` defaults for any missing fields.
+
+    PR #37 review (C1, C4): validate ``training_mode`` strictly against the
+    same set ``GBMRegressor`` / ``GBMRanker`` accept (``auto``, ``manual``,
+    ``morph``) so typos like ``"morhp"`` fail fast instead of silently
+    running standard training.
+    """
+    training_mode = str(kw.get("training_mode", "auto"))
+    if training_mode not in ("auto", "manual", "morph"):
+        raise ValueError(
+            f"training_mode must be 'auto', 'manual', or 'morph', "
+            f"got {training_mode!r}"
+        )
+    if training_mode != "morph":
+        return None
+    from ._morph import build_morph_config_dict
+
+    morph_kwargs: dict[str, Any] = {}
+    for k in (
+        "morph_rate",
+        "evolution_pressure",
+        "morph_warmup_iters",
+        "info_score_weight",
+        "depth_penalty_base",
+        "balance_penalty",
+        "lr_schedule",
+        "lr_warmup_frac",
+    ):
+        if k in kw:
+            morph_kwargs[k] = kw[k]
+    return build_morph_config_dict(**morph_kwargs)
+
+
 class MultiLabelGBMRanker:
     """Gradient Boosted Decision Tree learning-to-rank estimator with
     multiple ranking labels per item.
@@ -307,6 +346,21 @@ class MultiLabelGBMRanker:
         "dart_max_drop",
         "dart_normalize_type",
         "dart_sample_type",
+        # v0.10.4: MorphBoost on joint trainer. `training_mode="morph"`
+        # activates the MorphBoost split-gain blend + LR schedule + leaf
+        # shrinkage + depth penalty. Other values ("auto", "manual") are
+        # treated as no-op for joint (joint trainer doesn't have an
+        # auto-tuned policy in v0.10.x; "auto" means "use the user's
+        # explicit params unmodified", matching "manual").
+        "training_mode",
+        "morph_rate",
+        "evolution_pressure",
+        "morph_warmup_iters",
+        "info_score_weight",
+        "depth_penalty_base",
+        "balance_penalty",
+        "lr_schedule",
+        "lr_warmup_frac",
     })
 
     @staticmethod
@@ -598,6 +652,11 @@ class MultiLabelGBMRanker:
             init_artifact_bytes=init_artifact,
             init_baselines=init_baselines,
             init_rounds_completed=init_rounds,
+            # v0.10.4: MorphBoost on joint trainer. `morph_config` dict is
+            # built from per-label kwargs when training_mode='morph';
+            # `None` means non-morph training (the bridge ignores all
+            # other morph_* kwargs in that case).
+            morph_config=_build_joint_morph_config(kw),
         )
 
         self._joint_artifact_bytes = bytes(artifact)

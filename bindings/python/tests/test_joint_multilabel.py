@@ -630,25 +630,62 @@ def test_joint_warm_start_validates_init_model():
 
 
 def test_joint_mode_still_rejects_truly_unsupported_kwargs():
-    """v0.10.2: kwargs that the joint trainer still does NOT support
-    (warm-start, MorphBoost, etc.) must continue to be rejected with
-    a clear NotImplementedError. Only Phase 1 kwargs were added to
-    the allow-list."""
+    """v0.10.4: kwargs that the joint trainer still does NOT support
+    (leaf_model='linear', monotone_constraints) must continue to be
+    rejected with a clear NotImplementedError. `training_mode='morph'`
+    was added to the allow-list in v0.10.4 (see
+    `test_joint_morph_changes_predictions_vs_standard`)."""
     X, y, group = _toy_ranking()
     for unsupported in (
         "leaf_model",
         "monotone_constraints",
-        "training_mode",
     ):
-        # Some of these collide with __init__ signature in odd ways; we
-        # use a generic plausible-value-per-kwarg map.
         value = {
             "leaf_model": "linear",
             "monotone_constraints": [1, 0, 0, 0],
-            "training_mode": "morph",
         }[unsupported]
         m = MultiLabelGBMRanker(
             n_estimators=2, multi_label_mode="joint", **{unsupported: value}
         )
         with pytest.raises(NotImplementedError, match=unsupported):
             m.fit(X, y, group=group)
+
+
+def test_joint_morph_rejects_invalid_training_mode():
+    """PR #37 review (C1, C4): joint mode must reject invalid
+    `training_mode` values rather than silently downgrading to standard
+    training. Mirrors `GBMRegressor` / `GBMRanker` validation."""
+    X, y, group = _toy_ranking()
+    m = MultiLabelGBMRanker(
+        n_estimators=2,
+        multi_label_mode="joint",
+        training_mode="morhp",  # typo
+    )
+    with pytest.raises(ValueError, match="training_mode"):
+        m.fit(X, y, group=group)
+
+
+def test_joint_morph_changes_predictions_vs_standard():
+    """v0.10.4 acceptance: training_mode='morph' produces different
+    predictions than the default 'auto' (standard) on the same data + seed."""
+    rng = np.random.default_rng(42)
+    n_rows, n_features, n_labels = 200, 5, 3
+    X = rng.normal(size=(n_rows, n_features)).astype(np.float32)
+    y = rng.normal(size=(n_rows, n_labels)).astype(np.float32)
+
+    common = dict(
+        multi_label_mode="joint",
+        n_estimators=10,
+        seed=0,
+        max_depth=4,
+        ranking_objective="squared_error",
+    )
+    std = MultiLabelGBMRanker(**common, training_mode="auto")
+    std.fit(X, y)
+    mph = MultiLabelGBMRanker(**common, training_mode="morph")
+    mph.fit(X, y)
+    p_std = std.predict(X)
+    p_mph = mph.predict(X)
+    assert not np.allclose(p_std, p_mph, atol=1e-4), (
+        "MorphBoost predictions should differ from standard predictions"
+    )

@@ -1,7 +1,65 @@
 Release and platform policy
 ===========================
 
-AlloyGBM ``0.10.3`` release notes and platform policy.
+AlloyGBM ``0.10.4`` release notes and platform policy.
+
+What's new in 0.10.4
+--------------------
+
+Adds MorphBoost (Kriuk 2025, arXiv:2511.13234) to the joint multi-output
+trainer used by ``MultiLabelGBMRanker(multi_label_mode="joint")``. This
+is the first of three deferred items from ``docs/limitations.md``
+Limitation 2 to ship; DRO leaves and factor neutralization on the joint
+trainer land in v0.10.5 and v0.10.6 respectively. Default behaviour for
+every existing user-facing API remains byte-identical to v0.10.3 when
+MorphBoost is not opted into.
+
+**Joint MorphBoost surface:**
+``MultiLabelGBMRanker(multi_label_mode="joint", training_mode="morph",
+…)`` now activates MorphBoost on the shared-tree multi-output trainer.
+Honors the full single-output MorphBoost surface — ``morph_rate``,
+``evolution_pressure``, ``morph_warmup_iters``, ``info_score_weight``,
+``depth_penalty_base``, ``balance_penalty``, ``lr_schedule``,
+``lr_warmup_frac``. Per-iteration LR schedule (constant or
+warmup-cosine), per-leaf depth penalty
+(``depth_penalty_base ^ (depth/3)`` where
+``depth = (local_node_id + 1).ilog2()``), and per-iteration leaf
+shrinkage (``1 − morph_rate * round/total``) all apply uniformly across
+the K-output leaf values.
+
+**Multi-output morph gain:**
+two new helpers in ``crates/engine/src/shared_histogram.rs`` —
+``compute_multi_output_split_gain_morph`` and
+``find_best_multi_output_categorical_split_morph`` — sum per-output
+morph gain across the K outputs. Each output uses its own
+``(grad_mean, grad_std)`` snapshot from ``MorphState::ema_stats[k]``.
+Per-side row count for the info-gain term is approximated via
+``hess.max(0.0) as u32`` (multi-output histogram doesn't carry exact
+counts) — exact for objectives where hess ≡ 1 per row, monotone proxy
+for ranking. Warmup byte-equivalence with the standard K-output gain
+is guaranteed regardless.
+
+**MorphBoost EMA warm-start (continuity, not byte-equivalence):**
+``JointWarmStartState.initial_ema_stats: Option<Vec<GradientEmaStats>>``
+re-seeds ``MorphState::ema_stats`` on warm-resume so the gradient-
+statistics smoothing is continuous across the resume boundary — new
+rounds see the same per-output ``(mean, std)`` they would have seen had
+training never been interrupted. The PyO3 bridge auto-extracts the
+snapshot from ``init_artifact_bytes`` via
+``TrainedModel::from_artifact_bytes(…).morph_metadata``.
+
+**MorphBoost warm-resume is intentionally NOT byte-equivalent to a fresh
+longer fit.** Per-iteration leaf shrinkage and LR schedule are resolved
+against the ``total_iterations`` horizon at training time; a prior fit
+with ``n_estimators=6`` baked its first six trees against a 6-round
+horizon and resuming with ``n_estimators=4`` cannot retroactively
+re-scale them. The EMA continuity is the practical guarantee. This
+mirrors the single-output MorphBoost warm-start behavior.
+
+**Deferred to v0.10.5 / v0.10.6:**
+joint DRO leaves (``leaf_solver="dro"``) and joint factor
+neutralization (``neutralization`` + ``factor_exposures``). Both remain
+in ``docs/limitations.md`` Limitation 2 with explicit version markers.
 
 What's new in 0.10.3
 --------------------
