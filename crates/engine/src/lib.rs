@@ -37,7 +37,7 @@ pub use shared_histogram::{
 };
 
 pub mod joint;
-pub use joint::{JointObjective, JointRoundResult, build_joint_round};
+pub use joint::{JointObjective, JointRoundResult, JointWarmStartState, build_joint_round};
 
 /// Small epsilon added to leaf value denominators to prevent division by zero.
 const LEAF_EPSILON: f32 = 1e-6;

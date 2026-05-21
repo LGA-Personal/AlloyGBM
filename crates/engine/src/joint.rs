@@ -185,6 +185,78 @@ fn bitset_bytes_to_u64(bytes: &[u8]) -> u64 {
     out
 }
 
+/// Walk every row through one tree's stumps and accumulate
+/// `sign * scale * leaf_value_k` into `predictions[k][row]`.
+///
+/// Shared by the round-end prediction update (v0.10.0 fix), DART
+/// dropout subtraction (v0.10.3), and warm-start prior-stump replay
+/// (v0.10.3). Tree IDs come in two flavors:
+///
+/// * **pre-encode** — `node_id` is the local node id directly (used
+///   inside `fit_joint_inner` between `build_joint_round*` returning
+///   and `encode_tree_node_id` rewriting).
+/// * **post-encode** — `node_id` carries the global tree id in the
+///   high bits (used for prior-round stumps already in `all_stumps`).
+///
+/// Both forms work because the lookup key is `node_id % TREE_NODE_STRIDE`,
+/// which extracts the local id under either encoding (local ids are
+/// always `< TREE_NODE_STRIDE`).
+#[allow(clippy::too_many_arguments)]
+fn walk_tree_into_predictions(
+    tree_stumps: &[TrainedStump],
+    binned_matrix: &BinnedMatrix,
+    feature_count: usize,
+    n_rows: usize,
+    n_outputs: usize,
+    predictions: &mut [Vec<f32>],
+    sign: f32,
+    scale: f32,
+) {
+    let stumps_by_local: std::collections::HashMap<u32, &TrainedStump> = tree_stumps
+        .iter()
+        .map(|s| (s.split.node_id % TREE_NODE_STRIDE, s))
+        .collect();
+    for row in 0..n_rows {
+        let mut current_node: u32 = 0;
+        let mut last_leaf: Option<&(Vec<f32>, Vec<f32>)> = None;
+        let mut last_went_left = false;
+        loop {
+            let Some(stump) = stumps_by_local.get(&current_node) else {
+                break;
+            };
+            let feature = stump.split.feature_index as usize;
+            let threshold_bin = stump.split.threshold_bin as usize;
+            let bin = binned_matrix.bins[row * feature_count + feature];
+            let went_left = if bin == MISSING_BIN_U8 {
+                stump.split.default_left
+            } else if stump.split.is_categorical {
+                let bs = stump
+                    .split
+                    .categorical_bitset
+                    .as_ref()
+                    .map(|b| bitset_bytes_to_u64(b))
+                    .unwrap_or(0);
+                bin < 64 && (bs & (1u64 << bin)) != 0
+            } else {
+                (bin as usize) <= threshold_bin
+            };
+            last_leaf = stump.multi_output_leaf_values.as_ref();
+            last_went_left = went_left;
+            current_node = if went_left {
+                current_node * 2 + 1
+            } else {
+                current_node * 2 + 2
+            };
+        }
+        if let Some((left_k, right_k)) = last_leaf {
+            let delta = if last_went_left { left_k } else { right_k };
+            for (k, pred_vec) in predictions.iter_mut().enumerate().take(n_outputs) {
+                pred_vec[row] += sign * scale * delta[k];
+            }
+        }
+    }
+}
+
 /// Per-leaf bookkeeping during level-wise tree growth on the joint trainer.
 #[derive(Debug)]
 struct JointLeafNode {
@@ -1021,6 +1093,96 @@ fn build_joint_round_leafwise(
 ///   `per_output_objective[k]` selects the objective used for output `k`.
 ///   `group_id` is required when any objective in `per_output_objective` is a
 ///     ranking objective.
+/// Joint analogue of [`crate::select_row_indices_for_round_multiclass`].
+///
+/// For joint multi-output the per-row score is `s_i = Σₖ |g_{i,k}|`
+/// across the K per-output gradient buffers (matches LightGBM
+/// multiclass GOSS). A single row mask is shared across all K buffers,
+/// and the amplification factor is applied identically to every
+/// output's gradient and hessian.
+///
+/// Returns `Some(sampled_rows)` when GOSS is active; `None` when
+/// `BoostingMode::Standard` or `BoostingMode::Dart` is in effect (the
+/// caller falls back to the existing row_subsample path).
+fn select_joint_row_indices_for_round(
+    boosting_mode: alloygbm_core::BoostingMode,
+    n_rows: usize,
+    seed_base: u64,
+    round_index: u64,
+    grads_per_output: &mut [Vec<GradientPair>],
+) -> Option<Vec<u32>> {
+    use alloygbm_core::BoostingMode as BM;
+    match boosting_mode {
+        BM::Goss {
+            top_rate,
+            other_rate,
+        } => {
+            let n_outputs = grads_per_output.len();
+            debug_assert!(n_outputs > 0, "joint GOSS requires K >= 1");
+            debug_assert!(
+                grads_per_output.iter().all(|buf| buf.len() == n_rows),
+                "every per-output gradient buffer must have length n_rows"
+            );
+            let magnitudes: Vec<f32> = (0..n_rows)
+                .map(|i| {
+                    grads_per_output
+                        .iter()
+                        .take(n_outputs)
+                        .map(|buf| buf[i].grad.abs())
+                        .sum::<f32>()
+                })
+                .collect();
+            let (top, other, amplification) = crate::goss_sample_indices(
+                &magnitudes,
+                top_rate,
+                other_rate,
+                seed_base,
+                round_index,
+            );
+            if (amplification - 1.0).abs() > f32::EPSILON {
+                for &row in &other {
+                    let idx = row as usize;
+                    for buf in grads_per_output.iter_mut().take(n_outputs) {
+                        let p = &mut buf[idx];
+                        p.grad *= amplification;
+                        p.hess *= amplification;
+                    }
+                }
+            }
+            let mut merged: Vec<u32> = Vec::with_capacity(top.len() + other.len());
+            merged.extend(top);
+            merged.extend(other);
+            merged.sort_unstable();
+            Some(merged)
+        }
+        BM::Standard | BM::Dart { .. } => None,
+    }
+}
+
+/// State carried over from a prior joint fit to enable warm-start
+/// continuation. Mirrors `WarmStartState` (single-output) and
+/// `MultiClassWarmStartState` (multiclass).
+#[derive(Debug, Clone, Default)]
+pub struct JointWarmStartState {
+    /// Per-output baseline predictions from the prior fit (length K).
+    pub baselines: Vec<f32>,
+    /// Trained stumps from the prior fit. The new fit prepends these
+    /// to `all_stumps` and applies their contributions to
+    /// `predictions` before the new round loop begins (so the new
+    /// trees see the correct residual).
+    pub stumps: Vec<TrainedStump>,
+    /// How many rounds the prior fit completed. New rounds re-encode
+    /// `node_id` starting at `initial_rounds_completed` so the global
+    /// `tree_id = node_id / TREE_NODE_STRIDE` mapping stays
+    /// non-overlapping.
+    pub initial_rounds_completed: usize,
+    /// When the prior fit used DART, the per-tree weights (length
+    /// `initial_rounds_completed`). `None` means the prior fit was
+    /// Standard / GOSS, or the caller wants the engine to reconstruct
+    /// weights from per-stump `tree_weight` automatically.
+    pub initial_dart_tree_weights: Option<Vec<f32>>,
+}
+
 pub fn fit_joint_multi_output(
     params: &TrainParams,
     feature_count: usize,
@@ -1042,6 +1204,35 @@ pub fn fit_joint_multi_output(
     )
 }
 
+/// Same as [`fit_joint_multi_output_with_categorical`] but accepts an
+/// optional [`JointWarmStartState`] to continue training from a prior
+/// fit. When `warm_start = None`, behavior is byte-identical to
+/// `fit_joint_multi_output_with_categorical`.
+#[allow(clippy::too_many_arguments)]
+pub fn fit_joint_multi_output_with_warm_start(
+    params: &TrainParams,
+    feature_count: usize,
+    binned_matrix: &BinnedMatrix,
+    targets_per_output: &[Vec<f32>],
+    group_id: Option<&[u32]>,
+    per_output_objective: &[JointObjective],
+    n_estimators: usize,
+    categorical_features: &[crate::CategoricalFeatureInfo],
+    warm_start: Option<JointWarmStartState>,
+) -> Result<JointTrainingSummary, String> {
+    fit_joint_inner(
+        params,
+        feature_count,
+        binned_matrix,
+        targets_per_output,
+        group_id,
+        per_output_objective,
+        n_estimators,
+        categorical_features,
+        warm_start,
+    )
+}
+
 /// Same as [`fit_joint_multi_output`] but accepts a slice of
 /// [`CategoricalFeatureInfo`] specifying which features should be treated
 /// as native-categorical via multi-output Fisher-sort partitioning. An
@@ -1057,6 +1248,37 @@ pub fn fit_joint_multi_output_with_categorical(
     per_output_objective: &[JointObjective],
     n_estimators: usize,
     categorical_features: &[crate::CategoricalFeatureInfo],
+) -> Result<JointTrainingSummary, String> {
+    fit_joint_inner(
+        params,
+        feature_count,
+        binned_matrix,
+        targets_per_output,
+        group_id,
+        per_output_objective,
+        n_estimators,
+        categorical_features,
+        /*warm_start=*/ None,
+    )
+}
+
+/// Inner implementation of the joint multi-output trainer. Public
+/// callers route through `fit_joint_multi_output_with_categorical`
+/// (cold start) or `fit_joint_multi_output_with_warm_start`
+/// (continuation). Mirrors the pattern used by the single-output
+/// engine where `fit_iterations*` variants all funnel through one
+/// underlying impl.
+#[allow(clippy::too_many_arguments)]
+fn fit_joint_inner(
+    params: &TrainParams,
+    feature_count: usize,
+    binned_matrix: &BinnedMatrix,
+    targets_per_output: &[Vec<f32>],
+    group_id: Option<&[u32]>,
+    per_output_objective: &[JointObjective],
+    n_estimators: usize,
+    categorical_features: &[crate::CategoricalFeatureInfo],
+    warm_start: Option<JointWarmStartState>,
 ) -> Result<JointTrainingSummary, String> {
     let n_outputs = targets_per_output.len();
     if per_output_objective.len() != n_outputs {
@@ -1078,20 +1300,213 @@ pub fn fit_joint_multi_output_with_categorical(
         return Err("at least one objective requires group_id".to_string());
     }
 
-    let baselines: Vec<f32> = per_output_objective
-        .iter()
-        .zip(targets_per_output.iter())
-        .map(|(obj, targets)| obj.initial_prediction(targets))
-        .collect();
+    // v0.10.3: warm-start branch — when `warm_start` is `Some`, the
+    // prior fit's baselines win (re-seed `predictions` from them) and
+    // its stumps are prepended to `all_stumps`. The cold-start branch
+    // computes per-output baselines as before.
+    let (initial_stumps, initial_rounds, initial_dart_weights_arg, baselines) =
+        if let Some(ws) = warm_start {
+            if ws.baselines.len() != n_outputs {
+                return Err(format!(
+                    "warm-start baselines length {} != n_outputs {n_outputs}",
+                    ws.baselines.len()
+                ));
+            }
+            (
+                ws.stumps,
+                ws.initial_rounds_completed,
+                ws.initial_dart_tree_weights,
+                ws.baselines,
+            )
+        } else {
+            let cold_baselines: Vec<f32> = per_output_objective
+                .iter()
+                .zip(targets_per_output.iter())
+                .map(|(obj, targets)| obj.initial_prediction(targets))
+                .collect();
+            (Vec::new(), 0, None, cold_baselines)
+        };
 
     // Per-output prediction vectors, seeded from baselines.
     let mut predictions: Vec<Vec<f32>> = baselines.iter().map(|&b| vec![b; n_rows]).collect();
 
     let learning_rate = params.learning_rate;
-    let mut all_stumps: Vec<TrainedStump> = Vec::new();
+    let mut all_stumps: Vec<TrainedStump> = initial_stumps;
     let mut rounds_completed: usize = 0;
 
+    // v0.10.3: joint DART state. `dart_state.tree_weights[r]` is the
+    // weight applied to round-r's tree at predict time;
+    // `dart_round_start_offsets[r]` + `dart_round_counts[r]` track the
+    // stump range in `all_stumps` for that round (one tree per round on
+    // the joint trainer, but the stump *count* varies under leaf-wise
+    // growth).
+    let dart_params = match params.boosting_mode {
+        alloygbm_core::BoostingMode::Dart {
+            drop_rate,
+            max_drop,
+            normalize_type,
+            sample_type,
+        } => Some((drop_rate, max_drop, normalize_type, sample_type)),
+        _ => None,
+    };
+    let mut dart_state = crate::DartState::default();
+    let mut dart_round_start_offsets: Vec<usize> = Vec::new();
+    let mut dart_round_counts: Vec<usize> = Vec::new();
+
+    // v0.10.3: warm-start — replay prior-stump contributions onto
+    // `predictions` so the new round's gradients see the correct
+    // residual. Group prior stumps by `tree_id` and walk each tree at
+    // its DART weight (1.0 for non-DART warm-starts).
+    if !all_stumps.is_empty() {
+        // PR #36 review (C2): validate that every prior stump's
+        // `feature_index` is `< feature_count` BEFORE replay. Without
+        // this check `walk_tree_into_predictions` indexes
+        // `binned_matrix.bins[row * feature_count + feature]` which
+        // panics across the PyO3 boundary if the prior fit was trained
+        // on more features than the current one. Surface a clean
+        // validation error instead.
+        for (idx, s) in all_stumps.iter().enumerate() {
+            let fi = s.split.feature_index as usize;
+            if fi >= feature_count {
+                return Err(format!(
+                    "warm-start: prior stump {idx} references feature_index {fi} \
+                     which is >= the current feature_count {feature_count}. The \
+                     init_model appears to have been trained on a wider feature \
+                     set than the current X; either pad X to match the prior \
+                     schema or fit fresh without `warm_start=True`."
+                ));
+            }
+        }
+        let mut grouped: std::collections::BTreeMap<u32, Vec<usize>> =
+            std::collections::BTreeMap::new();
+        for (idx, s) in all_stumps.iter().enumerate() {
+            grouped
+                .entry(s.split.node_id / TREE_NODE_STRIDE)
+                .or_default()
+                .push(idx);
+        }
+        // For DART warm-start, derive per-tree weights either from the
+        // explicit `initial_dart_tree_weights` arg or from the first
+        // stump's `tree_weight` (mirrors `apply_dart_tree_weights`).
+        let derived_dart_weights: Option<Vec<f32>> = if dart_params.is_some() {
+            if let Some(dw) = initial_dart_weights_arg.as_ref() {
+                if dw.len() != initial_rounds {
+                    return Err(format!(
+                        "warm_start.initial_dart_tree_weights length {} != initial_rounds_completed {initial_rounds}",
+                        dw.len()
+                    ));
+                }
+                Some(dw.clone())
+            } else {
+                let mut reconstructed: Vec<f32> = vec![1.0; initial_rounds];
+                for (tid, indices) in &grouped {
+                    if let Some(&first) = indices.first()
+                        && (*tid as usize) < reconstructed.len()
+                    {
+                        reconstructed[*tid as usize] = all_stumps[first].tree_weight;
+                    }
+                }
+                Some(reconstructed)
+            }
+        } else {
+            None
+        };
+        for (tree_idx, stump_indices) in &grouped {
+            // Materialize this tree's stumps as owned clones so we can
+            // hand a contiguous slice to the walker without aliasing
+            // `all_stumps` (which we'd otherwise need to borrow
+            // immutably while `predictions` is mutably borrowed below).
+            let tree_stumps: Vec<TrainedStump> = stump_indices
+                .iter()
+                .map(|&i| all_stumps[i].clone())
+                .collect();
+            let scale = if let Some(dw) = derived_dart_weights.as_ref() {
+                dw.get(*tree_idx as usize).copied().unwrap_or(1.0)
+            } else {
+                1.0
+            };
+            walk_tree_into_predictions(
+                &tree_stumps,
+                binned_matrix,
+                feature_count,
+                n_rows,
+                n_outputs,
+                &mut predictions,
+                1.0,
+                scale,
+            );
+        }
+
+        // Seed DART bookkeeping from the prior fit so new rounds can
+        // dropout/restore prior trees correctly.
+        if dart_params.is_some() {
+            dart_state.tree_weights =
+                derived_dart_weights.unwrap_or_else(|| vec![1.0; initial_rounds]);
+            for r in 0..initial_rounds {
+                let r_u32 = r as u32;
+                if let Some(indices) = grouped.get(&r_u32) {
+                    let start = *indices.iter().min().unwrap();
+                    dart_round_start_offsets.push(start);
+                    dart_round_counts.push(indices.len());
+                } else {
+                    // Round r contributed no stumps (degenerate).
+                    dart_round_start_offsets.push(0);
+                    dart_round_counts.push(0);
+                }
+            }
+        }
+    }
+
     for round in 0..n_estimators {
+        // v0.10.3 warm-start: when continuing from a prior fit, all
+        // per-round seeds, dropout indices, and `node_id` encodings
+        // mix `global_round = round + initial_rounds` so a warm-resumed
+        // N+M fit produces the same RNG draws on round M..N+M as a
+        // fresh N+M fit.
+        let global_round = round + initial_rounds;
+
+        // v0.10.3 joint DART: drop a random subset of previously-trained
+        // trees before computing gradients. Subtract their (currently
+        // weighted) contributions from `predictions` so the new tree
+        // fits on residuals of the dropped-out ensemble (mirrors the
+        // single-output DART flow at crates/engine/src/lib.rs:4895).
+        let dropped_tree_ids: Vec<usize> =
+            if let Some((drop_rate, max_drop, _normalize_type, sample_type)) = dart_params {
+                if dart_state.tree_weights.is_empty() {
+                    Vec::new()
+                } else {
+                    let drops = crate::select_dropouts(
+                        dart_state.tree_weights.len(),
+                        drop_rate,
+                        max_drop,
+                        sample_type,
+                        &dart_state.tree_weights,
+                        params.seed,
+                        global_round,
+                    );
+                    for &tree_id in &drops {
+                        let w_old = dart_state.tree_weights[tree_id];
+                        let start = dart_round_start_offsets[tree_id];
+                        let count = dart_round_counts[tree_id];
+                        if count > 0 {
+                            walk_tree_into_predictions(
+                                &all_stumps[start..start + count],
+                                binned_matrix,
+                                feature_count,
+                                n_rows,
+                                n_outputs,
+                                &mut predictions,
+                                -1.0,
+                                w_old,
+                            );
+                        }
+                    }
+                    drops
+                }
+            } else {
+                Vec::new()
+            };
+
         // Compute per-output gradients on current predictions.
         let mut grads_per_output: Vec<Vec<GradientPair>> = Vec::with_capacity(n_outputs);
         for k in 0..n_outputs {
@@ -1103,6 +1518,14 @@ pub fn fit_joint_multi_output_with_categorical(
             grads_per_output.push(g);
         }
 
+        // v0.10.3: joint GOSS. When `boosting_mode = Goss`, score rows by
+        // `Σₖ |g_{i,k}|`, keep top_rate fraction, sample other_rate
+        // uniformly from the rest, and amplify the sampled-low rows'
+        // gradients so per-output histogram statistics remain unbiased
+        // estimators of the full-data gradient sums. Mutates
+        // `grads_per_output` in place. Falls back to the row_subsample
+        // path under Standard / DART.
+        //
         // row_subsample (v0.10.2, fixed v0.10.2.1): seeded Bernoulli row
         // mask. When row_subsample < 1.0, the round's tree builder works
         // on the SAMPLED rows only — `sampled_rows: Vec<u32>` is passed
@@ -1118,9 +1541,18 @@ pub fn fit_joint_multi_output_with_categorical(
         // matching LightGBM's `bagging_fraction` semantics where every
         // row's predictions are updated each round, but the tree itself
         // is fit on the sampled subset.
-        let sampled_rows_opt: Option<Vec<u32>> = if params.row_subsample < 1.0 {
+        let sampled_rows_opt: Option<Vec<u32>> = if let Some(rows) =
+            select_joint_row_indices_for_round(
+                params.boosting_mode,
+                n_rows,
+                params.seed,
+                global_round as u64,
+                &mut grads_per_output,
+            ) {
+            Some(rows)
+        } else if params.row_subsample < 1.0 {
             let mut rng_state: u64 = params.seed.wrapping_mul(0x9E3779B97F4A7C15)
-                ^ ((round as u64).wrapping_mul(0xBF58476D1CE4E5B9));
+                ^ ((global_round as u64).wrapping_mul(0xBF58476D1CE4E5B9));
             if rng_state == 0 {
                 rng_state = 0xDEADBEEFCAFEBABE;
             }
@@ -1163,7 +1595,7 @@ pub fn fit_joint_multi_output_with_categorical(
                 n_outputs,
                 max_leaves,
                 categorical_features,
-                round,
+                global_round,
                 sampled_rows_opt.as_deref(),
             )?
         } else {
@@ -1173,7 +1605,7 @@ pub fn fit_joint_multi_output_with_categorical(
                 active_grads,
                 n_outputs,
                 categorical_features,
-                round,
+                global_round,
                 sampled_rows_opt.as_deref(),
             )?
         };
@@ -1209,75 +1641,117 @@ pub fn fit_joint_multi_output_with_categorical(
             }
         }
 
-        // v0.10.0 review fix (Comment 2): update training-time predictions via
-        // a per-row tree walk over THIS round's stumps. Previously we applied
-        // every stump's delta to every row, which is correct only when
-        // max_depth == 1 (each row reaches every stump). For max_depth > 1,
-        // non-root stumps must only affect rows that reach them — which is
-        // exactly what JointPredictor does at predict time. Mirroring that
-        // walk here ensures training-time predictions match deserialized
-        // artifact predictions.
+        // v0.10.0 review fix (Comment 2) — refactored in v0.10.3:
+        // update training-time predictions via a per-row tree walk over
+        // THIS round's stumps. Previously we applied every stump's
+        // delta to every row, which is correct only when max_depth == 1
+        // (each row reaches every stump). For max_depth > 1, non-root
+        // stumps must only affect rows that reach them — which is
+        // exactly what JointPredictor does at predict time. The walk
+        // is now factored into `walk_tree_into_predictions`, shared
+        // with DART dropout subtraction and warm-start replay.
         //
-        // Build a lookup from local_node_id → (left_k, right_k, split info)
-        // for the current round's stumps. `local_node_id` is still pre-encode
-        // at this point (we re-encode below).
-        let stumps_by_local: std::collections::HashMap<u32, &TrainedStump> = round_result
-            .stumps
-            .iter()
-            .map(|s| (s.split.node_id, s))
-            .collect();
-        for (row, _) in (0..n_rows).enumerate().map(|(r, _)| (r, ())) {
-            // Walk from root (local_node_id = 0) until we fall off the tree at
-            // a terminal leaf. Accumulate the last reached leaf's K-output
-            // value into per-output predictions.
-            let mut current_node: u32 = 0;
-            let mut last_leaf: Option<&(Vec<f32>, Vec<f32>)> = None;
-            let mut last_went_left = false;
-            loop {
-                let Some(stump) = stumps_by_local.get(&current_node) else {
-                    break;
-                };
-                let feature = stump.split.feature_index as usize;
-                let threshold_bin = stump.split.threshold_bin as usize;
-                let bin = binned_matrix.bins[row * feature_count + feature];
-                let went_left = if bin == MISSING_BIN_U8 {
-                    stump.split.default_left
-                } else if stump.split.is_categorical {
-                    // Categorical stump: route by bitset bit.
-                    let bs = stump
-                        .split
-                        .categorical_bitset
-                        .as_ref()
-                        .map(|b| bitset_bytes_to_u64(b))
-                        .unwrap_or(0);
-                    bin < 64 && (bs & (1u64 << bin)) != 0
-                } else {
-                    (bin as usize) <= threshold_bin
-                };
-                last_leaf = stump.multi_output_leaf_values.as_ref();
-                last_went_left = went_left;
-                current_node = if went_left {
-                    current_node * 2 + 1
-                } else {
-                    current_node * 2 + 2
-                };
-            }
-            if let Some((left_k, right_k)) = last_leaf {
-                let delta = if last_went_left { left_k } else { right_k };
-                for (k, pred_vec) in predictions.iter_mut().enumerate().take(n_outputs) {
-                    pred_vec[row] += delta[k];
-                }
-            }
-        }
+        // `round_result.stumps` are still pre-encode at this point
+        // (local node IDs); the helper extracts local IDs via
+        // `node_id % TREE_NODE_STRIDE` which works under both encodings.
+        walk_tree_into_predictions(
+            &round_result.stumps,
+            binned_matrix,
+            feature_count,
+            n_rows,
+            n_outputs,
+            &mut predictions,
+            1.0,
+            1.0,
+        );
 
         // Re-encode node_id to be globally unique across rounds (joint
         // trainer outputs one tree per round; local_node_id stays the
-        // same, tree_index = round).
+        // same, tree_index = round). Track the round's stump range so
+        // DART can subtract / re-add this tree on later rounds.
+        let round_start = all_stumps.len();
+        let global_round = round + initial_rounds;
         for mut stump in round_result.stumps.into_iter() {
             let local_node_id = stump.split.node_id;
-            stump.split.node_id = encode_tree_node_id(round, local_node_id)
+            stump.split.node_id = encode_tree_node_id(global_round, local_node_id)
                 .map_err(|e| format!("encode_tree_node_id: {e:?}"))?;
             all_stumps.push(stump);
+        }
+        let round_count = all_stumps.len() - round_start;
+        dart_round_start_offsets.push(round_start);
+        dart_round_counts.push(round_count);
+
+        // v0.10.3 joint DART finalize: rescale the new tree from 1.0
+        // down to `new_w = 1 / (K + 1)`, and re-add each dropped tree
+        // at its rescaled weight. Mirrors the single-output DART
+        // finalize block in crates/engine/src/lib.rs:5118.
+        if let Some((_, _, normalize_type, _)) = dart_params {
+            let k = dropped_tree_ids.len() as f32;
+            let new_w = 1.0 / (k + 1.0);
+            let drop_factor = match normalize_type {
+                alloygbm_core::DartNormalize::Tree => k / (k + 1.0),
+                alloygbm_core::DartNormalize::Forest => 1.0 / (k + 1.0),
+            };
+            // 1. Scale new tree from 1.0 down to new_w: subtract
+            //    (1.0 - new_w) of the new tree's contribution.
+            let delta_scale = 1.0_f32 - new_w;
+            if delta_scale.abs() > f32::EPSILON && round_count > 0 {
+                walk_tree_into_predictions(
+                    &all_stumps[round_start..round_start + round_count],
+                    binned_matrix,
+                    feature_count,
+                    n_rows,
+                    n_outputs,
+                    &mut predictions,
+                    -1.0,
+                    delta_scale,
+                );
+            }
+            // 2. Re-add each dropped tree at its post-normalize weight
+            //    `w_new = w_old * drop_factor`.
+            for &tree_id in &dropped_tree_ids {
+                let w_old = dart_state.tree_weights[tree_id];
+                let w_new = w_old * drop_factor;
+                let start = dart_round_start_offsets[tree_id];
+                let count = dart_round_counts[tree_id];
+                if count > 0 {
+                    walk_tree_into_predictions(
+                        &all_stumps[start..start + count],
+                        binned_matrix,
+                        feature_count,
+                        n_rows,
+                        n_outputs,
+                        &mut predictions,
+                        1.0,
+                        w_new,
+                    );
+                }
+            }
+            // 3. Push placeholder weight for the new tree, then run
+            //    `apply_normalization` which rescales dropped trees in
+            //    place AND sets the new-tree weight to `new_w`.
+            dart_state.tree_weights.push(1.0);
+            let new_tree_index = dart_state.tree_weights.len() - 1;
+            crate::apply_normalization(
+                &mut dart_state.tree_weights,
+                &dropped_tree_ids,
+                normalize_type,
+                new_tree_index,
+            );
+        }
+    }
+
+    // v0.10.3 joint DART: stamp the per-tree `tree_weight` onto every
+    // stump in that tree so the artifact's `DartTreeWeights` section
+    // round-trips correctly. Mirrors the multiclass DART stamping
+    // step at the end of `fit_multiclass_iterations_impl`.
+    if dart_params.is_some() {
+        for (round_idx, &w) in dart_state.tree_weights.iter().enumerate() {
+            let start = dart_round_start_offsets[round_idx];
+            let count = dart_round_counts[round_idx];
+            for s in all_stumps.iter_mut().skip(start).take(count) {
+                s.tree_weight = w;
+            }
         }
     }
 
@@ -1294,7 +1768,10 @@ pub fn fit_joint_multi_output_with_categorical(
         feature_baseline: None,
     };
 
-    let _ = rounds_completed; // for future use (loss history etc.)
+    // v0.10.3 warm-start: report TOTAL rounds completed (prior + new)
+    // so a downstream consumer can decode "total tree count" from a
+    // single integer.
+    let total_rounds_completed = initial_rounds + rounds_completed;
 
     Ok(JointTrainingSummary {
         baselines,
@@ -1303,7 +1780,7 @@ pub fn fit_joint_multi_output_with_categorical(
             .iter()
             .map(|o| o.name().to_string())
             .collect(),
-        rounds_completed,
+        rounds_completed: total_rounds_completed,
     })
 }
 
@@ -1346,6 +1823,13 @@ pub struct JointPredictor {
     /// For each round, the list of stump indices that belong to that round.
     /// Used to walk one tree at a time.
     rounds: Vec<Vec<usize>>,
+    /// v0.10.3: per-tree (per-round) weight, read from each tree's first
+    /// stump's `tree_weight` field. For non-DART artifacts every entry is
+    /// 1.0 and this collapses to the v0.10.2 behavior. For DART artifacts
+    /// the weights come from the persisted `DartTreeWeights` section
+    /// (kind=11) which `TrainedModel::from_artifact_bytes` applies onto
+    /// stumps via `apply_dart_tree_weights`.
+    tree_weights: Vec<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -1398,6 +1882,7 @@ impl JointPredictor {
 
         let mut stumps: Vec<JointPredictorStump> = Vec::new();
         let mut rounds: Vec<Vec<usize>> = Vec::new();
+        let mut tree_weights: Vec<f32> = Vec::new();
         for stump in model.stumps.iter() {
             let Some(mo) = stump.multi_output_leaf_values.as_ref() else {
                 continue;
@@ -1423,6 +1908,14 @@ impl JointPredictor {
             });
             while rounds.len() <= tree_id {
                 rounds.push(Vec::new());
+                tree_weights.push(1.0);
+            }
+            // Record this tree's weight when we see its FIRST stump
+            // (matches `apply_dart_tree_weights` in
+            // crates/predictor/src/lib.rs:1214 — all stumps in a tree
+            // share the same `tree_weight`).
+            if rounds[tree_id].is_empty() {
+                tree_weights[tree_id] = stump.tree_weight;
             }
             rounds[tree_id].push(new_idx);
         }
@@ -1432,6 +1925,7 @@ impl JointPredictor {
             baselines,
             stumps,
             rounds,
+            tree_weights,
         })
     }
 
@@ -1440,10 +1934,12 @@ impl JointPredictor {
     /// plus the per-output baseline.
     pub fn predict_row(&self, features: &[f32]) -> Vec<f32> {
         let mut out = self.baselines.clone();
-        for tree_stump_indices in &self.rounds {
+        for (tree_idx, tree_stump_indices) in self.rounds.iter().enumerate() {
             if tree_stump_indices.is_empty() {
                 continue;
             }
+            // v0.10.3: per-tree DART weight (1.0 for non-DART artifacts).
+            let tree_w = *self.tree_weights.get(tree_idx).unwrap_or(&1.0);
             // Build a lookup from local_node_id to stump_index for this tree.
             let mut stumps_by_node: std::collections::HashMap<u32, usize> =
                 std::collections::HashMap::with_capacity(tree_stump_indices.len());
@@ -1492,7 +1988,7 @@ impl JointPredictor {
             }
             if let Some(leaf) = last_leaf_value {
                 for k in 0..self.n_outputs {
-                    out[k] += leaf[k];
+                    out[k] += tree_w * leaf[k];
                 }
             }
         }
@@ -2427,5 +2923,345 @@ mod tests {
         assert!(p1[1] < 0.0, "cat 1 output 1 should be < 0, got {}", p1[1]);
         assert!(p0[1] > 0.0, "cat 0 output 1 should be > 0, got {}", p0[1]);
         assert!(p2[1] > 0.0, "cat 2 output 1 should be > 0, got {}", p2[1]);
+    }
+
+    #[test]
+    fn joint_goss_changes_trained_model_vs_standard() {
+        // 200 rows, 2 outputs. Half are large-magnitude-gradient rows,
+        // half are near-zero. With GOSS top_rate=0.2 other_rate=0.1, the
+        // trainer should fit on a tiny subset (~60 rows) with amplified
+        // gradients. With Standard, the trainer sees all 200 rows. The
+        // resulting first-round leaf values MUST differ — a no-op
+        // BoostingMode would produce identical models.
+        use alloygbm_core::BoostingMode;
+
+        let n_rows = 200;
+        let feature_count = 1;
+        let targets_0: Vec<f32> = (0..n_rows)
+            .map(|i| if i < n_rows / 2 { -10.0 } else { 0.01 })
+            .collect();
+        let targets_1: Vec<f32> = targets_0.iter().map(|&t| t * 2.0).collect();
+        let bins: Vec<u8> = (0..n_rows).map(|i| (i % 8) as u8).collect();
+        let binned_matrix =
+            BinnedMatrix::new(n_rows, feature_count, /*max_bin=*/ 7, bins).expect("bm");
+
+        let params_standard = TrainParams {
+            seed: 7,
+            max_depth: 2,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            boosting_mode: BoostingMode::Standard,
+            ..TrainParams::default()
+        };
+        let params_goss = TrainParams {
+            seed: 7,
+            max_depth: 2,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            boosting_mode: BoostingMode::Goss {
+                top_rate: 0.2,
+                other_rate: 0.1,
+            },
+            ..TrainParams::default()
+        };
+
+        let summary_standard = fit_joint_multi_output(
+            &params_standard,
+            feature_count,
+            &binned_matrix,
+            &[targets_0.clone(), targets_1.clone()],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            3,
+        )
+        .expect("standard fit");
+        let summary_goss = fit_joint_multi_output(
+            &params_goss,
+            feature_count,
+            &binned_matrix,
+            &[targets_0.clone(), targets_1.clone()],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            3,
+        )
+        .expect("goss fit");
+
+        // Both must produce models, but the leaf values must diverge
+        // (proves GOSS isn't a silent no-op). Compare the first stump's
+        // K-output left value across the two fits.
+        assert!(!summary_standard.model.stumps.is_empty());
+        assert!(!summary_goss.model.stumps.is_empty());
+        let leaf_standard = summary_standard.model.stumps[0]
+            .multi_output_leaf_values
+            .as_ref()
+            .expect("multi-output leaf");
+        let leaf_goss = summary_goss.model.stumps[0]
+            .multi_output_leaf_values
+            .as_ref()
+            .expect("multi-output leaf");
+        let max_diff = leaf_standard
+            .0
+            .iter()
+            .zip(leaf_goss.0.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            max_diff > 1e-4,
+            "GOSS must change the first stump's left K-output leaf; \
+             standard={:?} goss={:?}",
+            leaf_standard.0,
+            leaf_goss.0,
+        );
+    }
+
+    #[test]
+    fn joint_dart_produces_non_uniform_tree_weights() {
+        // DART must drop at least one prior tree per round (after the
+        // first), and `apply_normalization` rescales both the new tree
+        // and the dropped trees so the persisted `tree_weight` field
+        // varies from 1.0. A fresh DART fit thus exposes a non-uniform
+        // tree_weight array.
+        use alloygbm_core::{BoostingMode, DartNormalize, DartSampleType};
+
+        let n_rows = 100;
+        let feature_count = 1;
+        let targets: Vec<f32> = (0..n_rows).map(|i| (i % 4) as f32).collect();
+        let bins: Vec<u8> = (0..n_rows).map(|i| (i % 4) as u8).collect();
+        let binned_matrix =
+            BinnedMatrix::new(n_rows, feature_count, /*max_bin=*/ 3, bins).expect("bm");
+
+        let params = TrainParams {
+            seed: 42,
+            max_depth: 2,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            boosting_mode: BoostingMode::Dart {
+                drop_rate: 0.5,
+                max_drop: 5,
+                normalize_type: DartNormalize::Tree,
+                sample_type: DartSampleType::Uniform,
+            },
+            ..TrainParams::default()
+        };
+
+        let summary = fit_joint_multi_output(
+            &params,
+            feature_count,
+            &binned_matrix,
+            &[targets.clone(), targets.clone()],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            8,
+        )
+        .expect("joint DART fit must succeed");
+        // Group stumps by tree; the first stump of each tree carries the
+        // tree_weight (mirrors `apply_dart_tree_weights`).
+        let mut weights: Vec<f32> = Vec::new();
+        let mut current_tree: Option<u32> = None;
+        for s in &summary.model.stumps {
+            let tree_id = s.split.node_id / TREE_NODE_STRIDE;
+            if Some(tree_id) != current_tree {
+                weights.push(s.tree_weight);
+                current_tree = Some(tree_id);
+            }
+        }
+        assert!(weights.len() >= 2, "got only {} weights", weights.len());
+        let any_non_unit = weights.iter().any(|&w| (w - 1.0).abs() > 1e-4);
+        assert!(
+            any_non_unit,
+            "expected non-uniform tree_weights, got {weights:?}"
+        );
+    }
+
+    #[test]
+    fn joint_dart_round_trips_through_predictor() {
+        // After DART training, JointPredictor must reproduce the
+        // training-time predictions. The per-tree `tree_weight` lives
+        // on every stump and is persisted via the existing
+        // `DartTreeWeights` artifact section.
+        use alloygbm_core::{BoostingMode, DartNormalize, DartSampleType};
+
+        let n_rows = 80;
+        let feature_count = 2;
+        let targets_0: Vec<f32> = (0..n_rows).map(|i| (i as f32) * 0.1).collect();
+        let targets_1: Vec<f32> = (0..n_rows).map(|i| -(i as f32) * 0.05).collect();
+        let bins: Vec<u8> = (0..(n_rows * feature_count))
+            .map(|i| (i % 8) as u8)
+            .collect();
+        let binned_matrix =
+            BinnedMatrix::new(n_rows, feature_count, /*max_bin=*/ 7, bins).expect("bm");
+
+        let params = TrainParams {
+            seed: 7,
+            max_depth: 3,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            boosting_mode: BoostingMode::Dart {
+                drop_rate: 0.4,
+                max_drop: 3,
+                normalize_type: DartNormalize::Tree,
+                sample_type: DartSampleType::Uniform,
+            },
+            ..TrainParams::default()
+        };
+        let summary = fit_joint_multi_output(
+            &params,
+            feature_count,
+            &binned_matrix,
+            &[targets_0.clone(), targets_1.clone()],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            6,
+        )
+        .expect("dart fit");
+
+        // The artifact must include DartTreeWeights (any non-unit weight
+        // triggers emission in `TrainedModel::to_artifact_bytes`).
+        let bytes = summary.model.clone().to_artifact_bytes().expect("artifact");
+        let predictor =
+            JointPredictor::from_artifact_bytes(&bytes, summary.baselines.clone()).expect("load");
+        // Reconstruct a few rows' raw features from binned_matrix.bins
+        // (the test fixture put bin == raw feature value modulo 8) and
+        // verify finite predictions.
+        for row in 0..5 {
+            let feats: Vec<f32> = (0..feature_count)
+                .map(|f| binned_matrix.bins[row * feature_count + f] as f32)
+                .collect();
+            let p = predictor.predict_row(&feats);
+            assert_eq!(p.len(), 2);
+            assert!(p[0].is_finite(), "row {row} output 0 = {}", p[0]);
+            assert!(p[1].is_finite(), "row {row} output 1 = {}", p[1]);
+        }
+    }
+
+    #[test]
+    fn joint_warm_start_with_no_prior_state_matches_fresh_fit() {
+        let n_rows = 60;
+        let feature_count = 1;
+        let targets: Vec<f32> = (0..n_rows).map(|i| (i % 4) as f32).collect();
+        let bins: Vec<u8> = (0..n_rows).map(|i| (i % 4) as u8).collect();
+        let binned_matrix =
+            BinnedMatrix::new(n_rows, feature_count, /*max_bin=*/ 3, bins).expect("bm");
+        let params = TrainParams {
+            seed: 1,
+            max_depth: 2,
+            ..TrainParams::default()
+        };
+        let fresh = fit_joint_multi_output(
+            &params,
+            feature_count,
+            &binned_matrix,
+            std::slice::from_ref(&targets),
+            None,
+            &[JointObjective::SquaredError],
+            4,
+        )
+        .expect("fresh");
+        let warm = fit_joint_multi_output_with_warm_start(
+            &params,
+            feature_count,
+            &binned_matrix,
+            std::slice::from_ref(&targets),
+            None,
+            &[JointObjective::SquaredError],
+            4,
+            &[],
+            None,
+        )
+        .expect("warm with None");
+        assert_eq!(fresh.model.stumps.len(), warm.model.stumps.len());
+        assert_eq!(fresh.baselines, warm.baselines);
+    }
+
+    #[test]
+    fn joint_warm_start_continues_from_prior_state() {
+        let n_rows = 80;
+        let feature_count = 2;
+        let targets_0: Vec<f32> = (0..n_rows).map(|i| (i as f32) * 0.1).collect();
+        let targets_1: Vec<f32> = (0..n_rows).map(|i| -(i as f32) * 0.05).collect();
+        let bins: Vec<u8> = (0..(n_rows * feature_count))
+            .map(|i| (i % 8) as u8)
+            .collect();
+        let binned_matrix =
+            BinnedMatrix::new(n_rows, feature_count, /*max_bin=*/ 7, bins).expect("bm");
+        let params = TrainParams {
+            seed: 5,
+            max_depth: 3,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            ..TrainParams::default()
+        };
+
+        // Fresh 10-round fit.
+        let fresh = fit_joint_multi_output(
+            &params,
+            feature_count,
+            &binned_matrix,
+            &[targets_0.clone(), targets_1.clone()],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            10,
+        )
+        .expect("fresh");
+
+        // 6 + 4 split: train 6 rounds, then warm-resume for 4 more.
+        let first = fit_joint_multi_output(
+            &params,
+            feature_count,
+            &binned_matrix,
+            &[targets_0.clone(), targets_1.clone()],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            6,
+        )
+        .expect("first 6");
+        let warm = JointWarmStartState {
+            baselines: first.baselines.clone(),
+            stumps: first.model.stumps.clone(),
+            initial_rounds_completed: 6,
+            initial_dart_tree_weights: None,
+        };
+        let resumed = fit_joint_multi_output_with_warm_start(
+            &params,
+            feature_count,
+            &binned_matrix,
+            &[targets_0.clone(), targets_1.clone()],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            4,
+            &[],
+            Some(warm),
+        )
+        .expect("resume 4");
+
+        assert_eq!(
+            resumed.model.stumps.len(),
+            fresh.model.stumps.len(),
+            "warm-resume must produce the same number of stumps"
+        );
+        // Predictions on a few rows must match (within tight numerical
+        // tolerance — the random draws on rounds 6..9 are seeded with
+        // `global_round = round + 6` so they should be identical to
+        // the fresh fit's rounds 6..9).
+        let bytes_fresh = fresh.model.clone().to_artifact_bytes().expect("artifact");
+        let bytes_resume = resumed.model.clone().to_artifact_bytes().expect("artifact");
+        let p_fresh = JointPredictor::from_artifact_bytes(&bytes_fresh, fresh.baselines.clone())
+            .expect("pred fresh");
+        let p_resume =
+            JointPredictor::from_artifact_bytes(&bytes_resume, resumed.baselines.clone())
+                .expect("pred resume");
+        for row in 0..5 {
+            let feats: Vec<f32> = (0..feature_count)
+                .map(|f| binned_matrix.bins[row * feature_count + f] as f32)
+                .collect();
+            let pf = p_fresh.predict_row(&feats);
+            let pr = p_resume.predict_row(&feats);
+            for k in 0..2 {
+                assert!(
+                    (pf[k] - pr[k]).abs() < 1e-4,
+                    "row {row} output {k} fresh={pf:?} resume={pr:?}"
+                );
+            }
+        }
     }
 }

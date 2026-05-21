@@ -1,6 +1,6 @@
 # AlloyGBM Current Limitations
 
-Last updated for v0.10.2.
+Last updated for v0.10.3.
 
 ## Remaining Limitations
 
@@ -10,23 +10,61 @@ The `BackendOps` trait is designed for hardware abstraction, but only
 `CpuBackend` exists. GPU/accelerator support is architecturally planned but
 not implemented.
 
-### 2. Joint-path advanced feature parity (Rust-level) — v0.10.3 / v0.10.4
+### 2. Joint-path advanced feature parity — v0.10.4
 
-The joint trainer covers leaf-wise growth + `max_leaves`,
-`interaction_constraints`, `min_split_gain`, `row_subsample`, and
-`col_subsample` as of v0.10.2. The Rust-level native-categorical
-support (`find_best_multi_output_categorical_split` +
-`fit_joint_multi_output_with_categorical`) is in place but **not yet
-reachable from Python** — the wrapper rejects
-`categorical_feature_indices` and `max_cat_threshold` in joint mode
-because the current Python binning bridge doesn't preserve
-`bin_index == category_id` for joint-mode fits. Still pending:
+The joint trainer reached feature parity with the single-output trainer
+in three releases:
 
-- **v0.10.3:** wire the proper categorical preparation through the
-  joint Python bridge; GOSS, DART, and warm-start on the joint path.
-- **v0.10.4:** MorphBoost, DRO, and neutralization on the joint path.
+- **v0.10.2** — leaf-wise growth + `max_leaves`, `interaction_constraints`,
+  `min_split_gain`, `row_subsample`, `col_subsample`. Rust-level
+  native-categorical (`find_best_multi_output_categorical_split` +
+  `fit_joint_multi_output_with_categorical`) landed but the Python
+  wrapper rejected the kwargs because the binning bridge didn't
+  preserve `bin_index == category_id`.
+- **v0.10.3** — Python wiring for native-categorical splits is now
+  honest (the bridge re-bins requested columns to
+  `bin_index == category_id`). GOSS, DART, and warm-start on the joint
+  path landed via a shared `walk_tree_into_predictions` helper +
+  `JointWarmStartState` / `fit_joint_multi_output_with_warm_start`.
+
+Still pending for **v0.10.4**: MorphBoost, DRO, and factor
+neutralization on the joint path. These touch the per-row gradient
+pipeline more invasively than GOSS/DART/warm-start and need their own
+design pass.
 
 ## Resolved (Previously Limitations)
+
+### v0.10.3
+
+- **Joint native-categorical Python wiring (was a v0.10.3 follow-up):**
+  the PyO3 bridge `train_joint_multi_label_ranker` now re-bins requested
+  columns to `bin_index == category_id` before calling
+  `fit_joint_multi_output_with_categorical`, mirroring the single-output
+  `apply_categorical_encoding_to_training_matrices_multi`. The
+  `_JOINT_SUPPORTED_KWARGS` allow-list re-adds
+  `categorical_feature_indices` and `max_cat_threshold`.
+- **Joint GOSS (was a v0.10.3 follow-up):** new
+  `select_joint_row_indices_for_round` helper in `joint.rs` scores rows
+  by `s_i = Σₖ |g_{i,k}|` across the K per-output gradient buffers
+  (LightGBM multiclass GOSS convention). A single row mask is shared
+  across all K buffers; the amplification factor mutates every
+  gradient/hessian in lockstep so histograms remain unbiased.
+- **Joint DART (was a v0.10.3 follow-up):** dropout/normalize cycle
+  added to `fit_joint_inner`. One tree per round simplifies bookkeeping
+  vs. multiclass DART: `dart_state.tree_weights` has length
+  `rounds_completed` and `dart_round_start_offsets[r]` /
+  `dart_round_counts[r]` collapse to a flat per-round pair.
+  `JointPredictor` extended with `tree_weights: Vec<f32>` so the
+  per-tree weight is applied at predict time. Reuses
+  `engine::dart::{select_dropouts, apply_normalization}` unchanged.
+- **Joint warm-start (was a v0.10.3 follow-up):** new
+  `JointWarmStartState` + `fit_joint_multi_output_with_warm_start`
+  entry point. Prior stumps are replayed onto `predictions` (using the
+  shared `walk_tree_into_predictions` helper); new-round `node_id` is
+  re-encoded starting at `initial_rounds_completed`; per-round seeds
+  mix `global_round = round + initial_rounds` so warm-resumed N+M
+  matches fresh N+M. DART warm-resume reconstructs
+  `dart_state.tree_weights` from per-stump `tree_weight`.
 
 ### v0.10.2
 
@@ -39,12 +77,12 @@ because the current Python binning bridge doesn't preserve
   and `col_subsample`. All five features are exposed through the
   `MultiLabelGBMRanker(multi_label_mode="joint")` Python surface; the
   `_JOINT_SUPPORTED_KWARGS` allow-list grew accordingly. Native-categorical
-  is partially shipped (Rust-level `find_best_multi_output_categorical_split`
-  + `fit_joint_multi_output_with_categorical` are in place; Python
-  surface deferred to v0.10.3 — see Limitation 2 above). Still
-  deferred to **v0.10.3**: native-cat Python wiring, GOSS, DART,
-  warm-start on the joint path. Still deferred to **v0.10.4**:
-  MorphBoost, DRO, neutralization on the joint path.
+  was partially shipped in v0.10.2 (Rust-level
+  `find_best_multi_output_categorical_split` +
+  `fit_joint_multi_output_with_categorical` in place; Python surface
+  closed in v0.10.3). GOSS, DART, and warm-start on the joint path
+  shipped in v0.10.3. Still deferred to **v0.10.4**: MorphBoost,
+  DRO, neutralization on the joint path.
 - **Leaf-wise multiclass DART (was a v0.10.x follow-up):**
   `GBMClassifier(boosting_mode="dart")` with K ≥ 3 classes now works
   under `tree_growth="leaf"` + `max_leaves`. The v0.10.1 level-wise

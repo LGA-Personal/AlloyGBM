@@ -290,16 +290,23 @@ class MultiLabelGBMRanker:
         # v0.10.2 Phase 2: leaf-wise growth.
         "tree_growth",
         "max_leaves",
-        # NOTE: native-categorical splits are intentionally NOT in this set
-        # in v0.10.2 (reverted via v0.10.2.1 fix). The Rust-level joint
-        # trainer (`fit_joint_multi_output_with_categorical` +
-        # `find_best_multi_output_categorical_split`) is sound when fed
-        # bins where `bin_index == category_id`, but the Python wrapper
-        # currently calls `prepare_training_matrices_from_dense_values`
-        # with `ContinuousBinningStrategy::Linear` which doesn't preserve
-        # that invariant for joint mode. Wiring the proper categorical
-        # preparation path through the joint bridge is tracked for
-        # v0.10.3 alongside joint GOSS/DART/warm-start.
+        # v0.10.3: native-categorical splits (Python wiring finally honest).
+        # The Rust-level joint trainer
+        # (`fit_joint_multi_output_with_categorical` +
+        # `find_best_multi_output_categorical_split`) was already in
+        # place in v0.10.2; v0.10.3 adds the re-binning step in the
+        # PyO3 bridge so `bin_index == category_id` is preserved for
+        # the requested columns before the trainer sees them.
+        "categorical_feature_indices",
+        "max_cat_threshold",
+        # v0.10.3: joint boosting modes — GOSS, DART.
+        "boosting_mode",
+        "goss_top_rate",
+        "goss_other_rate",
+        "dart_drop_rate",
+        "dart_max_drop",
+        "dart_normalize_type",
+        "dart_sample_type",
     })
 
     @staticmethod
@@ -388,12 +395,56 @@ class MultiLabelGBMRanker:
                 f"__init__ instead, or use multi_label_mode='independent'."
             )
 
+        # v0.10.3: joint warm-start. `init_model` is a previously fit
+        # MultiLabelGBMRanker (joint mode); we crack open its artifact
+        # + baselines + rounds_completed and feed them to the engine
+        # entry point. These are "managed" kwargs — not part of
+        # `_JOINT_SUPPORTED_KWARGS` because they map to a separate
+        # warm-start argument on the bridge.
+        init_model = self._per_label_kwargs.get("init_model")
+        warm_start_flag = bool(self._per_label_kwargs.get("warm_start", False))
+        if init_model is not None and not warm_start_flag:
+            raise ValueError("init_model requires warm_start=True")
+        if warm_start_flag and init_model is None:
+            raise ValueError(
+                "warm_start=True requires init_model=<fitted MultiLabelGBMRanker>"
+            )
+        init_artifact: bytes | None = None
+        init_baselines: list[float] | None = None
+        init_rounds: int | None = None
+        if init_model is not None:
+            if not isinstance(init_model, MultiLabelGBMRanker):
+                raise TypeError(
+                    "joint warm-start expects init_model to be a "
+                    f"MultiLabelGBMRanker (got {type(init_model).__name__})"
+                )
+            if init_model.multi_label_mode != "joint":
+                raise ValueError(
+                    "joint warm-start requires init_model.multi_label_mode == 'joint'"
+                )
+            if not init_model._is_fitted:
+                raise ValueError("init_model must be fitted")
+            if init_model._joint_artifact_bytes is None:
+                raise ValueError("init_model is missing joint artifact bytes")
+            init_artifact = init_model._joint_artifact_bytes
+            init_baselines = list(init_model._joint_baselines or [])
+            init_rounds = int(init_model.rounds_completed_ or 0)
+
         # Strict allow-list: every per-label kwarg must be in the set
         # that `train_joint_multi_label_ranker` actually forwards into
         # `TrainParams`.  Silently dropping a knob is a reproducibility
         # bug (e.g. setting `row_subsample=0.5` and then training on
         # the full dataset would be a debugging nightmare).
-        unsupported = set(self._per_label_kwargs.keys()) - self._JOINT_SUPPORTED_KWARGS
+        #
+        # `init_model` and `warm_start` are managed separately above
+        # so they're allowed in `_per_label_kwargs` without appearing
+        # in the bridge-forwarded set.
+        _MANAGED_KWARGS = {"init_model", "warm_start"}
+        unsupported = (
+            set(self._per_label_kwargs.keys())
+            - self._JOINT_SUPPORTED_KWARGS
+            - _MANAGED_KWARGS
+        )
         if unsupported:
             raise NotImplementedError(
                 f"multi_label_mode='joint' rejects per-label kwargs "
@@ -408,6 +459,50 @@ class MultiLabelGBMRanker:
         x_arr = np.ascontiguousarray(np.asarray(X), dtype=np.float32)
         row_count = int(x_arr.shape[0])
         feature_count = int(x_arr.shape[1])
+
+        # PR #36 review (C4): validate init_model schema before sending
+        # the artifact to Rust. Without these checks, a mismatched prior
+        # fit can panic the Rust side (e.g. out-of-bounds feature index
+        # in `walk_tree_into_predictions`) instead of raising a clean
+        # Python ValueError. C2 added defense-in-depth on the Rust side;
+        # this is the corresponding defense-in-depth on the Python side.
+        if init_model is not None:
+            prior_features = int(init_model._joint_feature_count or 0)
+            if prior_features != feature_count:
+                raise ValueError(
+                    f"joint warm-start: init_model was trained on "
+                    f"{prior_features} features, but X has {feature_count}. "
+                    f"Schemas must match exactly."
+                )
+            prior_n_labels = int(init_model.n_labels_ or 0)
+            if prior_n_labels != n_labels:
+                raise ValueError(
+                    f"joint warm-start: init_model has {prior_n_labels} "
+                    f"labels, but y has {n_labels}. Schemas must match."
+                )
+            # DART <-> non-DART mode mismatch: a DART prior resumed as
+            # standard is replayed at weight 1.0 (the per-tree weight
+            # is discarded for non-DART training), which silently
+            # changes the residual stream the new rounds see. A
+            # non-DART prior resumed as DART is also surprising — the
+            # new fit starts with `dart_state.tree_weights` reconstructed
+            # from `tree_weight=1.0` for every prior tree, which is
+            # numerically correct but means dropouts in early new rounds
+            # only ever drop prior trees with equal weight (no real
+            # dropout asymmetry until new DART rounds run). Both are
+            # confusing footguns; reject explicitly.
+            prior_bm = init_model._per_label_kwargs.get("boosting_mode", "standard")
+            curr_bm = self._per_label_kwargs.get("boosting_mode", "standard")
+            prior_is_dart = prior_bm == "dart"
+            curr_is_dart = curr_bm == "dart"
+            if prior_is_dart != curr_is_dart:
+                raise ValueError(
+                    f"joint warm-start: boosting_mode mismatch — init_model used "
+                    f"{prior_bm!r}, current fit uses {curr_bm!r}. DART <-> non-DART "
+                    f"transitions across warm-resume are rejected because the per-tree "
+                    f"`tree_weight` semantics differ. Use the same `boosting_mode` "
+                    f"for both fits, or fit fresh without `warm_start=True`."
+                )
 
         # PR review (C2): joint mode must reorder rows so per-query
         # group IDs are contiguous before handing the data to the
@@ -471,15 +566,38 @@ class MultiLabelGBMRanker:
             max_leaves=(
                 int(kw["max_leaves"]) if kw.get("max_leaves") is not None else None
             ),
-            # v0.10.2 Phase 3 (native-categorical) is reverted in v0.10.2.1
-            # because the Python binning path doesn't preserve
-            # bin_index == category_id for joint mode. The Rust-level entry
-            # point still accepts these kwargs (for future v0.10.3 wiring),
-            # but we always pass empty / 0 from Python so the Rust trainer
-            # falls back to the numeric path. The corresponding kwargs are
-            # rejected by `_JOINT_SUPPORTED_KWARGS` above.
-            categorical_feature_indices=[],
-            max_cat_threshold=0,
+            # v0.10.3: native-categorical kwargs are now passed through.
+            # The PyO3 bridge re-bins requested columns to
+            # `bin_index == category_id` before calling the Rust trainer,
+            # which is the invariant the joint native-cat path requires.
+            categorical_feature_indices=[
+                int(fi) for fi in (kw.get("categorical_feature_indices") or [])
+            ],
+            max_cat_threshold=int(kw.get("max_cat_threshold", 0)),
+            # v0.10.3: joint boosting_mode (GOSS / DART).
+            boosting_mode=str(kw.get("boosting_mode", "standard")),
+            goss_top_rate=(
+                float(kw["goss_top_rate"]) if "goss_top_rate" in kw else None
+            ),
+            goss_other_rate=(
+                float(kw["goss_other_rate"]) if "goss_other_rate" in kw else None
+            ),
+            dart_drop_rate=(
+                float(kw["dart_drop_rate"]) if "dart_drop_rate" in kw else None
+            ),
+            dart_max_drop=(
+                int(kw["dart_max_drop"]) if "dart_max_drop" in kw else None
+            ),
+            dart_normalize_type=(
+                str(kw["dart_normalize_type"]) if "dart_normalize_type" in kw else None
+            ),
+            dart_sample_type=(
+                str(kw["dart_sample_type"]) if "dart_sample_type" in kw else None
+            ),
+            # v0.10.3: joint warm-start.
+            init_artifact_bytes=init_artifact,
+            init_baselines=init_baselines,
+            init_rounds_completed=init_rounds,
         )
 
         self._joint_artifact_bytes = bytes(artifact)
