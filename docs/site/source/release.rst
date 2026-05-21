@@ -39,12 +39,22 @@ counts) — exact for objectives where hess ≡ 1 per row, monotone proxy
 for ranking. Warmup byte-equivalence with the standard K-output gain
 is guaranteed regardless.
 
-**MorphBoost EMA warm-start:**
+**MorphBoost EMA warm-start (continuity, not byte-equivalence):**
 ``JointWarmStartState.initial_ema_stats: Option<Vec<GradientEmaStats>>``
-re-seeds ``MorphState::ema_stats`` on warm-resume so a warm-resumed N+M
-fit matches a fresh N+M fit byte-for-byte under MorphBoost. The PyO3
-bridge auto-extracts the snapshot from ``init_artifact_bytes`` via
+re-seeds ``MorphState::ema_stats`` on warm-resume so the gradient-
+statistics smoothing is continuous across the resume boundary — new
+rounds see the same per-output ``(mean, std)`` they would have seen had
+training never been interrupted. The PyO3 bridge auto-extracts the
+snapshot from ``init_artifact_bytes`` via
 ``TrainedModel::from_artifact_bytes(…).morph_metadata``.
+
+**MorphBoost warm-resume is intentionally NOT byte-equivalent to a fresh
+longer fit.** Per-iteration leaf shrinkage and LR schedule are resolved
+against the ``total_iterations`` horizon at training time; a prior fit
+with ``n_estimators=6`` baked its first six trees against a 6-round
+horizon and resuming with ``n_estimators=4`` cannot retroactively
+re-scale them. The EMA continuity is the practical guarantee. This
+mirrors the single-output MorphBoost warm-start behavior.
 
 **Deferred to v0.10.5 / v0.10.6:**
 joint DRO leaves (``leaf_solver="dro"``) and joint factor

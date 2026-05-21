@@ -47,12 +47,29 @@ opted into (the engine skips morph plumbing entirely when
 
 - MorphBoost EMA persists through the artifact's `MorphMetadata`
   section. `JointWarmStartState.initial_ema_stats: Option<Vec<GradientEmaStats>>`
-  re-seeds `MorphState::ema_stats` on warm-resume so a warm-resumed N+M
-  fit matches a fresh N+M fit byte-for-byte under MorphBoost. The PyO3
-  bridge auto-extracts the snapshot from `init_artifact_bytes` via
+  re-seeds `MorphState::ema_stats` on warm-resume so the gradient-
+  statistics smoothing is continuous across the resume boundary — new
+  rounds see the same per-output `(mean, std)` they would have seen
+  had training never been interrupted. The PyO3 bridge auto-extracts
+  the snapshot from `init_artifact_bytes` via
   `TrainedModel::from_artifact_bytes(...).morph_metadata` and threads
-  it through. Mirrors the single-output multiclass EMA warm-start
-  pattern.
+  it through.
+
+  **MorphBoost warm-resume is NOT byte-equivalent to a fresh longer fit
+  (PR #37 review C3).** Per-iteration leaf shrinkage
+  (`1 − morph_rate * round/total`) and LR schedule are resolved against
+  the `total_iterations` horizon at training time. A prior fit with
+  `n_estimators=6` baked its first six trees against a 6-round horizon;
+  resuming with `n_estimators=4` runs the new four rounds against a
+  10-round horizon but the prior six trees keep their original
+  shrinkage. So a `6+4` warm-resumed MorphBoost fit does not match a
+  fresh `n_estimators=10` MorphBoost fit; the prior trees can't be
+  retroactively re-scaled. The EMA continuity is the practical
+  guarantee; byte-level reproducibility across a horizon change is
+  intentionally out of scope. This mirrors the single-output MorphBoost
+  warm-start behavior. The regression
+  `joint_morph_warm_resume_preserves_ema_continuity_not_byte_equivalence`
+  pins both invariants.
 
 ### Internal
 

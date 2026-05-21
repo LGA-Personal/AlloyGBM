@@ -651,6 +651,20 @@ def test_joint_mode_still_rejects_truly_unsupported_kwargs():
             m.fit(X, y, group=group)
 
 
+def test_joint_morph_rejects_invalid_training_mode():
+    """PR #37 review (C1, C4): joint mode must reject invalid
+    `training_mode` values rather than silently downgrading to standard
+    training. Mirrors `GBMRegressor` / `GBMRanker` validation."""
+    X, y, group = _toy_ranking()
+    m = MultiLabelGBMRanker(
+        n_estimators=2,
+        multi_label_mode="joint",
+        training_mode="morhp",  # typo
+    )
+    with pytest.raises(ValueError, match="training_mode"):
+        m.fit(X, y, group=group)
+
+
 def test_joint_morph_changes_predictions_vs_standard():
     """v0.10.4 acceptance: training_mode='morph' produces different
     predictions than the default 'auto' (standard) on the same data + seed."""

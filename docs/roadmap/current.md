@@ -33,12 +33,17 @@ MorphBoost is not opted into.
   `local_node_id.ilog2()`), and per-iteration leaf shrinkage
   (`1 − morph_rate * round/total`) all apply uniformly across the
   K-output leaf values.
-- **Joint MorphBoost warm-start:**
+- **Joint MorphBoost warm-start (EMA continuity, not byte-equivalence):**
   `JointWarmStartState.initial_ema_stats: Option<Vec<GradientEmaStats>>`
-  re-seeds `MorphState::ema_stats` on warm-resume so an
-  N+M warm-resumed MorphBoost fit matches a fresh N+M fit
-  byte-for-byte. The PyO3 bridge extracts the snapshot
-  automatically from `init_artifact_bytes` via
+  re-seeds `MorphState::ema_stats` on warm-resume so gradient-statistics
+  smoothing is continuous across the resume boundary. **Not byte-
+  equivalent to a fresh longer fit** (PR #37 review C3): per-iteration
+  leaf shrinkage and LR schedule are resolved against the
+  `total_iterations` horizon at training time, so a `6+4` warm-resume
+  does not match a fresh `n_estimators=10` MorphBoost fit — the prior
+  six trees keep their original 6-round shrinkage. Mirrors the single-
+  output MorphBoost warm-start behavior. The PyO3 bridge extracts the
+  EMA snapshot automatically from `init_artifact_bytes` via
   `TrainedModel::from_artifact_bytes(…).morph_metadata`.
 
 ### v0.10.x follow-ups (deferred)

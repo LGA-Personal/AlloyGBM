@@ -40,8 +40,19 @@ def _build_joint_morph_config(kw: dict[str, Any]) -> dict[str, Any] | None:
     MorphBoost wiring entirely. When ``training_mode == 'morph'``, calls
     ``alloygbm._morph.build_morph_config_dict`` with the per-label kwargs
     using ``GBMRegressor`` / ``GBMRanker`` defaults for any missing fields.
+
+    PR #37 review (C1, C4): validate ``training_mode`` strictly against the
+    same set ``GBMRegressor`` / ``GBMRanker`` accept (``auto``, ``manual``,
+    ``morph``) so typos like ``"morhp"`` fail fast instead of silently
+    running standard training.
     """
-    if str(kw.get("training_mode", "auto")) != "morph":
+    training_mode = str(kw.get("training_mode", "auto"))
+    if training_mode not in ("auto", "manual", "morph"):
+        raise ValueError(
+            f"training_mode must be 'auto', 'manual', or 'morph', "
+            f"got {training_mode!r}"
+        )
+    if training_mode != "morph":
         return None
     from ._morph import build_morph_config_dict
 

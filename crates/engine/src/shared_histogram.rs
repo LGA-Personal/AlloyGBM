@@ -158,15 +158,22 @@ pub fn compute_multi_output_split_gain(
 /// **Row-count approximation.** Single-output `compute_morph_gain` uses the
 /// real per-side row count for the info-score term. The multi-output
 /// histogram doesn't carry row counts (only `grad` + `hess` sums per bin),
-/// so this helper derives an approximate count via `hess.max(0.0) as u32`.
-/// That is exact for objectives where hessian ≡ 1 per row (`squared_error`,
-/// `queryrmse` in scalar mode) and a monotone proxy for ranking objectives
-/// where hessian is pair-derived. The dominant post-warmup signal is the
-/// gradient-gain term (weighted by `1 - info_score_weight`), which uses
-/// `(g, h)` directly — so the byte-equivalence guarantee in warmup and the
-/// asymptotic correctness post-warmup both hold. Threading exact per-bin
-/// counts would require a 1.5× memory expansion of `MultiOutputHistogram`
-/// and is deferred (joint-trainer follow-up).
+/// so this helper derives an approximate count via `morph_count_proxy`
+/// (see below): for `h > 0` it returns `max(1, ceil(h))` so any bin with
+/// positive hessian mass contributes at least one row to the post-warmup
+/// `info_side` and balance-penalty computations. The single-output exact
+/// path uses true integer counts; on the joint trainer the per-bin
+/// hessian is the closest available proxy without a 1.5× expansion of
+/// `MultiOutputHistogram` (deferred).
+///
+/// PR #37 review (C2): a previous draft used `hess.max(0.0) as u32`,
+/// which floors fractional hessians (common in ranking objectives where
+/// per-row hessians are well below 1) to zero — disabling `info_side`
+/// and the balance penalty for ranking. The `morph_count_proxy` rounds
+/// up so any positive-hessian bin gets count ≥ 1, restoring both signals.
+/// Warmup byte-equivalence with `compute_multi_output_split_gain` still
+/// holds because the morph branch is only taken when
+/// `!pre.in_warmup && !pre.info_score_negligible`.
 ///
 /// `grad_means.len()` and `grad_stds.len()` must equal `histogram.n_outputs`.
 #[allow(clippy::too_many_arguments)]
@@ -195,7 +202,7 @@ pub fn compute_multi_output_split_gain_morph(
             let g = histogram.data[histogram.idx(feature, b, k, HistComponent::Grad)];
             let h = histogram.data[histogram.idx(feature, b, k, HistComponent::Hess)];
             // Approximate per-side count via hessian sum (see doc-comment).
-            let approx_count = h.max(0.0) as u32;
+            let approx_count = morph_count_proxy(h);
             if b <= threshold_bin {
                 g_l += g;
                 h_l += h;
@@ -266,7 +273,7 @@ pub fn find_best_multi_output_categorical_split_morph(
             let h = hist.data()[hist.idx(feature, cat, ko, HistComponent::Hess)];
             total_g[ko] += g;
             total_h[ko] += h;
-            total_c[ko] = total_c[ko].saturating_add(h.max(0.0) as u32);
+            total_c[ko] = total_c[ko].saturating_add(morph_count_proxy(h));
         }
     }
 
@@ -291,7 +298,7 @@ pub fn find_best_multi_output_categorical_split_morph(
             let h = hist.data()[hist.idx(feature, cat, ko, HistComponent::Hess)];
             left_g[ko] += g;
             left_h[ko] += h;
-            left_c[ko] = left_c[ko].saturating_add(h.max(0.0) as u32);
+            left_c[ko] = left_c[ko].saturating_add(morph_count_proxy(h));
         }
         let mut gain = 0.0_f32;
         for ko in 0..k {
@@ -336,6 +343,26 @@ pub fn find_best_multi_output_categorical_split_morph(
         left_bitset,
         n_categories: num_categories as u32,
     })
+}
+
+/// Bin-level row-count proxy for MorphBoost gain on the multi-output
+/// histogram. Returns `0` when `h <= 0` (no row mass in this bin),
+/// otherwise `max(1, ceil(h))` — guarantees any positive-hessian bin
+/// contributes at least one count so `info_side` and the balance
+/// penalty actually fire for ranking objectives where per-row hessians
+/// can be well below 1.
+///
+/// See the doc-comment on `compute_multi_output_split_gain_morph` for
+/// why this proxy lives in the morph-gain helpers rather than as a
+/// general count field on `MultiOutputHistogram`.
+#[inline]
+fn morph_count_proxy(h: f32) -> u32 {
+    if h <= 0.0 || !h.is_finite() {
+        return 0;
+    }
+    // ceil() returns f32 in [1.0, ∞) for h in (0, ∞); cast to u32
+    // saturates on overflow (well-defined per the Rust reference).
+    (h.ceil() as u32).max(1)
 }
 
 /// Per-output morph gain calculation. Inlines the math from

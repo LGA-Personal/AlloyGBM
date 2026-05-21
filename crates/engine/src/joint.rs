@@ -1313,12 +1313,30 @@ pub struct JointWarmStartState {
     /// weights from per-stump `tree_weight` automatically.
     pub initial_dart_tree_weights: Option<Vec<f32>>,
     /// v0.10.4: EMA snapshot from the prior fit's `MorphState`. `Some(snap)`
-    /// seeds the fresh `MorphState::ema_stats` on warm-resume so a warm-
-    /// resumed N+M fit matches a fresh N+M fit byte-for-byte under
-    /// MorphBoost. `None` when the prior fit didn't use MorphBoost (the
-    /// fresh `MorphState::new` defaults are used instead). Length must
-    /// equal `n_outputs` on the new fit, or the warm-start branch returns
-    /// an error.
+    /// seeds the fresh `MorphState::ema_stats` on warm-resume so the
+    /// gradient-statistics smoothing is continuous across the resume
+    /// boundary — new rounds see the same per-output `(mean, std)` they
+    /// would have seen had training never been interrupted.
+    ///
+    /// **Not byte-equivalent to a fresh longer fit (PR #37 review C3).**
+    /// MorphBoost's per-iteration leaf shrinkage
+    /// (`1 − morph_rate * round/total`) and LR schedule are resolved
+    /// against the `total_iterations` horizon at training time. A prior
+    /// fit with `n_estimators=6` baked its first six trees against a
+    /// 6-round horizon; resuming with `n_estimators=4` runs the new four
+    /// rounds against a 10-round horizon, but the prior six trees keep
+    /// their original shrinkage. So a `6+4` warm-resumed MorphBoost fit
+    /// does not match a fresh `n_estimators=10` MorphBoost fit
+    /// byte-for-byte; the prior trees can't be retroactively re-scaled.
+    /// This mirrors the single-output MorphBoost warm-start behavior.
+    /// The EMA continuity is the practical guarantee; byte-level
+    /// reproducibility across a horizon change is intentionally out of
+    /// scope.
+    ///
+    /// `None` when the prior fit didn't use MorphBoost (the fresh
+    /// `MorphState::new` defaults are used instead). Length must equal
+    /// `n_outputs` on the new fit, or the warm-start branch returns an
+    /// error.
     pub initial_ema_stats: Option<Vec<alloygbm_core::GradientEmaStats>>,
 }
 
@@ -3423,6 +3441,150 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn joint_morph_warm_resume_preserves_ema_continuity_not_byte_equivalence() {
+        // v0.10.4 PR #37 review (C3): a `6+4` warm-resumed MorphBoost fit is
+        // intentionally NOT byte-equivalent to a fresh `n_estimators=10`
+        // MorphBoost fit. The prior six trees baked in their per-iteration
+        // leaf shrinkage (`1 - morph_rate * t/T`) against a 6-round horizon
+        // and cannot be retroactively re-scaled at resume time. What IS
+        // preserved is EMA continuity: `MorphState::ema_stats` from the
+        // prior fit is re-seeded into the new fit so gradient-statistics
+        // smoothing flows across the resume boundary.
+        //
+        // This test pins both invariants:
+        //   1. The persisted prior `morph_metadata.ema_stats` non-trivially
+        //      differs from the fresh `GradientEmaStats::default()`
+        //      (proves warm-resume actually receives the snapshot).
+        //   2. A warm-resumed `6+4` fit's predictions DO differ from a
+        //      fresh `n_estimators=10` fit's predictions (documents the
+        //      non-byte-equivalence contract).
+        use crate::TrainParams;
+        use alloygbm_core::{BinnedMatrix, MorphConfig};
+
+        let n_rows = 200;
+        let feature_count = 1;
+        let t0: Vec<f32> = (0..n_rows)
+            .map(|i| if i < n_rows / 2 { -1.0 } else { 1.0 })
+            .collect();
+        let t1: Vec<f32> = t0.iter().map(|&v| v * 0.5).collect();
+        let bins: Vec<u8> = (0..n_rows).map(|i| (i % 8) as u8).collect();
+        let binned = BinnedMatrix::new(n_rows, feature_count, 7, bins).expect("bm");
+
+        let params = TrainParams {
+            seed: 5,
+            max_depth: 3,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            learning_rate: 0.1,
+            morph_config: Some(MorphConfig::default()),
+            ..TrainParams::default()
+        };
+
+        // Prior 6-round fit.
+        let prior = fit_joint_multi_output(
+            &params,
+            feature_count,
+            &binned,
+            &[t0.clone(), t1.clone()],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            6,
+        )
+        .expect("prior fit");
+
+        // Invariant 1: prior fit persisted a non-default EMA snapshot.
+        let prior_meta = prior
+            .model
+            .morph_metadata
+            .as_ref()
+            .expect("morph_metadata persisted on morph fit");
+        assert_eq!(prior_meta.ema_stats.len(), 2);
+        let default_mean = alloygbm_core::GradientEmaStats::default().mean;
+        let default_std = alloygbm_core::GradientEmaStats::default().std;
+        let any_moved = prior_meta
+            .ema_stats
+            .iter()
+            .any(|s| (s.mean - default_mean).abs() > 1e-6 || (s.std - default_std).abs() > 1e-6);
+        assert!(
+            any_moved,
+            "prior MorphBoost fit must have moved EMA away from defaults: {:?}",
+            prior_meta.ema_stats
+        );
+
+        // Warm-resume +4 rounds.
+        let warm_state = JointWarmStartState {
+            baselines: prior.baselines.clone(),
+            stumps: prior.model.stumps.clone(),
+            initial_rounds_completed: 6,
+            initial_dart_tree_weights: None,
+            initial_ema_stats: Some(prior_meta.ema_stats.clone()),
+        };
+        let resumed = fit_joint_multi_output_with_warm_start(
+            &params,
+            feature_count,
+            &binned,
+            &[t0.clone(), t1.clone()],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            4,
+            &[],
+            Some(warm_state),
+        )
+        .expect("warm resume");
+        // Fresh 10-round fit.
+        let fresh = fit_joint_multi_output(
+            &params,
+            feature_count,
+            &binned,
+            &[t0, t1],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            10,
+        )
+        .expect("fresh 10");
+
+        // Invariant 2: warm-resumed `6+4` does NOT match fresh `10`. The
+        // prior six trees were trained against a 6-round horizon so their
+        // shrinkage is denser than the first six trees of a 10-round fit.
+        // We assert at least ONE stump's leaf values differ. (Note: this
+        // is a regression-style test pinning the documented non-equivalence
+        // contract; the user's reproduced ~0.064 prediction diff in PR #37
+        // C3 is consistent with this.)
+        let warm_meta = resumed
+            .model
+            .morph_metadata
+            .as_ref()
+            .expect("warm metadata");
+        let fresh_meta = fresh.model.morph_metadata.as_ref().expect("fresh metadata");
+        assert_eq!(warm_meta.ema_stats.len(), fresh_meta.ema_stats.len());
+        let differ = resumed
+            .model
+            .stumps
+            .iter()
+            .zip(fresh.model.stumps.iter())
+            .any(|(w, f)| {
+                let w_leaves = w.multi_output_leaf_values.as_ref();
+                let f_leaves = f.multi_output_leaf_values.as_ref();
+                match (w_leaves, f_leaves) {
+                    (Some((wl, wr)), Some((fl, fr))) => {
+                        wl.iter().zip(fl.iter()).any(|(a, b)| (a - b).abs() > 1e-5)
+                            || wr.iter().zip(fr.iter()).any(|(a, b)| (a - b).abs() > 1e-5)
+                    }
+                    _ => true,
+                }
+            });
+        assert!(
+            differ,
+            "PR #37 C3 contract: 6+4 warm-resume MorphBoost must DIFFER \
+             from fresh 10-round MorphBoost — prior-tree shrinkage was \
+             baked against the 6-round horizon and is not re-scaled on \
+             resume. If this assert fails the byte-equivalence contract \
+             has changed and CHANGELOG / docs / `JointWarmStartState::\
+             initial_ema_stats` need updating."
+        );
     }
 
     #[test]

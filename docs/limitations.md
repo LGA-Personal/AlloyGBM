@@ -66,11 +66,19 @@ Still pending:
   the K-output leaf values. MorphBoost EMA persists through the
   artifact's `MorphMetadata` section;
   `JointWarmStartState.initial_ema_stats` re-seeds
-  `MorphState::ema_stats` on warm-resume. The morph row-count
-  approximation (via `hess.max(0.0) as u32`) is exact for objectives
-  where hess ≡ 1 per row and a monotone proxy for ranking objectives;
-  warmup byte-equivalence with the standard K-output gain holds
-  regardless.
+  `MorphState::ema_stats` on warm-resume so gradient-statistics
+  smoothing is continuous across the resume boundary. (Warm-resume is
+  NOT byte-equivalent to a fresh longer fit — see the
+  `joint_morph_warm_resume_preserves_ema_continuity_not_byte_equivalence`
+  regression — because per-iteration leaf shrinkage and LR schedule are
+  resolved against the original training horizon and not re-scaled on
+  resume; mirrors single-output behavior.) The morph row-count proxy
+  uses `morph_count_proxy` (`ceil(h).max(1)` when `h > 0`, `0`
+  otherwise) so any positive-hessian bin contributes ≥ 1 count to the
+  post-warmup `info_side` and balance-penalty terms — necessary for
+  ranking objectives where per-row hessians are well below 1 (PR #37
+  review C2). Warmup byte-equivalence with the standard K-output gain
+  holds regardless.
 
 ### v0.10.3
 
