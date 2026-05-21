@@ -343,19 +343,12 @@ struct JointMorphContext {
 }
 
 impl JointMorphContext {
-    fn from_state(
-        state: &crate::MorphState,
-        iteration: u32,
-        total_iterations: u32,
-    ) -> Self {
+    fn from_state(state: &crate::MorphState, iteration: u32, total_iterations: u32) -> Self {
         let grad_means: Vec<f32> = state.ema_stats.iter().map(|s| s.mean).collect();
         let grad_stds: Vec<f32> = state.ema_stats.iter().map(|s| s.std).collect();
         Self {
             config: state.config,
-            precomputed: alloygbm_core::MorphPrecomputed::for_iteration(
-                iteration,
-                &state.config,
-            ),
+            precomputed: alloygbm_core::MorphPrecomputed::for_iteration(iteration, &state.config),
             iteration,
             total_iterations,
             grad_means,
@@ -1503,9 +1496,9 @@ fn fit_joint_inner(
     // re-seeds `MorphState::ema_stats` so a warm-resumed N+M fit matches
     // a fresh N+M fit byte-for-byte.
     let total_iterations_u32 = (initial_rounds + n_estimators) as u32;
-    let mut morph_state: Option<crate::MorphState> = params.morph_config.map(|cfg| {
-        crate::MorphState::new(cfg, n_outputs, total_iterations_u32, learning_rate)
-    });
+    let mut morph_state: Option<crate::MorphState> = params
+        .morph_config
+        .map(|cfg| crate::MorphState::new(cfg, n_outputs, total_iterations_u32, learning_rate));
     if let (Some(ms), Some(snapshot)) = (morph_state.as_mut(), initial_ema_stats_arg.as_ref()) {
         for (i, stat) in snapshot.iter().take(ms.ema_stats.len()).enumerate() {
             ms.ema_stats[i] = *stat;
@@ -1989,16 +1982,18 @@ fn fit_joint_inner(
     // v0.10.4: persist MorphBoost EMA snapshot into the artifact so
     // warm-resume can re-seed `MorphState::ema_stats`. Mirrors the
     // single-output regressor path (lib.rs:4413).
-    let morph_metadata = morph_state.as_ref().map(|ms| alloygbm_core::MorphMetadataPayload {
-        config: ms.config,
-        // `final_iteration` captures where training ended (last completed
-        // global round); `final_total` mirrors the full horizon used by
-        // the LR schedule + leaf-shrink curve so warm-resume can recompute
-        // them consistently.
-        final_iteration: (initial_rounds + rounds_completed).saturating_sub(1) as u32,
-        final_total: total_iterations_u32,
-        ema_stats: ms.ema_stats.clone(),
-    });
+    let morph_metadata = morph_state
+        .as_ref()
+        .map(|ms| alloygbm_core::MorphMetadataPayload {
+            config: ms.config,
+            // `final_iteration` captures where training ended (last completed
+            // global round); `final_total` mirrors the full horizon used by
+            // the LR schedule + leaf-shrink curve so warm-resume can recompute
+            // them consistently.
+            final_iteration: (initial_rounds + rounds_completed).saturating_sub(1) as u32,
+            final_total: total_iterations_u32,
+            ema_stats: ms.ema_stats.clone(),
+        });
 
     let model = TrainedModel {
         baseline_prediction: 0.0, // Joint model uses per-output baselines (see summary)
@@ -3369,8 +3364,8 @@ mod tests {
         };
         let params_morph = TrainParams {
             morph_config: Some(MorphConfig {
-                morph_warmup_iters: 10, // single round at iter 0 is in warmup
-                morph_rate: 0.0,        // no leaf shrinkage
+                morph_warmup_iters: 10,  // single round at iter 0 is in warmup
+                morph_rate: 0.0,         // no leaf shrinkage
                 depth_penalty_base: 1.0, // no depth penalty
                 evolution_pressure: 0.0,
                 info_score_weight: 0.0, // belt-and-suspenders: info_score off

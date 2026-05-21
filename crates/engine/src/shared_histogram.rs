@@ -375,9 +375,8 @@ fn morph_gain_per_output(
         gradient_score
     } else {
         // Info-score blend (Kriuk 2025).
-        let smoothing = 1.0
-            + config.evolution_pressure
-                * (iteration as f32 / total_iterations.max(1) as f32);
+        let smoothing =
+            1.0 + config.evolution_pressure * (iteration as f32 / total_iterations.max(1) as f32);
         let info_side = |g_sum: f32, count: u32| -> f32 {
             if count == 0 {
                 return 0.0;
@@ -701,7 +700,17 @@ mod tests {
         let grad_means = vec![0.0_f32; 2];
         let grad_stds = vec![1.0_f32; 2];
         let morph_gain = compute_multi_output_split_gain_morph(
-            &h, 0, 1, 0.0, 1e-6, &cfg, &pre, 0, 100, &grad_means, &grad_stds,
+            &h,
+            0,
+            1,
+            0.0,
+            1e-6,
+            &cfg,
+            &pre,
+            0,
+            100,
+            &grad_means,
+            &grad_stds,
         );
         let standard_gain = compute_multi_output_split_gain(&h, 0, 1, 0.0, 1e-6);
         assert!(
@@ -732,7 +741,17 @@ mod tests {
         let grad_means = vec![0.5_f32; 2];
         let grad_stds = vec![1.0_f32; 2];
         let morph_gain = compute_multi_output_split_gain_morph(
-            &h, 0, 1, 0.0, 1e-6, &cfg, &pre, 10, 100, &grad_means, &grad_stds,
+            &h,
+            0,
+            1,
+            0.0,
+            1e-6,
+            &cfg,
+            &pre,
+            10,
+            100,
+            &grad_means,
+            &grad_stds,
         );
         let standard_gain = compute_multi_output_split_gain(&h, 0, 1, 0.0, 1e-6);
         assert!(
@@ -767,7 +786,17 @@ mod tests {
         let std_result = find_best_multi_output_categorical_split(&h, 0, 3, 0.0, 1e-6)
             .expect("standard split found");
         let morph_result = find_best_multi_output_categorical_split_morph(
-            &h, 0, 3, 0.0, 1e-6, &cfg, &pre, 0, 100, &grad_means, &grad_stds,
+            &h,
+            0,
+            3,
+            0.0,
+            1e-6,
+            &cfg,
+            &pre,
+            0,
+            100,
+            &grad_means,
+            &grad_stds,
         )
         .expect("morph split found");
         assert_eq!(
