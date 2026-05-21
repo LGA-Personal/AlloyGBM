@@ -181,7 +181,7 @@ pub fn find_best_multi_output_categorical_split(
     lambda_l2: f32,
     eps: f32,
 ) -> Option<MultiOutputCategoricalSplit> {
-    if num_categories < 2 || num_categories > 64 {
+    if !(2..=64).contains(&num_categories) {
         return None;
     }
     let k = hist.n_outputs;
@@ -212,8 +212,7 @@ pub fn find_best_multi_output_categorical_split(
     let mut left_h = vec![0.0_f32; k];
     let mut best_gain = 0.0_f32;
     let mut best_prefix: i32 = -1;
-    for prefix_len in 0..(num_categories - 1) {
-        let cat = order[prefix_len];
+    for (prefix_len, &cat) in order.iter().take(num_categories - 1).enumerate() {
         for ko in 0..k {
             left_g[ko] += hist.data()[hist.idx(feature, cat, ko, HistComponent::Grad)];
             left_h[ko] += hist.data()[hist.idx(feature, cat, ko, HistComponent::Hess)];
@@ -398,12 +397,16 @@ mod tests {
         )
         .expect("split found");
         // The Fisher partition must put 0 and 2 together (same output-0 score).
-        let bit0 = (result.left_bitset >> 0) & 1;
+        let bit0 = result.left_bitset & 1;
         let bit1 = (result.left_bitset >> 1) & 1;
         let bit2 = (result.left_bitset >> 2) & 1;
         assert_eq!(bit0, bit2, "cats 0 and 2 must share a side");
         assert_ne!(bit0, bit1, "cat 1 must be on the opposite side from cat 0");
-        assert!(result.gain > 0.0, "expected positive gain, got {}", result.gain);
+        assert!(
+            result.gain > 0.0,
+            "expected positive gain, got {}",
+            result.gain
+        );
         assert_eq!(result.n_categories, 3);
     }
 
@@ -432,7 +435,11 @@ mod tests {
         let result = find_best_multi_output_categorical_split(&h, 0, 3, 0.0, 1e-6);
         // Either None (best_prefix never updated) or gain exactly 0.0.
         if let Some(r) = result {
-            assert!(r.gain.abs() < 1e-5, "expected ~0 gain on uniform fixture, got {}", r.gain);
+            assert!(
+                r.gain.abs() < 1e-5,
+                "expected ~0 gain on uniform fixture, got {}",
+                r.gain
+            );
         }
     }
 }

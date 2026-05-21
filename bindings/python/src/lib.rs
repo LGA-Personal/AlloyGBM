@@ -5356,7 +5356,7 @@ fn train_joint_multi_label_ranker(
     categorical_feature_indices: Vec<usize>,
     max_cat_threshold: usize,
 ) -> PyResult<(Vec<u8>, Vec<f32>, usize, usize)> {
-    use alloygbm_engine::joint::{JointObjective, fit_joint_multi_output};
+    use alloygbm_engine::joint::JointObjective;
 
     if targets_per_output.len() != n_outputs {
         return Err(PyValueError::new_err(format!(
@@ -5458,10 +5458,7 @@ fn train_joint_multi_label_ranker(
                 }
             }
             let num_categories = (max_bin as usize) + 1;
-            if num_categories >= 2
-                && num_categories <= max_cat_threshold
-                && num_categories <= 64
-            {
+            if num_categories >= 2 && num_categories <= max_cat_threshold && num_categories <= 64 {
                 cat_features.push(CategoricalFeatureInfo {
                     feature_index: fi,
                     num_categories,
