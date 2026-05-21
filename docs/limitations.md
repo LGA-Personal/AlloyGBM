@@ -1,6 +1,6 @@
 # AlloyGBM Current Limitations
 
-Last updated for v0.10.3.
+Last updated for v0.10.4.
 
 ## Remaining Limitations
 
@@ -10,10 +10,10 @@ The `BackendOps` trait is designed for hardware abstraction, but only
 `CpuBackend` exists. GPU/accelerator support is architecturally planned but
 not implemented.
 
-### 2. Joint-path advanced feature parity — v0.10.4
+### 2. Joint-path advanced feature parity — v0.10.5 / v0.10.6
 
 The joint trainer reached feature parity with the single-output trainer
-in three releases:
+across four releases:
 
 - **v0.10.2** — leaf-wise growth + `max_leaves`, `interaction_constraints`,
   `min_split_gain`, `row_subsample`, `col_subsample`. Rust-level
@@ -26,13 +26,51 @@ in three releases:
   `bin_index == category_id`). GOSS, DART, and warm-start on the joint
   path landed via a shared `walk_tree_into_predictions` helper +
   `JointWarmStartState` / `fit_joint_multi_output_with_warm_start`.
+- **v0.10.4** — MorphBoost on the joint trainer:
+  `training_mode="morph"` + the full `morph_*` / `lr_schedule` surface.
+  Multi-output morph gain helpers in `shared_histogram.rs`,
+  `JointMorphContext` plumbed through `build_joint_round*`, EMA
+  warm-resume via `JointWarmStartState.initial_ema_stats`.
 
-Still pending for **v0.10.4**: MorphBoost, DRO, and factor
-neutralization on the joint path. These touch the per-row gradient
-pipeline more invasively than GOSS/DART/warm-start and need their own
-design pass.
+Still pending:
+
+- **v0.10.5** — `leaf_solver="dro"` on the joint trainer (per-output
+  Wasserstein-style robust Newton leaf solve as a post-build pass).
+  Requires a `JointRoundResult` extension to carry per-stump child
+  row indices so `core::leaf_effective_gradient` can run per output.
+- **v0.10.6** — `neutralization="pre_target" | "per_round_gradient" |
+  "split_penalty"` + `factor_exposures=` on the joint trainer.
+  `pre_target` residualizes each of K target columns once; per-round
+  modes project each of K per-output gradient buffers through
+  `FactorProjector::project_gradient_pairs_in_place`; `split_penalty`
+  subtracts a global penalty from the K-output gain sum. The PyO3
+  bridge currently rejects `factor_exposures` unconditionally under
+  `multi_label_mode="joint"`.
 
 ## Resolved (Previously Limitations)
+
+### v0.10.4
+
+- **Joint MorphBoost (was a v0.10.4 follow-up):**
+  `MultiLabelGBMRanker(multi_label_mode="joint",
+  training_mode="morph", …)` now activates MorphBoost on the
+  shared-tree multi-output trainer. Two new helpers in
+  `crates/engine/src/shared_histogram.rs`
+  (`compute_multi_output_split_gain_morph`,
+  `find_best_multi_output_categorical_split_morph`) sum per-output
+  morph gain across K outputs, each using its own EMA snapshot from
+  `MorphState::ema_stats[k]`. `JointMorphContext` (private to
+  `joint.rs`) carries the per-round morph snapshot through
+  `build_joint_round*`. Per-iteration LR schedule, per-leaf depth
+  penalty, and per-iteration leaf shrinkage all apply uniformly across
+  the K-output leaf values. MorphBoost EMA persists through the
+  artifact's `MorphMetadata` section;
+  `JointWarmStartState.initial_ema_stats` re-seeds
+  `MorphState::ema_stats` on warm-resume. The morph row-count
+  approximation (via `hess.max(0.0) as u32`) is exact for objectives
+  where hess ≡ 1 per row and a monotone proxy for ranking objectives;
+  warmup byte-equivalence with the standard K-output gain holds
+  regardless.
 
 ### v0.10.3
 
@@ -81,8 +119,9 @@ design pass.
   `find_best_multi_output_categorical_split` +
   `fit_joint_multi_output_with_categorical` in place; Python surface
   closed in v0.10.3). GOSS, DART, and warm-start on the joint path
-  shipped in v0.10.3. Still deferred to **v0.10.4**: MorphBoost,
-  DRO, neutralization on the joint path.
+  shipped in v0.10.3. MorphBoost shipped in v0.10.4. DRO + factor
+  neutralization remain deferred to **v0.10.5** / **v0.10.6**
+  respectively (see "Remaining Limitations" above).
 - **Leaf-wise multiclass DART (was a v0.10.x follow-up):**
   `GBMClassifier(boosting_mode="dart")` with K ≥ 3 classes now works
   under `tree_growth="leaf"` + `max_leaves`. The v0.10.1 level-wise

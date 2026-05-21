@@ -207,16 +207,20 @@ strategy:
   K-output values, trained by `engine::joint::fit_joint_multi_output`.
   Splits are chosen using the per-output sum-of-gains
   `Σₖ (G_L_k²/(H_L_k+λ) + G_R_k²/(H_R_k+λ) − G_k²/(H_k+λ))`. Joint
-  mode is more efficient when labels share signal. As of v0.10.3,
+  mode is more efficient when labels share signal. As of v0.10.4,
   joint mode supports `tree_growth="leaf"` + `max_leaves`,
   `interaction_constraints`, `min_split_gain`, `row_subsample`,
   `col_subsample`, native-categorical splits
   (`categorical_feature_indices` + `max_cat_threshold`),
   `boosting_mode="goss"` / `boosting_mode="dart"`, `warm_start=True`
-  + `init_model=...`, and the built-in `squared_error` /
-  `queryrmse` / `rank:pairwise` / `rank:ndcg` / `rank:xendcg`
-  objectives. **Still deferred to v0.10.4** (joint MorphBoost,
-  neutralization, DRO) — see [../limitations.md](../limitations.md).
+  + `init_model=...`, `training_mode="morph"` with the full MorphBoost
+  kwarg surface (`morph_rate`, `evolution_pressure`,
+  `morph_warmup_iters`, `info_score_weight`, `depth_penalty_base`,
+  `balance_penalty`, `lr_schedule`, `lr_warmup_frac`), and the built-in
+  `squared_error` / `queryrmse` / `rank:pairwise` / `rank:ndcg` /
+  `rank:xendcg` objectives. **Still deferred:** joint DRO leaves
+  (v0.10.5) and joint factor neutralization (v0.10.6) — see
+  [../limitations.md](../limitations.md).
 
 ```python
 model = MultiLabelGBMRanker(
