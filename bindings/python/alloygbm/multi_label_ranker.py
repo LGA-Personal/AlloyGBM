@@ -290,16 +290,15 @@ class MultiLabelGBMRanker:
         # v0.10.2 Phase 2: leaf-wise growth.
         "tree_growth",
         "max_leaves",
-        # NOTE: native-categorical splits are intentionally NOT in this set
-        # in v0.10.2 (reverted via v0.10.2.1 fix). The Rust-level joint
-        # trainer (`fit_joint_multi_output_with_categorical` +
-        # `find_best_multi_output_categorical_split`) is sound when fed
-        # bins where `bin_index == category_id`, but the Python wrapper
-        # currently calls `prepare_training_matrices_from_dense_values`
-        # with `ContinuousBinningStrategy::Linear` which doesn't preserve
-        # that invariant for joint mode. Wiring the proper categorical
-        # preparation path through the joint bridge is tracked for
-        # v0.10.3 alongside joint GOSS/DART/warm-start.
+        # v0.10.3: native-categorical splits (Python wiring finally honest).
+        # The Rust-level joint trainer
+        # (`fit_joint_multi_output_with_categorical` +
+        # `find_best_multi_output_categorical_split`) was already in
+        # place in v0.10.2; v0.10.3 adds the re-binning step in the
+        # PyO3 bridge so `bin_index == category_id` is preserved for
+        # the requested columns before the trainer sees them.
+        "categorical_feature_indices",
+        "max_cat_threshold",
     })
 
     @staticmethod
@@ -471,15 +470,14 @@ class MultiLabelGBMRanker:
             max_leaves=(
                 int(kw["max_leaves"]) if kw.get("max_leaves") is not None else None
             ),
-            # v0.10.2 Phase 3 (native-categorical) is reverted in v0.10.2.1
-            # because the Python binning path doesn't preserve
-            # bin_index == category_id for joint mode. The Rust-level entry
-            # point still accepts these kwargs (for future v0.10.3 wiring),
-            # but we always pass empty / 0 from Python so the Rust trainer
-            # falls back to the numeric path. The corresponding kwargs are
-            # rejected by `_JOINT_SUPPORTED_KWARGS` above.
-            categorical_feature_indices=[],
-            max_cat_threshold=0,
+            # v0.10.3: native-categorical kwargs are now passed through.
+            # The PyO3 bridge re-bins requested columns to
+            # `bin_index == category_id` before calling the Rust trainer,
+            # which is the invariant the joint native-cat path requires.
+            categorical_feature_indices=[
+                int(fi) for fi in (kw.get("categorical_feature_indices") or [])
+            ],
+            max_cat_threshold=int(kw.get("max_cat_threshold", 0)),
         )
 
         self._joint_artifact_bytes = bytes(artifact)

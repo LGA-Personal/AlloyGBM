@@ -5398,7 +5398,7 @@ fn train_joint_multi_label_ranker(
     // use y[:, 0] as a throwaway target since binning is target-independent
     // for the linear and rank strategies.
     let throwaway_targets = targets_per_output[0].clone();
-    let prepared = prepare_training_matrices_from_dense_values(
+    let mut prepared = prepare_training_matrices_from_dense_values(
         &x_values,
         row_count,
         feature_count,
@@ -5436,36 +5436,81 @@ fn train_joint_multi_label_ranker(
         ..TrainParams::default()
     };
 
-    // v0.10.2 Phase 3: derive CategoricalFeatureInfo for each requested
-    // categorical feature. `num_categories` is the highest non-missing bin
-    // index + 1 observed in the binned column. If `max_cat_threshold == 0`
-    // OR num_categories exceeds the threshold, fall back to numeric for
-    // that feature (matches single-output behavior).
+    // v0.10.3: For each requested categorical feature, re-bin the column
+    // so `bin_index == category_id`. This is the invariant the joint
+    // native-cat trainer requires — `find_best_multi_output_categorical_split`
+    // returns a u64 bitset keyed by category ID, and the JointPredictor at
+    // predict time reads the raw feature value (cast to integer) as the
+    // category ID. If the binning step had reordered or merged categories
+    // (which `ContinuousBinningStrategy::Linear` can) the bitset would
+    // route rows to the wrong leaf.
+    //
+    // Strategy: scan the dense float column for unique non-NaN integer
+    // values (cast f32 -> i64), sort them, assign category IDs in sort
+    // order, and overwrite the binned column. This matches the
+    // single-output `apply_categorical_encoding_to_training_matrices_multi`
+    // semantics for low-cardinality features.
     let mut cat_features: Vec<CategoricalFeatureInfo> = Vec::new();
     if !categorical_feature_indices.is_empty() && max_cat_threshold > 0 {
+        let missing_bin = prepared.binned_matrix.missing_bin();
         for &fi in &categorical_feature_indices {
             if fi >= feature_count {
                 return Err(PyValueError::new_err(format!(
                     "categorical_feature_indices contains {fi} which exceeds feature_count {feature_count}"
                 )));
             }
-            // Scan the binned column for max non-missing bin.
-            let mut max_bin: u8 = 0;
+            // Collect unique non-NaN integer category values from the
+            // dense `x_values` column.
+            let mut uniq: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
             for row in 0..row_count {
-                let b = prepared.binned_matrix.bins[row * feature_count + fi];
-                if b != MISSING_BIN_U8 && b > max_bin {
-                    max_bin = b;
+                let v = x_values[row * feature_count + fi];
+                if v.is_finite() {
+                    uniq.insert(v.round() as i64);
                 }
             }
-            let num_categories = (max_bin as usize) + 1;
-            if num_categories >= 2 && num_categories <= max_cat_threshold && num_categories <= 64 {
-                cat_features.push(CategoricalFeatureInfo {
-                    feature_index: fi,
-                    num_categories,
-                });
+            let num_categories = uniq.len();
+            // Bail out (silently fall back to numeric) if cardinality
+            // exceeds `max_cat_threshold` or the 64-category Fisher-sort
+            // cap. This mirrors single-output LightGBM semantics.
+            if num_categories < 2
+                || num_categories > max_cat_threshold
+                || num_categories > 64
+            {
+                continue;
             }
-            // else: silently fall back to numeric for this feature (LightGBM
-            // semantics — too many categories or threshold disabled).
+            // Guard: category IDs must not collide with the missing-value
+            // sentinel.
+            if (num_categories as u16) > missing_bin {
+                return Err(PyValueError::new_err(format!(
+                    "Native categorical feature {fi} has {num_categories} categories which would collide with the missing-value sentinel (bin {missing_bin}). Reduce max_cat_threshold or increase max_bin."
+                )));
+            }
+            // Build cat_value -> id mapping.
+            let cat_to_id: std::collections::HashMap<i64, u16> = uniq
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| (v, i as u16))
+                .collect();
+            // Re-bin the column: bin_index == category_id, missing -> sentinel.
+            for row in 0..row_count {
+                let v = x_values[row * feature_count + fi];
+                let bin_val = if v.is_finite() {
+                    *cat_to_id
+                        .get(&(v.round() as i64))
+                        .unwrap_or(&missing_bin)
+                } else {
+                    missing_bin
+                };
+                prepared.binned_matrix.set_bin(row, fi, bin_val);
+            }
+            let cat_max_bin = (num_categories - 1) as u16;
+            if cat_max_bin > prepared.binned_matrix.max_bin {
+                prepared.binned_matrix.max_bin = cat_max_bin;
+            }
+            cat_features.push(CategoricalFeatureInfo {
+                feature_index: fi,
+                num_categories,
+            });
         }
     }
 

@@ -206,28 +206,74 @@ def test_joint_mode_leaf_wise_requires_max_leaves():
         m.fit(X, y, group=group)
 
 
-def test_joint_mode_rejects_native_categorical_until_v0_10_3():
-    """v0.10.2.1 fix: native-categorical kwargs (`categorical_feature_indices`,
-    `max_cat_threshold`) are intentionally rejected in joint mode in v0.10.2.
-
-    The Rust-level joint native-categorical path
-    (`fit_joint_multi_output_with_categorical` +
-    `find_best_multi_output_categorical_split`) is sound when given bins where
-    `bin_index == category_id`. But the Python wrapper currently bins all
-    features via `ContinuousBinningStrategy::Linear`, which doesn't preserve
-    that invariant — the JointPredictor at predict time interprets the raw
-    feature value as a category ID, and the bitset is keyed by bin ID, so
-    raw → bin mismatch corrupts predictions. Wiring the proper categorical
-    preparation path through the joint bridge is tracked for v0.10.3.
+def test_joint_mode_accepts_native_categorical():
+    """v0.10.3: native-categorical kwargs are now supported on the joint
+    path. Rebinning to ``bin_index == category_id`` happens in the PyO3
+    bridge before ``fit_joint_multi_output_with_categorical`` runs. The
+    JointPredictor decodes the ``cat_bitset`` and routes by raw feature
+    value (cast to category ID) at predict time, so end-to-end correctness
+    requires the bin == cat-id invariant to hold across the binning step.
     """
     X, y, group = _toy_ranking()
-    for kw in ("categorical_feature_indices", "max_cat_threshold"):
-        value = [0] if kw == "categorical_feature_indices" else 8
-        m = MultiLabelGBMRanker(
-            n_estimators=2, multi_label_mode="joint", **{kw: value}
-        )
-        with pytest.raises(NotImplementedError, match=kw):
-            m.fit(X, y, group=group)
+    # Pretend column 0 is a low-cardinality categorical (the toy fixture
+    # uses small integer feature values, so 0..max_value-1 are valid
+    # category IDs after astype(int) + clipping).
+    X_cat = X.copy()
+    X_cat[:, 0] = np.clip(X_cat[:, 0].astype(int), 0, 3)
+    m = MultiLabelGBMRanker(
+        n_estimators=4,
+        multi_label_mode="joint",
+        categorical_feature_indices=[0],
+        max_cat_threshold=8,
+        seed=7,
+    )
+    m.fit(X_cat, y, group=group)
+    preds = m.predict(X_cat)
+    assert preds.shape == (X_cat.shape[0], y.shape[1])
+    assert np.isfinite(preds).all()
+
+
+def test_joint_mode_native_categorical_routes_by_category_id():
+    """v0.10.3 correctness: a known-good fixture where one column is a
+    pure low-cardinality categorical and the per-category mean target
+    is monotone in category ID. Verify that JointPredictor produces
+    distinct predictions per category (proves the bitset routing
+    works) and that per-category mean predictions follow the signal
+    direction for both labels."""
+    rng = np.random.default_rng(0)
+    n = 240
+    groups = np.repeat(np.arange(n // 12), 12).astype(np.int64)
+    cat = rng.integers(0, 4, size=n).astype(np.float32)
+    # Per-category-id signal: mean target = cat.
+    y0 = cat + rng.normal(0, 0.1, size=n).astype(np.float32)
+    y1 = (3.0 - cat) + rng.normal(0, 0.1, size=n).astype(np.float32)
+    noise = rng.normal(0, 1, size=n).astype(np.float32)
+    X = np.column_stack([cat, noise]).astype(np.float32)
+    y = np.column_stack([y0, y1])
+
+    m = MultiLabelGBMRanker(
+        n_estimators=30,
+        learning_rate=0.3,
+        max_depth=4,
+        multi_label_mode="joint",
+        ranking_objective="squared_error",
+        categorical_feature_indices=[0],
+        max_cat_threshold=8,
+        seed=7,
+    )
+    m.fit(X, y, group=groups)
+
+    # Per-category mean prediction should be strictly monotone in cat ID
+    # for label 0 (and reverse-monotone for label 1).
+    preds = m.predict(X)
+    per_cat_pred_0 = [
+        preds[cat == c, 0].mean() for c in range(4)
+    ]
+    per_cat_pred_1 = [
+        preds[cat == c, 1].mean() for c in range(4)
+    ]
+    assert per_cat_pred_0[0] < per_cat_pred_0[1] < per_cat_pred_0[2] < per_cat_pred_0[3]
+    assert per_cat_pred_1[0] > per_cat_pred_1[1] > per_cat_pred_1[2] > per_cat_pred_1[3]
 
 
 def test_joint_mode_still_rejects_truly_unsupported_kwargs():
