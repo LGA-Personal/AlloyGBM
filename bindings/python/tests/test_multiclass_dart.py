@@ -234,7 +234,48 @@ def test_multiclass_dart_works_with_leaf_wise_growth():
     assert np.all(proba <= 1.0)
 
 
-def test_multiclass_dart_leaf_wise_validation_early_stopping_works():
+def test_multiclass_dart_leaf_wise_warm_start_round_trip():
+    """v0.10.2 Phase 4: warm-start with leaf-wise multiclass DART.
+
+    The PyO3 bridge reconstructs per-class DART tree weights by
+    grouping `class_stumps[k]` stumps by `tree_id = node_id / TREE_NODE_STRIDE`
+    and taking the first stump's `tree_weight` per tree. Under
+    leaf-wise growth each tree has a variable stump count but the
+    `tree_id` decoding works identically.
+
+    Mirror the existing `test_multiclass_dart_warm_start_continues_without_error`
+    pattern: base trains 8 rounds; cont with `warm_start=True` +
+    `init_model=base` trains 8 more rounds (16 total). The continuation
+    must produce a different, valid distribution.
+    """
+    X, y = _toy_multiclass()
+    base = GBMClassifier(
+        n_estimators=8,
+        boosting_mode="dart",
+        tree_growth="leaf",
+        max_leaves=6,
+        dart_drop_rate=0.15,
+        seed=23,
+    )
+    base.fit(X, y)
+    cont = GBMClassifier(
+        n_estimators=8,
+        boosting_mode="dart",
+        tree_growth="leaf",
+        max_leaves=6,
+        dart_drop_rate=0.15,
+        warm_start=True,
+        seed=23,
+    )
+    cont.fit(X, y, init_model=base)
+    p_base = base.predict_proba(X)
+    p_cont = cont.predict_proba(X)
+    assert not np.allclose(p_base, p_cont, atol=1e-5)
+    assert np.allclose(p_cont.sum(axis=1), 1.0, atol=1e-5)
+    assert np.all(np.isfinite(p_cont))
+
+
+def test_multiclass_dart_with_validation_early_stopping():
     """v0.10.2 Phase 4: validation DART transition (subtract dropped →
     scale new at new_w → re-add dropped) applies under leaf-wise growth
     too. A broken transition typically manifests as NaN/inf validation
