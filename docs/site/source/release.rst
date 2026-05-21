@@ -1,7 +1,49 @@
 Release and platform policy
 ===========================
 
-AlloyGBM ``0.10.1`` release notes and platform policy.
+AlloyGBM ``0.10.2`` release notes and platform policy.
+
+What's new in 0.10.2
+--------------------
+
+Closes the leaf-wise multiclass DART limitation and the first slice of
+joint-path feature parity (leaf-wise growth, native-categorical,
+interaction constraints, row/col subsample, min_split_gain). The
+remaining joint-path features land in v0.10.3 (GOSS, DART, warm-start
+on joint) and v0.10.4 (MorphBoost, DRO, neutralization on joint).
+Default behaviour for every existing user-facing API remains
+byte-identical to v0.10.1 when the new features are not opted into.
+
+**Joint trainer core feature parity:**
+``engine::joint::fit_joint_multi_output`` now supports
+``tree_growth="leaf"`` + ``max_leaves`` (via the new
+``build_joint_round_leafwise`` priority-queue best-first growth),
+native-categorical splits via the new
+``find_best_multi_output_categorical_split`` Fisher-sort helper,
+``interaction_constraints`` (reusing the single-output
+``InteractionConstraintIndex``), ``min_split_gain``, ``row_subsample``,
+and ``col_subsample``. All six are exposed through
+``MultiLabelGBMRanker(multi_label_mode="joint")`` Python surface;
+``_JOINT_SUPPORTED_KWARGS`` grew to permit
+``min_split_gain``, ``row_subsample``, ``col_subsample``,
+``interaction_constraints``, ``tree_growth``, ``max_leaves``,
+``categorical_feature_indices``, and ``max_cat_threshold``.
+
+**Leaf-wise multiclass DART:**
+``GBMClassifier(boosting_mode="dart")`` with K ≥ 3 classes now works
+under ``tree_growth="leaf"`` + ``max_leaves``. The v0.10.1
+``tree_growth='level'`` restriction in
+``fit_multiclass_iterations_impl`` was lifted. Per-class
+``dart_round_start_offsets[k]`` / ``dart_round_counts[k]`` bookkeeping
+is growth-mode-agnostic because it snapshots ``class_stumps[k].len()``
+around each ``build_tree_*`` call. Validation early-stopping DART
+transition and DART warm-start tree-weight reconstruction work
+without changes.
+
+**Deferred to later v0.10.x point releases:**
+
+- v0.10.3: GOSS, DART, and warm-start on the joint path.
+- v0.10.4: MorphBoost, DRO, and neutralization on the joint path.
 
 What's new in 0.10.1
 --------------------

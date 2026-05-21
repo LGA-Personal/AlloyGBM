@@ -1,6 +1,6 @@
 # AlloyGBM Current Limitations
 
-Last updated for v0.10.1.
+Last updated for v0.10.2.
 
 ## Remaining Limitations
 
@@ -10,19 +10,47 @@ The `BackendOps` trait is designed for hardware abstraction, but only
 `CpuBackend` exists. GPU/accelerator support is architecturally planned but
 not implemented.
 
-### 2. Joint-path feature parity (Rust-level)
+### 2. Joint-path advanced feature parity (Rust-level) — v0.10.3 / v0.10.4
 
-The v0.10.0 joint trainer is intentionally minimal:
+The joint trainer covers leaf-wise growth + `max_leaves`,
+native-categorical splits via multi-output Fisher-sort,
+`interaction_constraints`, `min_split_gain`, `row_subsample`, and
+`col_subsample` as of v0.10.2. Still pending:
 
-- Level-wise tree growth only (no leaf-wise / best-first).
-- No MorphBoost, no DRO, no neutralization, no native-categorical
-  splits, no GOSS, no DART, no warm-start, no interaction constraints
-  on the joint path.
-
-Adding these capabilities to joint multi-output is targeted incrementally
-across the **v0.10.x** point releases.
+- **v0.10.3:** GOSS, DART, and warm-start on the joint path.
+- **v0.10.4:** MorphBoost, DRO, and neutralization on the joint path.
 
 ## Resolved (Previously Limitations)
+
+### v0.10.2
+
+- **Joint trainer core feature parity (was the v0.10.x follow-up):** the
+  joint multi-output trainer (`engine::joint::fit_joint_multi_output`) now
+  supports `tree_growth="leaf"` + `max_leaves` (via the new
+  `build_joint_round_leafwise` priority-queue best-first growth),
+  native-categorical splits via the new
+  `find_best_multi_output_categorical_split` Fisher-sort helper,
+  `interaction_constraints` (reusing the single-output
+  `InteractionConstraintIndex`), `min_split_gain`, `row_subsample`,
+  and `col_subsample`. All six features are exposed through the
+  `MultiLabelGBMRanker(multi_label_mode="joint")` Python surface; the
+  `_JOINT_SUPPORTED_KWARGS` allow-list grew accordingly. Still
+  deferred to **v0.10.3**: GOSS, DART, warm-start on the joint
+  path. Still deferred to **v0.10.4**: MorphBoost, DRO,
+  neutralization on the joint path.
+- **Leaf-wise multiclass DART (was a v0.10.x follow-up):**
+  `GBMClassifier(boosting_mode="dart")` with K ≥ 3 classes now works
+  under `tree_growth="leaf"` + `max_leaves`. The v0.10.1 level-wise
+  restriction in `fit_multiclass_iterations_impl` was lifted; the
+  per-class `dart_round_start_offsets[k]` /
+  `dart_round_counts[k]` bookkeeping is growth-mode-agnostic because
+  it snapshots `class_stumps[k].len()` around each `build_tree_*`
+  call — under leaf-wise growth each tree has a variable stump count
+  (capped by `max_leaves`) but the round boundaries remain captured
+  correctly. Validation early-stopping DART transition and DART
+  warm-start tree-weight reconstruction both work without changes
+  (verified by regression tests in
+  `bindings/python/tests/test_multiclass_dart.py`).
 
 ### v0.10.1
 

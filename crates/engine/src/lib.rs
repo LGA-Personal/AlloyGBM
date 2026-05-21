@@ -3543,17 +3543,12 @@ impl Trainer {
             } => Some((drop_rate, max_drop, normalize_type, sample_type)),
             _ => None,
         };
-        // v0.10.1: multiclass DART requires level-wise tree growth.
-        // Leaf-wise dropout indexing across K class trees per round is
-        // a follow-up.
-        if dart_params.is_some() && self.params.tree_growth == TreeGrowth::Leaf {
-            return Err(EngineError::InvalidConfig(
-                "multiclass DART requires tree_growth='level' in v0.10.1; \
-                 leaf-wise dropout bookkeeping across K class trees per \
-                 round is tracked as a follow-up."
-                    .to_string(),
-            ));
-        }
+        // v0.10.2: leaf-wise multiclass DART is now supported. The per-class
+        // `dart_round_start_offsets[k]` / `dart_round_counts[k]` bookkeeping
+        // is growth-mode-agnostic because it snapshots `class_stumps[k].len()`
+        // around each `build_tree_*` call — under leaf-wise growth each tree
+        // has a variable stump count (capped by max_leaves), but the round
+        // boundaries are still captured correctly.
         validate_train_params(&self.params)?;
         validate_training_dataset(dataset)?;
         validate_neutralization_fit_contract_for_support(&self.params, dataset, false)?;

@@ -1,5 +1,67 @@
 # Changelog
 
+## 0.10.2
+
+Closes the leaf-wise multiclass DART limitation and the first slice of
+joint-path feature parity. The joint trainer
+(`engine::joint::fit_joint_multi_output`) gains leaf-wise growth + native
+categorical splits + interaction constraints + min_split_gain + row/col
+subsample. `GBMClassifier(boosting_mode="dart")` with K ≥ 3 classes now
+works under `tree_growth="leaf"`. Default behaviour for every existing
+user-facing API remains byte-identical to v0.10.1 when the new features
+are not opted into.
+
+### Added — joint trainer core feature parity
+
+- `engine::joint::fit_joint_multi_output` honors `tree_growth="leaf"` +
+  `max_leaves` via new `build_joint_round_leafwise` (priority-queue
+  best-first growth keyed by K-output split gain). Same constraints as
+  level-wise (`min_data_in_leaf`, `min_split_gain`, etc.) apply.
+- Native-categorical splits on the joint path via
+  `find_best_multi_output_categorical_split` in
+  `crates/engine/src/shared_histogram.rs` (Fisher-sort over K outputs,
+  ordering by output-0 Newton score, ≤ 64 categories per feature).
+  Exposed through Python as `categorical_feature_indices` +
+  `max_cat_threshold` on
+  `MultiLabelGBMRanker(multi_label_mode="joint")`. New entry point
+  `fit_joint_multi_output_with_categorical` accepts a
+  `&[CategoricalFeatureInfo]` slice; the original `fit_joint_multi_output`
+  remains as a thin wrapper passing an empty slice (byte-identical to
+  v0.10.1).
+- `interaction_constraints` on the joint trainer — reuses the
+  single-output `InteractionConstraintIndex` via `pub(crate)` visibility.
+  `HashMap<u32, u64>` tracks per-node active group bitset; descent
+  narrows on each split.
+- `min_split_gain` honored on the joint trainer (rejects splits below
+  the threshold).
+- `row_subsample` on the joint trainer — seeded per-round Bernoulli row
+  mask via xorshift64*; masked rows get zeroed gradients (LightGBM
+  `bagging_fraction` semantics).
+- `col_subsample` on the joint trainer — seeded per-round feature mask;
+  all-masked edge case falls back to all-allowed (LightGBM
+  `feature_fraction` behavior).
+- Python `_JOINT_SUPPORTED_KWARGS` expanded to permit
+  `min_split_gain`, `row_subsample`, `col_subsample`,
+  `interaction_constraints`, `tree_growth`, `max_leaves`,
+  `categorical_feature_indices`, `max_cat_threshold`.
+
+### Added — leaf-wise multiclass DART
+
+- `GBMClassifier(boosting_mode="dart")` with K ≥ 3 classes now supports
+  `tree_growth="leaf"` + `max_leaves`. The v0.10.1 level-wise
+  restriction in `fit_multiclass_iterations_impl` was lifted; the
+  per-class `dart_round_start_offsets[k]` / `dart_round_counts[k]`
+  bookkeeping was already growth-mode-agnostic (snapshots
+  `class_stumps[k].len()` around each `build_tree_*` call). Validation
+  early-stopping DART transition and DART warm-start tree-weight
+  reconstruction both work without code changes; verified by new
+  regression tests in `bindings/python/tests/test_multiclass_dart.py`.
+
+### Deferred
+
+- Joint trainer GOSS / DART / warm-start: v0.10.3
+- Joint trainer MorphBoost / DRO / neutralization: v0.10.4
+
 ## 0.10.1
 
 Closes the three v0.10.x deferred limitations from v0.10.0: joint

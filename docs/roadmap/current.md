@@ -4,12 +4,50 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
-The `0.10.1` release closes the three v0.10.x-deferred limitations
-from v0.10.0 (`MultiLabelGBMRanker` joint mode Python surface,
-multiclass softmax + GOSS, multiclass softmax + DART including
-warm-start). Default behaviour for every existing user-facing API
-remains byte-identical to v0.10.0 when the new features are not
-opted into.
+The `0.10.2` release closes the leaf-wise multiclass DART
+limitation and the first slice of joint-path feature parity
+(leaf-wise growth, native-categorical, interaction constraints,
+row/col subsample, min_split_gain). The remaining joint-path
+features land in v0.10.3 (GOSS, DART, warm-start on joint) and
+v0.10.4 (MorphBoost, DRO, neutralization on joint). Default
+behaviour for every existing user-facing API remains
+byte-identical to v0.10.1 when the new features are not opted
+into.
+
+## What Shipped In v0.10.2
+
+- **Joint trainer core feature parity (closes part of the v0.10.x
+  joint-path-feature-parity follow-up):**
+  `engine::joint::fit_joint_multi_output` now supports
+  `tree_growth="leaf"` + `max_leaves` via the new
+  `build_joint_round_leafwise` (priority-queue best-first growth
+  keyed by K-output split gain), native-categorical splits via the
+  new `find_best_multi_output_categorical_split` (Fisher-sort over
+  K outputs, ordering by output-0 Newton score),
+  `interaction_constraints` (reusing the single-output
+  `InteractionConstraintIndex`), `min_split_gain`, `row_subsample`,
+  and `col_subsample`. All six are exposed through
+  `MultiLabelGBMRanker(multi_label_mode="joint")` Python surface;
+  `_JOINT_SUPPORTED_KWARGS` grew to permit `min_split_gain`,
+  `row_subsample`, `col_subsample`, `interaction_constraints`,
+  `tree_growth`, `max_leaves`, `categorical_feature_indices`, and
+  `max_cat_threshold`.
+- **Leaf-wise multiclass DART (closes the v0.10.x leaf-wise
+  multiclass DART follow-up):** the v0.10.1 `tree_growth='level'`
+  restriction in `fit_multiclass_iterations_impl` was lifted.
+  Per-class `dart_round_start_offsets[k]` / `dart_round_counts[k]`
+  bookkeeping snapshots `class_stumps[k].len()` around each
+  `build_tree_*` call, which is growth-mode-agnostic — under
+  leaf-wise growth each tree contributes a variable stump count
+  (capped by `max_leaves`) but the round boundaries are still
+  captured correctly. Validation early-stopping DART transition and
+  DART warm-start tree-weight reconstruction both work without
+  changes.
+
+### v0.10.x follow-ups (deferred)
+
+- **v0.10.3**: GOSS, DART, and warm-start on the joint path.
+- **v0.10.4**: MorphBoost, DRO, and neutralization on the joint path.
 
 ## What Shipped In v0.10.1
 
@@ -60,15 +98,6 @@ opted into.
   `validation_class_predictions`, so `next_validation_loss` and
   early-stopping decisions are computed against the same full
   ensemble the model is training against.
-
-### v0.10.x follow-ups (deferred)
-
-- **v0.10.x**: Joint-path feature parity with the single-output
-  trainer — leaf-wise growth, MorphBoost, DRO, neutralization,
-  native-categorical splits, GOSS, DART, warm-start, interaction
-  constraints, `row_subsample`, `col_subsample`, `min_split_gain`.
-- **v0.10.x**: Leaf-wise multiclass DART (dropout indexing across K
-  class trees in best-first growth).
 
 ## What Shipped In v0.10.0
 

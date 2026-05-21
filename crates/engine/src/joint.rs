@@ -23,13 +23,15 @@ use crate::shared_histogram::{
     MultiOutputHistogram, build_multi_output_histogram_inplace, compute_multi_output_split_gain,
 };
 use crate::{
-    Device, LambdaMARTObjective, ObjectiveOps, PairwiseRankingObjective, QueryRMSEObjective,
-    SquaredErrorObjective, TrainedModel, TrainedStump, XeNDCGObjective, encode_tree_node_id,
+    Device, InteractionConstraintIndex, LambdaMARTObjective, ObjectiveOps,
+    PairwiseRankingObjective, QueryRMSEObjective, SquaredErrorObjective, TrainedModel,
+    TrainedStump, XeNDCGObjective, encode_tree_node_id,
 };
 use alloygbm_core::{
     BinnedMatrix, GradientPair, LeafValue, MISSING_BIN_U8, ModelMetadata, NodeStats,
-    SplitCandidate, TrainParams,
+    SplitCandidate, TrainParams, TreeGrowth,
 };
+use std::collections::HashMap;
 
 /// Runtime selector for per-output objective on the joint trainer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,6 +158,33 @@ pub struct JointTrainingSummary {
     pub rounds_completed: usize,
 }
 
+/// Convert a u64 categorical bitset (bit `k` = 1 means category `k` goes
+/// left) into the byte-packed Vec<u8> format used by the single-output
+/// trainer's `SplitCandidate::categorical_bitset`. Bit `K` of byte `K/8`
+/// represents category `K`; trailing bytes that contain only zeros are
+/// trimmed (single-output convention).
+fn u64_to_bitset_bytes(bs: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8);
+    for byte_idx in 0..8 {
+        let byte = ((bs >> (byte_idx * 8)) & 0xFF) as u8;
+        out.push(byte);
+    }
+    while out.len() > 1 && *out.last().unwrap() == 0 {
+        out.pop();
+    }
+    out
+}
+
+/// Inverse of `u64_to_bitset_bytes`: decodes a Vec<u8> bitset back into a
+/// u64. Used by JointPredictor when evaluating categorical stumps.
+fn bitset_bytes_to_u64(bytes: &[u8]) -> u64 {
+    let mut out: u64 = 0;
+    for (byte_idx, &byte) in bytes.iter().enumerate().take(8) {
+        out |= (byte as u64) << (byte_idx * 8);
+    }
+    out
+}
+
 /// Per-leaf bookkeeping during level-wise tree growth on the joint trainer.
 #[derive(Debug)]
 struct JointLeafNode {
@@ -163,6 +192,55 @@ struct JointLeafNode {
     local_node_id: u32,
     /// Row indices currently routed to this node.
     row_indices: Vec<u32>,
+}
+
+/// A candidate split for leaf-wise (best-first) growth on the joint trainer.
+/// Held in a `BinaryHeap` keyed by `gain` (max-heap). The candidate carries
+/// the resolved split decision (feature, threshold_bin, row partition, K-output
+/// leaf values) so popping the best candidate immediately commits a stump
+/// without re-running the histogram sweep.
+///
+/// `parent_active_groups` carries the parent node's interaction-constraint
+/// active group bitset so descendants of a split node propagate the
+/// constraint set correctly.
+#[derive(Debug)]
+struct JointLeafCandidate {
+    node: JointLeafNode,
+    feature: u32,
+    threshold_bin: u16,
+    default_left: bool,
+    gain: f32,
+    left_rows: Vec<u32>,
+    right_rows: Vec<u32>,
+    left_k: Vec<f32>,
+    right_k: Vec<f32>,
+    left_stats: NodeStats,
+    right_stats: NodeStats,
+    parent_active_groups: Option<u64>,
+    /// Categorical bitset (Some when this is a Fisher-sort categorical
+    /// split, None for numeric threshold splits). Bit `k` = 1 means
+    /// category `k` is routed to the left child.
+    cat_bitset: Option<u64>,
+}
+
+impl PartialEq for JointLeafCandidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.gain == other.gain
+    }
+}
+impl Eq for JointLeafCandidate {}
+impl Ord for JointLeafCandidate {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // f32 max-heap: NaN treated as least via `unwrap_or(Equal)`.
+        self.gain
+            .partial_cmp(&other.gain)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    }
+}
+impl PartialOrd for JointLeafCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 /// Output of a single joint training round: one shared tree expressed as a
@@ -176,11 +254,13 @@ pub struct JointRoundResult {
 /// stumps (already updated to carry K-output leaf values). The caller is
 /// responsible for accumulating leaf contributions into per-output prediction
 /// vectors using `predictions[k][row] += learning_rate * leaf_value_k`.
+#[allow(clippy::needless_range_loop)]
 pub fn build_joint_round(
     params: &TrainParams,
     binned_matrix: &BinnedMatrix,
     grads_per_output: &[Vec<GradientPair>],
     n_outputs: usize,
+    categorical_features: &[crate::CategoricalFeatureInfo],
 ) -> Result<JointRoundResult, String> {
     if grads_per_output.len() != n_outputs {
         return Err(format!(
@@ -219,6 +299,67 @@ pub fn build_joint_round(
     let min_rows_per_leaf = params.min_data_in_leaf.max(1) as usize;
     let lambda_l2 = params.lambda_l2;
 
+    // col_subsample (v0.10.2): per-tree feature mask, seeded by params.seed.
+    // One mask per call to build_joint_round (the joint trainer emits one
+    // tree per round, so per-tree == per-round). Deterministically derived
+    // via xorshift64*. If RNG masks every feature, fall back to all-allowed
+    // for this round so the tree doesn't become empty for purely RNG reasons
+    // (matches LightGBM's `feature_fraction` behavior).
+    let feature_allowed: Vec<bool> = if params.col_subsample < 1.0 {
+        let mut s: u64 = params.seed.wrapping_mul(0xBF58476D1CE4E5B9);
+        s ^= s >> 30;
+        s = s.wrapping_mul(0x94D049BB133111EB);
+        if s == 0 {
+            s = 0xDEADBEEFCAFEBABE;
+        }
+        let rate = params.col_subsample;
+        let mut mask: Vec<bool> = (0..feature_count)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                let u01 = ((s >> 11) & ((1u64 << 24) - 1)) as f32 / ((1u64 << 24) as f32);
+                u01 < rate
+            })
+            .collect();
+        if !mask.iter().any(|&b| b) {
+            // All-zero edge case: fall back to all-allowed.
+            for f in mask.iter_mut() {
+                *f = true;
+            }
+        }
+        mask
+    } else {
+        vec![true; feature_count]
+    };
+
+    // interaction_constraints (v0.10.2): build the constraint index (returns
+    // None if the user didn't configure any constraints). Per-node bookkeeping
+    // tracks the active group bitset for each local_node_id; the root starts
+    // with all groups active, and descendants narrow the set via `descend`
+    // each time their parent splits on a constrained feature.
+    let constraint_index = InteractionConstraintIndex::from_constraints(
+        &params.interaction_constraints,
+        feature_count,
+    )
+    .map_err(|e| format!("interaction_constraints: {e:?}"))?;
+    let mut node_active_groups: HashMap<u32, u64> = HashMap::new();
+    if let Some(idx) = constraint_index.as_ref() {
+        node_active_groups.insert(0, idx.root_active_groups());
+    }
+
+    // Native-categorical lookup (v0.10.2): feature_index → num_categories.
+    // Built once per call. `None` means the feature is numeric.
+    let cat_num_categories: Vec<Option<usize>> = {
+        let mut v = vec![None; feature_count];
+        for cf in categorical_features {
+            if cf.feature_index < feature_count {
+                v[cf.feature_index] = Some(cf.num_categories);
+            }
+        }
+        v
+    };
+
     let mut stumps: Vec<TrainedStump> = Vec::new();
     let mut active: Vec<JointLeafNode> = vec![JointLeafNode {
         local_node_id: 0,
@@ -248,6 +389,10 @@ pub fn build_joint_round(
             //
             // We accumulate per-feature column.
             for feature in 0..feature_count {
+                // col_subsample (v0.10.2): skip histogram build for masked-out features.
+                if !feature_allowed[feature] {
+                    continue;
+                }
                 // Subset the bin column for this feature.
                 let mut subset_bins: Vec<u8> = Vec::with_capacity(node.row_indices.len());
                 for &row in &node.row_indices {
@@ -275,11 +420,46 @@ pub fn build_joint_round(
             }
 
             // Find best split across all (feature, threshold_bin) pairs.
-            let mut best: Option<(usize, usize, f32)> = None; // (feature, threshold_bin, gain)
+            // For categorical features, the threshold_bin slot is unused
+            // (set to 0) and the bitset is carried in the 4th element.
+            let mut best: Option<(usize, usize, f32, Option<u64>)> = None;
             // BinnedMatrix exposes max_bin globally; iterate candidate
             // thresholds across the full bin range minus the NaN slot.
             let max_threshold = (binned_matrix.max_bin as usize).min(MISSING_BIN_U8 as usize - 1);
+            // interaction_constraints (v0.10.2): look up this node's active
+            // group set once outside the feature loop.
+            let node_ag = node_active_groups.get(&node.local_node_id).copied();
             for feature in 0..feature_count {
+                // col_subsample (v0.10.2): skip masked-out features in split search.
+                if !feature_allowed[feature] {
+                    continue;
+                }
+                // interaction_constraints (v0.10.2): skip features outside the
+                // active group set for this node.
+                if let (Some(idx), Some(ag)) = (constraint_index.as_ref(), node_ag)
+                    && !idx.feature_allowed(ag, feature as u32)
+                {
+                    continue;
+                }
+                // Native-categorical (v0.10.2): if the feature is in the
+                // categorical_features list, use Fisher-sort over the K
+                // outputs instead of a threshold sweep. The result carries
+                // a `left_bitset: u64` which the partition path consumes.
+                if let Some(num_cats) = cat_num_categories[feature] {
+                    if let Some(cat_split) =
+                        crate::shared_histogram::find_best_multi_output_categorical_split(
+                            &node_hist,
+                            feature,
+                            num_cats,
+                            lambda_l2,
+                            crate::LEAF_EPSILON,
+                        )
+                        && cat_split.gain > best.map(|(_, _, g, _)| g).unwrap_or(0.0)
+                    {
+                        best = Some((feature, 0, cat_split.gain, Some(cat_split.left_bitset)));
+                    }
+                    continue; // skip numeric threshold sweep for categorical features
+                }
                 for threshold_bin in 0..max_threshold {
                     let gain = compute_multi_output_split_gain(
                         &node_hist,
@@ -291,19 +471,27 @@ pub fn build_joint_round(
                     if gain <= 0.0 {
                         continue;
                     }
-                    if best.map(|(_, _, g)| gain > g).unwrap_or(true) {
-                        best = Some((feature, threshold_bin, gain));
+                    if best.map(|(_, _, g, _)| gain > g).unwrap_or(true) {
+                        best = Some((feature, threshold_bin, gain, None));
                     }
                 }
             }
 
-            let Some((feature, threshold_bin, gain)) = best else {
+            let Some((feature, threshold_bin, gain, cat_bitset)) = best else {
                 continue; // No positive-gain split — leave node as terminal leaf
             };
 
-            // Partition rows by the chosen split. NaN rows (bin == MISSING_BIN_U8)
-            // route per default_left below; we pick the direction yielding more
-            // rows on either side (simple v0.10.0 default).
+            // min_split_gain (v0.10.2): reject splits whose K-output sum-of-gains
+            // falls below the user-specified threshold. Mirrors the single-output
+            // trainer.
+            if gain < params.min_split_gain {
+                continue;
+            }
+
+            // Partition rows by the chosen split. For categorical splits the
+            // bin index is interpreted as a category ID and routed via the
+            // bitset; for numeric splits, by threshold_bin. NaN rows
+            // (bin == MISSING_BIN_U8) route per default_left below.
             let mut left_rows: Vec<u32> = Vec::new();
             let mut right_rows: Vec<u32> = Vec::new();
             let mut missing_rows: Vec<u32> = Vec::new();
@@ -311,6 +499,13 @@ pub fn build_joint_round(
                 let bin = binned_matrix.bins[row as usize * feature_count + feature];
                 if bin == MISSING_BIN_U8 {
                     missing_rows.push(row);
+                } else if let Some(bs) = cat_bitset {
+                    // Categorical: bit `bin` set → left.
+                    if bin < 64 && (bs & (1u64 << bin)) != 0 {
+                        left_rows.push(row);
+                    } else {
+                        right_rows.push(row);
+                    }
                 } else if (bin as usize) <= threshold_bin {
                     left_rows.push(row);
                 } else {
@@ -379,8 +574,8 @@ pub fn build_joint_round(
                     threshold_bin: threshold_bin as u16,
                     gain,
                     default_left,
-                    is_categorical: false,
-                    categorical_bitset: None,
+                    is_categorical: cat_bitset.is_some(),
+                    categorical_bitset: cat_bitset.map(u64_to_bitset_bytes),
                     left_stats,
                     right_stats,
                 },
@@ -395,6 +590,17 @@ pub fn build_joint_round(
             };
             stumps.push(stump);
 
+            // interaction_constraints (v0.10.2): propagate the active group
+            // set to both children. `descend` returns the intersection of
+            // the parent's active groups with the groups containing the
+            // split feature (or leaves it unchanged for unconstrained
+            // features).
+            if let (Some(idx), Some(parent_ag)) = (constraint_index.as_ref(), node_ag) {
+                let child_ag = idx.descend(parent_ag, feature as u32);
+                node_active_groups.insert(node.local_node_id * 2 + 1, child_ag);
+                node_active_groups.insert(node.local_node_id * 2 + 2, child_ag);
+            }
+
             // Schedule child nodes (local_node_id * 2 + 1 and + 2 per predictor
             // traversal convention).
             next_active.push(JointLeafNode {
@@ -408,6 +614,369 @@ pub fn build_joint_round(
         }
 
         active = next_active;
+    }
+
+    Ok(JointRoundResult { stumps })
+}
+
+/// Build one joint round using **leaf-wise (best-first)** tree growth.
+///
+/// Mirrors `build_joint_round` (level-wise) but pops the best candidate
+/// from a max-heap keyed by gain at each step, instead of expanding every
+/// node at the current depth. Stops when:
+///   - the heap is empty (no positive-gain split available anywhere), OR
+///   - the leaf count would exceed `max_leaves`, OR
+///   - a candidate's depth (derived from `local_node_id`) would exceed
+///     `params.max_depth`.
+///
+/// Honors `col_subsample`, `interaction_constraints`, and `min_split_gain`
+/// using the same logic as the level-wise builder. `row_subsample` is
+/// applied at the outer round level via `fit_joint_multi_output` (the
+/// gradients passed in are already row-masked when sampling is enabled).
+#[allow(clippy::needless_range_loop)]
+fn build_joint_round_leafwise(
+    params: &TrainParams,
+    binned_matrix: &BinnedMatrix,
+    grads_per_output: &[Vec<GradientPair>],
+    n_outputs: usize,
+    max_leaves: usize,
+    categorical_features: &[crate::CategoricalFeatureInfo],
+) -> Result<JointRoundResult, String> {
+    use std::collections::BinaryHeap;
+
+    let n_rows = binned_matrix.row_count;
+    let feature_count = binned_matrix.feature_count;
+    let n_bins = (binned_matrix.max_bin as usize + 1).max(MISSING_BIN_U8 as usize + 1);
+
+    // Per-output gradient sanity (mirror build_joint_round).
+    for (k, g) in grads_per_output.iter().enumerate() {
+        if g.len() != n_rows {
+            return Err(format!(
+                "gradient vector for output {k} has length {} != {n_rows}",
+                g.len()
+            ));
+        }
+    }
+
+    // Pack gradients for shared-histogram build (row-major K-output).
+    let mut packed_grads = vec![0.0_f32; n_rows * n_outputs];
+    let mut packed_hess = vec![0.0_f32; n_rows * n_outputs];
+    for k in 0..n_outputs {
+        for row in 0..n_rows {
+            let gp = grads_per_output[k][row];
+            packed_grads[row * n_outputs + k] = gp.grad;
+            packed_hess[row * n_outputs + k] = gp.hess;
+        }
+    }
+
+    let max_depth = params.max_depth.max(1) as usize;
+    let min_rows_per_leaf = params.min_data_in_leaf.max(1) as usize;
+    let lambda_l2 = params.lambda_l2;
+
+    // col_subsample (same logic as build_joint_round).
+    let feature_allowed: Vec<bool> = if params.col_subsample < 1.0 {
+        let mut s: u64 = params.seed.wrapping_mul(0xBF58476D1CE4E5B9);
+        s ^= s >> 30;
+        s = s.wrapping_mul(0x94D049BB133111EB);
+        if s == 0 {
+            s = 0xDEADBEEFCAFEBABE;
+        }
+        let rate = params.col_subsample;
+        let mut mask: Vec<bool> = (0..feature_count)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                let u01 = ((s >> 11) & ((1u64 << 24) - 1)) as f32 / ((1u64 << 24) as f32);
+                u01 < rate
+            })
+            .collect();
+        if !mask.iter().any(|&b| b) {
+            for f in mask.iter_mut() {
+                *f = true;
+            }
+        }
+        mask
+    } else {
+        vec![true; feature_count]
+    };
+
+    // interaction_constraints.
+    let constraint_index = InteractionConstraintIndex::from_constraints(
+        &params.interaction_constraints,
+        feature_count,
+    )
+    .map_err(|e| format!("interaction_constraints: {e:?}"))?;
+    let root_active_groups = constraint_index
+        .as_ref()
+        .map(|idx| idx.root_active_groups());
+
+    // Native-categorical lookup (v0.10.2): same as build_joint_round.
+    let cat_num_categories: Vec<Option<usize>> = {
+        let mut v = vec![None; feature_count];
+        for cf in categorical_features {
+            if cf.feature_index < feature_count {
+                v[cf.feature_index] = Some(cf.num_categories);
+            }
+        }
+        v
+    };
+
+    // Per-node candidate evaluator. Builds the multi-output histogram for
+    // `node.row_indices`, sweeps features (respecting `feature_allowed` and
+    // the active interaction-constraint group set), picks the best split,
+    // partitions rows, computes Newton-Raphson K-output leaf values, and
+    // returns a candidate (or None if no positive-gain split survives the
+    // constraints + min_data_in_leaf + min_split_gain filters).
+    let evaluate_node =
+        |node: JointLeafNode, active_groups: Option<u64>| -> Option<JointLeafCandidate> {
+            if node.row_indices.len() < 2 * min_rows_per_leaf {
+                return None;
+            }
+
+            // Build multi-output histogram for this node.
+            let mut node_hist = MultiOutputHistogram::new(feature_count, n_bins, n_outputs);
+            for feature in 0..feature_count {
+                if !feature_allowed[feature] {
+                    continue;
+                }
+                if let (Some(idx), Some(ag)) = (constraint_index.as_ref(), active_groups)
+                    && !idx.feature_allowed(ag, feature as u32)
+                {
+                    continue;
+                }
+                let mut subset_bins: Vec<u8> = Vec::with_capacity(node.row_indices.len());
+                for &row in &node.row_indices {
+                    let idx = row as usize * feature_count + feature;
+                    subset_bins.push(binned_matrix.bins[idx]);
+                }
+                let mut subset_g: Vec<f32> = Vec::with_capacity(node.row_indices.len() * n_outputs);
+                let mut subset_h: Vec<f32> = Vec::with_capacity(node.row_indices.len() * n_outputs);
+                for &row in &node.row_indices {
+                    for k in 0..n_outputs {
+                        subset_g.push(packed_grads[row as usize * n_outputs + k]);
+                        subset_h.push(packed_hess[row as usize * n_outputs + k]);
+                    }
+                }
+                build_multi_output_histogram_inplace(
+                    &mut node_hist,
+                    feature,
+                    &subset_bins,
+                    &subset_g,
+                    &subset_h,
+                    n_outputs,
+                );
+            }
+
+            // Sweep features for the best split. Categorical features dispatch
+            // to Fisher-sort and carry a u64 bitset in the 4th slot of `best`.
+            let mut best: Option<(usize, usize, f32, Option<u64>)> = None;
+            let max_threshold = (binned_matrix.max_bin as usize).min(MISSING_BIN_U8 as usize - 1);
+            for feature in 0..feature_count {
+                if !feature_allowed[feature] {
+                    continue;
+                }
+                if let (Some(idx), Some(ag)) = (constraint_index.as_ref(), active_groups)
+                    && !idx.feature_allowed(ag, feature as u32)
+                {
+                    continue;
+                }
+                if let Some(num_cats) = cat_num_categories[feature] {
+                    if let Some(cat_split) =
+                        crate::shared_histogram::find_best_multi_output_categorical_split(
+                            &node_hist,
+                            feature,
+                            num_cats,
+                            lambda_l2,
+                            crate::LEAF_EPSILON,
+                        )
+                        && cat_split.gain > best.map(|(_, _, g, _)| g).unwrap_or(0.0)
+                    {
+                        best = Some((feature, 0, cat_split.gain, Some(cat_split.left_bitset)));
+                    }
+                    continue;
+                }
+                for threshold_bin in 0..max_threshold {
+                    let gain = compute_multi_output_split_gain(
+                        &node_hist,
+                        feature,
+                        threshold_bin,
+                        lambda_l2,
+                        crate::LEAF_EPSILON,
+                    );
+                    if gain <= 0.0 {
+                        continue;
+                    }
+                    if best.map(|(_, _, g, _)| gain > g).unwrap_or(true) {
+                        best = Some((feature, threshold_bin, gain, None));
+                    }
+                }
+            }
+            let (feature, threshold_bin, gain, cat_bitset) = best?;
+            if gain < params.min_split_gain {
+                return None;
+            }
+
+            // Partition rows.
+            let mut left_rows: Vec<u32> = Vec::new();
+            let mut right_rows: Vec<u32> = Vec::new();
+            let mut missing_rows: Vec<u32> = Vec::new();
+            for &row in &node.row_indices {
+                let bin = binned_matrix.bins[row as usize * feature_count + feature];
+                if bin == MISSING_BIN_U8 {
+                    missing_rows.push(row);
+                } else if let Some(bs) = cat_bitset {
+                    if bin < 64 && (bs & (1u64 << bin)) != 0 {
+                        left_rows.push(row);
+                    } else {
+                        right_rows.push(row);
+                    }
+                } else if (bin as usize) <= threshold_bin {
+                    left_rows.push(row);
+                } else {
+                    right_rows.push(row);
+                }
+            }
+            let default_left = left_rows.len() >= right_rows.len();
+            if default_left {
+                left_rows.append(&mut missing_rows);
+            } else {
+                right_rows.append(&mut missing_rows);
+            }
+            if left_rows.len() < min_rows_per_leaf || right_rows.len() < min_rows_per_leaf {
+                return None;
+            }
+
+            // K-output leaf values via Newton-Raphson per output.
+            let leaf_values = |rows: &[u32]| -> Vec<f32> {
+                let mut out = vec![0.0_f32; n_outputs];
+                for k in 0..n_outputs {
+                    let mut g_sum = 0.0_f32;
+                    let mut h_sum = 0.0_f32;
+                    for &row in rows {
+                        let gp = grads_per_output[k][row as usize];
+                        g_sum += gp.grad;
+                        h_sum += gp.hess;
+                    }
+                    out[k] = -g_sum / (h_sum + lambda_l2 + crate::LEAF_EPSILON);
+                }
+                out
+            };
+            let left_k = leaf_values(&left_rows);
+            let right_k = leaf_values(&right_rows);
+
+            // NodeStats for record-keeping (joint trainer doesn't consume them
+            // beyond carrying them into SplitCandidate for compat).
+            let summarize = |rows: &[u32]| -> NodeStats {
+                let mut g = 0.0_f32;
+                let mut h = 0.0_f32;
+                for grad_vec in grads_per_output.iter().take(n_outputs) {
+                    for &row in rows {
+                        let gp = grad_vec[row as usize];
+                        g += gp.grad;
+                        h += gp.hess;
+                    }
+                }
+                NodeStats {
+                    grad_sum: g,
+                    hess_sum: h,
+                    grad_sq_sum: 0.0,
+                    row_count: rows.len() as u32,
+                }
+            };
+            let left_stats = summarize(&left_rows);
+            let right_stats = summarize(&right_rows);
+
+            Some(JointLeafCandidate {
+                node,
+                feature: feature as u32,
+                threshold_bin: threshold_bin as u16,
+                default_left,
+                gain,
+                left_rows,
+                right_rows,
+                left_k,
+                right_k,
+                left_stats,
+                right_stats,
+                parent_active_groups: active_groups,
+                cat_bitset,
+            })
+        };
+
+    // Initialize heap with the root candidate.
+    let mut heap: BinaryHeap<JointLeafCandidate> = BinaryHeap::new();
+    let root_node = JointLeafNode {
+        local_node_id: 0,
+        row_indices: (0..n_rows as u32).collect(),
+    };
+    if let Some(root_cand) = evaluate_node(root_node, root_active_groups) {
+        heap.push(root_cand);
+    }
+
+    // Best-first growth: each pop adds one stump (one split → one new leaf).
+    let mut stumps: Vec<TrainedStump> = Vec::new();
+    let mut leaf_count: usize = 1; // root starts as one leaf
+
+    while let Some(cand) = heap.pop() {
+        if leaf_count >= max_leaves {
+            break;
+        }
+        // Depth from local_node_id: depth = floor(log2(node_id + 1)).
+        // (0 → 0, 1/2 → 1, 3/4/5/6 → 2, ...)
+        let depth = (32 - (cand.node.local_node_id + 1).leading_zeros()) as usize - 1;
+        if depth >= max_depth {
+            continue;
+        }
+
+        let local_node_id = cand.node.local_node_id;
+        let left_local = local_node_id * 2 + 1;
+        let right_local = local_node_id * 2 + 2;
+
+        // Compute child active groups before consuming cand.feature.
+        let child_ag = match (constraint_index.as_ref(), cand.parent_active_groups) {
+            (Some(idx), Some(parent_ag)) => Some(idx.descend(parent_ag, cand.feature)),
+            _ => None,
+        };
+
+        // Commit the split as a TrainedStump.
+        let stump = TrainedStump {
+            split: SplitCandidate {
+                node_id: local_node_id,
+                feature_index: cand.feature,
+                threshold_bin: cand.threshold_bin,
+                gain: cand.gain,
+                default_left: cand.default_left,
+                is_categorical: cand.cat_bitset.is_some(),
+                categorical_bitset: cand.cat_bitset.map(u64_to_bitset_bytes),
+                left_stats: cand.left_stats,
+                right_stats: cand.right_stats,
+            },
+            left_leaf_value: LeafValue::Scalar(cand.left_k[0]),
+            right_leaf_value: LeafValue::Scalar(cand.right_k[0]),
+            tree_weight: 1.0,
+            multi_output_leaf_values: Some((cand.left_k.clone(), cand.right_k.clone())),
+        };
+        stumps.push(stump);
+        leaf_count += 1; // splitting a leaf adds 1 net leaf (1 → 2).
+
+        // Evaluate child candidates and push to heap if they have a viable split.
+        if depth + 1 < max_depth {
+            let left_node = JointLeafNode {
+                local_node_id: left_local,
+                row_indices: cand.left_rows,
+            };
+            if let Some(left_cand) = evaluate_node(left_node, child_ag) {
+                heap.push(left_cand);
+            }
+            let right_node = JointLeafNode {
+                local_node_id: right_local,
+                row_indices: cand.right_rows,
+            };
+            if let Some(right_cand) = evaluate_node(right_node, child_ag) {
+                heap.push(right_cand);
+            }
+        }
     }
 
     Ok(JointRoundResult { stumps })
@@ -431,6 +1000,34 @@ pub fn fit_joint_multi_output(
     group_id: Option<&[u32]>,
     per_output_objective: &[JointObjective],
     n_estimators: usize,
+) -> Result<JointTrainingSummary, String> {
+    fit_joint_multi_output_with_categorical(
+        params,
+        feature_count,
+        binned_matrix,
+        targets_per_output,
+        group_id,
+        per_output_objective,
+        n_estimators,
+        /*categorical_features=*/ &[],
+    )
+}
+
+/// Same as [`fit_joint_multi_output`] but accepts a slice of
+/// [`CategoricalFeatureInfo`] specifying which features should be treated
+/// as native-categorical via multi-output Fisher-sort partitioning. An
+/// empty slice means all features are numeric (byte-identical to
+/// `fit_joint_multi_output`).
+#[allow(clippy::too_many_arguments)]
+pub fn fit_joint_multi_output_with_categorical(
+    params: &TrainParams,
+    feature_count: usize,
+    binned_matrix: &BinnedMatrix,
+    targets_per_output: &[Vec<f32>],
+    group_id: Option<&[u32]>,
+    per_output_objective: &[JointObjective],
+    n_estimators: usize,
+    categorical_features: &[crate::CategoricalFeatureInfo],
 ) -> Result<JointTrainingSummary, String> {
     let n_outputs = targets_per_output.len();
     if per_output_objective.len() != n_outputs {
@@ -477,9 +1074,70 @@ pub fn fit_joint_multi_output(
             grads_per_output.push(g);
         }
 
-        // Build one shared tree.
-        let mut round_result =
-            build_joint_round(params, binned_matrix, &grads_per_output, n_outputs)?;
+        // row_subsample (v0.10.2): seeded Bernoulli row mask. When
+        // row_subsample < 1.0, the build_joint_round call sees a
+        // row-restricted view of the gradient buffers (other rows get
+        // zeroed gradients so they contribute nothing to histogram /
+        // split gain). We don't subset the BinnedMatrix (it's shared);
+        // zeroing gradients is equivalent for histogram math. The
+        // post-build per-row prediction walk still uses the un-masked
+        // `grads_per_output` indirectly via `predictions` — sampled rows
+        // still receive the leaf delta they traverse to, matching
+        // LightGBM's `bagging_fraction` semantics.
+        let active_grads: Vec<Vec<GradientPair>> = if params.row_subsample < 1.0 {
+            let mut rng_state: u64 = params.seed.wrapping_mul(0x9E3779B97F4A7C15)
+                ^ ((round as u64).wrapping_mul(0xBF58476D1CE4E5B9));
+            // Ensure the state is non-zero (xorshift requires non-zero seed).
+            if rng_state == 0 {
+                rng_state = 0xDEADBEEFCAFEBABE;
+            }
+            let rate = params.row_subsample;
+            let mut masked: Vec<Vec<GradientPair>> = grads_per_output.clone();
+            let zero_gp = GradientPair {
+                grad: 0.0,
+                hess: 0.0,
+            };
+            for row in 0..n_rows {
+                // xorshift64* for cheap deterministic Bernoulli.
+                rng_state ^= rng_state << 13;
+                rng_state ^= rng_state >> 7;
+                rng_state ^= rng_state << 17;
+                let u01 = ((rng_state >> 11) & ((1u64 << 24) - 1)) as f32 / ((1u64 << 24) as f32);
+                if u01 >= rate {
+                    for vec in masked.iter_mut().take(n_outputs) {
+                        vec[row] = zero_gp;
+                    }
+                }
+            }
+            masked
+        } else {
+            grads_per_output.clone()
+        };
+
+        // Build one shared tree. Dispatch on tree_growth: leaf-wise uses
+        // the priority-queue best-first builder gated by `max_leaves`;
+        // level-wise uses the BFS depth-bounded builder.
+        let mut round_result = if params.tree_growth == TreeGrowth::Leaf {
+            let max_leaves = params.max_leaves.ok_or_else(|| {
+                "tree_growth='leaf' requires max_leaves to be set on the joint trainer".to_string()
+            })?;
+            build_joint_round_leafwise(
+                params,
+                binned_matrix,
+                &active_grads,
+                n_outputs,
+                max_leaves,
+                categorical_features,
+            )?
+        } else {
+            build_joint_round(
+                params,
+                binned_matrix,
+                &active_grads,
+                n_outputs,
+                categorical_features,
+            )?
+        };
         if round_result.stumps.is_empty() {
             break;
         }
@@ -545,6 +1203,15 @@ pub fn fit_joint_multi_output(
                 let bin = binned_matrix.bins[row * feature_count + feature];
                 let went_left = if bin == MISSING_BIN_U8 {
                     stump.split.default_left
+                } else if stump.split.is_categorical {
+                    // Categorical stump: route by bitset bit.
+                    let bs = stump
+                        .split
+                        .categorical_bitset
+                        .as_ref()
+                        .map(|b| bitset_bytes_to_u64(b))
+                        .unwrap_or(0);
+                    bin < 64 && (bs & (1u64 << bin)) != 0
                 } else {
                     (bin as usize) <= threshold_bin
                 };
@@ -649,6 +1316,14 @@ struct JointPredictorStump {
     feature_index: u32,
     threshold_bin: u16,
     default_left: bool,
+    /// True if this stump uses a categorical bitset (Fisher-sort) instead of
+    /// a numeric threshold compare.
+    is_categorical: bool,
+    /// Categorical left-bitset (bit `k` = 1 means category `k` is routed
+    /// left). Populated only when `is_categorical` is true. Single u64
+    /// supports up to 64 categories per feature (the joint trainer's
+    /// per-feature cap from the Fisher-sort helper).
+    cat_bitset: u64,
     left_k: Vec<f32>,
     right_k: Vec<f32>,
 }
@@ -691,11 +1366,19 @@ impl JointPredictor {
             let tree_id = (stump.split.node_id / TREE_NODE_STRIDE) as usize;
             let local_node_id = stump.split.node_id % TREE_NODE_STRIDE;
             let new_idx = stumps.len();
+            let cat_bitset = stump
+                .split
+                .categorical_bitset
+                .as_ref()
+                .map(|b| bitset_bytes_to_u64(b))
+                .unwrap_or(0);
             stumps.push(JointPredictorStump {
                 local_node_id,
                 feature_index: stump.split.feature_index,
                 threshold_bin: stump.split.threshold_bin,
                 default_left: stump.split.default_left,
+                is_categorical: stump.split.is_categorical,
+                cat_bitset,
                 left_k: mo.0.clone(),
                 right_k: mo.1.clone(),
             });
@@ -744,6 +1427,16 @@ impl JointPredictor {
                 let v = features.get(f).copied().unwrap_or(f32::NAN);
                 let went_left = if v.is_nan() {
                     stump.default_left
+                } else if stump.is_categorical {
+                    // Categorical stump: route by bitset. The raw feature
+                    // value is interpreted as the category ID; bit `cat_id`
+                    // of `cat_bitset` decides the direction.
+                    let cat_id = v as i64;
+                    if !(0..64).contains(&cat_id) {
+                        stump.default_left
+                    } else {
+                        (stump.cat_bitset & (1u64 << cat_id)) != 0
+                    }
                 } else {
                     (v as i32) <= stump.threshold_bin as i32
                 };
@@ -1073,7 +1766,7 @@ mod tests {
             ..TrainParams::default()
         };
 
-        let result = build_joint_round(&params, &binned, &grads_per_output, 2).expect("build");
+        let result = build_joint_round(&params, &binned, &grads_per_output, 2, &[]).expect("build");
         assert_eq!(result.stumps.len(), 1, "should emit one root split");
         let stump = &result.stumps[0];
         let (left_k, right_k) = stump
@@ -1090,5 +1783,543 @@ mod tests {
         assert!((left_k[1] - 0.5).abs() < 0.01, "left[1]={}", left_k[1]);
         // Output 1: right grad sum = 2, hess sum = 4 → leaf = -0.5
         assert!((right_k[1] + 0.5).abs() < 0.01, "right[1]={}", right_k[1]);
+    }
+
+    #[test]
+    fn joint_min_split_gain_rejects_low_gain_splits() {
+        // 8 rows, 1 feature, 2 outputs. With a real (left ≠ right) signal,
+        // min_split_gain=0 yields a split; setting min_split_gain to a huge
+        // value (1e6) must suppress it.
+        let bins: Vec<u8> = vec![0, 0, 0, 0, 4, 4, 4, 4];
+        let binned = BinnedMatrix::new(8, 1, 4, bins).expect("binned");
+        let targets_per_output: Vec<Vec<f32>> = vec![
+            vec![-1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0],
+            vec![0.5, 0.5, 0.5, 0.5, -0.5, -0.5, -0.5, -0.5],
+        ];
+
+        // Baseline: min_split_gain=0 → trains 1 stump.
+        let params_baseline = TrainParams {
+            max_depth: 1,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            learning_rate: 1.0,
+            min_split_gain: 0.0,
+            ..TrainParams::default()
+        };
+        let summary_baseline = fit_joint_multi_output(
+            &params_baseline,
+            1,
+            &binned,
+            &targets_per_output,
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            1,
+        )
+        .expect("fit baseline");
+        assert!(
+            !summary_baseline.model.stumps.is_empty(),
+            "baseline fixture must produce >=1 stump; got {}",
+            summary_baseline.model.stumps.len()
+        );
+
+        // With min_split_gain=1e6, no split should survive.
+        let params_strict = TrainParams {
+            min_split_gain: 1e6,
+            ..params_baseline
+        };
+        let summary_strict = fit_joint_multi_output(
+            &params_strict,
+            1,
+            &binned,
+            &targets_per_output,
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            1,
+        )
+        .expect("fit strict");
+        assert_eq!(
+            summary_strict.model.stumps.len(),
+            0,
+            "min_split_gain=1e6 must suppress all splits; got {} stumps",
+            summary_strict.model.stumps.len()
+        );
+    }
+
+    #[test]
+    fn joint_row_subsample_changes_trees_deterministically_per_seed() {
+        // 64 rows, 1 feature, 2 outputs. row_subsample=0.5 should produce a
+        // different model than row_subsample=1.0, but identical across two
+        // calls with the same seed.
+        //
+        // CRITICAL: within-side target variance is required to make the test
+        // sensitive to which rows are sampled. With uniform per-side targets
+        // (e.g. all left=-1, all right=+1), Newton-Raphson leaves collapse
+        // to constants independent of the sampled subset.
+        let mut bins: Vec<u8> = Vec::with_capacity(64);
+        for i in 0..64 {
+            bins.push(if i < 32 { 0 } else { 4 });
+        }
+        let binned = BinnedMatrix::new(64, 1, 4, bins).expect("binned");
+        // Deterministic noisy targets keyed on row index so different sampled
+        // subsets produce different per-leaf gradient/hessian sums.
+        let targets_per_output: Vec<Vec<f32>> = vec![
+            (0..64)
+                .map(|i| {
+                    let base = if i < 32 { -1.0 } else { 1.0 };
+                    let noise = ((i as f32) * 0.137).sin() * 0.4;
+                    base + noise
+                })
+                .collect(),
+            (0..64)
+                .map(|i| {
+                    let base = if i < 32 { 0.5 } else { -0.5 };
+                    let noise = ((i as f32) * 0.241).cos() * 0.3;
+                    base + noise
+                })
+                .collect(),
+        ];
+
+        let mk = |row_subsample: f32, seed: u64| {
+            let params = TrainParams {
+                max_depth: 2,
+                min_data_in_leaf: 1,
+                lambda_l2: 0.0,
+                learning_rate: 1.0,
+                row_subsample,
+                seed,
+                ..TrainParams::default()
+            };
+            fit_joint_multi_output(
+                &params,
+                1,
+                &binned,
+                &targets_per_output,
+                None,
+                &[JointObjective::SquaredError, JointObjective::SquaredError],
+                5,
+            )
+            .expect("fit")
+        };
+
+        let s_full = mk(1.0, 42);
+        let s_half_a = mk(0.5, 42);
+        let s_half_b = mk(0.5, 42);
+        let s_half_c = mk(0.5, 99);
+
+        // Determinism: same seed + same row_subsample → identical stump count.
+        assert_eq!(
+            s_half_a.model.stumps.len(),
+            s_half_b.model.stumps.len(),
+            "same (seed, row_subsample) must produce identical stump counts"
+        );
+
+        // Different seed should differ in at least one leaf value.
+        let leaf_a = s_half_a.model.stumps[0]
+            .multi_output_leaf_values
+            .as_ref()
+            .unwrap();
+        let leaf_c = s_half_c.model.stumps[0]
+            .multi_output_leaf_values
+            .as_ref()
+            .unwrap();
+        assert!(
+            (leaf_a.0[0] - leaf_c.0[0]).abs() > 1e-6 || (leaf_a.1[0] - leaf_c.1[0]).abs() > 1e-6,
+            "different seeds should produce different leaves under row_subsample=0.5"
+        );
+        // row_subsample=0.5 should differ from row_subsample=1.0 in at least one leaf.
+        let leaf_full = s_full.model.stumps[0]
+            .multi_output_leaf_values
+            .as_ref()
+            .unwrap();
+        assert!(
+            (leaf_a.0[0] - leaf_full.0[0]).abs() > 1e-6
+                || (leaf_a.1[0] - leaf_full.1[0]).abs() > 1e-6,
+            "row_subsample=0.5 should produce different leaves from row_subsample=1.0"
+        );
+    }
+
+    #[test]
+    fn joint_col_subsample_restricts_features_in_split_search() {
+        // 8 rows, 4 features, 2 outputs. Feature 0 is the best split
+        // (target perfectly separates by f0). col_subsample=0.25 with some
+        // seed should sometimes mask out feature 0 and force the model to
+        // either split on a different feature OR produce zero stumps.
+        let bins: Vec<u8> = vec![
+            // f0, f1, f2, f3
+            0, 0, 0, 0, // row 0
+            0, 0, 0, 0, // row 1
+            0, 1, 1, 1, // row 2
+            0, 1, 1, 1, // row 3
+            4, 0, 0, 0, // row 4
+            4, 0, 0, 0, // row 5
+            4, 1, 1, 1, // row 6
+            4, 1, 1, 1, // row 7
+        ];
+        let binned = BinnedMatrix::new(8, 4, 4, bins).expect("binned");
+        let targets_per_output: Vec<Vec<f32>> = vec![
+            vec![-1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0],
+            vec![0.5, 0.5, 0.5, 0.5, -0.5, -0.5, -0.5, -0.5],
+        ];
+        let mk = |col_subsample: f32, seed: u64| {
+            let params = TrainParams {
+                max_depth: 1,
+                min_data_in_leaf: 1,
+                lambda_l2: 0.0,
+                learning_rate: 1.0,
+                col_subsample,
+                seed,
+                ..TrainParams::default()
+            };
+            fit_joint_multi_output(
+                &params,
+                4,
+                &binned,
+                &targets_per_output,
+                None,
+                &[JointObjective::SquaredError, JointObjective::SquaredError],
+                1,
+            )
+            .expect("fit")
+        };
+
+        // Sanity: col_subsample=1.0 picks feature 0 (the best).
+        let full = mk(1.0, 0);
+        assert_eq!(
+            full.model.stumps[0].split.feature_index, 0,
+            "best feature is 0 when all features available"
+        );
+
+        // col_subsample=0.25 → only ~1 of 4 features sampled per round.
+        // Sweep seeds; at least one should exclude feature 0 from the mask
+        // and force the model to either pick a different feature or
+        // produce no stumps.
+        let mut saw_non_zero = false;
+        for seed in 0..64u64 {
+            let m = mk(0.25, seed);
+            if m.model.stumps.is_empty() {
+                saw_non_zero = true;
+                break;
+            }
+            if m.model.stumps[0].split.feature_index != 0 {
+                saw_non_zero = true;
+                break;
+            }
+        }
+        assert!(
+            saw_non_zero,
+            "col_subsample=0.25 should sometimes exclude feature 0 from the split-search mask"
+        );
+    }
+
+    #[test]
+    fn joint_interaction_constraints_forbid_feature_outside_active_group() {
+        // 12 rows, 3 features, 2 outputs. With constraints {[0,1], [2]},
+        // feature 2 is in its own group; once the tree splits on feature 0
+        // (group 0), feature 2 (group 1) becomes unreachable on that path.
+        //
+        // We use a fixture where feature 2 is in fact the second-best split
+        // candidate, so we can detect whether the constraint is honored:
+        // without the constraint, feature 2 would appear in some stump;
+        // with the constraint, it must not.
+        let bins: Vec<u8> = vec![
+            // f0, f1, f2
+            0, 0, 0, // row 0
+            0, 0, 1, // row 1
+            0, 1, 0, // row 2
+            0, 1, 1, // row 3
+            4, 0, 0, // row 4
+            4, 0, 1, // row 5
+            4, 1, 0, // row 6
+            4, 1, 1, // row 7
+            0, 0, 0, // row 8
+            0, 1, 1, // row 9
+            4, 0, 1, // row 10
+            4, 1, 0, // row 11
+        ];
+        let binned = BinnedMatrix::new(12, 3, 4, bins).expect("binned");
+        let targets_per_output: Vec<Vec<f32>> = vec![
+            // f0 splits the major signal; f1 refines within each half.
+            vec![
+                -2.0, -1.0, -2.0, -1.0, 1.0, 2.0, 1.0, 2.0, -2.0, -1.0, 1.0, 2.0,
+            ],
+            vec![
+                1.0, 0.5, 1.0, 0.5, -0.5, -1.0, -0.5, -1.0, 1.0, 0.5, -0.5, -1.0,
+            ],
+        ];
+        let params = TrainParams {
+            max_depth: 2,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            learning_rate: 1.0,
+            interaction_constraints: vec![vec![0, 1], vec![2]],
+            ..TrainParams::default()
+        };
+        let summary = fit_joint_multi_output(
+            &params,
+            3,
+            &binned,
+            &targets_per_output,
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            3,
+        )
+        .expect("fit");
+
+        // No stump may ever split on feature 2 once a path has used a
+        // feature from group {0,1}. Since the root is constrained-free
+        // (both groups active), feature 2 is *technically* allowed at
+        // the root — but as soon as a stump on feature 0 or 1 appears,
+        // descendants on that path must not use feature 2. The simplest
+        // assertion: if the model contains feature-2 stumps AND
+        // feature-{0,1} stumps, the feature-2 stumps must be at the root
+        // (local_node_id 0) of their tree.
+        let mut group01_used = false;
+        let mut group2_non_root = false;
+        for stump in &summary.model.stumps {
+            let f = stump.split.feature_index;
+            let local_node_id = stump.split.node_id % (1u32 << 20); // strip tree_id
+            if f == 0 || f == 1 {
+                group01_used = true;
+            }
+            if f == 2 && local_node_id != 0 {
+                group2_non_root = true;
+            }
+        }
+        assert!(group01_used, "expected at least one f0/f1 stump");
+        assert!(
+            !group2_non_root,
+            "interaction_constraints violated: feature 2 used as a non-root stump (would cross groups)"
+        );
+    }
+
+    #[test]
+    fn joint_leafwise_growth_respects_max_leaves() {
+        // 16 rows, 2 features, 2 outputs. Rich enough signal that level-wise
+        // with max_depth=4 produces multiple stumps; leaf-wise with
+        // max_leaves=3 must cap to ≤2 stumps per round.
+        let bins: Vec<u8> = vec![
+            0, 0, 0, 1, 1, 0, 1, 1, 2, 0, 2, 1, 3, 0, 3, 1, 4, 0, 4, 1, 5, 0, 5, 1, 6, 0, 6, 1, 7,
+            0, 7, 1,
+        ];
+        let binned = BinnedMatrix::new(16, 2, 7, bins).expect("binned");
+        let targets_per_output: Vec<Vec<f32>> = vec![
+            // Output 0: monotonic in f0 with f1 modulating the slope.
+            (0..16)
+                .map(|i| {
+                    let f0 = (i / 2) as f32;
+                    let f1 = (i % 2) as f32;
+                    f0 * 0.3 + f1 * (-0.5) + 0.1 * (i as f32).sin()
+                })
+                .collect(),
+            // Output 1: opposite signal so joint gain is non-trivial.
+            (0..16)
+                .map(|i| {
+                    let f0 = (i / 2) as f32;
+                    let f1 = (i % 2) as f32;
+                    -f0 * 0.2 + f1 * 0.4 + 0.1 * (i as f32).cos()
+                })
+                .collect(),
+        ];
+
+        // First, confirm the fixture is rich enough: level-wise produces >2 stumps.
+        let params_level = TrainParams {
+            tree_growth: TreeGrowth::Level,
+            max_depth: 4,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            learning_rate: 1.0,
+            ..TrainParams::default()
+        };
+        let summary_level = fit_joint_multi_output(
+            &params_level,
+            2,
+            &binned,
+            &targets_per_output,
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            1,
+        )
+        .expect("fit level-wise");
+        assert!(
+            summary_level.model.stumps.len() > 2,
+            "fixture sanity check: level-wise with max_depth=4 should produce >2 stumps; got {}",
+            summary_level.model.stumps.len()
+        );
+
+        // Now leaf-wise with max_leaves=3 must cap to ≤2 stumps.
+        let params_leaf = TrainParams {
+            tree_growth: TreeGrowth::Leaf,
+            max_leaves: Some(3),
+            max_depth: 8,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            learning_rate: 1.0,
+            ..TrainParams::default()
+        };
+        let summary_leaf = fit_joint_multi_output(
+            &params_leaf,
+            2,
+            &binned,
+            &targets_per_output,
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            1,
+        )
+        .expect("fit leaf-wise");
+        // 3 leaves → 2 internal splits → exactly 2 stumps per tree.
+        assert!(
+            summary_leaf.model.stumps.len() <= 2,
+            "max_leaves=3 should cap stumps to ≤2; got {}",
+            summary_leaf.model.stumps.len()
+        );
+        // And at least 1 stump (the root split) — otherwise leaf-wise didn't run.
+        assert!(
+            !summary_leaf.model.stumps.is_empty(),
+            "expected at least 1 stump from leaf-wise growth"
+        );
+
+        // Round-trip: leaf-wise artifacts must serialize/deserialize and
+        // JointPredictor must reproduce the training-time predictions.
+        let bytes = summary_leaf
+            .model
+            .clone()
+            .to_artifact_bytes()
+            .expect("serialize leaf-wise model");
+        let predictor = JointPredictor::from_artifact_bytes(&bytes, summary_leaf.baselines.clone())
+            .expect("load leaf-wise predictor");
+        // Predict on representative rows; results must be finite and
+        // (with our fixture) at least two distinct rows must produce
+        // different output-0 predictions (otherwise leaf-wise collapsed
+        // everything to one leaf).
+        let p0 = predictor.predict_row(&[0.0_f32, 0.0_f32]);
+        let p15 = predictor.predict_row(&[7.0_f32, 1.0_f32]);
+        assert!(p0[0].is_finite() && p0[1].is_finite());
+        assert!(p15[0].is_finite() && p15[1].is_finite());
+        assert!(
+            (p0[0] - p15[0]).abs() > 1e-4,
+            "leaf-wise must produce different predictions across the fixture; got p0={p0:?}, p15={p15:?}"
+        );
+    }
+
+    #[test]
+    fn joint_native_categorical_split_produces_bitset_stump() {
+        // 12 rows, 1 categorical feature with 3 categories, 2 outputs.
+        // Target pattern: category 1 wants output 0 = +1; categories 0 and 2
+        // want output 0 = -1. Fisher-sort must partition {0, 2} vs {1}.
+        let bins: Vec<u8> = vec![0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2];
+        let binned = BinnedMatrix::new(12, 1, 2, bins).expect("binned");
+        let targets_per_output: Vec<Vec<f32>> = vec![
+            vec![
+                -1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0, -1.0, -1.0, -1.0, -1.0,
+            ],
+            vec![
+                0.5, 0.5, 0.5, 0.5, -0.5, -0.5, -0.5, -0.5, 0.5, 0.5, 0.5, 0.5,
+            ],
+        ];
+        let params = TrainParams {
+            max_depth: 1,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            learning_rate: 1.0,
+            ..TrainParams::default()
+        };
+        let cat_features = vec![crate::CategoricalFeatureInfo {
+            feature_index: 0,
+            num_categories: 3,
+        }];
+        let summary = fit_joint_multi_output_with_categorical(
+            &params,
+            1,
+            &binned,
+            &targets_per_output,
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            1,
+            &cat_features,
+        )
+        .expect("fit");
+        assert_eq!(summary.model.stumps.len(), 1, "expected one root split");
+        let stump = &summary.model.stumps[0];
+        assert!(
+            stump.split.is_categorical,
+            "should produce categorical split"
+        );
+        let bitset = stump
+            .split
+            .categorical_bitset
+            .as_ref()
+            .expect("bitset present");
+        // Decode bit 0 (cat 0), bit 1 (cat 1), bit 2 (cat 2) from the first byte.
+        let bs0 = bitset[0];
+        let bit0 = bs0 & 1;
+        let bit1 = (bs0 >> 1) & 1;
+        let bit2 = (bs0 >> 2) & 1;
+        // Cats 0 and 2 should be on the same side; cat 1 on the other.
+        assert_eq!(
+            bit0, bit2,
+            "cats 0 and 2 should share a side, got bitset=0b{:08b}",
+            bs0
+        );
+        assert_ne!(bit0, bit1, "cat 1 should be opposite of cat 0");
+    }
+
+    #[test]
+    fn joint_predictor_evaluates_categorical_stumps_correctly() {
+        // Same fixture as joint_native_categorical_split_produces_bitset_stump.
+        // After fit, JointPredictor must route raw category values via the
+        // bitset (not via threshold compare) and produce sign-correct
+        // predictions for each category.
+        let bins: Vec<u8> = vec![0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2];
+        let binned = BinnedMatrix::new(12, 1, 2, bins).expect("binned");
+        let targets_per_output: Vec<Vec<f32>> = vec![
+            vec![
+                -1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0, -1.0, -1.0, -1.0, -1.0,
+            ],
+            vec![
+                0.5, 0.5, 0.5, 0.5, -0.5, -0.5, -0.5, -0.5, 0.5, 0.5, 0.5, 0.5,
+            ],
+        ];
+        let params = TrainParams {
+            max_depth: 1,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            learning_rate: 1.0,
+            ..TrainParams::default()
+        };
+        let cat_features = vec![crate::CategoricalFeatureInfo {
+            feature_index: 0,
+            num_categories: 3,
+        }];
+        let summary = fit_joint_multi_output_with_categorical(
+            &params,
+            1,
+            &binned,
+            &targets_per_output,
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            1,
+            &cat_features,
+        )
+        .expect("fit");
+        let bytes = summary
+            .model
+            .clone()
+            .to_artifact_bytes()
+            .expect("serialize");
+        let predictor =
+            JointPredictor::from_artifact_bytes(&bytes, summary.baselines.clone()).expect("load");
+
+        // Predict each category. Cat 1 should produce output 0 > 0 and
+        // output 1 < 0 (since cat 1 wants y=+1 for output 0, y=-0.5 for output 1).
+        // Cats 0 and 2 (paired side) should produce the opposite signs.
+        let p0 = predictor.predict_row(&[0.0_f32]); // cat 0
+        let p1 = predictor.predict_row(&[1.0_f32]); // cat 1
+        let p2 = predictor.predict_row(&[2.0_f32]); // cat 2
+        assert!(p1[0] > 0.0, "cat 1 output 0 should be > 0, got {}", p1[0]);
+        assert!(p0[0] < 0.0, "cat 0 output 0 should be < 0, got {}", p0[0]);
+        assert!(p2[0] < 0.0, "cat 2 output 0 should be < 0, got {}", p2[0]);
+        assert!(p1[1] < 0.0, "cat 1 output 1 should be < 0, got {}", p1[1]);
+        assert!(p0[1] > 0.0, "cat 0 output 1 should be > 0, got {}", p0[1]);
+        assert!(p2[1] > 0.0, "cat 2 output 1 should be > 0, got {}", p2[1]);
     }
 }

@@ -204,6 +204,110 @@ def test_multiclass_dart_warm_start_with_multi_stump_trees():
     )
 
 
+def test_multiclass_dart_works_with_leaf_wise_growth():
+    """v0.10.2 Phase 4: lift the level-wise restriction for multiclass DART.
+
+    Per-class `dart_round_start_offsets[k]` + `dart_round_counts[k]`
+    bookkeeping snapshots `class_stumps[k].len()` around each
+    `build_tree_*` call. The bookkeeping is growth-mode-agnostic
+    (a tree's stump count is variable under leaf-wise but the round
+    boundaries are still correctly captured).
+    """
+    rng = np.random.default_rng(0)
+    X = rng.standard_normal((250, 4)).astype(np.float32)
+    y = (X[:, 0] + X[:, 1] * 2 + X[:, 2] * 3).round().astype(int) % 3
+    m = GBMClassifier(
+        n_estimators=10,
+        boosting_mode="dart",
+        tree_growth="leaf",
+        max_leaves=8,
+        dart_drop_rate=0.2,
+        seed=42,
+    )
+    m.fit(X, y)
+    proba = m.predict_proba(X)
+    assert proba.shape == (250, 3)
+    assert np.allclose(proba.sum(axis=1), 1.0, atol=1e-5)
+    # All probabilities finite and in [0, 1].
+    assert np.all(np.isfinite(proba))
+    assert np.all(proba >= 0.0)
+    assert np.all(proba <= 1.0)
+
+
+def test_multiclass_dart_leaf_wise_warm_start_round_trip():
+    """v0.10.2 Phase 4: warm-start with leaf-wise multiclass DART.
+
+    The PyO3 bridge reconstructs per-class DART tree weights by
+    grouping `class_stumps[k]` stumps by `tree_id = node_id / TREE_NODE_STRIDE`
+    and taking the first stump's `tree_weight` per tree. Under
+    leaf-wise growth each tree has a variable stump count but the
+    `tree_id` decoding works identically.
+
+    Mirror the existing `test_multiclass_dart_warm_start_continues_without_error`
+    pattern: base trains 8 rounds; cont with `warm_start=True` +
+    `init_model=base` trains 8 more rounds (16 total). The continuation
+    must produce a different, valid distribution.
+    """
+    X, y = _toy_multiclass()
+    base = GBMClassifier(
+        n_estimators=8,
+        boosting_mode="dart",
+        tree_growth="leaf",
+        max_leaves=6,
+        dart_drop_rate=0.15,
+        seed=23,
+    )
+    base.fit(X, y)
+    cont = GBMClassifier(
+        n_estimators=8,
+        boosting_mode="dart",
+        tree_growth="leaf",
+        max_leaves=6,
+        dart_drop_rate=0.15,
+        warm_start=True,
+        seed=23,
+    )
+    cont.fit(X, y, init_model=base)
+    p_base = base.predict_proba(X)
+    p_cont = cont.predict_proba(X)
+    assert not np.allclose(p_base, p_cont, atol=1e-5)
+    assert np.allclose(p_cont.sum(axis=1), 1.0, atol=1e-5)
+    assert np.all(np.isfinite(p_cont))
+
+
+def test_multiclass_dart_with_validation_early_stopping():
+    """v0.10.2 Phase 4: validation DART transition (subtract dropped →
+    scale new at new_w → re-add dropped) applies under leaf-wise growth
+    too. A broken transition typically manifests as NaN/inf validation
+    losses or a model that won't pickle round-trip.
+    """
+    import pickle
+
+    rng = np.random.default_rng(1)
+    X = rng.standard_normal((400, 5)).astype(np.float32)
+    y = (X[:, 0] + X[:, 1] * 2).round().astype(int) % 4  # 4 classes
+    X_train, y_train = X[:300], y[:300]
+    X_val, y_val = X[300:], y[300:]
+    m = GBMClassifier(
+        n_estimators=50,
+        boosting_mode="dart",
+        tree_growth="leaf",
+        max_leaves=8,
+        early_stopping_rounds=5,
+        dart_drop_rate=0.15,
+        seed=7,
+    )
+    m.fit(X_train, y_train, eval_set=(X_val, y_val))
+    proba = m.predict_proba(X_val)
+    assert proba.shape == (100, 4)
+    assert np.allclose(proba.sum(axis=1), 1.0, atol=1e-5)
+    assert np.all(np.isfinite(proba))
+    # Pickle round-trip after early stopping has truncated the model.
+    restored = pickle.loads(pickle.dumps(m))
+    proba_restored = restored.predict_proba(X_val)
+    np.testing.assert_allclose(proba, proba_restored, rtol=1e-5, atol=1e-6)
+
+
 def test_multiclass_dart_with_validation_early_stopping():
     """Regression test for the v0.10.1 PR review (C6): the DART
     transition (dropout subtract + new_w scale + dropped re-add) must

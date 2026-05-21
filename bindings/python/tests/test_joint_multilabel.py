@@ -150,16 +150,119 @@ def test_joint_mode_rejects_unsupported_kwarg():
         m.fit(X, y, group=group)
 
 
-def test_joint_mode_rejects_row_subsample_until_supported():
-    """PR review (C3, C7): the v0.10.1 joint trainer does not yet
-    consume `row_subsample` / `col_subsample` / `min_split_gain`, so
-    these are explicitly rejected rather than silently ignored. They
-    will land alongside the rest of joint-path feature parity in a
-    later v0.10.x release (see docs/limitations.md)."""
+@pytest.mark.parametrize(
+    "kw,value",
+    [
+        ("min_split_gain", 0.0),
+        ("row_subsample", 0.7),
+        ("col_subsample", 0.8),
+        ("interaction_constraints", [[0, 1], [2, 3]]),
+    ],
+)
+def test_joint_mode_accepts_phase1_kwargs(kw, value):
+    """v0.10.2 Phase 1: joint mode now plumbs `min_split_gain`,
+    `row_subsample`, `col_subsample`, `interaction_constraints` into
+    the engine's `TrainParams`. Each kwarg should round-trip through
+    `train_joint_multi_label_ranker` without raising."""
     X, y, group = _toy_ranking()
-    for unsupported in ("row_subsample", "col_subsample", "min_split_gain"):
+    m = MultiLabelGBMRanker(
+        n_estimators=2, multi_label_mode="joint", **{kw: value}
+    )
+    m.fit(X, y, group=group)
+    preds = m.predict(X)
+    assert preds.shape == y.shape
+
+
+def test_joint_mode_leaf_wise_growth_respects_max_leaves():
+    """v0.10.2 Phase 2: joint mode supports tree_growth='leaf' + max_leaves
+    via build_joint_round_leafwise. The model should fit, predict, and
+    produce a finite-sized tree capped by max_leaves."""
+    X, y, group = _toy_ranking(n_queries=12, items_per_query=6, n_features=4, n_labels=3)
+    m = MultiLabelGBMRanker(
+        n_estimators=3,
+        multi_label_mode="joint",
+        tree_growth="leaf",
+        max_leaves=5,
+        max_depth=8,
+    )
+    m.fit(X, y, group=group)
+    preds = m.predict(X)
+    assert preds.shape == y.shape
+    # Sanity: predictions should be finite.
+    assert np.all(np.isfinite(preds))
+
+
+def test_joint_mode_leaf_wise_requires_max_leaves():
+    """v0.10.2: tree_growth='leaf' without max_leaves must fail with a
+    clear error (mirroring the single-output trainer's contract)."""
+    X, y, group = _toy_ranking()
+    m = MultiLabelGBMRanker(
+        n_estimators=2,
+        multi_label_mode="joint",
+        tree_growth="leaf",
+        # max_leaves intentionally omitted
+    )
+    with pytest.raises(Exception, match="max_leaves"):
+        m.fit(X, y, group=group)
+
+
+def test_joint_mode_accepts_categorical_features_with_max_cat_threshold():
+    """v0.10.2 Phase 3: joint mode supports native-categorical splits via
+    multi-output Fisher-sort. Feature 0 is integer-valued (3 categories);
+    `categorical_feature_indices=[0]` + `max_cat_threshold=8` should route
+    it through the native path."""
+    rng = np.random.default_rng(0)
+    n_queries, items_per_query = 8, 5
+    n = n_queries * items_per_query
+    # Feature 0: 3 categorical levels (0, 1, 2).
+    f0 = rng.integers(0, 3, n).astype(np.float32)
+    # Features 1-2: continuous.
+    f1 = rng.standard_normal(n).astype(np.float32)
+    f2 = rng.standard_normal(n).astype(np.float32)
+    X = np.column_stack([f0, f1, f2])
+    # Targets: 3 labels driven by f0 and noise.
+    y = np.stack(
+        [
+            (f0 == k).astype(np.float32) + 0.1 * rng.standard_normal(n).astype(np.float32)
+            for k in range(3)
+        ],
+        axis=1,
+    )
+    group = np.full(n_queries, items_per_query, dtype=np.int32)
+    m = MultiLabelGBMRanker(
+        n_estimators=3,
+        multi_label_mode="joint",
+        categorical_feature_indices=[0],
+        max_cat_threshold=8,
+    )
+    m.fit(X, y, group=group)
+    preds = m.predict(X)
+    assert preds.shape == y.shape
+    assert np.all(np.isfinite(preds))
+
+
+def test_joint_mode_still_rejects_truly_unsupported_kwargs():
+    """v0.10.2: kwargs that the joint trainer still does NOT support
+    (warm-start, MorphBoost, etc.) must continue to be rejected with
+    a clear NotImplementedError. Only Phase 1 kwargs were added to
+    the allow-list."""
+    X, y, group = _toy_ranking()
+    for unsupported in (
+        "leaf_model",
+        "monotone_constraints",
+        "boosting_mode",
+        "training_mode",
+    ):
+        # Some of these collide with __init__ signature in odd ways; we
+        # use a generic plausible-value-per-kwarg map.
+        value = {
+            "leaf_model": "linear",
+            "monotone_constraints": [1, 0, 0, 0],
+            "boosting_mode": "goss",
+            "training_mode": "morph",
+        }[unsupported]
         m = MultiLabelGBMRanker(
-            n_estimators=2, multi_label_mode="joint", **{unsupported: 0.5}
+            n_estimators=2, multi_label_mode="joint", **{unsupported: value}
         )
         with pytest.raises(NotImplementedError, match=unsupported):
             m.fit(X, y, group=group)

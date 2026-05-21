@@ -110,6 +110,25 @@ def test_multiclass_dart_now_supported():
     assert m.predict_proba(X).shape == (60, 3)
 
 
+def test_multiclass_dart_leaf_wise_now_supported():
+    """v0.10.2 lifted the v0.10.1 `tree_growth='level'` restriction on
+    multiclass DART. Positive coverage lives in `test_multiclass_dart.py`;
+    this just confirms the public Python surface no longer raises.
+    """
+    rng = np.random.default_rng(33)
+    X = rng.normal(size=(80, 3)).astype(np.float32)
+    y = rng.integers(0, 3, size=80).tolist()  # 3 classes -> softmax path
+    m = GBMClassifier(
+        n_estimators=4,
+        boosting_mode="dart",
+        tree_growth="leaf",
+        max_leaves=6,
+        dart_drop_rate=0.1,
+    )
+    m.fit(X, y)  # Should NOT raise.
+    assert m.predict_proba(X).shape == (80, 3)
+
+
 def test_multiclass_goss_now_supported():
     """v0.10.1 enabled multiclass softmax + GOSS using per-row scoring
     `s_i = sum_k |g_{i,k}|` (LightGBM convention). The v0.9.0 rejection
