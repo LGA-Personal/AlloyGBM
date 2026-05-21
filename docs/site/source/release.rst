@@ -1,7 +1,71 @@
 Release and platform policy
 ===========================
 
-AlloyGBM ``0.10.2`` release notes and platform policy.
+AlloyGBM ``0.10.3`` release notes and platform policy.
+
+What's new in 0.10.3
+--------------------
+
+Closes the four "v0.10.3" follow-ups carved out of the v0.10.2
+joint-trainer parity work: native-categorical Python wiring, joint
+GOSS, joint DART, and joint warm-start. The
+``MultiLabelGBMRanker(multi_label_mode="joint")`` wrapper now accepts
+every kwarg the single-output trainer accepts (except MorphBoost / DRO
+/ factor neutralization, which are tracked for v0.10.4). Default
+behaviour for every existing user-facing API remains byte-identical to
+v0.10.2 when the new knobs are not opted into.
+
+**Joint native-categorical Python wiring:**
+the Rust-level joint native-cat trainer
+(``fit_joint_multi_output_with_categorical`` +
+``find_best_multi_output_categorical_split``) was already in v0.10.2;
+the PyO3 bridge ``train_joint_multi_label_ranker`` now re-bins
+requested columns to ``bin_index == category_id`` before invoking the
+trainer (mirrors the single-output
+``apply_categorical_encoding_to_training_matrices_multi``). The
+``_JOINT_SUPPORTED_KWARGS`` allow-list re-adds
+``categorical_feature_indices`` and ``max_cat_threshold``.
+
+**Joint GOSS:**
+new ``select_joint_row_indices_for_round`` helper inside
+``crates/engine/src/joint.rs`` mirrors
+``select_row_indices_for_round_multiclass`` — per-row score is
+:math:`s_i = \\sum_k |g_{i,k}|` across the K per-output gradient
+buffers (LightGBM multiclass GOSS convention). A single row mask is
+shared across all K buffers; the amplification factor mutates every
+per-output gradient/hessian in lockstep so histograms remain unbiased.
+``MultiLabelGBMRanker(multi_label_mode='joint', boosting_mode='goss',
+goss_top_rate=..., goss_other_rate=...)``.
+
+**Joint DART:**
+dropout/normalize cycle added to ``fit_joint_inner``. One tree per
+round on the joint trainer simplifies bookkeeping vs. multiclass DART:
+``dart_state.tree_weights`` has length ``rounds_completed`` and
+``dart_round_start_offsets[r]`` / ``dart_round_counts[r]`` collapse to
+a flat per-round pair. Reuses ``engine::dart::{select_dropouts,
+apply_normalization}`` unchanged. Per-stump ``tree_weight`` persists
+via the existing ``DartTreeWeights`` artifact section (kind=11), and
+``JointPredictor`` is extended with ``tree_weights: Vec<f32>`` so each
+tree's leaf contribution is multiplied by ``tree_w`` at predict time.
+
+**Joint warm-start:**
+new ``JointWarmStartState { baselines, stumps,
+initial_rounds_completed, initial_dart_tree_weights }`` + new
+``fit_joint_multi_output_with_warm_start`` entry point.
+``MultiLabelGBMRanker(multi_label_mode='joint', warm_start=True,
+init_model=<prior_fit>)`` cracks open the prior fit's joint artifact,
+replays prior stumps onto ``predictions`` via the shared
+``walk_tree_into_predictions`` helper, re-encodes new-round
+``node_id`` starting at ``initial_rounds_completed``, and (under DART)
+reconstructs ``dart_state.tree_weights`` from per-stump
+``tree_weight``. Per-round seeds mix
+``global_round = round + initial_rounds`` so an N+M warm-resumed fit
+produces identical RNG draws to a fresh N+M fit on rounds N..N+M.
+
+**Deferred to later v0.10.x point releases:**
+
+- v0.10.4: MorphBoost, DRO, and factor neutralization on the joint
+  path.
 
 What's new in 0.10.2
 --------------------
@@ -49,10 +113,13 @@ around each ``build_tree_*`` call. Validation early-stopping DART
 transition and DART warm-start tree-weight reconstruction work
 without changes.
 
-**Deferred to later v0.10.x point releases:**
+**Deferred to later v0.10.x point releases (as documented in v0.10.2,
+now closed):**
 
-- v0.10.3: GOSS, DART, and warm-start on the joint path.
-- v0.10.4: MorphBoost, DRO, and neutralization on the joint path.
+- v0.10.3 shipped: native-cat Python wiring, joint GOSS, joint DART,
+  joint warm-start.
+- v0.10.4: MorphBoost, DRO, and factor neutralization on the joint
+  path.
 
 What's new in 0.10.1
 --------------------

@@ -1,5 +1,107 @@
 # Changelog
 
+## 0.10.3
+
+Closes the four "v0.10.3" follow-ups carved out of the v0.10.2 joint-trainer
+parity work in `docs/limitations.md` Limitation 2. The
+`MultiLabelGBMRanker(multi_label_mode="joint")` wrapper now accepts
+native-categorical splits from the Python surface, and the joint trainer
+gains `boosting_mode="goss"`, `boosting_mode="dart"`, and `warm_start=True` +
+`init_model=...`. Default behaviour for every existing user-facing API
+remains byte-identical to v0.10.2 when the new knobs are not opted into.
+
+### Added — joint native-categorical Python wiring
+
+- The Rust-level joint native-categorical path
+  (`fit_joint_multi_output_with_categorical` +
+  `find_best_multi_output_categorical_split`) was already in v0.10.2; the
+  PyO3 bridge now re-bins requested columns to `bin_index == category_id`
+  before invoking the trainer, mirroring the single-output path's
+  `apply_categorical_encoding_to_training_matrices_multi`. The
+  `_JOINT_SUPPORTED_KWARGS` allow-list re-adds
+  `categorical_feature_indices` and `max_cat_threshold`.
+
+### Added — joint GOSS row sampling
+
+- New `select_joint_row_indices_for_round` helper inside
+  `crates/engine/src/joint.rs` mirrors
+  `select_row_indices_for_round_multiclass`: per-row score is
+  `s_i = Σₖ |g_{i,k}|` across the K per-output gradient buffers, a single
+  row mask is shared across all buffers, and the amplification factor
+  mutates every per-output gradient/hessian in lockstep so histograms
+  remain unbiased.
+  `MultiLabelGBMRanker(multi_label_mode='joint', boosting_mode='goss',
+  goss_top_rate=..., goss_other_rate=...)`.
+
+### Added — joint DART boosting
+
+- Dropout / normalize cycle added to `fit_joint_inner` (the renamed
+  inner of `fit_joint_multi_output_with_categorical`). One tree per
+  round on the joint trainer simplifies bookkeeping vs. multiclass
+  DART: `dart_state.tree_weights` has length `rounds_completed` and
+  `dart_round_start_offsets[r]` / `dart_round_counts[r]` collapse to a
+  flat per-round pair. Reuses `engine::dart::{select_dropouts,
+  apply_normalization}` unchanged. The per-round flow:
+  subtract dropped trees at -w_old → compute gradients on the
+  dropped-out residual → build tree → pre-scale leaves by lr → walk
+  new tree at scale 1.0 → rescale new tree from 1.0 → new_w; re-add
+  dropped trees at w_old · drop_factor.
+- After the round loop, per-tree `tree_weight` is stamped onto every
+  stump in that tree so `TrainedModel::to_artifact_bytes` emits the
+  existing `DartTreeWeights` section (kind=11) automatically.
+- `JointPredictor` extended with `tree_weights: Vec<f32>` parallel to
+  `rounds`. `predict_row` multiplies each tree's leaf contribution by
+  `tree_w`, collapsing to v0.10.2 behavior when every weight is 1.0.
+- Refactored the v0.10.0 in-loop joint tree walk into a shared
+  `walk_tree_into_predictions(tree_stumps, ..., sign, scale)` helper,
+  used by the new-tree update, DART dropout subtraction, DART
+  re-add, and warm-start replay. The helper extracts local node IDs
+  via `node_id % TREE_NODE_STRIDE` so it works both pre-encode
+  (round-result stumps) and post-encode (stumps already in `all_stumps`).
+  `MultiLabelGBMRanker(multi_label_mode='joint', boosting_mode='dart',
+  dart_drop_rate=..., dart_max_drop=..., dart_normalize_type=...,
+  dart_sample_type=...)`.
+
+### Added — joint warm-start
+
+- New `JointWarmStartState { baselines, stumps,
+  initial_rounds_completed, initial_dart_tree_weights }` + new
+  `fit_joint_multi_output_with_warm_start` entry point.
+  `MultiLabelGBMRanker(multi_label_mode='joint', warm_start=True,
+  init_model=<prior_fit>)` cracks open the prior fit's joint artifact
+  + baselines + rounds_completed, replays prior stumps' contributions
+  onto `predictions`, re-encodes new-round `node_id` starting at
+  `initial_rounds_completed`, and (under DART) reconstructs
+  `dart_state.tree_weights` from per-stump `tree_weight`.
+- All per-round seeds (GOSS, row_subsample, col_subsample,
+  `build_joint_round*`, DART `select_dropouts`) mix
+  `global_round = round + initial_rounds` so an N+M warm-resumed fit
+  produces identical RNG draws to a fresh N+M fit on rounds N..N+M.
+- The `MultiLabelGBMRanker` bundle format v2 mode byte already encoded
+  everything needed for warm-resume.
+- `JointTrainingSummary.rounds_completed` now reports the TOTAL
+  (prior + new) count.
+
+### Deferred
+
+- **Joint MorphBoost / DRO / factor neutralization** — tracked for
+  v0.10.4. These touch the per-row gradient pipeline more invasively
+  than GOSS/DART/warm-start and need their own design pass.
+
+### Internal
+
+- `fit_joint_multi_output_with_categorical` now delegates to a private
+  `fit_joint_inner`, matching the single-output engine's
+  `fit_iterations*` → inner-impl pattern. Both the cold-start and
+  warm-start public entry points route through `fit_joint_inner`.
+- Refactored the v0.10.0 in-loop tree walk into
+  `walk_tree_into_predictions` (shared by round-end add, DART
+  subtract/re-add, warm-start replay).
+- PyO3 bridge `train_joint_multi_label_ranker` signature extended with
+  six new keyword-only args (`boosting_mode`, `goss_*`, `dart_*`,
+  `init_artifact_bytes`, `init_baselines`, `init_rounds_completed`)
+  via PyO3's `#[pyo3(signature = ...)]` defaults.
+
 ## 0.10.2
 
 Closes the leaf-wise multiclass DART limitation and the first slice of

@@ -4,15 +4,71 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
-The `0.10.2` release closes the leaf-wise multiclass DART
-limitation and the first slice of joint-path feature parity
-(leaf-wise growth, native-categorical, interaction constraints,
-row/col subsample, min_split_gain). The remaining joint-path
-features land in v0.10.3 (GOSS, DART, warm-start on joint) and
-v0.10.4 (MorphBoost, DRO, neutralization on joint). Default
-behaviour for every existing user-facing API remains
-byte-identical to v0.10.1 when the new features are not opted
-into.
+The `0.10.3` release closes four follow-ups carved out of the
+v0.10.2 joint-trainer parity work: native-categorical Python
+wiring, joint GOSS, joint DART, and joint warm-start. The final
+remaining joint-path features (MorphBoost, DRO, factor
+neutralization) are tracked for v0.10.4. Default behaviour for
+every existing user-facing API remains byte-identical to v0.10.2
+when the new knobs are not opted into.
+
+## What Shipped In v0.10.3
+
+- **Joint native-categorical Python wiring (closes the v0.10.3
+  native-cat-wiring follow-up):** the Rust-level joint native-cat
+  trainer was already in v0.10.2; the PyO3 bridge
+  `train_joint_multi_label_ranker` now re-bins requested columns to
+  `bin_index == category_id` before invoking
+  `fit_joint_multi_output_with_categorical`. Strategy mirrors the
+  single-output path: collect unique non-NaN integer category values,
+  sort them, assign category IDs in sort order, overwrite the binned
+  column. The `_JOINT_SUPPORTED_KWARGS` allow-list re-adds
+  `categorical_feature_indices` and `max_cat_threshold`.
+- **Joint GOSS (closes the v0.10.3 joint-GOSS follow-up):** new
+  `select_joint_row_indices_for_round` helper inside
+  `crates/engine/src/joint.rs` mirrors
+  `select_row_indices_for_round_multiclass`: per-row score is
+  `s_i = Σₖ |g_{i,k}|` across the K per-output gradient buffers, a
+  single row mask is shared across all buffers, and the amplification
+  factor mutates every per-output gradient/hessian in lockstep so
+  histograms remain unbiased.
+- **Joint DART (closes the v0.10.3 joint-DART follow-up):** dropout /
+  normalize cycle added to `fit_joint_inner`. One tree per round on
+  the joint trainer simplifies bookkeeping vs. multiclass DART:
+  `dart_state.tree_weights` has length `rounds_completed` and
+  `dart_round_start_offsets[r]` / `dart_round_counts[r]` collapse to
+  a flat per-round pair. Reuses `engine::dart::{select_dropouts,
+  apply_normalization}` unchanged. Per-stump `tree_weight` persists
+  via the existing `DartTreeWeights` artifact section.
+  `JointPredictor` extended with `tree_weights: Vec<f32>` parallel to
+  `rounds`, so `predict_row` multiplies each tree's leaf contribution
+  by `tree_w` (collapsing to v0.10.2 behavior when every weight is
+  1.0).
+- **Joint warm-start (closes the v0.10.3 joint-warm-start follow-up):**
+  new `JointWarmStartState { baselines, stumps,
+  initial_rounds_completed, initial_dart_tree_weights }` + new
+  `fit_joint_multi_output_with_warm_start` entry point.
+  `MultiLabelGBMRanker(multi_label_mode='joint', warm_start=True,
+  init_model=<prior_fit>)` cracks open the prior fit's joint
+  artifact, replays prior stumps onto `predictions` via the shared
+  `walk_tree_into_predictions` helper, re-encodes new-round `node_id`
+  starting at `initial_rounds_completed`, and (under DART)
+  reconstructs `dart_state.tree_weights` from per-stump `tree_weight`.
+  Per-round seeds mix `global_round = round + initial_rounds`, so an
+  N+M warm-resumed fit produces identical RNG draws to a fresh N+M
+  fit on rounds N..N+M.
+- **Refactor:** the v0.10.0 in-loop joint tree walk became a shared
+  `walk_tree_into_predictions(tree_stumps, ..., sign, scale)` helper,
+  used by round-end add, DART dropout subtract/re-add, and warm-start
+  replay. `fit_joint_multi_output_with_categorical` now delegates to a
+  private `fit_joint_inner`, matching the single-output engine's
+  `fit_iterations*` → inner-impl pattern.
+
+### v0.10.x follow-ups (deferred)
+
+- **v0.10.4**: MorphBoost, DRO, and factor neutralization on the
+  joint path. These touch the per-row gradient pipeline more
+  invasively than GOSS/DART/warm-start and need their own design pass.
 
 ## What Shipped In v0.10.2
 
@@ -46,13 +102,6 @@ into.
   captured correctly. Validation early-stopping DART transition and
   DART warm-start tree-weight reconstruction both work without
   changes.
-
-### v0.10.x follow-ups (deferred)
-
-- **v0.10.3**: wire native-categorical preparation through the joint
-  Python bridge (Rust side is already in place); GOSS, DART, and
-  warm-start on the joint path.
-- **v0.10.4**: MorphBoost, DRO, and neutralization on the joint path.
 
 ## What Shipped In v0.10.1
 
