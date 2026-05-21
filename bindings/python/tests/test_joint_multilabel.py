@@ -324,6 +324,71 @@ def test_joint_mode_accepts_goss():
     assert max_diff > 1e-4, "GOSS produced identical predictions to Standard"
 
 
+def test_joint_mode_accepts_dart():
+    """v0.10.3: joint MultiLabelGBMRanker honors `boosting_mode='dart'`."""
+    rng = np.random.default_rng(0)
+    n = 480
+    groups = np.repeat(np.arange(n // 24), 24).astype(np.int64)
+    X = rng.normal(size=(n, 3)).astype(np.float32)
+    y0 = (X[:, 0] + rng.normal(0, 0.1, size=n)).astype(np.float32)
+    y1 = (X[:, 1] + rng.normal(0, 0.1, size=n)).astype(np.float32)
+    y = np.column_stack([y0, y1])
+
+    m = MultiLabelGBMRanker(
+        n_estimators=15,
+        learning_rate=0.1,
+        multi_label_mode="joint",
+        ranking_objective="squared_error",
+        boosting_mode="dart",
+        dart_drop_rate=0.3,
+        dart_max_drop=2,
+        dart_normalize_type="tree",
+        dart_sample_type="uniform",
+        seed=7,
+    )
+    m.fit(X, y, group=groups)
+    preds = m.predict(X)
+    assert preds.shape == (n, 2)
+    assert np.isfinite(preds).all()
+
+
+def test_joint_dart_save_load_round_trip(tmp_path):
+    """v0.10.3: a DART-trained joint model must round-trip via
+    save_model/load_model with bit-identical predictions (the DART
+    tree_weights live in the artifact's `DartTreeWeights` section,
+    and `JointPredictor.predict_row` multiplies each tree's leaf
+    contribution by the corresponding `tree_weight`)."""
+    rng = np.random.default_rng(1)
+    n = 200
+    groups = np.repeat(np.arange(n // 20), 20).astype(np.int64)
+    X = rng.normal(size=(n, 3)).astype(np.float32)
+    y = np.column_stack([
+        (X[:, 0] + rng.normal(0, 0.1, size=n)).astype(np.float32),
+        (X[:, 1] + rng.normal(0, 0.1, size=n)).astype(np.float32),
+    ])
+    m = MultiLabelGBMRanker(
+        n_estimators=12,
+        learning_rate=0.1,
+        multi_label_mode="joint",
+        ranking_objective="squared_error",
+        boosting_mode="dart",
+        dart_drop_rate=0.3,
+        dart_max_drop=2,
+        dart_normalize_type="tree",
+        dart_sample_type="uniform",
+        seed=11,
+    )
+    m.fit(X, y, group=groups)
+    pred_before = m.predict(X)
+
+    path = tmp_path / "joint_dart.alloy"
+    m.save_model(str(path))
+    m2 = MultiLabelGBMRanker.load_model(str(path))
+    pred_after = m2.predict(X)
+
+    np.testing.assert_allclose(pred_after, pred_before, rtol=1e-5, atol=1e-5)
+
+
 def test_joint_mode_still_rejects_truly_unsupported_kwargs():
     """v0.10.2: kwargs that the joint trainer still does NOT support
     (warm-start, MorphBoost, etc.) must continue to be rejected with
