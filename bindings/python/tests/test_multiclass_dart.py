@@ -234,6 +234,39 @@ def test_multiclass_dart_works_with_leaf_wise_growth():
     assert np.all(proba <= 1.0)
 
 
+def test_multiclass_dart_leaf_wise_validation_early_stopping_works():
+    """v0.10.2 Phase 4: validation DART transition (subtract dropped →
+    scale new at new_w → re-add dropped) applies under leaf-wise growth
+    too. A broken transition typically manifests as NaN/inf validation
+    losses or a model that won't pickle round-trip.
+    """
+    import pickle
+
+    rng = np.random.default_rng(1)
+    X = rng.standard_normal((400, 5)).astype(np.float32)
+    y = (X[:, 0] + X[:, 1] * 2).round().astype(int) % 4  # 4 classes
+    X_train, y_train = X[:300], y[:300]
+    X_val, y_val = X[300:], y[300:]
+    m = GBMClassifier(
+        n_estimators=50,
+        boosting_mode="dart",
+        tree_growth="leaf",
+        max_leaves=8,
+        early_stopping_rounds=5,
+        dart_drop_rate=0.15,
+        seed=7,
+    )
+    m.fit(X_train, y_train, eval_set=(X_val, y_val))
+    proba = m.predict_proba(X_val)
+    assert proba.shape == (100, 4)
+    assert np.allclose(proba.sum(axis=1), 1.0, atol=1e-5)
+    assert np.all(np.isfinite(proba))
+    # Pickle round-trip after early stopping has truncated the model.
+    restored = pickle.loads(pickle.dumps(m))
+    proba_restored = restored.predict_proba(X_val)
+    np.testing.assert_allclose(proba, proba_restored, rtol=1e-5, atol=1e-6)
+
+
 def test_multiclass_dart_with_validation_early_stopping():
     """Regression test for the v0.10.1 PR review (C6): the DART
     transition (dropout subtract + new_w scale + dropped re-add) must
