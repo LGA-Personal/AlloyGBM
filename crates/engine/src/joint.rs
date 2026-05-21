@@ -322,6 +322,48 @@ pub struct JointRoundResult {
     pub stumps: Vec<TrainedStump>,
 }
 
+/// Per-round MorphBoost context passed to `build_joint_round*`.
+///
+/// Carries the snapshot of `MorphState` needed for split-gain dispatch:
+/// the morph config + precomputed per-iteration constants, plus per-output
+/// `(grad_mean, grad_std)` pulled from `MorphState::ema_stats[k]`.
+///
+/// Separate from the single-output `crate::MorphTreeContext` (which is
+/// pub(crate) and tied to single-output `MorphState`) — joint mode tracks
+/// K independent EMA snapshots and routes them through the multi-output
+/// gain helpers in `shared_histogram.rs`.
+#[derive(Debug, Clone)]
+struct JointMorphContext {
+    config: alloygbm_core::MorphConfig,
+    precomputed: alloygbm_core::MorphPrecomputed,
+    iteration: u32,
+    total_iterations: u32,
+    grad_means: Vec<f32>,
+    grad_stds: Vec<f32>,
+}
+
+impl JointMorphContext {
+    fn from_state(
+        state: &crate::MorphState,
+        iteration: u32,
+        total_iterations: u32,
+    ) -> Self {
+        let grad_means: Vec<f32> = state.ema_stats.iter().map(|s| s.mean).collect();
+        let grad_stds: Vec<f32> = state.ema_stats.iter().map(|s| s.std).collect();
+        Self {
+            config: state.config,
+            precomputed: alloygbm_core::MorphPrecomputed::for_iteration(
+                iteration,
+                &state.config,
+            ),
+            iteration,
+            total_iterations,
+            grad_means,
+            grad_stds,
+        }
+    }
+}
+
 /// Train a single round of joint multi-output boosting and return the new
 /// stumps (already updated to carry K-output leaf values). The caller is
 /// responsible for accumulating leaf contributions into per-output prediction
@@ -345,6 +387,30 @@ pub fn build_joint_round(
     categorical_features: &[crate::CategoricalFeatureInfo],
     round_index: usize,
     sampled_root_rows: Option<&[u32]>,
+) -> Result<JointRoundResult, String> {
+    build_joint_round_inner(
+        params,
+        binned_matrix,
+        grads_per_output,
+        n_outputs,
+        categorical_features,
+        round_index,
+        sampled_root_rows,
+        /*morph_ctx=*/ None,
+    )
+}
+
+#[allow(clippy::needless_range_loop)]
+#[allow(clippy::too_many_arguments)]
+fn build_joint_round_inner(
+    params: &TrainParams,
+    binned_matrix: &BinnedMatrix,
+    grads_per_output: &[Vec<GradientPair>],
+    n_outputs: usize,
+    categorical_features: &[crate::CategoricalFeatureInfo],
+    round_index: usize,
+    sampled_root_rows: Option<&[u32]>,
+    morph_ctx: Option<&JointMorphContext>,
 ) -> Result<JointRoundResult, String> {
     if grads_per_output.len() != n_outputs {
         return Err(format!(
@@ -535,7 +601,24 @@ pub fn build_joint_round(
                 // outputs instead of a threshold sweep. The result carries
                 // a `left_bitset: u64` which the partition path consumes.
                 if let Some(num_cats) = cat_num_categories[feature] {
-                    if let Some(cat_split) =
+                    // v0.10.4: route categorical Fisher-sort through the morph
+                    // variant when active; falls through to the standard
+                    // variant when `morph_ctx` is None.
+                    let cat_opt = if let Some(m) = morph_ctx {
+                        crate::shared_histogram::find_best_multi_output_categorical_split_morph(
+                            &node_hist,
+                            feature,
+                            num_cats,
+                            lambda_l2,
+                            crate::LEAF_EPSILON,
+                            &m.config,
+                            &m.precomputed,
+                            m.iteration,
+                            m.total_iterations,
+                            &m.grad_means,
+                            &m.grad_stds,
+                        )
+                    } else {
                         crate::shared_histogram::find_best_multi_output_categorical_split(
                             &node_hist,
                             feature,
@@ -543,6 +626,8 @@ pub fn build_joint_round(
                             lambda_l2,
                             crate::LEAF_EPSILON,
                         )
+                    };
+                    if let Some(cat_split) = cat_opt
                         && cat_split.gain > best.map(|(_, _, g, _)| g).unwrap_or(0.0)
                     {
                         best = Some((feature, 0, cat_split.gain, Some(cat_split.left_bitset)));
@@ -550,13 +635,31 @@ pub fn build_joint_round(
                     continue; // skip numeric threshold sweep for categorical features
                 }
                 for threshold_bin in 0..max_threshold {
-                    let gain = compute_multi_output_split_gain(
-                        &node_hist,
-                        feature,
-                        threshold_bin,
-                        lambda_l2,
-                        crate::LEAF_EPSILON,
-                    );
+                    // v0.10.4: route numeric gain through the morph variant when
+                    // active; falls through to the standard variant otherwise.
+                    let gain = if let Some(m) = morph_ctx {
+                        crate::shared_histogram::compute_multi_output_split_gain_morph(
+                            &node_hist,
+                            feature,
+                            threshold_bin,
+                            lambda_l2,
+                            crate::LEAF_EPSILON,
+                            &m.config,
+                            &m.precomputed,
+                            m.iteration,
+                            m.total_iterations,
+                            &m.grad_means,
+                            &m.grad_stds,
+                        )
+                    } else {
+                        compute_multi_output_split_gain(
+                            &node_hist,
+                            feature,
+                            threshold_bin,
+                            lambda_l2,
+                            crate::LEAF_EPSILON,
+                        )
+                    };
                     if gain <= 0.0 {
                         continue;
                     }
@@ -733,6 +836,7 @@ fn build_joint_round_leafwise(
     categorical_features: &[crate::CategoricalFeatureInfo],
     round_index: usize,
     sampled_root_rows: Option<&[u32]>,
+    morph_ctx: Option<&JointMorphContext>,
 ) -> Result<JointRoundResult, String> {
     use std::collections::BinaryHeap;
 
@@ -877,7 +981,22 @@ fn build_joint_round_leafwise(
                     continue;
                 }
                 if let Some(num_cats) = cat_num_categories[feature] {
-                    if let Some(cat_split) =
+                    // v0.10.4: route through morph variant when active.
+                    let cat_opt = if let Some(m) = morph_ctx {
+                        crate::shared_histogram::find_best_multi_output_categorical_split_morph(
+                            &node_hist,
+                            feature,
+                            num_cats,
+                            lambda_l2,
+                            crate::LEAF_EPSILON,
+                            &m.config,
+                            &m.precomputed,
+                            m.iteration,
+                            m.total_iterations,
+                            &m.grad_means,
+                            &m.grad_stds,
+                        )
+                    } else {
                         crate::shared_histogram::find_best_multi_output_categorical_split(
                             &node_hist,
                             feature,
@@ -885,6 +1004,8 @@ fn build_joint_round_leafwise(
                             lambda_l2,
                             crate::LEAF_EPSILON,
                         )
+                    };
+                    if let Some(cat_split) = cat_opt
                         && cat_split.gain > best.map(|(_, _, g, _)| g).unwrap_or(0.0)
                     {
                         best = Some((feature, 0, cat_split.gain, Some(cat_split.left_bitset)));
@@ -892,13 +1013,30 @@ fn build_joint_round_leafwise(
                     continue;
                 }
                 for threshold_bin in 0..max_threshold {
-                    let gain = compute_multi_output_split_gain(
-                        &node_hist,
-                        feature,
-                        threshold_bin,
-                        lambda_l2,
-                        crate::LEAF_EPSILON,
-                    );
+                    // v0.10.4: route through morph variant when active.
+                    let gain = if let Some(m) = morph_ctx {
+                        crate::shared_histogram::compute_multi_output_split_gain_morph(
+                            &node_hist,
+                            feature,
+                            threshold_bin,
+                            lambda_l2,
+                            crate::LEAF_EPSILON,
+                            &m.config,
+                            &m.precomputed,
+                            m.iteration,
+                            m.total_iterations,
+                            &m.grad_means,
+                            &m.grad_stds,
+                        )
+                    } else {
+                        compute_multi_output_split_gain(
+                            &node_hist,
+                            feature,
+                            threshold_bin,
+                            lambda_l2,
+                            crate::LEAF_EPSILON,
+                        )
+                    };
                     if gain <= 0.0 {
                         continue;
                     }
@@ -1181,6 +1319,14 @@ pub struct JointWarmStartState {
     /// Standard / GOSS, or the caller wants the engine to reconstruct
     /// weights from per-stump `tree_weight` automatically.
     pub initial_dart_tree_weights: Option<Vec<f32>>,
+    /// v0.10.4: EMA snapshot from the prior fit's `MorphState`. `Some(snap)`
+    /// seeds the fresh `MorphState::ema_stats` on warm-resume so a warm-
+    /// resumed N+M fit matches a fresh N+M fit byte-for-byte under
+    /// MorphBoost. `None` when the prior fit didn't use MorphBoost (the
+    /// fresh `MorphState::new` defaults are used instead). Length must
+    /// equal `n_outputs` on the new fit, or the warm-start branch returns
+    /// an error.
+    pub initial_ema_stats: Option<Vec<alloygbm_core::GradientEmaStats>>,
 }
 
 pub fn fit_joint_multi_output(
@@ -1303,29 +1449,44 @@ fn fit_joint_inner(
     // v0.10.3: warm-start branch — when `warm_start` is `Some`, the
     // prior fit's baselines win (re-seed `predictions` from them) and
     // its stumps are prepended to `all_stumps`. The cold-start branch
-    // computes per-output baselines as before.
-    let (initial_stumps, initial_rounds, initial_dart_weights_arg, baselines) =
-        if let Some(ws) = warm_start {
-            if ws.baselines.len() != n_outputs {
-                return Err(format!(
-                    "warm-start baselines length {} != n_outputs {n_outputs}",
-                    ws.baselines.len()
-                ));
-            }
-            (
-                ws.stumps,
-                ws.initial_rounds_completed,
-                ws.initial_dart_tree_weights,
-                ws.baselines,
-            )
-        } else {
-            let cold_baselines: Vec<f32> = per_output_objective
-                .iter()
-                .zip(targets_per_output.iter())
-                .map(|(obj, targets)| obj.initial_prediction(targets))
-                .collect();
-            (Vec::new(), 0, None, cold_baselines)
-        };
+    // computes per-output baselines as before. v0.10.4: also carries
+    // `initial_ema_stats` for MorphBoost warm-resume.
+    let (
+        initial_stumps,
+        initial_rounds,
+        initial_dart_weights_arg,
+        initial_ema_stats_arg,
+        baselines,
+    ) = if let Some(ws) = warm_start {
+        if ws.baselines.len() != n_outputs {
+            return Err(format!(
+                "warm-start baselines length {} != n_outputs {n_outputs}",
+                ws.baselines.len()
+            ));
+        }
+        if let Some(ema) = ws.initial_ema_stats.as_ref()
+            && ema.len() != n_outputs
+        {
+            return Err(format!(
+                "warm-start initial_ema_stats length {} != n_outputs {n_outputs}",
+                ema.len()
+            ));
+        }
+        (
+            ws.stumps,
+            ws.initial_rounds_completed,
+            ws.initial_dart_tree_weights,
+            ws.initial_ema_stats,
+            ws.baselines,
+        )
+    } else {
+        let cold_baselines: Vec<f32> = per_output_objective
+            .iter()
+            .zip(targets_per_output.iter())
+            .map(|(obj, targets)| obj.initial_prediction(targets))
+            .collect();
+        (Vec::new(), 0, None, None, cold_baselines)
+    };
 
     // Per-output prediction vectors, seeded from baselines.
     let mut predictions: Vec<Vec<f32>> = baselines.iter().map(|&b| vec![b; n_rows]).collect();
@@ -1333,6 +1494,23 @@ fn fit_joint_inner(
     let learning_rate = params.learning_rate;
     let mut all_stumps: Vec<TrainedStump> = initial_stumps;
     let mut rounds_completed: usize = 0;
+
+    // v0.10.4: MorphBoost runtime state. Active when `params.morph_config`
+    // is `Some`. `total_iterations` covers warm-start prefix + new rounds so
+    // the LR schedule + depth-penalty curve see the full horizon, mirroring
+    // the single-output multiclass path. EMA snapshot from a prior
+    // MorphBoost fit (passed via `JointWarmStartState.initial_ema_stats`)
+    // re-seeds `MorphState::ema_stats` so a warm-resumed N+M fit matches
+    // a fresh N+M fit byte-for-byte.
+    let total_iterations_u32 = (initial_rounds + n_estimators) as u32;
+    let mut morph_state: Option<crate::MorphState> = params.morph_config.map(|cfg| {
+        crate::MorphState::new(cfg, n_outputs, total_iterations_u32, learning_rate)
+    });
+    if let (Some(ms), Some(snapshot)) = (morph_state.as_mut(), initial_ema_stats_arg.as_ref()) {
+        for (i, stat) in snapshot.iter().take(ms.ema_stats.len()).enumerate() {
+            ms.ema_stats[i] = *stat;
+        }
+    }
 
     // v0.10.3: joint DART state. `dart_state.tree_weights[r]` is the
     // weight applied to round-r's tree at predict time;
@@ -1518,6 +1696,19 @@ fn fit_joint_inner(
             grads_per_output.push(g);
         }
 
+        // v0.10.4: update per-output EMA stats BEFORE tree-building so
+        // morph split selection sees the latest mean/std. Mirrors the
+        // single-output multiclass path
+        // (crates/engine/src/lib.rs:3974 `update_ema_from_gradient_pairs`).
+        if let Some(ms) = morph_state.as_mut() {
+            for (k, g) in grads_per_output.iter().enumerate() {
+                ms.update_ema_from_gradient_pairs(g, k);
+            }
+        }
+        let morph_ctx: Option<JointMorphContext> = morph_state
+            .as_ref()
+            .map(|ms| JointMorphContext::from_state(ms, global_round as u32, total_iterations_u32));
+
         // v0.10.3: joint GOSS. When `boosting_mode = Goss`, score rows by
         // `Σₖ |g_{i,k}|`, keep top_rate fraction, sample other_rate
         // uniformly from the rest, and amplify the sampled-low rows'
@@ -1597,9 +1788,10 @@ fn fit_joint_inner(
                 categorical_features,
                 global_round,
                 sampled_rows_opt.as_deref(),
+                morph_ctx.as_ref(),
             )?
         } else {
-            build_joint_round(
+            build_joint_round_inner(
                 params,
                 binned_matrix,
                 active_grads,
@@ -1607,6 +1799,7 @@ fn fit_joint_inner(
                 categorical_features,
                 global_round,
                 sampled_rows_opt.as_deref(),
+                morph_ctx.as_ref(),
             )?
         };
         if round_result.stumps.is_empty() {
@@ -1614,20 +1807,58 @@ fn fit_joint_inner(
         }
         rounds_completed += 1;
 
-        // v0.10.0 review fix (Comment 3): pre-scale the per-leaf K-output
-        // deltas by `learning_rate` so the persisted artifact already encodes
-        // the LR-scaled contribution. JointPredictor and the in-loop
-        // prediction update both then add the leaf values directly without
-        // re-applying `learning_rate`, guaranteeing that training-time
-        // predictions match deserialized JointPredictor output for any LR.
-        if (learning_rate - 1.0).abs() > f32::EPSILON {
+        // v0.10.0 review fix (Comment 3) + v0.10.4 MorphBoost: pre-scale the
+        // per-leaf K-output deltas before persisting so the artifact already
+        // encodes the LR-scaled contribution. JointPredictor adds the leaf
+        // values directly without re-applying `learning_rate`.
+        //
+        // Standard scale: `learning_rate` (unchanged from v0.10.0).
+        // Morph scale: `morph_lr * leaf_shrink * depth_penalty` where
+        //   morph_lr = MorphState::lr_for_iter(round)
+        //   leaf_shrink = max(0, 1 - morph_rate * round/total)
+        //   depth_penalty = depth_penalty_base ^ (depth/3), depth derived from
+        //     local_node_id via `(id+1).ilog2()`.
+        // Depth-penalty applies per-stump because non-root leaves have larger
+        // depth than root leaves.
+        let standard_scale_active =
+            morph_state.is_none() && (learning_rate - 1.0).abs() > f32::EPSILON;
+        let morph_active = morph_state.is_some();
+        if standard_scale_active || morph_active {
+            // Pre-compute morph scalars that are stump-independent.
+            let (morph_lr, leaf_shrink) = if let Some(ms) = morph_state.as_ref() {
+                let lr = ms.lr_for_iter(global_round);
+                let t = global_round as f32;
+                let total_t = total_iterations_u32.max(1) as f32;
+                let shrink = (1.0 - ms.config.morph_rate * (t / total_t)).max(0.0);
+                (lr, shrink)
+            } else {
+                (learning_rate, 1.0_f32)
+            };
+            let depth_penalty_base = morph_state
+                .as_ref()
+                .map(|ms| ms.config.depth_penalty_base)
+                .unwrap_or(1.0);
             for stump in round_result.stumps.iter_mut() {
+                // local_node_id is the pre-encode id (re-encode happens
+                // later). depth = floor(log2(id + 1)).
+                let local_id = stump.split.node_id;
+                let depth = (local_id + 1).ilog2();
+                let depth_penalty = if morph_active {
+                    depth_penalty_base.powf(depth as f32 / 3.0)
+                } else {
+                    1.0
+                };
+                let scale = if morph_active {
+                    morph_lr * leaf_shrink * depth_penalty
+                } else {
+                    learning_rate
+                };
                 if let Some((left_k, right_k)) = stump.multi_output_leaf_values.as_mut() {
                     for v in left_k.iter_mut() {
-                        *v *= learning_rate;
+                        *v *= scale;
                     }
                     for v in right_k.iter_mut() {
-                        *v *= learning_rate;
+                        *v *= scale;
                     }
                 }
                 // Keep the placeholder scalar consistent for any scalar code
@@ -1755,6 +1986,20 @@ fn fit_joint_inner(
         }
     }
 
+    // v0.10.4: persist MorphBoost EMA snapshot into the artifact so
+    // warm-resume can re-seed `MorphState::ema_stats`. Mirrors the
+    // single-output regressor path (lib.rs:4413).
+    let morph_metadata = morph_state.as_ref().map(|ms| alloygbm_core::MorphMetadataPayload {
+        config: ms.config,
+        // `final_iteration` captures where training ended (last completed
+        // global round); `final_total` mirrors the full horizon used by
+        // the LR schedule + leaf-shrink curve so warm-resume can recompute
+        // them consistently.
+        final_iteration: (initial_rounds + rounds_completed).saturating_sub(1) as u32,
+        final_total: total_iterations_u32,
+        ema_stats: ms.ema_stats.clone(),
+    });
+
     let model = TrainedModel {
         baseline_prediction: 0.0, // Joint model uses per-output baselines (see summary)
         feature_count,
@@ -1763,7 +2008,7 @@ fn fit_joint_inner(
         node_debug_stats: None,
         objective: format!("joint_multi_output[{n_outputs}]"),
         native_categorical_feature_indices: Vec::new(),
-        morph_metadata: None,
+        morph_metadata,
         dro_metadata: None,
         feature_baseline: None,
     };
@@ -3015,6 +3260,177 @@ mod tests {
     }
 
     #[test]
+    fn joint_morph_changes_trained_model_vs_standard() {
+        // v0.10.4: same seed, same data, only `morph_config` differs → trees
+        // (or leaf values) must differ. Proves MorphBoost is plumbed into the
+        // joint split-gain dispatch and leaf-scaling pipeline.
+        use alloygbm_core::MorphConfig;
+
+        let n_rows = 200;
+        let feature_count = 1;
+        let targets_0: Vec<f32> = (0..n_rows)
+            .map(|i| if i < n_rows / 2 { -1.0 } else { 1.0 })
+            .collect();
+        let targets_1: Vec<f32> = targets_0.iter().map(|&t| t * 2.0).collect();
+        let bins: Vec<u8> = (0..n_rows).map(|i| (i % 8) as u8).collect();
+        let binned_matrix =
+            BinnedMatrix::new(n_rows, feature_count, /*max_bin=*/ 7, bins).expect("bm");
+
+        let params_standard = TrainParams {
+            seed: 7,
+            max_depth: 3,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            learning_rate: 0.1,
+            ..TrainParams::default()
+        };
+        let params_morph = TrainParams {
+            morph_config: Some(MorphConfig::default()),
+            ..params_standard.clone()
+        };
+
+        let summary_standard = fit_joint_multi_output(
+            &params_standard,
+            feature_count,
+            &binned_matrix,
+            &[targets_0.clone(), targets_1.clone()],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            5,
+        )
+        .expect("standard fit");
+        let summary_morph = fit_joint_multi_output(
+            &params_morph,
+            feature_count,
+            &binned_matrix,
+            &[targets_0.clone(), targets_1.clone()],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            5,
+        )
+        .expect("morph fit");
+
+        assert!(!summary_standard.model.stumps.is_empty());
+        assert!(!summary_morph.model.stumps.is_empty());
+        // Morph must persist a `morph_metadata` section (standard fit doesn't).
+        assert!(summary_standard.model.morph_metadata.is_none());
+        assert!(summary_morph.model.morph_metadata.is_some());
+
+        // At least one stump's leaf values must differ between the two fits
+        // (warmup is byte-equivalent, but later rounds + leaf shrinkage will
+        // diverge — the 5-round horizon is enough to exit warmup at depth_penalty
+        // factor < 1 for non-root leaves).
+        let differ = summary_standard
+            .model
+            .stumps
+            .iter()
+            .zip(summary_morph.model.stumps.iter())
+            .any(|(s, m)| {
+                let s_leaves = s.multi_output_leaf_values.as_ref();
+                let m_leaves = m.multi_output_leaf_values.as_ref();
+                match (s_leaves, m_leaves) {
+                    (Some((sl, sr)), Some((ml, mr))) => {
+                        sl.iter().zip(ml.iter()).any(|(a, b)| (a - b).abs() > 1e-5)
+                            || sr.iter().zip(mr.iter()).any(|(a, b)| (a - b).abs() > 1e-5)
+                    }
+                    _ => true,
+                }
+            });
+        assert!(
+            differ,
+            "MorphBoost must change at least one leaf value vs. standard"
+        );
+    }
+
+    #[test]
+    fn joint_morph_warmup_byte_equivalent_to_standard() {
+        // Within warmup (iteration < morph_warmup_iters), the morph split-gain
+        // dispatch is byte-equivalent to standard. Verify by running 1 round
+        // with morph_warmup_iters=10 (warmup never ends) and learning_rate=1.0,
+        // morph_rate=0.0 (no leaf shrinkage), depth_penalty_base=1.0 (no depth
+        // penalty) → leaves should match standard byte-for-byte.
+        use alloygbm_core::{LrSchedule, MorphConfig};
+
+        let n_rows = 64;
+        let feature_count = 1;
+        let targets_0: Vec<f32> = (0..n_rows).map(|i| (i % 4) as f32).collect();
+        let targets_1: Vec<f32> = (0..n_rows).map(|i| ((i + 1) % 4) as f32).collect();
+        let bins: Vec<u8> = (0..n_rows).map(|i| (i % 4) as u8).collect();
+        let binned_matrix =
+            BinnedMatrix::new(n_rows, feature_count, /*max_bin=*/ 3, bins).expect("bm");
+
+        let params_standard = TrainParams {
+            seed: 11,
+            max_depth: 2,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            learning_rate: 1.0,
+            ..TrainParams::default()
+        };
+        let params_morph = TrainParams {
+            morph_config: Some(MorphConfig {
+                morph_warmup_iters: 10, // single round at iter 0 is in warmup
+                morph_rate: 0.0,        // no leaf shrinkage
+                depth_penalty_base: 1.0, // no depth penalty
+                evolution_pressure: 0.0,
+                info_score_weight: 0.0, // belt-and-suspenders: info_score off
+                balance_penalty: false, // disable balance penalty so warmup is byte-equiv
+                lr_schedule: LrSchedule::Constant,
+            }),
+            ..params_standard.clone()
+        };
+
+        let summary_standard = fit_joint_multi_output(
+            &params_standard,
+            feature_count,
+            &binned_matrix,
+            &[targets_0.clone(), targets_1.clone()],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            1,
+        )
+        .expect("standard fit");
+        let summary_morph = fit_joint_multi_output(
+            &params_morph,
+            feature_count,
+            &binned_matrix,
+            &[targets_0, targets_1],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            1,
+        )
+        .expect("morph warmup fit");
+
+        // Leaf values must match within float rounding (warmup gain formula is
+        // byte-equivalent modulo `GAIN_EPSILON` matching).
+        assert_eq!(
+            summary_standard.model.stumps.len(),
+            summary_morph.model.stumps.len(),
+        );
+        for (s, m) in summary_standard
+            .model
+            .stumps
+            .iter()
+            .zip(summary_morph.model.stumps.iter())
+        {
+            let s_leaves = s.multi_output_leaf_values.as_ref().expect("std leaves");
+            let m_leaves = m.multi_output_leaf_values.as_ref().expect("morph leaves");
+            for (a, b) in s_leaves.0.iter().zip(m_leaves.0.iter()) {
+                assert!(
+                    (a - b).abs() < 1e-4,
+                    "warmup left leaves must match: std={a} morph={b}"
+                );
+            }
+            for (a, b) in s_leaves.1.iter().zip(m_leaves.1.iter()) {
+                assert!(
+                    (a - b).abs() < 1e-4,
+                    "warmup right leaves must match: std={a} morph={b}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn joint_dart_produces_non_uniform_tree_weights() {
         // DART must drop at least one prior tree per round (after the
         // first), and `apply_normalization` rescales both the new tree
@@ -3220,6 +3636,7 @@ mod tests {
             stumps: first.model.stumps.clone(),
             initial_rounds_completed: 6,
             initial_dart_tree_weights: None,
+            initial_ema_stats: None,
         };
         let resumed = fit_joint_multi_output_with_warm_start(
             &params,

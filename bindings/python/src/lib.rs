@@ -5591,6 +5591,16 @@ fn train_joint_multi_label_ranker(
         let rounds = init_rounds_completed.unwrap_or(0);
         let prior_model = alloygbm_engine::TrainedModel::from_artifact_bytes(&bytes)
             .map_err(|e| PyValueError::new_err(format!("init_artifact_bytes decode: {e:?}")))?;
+        // v0.10.4: extract MorphBoost EMA snapshot from the prior artifact's
+        // `morph_metadata` section. The engine writes this whenever
+        // MorphBoost is active and warm-resume requires it to byte-match a
+        // fresh longer fit. When the prior fit didn't use MorphBoost,
+        // `morph_metadata` is None and the new fit re-seeds with defaults.
+        let initial_ema_stats = prior_model
+            .morph_metadata
+            .as_ref()
+            .map(|m| m.ema_stats.clone())
+            .filter(|stats| !stats.is_empty());
         Some(alloygbm_engine::joint::JointWarmStartState {
             baselines,
             stumps: prior_model.stumps,
@@ -5599,6 +5609,7 @@ fn train_joint_multi_label_ranker(
             // per-tree weights from per-stump `tree_weight` (mirrors
             // the multiclass warm-start path).
             initial_dart_tree_weights: None,
+            initial_ema_stats,
         })
     } else {
         None
