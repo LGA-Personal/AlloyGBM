@@ -145,6 +145,269 @@ pub fn compute_multi_output_split_gain(
     total
 }
 
+/// MorphBoost-augmented multi-output split gain.
+///
+/// Sums per-output morph gain across K outputs. Each output uses its own
+/// EMA `(grad_mean, grad_std)` snapshot from `MorphState::ema_stats[k]`.
+///
+/// In warmup (`iteration < morph_warmup_iters`) this is byte-equivalent to
+/// [`compute_multi_output_split_gain`] — the morph branch only activates
+/// post-warmup, matching the single-output [`crates/backend_cpu/src/morph.rs`]
+/// precedent.
+///
+/// **Row-count approximation.** Single-output `compute_morph_gain` uses the
+/// real per-side row count for the info-score term. The multi-output
+/// histogram doesn't carry row counts (only `grad` + `hess` sums per bin),
+/// so this helper derives an approximate count via `hess.max(0.0) as u32`.
+/// That is exact for objectives where hessian ≡ 1 per row (`squared_error`,
+/// `queryrmse` in scalar mode) and a monotone proxy for ranking objectives
+/// where hessian is pair-derived. The dominant post-warmup signal is the
+/// gradient-gain term (weighted by `1 - info_score_weight`), which uses
+/// `(g, h)` directly — so the byte-equivalence guarantee in warmup and the
+/// asymptotic correctness post-warmup both hold. Threading exact per-bin
+/// counts would require a 1.5× memory expansion of `MultiOutputHistogram`
+/// and is deferred (joint-trainer follow-up).
+///
+/// `grad_means.len()` and `grad_stds.len()` must equal `histogram.n_outputs`.
+#[allow(clippy::too_many_arguments)]
+pub fn compute_multi_output_split_gain_morph(
+    histogram: &MultiOutputHistogram,
+    feature: usize,
+    threshold_bin: usize,
+    lambda_l2: f32,
+    eps: f32,
+    config: &alloygbm_core::MorphConfig,
+    precomputed: &alloygbm_core::MorphPrecomputed,
+    iteration: u32,
+    total_iterations: u32,
+    grad_means: &[f32],
+    grad_stds: &[f32],
+) -> f32 {
+    debug_assert_eq!(grad_means.len(), histogram.n_outputs);
+    debug_assert_eq!(grad_stds.len(), histogram.n_outputs);
+
+    let n_outputs = histogram.n_outputs;
+    let mut total = 0.0_f32;
+    for k in 0..n_outputs {
+        let (mut g_l, mut h_l, mut c_l) = (0.0_f32, 0.0_f32, 0u32);
+        let (mut g_r, mut h_r, mut c_r) = (0.0_f32, 0.0_f32, 0u32);
+        for b in 0..histogram.n_bins {
+            let g = histogram.data[histogram.idx(feature, b, k, HistComponent::Grad)];
+            let h = histogram.data[histogram.idx(feature, b, k, HistComponent::Hess)];
+            // Approximate per-side count via hessian sum (see doc-comment).
+            let approx_count = h.max(0.0) as u32;
+            if b <= threshold_bin {
+                g_l += g;
+                h_l += h;
+                c_l = c_l.saturating_add(approx_count);
+            } else {
+                g_r += g;
+                h_r += h;
+                c_r = c_r.saturating_add(approx_count);
+            }
+        }
+        total += morph_gain_per_output(
+            g_l,
+            h_l,
+            c_l,
+            g_r,
+            h_r,
+            c_r,
+            lambda_l2,
+            eps,
+            config,
+            precomputed,
+            iteration,
+            total_iterations,
+            grad_means[k],
+            grad_stds[k],
+        );
+    }
+    total
+}
+
+/// MorphBoost-augmented multi-output categorical (Fisher-sort) split.
+///
+/// Mirrors [`find_best_multi_output_categorical_split`] but blends per-output
+/// morph gain into the partition score. Output-0 Newton scores still order
+/// the categories (consistent with the standard variant — Fisher-sort
+/// ordering doesn't depend on which gain formula scores the candidates).
+///
+/// Returns `None` under the same conditions as the standard variant
+/// (`num_categories < 2 || num_categories > 64 || no positive-gain partition`).
+#[allow(clippy::too_many_arguments)]
+pub fn find_best_multi_output_categorical_split_morph(
+    hist: &MultiOutputHistogram,
+    feature: usize,
+    num_categories: usize,
+    lambda_l2: f32,
+    eps: f32,
+    config: &alloygbm_core::MorphConfig,
+    precomputed: &alloygbm_core::MorphPrecomputed,
+    iteration: u32,
+    total_iterations: u32,
+    grad_means: &[f32],
+    grad_stds: &[f32],
+) -> Option<MultiOutputCategoricalSplit> {
+    if !(2..=64).contains(&num_categories) {
+        return None;
+    }
+    debug_assert_eq!(grad_means.len(), hist.n_outputs);
+    debug_assert_eq!(grad_stds.len(), hist.n_outputs);
+    let k = hist.n_outputs;
+
+    // Per-output totals across all categories (matches standard variant).
+    let mut total_g = vec![0.0_f32; k];
+    let mut total_h = vec![0.0_f32; k];
+    let mut total_c = vec![0u32; k];
+    for cat in 0..num_categories {
+        for ko in 0..k {
+            let g = hist.data()[hist.idx(feature, cat, ko, HistComponent::Grad)];
+            let h = hist.data()[hist.idx(feature, cat, ko, HistComponent::Hess)];
+            total_g[ko] += g;
+            total_h[ko] += h;
+            total_c[ko] = total_c[ko].saturating_add(h.max(0.0) as u32);
+        }
+    }
+
+    // Sort categories by output-0 Newton score ascending (Fisher-sort).
+    let mut order: Vec<usize> = (0..num_categories).collect();
+    order.sort_by(|&a, &b| {
+        let sa = hist.data()[hist.idx(feature, a, 0, HistComponent::Grad)]
+            / (hist.data()[hist.idx(feature, a, 0, HistComponent::Hess)] + lambda_l2 + eps);
+        let sb = hist.data()[hist.idx(feature, b, 0, HistComponent::Grad)]
+            / (hist.data()[hist.idx(feature, b, 0, HistComponent::Hess)] + lambda_l2 + eps);
+        sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut left_g = vec![0.0_f32; k];
+    let mut left_h = vec![0.0_f32; k];
+    let mut left_c = vec![0u32; k];
+    let mut best_gain = 0.0_f32;
+    let mut best_prefix: i32 = -1;
+    for (prefix_len, &cat) in order.iter().take(num_categories - 1).enumerate() {
+        for ko in 0..k {
+            let g = hist.data()[hist.idx(feature, cat, ko, HistComponent::Grad)];
+            let h = hist.data()[hist.idx(feature, cat, ko, HistComponent::Hess)];
+            left_g[ko] += g;
+            left_h[ko] += h;
+            left_c[ko] = left_c[ko].saturating_add(h.max(0.0) as u32);
+        }
+        let mut gain = 0.0_f32;
+        for ko in 0..k {
+            let gl = left_g[ko];
+            let gr = total_g[ko] - gl;
+            let hl = left_h[ko];
+            let hr = total_h[ko] - hl;
+            let cl = left_c[ko];
+            let cr = total_c[ko].saturating_sub(cl);
+            gain += morph_gain_per_output(
+                gl,
+                hl,
+                cl,
+                gr,
+                hr,
+                cr,
+                lambda_l2,
+                eps,
+                config,
+                precomputed,
+                iteration,
+                total_iterations,
+                grad_means[ko],
+                grad_stds[ko],
+            );
+        }
+        if gain > best_gain {
+            best_gain = gain;
+            best_prefix = prefix_len as i32;
+        }
+    }
+    if best_prefix < 0 {
+        return None;
+    }
+
+    let mut left_bitset: u64 = 0;
+    for &cat in order.iter().take((best_prefix as usize) + 1) {
+        left_bitset |= 1u64 << cat;
+    }
+    Some(MultiOutputCategoricalSplit {
+        gain: best_gain,
+        left_bitset,
+        n_categories: num_categories as u32,
+    })
+}
+
+/// Per-output morph gain calculation. Inlines the math from
+/// `crates/backend_cpu/src/morph.rs::compute_morph_gain` (the engine can't
+/// depend on backend-cpu; the formula is small and self-contained).
+#[allow(clippy::too_many_arguments)]
+fn morph_gain_per_output(
+    g_l: f32,
+    h_l: f32,
+    c_l: u32,
+    g_r: f32,
+    h_r: f32,
+    c_r: u32,
+    lambda_l2: f32,
+    _eps: f32,
+    config: &alloygbm_core::MorphConfig,
+    pre: &alloygbm_core::MorphPrecomputed,
+    iteration: u32,
+    total_iterations: u32,
+    grad_mean: f32,
+    grad_std: f32,
+) -> f32 {
+    // `GAIN_EPSILON` mirrors `crates/backend_cpu/src/morph.rs:39` so warmup
+    // matches the standard gain to within float-rounding tolerance.
+    const GAIN_EPSILON: f32 = 1e-6;
+    const INFO_EPS: f32 = 1e-10;
+
+    // Gradient gain (standard XGBoost-style; same formula as the standard
+    // variant's per-output term, modulo `GAIN_EPSILON` matching).
+    let p_g = g_l + g_r;
+    let p_h = h_l + h_r;
+    let gradient_score = (g_l * g_l) / (h_l + lambda_l2 + GAIN_EPSILON)
+        + (g_r * g_r) / (h_r + lambda_l2 + GAIN_EPSILON)
+        - (p_g * p_g) / (p_h + lambda_l2 + GAIN_EPSILON);
+
+    let mut gain = if pre.in_warmup || pre.info_score_negligible {
+        gradient_score
+    } else {
+        // Info-score blend (Kriuk 2025).
+        let smoothing = 1.0
+            + config.evolution_pressure
+                * (iteration as f32 / total_iterations.max(1) as f32);
+        let info_side = |g_sum: f32, count: u32| -> f32 {
+            if count == 0 {
+                return 0.0;
+            }
+            let g_mean = g_sum / count as f32;
+            let g_norm = (g_mean - grad_mean) / (grad_std + INFO_EPS);
+            g_norm.abs() * (1.0 + g_mean.abs()).ln() / smoothing
+        };
+        let info_l = info_side(g_l, c_l);
+        let info_r = info_side(g_r, c_r);
+        let info_p = info_side(g_l + g_r, c_l.saturating_add(c_r));
+        let info_score = info_l + info_r - info_p;
+        pre.gradient_score_coeff * gradient_score + pre.info_score_coeff * info_score
+    };
+
+    // Balance penalty for very-unbalanced splits.
+    if pre.balance_penalty {
+        let total = c_l.saturating_add(c_r);
+        if total > 0 {
+            let min_side = c_l.min(c_r);
+            let ratio = min_side as f32 / total as f32;
+            if ratio < 0.1 {
+                gain += -0.5 * (1.0 - (-10.0 * ratio).exp());
+            }
+        }
+    }
+
+    gain
+}
+
 /// Result of a multi-output categorical (Fisher-sort) split search.
 ///
 /// `left_bitset` has bit `k` set iff category `k` is on the left side of
@@ -416,6 +679,101 @@ mod tests {
         assert!(
             find_best_multi_output_categorical_split(&h, 0, 1, 0.0, 1e-6).is_none(),
             "single-category feature can't be split"
+        );
+    }
+
+    #[test]
+    fn multi_output_morph_gain_in_warmup_matches_standard_gain() {
+        // v0.10.4: at iteration < morph_warmup_iters, morph gain MUST equal
+        // the standard K-output gain so warmup is byte-equivalent to the
+        // non-morph path. Mirrors the single-output warmup-byte-equivalence
+        // guarantee in crates/backend_cpu/src/morph.rs.
+        use alloygbm_core::{MorphConfig, MorphPrecomputed};
+        let mut h = MultiOutputHistogram::new(1, 4, 2);
+        for b in 0..3 {
+            for k in 0..2 {
+                set(&mut h, 0, b, k, HistComponent::Grad, (b * 2 + k + 1) as f32);
+                set(&mut h, 0, b, k, HistComponent::Hess, 1.0_f32);
+            }
+        }
+        let cfg = MorphConfig::default(); // morph_warmup_iters = 5
+        let pre = MorphPrecomputed::for_iteration(0, &cfg);
+        let grad_means = vec![0.0_f32; 2];
+        let grad_stds = vec![1.0_f32; 2];
+        let morph_gain = compute_multi_output_split_gain_morph(
+            &h, 0, 1, 0.0, 1e-6, &cfg, &pre, 0, 100, &grad_means, &grad_stds,
+        );
+        let standard_gain = compute_multi_output_split_gain(&h, 0, 1, 0.0, 1e-6);
+        assert!(
+            (morph_gain - standard_gain).abs() < 1e-5,
+            "morph in warmup must match standard: morph={morph_gain} standard={standard_gain}"
+        );
+    }
+
+    #[test]
+    fn multi_output_morph_gain_post_warmup_differs_from_standard() {
+        // After warmup, the info-score blend should produce a measurably
+        // different gain than the pure XGBoost gain. Proves the morph
+        // branch is reached and contributes.
+        use alloygbm_core::{MorphConfig, MorphPrecomputed};
+        let mut h = MultiOutputHistogram::new(1, 4, 2);
+        for b in 0..3 {
+            for k in 0..2 {
+                set(&mut h, 0, b, k, HistComponent::Grad, (b * 2 + k + 1) as f32);
+                set(&mut h, 0, b, k, HistComponent::Hess, 1.0_f32);
+            }
+        }
+        let cfg = MorphConfig {
+            morph_warmup_iters: 2,
+            info_score_weight: 0.5,
+            ..MorphConfig::default()
+        };
+        let pre = MorphPrecomputed::for_iteration(10, &cfg);
+        let grad_means = vec![0.5_f32; 2];
+        let grad_stds = vec![1.0_f32; 2];
+        let morph_gain = compute_multi_output_split_gain_morph(
+            &h, 0, 1, 0.0, 1e-6, &cfg, &pre, 10, 100, &grad_means, &grad_stds,
+        );
+        let standard_gain = compute_multi_output_split_gain(&h, 0, 1, 0.0, 1e-6);
+        assert!(
+            (morph_gain - standard_gain).abs() > 1e-3,
+            "morph post-warmup should differ from standard: morph={morph_gain} standard={standard_gain}"
+        );
+    }
+
+    #[test]
+    fn multi_output_morph_categorical_in_warmup_matches_standard() {
+        // Warmup byte-equivalence for the categorical Fisher-sort variant.
+        use alloygbm_core::{MorphConfig, MorphPrecomputed};
+        let mut h = MultiOutputHistogram::new(1, 4, 2);
+        let writes = [
+            (0_usize, 0_usize, -2.0_f32, 1.0_f32),
+            (0, 1, 1.0, 1.0),
+            (1, 0, 2.0, 1.0),
+            (1, 1, -1.0, 1.0),
+            (2, 0, -2.0, 1.0),
+            (2, 1, 1.0, 1.0),
+        ];
+        for (bin, k, g, hess) in writes {
+            let gi = h.idx(0, bin, k, HistComponent::Grad);
+            let hi = h.idx(0, bin, k, HistComponent::Hess);
+            h.data_mut()[gi] = g;
+            h.data_mut()[hi] = hess;
+        }
+        let cfg = MorphConfig::default();
+        let pre = MorphPrecomputed::for_iteration(0, &cfg);
+        let grad_means = vec![0.0_f32; 2];
+        let grad_stds = vec![1.0_f32; 2];
+        let std_result = find_best_multi_output_categorical_split(&h, 0, 3, 0.0, 1e-6)
+            .expect("standard split found");
+        let morph_result = find_best_multi_output_categorical_split_morph(
+            &h, 0, 3, 0.0, 1e-6, &cfg, &pre, 0, 100, &grad_means, &grad_stds,
+        )
+        .expect("morph split found");
+        assert_eq!(
+            std_result.left_bitset, morph_result.left_bitset,
+            "warmup must pick same partition: std={} morph={}",
+            std_result.left_bitset, morph_result.left_bitset
         );
     }
 
