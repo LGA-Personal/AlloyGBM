@@ -1021,6 +1021,72 @@ fn build_joint_round_leafwise(
 ///   `per_output_objective[k]` selects the objective used for output `k`.
 ///   `group_id` is required when any objective in `per_output_objective` is a
 ///     ranking objective.
+/// Joint analogue of [`crate::select_row_indices_for_round_multiclass`].
+///
+/// For joint multi-output the per-row score is `s_i = Σₖ |g_{i,k}|`
+/// across the K per-output gradient buffers (matches LightGBM
+/// multiclass GOSS). A single row mask is shared across all K buffers,
+/// and the amplification factor is applied identically to every
+/// output's gradient and hessian.
+///
+/// Returns `Some(sampled_rows)` when GOSS is active; `None` when
+/// `BoostingMode::Standard` or `BoostingMode::Dart` is in effect (the
+/// caller falls back to the existing row_subsample path).
+fn select_joint_row_indices_for_round(
+    boosting_mode: alloygbm_core::BoostingMode,
+    n_rows: usize,
+    seed_base: u64,
+    round_index: u64,
+    grads_per_output: &mut [Vec<GradientPair>],
+) -> Option<Vec<u32>> {
+    use alloygbm_core::BoostingMode as BM;
+    match boosting_mode {
+        BM::Goss {
+            top_rate,
+            other_rate,
+        } => {
+            let n_outputs = grads_per_output.len();
+            debug_assert!(n_outputs > 0, "joint GOSS requires K >= 1");
+            debug_assert!(
+                grads_per_output.iter().all(|buf| buf.len() == n_rows),
+                "every per-output gradient buffer must have length n_rows"
+            );
+            let magnitudes: Vec<f32> = (0..n_rows)
+                .map(|i| {
+                    grads_per_output
+                        .iter()
+                        .take(n_outputs)
+                        .map(|buf| buf[i].grad.abs())
+                        .sum::<f32>()
+                })
+                .collect();
+            let (top, other, amplification) = crate::goss_sample_indices(
+                &magnitudes,
+                top_rate,
+                other_rate,
+                seed_base,
+                round_index,
+            );
+            if (amplification - 1.0).abs() > f32::EPSILON {
+                for &row in &other {
+                    let idx = row as usize;
+                    for buf in grads_per_output.iter_mut().take(n_outputs) {
+                        let p = &mut buf[idx];
+                        p.grad *= amplification;
+                        p.hess *= amplification;
+                    }
+                }
+            }
+            let mut merged: Vec<u32> = Vec::with_capacity(top.len() + other.len());
+            merged.extend(top);
+            merged.extend(other);
+            merged.sort_unstable();
+            Some(merged)
+        }
+        BM::Standard | BM::Dart { .. } => None,
+    }
+}
+
 pub fn fit_joint_multi_output(
     params: &TrainParams,
     feature_count: usize,
@@ -1103,6 +1169,14 @@ pub fn fit_joint_multi_output_with_categorical(
             grads_per_output.push(g);
         }
 
+        // v0.10.3: joint GOSS. When `boosting_mode = Goss`, score rows by
+        // `Σₖ |g_{i,k}|`, keep top_rate fraction, sample other_rate
+        // uniformly from the rest, and amplify the sampled-low rows'
+        // gradients so per-output histogram statistics remain unbiased
+        // estimators of the full-data gradient sums. Mutates
+        // `grads_per_output` in place. Falls back to the row_subsample
+        // path under Standard / DART.
+        //
         // row_subsample (v0.10.2, fixed v0.10.2.1): seeded Bernoulli row
         // mask. When row_subsample < 1.0, the round's tree builder works
         // on the SAMPLED rows only — `sampled_rows: Vec<u32>` is passed
@@ -1118,7 +1192,17 @@ pub fn fit_joint_multi_output_with_categorical(
         // matching LightGBM's `bagging_fraction` semantics where every
         // row's predictions are updated each round, but the tree itself
         // is fit on the sampled subset.
-        let sampled_rows_opt: Option<Vec<u32>> = if params.row_subsample < 1.0 {
+        let sampled_rows_opt: Option<Vec<u32>> = if let Some(rows) =
+            select_joint_row_indices_for_round(
+                params.boosting_mode,
+                n_rows,
+                params.seed,
+                round as u64,
+                &mut grads_per_output,
+            )
+        {
+            Some(rows)
+        } else if params.row_subsample < 1.0 {
             let mut rng_state: u64 = params.seed.wrapping_mul(0x9E3779B97F4A7C15)
                 ^ ((round as u64).wrapping_mul(0xBF58476D1CE4E5B9));
             if rng_state == 0 {
@@ -2427,5 +2511,94 @@ mod tests {
         assert!(p1[1] < 0.0, "cat 1 output 1 should be < 0, got {}", p1[1]);
         assert!(p0[1] > 0.0, "cat 0 output 1 should be > 0, got {}", p0[1]);
         assert!(p2[1] > 0.0, "cat 2 output 1 should be > 0, got {}", p2[1]);
+    }
+
+    #[test]
+    fn joint_goss_changes_trained_model_vs_standard() {
+        // 200 rows, 2 outputs. Half are large-magnitude-gradient rows,
+        // half are near-zero. With GOSS top_rate=0.2 other_rate=0.1, the
+        // trainer should fit on a tiny subset (~60 rows) with amplified
+        // gradients. With Standard, the trainer sees all 200 rows. The
+        // resulting first-round leaf values MUST differ — a no-op
+        // BoostingMode would produce identical models.
+        use alloygbm_core::BoostingMode;
+
+        let n_rows = 200;
+        let feature_count = 1;
+        let targets_0: Vec<f32> = (0..n_rows)
+            .map(|i| if i < n_rows / 2 { -10.0 } else { 0.01 })
+            .collect();
+        let targets_1: Vec<f32> = targets_0.iter().map(|&t| t * 2.0).collect();
+        let bins: Vec<u8> = (0..n_rows).map(|i| (i % 8) as u8).collect();
+        let binned_matrix =
+            BinnedMatrix::new(n_rows, feature_count, /*max_bin=*/ 7, bins).expect("bm");
+
+        let params_standard = TrainParams {
+            seed: 7,
+            max_depth: 2,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            boosting_mode: BoostingMode::Standard,
+            ..TrainParams::default()
+        };
+        let params_goss = TrainParams {
+            seed: 7,
+            max_depth: 2,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            boosting_mode: BoostingMode::Goss {
+                top_rate: 0.2,
+                other_rate: 0.1,
+            },
+            ..TrainParams::default()
+        };
+
+        let summary_standard = fit_joint_multi_output(
+            &params_standard,
+            feature_count,
+            &binned_matrix,
+            &[targets_0.clone(), targets_1.clone()],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            3,
+        )
+        .expect("standard fit");
+        let summary_goss = fit_joint_multi_output(
+            &params_goss,
+            feature_count,
+            &binned_matrix,
+            &[targets_0.clone(), targets_1.clone()],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            3,
+        )
+        .expect("goss fit");
+
+        // Both must produce models, but the leaf values must diverge
+        // (proves GOSS isn't a silent no-op). Compare the first stump's
+        // K-output left value across the two fits.
+        assert!(!summary_standard.model.stumps.is_empty());
+        assert!(!summary_goss.model.stumps.is_empty());
+        let leaf_standard = summary_standard.model.stumps[0]
+            .multi_output_leaf_values
+            .as_ref()
+            .expect("multi-output leaf");
+        let leaf_goss = summary_goss.model.stumps[0]
+            .multi_output_leaf_values
+            .as_ref()
+            .expect("multi-output leaf");
+        let max_diff = leaf_standard
+            .0
+            .iter()
+            .zip(leaf_goss.0.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            max_diff > 1e-4,
+            "GOSS must change the first stump's left K-output leaf; \
+             standard={:?} goss={:?}",
+            leaf_standard.0,
+            leaf_goss.0,
+        );
     }
 }

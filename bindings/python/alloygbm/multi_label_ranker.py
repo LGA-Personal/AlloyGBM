@@ -299,6 +299,14 @@ class MultiLabelGBMRanker:
         # the requested columns before the trainer sees them.
         "categorical_feature_indices",
         "max_cat_threshold",
+        # v0.10.3: joint boosting modes — GOSS, DART.
+        "boosting_mode",
+        "goss_top_rate",
+        "goss_other_rate",
+        "dart_drop_rate",
+        "dart_max_drop",
+        "dart_normalize_type",
+        "dart_sample_type",
     })
 
     @staticmethod
@@ -478,6 +486,26 @@ class MultiLabelGBMRanker:
                 int(fi) for fi in (kw.get("categorical_feature_indices") or [])
             ],
             max_cat_threshold=int(kw.get("max_cat_threshold", 0)),
+            # v0.10.3: joint boosting_mode (GOSS / DART).
+            boosting_mode=str(kw.get("boosting_mode", "standard")),
+            goss_top_rate=(
+                float(kw["goss_top_rate"]) if "goss_top_rate" in kw else None
+            ),
+            goss_other_rate=(
+                float(kw["goss_other_rate"]) if "goss_other_rate" in kw else None
+            ),
+            dart_drop_rate=(
+                float(kw["dart_drop_rate"]) if "dart_drop_rate" in kw else None
+            ),
+            dart_max_drop=(
+                int(kw["dart_max_drop"]) if "dart_max_drop" in kw else None
+            ),
+            dart_normalize_type=(
+                str(kw["dart_normalize_type"]) if "dart_normalize_type" in kw else None
+            ),
+            dart_sample_type=(
+                str(kw["dart_sample_type"]) if "dart_sample_type" in kw else None
+            ),
         )
 
         self._joint_artifact_bytes = bytes(artifact)

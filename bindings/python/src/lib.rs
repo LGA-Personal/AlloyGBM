@@ -5331,6 +5331,13 @@ impl JointPredictorHandle {
     max_leaves=None::<usize>,
     categorical_feature_indices=Vec::<usize>::new(),
     max_cat_threshold=0_usize,
+    boosting_mode="standard".to_string(),
+    goss_top_rate=None::<f32>,
+    goss_other_rate=None::<f32>,
+    dart_drop_rate=None::<f32>,
+    dart_max_drop=None::<usize>,
+    dart_normalize_type=None::<String>,
+    dart_sample_type=None::<String>,
 ))]
 fn train_joint_multi_label_ranker(
     x_values: Vec<f32>,
@@ -5355,6 +5362,13 @@ fn train_joint_multi_label_ranker(
     max_leaves: Option<usize>,
     categorical_feature_indices: Vec<usize>,
     max_cat_threshold: usize,
+    boosting_mode: String,
+    goss_top_rate: Option<f32>,
+    goss_other_rate: Option<f32>,
+    dart_drop_rate: Option<f32>,
+    dart_max_drop: Option<usize>,
+    dart_normalize_type: Option<String>,
+    dart_sample_type: Option<String>,
 ) -> PyResult<(Vec<u8>, Vec<f32>, usize, usize)> {
     use alloygbm_engine::joint::JointObjective;
 
@@ -5421,6 +5435,15 @@ fn train_joint_multi_label_ranker(
             )));
         }
     };
+    let parsed_boosting_mode = parse_boosting_mode(
+        boosting_mode.as_str(),
+        goss_top_rate,
+        goss_other_rate,
+        dart_drop_rate,
+        dart_max_drop,
+        dart_normalize_type.as_deref(),
+        dart_sample_type.as_deref(),
+    )?;
     let params = TrainParams {
         learning_rate,
         seed,
@@ -5433,6 +5456,7 @@ fn train_joint_multi_label_ranker(
         interaction_constraints,
         tree_growth: tg,
         max_leaves,
+        boosting_mode: parsed_boosting_mode,
         ..TrainParams::default()
     };
 

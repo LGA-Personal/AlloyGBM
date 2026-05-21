@@ -276,6 +276,54 @@ def test_joint_mode_native_categorical_routes_by_category_id():
     assert per_cat_pred_1[0] > per_cat_pred_1[1] > per_cat_pred_1[2] > per_cat_pred_1[3]
 
 
+def test_joint_mode_accepts_goss():
+    """v0.10.3: joint MultiLabelGBMRanker honors `boosting_mode='goss'`.
+    The trained model must be non-empty and finite; GOSS shouldn't change
+    the API surface, just the row-sampling internals."""
+    rng = np.random.default_rng(0)
+    n = 600
+    groups = np.repeat(np.arange(n // 30), 30).astype(np.int64)
+    X = rng.normal(size=(n, 4)).astype(np.float32)
+    y0 = (X[:, 0] + 0.5 * X[:, 1] + rng.normal(0, 0.1, size=n)).astype(np.float32)
+    y1 = (X[:, 1] - 0.3 * X[:, 2] + rng.normal(0, 0.1, size=n)).astype(np.float32)
+    y = np.column_stack([y0, y1])
+
+    # Use mild GOSS rates (top=0.5, other=0.4) so the amplification
+    # factor stays close to 1.0 — aggressive rates can blow up the
+    # gradient on small fixtures.
+    m_goss = MultiLabelGBMRanker(
+        n_estimators=40,
+        learning_rate=0.05,
+        multi_label_mode="joint",
+        ranking_objective="squared_error",
+        boosting_mode="goss",
+        goss_top_rate=0.5,
+        goss_other_rate=0.4,
+        seed=7,
+    )
+    m_goss.fit(X, y, group=groups)
+    preds_goss = m_goss.predict(X)
+    assert preds_goss.shape == (n, 2)
+    assert np.isfinite(preds_goss).all()
+
+    # Compare against Standard (no GOSS) — predictions must differ
+    # because GOSS sees a different (sampled + amplified) gradient
+    # stream. This is the Python-level sanity check that the kwarg is
+    # actually plumbed end-to-end.
+    m_std = MultiLabelGBMRanker(
+        n_estimators=40,
+        learning_rate=0.05,
+        multi_label_mode="joint",
+        ranking_objective="squared_error",
+        boosting_mode="standard",
+        seed=7,
+    )
+    m_std.fit(X, y, group=groups)
+    preds_std = m_std.predict(X)
+    max_diff = float(np.abs(preds_goss - preds_std).max())
+    assert max_diff > 1e-4, "GOSS produced identical predictions to Standard"
+
+
 def test_joint_mode_still_rejects_truly_unsupported_kwargs():
     """v0.10.2: kwargs that the joint trainer still does NOT support
     (warm-start, MorphBoost, etc.) must continue to be rejected with
@@ -285,7 +333,6 @@ def test_joint_mode_still_rejects_truly_unsupported_kwargs():
     for unsupported in (
         "leaf_model",
         "monotone_constraints",
-        "boosting_mode",
         "training_mode",
     ):
         # Some of these collide with __init__ signature in odd ways; we
@@ -293,7 +340,6 @@ def test_joint_mode_still_rejects_truly_unsupported_kwargs():
         value = {
             "leaf_model": "linear",
             "monotone_constraints": [1, 0, 0, 0],
-            "boosting_mode": "goss",
             "training_mode": "morph",
         }[unsupported]
         m = MultiLabelGBMRanker(
