@@ -790,3 +790,153 @@ def test_joint_dro_works_with_morphboost():
     m.fit(X, y, group=group)
     p = m.predict(X)
     assert np.isfinite(p).all()
+
+
+# ── v0.10.6: joint factor neutralization ────────────────────────────────────
+
+
+def test_joint_pre_target_residualizes_predictions():
+    """pre_target should shrink output-0 variance when factor is correlated."""
+    rng = np.random.default_rng(60)
+    X = rng.standard_normal((32, 3)).astype(np.float32)
+    factor = rng.standard_normal((32, 1)).astype(np.float32)
+    y = np.column_stack(
+        [
+            (factor[:, 0] * 2.0 + rng.standard_normal(32) * 0.01).astype(np.float32),
+            rng.standard_normal(32).astype(np.float32),
+        ]
+    )
+    baseline = (
+        MultiLabelGBMRanker(
+            n_estimators=5,
+            multi_label_mode="joint",
+            ranking_objective="squared_error",
+        )
+        .fit(X, y)
+        .predict(X)
+    )
+    neutralized = (
+        MultiLabelGBMRanker(
+            n_estimators=5,
+            multi_label_mode="joint",
+            ranking_objective="squared_error",
+            neutralization="pre_target",
+        )
+        .fit(X, y, factor_exposures=factor)
+        .predict(X)
+    )
+    var_baseline_0 = float(np.var(baseline[:, 0]))
+    var_neutralized_0 = float(np.var(neutralized[:, 0]))
+    assert var_neutralized_0 < var_baseline_0 * 0.5, (
+        f"pre_target should shrink output-0 variance "
+        f"(baseline={var_baseline_0}, neutralized={var_neutralized_0})"
+    )
+
+
+def test_joint_per_round_gradient_changes_predictions():
+    """per_round_gradient should produce different predictions than baseline."""
+    rng = np.random.default_rng(61)
+    X = rng.standard_normal((32, 3)).astype(np.float32)
+    y = rng.standard_normal((32, 2)).astype(np.float32)
+    fe = rng.standard_normal((32, 1)).astype(np.float32)
+    baseline = (
+        MultiLabelGBMRanker(
+            n_estimators=4,
+            multi_label_mode="joint",
+            ranking_objective="squared_error",
+        )
+        .fit(X, y)
+        .predict(X)
+    )
+    neutralized = (
+        MultiLabelGBMRanker(
+            n_estimators=4,
+            multi_label_mode="joint",
+            ranking_objective="squared_error",
+            neutralization="per_round_gradient",
+        )
+        .fit(X, y, factor_exposures=fe)
+        .predict(X)
+    )
+    assert np.max(np.abs(baseline - neutralized)) > 1e-3
+
+
+def test_joint_split_penalty_changes_predictions():
+    """split_penalty with feature-correlated exposure should alter splits."""
+    rng = np.random.default_rng(62)
+    X = rng.standard_normal((48, 3)).astype(np.float32)
+    y = rng.standard_normal((48, 2)).astype(np.float32)
+    fe = X[:, 0:1].copy()
+    baseline = (
+        MultiLabelGBMRanker(
+            n_estimators=4,
+            multi_label_mode="joint",
+            ranking_objective="squared_error",
+        )
+        .fit(X, y)
+        .predict(X)
+    )
+    neutralized = (
+        MultiLabelGBMRanker(
+            n_estimators=4,
+            multi_label_mode="joint",
+            ranking_objective="squared_error",
+            neutralization="split_penalty",
+            factor_penalty=1.0,
+        )
+        .fit(X, y, factor_exposures=fe)
+        .predict(X)
+    )
+    assert np.max(np.abs(baseline - neutralized)) > 1e-3
+
+
+def test_joint_pre_target_rejects_ranking_objectives():
+    """pre_target requires squared_error per output; rank:* must be rejected."""
+    rng = np.random.default_rng(63)
+    X = rng.standard_normal((16, 2)).astype(np.float32)
+    y = rng.integers(0, 3, size=(16, 2)).astype(np.float32)
+    fe = rng.standard_normal((16, 1)).astype(np.float32)
+    grp = [0] * 8 + [1] * 8
+    m = MultiLabelGBMRanker(
+        n_estimators=2,
+        multi_label_mode="joint",
+        ranking_objective="rank:ndcg",
+        neutralization="pre_target",
+    )
+    with pytest.raises(Exception) as exc:
+        m.fit(X, y, group=grp, factor_exposures=fe)
+    msg = str(exc.value).lower()
+    assert "squared_error" in msg or "pre_target" in msg
+
+
+def test_joint_neutralization_requires_exposures():
+    """Active neutralization config without factor_exposures must error."""
+    rng = np.random.default_rng(64)
+    X = rng.standard_normal((8, 2)).astype(np.float32)
+    y = rng.standard_normal((8, 2)).astype(np.float32)
+    m = MultiLabelGBMRanker(
+        n_estimators=2,
+        multi_label_mode="joint",
+        ranking_objective="squared_error",
+        neutralization="per_round_gradient",
+    )
+    with pytest.raises(Exception) as exc:
+        m.fit(X, y)
+    assert "factor_exposures are required" in str(exc.value)
+
+
+def test_joint_exposures_without_neutralization_rejected():
+    """Providing factor_exposures with neutralization='none' must error."""
+    rng = np.random.default_rng(65)
+    X = rng.standard_normal((8, 2)).astype(np.float32)
+    y = rng.standard_normal((8, 2)).astype(np.float32)
+    fe = rng.standard_normal((8, 1)).astype(np.float32)
+    m = MultiLabelGBMRanker(
+        n_estimators=2,
+        multi_label_mode="joint",
+        ranking_objective="squared_error",
+        # neutralization left at default "none"
+    )
+    with pytest.raises(Exception) as exc:
+        m.fit(X, y, factor_exposures=fe)
+    assert "neutralization='none'" in str(exc.value)
