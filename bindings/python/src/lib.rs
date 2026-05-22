@@ -19,7 +19,8 @@ use alloygbm_engine::{
 };
 use alloygbm_predictor::{Predictor, PredictorError};
 use alloygbm_shap::{
-    BinningContext, ShapError, explain_rows_from_artifact_bytes,
+    BinningContext, ShapError, explain_interactions_from_artifact_bytes,
+    explain_interactions_from_artifact_bytes_with_binning, explain_rows_from_artifact_bytes,
     explain_rows_from_artifact_bytes_with_binning, global_importance_from_artifact_bytes,
     global_importance_from_artifact_bytes_with_binning,
 };
@@ -3419,6 +3420,25 @@ fn shap_explain_rows_dense_impl(
     shap_explain_rows_impl(artifact_bytes, &rows)
 }
 
+fn shap_explain_interactions_impl(
+    artifact_bytes: &[u8],
+    rows: &[Vec<f32>],
+) -> Result<(f32, Vec<Vec<Vec<f32>>>), ShapError> {
+    let batch = explain_interactions_from_artifact_bytes(artifact_bytes, rows)?;
+    Ok((batch.expected_value, batch.values))
+}
+
+fn shap_explain_interactions_dense_impl(
+    artifact_bytes: &[u8],
+    row_count: usize,
+    feature_count: usize,
+    values: &[f32],
+) -> Result<(f32, Vec<Vec<Vec<f32>>>), ShapError> {
+    let rows = dense_rows_from_flat_values(values, row_count, feature_count)
+        .map_err(ShapError::InvalidInput)?;
+    shap_explain_interactions_impl(artifact_bytes, &rows)
+}
+
 fn shap_global_importance_impl(
     artifact_bytes: &[u8],
     rows: &[Vec<f32>],
@@ -3898,6 +3918,90 @@ fn shap_explain_rows_dense(
 ) -> PyResult<(f32, Vec<Vec<f32>>)> {
     shap_explain_rows_dense_impl(artifact_bytes, row_count, feature_count, &values)
         .map_err(shap_error_to_pyerr)
+}
+
+#[pyfunction]
+fn shap_explain_interactions(
+    artifact_bytes: &[u8],
+    rows: Vec<Vec<f32>>,
+) -> PyResult<(f32, Vec<Vec<Vec<f32>>>)> {
+    shap_explain_interactions_impl(artifact_bytes, &rows).map_err(shap_error_to_pyerr)
+}
+
+#[pyfunction]
+fn shap_explain_interactions_dense(
+    artifact_bytes: &[u8],
+    values: Vec<f32>,
+    row_count: usize,
+    feature_count: usize,
+) -> PyResult<(f32, Vec<Vec<Vec<f32>>>)> {
+    shap_explain_interactions_dense_impl(artifact_bytes, row_count, feature_count, &values)
+        .map_err(shap_error_to_pyerr)
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    artifact_bytes, rows, binning_kind, feature_mins=None, feature_maxs=None,
+    max_data_bin=None, feature_cuts=None, linear_rank_per_feature=None,
+))]
+#[allow(clippy::too_many_arguments)]
+fn shap_explain_interactions_with_binning(
+    artifact_bytes: &[u8],
+    rows: Vec<Vec<f32>>,
+    binning_kind: &str,
+    feature_mins: Option<Vec<f32>>,
+    feature_maxs: Option<Vec<f32>>,
+    max_data_bin: Option<u16>,
+    feature_cuts: Option<Vec<Vec<f32>>>,
+    linear_rank_per_feature: Option<Vec<Option<Vec<f32>>>>,
+) -> PyResult<(f32, Vec<Vec<Vec<f32>>>)> {
+    let ctx = build_binning_context(
+        binning_kind,
+        feature_mins,
+        feature_maxs,
+        max_data_bin,
+        feature_cuts,
+        linear_rank_per_feature,
+    )
+    .map_err(shap_error_to_pyerr)?;
+    let batch = explain_interactions_from_artifact_bytes_with_binning(artifact_bytes, &rows, &ctx)
+        .map_err(shap_error_to_pyerr)?;
+    Ok((batch.expected_value, batch.values))
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    artifact_bytes, values, row_count, feature_count, binning_kind,
+    feature_mins=None, feature_maxs=None, max_data_bin=None,
+    feature_cuts=None, linear_rank_per_feature=None,
+))]
+#[allow(clippy::too_many_arguments)]
+fn shap_explain_interactions_dense_with_binning(
+    artifact_bytes: &[u8],
+    values: Vec<f32>,
+    row_count: usize,
+    feature_count: usize,
+    binning_kind: &str,
+    feature_mins: Option<Vec<f32>>,
+    feature_maxs: Option<Vec<f32>>,
+    max_data_bin: Option<u16>,
+    feature_cuts: Option<Vec<Vec<f32>>>,
+    linear_rank_per_feature: Option<Vec<Option<Vec<f32>>>>,
+) -> PyResult<(f32, Vec<Vec<Vec<f32>>>)> {
+    let rows = dense_rows_from_flat_values(&values, row_count, feature_count)
+        .map_err(|msg| shap_error_to_pyerr(ShapError::InvalidInput(msg)))?;
+    let ctx = build_binning_context(
+        binning_kind,
+        feature_mins,
+        feature_maxs,
+        max_data_bin,
+        feature_cuts,
+        linear_rank_per_feature,
+    )
+    .map_err(shap_error_to_pyerr)?;
+    let batch = explain_interactions_from_artifact_bytes_with_binning(artifact_bytes, &rows, &ctx)
+        .map_err(shap_error_to_pyerr)?;
+    Ok((batch.expected_value, batch.values))
 }
 
 #[pyfunction]
@@ -5796,6 +5900,13 @@ fn _alloygbm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(shap_explain_rows, m)?)?;
     m.add_function(wrap_pyfunction!(shap_explain_rows_dense, m)?)?;
+    m.add_function(wrap_pyfunction!(shap_explain_interactions, m)?)?;
+    m.add_function(wrap_pyfunction!(shap_explain_interactions_dense, m)?)?;
+    m.add_function(wrap_pyfunction!(shap_explain_interactions_with_binning, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        shap_explain_interactions_dense_with_binning,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(shap_global_importance, m)?)?;
     m.add_function(wrap_pyfunction!(shap_global_importance_dense, m)?)?;
     m.add_function(wrap_pyfunction!(shap_explain_rows_with_binning, m)?)?;
