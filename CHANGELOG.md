@@ -1,5 +1,61 @@
 # Changelog
 
+## v0.10.6 (2026-05-22)
+
+### Joint trainer: factor neutralization (all three modes)
+
+`MultiLabelGBMRanker(multi_label_mode="joint", neutralization=…,
+factor_exposures=…)` now supports all three factor-neutralization modes
+with the same surface as the single-output `GBMRegressor` /
+`GBMRanker`. Closes the last v0.10.4-deferred follow-up; the joint
+trainer reaches full feature parity with the single-output path.
+
+Three modes, all activated via the `neutralization` kwarg:
+
+- **`pre_target`** — residualize each per-output target through the factor
+  exposures once before training. Requires every per-output objective to be
+  `squared_error` (the only objective where residualize-target equals
+  residualize-gradient, the identity pre_target relies on).
+- **`per_round_gradient`** — project each of the K gradient buffers in
+  place every round after computing them. Mirrors the single-output
+  multiclass per-class projection pattern; works for any per-output
+  objective.
+- **`split_penalty`** — subtract a K-output factor-load penalty from each
+  candidate split's gain. Applies under both `tree_growth="level"` and
+  `tree_growth="leaf"`; the leaf-wise heap ranks candidates by penalized
+  gain.
+
+Three new kwargs admitted by `_JOINT_SUPPORTED_KWARGS`:
+
+- `neutralization` — `"none"` (default), `"pre_target"`,
+  `"per_round_gradient"`, or `"split_penalty"`
+- `factor_neutralization_lambda` — ridge regularization on the projector
+  Gram matrix (default `1e-6`)
+- `factor_penalty` — `split_penalty` mode's penalty multiplier (default
+  `0.0` — `0` collapses to standard byte-for-byte)
+
+Plus the `factor_exposures=` kwarg on `fit()` (already existed for the
+independent-mode fallback; now honored on joint too). The PyO3 bridge
+cross-validates the exposures-vs-config invariant: active config requires
+exposures, exposures require an active config.
+
+### Artifact
+
+New `ModelSectionKind::NeutralizationMetadata` (kind=14) records the
+active config in the artifact so joint models are self-describing.
+Metadata only; prediction never reads it (neutralization is a
+training-time transformation on targets/gradients/split-gains; the
+trained leaf values already bake in the projection).
+
+### Byte-equivalence
+
+A fit with `neutralization='none'` (or `kind=None`, or `split_penalty=0`)
+produces byte-identical artifact bytes to a pre-v0.10.6 fit. Pinned by
+`joint_neutralization_inert_configs_match_v0_10_5_byte_for_byte` in
+`crates/engine/src/joint.rs`. Composes with MorphBoost
+(`training_mode="morph"`), DRO leaves (`leaf_solver="dro"`),
+DART boosting, and warm-start.
+
 ## v0.10.5 (2026-05-22)
 
 ### Joint trainer: DRO leaves

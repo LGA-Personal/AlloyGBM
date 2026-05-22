@@ -28,8 +28,8 @@ use crate::{
     TrainedStump, XeNDCGObjective, encode_tree_node_id,
 };
 use alloygbm_core::{
-    BinnedMatrix, DroMetadataPayload, GradientPair, LeafSolverKind, LeafValue, MISSING_BIN_U8,
-    ModelMetadata, NodeStats, SplitCandidate, TrainParams, TreeGrowth,
+    BinnedMatrix, DroMetadataPayload, FactorExposureMatrix, GradientPair, LeafSolverKind,
+    LeafValue, MISSING_BIN_U8, ModelMetadata, NodeStats, SplitCandidate, TrainParams, TreeGrowth,
 };
 use std::collections::HashMap;
 
@@ -205,6 +205,77 @@ fn effective_dro_config(params: &TrainParams) -> Option<&alloygbm_core::DroConfi
     }
     let cfg = params.dro_config.as_ref()?;
     if cfg.radius <= 0.0 {
+        return None;
+    }
+    Some(cfg)
+}
+
+/// v0.10.6: scan a node's row indices once and accumulate per-side per-factor
+/// exposure sums for a candidate split. Used by `split_penalty` mode to compute
+/// the factor-load penalty.
+///
+/// Missing rows (bin == `MISSING_BIN_U8`) are skipped because the
+/// `default_left` direction is decided AFTER the best split is selected (the
+/// joint trainer's "more rows wins" heuristic). Skipping them under-estimates
+/// the penalty by exactly the missing-row contribution to factor load; this is
+/// a deterministic conservative choice and matches the documented bias.
+fn accumulate_factor_sums_for_threshold(
+    binned: &BinnedMatrix,
+    exposures: &alloygbm_core::FactorExposureMatrix,
+    row_indices: &[u32],
+    feature: usize,
+    threshold_bin: u8,
+    cat_bitset: Option<u64>,
+) -> (Vec<f32>, Vec<f32>) {
+    let factor_count = exposures.factor_count;
+    let feature_count = binned.feature_count;
+    let mut left = vec![0.0_f32; factor_count];
+    let mut right = vec![0.0_f32; factor_count];
+    for &row in row_indices {
+        let bin = binned.bins[row as usize * feature_count + feature];
+        if bin == MISSING_BIN_U8 {
+            continue;
+        }
+        let goes_left = if let Some(bs) = cat_bitset {
+            bin < 64 && (bs & (1u64 << bin)) != 0
+        } else {
+            bin <= threshold_bin
+        };
+        let exposure_start = row as usize * factor_count;
+        let exposure_row = &exposures.values[exposure_start..exposure_start + factor_count];
+        let target = if goes_left { &mut left } else { &mut right };
+        for (s, e) in target.iter_mut().zip(exposure_row) {
+            *s += *e;
+        }
+    }
+    (left, right)
+}
+
+/// Return `Some(config)` only when factor neutralization is actually active
+/// for this fit. Inert configs (kind = None) collapse to `None`.
+///
+/// Why a helper rather than `validate_train_params`: the joint trainer accepts
+/// raw `TrainParams` without invoking the single-output validator (which would
+/// also reject joint-unrelated configs like linear leaves). This helper is the
+/// SOURCE OF TRUTH for "is neutralization on?" — every behavioral site (target
+/// residualization in pre_target mode, gradient projection in
+/// per_round_gradient mode, FactorSplitContext construction in split_penalty
+/// mode) AND the artifact serializer must call it.
+fn effective_neutralization_config(
+    params: &TrainParams,
+) -> Option<&alloygbm_core::FactorNeutralizationConfig> {
+    let cfg = params.neutralization_config.as_ref()?;
+    if cfg.kind == alloygbm_core::NeutralizationKind::None {
+        return None;
+    }
+    // `SplitPenalty` with `split_penalty == 0` is behaviorally identical to
+    // `None` — the per-candidate penalty collapses to 0 — so treat it as inert.
+    // This mirrors v0.10.5's `effective_dro_config` collapsing radius=0 to None
+    // and preserves byte-equivalence with v0.10.5 fits when the penalty is off.
+    // (PreTarget and PerRoundGradient don't have an analogous "off" knob —
+    // ridge_lambda is a regularization hyperparameter, not an activation
+    // switch — so they only collapse on `kind == None`.)
+    if cfg.kind == alloygbm_core::NeutralizationKind::SplitPenalty && cfg.split_penalty == 0.0 {
         return None;
     }
     Some(cfg)
@@ -415,6 +486,7 @@ pub fn build_joint_round(
         round_index,
         sampled_root_rows,
         /*morph_ctx=*/ None,
+        /*factor_exposures=*/ None,
     )
 }
 
@@ -429,6 +501,7 @@ fn build_joint_round_inner(
     round_index: usize,
     sampled_root_rows: Option<&[u32]>,
     morph_ctx: Option<&JointMorphContext>,
+    factor_exposures: Option<&FactorExposureMatrix>,
 ) -> Result<JointRoundResult, String> {
     if grads_per_output.len() != n_outputs {
         return Err(format!(
@@ -466,6 +539,37 @@ fn build_joint_round_inner(
     let max_depth = params.max_depth.max(1) as usize;
     let min_rows_per_leaf = params.min_data_in_leaf.max(1) as usize;
     let lambda_l2 = params.lambda_l2;
+
+    // v0.10.6: split_penalty neutralization — when active, every candidate's
+    // gain is adjusted by a K-output factor-load penalty derived from the
+    // candidate's L/R leaf K-vectors and per-side factor sums. Inert configs
+    // (kind != SplitPenalty, or split_penalty == 0) leave the gain unchanged.
+    // Note: this path is opt-in; the no-op cost (one Option check per
+    // candidate) is negligible. The PyO3-only caller (`train_joint_*` from
+    // `bindings/python`) doesn't currently provide `factor_exposures`; future
+    // wiring in Task 11 will route them through.
+    // PR #39 review (R2): when split_penalty is configured but exposures
+    // weren't provided, return an explicit error instead of silently treating
+    // it as inert. Mirrors the pre_target / per_round_gradient guards in
+    // `fit_joint_inner`.
+    let split_penalty_ctx: Option<(f32, &alloygbm_core::FactorExposureMatrix)> =
+        match (effective_neutralization_config(params), factor_exposures) {
+            (Some(cfg), Some(exposures))
+                if cfg.kind == alloygbm_core::NeutralizationKind::SplitPenalty
+                    && cfg.split_penalty > 0.0 =>
+            {
+                Some((cfg.split_penalty, exposures))
+            }
+            (Some(cfg), None)
+                if cfg.kind == alloygbm_core::NeutralizationKind::SplitPenalty
+                    && cfg.split_penalty > 0.0 =>
+            {
+                return Err(
+                    "factor_exposures are required when neutralization='split_penalty'".to_string(),
+                );
+            }
+            _ => None,
+        };
 
     // col_subsample (v0.10.2): per-tree feature mask, seeded by
     // `(params.seed, round_index)`. v0.10.2.1 fix: mixing the round index
@@ -645,17 +749,53 @@ fn build_joint_round_inner(
                             crate::LEAF_EPSILON,
                         )
                     };
-                    if let Some(cat_split) = cat_opt
-                        && cat_split.gain > best.map(|(_, _, g, _)| g).unwrap_or(0.0)
-                    {
-                        best = Some((feature, 0, cat_split.gain, Some(cat_split.left_bitset)));
+                    if let Some(cat_split) = cat_opt {
+                        // v0.10.6 split_penalty (categorical): subtract the
+                        // K-output factor-load penalty from the raw gain.
+                        let adj_gain = if let Some((factor_penalty, exposures)) = split_penalty_ctx
+                        {
+                            let (leaf_l, leaf_r) =
+                                crate::shared_histogram::derive_kvec_leaves_from_categorical_histogram(
+                                    &node_hist,
+                                    feature,
+                                    cat_split.left_bitset,
+                                    num_cats,
+                                    lambda_l2,
+                                    crate::LEAF_EPSILON,
+                                    params.lambda_l1,
+                                    effective_dro_config(params),
+                                );
+                            let (left_sums, right_sums) = accumulate_factor_sums_for_threshold(
+                                binned_matrix,
+                                exposures,
+                                &node.row_indices,
+                                feature,
+                                0,
+                                Some(cat_split.left_bitset),
+                            );
+                            let penalty =
+                                crate::shared_histogram::compute_multi_output_factor_split_penalty(
+                                    &left_sums,
+                                    &right_sums,
+                                    &leaf_l,
+                                    &leaf_r,
+                                    factor_penalty,
+                                    node.row_indices.len(),
+                                );
+                            cat_split.gain - penalty
+                        } else {
+                            cat_split.gain
+                        };
+                        if adj_gain > best.map(|(_, _, g, _)| g).unwrap_or(0.0) {
+                            best = Some((feature, 0, adj_gain, Some(cat_split.left_bitset)));
+                        }
                     }
                     continue; // skip numeric threshold sweep for categorical features
                 }
                 for threshold_bin in 0..max_threshold {
                     // v0.10.4: route numeric gain through the morph variant when
                     // active; falls through to the standard variant otherwise.
-                    let gain = if let Some(m) = morph_ctx {
+                    let base_gain = if let Some(m) = morph_ctx {
                         crate::shared_histogram::compute_multi_output_split_gain_morph(
                             &node_hist,
                             feature,
@@ -677,6 +817,40 @@ fn build_joint_round_inner(
                             lambda_l2,
                             crate::LEAF_EPSILON,
                         )
+                    };
+                    // v0.10.6 split_penalty (numeric): subtract per-candidate
+                    // K-output factor-load penalty.
+                    let gain = if let Some((factor_penalty, exposures)) = split_penalty_ctx {
+                        let (leaf_l, leaf_r) =
+                            crate::shared_histogram::derive_kvec_leaves_from_threshold_histogram(
+                                &node_hist,
+                                feature,
+                                threshold_bin,
+                                lambda_l2,
+                                crate::LEAF_EPSILON,
+                                params.lambda_l1,
+                                effective_dro_config(params),
+                            );
+                        let (left_sums, right_sums) = accumulate_factor_sums_for_threshold(
+                            binned_matrix,
+                            exposures,
+                            &node.row_indices,
+                            feature,
+                            threshold_bin as u8,
+                            None,
+                        );
+                        let penalty =
+                            crate::shared_histogram::compute_multi_output_factor_split_penalty(
+                                &left_sums,
+                                &right_sums,
+                                &leaf_l,
+                                &leaf_r,
+                                factor_penalty,
+                                node.row_indices.len(),
+                            );
+                        base_gain - penalty
+                    } else {
+                        base_gain
                     };
                     if gain <= 0.0 {
                         continue;
@@ -870,6 +1044,7 @@ fn build_joint_round_leafwise(
     round_index: usize,
     sampled_root_rows: Option<&[u32]>,
     morph_ctx: Option<&JointMorphContext>,
+    factor_exposures: Option<&FactorExposureMatrix>,
 ) -> Result<JointRoundResult, String> {
     use std::collections::BinaryHeap;
 
@@ -954,236 +1129,333 @@ fn build_joint_round_leafwise(
         v
     };
 
+    // v0.10.6: split_penalty neutralization — same gate as the level-wise
+    // builder (`build_joint_round_inner`). The heap must rank candidates by
+    // PENALIZED gain, so the adjustment is applied inside `evaluate_node`
+    // before the candidate is pushed.
+    //
+    // PR #40 review (R1): mirror the level-wise explicit-error gate for
+    // `SplitPenalty + missing exposures` so a Rust caller calling the joint
+    // entry point directly with `tree_growth=Leaf` can't accidentally train
+    // an unpenalized model that still advertises split_penalty in its
+    // `NeutralizationMetadata` artifact section.
+    let split_penalty_ctx: Option<(f32, &FactorExposureMatrix)> =
+        match (effective_neutralization_config(params), factor_exposures) {
+            (Some(cfg), Some(exposures))
+                if cfg.kind == alloygbm_core::NeutralizationKind::SplitPenalty
+                    && cfg.split_penalty > 0.0 =>
+            {
+                Some((cfg.split_penalty, exposures))
+            }
+            (Some(cfg), None)
+                if cfg.kind == alloygbm_core::NeutralizationKind::SplitPenalty
+                    && cfg.split_penalty > 0.0 =>
+            {
+                return Err(
+                    "factor_exposures are required when neutralization='split_penalty'".to_string(),
+                );
+            }
+            _ => None,
+        };
+
     // Per-node candidate evaluator. Builds the multi-output histogram for
     // `node.row_indices`, sweeps features (respecting `feature_allowed` and
     // the active interaction-constraint group set), picks the best split,
     // partitions rows, computes Newton-Raphson K-output leaf values, and
     // returns a candidate (or None if no positive-gain split survives the
     // constraints + min_data_in_leaf + min_split_gain filters).
-    let evaluate_node =
-        |node: JointLeafNode, active_groups: Option<u64>| -> Option<JointLeafCandidate> {
-            if node.row_indices.len() < 2 * min_rows_per_leaf {
-                return None;
-            }
+    let evaluate_node = |node: JointLeafNode,
+                         active_groups: Option<u64>|
+     -> Option<JointLeafCandidate> {
+        if node.row_indices.len() < 2 * min_rows_per_leaf {
+            return None;
+        }
 
-            // Build multi-output histogram for this node.
-            let mut node_hist = MultiOutputHistogram::new(feature_count, n_bins, n_outputs);
-            for feature in 0..feature_count {
-                if !feature_allowed[feature] {
-                    continue;
-                }
-                if let (Some(idx), Some(ag)) = (constraint_index.as_ref(), active_groups)
-                    && !idx.feature_allowed(ag, feature as u32)
-                {
-                    continue;
-                }
-                let mut subset_bins: Vec<u8> = Vec::with_capacity(node.row_indices.len());
-                for &row in &node.row_indices {
-                    let idx = row as usize * feature_count + feature;
-                    subset_bins.push(binned_matrix.bins[idx]);
-                }
-                let mut subset_g: Vec<f32> = Vec::with_capacity(node.row_indices.len() * n_outputs);
-                let mut subset_h: Vec<f32> = Vec::with_capacity(node.row_indices.len() * n_outputs);
-                for &row in &node.row_indices {
-                    for k in 0..n_outputs {
-                        subset_g.push(packed_grads[row as usize * n_outputs + k]);
-                        subset_h.push(packed_hess[row as usize * n_outputs + k]);
-                    }
-                }
-                build_multi_output_histogram_inplace(
-                    &mut node_hist,
-                    feature,
-                    &subset_bins,
-                    &subset_g,
-                    &subset_h,
-                    n_outputs,
-                );
+        // Build multi-output histogram for this node.
+        let mut node_hist = MultiOutputHistogram::new(feature_count, n_bins, n_outputs);
+        for feature in 0..feature_count {
+            if !feature_allowed[feature] {
+                continue;
             }
-
-            // Sweep features for the best split. Categorical features dispatch
-            // to Fisher-sort and carry a u64 bitset in the 4th slot of `best`.
-            let mut best: Option<(usize, usize, f32, Option<u64>)> = None;
-            let max_threshold = (binned_matrix.max_bin as usize).min(MISSING_BIN_U8 as usize - 1);
-            for feature in 0..feature_count {
-                if !feature_allowed[feature] {
-                    continue;
-                }
-                if let (Some(idx), Some(ag)) = (constraint_index.as_ref(), active_groups)
-                    && !idx.feature_allowed(ag, feature as u32)
-                {
-                    continue;
-                }
-                if let Some(num_cats) = cat_num_categories[feature] {
-                    // v0.10.4: route through morph variant when active.
-                    let cat_opt = if let Some(m) = morph_ctx {
-                        crate::shared_histogram::find_best_multi_output_categorical_split_morph(
-                            &node_hist,
-                            feature,
-                            num_cats,
-                            lambda_l2,
-                            crate::LEAF_EPSILON,
-                            &m.config,
-                            &m.precomputed,
-                            m.iteration,
-                            m.total_iterations,
-                            &m.grad_means,
-                            &m.grad_stds,
-                        )
-                    } else {
-                        crate::shared_histogram::find_best_multi_output_categorical_split(
-                            &node_hist,
-                            feature,
-                            num_cats,
-                            lambda_l2,
-                            crate::LEAF_EPSILON,
-                        )
-                    };
-                    if let Some(cat_split) = cat_opt
-                        && cat_split.gain > best.map(|(_, _, g, _)| g).unwrap_or(0.0)
-                    {
-                        best = Some((feature, 0, cat_split.gain, Some(cat_split.left_bitset)));
-                    }
-                    continue;
-                }
-                for threshold_bin in 0..max_threshold {
-                    // v0.10.4: route through morph variant when active.
-                    let gain = if let Some(m) = morph_ctx {
-                        crate::shared_histogram::compute_multi_output_split_gain_morph(
-                            &node_hist,
-                            feature,
-                            threshold_bin,
-                            lambda_l2,
-                            crate::LEAF_EPSILON,
-                            &m.config,
-                            &m.precomputed,
-                            m.iteration,
-                            m.total_iterations,
-                            &m.grad_means,
-                            &m.grad_stds,
-                        )
-                    } else {
-                        compute_multi_output_split_gain(
-                            &node_hist,
-                            feature,
-                            threshold_bin,
-                            lambda_l2,
-                            crate::LEAF_EPSILON,
-                        )
-                    };
-                    if gain <= 0.0 {
-                        continue;
-                    }
-                    if best.map(|(_, _, g, _)| gain > g).unwrap_or(true) {
-                        best = Some((feature, threshold_bin, gain, None));
-                    }
-                }
+            if let (Some(idx), Some(ag)) = (constraint_index.as_ref(), active_groups)
+                && !idx.feature_allowed(ag, feature as u32)
+            {
+                continue;
             }
-            let (feature, threshold_bin, gain, cat_bitset) = best?;
-            if gain < params.min_split_gain {
-                return None;
-            }
-
-            // Partition rows.
-            let mut left_rows: Vec<u32> = Vec::new();
-            let mut right_rows: Vec<u32> = Vec::new();
-            let mut missing_rows: Vec<u32> = Vec::new();
+            let mut subset_bins: Vec<u8> = Vec::with_capacity(node.row_indices.len());
             for &row in &node.row_indices {
-                let bin = binned_matrix.bins[row as usize * feature_count + feature];
-                if bin == MISSING_BIN_U8 {
-                    missing_rows.push(row);
-                } else if let Some(bs) = cat_bitset {
-                    if bin < 64 && (bs & (1u64 << bin)) != 0 {
-                        left_rows.push(row);
+                let idx = row as usize * feature_count + feature;
+                subset_bins.push(binned_matrix.bins[idx]);
+            }
+            let mut subset_g: Vec<f32> = Vec::with_capacity(node.row_indices.len() * n_outputs);
+            let mut subset_h: Vec<f32> = Vec::with_capacity(node.row_indices.len() * n_outputs);
+            for &row in &node.row_indices {
+                for k in 0..n_outputs {
+                    subset_g.push(packed_grads[row as usize * n_outputs + k]);
+                    subset_h.push(packed_hess[row as usize * n_outputs + k]);
+                }
+            }
+            build_multi_output_histogram_inplace(
+                &mut node_hist,
+                feature,
+                &subset_bins,
+                &subset_g,
+                &subset_h,
+                n_outputs,
+            );
+        }
+
+        // Sweep features for the best split. Categorical features dispatch
+        // to Fisher-sort and carry a u64 bitset in the 4th slot of `best`.
+        let mut best: Option<(usize, usize, f32, Option<u64>)> = None;
+        let max_threshold = (binned_matrix.max_bin as usize).min(MISSING_BIN_U8 as usize - 1);
+        for feature in 0..feature_count {
+            if !feature_allowed[feature] {
+                continue;
+            }
+            if let (Some(idx), Some(ag)) = (constraint_index.as_ref(), active_groups)
+                && !idx.feature_allowed(ag, feature as u32)
+            {
+                continue;
+            }
+            if let Some(num_cats) = cat_num_categories[feature] {
+                // v0.10.4: route through morph variant when active.
+                let cat_opt = if let Some(m) = morph_ctx {
+                    crate::shared_histogram::find_best_multi_output_categorical_split_morph(
+                        &node_hist,
+                        feature,
+                        num_cats,
+                        lambda_l2,
+                        crate::LEAF_EPSILON,
+                        &m.config,
+                        &m.precomputed,
+                        m.iteration,
+                        m.total_iterations,
+                        &m.grad_means,
+                        &m.grad_stds,
+                    )
+                } else {
+                    crate::shared_histogram::find_best_multi_output_categorical_split(
+                        &node_hist,
+                        feature,
+                        num_cats,
+                        lambda_l2,
+                        crate::LEAF_EPSILON,
+                    )
+                };
+                if let Some(cat_split) = cat_opt {
+                    // v0.10.6 split_penalty (categorical, leaf-wise).
+                    let adj_gain = if let Some((factor_penalty, exposures)) = split_penalty_ctx {
+                        let (leaf_l, leaf_r) =
+                            crate::shared_histogram::derive_kvec_leaves_from_categorical_histogram(
+                                &node_hist,
+                                feature,
+                                cat_split.left_bitset,
+                                num_cats,
+                                lambda_l2,
+                                crate::LEAF_EPSILON,
+                                params.lambda_l1,
+                                effective_dro_config(params),
+                            );
+                        let (left_sums, right_sums) = accumulate_factor_sums_for_threshold(
+                            binned_matrix,
+                            exposures,
+                            &node.row_indices,
+                            feature,
+                            0,
+                            Some(cat_split.left_bitset),
+                        );
+                        let penalty =
+                            crate::shared_histogram::compute_multi_output_factor_split_penalty(
+                                &left_sums,
+                                &right_sums,
+                                &leaf_l,
+                                &leaf_r,
+                                factor_penalty,
+                                node.row_indices.len(),
+                            );
+                        cat_split.gain - penalty
                     } else {
-                        right_rows.push(row);
+                        cat_split.gain
+                    };
+                    if adj_gain > best.map(|(_, _, g, _)| g).unwrap_or(0.0) {
+                        best = Some((feature, 0, adj_gain, Some(cat_split.left_bitset)));
                     }
-                } else if (bin as usize) <= threshold_bin {
+                }
+                continue;
+            }
+            for threshold_bin in 0..max_threshold {
+                // v0.10.4: route through morph variant when active.
+                let base_gain = if let Some(m) = morph_ctx {
+                    crate::shared_histogram::compute_multi_output_split_gain_morph(
+                        &node_hist,
+                        feature,
+                        threshold_bin,
+                        lambda_l2,
+                        crate::LEAF_EPSILON,
+                        &m.config,
+                        &m.precomputed,
+                        m.iteration,
+                        m.total_iterations,
+                        &m.grad_means,
+                        &m.grad_stds,
+                    )
+                } else {
+                    compute_multi_output_split_gain(
+                        &node_hist,
+                        feature,
+                        threshold_bin,
+                        lambda_l2,
+                        crate::LEAF_EPSILON,
+                    )
+                };
+                // v0.10.6 split_penalty (numeric, leaf-wise).
+                let gain = if let Some((factor_penalty, exposures)) = split_penalty_ctx {
+                    let (leaf_l, leaf_r) =
+                        crate::shared_histogram::derive_kvec_leaves_from_threshold_histogram(
+                            &node_hist,
+                            feature,
+                            threshold_bin,
+                            lambda_l2,
+                            crate::LEAF_EPSILON,
+                            params.lambda_l1,
+                            effective_dro_config(params),
+                        );
+                    let (left_sums, right_sums) = accumulate_factor_sums_for_threshold(
+                        binned_matrix,
+                        exposures,
+                        &node.row_indices,
+                        feature,
+                        threshold_bin as u8,
+                        None,
+                    );
+                    let penalty =
+                        crate::shared_histogram::compute_multi_output_factor_split_penalty(
+                            &left_sums,
+                            &right_sums,
+                            &leaf_l,
+                            &leaf_r,
+                            factor_penalty,
+                            node.row_indices.len(),
+                        );
+                    base_gain - penalty
+                } else {
+                    base_gain
+                };
+                if gain <= 0.0 {
+                    continue;
+                }
+                if best.map(|(_, _, g, _)| gain > g).unwrap_or(true) {
+                    best = Some((feature, threshold_bin, gain, None));
+                }
+            }
+        }
+        let (feature, threshold_bin, gain, cat_bitset) = best?;
+        if gain < params.min_split_gain {
+            return None;
+        }
+
+        // Partition rows.
+        let mut left_rows: Vec<u32> = Vec::new();
+        let mut right_rows: Vec<u32> = Vec::new();
+        let mut missing_rows: Vec<u32> = Vec::new();
+        for &row in &node.row_indices {
+            let bin = binned_matrix.bins[row as usize * feature_count + feature];
+            if bin == MISSING_BIN_U8 {
+                missing_rows.push(row);
+            } else if let Some(bs) = cat_bitset {
+                if bin < 64 && (bs & (1u64 << bin)) != 0 {
                     left_rows.push(row);
                 } else {
                     right_rows.push(row);
                 }
-            }
-            let default_left = left_rows.len() >= right_rows.len();
-            if default_left {
-                left_rows.append(&mut missing_rows);
+            } else if (bin as usize) <= threshold_bin {
+                left_rows.push(row);
             } else {
-                right_rows.append(&mut missing_rows);
+                right_rows.push(row);
             }
-            if left_rows.len() < min_rows_per_leaf || right_rows.len() < min_rows_per_leaf {
-                return None;
+        }
+        let default_left = left_rows.len() >= right_rows.len();
+        if default_left {
+            left_rows.append(&mut missing_rows);
+        } else {
+            right_rows.append(&mut missing_rows);
+        }
+        if left_rows.len() < min_rows_per_leaf || right_rows.len() < min_rows_per_leaf {
+            return None;
+        }
+
+        // K-output leaf values via Newton-Raphson per output.
+        // v0.10.5: route through `leaf_effective_gradient` so L1 and DRO
+        // leaf solvers are honored on the leaf-wise path too.  When
+        // `lambda_l1 == 0` AND `dro_config == None`, this returns
+        // `g_sum` unchanged — preserving byte-for-byte compatibility
+        // with the v0.10.0–v0.10.4 default config.
+        let leaf_values = |rows: &[u32]| -> Vec<f32> {
+            let mut out = vec![0.0_f32; n_outputs];
+            let row_count = rows.len() as u32;
+            for k in 0..n_outputs {
+                let mut g_sum = 0.0_f32;
+                let mut h_sum = 0.0_f32;
+                let mut g_sq_sum = 0.0_f32;
+                for &row in rows {
+                    let gp = grads_per_output[k][row as usize];
+                    g_sum += gp.grad;
+                    h_sum += gp.hess;
+                    g_sq_sum += gp.grad * gp.grad;
+                }
+                let g_eff = alloygbm_core::leaf_effective_gradient(
+                    g_sum,
+                    g_sq_sum,
+                    row_count,
+                    params.lambda_l1,
+                    effective_dro_config(params),
+                );
+                out[k] = -g_eff / (h_sum + lambda_l2 + crate::LEAF_EPSILON);
             }
-
-            // K-output leaf values via Newton-Raphson per output.
-            // v0.10.5: route through `leaf_effective_gradient` so L1 and DRO
-            // leaf solvers are honored on the leaf-wise path too.  When
-            // `lambda_l1 == 0` AND `dro_config == None`, this returns
-            // `g_sum` unchanged — preserving byte-for-byte compatibility
-            // with the v0.10.0–v0.10.4 default config.
-            let leaf_values = |rows: &[u32]| -> Vec<f32> {
-                let mut out = vec![0.0_f32; n_outputs];
-                let row_count = rows.len() as u32;
-                for k in 0..n_outputs {
-                    let mut g_sum = 0.0_f32;
-                    let mut h_sum = 0.0_f32;
-                    let mut g_sq_sum = 0.0_f32;
-                    for &row in rows {
-                        let gp = grads_per_output[k][row as usize];
-                        g_sum += gp.grad;
-                        h_sum += gp.hess;
-                        g_sq_sum += gp.grad * gp.grad;
-                    }
-                    let g_eff = alloygbm_core::leaf_effective_gradient(
-                        g_sum,
-                        g_sq_sum,
-                        row_count,
-                        params.lambda_l1,
-                        effective_dro_config(params),
-                    );
-                    out[k] = -g_eff / (h_sum + lambda_l2 + crate::LEAF_EPSILON);
-                }
-                out
-            };
-            let left_k = leaf_values(&left_rows);
-            let right_k = leaf_values(&right_rows);
-
-            // NodeStats for record-keeping (joint trainer doesn't consume them
-            // beyond carrying them into SplitCandidate for compat).
-            let summarize = |rows: &[u32]| -> NodeStats {
-                let mut g = 0.0_f32;
-                let mut h = 0.0_f32;
-                for grad_vec in grads_per_output.iter().take(n_outputs) {
-                    for &row in rows {
-                        let gp = grad_vec[row as usize];
-                        g += gp.grad;
-                        h += gp.hess;
-                    }
-                }
-                NodeStats {
-                    grad_sum: g,
-                    hess_sum: h,
-                    grad_sq_sum: 0.0,
-                    row_count: rows.len() as u32,
-                }
-            };
-            let left_stats = summarize(&left_rows);
-            let right_stats = summarize(&right_rows);
-
-            Some(JointLeafCandidate {
-                node,
-                feature: feature as u32,
-                threshold_bin: threshold_bin as u16,
-                default_left,
-                gain,
-                left_rows,
-                right_rows,
-                left_k,
-                right_k,
-                left_stats,
-                right_stats,
-                parent_active_groups: active_groups,
-                cat_bitset,
-            })
+            out
         };
+        let left_k = leaf_values(&left_rows);
+        let right_k = leaf_values(&right_rows);
+
+        // NodeStats for record-keeping (joint trainer doesn't consume them
+        // beyond carrying them into SplitCandidate for compat).
+        let summarize = |rows: &[u32]| -> NodeStats {
+            let mut g = 0.0_f32;
+            let mut h = 0.0_f32;
+            for grad_vec in grads_per_output.iter().take(n_outputs) {
+                for &row in rows {
+                    let gp = grad_vec[row as usize];
+                    g += gp.grad;
+                    h += gp.hess;
+                }
+            }
+            NodeStats {
+                grad_sum: g,
+                hess_sum: h,
+                grad_sq_sum: 0.0,
+                row_count: rows.len() as u32,
+            }
+        };
+        let left_stats = summarize(&left_rows);
+        let right_stats = summarize(&right_rows);
+
+        Some(JointLeafCandidate {
+            node,
+            feature: feature as u32,
+            threshold_bin: threshold_bin as u16,
+            default_left,
+            gain,
+            left_rows,
+            right_rows,
+            left_k,
+            right_k,
+            left_stats,
+            right_stats,
+            parent_active_groups: active_groups,
+            cat_bitset,
+        })
+    };
 
     // Initialize heap with the root candidate. v0.10.2.1 fix: use the
     // sampled row subset (when row_subsample < 1.0) so min_data_in_leaf
@@ -1404,7 +1676,7 @@ pub fn fit_joint_multi_output(
     per_output_objective: &[JointObjective],
     n_estimators: usize,
 ) -> Result<JointTrainingSummary, String> {
-    fit_joint_multi_output_with_categorical(
+    fit_joint_inner(
         params,
         feature_count,
         binned_matrix,
@@ -1413,6 +1685,8 @@ pub fn fit_joint_multi_output(
         per_output_objective,
         n_estimators,
         /*categorical_features=*/ &[],
+        /*warm_start=*/ None,
+        /*factor_exposures=*/ None,
     )
 }
 
@@ -1431,6 +1705,7 @@ pub fn fit_joint_multi_output_with_warm_start(
     n_estimators: usize,
     categorical_features: &[crate::CategoricalFeatureInfo],
     warm_start: Option<JointWarmStartState>,
+    factor_exposures: Option<&FactorExposureMatrix>,
 ) -> Result<JointTrainingSummary, String> {
     fit_joint_inner(
         params,
@@ -1442,6 +1717,7 @@ pub fn fit_joint_multi_output_with_warm_start(
         n_estimators,
         categorical_features,
         warm_start,
+        factor_exposures,
     )
 }
 
@@ -1471,6 +1747,7 @@ pub fn fit_joint_multi_output_with_categorical(
         n_estimators,
         categorical_features,
         /*warm_start=*/ None,
+        /*factor_exposures=*/ None,
     )
 }
 
@@ -1491,6 +1768,7 @@ fn fit_joint_inner(
     n_estimators: usize,
     categorical_features: &[crate::CategoricalFeatureInfo],
     warm_start: Option<JointWarmStartState>,
+    factor_exposures: Option<&FactorExposureMatrix>,
 ) -> Result<JointTrainingSummary, String> {
     let n_outputs = targets_per_output.len();
     if per_output_objective.len() != n_outputs {
@@ -1511,6 +1789,53 @@ fn fit_joint_inner(
     if per_output_objective.iter().any(|o| o.requires_group()) && group_id.is_none() {
         return Err("at least one objective requires group_id".to_string());
     }
+
+    // v0.10.6: pre_target neutralization — residualize each per-output target
+    // through the factor exposures BEFORE baselines are computed.
+    // Squared-error only (the only objective where residualize-target equals
+    // residualize-gradient); validated at the Python boundary AND below so a
+    // Rust caller calling `fit_joint_*` directly still gets the guard.
+    let projected_targets_owned: Option<Vec<Vec<f32>>> =
+        match (effective_neutralization_config(params), factor_exposures) {
+            (Some(cfg), Some(exposures))
+                if cfg.kind == alloygbm_core::NeutralizationKind::PreTarget =>
+            {
+                for (k, obj) in per_output_objective.iter().enumerate() {
+                    if !matches!(obj, JointObjective::SquaredError) {
+                        return Err(format!(
+                            "neutralization='pre_target' requires every per-output \
+                         objective to be 'squared_error' (output {k} is {obj:?}). \
+                         Use neutralization='per_round_gradient' for ranking objectives."
+                        ));
+                    }
+                }
+                let projector = crate::FactorProjector::new(exposures, None, cfg.ridge_lambda)
+                    .map_err(|err| format!("pre_target projector: {err:?}"))?;
+                let mut projected: Vec<Vec<f32>> = Vec::with_capacity(n_outputs);
+                for tg in targets_per_output {
+                    let mut owned = tg.clone();
+                    projector
+                        .residualize_values_in_place(&mut owned)
+                        .map_err(|err| format!("pre_target residualize: {err:?}"))?;
+                    projected.push(owned);
+                }
+                Some(projected)
+            }
+            (Some(cfg), None) if cfg.kind == alloygbm_core::NeutralizationKind::PreTarget => {
+                return Err(
+                    "factor_exposures are required when neutralization='pre_target'".to_string(),
+                );
+            }
+            _ => None,
+        };
+
+    // `effective_targets` is the residualized view when pre_target is active;
+    // otherwise it borrows the original targets. Every gradient/baseline site
+    // below reads through this view so non-pre_target modes are unaffected.
+    let effective_targets: Vec<&[f32]> = match &projected_targets_owned {
+        Some(owned) => owned.iter().map(|v| v.as_slice()).collect(),
+        None => targets_per_output.iter().map(|v| v.as_slice()).collect(),
+    };
 
     // v0.10.3: warm-start branch — when `warm_start` is `Some`, the
     // prior fit's baselines win (re-seed `predictions` from them) and
@@ -1548,7 +1873,7 @@ fn fit_joint_inner(
     } else {
         let cold_baselines: Vec<f32> = per_output_objective
             .iter()
-            .zip(targets_per_output.iter())
+            .zip(effective_targets.iter())
             .map(|(obj, targets)| obj.initial_prediction(targets))
             .collect();
         (Vec::new(), 0, None, None, cold_baselines)
@@ -1701,6 +2026,30 @@ fn fit_joint_inner(
         }
     }
 
+    // v0.10.6: per_round_gradient neutralization — build the projector once,
+    // then project each per-output gradient buffer in place every round.
+    // Mirrors the single-output multiclass path (lib.rs:3581+).
+    let gradient_projector: Option<crate::FactorProjector> =
+        match (effective_neutralization_config(params), factor_exposures) {
+            (Some(cfg), Some(exposures))
+                if cfg.kind == alloygbm_core::NeutralizationKind::PerRoundGradient =>
+            {
+                Some(
+                    crate::FactorProjector::new(exposures, None, cfg.ridge_lambda)
+                        .map_err(|err| format!("per_round_gradient projector: {err:?}"))?,
+                )
+            }
+            (Some(cfg), None)
+                if cfg.kind == alloygbm_core::NeutralizationKind::PerRoundGradient =>
+            {
+                return Err(
+                    "factor_exposures are required when neutralization='per_round_gradient'"
+                        .to_string(),
+                );
+            }
+            _ => None,
+        };
+
     for round in 0..n_estimators {
         // v0.10.3 warm-start: when continuing from a prior fit, all
         // per-round seeds, dropout indices, and `node_id` encodings
@@ -1756,10 +2105,22 @@ fn fit_joint_inner(
         for k in 0..n_outputs {
             let g = per_output_objective[k].compute_gradients(
                 &predictions[k],
-                &targets_per_output[k],
+                effective_targets[k],
                 group_id,
             )?;
             grads_per_output.push(g);
+        }
+
+        // v0.10.6: per_round_gradient — project each per-output gradient
+        // buffer through the factor projector. Applied BEFORE row sampling
+        // so the joint GOSS scorer (which mutates `grads_per_output`) and
+        // the histogram builder both see projected residuals.
+        if let Some(projector) = &gradient_projector {
+            for buf in grads_per_output.iter_mut() {
+                projector
+                    .project_gradient_pairs_in_place(buf)
+                    .map_err(|err| format!("per_round_gradient projection: {err:?}"))?;
+            }
         }
 
         // v0.10.4: update per-output EMA stats BEFORE tree-building so
@@ -1855,6 +2216,7 @@ fn fit_joint_inner(
                 global_round,
                 sampled_rows_opt.as_deref(),
                 morph_ctx.as_ref(),
+                factor_exposures,
             )?
         } else {
             build_joint_round_inner(
@@ -1866,6 +2228,7 @@ fn fit_joint_inner(
                 global_round,
                 sampled_rows_opt.as_deref(),
                 morph_ctx.as_ref(),
+                factor_exposures,
             )?
         };
         if round_result.stumps.is_empty() {
@@ -2079,6 +2442,8 @@ fn fit_joint_inner(
         morph_metadata,
         dro_metadata: effective_dro_config(params).map(|cfg| DroMetadataPayload { config: *cfg }),
         feature_baseline: None,
+        neutralization_metadata: effective_neutralization_config(params)
+            .map(|cfg| alloygbm_core::NeutralizationMetadataPayload { config: *cfg }),
     };
 
     // v0.10.3 warm-start: report TOTAL rounds completed (prior + new)
@@ -2330,6 +2695,437 @@ const TREE_NODE_STRIDE: u32 = 1 << 20;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn joint_pre_target_residualizes_targets() {
+        // 8 rows × 1 feature × 2 outputs, all squared-error. With a single
+        // factor perfectly correlated with output 0, pre_target should shrink
+        // output-0 prediction variance vs the un-neutralized control.
+        use alloygbm_core::{FactorExposureMatrix, FactorNeutralizationConfig, NeutralizationKind};
+        let row_count = 8usize;
+        let feature_count = 1usize;
+        let bins: Vec<u8> = vec![0, 0, 1, 1, 2, 2, 3, 3];
+        let binned = BinnedMatrix::new(row_count, feature_count, 4, bins).expect("binned");
+        let target_0: Vec<f32> = (0..row_count).map(|i| i as f32 * 0.5).collect();
+        let target_1: Vec<f32> = (0..row_count).map(|i| (i as f32) * 2.0).collect();
+        let exposures =
+            FactorExposureMatrix::new(row_count, 1, target_0.clone()).expect("exposures");
+
+        let fit = |cfg: Option<FactorNeutralizationConfig>,
+                   exp: Option<&FactorExposureMatrix>|
+         -> Vec<Vec<f32>> {
+            let params = TrainParams {
+                neutralization_config: cfg,
+                ..TrainParams::default()
+            };
+            let summary = fit_joint_multi_output_with_warm_start(
+                &params,
+                feature_count,
+                &binned,
+                &[target_0.clone(), target_1.clone()],
+                None,
+                &[JointObjective::SquaredError, JointObjective::SquaredError],
+                3,
+                &[],
+                None,
+                exp,
+            )
+            .expect("fit");
+            let bytes = summary.model.clone().to_artifact_bytes().expect("encode");
+            let predictor = JointPredictor::from_artifact_bytes(&bytes, summary.baselines.clone())
+                .expect("load");
+            (0..row_count)
+                .map(|r| predictor.predict_row(&[binned.bins[r] as f32]))
+                .collect()
+        };
+
+        let baseline = fit(None, None);
+        let neutralized = fit(
+            Some(FactorNeutralizationConfig {
+                kind: NeutralizationKind::PreTarget,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            }),
+            Some(&exposures),
+        );
+        let var = |preds: &[Vec<f32>], col: usize| -> f32 {
+            let mean: f32 = preds.iter().map(|p| p[col]).sum::<f32>() / preds.len() as f32;
+            preds.iter().map(|p| (p[col] - mean).powi(2)).sum::<f32>() / preds.len() as f32
+        };
+        let v_base = var(&baseline, 0);
+        let v_neut = var(&neutralized, 0);
+        assert!(
+            v_neut < v_base * 0.5,
+            "expected residualized output-0 variance ({v_neut}) << baseline ({v_base})"
+        );
+    }
+
+    #[test]
+    fn joint_pre_target_rejects_non_squared_error_objectives() {
+        use alloygbm_core::{FactorExposureMatrix, FactorNeutralizationConfig, NeutralizationKind};
+        let row_count = 8usize;
+        let feature_count = 1usize;
+        let bins: Vec<u8> = vec![0, 0, 1, 1, 2, 2, 3, 3];
+        let binned = BinnedMatrix::new(row_count, feature_count, 4, bins).expect("binned");
+        let exposures =
+            FactorExposureMatrix::new(row_count, 1, vec![0.0; row_count]).expect("exposures");
+        let params = TrainParams {
+            neutralization_config: Some(FactorNeutralizationConfig {
+                kind: NeutralizationKind::PreTarget,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            }),
+            ..TrainParams::default()
+        };
+        let group_id: Vec<u32> = vec![0, 0, 0, 0, 1, 1, 1, 1];
+        let err = fit_joint_multi_output_with_warm_start(
+            &params,
+            feature_count,
+            &binned,
+            &[vec![1.0_f32; row_count], vec![1.0_f32; row_count]],
+            Some(&group_id),
+            &[JointObjective::RankNdcg, JointObjective::SquaredError],
+            1,
+            &[],
+            None,
+            Some(&exposures),
+        )
+        .expect_err("should reject");
+        assert!(
+            err.contains("squared_error") || err.contains("pre_target"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn joint_neutralization_inert_configs_match_v0_10_5_byte_for_byte() {
+        // A fit with neutralization_config=None (or kind=None, or
+        // SplitPenalty with penalty=0) must produce byte-identical artifact
+        // bytes to a fit without any v0.10.6 wiring. Proves the new code paths
+        // are zero-cost when inactive.
+        use alloygbm_core::{FactorNeutralizationConfig, NeutralizationKind};
+        let row_count = 16usize;
+        let feature_count = 2usize;
+        let mut bins: Vec<u8> = Vec::with_capacity(row_count * feature_count);
+        for i in 0..row_count {
+            bins.push((i % 4) as u8);
+            bins.push(((i / 4) % 4) as u8);
+        }
+        let binned = BinnedMatrix::new(row_count, feature_count, 4, bins).expect("binned");
+        let t0: Vec<f32> = (0..row_count).map(|i| i as f32 * 0.2).collect();
+        let t1: Vec<f32> = (0..row_count).map(|i| (i as f32) * 0.3).collect();
+
+        let fit = |cfg: Option<FactorNeutralizationConfig>| -> Vec<u8> {
+            let params = TrainParams {
+                neutralization_config: cfg,
+                ..TrainParams::default()
+            };
+            fit_joint_multi_output_with_warm_start(
+                &params,
+                feature_count,
+                &binned,
+                &[t0.clone(), t1.clone()],
+                None,
+                &[JointObjective::SquaredError, JointObjective::SquaredError],
+                3,
+                &[],
+                None,
+                None,
+            )
+            .expect("fit")
+            .model
+            .to_artifact_bytes()
+            .expect("encode")
+        };
+
+        let baseline = fit(None);
+        let with_none_kind = fit(Some(FactorNeutralizationConfig {
+            kind: NeutralizationKind::None,
+            ridge_lambda: 1e-6,
+            split_penalty: 0.0,
+        }));
+        let with_zero_penalty = fit(Some(FactorNeutralizationConfig {
+            kind: NeutralizationKind::SplitPenalty,
+            ridge_lambda: 1e-6,
+            split_penalty: 0.0,
+        }));
+
+        assert_eq!(
+            baseline, with_none_kind,
+            "neutralization=None must match no-config byte-for-byte"
+        );
+        assert_eq!(
+            baseline, with_zero_penalty,
+            "split_penalty=0 must match no-config byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn joint_split_penalty_works_with_leafwise_growth() {
+        use alloygbm_core::{FactorExposureMatrix, FactorNeutralizationConfig, NeutralizationKind};
+        let row_count = 32usize;
+        let feature_count = 2usize;
+        let mut bins: Vec<u8> = Vec::with_capacity(row_count * feature_count);
+        for i in 0..row_count {
+            bins.push((i % 4) as u8);
+            bins.push(((i / 4) % 4) as u8);
+        }
+        let binned = BinnedMatrix::new(row_count, feature_count, 4, bins).expect("binned");
+        let target_0: Vec<f32> = (0..row_count).map(|i| (i as f32) * 0.1).collect();
+        let target_1: Vec<f32> = (0..row_count).map(|i| i as f32 % 4.0).collect();
+        let exposures_vals: Vec<f32> = (0..row_count).map(|i| (i % 4) as f32 - 1.5).collect();
+        let exposures = FactorExposureMatrix::new(row_count, 1, exposures_vals).expect("exp");
+        let params = TrainParams {
+            tree_growth: TreeGrowth::Leaf,
+            max_leaves: Some(8),
+            neutralization_config: Some(FactorNeutralizationConfig {
+                kind: NeutralizationKind::SplitPenalty,
+                ridge_lambda: 1e-6,
+                split_penalty: 1.0,
+            }),
+            ..TrainParams::default()
+        };
+        let summary = fit_joint_multi_output_with_warm_start(
+            &params,
+            feature_count,
+            &binned,
+            &[target_0, target_1],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            3,
+            &[],
+            None,
+            Some(&exposures),
+        )
+        .expect("fit");
+        assert!(
+            !summary.model.stumps.is_empty(),
+            "expected at least one stump under leaf-wise split_penalty"
+        );
+    }
+
+    #[test]
+    fn joint_split_penalty_neutralization_changes_splits() {
+        // split_penalty should at minimum produce a different stump signature
+        // (feature, threshold_bin) sequence than the unpenalized control.
+        use alloygbm_core::{FactorExposureMatrix, FactorNeutralizationConfig, NeutralizationKind};
+        let row_count = 32usize;
+        let feature_count = 2usize;
+        // Two distinct features so split selection has more than one option.
+        let mut bins: Vec<u8> = Vec::with_capacity(row_count * feature_count);
+        for i in 0..row_count {
+            bins.push((i % 4) as u8); // feature 0: 0,1,2,3,0,1,...
+            bins.push(((i / 4) % 4) as u8); // feature 1: 0,0,0,0,1,1,1,1,2,...
+        }
+        let binned = BinnedMatrix::new(row_count, feature_count, 4, bins).expect("binned");
+        let target_0: Vec<f32> = (0..row_count).map(|i| (i as f32) * 0.1).collect();
+        let target_1: Vec<f32> = (0..row_count).map(|i| i as f32 % 4.0).collect();
+        // Factor exposure strongly correlated with feature 0's bin.
+        let exposures_vals: Vec<f32> = (0..row_count).map(|i| (i % 4) as f32 - 1.5).collect();
+        let exposures = FactorExposureMatrix::new(row_count, 1, exposures_vals).expect("exp");
+
+        let fit = |split_penalty: f32| -> crate::TrainedModel {
+            let params = TrainParams {
+                neutralization_config: Some(FactorNeutralizationConfig {
+                    kind: if split_penalty > 0.0 {
+                        NeutralizationKind::SplitPenalty
+                    } else {
+                        NeutralizationKind::None
+                    },
+                    ridge_lambda: 1e-6,
+                    split_penalty,
+                }),
+                ..TrainParams::default()
+            };
+            fit_joint_multi_output_with_warm_start(
+                &params,
+                feature_count,
+                &binned,
+                &[target_0.clone(), target_1.clone()],
+                None,
+                &[JointObjective::SquaredError, JointObjective::SquaredError],
+                3,
+                &[],
+                None,
+                if split_penalty > 0.0 {
+                    Some(&exposures)
+                } else {
+                    None
+                },
+            )
+            .expect("fit")
+            .model
+        };
+
+        let baseline = fit(0.0);
+        let penalized = fit(5.0);
+        let signature = |m: &crate::TrainedModel| -> Vec<(u32, u16)> {
+            m.stumps
+                .iter()
+                .map(|s| (s.split.feature_index, s.split.threshold_bin))
+                .collect()
+        };
+        assert_ne!(
+            signature(&baseline),
+            signature(&penalized),
+            "split_penalty should alter at least one split decision"
+        );
+    }
+
+    #[test]
+    fn joint_per_round_gradient_neutralization_changes_model() {
+        // Per_round_gradient should produce visibly different predictions
+        // than the un-neutralized control on the same dataset.
+        use alloygbm_core::{FactorExposureMatrix, FactorNeutralizationConfig, NeutralizationKind};
+        let row_count = 16usize;
+        let feature_count = 1usize;
+        let bins: Vec<u8> = (0..row_count as u8).map(|i| i % 4).collect();
+        let binned = BinnedMatrix::new(row_count, feature_count, 4, bins).expect("binned");
+        let target_0: Vec<f32> = (0..row_count).map(|i| (i as f32) * 0.5).collect();
+        let target_1: Vec<f32> = (0..row_count).map(|i| (i as f32) * 1.5).collect();
+        let exposures =
+            FactorExposureMatrix::new(row_count, 1, target_0.clone()).expect("exposures");
+
+        let fit = |neutralize: bool| -> Vec<Vec<f32>> {
+            let params = TrainParams {
+                neutralization_config: if neutralize {
+                    Some(FactorNeutralizationConfig {
+                        kind: NeutralizationKind::PerRoundGradient,
+                        ridge_lambda: 1e-6,
+                        split_penalty: 0.0,
+                    })
+                } else {
+                    None
+                },
+                ..TrainParams::default()
+            };
+            let summary = fit_joint_multi_output_with_warm_start(
+                &params,
+                feature_count,
+                &binned,
+                &[target_0.clone(), target_1.clone()],
+                None,
+                &[JointObjective::SquaredError, JointObjective::SquaredError],
+                4,
+                &[],
+                None,
+                if neutralize { Some(&exposures) } else { None },
+            )
+            .expect("fit");
+            let bytes = summary.model.clone().to_artifact_bytes().expect("encode");
+            let predictor = JointPredictor::from_artifact_bytes(&bytes, summary.baselines.clone())
+                .expect("load");
+            (0..row_count)
+                .map(|r| predictor.predict_row(&[binned.bins[r] as f32]))
+                .collect()
+        };
+
+        let baseline = fit(false);
+        let neutralized = fit(true);
+        let max_diff: f32 = baseline
+            .iter()
+            .zip(neutralized.iter())
+            .flat_map(|(a, b)| a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()))
+            .fold(0.0_f32, f32::max);
+        assert!(
+            max_diff > 1e-3,
+            "per_round_gradient neutralization should change predictions (max_diff = {max_diff})"
+        );
+    }
+
+    #[test]
+    fn joint_split_penalty_leafwise_rejects_missing_exposures() {
+        // PR #40 review (R1): leaf-wise `build_joint_round_leafwise` must
+        // mirror the level-wise `build_joint_round_inner` explicit-error gate
+        // for `SplitPenalty + missing exposures`. Previously it silently fell
+        // through to `_ => None`, training an unpenalized model whose artifact
+        // still advertised split_penalty in its NeutralizationMetadata section.
+        use alloygbm_core::{FactorNeutralizationConfig, NeutralizationKind};
+        let row_count = 8usize;
+        let feature_count = 1usize;
+        let bins: Vec<u8> = vec![0, 0, 1, 1, 2, 2, 3, 3];
+        let binned = BinnedMatrix::new(row_count, feature_count, 4, bins).expect("binned");
+        let params = TrainParams {
+            tree_growth: TreeGrowth::Leaf,
+            max_leaves: Some(4),
+            neutralization_config: Some(FactorNeutralizationConfig {
+                kind: NeutralizationKind::SplitPenalty,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.5,
+            }),
+            ..TrainParams::default()
+        };
+        let err = fit_joint_multi_output_with_warm_start(
+            &params,
+            feature_count,
+            &binned,
+            &[vec![0.0_f32; row_count], vec![1.0_f32; row_count]],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            1,
+            &[],
+            None,
+            None, // no exposures — leaf-wise must error, not silently no-op
+        )
+        .expect_err("leaf-wise split_penalty must reject missing exposures");
+        assert!(
+            err.contains("factor_exposures are required"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn joint_per_round_gradient_rejects_missing_exposures() {
+        use alloygbm_core::{FactorNeutralizationConfig, NeutralizationKind};
+        let row_count = 4usize;
+        let feature_count = 1usize;
+        let bins: Vec<u8> = vec![0, 1, 2, 3];
+        let binned = BinnedMatrix::new(row_count, feature_count, 4, bins).expect("binned");
+        let params = TrainParams {
+            neutralization_config: Some(FactorNeutralizationConfig {
+                kind: NeutralizationKind::PerRoundGradient,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            }),
+            ..TrainParams::default()
+        };
+        let err = fit_joint_multi_output_with_warm_start(
+            &params,
+            feature_count,
+            &binned,
+            &[vec![0.0_f32, 1.0, 0.0, 1.0]],
+            None,
+            &[JointObjective::SquaredError],
+            1,
+            &[],
+            None,
+            None,
+        )
+        .expect_err("should reject");
+        assert!(
+            err.contains("factor_exposures are required"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn joint_effective_neutralization_config_returns_none_when_inactive() {
+        use alloygbm_core::{FactorNeutralizationConfig, NeutralizationKind};
+        let mut params = TrainParams::default();
+        assert!(effective_neutralization_config(&params).is_none());
+        params.neutralization_config = Some(FactorNeutralizationConfig {
+            kind: NeutralizationKind::None,
+            ridge_lambda: 1e-6,
+            split_penalty: 0.0,
+        });
+        assert!(effective_neutralization_config(&params).is_none());
+        params.neutralization_config = Some(FactorNeutralizationConfig {
+            kind: NeutralizationKind::PerRoundGradient,
+            ridge_lambda: 1e-6,
+            split_penalty: 0.0,
+        });
+        assert!(effective_neutralization_config(&params).is_some());
+    }
 
     #[test]
     fn joint_objective_parses_supported_names() {
@@ -3587,6 +4383,7 @@ mod tests {
             4,
             &[],
             Some(warm_state),
+            None,
         )
         .expect("warm resume");
         // Fresh 10-round fit.
@@ -3794,6 +4591,7 @@ mod tests {
             &[JointObjective::SquaredError],
             4,
             &[],
+            None,
             None,
         )
         .expect("warm with None");
@@ -4085,6 +4883,7 @@ mod tests {
             4,
             &[],
             Some(warm),
+            None,
         )
         .expect("resume 4");
 

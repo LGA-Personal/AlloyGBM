@@ -1506,6 +1506,12 @@ pub enum ModelSectionKind {
     /// trained with the joint multi-output entry point; absent for scalar /
     /// linear-leaf / multiclass-softmax artifacts.
     MultiOutputLeafValues,
+    /// v0.10.6+: Optional artifact section recording the factor neutralization
+    /// configuration that was active during training. Metadata only — prediction
+    /// never reads it (neutralization is a training-time transformation on
+    /// gradients/targets/split-gains; the trained leaf values already bake in
+    /// the projection). Absent when `neutralization_config` is None / inert.
+    NeutralizationMetadata,
     Unknown(u32),
 }
 
@@ -1525,6 +1531,7 @@ impl ModelSectionKind {
             Self::FeatureBaseline => 11,
             Self::DartTreeWeights => 12,
             Self::MultiOutputLeafValues => 13,
+            Self::NeutralizationMetadata => 14,
             Self::Unknown(value) => value,
         }
     }
@@ -1544,6 +1551,7 @@ impl ModelSectionKind {
             11 => Self::FeatureBaseline,
             12 => Self::DartTreeWeights,
             13 => Self::MultiOutputLeafValues,
+            14 => Self::NeutralizationMetadata,
             other => Self::Unknown(other),
         }
     }
@@ -2189,6 +2197,88 @@ pub fn decode_optional_dro_metadata_artifact_section(
         return Ok(None);
     };
     Ok(Some(decode_dro_metadata_payload(&section.payload)?))
+}
+
+// ── Factor-neutralization metadata section ────────────────────────────────
+
+/// Optional artifact section recording the factor neutralization configuration.
+/// Metadata only — prediction never reads it. Mirrors `DroMetadataPayload`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NeutralizationMetadataPayload {
+    pub config: FactorNeutralizationConfig,
+}
+
+pub fn encode_neutralization_metadata_payload(payload: &NeutralizationMetadataPayload) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(11);
+    buf.extend_from_slice(&1u16.to_le_bytes()); // version
+    buf.push(match payload.config.kind {
+        NeutralizationKind::None => 0,
+        NeutralizationKind::PreTarget => 1,
+        NeutralizationKind::PerRoundGradient => 2,
+        NeutralizationKind::SplitPenalty => 3,
+    });
+    buf.extend_from_slice(&payload.config.ridge_lambda.to_le_bytes());
+    buf.extend_from_slice(&payload.config.split_penalty.to_le_bytes());
+    buf
+}
+
+pub fn decode_neutralization_metadata_payload(
+    bytes: &[u8],
+) -> CoreResult<NeutralizationMetadataPayload> {
+    if bytes.len() < 11 {
+        return Err(CoreError::Validation(
+            "neutralization metadata section too short".to_string(),
+        ));
+    }
+    let version = u16::from_le_bytes([bytes[0], bytes[1]]);
+    if version != 1 {
+        return Err(CoreError::Validation(format!(
+            "unsupported neutralization metadata version: {version}"
+        )));
+    }
+    let kind = match bytes[2] {
+        0 => NeutralizationKind::None,
+        1 => NeutralizationKind::PreTarget,
+        2 => NeutralizationKind::PerRoundGradient,
+        3 => NeutralizationKind::SplitPenalty,
+        other => {
+            return Err(CoreError::Validation(format!(
+                "unsupported neutralization metadata kind: {other}"
+            )));
+        }
+    };
+    let ridge_lambda = f32::from_le_bytes([bytes[3], bytes[4], bytes[5], bytes[6]]);
+    if !ridge_lambda.is_finite() || ridge_lambda < 0.0 {
+        return Err(CoreError::Validation(
+            "neutralization metadata ridge_lambda must be finite and >= 0".to_string(),
+        ));
+    }
+    let split_penalty = f32::from_le_bytes([bytes[7], bytes[8], bytes[9], bytes[10]]);
+    if !split_penalty.is_finite() || split_penalty < 0.0 {
+        return Err(CoreError::Validation(
+            "neutralization metadata split_penalty must be finite and >= 0".to_string(),
+        ));
+    }
+    Ok(NeutralizationMetadataPayload {
+        config: FactorNeutralizationConfig {
+            kind,
+            ridge_lambda,
+            split_penalty,
+        },
+    })
+}
+
+pub fn decode_optional_neutralization_metadata_artifact_section(
+    sections: &[ModelArtifactSection],
+) -> CoreResult<Option<NeutralizationMetadataPayload>> {
+    let Some(section) =
+        optional_single_section(sections, ModelSectionKind::NeutralizationMetadata)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(decode_neutralization_metadata_payload(
+        &section.payload,
+    )?))
 }
 
 // ── Linear-leaf coefficients section ─────────────────────────────────────────
@@ -4671,5 +4761,52 @@ mod tests {
             ModelSectionKind::from_u32(12),
             ModelSectionKind::DartTreeWeights
         ));
+    }
+
+    #[test]
+    fn neutralization_metadata_roundtrips_all_kinds() {
+        for kind in [
+            NeutralizationKind::None,
+            NeutralizationKind::PreTarget,
+            NeutralizationKind::PerRoundGradient,
+            NeutralizationKind::SplitPenalty,
+        ] {
+            let payload = NeutralizationMetadataPayload {
+                config: FactorNeutralizationConfig {
+                    kind,
+                    ridge_lambda: 1.5e-3,
+                    split_penalty: 0.25,
+                },
+            };
+            let bytes = encode_neutralization_metadata_payload(&payload);
+            let decoded = decode_neutralization_metadata_payload(&bytes).unwrap();
+            assert_eq!(decoded, payload);
+        }
+    }
+
+    #[test]
+    fn neutralization_metadata_rejects_bad_version() {
+        let mut bytes = encode_neutralization_metadata_payload(&NeutralizationMetadataPayload {
+            config: FactorNeutralizationConfig {
+                kind: NeutralizationKind::PerRoundGradient,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            },
+        });
+        bytes[0] = 2; // bump version byte
+        assert!(decode_neutralization_metadata_payload(&bytes).is_err());
+    }
+
+    #[test]
+    fn neutralization_metadata_rejects_bad_kind() {
+        let mut bytes = encode_neutralization_metadata_payload(&NeutralizationMetadataPayload {
+            config: FactorNeutralizationConfig {
+                kind: NeutralizationKind::PerRoundGradient,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            },
+        });
+        bytes[2] = 99; // bogus kind byte
+        assert!(decode_neutralization_metadata_payload(&bytes).is_err());
     }
 }

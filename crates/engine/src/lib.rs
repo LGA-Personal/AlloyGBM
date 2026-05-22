@@ -7,19 +7,21 @@ use alloygbm_core::{
     LinearLeafCoefficientsPayload, LinearLeafEntry, LrSchedule, MAX_PL_REGRESSORS, MISSING_BIN_U8,
     MODEL_FORMAT_V1, ModelArtifactSection, ModelMetadata, ModelSectionKind, MorphConfig,
     MorphMetadataPayload, MorphPrecomputed, NativeCategoricalSplitsPayload, NeutralizationKind,
-    NodeSlice, NodeStats, PartitionResult, SplitCandidate, TrainParams, TrainingDataset,
-    TreeGrowth, decode_optional_categorical_state_section_v1,
+    NeutralizationMetadataPayload, NodeSlice, NodeStats, PartitionResult, SplitCandidate,
+    TrainParams, TrainingDataset, TreeGrowth, decode_optional_categorical_state_section_v1,
     decode_optional_dart_tree_weights_section, decode_optional_dro_metadata_artifact_section,
     decode_optional_feature_baseline_section, decode_optional_linear_leaf_coefficients_section,
     decode_optional_morph_metadata_artifact_section,
-    decode_optional_native_categorical_splits_section, deserialize_model_artifact_v1,
+    decode_optional_native_categorical_splits_section,
+    decode_optional_neutralization_metadata_artifact_section, deserialize_model_artifact_v1,
     encode_categorical_state_payload_v1, encode_dart_tree_weights_payload,
     encode_dro_metadata_payload, encode_feature_baseline_payload,
     encode_linear_leaf_coefficients_payload, encode_morph_metadata_payload,
-    encode_native_categorical_splits_payload, format_required_section_auto_mode_error,
-    format_required_section_mode_error, leaf_effective_gradient,
-    required_section_compatibility_report, serialize_model_artifact_v1, validate_binned_matrix,
-    validate_categorical_state_payload_v1, validate_train_params, validate_training_dataset,
+    encode_native_categorical_splits_payload, encode_neutralization_metadata_payload,
+    format_required_section_auto_mode_error, format_required_section_mode_error,
+    leaf_effective_gradient, required_section_compatibility_report, serialize_model_artifact_v1,
+    validate_binned_matrix, validate_categorical_state_payload_v1, validate_train_params,
+    validate_training_dataset,
 };
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
@@ -87,7 +89,7 @@ type LinearLeafPairSplit = (
 );
 
 #[allow(dead_code)]
-struct FactorProjector<'a> {
+pub(crate) struct FactorProjector<'a> {
     exposures: &'a FactorExposureMatrix,
     weights: Option<&'a [f32]>,
     cholesky_lower: Vec<f64>,
@@ -95,7 +97,7 @@ struct FactorProjector<'a> {
 
 #[allow(dead_code)]
 impl<'a> FactorProjector<'a> {
-    fn new(
+    pub(crate) fn new(
         exposures: &'a FactorExposureMatrix,
         weights: Option<&'a [f32]>,
         ridge_lambda: f32,
@@ -129,7 +131,10 @@ impl<'a> FactorProjector<'a> {
         })
     }
 
-    fn project_gradient_pairs_in_place(&self, gradients: &mut [GradientPair]) -> EngineResult<()> {
+    pub(crate) fn project_gradient_pairs_in_place(
+        &self,
+        gradients: &mut [GradientPair],
+    ) -> EngineResult<()> {
         if gradients.len() != self.exposures.row_count {
             return Err(EngineError::ContractViolation(
                 "gradient length must match factor_exposures row_count".to_string(),
@@ -154,7 +159,7 @@ impl<'a> FactorProjector<'a> {
         Ok(())
     }
 
-    fn residualize_values_in_place(&self, values: &mut [f32]) -> EngineResult<()> {
+    pub(crate) fn residualize_values_in_place(&self, values: &mut [f32]) -> EngineResult<()> {
         if values.len() != self.exposures.row_count {
             return Err(EngineError::ContractViolation(
                 "value length must match factor_exposures row_count".to_string(),
@@ -1994,6 +1999,11 @@ pub struct TrainedModel {
     /// fit time.  Length equals `feature_count`.  Consumed by SHAP for
     /// interventional decomposition of linear-leaf contributions.
     pub feature_baseline: Option<Vec<f32>>,
+    /// v0.10.6+: Optional factor-neutralization configuration that was active
+    /// during training. `Some(...)` only when the joint trainer's
+    /// `effective_neutralization_config` returned a non-inert config. Mirrors
+    /// `dro_metadata` — metadata only, prediction never reads it.
+    pub neutralization_metadata: Option<NeutralizationMetadataPayload>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2591,6 +2601,14 @@ impl TrainedModel {
                 encode_dro_metadata_payload(dro),
             ));
         }
+        // Neutralization metadata section (optional — only for joint artifacts with
+        // factor neutralization active at training time).
+        if let Some(neut) = self.neutralization_metadata.as_ref() {
+            sections.push((
+                ModelSectionKind::NeutralizationMetadata,
+                encode_neutralization_metadata_payload(neut),
+            ));
+        }
         // Linear leaf coefficients section (optional — only for pl-tree artifacts)
         {
             let linear_entries: Vec<LinearLeafEntry> = self
@@ -2805,6 +2823,9 @@ impl TrainedModel {
             .map_err(EngineError::from)?;
         model.dro_metadata = decode_optional_dro_metadata_artifact_section(&parsed.sections)
             .map_err(EngineError::from)?;
+        model.neutralization_metadata =
+            decode_optional_neutralization_metadata_artifact_section(&parsed.sections)
+                .map_err(EngineError::from)?;
 
         // Decode optional linear leaf coefficients section and backfill LeafValue::Linear on stumps.
         if let Some(ll_payload) = decode_optional_linear_leaf_coefficients_section(&parsed.sections)
@@ -5593,6 +5614,7 @@ impl Trainer {
             morph_metadata,
             dro_metadata,
             feature_baseline,
+            neutralization_metadata: None,
         };
         let final_loss = current_loss;
 
@@ -8868,6 +8890,7 @@ fn decode_trained_model_payload(bytes: &[u8]) -> EngineResult<TrainedModel> {
         morph_metadata: None,
         dro_metadata: None,
         feature_baseline: None,
+        neutralization_metadata: None,
     })
 }
 
@@ -11763,6 +11786,7 @@ mod tests {
             morph_metadata: None,
             dro_metadata: None,
             feature_baseline: None,
+            neutralization_metadata: None,
         };
 
         let left = model.predict_row(&[0.0]).expect("left prediction succeeds");
@@ -13183,6 +13207,7 @@ mod tests {
             morph_metadata: None,
             dro_metadata: None,
             feature_baseline: None,
+            neutralization_metadata: None,
         };
 
         let bytes = model.to_artifact_bytes().expect("serialize should succeed");
@@ -13253,6 +13278,7 @@ mod tests {
             morph_metadata: None,
             dro_metadata: None,
             feature_baseline: None,
+            neutralization_metadata: None,
         };
 
         let bytes = model.to_artifact_bytes().expect("serialize should succeed");
@@ -13593,6 +13619,67 @@ mod tests {
         assert_eq!(right_k.len(), 2);
         assert_eq!(left_k[1], 2.0);
         assert_eq!(right_k[0], 3.0);
+    }
+
+    #[test]
+    fn trained_model_roundtrips_neutralization_metadata_when_some() {
+        use alloygbm_core::{
+            FactorNeutralizationConfig, NeutralizationKind, NeutralizationMetadataPayload,
+        };
+        let model = TrainedModel {
+            baseline_prediction: 0.0,
+            feature_count: 1,
+            stumps: Vec::new(),
+            categorical_state: None,
+            node_debug_stats: None,
+            objective: "test".to_string(),
+            native_categorical_feature_indices: Vec::new(),
+            morph_metadata: None,
+            dro_metadata: None,
+            feature_baseline: None,
+            neutralization_metadata: Some(NeutralizationMetadataPayload {
+                config: FactorNeutralizationConfig {
+                    kind: NeutralizationKind::PerRoundGradient,
+                    ridge_lambda: 5e-4,
+                    split_penalty: 0.0,
+                },
+            }),
+        };
+        let bytes = model.to_artifact_bytes().expect("encode");
+        let decoded = TrainedModel::from_artifact_bytes(&bytes).expect("decode");
+        assert_eq!(
+            decoded.neutralization_metadata,
+            model.neutralization_metadata
+        );
+    }
+
+    #[test]
+    fn trained_model_omits_neutralization_metadata_section_when_none() {
+        // Build a model with neutralization_metadata = None, parse its raw
+        // sections, and confirm no NeutralizationMetadata section is present.
+        let model = TrainedModel {
+            baseline_prediction: 0.0,
+            feature_count: 1,
+            stumps: Vec::new(),
+            categorical_state: None,
+            node_debug_stats: None,
+            objective: "test".to_string(),
+            native_categorical_feature_indices: Vec::new(),
+            morph_metadata: None,
+            dro_metadata: None,
+            feature_baseline: None,
+            neutralization_metadata: None,
+        };
+        let bytes = model.to_artifact_bytes().expect("encode");
+        let parsed = alloygbm_core::deserialize_model_artifact_v1(&bytes).expect("parse");
+        assert!(
+            !parsed
+                .sections
+                .iter()
+                .any(|s| s.descriptor.kind
+                    == alloygbm_core::ModelSectionKind::NeutralizationMetadata),
+            "did not expect a NeutralizationMetadata section"
+        );
     }
 }
 

@@ -1800,6 +1800,7 @@ mod tests {
             morph_metadata: None,
             dro_metadata: None,
             feature_baseline: None,
+            neutralization_metadata: None,
         }
     }
 
@@ -1815,6 +1816,7 @@ mod tests {
             morph_metadata: None,
             dro_metadata: None,
             feature_baseline: None,
+            neutralization_metadata: None,
         }
     }
 
@@ -2359,6 +2361,7 @@ mod tests {
             morph_metadata: None,
             dro_metadata: None,
             feature_baseline: None,
+            neutralization_metadata: None,
         };
 
         let rows = vec![vec![3.0, 0.0], vec![8.0, 0.0]];
@@ -2406,6 +2409,7 @@ mod tests {
             morph_metadata: None,
             dro_metadata: None,
             feature_baseline: None,
+            neutralization_metadata: None,
         };
 
         let rows = vec![
@@ -2474,6 +2478,7 @@ mod tests {
             morph_metadata: None,
             dro_metadata: None,
             feature_baseline: None,
+            neutralization_metadata: None,
         };
 
         let rows = vec![
@@ -2562,6 +2567,7 @@ mod tests {
             morph_metadata: None,
             dro_metadata: None,
             feature_baseline: None,
+            neutralization_metadata: None,
         };
 
         let rows = vec![
@@ -2656,6 +2662,7 @@ mod tests {
             morph_metadata: None,
             dro_metadata: None,
             feature_baseline: None,
+            neutralization_metadata: None,
         };
 
         // Feature 0 values: 0.0 (cat 0, left), 1.0 (cat 1, right),
@@ -2697,6 +2704,7 @@ mod tests {
             morph_metadata: None,
             dro_metadata: None,
             feature_baseline: None,
+            neutralization_metadata: None,
         };
 
         let rows = vec![
@@ -2750,6 +2758,7 @@ mod tests {
             morph_metadata: None,
             dro_metadata: None,
             feature_baseline: None,
+            neutralization_metadata: None,
         };
 
         let rows = vec![
@@ -2825,6 +2834,7 @@ mod tests {
             morph_metadata: None,
             dro_metadata: None,
             feature_baseline: None,
+            neutralization_metadata: None,
         };
 
         let rows = vec![
@@ -2888,6 +2898,7 @@ mod tests {
             morph_metadata: None,
             dro_metadata: None,
             feature_baseline,
+            neutralization_metadata: None,
         }
     }
 
@@ -3021,6 +3032,7 @@ mod tests {
             morph_metadata: None,
             dro_metadata: None,
             feature_baseline: Some(vec![0.0, 0.5, 0.0]),
+            neutralization_metadata: None,
         }
     }
 
@@ -3166,6 +3178,7 @@ mod tests {
             morph_metadata: None,
             dro_metadata: None,
             feature_baseline: None,
+            neutralization_metadata: None,
         }
     }
 

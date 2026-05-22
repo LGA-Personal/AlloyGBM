@@ -5345,6 +5345,12 @@ impl JointPredictorHandle {
     leaf_solver="standard".to_string(),
     dro_radius=0.05_f32,
     dro_metric="wasserstein".to_string(),
+    factor_exposure_values=None::<Vec<f32>>,
+    factor_exposure_row_count=None::<usize>,
+    factor_exposure_factor_count=None::<usize>,
+    neutralization="none".to_string(),
+    factor_neutralization_lambda=1e-6_f32,
+    factor_penalty=0.0_f32,
 ))]
 fn train_joint_multi_label_ranker(
     x_values: Vec<f32>,
@@ -5383,6 +5389,12 @@ fn train_joint_multi_label_ranker(
     leaf_solver: String,
     dro_radius: f32,
     dro_metric: String,
+    factor_exposure_values: Option<Vec<f32>>,
+    factor_exposure_row_count: Option<usize>,
+    factor_exposure_factor_count: Option<usize>,
+    neutralization: String,
+    factor_neutralization_lambda: f32,
+    factor_penalty: f32,
 ) -> PyResult<(Vec<u8>, Vec<f32>, usize, usize)> {
     use alloygbm_engine::joint::JointObjective;
 
@@ -5469,6 +5481,40 @@ fn train_joint_multi_label_ranker(
     // v0.10.5: DRO leaf solver — mirrors the single-output path.
     let parsed_leaf_solver = parse_leaf_solver(&leaf_solver)?;
     let parsed_dro_config = parse_dro_config(parsed_leaf_solver, dro_radius, &dro_metric)?;
+    // v0.10.6: factor neutralization — accept exposures + neutralization
+    // config and cross-validate the two are consistent (active config requires
+    // exposures; exposures require an active config).
+    let parsed_factor_exposures = parse_factor_exposure_matrix(
+        factor_exposure_values,
+        factor_exposure_row_count,
+        factor_exposure_factor_count,
+    )?;
+    let parsed_neutralization_config = parse_neutralization_config(
+        &neutralization,
+        factor_neutralization_lambda,
+        factor_penalty,
+    )?;
+    let neutralization_active = parsed_neutralization_config
+        .map(|c| c.kind != alloygbm_core::NeutralizationKind::None)
+        .unwrap_or(false);
+    if neutralization_active && parsed_factor_exposures.is_none() {
+        return Err(PyValueError::new_err(
+            "factor_exposures are required when neutralization is active",
+        ));
+    }
+    if !neutralization_active && parsed_factor_exposures.is_some() {
+        return Err(PyValueError::new_err(
+            "factor_exposures were provided but neutralization='none'",
+        ));
+    }
+    if let Some(exposures) = parsed_factor_exposures.as_ref()
+        && exposures.row_count != row_count
+    {
+        return Err(PyValueError::new_err(format!(
+            "factor_exposures row_count {} does not match X row_count {row_count}",
+            exposures.row_count
+        )));
+    }
     let params = TrainParams {
         learning_rate,
         seed,
@@ -5485,6 +5531,7 @@ fn train_joint_multi_label_ranker(
         morph_config: parsed_morph_config,
         leaf_solver: parsed_leaf_solver,
         dro_config: parsed_dro_config,
+        neutralization_config: parsed_neutralization_config,
         ..TrainParams::default()
     };
 
@@ -5613,6 +5660,72 @@ fn train_joint_multi_label_ranker(
         let rounds = init_rounds_completed.unwrap_or(0);
         let prior_model = alloygbm_engine::TrainedModel::from_artifact_bytes(&bytes)
             .map_err(|e| PyValueError::new_err(format!("init_artifact_bytes decode: {e:?}")))?;
+        // PR #40 review (R2): validate that the prior artifact's
+        // `neutralization_metadata` matches the current
+        // `parsed_neutralization_config` BEFORE constructing the warm-start
+        // state. Without this, a caller can resume an unneutralized prior fit
+        // under `per_round_gradient` / `split_penalty`, or change
+        // `ridge_lambda` / `split_penalty` across resume — the prior trees
+        // were trained against one residual / split-penalty geometry and the
+        // new gradients would be projected through a different one, producing
+        // an artifact whose stumps are inconsistent with its metadata. The
+        // single-output path enforces the same contract via
+        // `validate_warm_start_neutralization_contract` (lib.rs:5836); the
+        // new `NeutralizationMetadata` section gives the bridge enough info
+        // to do the same here. Compare the EFFECTIVE config (inert configs
+        // — kind=None or SplitPenalty-with-zero-penalty — collapse to None,
+        // mirroring `effective_neutralization_config` in joint.rs).
+        let prior_effective = prior_model
+            .neutralization_metadata
+            .as_ref()
+            .map(|m| m.config);
+        let curr_effective = parsed_neutralization_config.filter(|cfg| {
+            cfg.kind != alloygbm_core::NeutralizationKind::None
+                && !(cfg.kind == alloygbm_core::NeutralizationKind::SplitPenalty
+                    && cfg.split_penalty == 0.0)
+        });
+        match (prior_effective, curr_effective) {
+            (None, None) => {}
+            (Some(prior), Some(curr)) if prior == curr => {}
+            (Some(prior), Some(curr)) => {
+                return Err(PyValueError::new_err(format!(
+                    "warm-start neutralization contract violated: prior fit used \
+                     neutralization (kind={:?}, ridge_lambda={}, split_penalty={}) \
+                     but current fit uses (kind={:?}, ridge_lambda={}, split_penalty={}). \
+                     The prior trees were trained in a different residual / \
+                     split-penalty space; resuming under a different config would \
+                     produce inconsistent gradients. Use the same neutralization \
+                     parameters for both fits, or fit fresh without warm_start=True.",
+                    prior.kind,
+                    prior.ridge_lambda,
+                    prior.split_penalty,
+                    curr.kind,
+                    curr.ridge_lambda,
+                    curr.split_penalty,
+                )));
+            }
+            (Some(prior), None) => {
+                return Err(PyValueError::new_err(format!(
+                    "warm-start neutralization contract violated: prior fit used \
+                     neutralization (kind={:?}) but current fit has \
+                     neutralization='none'. Resuming an in-residual model in raw \
+                     gradient space would silently mis-train. Pass the same \
+                     neutralization config to the resume fit, or fit fresh \
+                     without warm_start=True.",
+                    prior.kind
+                )));
+            }
+            (None, Some(curr)) => {
+                return Err(PyValueError::new_err(format!(
+                    "warm-start neutralization contract violated: prior fit was \
+                     unneutralized but current fit requests neutralization \
+                     (kind={:?}). Resuming raw-gradient trees in a residual space \
+                     would silently mis-train. Either fit the prior model with \
+                     the same neutralization, or fit fresh without warm_start=True.",
+                    curr.kind
+                )));
+            }
+        }
         // v0.10.4: extract MorphBoost EMA snapshot from the prior artifact's
         // `morph_metadata` section. The engine writes this whenever
         // MorphBoost is active and warm-resume requires it to byte-match a
@@ -5647,6 +5760,7 @@ fn train_joint_multi_label_ranker(
         n_estimators,
         &cat_features,
         warm_start,
+        parsed_factor_exposures.as_ref(),
     )
     .map_err(PyValueError::new_err)?;
 

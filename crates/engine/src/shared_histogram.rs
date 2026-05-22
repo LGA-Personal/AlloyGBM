@@ -537,6 +537,150 @@ pub fn find_best_multi_output_categorical_split(
     })
 }
 
+/// v0.10.6: derive the K-output Newton-Raphson left/right leaf K-vectors for
+/// a numeric (threshold-based) split from the multi-output histogram. Used by
+/// the joint trainer's `split_penalty` mode at gain-evaluation time to compute
+/// the factor-load penalty per candidate.
+///
+/// Returns `(leaf_left, leaf_right)` each of length `n_outputs`. Mirrors the
+/// closed-form leaf step used inside the joint trainer's `leaf_values` closure
+/// (sum bins 0..=threshold_bin into left, rest into right), including the
+/// L1 / DRO shrinkage path via `alloygbm_core::leaf_effective_gradient`.
+///
+/// **PR #39 review (R1):** previously the helper used the bare
+/// `-g_sum/(h_sum+λ2)` Newton step regardless of `lambda_l1` / `dro_config`.
+/// That mis-ranked candidates whenever split_penalty was combined with L1
+/// or DRO because the penalty was computed from leaf magnitudes that
+/// differed from what `build_joint_round_*` would actually write at leaf
+/// finalization. L1 routing is now exact (the soft-threshold uses only
+/// `grad_sum` and `l1_alpha`). DRO routing is conservative: the multi-output
+/// histogram doesn't carry per-bin `grad_sq_sum`, so we pass `g_sq_sum=0`
+/// which collapses the DRO variance term to 0. The resulting leaf magnitudes
+/// are an upper bound on the actual DRO-shrunk leaves, which means the
+/// penalty is an upper bound too — splits with high factor load are slightly
+/// MORE penalized under DRO than a fully-accurate per-bin g_sq accumulation
+/// would penalize them. This is the same conservative tradeoff documented
+/// for v0.10.5's leaf-only DRO (split-time DRO would require a 1.5× memory
+/// inflation on the multi-output histogram).
+pub fn derive_kvec_leaves_from_threshold_histogram(
+    histogram: &MultiOutputHistogram,
+    feature: usize,
+    threshold_bin: usize,
+    lambda_l2: f32,
+    eps: f32,
+    lambda_l1: f32,
+    dro_config: Option<&alloygbm_core::DroConfig>,
+) -> (Vec<f32>, Vec<f32>) {
+    let n_outputs = histogram.n_outputs;
+    let mut left = vec![0.0_f32; n_outputs];
+    let mut right = vec![0.0_f32; n_outputs];
+    for k in 0..n_outputs {
+        let (mut g_l, mut h_l) = (0.0_f32, 0.0_f32);
+        let (mut g_r, mut h_r) = (0.0_f32, 0.0_f32);
+        for b in 0..histogram.n_bins {
+            let g = histogram.data[histogram.idx(feature, b, k, HistComponent::Grad)];
+            let h = histogram.data[histogram.idx(feature, b, k, HistComponent::Hess)];
+            if b <= threshold_bin {
+                g_l += g;
+                h_l += h;
+            } else {
+                g_r += g;
+                h_r += h;
+            }
+        }
+        let g_eff_l = alloygbm_core::leaf_effective_gradient(g_l, 0.0, 1, lambda_l1, dro_config);
+        let g_eff_r = alloygbm_core::leaf_effective_gradient(g_r, 0.0, 1, lambda_l1, dro_config);
+        left[k] = -g_eff_l / (h_l + lambda_l2 + eps);
+        right[k] = -g_eff_r / (h_r + lambda_l2 + eps);
+    }
+    (left, right)
+}
+
+/// v0.10.6: same as `derive_kvec_leaves_from_threshold_histogram` but for the
+/// native-categorical split path — bin `cat` goes left iff bit `cat` of
+/// `left_bitset` is set, mirroring the partition rule in
+/// `find_best_multi_output_categorical_split`. Routes through
+/// `leaf_effective_gradient` with the same L1-exact / DRO-conservative caveats
+/// documented on the threshold variant above.
+#[allow(clippy::too_many_arguments)]
+pub fn derive_kvec_leaves_from_categorical_histogram(
+    histogram: &MultiOutputHistogram,
+    feature: usize,
+    left_bitset: u64,
+    num_categories: usize,
+    lambda_l2: f32,
+    eps: f32,
+    lambda_l1: f32,
+    dro_config: Option<&alloygbm_core::DroConfig>,
+) -> (Vec<f32>, Vec<f32>) {
+    let n_outputs = histogram.n_outputs;
+    let mut left = vec![0.0_f32; n_outputs];
+    let mut right = vec![0.0_f32; n_outputs];
+    for k in 0..n_outputs {
+        let (mut g_l, mut h_l) = (0.0_f32, 0.0_f32);
+        let (mut g_r, mut h_r) = (0.0_f32, 0.0_f32);
+        for cat in 0..num_categories.min(64) {
+            let g = histogram.data[histogram.idx(feature, cat, k, HistComponent::Grad)];
+            let h = histogram.data[histogram.idx(feature, cat, k, HistComponent::Hess)];
+            if (left_bitset >> cat) & 1 == 1 {
+                g_l += g;
+                h_l += h;
+            } else {
+                g_r += g;
+                h_r += h;
+            }
+        }
+        let g_eff_l = alloygbm_core::leaf_effective_gradient(g_l, 0.0, 1, lambda_l1, dro_config);
+        let g_eff_r = alloygbm_core::leaf_effective_gradient(g_r, 0.0, 1, lambda_l1, dro_config);
+        left[k] = -g_eff_l / (h_l + lambda_l2 + eps);
+        right[k] = -g_eff_r / (h_r + lambda_l2 + eps);
+    }
+    (left, right)
+}
+
+/// v0.10.6: K-output factor-load penalty for a candidate split on the joint
+/// multi-output trainer. Generalizes the single-output
+/// `factor_split_penalty_for_candidate` (in `crates/backend_cpu/src/lib.rs`)
+/// to K outputs by summing the per-output factor-load squared-norm:
+///
+/// ```text
+/// load_{i,k} = left_factor_sums[i] * leaf_left[k]
+///            + right_factor_sums[i] * leaf_right[k]
+/// penalty    = factor_penalty * Σₖ Σᵢ load_{i,k}^2 / row_count
+/// ```
+///
+/// The caller performs the per-row scan that fills `left_factor_sums` /
+/// `right_factor_sums` once per candidate, because the goes-left decision is
+/// identical for all K outputs (it depends only on the candidate threshold and
+/// row bin, not on output identity). This helper only consumes the
+/// pre-computed sums.
+pub fn compute_multi_output_factor_split_penalty(
+    left_factor_sums: &[f32],
+    right_factor_sums: &[f32],
+    leaf_left: &[f32],
+    leaf_right: &[f32],
+    factor_penalty: f32,
+    row_count: usize,
+) -> f32 {
+    if factor_penalty == 0.0 || row_count == 0 {
+        return 0.0;
+    }
+    debug_assert_eq!(left_factor_sums.len(), right_factor_sums.len());
+    debug_assert_eq!(leaf_left.len(), leaf_right.len());
+    let mut penalty_sum = 0.0_f32;
+    for k in 0..leaf_left.len() {
+        let lv = leaf_left[k];
+        let rv = leaf_right[k];
+        let mut norm_sq = 0.0_f32;
+        for i in 0..left_factor_sums.len() {
+            let load = left_factor_sums[i] * lv + right_factor_sums[i] * rv;
+            norm_sq += load * load;
+        }
+        penalty_sum += norm_sq;
+    }
+    factor_penalty * penalty_sum / row_count as f32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -855,5 +999,51 @@ mod tests {
                 r.gain
             );
         }
+    }
+
+    #[test]
+    fn factor_split_penalty_zero_when_penalty_zero() {
+        let p = compute_multi_output_factor_split_penalty(
+            &[1.0, 2.0],
+            &[3.0, 4.0],
+            &[0.5, 0.25],
+            &[0.1, 0.2],
+            0.0,
+            10,
+        );
+        assert_eq!(p, 0.0);
+    }
+
+    #[test]
+    fn factor_split_penalty_zero_when_row_count_zero() {
+        let p = compute_multi_output_factor_split_penalty(
+            &[1.0, 2.0],
+            &[3.0, 4.0],
+            &[0.5, 0.25],
+            &[0.1, 0.2],
+            0.5,
+            0,
+        );
+        assert_eq!(p, 0.0);
+    }
+
+    #[test]
+    fn factor_split_penalty_matches_hand_computation() {
+        // 1 factor, 2 outputs, row_count=4.
+        // left_sum = 2.0, right_sum = -1.0.
+        // leaf_left  = [0.5, 0.25]
+        // leaf_right = [0.1, 0.2]
+        // Output 0: load = 2.0 * 0.5 + (-1.0) * 0.1 = 0.9 → norm² = 0.81
+        // Output 1: load = 2.0 * 0.25 + (-1.0) * 0.2 = 0.3 → norm² = 0.09
+        // total norm² = 0.90; penalty = 0.5 * 0.90 / 4 = 0.1125
+        let p = compute_multi_output_factor_split_penalty(
+            &[2.0],
+            &[-1.0],
+            &[0.5, 0.25],
+            &[0.1, 0.2],
+            0.5,
+            4,
+        );
+        assert!((p - 0.1125_f32).abs() < 1e-6, "got {p}");
     }
 }
