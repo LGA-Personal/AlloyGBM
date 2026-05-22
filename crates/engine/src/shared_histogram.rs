@@ -544,13 +544,32 @@ pub fn find_best_multi_output_categorical_split(
 ///
 /// Returns `(leaf_left, leaf_right)` each of length `n_outputs`. Mirrors the
 /// closed-form leaf step used inside the joint trainer's `leaf_values` closure
-/// (sum bins 0..=threshold_bin into left, rest into right).
+/// (sum bins 0..=threshold_bin into left, rest into right), including the
+/// L1 / DRO shrinkage path via `alloygbm_core::leaf_effective_gradient`.
+///
+/// **PR #39 review (R1):** previously the helper used the bare
+/// `-g_sum/(h_sum+λ2)` Newton step regardless of `lambda_l1` / `dro_config`.
+/// That mis-ranked candidates whenever split_penalty was combined with L1
+/// or DRO because the penalty was computed from leaf magnitudes that
+/// differed from what `build_joint_round_*` would actually write at leaf
+/// finalization. L1 routing is now exact (the soft-threshold uses only
+/// `grad_sum` and `l1_alpha`). DRO routing is conservative: the multi-output
+/// histogram doesn't carry per-bin `grad_sq_sum`, so we pass `g_sq_sum=0`
+/// which collapses the DRO variance term to 0. The resulting leaf magnitudes
+/// are an upper bound on the actual DRO-shrunk leaves, which means the
+/// penalty is an upper bound too — splits with high factor load are slightly
+/// MORE penalized under DRO than a fully-accurate per-bin g_sq accumulation
+/// would penalize them. This is the same conservative tradeoff documented
+/// for v0.10.5's leaf-only DRO (split-time DRO would require a 1.5× memory
+/// inflation on the multi-output histogram).
 pub fn derive_kvec_leaves_from_threshold_histogram(
     histogram: &MultiOutputHistogram,
     feature: usize,
     threshold_bin: usize,
     lambda_l2: f32,
     eps: f32,
+    lambda_l1: f32,
+    dro_config: Option<&alloygbm_core::DroConfig>,
 ) -> (Vec<f32>, Vec<f32>) {
     let n_outputs = histogram.n_outputs;
     let mut left = vec![0.0_f32; n_outputs];
@@ -569,8 +588,10 @@ pub fn derive_kvec_leaves_from_threshold_histogram(
                 h_r += h;
             }
         }
-        left[k] = -g_l / (h_l + lambda_l2 + eps);
-        right[k] = -g_r / (h_r + lambda_l2 + eps);
+        let g_eff_l = alloygbm_core::leaf_effective_gradient(g_l, 0.0, 1, lambda_l1, dro_config);
+        let g_eff_r = alloygbm_core::leaf_effective_gradient(g_r, 0.0, 1, lambda_l1, dro_config);
+        left[k] = -g_eff_l / (h_l + lambda_l2 + eps);
+        right[k] = -g_eff_r / (h_r + lambda_l2 + eps);
     }
     (left, right)
 }
@@ -578,7 +599,10 @@ pub fn derive_kvec_leaves_from_threshold_histogram(
 /// v0.10.6: same as `derive_kvec_leaves_from_threshold_histogram` but for the
 /// native-categorical split path — bin `cat` goes left iff bit `cat` of
 /// `left_bitset` is set, mirroring the partition rule in
-/// `find_best_multi_output_categorical_split`.
+/// `find_best_multi_output_categorical_split`. Routes through
+/// `leaf_effective_gradient` with the same L1-exact / DRO-conservative caveats
+/// documented on the threshold variant above.
+#[allow(clippy::too_many_arguments)]
 pub fn derive_kvec_leaves_from_categorical_histogram(
     histogram: &MultiOutputHistogram,
     feature: usize,
@@ -586,6 +610,8 @@ pub fn derive_kvec_leaves_from_categorical_histogram(
     num_categories: usize,
     lambda_l2: f32,
     eps: f32,
+    lambda_l1: f32,
+    dro_config: Option<&alloygbm_core::DroConfig>,
 ) -> (Vec<f32>, Vec<f32>) {
     let n_outputs = histogram.n_outputs;
     let mut left = vec![0.0_f32; n_outputs];
@@ -604,8 +630,10 @@ pub fn derive_kvec_leaves_from_categorical_histogram(
                 h_r += h;
             }
         }
-        left[k] = -g_l / (h_l + lambda_l2 + eps);
-        right[k] = -g_r / (h_r + lambda_l2 + eps);
+        let g_eff_l = alloygbm_core::leaf_effective_gradient(g_l, 0.0, 1, lambda_l1, dro_config);
+        let g_eff_r = alloygbm_core::leaf_effective_gradient(g_r, 0.0, 1, lambda_l1, dro_config);
+        left[k] = -g_eff_l / (h_l + lambda_l2 + eps);
+        right[k] = -g_eff_r / (h_r + lambda_l2 + eps);
     }
     (left, right)
 }

@@ -548,6 +548,10 @@ fn build_joint_round_inner(
     // candidate) is negligible. The PyO3-only caller (`train_joint_*` from
     // `bindings/python`) doesn't currently provide `factor_exposures`; future
     // wiring in Task 11 will route them through.
+    // PR #39 review (R2): when split_penalty is configured but exposures
+    // weren't provided, return an explicit error instead of silently treating
+    // it as inert. Mirrors the pre_target / per_round_gradient guards in
+    // `fit_joint_inner`.
     let split_penalty_ctx: Option<(f32, &alloygbm_core::FactorExposureMatrix)> =
         match (effective_neutralization_config(params), factor_exposures) {
             (Some(cfg), Some(exposures))
@@ -555,6 +559,14 @@ fn build_joint_round_inner(
                     && cfg.split_penalty > 0.0 =>
             {
                 Some((cfg.split_penalty, exposures))
+            }
+            (Some(cfg), None)
+                if cfg.kind == alloygbm_core::NeutralizationKind::SplitPenalty
+                    && cfg.split_penalty > 0.0 =>
+            {
+                return Err(
+                    "factor_exposures are required when neutralization='split_penalty'".to_string(),
+                );
             }
             _ => None,
         };
@@ -750,6 +762,8 @@ fn build_joint_round_inner(
                                     num_cats,
                                     lambda_l2,
                                     crate::LEAF_EPSILON,
+                                    params.lambda_l1,
+                                    effective_dro_config(params),
                                 );
                             let (left_sums, right_sums) = accumulate_factor_sums_for_threshold(
                                 binned_matrix,
@@ -814,6 +828,8 @@ fn build_joint_round_inner(
                                 threshold_bin,
                                 lambda_l2,
                                 crate::LEAF_EPSILON,
+                                params.lambda_l1,
+                                effective_dro_config(params),
                             );
                         let (left_sums, right_sums) = accumulate_factor_sums_for_threshold(
                             binned_matrix,
@@ -1224,6 +1240,8 @@ fn build_joint_round_leafwise(
                                 num_cats,
                                 lambda_l2,
                                 crate::LEAF_EPSILON,
+                                params.lambda_l1,
+                                effective_dro_config(params),
                             );
                         let (left_sums, right_sums) = accumulate_factor_sums_for_threshold(
                             binned_matrix,
@@ -1286,6 +1304,8 @@ fn build_joint_round_leafwise(
                             threshold_bin,
                             lambda_l2,
                             crate::LEAF_EPSILON,
+                            params.lambda_l1,
+                            effective_dro_config(params),
                         );
                     let (left_sums, right_sums) = accumulate_factor_sums_for_threshold(
                         binned_matrix,
