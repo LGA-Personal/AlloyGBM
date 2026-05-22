@@ -28,8 +28,8 @@ use crate::{
     TrainedStump, XeNDCGObjective, encode_tree_node_id,
 };
 use alloygbm_core::{
-    BinnedMatrix, GradientPair, LeafSolverKind, LeafValue, MISSING_BIN_U8, ModelMetadata,
-    NodeStats, SplitCandidate, TrainParams, TreeGrowth,
+    BinnedMatrix, DroMetadataPayload, GradientPair, LeafSolverKind, LeafValue, MISSING_BIN_U8,
+    ModelMetadata, NodeStats, SplitCandidate, TrainParams, TreeGrowth,
 };
 use std::collections::HashMap;
 
@@ -2077,7 +2077,7 @@ fn fit_joint_inner(
         objective: format!("joint_multi_output[{n_outputs}]"),
         native_categorical_feature_indices: Vec::new(),
         morph_metadata,
-        dro_metadata: None,
+        dro_metadata: effective_dro_config(params).map(|cfg| DroMetadataPayload { config: *cfg }),
         feature_baseline: None,
     };
 
@@ -4190,6 +4190,100 @@ mod tests {
         assert_eq!(
             a, b,
             "leaf_solver=Standard must ignore dro_config (gate prevents inconsistent state)"
+        );
+    }
+
+    #[test]
+    fn joint_dro_nonzero_emits_dro_metadata() {
+        // R3: nonzero DRO fits must emit DroMetadata so artifacts are
+        // self-describing, matching single-output and multiclass DRO.
+        use alloygbm_core::{DroConfig, DroMetric, LeafSolverKind};
+
+        let n_rows = 100;
+        let feature_count = 1;
+        let targets_0: Vec<f32> = (0..n_rows)
+            .map(|i| if i < n_rows / 2 { -1.0 } else { 1.0 })
+            .collect();
+        let bins: Vec<u8> = (0..n_rows).map(|i| (i % 8) as u8).collect();
+        let binned_matrix = BinnedMatrix::new(n_rows, feature_count, 7, bins).expect("bm");
+
+        let params = TrainParams {
+            seed: 7,
+            max_depth: 2,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            learning_rate: 0.3,
+            leaf_solver: LeafSolverKind::Dro,
+            dro_config: Some(DroConfig {
+                radius: 0.5,
+                metric: DroMetric::Wasserstein,
+            }),
+            ..TrainParams::default()
+        };
+
+        let result = fit_joint_multi_output(
+            &params,
+            feature_count,
+            &binned_matrix,
+            &[targets_0.clone(), targets_0.clone()],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            2,
+        )
+        .expect("dro fit");
+
+        let meta = result
+            .model
+            .dro_metadata
+            .as_ref()
+            .expect("nonzero DRO must emit DroMetadata");
+        assert_eq!(meta.config.radius, 0.5);
+        assert_eq!(meta.config.metric, DroMetric::Wasserstein);
+    }
+
+    #[test]
+    fn joint_dro_radius_zero_omits_dro_metadata() {
+        // R3: radius=0 must keep dro_metadata = None to preserve byte
+        // equivalence with standard fits. Pinned alongside
+        // joint_dro_radius_zero_matches_standard_byte_for_byte.
+        use alloygbm_core::{DroConfig, DroMetric, LeafSolverKind};
+
+        let n_rows = 100;
+        let feature_count = 1;
+        let targets_0: Vec<f32> = (0..n_rows)
+            .map(|i| if i < n_rows / 2 { -1.0 } else { 1.0 })
+            .collect();
+        let bins: Vec<u8> = (0..n_rows).map(|i| (i % 8) as u8).collect();
+        let binned_matrix = BinnedMatrix::new(n_rows, feature_count, 7, bins).expect("bm");
+
+        let params = TrainParams {
+            seed: 7,
+            max_depth: 2,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            learning_rate: 0.3,
+            leaf_solver: LeafSolverKind::Dro,
+            dro_config: Some(DroConfig {
+                radius: 0.0,
+                metric: DroMetric::Wasserstein,
+            }),
+            ..TrainParams::default()
+        };
+
+        let result = fit_joint_multi_output(
+            &params,
+            feature_count,
+            &binned_matrix,
+            &[targets_0.clone(), targets_0.clone()],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            2,
+        )
+        .expect("dro radius=0 fit");
+
+        assert!(
+            result.model.dro_metadata.is_none(),
+            "radius=0 must omit dro_metadata to preserve byte-equivalence with standard"
         );
     }
 }
