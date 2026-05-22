@@ -98,12 +98,16 @@ def test_v1_bundle_still_loads_as_independent(tmp_path):
     np.testing.assert_allclose(m.predict(X), restored.predict(X), rtol=1e-6)
 
 
-def test_joint_mode_rejects_factor_exposures():
+def test_joint_mode_rejects_factor_exposures_without_neutralization():
+    """v0.10.6: factor_exposures + neutralization='none' is rejected
+    (signals user confusion). Previously (v0.10.1–v0.10.5) any
+    factor_exposures on joint mode raised NotImplementedError; v0.10.6 lifted
+    that gate, but the consistency contract still rejects unused exposures."""
     X, y, group = _toy_ranking()
     n = X.shape[0]
     exposures = np.zeros((n, 2), dtype=np.float32)
     m = MultiLabelGBMRanker(n_estimators=2, multi_label_mode="joint")
-    with pytest.raises(NotImplementedError, match="factor_exposures"):
+    with pytest.raises(ValueError, match="neutralization='none'"):
         m.fit(X, y, group=group, factor_exposures=exposures)
 
 
