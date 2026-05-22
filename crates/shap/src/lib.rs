@@ -437,7 +437,7 @@ pub fn explain_interactions_from_artifact_bytes_with_binning(
 fn explain_interactions_from_model(
     model: &TrainedModel,
     rows: &[Vec<f32>],
-    _binning: Option<&BinningContext>,
+    binning: Option<&BinningContext>,
 ) -> ShapResult<ShapInteractionBatch> {
     validate_rows(rows, model.feature_count)?;
 
@@ -448,12 +448,82 @@ fn explain_interactions_from_model(
         ));
     }
 
-    // STUB — replaced in Task 3 with the polynomial-time implementation.
-    let n = model.feature_count;
-    let zeros = vec![vec![vec![0.0_f32; n]; n]; rows.len()];
+    // Pre-scale DART trees by tree_weight so the standard TreeSHAP path
+    // produces strictly-additive contributions.  Mirrors `explain_rows_from_model`.
+    let has_non_unit_weights = model
+        .stumps
+        .iter()
+        .any(|s| (s.tree_weight - 1.0).abs() > f32::EPSILON);
+    if has_non_unit_weights {
+        let scaled = scale_model_by_tree_weight(model);
+        return explain_interactions_from_model(&scaled, rows, binning);
+    }
+
+    // LinearRank: quantize once and dispatch with PreBinned semantics.
+    if let Some(ctx @ BinningContext::LinearRank { .. }) = binning {
+        let quantized: Vec<Vec<f32>> = rows
+            .iter()
+            .map(|row| {
+                ctx.quantize_row_for_linear_rank(row)
+                    .expect("LinearRank quantize_row_for_linear_rank returns Some")
+            })
+            .collect();
+        return explain_interactions_from_model(
+            model,
+            &quantized,
+            Some(&BinningContext::PreBinned),
+        );
+    }
+
+    // Build node lookup and standard trees once for all rows.
+    let mut nodes_map: HashMap<u64, &TrainedStump> = HashMap::new();
+    let mut tree_roots: Vec<u32> = Vec::new();
+    for stump in &model.stumps {
+        let (tree_id, local_id) = decode_tree_node_id(stump.split.node_id);
+        nodes_map.insert(tree_local_key(tree_id, local_id), stump);
+        if local_id == 0 {
+            tree_roots.push(tree_id);
+        }
+    }
+    tree_roots.sort_unstable();
+    tree_roots.dedup();
+
+    let baseline = model.feature_baseline.as_deref();
+    let mut std_trees = Vec::with_capacity(tree_roots.len());
+    let mut expected_value_f64 = model.baseline_prediction as f64;
+
+    for &tree_id in &tree_roots {
+        let root_key = tree_local_key(tree_id, 0);
+        let root_stump = nodes_map.get(&root_key).ok_or_else(|| {
+            ShapError::ContractViolation(format!("missing root stump for tree {tree_id}"))
+        })?;
+        let root_cover = root_stump.split.left_stats.row_count as f64
+            + root_stump.split.right_stats.row_count as f64;
+        let tree = build_std_tree(tree_id, 0, 0.0, root_cover, &nodes_map, baseline, binning);
+        let tree_cover = tree.cover();
+        if tree_cover > 0.0 {
+            expected_value_f64 += tree.cover_weighted_value_sum() / tree_cover;
+        }
+        std_trees.push(tree);
+    }
+
+    let expected_value = expected_value_f64 as f32;
+    let use_float_compare = binning.is_some();
+
+    let mut all_matrices = Vec::with_capacity(rows.len());
+    for row in rows {
+        let matrix_f64 =
+            tree_shap_interactions_row(&std_trees, row, model.feature_count, use_float_compare);
+        let matrix_f32: Vec<Vec<f32>> = matrix_f64
+            .into_iter()
+            .map(|inner| inner.into_iter().map(|v| v as f32).collect())
+            .collect();
+        all_matrices.push(matrix_f32);
+    }
+
     Ok(ShapInteractionBatch {
-        expected_value: model.baseline_prediction,
-        values: zeros,
+        expected_value,
+        values: all_matrices,
     })
 }
 
@@ -1675,6 +1745,275 @@ fn tree_shap_row(
         );
     }
     phi
+}
+
+/// Conditioning mode for SHAP-interaction TreeSHAP variant (Lundberg Alg 2).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConditioningMode {
+    /// Force the conditioning feature to always be present in S.
+    /// At any split on the conditioning feature, walk only the hot child
+    /// with `(zero=0, one=1)`.
+    On,
+    /// Force the conditioning feature to never be in S.  At any split on
+    /// the conditioning feature, walk both children with their cover-ratio
+    /// zero-fractions but `one_fraction=0` for the conditioning feature.
+    Off,
+}
+
+/// Variant of `ts_recurse` that conditions feature `conditioning_feature`
+/// to be ALWAYS present (`On`) or ALWAYS absent (`Off`).  All other features
+/// follow the standard TreeSHAP path.  Used to compute pairwise SHAP
+/// interactions per Lundberg et al. (2020) Algorithm 2.
+#[allow(clippy::too_many_arguments)]
+fn ts_recurse_conditioning(
+    node: &StdTreeNode,
+    row: &[f32],
+    path: &mut Vec<PathElement>,
+    depth: usize,
+    phi: &mut [f64],
+    zero_fraction: f64,
+    one_fraction: f64,
+    feature_index: usize,
+    use_float_compare: bool,
+    conditioning_feature: usize,
+    mode: ConditioningMode,
+) {
+    while path.len() <= depth {
+        path.push(PathElement {
+            feature_index: usize::MAX,
+            zero_fraction: 0.0,
+            one_fraction: 0.0,
+            pweight: 0.0,
+        });
+    }
+
+    ts_extend_path(path, depth, zero_fraction, one_fraction, feature_index);
+
+    match node {
+        StdTreeNode::Leaf { value, .. } => {
+            for i in 1..=depth {
+                let w = ts_unwound_path_sum(path, depth, i);
+                let feat = path[i].feature_index;
+                if feat < phi.len() {
+                    phi[feat] += w * (path[i].one_fraction - path[i].zero_fraction) * value;
+                }
+            }
+        }
+        StdTreeNode::Internal {
+            feature_index: node_feature,
+            threshold,
+            default_left,
+            is_categorical,
+            categorical_bitset,
+            left,
+            right,
+        } => {
+            let goes_left = row
+                .get(*node_feature)
+                .map(|v| {
+                    if *is_categorical {
+                        let cat_id = *v as u16;
+                        categorical_bitset.as_ref().map_or(*default_left, |bs| {
+                            let byte_idx = (cat_id / 8) as usize;
+                            let bit_idx = (cat_id % 8) as usize;
+                            byte_idx < bs.len() && (bs[byte_idx] & (1 << bit_idx)) != 0
+                        })
+                    } else if use_float_compare {
+                        *v < *threshold
+                    } else {
+                        *v <= *threshold
+                    }
+                })
+                .unwrap_or(*default_left);
+            let (hot, cold) = if goes_left {
+                (left.as_ref(), right.as_ref())
+            } else {
+                (right.as_ref(), left.as_ref())
+            };
+
+            let node_cover = node.cover();
+            let hot_zero = if node_cover > 0.0 {
+                hot.cover() / node_cover
+            } else {
+                0.5
+            };
+            let cold_zero = if node_cover > 0.0 {
+                cold.cover() / node_cover
+            } else {
+                0.5
+            };
+
+            // Check whether this split feature already appears in the path.
+            let duplicate_index = path[1..=depth]
+                .iter()
+                .position(|e| e.feature_index == *node_feature)
+                .map(|pos| pos + 1);
+
+            let mut hot_path = path[..=depth].to_vec();
+            let mut cold_path = path[..=depth].to_vec();
+
+            let (effective_depth, incoming_zero, incoming_one) = if let Some(dup_idx) =
+                duplicate_index
+            {
+                let iz = hot_path[dup_idx].zero_fraction;
+                let io = hot_path[dup_idx].one_fraction;
+                ts_unextend_path(&mut hot_path, depth, dup_idx);
+                ts_unextend_path(&mut cold_path, depth, dup_idx);
+                (depth - 1, iz, io)
+            } else {
+                (depth, 1.0, 1.0)
+            };
+
+            // Apply conditioning at the OUTGOING split when it matches.
+            if *node_feature == conditioning_feature {
+                match mode {
+                    ConditioningMode::On => {
+                        // Conditioning ON: only walk the hot child with (0, 1).
+                        ts_recurse_conditioning(
+                            hot,
+                            row,
+                            &mut hot_path,
+                            effective_depth + 1,
+                            phi,
+                            0.0,
+                            incoming_one,
+                            *node_feature,
+                            use_float_compare,
+                            conditioning_feature,
+                            mode,
+                        );
+                    }
+                    ConditioningMode::Off => {
+                        // Conditioning OFF: walk both children with cover-ratio
+                        // zero-fractions but one_fraction=0 for this feature.
+                        ts_recurse_conditioning(
+                            hot,
+                            row,
+                            &mut hot_path,
+                            effective_depth + 1,
+                            phi,
+                            incoming_zero * hot_zero,
+                            0.0,
+                            *node_feature,
+                            use_float_compare,
+                            conditioning_feature,
+                            mode,
+                        );
+                        ts_recurse_conditioning(
+                            cold,
+                            row,
+                            &mut cold_path,
+                            effective_depth + 1,
+                            phi,
+                            incoming_zero * cold_zero,
+                            0.0,
+                            *node_feature,
+                            use_float_compare,
+                            conditioning_feature,
+                            mode,
+                        );
+                    }
+                }
+            } else {
+                // Non-conditioning split: same as standard ts_recurse.
+                ts_recurse_conditioning(
+                    hot,
+                    row,
+                    &mut hot_path,
+                    effective_depth + 1,
+                    phi,
+                    incoming_zero * hot_zero,
+                    incoming_one,
+                    *node_feature,
+                    use_float_compare,
+                    conditioning_feature,
+                    mode,
+                );
+                ts_recurse_conditioning(
+                    cold,
+                    row,
+                    &mut cold_path,
+                    effective_depth + 1,
+                    phi,
+                    incoming_zero * cold_zero,
+                    0.0,
+                    *node_feature,
+                    use_float_compare,
+                    conditioning_feature,
+                    mode,
+                );
+            }
+        }
+    }
+}
+
+/// Compute pairwise SHAP interactions for a single row using pre-built
+/// standard trees (Lundberg Algorithm 2).  For each feature j: run TreeSHAP
+/// with j conditioned ON and OFF; the half-difference attributes the
+/// off-diagonal `Φ_ij`.  The diagonal is filled from the row-marginal
+/// invariant `Σ_j Φ_ij == φ_i`.
+fn tree_shap_interactions_row(
+    trees: &[StdTreeNode],
+    row: &[f32],
+    feature_count: usize,
+    use_float_compare: bool,
+) -> Vec<Vec<f64>> {
+    let mut matrix = vec![vec![0.0_f64; feature_count]; feature_count];
+
+    // Standard per-feature SHAP for the diagonal.
+    let phi = tree_shap_row(trees, row, feature_count, use_float_compare);
+
+    for j in 0..feature_count {
+        let mut phi_on = vec![0.0_f64; feature_count];
+        let mut phi_off = vec![0.0_f64; feature_count];
+        for tree in trees {
+            let mut path_on = Vec::with_capacity(32);
+            let mut path_off = Vec::with_capacity(32);
+            ts_recurse_conditioning(
+                tree,
+                row,
+                &mut path_on,
+                0,
+                &mut phi_on,
+                1.0,
+                1.0,
+                usize::MAX,
+                use_float_compare,
+                j,
+                ConditioningMode::On,
+            );
+            ts_recurse_conditioning(
+                tree,
+                row,
+                &mut path_off,
+                0,
+                &mut phi_off,
+                1.0,
+                1.0,
+                usize::MAX,
+                use_float_compare,
+                j,
+                ConditioningMode::Off,
+            );
+        }
+        for i in 0..feature_count {
+            if i == j {
+                continue;
+            }
+            matrix[i][j] = 0.5 * (phi_on[i] - phi_off[i]);
+        }
+    }
+
+    // Diagonal from row-marginal invariant.
+    for i in 0..feature_count {
+        let off_diag: f64 = (0..feature_count)
+            .filter(|&k| k != i)
+            .map(|k| matrix[i][k])
+            .sum();
+        matrix[i][i] = phi[i] - off_diag;
+    }
+
+    matrix
 }
 
 /// Compute SHAP values for multiple rows using TreeSHAP.
@@ -3429,6 +3768,31 @@ mod tests {
             assert_eq!(row_interactions.len(), feature_count);
             for column in row_interactions {
                 assert_eq!(column.len(), feature_count);
+            }
+        }
+    }
+
+    #[test]
+    fn tree_shap_interactions_match_brute_force_on_fixture() {
+        let artifact = fixture_model()
+            .to_artifact_bytes()
+            .expect("artifact serializes");
+        let model = fixture_model();
+        let rows = fixture_rows();
+
+        let batch = explain_interactions_from_artifact_bytes(&artifact, &rows)
+            .expect("interactions");
+        for (row_idx, row) in rows.iter().enumerate() {
+            let (_, expected_matrix) = brute_force_interactions_for_row(&model, row);
+            for i in 0..model.feature_count {
+                for j in 0..model.feature_count {
+                    let got = batch.values[row_idx][i][j];
+                    let want = expected_matrix[i][j];
+                    assert!(
+                        (got - want).abs() < 1e-4,
+                        "row={row_idx} i={i} j={j} got={got} want={want}"
+                    );
+                }
             }
         }
     }
