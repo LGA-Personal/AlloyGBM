@@ -5342,6 +5342,9 @@ impl JointPredictorHandle {
     init_baselines=None::<Vec<f32>>,
     init_rounds_completed=None::<usize>,
     morph_config=None::<pyo3::Bound<'_, pyo3::types::PyDict>>,
+    leaf_solver="standard".to_string(),
+    dro_radius=0.05_f32,
+    dro_metric="wasserstein".to_string(),
 ))]
 fn train_joint_multi_label_ranker(
     x_values: Vec<f32>,
@@ -5377,6 +5380,9 @@ fn train_joint_multi_label_ranker(
     init_baselines: Option<Vec<f32>>,
     init_rounds_completed: Option<usize>,
     morph_config: Option<pyo3::Bound<'_, pyo3::types::PyDict>>,
+    leaf_solver: String,
+    dro_radius: f32,
+    dro_metric: String,
 ) -> PyResult<(Vec<u8>, Vec<f32>, usize, usize)> {
     use alloygbm_engine::joint::JointObjective;
 
@@ -5460,6 +5466,9 @@ fn train_joint_multi_label_ranker(
         Some(dict) => Some(parse_morph_config_from_pydict(dict)?),
         None => None,
     };
+    // v0.10.5: DRO leaf solver — mirrors the single-output path.
+    let parsed_leaf_solver = parse_leaf_solver(&leaf_solver)?;
+    let parsed_dro_config = parse_dro_config(parsed_leaf_solver, dro_radius, &dro_metric)?;
     let params = TrainParams {
         learning_rate,
         seed,
@@ -5474,6 +5483,8 @@ fn train_joint_multi_label_ranker(
         max_leaves,
         boosting_mode: parsed_boosting_mode,
         morph_config: parsed_morph_config,
+        leaf_solver: parsed_leaf_solver,
+        dro_config: parsed_dro_config,
         ..TrainParams::default()
     };
 
