@@ -1748,22 +1748,37 @@ fn tree_shap_row(
 }
 
 /// Conditioning mode for SHAP-interaction TreeSHAP variant (Lundberg Alg 2).
+///
+/// Mirrors the canonical reference (slundberg/shap `tree_shap_recursive`,
+/// `condition` parameter): `On` ≙ `condition > 0`, `Off` ≙ `condition < 0`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ConditioningMode {
-    /// Force the conditioning feature to always be present in S.
-    /// At any split on the conditioning feature, walk only the hot child
-    /// with `(zero=0, one=1)`.
+    /// Force the conditioning feature to always be present in S.  At any
+    /// split on the conditioning feature: walk both children, but the cold
+    /// child receives `condition_fraction = 0` (early-returns); the hot
+    /// child's condition_fraction is unchanged.
     On,
     /// Force the conditioning feature to never be in S.  At any split on
-    /// the conditioning feature, walk both children with their cover-ratio
-    /// zero-fractions but `one_fraction=0` for the conditioning feature.
+    /// the conditioning feature: walk both children, each scaled by its
+    /// cover ratio (`hot_zero_fraction` / `cold_zero_fraction`).
     Off,
 }
 
-/// Variant of `ts_recurse` that conditions feature `conditioning_feature`
-/// to be ALWAYS present (`On`) or ALWAYS absent (`Off`).  All other features
-/// follow the standard TreeSHAP path.  Used to compute pairwise SHAP
-/// interactions per Lundberg et al. (2020) Algorithm 2.
+/// TreeSHAP recursion with conditioning support (Lundberg et al. 2020
+/// Algorithm 2), faithfully ported from the canonical reference
+/// (`shap/cext/tree_shap.h::tree_shap_recursive`).
+///
+/// The path is extended with the parent's edge UNLESS the parent's split
+/// was the conditioning feature — in that case the conditioning feature
+/// is "factored out" of the path (and the parent's recurse call already
+/// decremented `depth` to compensate).
+///
+/// At a node whose split IS on the conditioning feature, both children are
+/// recursed into but with adjusted `condition_fraction`s:
+/// - `On` mode: hot child unchanged, cold child gets `condition_fraction = 0`
+///   (so it early-returns).
+/// - `Off` mode: hot child gets `condition_fraction * hot_zero_fraction`,
+///   cold child gets `condition_fraction * cold_zero_fraction`.
 #[allow(clippy::too_many_arguments)]
 fn ts_recurse_conditioning(
     node: &StdTreeNode,
@@ -1771,13 +1786,19 @@ fn ts_recurse_conditioning(
     path: &mut Vec<PathElement>,
     depth: usize,
     phi: &mut [f64],
-    zero_fraction: f64,
-    one_fraction: f64,
-    feature_index: usize,
+    parent_zero_fraction: f64,
+    parent_one_fraction: f64,
+    parent_feature_index: usize,
     use_float_compare: bool,
     conditioning_feature: usize,
     mode: ConditioningMode,
+    condition_fraction: f64,
 ) {
+    // Early return: a zero condition_fraction kills the entire subtree.
+    if condition_fraction == 0.0 {
+        return;
+    }
+
     while path.len() <= depth {
         path.push(PathElement {
             feature_index: usize::MAX,
@@ -1787,15 +1808,35 @@ fn ts_recurse_conditioning(
         });
     }
 
-    ts_extend_path(path, depth, zero_fraction, one_fraction, feature_index);
+    // Skip extend_path if the parent's split was the conditioning feature
+    // (we're "factoring out" that feature from the path).
+    let skip_extend = parent_feature_index == conditioning_feature;
+    if !skip_extend {
+        ts_extend_path(
+            path,
+            depth,
+            parent_zero_fraction,
+            parent_one_fraction,
+            parent_feature_index,
+        );
+    }
 
     match node {
         StdTreeNode::Leaf { value, .. } => {
-            for i in 1..=depth {
-                let w = ts_unwound_path_sum(path, depth, i);
+            // unique_depth is the index of the last valid path entry.
+            // When skip_extend, depth was decremented by the parent so the
+            // last entry is at `depth` (NOT `depth - 1`).  When NOT skipped,
+            // we just extended to slot `depth`, so the last valid index is
+            // also `depth`.  Either way, iterate 1..=depth.
+            let effective_depth = depth;
+            for i in 1..=effective_depth {
+                let w = ts_unwound_path_sum(path, effective_depth, i);
                 let feat = path[i].feature_index;
                 if feat < phi.len() {
-                    phi[feat] += w * (path[i].one_fraction - path[i].zero_fraction) * value;
+                    phi[feat] += w
+                        * (path[i].one_fraction - path[i].zero_fraction)
+                        * value
+                        * condition_fraction;
                 }
             }
         }
@@ -1843,106 +1884,88 @@ fn ts_recurse_conditioning(
                 0.5
             };
 
-            // Check whether this split feature already appears in the path.
-            let duplicate_index = path[1..=depth]
+            // Duplicate-feature handling (BEFORE conditioning logic).
+            // The current depth's "extended depth" is `depth` when we
+            // extended at the top, but our internal "unique_depth" for
+            // path inspection mirrors slundberg's variable.  When we
+            // skipped extend, the duplicate scan still applies to the
+            // already-existing entries.
+            let mut unique_depth = depth;
+            let duplicate_index = path[1..=unique_depth]
                 .iter()
                 .position(|e| e.feature_index == *node_feature)
                 .map(|pos| pos + 1);
+            let mut incoming_zero = 1.0_f64;
+            let mut incoming_one = 1.0_f64;
+            if let Some(dup_idx) = duplicate_index {
+                incoming_zero = path[dup_idx].zero_fraction;
+                incoming_one = path[dup_idx].one_fraction;
+                ts_unextend_path(path, unique_depth, dup_idx);
+                unique_depth -= 1;
+            }
 
-            let mut hot_path = path[..=depth].to_vec();
-            let mut cold_path = path[..=depth].to_vec();
-
-            let (effective_depth, incoming_zero, incoming_one) = if let Some(dup_idx) =
-                duplicate_index
-            {
-                let iz = hot_path[dup_idx].zero_fraction;
-                let io = hot_path[dup_idx].one_fraction;
-                ts_unextend_path(&mut hot_path, depth, dup_idx);
-                ts_unextend_path(&mut cold_path, depth, dup_idx);
-                (depth - 1, iz, io)
-            } else {
-                (depth, 1.0, 1.0)
-            };
-
-            // Apply conditioning at the OUTGOING split when it matches.
+            // Conditioning-fraction logic at the OUTGOING split.
+            let mut hot_condition_fraction = condition_fraction;
+            let mut cold_condition_fraction = condition_fraction;
             if *node_feature == conditioning_feature {
                 match mode {
                     ConditioningMode::On => {
-                        // Conditioning ON: only walk the hot child with (0, 1).
-                        ts_recurse_conditioning(
-                            hot,
-                            row,
-                            &mut hot_path,
-                            effective_depth + 1,
-                            phi,
-                            0.0,
-                            incoming_one,
-                            *node_feature,
-                            use_float_compare,
-                            conditioning_feature,
-                            mode,
-                        );
+                        // ON: only walk hot (cold gets zero → early return).
+                        cold_condition_fraction = 0.0;
                     }
                     ConditioningMode::Off => {
-                        // Conditioning OFF: walk both children with cover-ratio
-                        // zero-fractions but one_fraction=0 for this feature.
-                        ts_recurse_conditioning(
-                            hot,
-                            row,
-                            &mut hot_path,
-                            effective_depth + 1,
-                            phi,
-                            incoming_zero * hot_zero,
-                            0.0,
-                            *node_feature,
-                            use_float_compare,
-                            conditioning_feature,
-                            mode,
-                        );
-                        ts_recurse_conditioning(
-                            cold,
-                            row,
-                            &mut cold_path,
-                            effective_depth + 1,
-                            phi,
-                            incoming_zero * cold_zero,
-                            0.0,
-                            *node_feature,
-                            use_float_compare,
-                            conditioning_feature,
-                            mode,
-                        );
+                        // OFF: walk both, scale each by its cover ratio.
+                        hot_condition_fraction *= hot_zero;
+                        cold_condition_fraction *= cold_zero;
                     }
                 }
-            } else {
-                // Non-conditioning split: same as standard ts_recurse.
-                ts_recurse_conditioning(
-                    hot,
-                    row,
-                    &mut hot_path,
-                    effective_depth + 1,
-                    phi,
-                    incoming_zero * hot_zero,
-                    incoming_one,
-                    *node_feature,
-                    use_float_compare,
-                    conditioning_feature,
-                    mode,
-                );
-                ts_recurse_conditioning(
-                    cold,
-                    row,
-                    &mut cold_path,
-                    effective_depth + 1,
-                    phi,
-                    incoming_zero * cold_zero,
-                    0.0,
-                    *node_feature,
-                    use_float_compare,
-                    conditioning_feature,
-                    mode,
-                );
+                // Compensate for the skipped extend at the children.
+                if unique_depth > 0 {
+                    unique_depth -= 1;
+                } else {
+                    // depth==0 conditioning means we're factoring out at the
+                    // root edge — extremely rare since the root has feature_index
+                    // = usize::MAX; left here for completeness.
+                }
             }
+
+            // Recurse into both children.  Clone the ENTIRE path buffer
+            // (not just up to unique_depth) — the conditioning logic above
+            // may have decremented unique_depth without unfilling slots,
+            // and the canonical reference (slundberg/shap) preserves all
+            // filled entries via raw-pointer arithmetic.  Truncating the
+            // clone here would lose the entries that the child needs.
+            let mut hot_path = path.clone();
+            let mut cold_path = path.clone();
+
+            ts_recurse_conditioning(
+                hot,
+                row,
+                &mut hot_path,
+                unique_depth + 1,
+                phi,
+                incoming_zero * hot_zero,
+                incoming_one,
+                *node_feature,
+                use_float_compare,
+                conditioning_feature,
+                mode,
+                hot_condition_fraction,
+            );
+            ts_recurse_conditioning(
+                cold,
+                row,
+                &mut cold_path,
+                unique_depth + 1,
+                phi,
+                incoming_zero * cold_zero,
+                0.0,
+                *node_feature,
+                use_float_compare,
+                conditioning_feature,
+                mode,
+                cold_condition_fraction,
+            );
         }
     }
 }
@@ -1981,6 +2004,7 @@ fn tree_shap_interactions_row(
                 use_float_compare,
                 j,
                 ConditioningMode::On,
+                1.0,
             );
             ts_recurse_conditioning(
                 tree,
@@ -1994,6 +2018,7 @@ fn tree_shap_interactions_row(
                 use_float_compare,
                 j,
                 ConditioningMode::Off,
+                1.0,
             );
         }
         for i in 0..feature_count {
@@ -3862,6 +3887,54 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn tree_shap_interactions_synthetic_depth_3_four_features_matches_brute_force() {
+        let model = synthetic_deep_model(3, 4, 1729);
+        let rows = deterministic_rows(4, 5, 1729);
+        let artifact = model.to_artifact_bytes().expect("artifact serializes");
+
+        let batch = explain_interactions_from_artifact_bytes(&artifact, &rows).expect("batch");
+        for (row_idx, row) in rows.iter().enumerate() {
+            let (_, expected_matrix) = brute_force_interactions_for_row(&model, row);
+            for i in 0..4 {
+                for j in 0..4 {
+                    let got = batch.values[row_idx][i][j];
+                    let want = expected_matrix[i][j];
+                    assert!(
+                        (got - want).abs() < 5e-3,
+                        "row={row_idx} i={i} j={j} got={got} want={want}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tree_shap_interactions_depth_5_three_features_satisfies_additivity() {
+        // 3 features at depth 5 — forces feature duplicates on every path
+        // (since depth > n_features), exercising the duplicate-handling
+        // branch in `ts_recurse_conditioning`.
+        let model = synthetic_deep_model(5, 3, 4242);
+        let rows = deterministic_rows(3, 8, 4242);
+        let artifact = model.to_artifact_bytes().expect("artifact serializes");
+
+        let batch = explain_interactions_from_artifact_bytes(&artifact, &rows).expect("batch");
+        for (row_idx, row) in rows.iter().enumerate() {
+            let matrix = &batch.values[row_idx];
+            let reconstructed: f32 = matrix
+                .iter()
+                .map(|r| r.iter().sum::<f32>())
+                .sum::<f32>()
+                + batch.expected_value;
+            let predicted = local_path_predict(&model, row, None);
+            let tol = additivity_tolerance(predicted) * 4.0;
+            assert!(
+                (reconstructed - predicted).abs() < tol,
+                "row={row_idx} reconstructed={reconstructed} predicted={predicted} tol={tol}"
+            );
         }
     }
 }
