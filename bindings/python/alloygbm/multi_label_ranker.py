@@ -366,6 +366,12 @@ class MultiLabelGBMRanker:
         "leaf_solver",
         "dro_radius",
         "dro_metric",
+        # v0.10.6: joint factor neutralization (all three modes).
+        # The shared `factor_exposures` kwarg is consumed in `fit()`; only the
+        # configuration kwargs flow through `_per_label_kwargs`.
+        "neutralization",
+        "factor_neutralization_lambda",
+        "factor_penalty",
     })
 
     @staticmethod
@@ -436,11 +442,20 @@ class MultiLabelGBMRanker:
         trains the same number of rounds as
         ``MultiLabelGBMRanker(multi_label_mode='independent', n_estimators=20)``.
         """
-        if factor_exposures is not None:
-            raise NotImplementedError(
-                "multi_label_mode='joint' does not support factor_exposures "
-                "in v0.10.1 (joint-path feature parity is tracked in "
-                "docs/limitations.md). Use multi_label_mode='independent'."
+        # v0.10.6: joint factor neutralization is now supported. Cross-validate
+        # the exposures-vs-config invariant up front; the PyO3 bridge enforces
+        # the same contract as a backstop. Empty / non-active configs cannot
+        # accept exposures (signals user confusion); active configs require
+        # exposures (otherwise the projector / split-penalty path has no input).
+        neutralization_kind = str(self._per_label_kwargs.get("neutralization", "none"))
+        if neutralization_kind != "none" and factor_exposures is None:
+            raise ValueError(
+                "factor_exposures are required when neutralization is active "
+                f"(neutralization={neutralization_kind!r})"
+            )
+        if factor_exposures is not None and neutralization_kind == "none":
+            raise ValueError(
+                "factor_exposures were provided but neutralization='none'"
             )
         if eval_set is not None:
             raise NotImplementedError(
@@ -568,6 +583,7 @@ class MultiLabelGBMRanker:
         # engine's ranking objectives.  Done here (not in the wrapper
         # of the predictor) so prediction order is preserved.
         group_arr: list[int] | None = None
+        sort_idx: np.ndarray | None = None
         if group is not None:
             per_row_ids = self._normalize_group_for_joint(group, row_count)
             ids_np = np.asarray(per_row_ids, dtype=np.uint32)
@@ -575,6 +591,28 @@ class MultiLabelGBMRanker:
             x_arr = x_arr[sort_idx]
             y_arr = y_arr[sort_idx]
             group_arr = ids_np[sort_idx].tolist()
+
+        # v0.10.6: factor_exposures must follow the same row order as X / y.
+        # Validated against `row_count` here (post-coercion); the PyO3 bridge
+        # re-checks the (values_len, row_count, factor_count) triple against
+        # the binned matrix.
+        fe_values: list[float] | None = None
+        fe_row_count: int | None = None
+        fe_factor_count: int | None = None
+        if factor_exposures is not None:
+            fe_arr = np.ascontiguousarray(factor_exposures, dtype=np.float32)
+            if fe_arr.ndim != 2:
+                raise ValueError("factor_exposures must be a 2D array")
+            if fe_arr.shape[0] != row_count:
+                raise ValueError(
+                    f"factor_exposures row count {fe_arr.shape[0]} does not "
+                    f"match X row count {row_count}"
+                )
+            if sort_idx is not None:
+                fe_arr = fe_arr[sort_idx]
+            fe_values = fe_arr.reshape(-1).tolist()
+            fe_row_count = int(fe_arr.shape[0])
+            fe_factor_count = int(fe_arr.shape[1])
 
         x_flat = x_arr.reshape(-1).tolist()
 
@@ -667,6 +705,15 @@ class MultiLabelGBMRanker:
             leaf_solver=str(kw.get("leaf_solver", "standard")),
             dro_radius=float(kw.get("dro_radius", 0.05)),
             dro_metric=str(kw.get("dro_metric", "wasserstein")),
+            # v0.10.6: joint factor neutralization.
+            factor_exposure_values=fe_values,
+            factor_exposure_row_count=fe_row_count,
+            factor_exposure_factor_count=fe_factor_count,
+            neutralization=str(kw.get("neutralization", "none")),
+            factor_neutralization_lambda=float(
+                kw.get("factor_neutralization_lambda", 1e-6)
+            ),
+            factor_penalty=float(kw.get("factor_penalty", 0.0)),
         )
 
         self._joint_artifact_bytes = bytes(artifact)
