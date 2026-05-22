@@ -3316,6 +3316,103 @@ mod tests {
     // v0.11.0: SHAP interaction values (Lundberg Algorithm 2)
     // ---------------------------------------------------------------------
 
+    /// Brute-force pairwise SHAP interaction oracle.  O(2^k) in the number of
+    /// distinct split features k; only valid for fixtures with k ≤ ~10.
+    ///
+    /// `Φ_ij = (1/2) · Σ_{S ⊆ N\{i,j}} (|S|! · (k-|S|-2)! / (k-1)!) ·
+    ///         [f(S ∪ {i,j}) − f(S ∪ {i}) − f(S ∪ {j}) + f(S)]`
+    /// where the sums are over subsets of the split-feature set excluding `i, j`.
+    /// Off-diagonal entries between non-split-features are zero (the model can't
+    /// depend on them).  The diagonal is filled from
+    /// `Φ_ii = φ_i − Σ_{j ≠ i} Φ_ij` to enforce the row-marginal invariant.
+    fn brute_force_interactions_for_row(
+        model: &TrainedModel,
+        row: &[f32],
+    ) -> (f32, Vec<Vec<f32>>) {
+        let n = model.feature_count;
+        let structure = build_model_structure(model).expect("model structure");
+        let subset_expectations = compute_subset_expectations(model, row, &structure, None, None)
+            .expect("subset expectations");
+        let split_features = &structure.split_features;
+        let k = split_features.len();
+        let factorials = factorial_table(k.max(2));
+        let phi = shapley_values_for_row_f64(model, row, &subset_expectations, &structure, 0)
+            .expect("per-feature shap");
+        let mut matrix = vec![vec![0.0_f64; n]; n];
+
+        // Off-diagonal: only nonzero for pairs of split features.
+        if k >= 2 {
+            for a in 0..k {
+                for b in (a + 1)..k {
+                    let feat_i = split_features[a];
+                    let feat_j = split_features[b];
+                    let bit_i = 1_u64 << a;
+                    let bit_j = 1_u64 << b;
+                    let mut accum = 0.0_f64;
+                    let others_count = k - 2;
+                    // Build the list of OTHER split-feature bit positions.
+                    let others: Vec<u32> = (0..k as u32)
+                        .filter(|&p| p as usize != a && p as usize != b)
+                        .collect();
+                    for sub_mask in 0..(1u32 << others_count) {
+                        let mut s_bits: u64 = 0;
+                        let mut s_size = 0_usize;
+                        for (idx, &pos) in others.iter().enumerate() {
+                            if (sub_mask >> idx) & 1 == 1 {
+                                s_bits |= 1_u64 << pos;
+                                s_size += 1;
+                            }
+                        }
+                        let f_s = subset_expectations[s_bits as usize] as f64;
+                        let f_si = subset_expectations[(s_bits | bit_i) as usize] as f64;
+                        let f_sj = subset_expectations[(s_bits | bit_j) as usize] as f64;
+                        let f_sij =
+                            subset_expectations[(s_bits | bit_i | bit_j) as usize] as f64;
+                        // Weight: |S|! · (k - |S| - 2)! / (k - 1)!
+                        let weight = factorials[s_size] * factorials[k - s_size - 2]
+                            / factorials[k - 1];
+                        accum += weight * (f_sij - f_si - f_sj + f_s);
+                    }
+                    let half = 0.5 * accum;
+                    matrix[feat_i][feat_j] = half;
+                    matrix[feat_j][feat_i] = half;
+                }
+            }
+        }
+
+        // Diagonal: Φ_ii = φ_i − Σ_{j ≠ i} Φ_ij
+        for i in 0..n {
+            let off: f64 = (0..n).filter(|&j| j != i).map(|j| matrix[i][j]).sum();
+            matrix[i][i] = phi[i] - off;
+        }
+
+        let expected_value = subset_expectations[0];
+        let matrix_f32: Vec<Vec<f32>> = matrix
+            .into_iter()
+            .map(|row_i| row_i.into_iter().map(|v| v as f32).collect())
+            .collect();
+        (expected_value, matrix_f32)
+    }
+
+    #[test]
+    fn brute_force_interactions_satisfy_additivity_on_fixture() {
+        let model = fixture_model();
+        for row in fixture_rows() {
+            let (expected, interactions) = brute_force_interactions_for_row(&model, &row);
+            let reconstructed: f32 = interactions
+                .iter()
+                .map(|r| r.iter().sum::<f32>())
+                .sum::<f32>()
+                + expected;
+            let predicted = local_path_predict(&model, &row, None);
+            let tol = additivity_tolerance(predicted);
+            assert!(
+                (reconstructed - predicted).abs() < tol,
+                "row={row:?} predicted={predicted} reconstructed={reconstructed} tol={tol}"
+            );
+        }
+    }
+
     #[test]
     fn explain_interactions_from_artifact_returns_pairwise_matrix() {
         let artifact = fixture_model()
