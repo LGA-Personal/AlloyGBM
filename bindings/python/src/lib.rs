@@ -5345,6 +5345,12 @@ impl JointPredictorHandle {
     leaf_solver="standard".to_string(),
     dro_radius=0.05_f32,
     dro_metric="wasserstein".to_string(),
+    factor_exposure_values=None::<Vec<f32>>,
+    factor_exposure_row_count=None::<usize>,
+    factor_exposure_factor_count=None::<usize>,
+    neutralization="none".to_string(),
+    factor_neutralization_lambda=1e-6_f32,
+    factor_penalty=0.0_f32,
 ))]
 fn train_joint_multi_label_ranker(
     x_values: Vec<f32>,
@@ -5383,6 +5389,12 @@ fn train_joint_multi_label_ranker(
     leaf_solver: String,
     dro_radius: f32,
     dro_metric: String,
+    factor_exposure_values: Option<Vec<f32>>,
+    factor_exposure_row_count: Option<usize>,
+    factor_exposure_factor_count: Option<usize>,
+    neutralization: String,
+    factor_neutralization_lambda: f32,
+    factor_penalty: f32,
 ) -> PyResult<(Vec<u8>, Vec<f32>, usize, usize)> {
     use alloygbm_engine::joint::JointObjective;
 
@@ -5469,6 +5481,40 @@ fn train_joint_multi_label_ranker(
     // v0.10.5: DRO leaf solver — mirrors the single-output path.
     let parsed_leaf_solver = parse_leaf_solver(&leaf_solver)?;
     let parsed_dro_config = parse_dro_config(parsed_leaf_solver, dro_radius, &dro_metric)?;
+    // v0.10.6: factor neutralization — accept exposures + neutralization
+    // config and cross-validate the two are consistent (active config requires
+    // exposures; exposures require an active config).
+    let parsed_factor_exposures = parse_factor_exposure_matrix(
+        factor_exposure_values,
+        factor_exposure_row_count,
+        factor_exposure_factor_count,
+    )?;
+    let parsed_neutralization_config = parse_neutralization_config(
+        &neutralization,
+        factor_neutralization_lambda,
+        factor_penalty,
+    )?;
+    let neutralization_active = parsed_neutralization_config
+        .map(|c| c.kind != alloygbm_core::NeutralizationKind::None)
+        .unwrap_or(false);
+    if neutralization_active && parsed_factor_exposures.is_none() {
+        return Err(PyValueError::new_err(
+            "factor_exposures are required when neutralization is active",
+        ));
+    }
+    if !neutralization_active && parsed_factor_exposures.is_some() {
+        return Err(PyValueError::new_err(
+            "factor_exposures were provided but neutralization='none'",
+        ));
+    }
+    if let Some(exposures) = parsed_factor_exposures.as_ref()
+        && exposures.row_count != row_count
+    {
+        return Err(PyValueError::new_err(format!(
+            "factor_exposures row_count {} does not match X row_count {row_count}",
+            exposures.row_count
+        )));
+    }
     let params = TrainParams {
         learning_rate,
         seed,
@@ -5485,6 +5531,7 @@ fn train_joint_multi_label_ranker(
         morph_config: parsed_morph_config,
         leaf_solver: parsed_leaf_solver,
         dro_config: parsed_dro_config,
+        neutralization_config: parsed_neutralization_config,
         ..TrainParams::default()
     };
 
@@ -5647,7 +5694,7 @@ fn train_joint_multi_label_ranker(
         n_estimators,
         &cat_features,
         warm_start,
-        /*factor_exposures=*/ None,
+        parsed_factor_exposures.as_ref(),
     )
     .map_err(PyValueError::new_err)?;
 
