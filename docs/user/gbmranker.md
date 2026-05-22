@@ -216,11 +216,38 @@ strategy:
   + `init_model=...`, `training_mode="morph"` with the full MorphBoost
   kwarg surface (`morph_rate`, `evolution_pressure`,
   `morph_warmup_iters`, `info_score_weight`, `depth_penalty_base`,
-  `balance_penalty`, `lr_schedule`, `lr_warmup_frac`), and the built-in
-  `squared_error` / `queryrmse` / `rank:pairwise` / `rank:ndcg` /
-  `rank:xendcg` objectives. **Still deferred:** joint DRO leaves
-  (v0.10.5) and joint factor neutralization (v0.10.6) — see
+  `balance_penalty`, `lr_schedule`, `lr_warmup_frac`),
+  `leaf_solver="dro"` with `dro_radius` / `dro_metric` (v0.10.5+),
+  and the built-in `squared_error` / `queryrmse` / `rank:pairwise` /
+  `rank:ndcg` / `rank:xendcg` objectives. **Still deferred:** joint
+  factor neutralization (v0.10.6) — see
   [../limitations.md](../limitations.md).
+
+#### Joint-mode kwargs reference (v0.10.5)
+
+| Parameter | Type | Default | Notes |
+|-----------|------|---------|-------|
+| `training_mode` | str | `"manual"` | `"manual"` or `"morph"` (MorphBoost). |
+| `morph_rate` | float | `0.5` | MorphBoost shrinkage rate per iteration. |
+| `evolution_pressure` | float | `1.0` | Blend between standard and morph gain. |
+| `morph_warmup_iters` | int | `20` | Rounds before morph gain ramps in fully. |
+| `info_score_weight` | float | `0.1` | Weight for the information-theoretic blend term. |
+| `depth_penalty_base` | float | `0.9` | Base for per-leaf depth penalty `base^(depth/3)`. |
+| `balance_penalty` | float | `0.0` | Penalty for unbalanced splits in MorphBoost. |
+| `lr_schedule` | str | `"constant"` | `"constant"` or `"warmup_cosine"`. |
+| `lr_warmup_frac` | float | `0.1` | Fraction of rounds for LR warmup (warmup_cosine only). |
+| `boosting_mode` | str | `"standard"` | `"standard"`, `"goss"`, or `"dart"`. |
+| `goss_top_rate` | float | `0.2` | Top gradient fraction to keep (GOSS). |
+| `goss_other_rate` | float | `0.1` | Fraction sampled from low-gradient rows (GOSS). |
+| `dart_drop_rate` | float | `0.1` | Fraction of trees dropped per round (DART). |
+| `dart_max_drop` | int | `50` | Maximum trees dropped per round (DART). |
+| `dart_normalize_type` | str | `"tree"` | `"tree"` or `"forest"` normalization (DART). |
+| `dart_sample_type` | str | `"uniform"` | `"uniform"` or `"weighted"` dropout (DART). |
+| `categorical_feature_indices` | list[int] | `[]` | Column indices to treat as native categorical. |
+| `max_cat_threshold` | int | `0` | Max categories for Fisher-sort splits (0 = disabled). |
+| `leaf_solver` | str | `"standard"` | `"standard"` or `"dro"` (v0.10.5+). When `"dro"`, applies Wasserstein-DRO leaf shrinkage. |
+| `dro_radius` | float | `0.05` | Wasserstein radius for DRO leaf solver. `0.0` collapses to standard byte-for-byte. |
+| `dro_metric` | str | `"wasserstein"` | Currently only `"wasserstein"` is supported. |
 
 ```python
 model = MultiLabelGBMRanker(

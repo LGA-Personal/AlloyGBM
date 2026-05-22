@@ -1,6 +1,6 @@
 # AlloyGBM Current Limitations
 
-Last updated for v0.10.4.
+Last updated for v0.10.5.
 
 ## Remaining Limitations
 
@@ -10,7 +10,7 @@ The `BackendOps` trait is designed for hardware abstraction, but only
 `CpuBackend` exists. GPU/accelerator support is architecturally planned but
 not implemented.
 
-### 2. Joint-path advanced feature parity — v0.10.5 / v0.10.6
+### 2. Joint-path advanced feature parity — v0.10.6
 
 The joint trainer reached feature parity with the single-output trainer
 across four releases:
@@ -34,10 +34,6 @@ across four releases:
 
 Still pending:
 
-- **v0.10.5** — `leaf_solver="dro"` on the joint trainer (per-output
-  Wasserstein-style robust Newton leaf solve as a post-build pass).
-  Requires a `JointRoundResult` extension to carry per-stump child
-  row indices so `core::leaf_effective_gradient` can run per output.
 - **v0.10.6** — `neutralization="pre_target" | "per_round_gradient" |
   "split_penalty"` + `factor_exposures=` on the joint trainer.
   `pre_target` residualizes each of K target columns once; per-round
@@ -48,6 +44,30 @@ Still pending:
   `multi_label_mode="joint"`.
 
 ## Resolved (Previously Limitations)
+
+### v0.10.5
+
+- **Joint DRO leaves (was a v0.10.5 follow-up):**
+  `MultiLabelGBMRanker(multi_label_mode="joint", leaf_solver="dro",
+  dro_radius=…, dro_metric="wasserstein")` now applies
+  Wasserstein-distributionally-robust leaf values on the joint
+  multi-output trainer. Reuses `alloygbm_core::leaf_effective_gradient`
+  (the same helper `GBMRegressor` / `GBMRanker` have used since v0.6.x).
+  Applied in-build inside `build_joint_round_inner`'s `leaf_values`
+  closure and `build_joint_round_leafwise`'s per-output leaf computation
+  — row indices are already in scope at leaf-computation time. DRO is
+  leaf-only: split-gain dispatch still uses the standard K-output
+  sum-of-XGBoost-gains (multi-output histogram doesn't carry per-bin
+  `grad_sq`; adding it would cost ~1.5× joint-round memory which isn't
+  justified before benchmark evidence). Byte-equivalent to v0.10.4 when
+  `lambda_l1 == 0` AND (`dro_config.is_none()` OR
+  `dro_config.radius == 0.0`); pinned by
+  `joint_dro_radius_zero_matches_standard_byte_for_byte` (cargo) and
+  `test_joint_dro_radius_zero_byte_equivalent_to_standard` (pytest).
+  Works under both `tree_growth="level"` and `tree_growth="leaf"`, and
+  composes with MorphBoost (`training_mode="morph"`) and DART/GOSS
+  boosting modes. `_JOINT_SUPPORTED_KWARGS` adds `leaf_solver`,
+  `dro_radius`, `dro_metric`.
 
 ### v0.10.4
 
@@ -127,9 +147,9 @@ Still pending:
   `find_best_multi_output_categorical_split` +
   `fit_joint_multi_output_with_categorical` in place; Python surface
   closed in v0.10.3). GOSS, DART, and warm-start on the joint path
-  shipped in v0.10.3. MorphBoost shipped in v0.10.4. DRO + factor
-  neutralization remain deferred to **v0.10.5** / **v0.10.6**
-  respectively (see "Remaining Limitations" above).
+  shipped in v0.10.3. MorphBoost shipped in v0.10.4. DRO shipped in
+  v0.10.5. Factor neutralization remains deferred to **v0.10.6**
+  (see "Remaining Limitations" above).
 - **Leaf-wise multiclass DART (was a v0.10.x follow-up):**
   `GBMClassifier(boosting_mode="dart")` with K ≥ 3 classes now works
   under `tree_growth="leaf"` + `max_leaves`. The v0.10.1 level-wise

@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.10.5 (2026-05-21)
+
+### Joint trainer: DRO leaves
+
+`MultiLabelGBMRanker(multi_label_mode="joint", leaf_solver="dro", dro_radius=…, dro_metric="wasserstein")`
+now applies Wasserstein-distributionally-robust leaf values on the joint
+multi-output trainer, mirroring `GBMRegressor` / `GBMRanker`'s single-output
+leaf solver. Leaf-only: split-gain dispatch still uses the standard
+K-output sum-of-XGBoost-gains (multi-output histogram doesn't carry per-bin
+`grad_sq` and adding it would cost ~1.5× joint-round memory — split-time
+DRO is deferred pending benchmark evidence).
+
+Three new kwargs allowed in `_JOINT_SUPPORTED_KWARGS`:
+- `leaf_solver` — `"standard"` (default) or `"dro"`
+- `dro_radius` — float ≥ 0; `0.0` collapses to standard byte-for-byte
+- `dro_metric` — `"wasserstein"` (only supported value in v0.10.5)
+
+Works under both `tree_growth="level"` and `tree_growth="leaf"`, and
+composes with MorphBoost (`training_mode="morph"`) and DART/GOSS
+boosting modes. Factor neutralization on the joint trainer remains
+deferred to **v0.10.6**.
+
 ## 0.10.4
 
 Adds MorphBoost (Kriuk 2025, arXiv:2511.13234) to the joint multi-output
