@@ -1,7 +1,60 @@
 Release and platform policy
 ===========================
 
-AlloyGBM ``0.10.5`` release notes and platform policy.
+AlloyGBM ``0.10.6`` release notes and platform policy.
+
+What's new in 0.10.6
+--------------------
+
+Closes the last v0.10.4-deferred joint-path follow-up: all three factor
+neutralization modes now work on the joint multi-output trainer.
+``MultiLabelGBMRanker(multi_label_mode="joint", neutralization=…,
+factor_exposures=…)`` supports ``"pre_target"``,
+``"per_round_gradient"``, and ``"split_penalty"`` with the same surface
+as the single-output ``GBMRegressor`` / ``GBMRanker``. The joint trainer
+reaches full feature parity with the single-output path. Default
+behaviour for every existing user-facing API remains byte-identical to
+v0.10.5 when neutralization is not opted into.
+
+**Three new modes**, all activated via the ``neutralization`` kwarg:
+
+- ``pre_target`` — residualize each per-output target through the factor
+  exposures once before training. Requires every per-output objective to
+  be ``squared_error`` (the only objective where residualize-target
+  equals residualize-gradient).
+- ``per_round_gradient`` — project each of the K gradient buffers in
+  place every round after computing them. Mirrors the single-output
+  multiclass per-class projection pattern.
+- ``split_penalty`` — subtract a K-output factor-load penalty from each
+  candidate split's gain. Applies under both ``tree_growth="level"`` and
+  ``tree_growth="leaf"``.
+
+**Three new kwargs** admitted by ``_JOINT_SUPPORTED_KWARGS``:
+
+- ``neutralization`` — ``"none"`` (default), ``"pre_target"``,
+  ``"per_round_gradient"``, or ``"split_penalty"``
+- ``factor_neutralization_lambda`` — ridge regularization on the projector
+  Gram matrix (default ``1e-6``)
+- ``factor_penalty`` — ``split_penalty`` mode's penalty multiplier
+  (default ``0.0`` — ``0`` collapses to standard byte-for-byte)
+
+Plus the ``factor_exposures=`` kwarg on ``fit()`` (already existed for the
+independent-mode fallback; now honored on joint too). The PyO3 bridge
+cross-validates the exposures-vs-config invariant: active config requires
+exposures, exposures require an active config.
+
+**Artifact:** new ``ModelSectionKind::NeutralizationMetadata`` (kind=14)
+records the active config in the artifact so joint models are
+self-describing. Metadata only; prediction never reads it (neutralization
+is a training-time transformation; the trained leaf values already bake
+in the projection).
+
+**Byte-equivalence:** a fit with ``neutralization='none'`` (or
+``kind=None``, or ``split_penalty=0``) produces byte-identical artifact
+bytes to a pre-v0.10.6 fit. Pinned by
+``joint_neutralization_inert_configs_match_v0_10_5_byte_for_byte``.
+Composes with MorphBoost (``training_mode="morph"``), DRO leaves
+(``leaf_solver="dro"``), DART boosting, and warm-start.
 
 What's new in 0.10.5
 --------------------

@@ -4,14 +4,25 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
-The `0.10.5` release closes the joint DRO leaves follow-up from
-v0.10.4: `MultiLabelGBMRanker(multi_label_mode="joint",
-leaf_solver="dro")` now routes per-output leaf values through
-`alloygbm_core::leaf_effective_gradient` (the same helper the
-single-output trainers have used since v0.6.x). Factor
-neutralization on the joint trainer remains tracked for v0.10.6.
+The `0.10.6` release closes the last v0.10.4-deferred joint-path
+follow-up: all three factor-neutralization modes (`pre_target`,
+`per_round_gradient`, `split_penalty`) now work on the joint
+multi-output trainer via the same `neutralization=` /
+`factor_exposures=` surface as the single-output `GBMRegressor` /
+`GBMRanker`. The joint trainer reaches full feature parity with
+the single-output path. A new
+`ModelSectionKind::NeutralizationMetadata` artifact section
+records the active config so joint models are self-describing.
 Default behaviour for every existing user-facing API remains
-byte-identical to v0.10.4 when DRO is not opted into.
+byte-identical to v0.10.5 when neutralization is not opted into.
+
+The `0.10.5` release closed the joint DRO leaves follow-up from
+v0.10.4: `MultiLabelGBMRanker(multi_label_mode="joint",
+leaf_solver="dro")` routes per-output leaf values through
+`alloygbm_core::leaf_effective_gradient` (the same helper the
+single-output trainers have used since v0.6.x). Default behaviour
+for every existing user-facing API remained byte-identical to
+v0.10.4 when DRO is not opted into.
 
 The `0.10.4` release adds MorphBoost to the joint multi-output
 trainer used by `MultiLabelGBMRanker(multi_label_mode="joint")` —
@@ -62,6 +73,49 @@ MorphBoost is not opted into.
   "split_penalty"` + `factor_exposures=`). The PyO3 bridge
   currently rejects `factor_exposures` unconditionally under
   `multi_label_mode="joint"`.
+
+## What Shipped In v0.10.6
+
+Closes the last v0.10.4-deferred joint-path follow-up. The joint
+multi-output trainer now reaches full feature parity with the
+single-output path. Default behaviour for every existing user-facing
+API remains byte-identical to v0.10.5 when neutralization is not
+opted into (pinned by
+`joint_neutralization_inert_configs_match_v0_10_5_byte_for_byte`).
+
+- **Joint factor neutralization (closes the v0.10.6 follow-up):**
+  `MultiLabelGBMRanker(multi_label_mode="joint", neutralization=…,
+  factor_exposures=…)` supports all three modes:
+  - `pre_target` — residualize each per-output target once before
+    training via `FactorProjector::residualize_values_in_place`.
+    Squared-error only (the only objective where residualize-target
+    equals residualize-gradient).
+  - `per_round_gradient` — build a `FactorProjector` once, project
+    each of the K gradient buffers in place every round. Mirrors the
+    single-output multiclass per-class projection pattern.
+  - `split_penalty` — per-candidate K-output factor-load penalty via
+    new `compute_multi_output_factor_split_penalty` helper in
+    `shared_histogram.rs`. Threaded through both level-wise
+    (`build_joint_round_inner`) and leaf-wise
+    (`build_joint_round_leafwise`) growth paths; the leaf-wise heap
+    ranks candidates by penalized gain.
+
+  Wired through a new `effective_neutralization_config(params)` helper
+  in `crates/engine/src/joint.rs` mirroring v0.10.5's
+  `effective_dro_config` — returns `Some(cfg)` only when the config is
+  non-inert (kind ≠ None, AND not SplitPenalty-with-zero-penalty).
+  Both growth paths AND the artifact serializer consult this helper, so
+  inert configs collapse to byte-equivalent v0.10.5 fits. New
+  `ModelSectionKind::NeutralizationMetadata = 14` records the active
+  config in the artifact (metadata only; prediction never reads it —
+  neutralization is a training-time transformation). Composes with
+  MorphBoost (`training_mode="morph"`), DRO leaves
+  (`leaf_solver="dro"`), DART, and warm-start.
+
+  `_JOINT_SUPPORTED_KWARGS` gains three entries: `neutralization`,
+  `factor_neutralization_lambda`, `factor_penalty`. The
+  `factor_exposures=` kwarg on `fit()` (already existed for the
+  independent-mode fallback) is now honored on joint too.
 
 ## What Shipped In v0.10.5
 

@@ -218,12 +218,14 @@ strategy:
   `morph_warmup_iters`, `info_score_weight`, `depth_penalty_base`,
   `balance_penalty`, `lr_schedule`, `lr_warmup_frac`),
   `leaf_solver="dro"` with `dro_radius` / `dro_metric` (v0.10.5+),
+  factor neutralization (v0.10.6+: `neutralization=` +
+  `factor_exposures=` for all three modes — `pre_target`,
+  `per_round_gradient`, `split_penalty`),
   and the built-in `squared_error` / `queryrmse` / `rank:pairwise` /
-  `rank:ndcg` / `rank:xendcg` objectives. **Still deferred:** joint
-  factor neutralization (v0.10.6) — see
-  [../limitations.md](../limitations.md).
+  `rank:ndcg` / `rank:xendcg` objectives. The joint trainer has
+  reached full feature parity with the single-output path.
 
-#### Joint-mode kwargs reference (v0.10.5)
+#### Joint-mode kwargs reference (v0.10.6)
 
 | Parameter | Type | Default | Notes |
 |-----------|------|---------|-------|
@@ -248,6 +250,11 @@ strategy:
 | `leaf_solver` | str | `"standard"` | `"standard"` or `"dro"` (v0.10.5+). When `"dro"`, applies Wasserstein-DRO leaf shrinkage. |
 | `dro_radius` | float | `0.05` | Wasserstein radius for DRO leaf solver. `0.0` collapses to standard byte-for-byte. |
 | `dro_metric` | str | `"wasserstein"` | Currently only `"wasserstein"` is supported. |
+| `neutralization` | str | `"none"` | v0.10.6+. `"none"`, `"pre_target"`, `"per_round_gradient"`, or `"split_penalty"`. Active configs require `factor_exposures=` on `fit()`. |
+| `factor_neutralization_lambda` | float | `1e-6` | v0.10.6+. Ridge regularization on the projector's Gram matrix. |
+| `factor_penalty` | float | `0.0` | v0.10.6+. `split_penalty` mode's penalty multiplier. `0.0` collapses to standard byte-for-byte. |
+
+`fit()` also accepts `factor_exposures=` (shape `(n_rows, n_factors)`, dtype float32). Already accepted in independent mode; honored in joint mode as of v0.10.6.
 
 ```python
 model = MultiLabelGBMRanker(

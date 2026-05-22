@@ -1,6 +1,6 @@
 # AlloyGBM Current Limitations
 
-Last updated for v0.10.5.
+Last updated for v0.10.6.
 
 ## Remaining Limitations
 
@@ -10,40 +10,27 @@ The `BackendOps` trait is designed for hardware abstraction, but only
 `CpuBackend` exists. GPU/accelerator support is architecturally planned but
 not implemented.
 
-### 2. Joint-path advanced feature parity — v0.10.6
-
-The joint trainer reached feature parity with the single-output trainer
-across four releases:
-
-- **v0.10.2** — leaf-wise growth + `max_leaves`, `interaction_constraints`,
-  `min_split_gain`, `row_subsample`, `col_subsample`. Rust-level
-  native-categorical (`find_best_multi_output_categorical_split` +
-  `fit_joint_multi_output_with_categorical`) landed but the Python
-  wrapper rejected the kwargs because the binning bridge didn't
-  preserve `bin_index == category_id`.
-- **v0.10.3** — Python wiring for native-categorical splits is now
-  honest (the bridge re-bins requested columns to
-  `bin_index == category_id`). GOSS, DART, and warm-start on the joint
-  path landed via a shared `walk_tree_into_predictions` helper +
-  `JointWarmStartState` / `fit_joint_multi_output_with_warm_start`.
-- **v0.10.4** — MorphBoost on the joint trainer:
-  `training_mode="morph"` + the full `morph_*` / `lr_schedule` surface.
-  Multi-output morph gain helpers in `shared_histogram.rs`,
-  `JointMorphContext` plumbed through `build_joint_round*`, EMA
-  warm-resume via `JointWarmStartState.initial_ema_stats`.
-
-Still pending:
-
-- **v0.10.6** — `neutralization="pre_target" | "per_round_gradient" |
-  "split_penalty"` + `factor_exposures=` on the joint trainer.
-  `pre_target` residualizes each of K target columns once; per-round
-  modes project each of K per-output gradient buffers through
-  `FactorProjector::project_gradient_pairs_in_place`; `split_penalty`
-  subtracts a global penalty from the K-output gain sum. The PyO3
-  bridge currently rejects `factor_exposures` unconditionally under
-  `multi_label_mode="joint"`.
-
 ## Resolved (Previously Limitations)
+
+### v0.10.6
+
+- **Joint-path advanced feature parity is COMPLETE.** The last v0.10.4-deferred
+  follow-up — factor neutralization on the joint multi-output trainer — shipped
+  in v0.10.6. `MultiLabelGBMRanker(multi_label_mode="joint",
+  neutralization=…, factor_exposures=…)` now supports all three modes
+  (`pre_target`, `per_round_gradient`, `split_penalty`) with the same surface
+  as the single-output `GBMRegressor` / `GBMRanker`. New
+  `effective_neutralization_config(params)` helper (in
+  `crates/engine/src/joint.rs`) mirrors v0.10.5's `effective_dro_config`:
+  returns `Some(cfg)` only when the config is non-inert. Both growth paths
+  AND the artifact serializer consult this helper. New
+  `ModelSectionKind::NeutralizationMetadata = 14` records the active config
+  in the artifact (metadata only). `pre_target` requires every per-output
+  objective to be `squared_error`; ranking objectives must use the other two
+  modes. `split_penalty` generalizes the single-output K-output factor-load
+  formula via the new `compute_multi_output_factor_split_penalty` helper in
+  `shared_histogram.rs`. Byte-equivalent to v0.10.5 when neutralization is
+  inert; pinned by `joint_neutralization_inert_configs_match_v0_10_5_byte_for_byte`.
 
 ### v0.10.5
 
