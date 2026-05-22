@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.10.5 (2026-05-21)
+## v0.10.5 (2026-05-22)
 
 ### Joint trainer: DRO leaves
 
