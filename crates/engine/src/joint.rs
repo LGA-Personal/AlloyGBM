@@ -268,6 +268,16 @@ fn effective_neutralization_config(
     if cfg.kind == alloygbm_core::NeutralizationKind::None {
         return None;
     }
+    // `SplitPenalty` with `split_penalty == 0` is behaviorally identical to
+    // `None` — the per-candidate penalty collapses to 0 — so treat it as inert.
+    // This mirrors v0.10.5's `effective_dro_config` collapsing radius=0 to None
+    // and preserves byte-equivalence with v0.10.5 fits when the penalty is off.
+    // (PreTarget and PerRoundGradient don't have an analogous "off" knob —
+    // ridge_lambda is a regularization hyperparameter, not an activation
+    // switch — so they only collapse on `kind == None`.)
+    if cfg.kind == alloygbm_core::NeutralizationKind::SplitPenalty && cfg.split_penalty == 0.0 {
+        return None;
+    }
     Some(cfg)
 }
 
@@ -2750,6 +2760,69 @@ mod tests {
         assert!(
             err.contains("squared_error") || err.contains("pre_target"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn joint_neutralization_inert_configs_match_v0_10_5_byte_for_byte() {
+        // A fit with neutralization_config=None (or kind=None, or
+        // SplitPenalty with penalty=0) must produce byte-identical artifact
+        // bytes to a fit without any v0.10.6 wiring. Proves the new code paths
+        // are zero-cost when inactive.
+        use alloygbm_core::{FactorNeutralizationConfig, NeutralizationKind};
+        let row_count = 16usize;
+        let feature_count = 2usize;
+        let mut bins: Vec<u8> = Vec::with_capacity(row_count * feature_count);
+        for i in 0..row_count {
+            bins.push((i % 4) as u8);
+            bins.push(((i / 4) % 4) as u8);
+        }
+        let binned = BinnedMatrix::new(row_count, feature_count, 4, bins).expect("binned");
+        let t0: Vec<f32> = (0..row_count).map(|i| i as f32 * 0.2).collect();
+        let t1: Vec<f32> = (0..row_count).map(|i| (i as f32) * 0.3).collect();
+
+        let fit = |cfg: Option<FactorNeutralizationConfig>| -> Vec<u8> {
+            let params = TrainParams {
+                neutralization_config: cfg,
+                ..TrainParams::default()
+            };
+            fit_joint_multi_output_with_warm_start(
+                &params,
+                feature_count,
+                &binned,
+                &[t0.clone(), t1.clone()],
+                None,
+                &[JointObjective::SquaredError, JointObjective::SquaredError],
+                3,
+                &[],
+                None,
+                None,
+            )
+            .expect("fit")
+            .model
+            .to_artifact_bytes()
+            .expect("encode")
+        };
+
+        let baseline = fit(None);
+        let with_none_kind = fit(Some(FactorNeutralizationConfig {
+            kind: NeutralizationKind::None,
+            ridge_lambda: 1e-6,
+            split_penalty: 0.0,
+        }));
+        let with_zero_penalty = fit(Some(FactorNeutralizationConfig {
+            kind: NeutralizationKind::SplitPenalty,
+            ridge_lambda: 1e-6,
+            split_penalty: 0.0,
+        }));
+
+        assert_eq!(
+            baseline, with_none_kind,
+            "neutralization=None must match no-config byte-for-byte"
+        );
+        assert_eq!(
+            baseline, with_zero_penalty,
+            "split_penalty=0 must match no-config byte-for-byte"
         );
     }
 
