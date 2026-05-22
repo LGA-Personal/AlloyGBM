@@ -3971,18 +3971,26 @@ mod tests {
         };
 
         let standard = fit_joint_multi_output(
-            &params_standard, feature_count, &binned_matrix,
-            &[targets_0.clone(), targets_1.clone()], None,
+            &params_standard,
+            feature_count,
+            &binned_matrix,
+            &[targets_0.clone(), targets_1.clone()],
+            None,
             &[JointObjective::SquaredError, JointObjective::SquaredError],
             4,
-        ).expect("standard fit");
+        )
+        .expect("standard fit");
 
         let dro_zero = fit_joint_multi_output(
-            &params_dro_zero, feature_count, &binned_matrix,
-            &[targets_0.clone(), targets_1.clone()], None,
+            &params_dro_zero,
+            feature_count,
+            &binned_matrix,
+            &[targets_0.clone(), targets_1.clone()],
+            None,
             &[JointObjective::SquaredError, JointObjective::SquaredError],
             4,
-        ).expect("dro radius=0 fit");
+        )
+        .expect("dro radius=0 fit");
 
         // Byte-equivalence: identical artifact bytes prove identical trees.
         let a = standard.model.to_artifact_bytes().expect("ser std");
