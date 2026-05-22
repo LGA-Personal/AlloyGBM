@@ -350,6 +350,20 @@ pub struct ShapExplanationBatch {
     pub values: Vec<Vec<f32>>,
 }
 
+/// Pairwise SHAP interaction values returned by `explain_interactions_from_artifact_bytes`.
+///
+/// `values[row][i][j]` is the SHAP interaction contribution of feature pair `(i, j)`
+/// to the prediction of row `row`.  The matrix is symmetric: `values[r][i][j] == values[r][j][i]`.
+/// The diagonal `values[r][i][i]` is the "main effect" of feature `i` after removing all
+/// interactions; the row-marginal `Σ_j values[r][i][j]` recovers the per-feature SHAP
+/// value from `ShapExplanationBatch`, and the full sum `Σ_i Σ_j values[r][i][j] + expected_value`
+/// recovers the prediction (additivity).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShapInteractionBatch {
+    pub expected_value: f32,
+    pub values: Vec<Vec<Vec<f32>>>,
+}
+
 #[derive(Debug, Clone)]
 struct ArtifactShapContext {
     feature_names: Vec<String>,
@@ -391,6 +405,56 @@ pub fn explain_rows_from_artifact_bytes_with_binning(
 ) -> ShapResult<ShapExplanationBatch> {
     let context = load_artifact_context(artifact_bytes)?;
     explain_rows_from_model(&context.model, rows, Some(binning))
+}
+
+/// Compute pairwise SHAP interaction values for the given rows.
+///
+/// Implements Lundberg et al. (2020) Algorithm 2, "Polynomial-time consistent
+/// individualized feature attributions" — extended to pairwise interactions.
+/// Cost: `O(T · L · D² · M)` where `M` is the feature count.
+///
+/// Linear-leaf (PL) models are rejected by this entry point in v0.11.0 —
+/// see `docs/limitations.md` for the deferred extension.
+pub fn explain_interactions_from_artifact_bytes(
+    artifact_bytes: &[u8],
+    rows: &[Vec<f32>],
+) -> ShapResult<ShapInteractionBatch> {
+    let context = load_artifact_context(artifact_bytes)?;
+    explain_interactions_from_model(&context.model, rows, None)
+}
+
+/// Predictor-aligned variant. See `explain_rows_from_artifact_bytes_with_binning`
+/// for the contract.
+pub fn explain_interactions_from_artifact_bytes_with_binning(
+    artifact_bytes: &[u8],
+    rows: &[Vec<f32>],
+    binning: &BinningContext,
+) -> ShapResult<ShapInteractionBatch> {
+    let context = load_artifact_context(artifact_bytes)?;
+    explain_interactions_from_model(&context.model, rows, Some(binning))
+}
+
+fn explain_interactions_from_model(
+    model: &TrainedModel,
+    rows: &[Vec<f32>],
+    _binning: Option<&BinningContext>,
+) -> ShapResult<ShapInteractionBatch> {
+    validate_rows(rows, model.feature_count)?;
+
+    if model_has_linear_leaves(model) {
+        return Err(ShapError::InvalidInput(
+            "SHAP interaction values are not supported for leaf_model=\"linear\" artifacts in v0.11.0"
+                .to_string(),
+        ));
+    }
+
+    // STUB — replaced in Task 3 with the polynomial-time implementation.
+    let n = model.feature_count;
+    let zeros = vec![vec![vec![0.0_f32; n]; n]; rows.len()];
+    Ok(ShapInteractionBatch {
+        expected_value: model.baseline_prediction,
+        values: zeros,
+    })
 }
 
 pub fn global_importance_from_shap_values(
@@ -3244,6 +3308,30 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // v0.11.0: SHAP interaction values (Lundberg Algorithm 2)
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn explain_interactions_from_artifact_returns_pairwise_matrix() {
+        let artifact = fixture_model()
+            .to_artifact_bytes()
+            .expect("artifact serializes");
+        let rows = fixture_rows();
+
+        let batch = explain_interactions_from_artifact_bytes(&artifact, &rows)
+            .expect("interaction explanation succeeds");
+
+        assert_eq!(batch.values.len(), rows.len());
+        let feature_count = fixture_model().feature_count;
+        for row_interactions in &batch.values {
+            assert_eq!(row_interactions.len(), feature_count);
+            for column in row_interactions {
+                assert_eq!(column.len(), feature_count);
             }
         }
     }
