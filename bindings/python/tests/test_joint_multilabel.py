@@ -940,3 +940,82 @@ def test_joint_exposures_without_neutralization_rejected():
     with pytest.raises(Exception) as exc:
         m.fit(X, y, factor_exposures=fe)
     assert "neutralization='none'" in str(exc.value)
+
+
+def test_joint_per_round_gradient_with_morphboost():
+    """neutralization composes with training_mode='morph'."""
+    rng = np.random.default_rng(70)
+    X = rng.standard_normal((24, 3)).astype(np.float32)
+    y = rng.standard_normal((24, 2)).astype(np.float32)
+    fe = rng.standard_normal((24, 1)).astype(np.float32)
+    m = MultiLabelGBMRanker(
+        n_estimators=3,
+        multi_label_mode="joint",
+        ranking_objective="squared_error",
+        neutralization="per_round_gradient",
+        training_mode="morph",
+    )
+    m.fit(X, y, factor_exposures=fe)
+    preds = m.predict(X)
+    assert preds.shape == (24, 2)
+    assert np.all(np.isfinite(preds))
+
+
+def test_joint_per_round_gradient_with_dro():
+    """neutralization composes with leaf_solver='dro'."""
+    rng = np.random.default_rng(71)
+    X = rng.standard_normal((24, 3)).astype(np.float32)
+    y = rng.standard_normal((24, 2)).astype(np.float32)
+    fe = rng.standard_normal((24, 1)).astype(np.float32)
+    m = MultiLabelGBMRanker(
+        n_estimators=3,
+        multi_label_mode="joint",
+        ranking_objective="squared_error",
+        neutralization="per_round_gradient",
+        leaf_solver="dro",
+        dro_radius=0.2,
+    )
+    m.fit(X, y, factor_exposures=fe)
+    assert m.predict(X).shape == (24, 2)
+
+
+def test_joint_per_round_gradient_with_dart():
+    """neutralization composes with boosting_mode='dart'."""
+    rng = np.random.default_rng(72)
+    X = rng.standard_normal((32, 3)).astype(np.float32)
+    y = rng.standard_normal((32, 2)).astype(np.float32)
+    fe = rng.standard_normal((32, 1)).astype(np.float32)
+    m = MultiLabelGBMRanker(
+        n_estimators=4,
+        multi_label_mode="joint",
+        ranking_objective="squared_error",
+        neutralization="per_round_gradient",
+        boosting_mode="dart",
+        dart_drop_rate=0.2,
+        dart_max_drop=2,
+    )
+    m.fit(X, y, factor_exposures=fe)
+    assert m.predict(X).shape == (32, 2)
+
+
+def test_joint_per_round_gradient_with_warm_start():
+    """neutralization composes with warm-start (same exposures both fits)."""
+    rng = np.random.default_rng(73)
+    X = rng.standard_normal((24, 3)).astype(np.float32)
+    y = rng.standard_normal((24, 2)).astype(np.float32)
+    fe = rng.standard_normal((24, 1)).astype(np.float32)
+    first = MultiLabelGBMRanker(
+        n_estimators=2,
+        multi_label_mode="joint",
+        ranking_objective="squared_error",
+        neutralization="per_round_gradient",
+    ).fit(X, y, factor_exposures=fe)
+    second = MultiLabelGBMRanker(
+        n_estimators=2,
+        multi_label_mode="joint",
+        ranking_objective="squared_error",
+        neutralization="per_round_gradient",
+        init_model=first,
+        warm_start=True,
+    ).fit(X, y, factor_exposures=fe)
+    assert second.predict(X).shape == (24, 2)
