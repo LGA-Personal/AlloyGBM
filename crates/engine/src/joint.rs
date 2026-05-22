@@ -28,8 +28,8 @@ use crate::{
     TrainedStump, XeNDCGObjective, encode_tree_node_id,
 };
 use alloygbm_core::{
-    BinnedMatrix, GradientPair, LeafValue, MISSING_BIN_U8, ModelMetadata, NodeStats,
-    SplitCandidate, TrainParams, TreeGrowth,
+    BinnedMatrix, GradientPair, LeafSolverKind, LeafValue, MISSING_BIN_U8, ModelMetadata,
+    NodeStats, SplitCandidate, TrainParams, TreeGrowth,
 };
 use std::collections::HashMap;
 
@@ -183,6 +183,31 @@ fn bitset_bytes_to_u64(bytes: &[u8]) -> u64 {
         out |= (byte as u64) << (byte_idx * 8);
     }
     out
+}
+
+/// Returns the effective DRO config for joint training. Returns
+/// `Some(&cfg)` only when DRO is genuinely active — i.e. the user
+/// requested `leaf_solver = Dro` AND the radius is strictly positive.
+///
+/// This gates against the "raw TrainParams with `dro_config = Some(...)`
+/// but `leaf_solver = Standard`" case that the Python bridge already
+/// avoids but the public Rust joint API does not (it doesn't call
+/// `validate_train_params`). Mirrors the single-output trainer's
+/// behavior post-validation, where the same inconsistency is rejected
+/// at `validate_train_params` time.
+///
+/// Note `radius = 0.0` collapses to `None` even when `leaf_solver = Dro`,
+/// preserving byte-equivalence between standard fits and DRO-with-radius-0
+/// fits (pinned by `joint_dro_radius_zero_matches_standard_byte_for_byte`).
+fn effective_dro_config(params: &TrainParams) -> Option<&alloygbm_core::DroConfig> {
+    if params.leaf_solver != LeafSolverKind::Dro {
+        return None;
+    }
+    let cfg = params.dro_config.as_ref()?;
+    if cfg.radius <= 0.0 {
+        return None;
+    }
+    Some(cfg)
 }
 
 /// Walk every row through one tree's stumps and accumulate
@@ -735,7 +760,7 @@ fn build_joint_round_inner(
                         g_sq_sum,
                         row_count,
                         params.lambda_l1,
-                        params.dro_config.as_ref(),
+                        effective_dro_config(params),
                     );
                     out[k] = -g_eff / (h_sum + lambda_l2 + crate::LEAF_EPSILON);
                 }
@@ -1112,7 +1137,7 @@ fn build_joint_round_leafwise(
                         g_sq_sum,
                         row_count,
                         params.lambda_l1,
-                        params.dro_config.as_ref(),
+                        effective_dro_config(params),
                     );
                     out[k] = -g_eff / (h_sum + lambda_l2 + crate::LEAF_EPSILON);
                 }
@@ -4092,5 +4117,79 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn joint_standard_solver_with_dro_config_is_a_no_op() {
+        // Direct Rust callers can construct TrainParams with the mismatched
+        // combination `leaf_solver=Standard, dro_config=Some(...)`. This must
+        // produce standard leaves (the dro_config is ignored), matching the
+        // single-output trainer's post-validation behavior. Reviewer R1+R2 fix.
+        use alloygbm_core::{DroConfig, DroMetric, LeafSolverKind};
+
+        let n_rows = 200;
+        let feature_count = 1;
+        let targets_0: Vec<f32> = (0..n_rows)
+            .map(|i| if i < n_rows / 2 { -1.0 } else { 1.0 })
+            .collect();
+        let targets_1: Vec<f32> = targets_0.iter().map(|&t| t * 2.0).collect();
+        let bins: Vec<u8> = (0..n_rows).map(|i| (i % 8) as u8).collect();
+        let binned_matrix =
+            BinnedMatrix::new(n_rows, feature_count, /*max_bin=*/ 7, bins).expect("bm");
+
+        let params_standard = TrainParams {
+            seed: 7,
+            max_depth: 2,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            learning_rate: 0.3,
+            leaf_solver: LeafSolverKind::Standard,
+            dro_config: None,
+            ..TrainParams::default()
+        };
+
+        // Mismatched: Standard solver but with a populated dro_config.
+        // Pre-fix, this incorrectly applied DRO shrinkage. Post-fix, it must
+        // be byte-equivalent to plain standard.
+        let params_mismatched = TrainParams {
+            leaf_solver: LeafSolverKind::Standard,
+            dro_config: Some(DroConfig {
+                radius: 0.5,
+                metric: DroMetric::Wasserstein,
+            }),
+            ..params_standard.clone()
+        };
+
+        let standard = fit_joint_multi_output(
+            &params_standard,
+            feature_count,
+            &binned_matrix,
+            &[targets_0.clone(), targets_1.clone()],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            3,
+        )
+        .expect("standard fit");
+
+        let mismatched = fit_joint_multi_output(
+            &params_mismatched,
+            feature_count,
+            &binned_matrix,
+            &[targets_0.clone(), targets_1.clone()],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            3,
+        )
+        .expect("mismatched fit");
+
+        let a = standard.model.to_artifact_bytes().expect("ser std");
+        let b = mismatched
+            .model
+            .to_artifact_bytes()
+            .expect("ser mismatched");
+        assert_eq!(
+            a, b,
+            "leaf_solver=Standard must ignore dro_config (gate prevents inconsistent state)"
+        );
     }
 }
