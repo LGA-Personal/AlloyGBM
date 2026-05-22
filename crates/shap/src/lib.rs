@@ -3773,6 +3773,74 @@ mod tests {
     }
 
     #[test]
+    fn tree_shap_interactions_additivity_holds() {
+        let artifact = fixture_model()
+            .to_artifact_bytes()
+            .expect("artifact serializes");
+        let rows = fixture_rows();
+        let batch =
+            explain_interactions_from_artifact_bytes(&artifact, &rows).expect("batch");
+        let model = fixture_model();
+        for (row_idx, row) in rows.iter().enumerate() {
+            let matrix = &batch.values[row_idx];
+            let reconstructed: f32 = matrix.iter().map(|r| r.iter().sum::<f32>()).sum::<f32>()
+                + batch.expected_value;
+            let predicted = local_path_predict(&model, row, None);
+            let tol = additivity_tolerance(predicted);
+            assert!(
+                (reconstructed - predicted).abs() < tol,
+                "row={row_idx} reconstructed={reconstructed} predicted={predicted}"
+            );
+        }
+    }
+
+    #[test]
+    fn tree_shap_interactions_row_marginal_equals_per_feature_shap() {
+        let artifact = fixture_model()
+            .to_artifact_bytes()
+            .expect("artifact serializes");
+        let rows = fixture_rows();
+        let pairwise =
+            explain_interactions_from_artifact_bytes(&artifact, &rows).expect("pairwise");
+        let per_feature =
+            explain_rows_from_artifact_bytes(&artifact, &rows).expect("per-feature");
+
+        let feature_count = fixture_model().feature_count;
+        for row_idx in 0..rows.len() {
+            for i in 0..feature_count {
+                let marginal: f32 = pairwise.values[row_idx][i].iter().sum();
+                let phi = per_feature.values[row_idx][i];
+                assert!(
+                    (marginal - phi).abs() < 1e-4,
+                    "row={row_idx} i={i} marginal={marginal} phi={phi}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tree_shap_interactions_matrix_is_symmetric() {
+        let artifact = fixture_model()
+            .to_artifact_bytes()
+            .expect("artifact serializes");
+        let rows = fixture_rows();
+        let batch =
+            explain_interactions_from_artifact_bytes(&artifact, &rows).expect("batch");
+        for row_matrix in &batch.values {
+            for i in 0..row_matrix.len() {
+                for j in 0..row_matrix.len() {
+                    let a = row_matrix[i][j];
+                    let b = row_matrix[j][i];
+                    assert!(
+                        (a - b).abs() < 1e-5,
+                        "symmetry: a[{i}][{j}]={a} a[{j}][{i}]={b}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn tree_shap_interactions_match_brute_force_on_fixture() {
         let artifact = fixture_model()
             .to_artifact_bytes()
