@@ -361,6 +361,11 @@ class MultiLabelGBMRanker:
         "balance_penalty",
         "lr_schedule",
         "lr_warmup_frac",
+        # v0.10.5: joint DRO leaves (Wasserstein-radius leaf shrinkage).
+        # Mirrors GBMRegressor / GBMRanker's leaf_solver kwargs.
+        "leaf_solver",
+        "dro_radius",
+        "dro_metric",
     })
 
     @staticmethod
@@ -657,6 +662,11 @@ class MultiLabelGBMRanker:
             # `None` means non-morph training (the bridge ignores all
             # other morph_* kwargs in that case).
             morph_config=_build_joint_morph_config(kw),
+            # v0.10.5: joint DRO leaves. Defaults match the PyO3 bridge
+            # defaults (which themselves match single-output train_python).
+            leaf_solver=str(kw.get("leaf_solver", "standard")),
+            dro_radius=float(kw.get("dro_radius", 0.05)),
+            dro_metric=str(kw.get("dro_metric", "wasserstein")),
         )
 
         self._joint_artifact_bytes = bytes(artifact)

@@ -1,7 +1,49 @@
 Release and platform policy
 ===========================
 
-AlloyGBM ``0.10.4`` release notes and platform policy.
+AlloyGBM ``0.10.5`` release notes and platform policy.
+
+What's new in 0.10.5
+--------------------
+
+Closes the joint DRO leaves follow-up from v0.10.4.
+``MultiLabelGBMRanker(multi_label_mode="joint", leaf_solver="dro",
+dro_radius=…, dro_metric="wasserstein")`` now applies
+Wasserstein-distributionally-robust leaf values on the joint
+multi-output trainer, mirroring ``GBMRegressor`` / ``GBMRanker``'s
+single-output leaf solver. Default behaviour for every existing
+user-facing API remains byte-identical to v0.10.4 when DRO is not
+opted into.
+
+**Joint DRO leaves:**
+routes the K-output Newton-Raphson leaf step through
+``alloygbm_core::leaf_effective_gradient`` (the same helper used by
+single-output ``GBMRegressor`` / ``GBMRanker`` since v0.6.x). Applied
+in-build inside ``build_joint_round_inner``'s ``leaf_values`` closure
+and ``build_joint_round_leafwise``'s per-output leaf computation — row
+indices are already in scope at leaf-computation time. DRO is leaf-only:
+split-gain dispatch still uses the standard K-output sum-of-XGBoost-gains
+(multi-output histogram doesn't carry per-bin ``grad_sq``; adding it would
+cost ~1.5× joint-round memory — split-time DRO is deferred pending
+benchmark evidence).
+
+Three new kwargs in ``_JOINT_SUPPORTED_KWARGS``:
+
+- ``leaf_solver`` — ``"standard"`` (default) or ``"dro"``
+- ``dro_radius`` — float ≥ 0; ``0.0`` collapses to standard byte-for-byte
+- ``dro_metric`` — ``"wasserstein"`` (only supported value in v0.10.5)
+
+Works under both ``tree_growth="level"`` and ``tree_growth="leaf"``, and
+composes with MorphBoost (``training_mode="morph"``) and DART/GOSS
+boosting modes. Byte-equivalent to v0.10.4 when ``lambda_l1 == 0`` AND
+(``dro_config.is_none()`` OR ``dro_config.radius == 0.0``); pinned by
+``joint_dro_radius_zero_matches_standard_byte_for_byte`` (cargo) and
+``test_joint_dro_radius_zero_byte_equivalent_to_standard`` (pytest).
+
+**Deferred to v0.10.6:**
+joint factor neutralization (``neutralization`` + ``factor_exposures``).
+Remains in ``docs/limitations.md`` Limitation 2 with explicit version
+marker.
 
 What's new in 0.10.4
 --------------------
@@ -9,8 +51,9 @@ What's new in 0.10.4
 Adds MorphBoost (Kriuk 2025, arXiv:2511.13234) to the joint multi-output
 trainer used by ``MultiLabelGBMRanker(multi_label_mode="joint")``. This
 is the first of three deferred items from ``docs/limitations.md``
-Limitation 2 to ship; DRO leaves and factor neutralization on the joint
-trainer land in v0.10.5 and v0.10.6 respectively. Default behaviour for
+Limitation 2 to ship; DRO leaves landed in v0.10.5 and factor
+neutralization on the joint trainer is tracked for v0.10.6. Default
+behaviour for
 every existing user-facing API remains byte-identical to v0.10.3 when
 MorphBoost is not opted into.
 
@@ -56,10 +99,10 @@ horizon and resuming with ``n_estimators=4`` cannot retroactively
 re-scale them. The EMA continuity is the practical guarantee. This
 mirrors the single-output MorphBoost warm-start behavior.
 
-**Deferred to v0.10.5 / v0.10.6:**
-joint DRO leaves (``leaf_solver="dro"``) and joint factor
-neutralization (``neutralization`` + ``factor_exposures``). Both remain
-in ``docs/limitations.md`` Limitation 2 with explicit version markers.
+**Deferred to v0.10.5 / v0.10.6 (from v0.10.4):**
+joint DRO leaves (``leaf_solver="dro"``) — shipped in v0.10.5 — and
+joint factor neutralization (``neutralization`` + ``factor_exposures``)
+— tracked for v0.10.6. See ``docs/limitations.md`` Limitation 2.
 
 What's new in 0.10.3
 --------------------

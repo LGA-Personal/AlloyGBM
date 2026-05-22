@@ -689,3 +689,104 @@ def test_joint_morph_changes_predictions_vs_standard():
     assert not np.allclose(p_std, p_mph, atol=1e-4), (
         "MorphBoost predictions should differ from standard predictions"
     )
+
+
+def test_joint_dro_changes_predictions_vs_standard():
+    """v0.10.5: leaf_solver='dro' must produce different predictions than
+    leaf_solver='standard' on the same multi-label data."""
+    rng = np.random.default_rng(7)
+    X = rng.normal(size=(64, 4)).astype(np.float32)
+    y = np.column_stack([
+        rng.integers(0, 2, size=64),
+        rng.integers(0, 2, size=64),
+    ]).astype(np.float32)
+    group = np.array([8] * 8, dtype=np.int64)  # 8 groups of 8 rows
+
+    common = dict(
+        n_estimators=5,
+        learning_rate=0.3,
+        max_depth=3,
+        seed=11,
+        multi_label_mode="joint",
+    )
+
+    m_std = MultiLabelGBMRanker(**common, leaf_solver="standard")
+    m_std.fit(X, y, group=group)
+    p_std = m_std.predict(X)
+
+    m_dro = MultiLabelGBMRanker(
+        **common, leaf_solver="dro", dro_radius=0.5, dro_metric="wasserstein",
+    )
+    m_dro.fit(X, y, group=group)
+    p_dro = m_dro.predict(X)
+
+    assert p_std.shape == p_dro.shape
+    assert not np.allclose(p_std, p_dro), (
+        "DRO leaves should produce different multi-label predictions than standard"
+    )
+
+
+def test_joint_dro_radius_zero_byte_equivalent_to_standard():
+    """DRO with radius=0 collapses to standard leaves — predictions must
+    match exactly."""
+    rng = np.random.default_rng(3)
+    X = rng.normal(size=(32, 3)).astype(np.float32)
+    y = rng.integers(0, 2, size=(32, 2)).astype(np.float32)
+    group = np.array([4] * 8, dtype=np.int64)
+
+    common = dict(
+        n_estimators=3,
+        learning_rate=0.3,
+        seed=5,
+        multi_label_mode="joint",
+    )
+
+    m_std = MultiLabelGBMRanker(**common, leaf_solver="standard")
+    m_std.fit(X, y, group=group)
+
+    m_dro = MultiLabelGBMRanker(
+        **common, leaf_solver="dro", dro_radius=0.0, dro_metric="wasserstein",
+    )
+    m_dro.fit(X, y, group=group)
+
+    np.testing.assert_allclose(m_std.predict(X), m_dro.predict(X), rtol=0, atol=0)
+
+
+def test_joint_dro_rejects_invalid_metric():
+    """dro_metric must be 'wasserstein'. Anything else raises."""
+    X = np.array([[1.0], [2.0], [3.0], [4.0]], dtype=np.float32)
+    y = np.array([[0, 1], [1, 0], [0, 1], [1, 0]], dtype=np.float32)
+
+    m = MultiLabelGBMRanker(
+        n_estimators=2,
+        multi_label_mode="joint",
+        leaf_solver="dro",
+        dro_radius=0.5,
+        dro_metric="kl-divergence",  # invalid
+    )
+    with pytest.raises((ValueError, Exception)):
+        m.fit(X, y, group=[2, 2])
+
+
+def test_joint_dro_works_with_morphboost():
+    """DRO leaves + MorphBoost LR/shrinkage compose without error and
+    produce finite predictions."""
+    rng = np.random.default_rng(13)
+    X = rng.normal(size=(48, 3)).astype(np.float32)
+    y = rng.integers(0, 2, size=(48, 2)).astype(np.float32)
+    group = np.array([6] * 8, dtype=np.int64)
+
+    m = MultiLabelGBMRanker(
+        n_estimators=4,
+        learning_rate=0.3,
+        max_depth=3,
+        seed=17,
+        multi_label_mode="joint",
+        training_mode="morph",
+        leaf_solver="dro",
+        dro_radius=0.3,
+        dro_metric="wasserstein",
+    )
+    m.fit(X, y, group=group)
+    p = m.predict(X)
+    assert np.isfinite(p).all()

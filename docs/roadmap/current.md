@@ -4,11 +4,20 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
+The `0.10.5` release closes the joint DRO leaves follow-up from
+v0.10.4: `MultiLabelGBMRanker(multi_label_mode="joint",
+leaf_solver="dro")` now routes per-output leaf values through
+`alloygbm_core::leaf_effective_gradient` (the same helper the
+single-output trainers have used since v0.6.x). Factor
+neutralization on the joint trainer remains tracked for v0.10.6.
+Default behaviour for every existing user-facing API remains
+byte-identical to v0.10.4 when DRO is not opted into.
+
 The `0.10.4` release adds MorphBoost to the joint multi-output
 trainer used by `MultiLabelGBMRanker(multi_label_mode="joint")` —
 the first of three deferred joint-path follow-ups from
 `docs/limitations.md` Limitation 2. DRO leaves on the joint
-trainer are tracked for v0.10.5; factor neutralization on the
+trainer shipped in v0.10.5; factor neutralization on the
 joint trainer is tracked for v0.10.6. Default behaviour for every
 existing user-facing API remains byte-identical to v0.10.3 when
 MorphBoost is not opted into.
@@ -48,10 +57,49 @@ MorphBoost is not opted into.
 
 ### v0.10.x follow-ups (deferred)
 
-- **v0.10.5**: DRO leaves on the joint trainer
-  (`leaf_solver="dro"`). Per-output Wasserstein-style robust
-  Newton leaf solve, applied post-build via `core::leaf_effective_gradient`.
-  Requires `JointRoundResult` to carry per-stump child row indices.
+- **v0.10.6**: factor neutralization on the joint trainer
+  (`neutralization="pre_target" | "per_round_gradient" |
+  "split_penalty"` + `factor_exposures=`). The PyO3 bridge
+  currently rejects `factor_exposures` unconditionally under
+  `multi_label_mode="joint"`.
+
+## What Shipped In v0.10.5
+
+Closes the joint DRO leaves follow-up carved out of v0.10.4.
+Default behaviour for every existing user-facing API remains
+byte-identical to v0.10.4 when `leaf_solver="dro"` is not opted into
+(byte-equivalence is pinned at `lambda_l1 == 0` and
+`dro_config.radius == 0.0`).
+
+- **Joint DRO leaves (closes the v0.10.5 DRO follow-up):**
+  `MultiLabelGBMRanker(multi_label_mode="joint", leaf_solver="dro",
+  dro_radius=…, dro_metric="wasserstein")` routes the K-output
+  Newton-Raphson leaf step through `alloygbm_core::leaf_effective_gradient`
+  (the same helper used by single-output `GBMRegressor` / `GBMRanker`
+  since v0.6.x). Applied in-build inside `build_joint_round_inner`'s
+  `leaf_values` closure and `build_joint_round_leafwise`'s per-output
+  leaf computation — row indices are already in scope at
+  leaf-computation time; no separate post-build pass is required.
+  Accumulates `grad_sq_sum` alongside `grad_sum` per output.
+  Split-gain dispatch is unchanged (multi-output histogram doesn't
+  carry per-bin `grad_sq`; inflating it costs ~1.5× joint-round memory
+  which isn't justified before benchmark evidence). Composes with
+  MorphBoost (`training_mode="morph"`), DART, and GOSS boosting modes,
+  and works under both `tree_growth="level"` and `tree_growth="leaf"`.
+  Byte-equivalent to v0.10.4 when `lambda_l1 == 0` AND
+  (`dro_config.is_none()` OR `dro_config.radius == 0.0`); pinned by
+  `joint_dro_radius_zero_matches_standard_byte_for_byte` (cargo) and
+  `test_joint_dro_radius_zero_byte_equivalent_to_standard` (pytest).
+  `_JOINT_SUPPORTED_KWARGS` adds `leaf_solver`, `dro_radius`,
+  `dro_metric`.
+- **Joint DRO warm-start:** `JointWarmStartState` requires no new
+  fields — the DRO config flows through `TrainParams` which is already
+  threaded into `fit_joint_inner`, so warm-resumed fits with
+  `leaf_solver="dro"` automatically apply DRO leaf shrinkage to new
+  rounds with no additional bridge plumbing.
+
+### v0.10.x follow-ups (deferred)
+
 - **v0.10.6**: factor neutralization on the joint trainer
   (`neutralization="pre_target" | "per_round_gradient" |
   "split_penalty"` + `factor_exposures=`). The PyO3 bridge

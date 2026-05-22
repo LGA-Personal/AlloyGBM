@@ -28,8 +28,8 @@ use crate::{
     TrainedStump, XeNDCGObjective, encode_tree_node_id,
 };
 use alloygbm_core::{
-    BinnedMatrix, GradientPair, LeafValue, MISSING_BIN_U8, ModelMetadata, NodeStats,
-    SplitCandidate, TrainParams, TreeGrowth,
+    BinnedMatrix, DroMetadataPayload, GradientPair, LeafSolverKind, LeafValue, MISSING_BIN_U8,
+    ModelMetadata, NodeStats, SplitCandidate, TrainParams, TreeGrowth,
 };
 use std::collections::HashMap;
 
@@ -183,6 +183,31 @@ fn bitset_bytes_to_u64(bytes: &[u8]) -> u64 {
         out |= (byte as u64) << (byte_idx * 8);
     }
     out
+}
+
+/// Returns the effective DRO config for joint training. Returns
+/// `Some(&cfg)` only when DRO is genuinely active — i.e. the user
+/// requested `leaf_solver = Dro` AND the radius is strictly positive.
+///
+/// This gates against the "raw TrainParams with `dro_config = Some(...)`
+/// but `leaf_solver = Standard`" case that the Python bridge already
+/// avoids but the public Rust joint API does not (it doesn't call
+/// `validate_train_params`). Mirrors the single-output trainer's
+/// behavior post-validation, where the same inconsistency is rejected
+/// at `validate_train_params` time.
+///
+/// Note `radius = 0.0` collapses to `None` even when `leaf_solver = Dro`,
+/// preserving byte-equivalence between standard fits and DRO-with-radius-0
+/// fits (pinned by `joint_dro_radius_zero_matches_standard_byte_for_byte`).
+fn effective_dro_config(params: &TrainParams) -> Option<&alloygbm_core::DroConfig> {
+    if params.leaf_solver != LeafSolverKind::Dro {
+        return None;
+    }
+    let cfg = params.dro_config.as_ref()?;
+    if cfg.radius <= 0.0 {
+        return None;
+    }
+    Some(cfg)
 }
 
 /// Walk every row through one tree's stumps and accumulate
@@ -712,17 +737,32 @@ fn build_joint_round_inner(
             }
 
             // Compute K-output leaf values via Newton-Raphson per output.
+            // v0.10.5: route through `leaf_effective_gradient` so L1 and DRO
+            // leaf solvers are honored. When `lambda_l1 == 0` AND
+            // `dro_config == None`, this returns `g_sum` unchanged — so the
+            // v0.10.0–v0.10.4 behavior is preserved byte-for-byte for the
+            // default config.
             let leaf_values = |rows: &[u32]| -> Vec<f32> {
                 let mut out = vec![0.0_f32; n_outputs];
+                let row_count = rows.len() as u32;
                 for k in 0..n_outputs {
                     let mut g_sum = 0.0_f32;
                     let mut h_sum = 0.0_f32;
+                    let mut g_sq_sum = 0.0_f32;
                     for &row in rows {
                         let gp = grads_per_output[k][row as usize];
                         g_sum += gp.grad;
                         h_sum += gp.hess;
+                        g_sq_sum += gp.grad * gp.grad;
                     }
-                    out[k] = -g_sum / (h_sum + lambda_l2 + crate::LEAF_EPSILON);
+                    let g_eff = alloygbm_core::leaf_effective_gradient(
+                        g_sum,
+                        g_sq_sum,
+                        row_count,
+                        params.lambda_l1,
+                        effective_dro_config(params),
+                    );
+                    out[k] = -g_eff / (h_sum + lambda_l2 + crate::LEAF_EPSILON);
                 }
                 out
             };
@@ -1074,17 +1114,32 @@ fn build_joint_round_leafwise(
             }
 
             // K-output leaf values via Newton-Raphson per output.
+            // v0.10.5: route through `leaf_effective_gradient` so L1 and DRO
+            // leaf solvers are honored on the leaf-wise path too.  When
+            // `lambda_l1 == 0` AND `dro_config == None`, this returns
+            // `g_sum` unchanged — preserving byte-for-byte compatibility
+            // with the v0.10.0–v0.10.4 default config.
             let leaf_values = |rows: &[u32]| -> Vec<f32> {
                 let mut out = vec![0.0_f32; n_outputs];
+                let row_count = rows.len() as u32;
                 for k in 0..n_outputs {
                     let mut g_sum = 0.0_f32;
                     let mut h_sum = 0.0_f32;
+                    let mut g_sq_sum = 0.0_f32;
                     for &row in rows {
                         let gp = grads_per_output[k][row as usize];
                         g_sum += gp.grad;
                         h_sum += gp.hess;
+                        g_sq_sum += gp.grad * gp.grad;
                     }
-                    out[k] = -g_sum / (h_sum + lambda_l2 + crate::LEAF_EPSILON);
+                    let g_eff = alloygbm_core::leaf_effective_gradient(
+                        g_sum,
+                        g_sq_sum,
+                        row_count,
+                        params.lambda_l1,
+                        effective_dro_config(params),
+                    );
+                    out[k] = -g_eff / (h_sum + lambda_l2 + crate::LEAF_EPSILON);
                 }
                 out
             };
@@ -2022,7 +2077,7 @@ fn fit_joint_inner(
         objective: format!("joint_multi_output[{n_outputs}]"),
         native_categorical_feature_indices: Vec::new(),
         morph_metadata,
-        dro_metadata: None,
+        dro_metadata: effective_dro_config(params).map(|cfg| DroMetadataPayload { config: *cfg }),
         feature_baseline: None,
     };
 
@@ -3747,6 +3802,231 @@ mod tests {
     }
 
     #[test]
+    fn joint_dro_radius_nonzero_changes_leaves_vs_standard() {
+        // v0.10.5: DRO leaf solver on the level-wise joint path must produce
+        // different leaf values from standard Newton-Raphson when dro_config
+        // has a nonzero radius.  The two fits are otherwise identical
+        // (same seed, same data, same objectives).
+        use alloygbm_core::{DroConfig, DroMetric, LeafSolverKind};
+
+        let n_rows = 200;
+        let feature_count = 1;
+        let targets_0: Vec<f32> = (0..n_rows)
+            .map(|i| if i < n_rows / 2 { -1.0 } else { 1.0 })
+            .collect();
+        let targets_1: Vec<f32> = targets_0.iter().map(|&t| t * 2.0).collect();
+        let bins: Vec<u8> = (0..n_rows).map(|i| (i % 8) as u8).collect();
+        let binned_matrix =
+            BinnedMatrix::new(n_rows, feature_count, /*max_bin=*/ 7, bins).expect("bm");
+
+        // Baseline: standard leaves (default solver, no DRO).
+        let params_standard = TrainParams {
+            seed: 7,
+            max_depth: 2,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            learning_rate: 0.3,
+            leaf_solver: LeafSolverKind::Standard,
+            dro_config: None,
+            ..TrainParams::default()
+        };
+
+        // DRO: same params but with Wasserstein DRO radius=0.5.
+        let params_dro = TrainParams {
+            leaf_solver: LeafSolverKind::Dro,
+            dro_config: Some(DroConfig {
+                radius: 0.5,
+                metric: DroMetric::Wasserstein,
+            }),
+            ..params_standard.clone()
+        };
+
+        let standard = fit_joint_multi_output(
+            &params_standard,
+            feature_count,
+            &binned_matrix,
+            &[targets_0.clone(), targets_1.clone()],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            3,
+        )
+        .expect("standard fit succeeds");
+
+        let dro = fit_joint_multi_output(
+            &params_dro,
+            feature_count,
+            &binned_matrix,
+            &[targets_0.clone(), targets_1.clone()],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            3,
+        )
+        .expect("dro fit succeeds");
+
+        // DRO can alter residuals enough to change the set of accepted splits
+        // across rounds, so the stump count may legitimately differ.  What we
+        // require is that at least one stump in the overlapping prefix has
+        // different leaf values — or the counts differ (which is itself a sign
+        // that DRO changed the training trajectory).
+        let counts_differ = standard.model.stumps.len() != dro.model.stumps.len();
+        let any_leaf_diff = standard
+            .model
+            .stumps
+            .iter()
+            .zip(dro.model.stumps.iter())
+            .any(|(a, b)| {
+                let (la, ra) = a.multi_output_leaf_values.as_ref().unwrap();
+                let (lb, rb) = b.multi_output_leaf_values.as_ref().unwrap();
+                la != lb || ra != rb
+            });
+        assert!(
+            counts_differ || any_leaf_diff,
+            "DRO leaves should differ from standard leaves on the same data"
+        );
+    }
+
+    #[test]
+    fn joint_dro_with_leafwise_growth_changes_leaves() {
+        use alloygbm_core::{DroConfig, DroMetric, LeafSolverKind};
+
+        let n_rows = 200;
+        let feature_count = 1;
+        let targets_0: Vec<f32> = (0..n_rows)
+            .map(|i| if i < n_rows / 2 { -1.0 } else { 1.0 })
+            .collect();
+        let targets_1: Vec<f32> = targets_0.iter().map(|&t| t * 2.0).collect();
+        let bins: Vec<u8> = (0..n_rows).map(|i| (i % 8) as u8).collect();
+        let binned_matrix =
+            BinnedMatrix::new(n_rows, feature_count, /*max_bin=*/ 7, bins).expect("bm");
+
+        let params_standard = TrainParams {
+            seed: 7,
+            max_depth: 4,
+            max_leaves: Some(4),
+            tree_growth: TreeGrowth::Leaf,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            learning_rate: 0.3,
+            leaf_solver: LeafSolverKind::Standard,
+            dro_config: None,
+            ..TrainParams::default()
+        };
+
+        let params_dro = TrainParams {
+            leaf_solver: LeafSolverKind::Dro,
+            dro_config: Some(DroConfig {
+                radius: 0.5,
+                metric: DroMetric::Wasserstein,
+            }),
+            ..params_standard.clone()
+        };
+
+        let standard = fit_joint_multi_output(
+            &params_standard,
+            feature_count,
+            &binned_matrix,
+            &[targets_0.clone(), targets_1.clone()],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            3,
+        )
+        .expect("standard leafwise fit");
+
+        let dro = fit_joint_multi_output(
+            &params_dro,
+            feature_count,
+            &binned_matrix,
+            &[targets_0.clone(), targets_1.clone()],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            3,
+        )
+        .expect("dro leafwise fit");
+
+        let counts_differ = standard.model.stumps.len() != dro.model.stumps.len();
+        let any_leaf_diff = standard
+            .model
+            .stumps
+            .iter()
+            .zip(dro.model.stumps.iter())
+            .any(|(a, b)| {
+                let (la, ra) = a.multi_output_leaf_values.as_ref().unwrap();
+                let (lb, rb) = b.multi_output_leaf_values.as_ref().unwrap();
+                la != lb || ra != rb
+            });
+        assert!(
+            counts_differ || any_leaf_diff,
+            "DRO leaves should differ from standard leaves under leaf-wise growth"
+        );
+    }
+
+    #[test]
+    fn joint_dro_radius_zero_matches_standard_byte_for_byte() {
+        use alloygbm_core::{DroConfig, DroMetric, LeafSolverKind};
+
+        let n_rows = 200;
+        let feature_count = 1;
+        let targets_0: Vec<f32> = (0..n_rows)
+            .map(|i| if i < n_rows / 2 { -1.0 } else { 1.0 })
+            .collect();
+        let targets_1: Vec<f32> = targets_0.iter().map(|&t| t * 2.0).collect();
+        let bins: Vec<u8> = (0..n_rows).map(|i| (i % 8) as u8).collect();
+        let binned_matrix =
+            BinnedMatrix::new(n_rows, feature_count, /*max_bin=*/ 7, bins).expect("bm");
+
+        let params_standard = TrainParams {
+            seed: 7,
+            max_depth: 2,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            learning_rate: 0.3,
+            leaf_solver: LeafSolverKind::Standard,
+            dro_config: None,
+            ..TrainParams::default()
+        };
+
+        // DRO with radius=0 should collapse to standard byte-for-byte.
+        let params_dro_zero = TrainParams {
+            leaf_solver: LeafSolverKind::Dro,
+            dro_config: Some(DroConfig {
+                radius: 0.0,
+                metric: DroMetric::Wasserstein,
+            }),
+            ..params_standard.clone()
+        };
+
+        let standard = fit_joint_multi_output(
+            &params_standard,
+            feature_count,
+            &binned_matrix,
+            &[targets_0.clone(), targets_1.clone()],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            4,
+        )
+        .expect("standard fit");
+
+        let dro_zero = fit_joint_multi_output(
+            &params_dro_zero,
+            feature_count,
+            &binned_matrix,
+            &[targets_0.clone(), targets_1.clone()],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            4,
+        )
+        .expect("dro radius=0 fit");
+
+        // Byte-equivalence: identical artifact bytes prove identical trees.
+        let a = standard.model.to_artifact_bytes().expect("ser std");
+        let b = dro_zero.model.to_artifact_bytes().expect("ser dro0");
+        assert_eq!(
+            a, b,
+            "DRO with radius=0 must produce byte-identical artifact to standard leaves"
+        );
+    }
+
+    #[test]
     fn joint_warm_start_continues_from_prior_state() {
         let n_rows = 80;
         let feature_count = 2;
@@ -3837,5 +4117,173 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn joint_standard_solver_with_dro_config_is_a_no_op() {
+        // Direct Rust callers can construct TrainParams with the mismatched
+        // combination `leaf_solver=Standard, dro_config=Some(...)`. This must
+        // produce standard leaves (the dro_config is ignored), matching the
+        // single-output trainer's post-validation behavior. Reviewer R1+R2 fix.
+        use alloygbm_core::{DroConfig, DroMetric, LeafSolverKind};
+
+        let n_rows = 200;
+        let feature_count = 1;
+        let targets_0: Vec<f32> = (0..n_rows)
+            .map(|i| if i < n_rows / 2 { -1.0 } else { 1.0 })
+            .collect();
+        let targets_1: Vec<f32> = targets_0.iter().map(|&t| t * 2.0).collect();
+        let bins: Vec<u8> = (0..n_rows).map(|i| (i % 8) as u8).collect();
+        let binned_matrix =
+            BinnedMatrix::new(n_rows, feature_count, /*max_bin=*/ 7, bins).expect("bm");
+
+        let params_standard = TrainParams {
+            seed: 7,
+            max_depth: 2,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            learning_rate: 0.3,
+            leaf_solver: LeafSolverKind::Standard,
+            dro_config: None,
+            ..TrainParams::default()
+        };
+
+        // Mismatched: Standard solver but with a populated dro_config.
+        // Pre-fix, this incorrectly applied DRO shrinkage. Post-fix, it must
+        // be byte-equivalent to plain standard.
+        let params_mismatched = TrainParams {
+            leaf_solver: LeafSolverKind::Standard,
+            dro_config: Some(DroConfig {
+                radius: 0.5,
+                metric: DroMetric::Wasserstein,
+            }),
+            ..params_standard.clone()
+        };
+
+        let standard = fit_joint_multi_output(
+            &params_standard,
+            feature_count,
+            &binned_matrix,
+            &[targets_0.clone(), targets_1.clone()],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            3,
+        )
+        .expect("standard fit");
+
+        let mismatched = fit_joint_multi_output(
+            &params_mismatched,
+            feature_count,
+            &binned_matrix,
+            &[targets_0.clone(), targets_1.clone()],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            3,
+        )
+        .expect("mismatched fit");
+
+        let a = standard.model.to_artifact_bytes().expect("ser std");
+        let b = mismatched
+            .model
+            .to_artifact_bytes()
+            .expect("ser mismatched");
+        assert_eq!(
+            a, b,
+            "leaf_solver=Standard must ignore dro_config (gate prevents inconsistent state)"
+        );
+    }
+
+    #[test]
+    fn joint_dro_nonzero_emits_dro_metadata() {
+        // R3: nonzero DRO fits must emit DroMetadata so artifacts are
+        // self-describing, matching single-output and multiclass DRO.
+        use alloygbm_core::{DroConfig, DroMetric, LeafSolverKind};
+
+        let n_rows = 100;
+        let feature_count = 1;
+        let targets_0: Vec<f32> = (0..n_rows)
+            .map(|i| if i < n_rows / 2 { -1.0 } else { 1.0 })
+            .collect();
+        let bins: Vec<u8> = (0..n_rows).map(|i| (i % 8) as u8).collect();
+        let binned_matrix = BinnedMatrix::new(n_rows, feature_count, 7, bins).expect("bm");
+
+        let params = TrainParams {
+            seed: 7,
+            max_depth: 2,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            learning_rate: 0.3,
+            leaf_solver: LeafSolverKind::Dro,
+            dro_config: Some(DroConfig {
+                radius: 0.5,
+                metric: DroMetric::Wasserstein,
+            }),
+            ..TrainParams::default()
+        };
+
+        let result = fit_joint_multi_output(
+            &params,
+            feature_count,
+            &binned_matrix,
+            &[targets_0.clone(), targets_0.clone()],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            2,
+        )
+        .expect("dro fit");
+
+        let meta = result
+            .model
+            .dro_metadata
+            .as_ref()
+            .expect("nonzero DRO must emit DroMetadata");
+        assert_eq!(meta.config.radius, 0.5);
+        assert_eq!(meta.config.metric, DroMetric::Wasserstein);
+    }
+
+    #[test]
+    fn joint_dro_radius_zero_omits_dro_metadata() {
+        // R3: radius=0 must keep dro_metadata = None to preserve byte
+        // equivalence with standard fits. Pinned alongside
+        // joint_dro_radius_zero_matches_standard_byte_for_byte.
+        use alloygbm_core::{DroConfig, DroMetric, LeafSolverKind};
+
+        let n_rows = 100;
+        let feature_count = 1;
+        let targets_0: Vec<f32> = (0..n_rows)
+            .map(|i| if i < n_rows / 2 { -1.0 } else { 1.0 })
+            .collect();
+        let bins: Vec<u8> = (0..n_rows).map(|i| (i % 8) as u8).collect();
+        let binned_matrix = BinnedMatrix::new(n_rows, feature_count, 7, bins).expect("bm");
+
+        let params = TrainParams {
+            seed: 7,
+            max_depth: 2,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            learning_rate: 0.3,
+            leaf_solver: LeafSolverKind::Dro,
+            dro_config: Some(DroConfig {
+                radius: 0.0,
+                metric: DroMetric::Wasserstein,
+            }),
+            ..TrainParams::default()
+        };
+
+        let result = fit_joint_multi_output(
+            &params,
+            feature_count,
+            &binned_matrix,
+            &[targets_0.clone(), targets_0.clone()],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            2,
+        )
+        .expect("dro radius=0 fit");
+
+        assert!(
+            result.model.dro_metadata.is_none(),
+            "radius=0 must omit dro_metadata to preserve byte-equivalence with standard"
+        );
     }
 }
