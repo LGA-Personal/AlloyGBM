@@ -537,6 +537,79 @@ pub fn find_best_multi_output_categorical_split(
     })
 }
 
+/// v0.10.6: derive the K-output Newton-Raphson left/right leaf K-vectors for
+/// a numeric (threshold-based) split from the multi-output histogram. Used by
+/// the joint trainer's `split_penalty` mode at gain-evaluation time to compute
+/// the factor-load penalty per candidate.
+///
+/// Returns `(leaf_left, leaf_right)` each of length `n_outputs`. Mirrors the
+/// closed-form leaf step used inside the joint trainer's `leaf_values` closure
+/// (sum bins 0..=threshold_bin into left, rest into right).
+pub fn derive_kvec_leaves_from_threshold_histogram(
+    histogram: &MultiOutputHistogram,
+    feature: usize,
+    threshold_bin: usize,
+    lambda_l2: f32,
+    eps: f32,
+) -> (Vec<f32>, Vec<f32>) {
+    let n_outputs = histogram.n_outputs;
+    let mut left = vec![0.0_f32; n_outputs];
+    let mut right = vec![0.0_f32; n_outputs];
+    for k in 0..n_outputs {
+        let (mut g_l, mut h_l) = (0.0_f32, 0.0_f32);
+        let (mut g_r, mut h_r) = (0.0_f32, 0.0_f32);
+        for b in 0..histogram.n_bins {
+            let g = histogram.data[histogram.idx(feature, b, k, HistComponent::Grad)];
+            let h = histogram.data[histogram.idx(feature, b, k, HistComponent::Hess)];
+            if b <= threshold_bin {
+                g_l += g;
+                h_l += h;
+            } else {
+                g_r += g;
+                h_r += h;
+            }
+        }
+        left[k] = -g_l / (h_l + lambda_l2 + eps);
+        right[k] = -g_r / (h_r + lambda_l2 + eps);
+    }
+    (left, right)
+}
+
+/// v0.10.6: same as `derive_kvec_leaves_from_threshold_histogram` but for the
+/// native-categorical split path — bin `cat` goes left iff bit `cat` of
+/// `left_bitset` is set, mirroring the partition rule in
+/// `find_best_multi_output_categorical_split`.
+pub fn derive_kvec_leaves_from_categorical_histogram(
+    histogram: &MultiOutputHistogram,
+    feature: usize,
+    left_bitset: u64,
+    num_categories: usize,
+    lambda_l2: f32,
+    eps: f32,
+) -> (Vec<f32>, Vec<f32>) {
+    let n_outputs = histogram.n_outputs;
+    let mut left = vec![0.0_f32; n_outputs];
+    let mut right = vec![0.0_f32; n_outputs];
+    for k in 0..n_outputs {
+        let (mut g_l, mut h_l) = (0.0_f32, 0.0_f32);
+        let (mut g_r, mut h_r) = (0.0_f32, 0.0_f32);
+        for cat in 0..num_categories.min(64) {
+            let g = histogram.data[histogram.idx(feature, cat, k, HistComponent::Grad)];
+            let h = histogram.data[histogram.idx(feature, cat, k, HistComponent::Hess)];
+            if (left_bitset >> cat) & 1 == 1 {
+                g_l += g;
+                h_l += h;
+            } else {
+                g_r += g;
+                h_r += h;
+            }
+        }
+        left[k] = -g_l / (h_l + lambda_l2 + eps);
+        right[k] = -g_r / (h_r + lambda_l2 + eps);
+    }
+    (left, right)
+}
+
 /// v0.10.6: K-output factor-load penalty for a candidate split on the joint
 /// multi-output trainer. Generalizes the single-output
 /// `factor_split_penalty_for_candidate` (in `crates/backend_cpu/src/lib.rs`)

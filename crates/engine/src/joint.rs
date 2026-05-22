@@ -210,6 +210,47 @@ fn effective_dro_config(params: &TrainParams) -> Option<&alloygbm_core::DroConfi
     Some(cfg)
 }
 
+/// v0.10.6: scan a node's row indices once and accumulate per-side per-factor
+/// exposure sums for a candidate split. Used by `split_penalty` mode to compute
+/// the factor-load penalty.
+///
+/// Missing rows (bin == `MISSING_BIN_U8`) are skipped because the
+/// `default_left` direction is decided AFTER the best split is selected (the
+/// joint trainer's "more rows wins" heuristic). Skipping them under-estimates
+/// the penalty by exactly the missing-row contribution to factor load; this is
+/// a deterministic conservative choice and matches the documented bias.
+fn accumulate_factor_sums_for_threshold(
+    binned: &BinnedMatrix,
+    exposures: &alloygbm_core::FactorExposureMatrix,
+    row_indices: &[u32],
+    feature: usize,
+    threshold_bin: u8,
+    cat_bitset: Option<u64>,
+) -> (Vec<f32>, Vec<f32>) {
+    let factor_count = exposures.factor_count;
+    let feature_count = binned.feature_count;
+    let mut left = vec![0.0_f32; factor_count];
+    let mut right = vec![0.0_f32; factor_count];
+    for &row in row_indices {
+        let bin = binned.bins[row as usize * feature_count + feature];
+        if bin == MISSING_BIN_U8 {
+            continue;
+        }
+        let goes_left = if let Some(bs) = cat_bitset {
+            bin < 64 && (bs & (1u64 << bin)) != 0
+        } else {
+            bin <= threshold_bin
+        };
+        let exposure_start = row as usize * factor_count;
+        let exposure_row = &exposures.values[exposure_start..exposure_start + factor_count];
+        let target = if goes_left { &mut left } else { &mut right };
+        for (s, e) in target.iter_mut().zip(exposure_row) {
+            *s += *e;
+        }
+    }
+    (left, right)
+}
+
 /// Return `Some(config)` only when factor neutralization is actually active
 /// for this fit. Inert configs (kind = None) collapse to `None`.
 ///
@@ -435,6 +476,7 @@ pub fn build_joint_round(
         round_index,
         sampled_root_rows,
         /*morph_ctx=*/ None,
+        /*factor_exposures=*/ None,
     )
 }
 
@@ -449,6 +491,7 @@ fn build_joint_round_inner(
     round_index: usize,
     sampled_root_rows: Option<&[u32]>,
     morph_ctx: Option<&JointMorphContext>,
+    factor_exposures: Option<&FactorExposureMatrix>,
 ) -> Result<JointRoundResult, String> {
     if grads_per_output.len() != n_outputs {
         return Err(format!(
@@ -486,6 +529,25 @@ fn build_joint_round_inner(
     let max_depth = params.max_depth.max(1) as usize;
     let min_rows_per_leaf = params.min_data_in_leaf.max(1) as usize;
     let lambda_l2 = params.lambda_l2;
+
+    // v0.10.6: split_penalty neutralization — when active, every candidate's
+    // gain is adjusted by a K-output factor-load penalty derived from the
+    // candidate's L/R leaf K-vectors and per-side factor sums. Inert configs
+    // (kind != SplitPenalty, or split_penalty == 0) leave the gain unchanged.
+    // Note: this path is opt-in; the no-op cost (one Option check per
+    // candidate) is negligible. The PyO3-only caller (`train_joint_*` from
+    // `bindings/python`) doesn't currently provide `factor_exposures`; future
+    // wiring in Task 11 will route them through.
+    let split_penalty_ctx: Option<(f32, &alloygbm_core::FactorExposureMatrix)> =
+        match (effective_neutralization_config(params), factor_exposures) {
+            (Some(cfg), Some(exposures))
+                if cfg.kind == alloygbm_core::NeutralizationKind::SplitPenalty
+                    && cfg.split_penalty > 0.0 =>
+            {
+                Some((cfg.split_penalty, exposures))
+            }
+            _ => None,
+        };
 
     // col_subsample (v0.10.2): per-tree feature mask, seeded by
     // `(params.seed, round_index)`. v0.10.2.1 fix: mixing the round index
@@ -665,17 +727,51 @@ fn build_joint_round_inner(
                             crate::LEAF_EPSILON,
                         )
                     };
-                    if let Some(cat_split) = cat_opt
-                        && cat_split.gain > best.map(|(_, _, g, _)| g).unwrap_or(0.0)
-                    {
-                        best = Some((feature, 0, cat_split.gain, Some(cat_split.left_bitset)));
+                    if let Some(cat_split) = cat_opt {
+                        // v0.10.6 split_penalty (categorical): subtract the
+                        // K-output factor-load penalty from the raw gain.
+                        let adj_gain = if let Some((factor_penalty, exposures)) = split_penalty_ctx
+                        {
+                            let (leaf_l, leaf_r) =
+                                crate::shared_histogram::derive_kvec_leaves_from_categorical_histogram(
+                                    &node_hist,
+                                    feature,
+                                    cat_split.left_bitset,
+                                    num_cats,
+                                    lambda_l2,
+                                    crate::LEAF_EPSILON,
+                                );
+                            let (left_sums, right_sums) = accumulate_factor_sums_for_threshold(
+                                binned_matrix,
+                                exposures,
+                                &node.row_indices,
+                                feature,
+                                0,
+                                Some(cat_split.left_bitset),
+                            );
+                            let penalty =
+                                crate::shared_histogram::compute_multi_output_factor_split_penalty(
+                                    &left_sums,
+                                    &right_sums,
+                                    &leaf_l,
+                                    &leaf_r,
+                                    factor_penalty,
+                                    node.row_indices.len(),
+                                );
+                            cat_split.gain - penalty
+                        } else {
+                            cat_split.gain
+                        };
+                        if adj_gain > best.map(|(_, _, g, _)| g).unwrap_or(0.0) {
+                            best = Some((feature, 0, adj_gain, Some(cat_split.left_bitset)));
+                        }
                     }
                     continue; // skip numeric threshold sweep for categorical features
                 }
                 for threshold_bin in 0..max_threshold {
                     // v0.10.4: route numeric gain through the morph variant when
                     // active; falls through to the standard variant otherwise.
-                    let gain = if let Some(m) = morph_ctx {
+                    let base_gain = if let Some(m) = morph_ctx {
                         crate::shared_histogram::compute_multi_output_split_gain_morph(
                             &node_hist,
                             feature,
@@ -697,6 +793,38 @@ fn build_joint_round_inner(
                             lambda_l2,
                             crate::LEAF_EPSILON,
                         )
+                    };
+                    // v0.10.6 split_penalty (numeric): subtract per-candidate
+                    // K-output factor-load penalty.
+                    let gain = if let Some((factor_penalty, exposures)) = split_penalty_ctx {
+                        let (leaf_l, leaf_r) =
+                            crate::shared_histogram::derive_kvec_leaves_from_threshold_histogram(
+                                &node_hist,
+                                feature,
+                                threshold_bin,
+                                lambda_l2,
+                                crate::LEAF_EPSILON,
+                            );
+                        let (left_sums, right_sums) = accumulate_factor_sums_for_threshold(
+                            binned_matrix,
+                            exposures,
+                            &node.row_indices,
+                            feature,
+                            threshold_bin as u8,
+                            None,
+                        );
+                        let penalty =
+                            crate::shared_histogram::compute_multi_output_factor_split_penalty(
+                                &left_sums,
+                                &right_sums,
+                                &leaf_l,
+                                &leaf_r,
+                                factor_penalty,
+                                node.row_indices.len(),
+                            );
+                        base_gain - penalty
+                    } else {
+                        base_gain
                     };
                     if gain <= 0.0 {
                         continue;
@@ -890,8 +1018,11 @@ fn build_joint_round_leafwise(
     round_index: usize,
     sampled_root_rows: Option<&[u32]>,
     morph_ctx: Option<&JointMorphContext>,
+    factor_exposures: Option<&FactorExposureMatrix>,
 ) -> Result<JointRoundResult, String> {
     use std::collections::BinaryHeap;
+    // T9 will use this; for now silence the unused-argument warning.
+    let _ = factor_exposures;
 
     let n_rows = binned_matrix.row_count;
     let feature_count = binned_matrix.feature_count;
@@ -1964,6 +2095,7 @@ fn fit_joint_inner(
                 global_round,
                 sampled_rows_opt.as_deref(),
                 morph_ctx.as_ref(),
+                factor_exposures,
             )?
         } else {
             build_joint_round_inner(
@@ -1975,6 +2107,7 @@ fn fit_joint_inner(
                 global_round,
                 sampled_rows_opt.as_deref(),
                 morph_ctx.as_ref(),
+                factor_exposures,
             )?
         };
         if round_result.stumps.is_empty() {
@@ -2540,6 +2673,74 @@ mod tests {
         assert!(
             err.contains("squared_error") || err.contains("pre_target"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn joint_split_penalty_neutralization_changes_splits() {
+        // split_penalty should at minimum produce a different stump signature
+        // (feature, threshold_bin) sequence than the unpenalized control.
+        use alloygbm_core::{FactorExposureMatrix, FactorNeutralizationConfig, NeutralizationKind};
+        let row_count = 32usize;
+        let feature_count = 2usize;
+        // Two distinct features so split selection has more than one option.
+        let mut bins: Vec<u8> = Vec::with_capacity(row_count * feature_count);
+        for i in 0..row_count {
+            bins.push((i % 4) as u8); // feature 0: 0,1,2,3,0,1,...
+            bins.push(((i / 4) % 4) as u8); // feature 1: 0,0,0,0,1,1,1,1,2,...
+        }
+        let binned = BinnedMatrix::new(row_count, feature_count, 4, bins).expect("binned");
+        let target_0: Vec<f32> = (0..row_count).map(|i| (i as f32) * 0.1).collect();
+        let target_1: Vec<f32> = (0..row_count).map(|i| i as f32 % 4.0).collect();
+        // Factor exposure strongly correlated with feature 0's bin.
+        let exposures_vals: Vec<f32> = (0..row_count).map(|i| (i % 4) as f32 - 1.5).collect();
+        let exposures = FactorExposureMatrix::new(row_count, 1, exposures_vals).expect("exp");
+
+        let fit = |split_penalty: f32| -> crate::TrainedModel {
+            let params = TrainParams {
+                neutralization_config: Some(FactorNeutralizationConfig {
+                    kind: if split_penalty > 0.0 {
+                        NeutralizationKind::SplitPenalty
+                    } else {
+                        NeutralizationKind::None
+                    },
+                    ridge_lambda: 1e-6,
+                    split_penalty,
+                }),
+                ..TrainParams::default()
+            };
+            fit_joint_multi_output_with_warm_start(
+                &params,
+                feature_count,
+                &binned,
+                &[target_0.clone(), target_1.clone()],
+                None,
+                &[JointObjective::SquaredError, JointObjective::SquaredError],
+                3,
+                &[],
+                None,
+                if split_penalty > 0.0 {
+                    Some(&exposures)
+                } else {
+                    None
+                },
+            )
+            .expect("fit")
+            .model
+        };
+
+        let baseline = fit(0.0);
+        let penalized = fit(5.0);
+        let signature = |m: &crate::TrainedModel| -> Vec<(u32, u16)> {
+            m.stumps
+                .iter()
+                .map(|s| (s.split.feature_index, s.split.threshold_bin))
+                .collect()
+        };
+        assert_ne!(
+            signature(&baseline),
+            signature(&penalized),
+            "split_penalty should alter at least one split decision"
         );
     }
 
