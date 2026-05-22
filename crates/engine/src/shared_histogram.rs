@@ -537,6 +537,49 @@ pub fn find_best_multi_output_categorical_split(
     })
 }
 
+/// v0.10.6: K-output factor-load penalty for a candidate split on the joint
+/// multi-output trainer. Generalizes the single-output
+/// `factor_split_penalty_for_candidate` (in `crates/backend_cpu/src/lib.rs`)
+/// to K outputs by summing the per-output factor-load squared-norm:
+///
+/// ```text
+/// load_{i,k} = left_factor_sums[i] * leaf_left[k]
+///            + right_factor_sums[i] * leaf_right[k]
+/// penalty    = factor_penalty * Σₖ Σᵢ load_{i,k}^2 / row_count
+/// ```
+///
+/// The caller performs the per-row scan that fills `left_factor_sums` /
+/// `right_factor_sums` once per candidate, because the goes-left decision is
+/// identical for all K outputs (it depends only on the candidate threshold and
+/// row bin, not on output identity). This helper only consumes the
+/// pre-computed sums.
+pub fn compute_multi_output_factor_split_penalty(
+    left_factor_sums: &[f32],
+    right_factor_sums: &[f32],
+    leaf_left: &[f32],
+    leaf_right: &[f32],
+    factor_penalty: f32,
+    row_count: usize,
+) -> f32 {
+    if factor_penalty == 0.0 || row_count == 0 {
+        return 0.0;
+    }
+    debug_assert_eq!(left_factor_sums.len(), right_factor_sums.len());
+    debug_assert_eq!(leaf_left.len(), leaf_right.len());
+    let mut penalty_sum = 0.0_f32;
+    for k in 0..leaf_left.len() {
+        let lv = leaf_left[k];
+        let rv = leaf_right[k];
+        let mut norm_sq = 0.0_f32;
+        for i in 0..left_factor_sums.len() {
+            let load = left_factor_sums[i] * lv + right_factor_sums[i] * rv;
+            norm_sq += load * load;
+        }
+        penalty_sum += norm_sq;
+    }
+    factor_penalty * penalty_sum / row_count as f32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -855,5 +898,51 @@ mod tests {
                 r.gain
             );
         }
+    }
+
+    #[test]
+    fn factor_split_penalty_zero_when_penalty_zero() {
+        let p = compute_multi_output_factor_split_penalty(
+            &[1.0, 2.0],
+            &[3.0, 4.0],
+            &[0.5, 0.25],
+            &[0.1, 0.2],
+            0.0,
+            10,
+        );
+        assert_eq!(p, 0.0);
+    }
+
+    #[test]
+    fn factor_split_penalty_zero_when_row_count_zero() {
+        let p = compute_multi_output_factor_split_penalty(
+            &[1.0, 2.0],
+            &[3.0, 4.0],
+            &[0.5, 0.25],
+            &[0.1, 0.2],
+            0.5,
+            0,
+        );
+        assert_eq!(p, 0.0);
+    }
+
+    #[test]
+    fn factor_split_penalty_matches_hand_computation() {
+        // 1 factor, 2 outputs, row_count=4.
+        // left_sum = 2.0, right_sum = -1.0.
+        // leaf_left  = [0.5, 0.25]
+        // leaf_right = [0.1, 0.2]
+        // Output 0: load = 2.0 * 0.5 + (-1.0) * 0.1 = 0.9 → norm² = 0.81
+        // Output 1: load = 2.0 * 0.25 + (-1.0) * 0.2 = 0.3 → norm² = 0.09
+        // total norm² = 0.90; penalty = 0.5 * 0.90 / 4 = 0.1125
+        let p = compute_multi_output_factor_split_penalty(
+            &[2.0],
+            &[-1.0],
+            &[0.5, 0.25],
+            &[0.1, 0.2],
+            0.5,
+            4,
+        );
+        assert!((p - 0.1125_f32).abs() < 1e-6, "got {p}");
     }
 }
