@@ -5647,6 +5647,7 @@ fn train_joint_multi_label_ranker(
         n_estimators,
         &cat_features,
         warm_start,
+        /*factor_exposures=*/ None,
     )
     .map_err(PyValueError::new_err)?;
 

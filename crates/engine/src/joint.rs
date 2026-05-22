@@ -28,8 +28,8 @@ use crate::{
     TrainedStump, XeNDCGObjective, encode_tree_node_id,
 };
 use alloygbm_core::{
-    BinnedMatrix, DroMetadataPayload, GradientPair, LeafSolverKind, LeafValue, MISSING_BIN_U8,
-    ModelMetadata, NodeStats, SplitCandidate, TrainParams, TreeGrowth,
+    BinnedMatrix, DroMetadataPayload, FactorExposureMatrix, GradientPair, LeafSolverKind,
+    LeafValue, MISSING_BIN_U8, ModelMetadata, NodeStats, SplitCandidate, TrainParams, TreeGrowth,
 };
 use std::collections::HashMap;
 
@@ -1424,7 +1424,7 @@ pub fn fit_joint_multi_output(
     per_output_objective: &[JointObjective],
     n_estimators: usize,
 ) -> Result<JointTrainingSummary, String> {
-    fit_joint_multi_output_with_categorical(
+    fit_joint_inner(
         params,
         feature_count,
         binned_matrix,
@@ -1433,6 +1433,8 @@ pub fn fit_joint_multi_output(
         per_output_objective,
         n_estimators,
         /*categorical_features=*/ &[],
+        /*warm_start=*/ None,
+        /*factor_exposures=*/ None,
     )
 }
 
@@ -1451,6 +1453,7 @@ pub fn fit_joint_multi_output_with_warm_start(
     n_estimators: usize,
     categorical_features: &[crate::CategoricalFeatureInfo],
     warm_start: Option<JointWarmStartState>,
+    factor_exposures: Option<&FactorExposureMatrix>,
 ) -> Result<JointTrainingSummary, String> {
     fit_joint_inner(
         params,
@@ -1462,6 +1465,7 @@ pub fn fit_joint_multi_output_with_warm_start(
         n_estimators,
         categorical_features,
         warm_start,
+        factor_exposures,
     )
 }
 
@@ -1491,6 +1495,7 @@ pub fn fit_joint_multi_output_with_categorical(
         n_estimators,
         categorical_features,
         /*warm_start=*/ None,
+        /*factor_exposures=*/ None,
     )
 }
 
@@ -1511,6 +1516,7 @@ fn fit_joint_inner(
     n_estimators: usize,
     categorical_features: &[crate::CategoricalFeatureInfo],
     warm_start: Option<JointWarmStartState>,
+    factor_exposures: Option<&FactorExposureMatrix>,
 ) -> Result<JointTrainingSummary, String> {
     let n_outputs = targets_per_output.len();
     if per_output_objective.len() != n_outputs {
@@ -1531,6 +1537,53 @@ fn fit_joint_inner(
     if per_output_objective.iter().any(|o| o.requires_group()) && group_id.is_none() {
         return Err("at least one objective requires group_id".to_string());
     }
+
+    // v0.10.6: pre_target neutralization — residualize each per-output target
+    // through the factor exposures BEFORE baselines are computed.
+    // Squared-error only (the only objective where residualize-target equals
+    // residualize-gradient); validated at the Python boundary AND below so a
+    // Rust caller calling `fit_joint_*` directly still gets the guard.
+    let projected_targets_owned: Option<Vec<Vec<f32>>> =
+        match (effective_neutralization_config(params), factor_exposures) {
+            (Some(cfg), Some(exposures))
+                if cfg.kind == alloygbm_core::NeutralizationKind::PreTarget =>
+            {
+                for (k, obj) in per_output_objective.iter().enumerate() {
+                    if !matches!(obj, JointObjective::SquaredError) {
+                        return Err(format!(
+                            "neutralization='pre_target' requires every per-output \
+                         objective to be 'squared_error' (output {k} is {obj:?}). \
+                         Use neutralization='per_round_gradient' for ranking objectives."
+                        ));
+                    }
+                }
+                let projector = crate::FactorProjector::new(exposures, None, cfg.ridge_lambda)
+                    .map_err(|err| format!("pre_target projector: {err:?}"))?;
+                let mut projected: Vec<Vec<f32>> = Vec::with_capacity(n_outputs);
+                for tg in targets_per_output {
+                    let mut owned = tg.clone();
+                    projector
+                        .residualize_values_in_place(&mut owned)
+                        .map_err(|err| format!("pre_target residualize: {err:?}"))?;
+                    projected.push(owned);
+                }
+                Some(projected)
+            }
+            (Some(cfg), None) if cfg.kind == alloygbm_core::NeutralizationKind::PreTarget => {
+                return Err(
+                    "factor_exposures are required when neutralization='pre_target'".to_string(),
+                );
+            }
+            _ => None,
+        };
+
+    // `effective_targets` is the residualized view when pre_target is active;
+    // otherwise it borrows the original targets. Every gradient/baseline site
+    // below reads through this view so non-pre_target modes are unaffected.
+    let effective_targets: Vec<&[f32]> = match &projected_targets_owned {
+        Some(owned) => owned.iter().map(|v| v.as_slice()).collect(),
+        None => targets_per_output.iter().map(|v| v.as_slice()).collect(),
+    };
 
     // v0.10.3: warm-start branch — when `warm_start` is `Some`, the
     // prior fit's baselines win (re-seed `predictions` from them) and
@@ -1568,7 +1621,7 @@ fn fit_joint_inner(
     } else {
         let cold_baselines: Vec<f32> = per_output_objective
             .iter()
-            .zip(targets_per_output.iter())
+            .zip(effective_targets.iter())
             .map(|(obj, targets)| obj.initial_prediction(targets))
             .collect();
         (Vec::new(), 0, None, None, cold_baselines)
@@ -1776,7 +1829,7 @@ fn fit_joint_inner(
         for k in 0..n_outputs {
             let g = per_output_objective[k].compute_gradients(
                 &predictions[k],
-                &targets_per_output[k],
+                effective_targets[k],
                 group_id,
             )?;
             grads_per_output.push(g);
@@ -2352,6 +2405,107 @@ const TREE_NODE_STRIDE: u32 = 1 << 20;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn joint_pre_target_residualizes_targets() {
+        // 8 rows × 1 feature × 2 outputs, all squared-error. With a single
+        // factor perfectly correlated with output 0, pre_target should shrink
+        // output-0 prediction variance vs the un-neutralized control.
+        use alloygbm_core::{FactorExposureMatrix, FactorNeutralizationConfig, NeutralizationKind};
+        let row_count = 8usize;
+        let feature_count = 1usize;
+        let bins: Vec<u8> = vec![0, 0, 1, 1, 2, 2, 3, 3];
+        let binned = BinnedMatrix::new(row_count, feature_count, 4, bins).expect("binned");
+        let target_0: Vec<f32> = (0..row_count).map(|i| i as f32 * 0.5).collect();
+        let target_1: Vec<f32> = (0..row_count).map(|i| (i as f32) * 2.0).collect();
+        let exposures =
+            FactorExposureMatrix::new(row_count, 1, target_0.clone()).expect("exposures");
+
+        let fit = |cfg: Option<FactorNeutralizationConfig>,
+                   exp: Option<&FactorExposureMatrix>|
+         -> Vec<Vec<f32>> {
+            let params = TrainParams {
+                neutralization_config: cfg,
+                ..TrainParams::default()
+            };
+            let summary = fit_joint_multi_output_with_warm_start(
+                &params,
+                feature_count,
+                &binned,
+                &[target_0.clone(), target_1.clone()],
+                None,
+                &[JointObjective::SquaredError, JointObjective::SquaredError],
+                3,
+                &[],
+                None,
+                exp,
+            )
+            .expect("fit");
+            let bytes = summary.model.clone().to_artifact_bytes().expect("encode");
+            let predictor = JointPredictor::from_artifact_bytes(&bytes, summary.baselines.clone())
+                .expect("load");
+            (0..row_count)
+                .map(|r| predictor.predict_row(&[binned.bins[r] as f32]))
+                .collect()
+        };
+
+        let baseline = fit(None, None);
+        let neutralized = fit(
+            Some(FactorNeutralizationConfig {
+                kind: NeutralizationKind::PreTarget,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            }),
+            Some(&exposures),
+        );
+        let var = |preds: &[Vec<f32>], col: usize| -> f32 {
+            let mean: f32 = preds.iter().map(|p| p[col]).sum::<f32>() / preds.len() as f32;
+            preds.iter().map(|p| (p[col] - mean).powi(2)).sum::<f32>() / preds.len() as f32
+        };
+        let v_base = var(&baseline, 0);
+        let v_neut = var(&neutralized, 0);
+        assert!(
+            v_neut < v_base * 0.5,
+            "expected residualized output-0 variance ({v_neut}) << baseline ({v_base})"
+        );
+    }
+
+    #[test]
+    fn joint_pre_target_rejects_non_squared_error_objectives() {
+        use alloygbm_core::{FactorExposureMatrix, FactorNeutralizationConfig, NeutralizationKind};
+        let row_count = 8usize;
+        let feature_count = 1usize;
+        let bins: Vec<u8> = vec![0, 0, 1, 1, 2, 2, 3, 3];
+        let binned = BinnedMatrix::new(row_count, feature_count, 4, bins).expect("binned");
+        let exposures =
+            FactorExposureMatrix::new(row_count, 1, vec![0.0; row_count]).expect("exposures");
+        let params = TrainParams {
+            neutralization_config: Some(FactorNeutralizationConfig {
+                kind: NeutralizationKind::PreTarget,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            }),
+            ..TrainParams::default()
+        };
+        let group_id: Vec<u32> = vec![0, 0, 0, 0, 1, 1, 1, 1];
+        let err = fit_joint_multi_output_with_warm_start(
+            &params,
+            feature_count,
+            &binned,
+            &[vec![1.0_f32; row_count], vec![1.0_f32; row_count]],
+            Some(&group_id),
+            &[JointObjective::RankNdcg, JointObjective::SquaredError],
+            1,
+            &[],
+            None,
+            Some(&exposures),
+        )
+        .expect_err("should reject");
+        assert!(
+            err.contains("squared_error") || err.contains("pre_target"),
+            "unexpected error: {err}"
+        );
+    }
 
     #[test]
     fn joint_effective_neutralization_config_returns_none_when_inactive() {
@@ -3628,6 +3782,7 @@ mod tests {
             4,
             &[],
             Some(warm_state),
+            None,
         )
         .expect("warm resume");
         // Fresh 10-round fit.
@@ -3835,6 +3990,7 @@ mod tests {
             &[JointObjective::SquaredError],
             4,
             &[],
+            None,
             None,
         )
         .expect("warm with None");
@@ -4126,6 +4282,7 @@ mod tests {
             4,
             &[],
             Some(warm),
+            None,
         )
         .expect("resume 4");
 

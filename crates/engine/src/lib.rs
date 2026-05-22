@@ -89,7 +89,7 @@ type LinearLeafPairSplit = (
 );
 
 #[allow(dead_code)]
-struct FactorProjector<'a> {
+pub(crate) struct FactorProjector<'a> {
     exposures: &'a FactorExposureMatrix,
     weights: Option<&'a [f32]>,
     cholesky_lower: Vec<f64>,
@@ -97,7 +97,7 @@ struct FactorProjector<'a> {
 
 #[allow(dead_code)]
 impl<'a> FactorProjector<'a> {
-    fn new(
+    pub(crate) fn new(
         exposures: &'a FactorExposureMatrix,
         weights: Option<&'a [f32]>,
         ridge_lambda: f32,
@@ -131,7 +131,10 @@ impl<'a> FactorProjector<'a> {
         })
     }
 
-    fn project_gradient_pairs_in_place(&self, gradients: &mut [GradientPair]) -> EngineResult<()> {
+    pub(crate) fn project_gradient_pairs_in_place(
+        &self,
+        gradients: &mut [GradientPair],
+    ) -> EngineResult<()> {
         if gradients.len() != self.exposures.row_count {
             return Err(EngineError::ContractViolation(
                 "gradient length must match factor_exposures row_count".to_string(),
@@ -156,7 +159,7 @@ impl<'a> FactorProjector<'a> {
         Ok(())
     }
 
-    fn residualize_values_in_place(&self, values: &mut [f32]) -> EngineResult<()> {
+    pub(crate) fn residualize_values_in_place(&self, values: &mut [f32]) -> EngineResult<()> {
         if values.len() != self.exposures.row_count {
             return Err(EngineError::ContractViolation(
                 "value length must match factor_exposures row_count".to_string(),
