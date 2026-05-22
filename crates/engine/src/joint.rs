@@ -1133,6 +1133,12 @@ fn build_joint_round_leafwise(
     // builder (`build_joint_round_inner`). The heap must rank candidates by
     // PENALIZED gain, so the adjustment is applied inside `evaluate_node`
     // before the candidate is pushed.
+    //
+    // PR #40 review (R1): mirror the level-wise explicit-error gate for
+    // `SplitPenalty + missing exposures` so a Rust caller calling the joint
+    // entry point directly with `tree_growth=Leaf` can't accidentally train
+    // an unpenalized model that still advertises split_penalty in its
+    // `NeutralizationMetadata` artifact section.
     let split_penalty_ctx: Option<(f32, &FactorExposureMatrix)> =
         match (effective_neutralization_config(params), factor_exposures) {
             (Some(cfg), Some(exposures))
@@ -1140,6 +1146,14 @@ fn build_joint_round_leafwise(
                     && cfg.split_penalty > 0.0 =>
             {
                 Some((cfg.split_penalty, exposures))
+            }
+            (Some(cfg), None)
+                if cfg.kind == alloygbm_core::NeutralizationKind::SplitPenalty
+                    && cfg.split_penalty > 0.0 =>
+            {
+                return Err(
+                    "factor_exposures are required when neutralization='split_penalty'".to_string(),
+                );
             }
             _ => None,
         };
@@ -3016,6 +3030,47 @@ mod tests {
         assert!(
             max_diff > 1e-3,
             "per_round_gradient neutralization should change predictions (max_diff = {max_diff})"
+        );
+    }
+
+    #[test]
+    fn joint_split_penalty_leafwise_rejects_missing_exposures() {
+        // PR #40 review (R1): leaf-wise `build_joint_round_leafwise` must
+        // mirror the level-wise `build_joint_round_inner` explicit-error gate
+        // for `SplitPenalty + missing exposures`. Previously it silently fell
+        // through to `_ => None`, training an unpenalized model whose artifact
+        // still advertised split_penalty in its NeutralizationMetadata section.
+        use alloygbm_core::{FactorNeutralizationConfig, NeutralizationKind};
+        let row_count = 8usize;
+        let feature_count = 1usize;
+        let bins: Vec<u8> = vec![0, 0, 1, 1, 2, 2, 3, 3];
+        let binned = BinnedMatrix::new(row_count, feature_count, 4, bins).expect("binned");
+        let params = TrainParams {
+            tree_growth: TreeGrowth::Leaf,
+            max_leaves: Some(4),
+            neutralization_config: Some(FactorNeutralizationConfig {
+                kind: NeutralizationKind::SplitPenalty,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.5,
+            }),
+            ..TrainParams::default()
+        };
+        let err = fit_joint_multi_output_with_warm_start(
+            &params,
+            feature_count,
+            &binned,
+            &[vec![0.0_f32; row_count], vec![1.0_f32; row_count]],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            1,
+            &[],
+            None,
+            None, // no exposures — leaf-wise must error, not silently no-op
+        )
+        .expect_err("leaf-wise split_penalty must reject missing exposures");
+        assert!(
+            err.contains("factor_exposures are required"),
+            "unexpected error: {err}"
         );
     }
 

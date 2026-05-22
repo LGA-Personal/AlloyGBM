@@ -1023,3 +1023,143 @@ def test_joint_per_round_gradient_with_warm_start():
         warm_start=True,
     ).fit(X, y, factor_exposures=fe)
     assert second.predict(X).shape == (24, 2)
+
+
+# ── v0.10.6 PR #40 R2: warm-start neutralization contract ────────────────────
+
+
+def test_joint_warm_start_rejects_unneutralized_prior_under_active_resume():
+    """PR #40 R2: prior fit was unneutralized; current fit requests
+    neutralization. The prior trees were trained in raw-gradient space —
+    resuming them under per_round_gradient would project new gradients
+    through a residual space the prior model doesn't share."""
+    rng = np.random.default_rng(80)
+    X = rng.standard_normal((24, 3)).astype(np.float32)
+    y = rng.standard_normal((24, 2)).astype(np.float32)
+    fe = rng.standard_normal((24, 1)).astype(np.float32)
+    first = MultiLabelGBMRanker(
+        n_estimators=2,
+        multi_label_mode="joint",
+        ranking_objective="squared_error",
+        # No neutralization on prior fit.
+    ).fit(X, y)
+    with pytest.raises(Exception) as exc:
+        MultiLabelGBMRanker(
+            n_estimators=2,
+            multi_label_mode="joint",
+            ranking_objective="squared_error",
+            neutralization="per_round_gradient",
+            init_model=first,
+            warm_start=True,
+        ).fit(X, y, factor_exposures=fe)
+    msg = str(exc.value)
+    assert "warm-start" in msg.lower() and "neutralization" in msg.lower()
+
+
+def test_joint_warm_start_rejects_neutralized_prior_under_unneutralized_resume():
+    """PR #40 R2: prior fit used neutralization; current fit drops it.
+    Prior trees are in a residual space; resuming with raw gradients
+    would silently mis-train."""
+    rng = np.random.default_rng(81)
+    X = rng.standard_normal((24, 3)).astype(np.float32)
+    y = rng.standard_normal((24, 2)).astype(np.float32)
+    fe = rng.standard_normal((24, 1)).astype(np.float32)
+    first = MultiLabelGBMRanker(
+        n_estimators=2,
+        multi_label_mode="joint",
+        ranking_objective="squared_error",
+        neutralization="per_round_gradient",
+    ).fit(X, y, factor_exposures=fe)
+    with pytest.raises(Exception) as exc:
+        MultiLabelGBMRanker(
+            n_estimators=2,
+            multi_label_mode="joint",
+            ranking_objective="squared_error",
+            # neutralization left at default "none"
+            init_model=first,
+            warm_start=True,
+        ).fit(X, y)
+    msg = str(exc.value)
+    assert "warm-start" in msg.lower() and "neutralization" in msg.lower()
+
+
+def test_joint_warm_start_rejects_changed_factor_neutralization_lambda():
+    """PR #40 R2: prior fit used ridge_lambda=1e-6; current bumps to 1e-3.
+    The projector changes, so the residual basis changes too."""
+    rng = np.random.default_rng(82)
+    X = rng.standard_normal((24, 3)).astype(np.float32)
+    y = rng.standard_normal((24, 2)).astype(np.float32)
+    fe = rng.standard_normal((24, 1)).astype(np.float32)
+    first = MultiLabelGBMRanker(
+        n_estimators=2,
+        multi_label_mode="joint",
+        ranking_objective="squared_error",
+        neutralization="per_round_gradient",
+        factor_neutralization_lambda=1e-6,
+    ).fit(X, y, factor_exposures=fe)
+    with pytest.raises(Exception) as exc:
+        MultiLabelGBMRanker(
+            n_estimators=2,
+            multi_label_mode="joint",
+            ranking_objective="squared_error",
+            neutralization="per_round_gradient",
+            factor_neutralization_lambda=1e-3,
+            init_model=first,
+            warm_start=True,
+        ).fit(X, y, factor_exposures=fe)
+    msg = str(exc.value)
+    assert "warm-start" in msg.lower() and "neutralization" in msg.lower()
+
+
+def test_joint_warm_start_rejects_changed_factor_penalty():
+    """PR #40 R2: split_penalty multiplier change across warm-resume."""
+    rng = np.random.default_rng(83)
+    X = rng.standard_normal((24, 3)).astype(np.float32)
+    y = rng.standard_normal((24, 2)).astype(np.float32)
+    fe = rng.standard_normal((24, 1)).astype(np.float32)
+    first = MultiLabelGBMRanker(
+        n_estimators=2,
+        multi_label_mode="joint",
+        ranking_objective="squared_error",
+        neutralization="split_penalty",
+        factor_penalty=0.5,
+    ).fit(X, y, factor_exposures=fe)
+    with pytest.raises(Exception) as exc:
+        MultiLabelGBMRanker(
+            n_estimators=2,
+            multi_label_mode="joint",
+            ranking_objective="squared_error",
+            neutralization="split_penalty",
+            factor_penalty=1.0,
+            init_model=first,
+            warm_start=True,
+        ).fit(X, y, factor_exposures=fe)
+    msg = str(exc.value)
+    assert "warm-start" in msg.lower() and "neutralization" in msg.lower()
+
+
+def test_joint_warm_start_accepts_matching_neutralization_contract():
+    """PR #40 R2: positive control — same config on both fits MUST succeed.
+    Otherwise the validation gate is over-restrictive."""
+    rng = np.random.default_rng(84)
+    X = rng.standard_normal((24, 3)).astype(np.float32)
+    y = rng.standard_normal((24, 2)).astype(np.float32)
+    fe = rng.standard_normal((24, 1)).astype(np.float32)
+    first = MultiLabelGBMRanker(
+        n_estimators=2,
+        multi_label_mode="joint",
+        ranking_objective="squared_error",
+        neutralization="per_round_gradient",
+        factor_neutralization_lambda=1e-6,
+    ).fit(X, y, factor_exposures=fe)
+    # Same config — must succeed.
+    resumed = MultiLabelGBMRanker(
+        n_estimators=2,
+        multi_label_mode="joint",
+        ranking_objective="squared_error",
+        neutralization="per_round_gradient",
+        factor_neutralization_lambda=1e-6,
+        init_model=first,
+        warm_start=True,
+    ).fit(X, y, factor_exposures=fe)
+    assert resumed.predict(X).shape == (24, 2)

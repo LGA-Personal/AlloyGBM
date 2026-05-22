@@ -5660,6 +5660,72 @@ fn train_joint_multi_label_ranker(
         let rounds = init_rounds_completed.unwrap_or(0);
         let prior_model = alloygbm_engine::TrainedModel::from_artifact_bytes(&bytes)
             .map_err(|e| PyValueError::new_err(format!("init_artifact_bytes decode: {e:?}")))?;
+        // PR #40 review (R2): validate that the prior artifact's
+        // `neutralization_metadata` matches the current
+        // `parsed_neutralization_config` BEFORE constructing the warm-start
+        // state. Without this, a caller can resume an unneutralized prior fit
+        // under `per_round_gradient` / `split_penalty`, or change
+        // `ridge_lambda` / `split_penalty` across resume — the prior trees
+        // were trained against one residual / split-penalty geometry and the
+        // new gradients would be projected through a different one, producing
+        // an artifact whose stumps are inconsistent with its metadata. The
+        // single-output path enforces the same contract via
+        // `validate_warm_start_neutralization_contract` (lib.rs:5836); the
+        // new `NeutralizationMetadata` section gives the bridge enough info
+        // to do the same here. Compare the EFFECTIVE config (inert configs
+        // — kind=None or SplitPenalty-with-zero-penalty — collapse to None,
+        // mirroring `effective_neutralization_config` in joint.rs).
+        let prior_effective = prior_model
+            .neutralization_metadata
+            .as_ref()
+            .map(|m| m.config);
+        let curr_effective = parsed_neutralization_config.filter(|cfg| {
+            cfg.kind != alloygbm_core::NeutralizationKind::None
+                && !(cfg.kind == alloygbm_core::NeutralizationKind::SplitPenalty
+                    && cfg.split_penalty == 0.0)
+        });
+        match (prior_effective, curr_effective) {
+            (None, None) => {}
+            (Some(prior), Some(curr)) if prior == curr => {}
+            (Some(prior), Some(curr)) => {
+                return Err(PyValueError::new_err(format!(
+                    "warm-start neutralization contract violated: prior fit used \
+                     neutralization (kind={:?}, ridge_lambda={}, split_penalty={}) \
+                     but current fit uses (kind={:?}, ridge_lambda={}, split_penalty={}). \
+                     The prior trees were trained in a different residual / \
+                     split-penalty space; resuming under a different config would \
+                     produce inconsistent gradients. Use the same neutralization \
+                     parameters for both fits, or fit fresh without warm_start=True.",
+                    prior.kind,
+                    prior.ridge_lambda,
+                    prior.split_penalty,
+                    curr.kind,
+                    curr.ridge_lambda,
+                    curr.split_penalty,
+                )));
+            }
+            (Some(prior), None) => {
+                return Err(PyValueError::new_err(format!(
+                    "warm-start neutralization contract violated: prior fit used \
+                     neutralization (kind={:?}) but current fit has \
+                     neutralization='none'. Resuming an in-residual model in raw \
+                     gradient space would silently mis-train. Pass the same \
+                     neutralization config to the resume fit, or fit fresh \
+                     without warm_start=True.",
+                    prior.kind
+                )));
+            }
+            (None, Some(curr)) => {
+                return Err(PyValueError::new_err(format!(
+                    "warm-start neutralization contract violated: prior fit was \
+                     unneutralized but current fit requests neutralization \
+                     (kind={:?}). Resuming raw-gradient trees in a residual space \
+                     would silently mis-train. Either fit the prior model with \
+                     the same neutralization, or fit fresh without warm_start=True.",
+                    curr.kind
+                )));
+            }
+        }
         // v0.10.4: extract MorphBoost EMA snapshot from the prior artifact's
         // `morph_metadata` section. The engine writes this whenever
         // MorphBoost is active and warm-resume requires it to byte-match a
