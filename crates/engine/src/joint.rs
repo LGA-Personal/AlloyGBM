@@ -712,17 +712,32 @@ fn build_joint_round_inner(
             }
 
             // Compute K-output leaf values via Newton-Raphson per output.
+            // v0.10.5: route through `leaf_effective_gradient` so L1 and DRO
+            // leaf solvers are honored. When `lambda_l1 == 0` AND
+            // `dro_config == None`, this returns `g_sum` unchanged — so the
+            // v0.10.0–v0.10.4 behavior is preserved byte-for-byte for the
+            // default config.
             let leaf_values = |rows: &[u32]| -> Vec<f32> {
                 let mut out = vec![0.0_f32; n_outputs];
+                let row_count = rows.len() as u32;
                 for k in 0..n_outputs {
                     let mut g_sum = 0.0_f32;
                     let mut h_sum = 0.0_f32;
+                    let mut g_sq_sum = 0.0_f32;
                     for &row in rows {
                         let gp = grads_per_output[k][row as usize];
                         g_sum += gp.grad;
                         h_sum += gp.hess;
+                        g_sq_sum += gp.grad * gp.grad;
                     }
-                    out[k] = -g_sum / (h_sum + lambda_l2 + crate::LEAF_EPSILON);
+                    let g_eff = alloygbm_core::leaf_effective_gradient(
+                        g_sum,
+                        g_sq_sum,
+                        row_count,
+                        params.lambda_l1,
+                        params.dro_config.as_ref(),
+                    );
+                    out[k] = -g_eff / (h_sum + lambda_l2 + crate::LEAF_EPSILON);
                 }
                 out
             };
@@ -3808,8 +3823,13 @@ mod tests {
         )
         .expect("dro fit succeeds");
 
-        assert_eq!(standard.model.stumps.len(), dro.model.stumps.len());
-        let any_diff = standard
+        // DRO can alter residuals enough to change the set of accepted splits
+        // across rounds, so the stump count may legitimately differ.  What we
+        // require is that at least one stump in the overlapping prefix has
+        // different leaf values — or the counts differ (which is itself a sign
+        // that DRO changed the training trajectory).
+        let counts_differ = standard.model.stumps.len() != dro.model.stumps.len();
+        let any_leaf_diff = standard
             .model
             .stumps
             .iter()
@@ -3820,7 +3840,7 @@ mod tests {
                 la != lb || ra != rb
             });
         assert!(
-            any_diff,
+            counts_differ || any_leaf_diff,
             "DRO leaves should differ from standard leaves on the same data"
         );
     }
