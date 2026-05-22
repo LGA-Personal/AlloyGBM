@@ -2079,6 +2079,7 @@ fn fit_joint_inner(
         morph_metadata,
         dro_metadata: effective_dro_config(params).map(|cfg| DroMetadataPayload { config: *cfg }),
         feature_baseline: None,
+        neutralization_metadata: None,
     };
 
     // v0.10.3 warm-start: report TOTAL rounds completed (prior + new)
