@@ -3846,6 +3846,81 @@ mod tests {
     }
 
     #[test]
+    fn joint_dro_with_leafwise_growth_changes_leaves() {
+        use alloygbm_core::{DroConfig, DroMetric, LeafSolverKind};
+
+        let n_rows = 200;
+        let feature_count = 1;
+        let targets_0: Vec<f32> = (0..n_rows)
+            .map(|i| if i < n_rows / 2 { -1.0 } else { 1.0 })
+            .collect();
+        let targets_1: Vec<f32> = targets_0.iter().map(|&t| t * 2.0).collect();
+        let bins: Vec<u8> = (0..n_rows).map(|i| (i % 8) as u8).collect();
+        let binned_matrix =
+            BinnedMatrix::new(n_rows, feature_count, /*max_bin=*/ 7, bins).expect("bm");
+
+        let params_standard = TrainParams {
+            seed: 7,
+            max_depth: 4,
+            max_leaves: Some(4),
+            tree_growth: TreeGrowth::Leaf,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            learning_rate: 0.3,
+            leaf_solver: LeafSolverKind::Standard,
+            dro_config: None,
+            ..TrainParams::default()
+        };
+
+        let params_dro = TrainParams {
+            leaf_solver: LeafSolverKind::Dro,
+            dro_config: Some(DroConfig {
+                radius: 0.5,
+                metric: DroMetric::Wasserstein,
+            }),
+            ..params_standard.clone()
+        };
+
+        let standard = fit_joint_multi_output(
+            &params_standard,
+            feature_count,
+            &binned_matrix,
+            &[targets_0.clone(), targets_1.clone()],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            3,
+        )
+        .expect("standard leafwise fit");
+
+        let dro = fit_joint_multi_output(
+            &params_dro,
+            feature_count,
+            &binned_matrix,
+            &[targets_0.clone(), targets_1.clone()],
+            None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            3,
+        )
+        .expect("dro leafwise fit");
+
+        let counts_differ = standard.model.stumps.len() != dro.model.stumps.len();
+        let any_leaf_diff = standard
+            .model
+            .stumps
+            .iter()
+            .zip(dro.model.stumps.iter())
+            .any(|(a, b)| {
+                let (la, ra) = a.multi_output_leaf_values.as_ref().unwrap();
+                let (lb, rb) = b.multi_output_leaf_values.as_ref().unwrap();
+                la != lb || ra != rb
+            });
+        assert!(
+            counts_differ || any_leaf_diff,
+            "DRO leaves should differ from standard leaves under leaf-wise growth"
+        );
+    }
+
+    #[test]
     fn joint_warm_start_continues_from_prior_state() {
         let n_rows = 80;
         let feature_count = 2;
