@@ -1774,6 +1774,30 @@ fn fit_joint_inner(
         }
     }
 
+    // v0.10.6: per_round_gradient neutralization — build the projector once,
+    // then project each per-output gradient buffer in place every round.
+    // Mirrors the single-output multiclass path (lib.rs:3581+).
+    let gradient_projector: Option<crate::FactorProjector> =
+        match (effective_neutralization_config(params), factor_exposures) {
+            (Some(cfg), Some(exposures))
+                if cfg.kind == alloygbm_core::NeutralizationKind::PerRoundGradient =>
+            {
+                Some(
+                    crate::FactorProjector::new(exposures, None, cfg.ridge_lambda)
+                        .map_err(|err| format!("per_round_gradient projector: {err:?}"))?,
+                )
+            }
+            (Some(cfg), None)
+                if cfg.kind == alloygbm_core::NeutralizationKind::PerRoundGradient =>
+            {
+                return Err(
+                    "factor_exposures are required when neutralization='per_round_gradient'"
+                        .to_string(),
+                );
+            }
+            _ => None,
+        };
+
     for round in 0..n_estimators {
         // v0.10.3 warm-start: when continuing from a prior fit, all
         // per-round seeds, dropout indices, and `node_id` encodings
@@ -1833,6 +1857,18 @@ fn fit_joint_inner(
                 group_id,
             )?;
             grads_per_output.push(g);
+        }
+
+        // v0.10.6: per_round_gradient — project each per-output gradient
+        // buffer through the factor projector. Applied BEFORE row sampling
+        // so the joint GOSS scorer (which mutates `grads_per_output`) and
+        // the histogram builder both see projected residuals.
+        if let Some(projector) = &gradient_projector {
+            for buf in grads_per_output.iter_mut() {
+                projector
+                    .project_gradient_pairs_in_place(buf)
+                    .map_err(|err| format!("per_round_gradient projection: {err:?}"))?;
+            }
         }
 
         // v0.10.4: update per-output EMA stats BEFORE tree-building so
@@ -2503,6 +2539,101 @@ mod tests {
         .expect_err("should reject");
         assert!(
             err.contains("squared_error") || err.contains("pre_target"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn joint_per_round_gradient_neutralization_changes_model() {
+        // Per_round_gradient should produce visibly different predictions
+        // than the un-neutralized control on the same dataset.
+        use alloygbm_core::{FactorExposureMatrix, FactorNeutralizationConfig, NeutralizationKind};
+        let row_count = 16usize;
+        let feature_count = 1usize;
+        let bins: Vec<u8> = (0..row_count as u8).map(|i| i % 4).collect();
+        let binned = BinnedMatrix::new(row_count, feature_count, 4, bins).expect("binned");
+        let target_0: Vec<f32> = (0..row_count).map(|i| (i as f32) * 0.5).collect();
+        let target_1: Vec<f32> = (0..row_count).map(|i| (i as f32) * 1.5).collect();
+        let exposures =
+            FactorExposureMatrix::new(row_count, 1, target_0.clone()).expect("exposures");
+
+        let fit = |neutralize: bool| -> Vec<Vec<f32>> {
+            let params = TrainParams {
+                neutralization_config: if neutralize {
+                    Some(FactorNeutralizationConfig {
+                        kind: NeutralizationKind::PerRoundGradient,
+                        ridge_lambda: 1e-6,
+                        split_penalty: 0.0,
+                    })
+                } else {
+                    None
+                },
+                ..TrainParams::default()
+            };
+            let summary = fit_joint_multi_output_with_warm_start(
+                &params,
+                feature_count,
+                &binned,
+                &[target_0.clone(), target_1.clone()],
+                None,
+                &[JointObjective::SquaredError, JointObjective::SquaredError],
+                4,
+                &[],
+                None,
+                if neutralize { Some(&exposures) } else { None },
+            )
+            .expect("fit");
+            let bytes = summary.model.clone().to_artifact_bytes().expect("encode");
+            let predictor = JointPredictor::from_artifact_bytes(&bytes, summary.baselines.clone())
+                .expect("load");
+            (0..row_count)
+                .map(|r| predictor.predict_row(&[binned.bins[r] as f32]))
+                .collect()
+        };
+
+        let baseline = fit(false);
+        let neutralized = fit(true);
+        let max_diff: f32 = baseline
+            .iter()
+            .zip(neutralized.iter())
+            .flat_map(|(a, b)| a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()))
+            .fold(0.0_f32, f32::max);
+        assert!(
+            max_diff > 1e-3,
+            "per_round_gradient neutralization should change predictions (max_diff = {max_diff})"
+        );
+    }
+
+    #[test]
+    fn joint_per_round_gradient_rejects_missing_exposures() {
+        use alloygbm_core::{FactorNeutralizationConfig, NeutralizationKind};
+        let row_count = 4usize;
+        let feature_count = 1usize;
+        let bins: Vec<u8> = vec![0, 1, 2, 3];
+        let binned = BinnedMatrix::new(row_count, feature_count, 4, bins).expect("binned");
+        let params = TrainParams {
+            neutralization_config: Some(FactorNeutralizationConfig {
+                kind: NeutralizationKind::PerRoundGradient,
+                ridge_lambda: 1e-6,
+                split_penalty: 0.0,
+            }),
+            ..TrainParams::default()
+        };
+        let err = fit_joint_multi_output_with_warm_start(
+            &params,
+            feature_count,
+            &binned,
+            &[vec![0.0_f32, 1.0, 0.0, 1.0]],
+            None,
+            &[JointObjective::SquaredError],
+            1,
+            &[],
+            None,
+            None,
+        )
+        .expect_err("should reject");
+        assert!(
+            err.contains("factor_exposures are required"),
             "unexpected error: {err}"
         );
     }
