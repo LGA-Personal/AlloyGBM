@@ -3936,6 +3936,64 @@ mod tests {
     }
 
     #[test]
+    fn joint_dro_radius_zero_matches_standard_byte_for_byte() {
+        use alloygbm_core::{DroConfig, DroMetric, LeafSolverKind};
+
+        let n_rows = 200;
+        let feature_count = 1;
+        let targets_0: Vec<f32> = (0..n_rows)
+            .map(|i| if i < n_rows / 2 { -1.0 } else { 1.0 })
+            .collect();
+        let targets_1: Vec<f32> = targets_0.iter().map(|&t| t * 2.0).collect();
+        let bins: Vec<u8> = (0..n_rows).map(|i| (i % 8) as u8).collect();
+        let binned_matrix =
+            BinnedMatrix::new(n_rows, feature_count, /*max_bin=*/ 7, bins).expect("bm");
+
+        let params_standard = TrainParams {
+            seed: 7,
+            max_depth: 2,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            learning_rate: 0.3,
+            leaf_solver: LeafSolverKind::Standard,
+            dro_config: None,
+            ..TrainParams::default()
+        };
+
+        // DRO with radius=0 should collapse to standard byte-for-byte.
+        let params_dro_zero = TrainParams {
+            leaf_solver: LeafSolverKind::Dro,
+            dro_config: Some(DroConfig {
+                radius: 0.0,
+                metric: DroMetric::Wasserstein,
+            }),
+            ..params_standard.clone()
+        };
+
+        let standard = fit_joint_multi_output(
+            &params_standard, feature_count, &binned_matrix,
+            &[targets_0.clone(), targets_1.clone()], None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            4,
+        ).expect("standard fit");
+
+        let dro_zero = fit_joint_multi_output(
+            &params_dro_zero, feature_count, &binned_matrix,
+            &[targets_0.clone(), targets_1.clone()], None,
+            &[JointObjective::SquaredError, JointObjective::SquaredError],
+            4,
+        ).expect("dro radius=0 fit");
+
+        // Byte-equivalence: identical artifact bytes prove identical trees.
+        let a = standard.model.to_artifact_bytes().expect("ser std");
+        let b = dro_zero.model.to_artifact_bytes().expect("ser dro0");
+        assert_eq!(
+            a, b,
+            "DRO with radius=0 must produce byte-identical artifact to standard leaves"
+        );
+    }
+
+    #[test]
     fn joint_warm_start_continues_from_prior_state() {
         let n_rows = 80;
         let feature_count = 2;
