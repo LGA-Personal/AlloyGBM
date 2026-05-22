@@ -210,6 +210,26 @@ fn effective_dro_config(params: &TrainParams) -> Option<&alloygbm_core::DroConfi
     Some(cfg)
 }
 
+/// Return `Some(config)` only when factor neutralization is actually active
+/// for this fit. Inert configs (kind = None) collapse to `None`.
+///
+/// Why a helper rather than `validate_train_params`: the joint trainer accepts
+/// raw `TrainParams` without invoking the single-output validator (which would
+/// also reject joint-unrelated configs like linear leaves). This helper is the
+/// SOURCE OF TRUTH for "is neutralization on?" — every behavioral site (target
+/// residualization in pre_target mode, gradient projection in
+/// per_round_gradient mode, FactorSplitContext construction in split_penalty
+/// mode) AND the artifact serializer must call it.
+fn effective_neutralization_config(
+    params: &TrainParams,
+) -> Option<&alloygbm_core::FactorNeutralizationConfig> {
+    let cfg = params.neutralization_config.as_ref()?;
+    if cfg.kind == alloygbm_core::NeutralizationKind::None {
+        return None;
+    }
+    Some(cfg)
+}
+
 /// Walk every row through one tree's stumps and accumulate
 /// `sign * scale * leaf_value_k` into `predictions[k][row]`.
 ///
@@ -2079,7 +2099,8 @@ fn fit_joint_inner(
         morph_metadata,
         dro_metadata: effective_dro_config(params).map(|cfg| DroMetadataPayload { config: *cfg }),
         feature_baseline: None,
-        neutralization_metadata: None,
+        neutralization_metadata: effective_neutralization_config(params)
+            .map(|cfg| alloygbm_core::NeutralizationMetadataPayload { config: *cfg }),
     };
 
     // v0.10.3 warm-start: report TOTAL rounds completed (prior + new)
@@ -2331,6 +2352,25 @@ const TREE_NODE_STRIDE: u32 = 1 << 20;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn joint_effective_neutralization_config_returns_none_when_inactive() {
+        use alloygbm_core::{FactorNeutralizationConfig, NeutralizationKind};
+        let mut params = TrainParams::default();
+        assert!(effective_neutralization_config(&params).is_none());
+        params.neutralization_config = Some(FactorNeutralizationConfig {
+            kind: NeutralizationKind::None,
+            ridge_lambda: 1e-6,
+            split_penalty: 0.0,
+        });
+        assert!(effective_neutralization_config(&params).is_none());
+        params.neutralization_config = Some(FactorNeutralizationConfig {
+            kind: NeutralizationKind::PerRoundGradient,
+            ridge_lambda: 1e-6,
+            split_penalty: 0.0,
+        });
+        assert!(effective_neutralization_config(&params).is_some());
+    }
 
     #[test]
     fn joint_objective_parses_supported_names() {
