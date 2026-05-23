@@ -5255,6 +5255,12 @@ impl Trainer {
         }
         validate_train_params(&self.params)?;
         if objective.quantile_alpha().is_some() {
+            let qa = self.params.quantile_alpha;
+            if !qa.is_finite() || qa <= 0.0 || qa >= 1.0 {
+                return Err(EngineError::InvalidConfig(
+                    "quantile_alpha must be finite and in (0.0, 1.0)".to_string(),
+                ));
+            }
             if self.params.leaf_model == LeafModelKind::Linear {
                 return Err(EngineError::InvalidConfig(
                     "leaf_model='linear' is not supported with objective='quantile'".to_string(),
@@ -9093,7 +9099,7 @@ fn fill_refined_subtree_absolute_output(
 
 struct LeafResiduals {
     residuals: Vec<f32>,
-    weights: Vec<f32>,
+    weights: Option<Vec<f32>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -9146,15 +9152,16 @@ fn refine_quantile_leaf_values(
         let terminal_local_node_id =
             terminal_local_node_id_for_row(row_index, binned_matrix, &stumps_by_local)?;
         let res = targets[row_index] - predictions[row_index];
-        let weight = sample_weights.map_or(1.0, |weights| weights[row_index]);
         let entry = leaf_residuals
             .entry(terminal_local_node_id)
             .or_insert_with(|| LeafResiduals {
                 residuals: Vec::new(),
-                weights: Vec::new(),
+                weights: sample_weights.map(|_| Vec::new()),
             });
         entry.residuals.push(res);
-        entry.weights.push(weight);
+        if let Some(ref mut w_vec) = entry.weights {
+            w_vec.push(sample_weights.unwrap()[row_index]);
+        }
     }
 
     let mut refined_absolute_outputs = HashMap::new();
@@ -9189,10 +9196,8 @@ fn refine_quantile_leaf_values(
 
         let dl = (left_absolute - parent_absolute) * learning_rate;
         let dr = (right_absolute - parent_absolute) * learning_rate;
-        stump.left_leaf_value =
-            LeafValue::Scalar(dl.clamp(-max_abs_leaf_value, max_abs_leaf_value));
-        stump.right_leaf_value =
-            LeafValue::Scalar(dr.clamp(-max_abs_leaf_value, max_abs_leaf_value));
+        stump.left_leaf_value = LeafValue::Scalar(dl);
+        stump.right_leaf_value = LeafValue::Scalar(dr);
     }
 
     Ok(())
@@ -9286,12 +9291,22 @@ fn fill_refined_subtree_quantile_absolute_output(
     }
 
     let (q_val, weight_sum) = if let Some(lr) = leaf_residuals.get(&local_node_id) {
-        let total_w: f32 = lr.weights.iter().sum();
-        if total_w > 0.0 {
-            let q = weighted_quantile(&lr.residuals, Some(&lr.weights), alpha)?;
-            (q, total_w)
+        if let Some(ref w_vec) = lr.weights {
+            let total_w: f32 = w_vec.iter().sum();
+            if total_w > 0.0 {
+                let q = weighted_quantile(&lr.residuals, Some(w_vec), alpha)?;
+                (q, total_w)
+            } else {
+                (0.0, 0.0)
+            }
         } else {
-            (0.0, 0.0)
+            let count = lr.residuals.len();
+            if count > 0 {
+                let q = weighted_quantile(&lr.residuals, None, alpha)?;
+                (q, count as f32)
+            } else {
+                (0.0, 0.0)
+            }
         }
     } else {
         (0.0, 0.0)
@@ -14699,6 +14714,34 @@ mod tests {
             "Loss did not improve. initial: {}, final: {}",
             initial_loss,
             final_loss
+        );
+    }
+
+    #[test]
+    fn test_quantile_validation_gated_on_objective() {
+        let dataset = sample_dataset();
+        let binned = sample_binned_matrix();
+
+        // 1. If objective is not quantile, invalid quantile_alpha is ignored during validation
+        let params = TrainParams {
+            quantile_alpha: -1.0, // normally invalid
+            ..TrainParams::default()
+        };
+        let trainer = Trainer::new(params).expect("valid params");
+        // Should succeed since objective is not quantile
+        let objective = SquaredErrorObjective;
+        assert!(
+            trainer
+                .fit_iterations(&dataset, &binned, &MockBackend, &objective, 1)
+                .is_ok()
+        );
+
+        // 2. If objective is quantile, invalid quantile_alpha raises an error
+        let objective_quantile = QuantileObjective { alpha: 0.5 };
+        assert!(
+            trainer
+                .fit_iterations(&dataset, &binned, &MockBackend, &objective_quantile, 1)
+                .is_err()
         );
     }
 }

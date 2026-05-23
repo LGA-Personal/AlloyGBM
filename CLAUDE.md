@@ -9,7 +9,7 @@ AlloyGBM is a Rust-first Gradient Boosted Decision Tree (GBDT) library with Pyth
 ```
 AlloyGBM/
   Cargo.toml              # Workspace root (6 crates, edition 2024, Rust 1.92.0)
-    crates/
+  crates/
     core/src/lib.rs        # Data structures: TrainParams, BinnedMatrix, ModelMetadata, artifact serde, NaN handling, FeatureBaseline section
     engine/src/lib.rs      # Training loop, ObjectiveOps trait (12 objectives — adds Poisson/Gamma/Tweedie in v0.11.0 and Quantile in v0.11.1), Trainer, IterationControls, IterationDiagnostics, interaction constraints, WarmStartState (with optional DART tree_weights snapshot)
     engine/src/dart.rs     # DART dropout + normalize helpers (v0.9.0)

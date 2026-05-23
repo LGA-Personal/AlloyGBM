@@ -131,9 +131,11 @@ def test_quantile_empirical_quantile_property() -> None:
         model.fit(X, y)
         preds = np.asarray(model.predict(X))
         
-        # Check that y < preds is approximately alpha
+        # Check that y < preds is approximately alpha.
+        # Note: For N=1000, the standard error of the empirical alpha-quantile is
+        # approx sqrt(alpha * (1 - alpha) / N), which is at most 0.0158 (at alpha=0.5).
+        # A tolerance of 0.05 gives a safe ~3-sigma margin to prevent test flakiness.
         underprediction_rate = np.mean(y < preds)
-        # We allow a tolerance of 0.05 (e.g., 0.1 +/- 0.05)
         assert np.abs(underprediction_rate - alpha) < 0.05, (
             f"For alpha={alpha}, empirical underprediction rate is {underprediction_rate}"
         )
@@ -177,6 +179,12 @@ def test_quantile_rejected_combinations() -> None:
 
     # 5. MultiLabelGBMRanker rejects
     from alloygbm import MultiLabelGBMRanker
-    mranker = MultiLabelGBMRanker(ranking_objective="quantile")
     with pytest.raises(ValueError, match="MultiLabelGBMRanker does not support objective='quantile'"):
-        mranker.fit([[1], [2]], [[0.5], [1.5]], group=[1, 1])
+        MultiLabelGBMRanker(ranking_objective="quantile")
+    with pytest.raises(ValueError, match="MultiLabelGBMRanker does not support objective='quantile'"):
+        MultiLabelGBMRanker(objective="quantile")
+    mranker = MultiLabelGBMRanker()
+    with pytest.raises(ValueError, match="MultiLabelGBMRanker does not support objective='quantile'"):
+        mranker.set_params(ranking_objective="quantile")
+    with pytest.raises(ValueError, match="MultiLabelGBMRanker does not support objective='quantile'"):
+        mranker.set_params(objective="quantile")
