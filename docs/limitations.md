@@ -43,6 +43,7 @@ objectives.
 ### 6. Quantile regression is rejected for linear leaves, DART, and MorphBoost
 
 The `"quantile"` objective uses empirical leaf refinement which assumes constant leaves, standard boosting (non-DART), and standard training mode (non-MorphBoost). These combinations are rejected at the Python and Rust layers.
+
 ## Resolved (Previously Limitations)
 
 ### v0.11.1

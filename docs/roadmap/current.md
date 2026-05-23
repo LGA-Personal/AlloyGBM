@@ -4,7 +4,7 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
-The `0.11.1` release ships quantile regression (`objective="quantile"`) with pinball loss semantics and parameter `quantile_alpha` on `GBMRegressor`. It uses a proxy Hessian during split-finding, an empirical leaf refinement step at the end of each round acting on the full dataset, and a fast unweighted quickselect path. Default behavior for all other estimators and objectives remains byte-identical when not opted into.
+The `0.11.1` release ships quantile regression (`objective="quantile"`) with pinball loss semantics and parameter `quantile_alpha` on `GBMRegressor`. It uses a proxy Hessian during split-finding, an empirical leaf refinement step at the end of each round acting on the full dataset, and a fast unweighted quickselect path. Default behavior for every existing user-facing API remains byte-identical to v0.11.0 when `objective="quantile"` is not opted into.
 
 ## What Shipped In v0.11.1
 
