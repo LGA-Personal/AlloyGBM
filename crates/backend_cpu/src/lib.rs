@@ -2380,6 +2380,7 @@ mod tests {
             dro_config: None,
             neutralization_config: None,
             boosting_mode: alloygbm_core::BoostingMode::Standard,
+            tweedie_variance_power: 1.5,
         }
     }
 

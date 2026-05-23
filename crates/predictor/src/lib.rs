@@ -1493,6 +1493,7 @@ mod tests {
             leaf_model: LeafModelKind::Constant,
             neutralization_config: None,
             boosting_mode: alloygbm_core::BoostingMode::Standard,
+            tweedie_variance_power: 1.5,
         }
     }
 
