@@ -346,6 +346,7 @@ class GBMRegressor(_GBMRegressorBase):
         dart_max_drop: int = 50,
         dart_normalize_type: str = "tree",
         dart_sample_type: str = "uniform",
+        tweedie_variance_power: float = 1.5,
     ) -> None:
         if not (0.0 < learning_rate <= 1.0):
             raise ValueError("learning_rate must be in (0.0, 1.0]")
@@ -484,6 +485,14 @@ class GBMRegressor(_GBMRegressorBase):
             raise TypeError(
                 "objective must be a string, a callable, or None"
             )
+        if isinstance(objective, str) and objective == "tweedie":
+            if not isinstance(tweedie_variance_power, (int, float)) or not (
+                1.0 < float(tweedie_variance_power) < 2.0
+            ):
+                raise ValueError(
+                    "tweedie_variance_power must satisfy 1 < p < 2 when objective='tweedie' "
+                    f"(got {tweedie_variance_power!r})"
+                )
         if int(max_cat_threshold) < 0:
             raise ValueError("max_cat_threshold must be >= 0")
         if training_mode not in ("auto", "manual", "morph"):
@@ -685,6 +694,7 @@ class GBMRegressor(_GBMRegressorBase):
         self.dart_max_drop = int(dart_max_drop)
         self.dart_normalize_type = str(dart_normalize_type)
         self.dart_sample_type = str(dart_sample_type)
+        self.tweedie_variance_power = float(tweedie_variance_power)
         self._fit_neutralization: str | None = None
         self._fit_factor_neutralization_lambda: float | None = None
         self._fit_factor_penalty: float | None = None
@@ -826,6 +836,7 @@ class GBMRegressor(_GBMRegressorBase):
             "dart_max_drop": self.dart_max_drop,
             "dart_normalize_type": self.dart_normalize_type,
             "dart_sample_type": self.dart_sample_type,
+            "tweedie_variance_power": self.tweedie_variance_power,
         }
 
     def set_params(self, **params: object) -> "GBMRegressor":
@@ -885,6 +896,7 @@ class GBMRegressor(_GBMRegressorBase):
             "dart_max_drop",
             "dart_normalize_type",
             "dart_sample_type",
+            "tweedie_variance_power",
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
@@ -1351,6 +1363,9 @@ class GBMRegressor(_GBMRegressorBase):
                     f"got {s!r}"
                 )
             self.dart_sample_type = s
+        if "tweedie_variance_power" in params:
+            v = float(params["tweedie_variance_power"])
+            self.tweedie_variance_power = v
         # Cross-field validation for goss top+other rates.
         if self.boosting_mode == "goss" and (
             self.goss_top_rate + self.goss_other_rate > 1.0
@@ -1462,6 +1477,12 @@ class GBMRegressor(_GBMRegressorBase):
             return "ndcg"
         if objective == "queryrmse":
             return "queryrmse"
+        if objective == "poisson":
+            return "poisson_deviance"
+        if objective == "gamma":
+            return "gamma_deviance"
+        if objective == "tweedie":
+            return "tweedie_deviance"
         if objective == "custom":
             return "loss"
         return "mse"
@@ -1796,6 +1817,25 @@ class GBMRegressor(_GBMRegressorBase):
                     stacklevel=2,
                 )
 
+        # Target-domain validation for GLM objectives.
+        obj_name = self._objective_name()
+        if obj_name in ("poisson", "tweedie", "gamma"):
+            import numpy as _np
+
+            _y_arr = _np.asarray(y, dtype=_np.float64)
+            if obj_name == "gamma":
+                if _np.any(_y_arr <= 0):
+                    raise ValueError(
+                        "objective='gamma' requires strictly positive targets, "
+                        f"got min(y)={float(_y_arr.min())}"
+                    )
+            else:
+                if _np.any(_y_arr < 0):
+                    raise ValueError(
+                        f"objective={obj_name!r} requires non-negative targets, "
+                        f"got min(y)={float(_y_arr.min())}"
+                    )
+
         # Validate group if provided.
         validated_group_id: list[int] | None = None
         if group is not None:
@@ -2090,6 +2130,11 @@ class GBMRegressor(_GBMRegressorBase):
                     dart_sample_type=(
                         self.dart_sample_type if self.boosting_mode == "dart" else None
                     ),
+                    tweedie_variance_power=(
+                        self.tweedie_variance_power
+                        if self._objective_name() == "tweedie"
+                        else None
+                    ),
                 )
                 return self._finalize_training_result(native_result, input_adaptation_seconds, feature_count=feature_count)
             except (ImportError, AttributeError):
@@ -2221,6 +2266,11 @@ class GBMRegressor(_GBMRegressorBase):
                 dart_sample_type=(
                     self.dart_sample_type if self.boosting_mode == "dart" else None
                 ),
+                tweedie_variance_power=(
+                    self.tweedie_variance_power
+                    if self._objective_name() == "tweedie"
+                    else None
+                ),
             )
         else:
             assert training_rows is not None
@@ -2309,6 +2359,11 @@ class GBMRegressor(_GBMRegressorBase):
                 ),
                 dart_sample_type=(
                     self.dart_sample_type if self.boosting_mode == "dart" else None
+                ),
+                tweedie_variance_power=(
+                    self.tweedie_variance_power
+                    if self._objective_name() == "tweedie"
+                    else None
                 ),
             )
 
@@ -2679,6 +2734,11 @@ class GBMRegressor(_GBMRegressorBase):
                 dart_sample_type=(
                     self.dart_sample_type if self.boosting_mode == "dart" else None
                 ),
+                tweedie_variance_power=(
+                    self.tweedie_variance_power
+                    if self._objective_name() == "tweedie"
+                    else None
+                ),
             )
         else:
             train_regression_artifact = _load_native_train_regression_artifact()
@@ -2739,6 +2799,11 @@ class GBMRegressor(_GBMRegressorBase):
                 ),
                 dart_sample_type=(
                     self.dart_sample_type if self.boosting_mode == "dart" else None
+                ),
+                tweedie_variance_power=(
+                    self.tweedie_variance_power
+                    if self._objective_name() == "tweedie"
+                    else None
                 ),
             )
 

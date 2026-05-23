@@ -340,15 +340,99 @@ def _ndcg_single_group(labels: list[float], scores: list[float], k: int) -> floa
     return dcg / idcg
 
 
+def poisson_deviance(y_true, y_pred):
+    """Mean Poisson deviance for log-link regression.
+
+    For ``y >= 0`` and ``mu > 0``:
+        ``D = 2 · mean_i [ y_i · log(y_i / mu_i) − (y_i − mu_i) ]``
+    With the convention ``y log(y/mu) → 0`` when ``y → 0``.
+    """
+    if len(y_true) != len(y_pred):
+        raise ValueError(
+            f"y_true length {len(y_true)} != y_pred length {len(y_pred)}"
+        )
+    if not y_true:
+        raise ValueError("y_true must be non-empty")
+    total = 0.0
+    for y, mu in zip(y_true, y_pred):
+        if mu <= 0.0:
+            raise ValueError(f"y_pred must be > 0, got {mu}")
+        if y < 0.0:
+            raise ValueError(f"y_true must be >= 0, got {y}")
+        term = -(y - mu)
+        if y > 0.0:
+            term += y * math.log(y / mu)
+        total += 2.0 * term
+    return total / len(y_true)
+
+
+def gamma_deviance(y_true, y_pred):
+    """Mean Gamma deviance for log-link regression.
+
+    For ``y > 0`` and ``mu > 0``:
+        ``D = 2 · mean_i [ -log(y_i / mu_i) + (y_i - mu_i) / mu_i ]``
+    """
+    if len(y_true) != len(y_pred):
+        raise ValueError(
+            f"y_true length {len(y_true)} != y_pred length {len(y_pred)}"
+        )
+    if not y_true:
+        raise ValueError("y_true must be non-empty")
+    total = 0.0
+    for y, mu in zip(y_true, y_pred):
+        if mu <= 0.0:
+            raise ValueError(f"y_pred must be > 0, got {mu}")
+        if y <= 0.0:
+            raise ValueError(f"y_true must be > 0, got {y}")
+        total += 2.0 * (-math.log(y / mu) + (y - mu) / mu)
+    return total / len(y_true)
+
+
+def tweedie_deviance(y_true, y_pred, *, variance_power):
+    """Mean Tweedie deviance for ``variance_power p ∈ (1, 2)``.
+
+    For ``y >= 0``, ``mu > 0``, ``1 < p < 2``:
+        ``D = 2 · mean_i [ y^(2-p) / ((1-p)(2-p))
+                          − y · mu^(1-p) / (1-p)
+                          + mu^(2-p) / (2-p) ]``
+    The ``y^(2-p)`` term is 0 when ``y == 0``.
+    """
+    if not (1.0 < variance_power < 2.0):
+        raise ValueError(
+            f"tweedie_deviance requires 1 < variance_power < 2 (got {variance_power})"
+        )
+    if len(y_true) != len(y_pred):
+        raise ValueError(
+            f"y_true length {len(y_true)} != y_pred length {len(y_pred)}"
+        )
+    if not y_true:
+        raise ValueError("y_true must be non-empty")
+    p = variance_power
+    total = 0.0
+    for y, mu in zip(y_true, y_pred):
+        if mu <= 0.0:
+            raise ValueError(f"y_pred must be > 0, got {mu}")
+        if y < 0.0:
+            raise ValueError(f"y_true must be >= 0, got {y}")
+        term1 = (y ** (2.0 - p)) / ((1.0 - p) * (2.0 - p)) if y > 0.0 else 0.0
+        term2 = y * (mu ** (1.0 - p)) / (1.0 - p)
+        term3 = (mu ** (2.0 - p)) / (2.0 - p)
+        total += 2.0 * (term1 - term2 + term3)
+    return total / len(y_true)
+
+
 __all__ = [
     "accuracy",
+    "gamma_deviance",
     "hit_rate",
     "icir",
     "log_loss",
     "mae",
     "ndcg",
     "pearson_correlation",
+    "poisson_deviance",
     "r2_score",
     "rank_ic",
     "rmse",
+    "tweedie_deviance",
 ]

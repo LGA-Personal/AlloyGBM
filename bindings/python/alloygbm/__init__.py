@@ -4,6 +4,7 @@ from ._alloygbm import native_runtime_info
 from .classifier import GBMClassifier
 from .evaluation import (
     accuracy,
+    gamma_deviance,
     hit_rate,
     icir,
     log_loss,
@@ -11,9 +12,11 @@ from .evaluation import (
     multiclass_log_loss,
     ndcg,
     pearson_correlation,
+    poisson_deviance,
     r2_score,
     rank_ic,
     rmse,
+    tweedie_deviance,
 )
 from .multi_label_ranker import MultiLabelGBMRanker
 from .ranker import GBMRanker
@@ -26,6 +29,7 @@ __all__ = [
     "GBMRegressor",
     "MultiLabelGBMRanker",
     "accuracy",
+    "gamma_deviance",
     "hit_rate",
     "icir",
     "log_loss",
@@ -34,9 +38,11 @@ __all__ = [
     "native_runtime_info",
     "ndcg",
     "pearson_correlation",
+    "poisson_deviance",
     "purged_panel_splits",
     "purged_time_series_splits",
     "r2_score",
     "rank_ic",
     "rmse",
+    "tweedie_deviance",
 ]
