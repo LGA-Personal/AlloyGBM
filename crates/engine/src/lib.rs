@@ -1135,6 +1135,367 @@ fn log_sum_exp(values: &[f32]) -> f32 {
     max_val + sum_exp.ln()
 }
 
+// ── GLM Objectives (Poisson, Gamma, Tweedie) — v0.11.0 ────────────────────
+//
+// All three use the log-link: predictions are in `η = log(μ)` space and
+// `predict()` returns `μ = exp(η)`.  Each computes its own gradient and
+// hessian per the chosen GLM deviance, and uses
+// `log(weighted_mean(targets))` as the initial prediction (clamped to
+// avoid `log(0)`).  Targets are clamped to `eta ∈ [-50, 50]` before
+// `exp` to keep μ in finite f32 range.
+
+/// Stable `exp` for log-link prediction space.  Clamps η to [-50, 50] so
+/// μ stays in f32-finite range (exp(80) ≈ 5.5e34 fits but exp(89) overflows).
+#[inline]
+fn glm_clamp_exp(eta: f32) -> f32 {
+    eta.clamp(-50.0, 50.0).exp()
+}
+
+/// Weighted-mean-of-targets helper used by every GLM initial prediction.
+/// Returns `(sum, total_weight)` or an error on bad weights.
+fn glm_weighted_target_sum(
+    targets: &[f32],
+    sample_weights: Option<&[f32]>,
+) -> EngineResult<(f32, f32)> {
+    match sample_weights {
+        Some(weights) => {
+            if weights.len() != targets.len() {
+                return Err(EngineError::ContractViolation(format!(
+                    "weights length {} does not match targets length {}",
+                    weights.len(),
+                    targets.len()
+                )));
+            }
+            let mut sum = 0.0_f32;
+            let mut w_sum = 0.0_f32;
+            for (&t, &wi) in targets.iter().zip(weights) {
+                if !wi.is_finite() || wi <= 0.0 {
+                    return Err(EngineError::ContractViolation(
+                        "sample weights must be finite and > 0".to_string(),
+                    ));
+                }
+                sum += t * wi;
+                w_sum += wi;
+            }
+            Ok((sum, w_sum))
+        }
+        None => Ok((targets.iter().sum::<f32>(), targets.len() as f32)),
+    }
+}
+
+/// Poisson regression objective with log-link: `μ = exp(η)`, `y ~ Poisson(μ)`.
+/// Targets must be ≥ 0.  Predictions are in log-mean (η) space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoissonObjective;
+
+impl ObjectiveOps for PoissonObjective {
+    fn objective_name(&self) -> &str {
+        "poisson"
+    }
+
+    fn initial_prediction(
+        &self,
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+    ) -> EngineResult<f32> {
+        if targets.is_empty() {
+            return Err(EngineError::ContractViolation(
+                "targets cannot be empty".to_string(),
+            ));
+        }
+        for &t in targets {
+            if !t.is_finite() || t < 0.0 {
+                return Err(EngineError::ContractViolation(
+                    "Poisson targets must be finite and non-negative".to_string(),
+                ));
+            }
+        }
+        let (sum, w_sum) = glm_weighted_target_sum(targets, sample_weights)?;
+        if w_sum <= 0.0 {
+            return Err(EngineError::ContractViolation(
+                "sample weight sum must be > 0".to_string(),
+            ));
+        }
+        let mean = (sum / w_sum).max(1e-7);
+        Ok(mean.ln())
+    }
+
+    fn compute_gradients(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+    ) -> EngineResult<Vec<GradientPair>> {
+        if predictions.len() != targets.len() {
+            return Err(EngineError::ContractViolation(format!(
+                "predictions length {} does not match targets length {}",
+                predictions.len(),
+                targets.len()
+            )));
+        }
+        let mut gradients = Vec::with_capacity(predictions.len());
+        for index in 0..predictions.len() {
+            let weight = sample_weights.map_or(1.0, |w| w[index]);
+            if !weight.is_finite() || weight <= 0.0 {
+                return Err(EngineError::ContractViolation(
+                    "sample weights must be finite and > 0".to_string(),
+                ));
+            }
+            let mu = glm_clamp_exp(predictions[index]);
+            let grad = (mu - targets[index]) * weight;
+            let hess = mu.max(1e-7) * weight;
+            gradients.push(GradientPair::new(grad, hess)?);
+        }
+        Ok(gradients)
+    }
+
+    fn loss(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+    ) -> EngineResult<f32> {
+        if predictions.len() != targets.len() {
+            return Err(EngineError::ContractViolation(format!(
+                "predictions length {} does not match targets length {}",
+                predictions.len(),
+                targets.len()
+            )));
+        }
+        let mut total = 0.0_f32;
+        let mut weight_sum = 0.0_f32;
+        for index in 0..predictions.len() {
+            let weight = sample_weights.map_or(1.0, |w| w[index]);
+            let eta = predictions[index].clamp(-50.0, 50.0);
+            let mu = eta.exp();
+            // Poisson deviance kernel (up to constants): μ − y·η
+            total += weight * (mu - targets[index] * eta);
+            weight_sum += weight;
+        }
+        if weight_sum <= 0.0 {
+            return Ok(0.0);
+        }
+        Ok(total / weight_sum)
+    }
+}
+
+/// Gamma regression objective with log-link: `μ = exp(η)`, `y ~ Gamma(μ, φ)`.
+/// Targets must be strictly positive.  Predictions are in log-mean (η) space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GammaObjective;
+
+impl ObjectiveOps for GammaObjective {
+    fn objective_name(&self) -> &str {
+        "gamma"
+    }
+
+    fn initial_prediction(
+        &self,
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+    ) -> EngineResult<f32> {
+        if targets.is_empty() {
+            return Err(EngineError::ContractViolation(
+                "targets cannot be empty".to_string(),
+            ));
+        }
+        for &t in targets {
+            if !t.is_finite() || t <= 0.0 {
+                return Err(EngineError::ContractViolation(
+                    "Gamma targets must be finite and strictly positive (> 0)".to_string(),
+                ));
+            }
+        }
+        let (sum, w_sum) = glm_weighted_target_sum(targets, sample_weights)?;
+        if w_sum <= 0.0 {
+            return Err(EngineError::ContractViolation(
+                "sample weight sum must be > 0".to_string(),
+            ));
+        }
+        Ok((sum / w_sum).max(1e-7).ln())
+    }
+
+    fn compute_gradients(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+    ) -> EngineResult<Vec<GradientPair>> {
+        if predictions.len() != targets.len() {
+            return Err(EngineError::ContractViolation(format!(
+                "predictions length {} does not match targets length {}",
+                predictions.len(),
+                targets.len()
+            )));
+        }
+        let mut gradients = Vec::with_capacity(predictions.len());
+        for index in 0..predictions.len() {
+            let weight = sample_weights.map_or(1.0, |w| w[index]);
+            if !weight.is_finite() || weight <= 0.0 {
+                return Err(EngineError::ContractViolation(
+                    "sample weights must be finite and > 0".to_string(),
+                ));
+            }
+            let mu = glm_clamp_exp(predictions[index]);
+            let y_over_mu = targets[index] / mu.max(1e-7);
+            let grad = (1.0 - y_over_mu) * weight;
+            let hess = y_over_mu.max(1e-7) * weight;
+            gradients.push(GradientPair::new(grad, hess)?);
+        }
+        Ok(gradients)
+    }
+
+    fn loss(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+    ) -> EngineResult<f32> {
+        if predictions.len() != targets.len() {
+            return Err(EngineError::ContractViolation(format!(
+                "predictions length {} does not match targets length {}",
+                predictions.len(),
+                targets.len()
+            )));
+        }
+        let mut total = 0.0_f32;
+        let mut weight_sum = 0.0_f32;
+        for index in 0..predictions.len() {
+            let weight = sample_weights.map_or(1.0, |w| w[index]);
+            let mu = glm_clamp_exp(predictions[index]).max(1e-7);
+            let r = (targets[index] / mu).max(1e-7);
+            total += weight * (r - r.ln() - 1.0);
+            weight_sum += weight;
+        }
+        if weight_sum <= 0.0 {
+            return Ok(0.0);
+        }
+        Ok(total / weight_sum)
+    }
+}
+
+/// Tweedie regression objective with log-link for variance power `p ∈ (1, 2)`
+/// (compound Poisson-gamma).  Targets must be ≥ 0.  Use [`PoissonObjective`]
+/// for `p = 1` and [`GammaObjective`] for `p = 2`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TweedieObjective {
+    pub variance_power: f32,
+}
+
+impl TweedieObjective {
+    pub fn new(variance_power: f32) -> EngineResult<Self> {
+        if !variance_power.is_finite() || variance_power <= 1.0 || variance_power >= 2.0 {
+            return Err(EngineError::InvalidConfig(format!(
+                "Tweedie variance_power must satisfy 1 < p < 2 (got {variance_power}); \
+                 use PoissonObjective for p=1 and GammaObjective for p=2"
+            )));
+        }
+        Ok(Self { variance_power })
+    }
+}
+
+impl ObjectiveOps for TweedieObjective {
+    fn objective_name(&self) -> &str {
+        "tweedie"
+    }
+
+    fn initial_prediction(
+        &self,
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+    ) -> EngineResult<f32> {
+        if targets.is_empty() {
+            return Err(EngineError::ContractViolation(
+                "targets cannot be empty".to_string(),
+            ));
+        }
+        for &t in targets {
+            if !t.is_finite() || t < 0.0 {
+                return Err(EngineError::ContractViolation(
+                    "Tweedie targets must be finite and non-negative".to_string(),
+                ));
+            }
+        }
+        let (sum, w_sum) = glm_weighted_target_sum(targets, sample_weights)?;
+        if w_sum <= 0.0 {
+            return Err(EngineError::ContractViolation(
+                "sample weight sum must be > 0".to_string(),
+            ));
+        }
+        Ok((sum / w_sum).max(1e-7).ln())
+    }
+
+    fn compute_gradients(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+    ) -> EngineResult<Vec<GradientPair>> {
+        if predictions.len() != targets.len() {
+            return Err(EngineError::ContractViolation(format!(
+                "predictions length {} does not match targets length {}",
+                predictions.len(),
+                targets.len()
+            )));
+        }
+        let p = self.variance_power;
+        let mut gradients = Vec::with_capacity(predictions.len());
+        for index in 0..predictions.len() {
+            let weight = sample_weights.map_or(1.0, |w| w[index]);
+            if !weight.is_finite() || weight <= 0.0 {
+                return Err(EngineError::ContractViolation(
+                    "sample weights must be finite and > 0".to_string(),
+                ));
+            }
+            let mu = glm_clamp_exp(predictions[index]);
+            let mu_2mp = mu.powf(2.0 - p);
+            let mu_1mp = mu.powf(1.0 - p);
+            let grad = (mu_2mp - targets[index] * mu_1mp) * weight;
+            // Simplified Newton hessian (LightGBM/XGBoost convention) — drops the
+            // (1-p)·y·μ^(1-p) second-derivative term which would be negative.
+            let hess = mu_2mp.max(1e-7) * weight;
+            gradients.push(GradientPair::new(grad, hess)?);
+        }
+        Ok(gradients)
+    }
+
+    fn loss(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+    ) -> EngineResult<f32> {
+        if predictions.len() != targets.len() {
+            return Err(EngineError::ContractViolation(format!(
+                "predictions length {} does not match targets length {}",
+                predictions.len(),
+                targets.len()
+            )));
+        }
+        let p = self.variance_power;
+        let mut total = 0.0_f32;
+        let mut weight_sum = 0.0_f32;
+        for index in 0..predictions.len() {
+            let weight = sample_weights.map_or(1.0, |w| w[index]);
+            let mu = glm_clamp_exp(predictions[index]);
+            let y = targets[index];
+            let term1 = if y > 0.0 {
+                y.powf(2.0 - p) / ((1.0 - p) * (2.0 - p))
+            } else {
+                0.0
+            };
+            let term2 = y * mu.powf(1.0 - p) / (1.0 - p);
+            let term3 = mu.powf(2.0 - p) / (2.0 - p);
+            total += 2.0 * weight * (term1 - term2 + term3);
+            weight_sum += weight;
+        }
+        if weight_sum <= 0.0 {
+            return Ok(0.0);
+        }
+        Ok(total / weight_sum)
+    }
+}
+
 // ── QueryRMSE Objective ──────────────────────────────────────────────────
 
 /// Resolves group boundaries for a given data length.
@@ -13976,5 +14337,128 @@ mod morph_state_tests {
         assert!((agg.gradient_l2_norm - 2.0).abs() < 1e-5); // mean(1, 2, 3) = 2
         assert_eq!(agg.neutralization_effectiveness, Some(0.75));
         assert_eq!(agg.n_active_rows, 10);
+    }
+
+    // ── GLM objectives (Poisson, Gamma, Tweedie) — v0.11.0 ─────────────
+
+    #[test]
+    fn poisson_initial_prediction_is_log_of_weighted_mean() {
+        let targets = vec![1.0_f32, 2.0, 3.0, 4.0, 5.0];
+        let init = PoissonObjective.initial_prediction(&targets, None).expect("init");
+        let expected = ((1.0_f32 + 2.0 + 3.0 + 4.0 + 5.0) / 5.0).ln();
+        assert!((init - expected).abs() < 1e-6, "got={init} want={expected}");
+    }
+
+    #[test]
+    fn poisson_gradient_is_mu_minus_y_in_log_space() {
+        let predictions = vec![0.0_f32, 1.0, 2.0];
+        let targets = vec![1.0_f32, 2.0, 3.0];
+        let gradients = PoissonObjective
+            .compute_gradients(&predictions, &targets, None)
+            .expect("grads");
+        for (idx, gp) in gradients.iter().enumerate() {
+            let mu = predictions[idx].exp();
+            let want_grad = mu - targets[idx];
+            let want_hess = mu;
+            assert!((gp.grad - want_grad).abs() < 1e-5);
+            assert!((gp.hess - want_hess).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn poisson_rejects_negative_targets() {
+        let targets = vec![1.0_f32, -0.5, 2.0];
+        let err = PoissonObjective
+            .initial_prediction(&targets, None)
+            .unwrap_err();
+        assert!(format!("{err:?}").to_lowercase().contains("non-negative"));
+    }
+
+    #[test]
+    fn gamma_initial_prediction_is_log_of_weighted_mean() {
+        let targets = vec![1.0_f32, 2.0, 4.0, 8.0];
+        let init = GammaObjective.initial_prediction(&targets, None).expect("init");
+        let expected = ((1.0_f32 + 2.0 + 4.0 + 8.0) / 4.0).ln();
+        assert!((init - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn gamma_gradient_uses_one_minus_y_over_mu() {
+        let predictions = vec![0.0_f32, 1.0];
+        let targets = vec![1.0_f32, 4.0];
+        let gradients = GammaObjective
+            .compute_gradients(&predictions, &targets, None)
+            .expect("grads");
+        for (idx, gp) in gradients.iter().enumerate() {
+            let mu = predictions[idx].exp();
+            let want_grad = 1.0 - targets[idx] / mu;
+            let want_hess = targets[idx] / mu;
+            assert!((gp.grad - want_grad).abs() < 1e-5);
+            assert!((gp.hess - want_hess).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn gamma_rejects_zero_or_negative_targets() {
+        let err = GammaObjective
+            .initial_prediction(&[1.0_f32, 0.0, 3.0], None)
+            .unwrap_err();
+        let msg = format!("{err:?}").to_lowercase();
+        assert!(msg.contains("strictly positive") || msg.contains("> 0"));
+    }
+
+    #[test]
+    fn tweedie_rejects_invalid_variance_power() {
+        assert!(TweedieObjective::new(0.5).is_err());
+        assert!(TweedieObjective::new(1.0).is_err());
+        assert!(TweedieObjective::new(2.0).is_err());
+        assert!(TweedieObjective::new(2.5).is_err());
+        assert!(TweedieObjective::new(1.5).is_ok());
+    }
+
+    #[test]
+    fn tweedie_initial_prediction_log_of_weighted_mean() {
+        let targets = vec![0.0_f32, 0.0, 1.0, 2.0, 3.0];
+        let init = TweedieObjective::new(1.5)
+            .expect("construct")
+            .initial_prediction(&targets, None)
+            .expect("init");
+        let expected = ((0.0_f32 + 0.0 + 1.0 + 2.0 + 3.0) / 5.0).max(1e-7).ln();
+        assert!((init - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn tweedie_gradient_uses_power_formula() {
+        let p = 1.5_f32;
+        let obj = TweedieObjective::new(p).expect("ok");
+        let predictions = vec![0.0_f32, 1.0];
+        let targets = vec![0.0_f32, 2.0];
+        let gradients = obj
+            .compute_gradients(&predictions, &targets, None)
+            .expect("grads");
+        for (idx, gp) in gradients.iter().enumerate() {
+            let mu = predictions[idx].exp();
+            let want_grad = mu.powf(2.0 - p) - targets[idx] * mu.powf(1.0 - p);
+            let want_hess = mu.powf(2.0 - p);
+            assert!(
+                (gp.grad - want_grad).abs() < 1e-4,
+                "idx={idx} grad got={} want={want_grad}",
+                gp.grad
+            );
+            assert!(
+                (gp.hess - want_hess).abs() < 1e-4,
+                "idx={idx} hess got={} want={want_hess}",
+                gp.hess
+            );
+        }
+    }
+
+    #[test]
+    fn tweedie_rejects_negative_targets() {
+        let err = TweedieObjective::new(1.5)
+            .expect("ok")
+            .initial_prediction(&[1.0_f32, -0.5], None)
+            .unwrap_err();
+        assert!(format!("{err:?}").to_lowercase().contains("non-negative"));
     }
 }
