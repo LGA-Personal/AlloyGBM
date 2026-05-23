@@ -2970,7 +2970,10 @@ pub fn validate_train_params(params: &TrainParams) -> CoreResult<()> {
         }
     }
 
-    if !params.quantile_alpha.is_finite() || params.quantile_alpha <= 0.0 || params.quantile_alpha >= 1.0 {
+    if !params.quantile_alpha.is_finite()
+        || params.quantile_alpha <= 0.0
+        || params.quantile_alpha >= 1.0
+    {
         return Err(CoreError::InvalidConfig(
             "quantile_alpha must be finite and in (0.0, 1.0)".to_string(),
         ));

@@ -14,9 +14,9 @@ use alloygbm_engine::{
     CategoricalTargetEncodingSpec, EngineError, GammaObjective, IterationDiagnostics,
     IterationRunSummary, LambdaMARTObjective, MultiClassIterationRunSummary,
     MultiClassSoftmaxObjective, MultiClassTrainedModel, MultiClassWarmStartState, ObjectiveOps,
-    PairwiseRankingObjective, PerRoundMetricCallback, PoissonObjective, QueryRMSEObjective,
-    QuantileObjective, SquaredErrorObjective, TrainedModel, Trainer, TrainingPolicyMode, TweedieObjective,
-    WarmStartState, XeNDCGObjective, YetiRankObjective,
+    PairwiseRankingObjective, PerRoundMetricCallback, PoissonObjective, QuantileObjective,
+    QueryRMSEObjective, SquaredErrorObjective, TrainedModel, Trainer, TrainingPolicyMode,
+    TweedieObjective, WarmStartState, XeNDCGObjective, YetiRankObjective,
 };
 use alloygbm_predictor::{Predictor, PredictorError};
 use alloygbm_shap::{
@@ -3059,7 +3059,9 @@ fn train_regression_artifact_with_summary_dense_impl(
         "poisson" => run_training!(&PoissonObjective),
         "gamma" => run_training!(&GammaObjective),
         "quantile" => {
-            let obj = QuantileObjective { alpha: quantile_alpha };
+            let obj = QuantileObjective {
+                alpha: quantile_alpha,
+            };
             run_training!(&obj)
         }
         "tweedie" => {

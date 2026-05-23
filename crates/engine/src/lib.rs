@@ -1541,6 +1541,7 @@ impl ObjectiveOps for QuantileObjective {
         weighted_quantile(targets, sample_weights, self.alpha)
     }
 
+    #[allow(clippy::collapsible_if)]
     fn compute_gradients(
         &self,
         predictions: &[f32],
@@ -1584,6 +1585,7 @@ impl ObjectiveOps for QuantileObjective {
         Ok(gradients)
     }
 
+    #[allow(clippy::collapsible_if)]
     fn compute_gradients_into(
         &self,
         predictions: &[f32],
@@ -1621,14 +1623,12 @@ impl ObjectiveOps for QuantileObjective {
             } else {
                 (1.0 - self.alpha) * weight
             };
-            buffer.push(GradientPair {
-                grad,
-                hess: weight,
-            });
+            buffer.push(GradientPair { grad, hess: weight });
         }
         Ok(())
     }
 
+    #[allow(clippy::collapsible_if)]
     fn loss(
         &self,
         predictions: &[f32],
@@ -1680,11 +1680,8 @@ impl ObjectiveOps for QuantileObjective {
     }
 }
 
-fn weighted_quantile(
-    values: &[f32],
-    weights: Option<&[f32]>,
-    alpha: f32,
-) -> EngineResult<f32> {
+#[allow(clippy::collapsible_if)]
+fn weighted_quantile(values: &[f32], weights: Option<&[f32]>, alpha: f32) -> EngineResult<f32> {
     if values.is_empty() {
         return Err(EngineError::ContractViolation(
             "values cannot be empty".to_string(),
@@ -9099,6 +9096,7 @@ struct LeafResiduals {
     weights: Vec<f32>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn refine_quantile_leaf_values(
     stumps: &mut [TrainedStump],
     binned_matrix: &BinnedMatrix,
@@ -9149,10 +9147,12 @@ fn refine_quantile_leaf_values(
             terminal_local_node_id_for_row(row_index, binned_matrix, &stumps_by_local)?;
         let res = targets[row_index] - predictions[row_index];
         let weight = sample_weights.map_or(1.0, |weights| weights[row_index]);
-        let entry = leaf_residuals.entry(terminal_local_node_id).or_insert_with(|| LeafResiduals {
-            residuals: Vec::new(),
-            weights: Vec::new(),
-        });
+        let entry = leaf_residuals
+            .entry(terminal_local_node_id)
+            .or_insert_with(|| LeafResiduals {
+                residuals: Vec::new(),
+                weights: Vec::new(),
+            });
         entry.residuals.push(res);
         entry.weights.push(weight);
     }
@@ -9186,11 +9186,13 @@ fn refine_quantile_leaf_values(
             .get(&right_local_node_id)
             .copied()
             .unwrap_or(parent_absolute + stump.right_leaf_value.as_scalar());
-        
+
         let dl = (left_absolute - parent_absolute) * learning_rate;
         let dr = (right_absolute - parent_absolute) * learning_rate;
-        stump.left_leaf_value = LeafValue::Scalar(dl.clamp(-max_abs_leaf_value, max_abs_leaf_value));
-        stump.right_leaf_value = LeafValue::Scalar(dr.clamp(-max_abs_leaf_value, max_abs_leaf_value));
+        stump.left_leaf_value =
+            LeafValue::Scalar(dl.clamp(-max_abs_leaf_value, max_abs_leaf_value));
+        stump.right_leaf_value =
+            LeafValue::Scalar(dr.clamp(-max_abs_leaf_value, max_abs_leaf_value));
     }
 
     Ok(())
@@ -14565,7 +14567,9 @@ mod tests {
         // cum weight = 1 (at 10), 2 (at 20), 3 (at 30) -> first cumulative >= 2.1 is 3 (at 30)
         assert_eq!(init, 30.0);
 
-        let init_weighted = obj.initial_prediction(&targets, Some(&[1.0, 2.0, 1.0])).unwrap();
+        let init_weighted = obj
+            .initial_prediction(&targets, Some(&[1.0, 2.0, 1.0]))
+            .unwrap();
         // weights = [1.0, 2.0, 1.0], total_weight = 4.0
         // threshold = 0.7 * 4.0 = 2.8
         // cum weights: 1.0 (at 10), 3.0 (at 20), 4.0 (at 30) -> first cumulative >= 2.8 is 3.0 (20.0 here)
@@ -14655,19 +14659,19 @@ mod tests {
         let dataset = sample_dataset();
         let binned = sample_binned_matrix();
         let objective = QuantileObjective { alpha: 0.5 };
-        
+
         let params = TrainParams {
             learning_rate: 1.0,
             ..TrainParams::default()
         };
         let trainer = Trainer::new(params).expect("valid params");
-        
+
         let model = trainer
             .fit_iterations(&dataset, &binned, &MockBackend, &objective, 3)
             .expect("training should succeed");
-            
+
         assert!(model.rounds_completed() > 0);
-        
+
         let initial_loss = objective
             .loss(
                 &vec![model.baseline_prediction; dataset.row_count()],
@@ -14675,7 +14679,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        
+
         // Predict on the training data using the model
         let mut predictions = vec![model.baseline_prediction; dataset.row_count()];
         apply_tree_to_binned_predictions(
@@ -14683,10 +14687,13 @@ mod tests {
             &binned,
             &model.stumps,
             Some((&dataset.matrix.values, dataset.matrix.feature_count)),
-        ).unwrap();
-        
-        let final_loss = objective.loss(&predictions, &dataset.targets, None).unwrap();
-        
+        )
+        .unwrap();
+
+        let final_loss = objective
+            .loss(&predictions, &dataset.targets, None)
+            .unwrap();
+
         assert!(
             final_loss < initial_loss,
             "Loss did not improve. initial: {}, final: {}",
@@ -15118,7 +15125,3 @@ mod morph_state_tests {
         assert!(format!("{err:?}").to_lowercase().contains("non-negative"));
     }
 }
-
-
-
-
