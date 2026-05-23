@@ -14344,7 +14344,9 @@ mod morph_state_tests {
     #[test]
     fn poisson_initial_prediction_is_log_of_weighted_mean() {
         let targets = vec![1.0_f32, 2.0, 3.0, 4.0, 5.0];
-        let init = PoissonObjective.initial_prediction(&targets, None).expect("init");
+        let init = PoissonObjective
+            .initial_prediction(&targets, None)
+            .expect("init");
         let expected = ((1.0_f32 + 2.0 + 3.0 + 4.0 + 5.0) / 5.0).ln();
         assert!((init - expected).abs() < 1e-6, "got={init} want={expected}");
     }
@@ -14377,7 +14379,9 @@ mod morph_state_tests {
     #[test]
     fn gamma_initial_prediction_is_log_of_weighted_mean() {
         let targets = vec![1.0_f32, 2.0, 4.0, 8.0];
-        let init = GammaObjective.initial_prediction(&targets, None).expect("init");
+        let init = GammaObjective
+            .initial_prediction(&targets, None)
+            .expect("init");
         let expected = ((1.0_f32 + 2.0 + 4.0 + 8.0) / 4.0).ln();
         assert!((init - expected).abs() < 1e-6);
     }

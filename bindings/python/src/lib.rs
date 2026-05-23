@@ -3428,6 +3428,7 @@ fn shap_explain_rows_dense_impl(
     shap_explain_rows_impl(artifact_bytes, &rows)
 }
 
+#[allow(clippy::type_complexity)]
 fn shap_explain_interactions_impl(
     artifact_bytes: &[u8],
     rows: &[Vec<f32>],
@@ -3436,6 +3437,7 @@ fn shap_explain_interactions_impl(
     Ok((batch.expected_value, batch.values))
 }
 
+#[allow(clippy::type_complexity)]
 fn shap_explain_interactions_dense_impl(
     artifact_bytes: &[u8],
     row_count: usize,

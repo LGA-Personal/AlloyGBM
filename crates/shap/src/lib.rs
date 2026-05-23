@@ -1968,6 +1968,7 @@ fn ts_recurse_conditioning(
 /// with j conditioned ON and OFF; the half-difference attributes the
 /// off-diagonal `Φ_ij`.  The diagonal is filled from the row-marginal
 /// invariant `Σ_j Φ_ij == φ_i`.
+#[allow(clippy::needless_range_loop)]
 fn tree_shap_interactions_row(
     trees: &[StdTreeNode],
     row: &[f32],
@@ -2111,6 +2112,7 @@ fn explain_rows_tree_shap(
 }
 
 #[cfg(test)]
+#[allow(clippy::needless_range_loop)]
 mod tests {
     use super::*;
     use alloygbm_core::{
@@ -3682,10 +3684,7 @@ mod tests {
     /// Off-diagonal entries between non-split-features are zero (the model can't
     /// depend on them).  The diagonal is filled from
     /// `Φ_ii = φ_i − Σ_{j ≠ i} Φ_ij` to enforce the row-marginal invariant.
-    fn brute_force_interactions_for_row(
-        model: &TrainedModel,
-        row: &[f32],
-    ) -> (f32, Vec<Vec<f32>>) {
+    fn brute_force_interactions_for_row(model: &TrainedModel, row: &[f32]) -> (f32, Vec<Vec<f32>>) {
         let n = model.feature_count;
         let structure = build_model_structure(model).expect("model structure");
         let subset_expectations = compute_subset_expectations(model, row, &structure, None, None)
@@ -3723,11 +3722,10 @@ mod tests {
                         let f_s = subset_expectations[s_bits as usize] as f64;
                         let f_si = subset_expectations[(s_bits | bit_i) as usize] as f64;
                         let f_sj = subset_expectations[(s_bits | bit_j) as usize] as f64;
-                        let f_sij =
-                            subset_expectations[(s_bits | bit_i | bit_j) as usize] as f64;
+                        let f_sij = subset_expectations[(s_bits | bit_i | bit_j) as usize] as f64;
                         // Weight: |S|! · (k - |S| - 2)! / (k - 1)!
-                        let weight = factorials[s_size] * factorials[k - s_size - 2]
-                            / factorials[k - 1];
+                        let weight =
+                            factorials[s_size] * factorials[k - s_size - 2] / factorials[k - 1];
                         accum += weight * (f_sij - f_si - f_sj + f_s);
                     }
                     let half = 0.5 * accum;
@@ -3796,13 +3794,12 @@ mod tests {
             .to_artifact_bytes()
             .expect("artifact serializes");
         let rows = fixture_rows();
-        let batch =
-            explain_interactions_from_artifact_bytes(&artifact, &rows).expect("batch");
+        let batch = explain_interactions_from_artifact_bytes(&artifact, &rows).expect("batch");
         let model = fixture_model();
         for (row_idx, row) in rows.iter().enumerate() {
             let matrix = &batch.values[row_idx];
-            let reconstructed: f32 = matrix.iter().map(|r| r.iter().sum::<f32>()).sum::<f32>()
-                + batch.expected_value;
+            let reconstructed: f32 =
+                matrix.iter().map(|r| r.iter().sum::<f32>()).sum::<f32>() + batch.expected_value;
             let predicted = local_path_predict(&model, row, None);
             let tol = additivity_tolerance(predicted);
             assert!(
@@ -3820,8 +3817,7 @@ mod tests {
         let rows = fixture_rows();
         let pairwise =
             explain_interactions_from_artifact_bytes(&artifact, &rows).expect("pairwise");
-        let per_feature =
-            explain_rows_from_artifact_bytes(&artifact, &rows).expect("per-feature");
+        let per_feature = explain_rows_from_artifact_bytes(&artifact, &rows).expect("per-feature");
 
         let feature_count = fixture_model().feature_count;
         for row_idx in 0..rows.len() {
@@ -3842,8 +3838,7 @@ mod tests {
             .to_artifact_bytes()
             .expect("artifact serializes");
         let rows = fixture_rows();
-        let batch =
-            explain_interactions_from_artifact_bytes(&artifact, &rows).expect("batch");
+        let batch = explain_interactions_from_artifact_bytes(&artifact, &rows).expect("batch");
         for row_matrix in &batch.values {
             for i in 0..row_matrix.len() {
                 for j in 0..row_matrix.len() {
@@ -3866,8 +3861,8 @@ mod tests {
         let model = fixture_model();
         let rows = fixture_rows();
 
-        let batch = explain_interactions_from_artifact_bytes(&artifact, &rows)
-            .expect("interactions");
+        let batch =
+            explain_interactions_from_artifact_bytes(&artifact, &rows).expect("interactions");
         for (row_idx, row) in rows.iter().enumerate() {
             let (_, expected_matrix) = brute_force_interactions_for_row(&model, row);
             for i in 0..model.feature_count {
@@ -3917,11 +3912,8 @@ mod tests {
         let batch = explain_interactions_from_artifact_bytes(&artifact, &rows).expect("batch");
         for (row_idx, row) in rows.iter().enumerate() {
             let matrix = &batch.values[row_idx];
-            let reconstructed: f32 = matrix
-                .iter()
-                .map(|r| r.iter().sum::<f32>())
-                .sum::<f32>()
-                + batch.expected_value;
+            let reconstructed: f32 =
+                matrix.iter().map(|r| r.iter().sum::<f32>()).sum::<f32>() + batch.expected_value;
             let predicted = local_path_predict(&model, row, None);
             let tol = additivity_tolerance(predicted) * 4.0;
             assert!(
