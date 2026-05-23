@@ -347,6 +347,7 @@ class GBMRegressor(_GBMRegressorBase):
         dart_normalize_type: str = "tree",
         dart_sample_type: str = "uniform",
         tweedie_variance_power: float = 1.5,
+        quantile_alpha: float = 0.5,
     ) -> None:
         if not (0.0 < learning_rate <= 1.0):
             raise ValueError("learning_rate must be in (0.0, 1.0]")
@@ -493,6 +494,8 @@ class GBMRegressor(_GBMRegressorBase):
                     "tweedie_variance_power must satisfy 1 < p < 2 when objective='tweedie' "
                     f"(got {tweedie_variance_power!r})"
                 )
+        if not (0.0 < quantile_alpha < 1.0):
+            raise ValueError("quantile_alpha must be in (0.0, 1.0)")
         if int(max_cat_threshold) < 0:
             raise ValueError("max_cat_threshold must be >= 0")
         if training_mode not in ("auto", "manual", "morph"):
@@ -695,6 +698,7 @@ class GBMRegressor(_GBMRegressorBase):
         self.dart_normalize_type = str(dart_normalize_type)
         self.dart_sample_type = str(dart_sample_type)
         self.tweedie_variance_power = float(tweedie_variance_power)
+        self.quantile_alpha = float(quantile_alpha)
         self._fit_neutralization: str | None = None
         self._fit_factor_neutralization_lambda: float | None = None
         self._fit_factor_penalty: float | None = None
@@ -774,7 +778,8 @@ class GBMRegressor(_GBMRegressorBase):
             f"dart_drop_rate={self.dart_drop_rate}, "
             f"dart_max_drop={self.dart_max_drop}, "
             f"dart_normalize_type='{self.dart_normalize_type}', "
-            f"dart_sample_type='{self.dart_sample_type}'"
+            f"dart_sample_type='{self.dart_sample_type}', "
+            f"quantile_alpha={self.quantile_alpha}"
             ")"
         )
 
@@ -837,6 +842,7 @@ class GBMRegressor(_GBMRegressorBase):
             "dart_normalize_type": self.dart_normalize_type,
             "dart_sample_type": self.dart_sample_type,
             "tweedie_variance_power": self.tweedie_variance_power,
+            "quantile_alpha": self.quantile_alpha,
         }
 
     def set_params(self, **params: object) -> "GBMRegressor":
@@ -897,6 +903,7 @@ class GBMRegressor(_GBMRegressorBase):
             "dart_normalize_type",
             "dart_sample_type",
             "tweedie_variance_power",
+            "quantile_alpha",
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
@@ -1366,6 +1373,11 @@ class GBMRegressor(_GBMRegressorBase):
         if "tweedie_variance_power" in params:
             v = float(params["tweedie_variance_power"])
             self.tweedie_variance_power = v
+        if "quantile_alpha" in params:
+            qa = float(params["quantile_alpha"])
+            if not (0.0 < qa < 1.0):
+                raise ValueError("quantile_alpha must be in (0.0, 1.0)")
+            self.quantile_alpha = qa
         # Cross-field validation for goss top+other rates.
         if self.boosting_mode == "goss" and (
             self.goss_top_rate + self.goss_other_rate > 1.0
@@ -1388,6 +1400,10 @@ class GBMRegressor(_GBMRegressorBase):
                     "tweedie_variance_power must satisfy 1 < p < 2 when "
                     f"objective='tweedie' (got {v!r})"
                 )
+        if post_objective == "quantile":
+            qa = self.quantile_alpha
+            if not (0.0 < qa < 1.0):
+                raise ValueError("quantile_alpha must be in (0.0, 1.0)")
 
         # Cross-field validation: leaf growth requires max_leaves
         if self.tree_growth == "leaf" and self.max_leaves is None:
@@ -1528,6 +1544,8 @@ class GBMRegressor(_GBMRegressorBase):
             return "gamma_deviance"
         if objective == "tweedie":
             return "tweedie_deviance"
+        if objective == "quantile":
+            return "quantile"
         if objective == "custom":
             return "loss"
         return "mse"
@@ -2172,6 +2190,11 @@ class GBMRegressor(_GBMRegressorBase):
                         if self._objective_name() == "tweedie"
                         else None
                     ),
+                    quantile_alpha=(
+                        self.quantile_alpha
+                        if self._objective_name() == "quantile"
+                        else None
+                    ),
                 )
                 return self._finalize_training_result(native_result, input_adaptation_seconds, feature_count=feature_count)
             except (ImportError, AttributeError):
@@ -2308,6 +2331,11 @@ class GBMRegressor(_GBMRegressorBase):
                     if self._objective_name() == "tweedie"
                     else None
                 ),
+                quantile_alpha=(
+                    self.quantile_alpha
+                    if self._objective_name() == "quantile"
+                    else None
+                ),
             )
         else:
             assert training_rows is not None
@@ -2400,6 +2428,11 @@ class GBMRegressor(_GBMRegressorBase):
                 tweedie_variance_power=(
                     self.tweedie_variance_power
                     if self._objective_name() == "tweedie"
+                    else None
+                ),
+                quantile_alpha=(
+                    self.quantile_alpha
+                    if self._objective_name() == "quantile"
                     else None
                 ),
             )
@@ -2776,6 +2809,11 @@ class GBMRegressor(_GBMRegressorBase):
                     if self._objective_name() == "tweedie"
                     else None
                 ),
+                quantile_alpha=(
+                    self.quantile_alpha
+                    if self._objective_name() == "quantile"
+                    else None
+                ),
             )
         else:
             train_regression_artifact = _load_native_train_regression_artifact()
@@ -2840,6 +2878,11 @@ class GBMRegressor(_GBMRegressorBase):
                 tweedie_variance_power=(
                     self.tweedie_variance_power
                     if self._objective_name() == "tweedie"
+                    else None
+                ),
+                quantile_alpha=(
+                    self.quantile_alpha
+                    if self._objective_name() == "quantile"
                     else None
                 ),
             )
