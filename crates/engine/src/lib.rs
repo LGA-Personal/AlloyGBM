@@ -757,9 +757,14 @@ pub trait ObjectiveOps {
         false
     }
 
+    /// Return the quantile alpha if this is a quantile objective.
+    fn quantile_alpha(&self) -> Option<f32> {
+        None
+    }
+
     /// Whether MSE-based leaf refinement is supported for this objective.
     fn supports_leaf_refinement(&self) -> bool {
-        true
+        self.quantile_alpha().is_none()
     }
 
     /// Whether pre-target factor neutralization is valid for this objective.
@@ -1494,6 +1499,225 @@ impl ObjectiveOps for TweedieObjective {
         }
         Ok(total / weight_sum)
     }
+}
+
+// ── Quantile Regression Objective ────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QuantileObjective {
+    pub alpha: f32,
+}
+
+impl ObjectiveOps for QuantileObjective {
+    fn objective_name(&self) -> &str {
+        "quantile"
+    }
+
+    fn quantile_alpha(&self) -> Option<f32> {
+        Some(self.alpha)
+    }
+
+    fn supports_leaf_refinement(&self) -> bool {
+        false
+    }
+
+    fn initial_prediction(
+        &self,
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+    ) -> EngineResult<f32> {
+        weighted_quantile(targets, sample_weights, self.alpha)
+    }
+
+    fn compute_gradients(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+    ) -> EngineResult<Vec<GradientPair>> {
+        if predictions.len() != targets.len() {
+            return Err(EngineError::ContractViolation(format!(
+                "predictions length {} does not match targets length {}",
+                predictions.len(),
+                targets.len()
+            )));
+        }
+        if let Some(weights) = sample_weights {
+            if weights.len() != targets.len() {
+                return Err(EngineError::ContractViolation(format!(
+                    "weights length {} does not match targets length {}",
+                    weights.len(),
+                    targets.len()
+                )));
+            }
+        }
+
+        let mut gradients = Vec::with_capacity(predictions.len());
+        for index in 0..predictions.len() {
+            let weight = sample_weights.map_or(1.0, |weights| weights[index]);
+            if !weight.is_finite() || weight <= 0.0 {
+                return Err(EngineError::ContractViolation(
+                    "sample weights must be finite and > 0".to_string(),
+                ));
+            }
+            let target = targets[index];
+            let prediction = predictions[index];
+            let grad = if target > prediction {
+                -self.alpha * weight
+            } else {
+                (1.0 - self.alpha) * weight
+            };
+            gradients.push(GradientPair::new(grad, weight)?);
+        }
+        Ok(gradients)
+    }
+
+    fn compute_gradients_into(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+        buffer: &mut Vec<GradientPair>,
+    ) -> EngineResult<()> {
+        if predictions.len() != targets.len() {
+            return Err(EngineError::ContractViolation(format!(
+                "predictions length {} does not match targets length {}",
+                predictions.len(),
+                targets.len()
+            )));
+        }
+        if let Some(weights) = sample_weights {
+            if weights.len() != targets.len() {
+                return Err(EngineError::ContractViolation(format!(
+                    "weights length {} does not match targets length {}",
+                    weights.len(),
+                    targets.len()
+                )));
+            }
+        }
+
+        buffer.clear();
+        if buffer.capacity() < predictions.len() {
+            buffer.reserve(predictions.len() - buffer.capacity());
+        }
+        for index in 0..predictions.len() {
+            let weight = sample_weights.map_or(1.0, |weights| weights[index]);
+            let target = targets[index];
+            let prediction = predictions[index];
+            let grad = if target > prediction {
+                -self.alpha * weight
+            } else {
+                (1.0 - self.alpha) * weight
+            };
+            buffer.push(GradientPair {
+                grad,
+                hess: weight,
+            });
+        }
+        Ok(())
+    }
+
+    fn loss(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+    ) -> EngineResult<f32> {
+        if predictions.len() != targets.len() {
+            return Err(EngineError::ContractViolation(format!(
+                "predictions length {} does not match targets length {}",
+                predictions.len(),
+                targets.len()
+            )));
+        }
+        if let Some(weights) = sample_weights {
+            if weights.len() != targets.len() {
+                return Err(EngineError::ContractViolation(format!(
+                    "weights length {} does not match targets length {}",
+                    weights.len(),
+                    targets.len()
+                )));
+            }
+        }
+
+        let n = predictions.len();
+        if n == 0 {
+            return Ok(0.0);
+        }
+
+        let mut total = 0.0_f64;
+        for index in 0..n {
+            let pred = predictions[index];
+            let target = targets[index];
+            let weight = sample_weights.map_or(1.0, |w| w[index]);
+            if !weight.is_finite() || weight <= 0.0 {
+                return Err(EngineError::ContractViolation(
+                    "sample weights must be finite and > 0".to_string(),
+                ));
+            }
+            let diff = target - pred;
+            let loss_i = if diff > 0.0 {
+                self.alpha * diff
+            } else {
+                (self.alpha - 1.0) * diff
+            };
+            total += loss_i as f64 * weight as f64;
+        }
+
+        Ok((total / n as f64) as f32)
+    }
+}
+
+fn weighted_quantile(
+    values: &[f32],
+    weights: Option<&[f32]>,
+    alpha: f32,
+) -> EngineResult<f32> {
+    if values.is_empty() {
+        return Err(EngineError::ContractViolation(
+            "values cannot be empty".to_string(),
+        ));
+    }
+    if let Some(w) = weights {
+        if w.len() != values.len() {
+            return Err(EngineError::ContractViolation(format!(
+                "weights length {} does not match values length {}",
+                w.len(),
+                values.len()
+            )));
+        }
+    }
+
+    let mut pairs = Vec::with_capacity(values.len());
+    let mut total_weight = 0.0_f64;
+    for i in 0..values.len() {
+        let w = weights.map_or(1.0, |ws| ws[i]);
+        if !w.is_finite() || w <= 0.0 {
+            return Err(EngineError::ContractViolation(
+                "sample weights must be finite and > 0".to_string(),
+            ));
+        }
+        if !values[i].is_finite() {
+            return Err(EngineError::ContractViolation(
+                "values must be finite".to_string(),
+            ));
+        }
+        pairs.push((values[i], w));
+        total_weight += w as f64;
+    }
+
+    pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+
+    let threshold = (alpha as f64 * total_weight) as f32;
+    let mut cum_weight = 0.0_f32;
+    for &(val, weight) in &pairs {
+        cum_weight += weight;
+        if cum_weight >= threshold {
+            return Ok(val);
+        }
+    }
+
+    Ok(pairs.last().unwrap().0)
 }
 
 // ── QueryRMSE Objective ──────────────────────────────────────────────────
@@ -14464,5 +14688,53 @@ mod morph_state_tests {
             .initial_prediction(&[1.0_f32, -0.5], None)
             .unwrap_err();
         assert!(format!("{err:?}").to_lowercase().contains("non-negative"));
+    }
+
+    #[test]
+    fn test_quantile_objective_gradients_and_loss() {
+        let obj = QuantileObjective { alpha: 0.7 };
+        assert_eq!(obj.objective_name(), "quantile");
+        assert_eq!(obj.quantile_alpha(), Some(0.7));
+        assert!(!obj.supports_leaf_refinement());
+
+        // Test initial prediction (weighted quantile)
+        let targets = vec![10.0, 20.0, 30.0];
+        let init = obj.initial_prediction(&targets, None).unwrap();
+        // threshold = 0.7 * 3 = 2.1
+        // cum weight = 1 (at 10), 2 (at 20), 3 (at 30) -> first cumulative >= 2.1 is 3 (at 30)
+        assert_eq!(init, 30.0);
+
+        let init_weighted = obj.initial_prediction(&targets, Some(&[1.0, 2.0, 1.0])).unwrap();
+        // weights = [1.0, 2.0, 1.0], total_weight = 4.0
+        // threshold = 0.7 * 4.0 = 2.8
+        // cum weights: 1.0 (at 10), 3.0 (at 20), 4.0 (at 30) -> first cumulative >= 2.8 is 3.0 (at 20)
+        assert_eq!(init_weighted, 20.0);
+
+        // Test gradients and loss
+        let predictions = vec![15.0, 25.0];
+        let targets = vec![20.0, 10.0]; // y > y_hat for first (20 > 15), y <= y_hat for second (10 <= 25)
+        let grads = obj.compute_gradients(&predictions, &targets, None).unwrap();
+        assert_eq!(grads.len(), 2);
+        // idx 0: target=20.0, pred=15.0. target > pred -> grad = -0.7 * 1.0 = -0.7, hess = 1.0
+        assert!((grads[0].grad - (-0.7)).abs() < 1e-6);
+        assert_eq!(grads[0].hess, 1.0);
+        // idx 1: target=10.0, pred=25.0. target <= pred -> grad = (1.0 - 0.7) * 1.0 = 0.3, hess = 1.0
+        assert!((grads[1].grad - 0.3).abs() < 1e-6);
+        assert_eq!(grads[1].hess, 1.0);
+
+        // Test loss
+        // diffs: idx 0: 20 - 15 = 5 > 0 -> loss = 0.7 * 5 = 3.5
+        //        idx 1: 10 - 25 = -15 <= 0 -> loss = (0.7 - 1.0) * (-15) = 4.5
+        // average loss = (3.5 + 4.5) / 2 = 4.0
+        let loss = obj.loss(&predictions, &targets, None).unwrap();
+        assert!((loss - 4.0).abs() < 1e-6);
+
+        // Test loss with weights
+        let weights = vec![2.0, 1.0];
+        // weighted loss: idx 0: 3.5 * 2.0 = 7.0
+        //                idx 1: 4.5 * 1.0 = 4.5
+        // average loss = (7.0 + 4.5) / 2 = 5.75
+        let loss_weighted = obj.loss(&predictions, &targets, Some(&weights)).unwrap();
+        assert!((loss_weighted - 5.75).abs() < 1e-6);
     }
 }
