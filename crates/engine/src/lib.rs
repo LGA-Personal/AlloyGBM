@@ -5644,7 +5644,7 @@ impl Trainer {
                 });
 
             let raw_fv = &active_dataset.matrix.values;
-            let (candidate_round_stumps, round_rejection_reason) =
+            let (mut candidate_round_stumps, round_rejection_reason) =
                 if self.params.tree_growth == TreeGrowth::Leaf {
                     build_tree_leaf_wise(
                         backend,
@@ -5707,6 +5707,30 @@ impl Trainer {
                 }
                 stop_reason = round_rejection_reason;
                 break;
+            }
+
+            if let Some(alpha) = objective.quantile_alpha() {
+                let lr = morph_state
+                    .as_ref()
+                    .map(|ms| ms.lr_for_iter(effective_round_index))
+                    .unwrap_or(self.params.learning_rate);
+                refine_quantile_leaf_values(
+                    &mut candidate_round_stumps,
+                    binned_matrix,
+                    &predictions,
+                    &active_dataset.targets,
+                    active_dataset.sample_weights.as_deref(),
+                    alpha,
+                    lr,
+                    controls.max_abs_leaf_value,
+                )?;
+                candidate_predictions.copy_from_slice(&predictions);
+                apply_round_stumps_tree_walk(
+                    &mut candidate_predictions,
+                    binned_matrix,
+                    &candidate_round_stumps,
+                    raw_features_opt,
+                )?;
             }
 
             // DART: rebuild `candidate_predictions` to reflect the
@@ -14579,6 +14603,51 @@ mod tests {
 
         assert_eq!(stumps[0].left_leaf_value.as_scalar(), 3.0);
         assert_eq!(stumps[0].right_leaf_value.as_scalar(), 20.0);
+    }
+
+    #[test]
+    fn test_quantile_regression_training_smoke() {
+        let dataset = sample_dataset();
+        let binned = sample_binned_matrix();
+        let objective = QuantileObjective { alpha: 0.5 };
+        
+        let params = TrainParams {
+            learning_rate: 1.0,
+            ..TrainParams::default()
+        };
+        let trainer = Trainer::new(params).expect("valid params");
+        
+        let model = trainer
+            .fit_iterations(&dataset, &binned, &MockBackend, &objective, 3)
+            .expect("training should succeed");
+            
+        assert!(model.rounds_completed() > 0);
+        
+        let initial_loss = objective
+            .loss(
+                &vec![model.baseline_prediction; dataset.row_count()],
+                &dataset.targets,
+                None,
+            )
+            .unwrap();
+        
+        // Predict on the training data using the model
+        let mut predictions = vec![model.baseline_prediction; dataset.row_count()];
+        apply_tree_to_binned_predictions(
+            &mut predictions,
+            &binned,
+            &model.stumps,
+            Some((&dataset.matrix.values, dataset.matrix.feature_count)),
+        ).unwrap();
+        
+        let final_loss = objective.loss(&predictions, &dataset.targets, None).unwrap();
+        
+        assert!(
+            final_loss < initial_loss,
+            "Loss did not improve. initial: {}, final: {}",
+            initial_loss,
+            final_loss
+        );
     }
 }
 
