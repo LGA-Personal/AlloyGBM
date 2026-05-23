@@ -9026,6 +9026,221 @@ fn fill_refined_subtree_absolute_output(
     })
 }
 
+struct LeafResiduals {
+    residuals: Vec<f32>,
+    weights: Vec<f32>,
+}
+
+fn refine_quantile_leaf_values(
+    stumps: &mut [TrainedStump],
+    binned_matrix: &BinnedMatrix,
+    predictions: &[f32],
+    targets: &[f32],
+    sample_weights: Option<&[f32]>,
+    alpha: f32,
+    learning_rate: f32,
+    max_abs_leaf_value: f32,
+) -> EngineResult<()> {
+    if stumps.is_empty() {
+        return Ok(());
+    }
+    if targets.len() != binned_matrix.row_count {
+        return Err(EngineError::ContractViolation(format!(
+            "targets length {} does not match binned row_count {}",
+            targets.len(),
+            binned_matrix.row_count
+        )));
+    }
+    if let Some(weights) = sample_weights
+        && weights.len() != targets.len()
+    {
+        return Err(EngineError::ContractViolation(format!(
+            "weights length {} does not match targets length {}",
+            weights.len(),
+            targets.len()
+        )));
+    }
+
+    let mut stumps_by_local = HashMap::new();
+    for stump in stumps.iter() {
+        let (_, local_node_id) = decode_tree_node_id(stump.split.node_id);
+        stumps_by_local.insert(local_node_id, stump);
+    }
+
+    let mut current_absolute_outputs = HashMap::new();
+    current_absolute_outputs.insert(0_u32, 0.0_f32);
+    populate_child_absolute_outputs(0, &stumps_by_local, &mut current_absolute_outputs)?;
+
+    // Map each row index to its terminal leaf local node ID, collecting residuals
+    let mut leaf_residuals: HashMap<u32, LeafResiduals> = HashMap::new();
+    for row_index in 0..binned_matrix.row_count {
+        let terminal_local_node_id =
+            terminal_local_node_id_for_row(row_index, binned_matrix, &stumps_by_local)?;
+        let res = targets[row_index] - predictions[row_index];
+        let weight = sample_weights.map_or(1.0, |weights| weights[row_index]);
+        let entry = leaf_residuals.entry(terminal_local_node_id).or_insert_with(|| LeafResiduals {
+            residuals: Vec::new(),
+            weights: Vec::new(),
+        });
+        entry.residuals.push(res);
+        entry.weights.push(weight);
+    }
+
+    // Now propagate values up/down to populate refined absolute outputs for all nodes
+    let mut refined_absolute_outputs = HashMap::new();
+    refined_absolute_outputs.insert(0_u32, 0.0_f32);
+
+    fill_refined_child_quantile_absolute_outputs(
+        0,
+        &stumps_by_local,
+        &leaf_residuals,
+        alpha,
+        &current_absolute_outputs,
+        max_abs_leaf_value,
+        &mut refined_absolute_outputs,
+    )?;
+
+    // Update stumps with final parent-relative delta values scaled by learning rate
+    for stump in stumps.iter_mut() {
+        let (_, local_node_id) = decode_tree_node_id(stump.split.node_id);
+        let parent_absolute = refined_absolute_outputs
+            .get(&local_node_id)
+            .copied()
+            .unwrap_or(0.0);
+        let left_local_node_id = left_child_node_id(local_node_id)?;
+        let right_local_node_id = right_child_node_id(local_node_id)?;
+        let left_absolute = refined_absolute_outputs
+            .get(&left_local_node_id)
+            .copied()
+            .unwrap_or(parent_absolute + stump.left_leaf_value.as_scalar());
+        let right_absolute = refined_absolute_outputs
+            .get(&right_local_node_id)
+            .copied()
+            .unwrap_or(parent_absolute + stump.right_leaf_value.as_scalar());
+        
+        let dl = (left_absolute - parent_absolute) * learning_rate;
+        let dr = (right_absolute - parent_absolute) * learning_rate;
+        stump.left_leaf_value = LeafValue::Scalar(dl.clamp(-max_abs_leaf_value, max_abs_leaf_value));
+        stump.right_leaf_value = LeafValue::Scalar(dr.clamp(-max_abs_leaf_value, max_abs_leaf_value));
+    }
+
+    Ok(())
+}
+
+fn fill_refined_child_quantile_absolute_outputs(
+    local_node_id: u32,
+    stumps_by_local: &HashMap<u32, &TrainedStump>,
+    leaf_residuals: &HashMap<u32, LeafResiduals>,
+    alpha: f32,
+    current_absolute_outputs: &HashMap<u32, f32>,
+    max_abs_leaf_value: f32,
+    refined_absolute_outputs: &mut HashMap<u32, f32>,
+) -> EngineResult<LeafRefinementStats> {
+    let Some(_stump) = stumps_by_local.get(&local_node_id) else {
+        return Ok(LeafRefinementStats::default());
+    };
+    let left_local_node_id = left_child_node_id(local_node_id)?;
+    let right_local_node_id = right_child_node_id(local_node_id)?;
+
+    let left_stats = fill_refined_subtree_quantile_absolute_output(
+        left_local_node_id,
+        stumps_by_local,
+        leaf_residuals,
+        alpha,
+        current_absolute_outputs,
+        max_abs_leaf_value,
+        refined_absolute_outputs,
+    )?;
+    let right_stats = fill_refined_subtree_quantile_absolute_output(
+        right_local_node_id,
+        stumps_by_local,
+        leaf_residuals,
+        alpha,
+        current_absolute_outputs,
+        max_abs_leaf_value,
+        refined_absolute_outputs,
+    )?;
+
+    let mut subtree_stats = left_stats;
+    subtree_stats.weighted_sum += right_stats.weighted_sum;
+    subtree_stats.weight_sum += right_stats.weight_sum;
+    Ok(subtree_stats)
+}
+
+fn fill_refined_subtree_quantile_absolute_output(
+    local_node_id: u32,
+    stumps_by_local: &HashMap<u32, &TrainedStump>,
+    leaf_residuals: &HashMap<u32, LeafResiduals>,
+    alpha: f32,
+    current_absolute_outputs: &HashMap<u32, f32>,
+    max_abs_leaf_value: f32,
+    refined_absolute_outputs: &mut HashMap<u32, f32>,
+) -> EngineResult<LeafRefinementStats> {
+    if stumps_by_local.contains_key(&local_node_id) {
+        let left_local_node_id = left_child_node_id(local_node_id)?;
+        let right_local_node_id = right_child_node_id(local_node_id)?;
+        let left_stats = fill_refined_subtree_quantile_absolute_output(
+            left_local_node_id,
+            stumps_by_local,
+            leaf_residuals,
+            alpha,
+            current_absolute_outputs,
+            max_abs_leaf_value,
+            refined_absolute_outputs,
+        )?;
+        let right_stats = fill_refined_subtree_quantile_absolute_output(
+            right_local_node_id,
+            stumps_by_local,
+            leaf_residuals,
+            alpha,
+            current_absolute_outputs,
+            max_abs_leaf_value,
+            refined_absolute_outputs,
+        )?;
+        let total_weight = left_stats.weight_sum + right_stats.weight_sum;
+        let absolute_output = if total_weight > 0.0 {
+            ((left_stats.weighted_sum + right_stats.weighted_sum) / total_weight)
+                .clamp(-max_abs_leaf_value, max_abs_leaf_value)
+        } else {
+            current_absolute_outputs
+                .get(&local_node_id)
+                .copied()
+                .unwrap_or(0.0)
+        };
+        refined_absolute_outputs.insert(local_node_id, absolute_output);
+        return Ok(LeafRefinementStats {
+            weighted_sum: absolute_output * total_weight,
+            weight_sum: total_weight,
+        });
+    }
+
+    let (q_val, weight_sum) = if let Some(lr) = leaf_residuals.get(&local_node_id) {
+        let total_w: f32 = lr.weights.iter().sum();
+        if total_w > 0.0 {
+            let q = weighted_quantile(&lr.residuals, Some(&lr.weights), alpha)?;
+            (q, total_w)
+        } else {
+            (0.0, 0.0)
+        }
+    } else {
+        (0.0, 0.0)
+    };
+
+    let absolute_output = if weight_sum > 0.0 {
+        q_val.clamp(-max_abs_leaf_value, max_abs_leaf_value)
+    } else {
+        current_absolute_outputs
+            .get(&local_node_id)
+            .copied()
+            .unwrap_or(0.0)
+    };
+    refined_absolute_outputs.insert(local_node_id, absolute_output);
+    Ok(LeafRefinementStats {
+        weighted_sum: absolute_output * weight_sum,
+        weight_sum,
+    })
+}
+
 fn squared_error_loss(
     predictions: &[f32],
     targets: &[f32],
@@ -14266,6 +14481,105 @@ mod tests {
             "did not expect a NeutralizationMetadata section"
         );
     }
+
+    #[test]
+    fn test_quantile_objective_gradients_and_loss() {
+        let obj = QuantileObjective { alpha: 0.7 };
+        assert_eq!(obj.objective_name(), "quantile");
+        assert_eq!(obj.quantile_alpha(), Some(0.7));
+        assert!(!obj.supports_leaf_refinement());
+
+        // Test initial prediction (weighted quantile)
+        let targets = vec![10.0, 20.0, 30.0];
+        let init = obj.initial_prediction(&targets, None).unwrap();
+        // threshold = 0.7 * 3 = 2.1
+        // cum weight = 1 (at 10), 2 (at 20), 3 (at 30) -> first cumulative >= 2.1 is 3 (at 30)
+        assert_eq!(init, 30.0);
+
+        let init_weighted = obj.initial_prediction(&targets, Some(&[1.0, 2.0, 1.0])).unwrap();
+        // weights = [1.0, 2.0, 1.0], total_weight = 4.0
+        // threshold = 0.7 * 4.0 = 2.8
+        // cum weights: 1.0 (at 10), 3.0 (at 20), 4.0 (at 30) -> first cumulative >= 2.8 is 3.0 (20.0 here)
+        assert_eq!(init_weighted, 20.0);
+
+        // Test gradients and loss
+        let predictions = vec![15.0, 25.0];
+        let targets = vec![20.0, 10.0]; // y > y_hat for first (20 > 15), y <= y_hat for second (10 <= 25)
+        let grads = obj.compute_gradients(&predictions, &targets, None).unwrap();
+        assert_eq!(grads.len(), 2);
+        // idx 0: target=20.0, pred=15.0. target > pred -> grad = -0.7 * 1.0 = -0.7, hess = 1.0
+        assert!((grads[0].grad - (-0.7)).abs() < 1e-6);
+        assert_eq!(grads[0].hess, 1.0);
+        // idx 1: target=10.0, pred=25.0. target <= pred -> grad = (1.0 - 0.7) * 1.0 = 0.3, hess = 1.0
+        assert!((grads[1].grad - 0.3).abs() < 1e-6);
+        assert_eq!(grads[1].hess, 1.0);
+
+        // Test loss
+        // diffs: idx 0: 20 - 15 = 5 > 0 -> loss = 0.7 * 5 = 3.5
+        //        idx 1: 10 - 25 = -15 <= 0 -> loss = (0.7 - 1.0) * (-15) = 4.5
+        // average loss = (3.5 + 4.5) / 2 = 4.0
+        let loss = obj.loss(&predictions, &targets, None).unwrap();
+        assert!((loss - 4.0).abs() < 1e-6);
+
+        // Test loss with weights
+        let weights = vec![2.0, 1.0];
+        // weighted loss: idx 0: 3.5 * 2.0 = 7.0
+        //                idx 1: 4.5 * 1.0 = 4.5
+        // average loss = (7.0 + 4.5) / 2 = 5.75
+        let loss_weighted = obj.loss(&predictions, &targets, Some(&weights)).unwrap();
+        assert!((loss_weighted - 5.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_refine_quantile_leaf_values() {
+        let node_id = encode_tree_node_id(0, 0).expect("node id encodes");
+        let mut stumps = vec![TrainedStump {
+            split: SplitCandidate {
+                node_id,
+                feature_index: 0,
+                threshold_bin: 1,
+                gain: 1.0,
+                default_left: false,
+                is_categorical: false,
+                categorical_bitset: None,
+                left_stats: NodeStats {
+                    grad_sum: 0.0,
+                    hess_sum: 2.0,
+                    grad_sq_sum: 0.0,
+                    row_count: 2,
+                },
+                right_stats: NodeStats {
+                    grad_sum: 0.0,
+                    hess_sum: 2.0,
+                    grad_sq_sum: 0.0,
+                    row_count: 2,
+                },
+            },
+            left_leaf_value: LeafValue::Scalar(0.0),
+            right_leaf_value: LeafValue::Scalar(0.0),
+            tree_weight: 1.0,
+            multi_output_leaf_values: None,
+        }];
+        let matrix = sample_binned_matrix();
+        let targets = vec![1.0, 3.0, 10.0, 20.0];
+        let predictions = vec![0.0, 0.0, 0.0, 0.0];
+
+        // test with alpha = 0.75, learning_rate = 1.0
+        refine_quantile_leaf_values(
+            &mut stumps,
+            &matrix,
+            &predictions,
+            &targets,
+            None,
+            0.75,
+            1.0,
+            100.0,
+        )
+        .expect("refinement should succeed");
+
+        assert_eq!(stumps[0].left_leaf_value.as_scalar(), 3.0);
+        assert_eq!(stumps[0].right_leaf_value.as_scalar(), 20.0);
+    }
 }
 
 #[cfg(test)]
@@ -14689,52 +15003,8 @@ mod morph_state_tests {
             .unwrap_err();
         assert!(format!("{err:?}").to_lowercase().contains("non-negative"));
     }
-
-    #[test]
-    fn test_quantile_objective_gradients_and_loss() {
-        let obj = QuantileObjective { alpha: 0.7 };
-        assert_eq!(obj.objective_name(), "quantile");
-        assert_eq!(obj.quantile_alpha(), Some(0.7));
-        assert!(!obj.supports_leaf_refinement());
-
-        // Test initial prediction (weighted quantile)
-        let targets = vec![10.0, 20.0, 30.0];
-        let init = obj.initial_prediction(&targets, None).unwrap();
-        // threshold = 0.7 * 3 = 2.1
-        // cum weight = 1 (at 10), 2 (at 20), 3 (at 30) -> first cumulative >= 2.1 is 3 (at 30)
-        assert_eq!(init, 30.0);
-
-        let init_weighted = obj.initial_prediction(&targets, Some(&[1.0, 2.0, 1.0])).unwrap();
-        // weights = [1.0, 2.0, 1.0], total_weight = 4.0
-        // threshold = 0.7 * 4.0 = 2.8
-        // cum weights: 1.0 (at 10), 3.0 (at 20), 4.0 (at 30) -> first cumulative >= 2.8 is 3.0 (at 20)
-        assert_eq!(init_weighted, 20.0);
-
-        // Test gradients and loss
-        let predictions = vec![15.0, 25.0];
-        let targets = vec![20.0, 10.0]; // y > y_hat for first (20 > 15), y <= y_hat for second (10 <= 25)
-        let grads = obj.compute_gradients(&predictions, &targets, None).unwrap();
-        assert_eq!(grads.len(), 2);
-        // idx 0: target=20.0, pred=15.0. target > pred -> grad = -0.7 * 1.0 = -0.7, hess = 1.0
-        assert!((grads[0].grad - (-0.7)).abs() < 1e-6);
-        assert_eq!(grads[0].hess, 1.0);
-        // idx 1: target=10.0, pred=25.0. target <= pred -> grad = (1.0 - 0.7) * 1.0 = 0.3, hess = 1.0
-        assert!((grads[1].grad - 0.3).abs() < 1e-6);
-        assert_eq!(grads[1].hess, 1.0);
-
-        // Test loss
-        // diffs: idx 0: 20 - 15 = 5 > 0 -> loss = 0.7 * 5 = 3.5
-        //        idx 1: 10 - 25 = -15 <= 0 -> loss = (0.7 - 1.0) * (-15) = 4.5
-        // average loss = (3.5 + 4.5) / 2 = 4.0
-        let loss = obj.loss(&predictions, &targets, None).unwrap();
-        assert!((loss - 4.0).abs() < 1e-6);
-
-        // Test loss with weights
-        let weights = vec![2.0, 1.0];
-        // weighted loss: idx 0: 3.5 * 2.0 = 7.0
-        //                idx 1: 4.5 * 1.0 = 4.5
-        // average loss = (7.0 + 4.5) / 2 = 5.75
-        let loss_weighted = obj.loss(&predictions, &targets, Some(&weights)).unwrap();
-        assert!((loss_weighted - 5.75).abs() < 1e-6);
-    }
 }
+
+
+
+
