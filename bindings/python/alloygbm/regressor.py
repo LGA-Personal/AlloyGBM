@@ -1373,6 +1373,21 @@ class GBMRegressor(_GBMRegressorBase):
             raise ValueError(
                 "boosting_mode='goss' requires goss_top_rate + goss_other_rate <= 1.0"
             )
+        # PR #41 review C3: cross-field validation for Tweedie variance
+        # power.  The constructor rejects out-of-range powers when
+        # `objective='tweedie'`; set_params must do the same regardless of
+        # whether the objective, the power, or both change in this call —
+        # otherwise sklearn-style updates leave the estimator in a state
+        # the constructor would have refused, and the failure only
+        # surfaces from the native bridge much later.
+        post_objective = self._objective_name()
+        if post_objective == "tweedie":
+            v = self.tweedie_variance_power
+            if not isinstance(v, (int, float)) or not (1.0 < float(v) < 2.0):
+                raise ValueError(
+                    "tweedie_variance_power must satisfy 1 < p < 2 when "
+                    f"objective='tweedie' (got {v!r})"
+                )
 
         # Cross-field validation: leaf growth requires max_leaves
         if self.tree_growth == "leaf" and self.max_leaves is None:
@@ -1467,6 +1482,36 @@ class GBMRegressor(_GBMRegressorBase):
                 return "custom"
             return str(self.objective)
         return "squared_error"
+
+    def _validate_glm_target_domain(self, y: object, *, role: str) -> None:
+        """Reject targets that violate the active GLM objective's domain.
+
+        Called on both training y and validation y from `eval_set` so that
+        early-stopping / validation-loss reporting don't operate on values
+        that the loss function can't evaluate (e.g. `log(y/μ)` for y=0 in
+        Gamma).  No-op for non-GLM objectives.
+
+        `role` is a free-form label ("training" / "validation") used only
+        to make the error message specific.
+        """
+        obj_name = self._objective_name()
+        if obj_name not in ("poisson", "tweedie", "gamma"):
+            return
+        import numpy as _np
+
+        y_arr = _np.asarray(y, dtype=_np.float64)
+        if obj_name == "gamma":
+            if _np.any(y_arr <= 0):
+                raise ValueError(
+                    f"objective='gamma' requires strictly positive {role} targets, "
+                    f"got min(y)={float(y_arr.min())}"
+                )
+        else:
+            if _np.any(y_arr < 0):
+                raise ValueError(
+                    f"objective={obj_name!r} requires non-negative {role} targets, "
+                    f"got min(y)={float(y_arr.min())}"
+                )
 
     @staticmethod
     def _loss_metric_name_for(objective: str) -> str:
@@ -1817,24 +1862,11 @@ class GBMRegressor(_GBMRegressorBase):
                     stacklevel=2,
                 )
 
-        # Target-domain validation for GLM objectives.
-        obj_name = self._objective_name()
-        if obj_name in ("poisson", "tweedie", "gamma"):
-            import numpy as _np
-
-            _y_arr = _np.asarray(y, dtype=_np.float64)
-            if obj_name == "gamma":
-                if _np.any(_y_arr <= 0):
-                    raise ValueError(
-                        "objective='gamma' requires strictly positive targets, "
-                        f"got min(y)={float(_y_arr.min())}"
-                    )
-            else:
-                if _np.any(_y_arr < 0):
-                    raise ValueError(
-                        f"objective={obj_name!r} requires non-negative targets, "
-                        f"got min(y)={float(_y_arr.min())}"
-                    )
+        # Target-domain validation for GLM objectives — applied to training
+        # targets here, and again to validation targets after `eval_set` is
+        # unpacked below (early-stopping and validation-loss reporting also
+        # need to respect the GLM domain — see PR #41 review C2).
+        self._validate_glm_target_domain(y, role="training")
 
         # Validate group if provided.
         validated_group_id: list[int] | None = None
@@ -1900,6 +1932,11 @@ class GBMRegressor(_GBMRegressorBase):
         if eval_set is not None:
             validation_X, validation_y = eval_set
             validation_targets = self._validate_targets(validation_y)
+            # PR #41 review C2: GLM domain check must also gate validation
+            # targets — without this, early-stopping reads losses computed
+            # on out-of-domain y and reports nonsensical numbers (Gamma loss
+            # on y=0 hits `log(0)`, Poisson/Tweedie hit negative-y paths).
+            self._validate_glm_target_domain(validation_targets, role="validation")
             validation_dense_bytes_payload = (
                 self._native_matrix_bytes_payload(validation_X)
                 if not has_categorical

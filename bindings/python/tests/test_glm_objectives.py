@@ -198,6 +198,78 @@ def test_poisson_model_round_trips_through_pickle() -> None:
     np.testing.assert_allclose(p1, p2, rtol=1e-6)
 
 
+def test_set_params_rejects_invalid_tweedie_power_when_objective_is_tweedie() -> None:
+    """PR #41 review C3: `set_params` must apply the same cross-field check
+    the constructor does — out-of-range tweedie_variance_power must be
+    rejected when the resolved objective is 'tweedie', whether the power,
+    the objective, or both change in the call."""
+    m = GBMRegressor(objective="tweedie", tweedie_variance_power=1.5)
+    # Changing only the power: must be rejected because objective stays tweedie.
+    with pytest.raises(ValueError, match="tweedie_variance_power"):
+        m.set_params(tweedie_variance_power=2.0)
+    with pytest.raises(ValueError, match="tweedie_variance_power"):
+        m.set_params(tweedie_variance_power=0.5)
+
+    # Switching objective to tweedie while leaving an out-of-range power
+    # already on the estimator: must be rejected.
+    m2 = GBMRegressor(objective="squared_error", tweedie_variance_power=2.5)
+    with pytest.raises(ValueError, match="tweedie_variance_power"):
+        m2.set_params(objective="tweedie")
+
+    # Switching BOTH at once with a valid pair: accepted.
+    m3 = GBMRegressor(objective="squared_error")
+    m3.set_params(objective="tweedie", tweedie_variance_power=1.7)
+    assert m3.tweedie_variance_power == 1.7
+
+    # Out-of-range power while objective is non-tweedie is allowed (the
+    # field is inert for the active objective; the constructor allows it
+    # too).  Regression-fence the current behaviour.
+    m4 = GBMRegressor(objective="squared_error")
+    m4.set_params(tweedie_variance_power=5.0)  # no error
+
+
+def test_gamma_rejects_zero_validation_targets() -> None:
+    """PR #41 review C2: validation targets must also pass the GLM
+    domain check.  Without this guard, early-stopping reads
+    `log(y/μ)` on `y == 0` validation rows and reports `−inf`."""
+    rng = np.random.default_rng(41)
+    X = rng.normal(size=(60, 3)).astype(np.float32)
+    y_train = np.abs(rng.normal(2.0, 0.5, 60)).astype(np.float32) + 0.1
+    X_val = rng.normal(size=(10, 3)).astype(np.float32)
+    y_val = np.abs(rng.normal(2.0, 0.5, 10)).astype(np.float32)
+    y_val[3] = 0.0  # invalid for gamma
+
+    model = GBMRegressor(
+        objective="gamma",
+        n_estimators=5,
+        training_policy="manual",
+        deterministic=True,
+        seed=41,
+    )
+    with pytest.raises(ValueError, match="validation"):
+        model.fit(X, y_train, eval_set=(X_val, y_val))
+
+
+def test_poisson_rejects_negative_validation_targets() -> None:
+    """PR #41 review C2: see `test_gamma_rejects_zero_validation_targets`."""
+    rng = np.random.default_rng(42)
+    X = rng.normal(size=(60, 3)).astype(np.float32)
+    y_train = rng.poisson(2.0, 60).astype(np.float32)
+    X_val = rng.normal(size=(10, 3)).astype(np.float32)
+    y_val = rng.poisson(2.0, 10).astype(np.float32)
+    y_val[2] = -1.0  # invalid for poisson
+
+    model = GBMRegressor(
+        objective="poisson",
+        n_estimators=5,
+        training_policy="manual",
+        deterministic=True,
+        seed=42,
+    )
+    with pytest.raises(ValueError, match="validation"):
+        model.fit(X, y_train, eval_set=(X_val, y_val))
+
+
 def test_tweedie_with_dart_smoke() -> None:
     """DART boosting on Tweedie: feature-agnostic gradient handling should just work."""
     rng = np.random.default_rng(37)

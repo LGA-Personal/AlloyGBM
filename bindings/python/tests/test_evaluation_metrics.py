@@ -231,6 +231,37 @@ class EvaluationMetricTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "variance_power"):
             tweedie_deviance([1.0], [1.0], variance_power=2.0)
 
+    def test_deviance_metrics_accept_numpy_arrays(self) -> None:
+        """Regression for PR #41 review C1: `if not y_true:` raised on
+        multi-element numpy arrays via the ambiguous-truth-value pitfall.
+        All three GLM deviance helpers now route through the shared
+        `_validated_pair` coercion path used by every other metric."""
+        try:
+            import numpy as _np
+        except ImportError:
+            self.skipTest("numpy not installed")
+
+        y = _np.array([1.0, 2.0, 3.0])
+        self.assertAlmostEqual(poisson_deviance(y, y), 0.0, places=9)
+        self.assertAlmostEqual(gamma_deviance(y, y), 0.0, places=9)
+        d_match = tweedie_deviance(y, y, variance_power=1.5)
+        d_mismatch = tweedie_deviance(
+            y, _np.array([2.0, 4.0, 6.0]), variance_power=1.5
+        )
+        self.assertLess(d_match, d_mismatch)
+
+    def test_deviance_metrics_reject_non_finite_via_shared_helper(self) -> None:
+        """Regression for PR #41 review C1: routing through `_validated_pair`
+        means `nan` / `inf` are rejected before the GLM domain check fires."""
+        with self.assertRaisesRegex(ValueError, "finite"):
+            poisson_deviance([1.0, float("nan")], [1.0, 1.0])
+        with self.assertRaisesRegex(ValueError, "finite"):
+            gamma_deviance([1.0, float("inf")], [1.0, 1.0])
+        with self.assertRaisesRegex(ValueError, "finite"):
+            tweedie_deviance(
+                [1.0, float("nan")], [1.0, 1.0], variance_power=1.5
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
