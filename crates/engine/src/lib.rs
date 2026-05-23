@@ -757,9 +757,14 @@ pub trait ObjectiveOps {
         false
     }
 
+    /// Return the quantile alpha if this is a quantile objective.
+    fn quantile_alpha(&self) -> Option<f32> {
+        None
+    }
+
     /// Whether MSE-based leaf refinement is supported for this objective.
     fn supports_leaf_refinement(&self) -> bool {
-        true
+        self.quantile_alpha().is_none()
     }
 
     /// Whether pre-target factor neutralization is valid for this objective.
@@ -1494,6 +1499,249 @@ impl ObjectiveOps for TweedieObjective {
         }
         Ok(total / weight_sum)
     }
+}
+
+// ── Quantile Regression Objective ────────────────────────────────────────
+
+/// Quantile Regression (pinball loss) objective.
+///
+/// Since the second derivative (Hessian) of the pinball loss is zero everywhere
+/// except at 0 (where it is undefined), standard Newton-Raphson tree boosting
+/// cannot compute meaningful split gains directly.
+/// To circumvent this, we use a proxy Hessian `h_i = w_i` (sample weight,
+/// defaulting to 1.0) during split finding. This acts as a proxy for the sample
+/// count in each leaf.
+/// Because using a proxy Hessian results in incorrect Newton-Raphson leaf values,
+/// a post-growth leaf refinement step (`refine_quantile_leaf_values`) is executed
+/// at the end of each round to replace leaf predictions with the actual empirical
+/// quantiles of the residuals of rows routed to each leaf.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QuantileObjective {
+    pub alpha: f32,
+}
+
+impl ObjectiveOps for QuantileObjective {
+    fn objective_name(&self) -> &str {
+        "quantile"
+    }
+
+    fn quantile_alpha(&self) -> Option<f32> {
+        Some(self.alpha)
+    }
+
+    fn supports_leaf_refinement(&self) -> bool {
+        false
+    }
+
+    fn initial_prediction(
+        &self,
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+    ) -> EngineResult<f32> {
+        weighted_quantile(targets, sample_weights, self.alpha)
+    }
+
+    #[allow(clippy::collapsible_if)]
+    fn compute_gradients(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+    ) -> EngineResult<Vec<GradientPair>> {
+        if predictions.len() != targets.len() {
+            return Err(EngineError::ContractViolation(format!(
+                "predictions length {} does not match targets length {}",
+                predictions.len(),
+                targets.len()
+            )));
+        }
+        if let Some(weights) = sample_weights {
+            if weights.len() != targets.len() {
+                return Err(EngineError::ContractViolation(format!(
+                    "weights length {} does not match targets length {}",
+                    weights.len(),
+                    targets.len()
+                )));
+            }
+        }
+
+        let mut gradients = Vec::with_capacity(predictions.len());
+        for index in 0..predictions.len() {
+            let weight = sample_weights.map_or(1.0, |weights| weights[index]);
+            if !weight.is_finite() || weight <= 0.0 {
+                return Err(EngineError::ContractViolation(
+                    "sample weights must be finite and > 0".to_string(),
+                ));
+            }
+            let target = targets[index];
+            let prediction = predictions[index];
+            let grad = if target > prediction {
+                -self.alpha * weight
+            } else {
+                (1.0 - self.alpha) * weight
+            };
+            gradients.push(GradientPair::new(grad, weight)?);
+        }
+        Ok(gradients)
+    }
+
+    #[allow(clippy::collapsible_if)]
+    fn compute_gradients_into(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+        buffer: &mut Vec<GradientPair>,
+    ) -> EngineResult<()> {
+        if predictions.len() != targets.len() {
+            return Err(EngineError::ContractViolation(format!(
+                "predictions length {} does not match targets length {}",
+                predictions.len(),
+                targets.len()
+            )));
+        }
+        if let Some(weights) = sample_weights {
+            if weights.len() != targets.len() {
+                return Err(EngineError::ContractViolation(format!(
+                    "weights length {} does not match targets length {}",
+                    weights.len(),
+                    targets.len()
+                )));
+            }
+        }
+
+        buffer.clear();
+        if buffer.capacity() < predictions.len() {
+            buffer.reserve(predictions.len() - buffer.capacity());
+        }
+        for index in 0..predictions.len() {
+            let weight = sample_weights.map_or(1.0, |weights| weights[index]);
+            let target = targets[index];
+            let prediction = predictions[index];
+            let grad = if target > prediction {
+                -self.alpha * weight
+            } else {
+                (1.0 - self.alpha) * weight
+            };
+            buffer.push(GradientPair { grad, hess: weight });
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::collapsible_if)]
+    fn loss(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+    ) -> EngineResult<f32> {
+        if predictions.len() != targets.len() {
+            return Err(EngineError::ContractViolation(format!(
+                "predictions length {} does not match targets length {}",
+                predictions.len(),
+                targets.len()
+            )));
+        }
+        if let Some(weights) = sample_weights {
+            if weights.len() != targets.len() {
+                return Err(EngineError::ContractViolation(format!(
+                    "weights length {} does not match targets length {}",
+                    weights.len(),
+                    targets.len()
+                )));
+            }
+        }
+
+        let n = predictions.len();
+        if n == 0 {
+            return Ok(0.0);
+        }
+
+        let mut total = 0.0_f64;
+        for index in 0..n {
+            let pred = predictions[index];
+            let target = targets[index];
+            let weight = sample_weights.map_or(1.0, |w| w[index]);
+            if !weight.is_finite() || weight <= 0.0 {
+                return Err(EngineError::ContractViolation(
+                    "sample weights must be finite and > 0".to_string(),
+                ));
+            }
+            let diff = target - pred;
+            let loss_i = if diff > 0.0 {
+                self.alpha * diff
+            } else {
+                (self.alpha - 1.0) * diff
+            };
+            total += loss_i as f64 * weight as f64;
+        }
+
+        Ok((total / n as f64) as f32)
+    }
+}
+
+#[allow(clippy::collapsible_if)]
+fn weighted_quantile(values: &[f32], weights: Option<&[f32]>, alpha: f32) -> EngineResult<f32> {
+    if values.is_empty() {
+        return Err(EngineError::ContractViolation(
+            "values cannot be empty".to_string(),
+        ));
+    }
+    if let Some(w) = weights {
+        if w.len() != values.len() {
+            return Err(EngineError::ContractViolation(format!(
+                "weights length {} does not match values length {}",
+                w.len(),
+                values.len()
+            )));
+        }
+    }
+
+    if weights.is_none() {
+        for &val in values {
+            if !val.is_finite() {
+                return Err(EngineError::ContractViolation(
+                    "values must be finite".to_string(),
+                ));
+            }
+        }
+        let mut vals = values.to_vec();
+        let k = ((alpha as f64 * vals.len() as f64) - 1.0).max(0.0).ceil() as usize;
+        let k = k.min(vals.len() - 1);
+        vals.select_nth_unstable_by(k, |a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+        return Ok(vals[k]);
+    }
+
+    let mut pairs = Vec::with_capacity(values.len());
+    let mut total_weight = 0.0_f64;
+    for i in 0..values.len() {
+        let w = weights.map_or(1.0, |ws| ws[i]);
+        if !w.is_finite() || w <= 0.0 {
+            return Err(EngineError::ContractViolation(
+                "sample weights must be finite and > 0".to_string(),
+            ));
+        }
+        if !values[i].is_finite() {
+            return Err(EngineError::ContractViolation(
+                "values must be finite".to_string(),
+            ));
+        }
+        pairs.push((values[i], w));
+        total_weight += w as f64;
+    }
+
+    pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+
+    let threshold = alpha as f64 * total_weight;
+    let mut cum_weight = 0.0_f64;
+    for &(val, weight) in &pairs {
+        cum_weight += weight as f64;
+        if cum_weight >= threshold {
+            return Ok(val);
+        }
+    }
+
+    Ok(pairs.last().unwrap().0)
 }
 
 // ── QueryRMSE Objective ──────────────────────────────────────────────────
@@ -5006,6 +5254,28 @@ impl Trainer {
             }
         }
         validate_train_params(&self.params)?;
+        if let Some(qa) = objective.quantile_alpha() {
+            if !qa.is_finite() || qa <= 0.0 || qa >= 1.0 {
+                return Err(EngineError::InvalidConfig(
+                    "quantile_alpha must be finite and in (0.0, 1.0)".to_string(),
+                ));
+            }
+            if self.params.leaf_model == LeafModelKind::Linear {
+                return Err(EngineError::InvalidConfig(
+                    "leaf_model='linear' is not supported with objective='quantile'".to_string(),
+                ));
+            }
+            if matches!(self.params.boosting_mode, BoostingMode::Dart { .. }) {
+                return Err(EngineError::InvalidConfig(
+                    "boosting_mode='dart' is not supported with objective='quantile'".to_string(),
+                ));
+            }
+            if self.params.morph_config.is_some() {
+                return Err(EngineError::InvalidConfig(
+                    "morph_config is not supported with objective='quantile'".to_string(),
+                ));
+            }
+        }
         validate_training_dataset(dataset)?;
         validate_neutralization_fit_contract(&self.params, dataset, objective)?;
         validate_warm_start_neutralization_contract(
@@ -5420,7 +5690,7 @@ impl Trainer {
                 });
 
             let raw_fv = &active_dataset.matrix.values;
-            let (candidate_round_stumps, round_rejection_reason) =
+            let (mut candidate_round_stumps, round_rejection_reason) =
                 if self.params.tree_growth == TreeGrowth::Leaf {
                     build_tree_leaf_wise(
                         backend,
@@ -5483,6 +5753,30 @@ impl Trainer {
                 }
                 stop_reason = round_rejection_reason;
                 break;
+            }
+
+            if let Some(alpha) = objective.quantile_alpha() {
+                let lr = morph_state
+                    .as_ref()
+                    .map(|ms| ms.lr_for_iter(effective_round_index))
+                    .unwrap_or(self.params.learning_rate);
+                refine_quantile_leaf_values(
+                    &mut candidate_round_stumps,
+                    binned_matrix,
+                    &predictions,
+                    &active_dataset.targets,
+                    active_dataset.sample_weights.as_deref(),
+                    alpha,
+                    lr,
+                    controls.max_abs_leaf_value,
+                )?;
+                candidate_predictions.copy_from_slice(&predictions);
+                apply_round_stumps_tree_walk(
+                    &mut candidate_predictions,
+                    binned_matrix,
+                    &candidate_round_stumps,
+                    raw_features_opt,
+                )?;
             }
 
             // DART: rebuild `candidate_predictions` to reflect the
@@ -8799,6 +9093,236 @@ fn fill_refined_subtree_absolute_output(
     Ok(LeafRefinementStats {
         weighted_sum: absolute_output * stats.weight_sum,
         weight_sum: stats.weight_sum,
+    })
+}
+
+struct LeafResiduals {
+    residuals: Vec<f32>,
+    weights: Option<Vec<f32>>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn refine_quantile_leaf_values(
+    stumps: &mut [TrainedStump],
+    binned_matrix: &BinnedMatrix,
+    predictions: &[f32],
+    targets: &[f32],
+    sample_weights: Option<&[f32]>,
+    alpha: f32,
+    learning_rate: f32,
+    max_abs_leaf_value: f32,
+) -> EngineResult<()> {
+    if stumps.is_empty() {
+        return Ok(());
+    }
+    if targets.len() != binned_matrix.row_count {
+        return Err(EngineError::ContractViolation(format!(
+            "targets length {} does not match binned row_count {}",
+            targets.len(),
+            binned_matrix.row_count
+        )));
+    }
+    if let Some(weights) = sample_weights
+        && weights.len() != targets.len()
+    {
+        return Err(EngineError::ContractViolation(format!(
+            "weights length {} does not match targets length {}",
+            weights.len(),
+            targets.len()
+        )));
+    }
+
+    let mut stumps_by_local = HashMap::new();
+    for stump in stumps.iter() {
+        let (_, local_node_id) = decode_tree_node_id(stump.split.node_id);
+        stumps_by_local.insert(local_node_id, stump);
+    }
+
+    let mut current_absolute_outputs = HashMap::new();
+    current_absolute_outputs.insert(0_u32, 0.0_f32);
+    populate_child_absolute_outputs(0, &stumps_by_local, &mut current_absolute_outputs)?;
+
+    // We map every row in the full training dataset to its terminal leaf to collect residuals.
+    // When row_subsample < 1.0, split-finding is performed on a subsampled subset of rows,
+    // but we use the entire training set for the final quantile leaf refinement step
+    // to minimize estimation variance of the empirical quantile.
+    let mut leaf_residuals: HashMap<u32, LeafResiduals> = HashMap::new();
+    for row_index in 0..binned_matrix.row_count {
+        let terminal_local_node_id =
+            terminal_local_node_id_for_row(row_index, binned_matrix, &stumps_by_local)?;
+        let res = targets[row_index] - predictions[row_index];
+        let entry = leaf_residuals
+            .entry(terminal_local_node_id)
+            .or_insert_with(|| LeafResiduals {
+                residuals: Vec::new(),
+                weights: sample_weights.map(|_| Vec::new()),
+            });
+        entry.residuals.push(res);
+        if let (Some(w_vec), Some(weights)) = (&mut entry.weights, sample_weights) {
+            w_vec.push(weights[row_index]);
+        }
+    }
+
+    let mut refined_absolute_outputs = HashMap::new();
+    refined_absolute_outputs.insert(0_u32, 0.0_f32);
+
+    fill_refined_child_quantile_absolute_outputs(
+        0,
+        &stumps_by_local,
+        &leaf_residuals,
+        alpha,
+        &current_absolute_outputs,
+        max_abs_leaf_value,
+        &mut refined_absolute_outputs,
+    )?;
+
+    for stump in stumps.iter_mut() {
+        let (_, local_node_id) = decode_tree_node_id(stump.split.node_id);
+        let parent_absolute = refined_absolute_outputs
+            .get(&local_node_id)
+            .copied()
+            .unwrap_or(0.0);
+        let left_local_node_id = left_child_node_id(local_node_id)?;
+        let right_local_node_id = right_child_node_id(local_node_id)?;
+        let left_absolute = refined_absolute_outputs
+            .get(&left_local_node_id)
+            .copied()
+            .unwrap_or(parent_absolute + stump.left_leaf_value.as_scalar());
+        let right_absolute = refined_absolute_outputs
+            .get(&right_local_node_id)
+            .copied()
+            .unwrap_or(parent_absolute + stump.right_leaf_value.as_scalar());
+
+        let dl = (left_absolute - parent_absolute) * learning_rate;
+        let dr = (right_absolute - parent_absolute) * learning_rate;
+        stump.left_leaf_value = LeafValue::Scalar(dl);
+        stump.right_leaf_value = LeafValue::Scalar(dr);
+    }
+
+    Ok(())
+}
+
+fn fill_refined_child_quantile_absolute_outputs(
+    local_node_id: u32,
+    stumps_by_local: &HashMap<u32, &TrainedStump>,
+    leaf_residuals: &HashMap<u32, LeafResiduals>,
+    alpha: f32,
+    current_absolute_outputs: &HashMap<u32, f32>,
+    max_abs_leaf_value: f32,
+    refined_absolute_outputs: &mut HashMap<u32, f32>,
+) -> EngineResult<LeafRefinementStats> {
+    let Some(_stump) = stumps_by_local.get(&local_node_id) else {
+        return Ok(LeafRefinementStats::default());
+    };
+    let left_local_node_id = left_child_node_id(local_node_id)?;
+    let right_local_node_id = right_child_node_id(local_node_id)?;
+
+    let left_stats = fill_refined_subtree_quantile_absolute_output(
+        left_local_node_id,
+        stumps_by_local,
+        leaf_residuals,
+        alpha,
+        current_absolute_outputs,
+        max_abs_leaf_value,
+        refined_absolute_outputs,
+    )?;
+    let right_stats = fill_refined_subtree_quantile_absolute_output(
+        right_local_node_id,
+        stumps_by_local,
+        leaf_residuals,
+        alpha,
+        current_absolute_outputs,
+        max_abs_leaf_value,
+        refined_absolute_outputs,
+    )?;
+
+    let mut subtree_stats = left_stats;
+    subtree_stats.weighted_sum += right_stats.weighted_sum;
+    subtree_stats.weight_sum += right_stats.weight_sum;
+    Ok(subtree_stats)
+}
+
+fn fill_refined_subtree_quantile_absolute_output(
+    local_node_id: u32,
+    stumps_by_local: &HashMap<u32, &TrainedStump>,
+    leaf_residuals: &HashMap<u32, LeafResiduals>,
+    alpha: f32,
+    current_absolute_outputs: &HashMap<u32, f32>,
+    max_abs_leaf_value: f32,
+    refined_absolute_outputs: &mut HashMap<u32, f32>,
+) -> EngineResult<LeafRefinementStats> {
+    if stumps_by_local.contains_key(&local_node_id) {
+        let left_local_node_id = left_child_node_id(local_node_id)?;
+        let right_local_node_id = right_child_node_id(local_node_id)?;
+        let left_stats = fill_refined_subtree_quantile_absolute_output(
+            left_local_node_id,
+            stumps_by_local,
+            leaf_residuals,
+            alpha,
+            current_absolute_outputs,
+            max_abs_leaf_value,
+            refined_absolute_outputs,
+        )?;
+        let right_stats = fill_refined_subtree_quantile_absolute_output(
+            right_local_node_id,
+            stumps_by_local,
+            leaf_residuals,
+            alpha,
+            current_absolute_outputs,
+            max_abs_leaf_value,
+            refined_absolute_outputs,
+        )?;
+        let total_weight = left_stats.weight_sum + right_stats.weight_sum;
+        let absolute_output = if total_weight > 0.0 {
+            ((left_stats.weighted_sum + right_stats.weighted_sum) / total_weight)
+                .clamp(-max_abs_leaf_value, max_abs_leaf_value)
+        } else {
+            current_absolute_outputs
+                .get(&local_node_id)
+                .copied()
+                .unwrap_or(0.0)
+        };
+        refined_absolute_outputs.insert(local_node_id, absolute_output);
+        return Ok(LeafRefinementStats {
+            weighted_sum: absolute_output * total_weight,
+            weight_sum: total_weight,
+        });
+    }
+
+    let (q_val, weight_sum) = if let Some(lr) = leaf_residuals.get(&local_node_id) {
+        if let Some(ref w_vec) = lr.weights {
+            let total_w: f32 = w_vec.iter().sum();
+            if total_w > 0.0 {
+                let q = weighted_quantile(&lr.residuals, Some(w_vec), alpha)?;
+                (q, total_w)
+            } else {
+                (0.0, 0.0)
+            }
+        } else {
+            let count = lr.residuals.len();
+            if count > 0 {
+                let q = weighted_quantile(&lr.residuals, None, alpha)?;
+                (q, count as f32)
+            } else {
+                (0.0, 0.0)
+            }
+        }
+    } else {
+        (0.0, 0.0)
+    };
+
+    let absolute_output = if weight_sum > 0.0 {
+        q_val.clamp(-max_abs_leaf_value, max_abs_leaf_value)
+    } else {
+        current_absolute_outputs
+            .get(&local_node_id)
+            .copied()
+            .unwrap_or(0.0)
+    };
+    refined_absolute_outputs.insert(local_node_id, absolute_output);
+    Ok(LeafRefinementStats {
+        weighted_sum: absolute_output * weight_sum,
+        weight_sum,
     })
 }
 
@@ -14040,6 +14564,203 @@ mod tests {
                 .any(|s| s.descriptor.kind
                     == alloygbm_core::ModelSectionKind::NeutralizationMetadata),
             "did not expect a NeutralizationMetadata section"
+        );
+    }
+
+    #[test]
+    fn test_quantile_objective_gradients_and_loss() {
+        let obj = QuantileObjective { alpha: 0.7 };
+        assert_eq!(obj.objective_name(), "quantile");
+        assert_eq!(obj.quantile_alpha(), Some(0.7));
+        assert!(!obj.supports_leaf_refinement());
+
+        // Test initial prediction (weighted quantile)
+        let targets = vec![10.0, 20.0, 30.0];
+        let init = obj.initial_prediction(&targets, None).unwrap();
+        // threshold = 0.7 * 3 = 2.1
+        // cum weight = 1 (at 10), 2 (at 20), 3 (at 30) -> first cumulative >= 2.1 is 3 (at 30)
+        assert_eq!(init, 30.0);
+
+        let init_weighted = obj
+            .initial_prediction(&targets, Some(&[1.0, 2.0, 1.0]))
+            .unwrap();
+        // weights = [1.0, 2.0, 1.0], total_weight = 4.0
+        // threshold = 0.7 * 4.0 = 2.8
+        // cum weights: 1.0 (at 10), 3.0 (at 20), 4.0 (at 30) -> first cumulative >= 2.8 is 3.0 (20.0 here)
+        assert_eq!(init_weighted, 20.0);
+
+        // Test gradients and loss
+        let predictions = vec![15.0, 25.0];
+        let targets = vec![20.0, 10.0]; // y > y_hat for first (20 > 15), y <= y_hat for second (10 <= 25)
+        let grads = obj.compute_gradients(&predictions, &targets, None).unwrap();
+        assert_eq!(grads.len(), 2);
+        // idx 0: target=20.0, pred=15.0. target > pred -> grad = -0.7 * 1.0 = -0.7, hess = 1.0
+        assert!((grads[0].grad - (-0.7)).abs() < 1e-6);
+        assert_eq!(grads[0].hess, 1.0);
+        // idx 1: target=10.0, pred=25.0. target <= pred -> grad = (1.0 - 0.7) * 1.0 = 0.3, hess = 1.0
+        assert!((grads[1].grad - 0.3).abs() < 1e-6);
+        assert_eq!(grads[1].hess, 1.0);
+
+        // Test loss
+        // diffs: idx 0: 20 - 15 = 5 > 0 -> loss = 0.7 * 5 = 3.5
+        //        idx 1: 10 - 25 = -15 <= 0 -> loss = (0.7 - 1.0) * (-15) = 4.5
+        // average loss = (3.5 + 4.5) / 2 = 4.0
+        let loss = obj.loss(&predictions, &targets, None).unwrap();
+        assert!((loss - 4.0).abs() < 1e-6);
+
+        // Test loss with weights
+        let weights = vec![2.0, 1.0];
+        // weighted loss: idx 0: 3.5 * 2.0 = 7.0
+        //                idx 1: 4.5 * 1.0 = 4.5
+        // average loss = (7.0 + 4.5) / 2 = 5.75
+        let loss_weighted = obj.loss(&predictions, &targets, Some(&weights)).unwrap();
+        assert!((loss_weighted - 5.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_refine_quantile_leaf_values() {
+        let node_id = encode_tree_node_id(0, 0).expect("node id encodes");
+        let mut stumps = vec![TrainedStump {
+            split: SplitCandidate {
+                node_id,
+                feature_index: 0,
+                threshold_bin: 1,
+                gain: 1.0,
+                default_left: false,
+                is_categorical: false,
+                categorical_bitset: None,
+                left_stats: NodeStats {
+                    grad_sum: 0.0,
+                    hess_sum: 2.0,
+                    grad_sq_sum: 0.0,
+                    row_count: 2,
+                },
+                right_stats: NodeStats {
+                    grad_sum: 0.0,
+                    hess_sum: 2.0,
+                    grad_sq_sum: 0.0,
+                    row_count: 2,
+                },
+            },
+            left_leaf_value: LeafValue::Scalar(0.0),
+            right_leaf_value: LeafValue::Scalar(0.0),
+            tree_weight: 1.0,
+            multi_output_leaf_values: None,
+        }];
+        let matrix = sample_binned_matrix();
+        let targets = vec![1.0, 3.0, 10.0, 20.0];
+        let predictions = vec![0.0, 0.0, 0.0, 0.0];
+
+        // test with alpha = 0.75, learning_rate = 1.0
+        refine_quantile_leaf_values(
+            &mut stumps,
+            &matrix,
+            &predictions,
+            &targets,
+            None,
+            0.75,
+            1.0,
+            100.0,
+        )
+        .expect("refinement should succeed");
+
+        assert_eq!(stumps[0].left_leaf_value.as_scalar(), 3.0);
+        assert_eq!(stumps[0].right_leaf_value.as_scalar(), 20.0);
+    }
+
+    #[test]
+    fn test_quantile_regression_training_smoke() {
+        let dataset = sample_dataset();
+        let binned = sample_binned_matrix();
+        let objective = QuantileObjective { alpha: 0.5 };
+
+        let params = TrainParams {
+            learning_rate: 1.0,
+            ..TrainParams::default()
+        };
+        let trainer = Trainer::new(params).expect("valid params");
+
+        let model = trainer
+            .fit_iterations(&dataset, &binned, &MockBackend, &objective, 3)
+            .expect("training should succeed");
+
+        assert!(model.rounds_completed() > 0);
+
+        let initial_loss = objective
+            .loss(
+                &vec![model.baseline_prediction; dataset.row_count()],
+                &dataset.targets,
+                None,
+            )
+            .unwrap();
+
+        // Predict on the training data using the model
+        let mut predictions = vec![model.baseline_prediction; dataset.row_count()];
+        apply_tree_to_binned_predictions(
+            &mut predictions,
+            &binned,
+            &model.stumps,
+            Some((&dataset.matrix.values, dataset.matrix.feature_count)),
+        )
+        .unwrap();
+
+        let final_loss = objective
+            .loss(&predictions, &dataset.targets, None)
+            .unwrap();
+
+        assert!(
+            final_loss < initial_loss,
+            "Loss did not improve. initial: {}, final: {}",
+            initial_loss,
+            final_loss
+        );
+    }
+
+    #[test]
+    fn test_quantile_validation_gated_on_objective() {
+        let dataset = sample_dataset();
+        let binned = sample_binned_matrix();
+
+        // 1. If objective is not quantile, invalid quantile_alpha in TrainParams is ignored during validation
+        let params = TrainParams {
+            quantile_alpha: -1.0, // normally invalid in params, but ignored for non-quantile
+            ..TrainParams::default()
+        };
+        let trainer = Trainer::new(params).expect("valid params");
+        // Should succeed since objective is not quantile
+        let objective = SquaredErrorObjective;
+        assert!(
+            trainer
+                .fit_iterations(&dataset, &binned, &MockBackend, &objective, 1)
+                .is_ok()
+        );
+
+        // 2. If objective is quantile and has invalid alpha, it raises an error
+        let objective_quantile_invalid = QuantileObjective { alpha: -1.0 };
+        assert!(
+            trainer
+                .fit_iterations(
+                    &dataset,
+                    &binned,
+                    &MockBackend,
+                    &objective_quantile_invalid,
+                    1
+                )
+                .is_err()
+        );
+
+        // 3. If objective is quantile and has a valid alpha, it succeeds
+        let objective_quantile_valid = QuantileObjective { alpha: 0.5 };
+        assert!(
+            trainer
+                .fit_iterations(
+                    &dataset,
+                    &binned,
+                    &MockBackend,
+                    &objective_quantile_valid,
+                    1
+                )
+                .is_ok()
         );
     }
 }

@@ -107,6 +107,16 @@ class MultiLabelGBMRanker:
                 f"multi_label_mode must be 'independent' or 'joint', got "
                 f"{multi_label_mode!r}"
             )
+        if isinstance(ranking_objective, str):
+            if ranking_objective == "quantile":
+                raise ValueError("MultiLabelGBMRanker does not support objective='quantile'")
+        else:
+            for obj in ranking_objective:
+                if str(obj) == "quantile":
+                    raise ValueError("MultiLabelGBMRanker does not support objective='quantile'")
+        if kwargs.get("objective") == "quantile":
+            raise ValueError("MultiLabelGBMRanker does not support objective='quantile'")
+
         self.multi_label_mode = multi_label_mode
         self.ranking_labels = (
             [str(label) for label in ranking_labels]
@@ -134,14 +144,18 @@ class MultiLabelGBMRanker:
 
     def _resolve_objectives(self, n_labels: int) -> list[str]:
         if isinstance(self.ranking_objective, str):
-            return [self.ranking_objective] * n_labels
-        objs = list(self.ranking_objective)
-        if len(objs) != n_labels:
-            raise ValueError(
-                f"ranking_objective list length {len(objs)} does not match "
-                f"y's label count {n_labels}"
-            )
-        return [str(obj) for obj in objs]
+            objs = [self.ranking_objective] * n_labels
+        else:
+            objs = [str(obj) for obj in self.ranking_objective]
+            if len(objs) != n_labels:
+                raise ValueError(
+                    f"ranking_objective list length {len(objs)} does not match "
+                    f"y's label count {n_labels}"
+                )
+        for obj in objs:
+            if obj == "quantile":
+                raise ValueError("MultiLabelGBMRanker does not support objective='quantile'")
+        return objs
 
     def _resolve_label_names(self, n_labels: int) -> list[str]:
         if self.ranking_labels is None:
@@ -177,7 +191,17 @@ class MultiLabelGBMRanker:
                 )
             self.multi_label_mode = tm  # type: ignore[assignment]
         if "ranking_objective" in params:
+            ro = params.get("ranking_objective")
+            if isinstance(ro, str):
+                if ro == "quantile":
+                    raise ValueError("MultiLabelGBMRanker does not support objective='quantile'")
+            elif ro is not None:
+                for obj in ro:  # type: ignore[union-attr]
+                    if str(obj) == "quantile":
+                        raise ValueError("MultiLabelGBMRanker does not support objective='quantile'")
             self.ranking_objective = params.pop("ranking_objective")  # type: ignore[assignment]
+        if "objective" in params and params.get("objective") == "quantile":
+            raise ValueError("MultiLabelGBMRanker does not support objective='quantile'")
         if "ranking_labels" in params:
             v = params.pop("ranking_labels")
             self.ranking_labels = (

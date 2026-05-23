@@ -60,6 +60,8 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
                 "neutralization='pre_target' is only supported for GBMRegressor "
                 "squared-error training"
             )
+        if kwargs.get("objective") == "quantile":
+            raise ValueError("GBMClassifier does not support objective='quantile'")
         super().__init__(*args, **kwargs)
 
     __init__.__signature__ = _inspect.signature(GBMRegressor.__init__)  # type: ignore[attr-defined]
@@ -378,6 +380,8 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
                 "neutralization='pre_target' is only supported for GBMRegressor "
                 "squared-error training"
             )
+        if params.get("objective") == "quantile":
+            raise ValueError("GBMClassifier does not support objective='quantile'")
         super().set_params(**params)
         return self
 

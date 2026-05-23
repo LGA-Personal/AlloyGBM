@@ -766,6 +766,7 @@ impl Predictor {
         match self.metadata.objective.as_str() {
             "binary_crossentropy" => sigmoid(raw),
             "poisson" | "gamma" | "tweedie" => raw.clamp(-50.0, 50.0).exp(),
+            "quantile" => raw,
             _ => raw,
         }
     }
@@ -1494,6 +1495,7 @@ mod tests {
             neutralization_config: None,
             boosting_mode: alloygbm_core::BoostingMode::Standard,
             tweedie_variance_power: 1.5,
+            quantile_alpha: 0.5,
         }
     }
 

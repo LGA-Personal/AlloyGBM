@@ -1,6 +1,6 @@
 # AlloyGBM Current Limitations
 
-Last updated for v0.11.0.
+Last updated for v0.11.1.
 
 ## Remaining Limitations
 
@@ -26,9 +26,9 @@ future-release item.
 (joint multi-label ranker) and multiclass softmax models don't have an
 interaction-values surface in v0.11.0.
 
-### 4. GLM regression objectives on Ranker / Classifier / multiclass
+### 4. GLM and Quantile regression objectives on Ranker / Classifier / multiclass
 
-`objective="poisson"`, `"gamma"`, `"tweedie"` are supported only on
+`objective="poisson"`, `"gamma"`, `"tweedie"`, and `"quantile"` are supported only on
 single-output `GBMRegressor`. The Ranker, Classifier, and multiclass
 softmax paths reject these objectives.
 
@@ -40,8 +40,15 @@ residualize-target == residualize-gradient identity that pre_target
 relies on breaks down (the gradient under log-link is `μ − y`, not
 `pred − y`). Use `"per_round_gradient"` or `"split_penalty"` with GLM
 objectives.
+### 6. Quantile regression is rejected for linear leaves, DART, and MorphBoost
+
+The `"quantile"` objective uses empirical leaf refinement which assumes constant leaves, standard boosting (non-DART), and standard training mode (non-MorphBoost). These combinations are rejected at the Python and Rust layers.
 
 ## Resolved (Previously Limitations)
+
+### v0.11.1
+
+- **Quantile regression objective shipped.** `GBMRegressor(objective="quantile", quantile_alpha=…)` adds pinball loss regression with alpha ∈ (0.0, 1.0). Uses a proxy Hessian `h_i = w_i` during split-finding, an empirical quantile leaf refinement step at the end of each round acting on the full dataset, and a fast unweighted quickselect path. Explicitly rejected for linear leaves, DART, MorphBoost, classification, ranking, and joint training.
 
 ### v0.11.0
 

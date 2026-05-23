@@ -15,6 +15,8 @@
     `boosting_mode="goss"` (GOSS uses gradient-based sampling instead).
 - `col_subsample: float = 1.0`
   - Fraction of features sampled per round.
+- `quantile_alpha: float = 0.5`
+  - Target quantile for `"quantile"` regression. Must be strictly in `(0.0, 1.0)`.
 
 ## Boosting Mode
 
@@ -455,7 +457,7 @@ After `fit(...)`, `GBMRegressor` may expose:
 - `stop_reason_` / `rounds_completed_`
   - Engine's early-stop reason and actual committed round count.
 
-## Regression objectives (v0.11.0+)
+## Regression objectives (v0.11.1+)
 
 `GBMRegressor` accepts the following values for the `objective` kwarg:
 
@@ -471,12 +473,19 @@ After `fit(...)`, `GBMRegressor` may expose:
   another value in `(1, 2)`). Targets must be `>= 0`. `predict()`
   returns `exp(raw)`. Uses LightGBM/XGBoost's simplified Newton hessian
   (drops the negative second-derivative term that breaks histogram aggregation).
+- `"quantile"` — pinball loss regression with parameter `quantile_alpha`.
+  Uses a proxy Hessian `h_i = w_i` (sample weight) during split-finding,
+  and performs an empirical quantile leaf refinement step at the end of
+  each round acting on the full dataset.
 - Custom callable — any user-supplied `(predictions, targets) →
   (gradients, hessians)` function.
 
 `tweedie_variance_power: float = 1.5` — only used when
 `objective="tweedie"`. Must satisfy `1 < p < 2`. For `p = 1` use
 `objective="poisson"`; for `p = 2` use `objective="gamma"`.
+
+`quantile_alpha: float = 0.5` — quantile to estimate when `objective="quantile"`.
+Must be in `(0, 1)`.
 
 Target-domain pre-validation runs before training starts, raising
 `ValueError` with `min(y)` in the message when targets violate the
@@ -490,6 +499,10 @@ The three GLM objectives compose with `boosting_mode="dart"`,
 `neutralization="pre_target"` remains squared-error-only (the
 residualize-target == residualize-gradient identity doesn't hold under
 log-link).
+
+The `"quantile"` objective is explicitly rejected when combined with DART,
+MorphBoost, linear leaves (`leaf_model="linear"`), classification, ranking,
+or joint multi-output training.
 
 Three deviance metrics are exported from `alloygbm.evaluation`:
 
