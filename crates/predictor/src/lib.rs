@@ -766,6 +766,7 @@ impl Predictor {
         match self.metadata.objective.as_str() {
             "binary_crossentropy" => sigmoid(raw),
             "poisson" | "gamma" | "tweedie" => raw.clamp(-50.0, 50.0).exp(),
+            "quantile" => raw,
             _ => raw,
         }
     }

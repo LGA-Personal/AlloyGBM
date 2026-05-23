@@ -60,6 +60,8 @@ class GBMRanker(GBMRegressor):
                 "neutralization='pre_target' is only supported for GBMRegressor "
                 "squared-error training"
             )
+        if kwargs.get("objective") == "quantile":
+            raise ValueError("GBMRanker does not support objective='quantile'")
         super().__init__(**kwargs)
         self.ranking_objective = ranking_objective
 
@@ -306,6 +308,8 @@ class GBMRanker(GBMRegressor):
                 "neutralization='pre_target' is only supported for GBMRegressor "
                 "squared-error training"
             )
+        if params.get("objective") == "quantile":
+            raise ValueError("GBMRanker does not support objective='quantile'")
         if "ranking_objective" in params:
             val = params.pop("ranking_objective")
             if val not in _RANKING_OBJECTIVES:

@@ -108,3 +108,75 @@ def test_quantile_objective_evals_result() -> None:
 
     assert len(model.evals_result_["train"]["quantile"]) == 5
     assert len(model.evals_result_["validation"]["quantile"]) == 5
+
+
+def test_quantile_empirical_quantile_property() -> None:
+    rng = np.random.default_rng(42)
+    # Generate enough points so the empirical quantile is stable
+    X = rng.uniform(-2, 2, size=(1000, 1)).astype(np.float32)
+    # y = X + noise
+    y = (X[:, 0] + rng.normal(scale=0.5, size=1000)).astype(np.float32)
+
+    for alpha in [0.1, 0.5, 0.9]:
+        model = GBMRegressor(
+            objective="quantile",
+            quantile_alpha=alpha,
+            n_estimators=100,
+            learning_rate=0.05,
+            max_depth=4,
+            training_policy="manual",
+            deterministic=True,
+            seed=42,
+        )
+        model.fit(X, y)
+        preds = np.asarray(model.predict(X))
+        
+        # Check that y < preds is approximately alpha
+        underprediction_rate = np.mean(y < preds)
+        # We allow a tolerance of 0.05 (e.g., 0.1 +/- 0.05)
+        assert np.abs(underprediction_rate - alpha) < 0.05, (
+            f"For alpha={alpha}, empirical underprediction rate is {underprediction_rate}"
+        )
+
+
+def test_quantile_rejected_combinations() -> None:
+    # 1. GBMRegressor constructor rejects
+    with pytest.raises(ValueError, match="boosting_mode='dart'"):
+        GBMRegressor(objective="quantile", boosting_mode="dart")
+    with pytest.raises(ValueError, match="training_mode='morph'"):
+        GBMRegressor(objective="quantile", training_mode="morph")
+    with pytest.raises(ValueError, match="leaf_model='linear'"):
+        GBMRegressor(objective="quantile", leaf_model="linear")
+
+    # 2. GBMRegressor set_params rejects
+    model = GBMRegressor(objective="quantile")
+    with pytest.raises(ValueError, match="boosting_mode='dart'"):
+        model.set_params(boosting_mode="dart")
+    model = GBMRegressor(objective="quantile")
+    with pytest.raises(ValueError, match="training_mode='morph'"):
+        model.set_params(training_mode="morph")
+    model = GBMRegressor(objective="quantile")
+    with pytest.raises(ValueError, match="leaf_model='linear'"):
+        model.set_params(leaf_model="linear")
+
+    # 3. GBMClassifier rejects
+    from alloygbm import GBMClassifier
+    with pytest.raises(ValueError, match="GBMClassifier does not support objective='quantile'"):
+        GBMClassifier(objective="quantile")
+    clf = GBMClassifier()
+    with pytest.raises(ValueError, match="GBMClassifier does not support objective='quantile'"):
+        clf.set_params(objective="quantile")
+
+    # 4. GBMRanker rejects
+    from alloygbm import GBMRanker
+    with pytest.raises(ValueError, match="GBMRanker does not support objective='quantile'"):
+        GBMRanker(objective="quantile")
+    ranker = GBMRanker()
+    with pytest.raises(ValueError, match="GBMRanker does not support objective='quantile'"):
+        ranker.set_params(objective="quantile")
+
+    # 5. MultiLabelGBMRanker rejects
+    from alloygbm import MultiLabelGBMRanker
+    mranker = MultiLabelGBMRanker(ranking_objective="quantile")
+    with pytest.raises(ValueError, match="MultiLabelGBMRanker does not support objective='quantile'"):
+        mranker.fit([[1], [2]], [[0.5], [1.5]], group=[1, 1])

@@ -285,6 +285,10 @@ def _diagnostics_to_dicts(diagnostics):
         for d in diagnostics
     ]
 
+def _validate_quantile_alpha(quantile_alpha: float) -> None:
+    if not (0.0 < quantile_alpha < 1.0):
+        raise ValueError("quantile_alpha must be in (0.0, 1.0)")
+
 
 class GBMRegressor(_GBMRegressorBase):
     """Gradient Boosted Decision Tree regressor with sklearn-compatible API."""
@@ -494,8 +498,14 @@ class GBMRegressor(_GBMRegressorBase):
                     "tweedie_variance_power must satisfy 1 < p < 2 when objective='tweedie' "
                     f"(got {tweedie_variance_power!r})"
                 )
-        if not (0.0 < quantile_alpha < 1.0):
-            raise ValueError("quantile_alpha must be in (0.0, 1.0)")
+        _validate_quantile_alpha(quantile_alpha)
+        if objective == "quantile":
+            if boosting_mode == "dart":
+                raise ValueError("boosting_mode='dart' is not supported with objective='quantile'")
+            if training_mode == "morph":
+                raise ValueError("training_mode='morph' is not supported with objective='quantile'")
+            if leaf_model == "linear":
+                raise ValueError("leaf_model='linear' is not supported with objective='quantile'")
         if int(max_cat_threshold) < 0:
             raise ValueError("max_cat_threshold must be >= 0")
         if training_mode not in ("auto", "manual", "morph"):
@@ -1375,8 +1385,7 @@ class GBMRegressor(_GBMRegressorBase):
             self.tweedie_variance_power = v
         if "quantile_alpha" in params:
             qa = float(params["quantile_alpha"])
-            if not (0.0 < qa < 1.0):
-                raise ValueError("quantile_alpha must be in (0.0, 1.0)")
+            _validate_quantile_alpha(qa)
             self.quantile_alpha = qa
         # Cross-field validation for goss top+other rates.
         if self.boosting_mode == "goss" and (
@@ -1401,9 +1410,13 @@ class GBMRegressor(_GBMRegressorBase):
                     f"objective='tweedie' (got {v!r})"
                 )
         if post_objective == "quantile":
-            qa = self.quantile_alpha
-            if not (0.0 < qa < 1.0):
-                raise ValueError("quantile_alpha must be in (0.0, 1.0)")
+            _validate_quantile_alpha(self.quantile_alpha)
+            if self.boosting_mode == "dart":
+                raise ValueError("boosting_mode='dart' is not supported with objective='quantile'")
+            if self.training_mode == "morph":
+                raise ValueError("training_mode='morph' is not supported with objective='quantile'")
+            if self.leaf_model == "linear":
+                raise ValueError("leaf_model='linear' is not supported with objective='quantile'")
 
         # Cross-field validation: leaf growth requires max_leaves
         if self.tree_growth == "leaf" and self.max_leaves is None:
@@ -1717,6 +1730,15 @@ class GBMRegressor(_GBMRegressorBase):
         fit_start = time.perf_counter()
         self._fit_start_time = fit_start
         targets = self._validate_targets(y)
+        obj = self._objective_name()
+        if obj == "quantile":
+            _validate_quantile_alpha(self.quantile_alpha)
+            if self.boosting_mode == "dart":
+                raise ValueError("boosting_mode='dart' is not supported with objective='quantile'")
+            if self.training_mode == "morph":
+                raise ValueError("training_mode='morph' is not supported with objective='quantile'")
+            if self.leaf_model == "linear":
+                raise ValueError("leaf_model='linear' is not supported with objective='quantile'")
         if self.early_stopping_rounds is not None and eval_set is None:
             raise ValueError("early_stopping_rounds requires eval_set to be provided")
         if eval_time_index is not None and eval_set is None:

@@ -134,14 +134,18 @@ class MultiLabelGBMRanker:
 
     def _resolve_objectives(self, n_labels: int) -> list[str]:
         if isinstance(self.ranking_objective, str):
-            return [self.ranking_objective] * n_labels
-        objs = list(self.ranking_objective)
-        if len(objs) != n_labels:
-            raise ValueError(
-                f"ranking_objective list length {len(objs)} does not match "
-                f"y's label count {n_labels}"
-            )
-        return [str(obj) for obj in objs]
+            objs = [self.ranking_objective] * n_labels
+        else:
+            objs = [str(obj) for obj in self.ranking_objective]
+            if len(objs) != n_labels:
+                raise ValueError(
+                    f"ranking_objective list length {len(objs)} does not match "
+                    f"y's label count {n_labels}"
+                )
+        for obj in objs:
+            if obj == "quantile":
+                raise ValueError("MultiLabelGBMRanker does not support objective='quantile'")
+        return objs
 
     def _resolve_label_names(self, n_labels: int) -> list[str]:
         if self.ranking_labels is None:

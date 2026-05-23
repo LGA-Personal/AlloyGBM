@@ -1503,6 +1503,18 @@ impl ObjectiveOps for TweedieObjective {
 
 // ── Quantile Regression Objective ────────────────────────────────────────
 
+/// Quantile Regression (pinball loss) objective.
+///
+/// Since the second derivative (Hessian) of the pinball loss is zero everywhere
+/// except at 0 (where it is undefined), standard Newton-Raphson tree boosting
+/// cannot compute meaningful split gains directly.
+/// To circumvent this, we use a proxy Hessian `h_i = w_i` (sample weight,
+/// defaulting to 1.0) during split finding. This acts as a proxy for the sample
+/// count in each leaf.
+/// Because using a proxy Hessian results in incorrect Newton-Raphson leaf values,
+/// a post-growth leaf refinement step (`refine_quantile_leaf_values`) is executed
+/// at the end of each round to replace leaf predictions with the actual empirical
+/// quantiles of the residuals of rows routed to each leaf.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct QuantileObjective {
     pub alpha: f32,
@@ -1688,6 +1700,21 @@ fn weighted_quantile(
         }
     }
 
+    if weights.is_none() {
+        for &val in values {
+            if !val.is_finite() {
+                return Err(EngineError::ContractViolation(
+                    "values must be finite".to_string(),
+                ));
+            }
+        }
+        let mut vals = values.to_vec();
+        let k = ((alpha as f64 * vals.len() as f64) - 1.0).max(0.0).ceil() as usize;
+        let k = k.min(vals.len() - 1);
+        vals.select_nth_unstable_by(k, |a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+        return Ok(vals[k]);
+    }
+
     let mut pairs = Vec::with_capacity(values.len());
     let mut total_weight = 0.0_f64;
     for i in 0..values.len() {
@@ -1708,10 +1735,10 @@ fn weighted_quantile(
 
     pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
 
-    let threshold = (alpha as f64 * total_weight) as f32;
-    let mut cum_weight = 0.0_f32;
+    let threshold = alpha as f64 * total_weight;
+    let mut cum_weight = 0.0_f64;
     for &(val, weight) in &pairs {
-        cum_weight += weight;
+        cum_weight += weight as f64;
         if cum_weight >= threshold {
             return Ok(val);
         }
@@ -5230,6 +5257,23 @@ impl Trainer {
             }
         }
         validate_train_params(&self.params)?;
+        if objective.quantile_alpha().is_some() {
+            if self.params.leaf_model == LeafModelKind::Linear {
+                return Err(EngineError::InvalidConfig(
+                    "leaf_model='linear' is not supported with objective='quantile'".to_string(),
+                ));
+            }
+            if matches!(self.params.boosting_mode, BoostingMode::Dart { .. }) {
+                return Err(EngineError::InvalidConfig(
+                    "boosting_mode='dart' is not supported with objective='quantile'".to_string(),
+                ));
+            }
+            if self.params.morph_config.is_some() {
+                return Err(EngineError::InvalidConfig(
+                    "morph_config is not supported with objective='quantile'".to_string(),
+                ));
+            }
+        }
         validate_training_dataset(dataset)?;
         validate_neutralization_fit_contract(&self.params, dataset, objective)?;
         validate_warm_start_neutralization_contract(
@@ -9095,7 +9139,10 @@ fn refine_quantile_leaf_values(
     current_absolute_outputs.insert(0_u32, 0.0_f32);
     populate_child_absolute_outputs(0, &stumps_by_local, &mut current_absolute_outputs)?;
 
-    // Map each row index to its terminal leaf local node ID, collecting residuals
+    // We map every row in the full training dataset to its terminal leaf to collect residuals.
+    // When row_subsample < 1.0, split-finding is performed on a subsampled subset of rows,
+    // but we use the entire training set for the final quantile leaf refinement step
+    // to minimize estimation variance of the empirical quantile.
     let mut leaf_residuals: HashMap<u32, LeafResiduals> = HashMap::new();
     for row_index in 0..binned_matrix.row_count {
         let terminal_local_node_id =
@@ -9110,7 +9157,6 @@ fn refine_quantile_leaf_values(
         entry.weights.push(weight);
     }
 
-    // Now propagate values up/down to populate refined absolute outputs for all nodes
     let mut refined_absolute_outputs = HashMap::new();
     refined_absolute_outputs.insert(0_u32, 0.0_f32);
 
@@ -9124,7 +9170,6 @@ fn refine_quantile_leaf_values(
         &mut refined_absolute_outputs,
     )?;
 
-    // Update stumps with final parent-relative delta values scaled by learning rate
     for stump in stumps.iter_mut() {
         let (_, local_node_id) = decode_tree_node_id(stump.split.node_id);
         let parent_absolute = refined_absolute_outputs
