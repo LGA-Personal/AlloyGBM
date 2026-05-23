@@ -15,7 +15,7 @@ use alloygbm_engine::{
     IterationRunSummary, LambdaMARTObjective, MultiClassIterationRunSummary,
     MultiClassSoftmaxObjective, MultiClassTrainedModel, MultiClassWarmStartState, ObjectiveOps,
     PairwiseRankingObjective, PerRoundMetricCallback, PoissonObjective, QueryRMSEObjective,
-    SquaredErrorObjective, TrainedModel, Trainer, TrainingPolicyMode, TweedieObjective,
+    QuantileObjective, SquaredErrorObjective, TrainedModel, Trainer, TrainingPolicyMode, TweedieObjective,
     WarmStartState, XeNDCGObjective, YetiRankObjective,
 };
 use alloygbm_predictor::{Predictor, PredictorError};
@@ -2979,6 +2979,7 @@ fn train_regression_artifact_with_summary_dense_impl(
     let bridge_prepare_seconds = bridge_start.elapsed().as_secs_f64();
     let user_seed = params.seed;
     let tweedie_variance_power = params.tweedie_variance_power;
+    let quantile_alpha = params.quantile_alpha;
     let trainer = Trainer::new(params)?.with_categorical_features(native_cat_infos.clone());
     let backend = CpuBackend;
     let native_start = Instant::now();
@@ -3057,6 +3058,10 @@ fn train_regression_artifact_with_summary_dense_impl(
         "binary_crossentropy" => run_training!(&BinaryCrossEntropyObjective),
         "poisson" => run_training!(&PoissonObjective),
         "gamma" => run_training!(&GammaObjective),
+        "quantile" => {
+            let obj = QuantileObjective { alpha: quantile_alpha };
+            run_training!(&obj)
+        }
         "tweedie" => {
             let obj = TweedieObjective::new(tweedie_variance_power)?;
             run_training!(&obj)
@@ -3577,6 +3582,7 @@ fn build_train_params(
     neutralization_config: Option<FactorNeutralizationConfig>,
     boosting_mode: alloygbm_core::BoostingMode,
     tweedie_variance_power: f32,
+    quantile_alpha: f32,
 ) -> TrainParams {
     TrainParams {
         seed,
@@ -3604,7 +3610,7 @@ fn build_train_params(
         neutralization_config,
         boosting_mode,
         tweedie_variance_power,
-        quantile_alpha: 0.5,
+        quantile_alpha,
     }
 }
 
@@ -4240,7 +4246,8 @@ fn shap_global_importance_dense_with_binning(
     dart_max_drop=None,
     dart_normalize_type=None,
     dart_sample_type=None,
-    tweedie_variance_power=None
+    tweedie_variance_power=None,
+    quantile_alpha=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact(
@@ -4285,6 +4292,7 @@ fn train_regression_artifact(
     dart_normalize_type: Option<&str>,
     dart_sample_type: Option<&str>,
     tweedie_variance_power: Option<f32>,
+    quantile_alpha: Option<f32>,
 ) -> PyResult<Vec<u8>> {
     let parsed_morph_config = morph_config
         .map(|d| parse_morph_config_from_pydict(&d))
@@ -4343,6 +4351,7 @@ fn train_regression_artifact(
         parsed_neutralization_config,
         parsed_boosting_mode,
         tweedie_variance_power.unwrap_or(1.5),
+        quantile_alpha.unwrap_or(0.5),
     );
 
     let categorical_spec = resolve_categorical_spec(
@@ -4435,7 +4444,8 @@ fn train_regression_artifact(
     dart_max_drop=None,
     dart_normalize_type=None,
     dart_sample_type=None,
-    tweedie_variance_power=None
+    tweedie_variance_power=None,
+    quantile_alpha=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense(
@@ -4482,6 +4492,7 @@ fn train_regression_artifact_dense(
     dart_normalize_type: Option<&str>,
     dart_sample_type: Option<&str>,
     tweedie_variance_power: Option<f32>,
+    quantile_alpha: Option<f32>,
 ) -> PyResult<Vec<u8>> {
     let parsed_morph_config = morph_config
         .map(|d| parse_morph_config_from_pydict(&d))
@@ -4540,6 +4551,7 @@ fn train_regression_artifact_dense(
         parsed_neutralization_config,
         parsed_boosting_mode,
         tweedie_variance_power.unwrap_or(1.5),
+        quantile_alpha.unwrap_or(0.5),
     );
     let categorical_spec = resolve_categorical_spec(
         categorical_feature_index,
@@ -4653,7 +4665,8 @@ fn train_regression_artifact_dense(
     dart_max_drop=None,
     dart_normalize_type=None,
     dart_sample_type=None,
-    tweedie_variance_power=None
+    tweedie_variance_power=None,
+    quantile_alpha=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_with_summary(
@@ -4725,6 +4738,7 @@ fn train_regression_artifact_with_summary(
     dart_normalize_type: Option<&str>,
     dart_sample_type: Option<&str>,
     tweedie_variance_power: Option<f32>,
+    quantile_alpha: Option<f32>,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -4784,6 +4798,7 @@ fn train_regression_artifact_with_summary(
         parsed_neutralization_config,
         parsed_boosting_mode,
         tweedie_variance_power.unwrap_or(1.5),
+        quantile_alpha.unwrap_or(0.5),
     );
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
@@ -4923,7 +4938,8 @@ fn train_regression_artifact_with_summary(
     dart_max_drop=None,
     dart_normalize_type=None,
     dart_sample_type=None,
-    tweedie_variance_power=None
+    tweedie_variance_power=None,
+    quantile_alpha=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary(
@@ -4998,6 +5014,7 @@ fn train_regression_artifact_dense_with_summary(
     dart_normalize_type: Option<&str>,
     dart_sample_type: Option<&str>,
     tweedie_variance_power: Option<f32>,
+    quantile_alpha: Option<f32>,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -5057,6 +5074,7 @@ fn train_regression_artifact_dense_with_summary(
         parsed_neutralization_config,
         parsed_boosting_mode,
         tweedie_variance_power.unwrap_or(1.5),
+        quantile_alpha.unwrap_or(0.5),
     );
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
@@ -5192,7 +5210,8 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> PyResult<Vec<f32>> {
     dart_max_drop=None,
     dart_normalize_type=None,
     dart_sample_type=None,
-    tweedie_variance_power=None
+    tweedie_variance_power=None,
+    quantile_alpha=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary_bytes(
@@ -5267,6 +5286,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
     dart_normalize_type: Option<&str>,
     dart_sample_type: Option<&str>,
     tweedie_variance_power: Option<f32>,
+    quantile_alpha: Option<f32>,
 ) -> PyResult<NativeTrainingResult> {
     let values = bytes_to_f32_vec(values_bytes)?;
     let targets = bytes_to_f32_vec(targets_bytes)?;
@@ -5330,6 +5350,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
         parsed_neutralization_config,
         parsed_boosting_mode,
         tweedie_variance_power.unwrap_or(1.5),
+        quantile_alpha.unwrap_or(0.5),
     );
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
