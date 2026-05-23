@@ -234,6 +234,42 @@ After fitting, the estimator supports:
 - fitted training summaries via ``best_iteration_``, ``best_score_``,
   ``n_estimators_``, ``evals_result_``, and ``fit_timing_``
 
+GLM regression objectives (v0.11.0+)
+------------------------------------
+
+``GBMRegressor`` supports three log-link GLM objectives in addition to the
+default ``"squared_error"``:
+
+.. code-block:: python
+
+   from alloygbm import GBMRegressor
+
+   # Count regression (Poisson)
+   model = GBMRegressor(objective="poisson", n_estimators=50)
+   model.fit(X_train, y_count)  # y_count: non-negative
+   predictions = model.predict(X_test)  # exp(raw); strictly positive
+
+   # Strictly-positive continuous (Gamma)
+   model = GBMRegressor(objective="gamma", n_estimators=50)
+   model.fit(X_train, y_positive)  # y_positive: y > 0
+
+   # Insurance/claims (Tweedie compound Poisson-gamma)
+   model = GBMRegressor(
+       objective="tweedie", tweedie_variance_power=1.5, n_estimators=50
+   )
+   model.fit(X_train, y_inflated_zeros)  # y: y >= 0 with a mass at 0
+
+Matching deviance metrics live in ``alloygbm.evaluation``:
+``poisson_deviance``, ``gamma_deviance``, and
+``tweedie_deviance(y_true, y_pred, variance_power=p)``.
+
+SHAP interaction values (v0.11.0+)
+----------------------------------
+
+``GBMRegressor.shap_interaction_values(X)`` returns the pairwise
+``(n_rows, n_features, n_features)`` SHAP tensor. See :doc:`explanations`
+for the full contract.
+
 NaN / missing values
 --------------------
 
