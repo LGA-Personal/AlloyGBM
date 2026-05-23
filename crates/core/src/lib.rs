@@ -490,6 +490,10 @@ pub struct TrainParams {
     /// `objective="tweedie"`.  Ignored for all other objectives.
     /// Defaults to 1.5 (a common starting point for insurance/claims data).
     pub tweedie_variance_power: f32,
+    /// Quantile alpha `alpha ∈ (0.0, 1.0)` for `objective="quantile"`.
+    /// Ignored for all other objectives.
+    /// Defaults to 0.5 (median).
+    pub quantile_alpha: f32,
 }
 
 impl Default for TrainParams {
@@ -520,6 +524,7 @@ impl Default for TrainParams {
             neutralization_config: None,
             boosting_mode: BoostingMode::Standard,
             tweedie_variance_power: 1.5,
+            quantile_alpha: 0.5,
         }
     }
 }
@@ -2965,6 +2970,12 @@ pub fn validate_train_params(params: &TrainParams) -> CoreResult<()> {
         }
     }
 
+    if !params.quantile_alpha.is_finite() || params.quantile_alpha <= 0.0 || params.quantile_alpha >= 1.0 {
+        return Err(CoreError::InvalidConfig(
+            "quantile_alpha must be finite and in (0.0, 1.0)".to_string(),
+        ));
+    }
+
     Ok(())
 }
 
@@ -4393,6 +4404,60 @@ mod tests {
             ..TrainParams::default()
         };
         assert!(validate_train_params(&p).is_err());
+    }
+
+    #[test]
+    fn validate_train_params_rejects_invalid_quantile_alpha() {
+        let p = TrainParams::default();
+        assert!(validate_train_params(&p).is_ok());
+
+        let p = TrainParams {
+            quantile_alpha: 0.0,
+            ..TrainParams::default()
+        };
+        assert!(validate_train_params(&p).is_err());
+
+        let p = TrainParams {
+            quantile_alpha: 1.0,
+            ..TrainParams::default()
+        };
+        assert!(validate_train_params(&p).is_err());
+
+        let p = TrainParams {
+            quantile_alpha: -0.5,
+            ..TrainParams::default()
+        };
+        assert!(validate_train_params(&p).is_err());
+
+        let p = TrainParams {
+            quantile_alpha: 1.5,
+            ..TrainParams::default()
+        };
+        assert!(validate_train_params(&p).is_err());
+
+        let p = TrainParams {
+            quantile_alpha: f32::NAN,
+            ..TrainParams::default()
+        };
+        assert!(validate_train_params(&p).is_err());
+
+        let p = TrainParams {
+            quantile_alpha: f32::INFINITY,
+            ..TrainParams::default()
+        };
+        assert!(validate_train_params(&p).is_err());
+
+        let p = TrainParams {
+            quantile_alpha: 0.1,
+            ..TrainParams::default()
+        };
+        assert!(validate_train_params(&p).is_ok());
+
+        let p = TrainParams {
+            quantile_alpha: 0.9,
+            ..TrainParams::default()
+        };
+        assert!(validate_train_params(&p).is_ok());
     }
 
     #[test]
