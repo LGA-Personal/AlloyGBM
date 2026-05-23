@@ -18,6 +18,8 @@ Core parameters
     instead).
 - ``col_subsample: float = 1.0``
   - per-round feature sampling fraction
+- ``quantile_alpha: float = 0.5``
+  - Target quantile for ``"quantile"`` regression. Must be strictly in ``(0.0, 1.0)``.
 
 Boosting mode
 -------------
@@ -445,7 +447,7 @@ After fitting, the estimator may expose:
 - ``fit_timing_``
 - ``feature_names_`` -- captured from training data or auto-generated
 
-Regression objectives (v0.11.0+)
+Regression objectives (v0.11.1+)
 --------------------------------
 
 ``GBMRegressor`` accepts the following values for the ``objective`` kwarg:
@@ -461,6 +463,10 @@ Regression objectives (v0.11.0+)
   mass at zero and a positive tail. Set
   ``tweedie_variance_power=1.5`` (or another value in ``(1, 2)``).
   Targets must be ``>= 0``. ``predict()`` returns ``exp(raw)``.
+- ``"quantile"`` -- pinball loss regression with parameter ``quantile_alpha``.
+  Uses a proxy Hessian ``h_i = w_i`` (sample weight) during split-finding,
+  and performs an empirical quantile leaf refinement step at the end of
+  each round acting on the full dataset.
 - Custom callable -- any user-supplied
   ``(predictions, targets) → (gradients, hessians)`` function.
 
@@ -468,11 +474,18 @@ Regression objectives (v0.11.0+)
 ``objective="tweedie"``. Must satisfy ``1 < p < 2``. For ``p = 1`` use
 ``objective="poisson"``; for ``p = 2`` use ``objective="gamma"``.
 
+``quantile_alpha: float = 0.5`` -- quantile to estimate when ``objective="quantile"``.
+Must be in ``(0, 1)``.
+
 All three GLM objectives compose with ``boosting_mode="dart"``,
 ``boosting_mode="goss"``, warm-start, ``tree_growth="leaf"``,
 ``neutralization="per_round_gradient"`` /
 ``neutralization="split_penalty"``, and ``training_mode="morph"``.
 ``neutralization="pre_target"`` remains squared-error-only.
+
+The ``"quantile"`` objective is explicitly rejected when combined with DART,
+MorphBoost, linear leaves (``leaf_model="linear"``), classification, ranking,
+or joint multi-output training.
 
 Three deviance metrics in ``alloygbm.evaluation`` partner with the new
 objectives: ``poisson_deviance``, ``gamma_deviance``, and

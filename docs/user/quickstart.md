@@ -316,6 +316,24 @@ Matching deviance metrics live in `alloygbm.evaluation`:
 `poisson_deviance`, `gamma_deviance`, and
 `tweedie_deviance(y_true, y_pred, variance_power=p)`.
 
+## Quantile Regression (v0.11.1+)
+
+`GBMRegressor` supports quantile regression (`objective="quantile"`) to estimate target quantiles:
+
+```python
+from alloygbm import GBMRegressor
+
+# Median regression (50th percentile)
+model = GBMRegressor(objective="quantile", quantile_alpha=0.5, n_estimators=100)
+model.fit(X_train, y_train)
+
+# 90th percentile (higher prediction bound)
+model = GBMRegressor(objective="quantile", quantile_alpha=0.9, n_estimators=100)
+model.fit(X_train, y_train)
+```
+
+The quantile objective is supported on single-output `GBMRegressor` and is rejected for linear leaves, DART boosting, MorphBoost, classification, ranking, and joint multi-output training.
+
 ## SHAP Interaction Values (v0.11.0+)
 
 `GBMRegressor.shap_interaction_values(X)` returns the pairwise

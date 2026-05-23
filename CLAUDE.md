@@ -30,7 +30,7 @@ AlloyGBM/
       evaluation.py           # Metrics: rmse, mae, r2_score, accuracy, log_loss, ndcg, etc.
       validation.py           # Purged time-series and panel cross-validation splits
   docs/
-    limitations.md         # Current limitation analysis (v0.11.0: SHAP interactions + Poisson/Gamma/Tweedie shipped; CPU-only + PL-leaf SHAP interactions remain)
+    limitations.md         # Current limitation analysis (v0.11.1: SHAP interactions, GLMs, and Quantile shipped; CPU-only + PL-leaf SHAP interactions remain)
     roadmap/current.md     # Active roadmap and per-release history
     user/                  # User-facing Markdown docs (mirrored by docs/site/source/*.rst)
     site/                  # Sphinx site (Read the Docs)

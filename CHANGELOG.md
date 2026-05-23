@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.11.1 (2026-05-23)
+
+Quantile regression objective feature release.
+
+### Quantile regression objective
+
+`GBMRegressor` accepts a new quantile regression objective (`objective="quantile"`) with pinball loss semantics and parameter `quantile_alpha` (default `0.5`, strictly in `(0.0, 1.0)`):
+
+- **Empirical Quantile Leaf Refinement**: At the end of each round, a custom post-growth leaf refinement step (`refine_quantile_leaf_values`) is run to replace Newton-Raphson leaf predictions with the actual empirical quantiles of residuals for all rows in each leaf.
+- **Full-dataset refinement**: Under `row_subsample < 1.0`, split-finding runs on the subsampled subset, but leaf refinement uses the entire training set to minimize the estimation variance of the empirical quantile.
+- **Proxy Hessian**: Since the pinball loss has a zero second derivative everywhere, a proxy Hessian `h_i = w_i` (sample weight) is used during split-finding.
+- **Quickselect optimization**: The unweighted refinement path uses a fast `O(N)` quickselect algorithm (`select_nth_unstable_by`) instead of sorting `O(N log N)`, avoiding performance degradation.
+- **Validation**: Gated validation ensures that invalid `quantile_alpha` settings are only rejected when `objective="quantile"` is active, leaving non-quantile models unaffected.
+
+Scope limit: Single-output `GBMRegressor` only. Rejects combinations with DART boosting, MorphBoost, linear leaves (`leaf_model="linear"`), classification, ranking, and joint multi-output training.
+
 ## v0.11.0 (2026-05-22)
 
 Two small, independent wins in one release.

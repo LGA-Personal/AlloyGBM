@@ -12,18 +12,13 @@ types.
 
 .. note::
 
-   AlloyGBM ``0.11.0`` is a minor feature release shipping two small,
-   independent wins. First, pairwise **SHAP interaction values** on
-   ``GBMRegressor`` via ``shap_interaction_values(X)`` -- Lundberg et al.
-   (2020) Algorithm 2 in polynomial time ``O(T · L · D² · M)``, ported
-   verbatim from the canonical ``slundberg/shap`` C++ reference. Second,
-   three new **GLM regression objectives** -- ``"poisson"``,
-   ``"gamma"``, ``"tweedie"`` (with ``tweedie_variance_power`` in
-   ``(1, 2)``) -- all with log-link semantics (``predict()`` returns
-   ``exp(raw)``), Newton gradients/hessians, and matching deviance
-   metrics in ``alloygbm.evaluation``. Default behaviour for every
-   existing user-facing API remains byte-identical to v0.10.6 when
-   neither new feature is opted into. See :doc:`release` for full notes.
+   AlloyGBM ``0.11.1`` is a feature release shipping quantile regression
+   (``objective="quantile"``) with pinball loss semantics and parameter
+   ``quantile_alpha`` (default ``0.5``, strictly in ``(0.0, 1.0)``) on
+   ``GBMRegressor``, utilizing a proxy Hessian, empirical leaf refinement on the
+   full dataset, and a fast unweighted quickselect path. See :doc:`release` for
+   full notes.
+
 
 Getting started
 ---------------

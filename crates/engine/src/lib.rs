@@ -5254,8 +5254,7 @@ impl Trainer {
             }
         }
         validate_train_params(&self.params)?;
-        if objective.quantile_alpha().is_some() {
-            let qa = self.params.quantile_alpha;
+        if let Some(qa) = objective.quantile_alpha() {
             if !qa.is_finite() || qa <= 0.0 || qa >= 1.0 {
                 return Err(EngineError::InvalidConfig(
                     "quantile_alpha must be finite and in (0.0, 1.0)".to_string(),
@@ -9159,8 +9158,8 @@ fn refine_quantile_leaf_values(
                 weights: sample_weights.map(|_| Vec::new()),
             });
         entry.residuals.push(res);
-        if let Some(ref mut w_vec) = entry.weights {
-            w_vec.push(sample_weights.unwrap()[row_index]);
+        if let (Some(w_vec), Some(weights)) = (&mut entry.weights, sample_weights) {
+            w_vec.push(weights[row_index]);
         }
     }
 
@@ -14722,9 +14721,9 @@ mod tests {
         let dataset = sample_dataset();
         let binned = sample_binned_matrix();
 
-        // 1. If objective is not quantile, invalid quantile_alpha is ignored during validation
+        // 1. If objective is not quantile, invalid quantile_alpha in TrainParams is ignored during validation
         let params = TrainParams {
-            quantile_alpha: -1.0, // normally invalid
+            quantile_alpha: -1.0, // normally invalid in params, but ignored for non-quantile
             ..TrainParams::default()
         };
         let trainer = Trainer::new(params).expect("valid params");
@@ -14736,12 +14735,32 @@ mod tests {
                 .is_ok()
         );
 
-        // 2. If objective is quantile, invalid quantile_alpha raises an error
-        let objective_quantile = QuantileObjective { alpha: 0.5 };
+        // 2. If objective is quantile and has invalid alpha, it raises an error
+        let objective_quantile_invalid = QuantileObjective { alpha: -1.0 };
         assert!(
             trainer
-                .fit_iterations(&dataset, &binned, &MockBackend, &objective_quantile, 1)
+                .fit_iterations(
+                    &dataset,
+                    &binned,
+                    &MockBackend,
+                    &objective_quantile_invalid,
+                    1
+                )
                 .is_err()
+        );
+
+        // 3. If objective is quantile and has a valid alpha, it succeeds
+        let objective_quantile_valid = QuantileObjective { alpha: 0.5 };
+        assert!(
+            trainer
+                .fit_iterations(
+                    &dataset,
+                    &binned,
+                    &MockBackend,
+                    &objective_quantile_valid,
+                    1
+                )
+                .is_ok()
         );
     }
 }
