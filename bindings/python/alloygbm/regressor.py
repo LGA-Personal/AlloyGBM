@@ -3169,6 +3169,107 @@ class GBMRegressor(_GBMRegressorBase):
             return float(expected_value), shap_matrix
         return shap_matrix
 
+    def shap_interaction_values(
+        self, X: object, *, include_expected_value: bool = False
+    ):
+        """Return pairwise SHAP interaction values for the provided rows.
+
+        Implements Lundberg et al. (2020) Algorithm 2 in polynomial time
+        (``O(T · L · D² · M)``).  Returns a 3-D structure
+        ``values[row][i][j]`` such that:
+
+        - ``values[row][i][j] == values[row][j][i]`` (symmetric).
+        - ``Σ_j values[row][i][j] == shap_values(X)[row][i]`` (row marginal).
+        - ``Σ_i Σ_j values[row][i][j] + expected_value == predict(x)``
+          (full additivity, mod f32 round-off).
+
+        Linear-leaf (``leaf_model="linear"``) artifacts are rejected in
+        v0.11.0 — pairwise interactions on PL leaves require a different
+        decomposition that is not yet implemented.
+        """
+        if not self._is_fitted:
+            raise RuntimeError(
+                "GBMRegressor must be fit before shap_interaction_values"
+            )
+        if self._artifact_bytes is None:
+            raise RuntimeError("GBMRegressor native artifact is not available")
+
+        binning_kwargs = self._shap_binning_kwargs()
+        if binning_kwargs is not None:
+            rows = self._native_matrix_flat_payload(X) or self._validate_rows(X)
+            row_feature_count = (
+                rows[2] if isinstance(rows, tuple) else len(rows[0])
+            )
+            if row_feature_count != self._n_features_in:
+                raise ValueError(
+                    f"X feature count {row_feature_count} does not match fitted feature count "
+                    f"{self._n_features_in}"
+                )
+        elif self._uses_continuous_binning:
+            rows = self._quantize_rows_for_prediction(self._validate_rows(X))
+            if len(rows[0]) != self._n_features_in:
+                raise ValueError(
+                    f"X feature count {len(rows[0])} does not match fitted feature count "
+                    f"{self._n_features_in}"
+                )
+        else:
+            dense_payload = self._native_matrix_flat_payload(X)
+            if dense_payload is not None:
+                _, _, feature_count = dense_payload
+                if feature_count != self._n_features_in:
+                    raise ValueError(
+                        f"X feature count {feature_count} does not match fitted feature count "
+                        f"{self._n_features_in}"
+                    )
+                rows = dense_payload
+            else:
+                rows = self._validate_rows(X)
+                if len(rows[0]) != self._n_features_in:
+                    raise ValueError(
+                        f"X feature count {len(rows[0])} does not match fitted feature count "
+                        f"{self._n_features_in}"
+                    )
+
+        if binning_kwargs is not None:
+            from alloygbm._alloygbm import (
+                shap_explain_interactions_dense_with_binning,
+                shap_explain_interactions_with_binning,
+            )
+
+            if isinstance(rows, tuple):
+                flat, row_count, feature_count = rows
+                expected_value, values = shap_explain_interactions_dense_with_binning(
+                    self._artifact_bytes,
+                    flat,
+                    row_count,
+                    feature_count,
+                    **binning_kwargs,
+                )
+            else:
+                expected_value, values = shap_explain_interactions_with_binning(
+                    self._artifact_bytes, rows, **binning_kwargs
+                )
+        else:
+            from alloygbm._alloygbm import (
+                shap_explain_interactions,
+                shap_explain_interactions_dense,
+            )
+
+            if isinstance(rows, tuple):
+                flat, row_count, feature_count = rows
+                expected_value, values = shap_explain_interactions_dense(
+                    self._artifact_bytes, flat, row_count, feature_count
+                )
+            else:
+                expected_value, values = shap_explain_interactions(
+                    self._artifact_bytes, rows
+                )
+
+        matrix = [[list(col) for col in row] for row in values]
+        if include_expected_value:
+            return float(expected_value), matrix
+        return matrix
+
     def feature_importances(
         self, X: object, *, method: str = "shap"
     ) -> list[tuple[str, float]]:

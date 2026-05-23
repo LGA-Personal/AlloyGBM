@@ -1885,13 +1885,12 @@ fn ts_recurse_conditioning(
             };
 
             // Duplicate-feature handling (BEFORE conditioning logic).
-            // The current depth's "extended depth" is `depth` when we
-            // extended at the top, but our internal "unique_depth" for
-            // path inspection mirrors slundberg's variable.  When we
-            // skipped extend, the duplicate scan still applies to the
-            // already-existing entries.
-            let mut unique_depth = depth;
-            let duplicate_index = path[1..=unique_depth]
+            // We use a signed counter so successive decrements can go below
+            // zero — matching slundberg/shap's unsigned-underflow trick,
+            // which produces a `child_depth` of 0 (empty leaf-scan) when
+            // conditioning fires at the very first split of a tree.
+            let mut unique_depth: i32 = depth as i32;
+            let duplicate_index = path[1..=depth]
                 .iter()
                 .position(|e| e.feature_index == *node_feature)
                 .map(|pos| pos + 1);
@@ -1900,7 +1899,7 @@ fn ts_recurse_conditioning(
             if let Some(dup_idx) = duplicate_index {
                 incoming_zero = path[dup_idx].zero_fraction;
                 incoming_one = path[dup_idx].one_fraction;
-                ts_unextend_path(path, unique_depth, dup_idx);
+                ts_unextend_path(path, depth, dup_idx);
                 unique_depth -= 1;
             }
 
@@ -1920,29 +1919,23 @@ fn ts_recurse_conditioning(
                     }
                 }
                 // Compensate for the skipped extend at the children.
-                if unique_depth > 0 {
-                    unique_depth -= 1;
-                } else {
-                    // depth==0 conditioning means we're factoring out at the
-                    // root edge — extremely rare since the root has feature_index
-                    // = usize::MAX; left here for completeness.
-                }
+                unique_depth -= 1;
             }
 
             // Recurse into both children.  Clone the ENTIRE path buffer
-            // (not just up to unique_depth) — the conditioning logic above
-            // may have decremented unique_depth without unfilling slots,
-            // and the canonical reference (slundberg/shap) preserves all
-            // filled entries via raw-pointer arithmetic.  Truncating the
-            // clone here would lose the entries that the child needs.
+            // (not just up to unique_depth) — the canonical reference
+            // (slundberg/shap) preserves all filled entries via raw-pointer
+            // arithmetic, even after decrements.
             let mut hot_path = path.clone();
             let mut cold_path = path.clone();
+
+            let child_depth = (unique_depth + 1).max(0) as usize;
 
             ts_recurse_conditioning(
                 hot,
                 row,
                 &mut hot_path,
-                unique_depth + 1,
+                child_depth,
                 phi,
                 incoming_zero * hot_zero,
                 incoming_one,
@@ -1956,7 +1949,7 @@ fn ts_recurse_conditioning(
                 cold,
                 row,
                 &mut cold_path,
-                unique_depth + 1,
+                child_depth,
                 phi,
                 incoming_zero * cold_zero,
                 0.0,
