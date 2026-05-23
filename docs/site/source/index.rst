@@ -12,14 +12,18 @@ types.
 
 .. note::
 
-   AlloyGBM ``0.9.0`` is a minor feature release.  It adds DART
-   (Dropouts meet MART) as a new opt-in ``boosting_mode="dart"`` on
-   ``GBMRegressor``, binary ``GBMClassifier``, and ``GBMRanker``, and
-   resolves the linear-rank predict-path NaN routing bug
-   (Limitation 4 from v0.8.0).  Default ``boosting_mode="standard"``
-   is byte-identical to v0.8.0.  Joint shared-tree multi-label
-   ranking remains scoped for v0.10.0.  See :doc:`release` for full
-   notes.
+   AlloyGBM ``0.11.0`` is a minor feature release shipping two small,
+   independent wins. First, pairwise **SHAP interaction values** on
+   ``GBMRegressor`` via ``shap_interaction_values(X)`` -- Lundberg et al.
+   (2020) Algorithm 2 in polynomial time ``O(T · L · D² · M)``, ported
+   verbatim from the canonical ``slundberg/shap`` C++ reference. Second,
+   three new **GLM regression objectives** -- ``"poisson"``,
+   ``"gamma"``, ``"tweedie"`` (with ``tweedie_variance_power`` in
+   ``(1, 2)``) -- all with log-link semantics (``predict()`` returns
+   ``exp(raw)``), Newton gradients/hessians, and matching deviance
+   metrics in ``alloygbm.evaluation``. Default behaviour for every
+   existing user-facing API remains byte-identical to v0.10.6 when
+   neither new feature is opted into. See :doc:`release` for full notes.
 
 Getting started
 ---------------

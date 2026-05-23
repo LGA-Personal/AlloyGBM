@@ -11,15 +11,17 @@ use alloygbm_core::{
 };
 use alloygbm_engine::{
     ArtifactCompatibilityMode, BinaryCrossEntropyObjective, CategoricalFeatureInfo,
-    CategoricalTargetEncodingSpec, EngineError, IterationDiagnostics, IterationRunSummary,
-    LambdaMARTObjective, MultiClassIterationRunSummary, MultiClassSoftmaxObjective,
-    MultiClassTrainedModel, MultiClassWarmStartState, ObjectiveOps, PairwiseRankingObjective,
-    PerRoundMetricCallback, QueryRMSEObjective, SquaredErrorObjective, TrainedModel, Trainer,
-    TrainingPolicyMode, WarmStartState, XeNDCGObjective, YetiRankObjective,
+    CategoricalTargetEncodingSpec, EngineError, GammaObjective, IterationDiagnostics,
+    IterationRunSummary, LambdaMARTObjective, MultiClassIterationRunSummary,
+    MultiClassSoftmaxObjective, MultiClassTrainedModel, MultiClassWarmStartState, ObjectiveOps,
+    PairwiseRankingObjective, PerRoundMetricCallback, PoissonObjective, QueryRMSEObjective,
+    SquaredErrorObjective, TrainedModel, Trainer, TrainingPolicyMode, TweedieObjective,
+    WarmStartState, XeNDCGObjective, YetiRankObjective,
 };
 use alloygbm_predictor::{Predictor, PredictorError};
 use alloygbm_shap::{
-    BinningContext, ShapError, explain_rows_from_artifact_bytes,
+    BinningContext, ShapError, explain_interactions_from_artifact_bytes,
+    explain_interactions_from_artifact_bytes_with_binning, explain_rows_from_artifact_bytes,
     explain_rows_from_artifact_bytes_with_binning, global_importance_from_artifact_bytes,
     global_importance_from_artifact_bytes_with_binning,
 };
@@ -2976,6 +2978,7 @@ fn train_regression_artifact_with_summary_dense_impl(
 
     let bridge_prepare_seconds = bridge_start.elapsed().as_secs_f64();
     let user_seed = params.seed;
+    let tweedie_variance_power = params.tweedie_variance_power;
     let trainer = Trainer::new(params)?.with_categorical_features(native_cat_infos.clone());
     let backend = CpuBackend;
     let native_start = Instant::now();
@@ -3052,6 +3055,12 @@ fn train_regression_artifact_with_summary_dense_impl(
     let mut summary = match objective {
         "squared_error" => run_training!(&SquaredErrorObjective),
         "binary_crossentropy" => run_training!(&BinaryCrossEntropyObjective),
+        "poisson" => run_training!(&PoissonObjective),
+        "gamma" => run_training!(&GammaObjective),
+        "tweedie" => {
+            let obj = TweedieObjective::new(tweedie_variance_power)?;
+            run_training!(&obj)
+        }
         "queryrmse" | "rank_pairwise" | "rank_ndcg" | "rank_xendcg" | "yetirank" => {
             let group_id = prepared.dataset.group_id.as_ref().ok_or_else(|| {
                 EngineError::ContractViolation(format!(
@@ -3303,7 +3312,7 @@ fn train_regression_artifact_with_summary_dense_impl(
             return Err(EngineError::InvalidConfig(format!(
                 "unknown objective '{other}', expected one of: squared_error, \
                  binary_crossentropy, multiclass_softmax, custom, queryrmse, rank_pairwise, \
-                 rank_ndcg, rank_xendcg, yetirank"
+                 rank_ndcg, rank_xendcg, yetirank, poisson, gamma, tweedie"
             )));
         }
     };
@@ -3417,6 +3426,27 @@ fn shap_explain_rows_dense_impl(
     let rows = dense_rows_from_flat_values(values, row_count, feature_count)
         .map_err(ShapError::InvalidInput)?;
     shap_explain_rows_impl(artifact_bytes, &rows)
+}
+
+#[allow(clippy::type_complexity)]
+fn shap_explain_interactions_impl(
+    artifact_bytes: &[u8],
+    rows: &[Vec<f32>],
+) -> Result<(f32, Vec<Vec<Vec<f32>>>), ShapError> {
+    let batch = explain_interactions_from_artifact_bytes(artifact_bytes, rows)?;
+    Ok((batch.expected_value, batch.values))
+}
+
+#[allow(clippy::type_complexity)]
+fn shap_explain_interactions_dense_impl(
+    artifact_bytes: &[u8],
+    row_count: usize,
+    feature_count: usize,
+    values: &[f32],
+) -> Result<(f32, Vec<Vec<Vec<f32>>>), ShapError> {
+    let rows = dense_rows_from_flat_values(values, row_count, feature_count)
+        .map_err(ShapError::InvalidInput)?;
+    shap_explain_interactions_impl(artifact_bytes, &rows)
 }
 
 fn shap_global_importance_impl(
@@ -3546,6 +3576,7 @@ fn build_train_params(
     dro_config: Option<alloygbm_core::DroConfig>,
     neutralization_config: Option<FactorNeutralizationConfig>,
     boosting_mode: alloygbm_core::BoostingMode,
+    tweedie_variance_power: f32,
 ) -> TrainParams {
     TrainParams {
         seed,
@@ -3572,6 +3603,7 @@ fn build_train_params(
         dro_config,
         neutralization_config,
         boosting_mode,
+        tweedie_variance_power,
     }
 }
 
@@ -3901,6 +3933,90 @@ fn shap_explain_rows_dense(
 }
 
 #[pyfunction]
+fn shap_explain_interactions(
+    artifact_bytes: &[u8],
+    rows: Vec<Vec<f32>>,
+) -> PyResult<(f32, Vec<Vec<Vec<f32>>>)> {
+    shap_explain_interactions_impl(artifact_bytes, &rows).map_err(shap_error_to_pyerr)
+}
+
+#[pyfunction]
+fn shap_explain_interactions_dense(
+    artifact_bytes: &[u8],
+    values: Vec<f32>,
+    row_count: usize,
+    feature_count: usize,
+) -> PyResult<(f32, Vec<Vec<Vec<f32>>>)> {
+    shap_explain_interactions_dense_impl(artifact_bytes, row_count, feature_count, &values)
+        .map_err(shap_error_to_pyerr)
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    artifact_bytes, rows, binning_kind, feature_mins=None, feature_maxs=None,
+    max_data_bin=None, feature_cuts=None, linear_rank_per_feature=None,
+))]
+#[allow(clippy::too_many_arguments)]
+fn shap_explain_interactions_with_binning(
+    artifact_bytes: &[u8],
+    rows: Vec<Vec<f32>>,
+    binning_kind: &str,
+    feature_mins: Option<Vec<f32>>,
+    feature_maxs: Option<Vec<f32>>,
+    max_data_bin: Option<u16>,
+    feature_cuts: Option<Vec<Vec<f32>>>,
+    linear_rank_per_feature: Option<Vec<Option<Vec<f32>>>>,
+) -> PyResult<(f32, Vec<Vec<Vec<f32>>>)> {
+    let ctx = build_binning_context(
+        binning_kind,
+        feature_mins,
+        feature_maxs,
+        max_data_bin,
+        feature_cuts,
+        linear_rank_per_feature,
+    )
+    .map_err(shap_error_to_pyerr)?;
+    let batch = explain_interactions_from_artifact_bytes_with_binning(artifact_bytes, &rows, &ctx)
+        .map_err(shap_error_to_pyerr)?;
+    Ok((batch.expected_value, batch.values))
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    artifact_bytes, values, row_count, feature_count, binning_kind,
+    feature_mins=None, feature_maxs=None, max_data_bin=None,
+    feature_cuts=None, linear_rank_per_feature=None,
+))]
+#[allow(clippy::too_many_arguments)]
+fn shap_explain_interactions_dense_with_binning(
+    artifact_bytes: &[u8],
+    values: Vec<f32>,
+    row_count: usize,
+    feature_count: usize,
+    binning_kind: &str,
+    feature_mins: Option<Vec<f32>>,
+    feature_maxs: Option<Vec<f32>>,
+    max_data_bin: Option<u16>,
+    feature_cuts: Option<Vec<Vec<f32>>>,
+    linear_rank_per_feature: Option<Vec<Option<Vec<f32>>>>,
+) -> PyResult<(f32, Vec<Vec<Vec<f32>>>)> {
+    let rows = dense_rows_from_flat_values(&values, row_count, feature_count)
+        .map_err(|msg| shap_error_to_pyerr(ShapError::InvalidInput(msg)))?;
+    let ctx = build_binning_context(
+        binning_kind,
+        feature_mins,
+        feature_maxs,
+        max_data_bin,
+        feature_cuts,
+        linear_rank_per_feature,
+    )
+    .map_err(shap_error_to_pyerr)?;
+    let batch = explain_interactions_from_artifact_bytes_with_binning(artifact_bytes, &rows, &ctx)
+        .map_err(shap_error_to_pyerr)?;
+    Ok((batch.expected_value, batch.values))
+}
+
+#[pyfunction]
 fn shap_global_importance(
     artifact_bytes: &[u8],
     rows: Vec<Vec<f32>>,
@@ -4122,7 +4238,8 @@ fn shap_global_importance_dense_with_binning(
     dart_drop_rate=None,
     dart_max_drop=None,
     dart_normalize_type=None,
-    dart_sample_type=None
+    dart_sample_type=None,
+    tweedie_variance_power=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact(
@@ -4166,6 +4283,7 @@ fn train_regression_artifact(
     dart_max_drop: Option<usize>,
     dart_normalize_type: Option<&str>,
     dart_sample_type: Option<&str>,
+    tweedie_variance_power: Option<f32>,
 ) -> PyResult<Vec<u8>> {
     let parsed_morph_config = morph_config
         .map(|d| parse_morph_config_from_pydict(&d))
@@ -4223,6 +4341,7 @@ fn train_regression_artifact(
         parsed_dro_config,
         parsed_neutralization_config,
         parsed_boosting_mode,
+        tweedie_variance_power.unwrap_or(1.5),
     );
 
     let categorical_spec = resolve_categorical_spec(
@@ -4314,7 +4433,8 @@ fn train_regression_artifact(
     dart_drop_rate=None,
     dart_max_drop=None,
     dart_normalize_type=None,
-    dart_sample_type=None
+    dart_sample_type=None,
+    tweedie_variance_power=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense(
@@ -4360,6 +4480,7 @@ fn train_regression_artifact_dense(
     dart_max_drop: Option<usize>,
     dart_normalize_type: Option<&str>,
     dart_sample_type: Option<&str>,
+    tweedie_variance_power: Option<f32>,
 ) -> PyResult<Vec<u8>> {
     let parsed_morph_config = morph_config
         .map(|d| parse_morph_config_from_pydict(&d))
@@ -4417,6 +4538,7 @@ fn train_regression_artifact_dense(
         parsed_dro_config,
         parsed_neutralization_config,
         parsed_boosting_mode,
+        tweedie_variance_power.unwrap_or(1.5),
     );
     let categorical_spec = resolve_categorical_spec(
         categorical_feature_index,
@@ -4529,7 +4651,8 @@ fn train_regression_artifact_dense(
     dart_drop_rate=None,
     dart_max_drop=None,
     dart_normalize_type=None,
-    dart_sample_type=None
+    dart_sample_type=None,
+    tweedie_variance_power=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_with_summary(
@@ -4600,6 +4723,7 @@ fn train_regression_artifact_with_summary(
     dart_max_drop: Option<usize>,
     dart_normalize_type: Option<&str>,
     dart_sample_type: Option<&str>,
+    tweedie_variance_power: Option<f32>,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -4658,6 +4782,7 @@ fn train_regression_artifact_with_summary(
         parsed_dro_config,
         parsed_neutralization_config,
         parsed_boosting_mode,
+        tweedie_variance_power.unwrap_or(1.5),
     );
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
@@ -4796,7 +4921,8 @@ fn train_regression_artifact_with_summary(
     dart_drop_rate=None,
     dart_max_drop=None,
     dart_normalize_type=None,
-    dart_sample_type=None
+    dart_sample_type=None,
+    tweedie_variance_power=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary(
@@ -4870,6 +4996,7 @@ fn train_regression_artifact_dense_with_summary(
     dart_max_drop: Option<usize>,
     dart_normalize_type: Option<&str>,
     dart_sample_type: Option<&str>,
+    tweedie_variance_power: Option<f32>,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -4928,6 +5055,7 @@ fn train_regression_artifact_dense_with_summary(
         parsed_dro_config,
         parsed_neutralization_config,
         parsed_boosting_mode,
+        tweedie_variance_power.unwrap_or(1.5),
     );
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
@@ -5062,7 +5190,8 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> PyResult<Vec<f32>> {
     dart_drop_rate=None,
     dart_max_drop=None,
     dart_normalize_type=None,
-    dart_sample_type=None
+    dart_sample_type=None,
+    tweedie_variance_power=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn train_regression_artifact_dense_with_summary_bytes(
@@ -5136,6 +5265,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
     dart_max_drop: Option<usize>,
     dart_normalize_type: Option<&str>,
     dart_sample_type: Option<&str>,
+    tweedie_variance_power: Option<f32>,
 ) -> PyResult<NativeTrainingResult> {
     let values = bytes_to_f32_vec(values_bytes)?;
     let targets = bytes_to_f32_vec(targets_bytes)?;
@@ -5198,6 +5328,7 @@ fn train_regression_artifact_dense_with_summary_bytes(
         parsed_dro_config,
         parsed_neutralization_config,
         parsed_boosting_mode,
+        tweedie_variance_power.unwrap_or(1.5),
     );
     let (categorical_specs, validation_categorical_values_list) =
         resolve_categorical_specs_from_params(
@@ -5796,6 +5927,13 @@ fn _alloygbm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(shap_explain_rows, m)?)?;
     m.add_function(wrap_pyfunction!(shap_explain_rows_dense, m)?)?;
+    m.add_function(wrap_pyfunction!(shap_explain_interactions, m)?)?;
+    m.add_function(wrap_pyfunction!(shap_explain_interactions_dense, m)?)?;
+    m.add_function(wrap_pyfunction!(shap_explain_interactions_with_binning, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        shap_explain_interactions_dense_with_binning,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(shap_global_importance, m)?)?;
     m.add_function(wrap_pyfunction!(shap_global_importance_dense, m)?)?;
     m.add_function(wrap_pyfunction!(shap_explain_rows_with_binning, m)?)?;
@@ -5976,6 +6114,7 @@ mod tests {
             dro_config: None,
             neutralization_config: None,
             boosting_mode: alloygbm_core::BoostingMode::Standard,
+            tweedie_variance_power: 1.5,
         }
     }
 

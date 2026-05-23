@@ -1,6 +1,6 @@
 # AlloyGBM Current Limitations
 
-Last updated for v0.10.6.
+Last updated for v0.11.0.
 
 ## Remaining Limitations
 
@@ -10,7 +10,56 @@ The `BackendOps` trait is designed for hardware abstraction, but only
 `CpuBackend` exists. GPU/accelerator support is architecturally planned but
 not implemented.
 
+### 2. SHAP interactions on `leaf_model="linear"`
+
+`GBMRegressor.shap_interaction_values(X)` rejects artifacts trained with
+`leaf_model="linear"`. The piecewise-linear (PL) interventional
+decomposition credits per-feature deviation terms `w_j · (x_j − μ_j)`
+along the visited path — these are first-order single-feature credits
+and don't decompose into pairwise interactions in any obvious
+polynomial-time way. A correct PL-leaf interaction algorithm is a
+future-release item.
+
+### 3. SHAP interactions on multi-output / multiclass models
+
+`shap_interaction_values()` is `GBMRegressor`-only.  Multi-output
+(joint multi-label ranker) and multiclass softmax models don't have an
+interaction-values surface in v0.11.0.
+
+### 4. GLM regression objectives on Ranker / Classifier / multiclass
+
+`objective="poisson"`, `"gamma"`, `"tweedie"` are supported only on
+single-output `GBMRegressor`. The Ranker, Classifier, and multiclass
+softmax paths reject these objectives.
+
+### 5. `neutralization="pre_target"` is squared-error-only
+
+The pre-target factor-neutralization mode residualizes targets before
+training. For non-squared-error objectives the
+residualize-target == residualize-gradient identity that pre_target
+relies on breaks down (the gradient under log-link is `μ − y`, not
+`pred − y`). Use `"per_round_gradient"` or `"split_penalty"` with GLM
+objectives.
+
 ## Resolved (Previously Limitations)
+
+### v0.11.0
+
+- **SHAP interaction values shipped.** `GBMRegressor.shap_interaction_values(X)`
+  returns the `(n_rows, n_features, n_features)` pairwise SHAP tensor in
+  `O(T · L · D² · M)` time via Lundberg et al. (2020) Algorithm 2 (ported
+  verbatim from `slundberg/shap`'s canonical `tree_shap_recursive`).
+  Row marginal recovers per-feature SHAP exactly; full sum reconstructs
+  the prediction within `atol = 1e-5 + rtol = 1e-4 · |predict(x)|`.
+
+- **Poisson / Gamma / Tweedie GLM objectives shipped.**
+  `GBMRegressor(objective="poisson"|"gamma"|"tweedie",
+  tweedie_variance_power=…)` adds log-link GLM regression to the
+  single-output regressor. Standard Newton gradients/hessians;
+  predictor-side `exp(raw)` post-transform; target-domain validation;
+  new deviance metrics in `alloygbm.evaluation`. Composes with
+  DART/GOSS/leaf-wise/warm-start/MorphBoost/per-round-gradient and
+  split-penalty factor neutralization.
 
 ### v0.10.6
 

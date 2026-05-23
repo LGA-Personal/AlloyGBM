@@ -288,6 +288,50 @@ native predictor handle. That means you can:
   - `evals_result_`
   - `fit_timing_`
 
+## GLM Regression Objectives (v0.11.0+)
+
+`GBMRegressor` supports three log-link GLM objectives in addition to
+the default `"squared_error"`:
+
+```python
+from alloygbm import GBMRegressor
+
+# Count regression (Poisson)
+model = GBMRegressor(objective="poisson", n_estimators=50)
+model.fit(X_train, y_count)  # y_count: non-negative integers/floats
+predictions = model.predict(X_test)  # exp(raw); strictly positive
+
+# Strictly-positive continuous (Gamma)
+model = GBMRegressor(objective="gamma", n_estimators=50)
+model.fit(X_train, y_positive)  # y_positive: y > 0
+
+# Insurance/claims (Tweedie compound Poisson-gamma)
+model = GBMRegressor(
+    objective="tweedie", tweedie_variance_power=1.5, n_estimators=50
+)
+model.fit(X_train, y_inflated_zeros)  # y: y >= 0 with a mass at 0
+```
+
+Matching deviance metrics live in `alloygbm.evaluation`:
+`poisson_deviance`, `gamma_deviance`, and
+`tweedie_deviance(y_true, y_pred, variance_power=p)`.
+
+## SHAP Interaction Values (v0.11.0+)
+
+`GBMRegressor.shap_interaction_values(X)` returns the pairwise
+`(n_rows, n_features, n_features)` SHAP tensor:
+
+```python
+import numpy as np
+interactions = np.asarray(model.shap_interaction_values(X_test))
+# interactions[r, i, j] is the pairwise contribution of (i, j) at row r.
+# Row marginal recovers per-feature SHAP: interactions[r].sum(axis=1) == shap_values(X_test)[r]
+# Full sum reconstructs the prediction (within float tolerance):
+#   interactions[r].sum() + expected_value == predict(X_test)[r]
+```
+
+See [Explanations](explanations.md) for the full contract.
+
 ## NaN / Missing Values
 
 AlloyGBM handles NaN values natively. You do not need to impute missing values

@@ -445,6 +445,47 @@ After fitting, the estimator may expose:
 - ``fit_timing_``
 - ``feature_names_`` -- captured from training data or auto-generated
 
+Regression objectives (v0.11.0+)
+--------------------------------
+
+``GBMRegressor`` accepts the following values for the ``objective`` kwarg:
+
+- ``"squared_error"`` (default) -- standard least-squares regression.
+- ``"poisson"`` -- log-link Poisson regression for count targets.
+  Targets must be ``>= 0``. ``predict()`` returns ``exp(raw)``.
+- ``"gamma"`` -- log-link Gamma regression for strictly-positive
+  continuous targets. Targets must be ``> 0``. ``predict()`` returns
+  ``exp(raw)``.
+- ``"tweedie"`` -- log-link compound Poisson-gamma regression for
+  ``1 < variance_power < 2``. Useful for insurance/claims data with a
+  mass at zero and a positive tail. Set
+  ``tweedie_variance_power=1.5`` (or another value in ``(1, 2)``).
+  Targets must be ``>= 0``. ``predict()`` returns ``exp(raw)``.
+- Custom callable -- any user-supplied
+  ``(predictions, targets) → (gradients, hessians)`` function.
+
+``tweedie_variance_power: float = 1.5`` -- only used when
+``objective="tweedie"``. Must satisfy ``1 < p < 2``. For ``p = 1`` use
+``objective="poisson"``; for ``p = 2`` use ``objective="gamma"``.
+
+All three GLM objectives compose with ``boosting_mode="dart"``,
+``boosting_mode="goss"``, warm-start, ``tree_growth="leaf"``,
+``neutralization="per_round_gradient"`` /
+``neutralization="split_penalty"``, and ``training_mode="morph"``.
+``neutralization="pre_target"`` remains squared-error-only.
+
+Three deviance metrics in ``alloygbm.evaluation`` partner with the new
+objectives: ``poisson_deviance``, ``gamma_deviance``, and
+``tweedie_deviance``.
+
+SHAP interaction values (v0.11.0+)
+----------------------------------
+
+``GBMRegressor.shap_interaction_values(X)`` returns pairwise SHAP
+attributions as an ``(n_rows, n_features, n_features)`` tensor in
+``O(T · L · D² · M)`` time via Lundberg et al. (2020) Algorithm 2.
+See :doc:`explanations` for the full contract and scope limits.
+
 Recommended usage pattern
 -------------------------
 

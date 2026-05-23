@@ -486,6 +486,10 @@ pub struct TrainParams {
     /// preserves v0.7.5 behaviour exactly.  See [`BoostingMode`] for
     /// the GOSS / DART semantics.
     pub boosting_mode: BoostingMode,
+    /// v0.11.0: Tweedie variance power `p ∈ (1, 2)` for
+    /// `objective="tweedie"`.  Ignored for all other objectives.
+    /// Defaults to 1.5 (a common starting point for insurance/claims data).
+    pub tweedie_variance_power: f32,
 }
 
 impl Default for TrainParams {
@@ -515,6 +519,7 @@ impl Default for TrainParams {
             dro_config: None,
             neutralization_config: None,
             boosting_mode: BoostingMode::Standard,
+            tweedie_variance_power: 1.5,
         }
     }
 }

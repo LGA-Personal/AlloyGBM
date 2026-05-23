@@ -350,6 +350,20 @@ pub struct ShapExplanationBatch {
     pub values: Vec<Vec<f32>>,
 }
 
+/// Pairwise SHAP interaction values returned by `explain_interactions_from_artifact_bytes`.
+///
+/// `values[row][i][j]` is the SHAP interaction contribution of feature pair `(i, j)`
+/// to the prediction of row `row`.  The matrix is symmetric: `values[r][i][j] == values[r][j][i]`.
+/// The diagonal `values[r][i][i]` is the "main effect" of feature `i` after removing all
+/// interactions; the row-marginal `Σ_j values[r][i][j]` recovers the per-feature SHAP
+/// value from `ShapExplanationBatch`, and the full sum `Σ_i Σ_j values[r][i][j] + expected_value`
+/// recovers the prediction (additivity).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShapInteractionBatch {
+    pub expected_value: f32,
+    pub values: Vec<Vec<Vec<f32>>>,
+}
+
 #[derive(Debug, Clone)]
 struct ArtifactShapContext {
     feature_names: Vec<String>,
@@ -391,6 +405,126 @@ pub fn explain_rows_from_artifact_bytes_with_binning(
 ) -> ShapResult<ShapExplanationBatch> {
     let context = load_artifact_context(artifact_bytes)?;
     explain_rows_from_model(&context.model, rows, Some(binning))
+}
+
+/// Compute pairwise SHAP interaction values for the given rows.
+///
+/// Implements Lundberg et al. (2020) Algorithm 2, "Polynomial-time consistent
+/// individualized feature attributions" — extended to pairwise interactions.
+/// Cost: `O(T · L · D² · M)` where `M` is the feature count.
+///
+/// Linear-leaf (PL) models are rejected by this entry point in v0.11.0 —
+/// see `docs/limitations.md` for the deferred extension.
+pub fn explain_interactions_from_artifact_bytes(
+    artifact_bytes: &[u8],
+    rows: &[Vec<f32>],
+) -> ShapResult<ShapInteractionBatch> {
+    let context = load_artifact_context(artifact_bytes)?;
+    explain_interactions_from_model(&context.model, rows, None)
+}
+
+/// Predictor-aligned variant. See `explain_rows_from_artifact_bytes_with_binning`
+/// for the contract.
+pub fn explain_interactions_from_artifact_bytes_with_binning(
+    artifact_bytes: &[u8],
+    rows: &[Vec<f32>],
+    binning: &BinningContext,
+) -> ShapResult<ShapInteractionBatch> {
+    let context = load_artifact_context(artifact_bytes)?;
+    explain_interactions_from_model(&context.model, rows, Some(binning))
+}
+
+fn explain_interactions_from_model(
+    model: &TrainedModel,
+    rows: &[Vec<f32>],
+    binning: Option<&BinningContext>,
+) -> ShapResult<ShapInteractionBatch> {
+    validate_rows(rows, model.feature_count)?;
+
+    if model_has_linear_leaves(model) {
+        return Err(ShapError::InvalidInput(
+            "SHAP interaction values are not supported for leaf_model=\"linear\" artifacts in v0.11.0"
+                .to_string(),
+        ));
+    }
+
+    // Pre-scale DART trees by tree_weight so the standard TreeSHAP path
+    // produces strictly-additive contributions.  Mirrors `explain_rows_from_model`.
+    let has_non_unit_weights = model
+        .stumps
+        .iter()
+        .any(|s| (s.tree_weight - 1.0).abs() > f32::EPSILON);
+    if has_non_unit_weights {
+        let scaled = scale_model_by_tree_weight(model);
+        return explain_interactions_from_model(&scaled, rows, binning);
+    }
+
+    // LinearRank: quantize once and dispatch with PreBinned semantics.
+    if let Some(ctx @ BinningContext::LinearRank { .. }) = binning {
+        let quantized: Vec<Vec<f32>> = rows
+            .iter()
+            .map(|row| {
+                ctx.quantize_row_for_linear_rank(row)
+                    .expect("LinearRank quantize_row_for_linear_rank returns Some")
+            })
+            .collect();
+        return explain_interactions_from_model(
+            model,
+            &quantized,
+            Some(&BinningContext::PreBinned),
+        );
+    }
+
+    // Build node lookup and standard trees once for all rows.
+    let mut nodes_map: HashMap<u64, &TrainedStump> = HashMap::new();
+    let mut tree_roots: Vec<u32> = Vec::new();
+    for stump in &model.stumps {
+        let (tree_id, local_id) = decode_tree_node_id(stump.split.node_id);
+        nodes_map.insert(tree_local_key(tree_id, local_id), stump);
+        if local_id == 0 {
+            tree_roots.push(tree_id);
+        }
+    }
+    tree_roots.sort_unstable();
+    tree_roots.dedup();
+
+    let baseline = model.feature_baseline.as_deref();
+    let mut std_trees = Vec::with_capacity(tree_roots.len());
+    let mut expected_value_f64 = model.baseline_prediction as f64;
+
+    for &tree_id in &tree_roots {
+        let root_key = tree_local_key(tree_id, 0);
+        let root_stump = nodes_map.get(&root_key).ok_or_else(|| {
+            ShapError::ContractViolation(format!("missing root stump for tree {tree_id}"))
+        })?;
+        let root_cover = root_stump.split.left_stats.row_count as f64
+            + root_stump.split.right_stats.row_count as f64;
+        let tree = build_std_tree(tree_id, 0, 0.0, root_cover, &nodes_map, baseline, binning);
+        let tree_cover = tree.cover();
+        if tree_cover > 0.0 {
+            expected_value_f64 += tree.cover_weighted_value_sum() / tree_cover;
+        }
+        std_trees.push(tree);
+    }
+
+    let expected_value = expected_value_f64 as f32;
+    let use_float_compare = binning.is_some();
+
+    let mut all_matrices = Vec::with_capacity(rows.len());
+    for row in rows {
+        let matrix_f64 =
+            tree_shap_interactions_row(&std_trees, row, model.feature_count, use_float_compare);
+        let matrix_f32: Vec<Vec<f32>> = matrix_f64
+            .into_iter()
+            .map(|inner| inner.into_iter().map(|v| v as f32).collect())
+            .collect();
+        all_matrices.push(matrix_f32);
+    }
+
+    Ok(ShapInteractionBatch {
+        expected_value,
+        values: all_matrices,
+    })
 }
 
 pub fn global_importance_from_shap_values(
@@ -1613,6 +1747,294 @@ fn tree_shap_row(
     phi
 }
 
+/// Conditioning mode for SHAP-interaction TreeSHAP variant (Lundberg Alg 2).
+///
+/// Mirrors the canonical reference (slundberg/shap `tree_shap_recursive`,
+/// `condition` parameter): `On` ≙ `condition > 0`, `Off` ≙ `condition < 0`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConditioningMode {
+    /// Force the conditioning feature to always be present in S.  At any
+    /// split on the conditioning feature: walk both children, but the cold
+    /// child receives `condition_fraction = 0` (early-returns); the hot
+    /// child's condition_fraction is unchanged.
+    On,
+    /// Force the conditioning feature to never be in S.  At any split on
+    /// the conditioning feature: walk both children, each scaled by its
+    /// cover ratio (`hot_zero_fraction` / `cold_zero_fraction`).
+    Off,
+}
+
+/// TreeSHAP recursion with conditioning support (Lundberg et al. 2020
+/// Algorithm 2), faithfully ported from the canonical reference
+/// (`shap/cext/tree_shap.h::tree_shap_recursive`).
+///
+/// The path is extended with the parent's edge UNLESS the parent's split
+/// was the conditioning feature — in that case the conditioning feature
+/// is "factored out" of the path (and the parent's recurse call already
+/// decremented `depth` to compensate).
+///
+/// At a node whose split IS on the conditioning feature, both children are
+/// recursed into but with adjusted `condition_fraction`s:
+/// - `On` mode: hot child unchanged, cold child gets `condition_fraction = 0`
+///   (so it early-returns).
+/// - `Off` mode: hot child gets `condition_fraction * hot_zero_fraction`,
+///   cold child gets `condition_fraction * cold_zero_fraction`.
+#[allow(clippy::too_many_arguments)]
+fn ts_recurse_conditioning(
+    node: &StdTreeNode,
+    row: &[f32],
+    path: &mut Vec<PathElement>,
+    depth: usize,
+    phi: &mut [f64],
+    parent_zero_fraction: f64,
+    parent_one_fraction: f64,
+    parent_feature_index: usize,
+    use_float_compare: bool,
+    conditioning_feature: usize,
+    mode: ConditioningMode,
+    condition_fraction: f64,
+) {
+    // Early return: a zero condition_fraction kills the entire subtree.
+    if condition_fraction == 0.0 {
+        return;
+    }
+
+    while path.len() <= depth {
+        path.push(PathElement {
+            feature_index: usize::MAX,
+            zero_fraction: 0.0,
+            one_fraction: 0.0,
+            pweight: 0.0,
+        });
+    }
+
+    // Skip extend_path if the parent's split was the conditioning feature
+    // (we're "factoring out" that feature from the path).
+    let skip_extend = parent_feature_index == conditioning_feature;
+    if !skip_extend {
+        ts_extend_path(
+            path,
+            depth,
+            parent_zero_fraction,
+            parent_one_fraction,
+            parent_feature_index,
+        );
+    }
+
+    match node {
+        StdTreeNode::Leaf { value, .. } => {
+            // unique_depth is the index of the last valid path entry.
+            // When skip_extend, depth was decremented by the parent so the
+            // last entry is at `depth` (NOT `depth - 1`).  When NOT skipped,
+            // we just extended to slot `depth`, so the last valid index is
+            // also `depth`.  Either way, iterate 1..=depth.
+            let effective_depth = depth;
+            for i in 1..=effective_depth {
+                let w = ts_unwound_path_sum(path, effective_depth, i);
+                let feat = path[i].feature_index;
+                if feat < phi.len() {
+                    phi[feat] += w
+                        * (path[i].one_fraction - path[i].zero_fraction)
+                        * value
+                        * condition_fraction;
+                }
+            }
+        }
+        StdTreeNode::Internal {
+            feature_index: node_feature,
+            threshold,
+            default_left,
+            is_categorical,
+            categorical_bitset,
+            left,
+            right,
+        } => {
+            let goes_left = row
+                .get(*node_feature)
+                .map(|v| {
+                    if *is_categorical {
+                        let cat_id = *v as u16;
+                        categorical_bitset.as_ref().map_or(*default_left, |bs| {
+                            let byte_idx = (cat_id / 8) as usize;
+                            let bit_idx = (cat_id % 8) as usize;
+                            byte_idx < bs.len() && (bs[byte_idx] & (1 << bit_idx)) != 0
+                        })
+                    } else if use_float_compare {
+                        *v < *threshold
+                    } else {
+                        *v <= *threshold
+                    }
+                })
+                .unwrap_or(*default_left);
+            let (hot, cold) = if goes_left {
+                (left.as_ref(), right.as_ref())
+            } else {
+                (right.as_ref(), left.as_ref())
+            };
+
+            let node_cover = node.cover();
+            let hot_zero = if node_cover > 0.0 {
+                hot.cover() / node_cover
+            } else {
+                0.5
+            };
+            let cold_zero = if node_cover > 0.0 {
+                cold.cover() / node_cover
+            } else {
+                0.5
+            };
+
+            // Duplicate-feature handling (BEFORE conditioning logic).
+            // We use a signed counter so successive decrements can go below
+            // zero — matching slundberg/shap's unsigned-underflow trick,
+            // which produces a `child_depth` of 0 (empty leaf-scan) when
+            // conditioning fires at the very first split of a tree.
+            let mut unique_depth: i32 = depth as i32;
+            let duplicate_index = path[1..=depth]
+                .iter()
+                .position(|e| e.feature_index == *node_feature)
+                .map(|pos| pos + 1);
+            let mut incoming_zero = 1.0_f64;
+            let mut incoming_one = 1.0_f64;
+            if let Some(dup_idx) = duplicate_index {
+                incoming_zero = path[dup_idx].zero_fraction;
+                incoming_one = path[dup_idx].one_fraction;
+                ts_unextend_path(path, depth, dup_idx);
+                unique_depth -= 1;
+            }
+
+            // Conditioning-fraction logic at the OUTGOING split.
+            let mut hot_condition_fraction = condition_fraction;
+            let mut cold_condition_fraction = condition_fraction;
+            if *node_feature == conditioning_feature {
+                match mode {
+                    ConditioningMode::On => {
+                        // ON: only walk hot (cold gets zero → early return).
+                        cold_condition_fraction = 0.0;
+                    }
+                    ConditioningMode::Off => {
+                        // OFF: walk both, scale each by its cover ratio.
+                        hot_condition_fraction *= hot_zero;
+                        cold_condition_fraction *= cold_zero;
+                    }
+                }
+                // Compensate for the skipped extend at the children.
+                unique_depth -= 1;
+            }
+
+            // Recurse into both children.  Clone the ENTIRE path buffer
+            // (not just up to unique_depth) — the canonical reference
+            // (slundberg/shap) preserves all filled entries via raw-pointer
+            // arithmetic, even after decrements.
+            let mut hot_path = path.clone();
+            let mut cold_path = path.clone();
+
+            let child_depth = (unique_depth + 1).max(0) as usize;
+
+            ts_recurse_conditioning(
+                hot,
+                row,
+                &mut hot_path,
+                child_depth,
+                phi,
+                incoming_zero * hot_zero,
+                incoming_one,
+                *node_feature,
+                use_float_compare,
+                conditioning_feature,
+                mode,
+                hot_condition_fraction,
+            );
+            ts_recurse_conditioning(
+                cold,
+                row,
+                &mut cold_path,
+                child_depth,
+                phi,
+                incoming_zero * cold_zero,
+                0.0,
+                *node_feature,
+                use_float_compare,
+                conditioning_feature,
+                mode,
+                cold_condition_fraction,
+            );
+        }
+    }
+}
+
+/// Compute pairwise SHAP interactions for a single row using pre-built
+/// standard trees (Lundberg Algorithm 2).  For each feature j: run TreeSHAP
+/// with j conditioned ON and OFF; the half-difference attributes the
+/// off-diagonal `Φ_ij`.  The diagonal is filled from the row-marginal
+/// invariant `Σ_j Φ_ij == φ_i`.
+#[allow(clippy::needless_range_loop)]
+fn tree_shap_interactions_row(
+    trees: &[StdTreeNode],
+    row: &[f32],
+    feature_count: usize,
+    use_float_compare: bool,
+) -> Vec<Vec<f64>> {
+    let mut matrix = vec![vec![0.0_f64; feature_count]; feature_count];
+
+    // Standard per-feature SHAP for the diagonal.
+    let phi = tree_shap_row(trees, row, feature_count, use_float_compare);
+
+    for j in 0..feature_count {
+        let mut phi_on = vec![0.0_f64; feature_count];
+        let mut phi_off = vec![0.0_f64; feature_count];
+        for tree in trees {
+            let mut path_on = Vec::with_capacity(32);
+            let mut path_off = Vec::with_capacity(32);
+            ts_recurse_conditioning(
+                tree,
+                row,
+                &mut path_on,
+                0,
+                &mut phi_on,
+                1.0,
+                1.0,
+                usize::MAX,
+                use_float_compare,
+                j,
+                ConditioningMode::On,
+                1.0,
+            );
+            ts_recurse_conditioning(
+                tree,
+                row,
+                &mut path_off,
+                0,
+                &mut phi_off,
+                1.0,
+                1.0,
+                usize::MAX,
+                use_float_compare,
+                j,
+                ConditioningMode::Off,
+                1.0,
+            );
+        }
+        for i in 0..feature_count {
+            if i == j {
+                continue;
+            }
+            matrix[i][j] = 0.5 * (phi_on[i] - phi_off[i]);
+        }
+    }
+
+    // Diagonal from row-marginal invariant.
+    for i in 0..feature_count {
+        let off_diag: f64 = (0..feature_count)
+            .filter(|&k| k != i)
+            .map(|k| matrix[i][k])
+            .sum();
+        matrix[i][i] = phi[i] - off_diag;
+    }
+
+    matrix
+}
+
 /// Compute SHAP values for multiple rows using TreeSHAP.
 fn explain_rows_tree_shap(
     model: &TrainedModel,
@@ -1690,6 +2112,7 @@ fn explain_rows_tree_shap(
 }
 
 #[cfg(test)]
+#[allow(clippy::needless_range_loop)]
 mod tests {
     use super::*;
     use alloygbm_core::{
@@ -3245,6 +3668,258 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // v0.11.0: SHAP interaction values (Lundberg Algorithm 2)
+    // ---------------------------------------------------------------------
+
+    /// Brute-force pairwise SHAP interaction oracle.  O(2^k) in the number of
+    /// distinct split features k; only valid for fixtures with k ≤ ~10.
+    ///
+    /// `Φ_ij = (1/2) · Σ_{S ⊆ N\{i,j}} (|S|! · (k-|S|-2)! / (k-1)!) ·
+    ///         [f(S ∪ {i,j}) − f(S ∪ {i}) − f(S ∪ {j}) + f(S)]`
+    /// where the sums are over subsets of the split-feature set excluding `i, j`.
+    /// Off-diagonal entries between non-split-features are zero (the model can't
+    /// depend on them).  The diagonal is filled from
+    /// `Φ_ii = φ_i − Σ_{j ≠ i} Φ_ij` to enforce the row-marginal invariant.
+    fn brute_force_interactions_for_row(model: &TrainedModel, row: &[f32]) -> (f32, Vec<Vec<f32>>) {
+        let n = model.feature_count;
+        let structure = build_model_structure(model).expect("model structure");
+        let subset_expectations = compute_subset_expectations(model, row, &structure, None, None)
+            .expect("subset expectations");
+        let split_features = &structure.split_features;
+        let k = split_features.len();
+        let factorials = factorial_table(k.max(2));
+        let phi = shapley_values_for_row_f64(model, row, &subset_expectations, &structure, 0)
+            .expect("per-feature shap");
+        let mut matrix = vec![vec![0.0_f64; n]; n];
+
+        // Off-diagonal: only nonzero for pairs of split features.
+        if k >= 2 {
+            for a in 0..k {
+                for b in (a + 1)..k {
+                    let feat_i = split_features[a];
+                    let feat_j = split_features[b];
+                    let bit_i = 1_u64 << a;
+                    let bit_j = 1_u64 << b;
+                    let mut accum = 0.0_f64;
+                    let others_count = k - 2;
+                    // Build the list of OTHER split-feature bit positions.
+                    let others: Vec<u32> = (0..k as u32)
+                        .filter(|&p| p as usize != a && p as usize != b)
+                        .collect();
+                    for sub_mask in 0..(1u32 << others_count) {
+                        let mut s_bits: u64 = 0;
+                        let mut s_size = 0_usize;
+                        for (idx, &pos) in others.iter().enumerate() {
+                            if (sub_mask >> idx) & 1 == 1 {
+                                s_bits |= 1_u64 << pos;
+                                s_size += 1;
+                            }
+                        }
+                        let f_s = subset_expectations[s_bits as usize] as f64;
+                        let f_si = subset_expectations[(s_bits | bit_i) as usize] as f64;
+                        let f_sj = subset_expectations[(s_bits | bit_j) as usize] as f64;
+                        let f_sij = subset_expectations[(s_bits | bit_i | bit_j) as usize] as f64;
+                        // Weight: |S|! · (k - |S| - 2)! / (k - 1)!
+                        let weight =
+                            factorials[s_size] * factorials[k - s_size - 2] / factorials[k - 1];
+                        accum += weight * (f_sij - f_si - f_sj + f_s);
+                    }
+                    let half = 0.5 * accum;
+                    matrix[feat_i][feat_j] = half;
+                    matrix[feat_j][feat_i] = half;
+                }
+            }
+        }
+
+        // Diagonal: Φ_ii = φ_i − Σ_{j ≠ i} Φ_ij
+        for i in 0..n {
+            let off: f64 = (0..n).filter(|&j| j != i).map(|j| matrix[i][j]).sum();
+            matrix[i][i] = phi[i] - off;
+        }
+
+        let expected_value = subset_expectations[0];
+        let matrix_f32: Vec<Vec<f32>> = matrix
+            .into_iter()
+            .map(|row_i| row_i.into_iter().map(|v| v as f32).collect())
+            .collect();
+        (expected_value, matrix_f32)
+    }
+
+    #[test]
+    fn brute_force_interactions_satisfy_additivity_on_fixture() {
+        let model = fixture_model();
+        for row in fixture_rows() {
+            let (expected, interactions) = brute_force_interactions_for_row(&model, &row);
+            let reconstructed: f32 = interactions
+                .iter()
+                .map(|r| r.iter().sum::<f32>())
+                .sum::<f32>()
+                + expected;
+            let predicted = local_path_predict(&model, &row, None);
+            let tol = additivity_tolerance(predicted);
+            assert!(
+                (reconstructed - predicted).abs() < tol,
+                "row={row:?} predicted={predicted} reconstructed={reconstructed} tol={tol}"
+            );
+        }
+    }
+
+    #[test]
+    fn explain_interactions_from_artifact_returns_pairwise_matrix() {
+        let artifact = fixture_model()
+            .to_artifact_bytes()
+            .expect("artifact serializes");
+        let rows = fixture_rows();
+
+        let batch = explain_interactions_from_artifact_bytes(&artifact, &rows)
+            .expect("interaction explanation succeeds");
+
+        assert_eq!(batch.values.len(), rows.len());
+        let feature_count = fixture_model().feature_count;
+        for row_interactions in &batch.values {
+            assert_eq!(row_interactions.len(), feature_count);
+            for column in row_interactions {
+                assert_eq!(column.len(), feature_count);
+            }
+        }
+    }
+
+    #[test]
+    fn tree_shap_interactions_additivity_holds() {
+        let artifact = fixture_model()
+            .to_artifact_bytes()
+            .expect("artifact serializes");
+        let rows = fixture_rows();
+        let batch = explain_interactions_from_artifact_bytes(&artifact, &rows).expect("batch");
+        let model = fixture_model();
+        for (row_idx, row) in rows.iter().enumerate() {
+            let matrix = &batch.values[row_idx];
+            let reconstructed: f32 =
+                matrix.iter().map(|r| r.iter().sum::<f32>()).sum::<f32>() + batch.expected_value;
+            let predicted = local_path_predict(&model, row, None);
+            let tol = additivity_tolerance(predicted);
+            assert!(
+                (reconstructed - predicted).abs() < tol,
+                "row={row_idx} reconstructed={reconstructed} predicted={predicted}"
+            );
+        }
+    }
+
+    #[test]
+    fn tree_shap_interactions_row_marginal_equals_per_feature_shap() {
+        let artifact = fixture_model()
+            .to_artifact_bytes()
+            .expect("artifact serializes");
+        let rows = fixture_rows();
+        let pairwise =
+            explain_interactions_from_artifact_bytes(&artifact, &rows).expect("pairwise");
+        let per_feature = explain_rows_from_artifact_bytes(&artifact, &rows).expect("per-feature");
+
+        let feature_count = fixture_model().feature_count;
+        for row_idx in 0..rows.len() {
+            for i in 0..feature_count {
+                let marginal: f32 = pairwise.values[row_idx][i].iter().sum();
+                let phi = per_feature.values[row_idx][i];
+                assert!(
+                    (marginal - phi).abs() < 1e-4,
+                    "row={row_idx} i={i} marginal={marginal} phi={phi}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tree_shap_interactions_matrix_is_symmetric() {
+        let artifact = fixture_model()
+            .to_artifact_bytes()
+            .expect("artifact serializes");
+        let rows = fixture_rows();
+        let batch = explain_interactions_from_artifact_bytes(&artifact, &rows).expect("batch");
+        for row_matrix in &batch.values {
+            for i in 0..row_matrix.len() {
+                for j in 0..row_matrix.len() {
+                    let a = row_matrix[i][j];
+                    let b = row_matrix[j][i];
+                    assert!(
+                        (a - b).abs() < 1e-5,
+                        "symmetry: a[{i}][{j}]={a} a[{j}][{i}]={b}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tree_shap_interactions_match_brute_force_on_fixture() {
+        let artifact = fixture_model()
+            .to_artifact_bytes()
+            .expect("artifact serializes");
+        let model = fixture_model();
+        let rows = fixture_rows();
+
+        let batch =
+            explain_interactions_from_artifact_bytes(&artifact, &rows).expect("interactions");
+        for (row_idx, row) in rows.iter().enumerate() {
+            let (_, expected_matrix) = brute_force_interactions_for_row(&model, row);
+            for i in 0..model.feature_count {
+                for j in 0..model.feature_count {
+                    let got = batch.values[row_idx][i][j];
+                    let want = expected_matrix[i][j];
+                    assert!(
+                        (got - want).abs() < 1e-4,
+                        "row={row_idx} i={i} j={j} got={got} want={want}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tree_shap_interactions_synthetic_depth_3_four_features_matches_brute_force() {
+        let model = synthetic_deep_model(3, 4, 1729);
+        let rows = deterministic_rows(4, 5, 1729);
+        let artifact = model.to_artifact_bytes().expect("artifact serializes");
+
+        let batch = explain_interactions_from_artifact_bytes(&artifact, &rows).expect("batch");
+        for (row_idx, row) in rows.iter().enumerate() {
+            let (_, expected_matrix) = brute_force_interactions_for_row(&model, row);
+            for i in 0..4 {
+                for j in 0..4 {
+                    let got = batch.values[row_idx][i][j];
+                    let want = expected_matrix[i][j];
+                    assert!(
+                        (got - want).abs() < 5e-3,
+                        "row={row_idx} i={i} j={j} got={got} want={want}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tree_shap_interactions_depth_5_three_features_satisfies_additivity() {
+        // 3 features at depth 5 — forces feature duplicates on every path
+        // (since depth > n_features), exercising the duplicate-handling
+        // branch in `ts_recurse_conditioning`.
+        let model = synthetic_deep_model(5, 3, 4242);
+        let rows = deterministic_rows(3, 8, 4242);
+        let artifact = model.to_artifact_bytes().expect("artifact serializes");
+
+        let batch = explain_interactions_from_artifact_bytes(&artifact, &rows).expect("batch");
+        for (row_idx, row) in rows.iter().enumerate() {
+            let matrix = &batch.values[row_idx];
+            let reconstructed: f32 =
+                matrix.iter().map(|r| r.iter().sum::<f32>()).sum::<f32>() + batch.expected_value;
+            let predicted = local_path_predict(&model, row, None);
+            let tol = additivity_tolerance(predicted) * 4.0;
+            assert!(
+                (reconstructed - predicted).abs() < tol,
+                "row={row_idx} reconstructed={reconstructed} predicted={predicted} tol={tol}"
+            );
         }
     }
 }

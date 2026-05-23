@@ -340,15 +340,98 @@ def _ndcg_single_group(labels: list[float], scores: list[float], k: int) -> floa
     return dcg / idcg
 
 
+def poisson_deviance(y_true: object, y_pred: object) -> float:
+    """Mean Poisson deviance for log-link regression.
+
+    For ``y >= 0`` and ``mu > 0``:
+        ``D = 2 · mean_i [ y_i · log(y_i / mu_i) − (y_i − mu_i) ]``
+    With the convention ``y log(y/mu) → 0`` when ``y → 0``.
+
+    Inputs are coerced via the same path as other metrics, so numpy arrays,
+    pandas Series, and other sequence-likes are accepted; non-finite values
+    are rejected before the GLM domain check.
+    """
+    true_values, pred_values = _validated_pair(y_true, y_pred)
+    total = 0.0
+    for y, mu in zip(true_values, pred_values):
+        if mu <= 0.0:
+            raise ValueError(f"y_pred must be > 0, got {mu}")
+        if y < 0.0:
+            raise ValueError(f"y_true must be >= 0, got {y}")
+        term = -(y - mu)
+        if y > 0.0:
+            term += y * math.log(y / mu)
+        total += 2.0 * term
+    return total / len(true_values)
+
+
+def gamma_deviance(y_true: object, y_pred: object) -> float:
+    """Mean Gamma deviance for log-link regression.
+
+    For ``y > 0`` and ``mu > 0``:
+        ``D = 2 · mean_i [ -log(y_i / mu_i) + (y_i - mu_i) / mu_i ]``
+
+    Inputs are coerced via the same path as other metrics, so numpy arrays,
+    pandas Series, and other sequence-likes are accepted; non-finite values
+    are rejected before the GLM domain check.
+    """
+    true_values, pred_values = _validated_pair(y_true, y_pred)
+    total = 0.0
+    for y, mu in zip(true_values, pred_values):
+        if mu <= 0.0:
+            raise ValueError(f"y_pred must be > 0, got {mu}")
+        if y <= 0.0:
+            raise ValueError(f"y_true must be > 0, got {y}")
+        total += 2.0 * (-math.log(y / mu) + (y - mu) / mu)
+    return total / len(true_values)
+
+
+def tweedie_deviance(
+    y_true: object, y_pred: object, *, variance_power: float
+) -> float:
+    """Mean Tweedie deviance for ``variance_power p ∈ (1, 2)``.
+
+    For ``y >= 0``, ``mu > 0``, ``1 < p < 2``:
+        ``D = 2 · mean_i [ y^(2-p) / ((1-p)(2-p))
+                          − y · mu^(1-p) / (1-p)
+                          + mu^(2-p) / (2-p) ]``
+    The ``y^(2-p)`` term is 0 when ``y == 0``.
+
+    Inputs are coerced via the same path as other metrics, so numpy arrays,
+    pandas Series, and other sequence-likes are accepted; non-finite values
+    are rejected before the GLM domain check.
+    """
+    if not (1.0 < variance_power < 2.0):
+        raise ValueError(
+            f"tweedie_deviance requires 1 < variance_power < 2 (got {variance_power})"
+        )
+    true_values, pred_values = _validated_pair(y_true, y_pred)
+    p = variance_power
+    total = 0.0
+    for y, mu in zip(true_values, pred_values):
+        if mu <= 0.0:
+            raise ValueError(f"y_pred must be > 0, got {mu}")
+        if y < 0.0:
+            raise ValueError(f"y_true must be >= 0, got {y}")
+        term1 = (y ** (2.0 - p)) / ((1.0 - p) * (2.0 - p)) if y > 0.0 else 0.0
+        term2 = y * (mu ** (1.0 - p)) / (1.0 - p)
+        term3 = (mu ** (2.0 - p)) / (2.0 - p)
+        total += 2.0 * (term1 - term2 + term3)
+    return total / len(true_values)
+
+
 __all__ = [
     "accuracy",
+    "gamma_deviance",
     "hit_rate",
     "icir",
     "log_loss",
     "mae",
     "ndcg",
     "pearson_correlation",
+    "poisson_deviance",
     "r2_score",
     "rank_ic",
     "rmse",
+    "tweedie_deviance",
 ]

@@ -166,6 +166,12 @@ Run the full verification suite from a clean tree. Do not skip any of these.
 .venv/bin/python -c "from alloygbm import GBMClassifier; m = GBMClassifier(n_estimators=3); m.fit([[1],[2],[3],[4]], [0,0,1,1]); print(m.predict([[2]]))"
 .venv/bin/python -c "from alloygbm import GBMRanker; m = GBMRanker(n_estimators=3); m.fit([[1],[2],[3],[4]], [0,1,0,1], group=[0,0,1,1]); print(m.predict([[2]]))"
 .venv/bin/python -c "from alloygbm import MultiLabelGBMRanker; import numpy as np; m = MultiLabelGBMRanker(n_estimators=3); m.fit([[1],[2],[3],[4]], np.array([[0,1],[1,0],[0,1],[1,0]]), group=[0,0,1,1]); print(m.predict([[2]]))"
+# v0.11.0 GLM regression objectives
+.venv/bin/python -c "from alloygbm import GBMRegressor; m = GBMRegressor(n_estimators=5, objective='poisson'); m.fit([[1],[2],[3],[4]], [1,2,3,4]); print(m.predict([[2]]))"
+.venv/bin/python -c "from alloygbm import GBMRegressor; m = GBMRegressor(n_estimators=5, objective='gamma'); m.fit([[1],[2],[3],[4]], [1.0,2.0,3.0,4.0]); print(m.predict([[2]]))"
+.venv/bin/python -c "from alloygbm import GBMRegressor; m = GBMRegressor(n_estimators=5, objective='tweedie', tweedie_variance_power=1.5); m.fit([[1],[2],[3],[4]], [0.0,2.0,0.0,4.0]); print(m.predict([[2]]))"
+# v0.11.0 SHAP interaction values
+.venv/bin/python -c "from alloygbm import GBMRegressor; import numpy as np; rng=np.random.default_rng(0); X=rng.normal(size=(20,3)).astype(np.float32); y=(X[:,0]*X[:,1]).astype(np.float32); m=GBMRegressor(n_estimators=5); m.fit(X,y); print(np.asarray(m.shap_interaction_values(X[:3])).shape)"
 ```
 
 If you added new top-level API in this release, add a one-liner for it here

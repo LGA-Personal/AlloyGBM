@@ -346,6 +346,7 @@ class GBMRegressor(_GBMRegressorBase):
         dart_max_drop: int = 50,
         dart_normalize_type: str = "tree",
         dart_sample_type: str = "uniform",
+        tweedie_variance_power: float = 1.5,
     ) -> None:
         if not (0.0 < learning_rate <= 1.0):
             raise ValueError("learning_rate must be in (0.0, 1.0]")
@@ -484,6 +485,14 @@ class GBMRegressor(_GBMRegressorBase):
             raise TypeError(
                 "objective must be a string, a callable, or None"
             )
+        if isinstance(objective, str) and objective == "tweedie":
+            if not isinstance(tweedie_variance_power, (int, float)) or not (
+                1.0 < float(tweedie_variance_power) < 2.0
+            ):
+                raise ValueError(
+                    "tweedie_variance_power must satisfy 1 < p < 2 when objective='tweedie' "
+                    f"(got {tweedie_variance_power!r})"
+                )
         if int(max_cat_threshold) < 0:
             raise ValueError("max_cat_threshold must be >= 0")
         if training_mode not in ("auto", "manual", "morph"):
@@ -685,6 +694,7 @@ class GBMRegressor(_GBMRegressorBase):
         self.dart_max_drop = int(dart_max_drop)
         self.dart_normalize_type = str(dart_normalize_type)
         self.dart_sample_type = str(dart_sample_type)
+        self.tweedie_variance_power = float(tweedie_variance_power)
         self._fit_neutralization: str | None = None
         self._fit_factor_neutralization_lambda: float | None = None
         self._fit_factor_penalty: float | None = None
@@ -826,6 +836,7 @@ class GBMRegressor(_GBMRegressorBase):
             "dart_max_drop": self.dart_max_drop,
             "dart_normalize_type": self.dart_normalize_type,
             "dart_sample_type": self.dart_sample_type,
+            "tweedie_variance_power": self.tweedie_variance_power,
         }
 
     def set_params(self, **params: object) -> "GBMRegressor":
@@ -885,6 +896,7 @@ class GBMRegressor(_GBMRegressorBase):
             "dart_max_drop",
             "dart_normalize_type",
             "dart_sample_type",
+            "tweedie_variance_power",
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
@@ -1351,6 +1363,9 @@ class GBMRegressor(_GBMRegressorBase):
                     f"got {s!r}"
                 )
             self.dart_sample_type = s
+        if "tweedie_variance_power" in params:
+            v = float(params["tweedie_variance_power"])
+            self.tweedie_variance_power = v
         # Cross-field validation for goss top+other rates.
         if self.boosting_mode == "goss" and (
             self.goss_top_rate + self.goss_other_rate > 1.0
@@ -1358,6 +1373,21 @@ class GBMRegressor(_GBMRegressorBase):
             raise ValueError(
                 "boosting_mode='goss' requires goss_top_rate + goss_other_rate <= 1.0"
             )
+        # PR #41 review C3: cross-field validation for Tweedie variance
+        # power.  The constructor rejects out-of-range powers when
+        # `objective='tweedie'`; set_params must do the same regardless of
+        # whether the objective, the power, or both change in this call —
+        # otherwise sklearn-style updates leave the estimator in a state
+        # the constructor would have refused, and the failure only
+        # surfaces from the native bridge much later.
+        post_objective = self._objective_name()
+        if post_objective == "tweedie":
+            v = self.tweedie_variance_power
+            if not isinstance(v, (int, float)) or not (1.0 < float(v) < 2.0):
+                raise ValueError(
+                    "tweedie_variance_power must satisfy 1 < p < 2 when "
+                    f"objective='tweedie' (got {v!r})"
+                )
 
         # Cross-field validation: leaf growth requires max_leaves
         if self.tree_growth == "leaf" and self.max_leaves is None:
@@ -1453,6 +1483,36 @@ class GBMRegressor(_GBMRegressorBase):
             return str(self.objective)
         return "squared_error"
 
+    def _validate_glm_target_domain(self, y: object, *, role: str) -> None:
+        """Reject targets that violate the active GLM objective's domain.
+
+        Called on both training y and validation y from `eval_set` so that
+        early-stopping / validation-loss reporting don't operate on values
+        that the loss function can't evaluate (e.g. `log(y/μ)` for y=0 in
+        Gamma).  No-op for non-GLM objectives.
+
+        `role` is a free-form label ("training" / "validation") used only
+        to make the error message specific.
+        """
+        obj_name = self._objective_name()
+        if obj_name not in ("poisson", "tweedie", "gamma"):
+            return
+        import numpy as _np
+
+        y_arr = _np.asarray(y, dtype=_np.float64)
+        if obj_name == "gamma":
+            if _np.any(y_arr <= 0):
+                raise ValueError(
+                    f"objective='gamma' requires strictly positive {role} targets, "
+                    f"got min(y)={float(y_arr.min())}"
+                )
+        else:
+            if _np.any(y_arr < 0):
+                raise ValueError(
+                    f"objective={obj_name!r} requires non-negative {role} targets, "
+                    f"got min(y)={float(y_arr.min())}"
+                )
+
     @staticmethod
     def _loss_metric_name_for(objective: str) -> str:
         """Map an objective name to its natural loss metric name."""
@@ -1462,6 +1522,12 @@ class GBMRegressor(_GBMRegressorBase):
             return "ndcg"
         if objective == "queryrmse":
             return "queryrmse"
+        if objective == "poisson":
+            return "poisson_deviance"
+        if objective == "gamma":
+            return "gamma_deviance"
+        if objective == "tweedie":
+            return "tweedie_deviance"
         if objective == "custom":
             return "loss"
         return "mse"
@@ -1796,6 +1862,12 @@ class GBMRegressor(_GBMRegressorBase):
                     stacklevel=2,
                 )
 
+        # Target-domain validation for GLM objectives — applied to training
+        # targets here, and again to validation targets after `eval_set` is
+        # unpacked below (early-stopping and validation-loss reporting also
+        # need to respect the GLM domain — see PR #41 review C2).
+        self._validate_glm_target_domain(y, role="training")
+
         # Validate group if provided.
         validated_group_id: list[int] | None = None
         if group is not None:
@@ -1860,6 +1932,11 @@ class GBMRegressor(_GBMRegressorBase):
         if eval_set is not None:
             validation_X, validation_y = eval_set
             validation_targets = self._validate_targets(validation_y)
+            # PR #41 review C2: GLM domain check must also gate validation
+            # targets — without this, early-stopping reads losses computed
+            # on out-of-domain y and reports nonsensical numbers (Gamma loss
+            # on y=0 hits `log(0)`, Poisson/Tweedie hit negative-y paths).
+            self._validate_glm_target_domain(validation_targets, role="validation")
             validation_dense_bytes_payload = (
                 self._native_matrix_bytes_payload(validation_X)
                 if not has_categorical
@@ -2090,6 +2167,11 @@ class GBMRegressor(_GBMRegressorBase):
                     dart_sample_type=(
                         self.dart_sample_type if self.boosting_mode == "dart" else None
                     ),
+                    tweedie_variance_power=(
+                        self.tweedie_variance_power
+                        if self._objective_name() == "tweedie"
+                        else None
+                    ),
                 )
                 return self._finalize_training_result(native_result, input_adaptation_seconds, feature_count=feature_count)
             except (ImportError, AttributeError):
@@ -2221,6 +2303,11 @@ class GBMRegressor(_GBMRegressorBase):
                 dart_sample_type=(
                     self.dart_sample_type if self.boosting_mode == "dart" else None
                 ),
+                tweedie_variance_power=(
+                    self.tweedie_variance_power
+                    if self._objective_name() == "tweedie"
+                    else None
+                ),
             )
         else:
             assert training_rows is not None
@@ -2309,6 +2396,11 @@ class GBMRegressor(_GBMRegressorBase):
                 ),
                 dart_sample_type=(
                     self.dart_sample_type if self.boosting_mode == "dart" else None
+                ),
+                tweedie_variance_power=(
+                    self.tweedie_variance_power
+                    if self._objective_name() == "tweedie"
+                    else None
                 ),
             )
 
@@ -2679,6 +2771,11 @@ class GBMRegressor(_GBMRegressorBase):
                 dart_sample_type=(
                     self.dart_sample_type if self.boosting_mode == "dart" else None
                 ),
+                tweedie_variance_power=(
+                    self.tweedie_variance_power
+                    if self._objective_name() == "tweedie"
+                    else None
+                ),
             )
         else:
             train_regression_artifact = _load_native_train_regression_artifact()
@@ -2739,6 +2836,11 @@ class GBMRegressor(_GBMRegressorBase):
                 ),
                 dart_sample_type=(
                     self.dart_sample_type if self.boosting_mode == "dart" else None
+                ),
+                tweedie_variance_power=(
+                    self.tweedie_variance_power
+                    if self._objective_name() == "tweedie"
+                    else None
                 ),
             )
 
@@ -3168,6 +3270,107 @@ class GBMRegressor(_GBMRegressorBase):
         if include_expected_value:
             return float(expected_value), shap_matrix
         return shap_matrix
+
+    def shap_interaction_values(
+        self, X: object, *, include_expected_value: bool = False
+    ):
+        """Return pairwise SHAP interaction values for the provided rows.
+
+        Implements Lundberg et al. (2020) Algorithm 2 in polynomial time
+        (``O(T · L · D² · M)``).  Returns a 3-D structure
+        ``values[row][i][j]`` such that:
+
+        - ``values[row][i][j] == values[row][j][i]`` (symmetric).
+        - ``Σ_j values[row][i][j] == shap_values(X)[row][i]`` (row marginal).
+        - ``Σ_i Σ_j values[row][i][j] + expected_value == predict(x)``
+          (full additivity, mod f32 round-off).
+
+        Linear-leaf (``leaf_model="linear"``) artifacts are rejected in
+        v0.11.0 — pairwise interactions on PL leaves require a different
+        decomposition that is not yet implemented.
+        """
+        if not self._is_fitted:
+            raise RuntimeError(
+                "GBMRegressor must be fit before shap_interaction_values"
+            )
+        if self._artifact_bytes is None:
+            raise RuntimeError("GBMRegressor native artifact is not available")
+
+        binning_kwargs = self._shap_binning_kwargs()
+        if binning_kwargs is not None:
+            rows = self._native_matrix_flat_payload(X) or self._validate_rows(X)
+            row_feature_count = (
+                rows[2] if isinstance(rows, tuple) else len(rows[0])
+            )
+            if row_feature_count != self._n_features_in:
+                raise ValueError(
+                    f"X feature count {row_feature_count} does not match fitted feature count "
+                    f"{self._n_features_in}"
+                )
+        elif self._uses_continuous_binning:
+            rows = self._quantize_rows_for_prediction(self._validate_rows(X))
+            if len(rows[0]) != self._n_features_in:
+                raise ValueError(
+                    f"X feature count {len(rows[0])} does not match fitted feature count "
+                    f"{self._n_features_in}"
+                )
+        else:
+            dense_payload = self._native_matrix_flat_payload(X)
+            if dense_payload is not None:
+                _, _, feature_count = dense_payload
+                if feature_count != self._n_features_in:
+                    raise ValueError(
+                        f"X feature count {feature_count} does not match fitted feature count "
+                        f"{self._n_features_in}"
+                    )
+                rows = dense_payload
+            else:
+                rows = self._validate_rows(X)
+                if len(rows[0]) != self._n_features_in:
+                    raise ValueError(
+                        f"X feature count {len(rows[0])} does not match fitted feature count "
+                        f"{self._n_features_in}"
+                    )
+
+        if binning_kwargs is not None:
+            from alloygbm._alloygbm import (
+                shap_explain_interactions_dense_with_binning,
+                shap_explain_interactions_with_binning,
+            )
+
+            if isinstance(rows, tuple):
+                flat, row_count, feature_count = rows
+                expected_value, values = shap_explain_interactions_dense_with_binning(
+                    self._artifact_bytes,
+                    flat,
+                    row_count,
+                    feature_count,
+                    **binning_kwargs,
+                )
+            else:
+                expected_value, values = shap_explain_interactions_with_binning(
+                    self._artifact_bytes, rows, **binning_kwargs
+                )
+        else:
+            from alloygbm._alloygbm import (
+                shap_explain_interactions,
+                shap_explain_interactions_dense,
+            )
+
+            if isinstance(rows, tuple):
+                flat, row_count, feature_count = rows
+                expected_value, values = shap_explain_interactions_dense(
+                    self._artifact_bytes, flat, row_count, feature_count
+                )
+            else:
+                expected_value, values = shap_explain_interactions(
+                    self._artifact_bytes, rows
+                )
+
+        matrix = [[list(col) for col in row] for row in values]
+        if include_expected_value:
+            return float(expected_value), matrix
+        return matrix
 
     def feature_importances(
         self, X: object, *, method: str = "shap"

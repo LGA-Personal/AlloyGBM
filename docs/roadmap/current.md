@@ -4,6 +4,74 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
+The `0.11.0` release ships two small, independent wins: pairwise SHAP
+interaction values on `GBMRegressor` (Lundberg et al. 2020 Algorithm 2,
+polynomial-time `O(T·L·D²·M)` via a verbatim port of the canonical
+`slundberg/shap` C++ reference), and three new GLM regression
+objectives — Poisson, Gamma, and Tweedie — on `GBMRegressor`. All
+three GLM objectives use a log link, return `exp(raw)` from
+`predict()`, validate target-domain constraints before training, and
+ship with matching deviance metrics in `alloygbm.evaluation`. Default
+behaviour for every existing user-facing API remains byte-identical
+to v0.10.6 when neither new feature is opted into.
+
+## What Shipped In v0.11.0
+
+### SHAP interaction values (Lundberg Algorithm 2)
+
+`GBMRegressor.shap_interaction_values(X)` returns the
+`(n_rows, n_features, n_features)` pairwise SHAP-interaction tensor in
+`O(T · L · D² · M)` time. Implements Lundberg et al. (2020) "From local
+explanations to global understanding with explainable AI for trees"
+Algorithm 2, ported verbatim from `shap/cext/tree_shap.h`'s
+`tree_shap_recursive`. Three invariants are pinned by tests:
+
+- **Symmetric**: `values[r][i][j] == values[r][j][i]`.
+- **Row-marginal**: `Σ_j values[r][i][j] == shap_values(X)[r][i]`.
+- **Full additivity**: `Σ_i Σ_j values[r][i][j] + expected_value
+  == predict(x)` within `atol = 1e-5 + rtol = 1e-4 · |predict(x)|`.
+
+The diagonal is filled from the row-marginal invariant (the "main
+effect" of each feature after subtracting off-diagonals). New Rust
+crate-level surface: `alloygbm_shap::explain_interactions_from_artifact_bytes`,
+`_with_binning`, and `ShapInteractionBatch`. Four new PyO3
+pyfunctions wrap them.
+
+Scope limit: constant-leaf artifacts only. `leaf_model="linear"` is
+rejected by the entry point with a clear error. Multi-output and
+multiclass interactions are deferred.
+
+### Poisson / Gamma / Tweedie regression objectives
+
+`GBMRegressor` accepts three new GLM regression objectives with
+log-link semantics (`predict()` returns `exp(raw)`):
+
+- `objective="poisson"` — count regression. Targets must be `>= 0`.
+  Gradients: `(μ − y) · w`; hessians: `μ · w`; loss: Poisson deviance.
+- `objective="gamma"` — strictly-positive continuous regression.
+  Targets must be `> 0`. Gradients: `(1 − y/μ) · w`; hessians:
+  `(y/μ) · w`; loss: Gamma deviance.
+- `objective="tweedie"` — compound Poisson-gamma for
+  `1 < variance_power < 2`. Set via new
+  `tweedie_variance_power: float = 1.5` constructor kwarg. Targets must
+  be `>= 0`. Gradients: `(μ^(2-p) − y·μ^(1-p)) · w`; hessians:
+  `μ^(2-p) · w` (LightGBM/XGBoost simplified Newton form).
+
+All three use weighted-mean-in-log-space initial predictions, reuse
+the standard `ObjectiveOps` machinery (Newton-Raphson leaves), and
+compose with DART/GOSS/leaf-wise/warm-start/MorphBoost,
+`neutralization="per_round_gradient"`, and `"split_penalty"`. The
+`"pre_target"` mode remains squared-error-only.
+
+Three new deviance metrics in `alloygbm.evaluation`:
+`poisson_deviance(y_true, y_pred)`, `gamma_deviance(y_true, y_pred)`,
+`tweedie_deviance(y_true, y_pred, variance_power=p)`.
+
+Scope limit: single-output `GBMRegressor` only. Not on `GBMRanker`,
+`GBMClassifier`, multiclass softmax, or the joint multi-output ranker.
+
+## What Shipped In v0.10.6
+
 The `0.10.6` release closes the last v0.10.4-deferred joint-path
 follow-up: all three factor-neutralization modes (`pre_target`,
 `per_round_gradient`, `split_penalty`) now work on the joint

@@ -29,6 +29,9 @@ pearson_correlation = evaluation_module.pearson_correlation
 r2_score = evaluation_module.r2_score
 rank_ic = evaluation_module.rank_ic
 rmse = evaluation_module.rmse
+poisson_deviance = evaluation_module.poisson_deviance
+gamma_deviance = evaluation_module.gamma_deviance
+tweedie_deviance = evaluation_module.tweedie_deviance
 
 
 class _FakeNumpyLike:
@@ -187,6 +190,77 @@ class EvaluationMetricTests(unittest.TestCase):
             rank_ic([1.0, 2.0], [1.0])
         with self.assertRaisesRegex(ValueError, "same number of values"):
             hit_rate([1.0, 2.0], [1.0])
+
+    # ── v0.11.0: GLM deviance metrics ────────────────────────────────
+
+    def test_poisson_deviance_zero_when_perfect_fit(self) -> None:
+        y = [1.0, 2.0, 3.0]
+        self.assertAlmostEqual(poisson_deviance(y, y), 0.0, places=9)
+
+    def test_poisson_deviance_handles_zero_y(self) -> None:
+        # y=0, mu=1: 2 * (-(0 - 1)) = 2.0
+        self.assertAlmostEqual(poisson_deviance([0.0], [1.0]), 2.0)
+
+    def test_poisson_deviance_rejects_non_positive_pred(self) -> None:
+        with self.assertRaisesRegex(ValueError, "y_pred must be > 0"):
+            poisson_deviance([1.0], [0.0])
+
+    def test_poisson_deviance_rejects_negative_y(self) -> None:
+        with self.assertRaisesRegex(ValueError, "y_true must be >= 0"):
+            poisson_deviance([-0.5], [1.0])
+
+    def test_gamma_deviance_zero_when_perfect_fit(self) -> None:
+        y = [1.0, 2.0, 4.0]
+        self.assertAlmostEqual(gamma_deviance(y, y), 0.0, places=9)
+
+    def test_gamma_deviance_rejects_zero_y(self) -> None:
+        with self.assertRaisesRegex(ValueError, "y_true must be > 0"):
+            gamma_deviance([0.0], [1.0])
+
+    def test_tweedie_deviance_decreases_at_match(self) -> None:
+        y = [1.0, 2.0, 4.0]
+        d_match = tweedie_deviance(y, y, variance_power=1.5)
+        d_mismatch = tweedie_deviance(
+            y, [v * 2.0 for v in y], variance_power=1.5
+        )
+        self.assertLess(d_match, d_mismatch)
+
+    def test_tweedie_deviance_rejects_bad_variance_power(self) -> None:
+        with self.assertRaisesRegex(ValueError, "variance_power"):
+            tweedie_deviance([1.0], [1.0], variance_power=1.0)
+        with self.assertRaisesRegex(ValueError, "variance_power"):
+            tweedie_deviance([1.0], [1.0], variance_power=2.0)
+
+    def test_deviance_metrics_accept_numpy_arrays(self) -> None:
+        """Regression for PR #41 review C1: `if not y_true:` raised on
+        multi-element numpy arrays via the ambiguous-truth-value pitfall.
+        All three GLM deviance helpers now route through the shared
+        `_validated_pair` coercion path used by every other metric."""
+        try:
+            import numpy as _np
+        except ImportError:
+            self.skipTest("numpy not installed")
+
+        y = _np.array([1.0, 2.0, 3.0])
+        self.assertAlmostEqual(poisson_deviance(y, y), 0.0, places=9)
+        self.assertAlmostEqual(gamma_deviance(y, y), 0.0, places=9)
+        d_match = tweedie_deviance(y, y, variance_power=1.5)
+        d_mismatch = tweedie_deviance(
+            y, _np.array([2.0, 4.0, 6.0]), variance_power=1.5
+        )
+        self.assertLess(d_match, d_mismatch)
+
+    def test_deviance_metrics_reject_non_finite_via_shared_helper(self) -> None:
+        """Regression for PR #41 review C1: routing through `_validated_pair`
+        means `nan` / `inf` are rejected before the GLM domain check fires."""
+        with self.assertRaisesRegex(ValueError, "finite"):
+            poisson_deviance([1.0, float("nan")], [1.0, 1.0])
+        with self.assertRaisesRegex(ValueError, "finite"):
+            gamma_deviance([1.0, float("inf")], [1.0, 1.0])
+        with self.assertRaisesRegex(ValueError, "finite"):
+            tweedie_deviance(
+                [1.0, float("nan")], [1.0, 1.0], variance_power=1.5
+            )
 
 
 if __name__ == "__main__":

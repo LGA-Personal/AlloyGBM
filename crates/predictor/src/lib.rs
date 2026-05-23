@@ -755,14 +755,18 @@ impl Predictor {
         self.predict_batch(rows)
     }
 
-    /// Apply objective-specific post-transform to a raw prediction (logit).
-    /// For `"squared_error"` this is identity; for `"binary_crossentropy"` this applies sigmoid.
+    /// Apply objective-specific post-transform to a raw prediction.
+    /// - `"squared_error"`, `"queryrmse"`, ranking objectives: identity.
+    /// - `"binary_crossentropy"`: sigmoid (logit → probability).
+    /// - `"poisson"` / `"gamma"` / `"tweedie"`: `exp` (log-link → mean μ).
+    ///   η is clamped to [-50, 50] to keep μ in finite f32 range, mirroring
+    ///   the training-side clamp in `glm_clamp_exp`.
     #[inline]
     fn post_transform(&self, raw: f32) -> f32 {
-        if self.metadata.objective == "binary_crossentropy" {
-            sigmoid(raw)
-        } else {
-            raw
+        match self.metadata.objective.as_str() {
+            "binary_crossentropy" => sigmoid(raw),
+            "poisson" | "gamma" | "tweedie" => raw.clamp(-50.0, 50.0).exp(),
+            _ => raw,
         }
     }
 
@@ -1489,6 +1493,7 @@ mod tests {
             leaf_model: LeafModelKind::Constant,
             neutralization_config: None,
             boosting_mode: alloygbm_core::BoostingMode::Standard,
+            tweedie_variance_power: 1.5,
         }
     }
 

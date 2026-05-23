@@ -100,3 +100,29 @@ linear leaves only.
    :align: center
 
    Example of a prediction path and additive SHAP-style contribution breakdown.
+
+SHAP interaction values (v0.11.0+)
+----------------------------------
+
+``GBMRegressor.shap_interaction_values(X)`` returns pairwise SHAP
+attributions as an ``(n_rows, n_features, n_features)`` tensor.
+Implements Lundberg et al. (2020) "From local explanations to global
+understanding with explainable AI for trees" Algorithm 2 in polynomial
+time ``O(T · L · D² · M)`` where ``M`` is the feature count.
+
+Invariants (within ``atol = 1e-5 + rtol = 1e-4 · |predict(x)|``):
+
+- **Symmetric**: ``values[r][i][j] == values[r][j][i]``.
+- **Row-marginal**: ``Σ_j values[r][i][j] == shap_values(X)[r][i]``.
+- **Full additivity**: ``Σ_i Σ_j values[r][i][j] + expected_value
+  == predict(x)``.
+
+The diagonal ``values[r][i][i]`` is the "main effect" of feature ``i``
+after subtracting all off-diagonal interactions.  Pass
+``include_expected_value=True`` to receive a ``(expected_value,
+interactions)`` tuple.
+
+Scope limits: ``leaf_model="linear"`` artifacts are rejected (PL-leaf
+pairwise interactions are deferred); ``GBMClassifier``, ``GBMRanker``,
+and the joint multi-output ranker do not have an interaction-values
+surface yet.
