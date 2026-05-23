@@ -333,7 +333,7 @@ artifact_bytes = model.artifact_bytes
 
 ### Estimators
 
-- **`GBMRegressor`** -- squared-error regression with dataset-aware `training_policy`
+- **`GBMRegressor`** -- regression with dataset-aware `training_policy`. As of v0.11.0 supports five built-in objectives: `"squared_error"` (default), `"poisson"`, `"gamma"`, `"tweedie"` (with `tweedie_variance_power` ∈ (1, 2)), and custom callables. All three GLM objectives use a log-link (`predict()` returns `exp(raw)`).
 - **`GBMClassifier`** -- binary classification with log-loss objective, `predict_proba`, sklearn `ClassifierMixin`
 - **`GBMRanker`** -- learning-to-rank with 5 objectives: `rank:pairwise`, `rank:ndcg`, `rank:xendcg`, `queryrmse`, `yetirank`
 - **`MultiLabelGBMRanker`** -- multi-output ranking: `y` shaped `(n_rows, n_labels)`, `predict` returns the same shape, per-label `ranking_objective` lists supported. As of v0.10.1 also supports `multi_label_mode="joint"` for shared-tree training across all K labels via `engine::joint::fit_joint_multi_output` (default `"independent"` preserves the K-per-label `GBMRanker` fallback). v0.10.2 expanded joint-mode kwargs to include `tree_growth="leaf"` + `max_leaves`, `interaction_constraints`, `min_split_gain`, `row_subsample`, and `col_subsample`. v0.10.3 wires native-categorical splits (`categorical_feature_indices` + `max_cat_threshold`) through the joint Python bridge, adds `boosting_mode="goss"` and `boosting_mode="dart"` to the joint trainer, and supports `warm_start=True` + `init_model=...` on the joint path. v0.10.4 adds MorphBoost to the joint trainer (`training_mode="morph"` + the full `morph_*` / `lr_schedule` surface, with EMA warm-resume via the `MorphMetadata` artifact section). v0.10.5 adds joint DRO leaves (`leaf_solver="dro"` + `dro_radius` / `dro_metric`). v0.10.6 closes the last v0.10.4-deferred follow-up by adding all three factor-neutralization modes (`neutralization="pre_target" | "per_round_gradient" | "split_penalty"` + `factor_exposures=` on `fit()`) to the joint trainer — full feature parity with the single-output path.
@@ -366,6 +366,7 @@ artifact_bytes = model.artifact_bytes
 
 - Zero-copy numpy prediction from native artifacts
 - TreeSHAP explanations via `shap_values(...)` (polynomial-time, no feature limit, also supports `leaf_model="linear"` as a best-effort interventional decomposition)
+- **Pairwise SHAP interaction values** (v0.11.0+) via `GBMRegressor.shap_interaction_values(X)` — Lundberg et al. (2020) Algorithm 2 in polynomial time `O(T·L·D²·M)`. Row marginal recovers per-feature SHAP; full sum reconstructs the prediction.
 - Global feature importance via `feature_importances(...)`
 - Artifact-backed prediction via `predict_from_artifact(...)`
 
@@ -377,6 +378,7 @@ artifact_bytes = model.artifact_bytes
 ### Metrics
 
 - Regression: `rmse`, `mae`, `r2_score`
+- GLM deviance (v0.11.0+): `poisson_deviance`, `gamma_deviance`, `tweedie_deviance`
 - Classification: `accuracy`, `log_loss`
 - Ranking: `ndcg`
 - Finance: `pearson_correlation`, `rank_ic`, `hit_rate`, `icir`

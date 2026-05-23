@@ -455,4 +455,79 @@ After `fit(...)`, `GBMRegressor` may expose:
 - `stop_reason_` / `rounds_completed_`
   - Engine's early-stop reason and actual committed round count.
 
+## Regression objectives (v0.11.0+)
+
+`GBMRegressor` accepts the following values for the `objective` kwarg:
+
+- `"squared_error"` (default) — standard least-squares regression.
+- `"poisson"` — log-link Poisson regression for count targets. Targets
+  must be `>= 0`. `predict()` returns `exp(raw)` (the conditional mean).
+  Newton gradients/hessians; weighted-mean-in-log-space initial prediction.
+- `"gamma"` — log-link Gamma regression for strictly-positive continuous
+  targets. Targets must be `> 0`. `predict()` returns `exp(raw)`.
+- `"tweedie"` — log-link compound Poisson-gamma regression for
+  `1 < variance_power < 2`. Useful for insurance/claims data with a mass
+  at zero and a positive tail. Set `tweedie_variance_power=1.5` (or
+  another value in `(1, 2)`). Targets must be `>= 0`. `predict()`
+  returns `exp(raw)`. Uses LightGBM/XGBoost's simplified Newton hessian
+  (drops the negative second-derivative term that breaks histogram aggregation).
+- Custom callable — any user-supplied `(predictions, targets) →
+  (gradients, hessians)` function.
+
+`tweedie_variance_power: float = 1.5` — only used when
+`objective="tweedie"`. Must satisfy `1 < p < 2`. For `p = 1` use
+`objective="poisson"`; for `p = 2` use `objective="gamma"`.
+
+Target-domain pre-validation runs before training starts, raising
+`ValueError` with `min(y)` in the message when targets violate the
+objective's domain (negative y for Poisson/Tweedie, non-positive y for
+Gamma).
+
+The three GLM objectives compose with `boosting_mode="dart"`,
+`boosting_mode="goss"`, warm-start, `tree_growth="leaf"`,
+`neutralization="per_round_gradient"` and
+`neutralization="split_penalty"`, and `training_mode="morph"`.
+`neutralization="pre_target"` remains squared-error-only (the
+residualize-target == residualize-gradient identity doesn't hold under
+log-link).
+
+Three deviance metrics are exported from `alloygbm.evaluation`:
+
+```python
+from alloygbm.evaluation import (
+    poisson_deviance, gamma_deviance, tweedie_deviance
+)
+```
+
+## SHAP interaction values (v0.11.0+)
+
+`GBMRegressor.shap_interaction_values(X)` returns pairwise SHAP
+attributions as an `(n_rows, n_features, n_features)` tensor.
+Implements Lundberg et al. (2020) "From local explanations to global
+understanding with explainable AI for trees" Algorithm 2 in polynomial
+time `O(T · L · D² · M)` where `M` is the feature count.
+
+Invariants (within `atol = 1e-5 + rtol = 1e-4 · |predict(x)|`):
+
+- **Symmetric**: `values[r][i][j] == values[r][j][i]`.
+- **Row-marginal**: `sum_j values[r][i][j] == shap_values(X)[r][i]`.
+- **Full additivity**: `sum_i sum_j values[r][i][j] + expected_value
+  == predict(x)`.
+
+The diagonal `values[r][i][i]` is the "main effect" of feature `i`
+after subtracting all off-diagonal interactions; the off-diagonals
+`values[r][i][j]` (i ≠ j) are the pairwise interaction contributions.
+
+Pass `include_expected_value=True` to receive a `(expected_value,
+interactions)` tuple.
+
+Scope limits in v0.11.0:
+
+- `leaf_model="linear"` (piecewise-linear leaves) is rejected with a
+  clear error. The interventional row-deviation term lacks a
+  polynomial-time pairwise decomposition; this is deferred to a future
+  release.
+- Multi-output (joint multi-label) and multiclass softmax interactions
+  are not supported.
+
 See [Quickstart](quickstart.md) for an end-to-end example.
