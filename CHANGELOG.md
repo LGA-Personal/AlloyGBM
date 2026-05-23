@@ -1,5 +1,95 @@
 # Changelog
 
+## v0.11.0 (2026-05-22)
+
+Two small, independent wins in one release.
+
+### SHAP interaction values (Lundberg Algorithm 2)
+
+`GBMRegressor.shap_interaction_values(X)` returns pairwise SHAP
+attributions as a `(n_rows, n_features, n_features)` tensor.  Implements
+Lundberg et al. (2020) "From local explanations to global understanding
+with explainable AI for trees" Algorithm 2 in polynomial time
+`O(T · L · D² · M)` where `M` is the feature count.  The implementation
+is a verbatim port of the canonical `slundberg/shap` C++ reference
+(`shap/cext/tree_shap.h::tree_shap_recursive`) — including the
+`condition_fraction` accumulator approach, the "skip path-extend on
+parent_feature_index == conditioning_feature" trick, and the unsigned
+underflow that produces an empty leaf scan when conditioning fires at
+the very first split of a tree.
+
+Three invariants pinned by tests (within `atol = 1e-5 + rtol = 1e-4 · |predict(x)|`):
+
+- **Symmetric**: `Φ_ij == Φ_ji`.
+- **Row-marginal**: `Σ_j Φ_ij == φ_i` (per-feature SHAP).
+- **Full additivity**: `Σ_i Σ_j Φ_ij + expected_value == predict(x)`.
+
+The diagonal is filled from the row-marginal invariant; off-diagonals
+match the brute-force exact-Shapley enumeration within 5e-3 on
+synthetic depth-3 4-feature and depth-5 3-feature models (the latter
+with forced feature duplicates on every path).
+
+New Rust crate-level surface:
+
+- `alloygbm_shap::ShapInteractionBatch`
+- `alloygbm_shap::explain_interactions_from_artifact_bytes`
+- `alloygbm_shap::explain_interactions_from_artifact_bytes_with_binning`
+
+New PyO3 pyfunctions: `shap_explain_interactions`,
+`shap_explain_interactions_dense`, and `_with_binning` variants.
+
+Scope limit: constant-leaf artifacts only.  `leaf_model="linear"` is
+rejected by the entry point with a clear error.  Multi-output and
+multiclass softmax interactions are deferred.
+
+### Poisson / Gamma / Tweedie regression objectives
+
+`GBMRegressor` accepts three new GLM regression objectives with log-link
+semantics (`predict()` returns `exp(raw)`):
+
+- `objective="poisson"` — count regression. Targets must be `>= 0`.
+  Gradients: `(μ − y) · w`; hessians: `μ · w`; loss: Poisson deviance.
+- `objective="gamma"` — strictly-positive continuous regression. Targets
+  must be `> 0`. Gradients: `(1 − y/μ) · w`; hessians: `(y/μ) · w`;
+  loss: Gamma deviance.
+- `objective="tweedie"` — compound Poisson-gamma for
+  `1 < variance_power < 2`. Set via new
+  `tweedie_variance_power: float = 1.5` constructor kwarg. Targets must
+  be `>= 0`. Gradients: `(μ^(2-p) − y · μ^(1-p)) · w`; hessians:
+  `μ^(2-p) · w` (LightGBM/XGBoost simplified Newton form).
+
+All three use weighted-mean-in-log-space initial predictions and reuse
+the standard `ObjectiveOps` machinery — Newton-Raphson leaves and all
+training features (DART, GOSS, leaf-wise, warm-start, MorphBoost,
+`neutralization="per_round_gradient"` and `"split_penalty"`) compose
+without modification.
+
+Pre-target factor neutralization remains squared-error-only (the
+residualize-target == residualize-gradient identity doesn't hold for
+log-link objectives).
+
+New deviance metrics in `alloygbm.evaluation`:
+`poisson_deviance(y_true, y_pred)`, `gamma_deviance(y_true, y_pred)`,
+`tweedie_deviance(y_true, y_pred, variance_power=p)`.
+
+Target-domain validation raises `ValueError` before training starts
+when targets violate the objective's domain (negative y for
+Poisson/Tweedie, non-positive y for Gamma).
+
+`TrainParams` gains one new public field: `tweedie_variance_power: f32`
+(default 1.5).  Only consulted for `objective="tweedie"`; ignored
+otherwise.  Predictor post-transform table extended: `exp(raw.clamp(-50, 50))`
+for `"poisson"`, `"gamma"`, `"tweedie"` artifacts.
+
+Scope limit: single-output regression only.  Not on `GBMRanker`,
+`GBMClassifier`, multiclass softmax, or the joint multi-output ranker.
+
+### Internal helpers (small)
+
+- New `glm_clamp_exp(eta)` and `glm_weighted_target_sum(targets, weights)`
+  helpers in `crates/engine/src/lib.rs` shared across the three GLM
+  objectives.
+
 ## v0.10.6 (2026-05-22)
 
 ### Joint trainer: factor neutralization (all three modes)

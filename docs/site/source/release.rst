@@ -1,7 +1,37 @@
 Release and platform policy
 ===========================
 
-AlloyGBM ``0.10.6`` release notes and platform policy.
+AlloyGBM ``0.11.0`` release notes and platform policy.
+
+What's new in 0.11.0
+--------------------
+
+Two small, independent wins in one release.
+
+**SHAP interaction values.** ``GBMRegressor.shap_interaction_values(X)``
+returns the ``(n_rows, n_features, n_features)`` pairwise SHAP-interaction
+tensor in ``O(T · L · D² · M)`` time. Implements Lundberg et al. (2020)
+Algorithm 2, ported verbatim from the canonical ``slundberg/shap`` C++
+reference. Three invariants are pinned by tests: symmetric
+(``Φ_ij == Φ_ji``), row-marginal recovers per-feature SHAP
+(``Σ_j Φ_ij == φ_i``), and full additivity reconstructs the prediction
+(``Σ_i Σ_j Φ_ij + expected_value == predict(x)`` within
+``atol = 1e-5 + rtol = 1e-4 · |predict(x)|``). Constant-leaf artifacts only;
+``leaf_model="linear"`` is rejected.
+
+**Poisson / Gamma / Tweedie GLM objectives.** ``GBMRegressor`` accepts
+three new log-link GLM objectives. All three use weighted-mean-in-log-space
+initial predictions, Newton-Raphson leaves, and the standard ``ObjectiveOps``
+machinery. ``predict()`` returns ``exp(raw)``. Tweedie supports
+``1 < variance_power < 2`` (compound Poisson-gamma) via the new
+``tweedie_variance_power: float = 1.5`` constructor kwarg. New deviance
+metrics in ``alloygbm.evaluation``: ``poisson_deviance``, ``gamma_deviance``,
+``tweedie_deviance(y_true, y_pred, variance_power=p)``. Target-domain
+validation raises ``ValueError`` before training starts when targets violate
+the domain (negative y for Poisson/Tweedie, non-positive y for Gamma).
+
+Single-output ``GBMRegressor`` only; not on Ranker, Classifier,
+multiclass, or the joint multi-output ranker.
 
 What's new in 0.10.6
 --------------------
