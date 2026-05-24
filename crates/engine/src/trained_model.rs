@@ -24,7 +24,7 @@ use crate::tree_node::{decode_tree_node_id, row_satisfies_stump_path_features, s
 use crate::types::{
     ArtifactCompatibilityMode, ArtifactCompatibilityReport, NodeDebugStats, TrainedStump,
 };
-use crate::{
+use crate::artifact::{
     artifact_compatibility_report_from_sections, decode_optional_node_debug_stats_section,
     decode_trained_model_payload, encode_node_debug_stats_payload, encode_predictor_layout_payload,
     encode_trained_model_payload, required_single_section, resolve_predictor_layout,

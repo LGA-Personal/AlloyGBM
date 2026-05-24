@@ -12,10 +12,8 @@ use alloygbm_core::{
 
 use crate::error::{EngineError, EngineResult};
 use crate::tree_node::TREE_NODE_STRIDE;
-use crate::{
-    IterationDiagnostics, IterationStopReason, TrainedStump, read_f32_le, read_u16_le,
-    read_u32_le, required_single_section,
-};
+use crate::artifact::{read_f32_le, read_u16_le, read_u32_le, required_single_section};
+use crate::{IterationDiagnostics, IterationStopReason, TrainedStump};
 
 /// Trained multi-class model: K tree sequences (one per class).
 #[derive(Debug, Clone, PartialEq)]
