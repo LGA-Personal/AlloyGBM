@@ -1,6 +1,6 @@
 use alloygbm_categorical::{TargetEncoderConfig, fit_transform_target_encoder};
 use alloygbm_core::{
-    BinnedMatrix, BoostingMode, CategoricalStatePayloadV1, CoreError, DartTreeWeightsPayload,
+    BinnedMatrix, BoostingMode, CategoricalStatePayloadV1, DartTreeWeightsPayload,
     DatasetMatrix, Device, DroConfig, DroMetadataPayload, FactorExposureMatrix,
     FeatureBaselinePayload, FeatureTile, GradientEmaStats, GradientPair, HistogramBundle,
     LeafModelKind, LeafSolverKind, LeafValue, LinearHistogramBundle, LinearLeaf,
@@ -25,9 +25,10 @@ use alloygbm_core::{
 };
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
-use std::error::Error;
-use std::fmt::{Display, Formatter};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+mod error;
+pub use error::{EngineError, EngineResult};
 
 pub mod dart;
 pub use dart::{DartState, apply_normalization, select_dropouts};
@@ -43,37 +44,6 @@ pub use joint::{JointObjective, JointRoundResult, JointWarmStartState, build_joi
 
 /// Small epsilon added to leaf value denominators to prevent division by zero.
 const LEAF_EPSILON: f32 = 1e-6;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EngineError {
-    InvalidConfig(String),
-    ContractViolation(String),
-    BackendUnavailable(String),
-    NotImplemented(String),
-    Core(CoreError),
-}
-
-impl Display for EngineError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidConfig(msg) => write!(f, "invalid config: {msg}"),
-            Self::ContractViolation(msg) => write!(f, "contract violation: {msg}"),
-            Self::BackendUnavailable(msg) => write!(f, "backend unavailable: {msg}"),
-            Self::NotImplemented(msg) => write!(f, "not implemented: {msg}"),
-            Self::Core(err) => write!(f, "core error: {err}"),
-        }
-    }
-}
-
-impl Error for EngineError {}
-
-impl From<CoreError> for EngineError {
-    fn from(value: CoreError) -> Self {
-        Self::Core(value)
-    }
-}
-
-pub type EngineResult<T> = Result<T, EngineError>;
 
 /// Type alias for an active node entry in the level-wise tree builder.
 /// Fields: (local_node_id, row_indices, histograms, parent_leaf_value, parent_linear_leaf)

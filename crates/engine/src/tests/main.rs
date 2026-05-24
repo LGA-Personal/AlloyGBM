@@ -1,4 +1,5 @@
     use super::*;
+    use alloygbm_core::CoreError;
     use std::cell::Cell;
 
     struct MockBackend;
