@@ -30,6 +30,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 mod error;
 pub use error::{EngineError, EngineResult};
 
+mod env;
+use env::{
+    experiment_force_manual_policy_enabled, experiment_leaf_refinement_enabled,
+    split_l2_env_is_configured, split_selection_options_from_env,
+};
+
 pub mod dart;
 pub use dart::{DartState, apply_normalization, select_dropouts};
 
@@ -6573,65 +6579,7 @@ fn validate_gradient_pairs(gradients: &[GradientPair], row_count: usize) -> Engi
     Ok(())
 }
 
-const SPLIT_L2_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_SPLIT_L2";
-const SPLIT_L1_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_SPLIT_L1";
-const MIN_CHILD_HESS_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_MIN_CHILD_HESS";
-const SPLIT_MIN_LEAF_MAGNITUDE_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_SPLIT_MIN_LEAF_MAGNITUDE";
-const FORCE_MANUAL_POLICY_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_FORCE_MANUAL_POLICY";
-const ENABLE_LEAF_REFINEMENT_ENV_VAR: &str = "ALLOYGBM_EXPERIMENT_ENABLE_LEAF_REFINEMENT";
 const AUTO_SPLIT_L2_NOISY_SMALL_WIDE: f32 = 2.0;
-
-fn split_selection_options_from_env() -> EngineResult<SplitSelectionOptions> {
-    Ok(SplitSelectionOptions {
-        l2_lambda: parse_nonnegative_env_f32(SPLIT_L2_ENV_VAR)?,
-        l1_alpha: parse_nonnegative_env_f32(SPLIT_L1_ENV_VAR)?,
-        min_child_hessian: parse_nonnegative_env_f32(MIN_CHILD_HESS_ENV_VAR)?,
-        min_leaf_magnitude: parse_nonnegative_env_f32(SPLIT_MIN_LEAF_MAGNITUDE_ENV_VAR)?,
-        dro_config: None,
-        missing_bin_index: MISSING_BIN_U8 as usize,
-    })
-}
-
-fn experiment_force_manual_policy_enabled() -> bool {
-    env_toggle_enabled(FORCE_MANUAL_POLICY_ENV_VAR)
-}
-
-fn experiment_leaf_refinement_enabled() -> bool {
-    env_toggle_enabled(ENABLE_LEAF_REFINEMENT_ENV_VAR)
-}
-
-fn env_toggle_enabled(env_name: &str) -> bool {
-    match std::env::var(env_name) {
-        Ok(value) => {
-            let normalized = value.trim().to_ascii_lowercase();
-            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
-        }
-        Err(_) => false,
-    }
-}
-
-fn parse_nonnegative_env_f32(env_name: &str) -> EngineResult<f32> {
-    match std::env::var(env_name) {
-        Ok(value) => {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                return Ok(0.0);
-            }
-            let parsed = trimmed.parse::<f32>().map_err(|_| {
-                EngineError::InvalidConfig(format!(
-                    "{env_name} must be a finite, non-negative f32 value"
-                ))
-            })?;
-            if !parsed.is_finite() || parsed < 0.0 {
-                return Err(EngineError::InvalidConfig(format!(
-                    "{env_name} must be finite and >= 0"
-                )));
-            }
-            Ok(parsed)
-        }
-        Err(_) => Ok(0.0),
-    }
-}
 
 fn split_selection_options_for_training(
     params: &TrainParams,
@@ -6665,10 +6613,6 @@ fn split_selection_options_for_training(
         options.l2_lambda = AUTO_SPLIT_L2_NOISY_SMALL_WIDE;
     }
     Ok(options)
-}
-
-fn split_l2_env_is_configured() -> bool {
-    std::env::var_os(SPLIT_L2_ENV_VAR).is_some()
 }
 
 fn should_apply_auto_split_l2(
