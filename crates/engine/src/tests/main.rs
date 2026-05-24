@@ -1,5 +1,5 @@
     use super::*;
-    use alloygbm_core::CoreError;
+    use alloygbm_core::{CoreError, DroConfig, MorphConfig};
     use std::cell::Cell;
 
     struct MockBackend;
