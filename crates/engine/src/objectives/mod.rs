@@ -1,11 +1,13 @@
 mod binary;
 mod glm;
+mod multiclass;
 mod quantile;
 mod ranking;
 mod squared;
 
 pub use binary::BinaryCrossEntropyObjective;
 pub use glm::{GammaObjective, PoissonObjective, TweedieObjective};
+pub use multiclass::MultiClassSoftmaxObjective;
 pub use quantile::QuantileObjective;
 pub use ranking::{
     LambdaMARTObjective, PairwiseRankingObjective, QueryRMSEObjective, XeNDCGObjective,
