@@ -1,4 +1,5 @@
     use super::*;
+    use alloygbm_categorical::TargetEncoderConfig;
     use alloygbm_core::{CoreError, DroConfig, MorphConfig};
     use std::cell::Cell;
 
