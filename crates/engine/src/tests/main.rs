@@ -1,6 +1,7 @@
     use super::*;
     use alloygbm_categorical::TargetEncoderConfig;
-    use alloygbm_core::{CoreError, DroConfig, MorphConfig};
+    use alloygbm_core::{CoreError, Device, DroConfig, LeafSolverKind, MorphConfig, NeutralizationKind};
+    use crate::factor::apply_pre_target_neutralization;
     use std::cell::Cell;
 
     struct MockBackend;

@@ -23,12 +23,12 @@ use crate::shared_histogram::{
     MultiOutputHistogram, build_multi_output_histogram_inplace, compute_multi_output_split_gain,
 };
 use crate::{
-    Device, InteractionConstraintIndex, LambdaMARTObjective, ObjectiveOps,
-    PairwiseRankingObjective, QueryRMSEObjective, SquaredErrorObjective, TrainedModel,
-    TrainedStump, XeNDCGObjective, encode_tree_node_id,
+    InteractionConstraintIndex, LambdaMARTObjective, ObjectiveOps, PairwiseRankingObjective,
+    QueryRMSEObjective, SquaredErrorObjective, TrainedModel, TrainedStump, XeNDCGObjective,
+    encode_tree_node_id,
 };
 use alloygbm_core::{
-    BinnedMatrix, DroMetadataPayload, FactorExposureMatrix, GradientPair, LeafSolverKind,
+    BinnedMatrix, Device, DroMetadataPayload, FactorExposureMatrix, GradientPair, LeafSolverKind,
     LeafValue, MISSING_BIN_U8, ModelMetadata, NodeStats, SplitCandidate, TrainParams, TreeGrowth,
 };
 use std::collections::HashMap;
