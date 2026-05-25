@@ -12,12 +12,12 @@ types.
 
 .. note::
 
-   AlloyGBM ``0.11.1`` is a feature release shipping quantile regression
-   (``objective="quantile"``) with pinball loss semantics and parameter
-   ``quantile_alpha`` (default ``0.5``, strictly in ``(0.0, 1.0)``) on
-   ``GBMRegressor``, utilizing a proxy Hessian, empirical leaf refinement on the
-   full dataset, and a fast unweighted quickselect path. See :doc:`release` for
-   full notes.
+   AlloyGBM ``0.12.0`` is a structural release: the engine crate
+   (``crates/engine/src/lib.rs``) was decomposed from a 15,189-line monolith
+   into 24 focused single-responsibility modules. **No user-facing API
+   changes, no behavioral changes, no new features.** Model artifacts
+   written by v0.11.1 load and predict identically under v0.12.0. See
+   :doc:`release` for full notes.
 
 
 Getting started

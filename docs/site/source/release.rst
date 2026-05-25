@@ -1,7 +1,36 @@
 Release and platform policy
 ===========================
 
-AlloyGBM ``0.11.1`` release notes and platform policy.
+AlloyGBM ``0.12.0`` release notes and platform policy.
+
+What's new in 0.12.0
+--------------------
+
+**Engine crate refactor.** No user-facing API changes, no behavioral changes,
+no new features. The 15,189-line ``crates/engine/src/lib.rs`` monolith was
+decomposed into 24 focused single-responsibility modules across a new
+``crates/engine/src/`` layout and a new ``crates/engine/src/trainer/``
+submodule directory. The remaining ``lib.rs`` is 101 lines of module
+declarations and ``pub use`` re-exports.
+
+- **No new objectives, parameters, training modes, or estimator API.**
+- **No artifact format changes.** Model artifacts written by v0.11.1 load and
+  predict identically under v0.12.0; v0.12.0 produces byte-identical artifacts
+  to v0.11.1 from the same training data.
+- **No public Rust API changes.** Every ``pub`` symbol that resolved at
+  ``alloygbm_engine::*`` in v0.11.1 still resolves at the same path in
+  v0.12.0 via the ``pub use`` re-exports in ``lib.rs``.
+- **Verified at every commit.** All 207 engine unit tests, all 445 workspace
+  Rust tests, and all 641 pytest tests pass unchanged on every one of the 24
+  refactor commits. Function bodies were moved byte-identically; visibility
+  promotions were limited to the minimum required by the new module boundary
+  (private ``fn`` to ``pub(crate) fn``, never past ``pub(crate)``).
+
+Scope: only ``crates/engine/src/lib.rs``. The other large files
+(``bindings/python/src/lib.rs``, ``crates/engine/src/joint.rs``,
+``bindings/python/alloygbm/regressor.py``, ``crates/core/src/lib.rs``,
+``crates/backend_cpu/src/lib.rs``, ``crates/shap/src/lib.rs``) are untouched
+and queued for future releases.
 
 What's new in 0.11.1
 --------------------

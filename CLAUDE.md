@@ -11,10 +11,45 @@ AlloyGBM/
   Cargo.toml              # Workspace root (6 crates, edition 2024, Rust 1.92.0)
   crates/
     core/src/lib.rs        # Data structures: TrainParams, BinnedMatrix, ModelMetadata, artifact serde, NaN handling, FeatureBaseline section
-    engine/src/lib.rs      # Training loop, ObjectiveOps trait (12 objectives — adds Poisson/Gamma/Tweedie in v0.11.0 and Quantile in v0.11.1), Trainer, IterationControls, IterationDiagnostics, interaction constraints, WarmStartState (with optional DART tree_weights snapshot)
-    engine/src/dart.rs     # DART dropout + normalize helpers (v0.9.0)
-    engine/src/shared_histogram.rs  # K-output MultiOutputHistogram primitive (v0.10.0)
-    engine/src/joint.rs    # Joint multi-output trainer + JointPredictor (v0.10.0)
+    engine/src/                 # (v0.12.0: lib.rs decomposed into focused modules)
+      lib.rs                    # ~100 lines: mod declarations + pub use re-exports only
+      error.rs                  # EngineError, EngineResult
+      env.rs                    # ALLOYGBM_EXPERIMENT_* env-var consts + parsers
+      tree_node.rs              # TREE_NODE_STRIDE + tree-node ID encode/decode
+      morph_state.rs            # MorphState + resolve_lr_schedule + MorphTreeContext
+      factor.rs                 # FactorProjector + Cholesky + apply_pre_target_neutralization
+      split_options.rs          # SplitSelectionOptions, CategoricalFeatureInfo, FactorSplitContext, MorphContext, LinearContext
+      traits.rs                 # BackendOps, PerRoundMetricCallback, ObjectiveOps
+      types.rs                  # TrainedStump, IterationControls, IterationDiagnostics, IterationStopReason, TrainingPolicyMode, ArtifactCompatibilityReport, etc.
+      warm_start.rs             # WarmStartState, MultiClassWarmStartState
+      trained_model.rs          # TrainedModel + impl (single-output artifact persistence)
+      multiclass_model.rs       # MultiClassTrainedModel, MultiClassIterationRunSummary
+      artifact.rs               # Artifact section encode/decode (encode_trained_model_payload, etc.)
+      loss.rs                   # squared_error_loss, binary_crossentropy_loss
+      sampling.rs               # mixed_hash, goss_sample_indices, select_row_indices_for_round*
+      tiling.rs                 # Feature-tile helpers
+      round.rs                  # Round application + tree-walk appliers
+      leaf_refinement.rs        # Newton + empirical-quantile leaf refinement
+      objectives/
+        mod.rs                  # Re-exports
+        squared.rs              # SquaredErrorObjective
+        binary.rs               # BinaryCrossEntropyObjective + sigmoid
+        glm.rs                  # PoissonObjective, GammaObjective, TweedieObjective + glm_clamp_exp
+        quantile.rs             # QuantileObjective + weighted_quantile + resolve_boundaries_for_len
+        ranking.rs              # QueryRMSE, Pairwise, LambdaMART, XeNDCG, YetiRank + NDCG helpers
+        multiclass.rs           # MultiClassSoftmaxObjective
+      trainer/
+        mod.rs                  # Trainer struct + giant impl block (the heart of training)
+        tree_build.rs           # build_tree_level_wise, build_tree_leaf_wise, find_best_split_dispatch, PendingSplit
+        interaction.rs          # InteractionConstraintIndex + filter_histogram_bundle_by_features
+        policy.rs               # split_selection_options_for_training, should_apply_auto_split_l2
+        validate.rs             # validate_* fit-contract helpers
+      dart.rs                   # DART dropout + normalize helpers (v0.9.0)
+      shared_histogram.rs       # K-output MultiOutputHistogram primitive (v0.10.0)
+      joint.rs                  # Joint multi-output trainer + JointPredictor (v0.10.0)
+      tests/mod.rs              # #[cfg(test)] entry
+      tests/main.rs             # Engine unit tests
+      tests/morph_state.rs      # MorphState unit tests
     backend_cpu/src/lib.rs # Histogram kernels, split finding, NaN-aware partitioning (Rayon parallelism)
     predictor/src/lib.rs   # Prediction from trained artifacts (post-transforms: identity, sigmoid)
     shap/src/lib.rs        # TreeSHAP (polynomial-time) + legacy brute-force Shapley; PL-leaf interventional decomposition
@@ -30,7 +65,7 @@ AlloyGBM/
       evaluation.py           # Metrics: rmse, mae, r2_score, accuracy, log_loss, ndcg, etc.
       validation.py           # Purged time-series and panel cross-validation splits
   docs/
-    limitations.md         # Current limitation analysis (v0.11.1: SHAP interactions, GLMs, and Quantile shipped; CPU-only + PL-leaf SHAP interactions remain)
+    limitations.md         # Current limitation analysis (v0.12.0: engine crate refactor; CPU-only + PL-leaf SHAP interactions still pending)
     roadmap/current.md     # Active roadmap and per-release history
     user/                  # User-facing Markdown docs (mirrored by docs/site/source/*.rst)
     site/                  # Sphinx site (Read the Docs)
@@ -67,8 +102,10 @@ maturin develop --release      # Build and install Python extension
 
 ## Key Architectural Patterns
 
-- **ObjectiveOps trait** (`engine/src/lib.rs`): Generic trait with `initial_prediction`, `compute_gradients`, `compute_gradients_into`. Implementations: SquaredError, BinaryCrossEntropy, MulticlassSoftmax, RankPairwise, RankNdcg, RankXendcg, QueryRmse, YetiRank, **Poisson, Gamma, Tweedie** (v0.11.0).
-- **BackendOps trait** (`engine/src/lib.rs`): Abstraction over hardware. Only `CpuBackend` exists.
+> **Note (v0.12.0):** Many historical entries below reference `crates/engine/src/lib.rs` as the location of specific functions and types. The v0.12.0 refactor moved nearly all of these into focused sibling modules — see the Project Structure section above for the new layout. The narrative descriptions of *what* each subsystem does remain accurate; only the file paths in older entries are out of date. Use `grep -rn "symbol_name" crates/engine/src/` to find the current location.
+
+- **ObjectiveOps trait** (`engine/src/traits.rs`, v0.12.0 moved from lib.rs): Generic trait with `initial_prediction`, `compute_gradients`, `compute_gradients_into`. Implementations live in `engine/src/objectives/`: SquaredError, BinaryCrossEntropy, MulticlassSoftmax, RankPairwise, RankNdcg, RankXendcg, QueryRmse, YetiRank, **Poisson, Gamma, Tweedie** (v0.11.0), **Quantile** (v0.11.1).
+- **BackendOps trait** (`engine/src/traits.rs`, v0.12.0 moved from lib.rs): Abstraction over hardware. Only `CpuBackend` exists.
 - **Training policy**: Auto mode with dataset-aware heuristics for `min_split_gain`, `min_rows_per_leaf`, regularization. Manual mode uses raw user params.
 - **Tree growth**: Level-wise (default) or leaf-wise (best-first) via `tree_growth` parameter.
 - **Histogram subtraction trick**: Used for child nodes within a level (smaller child built from scratch, larger = parent - smaller). Histogram buffers are reused across rounds.
@@ -105,8 +142,8 @@ maturin develop --release      # Build and install Python extension
 - **Joint factor neutralization** (v0.10.6): closes the last v0.10.4-deferred follow-up. `MultiLabelGBMRanker(multi_label_mode="joint", neutralization=…, factor_exposures=…)` supports all three modes — `pre_target`, `per_round_gradient`, `split_penalty` — with the same surface as single-output `GBMRegressor` / `GBMRanker`. The joint trainer reaches full feature parity with the single-output path. New `effective_neutralization_config(params)` helper (in `crates/engine/src/joint.rs`) mirrors v0.10.5's `effective_dro_config`: returns `Some(cfg)` only when the config is non-inert (kind ≠ None, AND not SplitPenalty-with-zero-penalty — this last collapse is what preserves byte-equivalence). Both growth paths AND the artifact serializer consult this helper. **`pre_target`** clones the dataset and routes each per-output target through `FactorProjector::residualize_values_in_place`; squared-error only (the residualize-target == residualize-grad identity). **`per_round_gradient`** builds one `FactorProjector` once and projects each of the K gradient buffers in place every round; mirrors the single-output multiclass per-class projection pattern. **`split_penalty`** subtracts a K-output factor-load penalty from each candidate split's gain via new `compute_multi_output_factor_split_penalty` helper in `shared_histogram.rs` plus two new leaf-derivation helpers (`derive_kvec_leaves_from_threshold_histogram`, `derive_kvec_leaves_from_categorical_histogram`); threaded through both level-wise (`build_joint_round_inner`) and leaf-wise (`build_joint_round_leafwise`) growth paths. Per-candidate row scan accumulates per-side factor sums via `accumulate_factor_sums_for_threshold` in `joint.rs`; missing rows are skipped (default-direction is decided post-split, so their factor-load contribution can't be determined at gain-evaluation time). New `ModelSectionKind::NeutralizationMetadata = 14` records the active config in the artifact (metadata only — neutralization is a training-time transformation; the trained leaf values bake in the projection). `_JOINT_SUPPORTED_KWARGS` adds three entries: `neutralization`, `factor_neutralization_lambda`, `factor_penalty`. The PyO3 bridge `train_joint_multi_label_ranker` gains six kwargs (`factor_exposure_values` / `factor_exposure_row_count` / `factor_exposure_factor_count` flat triple + `neutralization` / `factor_neutralization_lambda` / `factor_penalty`) and cross-validates the exposures-vs-config invariant: active config requires exposures, exposures require an active config. The Python wrapper `_fit_joint` accepts `factor_exposures` on `fit()` (already existed for the independent-mode fallback) and group-sorts exposures alongside X/y so per-query group IDs stay contiguous. `FactorProjector` was promoted from private to `pub(crate)` (struct + `new` / `project_gradient_pairs_in_place` / `residualize_values_in_place`) to be reachable from `joint.rs`. Composes with MorphBoost (`training_mode="morph"`), DRO leaves (`leaf_solver="dro"`), DART, GOSS, and warm-start. Byte-equivalent to v0.10.5 when neutralization is inert; pinned by `joint_neutralization_inert_configs_match_v0_10_5_byte_for_byte` (cargo) and `test_joint_exposures_without_neutralization_rejected` (pytest, the consistency gate).
 - **Piecewise-linear (PL) leaves** (`leaf_model="linear"`): `LeafValue` enum (`Scalar(f32)` | `Linear(LinearLeaf)`) replaces the plain `f32` leaf fields on `TrainedStump`. `LinearLeaf { intercept, weights, regressor_features }` stores closed-form ridge weights `α* = -(XᵀHX + λI)⁻¹ Xᵀg`. A parallel `LinearHistogramBundle` (module `crates/backend_cpu/src/pl_histogram.rs`) accumulates `xtg` and `xtHx` matrix statistics alongside the standard grad/hess bins; the standard SIMD path is untouched. Split gain for PL candidates is computed in `crates/backend_cpu/src/pl.rs` via an 8×8 Cholesky solve. The `GainStrategy::Linear(&LinearContext)` dispatch variant mirrors the MorphBoost precedent. Coefficients are persisted in a new `ModelSectionKind::LinearLeafCoefficients` artifact section; the predictor branches on a per-stump flag bit when evaluating leaves. Native-bitset categorical splits fall back to constant leaves; descendant numeric leaves use linear models normally.
 - **SHAP interaction values** (v0.11.0, `crates/shap/src/lib.rs`): `explain_interactions_from_artifact_bytes` and `_with_binning` return a `ShapInteractionBatch { expected_value: f32, values: Vec<Vec<Vec<f32>>> }` — pairwise SHAP per row in `O(T·L·D²·M)` time. Implements Lundberg et al. (2020) Algorithm 2, ported verbatim from `slundberg/shap`'s canonical `tree_shap_recursive` (`shap/cext/tree_shap.h`). Per-j conditioning runs two recursions (ON, OFF) over each tree with a `condition_fraction` accumulator: at a split on the conditioning feature, ON sets `cold_condition_fraction = 0` (early-return short-circuits the cold subtree) and OFF scales both children by `hot_zero_fraction` / `cold_zero_fraction`. The conditioning feature is **not** added to the path — `unique_depth -= 1` compensates so the child's leaf scan ignores the would-be slot. A signed depth counter mirrors slundberg's unsigned-underflow trick so conditioning at the very first split of a tree produces `child_depth = 0` and an empty leaf scan. Off-diagonal `Φ_ij = 0.5 · (phi_on_j[i] − phi_off_j[i])`; diagonal filled from row-marginal `Σ_j Φ_ij == φ_i`. Linear-leaf artifacts rejected — pairwise PL interactions deferred. The Python sugar method `GBMRegressor.shap_interaction_values(X)` routes through the predictor-aligned binning context when available, exactly mirroring `shap_values(X)`'s binning resolution.
-- **GLM regression objectives** (v0.11.0, `crates/engine/src/lib.rs`): `PoissonObjective`, `GammaObjective`, `TweedieObjective { variance_power }` — three log-link `ObjectiveOps` impls. All three: targets validated for domain (`y >= 0` Poisson/Tweedie, `y > 0` Gamma) in `initial_prediction`; weighted-mean-in-log-space init via shared `glm_weighted_target_sum` helper; gradient/hessian per the canonical GLM formulas with `glm_clamp_exp(eta) = eta.clamp(-50, 50).exp()` for f32 safety. Tweedie uses LightGBM/XGBoost's simplified Newton hessian `μ^(2-p)` (drops the negative second-derivative term that would break histogram aggregation). New `TrainParams.tweedie_variance_power: f32 = 1.5` field carries the kwarg through the bridge. Predictor's `post_transform` extended to match: `exp(raw.clamp(-50, 50))` for `"poisson"` / `"gamma"` / `"tweedie"` artifacts. The PyO3 bridge captures `params.tweedie_variance_power` BEFORE the `Trainer::new(params)` move and uses it to construct `TweedieObjective::new(p)` in the dispatch. Target-domain pre-validation also runs at the Python layer in `GBMRegressor.fit()` for fail-fast UX.  Single-output regression only.
-- **Quantile regression objective** (v0.11.1, `crates/engine/src/lib.rs`): `QuantileObjective { alpha }` implements `ObjectiveOps` with pinball loss. Since pinball loss has a zero second derivative everywhere, we use a proxy Hessian `h_i = w_i` (sample weight) during split finding. A post-growth leaf refinement step (`refine_quantile_leaf_values`) runs at the end of each iteration to replace Newton-Raphson leaf predictions with the actual empirical quantiles of residuals for all rows in each leaf (minimizing variance by using the full dataset even under `row_subsample < 1.0`). Quantile is explicitly rejected for linear leaves, DART boosting, MorphBoost, and joint/multiclass/ranking tasks.
+- **GLM regression objectives** (v0.11.0, now in `crates/engine/src/objectives/glm.rs` post-v0.12.0): `PoissonObjective`, `GammaObjective`, `TweedieObjective { variance_power }` — three log-link `ObjectiveOps` impls. All three: targets validated for domain (`y >= 0` Poisson/Tweedie, `y > 0` Gamma) in `initial_prediction`; weighted-mean-in-log-space init via shared `glm_weighted_target_sum` helper; gradient/hessian per the canonical GLM formulas with `glm_clamp_exp(eta) = eta.clamp(-50, 50).exp()` for f32 safety. Tweedie uses LightGBM/XGBoost's simplified Newton hessian `μ^(2-p)` (drops the negative second-derivative term that would break histogram aggregation). New `TrainParams.tweedie_variance_power: f32 = 1.5` field carries the kwarg through the bridge. Predictor's `post_transform` extended to match: `exp(raw.clamp(-50, 50))` for `"poisson"` / `"gamma"` / `"tweedie"` artifacts. The PyO3 bridge captures `params.tweedie_variance_power` BEFORE the `Trainer::new(params)` move and uses it to construct `TweedieObjective::new(p)` in the dispatch. Target-domain pre-validation also runs at the Python layer in `GBMRegressor.fit()` for fail-fast UX.  Single-output regression only.
+- **Quantile regression objective** (v0.11.1, now in `crates/engine/src/objectives/quantile.rs` post-v0.12.0): `QuantileObjective { alpha }` implements `ObjectiveOps` with pinball loss. Since pinball loss has a zero second derivative everywhere, we use a proxy Hessian `h_i = w_i` (sample weight) during split finding. A post-growth leaf refinement step (`refine_quantile_leaf_values`) runs at the end of each iteration to replace Newton-Raphson leaf predictions with the actual empirical quantiles of residuals for all rows in each leaf (minimizing variance by using the full dataset even under `row_subsample < 1.0`). Quantile is explicitly rejected for linear leaves, DART boosting, MorphBoost, and joint/multiclass/ranking tasks.
 
 ## When Implementing Changes
 
