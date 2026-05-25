@@ -48,7 +48,7 @@ The pre-existing `dart.rs`, `shared_histogram.rs`, and `joint.rs` modules are un
 This refactor was done as a sequence of 24 small commits, one per logical extraction. At every commit:
 
 - **All 207 engine unit tests passed unchanged.**
-- **Full workspace `cargo test --workspace` passed** (415 Rust tests across all crates).
+- **Full workspace `cargo test --workspace` passed** (445 Rust tests across all crates: engine 207, backend_cpu 79, core 68, predictor 47, ranking-integration 20, shap 14, categorical 10).
 - **Full pytest suite passed unchanged**: 641 passed, 16 subtests, identical to v0.11.1 baseline.
 - **No public API changes**: every `pub` symbol from v0.11.1 still resolves at its old path. `alloygbm_engine::TrainedModel`, `alloygbm_engine::Trainer`, `alloygbm_engine::WarmStartState`, etc. all remain importable from the crate root via `pub use` re-exports.
 - **No behavioral changes**: every moved function body is byte-identical to its v0.11.1 form. Visibility modifiers were promoted (e.g. private `fn` → `pub(crate) fn`) only when strictly required by the new module boundary; never promoted past `pub(crate)`.

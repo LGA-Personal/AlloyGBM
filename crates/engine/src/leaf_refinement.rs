@@ -9,9 +9,10 @@
 //!
 //! * `refine_quantile_leaf_values` — replaces the Newton-Raphson
 //!   leaf prediction with the empirical α-quantile of residuals over
-//!   all rows in each leaf, for the v0.11.1 quantile objective.
-//!   Uses the full dataset (not the subsampled subset) to minimise
-//!   estimation variance of the empirical quantile.
+//!   all rows in each leaf, for the quantile objective
+//!   (introduced in v0.11.1). Uses the full dataset (not the
+//!   subsampled subset) to minimise estimation variance of the empirical
+//!   quantile.
 //!
 //! The two share a small set of recursive walkers
 //! (`fill_refined_*`) that map terminal-leaf statistics back up the

@@ -20,7 +20,7 @@ declarations and ``pub use`` re-exports.
 - **No public Rust API changes.** Every ``pub`` symbol that resolved at
   ``alloygbm_engine::*`` in v0.11.1 still resolves at the same path in
   v0.12.0 via the ``pub use`` re-exports in ``lib.rs``.
-- **Verified at every commit.** All 207 engine unit tests, all 415 workspace
+- **Verified at every commit.** All 207 engine unit tests, all 445 workspace
   Rust tests, and all 641 pytest tests pass unchanged on every one of the 24
   refactor commits. Function bodies were moved byte-identically; visibility
   promotions were limited to the minimum required by the new module boundary

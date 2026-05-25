@@ -82,7 +82,7 @@ fn ndcg_for_group(labels: &[f32], scores: &[f32]) -> f32 {
 }
 
 /// Numerically stable log-sum-exp for softmax computation.
-pub(crate) fn log_sum_exp(values: &[f32]) -> f32 {
+fn log_sum_exp(values: &[f32]) -> f32 {
     let max_val = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     if !max_val.is_finite() {
         return 0.0;

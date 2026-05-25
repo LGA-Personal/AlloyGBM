@@ -10,7 +10,7 @@ The `0.12.0` release is a structural refactor of the engine crate: `crates/engin
 
 ### Engine crate restructure
 
-`crates/engine/src/lib.rs` decomposed into 28 sibling modules + 5 trainer submodules. Twenty-four small commits, one per logical extraction. Every commit kept the 207 engine tests, 415 workspace tests, and 641 pytest tests passing.
+`crates/engine/src/lib.rs` decomposed into 28 sibling modules + 5 trainer submodules. Twenty-four small commits, one per logical extraction. Every commit kept the 207 engine tests, 445 workspace tests, and 641 pytest tests passing.
 
 The full inventory and motivation is in the v0.12.0 CHANGELOG entry. The post-refactor file layout is reflected in `CLAUDE.md`'s Project Structure section. The follow-up plan covering the remaining 6 large files in the repo (Python bindings Rust glue, joint trainer, `regressor.py`, core, backend_cpu, shap) is at `docs/superpowers/plans/2026-05-23-refactor-large-files.md`.
 
