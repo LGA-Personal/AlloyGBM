@@ -1,6 +1,8 @@
+pub mod dro;
 pub mod error;
 pub mod simd;
 
+pub use dro::{DroConfig, DroMetric};
 pub use error::{CoreError, CoreResult};
 
 pub const MODEL_FORMAT_V1: u32 = 1;
@@ -136,32 +138,6 @@ impl FactorExposureMatrix {
         }
         let start = row_index * self.factor_count;
         Ok(&self.values[start..start + self.factor_count])
-    }
-}
-
-/// Uncertainty metric used by the DRO leaf solver.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum DroMetric {
-    /// Wasserstein-inspired uncertainty radius over leaf gradient dispersion.
-    #[default]
-    Wasserstein,
-}
-
-/// Configuration for the fast DRO-style scalar leaf solver.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct DroConfig {
-    /// Non-negative robustness radius. `0.0` is exactly standard leaf behavior.
-    pub radius: f32,
-    /// Uncertainty metric for interpreting the radius.
-    pub metric: DroMetric,
-}
-
-impl Default for DroConfig {
-    fn default() -> Self {
-        Self {
-            radius: 0.05,
-            metric: DroMetric::Wasserstein,
-        }
     }
 }
 
