@@ -4,7 +4,15 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
-The `0.11.1` release ships quantile regression (`objective="quantile"`) with pinball loss semantics and parameter `quantile_alpha` on `GBMRegressor`. It uses a proxy Hessian during split-finding, an empirical leaf refinement step at the end of each round acting on the full dataset, and a fast unweighted quickselect path. Default behavior for every existing user-facing API remains byte-identical to v0.11.0 when `objective="quantile"` is not opted into.
+The `0.12.0` release is a structural refactor of the engine crate: `crates/engine/src/lib.rs` shrinks from 15,189 lines to 101 lines, with all functionality moved into 24 focused single-responsibility modules. **No user-facing API changes, no behavioral changes, no new features.** Every `pub` symbol resolves at its v0.11.1 path; trained model artifacts are byte-identical to v0.11.1; the full Rust + Python test suite passes unchanged at every refactor commit. The motivation is maintainability: future feature work on the engine (new objectives, training modes, leaf solvers) now lands in scoped modules rather than appending to an ever-growing monolith.
+
+## What Shipped In v0.12.0
+
+### Engine crate restructure
+
+`crates/engine/src/lib.rs` decomposed into 28 sibling modules + 5 trainer submodules. Twenty-four small commits, one per logical extraction. Every commit kept the 207 engine tests, 415 workspace tests, and 641 pytest tests passing.
+
+The full inventory and motivation is in the v0.12.0 CHANGELOG entry. The post-refactor file layout is reflected in `CLAUDE.md`'s Project Structure section. The follow-up plan covering the remaining 6 large files in the repo (Python bindings Rust glue, joint trainer, `regressor.py`, core, backend_cpu, shap) is at `docs/superpowers/plans/2026-05-23-refactor-large-files.md`.
 
 ## What Shipped In v0.11.1
 

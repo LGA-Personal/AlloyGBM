@@ -11,10 +11,45 @@ AlloyGBM/
   Cargo.toml              # Workspace root (6 crates, edition 2024, Rust 1.92.0)
   crates/
     core/src/lib.rs        # Data structures: TrainParams, BinnedMatrix, ModelMetadata, artifact serde, NaN handling, FeatureBaseline section
-    engine/src/lib.rs      # Training loop, ObjectiveOps trait (12 objectives — adds Poisson/Gamma/Tweedie in v0.11.0 and Quantile in v0.11.1), Trainer, IterationControls, IterationDiagnostics, interaction constraints, WarmStartState (with optional DART tree_weights snapshot)
-    engine/src/dart.rs     # DART dropout + normalize helpers (v0.9.0)
-    engine/src/shared_histogram.rs  # K-output MultiOutputHistogram primitive (v0.10.0)
-    engine/src/joint.rs    # Joint multi-output trainer + JointPredictor (v0.10.0)
+    engine/src/                 # (v0.12.0: lib.rs decomposed into focused modules)
+      lib.rs                    # ~100 lines: mod declarations + pub use re-exports only
+      error.rs                  # EngineError, EngineResult
+      env.rs                    # ALLOYGBM_EXPERIMENT_* env-var consts + parsers
+      tree_node.rs              # TREE_NODE_STRIDE + tree-node ID encode/decode
+      morph_state.rs            # MorphState + resolve_lr_schedule + MorphTreeContext
+      factor.rs                 # FactorProjector + Cholesky + apply_pre_target_neutralization
+      split_options.rs          # SplitSelectionOptions, CategoricalFeatureInfo, FactorSplitContext, MorphContext, LinearContext
+      traits.rs                 # BackendOps, PerRoundMetricCallback, ObjectiveOps
+      types.rs                  # TrainedStump, IterationControls, IterationDiagnostics, IterationStopReason, TrainingPolicyMode, ArtifactCompatibilityReport, etc.
+      warm_start.rs             # WarmStartState, MultiClassWarmStartState
+      trained_model.rs          # TrainedModel + impl (single-output artifact persistence)
+      multiclass_model.rs       # MultiClassTrainedModel, MultiClassIterationRunSummary
+      artifact.rs               # Artifact section encode/decode (encode_trained_model_payload, etc.)
+      loss.rs                   # squared_error_loss, binary_crossentropy_loss
+      sampling.rs               # mixed_hash, goss_sample_indices, select_row_indices_for_round*
+      tiling.rs                 # Feature-tile helpers
+      round.rs                  # Round application + tree-walk appliers
+      leaf_refinement.rs        # Newton + empirical-quantile leaf refinement
+      objectives/
+        mod.rs                  # Re-exports
+        squared.rs              # SquaredErrorObjective
+        binary.rs               # BinaryCrossEntropyObjective + sigmoid
+        glm.rs                  # PoissonObjective, GammaObjective, TweedieObjective + glm_clamp_exp
+        quantile.rs             # QuantileObjective + weighted_quantile + resolve_boundaries_for_len
+        ranking.rs              # QueryRMSE, Pairwise, LambdaMART, XeNDCG, YetiRank + NDCG helpers
+        multiclass.rs           # MultiClassSoftmaxObjective
+      trainer/
+        mod.rs                  # Trainer struct + giant impl block (the heart of training)
+        tree_build.rs           # build_tree_level_wise, build_tree_leaf_wise, find_best_split_dispatch, PendingSplit
+        interaction.rs          # InteractionConstraintIndex + filter_histogram_bundle_by_features
+        policy.rs               # split_selection_options_for_training, should_apply_auto_split_l2
+        validate.rs             # validate_* fit-contract helpers
+      dart.rs                   # DART dropout + normalize helpers (v0.9.0)
+      shared_histogram.rs       # K-output MultiOutputHistogram primitive (v0.10.0)
+      joint.rs                  # Joint multi-output trainer + JointPredictor (v0.10.0)
+      tests/mod.rs              # #[cfg(test)] entry
+      tests/main.rs             # Engine unit tests
+      tests/morph_state.rs      # MorphState unit tests
     backend_cpu/src/lib.rs # Histogram kernels, split finding, NaN-aware partitioning (Rayon parallelism)
     predictor/src/lib.rs   # Prediction from trained artifacts (post-transforms: identity, sigmoid)
     shap/src/lib.rs        # TreeSHAP (polynomial-time) + legacy brute-force Shapley; PL-leaf interventional decomposition
@@ -67,8 +102,10 @@ maturin develop --release      # Build and install Python extension
 
 ## Key Architectural Patterns
 
-- **ObjectiveOps trait** (`engine/src/lib.rs`): Generic trait with `initial_prediction`, `compute_gradients`, `compute_gradients_into`. Implementations: SquaredError, BinaryCrossEntropy, MulticlassSoftmax, RankPairwise, RankNdcg, RankXendcg, QueryRmse, YetiRank, **Poisson, Gamma, Tweedie** (v0.11.0).
-- **BackendOps trait** (`engine/src/lib.rs`): Abstraction over hardware. Only `CpuBackend` exists.
+> **Note (v0.12.0):** Many historical entries below reference `crates/engine/src/lib.rs` as the location of specific functions and types. The v0.12.0 refactor moved nearly all of these into focused sibling modules — see the Project Structure section above for the new layout. The narrative descriptions of *what* each subsystem does remain accurate; only the file paths in older entries are out of date. Use `grep -rn "symbol_name" crates/engine/src/` to find the current location.
+
+- **ObjectiveOps trait** (`engine/src/traits.rs`, v0.12.0 moved from lib.rs): Generic trait with `initial_prediction`, `compute_gradients`, `compute_gradients_into`. Implementations live in `engine/src/objectives/`: SquaredError, BinaryCrossEntropy, MulticlassSoftmax, RankPairwise, RankNdcg, RankXendcg, QueryRmse, YetiRank, **Poisson, Gamma, Tweedie** (v0.11.0), **Quantile** (v0.11.1).
+- **BackendOps trait** (`engine/src/traits.rs`, v0.12.0 moved from lib.rs): Abstraction over hardware. Only `CpuBackend` exists.
 - **Training policy**: Auto mode with dataset-aware heuristics for `min_split_gain`, `min_rows_per_leaf`, regularization. Manual mode uses raw user params.
 - **Tree growth**: Level-wise (default) or leaf-wise (best-first) via `tree_growth` parameter.
 - **Histogram subtraction trick**: Used for child nodes within a level (smaller child built from scratch, larger = parent - smaller). Histogram buffers are reused across rounds.

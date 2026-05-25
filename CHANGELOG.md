@@ -1,5 +1,75 @@
 # Changelog
 
+## v0.12.0 (2026-05-25)
+
+Engine crate refactor. **No user-facing API changes, no behavioral changes, no new features.** This is a structural release: `crates/engine/src/lib.rs` was a 15,189-line monolith covering errors, training params, objectives, the trainer impl, artifact serde, sampling, leaf refinement, and more. This release decomposes that single file into 24 focused, single-responsibility modules.
+
+### What changed structurally
+
+`crates/engine/src/lib.rs` shrank from **15,189 lines to 101 lines** (99.3% reduction). The 101 remaining lines are entirely module declarations and `pub use` re-exports — no logic, no types, no impls. Twenty-eight new sibling modules and one new `trainer/` submodule directory were added:
+
+| Module | Lines | Holds |
+|---|---:|---|
+| `crates/engine/src/error.rs` | 34 | `EngineError`, `EngineResult` |
+| `crates/engine/src/env.rs` | 78 | `ALLOYGBM_EXPERIMENT_*` env-var consts + parsers |
+| `crates/engine/src/tree_node.rs` | 116 | `TREE_NODE_STRIDE` + tree-node ID encode/decode |
+| `crates/engine/src/morph_state.rs` | 161 | `MorphState` + `resolve_lr_schedule` + `MorphTreeContext` |
+| `crates/engine/src/factor.rs` | 210 | `FactorProjector` + Cholesky + `apply_pre_target_neutralization` |
+| `crates/engine/src/split_options.rs` | 84 | `SplitSelectionOptions`, `CategoricalFeatureInfo`, `FactorSplitContext`, `MorphContext`, `LinearContext` |
+| `crates/engine/src/traits.rs` | 255 | `BackendOps`, `PerRoundMetricCallback`, `ObjectiveOps` traits |
+| `crates/engine/src/objectives/squared.rs` | 144 | `SquaredErrorObjective` |
+| `crates/engine/src/objectives/binary.rs` | 153 | `BinaryCrossEntropyObjective` + `sigmoid` |
+| `crates/engine/src/objectives/glm.rs` | 356 | `PoissonObjective`, `GammaObjective`, `TweedieObjective` |
+| `crates/engine/src/objectives/quantile.rs` | 278 | `QuantileObjective` + `weighted_quantile` + `resolve_boundaries_for_len` |
+| `crates/engine/src/objectives/ranking.rs` | 839 | `QueryRMSEObjective`, `PairwiseRankingObjective`, `LambdaMARTObjective`, `XeNDCGObjective`, `YetiRankObjective`, `compute_group_boundaries` |
+| `crates/engine/src/objectives/multiclass.rs` | 151 | `MultiClassSoftmaxObjective` |
+| `crates/engine/src/multiclass_model.rs` | 378 | `MultiClassTrainedModel`, `MultiClassIterationRunSummary` |
+| `crates/engine/src/types.rs` | 469 | `TrainedStump`, `IterationControls`, `IterationDiagnostics`, `IterationStopReason`, `TrainingPolicyMode`, `ArtifactCompatibilityReport`, etc. |
+| `crates/engine/src/warm_start.rs` | 45 | `WarmStartState`, `MultiClassWarmStartState` |
+| `crates/engine/src/trained_model.rs` | 533 | `TrainedModel` + impl |
+| `crates/engine/src/artifact.rs` | 393 | Artifact section encode/decode (`encode_trained_model_payload`, etc.) |
+| `crates/engine/src/loss.rs` | 115 | `squared_error_loss`, `binary_crossentropy_loss` |
+| `crates/engine/src/sampling.rs` | 327 | `mixed_hash`, `goss_sample_indices`, `select_row_indices_for_round*` |
+| `crates/engine/src/tiling.rs` | 70 | Feature-tile helpers |
+| `crates/engine/src/round.rs` | 244 | Round application + tree-walk appliers |
+| `crates/engine/src/leaf_refinement.rs` | 632 | Newton + empirical-quantile leaf refinement |
+| `crates/engine/src/trainer/mod.rs` | 2,821 | `Trainer` struct + impl (the giant 40-method block) |
+| `crates/engine/src/trainer/tree_build.rs` | 1,256 | `build_tree_level_wise`, `build_tree_leaf_wise`, `find_best_split_dispatch`, `PendingSplit` |
+| `crates/engine/src/trainer/interaction.rs` | — | `InteractionConstraintIndex` + `filter_histogram_bundle_by_features` |
+| `crates/engine/src/trainer/policy.rs` | — | `split_selection_options_for_training`, `should_apply_auto_split_l2` |
+| `crates/engine/src/trainer/validate.rs` | 301 | `validate_*` fit-contract helpers |
+| `crates/engine/src/tests/main.rs` | 4,431 | Engine unit tests (previously inline) |
+| `crates/engine/src/tests/morph_state.rs` | 419 | MorphState unit tests (previously inline) |
+
+The pre-existing `dart.rs`, `shared_histogram.rs`, and `joint.rs` modules are unchanged.
+
+### Discipline rules followed (and verified)
+
+This refactor was done as a sequence of 24 small commits, one per logical extraction. At every commit:
+
+- **All 207 engine unit tests passed unchanged.**
+- **Full workspace `cargo test --workspace` passed** (415 Rust tests across all crates).
+- **Full pytest suite passed unchanged**: 641 passed, 16 subtests, identical to v0.11.1 baseline.
+- **No public API changes**: every `pub` symbol from v0.11.1 still resolves at its old path. `alloygbm_engine::TrainedModel`, `alloygbm_engine::Trainer`, `alloygbm_engine::WarmStartState`, etc. all remain importable from the crate root via `pub use` re-exports.
+- **No behavioral changes**: every moved function body is byte-identical to its v0.11.1 form. Visibility modifiers were promoted (e.g. private `fn` → `pub(crate) fn`) only when strictly required by the new module boundary; never promoted past `pub(crate)`.
+- **No dependency changes**: lockfile diff is the version bumps and nothing else.
+
+### Why the version bump
+
+Even though there are zero user-facing changes, this is a v0.12.0 minor bump rather than a v0.11.2 patch because:
+
+1. **Scope.** Twenty-four commits, ~5,000 lines of code physically relocated, twenty-eight new module files in the engine crate. A patch release implies a small targeted fix; this is structural surgery.
+2. **Bug risk surface area.** Mechanical refactors at this scale have a non-zero risk of subtle defects — a visibility promotion that accidentally lets test code reach into private impls, a `use crate::*;` glob that masks an unused import, a tree-node ID re-encoding helper that resolves to the wrong constant. The test suite covers most paths but not all. A minor version bump signals to downstream consumers that the engine's internal layout has changed and they should re-run their own integration tests.
+3. **CHANGELOG hygiene.** Future patch releases (v0.12.1, v0.12.2) for bugs discovered after merge should be obviously distinguishable from the refactor itself.
+
+### What did NOT change
+
+No new objectives. No new estimator parameters. No new training modes. No artifact format changes. No predictor post-transform changes. No Python API surface changes. No `GBMRegressor` / `GBMClassifier` / `GBMRanker` / `MultiLabelGBMRanker` method additions or removals. No `__getstate__`/`__setstate__` schema changes. Model artifacts written by v0.11.1 load and predict identically under v0.12.0. Model artifacts written by v0.12.0 are byte-identical to what v0.11.1 would have produced from the same training data.
+
+### Known scope limits of this refactor
+
+This release refactors **only** `crates/engine/src/lib.rs`. The remaining large files in the repository (`bindings/python/src/lib.rs`, `crates/engine/src/joint.rs`, `bindings/python/alloygbm/regressor.py`, `crates/core/src/lib.rs`, `crates/backend_cpu/src/lib.rs`, `crates/shap/src/lib.rs`) are untouched and will be tackled in follow-up releases per the plan at `docs/superpowers/plans/2026-05-23-refactor-large-files.md`.
+
 ## v0.11.1 (2026-05-23)
 
 Quantile regression objective feature release.
