@@ -5,12 +5,19 @@
 
 mod interaction;
 mod policy;
+mod tree_build;
 mod validate;
 
-pub(crate) use interaction::{InteractionConstraintIndex, filter_histogram_bundle_by_features};
+pub(crate) use interaction::InteractionConstraintIndex;
 pub(crate) use policy::split_selection_options_for_training;
 #[cfg(test)]
 pub(crate) use policy::should_apply_auto_split_l2;
+pub(crate) use tree_build::{
+    LEAF_EPSILON, apply_single_categorical_target_encoding, build_tree_leaf_wise,
+    build_tree_level_wise, validate_iteration_controls,
+};
+#[cfg(test)]
+pub(crate) use tree_build::{subtract_histogram_bundle, subtract_histogram_bundle_into};
 pub(crate) use validate::{
     binned_feature_density, compute_feature_means_from_matrix, factor_split_context_for_node,
     gradient_neutralization_config, prepare_pre_target_training_dataset, target_variance,
