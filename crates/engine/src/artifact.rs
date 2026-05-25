@@ -109,7 +109,9 @@ pub(crate) struct PredictorLayoutPayload {
     pub(crate) feature_count: usize,
 }
 
-pub(crate) fn decode_predictor_layout_payload(bytes: &[u8]) -> EngineResult<PredictorLayoutPayload> {
+pub(crate) fn decode_predictor_layout_payload(
+    bytes: &[u8],
+) -> EngineResult<PredictorLayoutPayload> {
     const LAYOUT_LEN: usize = 12;
     const THRESHOLD_MODE_BIN_INDEX: u32 = 1;
     if bytes.len() != LAYOUT_LEN {
@@ -137,7 +139,9 @@ pub(crate) fn decode_predictor_layout_payload(bytes: &[u8]) -> EngineResult<Pred
     Ok(PredictorLayoutPayload { feature_count })
 }
 
-pub(crate) fn encode_node_debug_stats_payload(node_debug_stats: &[NodeDebugStats]) -> EngineResult<Vec<u8>> {
+pub(crate) fn encode_node_debug_stats_payload(
+    node_debug_stats: &[NodeDebugStats],
+) -> EngineResult<Vec<u8>> {
     let record_count = u32::try_from(node_debug_stats.len()).map_err(|_| {
         EngineError::ContractViolation("node debug stats count exceeds u32::MAX".to_string())
     })?;

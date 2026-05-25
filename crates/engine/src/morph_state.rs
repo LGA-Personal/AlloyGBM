@@ -1,6 +1,4 @@
-use alloygbm_core::{
-    GradientEmaStats, GradientPair, LrSchedule, MorphConfig, MorphPrecomputed,
-};
+use alloygbm_core::{GradientEmaStats, GradientPair, LrSchedule, MorphConfig, MorphPrecomputed};
 
 use crate::MorphContext;
 

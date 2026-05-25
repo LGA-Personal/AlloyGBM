@@ -10,9 +10,9 @@ use alloygbm_core::{
     serialize_model_artifact_v1, validate_categorical_state_payload_v1,
 };
 
+use crate::artifact::{read_f32_le, read_u16_le, read_u32_le, required_single_section};
 use crate::error::{EngineError, EngineResult};
 use crate::tree_node::TREE_NODE_STRIDE;
-use crate::artifact::{read_f32_le, read_u16_le, read_u32_le, required_single_section};
 use crate::{IterationDiagnostics, IterationStopReason, TrainedStump};
 
 /// Trained multi-class model: K tree sequences (one per class).

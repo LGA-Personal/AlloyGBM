@@ -19,9 +19,11 @@ use crate::error::{EngineError, EngineResult};
 use crate::morph_state::MorphTreeContext;
 use crate::round::apply_partition_leaf_updates;
 use crate::split_options::{CategoricalFeatureInfo, SplitSelectionOptions};
-use crate::traits::BackendOps;
-use crate::trainer::interaction::{InteractionConstraintIndex, filter_histogram_bundle_by_features};
+use crate::trainer::interaction::{
+    InteractionConstraintIndex, filter_histogram_bundle_by_features,
+};
 use crate::trainer::validate::{factor_split_context_for_node, validate_training_alignment};
+use crate::traits::BackendOps;
 use crate::tree_node::{encode_tree_node_id, left_child_node_id, right_child_node_id};
 use crate::types::{
     CategoricalTargetEncodingSpec, IterationControls, IterationStopReason, TrainedStump,

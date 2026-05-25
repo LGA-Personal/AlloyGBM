@@ -342,7 +342,9 @@ pub struct ArtifactCompatibilityReport {
 }
 
 impl ArtifactCompatibilityReport {
-    pub(crate) fn required_section_report(self) -> alloygbm_core::RequiredSectionCompatibilityReport {
+    pub(crate) fn required_section_report(
+        self,
+    ) -> alloygbm_core::RequiredSectionCompatibilityReport {
         alloygbm_core::RequiredSectionCompatibilityReport {
             trees_section_count: self.trees_section_count,
             predictor_layout_section_count: self.predictor_layout_section_count,

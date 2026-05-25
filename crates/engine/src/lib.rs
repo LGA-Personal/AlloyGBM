@@ -37,8 +37,8 @@ pub mod joint;
 pub use joint::{JointObjective, JointRoundResult, JointWarmStartState, build_joint_round};
 
 mod morph_state;
-pub use morph_state::{MorphState, resolve_lr_schedule};
 pub(crate) use morph_state::MorphTreeContext;
+pub use morph_state::{MorphState, resolve_lr_schedule};
 
 mod factor;
 pub(crate) use factor::FactorProjector;
@@ -93,9 +93,8 @@ mod leaf_refinement;
 pub(crate) use leaf_refinement::*;
 
 mod trainer;
-pub(crate) use trainer::*;
 pub use trainer::Trainer;
-
+pub(crate) use trainer::*;
 
 #[cfg(test)]
 mod tests;
