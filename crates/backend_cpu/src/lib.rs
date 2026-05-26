@@ -10,6 +10,7 @@ use alloygbm_engine::{
 use rayon::prelude::*;
 use std::cell::RefCell;
 
+mod arena;
 mod morph;
 pub use morph::{MorphGainInputs, SplitSideStats, compute_morph_gain};
 
@@ -17,6 +18,11 @@ mod pl_histogram;
 pub use pl_histogram::build_linear_histograms_cpu;
 
 mod pl;
+
+use arena::{
+    BIN_HEAVY_THRESHOLD, HistogramArena, HistogramKernelPath, PARALLEL_TILE_WORKLOAD_THRESHOLD,
+    SMALL_TILE_WORKLOAD_THRESHOLD, TINY_NODE_ROW_THRESHOLD,
+};
 
 pub use alloygbm_core::simd;
 
@@ -27,11 +33,6 @@ thread_local! {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CpuBackend;
-
-const SMALL_TILE_WORKLOAD_THRESHOLD: usize = 16_384;
-const PARALLEL_TILE_WORKLOAD_THRESHOLD: usize = 131_072;
-const TINY_NODE_ROW_THRESHOLD: usize = 32;
-const BIN_HEAVY_THRESHOLD: usize = 512;
 
 /// Controls which gain formula is used inside `best_split_for_feature_inner`.
 ///
@@ -55,74 +56,6 @@ struct MissingDirectionCandidate {
     left: ScalarSideStats,
     right: ScalarSideStats,
     default_left: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HistogramKernelPath {
-    TinyNodeScalar,
-    BinHeavyPerFeatureScalar,
-    ArenaRowFirstUnrolled,
-}
-
-#[derive(Debug, Clone)]
-struct HistogramArena {
-    bin_count: usize,
-    grad_sums: Vec<f32>,
-    hess_sums: Vec<f32>,
-    grad_sq_sums: Vec<f32>,
-    counts: Vec<u32>,
-}
-
-impl HistogramArena {
-    fn new(tile_feature_count: usize, bin_count: usize) -> Self {
-        let flat_len = tile_feature_count * bin_count;
-        Self {
-            bin_count,
-            grad_sums: vec![0.0; flat_len],
-            hess_sums: vec![0.0; flat_len],
-            grad_sq_sums: vec![0.0; flat_len],
-            counts: vec![0; flat_len],
-        }
-    }
-
-    /// Zero all accumulators without deallocating, allowing the arena to be reused.
-    fn reset(&mut self) {
-        self.grad_sums.fill(0.0);
-        self.hess_sums.fill(0.0);
-        self.grad_sq_sums.fill(0.0);
-        self.counts.fill(0);
-    }
-
-    /// Resize the arena to handle a new tile size without unnecessary re-allocation.
-    /// Only reallocates if the new tile requires more capacity.
-    fn resize_for_tile(&mut self, tile_feature_count: usize, bin_count: usize) {
-        let flat_len = tile_feature_count * bin_count;
-        self.bin_count = bin_count;
-        if self.grad_sums.len() == flat_len {
-            self.reset();
-        } else {
-            self.grad_sums.resize(flat_len, 0.0);
-            self.hess_sums.resize(flat_len, 0.0);
-            self.grad_sq_sums.resize(flat_len, 0.0);
-            self.counts.resize(flat_len, 0);
-            self.grad_sums.fill(0.0);
-            self.hess_sums.fill(0.0);
-            self.grad_sq_sums.fill(0.0);
-            self.counts.fill(0);
-        }
-    }
-
-    fn materialize(&self, start_feature: usize, feature_histograms: &mut Vec<FeatureHistogram>) {
-        CpuBackend::materialize_tile_histograms(
-            start_feature,
-            self.bin_count,
-            &self.grad_sums,
-            &self.hess_sums,
-            &self.grad_sq_sums,
-            &self.counts,
-            feature_histograms,
-        );
-    }
 }
 
 /// Apply a per-feature weight to a split candidate's gain for cross-feature comparison.
@@ -157,7 +90,7 @@ impl CpuBackend {
         }
     }
 
-    fn materialize_tile_histograms(
+    pub(crate) fn materialize_tile_histograms(
         start_feature: usize,
         bin_count: usize,
         grad_sums: &[f32],
