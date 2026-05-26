@@ -4,7 +4,19 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
-The `0.12.0` release is a structural refactor of the engine crate: `crates/engine/src/lib.rs` shrinks from 15,189 lines to 101 lines, with all functionality moved into 24 focused single-responsibility modules. **No user-facing API changes, no behavioral changes, no new features.** Every `pub` symbol resolves at its v0.11.1 path; trained model artifacts are byte-identical to v0.11.1; the full Rust + Python test suite passes unchanged at every refactor commit. The motivation is maintainability: future feature work on the engine (new objectives, training modes, leaf solvers) now lands in scoped modules rather than appending to an ever-growing monolith.
+The `0.12.1` release continues the structural refactor begun in v0.12.0. The 4,822-line `crates/core/src/lib.rs` shrinks to 73 lines across 13 focused modules; the 3,987-line `crates/backend_cpu/src/lib.rs` shrinks to 1,507 lines across 5 sibling modules (the residual being the `impl CpuBackend` intrinsic block, kept intact). **No user-facing API changes, no behavioral changes, no new features.** Every `pub` symbol resolves at its v0.12.0 path; trained model artifacts are byte-identical to v0.12.0; the full Rust + Python test suite passes unchanged at every refactor commit. After v0.12.1 the remaining refactor work is the SHAP crate (Phase 4), the engine joint trainer (Phase 5), the PyO3 binding (Phase 6), the Python regressor (Phase 7), and a cross-cutting verification pass (Phase 8) — see tracking issue #44.
+
+## What Shipped In v0.12.1
+
+### Core crate restructure (Phase 2)
+
+`crates/core/src/lib.rs` decomposed into 13 sibling modules (`error`, `dro`, `neutralization`, `training_mode`, `config`, `dataset`, `binned`, `histogram`, `linear_histogram`, `leaf`, `artifact_format`, `validation`, `tests/`). Thirteen small commits, one per logical extraction. Every commit kept the 445 workspace cargo tests and 641 pytest tests passing.
+
+### Backend CPU crate restructure (Phase 3)
+
+`crates/backend_cpu/src/lib.rs` decomposed into 5 sibling modules (`arena`, `split_helpers`, `factor_split`, `backend_ops`, `tests/`). The giant `impl CpuBackend { ... }` intrinsic-method block stays in lib.rs intact — splitting an inherent impl across files in Rust requires per-file `impl` blocks, which adds boilerplate without clear payoff at this scale. Five small commits. Same test-suite invariant maintained at every commit.
+
+The full inventory is in the v0.12.1 CHANGELOG entry. The post-refactor file layouts are reflected in `CLAUDE.md`'s Project Structure section.
 
 ## What Shipped In v0.12.0
 

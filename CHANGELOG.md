@@ -1,5 +1,45 @@
 # Changelog
 
+## v0.12.1 (2026-05-26)
+
+Continuation of the structural refactor begun in v0.12.0. **No user-facing API changes, no behavioral changes, no new features.** This release decomposes two more large monolithic files — `crates/core/src/lib.rs` and `crates/backend_cpu/src/lib.rs` — into focused, single-responsibility modules. Patch release because every change is mechanical; the full test suite (445 cargo + 641 pytest) holds at every individual commit.
+
+### What changed structurally
+
+- **`crates/core/src/lib.rs`** shrank from **4,822 lines to 73 lines** (98.5% reduction). The 73 remaining lines are entirely `mod` declarations, `pub use` re-exports, and the `#[cfg(test)] mod tests;` line. Thirteen new sibling modules under `crates/core/src/` host the moved code:
+  - `error.rs` — `CoreError` enum, `CoreResult<T>` alias
+  - `dro.rs` — `DroMetric`, `DroConfig`
+  - `neutralization.rs` — `NeutralizationKind`, `FactorNeutralizationConfig`, `FactorExposureMatrix`
+  - `training_mode.rs` — `LrSchedule`, `MorphConfig`, `MorphPrecomputed`, `TrainingMode`, `GradientEmaStats`
+  - `config.rs` — `TreeGrowth`, `LeafModelKind`, `LeafSolverKind`, `DartNormalize`, `DartSampleType`, `BoostingMode`, `Device`, `TrainParams`
+  - `dataset.rs` — `DatasetSchema`, `DatasetMatrix`, `DenseMatrixView`, `ColumnarMatrixView`, `ColumnarMatrixColumnView`, `TrainingDataset`
+  - `binned.rs` — `MISSING_BIN_U8`/`U16`, `BinStorage`, `BinnedMatrix`, transpose helpers
+  - `histogram.rs` — `GradientPair`, `leaf_effective_gradient`, `leaf_gain_term`, `FeatureTile`, `NodeSlice`, `NodeStats`, `HistogramBin`, `FeatureHistogram`, `HistogramBundle`
+  - `linear_histogram.rs` — `MAX_PL_REGRESSORS`, `MAX_PL_MATRIX_ENTRIES`, `LinearHistogramBin`, `pl_matrix_index`, `LinearFeatureHistogram`, `LinearHistogramBundle`, `subtract_linear_histogram_bundle`
+  - `leaf.rs` — `LinearLeaf`, `LeafValue`, `SplitCandidate`, `PartitionResult`
+  - `artifact_format.rs` — All artifact section types, payload encoders/decoders, JSON metadata serde, and the private JSON parsing helpers (1,710 lines — the largest leaf module)
+  - `validation.rs` — All `validate_*` functions
+  - `tests/` — extracted `tests/mod.rs` + `tests/main.rs` mirroring the Phase 1 engine-crate pattern
+
+- **`crates/backend_cpu/src/lib.rs`** shrank from **3,987 lines to 1,507 lines** (62.2% reduction). The remaining 1,507 lines are predominantly the giant `impl CpuBackend { ... }` intrinsic-methods block (histogram building and split finding) which was intentionally kept intact — splitting an inherent `impl` across files in Rust requires fragmenting it into multiple `impl` blocks per file, which adds boilerplate without proportional payoff. Five new sibling modules under `crates/backend_cpu/src/` host the moved code:
+  - `arena.rs` — `HistogramArena`, `HistogramKernelPath`, workload threshold constants
+  - `split_helpers.rs` — `GainStrategy`, `ScalarSideStats`, `MissingDirectionCandidate`, `apply_feature_weight`, `l1_threshold_gradient`, `split_gain_term`, `categorical_bitset_for_prefix*`, `goes_left_for_split`
+  - `factor_split.rs` — `FactorSplitScratch`, `FactorSplitCandidate`, `factor_split_penalty*`, `validate_factor_split_context`
+  - `backend_ops.rs` — The `impl BackendOps for CpuBackend { ... }` trait implementation (449 lines)
+  - `tests/` — extracted `tests/mod.rs` + `tests/main.rs`
+
+### What did NOT change
+
+Behavioral surface, public API, on-disk artifact format, training output bytes, prediction output bytes. The full test suite — 445 cargo workspace tests + 641 pytest tests — passes at every individual commit (13 commits for the core decomposition, 5 commits for the backend_cpu decomposition).
+
+### Import compatibility
+
+External consumers can keep their existing `use alloygbm_core::*;` and `use alloygbm_backend_cpu::*;` imports unchanged. Every previously-`pub` item is re-exported via `pub use` from each crate's `lib.rs`, so `alloygbm_core::TrainParams`, `alloygbm_core::ModelMetadata`, etc. all continue to resolve. Items inside `backend_cpu` that were module-private are now `pub(crate)` for sibling-module access but remain inaccessible outside the crate.
+
+### Remaining refactor follow-ups
+
+Tracking issue [#44](https://github.com/LGA-Personal/AlloyGBM/issues/44) lists the remaining four phases of the original decomposition plan: the SHAP crate (Phase 4), the engine joint trainer (Phase 5), the PyO3 binding (Phase 6), the Python regressor (Phase 7), and a cross-cutting verification + CLAUDE.md refresh (Phase 8). These ship as separate patch releases.
+
 ## v0.12.0 (2026-05-25)
 
 Engine crate refactor. **No user-facing API changes, no behavioral changes, no new features.** This is a structural release: `crates/engine/src/lib.rs` was a 15,189-line monolith covering errors, training params, objectives, the trainer impl, artifact serde, sampling, leaf refinement, and more. This release decomposes that single file into 24 focused, single-responsibility modules.

@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "alloygbm-backend-cpu"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "alloygbm-core",
  "alloygbm-engine",
@@ -14,21 +14,21 @@ dependencies = [
 
 [[package]]
 name = "alloygbm-categorical"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "alloygbm-core",
 ]
 
 [[package]]
 name = "alloygbm-core"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "wide",
 ]
 
 [[package]]
 name = "alloygbm-engine"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "alloygbm-categorical",
  "alloygbm-core",
@@ -37,7 +37,7 @@ dependencies = [
 
 [[package]]
 name = "alloygbm-predictor"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "alloygbm-backend-cpu",
  "alloygbm-core",
@@ -47,7 +47,7 @@ dependencies = [
 
 [[package]]
 name = "alloygbm-python"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "alloygbm-backend-cpu",
  "alloygbm-categorical",
@@ -62,7 +62,7 @@ dependencies = [
 
 [[package]]
 name = "alloygbm-shap"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "alloygbm-core",
  "alloygbm-engine",

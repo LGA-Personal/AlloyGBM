@@ -3351,7 +3351,7 @@ class GBMRegressor(_GBMRegressorBase):
           (full additivity, mod f32 round-off).
 
         Linear-leaf (``leaf_model="linear"``) artifacts are rejected in
-        v0.12.0 — pairwise interactions on PL leaves require a different
+        v0.12.1 — pairwise interactions on PL leaves require a different
         decomposition that is not yet implemented.
         """
         if not self._is_fitted:
