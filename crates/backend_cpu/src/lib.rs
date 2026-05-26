@@ -1,7 +1,7 @@
 use alloygbm_core::{
     BinnedMatrix, Device, FeatureHistogram, FeatureTile, GradientPair, HistogramBin,
     HistogramBundle, LinearFeatureHistogram, LinearHistogramBundle, LinearLeaf, NodeSlice,
-    NodeStats, PartitionResult, SplitCandidate, leaf_effective_gradient, leaf_gain_term,
+    NodeStats, PartitionResult, SplitCandidate, leaf_effective_gradient,
 };
 use alloygbm_engine::{
     BackendOps, CategoricalFeatureInfo, EngineError, EngineResult, FactorSplitContext,
@@ -19,9 +19,16 @@ pub use pl_histogram::build_linear_histograms_cpu;
 
 mod pl;
 
+mod split_helpers;
+
 use arena::{
     BIN_HEAVY_THRESHOLD, HistogramArena, HistogramKernelPath, PARALLEL_TILE_WORKLOAD_THRESHOLD,
     SMALL_TILE_WORKLOAD_THRESHOLD, TINY_NODE_ROW_THRESHOLD,
+};
+use split_helpers::{
+    GainStrategy, MissingDirectionCandidate, ScalarSideStats, apply_feature_weight,
+    categorical_bitset_for_prefix, categorical_bitset_for_prefix_into, goes_left_for_split,
+    l1_threshold_gradient, split_gain_term,
 };
 
 pub use alloygbm_core::simd;
@@ -33,43 +40,6 @@ thread_local! {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CpuBackend;
-
-/// Controls which gain formula is used inside `best_split_for_feature_inner`.
-///
-/// `Standard` uses the XGBoost gain formula.
-/// `Morph` delegates to `compute_morph_gain` from the morph module.
-enum GainStrategy<'a> {
-    Standard,
-    Morph(&'a MorphContext),
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ScalarSideStats {
-    grad: f32,
-    hess: f32,
-    grad_sq: f32,
-    count: u32,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct MissingDirectionCandidate {
-    left: ScalarSideStats,
-    right: ScalarSideStats,
-    default_left: bool,
-}
-
-/// Apply a per-feature weight to a split candidate's gain for cross-feature comparison.
-///
-/// The gain stored in `SplitCandidate` remains unweighted (the true gain);
-/// the weighted gain is only used when comparing splits across features.
-fn apply_feature_weight(candidate: &SplitCandidate, feature_weights: &[f32]) -> f32 {
-    let fi = candidate.feature_index as usize;
-    if fi < feature_weights.len() {
-        candidate.gain * feature_weights[fi]
-    } else {
-        candidate.gain
-    }
-}
 
 impl CpuBackend {
     pub fn device(&self) -> Device {
@@ -1530,66 +1500,6 @@ impl CpuBackend {
     }
 }
 
-fn l1_threshold_gradient(grad_sum: f32, l1_alpha: f32) -> f32 {
-    if l1_alpha <= 0.0 {
-        return grad_sum;
-    }
-    if grad_sum > l1_alpha {
-        grad_sum - l1_alpha
-    } else if grad_sum < -l1_alpha {
-        grad_sum + l1_alpha
-    } else {
-        0.0
-    }
-}
-
-fn split_gain_term(
-    grad_sum: f32,
-    hess_sum: f32,
-    grad_sq_sum: f32,
-    row_count: u32,
-    options: &SplitSelectionOptions,
-) -> f32 {
-    2.0 * leaf_gain_term(
-        grad_sum,
-        hess_sum,
-        grad_sq_sum,
-        row_count,
-        options.l1_alpha,
-        options.l2_lambda,
-        options.dro_config.as_ref(),
-    )
-}
-
-fn categorical_bitset_for_prefix(
-    num_categories: usize,
-    categories: &[(u16, f32, f32, f32, u32)],
-    prefix_end: usize,
-) -> Vec<u8> {
-    let bitset_len = num_categories.div_ceil(8);
-    let mut bitset = vec![0u8; bitset_len];
-    categorical_bitset_for_prefix_into(num_categories, categories, prefix_end, &mut bitset);
-    bitset
-}
-
-fn categorical_bitset_for_prefix_into(
-    num_categories: usize,
-    categories: &[(u16, f32, f32, f32, u32)],
-    prefix_end: usize,
-    bitset: &mut Vec<u8>,
-) {
-    let bitset_len = num_categories.div_ceil(8);
-    bitset.clear();
-    bitset.resize(bitset_len, 0);
-    for &(bin_id, _, _, _, _) in &categories[..=prefix_end] {
-        let byte_idx = (bin_id / 8) as usize;
-        let bit_idx = (bin_id % 8) as usize;
-        if byte_idx < bitset.len() {
-            bitset[byte_idx] |= 1 << bit_idx;
-        }
-    }
-}
-
 struct FactorSplitScratch {
     left_factor_sums: Vec<f32>,
     right_factor_sums: Vec<f32>,
@@ -1743,26 +1653,6 @@ fn validate_factor_split_context(context: &FactorSplitContext<'_>) -> EngineResu
         }
     }
     Ok(())
-}
-
-/// Determine if a row goes to the left child for a given split.
-/// Handles both continuous (threshold comparison) and categorical (bitset membership) splits.
-#[inline]
-fn goes_left_for_split(bin_val: u16, missing: u16, split: &SplitCandidate) -> bool {
-    if bin_val == missing {
-        split.default_left
-    } else if split.is_categorical {
-        split
-            .categorical_bitset
-            .as_ref()
-            .map_or(split.default_left, |bs| {
-                let byte_idx = (bin_val / 8) as usize;
-                let bit_idx = (bin_val % 8) as usize;
-                byte_idx < bs.len() && (bs[byte_idx] & (1 << bit_idx)) != 0
-            })
-    } else {
-        bin_val <= split.threshold_bin
-    }
 }
 
 impl BackendOps for CpuBackend {
