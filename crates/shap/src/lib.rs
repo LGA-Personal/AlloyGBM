@@ -5,8 +5,9 @@ use alloygbm_core::{
 use alloygbm_engine::{ArtifactCompatibilityMode, TrainedModel, TrainedStump};
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::error::Error;
-use std::fmt::{Display, Formatter};
+
+mod error;
+pub use error::{ShapError, ShapResult};
 
 /// Reduce a leaf value to the "constant part" used by path-based SHAP
 /// machinery.
@@ -322,27 +323,6 @@ fn additivity_tolerance(predicted: f32) -> f32 {
 }
 
 const MAX_EXACT_SPLIT_FEATURES: usize = 25;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ShapError {
-    InvalidInput(String),
-    ContractViolation(String),
-    NotSupported(String),
-}
-
-impl Display for ShapError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidInput(message) => write!(f, "invalid input: {message}"),
-            Self::ContractViolation(message) => write!(f, "contract violation: {message}"),
-            Self::NotSupported(message) => write!(f, "not supported: {message}"),
-        }
-    }
-}
-
-impl Error for ShapError {}
-
-pub type ShapResult<T> = Result<T, ShapError>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShapExplanationBatch {
