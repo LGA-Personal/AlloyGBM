@@ -14,7 +14,7 @@ use crate::leaf::LinearLeaf;
 use crate::linear_histogram::MAX_PL_REGRESSORS;
 use crate::neutralization::{FactorNeutralizationConfig, NeutralizationKind};
 use crate::training_mode::{GradientEmaStats, LrSchedule, MorphConfig};
-use crate::validate_model_contract_v1;
+use crate::validation::validate_model_contract_v1;
 
 pub const MODEL_FORMAT_V1: u32 = 1;
 pub const MODEL_BINARY_MAGIC: [u8; 4] = *b"AGBM";
