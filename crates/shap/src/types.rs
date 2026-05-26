@@ -5,8 +5,9 @@ use alloygbm_core::{
 use alloygbm_engine::{ArtifactCompatibilityMode, TrainedModel, TrainedStump};
 use std::collections::HashMap;
 
+use crate::binning::MAX_EXACT_SPLIT_FEATURES;
+use crate::brute_force::{decode_tree_node_id, tree_local_key};
 use crate::error::{ShapError, ShapResult};
-use crate::{MAX_EXACT_SPLIT_FEATURES, decode_tree_node_id, tree_local_key};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShapExplanationBatch {

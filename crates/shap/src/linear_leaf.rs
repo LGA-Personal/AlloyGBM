@@ -3,7 +3,7 @@ use alloygbm_engine::{TrainedModel, TrainedStump};
 use std::collections::HashMap;
 
 use crate::binning::BinningContext;
-use crate::{decode_tree_node_id, stump_goes_left, tree_local_key};
+use crate::brute_force::{decode_tree_node_id, stump_goes_left, tree_local_key};
 
 /// Reduce a leaf value to the "constant part" used by path-based SHAP
 /// machinery.
