@@ -1,7 +1,37 @@
 Release and platform policy
 ===========================
 
-AlloyGBM ``0.12.0`` release notes and platform policy.
+AlloyGBM ``0.12.1`` release notes and platform policy.
+
+What's new in 0.12.1
+--------------------
+
+**Phase 2 + Phase 3 of the structural refactor.** No user-facing API
+changes, no behavioral changes, no new features. The 4,822-line
+``crates/core/src/lib.rs`` was decomposed into thirteen focused
+single-responsibility modules; the 3,987-line
+``crates/backend_cpu/src/lib.rs`` was decomposed into five sibling modules.
+
+- **No new objectives, parameters, training modes, or estimator API.**
+- **No artifact format changes.** Model artifacts written by v0.12.0 load
+  and predict identically under v0.12.1; v0.12.1 produces byte-identical
+  artifacts to v0.12.0 from the same training data.
+- **No public Rust API changes.** Every ``pub`` symbol that resolved at
+  ``alloygbm_core::*`` or ``alloygbm_backend_cpu::*`` in v0.12.0 still
+  resolves at the same path in v0.12.1 via the ``pub use`` re-exports
+  in each crate's ``lib.rs``.
+- **Verified at every commit.** All 445 cargo workspace tests and all
+  641 pytest tests pass unchanged on every one of the 18 refactor commits
+  (13 for the core crate, 5 for backend_cpu). Function bodies were moved
+  byte-identically; visibility promotions on private items in backend_cpu
+  were limited to the minimum required for sibling-module access
+  (private ``fn`` to ``pub(crate) fn``, never past ``pub(crate)``).
+
+After this release, the remaining queued refactor work is the SHAP crate
+(Phase 4), the engine joint trainer (Phase 5), the PyO3 binding
+(Phase 6), the Python regressor (Phase 7), and a cross-cutting
+verification + ``CLAUDE.md`` refresh (Phase 8) — see tracking issue #44.
+Each ships as its own patch release.
 
 What's new in 0.12.0
 --------------------

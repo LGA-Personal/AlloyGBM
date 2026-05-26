@@ -10,7 +10,23 @@ AlloyGBM is a Rust-first Gradient Boosted Decision Tree (GBDT) library with Pyth
 AlloyGBM/
   Cargo.toml              # Workspace root (6 crates, edition 2024, Rust 1.92.0)
   crates/
-    core/src/lib.rs        # Data structures: TrainParams, BinnedMatrix, ModelMetadata, artifact serde, NaN handling, FeatureBaseline section
+    core/src/                   # (v0.12.1: lib.rs decomposed into focused modules)
+      lib.rs                    # ~73 lines: mod declarations + pub use re-exports only
+      error.rs                  # CoreError, CoreResult
+      dro.rs                    # DroMetric, DroConfig
+      neutralization.rs         # NeutralizationKind, FactorNeutralizationConfig, FactorExposureMatrix
+      training_mode.rs          # LrSchedule, MorphConfig, MorphPrecomputed, TrainingMode, GradientEmaStats
+      config.rs                 # TreeGrowth, LeafModelKind, LeafSolverKind, DartNormalize, DartSampleType, BoostingMode, Device, TrainParams
+      dataset.rs                # DatasetSchema, DatasetMatrix, *View, TrainingDataset
+      binned.rs                 # MISSING_BIN_U8/U16, BinStorage, BinnedMatrix, transpose helpers
+      histogram.rs              # GradientPair, leaf_effective_gradient, leaf_gain_term, FeatureTile, NodeSlice, NodeStats, HistogramBin, FeatureHistogram, HistogramBundle
+      linear_histogram.rs       # MAX_PL_*, LinearHistogramBin, pl_matrix_index, LinearFeatureHistogram, LinearHistogramBundle, subtract_linear_histogram_bundle
+      leaf.rs                   # LinearLeaf, LeafValue, SplitCandidate, PartitionResult
+      artifact_format.rs        # MODEL_FORMAT_V1 / MODEL_BINARY_MAGIC / CATEGORICAL_STATE_FORMAT_V1 constants, ModelMetadata, ModelBinaryHeader, ModelSectionKind, ModelSectionDescriptor, all 8 payload types (Morph/Dro/Neutralization/LinearLeafCoefficients/DartTreeWeights/MultiOutputLeafValues/FeatureBaseline + CategoricalState/NativeCategoricalSplits), every encode_*/decode_* helper, required_section_compatibility_report, serialize_metadata_json/deserialize_metadata_json, serialize_model_artifact_v1/deserialize_model_artifact_v1, private JSON parsing helpers (1,710 lines — the largest leaf module)
+      validation.rs             # validate_train_params, validate_dataset_*, validate_binned_matrix, validate_model_contract_v1
+      simd.rs                   # SIMD primitives (sum_f32, sum_squares_f32)
+      tests/mod.rs              # #[cfg(test)] entry
+      tests/main.rs             # Core unit tests
     engine/src/                 # (v0.12.0: lib.rs decomposed into focused modules)
       lib.rs                    # ~100 lines: mod declarations + pub use re-exports only
       error.rs                  # EngineError, EngineResult
@@ -50,7 +66,17 @@ AlloyGBM/
       tests/mod.rs              # #[cfg(test)] entry
       tests/main.rs             # Engine unit tests
       tests/morph_state.rs      # MorphState unit tests
-    backend_cpu/src/lib.rs # Histogram kernels, split finding, NaN-aware partitioning (Rayon parallelism)
+    backend_cpu/src/            # (v0.12.1: lib.rs decomposed; impl CpuBackend intrinsic block stays in lib.rs)
+      lib.rs                    # ~1,507 lines: CpuBackend struct + giant impl CpuBackend block (histogram building + best_split_* methods)
+      arena.rs                  # HistogramArena, HistogramKernelPath, workload threshold constants
+      split_helpers.rs          # GainStrategy, ScalarSideStats, MissingDirectionCandidate, apply_feature_weight, l1_threshold_gradient, split_gain_term, categorical_bitset_for_prefix*, goes_left_for_split
+      factor_split.rs           # FactorSplitScratch, FactorSplitCandidate, factor_split_penalty*, validate_factor_split_context
+      backend_ops.rs            # impl BackendOps for CpuBackend (the trait impl, 449 lines)
+      morph.rs                  # MorphBoost split-gain helper (pre-existing)
+      pl_histogram.rs           # PL histogram bundle (pre-existing)
+      pl.rs                     # PL split finding via Cholesky (pre-existing)
+      tests/mod.rs              # #[cfg(test)] entry
+      tests/main.rs             # backend_cpu unit tests
     predictor/src/lib.rs   # Prediction from trained artifacts (post-transforms: identity, sigmoid)
     shap/src/lib.rs        # TreeSHAP (polynomial-time) + legacy brute-force Shapley; PL-leaf interventional decomposition
     categorical/src/lib.rs # Target encoding, frequency encoding (multi-column support)
@@ -65,7 +91,7 @@ AlloyGBM/
       evaluation.py           # Metrics: rmse, mae, r2_score, accuracy, log_loss, ndcg, etc.
       validation.py           # Purged time-series and panel cross-validation splits
   docs/
-    limitations.md         # Current limitation analysis (v0.12.0: engine crate refactor; CPU-only + PL-leaf SHAP interactions still pending)
+    limitations.md         # Current limitation analysis (v0.12.1: core + backend_cpu crate refactors; CPU-only + PL-leaf SHAP interactions still pending)
     roadmap/current.md     # Active roadmap and per-release history
     user/                  # User-facing Markdown docs (mirrored by docs/site/source/*.rst)
     site/                  # Sphinx site (Read the Docs)
@@ -96,13 +122,13 @@ maturin develop --release      # Build and install Python extension
 - **`unsafe_code = "forbid"`** -- no unsafe Rust anywhere in the workspace
 - **Edition 2024** with Rust 1.92.0 minimum
 - **Newton-Raphson leaf values**: `leaf = -lr * grad_sum / (hess_sum + lambda + eps)` -- general-purpose for any objective
-- **Hand-rolled JSON serde** for `ModelMetadata` in `core/src/lib.rs` -- positional parser, very brittle. Adding fields requires careful ordering.
+- **Hand-rolled JSON serde** for `ModelMetadata` in `core/src/artifact_format.rs` (v0.12.1: moved from lib.rs) -- positional parser, very brittle. Adding fields requires careful ordering.
 - **`BinnedMatrix`** uses adaptive `Vec<u8>` or `Vec<u16>` -- up to 65,535 bins, column-major duplicate for cache-friendly histograms
 - **Artifact format**: Binary with magic bytes `AGBM`, versioned sections (Trees, PredictorLayout, CategoricalState, NativeCategoricalSplits, LinearLeafCoefficients, FeatureBaseline, DartTreeWeights, MultiOutputLeafValues), JSON metadata header. Includes objective type for post-transform dispatch.
 
 ## Key Architectural Patterns
 
-> **Note (v0.12.0):** Many historical entries below reference `crates/engine/src/lib.rs` as the location of specific functions and types. The v0.12.0 refactor moved nearly all of these into focused sibling modules — see the Project Structure section above for the new layout. The narrative descriptions of *what* each subsystem does remain accurate; only the file paths in older entries are out of date. Use `grep -rn "symbol_name" crates/engine/src/` to find the current location.
+> **Note (v0.12.0 / v0.12.1):** Many historical entries below reference `crates/engine/src/lib.rs`, `crates/core/src/lib.rs`, or `crates/backend_cpu/src/lib.rs` as the location of specific functions and types. The v0.12.0 (engine) and v0.12.1 (core + backend_cpu) refactors moved nearly all of these into focused sibling modules — see the Project Structure section above for the new layouts. The narrative descriptions of *what* each subsystem does remain accurate; only the file paths in older entries are out of date. Use `grep -rn "symbol_name" crates/<crate>/src/` to find the current location.
 
 - **ObjectiveOps trait** (`engine/src/traits.rs`, v0.12.0 moved from lib.rs): Generic trait with `initial_prediction`, `compute_gradients`, `compute_gradients_into`. Implementations live in `engine/src/objectives/`: SquaredError, BinaryCrossEntropy, MulticlassSoftmax, RankPairwise, RankNdcg, RankXendcg, QueryRmse, YetiRank, **Poisson, Gamma, Tweedie** (v0.11.0), **Quantile** (v0.11.1).
 - **BackendOps trait** (`engine/src/traits.rs`, v0.12.0 moved from lib.rs): Abstraction over hardware. Only `CpuBackend` exists.
