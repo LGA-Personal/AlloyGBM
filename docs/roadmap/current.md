@@ -4,7 +4,19 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
-The `0.12.1` release continues the structural refactor begun in v0.12.0. The 4,822-line `crates/core/src/lib.rs` shrinks to 73 lines across 13 focused modules; the 3,987-line `crates/backend_cpu/src/lib.rs` shrinks to 1,507 lines across 5 sibling modules (the residual being the `impl CpuBackend` intrinsic block, kept intact). **No user-facing API changes, no behavioral changes, no new features.** Every `pub` symbol resolves at its v0.12.0 path; trained model artifacts are byte-identical to v0.12.0; the full Rust + Python test suite passes unchanged at every refactor commit. After v0.12.1 the remaining refactor work is the SHAP crate (Phase 4), the engine joint trainer (Phase 5), the PyO3 binding (Phase 6), the Python regressor (Phase 7), and a cross-cutting verification pass (Phase 8) — see tracking issue #44.
+The `0.12.2` release continues the structural refactor begun in v0.12.0 and continued in v0.12.1. The 3,925-line `crates/shap/src/lib.rs` shrinks to 246 lines across 8 focused modules; the 5,088-line `crates/engine/src/joint.rs` is promoted to a `crates/engine/src/joint/` subdir with `mod.rs` reduced to 42 lines of scaffolding and 5 sibling modules. **No user-facing API changes, no behavioral changes, no new features.** Every `pub` symbol resolves at its v0.12.1 path; trained model artifacts are byte-identical to v0.12.1; the full Rust + Python test suite passes unchanged at every refactor commit. After v0.12.2 the remaining refactor work is the PyO3 binding (Phase 6), the Python regressor (Phase 7), and a cross-cutting verification pass (Phase 8) — see tracking issue #44.
+
+## What Shipped In v0.12.2
+
+### SHAP crate restructure (Phase 4)
+
+`crates/shap/src/lib.rs` decomposed into 8 sibling modules (`error`, `types`, `binning`, `linear_leaf`, `importance`, `brute_force`, `tree_shap`, `tests/`). Nine small commits, one per logical extraction plus a final layout-cleanup pass. Every commit kept the 445 workspace cargo tests and 641 pytest tests passing.
+
+### Engine joint trainer restructure (Phase 5)
+
+`crates/engine/src/joint.rs` promoted to a `crates/engine/src/joint/` subdir with `mod.rs` reduced to 42 lines of scaffolding and 5 sibling modules (`helpers`, `types`, `build_round`, `fit`, `tests`). Six small commits — `git mv` to the subdir, then four content extractions, then a no-op verification pass. Same test-suite invariant maintained at every commit.
+
+The full inventory is in the v0.12.2 CHANGELOG entry. The post-refactor file layouts are reflected in `CLAUDE.md`'s Project Structure section.
 
 ## What Shipped In v0.12.1
 

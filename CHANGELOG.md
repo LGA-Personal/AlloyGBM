@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.12.2 (2026-05-27)
+
+Continuation of the structural refactor begun in v0.12.0 and continued in v0.12.1. **No user-facing API changes, no behavioral changes, no new features.** This release decomposes the SHAP crate and the engine joint multi-output trainer into focused, single-responsibility modules. Patch release because every change is mechanical; the full test suite (445 cargo + 641 pytest) holds at every individual commit.
+
+### What changed structurally
+
+- **`crates/shap/src/lib.rs`** shrank from **3,925 lines to 246 lines** (93.7% reduction). The remaining 246 lines are mod declarations, `pub use` re-exports, the public `explain_*` entry points, and the `#[cfg(test)] mod tests;` line. Eight new sibling modules under `crates/shap/src/` host the moved code:
+  - `error.rs` — `ShapError` enum, `ShapResult<T>` alias
+  - `types.rs` — `ShapBatch`, `ShapInteractionBatch`, `ShapFeatureContribution`, plus shared artifact-loader helpers
+  - `binning.rs` — `BinningContext` plus shared binning constants used by both SHAP entry points
+  - `linear_leaf.rs` — Linear-leaf (PL) SHAP helpers for interventional decomposition through PL leaves
+  - `importance.rs` — `feature_importance_from_artifact_bytes` global importance API
+  - `brute_force.rs` — Legacy brute-force Shapley algorithm (`explain_from_artifact_bytes` legacy path)
+  - `tree_shap.rs` — TreeSHAP polynomial-time algorithm (Lundberg et al. 2020) for both row-level Shapley values and pairwise interactions
+  - `tests/` — extracted `tests/mod.rs` + `tests/main.rs` mirroring the established crate-test pattern
+
+- **`crates/engine/src/joint.rs`** (5,088 lines) was promoted to a `crates/engine/src/joint/` subdir. `joint/mod.rs` is now 42 lines (scaffolding only — mod declarations + `pub use` re-exports). Five new sibling modules under `crates/engine/src/joint/` host the moved code:
+  - `helpers.rs` — Private RNG / row-sampling / factor-sums / iteration helpers
+  - `types.rs` — `JointObjective`, `JointPredictor`, `JointPredictorStump`, `JointWarmStartState`, `JointMorphContext`, and other joint-specific data types
+  - `build_round.rs` — Per-round tree builders (`build_joint_round_inner`, `build_joint_round_leafwise`) for both level-wise and leaf-wise growth
+  - `fit.rs` — Public training entry points (`fit_joint_multi_output`, `fit_joint_multi_output_with_categorical`, `fit_joint_multi_output_with_warm_start`) and the shared `fit_joint_inner` driver
+  - `tests.rs` — Extracted joint-trainer unit tests
+
+### What did NOT change
+
+Behavioral surface, public API, on-disk artifact format, training output bytes, prediction output bytes. The full test suite — 445 cargo workspace tests + 641 pytest tests — passes at every individual commit (9 commits for the SHAP decomposition, 6 commits for the joint-trainer decomposition).
+
+### Import compatibility
+
+External consumers can keep their existing `use alloygbm_shap::*;` and `use alloygbm_engine::joint::*;` imports unchanged. Every previously-`pub` item is re-exported via `pub use` from the crate root (SHAP) or from `joint/mod.rs` (engine), so paths like `alloygbm_shap::explain_interactions_from_artifact_bytes` and `alloygbm_engine::joint::fit_joint_multi_output` continue to resolve. Items inside the joint subdir that were module-private are now `pub(super)` or `pub(crate)` for sibling-module access but remain inaccessible outside the engine crate.
+
+### Remaining refactor follow-ups
+
+This release closes Phases 4 and 5 of the original decomposition plan (tracking issue [#44](https://github.com/LGA-Personal/AlloyGBM/issues/44)). The remaining phases — the PyO3 binding (Phase 6), the Python regressor (Phase 7), and a cross-cutting verification + `CLAUDE.md` refresh (Phase 8) — ship as separate patch releases.
+
 ## v0.12.1 (2026-05-26)
 
 Continuation of the structural refactor begun in v0.12.0. **No user-facing API changes, no behavioral changes, no new features.** This release decomposes two more large monolithic files — `crates/core/src/lib.rs` and `crates/backend_cpu/src/lib.rs` — into focused, single-responsibility modules. Patch release because every change is mechanical; the full test suite (445 cargo + 641 pytest) holds at every individual commit.
