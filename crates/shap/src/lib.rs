@@ -1,5 +1,6 @@
-use alloygbm_engine::{TrainedModel, TrainedStump};
 use std::collections::HashMap;
+
+use alloygbm_engine::{TrainedModel, TrainedStump};
 
 mod binning;
 mod brute_force;
@@ -9,19 +10,18 @@ mod linear_leaf;
 mod tree_shap;
 mod types;
 
-#[cfg(test)]
-mod tests;
-pub use binning::BinningContext;
 use binning::MAX_EXACT_SPLIT_FEATURES;
 use brute_force::{decode_tree_node_id, explain_rows_brute_force, tree_local_key, validate_rows};
+use linear_leaf::{model_has_linear_leaves, scale_model_by_tree_weight};
+use tree_shap::{build_std_tree, explain_rows_tree_shap, tree_shap_interactions_row};
+use types::load_artifact_context;
+
+pub use binning::BinningContext;
 pub use error::{ShapError, ShapResult};
 pub use importance::{
     global_importance_from_artifact_bytes, global_importance_from_artifact_bytes_with_binning,
     global_importance_from_shap_values, global_importance_stub, shap_values_stub,
 };
-use linear_leaf::{model_has_linear_leaves, scale_model_by_tree_weight};
-use tree_shap::{build_std_tree, explain_rows_tree_shap, tree_shap_interactions_row};
-use types::load_artifact_context;
 pub use types::{ShapExplanationBatch, ShapInteractionBatch};
 
 pub fn explain_rows_from_artifact_bytes(
@@ -241,3 +241,6 @@ pub(crate) fn explain_rows_from_model(
     // Brute-force exact Shapley values for models with few split features.
     explain_rows_brute_force(model, rows, binning)
 }
+
+#[cfg(test)]
+mod tests;
