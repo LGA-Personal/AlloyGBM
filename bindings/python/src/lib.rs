@@ -1,5 +1,8 @@
 #![allow(clippy::too_many_arguments)]
 
+mod errors;
+use crate::errors::{engine_error_to_pyerr, predictor_error_to_pyerr, shap_error_to_pyerr};
+
 use alloygbm_backend_cpu::CpuBackend;
 use alloygbm_categorical::{
     TargetEncoderConfig, fit_target_encoder, fit_transform_target_encoder, transform_target_encoder,
@@ -26,7 +29,7 @@ use alloygbm_shap::{
     global_importance_from_artifact_bytes_with_binning,
 };
 use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods};
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rayon::prelude::*;
 use std::time::Instant;
@@ -2042,34 +2045,6 @@ fn prepare_training_matrices_from_dense_values(
             binned_matrix,
             metadata,
         })
-    }
-}
-
-fn predictor_error_to_pyerr(error: PredictorError) -> PyErr {
-    match error {
-        PredictorError::InvalidInput(message) => PyValueError::new_err(message),
-        PredictorError::ContractViolation(message) => PyRuntimeError::new_err(message),
-        PredictorError::Core(error) => PyRuntimeError::new_err(error.to_string()),
-    }
-}
-
-fn engine_error_to_pyerr(error: EngineError) -> PyErr {
-    match error {
-        EngineError::InvalidConfig(message) | EngineError::ContractViolation(message) => {
-            PyValueError::new_err(message)
-        }
-        EngineError::BackendUnavailable(message) | EngineError::NotImplemented(message) => {
-            PyRuntimeError::new_err(message)
-        }
-        EngineError::Core(error) => PyRuntimeError::new_err(error.to_string()),
-    }
-}
-
-fn shap_error_to_pyerr(error: ShapError) -> PyErr {
-    match error {
-        ShapError::InvalidInput(message) => PyValueError::new_err(message),
-        ShapError::ContractViolation(message) => PyRuntimeError::new_err(message),
-        ShapError::NotSupported(message) => PyRuntimeError::new_err(message),
     }
 }
 
