@@ -12,17 +12,7 @@ from unittest.mock import patch
 
 
 def load_regressor_module():
-    regressor_path = (
-        Path(__file__).resolve().parents[1] / "alloygbm" / "regressor.py"
-    )
-    spec = importlib.util.spec_from_file_location(
-        "alloygbm_regressor", regressor_path
-    )
-    if spec is None or spec.loader is None:
-        raise RuntimeError("unable to load alloygbm regressor module")
-
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    import alloygbm._regressor._core as module
     return module
 
 
