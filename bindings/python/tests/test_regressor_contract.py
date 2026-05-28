@@ -19,6 +19,8 @@ def load_regressor_module():
 regressor_module = load_regressor_module()
 GBMRegressor = regressor_module.GBMRegressor
 
+import alloygbm._regressor._base as base_module
+
 
 from contextlib import contextmanager
 
@@ -27,24 +29,24 @@ from contextlib import contextmanager
 def _force_legacy_train_path():
     """Block the _with_summary training paths so tests that mock
     ``_load_native_train_regression_artifact`` hit the legacy bridge."""
-    orig_ws = regressor_module._load_native_train_regression_artifact_with_summary
-    orig_dws = regressor_module._load_native_train_regression_artifact_dense_with_summary
-    orig_ds = getattr(regressor_module, "_load_native_train_regression_artifact_dense", None)
+    orig_ws = base_module._load_native_train_regression_artifact_with_summary
+    orig_dws = base_module._load_native_train_regression_artifact_dense_with_summary
+    orig_ds = getattr(base_module, "_load_native_train_regression_artifact_dense", None)
 
     def _raise():
         raise RuntimeError("blocked by test helper")
 
-    regressor_module._load_native_train_regression_artifact_with_summary = _raise
-    regressor_module._load_native_train_regression_artifact_dense_with_summary = _raise
+    base_module._load_native_train_regression_artifact_with_summary = _raise
+    base_module._load_native_train_regression_artifact_dense_with_summary = _raise
     if orig_ds is not None:
-        regressor_module._load_native_train_regression_artifact_dense = _raise
+        base_module._load_native_train_regression_artifact_dense = _raise
     try:
         yield
     finally:
-        regressor_module._load_native_train_regression_artifact_with_summary = orig_ws
-        regressor_module._load_native_train_regression_artifact_dense_with_summary = orig_dws
+        base_module._load_native_train_regression_artifact_with_summary = orig_ws
+        base_module._load_native_train_regression_artifact_dense_with_summary = orig_dws
         if orig_ds is not None:
-            regressor_module._load_native_train_regression_artifact_dense = orig_ds
+            base_module._load_native_train_regression_artifact_dense = orig_ds
 
 
 class _FakeNumpyLike:
@@ -294,12 +296,12 @@ class GBMRegressorContractTests(unittest.TestCase):
                 predict_calls.append((artifact_bytes, rows))
                 return [0.5 + row[0] for row in rows]
 
-            original_train_loader = regressor_module._load_native_train_regression_artifact
+            original_train_loader = base_module._load_native_train_regression_artifact
             original_predict_loader = (
-                regressor_module._load_native_predictor_predict_batch_canonical
+                base_module._load_native_predictor_predict_batch_canonical
             )
-            regressor_module._load_native_train_regression_artifact = lambda: fake_train
-            regressor_module._load_native_predictor_predict_batch_canonical = (
+            base_module._load_native_train_regression_artifact = lambda: fake_train
+            base_module._load_native_predictor_predict_batch_canonical = (
                 lambda: fake_predictor
             )
             try:
@@ -316,10 +318,10 @@ class GBMRegressorContractTests(unittest.TestCase):
                 fitted = model.fit([[1.0, 0.0], [2.0, 0.0], [3.0, 0.0]], [2.0, 4.0, 6.0])
                 predictions = model.predict([[1.0, 0.0], [2.0, 0.0]])
             finally:
-                regressor_module._load_native_train_regression_artifact = (
+                base_module._load_native_train_regression_artifact = (
                     original_train_loader
                 )
-                regressor_module._load_native_predictor_predict_batch_canonical = (
+                base_module._load_native_predictor_predict_batch_canonical = (
                     original_predict_loader
                 )
 
@@ -410,9 +412,9 @@ class GBMRegressorContractTests(unittest.TestCase):
             ),
         )
         original_loader = (
-            regressor_module._load_native_train_regression_artifact_dense_with_summary
+            base_module._load_native_train_regression_artifact_dense_with_summary
         )
-        regressor_module._load_native_train_regression_artifact_dense_with_summary = (
+        base_module._load_native_train_regression_artifact_dense_with_summary = (
             lambda: (lambda **_kwargs: result)
         )
         # The bytes-path function (train_regression_artifact_dense_with_summary_bytes) is
@@ -434,7 +436,7 @@ class GBMRegressorContractTests(unittest.TestCase):
                     eval_set=(_dense_memoryview([0.5, 1.5], 2, 1), [0.4, 1.4]),
                 )
         finally:
-            regressor_module._load_native_train_regression_artifact_dense_with_summary = (
+            base_module._load_native_train_regression_artifact_dense_with_summary = (
                 original_loader
             )
 
@@ -466,15 +468,15 @@ class GBMRegressorContractTests(unittest.TestCase):
                 train_calls.append(kwargs)
                 return b"artifact"
 
-            original_train_loader = regressor_module._load_native_train_regression_artifact
-            regressor_module._load_native_train_regression_artifact = lambda: fake_train
+            original_train_loader = base_module._load_native_train_regression_artifact
+            base_module._load_native_train_regression_artifact = lambda: fake_train
             try:
                 GBMRegressor().fit(
                     [[-1.2, 0.49], [0.51, 300.1], [2.6, 12.9]],
                     [0.0, 1.0, 2.0],
                 )
             finally:
-                regressor_module._load_native_train_regression_artifact = (
+                base_module._load_native_train_regression_artifact = (
                     original_train_loader
                 )
 
@@ -492,12 +494,12 @@ class GBMRegressorContractTests(unittest.TestCase):
                 train_calls.append(kwargs)
                 return b"artifact"
 
-            original_train_loader = regressor_module._load_native_train_regression_artifact
+            original_train_loader = base_module._load_native_train_regression_artifact
             original_tail_rank = os.environ.get("ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK")
             original_tail_ratio = os.environ.get(
                 "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_CORE_SPAN_RATIO"
             )
-            regressor_module._load_native_train_regression_artifact = lambda: fake_train
+            base_module._load_native_train_regression_artifact = lambda: fake_train
             os.environ["ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK"] = "1"
             os.environ["ALLOYGBM_EXPERIMENT_LINEAR_TAIL_CORE_SPAN_RATIO"] = "0.05"
             try:
@@ -512,7 +514,7 @@ class GBMRegressorContractTests(unittest.TestCase):
                     [0.0, 1.0, 2.0, 3.0, 4.0],
                 )
             finally:
-                regressor_module._load_native_train_regression_artifact = (
+                base_module._load_native_train_regression_artifact = (
                     original_train_loader
                 )
                 if original_tail_rank is None:
@@ -548,14 +550,14 @@ class GBMRegressorContractTests(unittest.TestCase):
                 predict_calls.append(rows)
                 return [0.0] * len(rows)
 
-            original_train_loader = regressor_module._load_native_train_regression_artifact
+            original_train_loader = base_module._load_native_train_regression_artifact
             original_predict_loader = (
-                regressor_module._load_native_predictor_predict_batch_canonical
+                base_module._load_native_predictor_predict_batch_canonical
             )
-            regressor_module._load_native_train_regression_artifact = lambda: (
+            base_module._load_native_train_regression_artifact = lambda: (
                 lambda *_args, **_kwargs: b"artifact"
             )
-            regressor_module._load_native_predictor_predict_batch_canonical = (
+            base_module._load_native_predictor_predict_batch_canonical = (
                 lambda: fake_predictor
             )
             try:
@@ -565,10 +567,10 @@ class GBMRegressorContractTests(unittest.TestCase):
                 )
                 model.predict([[-0.7, 0.2], [4.4, 1200.4]])
             finally:
-                regressor_module._load_native_train_regression_artifact = (
+                base_module._load_native_train_regression_artifact = (
                     original_train_loader
                 )
-                regressor_module._load_native_predictor_predict_batch_canonical = (
+                base_module._load_native_predictor_predict_batch_canonical = (
                     original_predict_loader
                 )
 
@@ -584,18 +586,18 @@ class GBMRegressorContractTests(unittest.TestCase):
                 predict_calls.append(rows)
                 return [0.0] * len(rows)
 
-            original_train_loader = regressor_module._load_native_train_regression_artifact
+            original_train_loader = base_module._load_native_train_regression_artifact
             original_predict_loader = (
-                regressor_module._load_native_predictor_predict_batch_canonical
+                base_module._load_native_predictor_predict_batch_canonical
             )
             original_tail_rank = os.environ.get("ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK")
             original_tail_ratio = os.environ.get(
                 "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_CORE_SPAN_RATIO"
             )
-            regressor_module._load_native_train_regression_artifact = lambda: (
+            base_module._load_native_train_regression_artifact = lambda: (
                 lambda *_args, **_kwargs: b"artifact"
             )
-            regressor_module._load_native_predictor_predict_batch_canonical = (
+            base_module._load_native_predictor_predict_batch_canonical = (
                 lambda: fake_predictor
             )
             os.environ["ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK"] = "1"
@@ -614,10 +616,10 @@ class GBMRegressorContractTests(unittest.TestCase):
                 os.environ["ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK"] = "0"
                 model.predict([[0.35, 0.24], [2.0, 0.30]])
             finally:
-                regressor_module._load_native_train_regression_artifact = (
+                base_module._load_native_train_regression_artifact = (
                     original_train_loader
                 )
-                regressor_module._load_native_predictor_predict_batch_canonical = (
+                base_module._load_native_predictor_predict_batch_canonical = (
                     original_predict_loader
                 )
                 if original_tail_rank is None:
@@ -643,15 +645,15 @@ class GBMRegressorContractTests(unittest.TestCase):
                 train_calls.append(kwargs)
                 return b"artifact"
 
-            original_train_loader = regressor_module._load_native_train_regression_artifact
-            regressor_module._load_native_train_regression_artifact = lambda: fake_train
+            original_train_loader = base_module._load_native_train_regression_artifact
+            base_module._load_native_train_regression_artifact = lambda: fake_train
             try:
                 GBMRegressor(continuous_binning_strategy="rank").fit(
                     [[-1.2, 0.49], [0.51, 300.1], [2.6, 12.9]],
                     [0.0, 1.0, 2.0],
                 )
             finally:
-                regressor_module._load_native_train_regression_artifact = (
+                base_module._load_native_train_regression_artifact = (
                     original_train_loader
                 )
 
@@ -669,15 +671,15 @@ class GBMRegressorContractTests(unittest.TestCase):
                 train_calls.append(kwargs)
                 return b"artifact"
 
-            original_train_loader = regressor_module._load_native_train_regression_artifact
-            regressor_module._load_native_train_regression_artifact = lambda: fake_train
+            original_train_loader = base_module._load_native_train_regression_artifact
+            base_module._load_native_train_regression_artifact = lambda: fake_train
             try:
                 GBMRegressor(continuous_binning_strategy="quantile").fit(
                     [[-1.2, 0.49], [0.51, 300.1], [2.6, 12.9]],
                     [0.0, 1.0, 2.0],
                 )
             finally:
-                regressor_module._load_native_train_regression_artifact = (
+                base_module._load_native_train_regression_artifact = (
                     original_train_loader
                 )
 
@@ -702,8 +704,8 @@ class GBMRegressorContractTests(unittest.TestCase):
             shap_calls.append((artifact_bytes, rows))
             return (1.25, [[0.1, -0.1], [0.2, -0.2]])
 
-        original_shap_loader = regressor_module._load_native_shap_explain_rows
-        regressor_module._load_native_shap_explain_rows = lambda: fake_shap
+        original_shap_loader = base_module._load_native_shap_explain_rows
+        base_module._load_native_shap_explain_rows = lambda: fake_shap
         try:
             model = GBMRegressor().fit([[1.0, 0.0], [2.0, 0.0]], [1.0, 2.0])
             values = model.shap_values([[1.0, 0.0], [2.0, 0.0]])
@@ -711,7 +713,7 @@ class GBMRegressorContractTests(unittest.TestCase):
                 [[1.0, 0.0], [2.0, 0.0]], include_expected_value=True
             )
         finally:
-            regressor_module._load_native_shap_explain_rows = original_shap_loader
+            base_module._load_native_shap_explain_rows = original_shap_loader
 
         self.assertEqual(values, [[0.1, -0.1], [0.2, -0.2]])
         self.assertEqual(with_expected, (1.25, [[0.1, -0.1], [0.2, -0.2]]))
@@ -735,13 +737,13 @@ class GBMRegressorContractTests(unittest.TestCase):
             calls.append((artifact_bytes, rows))
             return [("f0", 0.6), ("f1", 0.05)]
 
-        original_importance_loader = regressor_module._load_native_shap_global_importance
-        regressor_module._load_native_shap_global_importance = lambda: fake_importance
+        original_importance_loader = base_module._load_native_shap_global_importance
+        base_module._load_native_shap_global_importance = lambda: fake_importance
         try:
             model = GBMRegressor().fit([[1.0, 0.0], [2.0, 0.0]], [1.0, 2.0])
             importance = model.feature_importances([[1.0, 0.0], [2.0, 0.0]])
         finally:
-            regressor_module._load_native_shap_global_importance = (
+            base_module._load_native_shap_global_importance = (
                 original_importance_loader
             )
 
@@ -800,8 +802,8 @@ class GBMRegressorContractTests(unittest.TestCase):
                 train_calls.append(kwargs)
                 return b"artifact"
 
-            original_train_loader = regressor_module._load_native_train_regression_artifact
-            regressor_module._load_native_train_regression_artifact = lambda: fake_train
+            original_train_loader = base_module._load_native_train_regression_artifact
+            base_module._load_native_train_regression_artifact = lambda: fake_train
             try:
                 model = GBMRegressor(
                     categorical_feature_index=1,
@@ -816,7 +818,7 @@ class GBMRegressorContractTests(unittest.TestCase):
                     time_index=[1, 2, 3],
                 )
             finally:
-                regressor_module._load_native_train_regression_artifact = (
+                base_module._load_native_train_regression_artifact = (
                     original_train_loader
                 )
 
@@ -847,14 +849,14 @@ class GBMRegressorContractTests(unittest.TestCase):
             train_calls.append((rows, targets))
             return b"artifact"
 
-        original_train_loader = regressor_module._load_native_train_regression_artifact
-        original_summary_loader = regressor_module._load_native_train_regression_artifact_with_summary
-        original_dense_summary_loader = regressor_module._load_native_train_regression_artifact_dense_with_summary
-        regressor_module._load_native_train_regression_artifact = lambda: fake_train
-        regressor_module._load_native_train_regression_artifact_with_summary = (
+        original_train_loader = base_module._load_native_train_regression_artifact
+        original_summary_loader = base_module._load_native_train_regression_artifact_with_summary
+        original_dense_summary_loader = base_module._load_native_train_regression_artifact_dense_with_summary
+        base_module._load_native_train_regression_artifact = lambda: fake_train
+        base_module._load_native_train_regression_artifact_with_summary = (
             lambda: (_ for _ in ()).throw(RuntimeError("force legacy path"))
         )
-        regressor_module._load_native_train_regression_artifact_dense_with_summary = (
+        base_module._load_native_train_regression_artifact_dense_with_summary = (
             lambda: (_ for _ in ()).throw(RuntimeError("force legacy path"))
         )
         try:
@@ -872,13 +874,13 @@ class GBMRegressorContractTests(unittest.TestCase):
                 _FakeNumpyLike([5.0, 6.0]),
             )
         finally:
-            regressor_module._load_native_train_regression_artifact = (
+            base_module._load_native_train_regression_artifact = (
                 original_train_loader
             )
-            regressor_module._load_native_train_regression_artifact_with_summary = (
+            base_module._load_native_train_regression_artifact_with_summary = (
                 original_summary_loader
             )
-            regressor_module._load_native_train_regression_artifact_dense_with_summary = (
+            base_module._load_native_train_regression_artifact_dense_with_summary = (
                 original_dense_summary_loader
             )
 
@@ -908,8 +910,8 @@ class GBMRegressorContractTests(unittest.TestCase):
                 train_calls.append(kwargs)
                 return b"artifact"
 
-            original_train_loader = regressor_module._load_native_train_regression_artifact
-            regressor_module._load_native_train_regression_artifact = lambda: fake_train
+            original_train_loader = base_module._load_native_train_regression_artifact
+            base_module._load_native_train_regression_artifact = lambda: fake_train
             try:
                 model = GBMRegressor()
                 model.fit(
@@ -921,7 +923,7 @@ class GBMRegressorContractTests(unittest.TestCase):
                     [1.0, 2.0, 3.0],
                 )
             finally:
-                regressor_module._load_native_train_regression_artifact = (
+                base_module._load_native_train_regression_artifact = (
                     original_train_loader
                 )
 
@@ -947,8 +949,8 @@ class GBMRegressorContractTests(unittest.TestCase):
 
     def test_predict_rejects_feature_count_mismatch(self) -> None:
         with _force_legacy_train_path():
-            original_train_loader = regressor_module._load_native_train_regression_artifact
-            regressor_module._load_native_train_regression_artifact = lambda: (
+            original_train_loader = base_module._load_native_train_regression_artifact
+            base_module._load_native_train_regression_artifact = lambda: (
                 lambda *_args, **_kwargs: b"artifact"
             )
             try:
@@ -956,7 +958,7 @@ class GBMRegressorContractTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "feature count"):
                     model.predict([[1.0]])
             finally:
-                regressor_module._load_native_train_regression_artifact = (
+                base_module._load_native_train_regression_artifact = (
                     original_train_loader
                 )
 
@@ -969,24 +971,24 @@ class GBMRegressorContractTests(unittest.TestCase):
                 predict_calls.append(rows)
                 return [0.0] * len(rows)
 
-            original_train_loader = regressor_module._load_native_train_regression_artifact
+            original_train_loader = base_module._load_native_train_regression_artifact
             original_predict_loader = (
-                regressor_module._load_native_predictor_predict_batch_canonical
+                base_module._load_native_predictor_predict_batch_canonical
             )
-            regressor_module._load_native_train_regression_artifact = lambda: (
+            base_module._load_native_train_regression_artifact = lambda: (
                 lambda *_args, **_kwargs: b"artifact"
             )
-            regressor_module._load_native_predictor_predict_batch_canonical = (
+            base_module._load_native_predictor_predict_batch_canonical = (
                 lambda: fake_predictor
             )
             try:
                 model = GBMRegressor().fit([[1.0, 0.0], [2.0, 0.0]], [1.0, 2.0])
                 predictions = model.predict(_FakePandasLikeFrame([[3.0, 0.0], [4.0, 0.0]]))
             finally:
-                regressor_module._load_native_train_regression_artifact = (
+                base_module._load_native_train_regression_artifact = (
                     original_train_loader
                 )
-                regressor_module._load_native_predictor_predict_batch_canonical = (
+                base_module._load_native_predictor_predict_batch_canonical = (
                     original_predict_loader
                 )
 
@@ -1006,16 +1008,16 @@ class GBMRegressorContractTests(unittest.TestCase):
                     handle_predict_calls.append(rows)
                     return [8.0 + row[0] for row in rows]
 
-            original_train_loader = regressor_module._load_native_train_regression_artifact
-            original_handle_loader = regressor_module._load_native_predictor_handle_class
+            original_train_loader = base_module._load_native_train_regression_artifact
+            original_handle_loader = base_module._load_native_predictor_handle_class
             original_canonical_loader = (
-                regressor_module._load_native_predictor_predict_batch_canonical
+                base_module._load_native_predictor_predict_batch_canonical
             )
-            regressor_module._load_native_train_regression_artifact = lambda: (
+            base_module._load_native_train_regression_artifact = lambda: (
                 lambda *_args, **_kwargs: b"artifact"
             )
-            regressor_module._load_native_predictor_handle_class = lambda: FakeHandle
-            regressor_module._load_native_predictor_predict_batch_canonical = lambda: (
+            base_module._load_native_predictor_handle_class = lambda: FakeHandle
+            base_module._load_native_predictor_predict_batch_canonical = lambda: (
                 lambda *_args, **_kwargs: (_ for _ in ()).throw(
                     RuntimeError("canonical loader should not be used when handle is cached")
                 )
@@ -1024,11 +1026,11 @@ class GBMRegressorContractTests(unittest.TestCase):
                 model = GBMRegressor().fit([[1.0, 0.0], [2.0, 0.0]], [1.0, 2.0])
                 predictions = model.predict([[3.0, 0.0], [4.0, 0.0]])
             finally:
-                regressor_module._load_native_train_regression_artifact = (
+                base_module._load_native_train_regression_artifact = (
                     original_train_loader
                 )
-                regressor_module._load_native_predictor_handle_class = original_handle_loader
-                regressor_module._load_native_predictor_predict_batch_canonical = (
+                base_module._load_native_predictor_handle_class = original_handle_loader
+                base_module._load_native_predictor_predict_batch_canonical = (
                     original_canonical_loader
                 )
 
@@ -1055,16 +1057,16 @@ class GBMRegressorContractTests(unittest.TestCase):
                 canonical_calls.append((artifact_bytes, rows))
                 return [5.0] * len(rows)
 
-            original_train_loader = regressor_module._load_native_train_regression_artifact
-            original_handle_loader = regressor_module._load_native_predictor_handle_class
+            original_train_loader = base_module._load_native_train_regression_artifact
+            original_handle_loader = base_module._load_native_predictor_handle_class
             original_canonical_loader = (
-                regressor_module._load_native_predictor_predict_batch_canonical
+                base_module._load_native_predictor_predict_batch_canonical
             )
-            regressor_module._load_native_train_regression_artifact = lambda: (
+            base_module._load_native_train_regression_artifact = lambda: (
                 lambda *_args, **_kwargs: b"artifact"
             )
-            regressor_module._load_native_predictor_handle_class = lambda: FailingHandle
-            regressor_module._load_native_predictor_predict_batch_canonical = (
+            base_module._load_native_predictor_handle_class = lambda: FailingHandle
+            base_module._load_native_predictor_predict_batch_canonical = (
                 lambda: fake_canonical
             )
             try:
@@ -1072,11 +1074,11 @@ class GBMRegressorContractTests(unittest.TestCase):
                 first = model.predict([[3.0, 0.0]])
                 second = model.predict([[4.0, 0.0]])
             finally:
-                regressor_module._load_native_train_regression_artifact = (
+                base_module._load_native_train_regression_artifact = (
                     original_train_loader
                 )
-                regressor_module._load_native_predictor_handle_class = original_handle_loader
-                regressor_module._load_native_predictor_predict_batch_canonical = (
+                base_module._load_native_predictor_handle_class = original_handle_loader
+                base_module._load_native_predictor_predict_batch_canonical = (
                     original_canonical_loader
                 )
 
@@ -1096,31 +1098,31 @@ class GBMRegressorContractTests(unittest.TestCase):
                 calls.append((artifact_bytes, rows))
                 return [3.0] * len(rows)
 
-            original_train_loader = regressor_module._load_native_train_regression_artifact
-            original_compat_loader = regressor_module._load_native_predictor_predict_batch
+            original_train_loader = base_module._load_native_train_regression_artifact
+            original_compat_loader = base_module._load_native_predictor_predict_batch
             original_canonical_loader = (
-                regressor_module._load_native_predictor_predict_batch_canonical
+                base_module._load_native_predictor_predict_batch_canonical
             )
-            regressor_module._load_native_train_regression_artifact = lambda: (
+            base_module._load_native_train_regression_artifact = lambda: (
                 lambda *_args, **_kwargs: b"artifact"
             )
-            regressor_module._load_native_predictor_predict_batch = lambda: (
+            base_module._load_native_predictor_predict_batch = lambda: (
                 lambda *_args, **_kwargs: (_ for _ in ()).throw(
                     RuntimeError("compatibility loader should not be used for predict")
                 )
             )
-            regressor_module._load_native_predictor_predict_batch_canonical = (
+            base_module._load_native_predictor_predict_batch_canonical = (
                 lambda: fake_canonical
             )
             try:
                 model = GBMRegressor().fit([[1.0, 0.0], [2.0, 0.0]], [1.0, 2.0])
                 predictions = model.predict([[1.0, 0.0], [2.0, 0.0]])
             finally:
-                regressor_module._load_native_train_regression_artifact = (
+                base_module._load_native_train_regression_artifact = (
                     original_train_loader
                 )
-                regressor_module._load_native_predictor_predict_batch = original_compat_loader
-                regressor_module._load_native_predictor_predict_batch_canonical = (
+                base_module._load_native_predictor_predict_batch = original_compat_loader
+                base_module._load_native_predictor_predict_batch_canonical = (
                     original_canonical_loader
                 )
 
@@ -1136,12 +1138,12 @@ class GBMRegressorContractTests(unittest.TestCase):
             calls.append((artifact_bytes, rows))
             return [4.0] * len(rows)
 
-        original_compat_loader = regressor_module._load_native_predictor_predict_batch
+        original_compat_loader = base_module._load_native_predictor_predict_batch
         original_canonical_loader = (
-            regressor_module._load_native_predictor_predict_batch_canonical
+            base_module._load_native_predictor_predict_batch_canonical
         )
-        regressor_module._load_native_predictor_predict_batch = lambda: fake_compatibility
-        regressor_module._load_native_predictor_predict_batch_canonical = lambda: (
+        base_module._load_native_predictor_predict_batch = lambda: fake_compatibility
+        base_module._load_native_predictor_predict_batch_canonical = lambda: (
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
                 RuntimeError("canonical loader should not be used for predict_from_artifact")
             )
@@ -1151,8 +1153,8 @@ class GBMRegressorContractTests(unittest.TestCase):
                 b"artifact", [[1.0, 0.0], [2.0, 0.0]]
             )
         finally:
-            regressor_module._load_native_predictor_predict_batch = original_compat_loader
-            regressor_module._load_native_predictor_predict_batch_canonical = (
+            base_module._load_native_predictor_predict_batch = original_compat_loader
+            base_module._load_native_predictor_predict_batch_canonical = (
                 original_canonical_loader
             )
 
@@ -1172,14 +1174,14 @@ class GBMRegressorContractTests(unittest.TestCase):
             calls.append((artifact_bytes, rows))
             return [1.0] * len(rows)
 
-        original_loader = regressor_module._load_native_predictor_predict_batch
-        regressor_module._load_native_predictor_predict_batch = lambda: fake_predictor
+        original_loader = base_module._load_native_predictor_predict_batch
+        base_module._load_native_predictor_predict_batch = lambda: fake_predictor
         try:
             predictions = GBMRegressor.predict_from_artifact(
                 bytearray(b"artifact"), [[1.0, 0.0], [2.0, 0.0]]
             )
         finally:
-            regressor_module._load_native_predictor_predict_batch = original_loader
+            base_module._load_native_predictor_predict_batch = original_loader
 
         self.assertEqual(predictions, [1.0, 1.0])
         self.assertEqual(calls, [(b"artifact", [[1.0, 0.0], [2.0, 0.0]])])
@@ -1193,14 +1195,14 @@ class GBMRegressorContractTests(unittest.TestCase):
             calls.append((artifact_bytes, rows))
             return [2.0] * len(rows)
 
-        original_loader = regressor_module._load_native_predictor_predict_batch
-        regressor_module._load_native_predictor_predict_batch = lambda: fake_predictor
+        original_loader = base_module._load_native_predictor_predict_batch
+        base_module._load_native_predictor_predict_batch = lambda: fake_predictor
         try:
             predictions = GBMRegressor.predict_from_artifact(
                 memoryview(b"artifact"), [[1.0, 0.0], [2.0, 0.0]]
             )
         finally:
-            regressor_module._load_native_predictor_predict_batch = original_loader
+            base_module._load_native_predictor_predict_batch = original_loader
 
         self.assertEqual(predictions, [2.0, 2.0])
         self.assertEqual(calls, [(b"artifact", [[1.0, 0.0], [2.0, 0.0]])])
@@ -1218,14 +1220,14 @@ class GBMRegressorContractTests(unittest.TestCase):
             calls.append((artifact_bytes, rows))
             return [2.5] * len(rows)
 
-        original_loader = regressor_module._load_native_predictor_predict_batch
-        regressor_module._load_native_predictor_predict_batch = lambda: fake_predictor
+        original_loader = base_module._load_native_predictor_predict_batch
+        base_module._load_native_predictor_predict_batch = lambda: fake_predictor
         try:
             predictions = GBMRegressor.predict_from_artifact(
                 b"artifact", _FakePolarsLikeFrame([[1.0, 0.0], [2.0, 0.0]])
             )
         finally:
-            regressor_module._load_native_predictor_predict_batch = original_loader
+            base_module._load_native_predictor_predict_batch = original_loader
 
         self.assertEqual(predictions, [2.5, 2.5])
         self.assertEqual(calls, [(b"artifact", [[1.0, 0.0], [2.0, 0.0]])])
@@ -1239,14 +1241,14 @@ class GBMRegressorContractTests(unittest.TestCase):
             calls.append((artifact_bytes, rows))
             return [1.5] * len(rows)
 
-        original_loader = regressor_module._load_native_predictor_predict_batch
-        regressor_module._load_native_predictor_predict_batch = lambda: fake_predictor
+        original_loader = base_module._load_native_predictor_predict_batch
+        base_module._load_native_predictor_predict_batch = lambda: fake_predictor
         try:
             predictions = GBMRegressor.predict_from_artifact(
                 b"artifact", [[1.0, 0.0], [2.0, 0.0]]
             )
         finally:
-            regressor_module._load_native_predictor_predict_batch = original_loader
+            base_module._load_native_predictor_predict_batch = original_loader
 
         self.assertEqual(predictions, [1.5, 1.5])
         self.assertEqual(
@@ -1255,15 +1257,15 @@ class GBMRegressorContractTests(unittest.TestCase):
         )
 
     def test_predict_from_artifact_propagates_native_bridge_error(self) -> None:
-        original_loader = regressor_module._load_native_predictor_predict_batch
-        regressor_module._load_native_predictor_predict_batch = lambda: (_ for _ in ()).throw(
+        original_loader = base_module._load_native_predictor_predict_batch
+        base_module._load_native_predictor_predict_batch = lambda: (_ for _ in ()).throw(
             RuntimeError("native bridge unavailable")
         )
         try:
             with self.assertRaisesRegex(RuntimeError, "native bridge unavailable"):
                 GBMRegressor.predict_from_artifact(b"artifact", [[1.0, 0.0]])
         finally:
-            regressor_module._load_native_predictor_predict_batch = original_loader
+            base_module._load_native_predictor_predict_batch = original_loader
 
 
 if __name__ == "__main__":

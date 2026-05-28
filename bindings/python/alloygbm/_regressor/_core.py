@@ -9,6 +9,7 @@ import time
 from collections.abc import Sequence
 
 from ._validation import _ValidationMixin
+from . import _base
 from ._base import (
     _GBMRegressorBase,
     _PRE_BINNED_INTEGER_TOLERANCE,
@@ -22,23 +23,6 @@ from ._base import (
     _linear_tail_core_span_ratio_threshold_from_env,
     _diagnostics_to_dicts,
     _validate_quantile_alpha,
-    _load_native_predictor_predict_batch,
-    _load_native_predictor_predict_batch_dense,
-    _load_native_predictor_predict_batch_canonical,
-    _load_native_predictor_predict_batch_canonical_dense,
-    _load_native_predictor_handle_class,
-    _load_native_train_regression_artifact,
-    _load_native_train_regression_artifact_dense,
-    _load_native_train_regression_artifact_with_summary,
-    _load_native_train_regression_artifact_dense_with_summary,
-    _load_native_shap_explain_rows,
-    _load_native_shap_explain_rows_dense,
-    _load_native_shap_global_importance,
-    _load_native_shap_global_importance_dense,
-    _load_native_shap_explain_rows_with_binning,
-    _load_native_shap_explain_rows_dense_with_binning,
-    _load_native_shap_global_importance_with_binning,
-    _load_native_shap_global_importance_dense_with_binning,
 )
 
 
@@ -1737,9 +1721,9 @@ class GBMRegressor(_ValidationMixin, _GBMRegressorBase):
 
         try:
             if dense_training_payload is not None:
-                train_with_summary = _load_native_train_regression_artifact_dense_with_summary()
+                train_with_summary = _base._load_native_train_regression_artifact_dense_with_summary()
             else:
-                train_with_summary = _load_native_train_regression_artifact_with_summary()
+                train_with_summary = _base._load_native_train_regression_artifact_with_summary()
         except RuntimeError:
             return self._fit_with_legacy_native_bridge(
                 X=X,
@@ -2272,7 +2256,7 @@ class GBMRegressor(_ValidationMixin, _GBMRegressorBase):
                     )
 
         if active_dense_training_payload is not None:
-            train_regression_artifact_dense = _load_native_train_regression_artifact_dense()
+            train_regression_artifact_dense = _base._load_native_train_regression_artifact_dense()
             artifact_bytes = train_regression_artifact_dense(
                 values=active_dense_training_payload[0],
                 row_count=active_dense_training_payload[1],
@@ -2345,7 +2329,7 @@ class GBMRegressor(_ValidationMixin, _GBMRegressorBase):
                 ),
             )
         else:
-            train_regression_artifact = _load_native_train_regression_artifact()
+            train_regression_artifact = _base._load_native_train_regression_artifact()
             artifact_bytes = train_regression_artifact(
                 rows=native_training_rows,
                 targets=targets,
@@ -2597,7 +2581,7 @@ class GBMRegressor(_ValidationMixin, _GBMRegressorBase):
                 predict_dense = getattr(self._native_predictor_handle, "predict_dense", None)
                 if callable(predict_dense):
                     return list(predict_dense(flat_values, row_count, feature_count))
-                predictor_predict_batch_dense = _load_native_predictor_predict_batch_dense()
+                predictor_predict_batch_dense = _base._load_native_predictor_predict_batch_dense()
                 return list(
                     predictor_predict_batch_dense(
                         self._artifact_bytes, flat_values, row_count, feature_count
@@ -2656,7 +2640,7 @@ class GBMRegressor(_ValidationMixin, _GBMRegressorBase):
         if isinstance(rows, tuple):
             flat_values, row_count, feature_count = rows
             predictor_predict_batch_canonical_dense = (
-                _load_native_predictor_predict_batch_canonical_dense()
+                _base._load_native_predictor_predict_batch_canonical_dense()
             )
             return list(
                 predictor_predict_batch_canonical_dense(
@@ -2666,7 +2650,7 @@ class GBMRegressor(_ValidationMixin, _GBMRegressorBase):
                     feature_count=feature_count,
                 )
             )
-        predictor_predict_batch_canonical = _load_native_predictor_predict_batch_canonical()
+        predictor_predict_batch_canonical = _base._load_native_predictor_predict_batch_canonical()
         return list(predictor_predict_batch_canonical(self._artifact_bytes, rows))
 
     def _shap_binning_kwargs(self) -> dict | None:
@@ -2813,7 +2797,7 @@ class GBMRegressor(_ValidationMixin, _GBMRegressorBase):
         if binning_kwargs is not None:
             if isinstance(rows, tuple):
                 flat_values, row_count, feature_count = rows
-                shap_fn = _load_native_shap_explain_rows_dense_with_binning()
+                shap_fn = _base._load_native_shap_explain_rows_dense_with_binning()
                 expected_value, values = shap_fn(
                     self._artifact_bytes,
                     flat_values,
@@ -2822,13 +2806,13 @@ class GBMRegressor(_ValidationMixin, _GBMRegressorBase):
                     **binning_kwargs,
                 )
             else:
-                shap_fn = _load_native_shap_explain_rows_with_binning()
+                shap_fn = _base._load_native_shap_explain_rows_with_binning()
                 expected_value, values = shap_fn(
                     self._artifact_bytes, rows, **binning_kwargs
                 )
         elif isinstance(rows, tuple):
             flat_values, row_count, feature_count = rows
-            shap_explain_rows_dense = _load_native_shap_explain_rows_dense()
+            shap_explain_rows_dense = _base._load_native_shap_explain_rows_dense()
             expected_value, values = shap_explain_rows_dense(
                 self._artifact_bytes,
                 flat_values,
@@ -2836,7 +2820,7 @@ class GBMRegressor(_ValidationMixin, _GBMRegressorBase):
                 feature_count=feature_count,
             )
         else:
-            shap_explain_rows = _load_native_shap_explain_rows()
+            shap_explain_rows = _base._load_native_shap_explain_rows()
             expected_value, values = shap_explain_rows(self._artifact_bytes, rows)
         shap_matrix = [list(row) for row in values]
         if include_expected_value:
@@ -2994,7 +2978,7 @@ class GBMRegressor(_ValidationMixin, _GBMRegressorBase):
         if binning_kwargs is not None:
             if isinstance(rows, tuple):
                 flat_values, row_count, feature_count = rows
-                shap_fn = _load_native_shap_global_importance_dense_with_binning()
+                shap_fn = _base._load_native_shap_global_importance_dense_with_binning()
                 importance = shap_fn(
                     self._artifact_bytes,
                     flat_values,
@@ -3003,11 +2987,11 @@ class GBMRegressor(_ValidationMixin, _GBMRegressorBase):
                     **binning_kwargs,
                 )
             else:
-                shap_fn = _load_native_shap_global_importance_with_binning()
+                shap_fn = _base._load_native_shap_global_importance_with_binning()
                 importance = shap_fn(self._artifact_bytes, rows, **binning_kwargs)
         elif isinstance(rows, tuple):
             flat_values, row_count, feature_count = rows
-            shap_global_importance_dense = _load_native_shap_global_importance_dense()
+            shap_global_importance_dense = _base._load_native_shap_global_importance_dense()
             importance = shap_global_importance_dense(
                 self._artifact_bytes,
                 flat_values,
@@ -3015,7 +2999,7 @@ class GBMRegressor(_ValidationMixin, _GBMRegressorBase):
                 feature_count=feature_count,
             )
         else:
-            shap_global_importance = _load_native_shap_global_importance()
+            shap_global_importance = _base._load_native_shap_global_importance()
             importance = shap_global_importance(self._artifact_bytes, rows)
         result = [(str(name), float(value)) for name, value in importance]
         if self.feature_names_in_ is not None and len(result) == len(
@@ -3064,7 +3048,7 @@ class GBMRegressor(_ValidationMixin, _GBMRegressorBase):
         dense_payload = GBMRegressor._native_matrix_flat_payload(X)
         if dense_payload is not None:
             flat_values, row_count, feature_count = dense_payload
-            predictor_predict_batch_dense = _load_native_predictor_predict_batch_dense()
+            predictor_predict_batch_dense = _base._load_native_predictor_predict_batch_dense()
             return list(
                 predictor_predict_batch_dense(
                     bytes(artifact_bytes),
@@ -3074,7 +3058,7 @@ class GBMRegressor(_ValidationMixin, _GBMRegressorBase):
                 )
             )
         rows = GBMRegressor._validate_rows(X)
-        predictor_predict_batch = _load_native_predictor_predict_batch()
+        predictor_predict_batch = _base._load_native_predictor_predict_batch()
         return list(predictor_predict_batch(bytes(artifact_bytes), rows))
 
     @staticmethod
@@ -4058,7 +4042,7 @@ class GBMRegressor(_ValidationMixin, _GBMRegressorBase):
     @staticmethod
     def _build_native_predictor_handle(artifact_bytes: bytes) -> object | None:
         try:
-            native_predictor_handle_class = _load_native_predictor_handle_class()
+            native_predictor_handle_class = _base._load_native_predictor_handle_class()
         except RuntimeError:
             return None
         try:
