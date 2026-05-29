@@ -4,7 +4,23 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
-The `0.12.2` release continues the structural refactor begun in v0.12.0 and continued in v0.12.1. The 3,925-line `crates/shap/src/lib.rs` shrinks to 246 lines across 8 focused modules; the 5,088-line `crates/engine/src/joint.rs` is promoted to a `crates/engine/src/joint/` subdir with `mod.rs` reduced to 42 lines of scaffolding and 5 sibling modules. **No user-facing API changes, no behavioral changes, no new features.** Every `pub` symbol resolves at its v0.12.1 path; trained model artifacts are byte-identical to v0.12.1; the full Rust + Python test suite passes unchanged at every refactor commit. After v0.12.2 the remaining refactor work is the PyO3 binding (Phase 6), the Python regressor (Phase 7), and a cross-cutting verification pass (Phase 8) — see tracking issue #44.
+The `0.12.3` release **completes** the structural refactor begun in v0.12.0. The 6,619-line PyO3 bridge `bindings/python/src/lib.rs` shrinks to ~110 lines across 9 focused submodules (plus an extracted `tests/`); the 4,909-line `GBMRegressor` estimator `bindings/python/alloygbm/regressor.py` becomes a back-compat shim over a `_regressor/` mixin package (`_base`, `_ValidationMixin`, `_QuantizationMixin`, `_ShapMixin`, `_PersistenceMixin`, `_core`). **No user-facing API changes, no behavioral changes, no new features.** Every Python symbol resolves at its v0.12.2 path; trained model artifacts load and predict identically; the full Rust + Python test suite passes unchanged at every refactor commit. This closes the file-decomposition program (tracking issue #44, Phases 1–8).
+
+## What Shipped In v0.12.3
+
+### PyO3 bridge restructure (Phase 6)
+
+`bindings/python/src/lib.rs` (6,619 lines) decomposed into 9 sibling modules (`errors`, `callbacks`, `pyclasses`, `quantization`, `params`, `categorical_bridge`, `predict`, `train`, `joint`) plus a slim `lib.rs` (mod decls, shared `pub(crate)` consts, the `#[pymodule]` registration, the shared `dense_rows_from_flat_values` helper) and an extracted `tests/` submodule. Eleven commits, one per logical extraction plus the test extraction. Every pyfunction/pyclass stays registered and importable unchanged; 445 cargo + 641 pytest green at every commit.
+
+### GBMRegressor estimator restructure (Phase 7)
+
+`regressor.py` (4,909 lines) decomposed into a `_regressor/` package via the mixin pattern (method bodies moved byte-identically; `GBMRegressor` assembled from `_ValidationMixin`, `_QuantizationMixin`, `_ShapMixin`, `_PersistenceMixin` over the `_GBMRegressorBase`). `_base` holds module-level helpers and the native loaders, which are now invoked as `_base._load_native_*()` so the white-box contract test's 119 monkeypatches retarget to a single stable module. `regressor.py` is a back-compat shim; `GBMClassifier`/`GBMRanker` subclassing is preserved. Nine commits, 641 pytest green throughout.
+
+### Cross-cutting (Phase 8)
+
+CLAUDE.md Project Structure and architectural-pointer refresh for the new layouts. Deferred (documented): the `crates/engine/src/trainer/mod.rs` `use crate::*;` glob tightening (explicit list would exceed ~50 entries) and the single `#[allow(dead_code)]` in `crates/engine/src/factor.rs` (predates this release).
+
+The full inventory is in the v0.12.3 CHANGELOG entry. The post-refactor file layouts are reflected in `CLAUDE.md`'s Project Structure section.
 
 ## What Shipped In v0.12.2
 

@@ -59,7 +59,7 @@ pub fn explain_rows_from_artifact_bytes_with_binning(
 /// individualized feature attributions" — extended to pairwise interactions.
 /// Cost: `O(T · L · D² · M)` where `M` is the feature count.
 ///
-/// Linear-leaf (PL) models are rejected by this entry point in v0.12.2 —
+/// Linear-leaf (PL) models are rejected by this entry point in v0.12.3 —
 /// see `docs/limitations.md` for the deferred extension.
 pub fn explain_interactions_from_artifact_bytes(
     artifact_bytes: &[u8],
@@ -89,7 +89,7 @@ fn explain_interactions_from_model(
 
     if model_has_linear_leaves(model) {
         return Err(ShapError::InvalidInput(
-            "SHAP interaction values are not supported for leaf_model=\"linear\" artifacts in v0.12.2"
+            "SHAP interaction values are not supported for leaf_model=\"linear\" artifacts in v0.12.3"
                 .to_string(),
         ));
     }

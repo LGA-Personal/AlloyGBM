@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.12.3 (2026-05-29)
+
+Completion of the structural refactor begun in v0.12.0. **No user-facing API changes, no behavioral changes, no new features.** This release decomposes the two remaining large files — the PyO3 bridge and the `GBMRegressor` estimator — into focused, single-responsibility modules. Patch release because every change is mechanical; the full test suite (445 cargo + 641 pytest) holds at every individual commit. Closes the file-decomposition program tracked in issue #44 (Phases 6–8).
+
+### What changed structurally
+
+- **`bindings/python/src/lib.rs`** (the PyO3 bridge crate `_alloygbm`) shrank from **6,619 lines to ~110 lines**. The remaining lines are module declarations, shared `pub(crate)` constants, the `#[pymodule] fn _alloygbm` registration, a shared `dense_rows_from_flat_values` helper, and `#[cfg(test)] mod tests;`. Nine new sibling modules under `bindings/python/src/` host the moved code:
+  - `errors.rs` — `PredictorError`/`EngineError`/`ShapError` → `PyErr` converters
+  - `callbacks.rs` — `CustomPythonObjective`, `CustomPythonMetricCallback`, numpy transfer helpers
+  - `pyclasses.rs` — `NativeRuntimeInfo`, `NativeContinuousBinningMetadata`, `NativeTrainingSummary`, `NativeTrainingResult`, `NativeIterationDiagnostics`, `diagnostics_to_native`
+  - `quantization.rs` — dense-value → binned-matrix preparation (`PreparedTrainingMatrices`, all `quantize_*`/`derive_*`/`prepare_*_matrices`, binning-strategy parse/validate)
+  - `params.rs` — `build_train_params`, `build_binning_context`, and the `parse_*` config parsers
+  - `categorical_bridge.rs` — categorical encoding + the Cholesky/residualize factor-neutralization bridge
+  - `predict.rs` — `NativePredictorHandle`, the predict/shap `_impl` functions, and the 16 predictor/shap `#[pyfunction]` wrappers
+  - `train.rs` — `train_regression_artifact_with_summary_dense_impl`, the summary builders, and the 5 `train_regression_artifact*` `#[pyfunction]`s
+  - `joint.rs` — `JointPredictorHandle` + `train_joint_multi_label_ranker`
+  - plus `tests/mod.rs` + `tests/main.rs` (the extracted unit tests)
+  - Every previously-registered pyfunction/pyclass remains registered and importable from `alloygbm._alloygbm` unchanged.
+- **`bindings/python/alloygbm/regressor.py`** (the `GBMRegressor` estimator, 4,909 lines) was decomposed into a `_regressor/` package, with `regressor.py` reduced to a back-compat shim:
+  - `_base.py` — module-level constants, bin-size helpers, the native `_load_native_*` loaders, the sklearn `_GBMRegressorBase`, `_diagnostics_to_dicts`, `_validate_quantile_alpha`
+  - `_validation.py` — `_ValidationMixin` (param resolution, objective/neutralization-contract, input validators, categorical inference — 27 methods)
+  - `_quantization.py` — `_QuantizationMixin` (`predict_from_artifact`, native-matrix handling, dense/row quantization + binning derivation — 33 methods)
+  - `_shap.py` — `_ShapMixin` (`shap_values`, `shap_interaction_values`, `feature_importances`, `_shap_binning_kwargs`)
+  - `_persistence.py` — `_PersistenceMixin` (`__getstate__`/`__setstate__`, `save_model`/`load_model`, `save_artifact`, `artifact_bytes`, native predictor-handle, `_reset_fitted_state`)
+  - `_core.py` — the `GBMRegressor` shell: `__init__`, `__repr__`, `get_params`/`set_params`, `fit`, `predict`, `score`, sklearn glue (the 11 headline methods) assembled over the four mixins
+  - `from alloygbm.regressor import GBMRegressor` and the `alloygbm.regressor` module name are unchanged. `GBMClassifier`/`GBMRanker` continue to subclass `GBMRegressor` transparently via the MRO. Native loaders are now invoked as `_base._load_native_*()` so monkeypatch-based tests retarget cleanly to the `_base` module.
+
+### Deferred (out of scope, documented)
+
+- Tightening the `use crate::*;` glob in `crates/engine/src/trainer/mod.rs` to an explicit list — the list would exceed ~50 entries and hurt readability; engine-crate scope, not this release.
+- The single `#[allow(dead_code)]` in `crates/engine/src/factor.rs` — predates this release.
+
 ## v0.12.2 (2026-05-27)
 
 Continuation of the structural refactor begun in v0.12.0 and continued in v0.12.1. **No user-facing API changes, no behavioral changes, no new features.** This release decomposes the SHAP crate and the engine joint multi-output trainer into focused, single-responsibility modules. Patch release because every change is mechanical; the full test suite (445 cargo + 641 pytest) holds at every individual commit.
