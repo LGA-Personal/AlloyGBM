@@ -1,6 +1,6 @@
 # AlloyGBM Current Limitations
 
-Last updated for v0.12.2.
+Last updated for v0.12.3.
 
 ## Remaining Limitations
 

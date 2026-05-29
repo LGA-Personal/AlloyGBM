@@ -1,7 +1,28 @@
 Release and platform policy
 ===========================
 
-AlloyGBM ``0.12.2`` release notes and platform policy.
+AlloyGBM ``0.12.3`` release notes and platform policy.
+
+What's new in 0.12.3
+--------------------
+
+**Phases 6–8 of the structural refactor — completing the program.** No
+user-facing API changes, no behavioral changes, no new features. The
+6,619-line ``bindings/python/src/lib.rs`` (the PyO3 bridge) was decomposed
+into nine focused submodules plus a slim ``lib.rs`` and an extracted
+``tests/`` submodule; the 4,909-line ``bindings/python/alloygbm/regressor.py``
+(the ``GBMRegressor`` estimator) was decomposed into a ``_regressor/`` mixin
+package (``_base`` plus four mixins and a ``_core`` shell), with
+``regressor.py`` reduced to a back-compat shim.
+
+- **No new objectives, parameters, training modes, or estimator API.**
+- **No artifact format changes.** Model artifacts written by v0.12.2 load
+  and predict identically under v0.12.3.
+- ``from alloygbm.regressor import GBMRegressor`` and the ``alloygbm.regressor``
+  module name are unchanged; ``GBMClassifier`` / ``GBMRanker`` subclass
+  ``GBMRegressor`` transparently.
+- Closes the file-decomposition program (issue #44). The 445 cargo + 641
+  pytest tests held at every refactor commit.
 
 What's new in 0.12.2
 --------------------
