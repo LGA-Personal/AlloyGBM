@@ -12,14 +12,19 @@ types.
 
 .. note::
 
-   AlloyGBM ``0.12.3`` completes the structural refactor: the PyO3 bridge
-   (``bindings/python/src/lib.rs``, 6,619 lines) and the ``GBMRegressor``
-   estimator (``bindings/python/alloygbm/regressor.py``, 4,909 lines) were
-   each decomposed into focused single-responsibility modules — nine
-   submodules for the bridge, a ``_regressor/`` mixin package for the
-   estimator. **No user-facing API changes, no behavioral changes, no new
-   features.** Model artifacts written by v0.12.2 load and predict
-   identically under v0.12.3. See :doc:`release` for full notes.
+   AlloyGBM ``0.12.4`` is a small bugfix release on top of the v0.12.3
+   refactor completion. ``GBMRegressor.__module__`` now advertises its
+   public ``alloygbm.regressor`` shim path instead of the private
+   ``alloygbm._regressor._core`` implementation module, so pickle payloads
+   and ``repr`` no longer leak internals. The joint trainer's module-level
+   documentation in ``crates/engine/src/joint/mod.rs`` is refreshed to
+   reflect the v0.10.x feature parity (DART, GOSS, MorphBoost, DRO, factor
+   neutralization, warm-start, leaf-wise growth, native categorical
+   splits, interaction constraints) that had landed since the original
+   v0.10.0 minimal scope. **No user-facing API changes, no behavioral
+   changes, no new features.** Model artifacts written by v0.12.3 load
+   and predict identically under v0.12.4. See :doc:`release` for full
+   notes.
 
 
 Getting started
