@@ -10,7 +10,7 @@ use alloygbm_core::{
     Device, LeafValue, LinearLeaf, ModelMetadata, ModelSectionKind, NodeStats, SplitCandidate,
     deserialize_model_artifact_v1, serialize_model_artifact_v1,
 };
-use alloygbm_engine::TrainedModel;
+use alloygbm_engine::{TrainedModel, TrainedStump};
 use alloygbm_predictor::Predictor;
 
 fn sample_metadata(feature_names: &[&str]) -> ModelMetadata {
@@ -1388,8 +1388,10 @@ fn shap_interactions_linear_leaves_satisfies_additivity() {
     ];
     let batch = explain_interactions_from_artifact_bytes(&artifact, &rows)
         .expect("interaction explanation succeeds");
+    let per_feature = explain_rows_from_artifact_bytes(&artifact, &rows).expect("per-feature");
 
     let predictor = Predictor::from_artifact_bytes(&artifact).expect("predictor builds");
+    let feature_count = model.feature_count;
     for (row_idx, (row, matrix)) in rows.iter().zip(batch.values.iter()).enumerate() {
         let predicted = predictor.predict_row(row).expect("predict succeeds");
         let reconstructed = batch.expected_value + matrix.iter().map(|m_row| m_row.iter().sum::<f32>()).sum::<f32>();
@@ -1397,6 +1399,28 @@ fn shap_interactions_linear_leaves_satisfies_additivity() {
             (reconstructed - predicted).abs() <= ADDITIVITY_ATOL,
             "row {row_idx}: reconstructed {reconstructed} vs predicted {predicted}"
         );
+
+        // Symmetry: matrix[i][j] == matrix[j][i]
+        for i in 0..feature_count {
+            for j in 0..feature_count {
+                assert!(
+                    (matrix[i][j] - matrix[j][i]).abs() < 1e-5,
+                    "symmetry: matrix[{i}][{j}]={} matrix[{j}][{i}]={}",
+                    matrix[i][j],
+                    matrix[j][i]
+                );
+            }
+        }
+
+        // Row marginal: Σ_j Φ_ij == φ_i
+        for i in 0..feature_count {
+            let marginal: f32 = matrix[i].iter().sum();
+            let phi = per_feature.values[row_idx][i];
+            assert!(
+                (marginal - phi).abs() < 1e-4,
+                "row {row_idx} feature {i}: marginal={marginal} phi={phi}"
+            );
+        }
     }
 }
 
@@ -1413,7 +1437,9 @@ fn shap_interactions_linear_leaves_mixed_with_scalar_leaves_satisfies_additivity
     ];
     let batch = explain_interactions_from_artifact_bytes(&artifact, &rows)
         .expect("interaction explanation succeeds");
+    let per_feature = explain_rows_from_artifact_bytes(&artifact, &rows).expect("per-feature");
 
+    let feature_count = model.feature_count;
     for (row_idx, (row, matrix)) in rows.iter().zip(batch.values.iter()).enumerate() {
         let predicted = predictor.predict_row(row).expect("predict succeeds");
         let reconstructed = batch.expected_value + matrix.iter().map(|m_row| m_row.iter().sum::<f32>()).sum::<f32>();
@@ -1421,6 +1447,28 @@ fn shap_interactions_linear_leaves_mixed_with_scalar_leaves_satisfies_additivity
             (reconstructed - predicted).abs() <= ADDITIVITY_ATOL,
             "row {row_idx}: reconstructed {reconstructed} vs predicted {predicted}"
         );
+
+        // Symmetry: matrix[i][j] == matrix[j][i]
+        for i in 0..feature_count {
+            for j in 0..feature_count {
+                assert!(
+                    (matrix[i][j] - matrix[j][i]).abs() < 1e-5,
+                    "symmetry: matrix[{i}][{j}]={} matrix[{j}][{i}]={}",
+                    matrix[i][j],
+                    matrix[j][i]
+                );
+            }
+        }
+
+        // Row marginal: Σ_j Φ_ij == φ_i
+        for i in 0..feature_count {
+            let marginal: f32 = matrix[i].iter().sum();
+            let phi = per_feature.values[row_idx][i];
+            assert!(
+                (marginal - phi).abs() < 1e-4,
+                "row {row_idx} feature {i}: marginal={marginal} phi={phi}"
+            );
+        }
     }
 }
 

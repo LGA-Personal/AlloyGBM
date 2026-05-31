@@ -73,15 +73,58 @@ def test_shap_interaction_values_accepts_linear_leaf_model() -> None:
         seed=11,
     )
     model.fit(X, y)
-    
+
     expected, phi_list = model.shap_interaction_values(X, include_expected_value=True)
     phi = np.array(phi_list)
     assert phi.shape == (60, 3, 3)
-    
+
     # Check full additivity
     predicted = model.predict(X)
     reconstructed = phi.sum(axis=(1, 2)) + expected
     np.testing.assert_allclose(reconstructed, predicted, atol=1e-3, rtol=1e-3)
+
+    # Check symmetry
+    for k in range(phi.shape[0]):
+        np.testing.assert_allclose(phi[k], phi[k].T, atol=1e-5)
+
+    # Check row marginal
+    shap = np.asarray(model.shap_values(X))
+    np.testing.assert_allclose(phi.sum(axis=2), shap, atol=1e-3, rtol=1e-3)
+
+
+def test_shap_interaction_values_linear_rank_with_linear_leaves(monkeypatch) -> None:
+    monkeypatch.setenv("ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK", "1")
+    rng = np.random.default_rng(20260517)
+    X = rng.lognormal(size=(100, 4)).astype("float32")
+    y = (X[:, 0] - X[:, 1] + 0.1 * rng.normal(size=100)).astype("float32")
+    model = GBMRegressor(
+        n_estimators=10,
+        continuous_binning_strategy="linear",
+        continuous_binning_max_bins=64,
+        leaf_model="linear",
+        seed=7,
+        deterministic=True,
+    ).fit(X, y)
+
+    flags = model._continuous_feature_linear_rank_flags
+    assert flags is not None and any(flags), "Should exercise mixed linear-rank binning"
+
+    expected, phi_list = model.shap_interaction_values(X, include_expected_value=True)
+    phi = np.array(phi_list)
+    assert phi.shape == (100, 4, 4)
+
+    # Full additivity
+    predicted = model.predict(X)
+    reconstructed = phi.sum(axis=(1, 2)) + expected
+    np.testing.assert_allclose(reconstructed, predicted, atol=1e-3, rtol=1e-3)
+
+    # Symmetry
+    for k in range(phi.shape[0]):
+        np.testing.assert_allclose(phi[k], phi[k].T, atol=1e-5)
+
+    # Row marginal
+    shap = np.asarray(model.shap_values(X))
+    np.testing.assert_allclose(phi.sum(axis=2), shap, atol=1e-3, rtol=1e-3)
 
 
 def test_shap_interaction_values_handles_unfit_model() -> None:
