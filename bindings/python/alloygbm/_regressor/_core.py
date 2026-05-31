@@ -2693,3 +2693,14 @@ del _validation_module
 import alloygbm._regressor._quantization as _quantization_module
 _quantization_module.GBMRegressor = GBMRegressor
 del _quantization_module
+
+# Advertise the public import path. `alloygbm.regressor` is the stable
+# compatibility surface (the back-compat shim that re-exports this class);
+# `alloygbm._regressor._core` is the private implementation module. Without
+# this assignment, `GBMRegressor.__module__` would expose the private path,
+# repr would print `<class 'alloygbm._regressor._core.GBMRegressor'>`, and
+# newly-created pickles would store the private path — tying the pickle
+# format to the internal package layout. The shim re-export means
+# `alloygbm.regressor.GBMRegressor` always resolves to this class object, so
+# pickles using the public path load correctly.
+GBMRegressor.__module__ = "alloygbm.regressor"
