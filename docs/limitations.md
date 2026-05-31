@@ -38,9 +38,9 @@ The `"quantile"` objective uses empirical leaf refinement which assumes constant
 
 ## Resolved (Previously Limitations)
 
-### v0.12.5
+### Pending Release
 
-- **SHAP interactions on `leaf_model="linear"`:** `GBMRegressor.shap_interaction_values(X)` now supports linear leaves. The linear deviation terms `w_j · (x_j − μ_j)` are credited directly to the diagonal of the interaction matrix (the regressor feature's main effect), preserving both row-marginal and full additivity invariants according to standard TreeSHAP conventions for linear dependencies.
+- **SHAP interactions on `leaf_model="linear"`:** `GBMRegressor.shap_interaction_values(X)` now supports linear leaves. The linear deviation terms `w_j · (x_j − μ_j)` are credited directly to the diagonal of the interaction matrix (the regressor feature's main effect). This is a pragmatic choice to attribute linear deviations strictly to the feature's main effect (as linear terms do not model pairwise interaction effects), preserving both row-marginal and full additivity invariants.
 ### v0.11.1
 
 - **Quantile regression objective shipped.** `GBMRegressor(objective="quantile", quantile_alpha=…)` adds pinball loss regression with alpha ∈ (0.0, 1.0). Uses a proxy Hessian `h_i = w_i` during split-finding, an empirical quantile leaf refinement step at the end of each round acting on the full dataset, and a fast unweighted quickselect path. Explicitly rejected for linear leaves, DART, MorphBoost, classification, ranking, and joint training.
