@@ -60,7 +60,7 @@ def test_shap_interaction_values_row_marginal_matches_shap_values() -> None:
     )
 
 
-def test_shap_interaction_values_rejects_linear_leaf_model() -> None:
+def test_shap_interaction_values_accepts_linear_leaf_model() -> None:
     rng = np.random.default_rng(11)
     X = rng.normal(size=(60, 3)).astype(np.float32)
     y = (X[:, 0] + 0.5 * X[:, 1]).astype(np.float32)
@@ -73,10 +73,15 @@ def test_shap_interaction_values_rejects_linear_leaf_model() -> None:
         seed=11,
     )
     model.fit(X, y)
-    with pytest.raises(Exception) as exc:
-        model.shap_interaction_values(X[:3])
-    msg = str(exc.value).lower()
-    assert "linear" in msg or "not supported" in msg
+    
+    expected, phi_list = model.shap_interaction_values(X, include_expected_value=True)
+    phi = np.array(phi_list)
+    assert phi.shape == (60, 3, 3)
+    
+    # Check full additivity
+    predicted = model.predict(X)
+    reconstructed = phi.sum(axis=(1, 2)) + expected
+    np.testing.assert_allclose(reconstructed, predicted, atol=1e-3, rtol=1e-3)
 
 
 def test_shap_interaction_values_handles_unfit_model() -> None:
