@@ -7,8 +7,9 @@ use crate::brute_force::{decode_tree_node_id, tree_local_key, validate_rows, ver
 use crate::error::{ShapError, ShapResult};
 use crate::linear_leaf::{
     distribute_linear_terms_for_row, leaf_constant_part, model_has_linear_leaves,
+    scale_model_by_tree_weight,
 };
-use crate::types::ShapExplanationBatch;
+use crate::types::{ShapExplanationBatch, ShapInteractionBatch};
 
 /// Standard tree node used by TreeSHAP. Converts from AlloyGBM's stump-based
 /// representation where each stump carries left/right leaf values into a
@@ -759,5 +760,112 @@ pub(crate) fn explain_rows_tree_shap(
     Ok(ShapExplanationBatch {
         expected_value,
         values: row_contributions,
+    })
+}
+
+pub(crate) fn explain_interactions_from_model(
+    model: &TrainedModel,
+    rows: &[Vec<f32>],
+    binning: Option<&BinningContext>,
+) -> ShapResult<ShapInteractionBatch> {
+    validate_rows(rows, model.feature_count)?;
+
+    // Linear leaves are fully supported for SHAP interactions: we run standard
+    // TreeSHAP interactions on the constant parts of the leaves, then attribute
+    // the row-dependent linear deviation directly to the regressor feature's
+    // main effect (the diagonal of the interaction matrix).
+
+    // Pre-scale DART trees by tree_weight so the standard TreeSHAP path
+    // produces strictly-additive contributions.  Mirrors `explain_rows_from_model`.
+    let has_non_unit_weights = model
+        .stumps
+        .iter()
+        .any(|s| (s.tree_weight - 1.0).abs() > f32::EPSILON);
+    if has_non_unit_weights {
+        let scaled = scale_model_by_tree_weight(model);
+        return explain_interactions_from_model(&scaled, rows, binning);
+    }
+
+    // LinearRank: quantize once and dispatch with PreBinned semantics.
+    if let Some(ctx @ BinningContext::LinearRank { .. }) = binning {
+        let quantized: Vec<Vec<f32>> = rows
+            .iter()
+            .map(|row| {
+                ctx.quantize_row_for_linear_rank(row)
+                    .expect("LinearRank quantize_row_for_linear_rank returns Some")
+            })
+            .collect();
+        return explain_interactions_from_model(
+            model,
+            &quantized,
+            Some(&BinningContext::PreBinned),
+        );
+    }
+
+    // Build node lookup and standard trees once for all rows.
+    let mut nodes_map: HashMap<u64, &TrainedStump> = HashMap::new();
+    let mut tree_roots: Vec<u32> = Vec::new();
+    for stump in &model.stumps {
+        let (tree_id, local_id) = decode_tree_node_id(stump.split.node_id);
+        nodes_map.insert(tree_local_key(tree_id, local_id), stump);
+        if local_id == 0 {
+            tree_roots.push(tree_id);
+        }
+    }
+    tree_roots.sort_unstable();
+    tree_roots.dedup();
+
+    let baseline = model.feature_baseline.as_deref();
+    let mut std_trees = Vec::with_capacity(tree_roots.len());
+    let mut expected_value_f64 = model.baseline_prediction as f64;
+
+    for &tree_id in &tree_roots {
+        let root_key = tree_local_key(tree_id, 0);
+        let root_stump = nodes_map.get(&root_key).ok_or_else(|| {
+            ShapError::ContractViolation(format!("missing root stump for tree {tree_id}"))
+        })?;
+        let root_cover = root_stump.split.left_stats.row_count as f64
+            + root_stump.split.right_stats.row_count as f64;
+        let tree = build_std_tree(tree_id, 0, 0.0, root_cover, &nodes_map, baseline, binning);
+        let tree_cover = tree.cover();
+        if tree_cover > 0.0 {
+            expected_value_f64 += tree.cover_weighted_value_sum() / tree_cover;
+        }
+        std_trees.push(tree);
+    }
+
+    let expected_value = expected_value_f64 as f32;
+    let use_float_compare = binning.is_some();
+
+    let mut all_matrices = Vec::with_capacity(rows.len());
+    let has_linear = model_has_linear_leaves(model);
+    for row in rows {
+        let mut matrix_f64 =
+            tree_shap_interactions_row(&std_trees, row, model.feature_count, use_float_compare);
+
+        if has_linear {
+            let mut linear_phi = vec![0.0_f64; model.feature_count];
+            distribute_linear_terms_for_row(
+                model,
+                row,
+                baseline,
+                binning,
+                &mut linear_phi,
+            );
+            for i in 0..model.feature_count {
+                matrix_f64[i][i] += linear_phi[i];
+            }
+        }
+
+        let matrix_f32: Vec<Vec<f32>> = matrix_f64
+            .into_iter()
+            .map(|inner| inner.into_iter().map(|v| v as f32).collect())
+            .collect();
+        all_matrices.push(matrix_f32);
+    }
+
+    Ok(ShapInteractionBatch {
+        expected_value,
+        values: all_matrices,
     })
 }
