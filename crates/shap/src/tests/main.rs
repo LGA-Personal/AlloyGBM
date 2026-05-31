@@ -1374,6 +1374,56 @@ fn shap_linear_leaves_mixed_with_scalar_leaves_satisfies_additivity() {
     }
 }
 
+#[test]
+fn shap_interactions_linear_leaves_satisfies_additivity() {
+    let baseline = vec![0.0_f32, 0.5_f32];
+    let model = linear_fixture_model(Some(baseline));
+    let artifact = model.to_artifact_bytes().expect("artifact serializes");
+
+    let rows = vec![
+        vec![0.0_f32, 1.0_f32], // goes left
+        vec![3.0_f32, 1.0_f32], // goes right
+        vec![0.0_f32, -1.0_f32],
+        vec![3.0_f32, -1.0_f32],
+    ];
+    let batch = explain_interactions_from_artifact_bytes(&artifact, &rows)
+        .expect("interaction explanation succeeds");
+
+    let predictor = Predictor::from_artifact_bytes(&artifact).expect("predictor builds");
+    for (row_idx, (row, matrix)) in rows.iter().zip(batch.values.iter()).enumerate() {
+        let predicted = predictor.predict_row(row).expect("predict succeeds");
+        let reconstructed = batch.expected_value + matrix.iter().map(|m_row| m_row.iter().sum::<f32>()).sum::<f32>();
+        assert!(
+            (reconstructed - predicted).abs() <= ADDITIVITY_ATOL,
+            "row {row_idx}: reconstructed {reconstructed} vs predicted {predicted}"
+        );
+    }
+}
+
+#[test]
+fn shap_interactions_linear_leaves_mixed_with_scalar_leaves_satisfies_additivity() {
+    let model = mixed_leaf_fixture_model();
+    let artifact = model.to_artifact_bytes().expect("artifact serializes");
+    let predictor = Predictor::from_artifact_bytes(&artifact).expect("predictor builds");
+
+    let rows = vec![
+        vec![0.0_f32, 0.5_f32, 0.0_f32],  // left scalar leaf
+        vec![3.0_f32, 1.0_f32, 0.0_f32],  // right→left linear leaf
+        vec![3.0_f32, -0.5_f32, 2.0_f32], // right→right linear leaf
+    ];
+    let batch = explain_interactions_from_artifact_bytes(&artifact, &rows)
+        .expect("interaction explanation succeeds");
+
+    for (row_idx, (row, matrix)) in rows.iter().zip(batch.values.iter()).enumerate() {
+        let predicted = predictor.predict_row(row).expect("predict succeeds");
+        let reconstructed = batch.expected_value + matrix.iter().map(|m_row| m_row.iter().sum::<f32>()).sum::<f32>();
+        assert!(
+            (reconstructed - predicted).abs() <= ADDITIVITY_ATOL,
+            "row {row_idx}: reconstructed {reconstructed} vs predicted {predicted}"
+        );
+    }
+}
+
 // ── TreeSHAP polynomial-path diagnostic: synthetic deep trees ────────────
 //
 // Used to localize Limitation 5 (TreeSHAP polynomial-path additivity
@@ -1583,8 +1633,19 @@ fn brute_force_interactions_for_row(model: &TrainedModel, row: &[f32]) -> (f32, 
     let split_features = &structure.split_features;
     let k = split_features.len();
     let factorials = factorial_table(k.max(2));
-    let phi = shapley_values_for_row_f64(model, row, &subset_expectations, &structure, 0)
+    let mut phi = shapley_values_for_row_f64(model, row, &subset_expectations, &structure, 0)
         .expect("per-feature shap");
+
+    if crate::linear_leaf::model_has_linear_leaves(model) {
+        crate::linear_leaf::distribute_linear_terms_for_row(
+            model,
+            row,
+            model.feature_baseline.as_deref(),
+            None,
+            &mut phi,
+        );
+    }
+
     let mut matrix = vec![vec![0.0_f64; n]; n];
 
     // Off-diagonal: only nonzero for pairs of split features.

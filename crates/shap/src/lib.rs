@@ -87,12 +87,10 @@ fn explain_interactions_from_model(
 ) -> ShapResult<ShapInteractionBatch> {
     validate_rows(rows, model.feature_count)?;
 
-    if model_has_linear_leaves(model) {
-        return Err(ShapError::InvalidInput(
-            "SHAP interaction values are not supported for leaf_model=\"linear\" artifacts in v0.12.4"
-                .to_string(),
-        ));
-    }
+    // Linear leaves are fully supported for SHAP interactions: we run standard
+    // TreeSHAP interactions on the constant parts of the leaves, then attribute
+    // the row-dependent linear deviation directly to the regressor feature's
+    // main effect (the diagonal of the interaction matrix).
 
     // Pre-scale DART trees by tree_weight so the standard TreeSHAP path
     // produces strictly-additive contributions.  Mirrors `explain_rows_from_model`.
@@ -157,9 +155,25 @@ fn explain_interactions_from_model(
     let use_float_compare = binning.is_some();
 
     let mut all_matrices = Vec::with_capacity(rows.len());
+    let has_linear = model_has_linear_leaves(model);
     for row in rows {
-        let matrix_f64 =
+        let mut matrix_f64 =
             tree_shap_interactions_row(&std_trees, row, model.feature_count, use_float_compare);
+            
+        if has_linear {
+            let mut linear_phi = vec![0.0_f64; model.feature_count];
+            crate::linear_leaf::distribute_linear_terms_for_row(
+                model,
+                row,
+                baseline,
+                binning,
+                &mut linear_phi,
+            );
+            for i in 0..model.feature_count {
+                matrix_f64[i][i] += linear_phi[i];
+            }
+        }
+
         let matrix_f32: Vec<Vec<f32>> = matrix_f64
             .into_iter()
             .map(|inner| inner.into_iter().map(|v| v as f32).collect())
