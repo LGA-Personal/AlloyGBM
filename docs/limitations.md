@@ -10,15 +10,7 @@ The `BackendOps` trait is designed for hardware abstraction, but only
 `CpuBackend` exists. GPU/accelerator support is architecturally planned but
 not implemented.
 
-### 2. SHAP interactions on `leaf_model="linear"`
 
-`GBMRegressor.shap_interaction_values(X)` rejects artifacts trained with
-`leaf_model="linear"`. The piecewise-linear (PL) interventional
-decomposition credits per-feature deviation terms `w_j · (x_j − μ_j)`
-along the visited path — these are first-order single-feature credits
-and don't decompose into pairwise interactions in any obvious
-polynomial-time way. A correct PL-leaf interaction algorithm is a
-future-release item.
 
 ### 3. SHAP interactions on multi-output / multiclass models
 
@@ -46,6 +38,9 @@ The `"quantile"` objective uses empirical leaf refinement which assumes constant
 
 ## Resolved (Previously Limitations)
 
+### v0.12.5
+
+- **SHAP interactions on `leaf_model="linear"`:** `GBMRegressor.shap_interaction_values(X)` now supports linear leaves. The linear deviation terms `w_j · (x_j − μ_j)` are credited directly to the diagonal of the interaction matrix (the regressor feature's main effect), preserving both row-marginal and full additivity invariants according to standard TreeSHAP conventions for linear dependencies.
 ### v0.11.1
 
 - **Quantile regression objective shipped.** `GBMRegressor(objective="quantile", quantile_alpha=…)` adds pinball loss regression with alpha ∈ (0.0, 1.0). Uses a proxy Hessian `h_i = w_i` during split-finding, an empirical quantile leaf refinement step at the end of each round acting on the full dataset, and a fast unweighted quickselect path. Explicitly rejected for linear leaves, DART, MorphBoost, classification, ranking, and joint training.
