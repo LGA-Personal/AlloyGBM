@@ -845,13 +845,7 @@ pub(crate) fn explain_interactions_from_model(
 
         if has_linear {
             let mut linear_phi = vec![0.0_f64; model.feature_count];
-            distribute_linear_terms_for_row(
-                model,
-                row,
-                baseline,
-                binning,
-                &mut linear_phi,
-            );
+            distribute_linear_terms_for_row(model, row, baseline, binning, &mut linear_phi);
             for i in 0..model.feature_count {
                 matrix_f64[i][i] += linear_phi[i];
             }

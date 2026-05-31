@@ -1394,7 +1394,11 @@ fn shap_interactions_linear_leaves_satisfies_additivity() {
     let feature_count = model.feature_count;
     for (row_idx, (row, matrix)) in rows.iter().zip(batch.values.iter()).enumerate() {
         let predicted = predictor.predict_row(row).expect("predict succeeds");
-        let reconstructed = batch.expected_value + matrix.iter().map(|m_row| m_row.iter().sum::<f32>()).sum::<f32>();
+        let reconstructed = batch.expected_value
+            + matrix
+                .iter()
+                .map(|m_row| m_row.iter().sum::<f32>())
+                .sum::<f32>();
         assert!(
             (reconstructed - predicted).abs() <= ADDITIVITY_ATOL,
             "row {row_idx}: reconstructed {reconstructed} vs predicted {predicted}"
@@ -1442,7 +1446,11 @@ fn shap_interactions_linear_leaves_mixed_with_scalar_leaves_satisfies_additivity
     let feature_count = model.feature_count;
     for (row_idx, (row, matrix)) in rows.iter().zip(batch.values.iter()).enumerate() {
         let predicted = predictor.predict_row(row).expect("predict succeeds");
-        let reconstructed = batch.expected_value + matrix.iter().map(|m_row| m_row.iter().sum::<f32>()).sum::<f32>();
+        let reconstructed = batch.expected_value
+            + matrix
+                .iter()
+                .map(|m_row| m_row.iter().sum::<f32>())
+                .sum::<f32>();
         assert!(
             (reconstructed - predicted).abs() <= ADDITIVITY_ATOL,
             "row {row_idx}: reconstructed {reconstructed} vs predicted {predicted}"
