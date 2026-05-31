@@ -202,9 +202,10 @@ class _ShapMixin:
         - ``Σ_i Σ_j values[row][i][j] + expected_value == predict(x)``
           (full additivity, mod f32 round-off).
 
-        Linear-leaf (``leaf_model="linear"``) artifacts are rejected in
-        v0.12.4 — pairwise interactions on PL leaves require a different
-        decomposition that is not yet implemented.
+        For linear-leaf (``leaf_model="linear"``) artifacts, the linear deviation
+        ``wj · (xj − μj)`` is attributed strictly to the regressor feature's main
+        effect (the diagonal of the interaction matrix), ensuring both row-marginal
+        and full additivity are preserved.
         """
         if not self._is_fitted:
             raise RuntimeError(

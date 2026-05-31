@@ -4,12 +4,19 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
-The `0.12.4` release is a small bugfix release on top of the v0.12.3-completed refactor program. Two post-merge LLM review findings on the v0.12.2 / v0.12.3 PRs:
+The `0.12.5` release closes the `leaf_model="linear"` exception on SHAP interaction values that was carved out in v0.11.0. `GBMRegressor.shap_interaction_values(X)` now accepts PL-leaf artifacts: the row-dependent linear deviation `w_j · (x_j − μ_j)` is credited to the diagonal of the interaction matrix (the regressor feature's main effect), preserving both row-marginal and full additivity invariants by construction. The pragmatic caveat is that path-feature × regressor-feature off-diagonals are not populated for the linear-deviation portion — a faithful PL-leaf interaction decomposition remains an open extension. Internal refactor: `explain_interactions_from_model` moved from `crates/shap/src/lib.rs` to `crates/shap/src/tree_shap.rs` next to its peer `explain_rows_tree_shap`, continuing the v0.12.2 SHAP-crate decomposition pattern.
 
-- `GBMRegressor.__module__` now exposes the public `alloygbm.regressor` shim path (it was leaking the private `_regressor._core` path through `repr` and newly-created pickle payloads).
-- The joint trainer's module-level docs in `crates/engine/src/joint/mod.rs` are refreshed to match the actual v0.10.x feature parity (DART, GOSS, MorphBoost, DRO leaves, factor neutralization, warm-start, leaf-wise growth, native categorical splits, interaction constraints) — they had still been claiming the v0.10.0 minimal scope.
+**No artifact format change. Model artifacts written by v0.12.4 load and predict identically under v0.12.5.** Test counts: 447 cargo + 644 pytest (v0.12.4 baseline 445/643 plus two cargo + one renamed + one new pytest covering linear-leaf SHAP interactions and the LinearRank × linear-leaves binning combination).
 
-**No user-facing API changes, no behavioral changes, no new features.** Two new pytest regression tests pin the module-identity invariants; the full Rust + Python test suite passes (445 cargo + 643 pytest).
+## What Shipped In v0.12.5
+
+### SHAP interaction values on `leaf_model="linear"` (#51)
+
+PL-leaf artifacts were the last remaining rejection on `GBMRegressor.shap_interaction_values(X)` after v0.11.0 shipped the interactions surface for scalar leaves. The math: each PL leaf value decomposes as `intercept + Σⱼ wⱼ·μⱼ` (constant, the same shape standard TreeSHAP wants) plus `Σⱼ wⱼ·(xⱼ − μⱼ)` (row-dependent). Standard TreeSHAP runs on the constant part; the per-row deviation is then folded onto the diagonal of the interaction matrix via `distribute_linear_terms_for_row` — the same helper that backs PL-leaf `shap_values`, so row-marginal `Σⱼ Φᵢⱼ = φᵢ` is automatic by construction, and adding to the diagonal preserves full additivity `Σᵢⱼ Φᵢⱼ + E = ŷ`. The matrix stays symmetric. The diagonal-only attribution is a pragmatic choice that loses path-feature × regressor-feature interaction credit — captured deliberately in `docs/limitations.md` as a future-research item, not claimed as the canonical algorithm.
+
+Tests pin all three invariants on both sides: the renamed `test_shap_interaction_values_accepts_linear_leaf_model` (pytest) and the new `shap_interactions_linear_leaves_satisfies_additivity` + `shap_interactions_linear_leaves_mixed_with_scalar_leaves_satisfies_additivity` (cargo) all verify additivity + symmetry + row-marginal-matches-`shap_values`. A new `test_shap_interaction_values_linear_rank_with_linear_leaves` exercises the LinearRank × linear-leaves binning combo via `ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK=1` to confirm the quantize-and-recurse path also satisfies all three invariants.
+
+Internal refactor (PR #51): `explain_interactions_from_model` moved from `crates/shap/src/lib.rs` to `crates/shap/src/tree_shap.rs` next to its peer `explain_rows_tree_shap`. Continues the v0.12.2 SHAP-crate decomposition pattern — `lib.rs` is back to thin entry-point glue (~165 lines).
 
 ## What Shipped In v0.12.4
 

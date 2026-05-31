@@ -1,6 +1,6 @@
 # AlloyGBM Current Limitations
 
-Last updated for v0.12.4.
+Last updated for v0.12.5.
 
 ## Remaining Limitations
 
@@ -10,15 +10,7 @@ The `BackendOps` trait is designed for hardware abstraction, but only
 `CpuBackend` exists. GPU/accelerator support is architecturally planned but
 not implemented.
 
-### 2. SHAP interactions on `leaf_model="linear"`
 
-`GBMRegressor.shap_interaction_values(X)` rejects artifacts trained with
-`leaf_model="linear"`. The piecewise-linear (PL) interventional
-decomposition credits per-feature deviation terms `w_j · (x_j − μ_j)`
-along the visited path — these are first-order single-feature credits
-and don't decompose into pairwise interactions in any obvious
-polynomial-time way. A correct PL-leaf interaction algorithm is a
-future-release item.
 
 ### 3. SHAP interactions on multi-output / multiclass models
 
@@ -45,6 +37,10 @@ objectives.
 The `"quantile"` objective uses empirical leaf refinement which assumes constant leaves, standard boosting (non-DART), and standard training mode (non-MorphBoost). These combinations are rejected at the Python and Rust layers.
 
 ## Resolved (Previously Limitations)
+
+### v0.12.5
+
+- **SHAP interactions on `leaf_model="linear"`:** `GBMRegressor.shap_interaction_values(X)` now supports linear leaves. The linear deviation terms `w_j · (x_j − μ_j)` are credited directly to the diagonal of the interaction matrix (the regressor feature's main effect). This is a pragmatic choice to attribute linear deviations strictly to the feature's main effect (as linear terms do not model pairwise interaction effects), preserving both row-marginal and full additivity invariants. A faithful path-feature × regressor-feature interaction decomposition for PL leaves remains an open extension.
 
 ### v0.11.1
 

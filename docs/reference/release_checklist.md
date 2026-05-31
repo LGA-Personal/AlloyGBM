@@ -172,6 +172,8 @@ Run the full verification suite from a clean tree. Do not skip any of these.
 .venv/bin/python -c "from alloygbm import GBMRegressor; m = GBMRegressor(n_estimators=5, objective='tweedie', tweedie_variance_power=1.5); m.fit([[1],[2],[3],[4]], [0.0,2.0,0.0,4.0]); print(m.predict([[2]]))"
 # v0.11.0 SHAP interaction values
 .venv/bin/python -c "from alloygbm import GBMRegressor; import numpy as np; rng=np.random.default_rng(0); X=rng.normal(size=(20,3)).astype(np.float32); y=(X[:,0]*X[:,1]).astype(np.float32); m=GBMRegressor(n_estimators=5); m.fit(X,y); print(np.asarray(m.shap_interaction_values(X[:3])).shape)"
+# v0.12.5 PL-leaf SHAP interactions
+.venv/bin/python -c "from alloygbm import GBMRegressor; import numpy as np; rng=np.random.default_rng(11); X=rng.normal(size=(40,3)).astype(np.float32); y=(X[:,0]+0.5*X[:,1]).astype(np.float32); m=GBMRegressor(n_estimators=5, leaf_model='linear', deterministic=True, seed=11); m.fit(X,y); print(np.asarray(m.shap_interaction_values(X[:3])).shape)"
 ```
 
 If you added new top-level API in this release, add a one-liner for it here

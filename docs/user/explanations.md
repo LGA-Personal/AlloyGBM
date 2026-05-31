@@ -112,8 +112,6 @@ interactions)` tuple.
 
 Scope limits:
 
-- `leaf_model="linear"` artifacts are rejected (the PL-leaf
-  interventional decomposition lacks a polynomial-time pairwise
-  formulation; deferred).
+- `leaf_model="linear"` artifacts are supported. The row-dependent linear deviation terms are attributed directly to the main effect (the diagonal of the interaction matrix) to preserve both row-marginal and full additivity invariants.
 - `GBMClassifier`, `GBMRanker`, and the joint multi-output ranker do
   not have an interaction-values surface yet.

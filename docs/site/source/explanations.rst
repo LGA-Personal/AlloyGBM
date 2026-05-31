@@ -122,7 +122,4 @@ after subtracting all off-diagonal interactions.  Pass
 ``include_expected_value=True`` to receive a ``(expected_value,
 interactions)`` tuple.
 
-Scope limits: ``leaf_model="linear"`` artifacts are rejected (PL-leaf
-pairwise interactions are deferred); ``GBMClassifier``, ``GBMRanker``,
-and the joint multi-output ranker do not have an interaction-values
-surface yet.
+Scope limits: ``leaf_model="linear"`` artifacts are supported. The row-dependent linear deviation terms are attributed directly to the main effect (the diagonal of the interaction matrix) to preserve both row-marginal and full additivity invariants. ``GBMClassifier``, ``GBMRanker``, and the joint multi-output ranker do not have an interaction-values surface yet.

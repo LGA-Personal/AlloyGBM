@@ -1,7 +1,39 @@
 Release and platform policy
 ===========================
 
-AlloyGBM ``0.12.4`` release notes and platform policy.
+AlloyGBM ``0.12.5`` release notes and platform policy.
+
+What's new in 0.12.5
+--------------------
+
+**Small feature release on top of v0.12.4.** Closes the
+``leaf_model="linear"`` exception on SHAP interaction values that was
+carved out when interactions originally shipped in v0.11.0.
+
+- ``GBMRegressor.shap_interaction_values(X)`` now accepts artifacts
+  trained with ``leaf_model="linear"``. The row-dependent linear
+  deviation ``w_j · (x_j − μ_j)`` is credited to the diagonal of the
+  interaction matrix (the regressor feature's main effect): standard
+  TreeSHAP interactions run on the constant part of each leaf
+  (``intercept + Σⱼ wⱼ·μⱼ``), then the per-row deviations are folded
+  onto ``Φ[j][j]`` via the same helper that backs PL-leaf
+  ``shap_values``. Full additivity (``Σᵢⱼ Φᵢⱼ + E = ŷ``) and row-marginal
+  (``Σⱼ Φᵢⱼ = φᵢ``) hold by construction; the matrix is symmetric and
+  ``expected_value`` is unchanged.
+- Pragmatic caveat: this attribution does not split linear-deviation
+  credit across path-feature × regressor-feature off-diagonals; a
+  faithful PL-leaf interaction decomposition remains an open extension.
+- Internal refactor: ``explain_interactions_from_model`` moved from
+  ``crates/shap/src/lib.rs`` to ``crates/shap/src/tree_shap.rs`` next to
+  its peer ``explain_rows_tree_shap``. Continues the v0.12.2 SHAP-crate
+  decomposition pattern; no behavioral change.
+
+No artifact format change. Model artifacts written by v0.12.4 load and
+predict identically under v0.12.5. **644 pytest** (v0.12.4 baseline 643
+plus the renamed-and-extended linear-leaf interactions test and the new
+LinearRank × linear-leaves coverage) and **447 cargo** (v0.12.4 baseline
+445 plus two new ``shap_interactions_linear_leaves_*_satisfies_additivity``
+tests).
 
 What's new in 0.12.4
 --------------------
