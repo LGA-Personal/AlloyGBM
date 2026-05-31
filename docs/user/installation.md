@@ -40,7 +40,7 @@ You should see runtime information for the loaded native extension module.
 - The public Python package name is `alloygbm`.
 - If native import fails, rebuild or reinstall the package rather than mixing
   source-tree imports with an older installed wheel.
-- `0.12.3` wheel support:
+- `0.12.4` wheel support:
   - macOS `arm64`
   - Linux `x86_64` via a manylinux-oriented build
   - Windows is deferred until a later release

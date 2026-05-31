@@ -4,7 +4,22 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
-The `0.12.3` release **completes** the structural refactor begun in v0.12.0. The 6,619-line PyO3 bridge `bindings/python/src/lib.rs` shrinks to ~110 lines across 9 focused submodules (plus an extracted `tests/`); the 4,909-line `GBMRegressor` estimator `bindings/python/alloygbm/regressor.py` becomes a back-compat shim over a `_regressor/` mixin package (`_base`, `_ValidationMixin`, `_QuantizationMixin`, `_ShapMixin`, `_PersistenceMixin`, `_core`). **No user-facing API changes, no behavioral changes, no new features.** Every Python symbol resolves at its v0.12.2 path; trained model artifacts load and predict identically; the full Rust + Python test suite passes unchanged at every refactor commit. This closes the file-decomposition program (tracking issue #44, Phases 1–8).
+The `0.12.4` release is a small bugfix release on top of the v0.12.3-completed refactor program. Two post-merge LLM review findings on the v0.12.2 / v0.12.3 PRs:
+
+- `GBMRegressor.__module__` now exposes the public `alloygbm.regressor` shim path (it was leaking the private `_regressor._core` path through `repr` and newly-created pickle payloads).
+- The joint trainer's module-level docs in `crates/engine/src/joint/mod.rs` are refreshed to match the actual v0.10.x feature parity (DART, GOSS, MorphBoost, DRO leaves, factor neutralization, warm-start, leaf-wise growth, native categorical splits, interaction constraints) — they had still been claiming the v0.10.0 minimal scope.
+
+**No user-facing API changes, no behavioral changes, no new features.** Two new pytest regression tests pin the module-identity invariants; the full Rust + Python test suite passes (445 cargo + 643 pytest).
+
+## What Shipped In v0.12.4
+
+### `GBMRegressor.__module__` public-shim identity (#48)
+
+After the v0.12.3 `_regressor/` package decomposition, `GBMRegressor.__module__` was the private `alloygbm._regressor._core` (the module where the class is defined), which leaked the internal package layout through `repr` and made newly-created pickles depend on `_regressor._core` staying importable forever. v0.12.4 sets `GBMRegressor.__module__ = "alloygbm.regressor"` after the class definition so the public shim path is the canonical one. Old v0.12.3 pickles still load (the class object remains accessible at the private path); new pickles use the public path. Pinned by `bindings/python/tests/test_module_identity.py` (2 tests).
+
+### Joint trainer module-doc refresh (#49)
+
+`crates/engine/src/joint/mod.rs`'s module-level docstring claimed the v0.10.0 minimal scope (no DART/GOSS/MorphBoost/DRO/neutralization/leaf-wise/warm-start/native-categorical/interaction-constraints), but all of those features had been added to the joint path over v0.10.1–v0.10.6. Docstring rewritten to describe the current capability matrix accurately with per-feature release tags, plus an explicit note that this `mod.rs` is the scaffolding / re-export layer added in v0.12.2 (PR #46) — the actual implementation lives in the sibling modules (`helpers`, `types`, `build_round`, `fit`, `tests`).
 
 ## What Shipped In v0.12.3
 

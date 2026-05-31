@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.12.4 (2026-05-29)
+
+Bugfix release on top of v0.12.3. Two issues raised by post-merge LLM review of the v0.12.2 and v0.12.3 refactor PRs:
+
+### Bug fixes
+
+- **`GBMRegressor.__module__` now advertises the public shim path** (#48). After the v0.12.3 `_regressor/` package decomposition, `GBMRegressor` was defined inside `alloygbm._regressor._core`, so `__module__` exposed the private implementation path. This leaked the internal layout through `repr` (`<class 'alloygbm._regressor._core.GBMRegressor'>`) and, more importantly, newly-created pickles serialized with that private path — tying the pickle format to internals that the v0.12.3 refactor explicitly framed as private. `GBMRegressor.__module__` is now `"alloygbm.regressor"` (the stable back-compat shim). Old v0.12.3 pickles still load because `_regressor._core` continues to define the class; new pickles use the public path that survives future internal moves. Regression tests added in `bindings/python/tests/test_module_identity.py` pin both invariants (`__module__` equals the public path; pickle payload contains the public path and not the private one).
+- **Joint trainer module docs refreshed** (#49). `crates/engine/src/joint/mod.rs`'s module-level documentation still described the original v0.10.0 minimal scope (no DART, no GOSS, no MorphBoost, no DRO, no neutralization, no leaf-wise growth, no warm-start, no native categorical splits, no interaction constraints), but the joint path reached full feature parity over the v0.10.x line. Docstring rewritten to describe the current capability matrix accurately with per-feature release tags (v0.10.2 leaf-wise + interaction constraints + native categorical + row/col subsample; v0.10.3 GOSS + DART + warm-start; v0.10.4 MorphBoost; v0.10.5 DRO leaves; v0.10.6 factor neutralization) plus a note that this `mod.rs` is the scaffolding / re-export layer added in v0.12.2 (PR #46).
+
+No behavioral change, no API change, no artifact format change. Test counts: **643 pytest** (the v0.12.3 baseline of 641 plus the two new `test_module_identity.py` regression tests) and **445 cargo**.
+
 ## v0.12.3 (2026-05-29)
 
 Completion of the structural refactor begun in v0.12.0. **No user-facing API changes, no behavioral changes, no new features.** This release decomposes the two remaining large files — the PyO3 bridge and the `GBMRegressor` estimator — into focused, single-responsibility modules. Patch release because every change is mechanical; the full test suite (445 cargo + 641 pytest) holds at every individual commit. Closes the file-decomposition program tracked in issue #44 (Phases 6–8).

@@ -1,7 +1,30 @@
 Release and platform policy
 ===========================
 
-AlloyGBM ``0.12.3`` release notes and platform policy.
+AlloyGBM ``0.12.4`` release notes and platform policy.
+
+What's new in 0.12.4
+--------------------
+
+**Bugfix release on top of v0.12.3.** Two post-merge review findings
+(issues #48, #49) from the v0.12.2 / v0.12.3 refactor PRs:
+
+- ``GBMRegressor.__module__`` now reports its public ``alloygbm.regressor``
+  shim path instead of the private ``alloygbm._regressor._core``
+  implementation module. ``repr`` and newly-created pickle payloads no
+  longer leak the internal package layout; old v0.12.3 pickles continue
+  to load.
+- The joint trainer's module-level documentation in
+  ``crates/engine/src/joint/mod.rs`` is refreshed to reflect the v0.10.x
+  feature parity (DART, GOSS, MorphBoost, DRO, factor neutralization,
+  warm-start, leaf-wise growth, native categorical splits, interaction
+  constraints) that had landed since the original v0.10.0 minimal scope.
+
+No user-facing API changes, no behavioral changes, no new features.
+Model artifacts written by v0.12.3 load and predict identically under
+v0.12.4. **643 pytest** (the v0.12.3 baseline of 641 plus the two new
+regression tests for the module-identity fix) and **445 cargo** tests
+pass.
 
 What's new in 0.12.3
 --------------------
