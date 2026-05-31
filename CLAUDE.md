@@ -127,7 +127,7 @@ AlloyGBM/
       evaluation.py           # Metrics: rmse, mae, r2_score, accuracy, log_loss, ndcg, etc.
       validation.py           # Purged time-series and panel cross-validation splits
   docs/
-    limitations.md         # Current limitation analysis (last updated for v0.12.4; refactor program completed in v0.12.3; CPU-only still pending)
+    limitations.md         # Current limitation analysis (last updated for v0.12.5; refactor program completed in v0.12.3; CPU-only still pending)
     roadmap/current.md     # Active roadmap and per-release history
     user/                  # User-facing Markdown docs (mirrored by docs/site/source/*.rst)
     site/                  # Sphinx site (Read the Docs)

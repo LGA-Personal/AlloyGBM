@@ -8,7 +8,7 @@
 //! single-output training (`crate::trainer::Trainer`) uses a different
 //! per-feature histogram type and remains the path for K = 1.
 //!
-//! ## Capabilities (current, as of v0.12.4)
+//! ## Capabilities (current, as of v0.12.5)
 //!
 //! The joint path reached feature parity with the single-output trainer
 //! over the v0.10.x line; the original v0.10.0 minimal scope is long

@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.12.5 (2026-05-31)
+
+Small feature release on top of v0.12.4. Closes the `leaf_model="linear"` exception on SHAP interaction values that was carved out when interactions shipped in v0.11.0.
+
+### Features
+
+- **SHAP interaction values now accept `leaf_model="linear"` artifacts** (#51). `GBMRegressor.shap_interaction_values(X)` previously rejected piecewise-linear (PL) leaf artifacts because the standard TreeSHAP polynomial path operates on constant leaf values. The row-dependent linear deviation `w_j · (x_j − μ_j)` carried by PL leaves is now credited to the diagonal of the interaction matrix (the regressor feature's main effect): standard TreeSHAP interactions run on the constant part of each leaf (`intercept + Σⱼ wⱼ·μⱼ`), then `distribute_linear_terms_for_row` — the same helper that backs PL-leaf `shap_values` — folds the per-row deviations onto `Φ[j][j]`. Mathematical guarantees: full additivity (`Σᵢⱼ Φᵢⱼ + E = ŷ`) and row-marginal (`Σⱼ Φᵢⱼ = φᵢ`) hold by construction; matrix is symmetric and `expected_value` is unchanged (the deviations have zero expectation under the recorded baseline). Pragmatic caveat: this attribution does not split linear-deviation credit across path-feature × regressor-feature off-diagonals; a faithful PL-leaf interaction decomposition remains an open extension. Covered by 3 new tests pinning all three invariants (Rust + Python), plus a new Python test exercising the LinearRank × linear-leaves binning combination.
+
+### Internal refactors
+
+- **`explain_interactions_from_model` moved from `crates/shap/src/lib.rs` to `crates/shap/src/tree_shap.rs`** next to its peer `explain_rows_tree_shap`. Continues the v0.12.2 SHAP-crate decomposition pattern: `lib.rs` is back to thin entry-point glue (~165 lines) and the algorithmic body lives alongside the helpers it consumes (`tree_shap_interactions_row`, `distribute_linear_terms_for_row`, `model_has_linear_leaves`). No behavioral change.
+
+### Documentation
+
+- `crates/shap/src/lib.rs` rustdoc on `explain_interactions_from_artifact_bytes`, `bindings/python/alloygbm/_regressor/_shap.py` docstring on `shap_interaction_values`, `docs/user/explanations.md`, `docs/site/source/explanations.rst`, and the CLAUDE.md SHAP-interactions bullet all updated to describe the new linear-leaf treatment (replacing the v0.11.0 rejection language).
+
+No artifact format change. Test counts: **644 pytest** (the v0.12.4 baseline of 643 plus the renamed-and-extended `test_shap_interaction_values_accepts_linear_leaf_model` and the new `test_shap_interaction_values_linear_rank_with_linear_leaves`) and **447 cargo** (the v0.12.4 baseline of 445 plus the two new `shap_interactions_linear_leaves_*_satisfies_additivity` tests).
+
 ## v0.12.4 (2026-05-29)
 
 Bugfix release on top of v0.12.3. Two issues raised by post-merge LLM review of the v0.12.2 and v0.12.3 refactor PRs:

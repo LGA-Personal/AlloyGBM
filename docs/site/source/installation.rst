@@ -15,7 +15,7 @@ Install from PyPI
 
    pip install alloygbm
 
-For ``0.12.4``, this is expected to work best on:
+For ``0.12.5``, this is expected to work best on:
 
 - macOS ``arm64``
 - Linux ``x86_64`` environments compatible with the published manylinux wheel
@@ -43,7 +43,7 @@ Verify the install
 The native runtime info object confirms that the extension module loaded
 correctly.
 
-Platform policy for ``0.12.4``
+Platform policy for ``0.12.5``
 -----------------------------
 
 - officially targeted wheel platforms:
