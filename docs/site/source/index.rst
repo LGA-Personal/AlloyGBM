@@ -12,16 +12,17 @@ types.
 
 .. note::
 
-   AlloyGBM ``0.12.5`` is a small feature release on top of v0.12.4.
-   ``GBMRegressor.shap_interaction_values(X)`` now accepts artifacts
-   trained with ``leaf_model="linear"`` — the row-dependent linear
-   deviation ``w_j · (x_j − μ_j)`` is credited to the diagonal of the
-   interaction matrix (the regressor feature's main effect), preserving
-   both row-marginal and full additivity. This closes the
-   ``leaf_model="linear"`` exception that was carved out in v0.11.0. No
-   other user-facing API changes; model artifacts written by v0.12.4
-   load and predict identically under v0.12.5. See :doc:`release` for
-   full notes.
+   AlloyGBM ``0.12.6`` is a feature release on top of v0.12.5.
+   ``GBMClassifier`` and ``MultiLabelGBMRanker`` now support
+   ``shap_values(X)`` and ``shap_interaction_values(X)`` — returning a
+   list of ``K`` matrices, one per class (classifier) or per output
+   label (ranker). Joint multi-output rankers route through new
+   per-output Rust entry points; independent-mode rankers fan out to
+   per-label ``GBMRanker`` calls. ``global_importance_from_artifact_bytes``
+   averages over outputs so importance magnitudes remain comparable
+   across single-output and multi-output models. No artifact format
+   change — v0.12.5 artifacts load and predict identically under
+   v0.12.6. See :doc:`release` for full notes.
 
 
 Getting started

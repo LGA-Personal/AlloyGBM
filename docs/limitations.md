@@ -1,6 +1,6 @@
 # AlloyGBM Current Limitations
 
-Last updated for v0.12.5 (pending v0.12.6 items noted inline).
+Last updated for v0.12.6.
 
 ## Remaining Limitations
 
@@ -30,7 +30,7 @@ The `"quantile"` objective uses empirical leaf refinement which assumes constant
 
 ## Resolved (Previously Limitations)
 
-### Pending Release (v0.12.6)
+### v0.12.6
 
 - **SHAP values and interaction values on multiclass and multi-output models.**
   `GBMClassifier.shap_values(X)`, `GBMClassifier.shap_interaction_values(X)`,

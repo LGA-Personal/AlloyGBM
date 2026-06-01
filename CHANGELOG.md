@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.12.6 (2026-06-01)
+
+Feature release on top of v0.12.5. Closes limitation #3 from `docs/limitations.md`: SHAP values and interaction values are now supported on multiclass classifiers and multi-output (joint) rankers in addition to single-output regressors.
+
+### Features
+
+- **Multiclass and multi-output SHAP** (#52). `GBMClassifier.shap_values(X)`, `GBMClassifier.shap_interaction_values(X)`, `MultiLabelGBMRanker.shap_values(X)`, and `MultiLabelGBMRanker.shap_interaction_values(X)` are now supported. All return a list of `K` arrays — one per class (multiclass classifier) or per output label (multi-label ranker). The Rust crate gained four new public entry points (`explain_rows_from_artifact_bytes_per_output`, `explain_rows_from_artifact_bytes_with_binning_per_output`, `explain_interactions_from_artifact_bytes_per_output`, `explain_interactions_from_artifact_bytes_with_binning_per_output`) that return `Vec<ShapExplanationBatch>` / `Vec<ShapInteractionBatch>` — element `k` is the SHAP attribution for class `k`'s logit (multiclass) or output `k` (joint multi-output). The original single-output entry points keep their `ShapResult<ShapExplanationBatch>` signature and now error on K>1 artifacts ("use the `_per_output` variants"). `MultiLabelGBMRanker(multi_label_mode="joint")` routes through the per-output Rust bridge via `_ShapMixin` (binning context preserved); independent mode fans out to per-label `GBMRanker.shap_values`. `global_importance_from_artifact_bytes` averages over outputs (divides by `n_models`) so importance magnitudes remain comparable across single-output and multi-output models. Internally, `load_artifact_context` unrolls the artifact into K independent `TrainedModel` instances — multiclass via `MultiClassTrainedModel.class_stumps` (with `FeatureBaseline` + `NativeCategoricalSplits` threaded into each per-class model), joint multi-output via per-stump residualization (`leaf_value[k] − parent_value[k]`) with per-output baselines parsed from the joint trainer's objective metadata. Covered by 4 new tests in `bindings/python/tests/test_shap_multiclass_multioutput.py` pinning additivity, symmetry, and row-marginal invariants for both multiclass classifiers (including `leaf_model="linear"`) and joint multi-output rankers.
+
+### Internal refactors
+
+- **`crates/shap/src/types.rs::load_artifact_context` decomposed** into four focused helpers (`unroll_multiclass`, `parse_joint_baselines`, `unroll_multi_output`) so the orchestrator stays ~45 lines and each helper does one thing. Continues the v0.12.2 SHAP-crate decomposition pattern.
+- **`bindings/python/src/predict.rs` split into `predict.rs` + `shap_bridge.rs`**. After this PR added 8 new `_multi` PyO3 wrappers (one per existing SHAP entry point), `predict.rs` would have crossed an organizational threshold. Instead, all 16 SHAP wrappers (8 single-output + 8 `_multi`) now live in a dedicated `shap_bridge.rs`; `predict.rs` shrunk to 396 lines and contains only the `NativePredictorHandle` and `predictor_predict_*` family. `lib.rs` re-exports through `use crate::shap_bridge::{...}`.
+
+### Documentation
+
+- `docs/limitations.md` limitation #3 moved from Remaining to Resolved (v0.12.6). `docs/user/explanations.md`, `docs/site/source/explanations.rst`, and `CLAUDE.md` SHAP-interactions bullet all updated to describe the new multiclass and multi-output surfaces. Four new `_per_output` Rust functions have rustdoc covering output-index contract, dispatch semantics, additivity invariant, and cost. PR description rewritten to accurately describe the implementation across all commits.
+
+No artifact format change. Test counts: **648 pytest** (the v0.12.5 baseline of 644 plus the 4 new `test_shap_multiclass_multioutput.py` cases) and **447 cargo** (unchanged).
+
 ## v0.12.5 (2026-05-31)
 
 Small feature release on top of v0.12.4. Closes the `leaf_model="linear"` exception on SHAP interaction values that was carved out when interactions shipped in v0.11.0.
