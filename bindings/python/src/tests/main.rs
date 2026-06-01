@@ -1,9 +1,7 @@
 use crate::categorical_bridge::{flatten_rows, resolve_categorical_spec};
-use crate::predict::{
-    predictor_predict_batch_canonical_impl, predictor_predict_batch_impl, shap_explain_rows_impl,
-    shap_global_importance_impl,
-};
+use crate::predict::{predictor_predict_batch_canonical_impl, predictor_predict_batch_impl};
 use crate::quantization::ContinuousBinningStrategy;
+use crate::shap_bridge::{shap_explain_rows_impl, shap_global_importance_impl};
 use crate::train::train_regression_artifact_with_summary_dense_impl;
 use crate::{DEFAULT_TRAIN_ROUNDS, MAX_CONTINUOUS_QUANTIZED_BIN_U8};
 use alloygbm_backend_cpu::CpuBackend;
