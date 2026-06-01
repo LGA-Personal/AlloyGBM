@@ -69,8 +69,38 @@ pub fn global_importance_from_artifact_bytes(
     rows: &[Vec<f32>],
 ) -> ShapResult<Vec<(String, f32)>> {
     let context = load_artifact_context(artifact_bytes)?;
-    let explanation = explain_rows_from_model(&context.model, rows, None)?;
-    global_importance_from_shap_values(&context.feature_names, &explanation.values)
+    let mut total_contribution_sums = vec![0.0_f32; context.feature_names.len()];
+    
+    for model in &context.models {
+        let explanation = explain_rows_from_model(model, rows, None)?;
+        for row_values in &explanation.values {
+            for (feature_index, value) in row_values.iter().enumerate() {
+                total_contribution_sums[feature_index] += value.abs();
+            }
+        }
+    }
+
+    let row_count = rows.len() as f32;
+    let mut global_importance = context.feature_names
+        .iter()
+        .enumerate()
+        .map(|(feature_index, feature_name)| {
+            (
+                feature_name.clone(),
+                total_contribution_sums[feature_index] / row_count,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    global_importance.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+
+    Ok(global_importance)
 }
 
 /// Predictor-aligned variant of `global_importance_from_artifact_bytes`.
@@ -81,8 +111,38 @@ pub fn global_importance_from_artifact_bytes_with_binning(
     binning: &BinningContext,
 ) -> ShapResult<Vec<(String, f32)>> {
     let context = load_artifact_context(artifact_bytes)?;
-    let explanation = explain_rows_from_model(&context.model, rows, Some(binning))?;
-    global_importance_from_shap_values(&context.feature_names, &explanation.values)
+    let mut total_contribution_sums = vec![0.0_f32; context.feature_names.len()];
+    
+    for model in &context.models {
+        let explanation = explain_rows_from_model(model, rows, Some(binning))?;
+        for row_values in &explanation.values {
+            for (feature_index, value) in row_values.iter().enumerate() {
+                total_contribution_sums[feature_index] += value.abs();
+            }
+        }
+    }
+
+    let row_count = rows.len() as f32;
+    let mut global_importance = context.feature_names
+        .iter()
+        .enumerate()
+        .map(|(feature_index, feature_name)| {
+            (
+                feature_name.clone(),
+                total_contribution_sums[feature_index] / row_count,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    global_importance.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+
+    Ok(global_importance)
 }
 
 // Legacy compatibility shim for the v0.0.1 placeholder API. Prefer

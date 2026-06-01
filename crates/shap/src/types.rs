@@ -32,7 +32,7 @@ pub struct ShapInteractionBatch {
 #[derive(Debug, Clone)]
 pub(crate) struct ArtifactShapContext {
     pub(crate) feature_names: Vec<String>,
-    pub(crate) model: TrainedModel,
+    pub(crate) models: Vec<TrainedModel>,
 }
 
 #[derive(Debug)]
@@ -47,36 +47,79 @@ pub(crate) fn load_artifact_context(artifact_bytes: &[u8]) -> ShapResult<Artifac
     let parsed = deserialize_model_artifact_v1(artifact_bytes)
         .map_err(|error| ShapError::ContractViolation(error.to_string()))?;
 
-    if parsed.contract.metadata.num_classes.is_some() {
-        return Err(ShapError::ContractViolation(
-            "SHAP values are not yet supported for multi-class models".to_string(),
-        ));
-    }
-
     let compatibility_report = required_section_compatibility_report(&parsed.sections);
-    if !compatibility_report.legacy_compatible {
+    let has_multi_output = parsed.sections.iter().any(|s| s.descriptor.kind == alloygbm_core::ModelSectionKind::MultiOutputLeafValues);
+    if parsed.contract.metadata.num_classes.is_none() && !compatibility_report.legacy_compatible && !has_multi_output {
         return Err(ShapError::ContractViolation(
             format_required_section_mode_error(compatibility_report, true),
         ));
     }
 
-    let model = TrainedModel::from_artifact_bytes_with_mode(
-        artifact_bytes,
-        ArtifactCompatibilityMode::AllowLegacyTreesOnly,
-    )
-    .map_err(|error| ShapError::ContractViolation(error.to_string()))?;
+    let mut models = Vec::new();
 
-    if parsed.contract.metadata.feature_names.len() != model.feature_count {
-        return Err(ShapError::ContractViolation(format!(
-            "metadata feature count {} does not match model feature count {}",
-            parsed.contract.metadata.feature_names.len(),
-            model.feature_count
-        )));
+    if parsed.contract.metadata.num_classes.is_some() {
+        let mc_model = alloygbm_engine::MultiClassTrainedModel::from_artifact_bytes(artifact_bytes)
+            .map_err(|e| ShapError::ContractViolation(e.to_string()))?;
+
+        if parsed.contract.metadata.feature_names.len() != mc_model.feature_count {
+            return Err(ShapError::ContractViolation(format!(
+                "metadata feature count {} does not match model feature count {}",
+                parsed.contract.metadata.feature_names.len(),
+                mc_model.feature_count
+            )));
+        }
+
+        for (k, stumps) in mc_model.class_stumps.into_iter().enumerate() {
+            models.push(TrainedModel {
+                baseline_prediction: mc_model.baseline_predictions[k],
+                feature_count: mc_model.feature_count,
+                stumps,
+                categorical_state: mc_model.categorical_state.clone(),
+                node_debug_stats: None,
+                objective: mc_model.objective.clone(),
+                native_categorical_feature_indices: Vec::new(),
+                morph_metadata: mc_model.morph_metadata.clone(),
+                dro_metadata: mc_model.dro_metadata.clone(),
+                feature_baseline: None,
+                neutralization_metadata: None,
+            });
+        }
+    } else {
+        let mut base_model = TrainedModel::from_artifact_bytes_with_mode(
+            artifact_bytes,
+            ArtifactCompatibilityMode::AllowLegacyTreesOnly,
+        )
+        .map_err(|error| ShapError::ContractViolation(error.to_string()))?;
+
+        if parsed.contract.metadata.feature_names.len() != base_model.feature_count {
+            return Err(ShapError::ContractViolation(format!(
+                "metadata feature count {} does not match model feature count {}",
+                parsed.contract.metadata.feature_names.len(),
+                base_model.feature_count
+            )));
+        }
+
+        if let Some((left_vec, _)) = base_model.stumps.first().and_then(|s| s.multi_output_leaf_values.as_ref()) {
+            let n_outputs = left_vec.len();
+            for k in 0..n_outputs {
+                let mut k_model = base_model.clone();
+                for stump in &mut k_model.stumps {
+                    if let Some((left_mo, right_mo)) = &stump.multi_output_leaf_values {
+                        stump.left_leaf_value = alloygbm_core::LeafValue::Scalar(left_mo[k]);
+                        stump.right_leaf_value = alloygbm_core::LeafValue::Scalar(right_mo[k]);
+                    }
+                    stump.multi_output_leaf_values = None;
+                }
+                models.push(k_model);
+            }
+        } else {
+            models.push(base_model);
+        }
     }
 
     Ok(ArtifactShapContext {
         feature_names: parsed.contract.metadata.feature_names,
-        model,
+        models,
     })
 }
 

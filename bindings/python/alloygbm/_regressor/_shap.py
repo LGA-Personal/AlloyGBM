@@ -183,10 +183,16 @@ class _ShapMixin:
         else:
             shap_explain_rows = _base._load_native_shap_explain_rows()
             expected_value, values = shap_explain_rows(self._artifact_bytes, rows)
-        shap_matrix = [list(row) for row in values]
+        if len(expected_value) == 1:
+            shap_matrix = [list(row) for row in values[0]]
+            if include_expected_value:
+                return float(expected_value[0]), shap_matrix
+            return shap_matrix
+        
+        shap_matrices = [[list(row) for row in out_values] for out_values in values]
         if include_expected_value:
-            return float(expected_value), shap_matrix
-        return shap_matrix
+            return [float(e) for e in expected_value], shap_matrices
+        return shap_matrices
 
     def shap_interaction_values(
         self, X: object, *, include_expected_value: bool = False
@@ -285,10 +291,16 @@ class _ShapMixin:
                     self._artifact_bytes, rows
                 )
 
-        matrix = [[list(col) for col in row] for row in values]
+        if len(expected_value) == 1:
+            matrix = [[list(col) for col in row] for row in values[0]]
+            if include_expected_value:
+                return float(expected_value[0]), matrix
+            return matrix
+        
+        matrices = [[[list(col) for col in row] for row in out_values] for out_values in values]
         if include_expected_value:
-            return float(expected_value), matrix
-        return matrix
+            return [float(e) for e in expected_value], matrices
+        return matrices
 
     def feature_importances(
         self, X: object, *, method: str = "shap"

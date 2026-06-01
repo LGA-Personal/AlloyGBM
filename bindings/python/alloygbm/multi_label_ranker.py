@@ -795,6 +795,57 @@ class MultiLabelGBMRanker:
         cols = [np.asarray(ranker.predict(X), dtype=np.float64) for ranker in self._sub_rankers]
         return np.stack(cols, axis=1)
 
+    # ── SHAP ───────────────────────────────────────────────────────────
+
+    def shap_values(self, X: object) -> list[np.ndarray]:
+        """Compute SHAP values for each label.
+
+        Returns
+        -------
+        list[np.ndarray]
+            A list of ``n_labels`` matrices, where each matrix has shape
+            ``(n_samples, n_features)``.
+        """
+        if not self._is_fitted:
+            raise RuntimeError("MultiLabelGBMRanker must be fit before computing SHAP values")
+        
+        if self.multi_label_mode == "joint":
+            assert self._joint_artifact_bytes is not None
+            from . import _alloygbm
+            x_arr = np.ascontiguousarray(np.asarray(X), dtype=np.float64)
+            _, values = _alloygbm.shap_explain_rows(
+                self._joint_artifact_bytes, 
+                x_arr.tolist()
+            )
+            # The native bridge handles unpacking the multi-output matrix
+            return [np.array(v, dtype=np.float64) for v in values]
+            
+        return [ranker.shap_values(X) for ranker in self._sub_rankers]
+
+    def shap_interaction_values(self, X: object) -> list[np.ndarray]:
+        """Compute SHAP interaction values for each label.
+
+        Returns
+        -------
+        list[np.ndarray]
+            A list of ``n_labels`` 3D tensors, where each tensor has shape
+            ``(n_samples, n_features, n_features)``.
+        """
+        if not self._is_fitted:
+            raise RuntimeError("MultiLabelGBMRanker must be fit before computing SHAP interaction values")
+            
+        if self.multi_label_mode == "joint":
+            assert self._joint_artifact_bytes is not None
+            from . import _alloygbm
+            x_arr = np.ascontiguousarray(np.asarray(X), dtype=np.float64)
+            _, values = _alloygbm.shap_explain_interactions(
+                self._joint_artifact_bytes, 
+                x_arr.tolist()
+            )
+            return [np.array(v, dtype=np.float64) for v in values]
+            
+        return [ranker.shap_interaction_values(X) for ranker in self._sub_rankers]
+
     # ── Pickle ─────────────────────────────────────────────────────────
 
     def __getstate__(self) -> dict:

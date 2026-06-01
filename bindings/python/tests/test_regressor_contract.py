@@ -700,9 +700,9 @@ class GBMRegressorContractTests(unittest.TestCase):
 
         def fake_shap(
             artifact_bytes: bytes, rows: list[list[float]]
-        ) -> tuple[float, list[list[float]]]:
+        ) -> tuple[list[float], list[list[list[float]]]]:
             shap_calls.append((artifact_bytes, rows))
-            return (1.25, [[0.1, -0.1], [0.2, -0.2]])
+            return ([1.25], [[[0.1, -0.1], [0.2, -0.2]]])
 
         original_shap_loader = base_module._load_native_shap_explain_rows
         base_module._load_native_shap_explain_rows = lambda: fake_shap

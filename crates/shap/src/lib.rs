@@ -25,9 +25,13 @@ pub use types::{ShapExplanationBatch, ShapInteractionBatch};
 pub fn explain_rows_from_artifact_bytes(
     artifact_bytes: &[u8],
     rows: &[Vec<f32>],
-) -> ShapResult<ShapExplanationBatch> {
+) -> ShapResult<Vec<ShapExplanationBatch>> {
     let context = load_artifact_context(artifact_bytes)?;
-    explain_rows_from_model(&context.model, rows, None)
+    context
+        .models
+        .iter()
+        .map(|model| explain_rows_from_model(model, rows, None))
+        .collect()
 }
 
 /// Predictor-aligned variant of `explain_rows_from_artifact_bytes`.
@@ -46,9 +50,13 @@ pub fn explain_rows_from_artifact_bytes_with_binning(
     artifact_bytes: &[u8],
     rows: &[Vec<f32>],
     binning: &BinningContext,
-) -> ShapResult<ShapExplanationBatch> {
+) -> ShapResult<Vec<ShapExplanationBatch>> {
     let context = load_artifact_context(artifact_bytes)?;
-    explain_rows_from_model(&context.model, rows, Some(binning))
+    context
+        .models
+        .iter()
+        .map(|model| explain_rows_from_model(model, rows, Some(binning)))
+        .collect()
 }
 
 /// Compute pairwise SHAP interaction values for the given rows.
@@ -64,9 +72,13 @@ pub fn explain_rows_from_artifact_bytes_with_binning(
 pub fn explain_interactions_from_artifact_bytes(
     artifact_bytes: &[u8],
     rows: &[Vec<f32>],
-) -> ShapResult<ShapInteractionBatch> {
+) -> ShapResult<Vec<ShapInteractionBatch>> {
     let context = load_artifact_context(artifact_bytes)?;
-    explain_interactions_from_model(&context.model, rows, None)
+    context
+        .models
+        .iter()
+        .map(|model| explain_interactions_from_model(model, rows, None))
+        .collect()
 }
 
 /// Predictor-aligned variant. See `explain_rows_from_artifact_bytes_with_binning`
@@ -75,9 +87,13 @@ pub fn explain_interactions_from_artifact_bytes_with_binning(
     artifact_bytes: &[u8],
     rows: &[Vec<f32>],
     binning: &BinningContext,
-) -> ShapResult<ShapInteractionBatch> {
+) -> ShapResult<Vec<ShapInteractionBatch>> {
     let context = load_artifact_context(artifact_bytes)?;
-    explain_interactions_from_model(&context.model, rows, Some(binning))
+    context
+        .models
+        .iter()
+        .map(|model| explain_interactions_from_model(model, rows, Some(binning)))
+        .collect()
 }
 
 pub(crate) fn explain_rows_from_model(
