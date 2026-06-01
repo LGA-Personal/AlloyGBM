@@ -1,7 +1,48 @@
 Release and platform policy
 ===========================
 
-AlloyGBM ``0.12.5`` release notes and platform policy.
+AlloyGBM ``0.12.6`` release notes and platform policy.
+
+What's new in 0.12.6
+--------------------
+
+**Feature release on top of v0.12.5.** Closes limitation #3 from
+``docs/limitations.md``: SHAP values and interaction values are now
+supported on multiclass classifiers and multi-output (joint) rankers in
+addition to single-output regressors.
+
+- ``GBMClassifier.shap_values(X)`` and
+  ``GBMClassifier.shap_interaction_values(X)`` return a list of ``K``
+  arrays — one per class logit. Additivity per class:
+  ``Σⱼ values[k][i][j] + expected_values[k] ≈ raw_logit_k(rows[i])``.
+- ``MultiLabelGBMRanker.shap_values(X)`` and
+  ``MultiLabelGBMRanker.shap_interaction_values(X)`` return a list of
+  ``n_labels`` arrays — one per output. Joint mode
+  (``multi_label_mode="joint"``) routes through new per-output Rust
+  entry points with full binning-context support; independent mode
+  fans out to per-label ``GBMRanker.shap_values``.
+- ``global_importance_from_artifact_bytes`` now averages over outputs
+  (divides by ``n_models``) so importance magnitudes remain comparable
+  across single-output and multi-output models.
+- The Rust crate gained four new public entry points:
+  ``explain_rows_from_artifact_bytes_per_output``,
+  ``explain_rows_from_artifact_bytes_with_binning_per_output``,
+  ``explain_interactions_from_artifact_bytes_per_output``, and
+  ``explain_interactions_from_artifact_bytes_with_binning_per_output``.
+  The original single-output entry points keep their existing signature
+  and now error on K>1 artifacts directing callers to the
+  ``_per_output`` variants.
+
+**Internal refactors.** ``load_artifact_context`` decomposed into
+``unroll_multiclass``, ``parse_joint_baselines``, and
+``unroll_multi_output`` helpers (orchestrator stays ~45 lines).
+``bindings/python/src/predict.rs`` split into ``predict.rs`` (predictor
+entry points) and ``shap_bridge.rs`` (all 16 SHAP PyO3 wrappers — 8
+single-output + 8 ``_multi``). Continues the v0.12.2 / v0.12.3
+decomposition pattern.
+
+**No artifact format change.** Model artifacts written by v0.12.5 load
+and predict identically under v0.12.6.
 
 What's new in 0.12.5
 --------------------

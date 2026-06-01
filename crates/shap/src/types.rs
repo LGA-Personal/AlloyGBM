@@ -32,7 +32,7 @@ pub struct ShapInteractionBatch {
 #[derive(Debug, Clone)]
 pub(crate) struct ArtifactShapContext {
     pub(crate) feature_names: Vec<String>,
-    pub(crate) model: TrainedModel,
+    pub(crate) models: Vec<TrainedModel>,
 }
 
 #[derive(Debug)]
@@ -43,40 +43,189 @@ pub(crate) struct ModelStructure<'a> {
     pub(crate) split_feature_bit_positions: Vec<Option<u8>>,
 }
 
+fn unroll_multiclass(
+    artifact_bytes: &[u8],
+    parsed: &alloygbm_core::ParsedModelArtifactV1,
+) -> ShapResult<Vec<TrainedModel>> {
+    let mc_model = alloygbm_engine::MultiClassTrainedModel::from_artifact_bytes(artifact_bytes)
+        .map_err(|e| ShapError::ContractViolation(e.to_string()))?;
+
+    if parsed.contract.metadata.feature_names.len() != mc_model.feature_count {
+        return Err(ShapError::ContractViolation(format!(
+            "metadata feature count {} does not match model feature count {}",
+            parsed.contract.metadata.feature_names.len(),
+            mc_model.feature_count
+        )));
+    }
+
+    // Decode optional FeatureBaseline section.
+    let feature_baseline =
+        alloygbm_core::decode_optional_feature_baseline_section(&parsed.sections)
+            .map_err(|error| ShapError::ContractViolation(error.to_string()))?
+            .map(|payload| payload.feature_means)
+            .filter(|means| means.len() == mc_model.feature_count);
+
+    // Decode optional NativeCategoricalSplits section.
+    let mut native_categorical_feature_indices = Vec::new();
+    let mut class_stumps = mc_model.class_stumps;
+
+    if let Some(cat_payload) =
+        alloygbm_core::decode_optional_native_categorical_splits_section(&parsed.sections)
+            .map_err(|error| ShapError::ContractViolation(error.to_string()))?
+    {
+        native_categorical_feature_indices = cat_payload.native_categorical_feature_indices;
+        let stump_bitsets: std::collections::HashMap<u32, Vec<u8>> =
+            cat_payload.stump_bitsets.into_iter().collect();
+        let mut global_idx = 0usize;
+        for stumps in &mut class_stumps {
+            for stump in stumps.iter_mut() {
+                if let Some(bitset) = stump_bitsets.get(&(global_idx as u32)) {
+                    stump.split.categorical_bitset = Some(bitset.clone());
+                }
+                global_idx += 1;
+            }
+        }
+    }
+
+    let mut models = Vec::new();
+    for (k, stumps) in class_stumps.into_iter().enumerate() {
+        models.push(TrainedModel {
+            baseline_prediction: mc_model.baseline_predictions[k],
+            feature_count: mc_model.feature_count,
+            stumps,
+            categorical_state: mc_model.categorical_state.clone(),
+            node_debug_stats: None,
+            objective: mc_model.objective.clone(),
+            native_categorical_feature_indices: native_categorical_feature_indices.clone(),
+            morph_metadata: mc_model.morph_metadata.clone(),
+            dro_metadata: mc_model.dro_metadata.clone(),
+            feature_baseline: feature_baseline.clone(),
+            neutralization_metadata: None,
+        });
+    }
+    Ok(models)
+}
+
+fn parse_joint_baselines(metadata: &alloygbm_core::ModelMetadata) -> ShapResult<Option<Vec<f32>>> {
+    let mut baselines = None;
+    if metadata.objective.starts_with("joint_multi_output:")
+        && metadata.objective.contains("|baselines=")
+    {
+        let pos = metadata.objective.find("|baselines=").unwrap();
+        let baselines_str = &metadata.objective[pos + "|baselines=".len()..];
+        let parsed_baselines: Result<Vec<f32>, _> =
+            baselines_str.split(',').map(|s| s.parse::<f32>()).collect();
+        match parsed_baselines {
+            Ok(b) => baselines = Some(b),
+            Err(e) => {
+                return Err(ShapError::ContractViolation(format!(
+                    "Failed to parse |baselines= field in objective metadata string: {e}"
+                )));
+            }
+        }
+    }
+    Ok(baselines)
+}
+
+fn unroll_multi_output(base_model: TrainedModel, baselines: Option<Vec<f32>>) -> Vec<TrainedModel> {
+    let mut models = Vec::new();
+    if let Some((left_vec, _)) = base_model
+        .stumps
+        .first()
+        .and_then(|s| s.multi_output_leaf_values.as_ref())
+    {
+        let n_outputs = left_vec.len();
+        for k in 0..n_outputs {
+            let mut k_model = base_model.clone();
+            // Map tree_id -> Map local_node_id -> (left_val, right_val)
+            let mut stump_vals: HashMap<u32, HashMap<u32, (f32, f32)>> = HashMap::new();
+            for stump in &k_model.stumps {
+                if let Some((left_mo, right_mo)) = &stump.multi_output_leaf_values {
+                    let (tree_id, local_id) = decode_tree_node_id(stump.split.node_id);
+                    stump_vals
+                        .entry(tree_id)
+                        .or_default()
+                        .insert(local_id, (left_mo[k], right_mo[k]));
+                }
+            }
+
+            for stump in &mut k_model.stumps {
+                if let Some((left_mo, right_mo)) = &stump.multi_output_leaf_values {
+                    let (tree_id, local_id) = decode_tree_node_id(stump.split.node_id);
+                    let parent_val = if local_id == 0 {
+                        0.0
+                    } else {
+                        let parent_id = (local_id - 1) / 2;
+                        if let Some(tree_map) = stump_vals.get(&tree_id) {
+                            if let Some(&(p_left, p_right)) = tree_map.get(&parent_id) {
+                                if local_id % 2 == 1 { p_left } else { p_right }
+                            } else {
+                                0.0
+                            }
+                        } else {
+                            0.0
+                        }
+                    };
+                    stump.left_leaf_value =
+                        alloygbm_core::LeafValue::Scalar(left_mo[k] - parent_val);
+                    stump.right_leaf_value =
+                        alloygbm_core::LeafValue::Scalar(right_mo[k] - parent_val);
+                }
+                stump.multi_output_leaf_values = None;
+            }
+            if let Some(&b) = baselines.as_ref().and_then(|b| b.get(k)) {
+                k_model.baseline_prediction = b;
+            }
+            models.push(k_model);
+        }
+    } else {
+        models.push(base_model);
+    }
+    models
+}
+
 pub(crate) fn load_artifact_context(artifact_bytes: &[u8]) -> ShapResult<ArtifactShapContext> {
     let parsed = deserialize_model_artifact_v1(artifact_bytes)
         .map_err(|error| ShapError::ContractViolation(error.to_string()))?;
 
-    if parsed.contract.metadata.num_classes.is_some() {
-        return Err(ShapError::ContractViolation(
-            "SHAP values are not yet supported for multi-class models".to_string(),
-        ));
-    }
-
     let compatibility_report = required_section_compatibility_report(&parsed.sections);
-    if !compatibility_report.legacy_compatible {
+    let has_multi_output = parsed
+        .sections
+        .iter()
+        .any(|s| s.descriptor.kind == alloygbm_core::ModelSectionKind::MultiOutputLeafValues);
+    if parsed.contract.metadata.num_classes.is_none()
+        && !compatibility_report.legacy_compatible
+        && !has_multi_output
+    {
         return Err(ShapError::ContractViolation(
             format_required_section_mode_error(compatibility_report, true),
         ));
     }
 
-    let model = TrainedModel::from_artifact_bytes_with_mode(
-        artifact_bytes,
-        ArtifactCompatibilityMode::AllowLegacyTreesOnly,
-    )
-    .map_err(|error| ShapError::ContractViolation(error.to_string()))?;
+    let models = if parsed.contract.metadata.num_classes.is_some() {
+        unroll_multiclass(artifact_bytes, &parsed)?
+    } else {
+        let base_model = TrainedModel::from_artifact_bytes_with_mode(
+            artifact_bytes,
+            ArtifactCompatibilityMode::AllowLegacyTreesOnly,
+        )
+        .map_err(|error| ShapError::ContractViolation(error.to_string()))?;
 
-    if parsed.contract.metadata.feature_names.len() != model.feature_count {
-        return Err(ShapError::ContractViolation(format!(
-            "metadata feature count {} does not match model feature count {}",
-            parsed.contract.metadata.feature_names.len(),
-            model.feature_count
-        )));
-    }
+        if parsed.contract.metadata.feature_names.len() != base_model.feature_count {
+            return Err(ShapError::ContractViolation(format!(
+                "metadata feature count {} does not match model feature count {}",
+                parsed.contract.metadata.feature_names.len(),
+                base_model.feature_count
+            )));
+        }
+
+        let baselines = parse_joint_baselines(&parsed.contract.metadata)?;
+        unroll_multi_output(base_model, baselines)
+    };
 
     Ok(ArtifactShapContext {
         feature_names: parsed.contract.metadata.feature_names,
-        model,
+        models,
     })
 }
 
