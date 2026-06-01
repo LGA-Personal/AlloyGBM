@@ -100,6 +100,18 @@ pub fn explain_interactions_from_artifact_bytes_with_binning(
     explain_interactions_from_model(&context.models[0], rows, Some(binning))
 }
 
+/// Per-output variant of [`explain_rows_from_artifact_bytes`]. Returns one
+/// [`ShapExplanationBatch`] per model output:
+///
+/// - For multiclass classifiers (`num_classes >= 2`): element `k` is the SHAP
+///   attribution for class `k`'s logit.
+/// - For joint multi-output rankers (`MultiOutputLeafValues` section present):
+///   element `k` is the SHAP attribution for output `k`.
+/// - For single-output regressors: returns a 1-element `Vec`.
+///
+/// Additivity per output:
+/// `Σⱼ values[k][i][j] + expected_values[k] ≈ raw_prediction_k(rows[i])`
+/// within `atol = 1e-5 + rtol = 1e-4 · |raw_prediction_k|`.
 pub fn explain_rows_from_artifact_bytes_per_output(
     artifact_bytes: &[u8],
     rows: &[Vec<f32>],
@@ -112,6 +124,12 @@ pub fn explain_rows_from_artifact_bytes_per_output(
         .collect()
 }
 
+/// Predictor-aligned per-output variant. Combines the binning-context
+/// semantics of [`explain_rows_from_artifact_bytes_with_binning`] with the
+/// per-output fan-out of [`explain_rows_from_artifact_bytes_per_output`].
+/// Required for `leaf_model="linear"` or `continuous_binning_strategy=
+/// "linear"` (LinearRank) joint multi-output artifacts to reach the same
+/// leaves as the predictor.
 pub fn explain_rows_from_artifact_bytes_with_binning_per_output(
     artifact_bytes: &[u8],
     rows: &[Vec<f32>],
@@ -125,6 +143,13 @@ pub fn explain_rows_from_artifact_bytes_with_binning_per_output(
         .collect()
 }
 
+/// Per-output variant of [`explain_interactions_from_artifact_bytes`].
+/// Returns one [`ShapInteractionBatch`] per model output. Semantics match
+/// [`explain_rows_from_artifact_bytes_per_output`] — see that function's
+/// docs for the output-index mapping across multiclass and multi-output
+/// artifact types.
+///
+/// Cost: `O(K · T · L · D² · M)` where `K` is the number of outputs.
 pub fn explain_interactions_from_artifact_bytes_per_output(
     artifact_bytes: &[u8],
     rows: &[Vec<f32>],
@@ -137,6 +162,12 @@ pub fn explain_interactions_from_artifact_bytes_per_output(
         .collect()
 }
 
+/// Predictor-aligned per-output variant of
+/// [`explain_interactions_from_artifact_bytes`]. Combines binning-context
+/// semantics with per-output fan-out; see
+/// [`explain_rows_from_artifact_bytes_with_binning_per_output`] for the
+/// binning contract and [`explain_interactions_from_artifact_bytes_per_output`]
+/// for the output-index semantics.
 pub fn explain_interactions_from_artifact_bytes_with_binning_per_output(
     artifact_bytes: &[u8],
     rows: &[Vec<f32>],

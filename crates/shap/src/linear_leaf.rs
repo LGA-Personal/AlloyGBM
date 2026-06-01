@@ -166,6 +166,8 @@ pub(crate) fn distribute_linear_terms_for_row(
             } else {
                 &stump.right_leaf_value
             };
+            // Credit the visited leaf's linear deviation, whether it's an
+            // internal-node side or the terminal.  No-op for scalar leaves.
             linear_leaf_row_terms(leaf_value, row, baseline, phi);
             local_id = if goes_left {
                 local_id.saturating_mul(2).saturating_add(1)

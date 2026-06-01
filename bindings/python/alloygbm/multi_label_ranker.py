@@ -19,6 +19,7 @@ Users get the ergonomic API today and a clean upgrade path tomorrow.
 from __future__ import annotations
 
 import copy
+import json
 import struct
 from typing import Any
 
@@ -1000,7 +1001,6 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
                 f.write(self._joint_artifact_bytes)
                 
                 # Append continuous binning metadata as JSON block for joint mode in v3
-                import json
 
                 def to_list(val):
                     if isinstance(val, np.ndarray):
@@ -1120,7 +1120,6 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
             inst._is_fitted = True
 
             if version == 3:
-                import json
                 (metadata_len,) = struct.unpack("<Q", f.read(8))
                 metadata_json = f.read(metadata_len)
                 metadata = json.loads(metadata_json.decode("utf-8"))

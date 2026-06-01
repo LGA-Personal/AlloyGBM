@@ -113,5 +113,5 @@ interactions)` tuple.
 Scope limits:
 
 - `leaf_model="linear"` artifacts are supported. The row-dependent linear deviation terms are attributed directly to the main effect (the diagonal of the interaction matrix) to preserve both row-marginal and full additivity invariants.
-- `GBMClassifier`, `GBMRanker`, and the joint multi-output ranker do
-  not have an interaction-values surface yet.
+- `GBMClassifier.shap_values(X)` and `GBMClassifier.shap_interaction_values(X)` return a list of `K` arrays — one per class logit (v0.12.6+).
+- `MultiLabelGBMRanker.shap_values(X)` and `MultiLabelGBMRanker.shap_interaction_values(X)` return a list of `n_labels` arrays — one per output (v0.12.6+). Joint mode routes through per-output Rust entry points; independent mode fans out to per-label `GBMRanker` calls.

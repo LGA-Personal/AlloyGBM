@@ -151,8 +151,13 @@ pub(crate) fn load_artifact_context(artifact_bytes: &[u8]) -> ShapResult<Artifac
             let baselines_str = &parsed.contract.metadata.objective[pos + "|baselines=".len()..];
             let parsed_baselines: Result<Vec<f32>, _> =
                 baselines_str.split(',').map(|s| s.parse::<f32>()).collect();
-            if let Ok(b) = parsed_baselines {
-                baselines = Some(b);
+            match parsed_baselines {
+                Ok(b) => baselines = Some(b),
+                Err(e) => {
+                    return Err(ShapError::ContractViolation(format!(
+                        "Failed to parse |baselines= field in objective metadata string: {e}"
+                    )));
+                }
             }
         }
 

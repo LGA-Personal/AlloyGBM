@@ -394,9 +394,6 @@ pub(crate) fn verify_additivity(
         tolerance += (max_linear_deviation * (f32::EPSILON as f64)) as f32;
     }
     if (predicted - reconstructed).abs() > tolerance {
-        let baseline = model.feature_baseline.as_deref();
-        let mut linear_terms = vec![0.0_f64; model.feature_count];
-        distribute_linear_terms_for_row(model, row, baseline, binning, &mut linear_terms);
         return Err(ShapError::ContractViolation(format!(
             "row {row_index} additivity check failed: predicted={predicted}, reconstructed={reconstructed}, tolerance={tolerance} (atol={ADDITIVITY_ATOL}, rtol={ADDITIVITY_RTOL})"
         )));
@@ -438,8 +435,7 @@ pub(crate) fn local_path_predict(
             } else {
                 &stump.right_leaf_value
             };
-            let val = leaf.eval_row(row);
-            prediction += val;
+            prediction += leaf.eval_row(row);
             local_id = if goes_left {
                 local_id.saturating_mul(2).saturating_add(1)
             } else {

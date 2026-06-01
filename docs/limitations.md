@@ -1,6 +1,6 @@
 # AlloyGBM Current Limitations
 
-Last updated for v0.12.5.
+Last updated for v0.12.5 (pending v0.12.6 items noted inline).
 
 ## Remaining Limitations
 
@@ -9,14 +9,6 @@ Last updated for v0.12.5.
 The `BackendOps` trait is designed for hardware abstraction, but only
 `CpuBackend` exists. GPU/accelerator support is architecturally planned but
 not implemented.
-
-
-
-### 3. SHAP interactions on multi-output / multiclass models
-
-`shap_interaction_values()` is `GBMRegressor`-only.  Multi-output
-(joint multi-label ranker) and multiclass softmax models don't have an
-interaction-values surface in v0.11.0.
 
 ### 4. GLM and Quantile regression objectives on Ranker / Classifier / multiclass
 
@@ -37,6 +29,21 @@ objectives.
 The `"quantile"` objective uses empirical leaf refinement which assumes constant leaves, standard boosting (non-DART), and standard training mode (non-MorphBoost). These combinations are rejected at the Python and Rust layers.
 
 ## Resolved (Previously Limitations)
+
+### Pending Release (v0.12.6)
+
+- **SHAP values and interaction values on multiclass and multi-output models.**
+  `GBMClassifier.shap_values(X)`, `GBMClassifier.shap_interaction_values(X)`,
+  `MultiLabelGBMRanker.shap_values(X)`, and
+  `MultiLabelGBMRanker.shap_interaction_values(X)` are now supported.
+  All return a list of `K` arrays — one per class (classifier) or per output
+  label (ranker). `MultiLabelGBMRanker` with `multi_label_mode="joint"` routes
+  through the new `explain_*_per_output` Rust entry points backed by the
+  per-output unrolling logic in `load_artifact_context`; independent mode fans
+  out to the existing per-label `GBMRanker.shap_values` as before.
+  `global_importance_from_artifact_bytes` now averages over outputs
+  (divides by `n_models`) so single-output and multi-output importance
+  magnitudes remain comparable.
 
 ### v0.12.5
 
