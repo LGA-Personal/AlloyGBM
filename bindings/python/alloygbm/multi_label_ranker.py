@@ -25,12 +25,14 @@ from typing import Any
 import numpy as np
 
 from .ranker import GBMRanker
+from ._regressor._quantization import _QuantizationMixin
+from ._regressor._shap import _ShapMixin
 
 _MULTI_LABEL_RANKER_MAGIC = b"MLRK"
 # v2 (v0.10.1+) bundles include a `mode` byte after the version word so
 # joint-mode and independent-mode bundles can coexist. v1 bundles always
 # implied independent mode and load through a back-compat branch.
-_MULTI_LABEL_RANKER_VERSION = 2
+_MULTI_LABEL_RANKER_VERSION = 3
 
 
 def _build_joint_morph_config(kw: dict[str, Any]) -> dict[str, Any] | None:
@@ -72,7 +74,7 @@ def _build_joint_morph_config(kw: dict[str, Any]) -> dict[str, Any] | None:
     return build_morph_config_dict(**morph_kwargs)
 
 
-class MultiLabelGBMRanker:
+class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
     """Gradient Boosted Decision Tree learning-to-rank estimator with
     multiple ranking labels per item.
 
@@ -136,9 +138,28 @@ class MultiLabelGBMRanker:
         self._joint_artifact_bytes: bytes | None = None
         self._joint_baselines: list[float] | None = None
         self._joint_feature_count: int | None = None
+        self._uses_continuous_binning = False
+        self._artifact_bytes: bytes | None = None
+        self._continuous_feature_mins = None
+        self._continuous_feature_maxs = None
+        self._continuous_feature_linear_rank_flags = None
+        self._continuous_feature_sorted_values = None
+        self._continuous_feature_quantile_cuts = None
         self.ranking_labels_: list[str] | None = None
         self.n_labels_: int | None = None
         self.rounds_completed_: list[int] | int | None = None
+
+    @property
+    def continuous_binning_strategy(self) -> str:
+        return self._per_label_kwargs.get("continuous_binning_strategy", "linear")
+
+    @property
+    def continuous_binning_max_bins(self) -> int:
+        return self._per_label_kwargs.get("continuous_binning_max_bins", 256)
+
+    @property
+    def _n_features_in(self) -> int:
+        return self._joint_feature_count or 0
 
     # ── Configuration ──────────────────────────────────────────────────
 
@@ -767,6 +788,20 @@ class MultiLabelGBMRanker:
                     "multi_label_mode='independent'."
                 ) from e
             raise
+        self._artifact_bytes = self._joint_artifact_bytes
+        self._uses_continuous_binning = not self._rows_are_pre_binned(x_arr)
+        if self._uses_continuous_binning:
+            strategy = self.continuous_binning_strategy
+            if strategy == "linear":
+                self._continuous_feature_mins = np.nanmin(x_arr, axis=0)
+                self._continuous_feature_maxs = np.nanmax(x_arr, axis=0)
+                self._continuous_feature_linear_rank_flags = None
+                self._continuous_feature_sorted_values = None
+            elif strategy == "quantile":
+                self._continuous_feature_quantile_cuts = self._derive_continuous_feature_quantile_cuts(
+                    x_arr, self.continuous_binning_max_bins
+                )
+
         self.ranking_labels_ = names
         self.n_labels_ = n_labels
         self.rounds_completed_ = int(rounds_completed)
@@ -786,48 +821,77 @@ class MultiLabelGBMRanker:
         if not self._is_fitted:
             raise RuntimeError("MultiLabelGBMRanker must be fit before predict")
         if self.multi_label_mode == "joint":
-            assert self._joint_handle is not None
-            assert self.n_labels_ is not None
+            if self._joint_handle is None:
+                raise RuntimeError("Joint predictor handle is not initialized; model must be fitted first.")
+            if self.n_labels_ is None:
+                raise RuntimeError("n_labels_ is not initialized; model must be fitted first.")
             x_arr = np.ascontiguousarray(np.asarray(X), dtype=np.float32)
             n_rows = int(x_arr.shape[0])
-            flat = self._joint_handle.predict_dense(x_arr.reshape(-1).tolist())
-            return np.asarray(flat, dtype=np.float64).reshape(n_rows, self.n_labels_)
+            if self._uses_continuous_binning:
+                rows = self._quantize_rows_for_prediction(x_arr.tolist())
+                cat_indices = self._per_label_kwargs.get("categorical_feature_indices")
+                if cat_indices:
+                    cat_indices = [int(i) for i in cat_indices]
+                    raw_rows = x_arr.tolist()
+                    for r_idx in range(len(rows)):
+                        for c_idx in cat_indices:
+                            if c_idx < len(rows[r_idx]):
+                                rows[r_idx][c_idx] = raw_rows[r_idx][c_idx]
+                flat = [v for row in rows for v in row]
+            else:
+                flat = x_arr.reshape(-1).tolist()
+            raw = self._joint_handle.predict_dense(flat)
+            return np.asarray(raw, dtype=np.float64).reshape(n_rows, self.n_labels_)
         cols = [np.asarray(ranker.predict(X), dtype=np.float64) for ranker in self._sub_rankers]
         return np.stack(cols, axis=1)
 
     # ── SHAP ───────────────────────────────────────────────────────────
 
-    def shap_values(self, X: object) -> list[np.ndarray]:
+    def shap_values(
+        self, X: object, *, include_expected_value: bool = False
+    ) -> list[np.ndarray] | tuple[list[float], list[np.ndarray]]:
         """Compute SHAP values for each label.
 
         Returns
         -------
-        list[np.ndarray]
-            A list of ``n_labels`` matrices, where each matrix has shape
-            ``(n_samples, n_features)``.
+        list[np.ndarray] or tuple[list[float], list[np.ndarray]]
+            If include_expected_value is False, returns a list of ``n_labels`` matrices,
+            where each matrix has shape ``(n_samples, n_features)``.
+            If include_expected_value is True, returns a tuple of (expected_values, shap_values),
+            where expected_values is a list of length ``n_labels``.
         """
         if not self._is_fitted:
             raise RuntimeError("MultiLabelGBMRanker must be fit before computing SHAP values")
         
         if self.multi_label_mode == "joint":
-            assert self._joint_artifact_bytes is not None
-            from . import _alloygbm
-            x_arr = np.ascontiguousarray(np.asarray(X), dtype=np.float64)
-            _, values = _alloygbm.shap_explain_rows(
-                self._joint_artifact_bytes, 
-                x_arr.tolist()
-            )
-            # The native bridge handles unpacking the multi-output matrix
-            return [np.array(v, dtype=np.float64) for v in values]
+            if self._joint_artifact_bytes is None:
+                raise RuntimeError("Joint model is fit but artifact bytes are missing.")
+            if include_expected_value:
+                expected_vals, vals = _ShapMixin.shap_values(self, X, include_expected_value=True)
+                return expected_vals, [np.array(v, dtype=np.float64) for v in vals]
+            else:
+                vals = _ShapMixin.shap_values(self, X, include_expected_value=False)
+                return [np.array(v, dtype=np.float64) for v in vals]
             
-        return [ranker.shap_values(X) for ranker in self._sub_rankers]
+        results = [
+            ranker.shap_values(X, include_expected_value=include_expected_value)
+            for ranker in self._sub_rankers
+        ]
+        if include_expected_value:
+            expected_vals = [res[0] for res in results]
+            shap_vals = [np.array(res[1], dtype=np.float64) for res in results]
+            return expected_vals, shap_vals
+        else:
+            return [np.array(res, dtype=np.float64) for res in results]
 
-    def shap_interaction_values(self, X: object) -> list[np.ndarray]:
+    def shap_interaction_values(
+        self, X: object, *, include_expected_value: bool = False
+    ) -> list[np.ndarray] | tuple[list[float], list[np.ndarray]]:
         """Compute SHAP interaction values for each label.
 
         Returns
         -------
-        list[np.ndarray]
+        list[np.ndarray] or tuple[list[float], list[np.ndarray]]
             A list of ``n_labels`` 3D tensors, where each tensor has shape
             ``(n_samples, n_features, n_features)``.
         """
@@ -835,16 +899,25 @@ class MultiLabelGBMRanker:
             raise RuntimeError("MultiLabelGBMRanker must be fit before computing SHAP interaction values")
             
         if self.multi_label_mode == "joint":
-            assert self._joint_artifact_bytes is not None
-            from . import _alloygbm
-            x_arr = np.ascontiguousarray(np.asarray(X), dtype=np.float64)
-            _, values = _alloygbm.shap_explain_interactions(
-                self._joint_artifact_bytes, 
-                x_arr.tolist()
-            )
-            return [np.array(v, dtype=np.float64) for v in values]
+            if self._joint_artifact_bytes is None:
+                raise RuntimeError("Joint model is fit but artifact bytes are missing.")
+            if include_expected_value:
+                expected_vals, vals = _ShapMixin.shap_interaction_values(self, X, include_expected_value=True)
+                return expected_vals, [np.array(v, dtype=np.float64) for v in vals]
+            else:
+                vals = _ShapMixin.shap_interaction_values(self, X, include_expected_value=False)
+                return [np.array(v, dtype=np.float64) for v in vals]
             
-        return [ranker.shap_interaction_values(X) for ranker in self._sub_rankers]
+        results = [
+            ranker.shap_interaction_values(X, include_expected_value=include_expected_value)
+            for ranker in self._sub_rankers
+        ]
+        if include_expected_value:
+            expected_vals = [res[0] for res in results]
+            shap_vals = [np.array(res[1], dtype=np.float64) for res in results]
+            return expected_vals, shap_vals
+        else:
+            return [np.array(res, dtype=np.float64) for res in results]
 
     # ── Pickle ─────────────────────────────────────────────────────────
 
@@ -913,15 +986,49 @@ class MultiLabelGBMRanker:
                     f.write(struct.pack("<Q", len(blob)))
                     f.write(blob)
             else:
-                assert self._joint_artifact_bytes is not None
-                assert self._joint_baselines is not None
-                assert self._joint_feature_count is not None
+                if self._joint_artifact_bytes is None:
+                    raise ValueError("Cannot save joint model: artifact bytes are missing.")
+                if self._joint_baselines is None:
+                    raise ValueError("Cannot save joint model: baselines are missing.")
+                if self._joint_feature_count is None:
+                    raise ValueError("Cannot save joint model: feature count is missing.")
                 f.write(struct.pack("<I", int(self._joint_feature_count)))
                 f.write(struct.pack("<I", len(self._joint_baselines)))
                 for b in self._joint_baselines:
                     f.write(struct.pack("<f", float(b)))
                 f.write(struct.pack("<Q", len(self._joint_artifact_bytes)))
                 f.write(self._joint_artifact_bytes)
+                
+                # Append continuous binning metadata as JSON block for joint mode in v3
+                import json
+
+                def to_list(val):
+                    if isinstance(val, np.ndarray):
+                        return val.tolist()
+                    if isinstance(val, (list, tuple)):
+                        return [to_list(v) for v in val]
+                    if isinstance(val, dict):
+                        return {k: to_list(v) for k, v in val.items()}
+                    if hasattr(val, "item") and callable(val.item):
+                        return val.item()
+                    if callable(val):
+                        return None
+                    return val
+
+                metadata = {
+                    "uses_continuous_binning": getattr(self, "_uses_continuous_binning", False),
+                    "continuous_binning_strategy": getattr(self, "continuous_binning_strategy", "linear"),
+                    "continuous_binning_max_bins": getattr(self, "continuous_binning_max_bins", 256),
+                    "continuous_feature_mins": getattr(self, "_continuous_feature_mins", None),
+                    "continuous_feature_maxs": getattr(self, "_continuous_feature_maxs", None),
+                    "continuous_feature_sorted_values": getattr(self, "_continuous_feature_sorted_values", None),
+                    "continuous_feature_quantile_cuts": getattr(self, "_continuous_feature_quantile_cuts", None),
+                    "continuous_feature_linear_rank_flags": getattr(self, "_continuous_feature_linear_rank_flags", None),
+                    "per_label_kwargs": self._per_label_kwargs,
+                }
+                metadata_json = json.dumps(to_list(metadata)).encode("utf-8")
+                f.write(struct.pack("<Q", len(metadata_json)))
+                f.write(metadata_json)
 
     @classmethod
     def load_model(cls, path: str) -> "MultiLabelGBMRanker":
@@ -945,7 +1052,7 @@ class MultiLabelGBMRanker:
             if version == 1:
                 mode_int = 0
                 (n_labels,) = struct.unpack("<I", f.read(4))
-            elif version == 2:
+            elif version == 2 or version == 3:
                 mode_int, n_labels = struct.unpack("<II", f.read(8))
             else:
                 raise ValueError(
@@ -1011,6 +1118,23 @@ class MultiLabelGBMRanker:
             inst.ranking_labels_ = names
             inst.n_labels_ = n_labels
             inst._is_fitted = True
+
+            if version == 3:
+                import json
+                (metadata_len,) = struct.unpack("<Q", f.read(8))
+                metadata_json = f.read(metadata_len)
+                metadata = json.loads(metadata_json.decode("utf-8"))
+                inst._uses_continuous_binning = metadata.get("uses_continuous_binning", False)
+                inst._continuous_feature_mins = metadata.get("continuous_feature_mins")
+                inst._continuous_feature_maxs = metadata.get("continuous_feature_maxs")
+                inst._continuous_feature_sorted_values = metadata.get("continuous_feature_sorted_values")
+                inst._continuous_feature_quantile_cuts = metadata.get("continuous_feature_quantile_cuts")
+                inst._continuous_feature_linear_rank_flags = metadata.get("continuous_feature_linear_rank_flags")
+                inst._per_label_kwargs = metadata.get("per_label_kwargs", {})
+            else:
+                inst._uses_continuous_binning = False
+                inst._per_label_kwargs = {}
+
             return inst
 
     # ── Introspection ──────────────────────────────────────────────────
