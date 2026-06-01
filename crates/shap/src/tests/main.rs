@@ -205,7 +205,7 @@ fn explain_rows_from_artifact_rejects_empty_rows() {
     let artifact = fixture_model()
         .to_artifact_bytes()
         .expect("artifact serializes");
-    let result = explain_rows_from_artifact_bytes_single(&artifact, &[]);
+    let result = explain_rows_from_artifact_bytes(&artifact, &[]);
     assert!(matches!(result, Err(ShapError::InvalidInput(_))));
 }
 
@@ -214,7 +214,7 @@ fn explain_rows_from_artifact_rejects_feature_count_mismatch() {
     let artifact = fixture_model()
         .to_artifact_bytes()
         .expect("artifact serializes");
-    let result = explain_rows_from_artifact_bytes_single(&artifact, &[vec![0.0]]);
+    let result = explain_rows_from_artifact_bytes(&artifact, &[vec![0.0]]);
     assert!(matches!(result, Err(ShapError::InvalidInput(_))));
 }
 
@@ -223,7 +223,7 @@ fn explain_rows_from_artifact_rejects_non_finite_features() {
     let artifact = fixture_model()
         .to_artifact_bytes()
         .expect("artifact serializes");
-    let result = explain_rows_from_artifact_bytes_single(&artifact, &[vec![f32::NAN, 0.0]]);
+    let result = explain_rows_from_artifact_bytes(&artifact, &[vec![f32::NAN, 0.0]]);
     assert!(matches!(result, Err(ShapError::InvalidInput(_))));
 }
 
@@ -248,7 +248,7 @@ fn explain_rows_from_artifact_rejects_incompatible_required_sections() {
     )
     .expect("artifact serializes");
 
-    let result = explain_rows_from_artifact_bytes_single(&incompatible_artifact, &[vec![0.0, 0.0]]);
+    let result = explain_rows_from_artifact_bytes(&incompatible_artifact, &[vec![0.0, 0.0]]);
     assert!(matches!(result, Err(ShapError::ContractViolation(_))));
 }
 
@@ -260,7 +260,7 @@ fn explain_rows_from_artifact_accepts_legacy_trees_only_artifact() {
     )
     .expect("artifact serializes");
 
-    let explanation = explain_rows_from_artifact_bytes_single(&legacy_artifact, &fixture_rows())
+    let explanation = explain_rows_from_artifact_bytes(&legacy_artifact, &fixture_rows())
         .expect("legacy artifact explains");
     assert_close(explanation.expected_value, 2.25);
     assert_eq!(explanation.values.len(), 4);
@@ -279,7 +279,7 @@ fn explain_rows_from_artifact_rejects_duplicate_trees_sections() {
     )
     .expect("artifact serializes");
 
-    let result = explain_rows_from_artifact_bytes_single(&duplicate_trees_artifact, &[vec![0.0, 0.0]]);
+    let result = explain_rows_from_artifact_bytes(&duplicate_trees_artifact, &[vec![0.0, 0.0]]);
     assert!(matches!(result, Err(ShapError::ContractViolation(_))));
 }
 
@@ -291,7 +291,7 @@ fn explain_rows_from_artifact_rejects_metadata_feature_count_mismatch() {
     )
     .expect("artifact serializes");
 
-    let result = explain_rows_from_artifact_bytes_single(&mismatched_artifact, &[vec![0.0, 0.0, 0.0]]);
+    let result = explain_rows_from_artifact_bytes(&mismatched_artifact, &[vec![0.0, 0.0, 0.0]]);
     assert!(matches!(result, Err(ShapError::ContractViolation(_))));
 }
 
@@ -301,7 +301,7 @@ fn explain_rows_from_artifact_computes_exact_expected_value_and_contributions() 
     let artifact = model.to_artifact_bytes().expect("artifact serializes");
     let rows = fixture_rows();
 
-    let explanation = explain_rows_from_artifact_bytes_single(&artifact, &rows).expect("explains");
+    let explanation = explain_rows_from_artifact_bytes(&artifact, &rows).expect("explains");
     assert_close(explanation.expected_value, 2.25);
     assert_eq!(explanation.values.len(), rows.len());
     for row_values in &explanation.values {
@@ -336,7 +336,7 @@ fn explain_rows_from_artifact_matches_predictor_predictions() {
     let predictor = Predictor::from_artifact_bytes(&artifact).expect("predictor loads");
     let rows = fixture_rows();
 
-    let explanation = explain_rows_from_artifact_bytes_single(&artifact, &rows).expect("explains");
+    let explanation = explain_rows_from_artifact_bytes(&artifact, &rows).expect("explains");
     for (row_index, row) in rows.iter().enumerate() {
         let predicted = predictor.predict_row(row).expect("predicts");
         let reconstructed =
@@ -504,7 +504,7 @@ fn binning_context_explanation_matches_predictor_on_constant_leaves() {
         vec![5.0_f32, 5.0_f32],   // both above
     ];
 
-    let explanation = explain_rows_from_artifact_bytes_with_binning_single(&artifact, &rows, &binning)
+    let explanation = explain_rows_from_artifact_bytes_with_binning(&artifact, &rows, &binning)
         .expect("with-binning explains");
     // Additivity check inside explain enforces strict tolerance
     // when binning is provided and leaves are scalar — if this
@@ -525,7 +525,7 @@ fn explain_rows_from_artifact_assigns_zero_to_unused_features() {
     let artifact = model.to_artifact_bytes().expect("artifact serializes");
     let rows = vec![vec![0.0, 0.0, 5.0], vec![3.0, 2.0, 9.0]];
 
-    let explanation = explain_rows_from_artifact_bytes_single(&artifact, &rows).expect("explains");
+    let explanation = explain_rows_from_artifact_bytes(&artifact, &rows).expect("explains");
     assert_eq!(explanation.values[0].len(), 3);
     assert_close(explanation.values[0][2], 0.0);
     assert_close(explanation.values[1][2], 0.0);
@@ -1223,7 +1223,7 @@ fn shap_linear_leaves_does_not_reject_artifact() {
     let model = linear_fixture_model(Some(vec![0.0, 0.5]));
     let artifact = model.to_artifact_bytes().expect("artifact serializes");
     let rows = vec![vec![0.0, 0.5], vec![3.0, 0.5]];
-    let result = explain_rows_from_artifact_bytes_single(&artifact, &rows);
+    let result = explain_rows_from_artifact_bytes(&artifact, &rows);
     assert!(result.is_ok(), "expected ok, got {result:?}");
 }
 
@@ -1243,7 +1243,7 @@ fn shap_linear_leaves_additivity_with_baseline_brute_force() {
         vec![3.0_f32, -1.0_f32],
     ];
     let explanation =
-        explain_rows_from_artifact_bytes_single(&artifact, &rows).expect("explanation succeeds");
+        explain_rows_from_artifact_bytes(&artifact, &rows).expect("explanation succeeds");
 
     let predictor = Predictor::from_artifact_bytes(&artifact).expect("predictor builds");
     for (row, phi) in rows.iter().zip(explanation.values.iter()) {
@@ -1264,7 +1264,7 @@ fn shap_linear_leaves_additivity_without_baseline_brute_force() {
 
     let rows = vec![vec![0.0_f32, 1.0_f32], vec![3.0_f32, -0.5_f32]];
     let explanation =
-        explain_rows_from_artifact_bytes_single(&artifact, &rows).expect("explanation succeeds");
+        explain_rows_from_artifact_bytes(&artifact, &rows).expect("explanation succeeds");
 
     let predictor = Predictor::from_artifact_bytes(&artifact).expect("predictor builds");
     for (row, phi) in rows.iter().zip(explanation.values.iter()) {
@@ -1289,7 +1289,7 @@ fn shap_linear_leaves_attribute_deviation_to_regressor_feature() {
     // Linear deviation w_left * (0.5 - 0.5) = 0.
     let on_baseline_row = vec![0.0_f32, 0.5_f32];
     let off_baseline_row = vec![0.0_f32, 1.5_f32];
-    let explanation = explain_rows_from_artifact_bytes_single(
+    let explanation = explain_rows_from_artifact_bytes(
         &artifact,
         &[on_baseline_row.clone(), off_baseline_row.clone()],
     )
@@ -1362,7 +1362,7 @@ fn shap_linear_leaves_mixed_with_scalar_leaves_satisfies_additivity() {
         vec![3.0_f32, -0.5_f32, 2.0_f32], // right→right linear leaf
     ];
     let explanation =
-        explain_rows_from_artifact_bytes_single(&artifact, &rows).expect("explanation succeeds");
+        explain_rows_from_artifact_bytes(&artifact, &rows).expect("explanation succeeds");
 
     for (row_idx, (row, phi)) in rows.iter().zip(explanation.values.iter()).enumerate() {
         let predicted = predictor.predict_row(row).expect("predict succeeds");
@@ -1386,9 +1386,9 @@ fn shap_interactions_linear_leaves_satisfies_additivity() {
         vec![0.0_f32, -1.0_f32],
         vec![3.0_f32, -1.0_f32],
     ];
-    let batch = explain_interactions_from_artifact_bytes_single(&artifact, &rows)
+    let batch = explain_interactions_from_artifact_bytes(&artifact, &rows)
         .expect("interaction explanation succeeds");
-    let per_feature = explain_rows_from_artifact_bytes_single(&artifact, &rows).expect("per-feature");
+    let per_feature = explain_rows_from_artifact_bytes(&artifact, &rows).expect("per-feature");
 
     let predictor = Predictor::from_artifact_bytes(&artifact).expect("predictor builds");
     let feature_count = model.feature_count;
@@ -1439,9 +1439,9 @@ fn shap_interactions_linear_leaves_mixed_with_scalar_leaves_satisfies_additivity
         vec![3.0_f32, 1.0_f32, 0.0_f32],  // right→left linear leaf
         vec![3.0_f32, -0.5_f32, 2.0_f32], // right→right linear leaf
     ];
-    let batch = explain_interactions_from_artifact_bytes_single(&artifact, &rows)
+    let batch = explain_interactions_from_artifact_bytes(&artifact, &rows)
         .expect("interaction explanation succeeds");
-    let per_feature = explain_rows_from_artifact_bytes_single(&artifact, &rows).expect("per-feature");
+    let per_feature = explain_rows_from_artifact_bytes(&artifact, &rows).expect("per-feature");
 
     let feature_count = model.feature_count;
     for (row_idx, (row, matrix)) in rows.iter().zip(batch.values.iter()).enumerate() {
@@ -1783,7 +1783,7 @@ fn explain_interactions_from_artifact_returns_pairwise_matrix() {
         .expect("artifact serializes");
     let rows = fixture_rows();
 
-    let batch = explain_interactions_from_artifact_bytes_single(&artifact, &rows)
+    let batch = explain_interactions_from_artifact_bytes(&artifact, &rows)
         .expect("interaction explanation succeeds");
 
     assert_eq!(batch.values.len(), rows.len());
@@ -1802,7 +1802,7 @@ fn tree_shap_interactions_additivity_holds() {
         .to_artifact_bytes()
         .expect("artifact serializes");
     let rows = fixture_rows();
-    let batch = explain_interactions_from_artifact_bytes_single(&artifact, &rows).expect("batch");
+    let batch = explain_interactions_from_artifact_bytes(&artifact, &rows).expect("batch");
     let model = fixture_model();
     for (row_idx, row) in rows.iter().enumerate() {
         let matrix = &batch.values[row_idx];
@@ -1823,8 +1823,8 @@ fn tree_shap_interactions_row_marginal_equals_per_feature_shap() {
         .to_artifact_bytes()
         .expect("artifact serializes");
     let rows = fixture_rows();
-    let pairwise = explain_interactions_from_artifact_bytes_single(&artifact, &rows).expect("pairwise");
-    let per_feature = explain_rows_from_artifact_bytes_single(&artifact, &rows).expect("per-feature");
+    let pairwise = explain_interactions_from_artifact_bytes(&artifact, &rows).expect("pairwise");
+    let per_feature = explain_rows_from_artifact_bytes(&artifact, &rows).expect("per-feature");
 
     let feature_count = fixture_model().feature_count;
     for row_idx in 0..rows.len() {
@@ -1845,7 +1845,7 @@ fn tree_shap_interactions_matrix_is_symmetric() {
         .to_artifact_bytes()
         .expect("artifact serializes");
     let rows = fixture_rows();
-    let batch = explain_interactions_from_artifact_bytes_single(&artifact, &rows).expect("batch");
+    let batch = explain_interactions_from_artifact_bytes(&artifact, &rows).expect("batch");
     for row_matrix in &batch.values {
         for i in 0..row_matrix.len() {
             for j in 0..row_matrix.len() {
@@ -1868,7 +1868,7 @@ fn tree_shap_interactions_match_brute_force_on_fixture() {
     let model = fixture_model();
     let rows = fixture_rows();
 
-    let batch = explain_interactions_from_artifact_bytes_single(&artifact, &rows).expect("interactions");
+    let batch = explain_interactions_from_artifact_bytes(&artifact, &rows).expect("interactions");
     for (row_idx, row) in rows.iter().enumerate() {
         let (_, expected_matrix) = brute_force_interactions_for_row(&model, row);
         for i in 0..model.feature_count {
@@ -1890,7 +1890,7 @@ fn tree_shap_interactions_synthetic_depth_3_four_features_matches_brute_force() 
     let rows = deterministic_rows(4, 5, 1729);
     let artifact = model.to_artifact_bytes().expect("artifact serializes");
 
-    let batch = explain_interactions_from_artifact_bytes_single(&artifact, &rows).expect("batch");
+    let batch = explain_interactions_from_artifact_bytes(&artifact, &rows).expect("batch");
     for (row_idx, row) in rows.iter().enumerate() {
         let (_, expected_matrix) = brute_force_interactions_for_row(&model, row);
         for i in 0..4 {
@@ -1915,7 +1915,7 @@ fn tree_shap_interactions_depth_5_three_features_satisfies_additivity() {
     let rows = deterministic_rows(3, 8, 4242);
     let artifact = model.to_artifact_bytes().expect("artifact serializes");
 
-    let batch = explain_interactions_from_artifact_bytes_single(&artifact, &rows).expect("batch");
+    let batch = explain_interactions_from_artifact_bytes(&artifact, &rows).expect("batch");
     for (row_idx, row) in rows.iter().enumerate() {
         let matrix = &batch.values[row_idx];
         let reconstructed: f32 =
@@ -1927,27 +1927,4 @@ fn tree_shap_interactions_depth_5_three_features_satisfies_additivity() {
             "row={row_idx} reconstructed={reconstructed} predicted={predicted} tol={tol}"
         );
     }
-}
-
-use crate::{
-    explain_rows_from_artifact_bytes,
-    explain_interactions_from_artifact_bytes,
-    explain_rows_from_artifact_bytes_with_binning,
-    explain_interactions_from_artifact_bytes_with_binning
-};
-
-fn explain_rows_from_artifact_bytes_single(artifact_bytes: &[u8], rows: &[Vec<f32>]) -> crate::ShapResult<crate::ShapExplanationBatch> {
-    explain_rows_from_artifact_bytes(artifact_bytes, rows).map(|mut v| v.pop().unwrap())
-}
-
-fn explain_interactions_from_artifact_bytes_single(artifact_bytes: &[u8], rows: &[Vec<f32>]) -> crate::ShapResult<crate::ShapInteractionBatch> {
-    explain_interactions_from_artifact_bytes(artifact_bytes, rows).map(|mut v| v.pop().unwrap())
-}
-
-fn explain_rows_from_artifact_bytes_with_binning_single(artifact_bytes: &[u8], rows: &[Vec<f32>], binning: &crate::BinningContext) -> crate::ShapResult<crate::ShapExplanationBatch> {
-    explain_rows_from_artifact_bytes_with_binning(artifact_bytes, rows, binning).map(|mut v| v.pop().unwrap())
-}
-
-fn explain_interactions_from_artifact_bytes_with_binning_single(artifact_bytes: &[u8], rows: &[Vec<f32>], binning: &crate::BinningContext) -> crate::ShapResult<crate::ShapInteractionBatch> {
-    explain_interactions_from_artifact_bytes_with_binning(artifact_bytes, rows, binning).map(|mut v| v.pop().unwrap())
 }

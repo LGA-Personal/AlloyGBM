@@ -210,6 +210,126 @@ def _load_native_shap_global_importance_dense_with_binning():
     return shap_global_importance_dense_with_binning
 
 
+def _load_native_shap_explain_rows_multi():
+    try:
+        from alloygbm._alloygbm import shap_explain_rows_multi
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError(
+            "native multi-output SHAP explain binding is unavailable; rebuild the alloygbm extension module"
+        ) from exc
+    return shap_explain_rows_multi
+
+
+def _load_native_shap_explain_rows_dense_multi():
+    try:
+        from alloygbm._alloygbm import shap_explain_rows_dense_multi
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError(
+            "native dense multi-output SHAP explain binding is unavailable; rebuild the alloygbm extension module"
+        ) from exc
+    return shap_explain_rows_dense_multi
+
+
+def _load_native_shap_explain_interactions_multi():
+    try:
+        from alloygbm._alloygbm import shap_explain_interactions_multi
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError(
+            "native multi-output SHAP interactions binding is unavailable; rebuild the alloygbm extension module"
+        ) from exc
+    return shap_explain_interactions_multi
+
+
+def _load_native_shap_explain_interactions_dense_multi():
+    try:
+        from alloygbm._alloygbm import shap_explain_interactions_dense_multi
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError(
+            "native dense multi-output SHAP interactions binding is unavailable; rebuild the alloygbm extension module"
+        ) from exc
+    return shap_explain_interactions_dense_multi
+
+
+def _load_native_shap_explain_rows_with_binning_multi():
+    try:
+        from alloygbm._alloygbm import shap_explain_rows_with_binning_multi
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError(
+            "native predictor-aligned multi-output SHAP binding is unavailable; rebuild the alloygbm extension module"
+        ) from exc
+    return shap_explain_rows_with_binning_multi
+
+
+def _load_native_shap_explain_rows_dense_with_binning_multi():
+    try:
+        from alloygbm._alloygbm import shap_explain_rows_dense_with_binning_multi
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError(
+            "native predictor-aligned dense multi-output SHAP binding is unavailable; rebuild the alloygbm extension module"
+        ) from exc
+    return shap_explain_rows_dense_with_binning_multi
+
+
+def _load_native_shap_explain_interactions_with_binning_multi():
+    try:
+        from alloygbm._alloygbm import shap_explain_interactions_with_binning_multi
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError(
+            "native predictor-aligned multi-output SHAP interactions binding is unavailable; rebuild the alloygbm extension module"
+        ) from exc
+    return shap_explain_interactions_with_binning_multi
+
+
+def _load_native_shap_explain_interactions_dense_with_binning_multi():
+    try:
+        from alloygbm._alloygbm import shap_explain_interactions_dense_with_binning_multi
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError(
+            "native predictor-aligned dense multi-output SHAP interactions binding is unavailable; rebuild the alloygbm extension module"
+        ) from exc
+    return shap_explain_interactions_dense_with_binning_multi
+
+
+def _load_native_shap_explain_interactions():
+    try:
+        from alloygbm._alloygbm import shap_explain_interactions
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError(
+            "native SHAP interactions binding is unavailable; rebuild the alloygbm extension module"
+        ) from exc
+    return shap_explain_interactions
+
+
+def _load_native_shap_explain_interactions_dense():
+    try:
+        from alloygbm._alloygbm import shap_explain_interactions_dense
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError(
+            "native dense SHAP interactions binding is unavailable; rebuild the alloygbm extension module"
+        ) from exc
+    return shap_explain_interactions_dense
+
+
+def _load_native_shap_explain_interactions_with_binning():
+    try:
+        from alloygbm._alloygbm import shap_explain_interactions_with_binning
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError(
+            "native predictor-aligned SHAP interactions binding is unavailable; rebuild the alloygbm extension module"
+        ) from exc
+    return shap_explain_interactions_with_binning
+
+
+def _load_native_shap_explain_interactions_dense_with_binning():
+    try:
+        from alloygbm._alloygbm import shap_explain_interactions_dense_with_binning
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError(
+            "native predictor-aligned dense SHAP interactions binding is unavailable; rebuild the alloygbm extension module"
+        ) from exc
+    return shap_explain_interactions_dense_with_binning
+
+
 def _parse_env_toggle(env_name: str) -> bool:
     value = os.environ.get(env_name)
     if value is None:

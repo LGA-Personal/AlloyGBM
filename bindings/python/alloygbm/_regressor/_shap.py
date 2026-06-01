@@ -155,10 +155,19 @@ class _ShapMixin:
                         f"{self._n_features_in}"
                     )
 
+        is_multi = False
+        if hasattr(self, "n_classes_") and self.n_classes_ is not None and self.n_classes_ > 2:
+            is_multi = True
+        elif getattr(self, "multi_label_mode", None) == "joint":
+            is_multi = True
+
         if binning_kwargs is not None:
             if isinstance(rows, tuple):
                 flat_values, row_count, feature_count = rows
-                shap_fn = _base._load_native_shap_explain_rows_dense_with_binning()
+                if is_multi:
+                    shap_fn = _base._load_native_shap_explain_rows_dense_with_binning_multi()
+                else:
+                    shap_fn = _base._load_native_shap_explain_rows_dense_with_binning()
                 expected_value, values = shap_fn(
                     self._artifact_bytes,
                     flat_values,
@@ -167,13 +176,19 @@ class _ShapMixin:
                     **binning_kwargs,
                 )
             else:
-                shap_fn = _base._load_native_shap_explain_rows_with_binning()
+                if is_multi:
+                    shap_fn = _base._load_native_shap_explain_rows_with_binning_multi()
+                else:
+                    shap_fn = _base._load_native_shap_explain_rows_with_binning()
                 expected_value, values = shap_fn(
                     self._artifact_bytes, rows, **binning_kwargs
                 )
         elif isinstance(rows, tuple):
             flat_values, row_count, feature_count = rows
-            shap_explain_rows_dense = _base._load_native_shap_explain_rows_dense()
+            if is_multi:
+                shap_explain_rows_dense = _base._load_native_shap_explain_rows_dense_multi()
+            else:
+                shap_explain_rows_dense = _base._load_native_shap_explain_rows_dense()
             expected_value, values = shap_explain_rows_dense(
                 self._artifact_bytes,
                 flat_values,
@@ -181,15 +196,19 @@ class _ShapMixin:
                 feature_count=feature_count,
             )
         else:
-            shap_explain_rows = _base._load_native_shap_explain_rows()
+            if is_multi:
+                shap_explain_rows = _base._load_native_shap_explain_rows_multi()
+            else:
+                shap_explain_rows = _base._load_native_shap_explain_rows()
             expected_value, values = shap_explain_rows(self._artifact_bytes, rows)
-        if len(expected_value) == 1:
-            shap_matrix = [list(row) for row in values[0]]
+
+        if not is_multi:
+            shap_matrix = [list(row) for row in values]
             if include_expected_value:
-                return float(expected_value[0]), shap_matrix
+                return float(expected_value), shap_matrix
             return shap_matrix
-        
-        shap_matrices = [[list(row) for row in out_values] for out_values in values]
+
+        shap_matrices = [[list(row) for row in class_values] for class_values in values]
         if include_expected_value:
             return [float(e) for e in expected_value], shap_matrices
         return shap_matrices
@@ -256,14 +275,19 @@ class _ShapMixin:
                         f"{self._n_features_in}"
                     )
 
-        if binning_kwargs is not None:
-            from alloygbm._alloygbm import (
-                shap_explain_interactions_dense_with_binning,
-                shap_explain_interactions_with_binning,
-            )
+        is_multi = False
+        if hasattr(self, "n_classes_") and self.n_classes_ is not None and self.n_classes_ > 2:
+            is_multi = True
+        elif getattr(self, "multi_label_mode", None) == "joint":
+            is_multi = True
 
+        if binning_kwargs is not None:
             if isinstance(rows, tuple):
                 flat, row_count, feature_count = rows
+                if is_multi:
+                    shap_explain_interactions_dense_with_binning = _base._load_native_shap_explain_interactions_dense_with_binning_multi()
+                else:
+                    shap_explain_interactions_dense_with_binning = _base._load_native_shap_explain_interactions_dense_with_binning()
                 expected_value, values = shap_explain_interactions_dense_with_binning(
                     self._artifact_bytes,
                     flat,
@@ -272,31 +296,38 @@ class _ShapMixin:
                     **binning_kwargs,
                 )
             else:
+                if is_multi:
+                    shap_explain_interactions_with_binning = _base._load_native_shap_explain_interactions_with_binning_multi()
+                else:
+                    shap_explain_interactions_with_binning = _base._load_native_shap_explain_interactions_with_binning()
                 expected_value, values = shap_explain_interactions_with_binning(
                     self._artifact_bytes, rows, **binning_kwargs
                 )
         else:
-            from alloygbm._alloygbm import (
-                shap_explain_interactions,
-                shap_explain_interactions_dense,
-            )
-
             if isinstance(rows, tuple):
                 flat, row_count, feature_count = rows
+                if is_multi:
+                    shap_explain_interactions_dense = _base._load_native_shap_explain_interactions_dense_multi()
+                else:
+                    shap_explain_interactions_dense = _base._load_native_shap_explain_interactions_dense()
                 expected_value, values = shap_explain_interactions_dense(
                     self._artifact_bytes, flat, row_count, feature_count
                 )
             else:
+                if is_multi:
+                    shap_explain_interactions = _base._load_native_shap_explain_interactions_multi()
+                else:
+                    shap_explain_interactions = _base._load_native_shap_explain_interactions()
                 expected_value, values = shap_explain_interactions(
                     self._artifact_bytes, rows
                 )
 
-        if len(expected_value) == 1:
-            matrix = [[list(col) for col in row] for row in values[0]]
+        if not is_multi:
+            matrix = [[list(col) for col in row] for row in values]
             if include_expected_value:
-                return float(expected_value[0]), matrix
+                return float(expected_value), matrix
             return matrix
-        
+
         matrices = [[[list(col) for col in row] for row in out_values] for out_values in values]
         if include_expected_value:
             return [float(e) for e in expected_value], matrices

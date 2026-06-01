@@ -14,9 +14,13 @@ use crate::predict::{
     NativePredictorHandle, predictor_predict_batch, predictor_predict_batch_canonical,
     predictor_predict_batch_canonical_dense, predictor_predict_batch_dense,
     shap_explain_interactions, shap_explain_interactions_dense,
-    shap_explain_interactions_dense_with_binning, shap_explain_interactions_with_binning,
-    shap_explain_rows, shap_explain_rows_dense, shap_explain_rows_dense_with_binning,
-    shap_explain_rows_with_binning, shap_global_importance, shap_global_importance_dense,
+    shap_explain_interactions_dense_multi, shap_explain_interactions_dense_with_binning,
+    shap_explain_interactions_dense_with_binning_multi, shap_explain_interactions_multi,
+    shap_explain_interactions_with_binning, shap_explain_interactions_with_binning_multi,
+    shap_explain_rows, shap_explain_rows_dense, shap_explain_rows_dense_multi,
+    shap_explain_rows_dense_with_binning, shap_explain_rows_dense_with_binning_multi,
+    shap_explain_rows_multi, shap_explain_rows_with_binning, shap_explain_rows_with_binning_multi,
+    shap_global_importance, shap_global_importance_dense,
     shap_global_importance_dense_with_binning, shap_global_importance_with_binning,
 };
 use crate::pyclasses::{
@@ -88,6 +92,23 @@ fn _alloygbm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(shap_global_importance_with_binning, m)?)?;
     m.add_function(wrap_pyfunction!(
         shap_global_importance_dense_with_binning,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(shap_explain_rows_multi, m)?)?;
+    m.add_function(wrap_pyfunction!(shap_explain_rows_dense_multi, m)?)?;
+    m.add_function(wrap_pyfunction!(shap_explain_interactions_multi, m)?)?;
+    m.add_function(wrap_pyfunction!(shap_explain_interactions_dense_multi, m)?)?;
+    m.add_function(wrap_pyfunction!(shap_explain_rows_with_binning_multi, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        shap_explain_rows_dense_with_binning_multi,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        shap_explain_interactions_with_binning_multi,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        shap_explain_interactions_dense_with_binning_multi,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(train_regression_artifact, m)?)?;

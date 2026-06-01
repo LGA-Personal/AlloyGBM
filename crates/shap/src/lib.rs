@@ -25,13 +25,14 @@ pub use types::{ShapExplanationBatch, ShapInteractionBatch};
 pub fn explain_rows_from_artifact_bytes(
     artifact_bytes: &[u8],
     rows: &[Vec<f32>],
-) -> ShapResult<Vec<ShapExplanationBatch>> {
+) -> ShapResult<ShapExplanationBatch> {
     let context = load_artifact_context(artifact_bytes)?;
-    context
-        .models
-        .iter()
-        .map(|model| explain_rows_from_model(model, rows, None))
-        .collect()
+    if context.models.len() != 1 {
+        return Err(ShapError::ContractViolation(
+            "Expected a single-output model. For multi-class/multi-output models, use the _per_output variants.".to_string(),
+        ));
+    }
+    explain_rows_from_model(&context.models[0], rows, None)
 }
 
 /// Predictor-aligned variant of `explain_rows_from_artifact_bytes`.
@@ -50,13 +51,14 @@ pub fn explain_rows_from_artifact_bytes_with_binning(
     artifact_bytes: &[u8],
     rows: &[Vec<f32>],
     binning: &BinningContext,
-) -> ShapResult<Vec<ShapExplanationBatch>> {
+) -> ShapResult<ShapExplanationBatch> {
     let context = load_artifact_context(artifact_bytes)?;
-    context
-        .models
-        .iter()
-        .map(|model| explain_rows_from_model(model, rows, Some(binning)))
-        .collect()
+    if context.models.len() != 1 {
+        return Err(ShapError::ContractViolation(
+            "Expected a single-output model. For multi-class/multi-output models, use the _per_output variants.".to_string(),
+        ));
+    }
+    explain_rows_from_model(&context.models[0], rows, Some(binning))
 }
 
 /// Compute pairwise SHAP interaction values for the given rows.
@@ -72,6 +74,60 @@ pub fn explain_rows_from_artifact_bytes_with_binning(
 pub fn explain_interactions_from_artifact_bytes(
     artifact_bytes: &[u8],
     rows: &[Vec<f32>],
+) -> ShapResult<ShapInteractionBatch> {
+    let context = load_artifact_context(artifact_bytes)?;
+    if context.models.len() != 1 {
+        return Err(ShapError::ContractViolation(
+            "Expected a single-output model. For multi-class/multi-output models, use the _per_output variants.".to_string(),
+        ));
+    }
+    explain_interactions_from_model(&context.models[0], rows, None)
+}
+
+/// Predictor-aligned variant. See `explain_rows_from_artifact_bytes_with_binning`
+/// for the contract.
+pub fn explain_interactions_from_artifact_bytes_with_binning(
+    artifact_bytes: &[u8],
+    rows: &[Vec<f32>],
+    binning: &BinningContext,
+) -> ShapResult<ShapInteractionBatch> {
+    let context = load_artifact_context(artifact_bytes)?;
+    if context.models.len() != 1 {
+        return Err(ShapError::ContractViolation(
+            "Expected a single-output model. For multi-class/multi-output models, use the _per_output variants.".to_string(),
+        ));
+    }
+    explain_interactions_from_model(&context.models[0], rows, Some(binning))
+}
+
+pub fn explain_rows_from_artifact_bytes_per_output(
+    artifact_bytes: &[u8],
+    rows: &[Vec<f32>],
+) -> ShapResult<Vec<ShapExplanationBatch>> {
+    let context = load_artifact_context(artifact_bytes)?;
+    context
+        .models
+        .iter()
+        .map(|model| explain_rows_from_model(model, rows, None))
+        .collect()
+}
+
+pub fn explain_rows_from_artifact_bytes_with_binning_per_output(
+    artifact_bytes: &[u8],
+    rows: &[Vec<f32>],
+    binning: &BinningContext,
+) -> ShapResult<Vec<ShapExplanationBatch>> {
+    let context = load_artifact_context(artifact_bytes)?;
+    context
+        .models
+        .iter()
+        .map(|model| explain_rows_from_model(model, rows, Some(binning)))
+        .collect()
+}
+
+pub fn explain_interactions_from_artifact_bytes_per_output(
+    artifact_bytes: &[u8],
+    rows: &[Vec<f32>],
 ) -> ShapResult<Vec<ShapInteractionBatch>> {
     let context = load_artifact_context(artifact_bytes)?;
     context
@@ -81,9 +137,7 @@ pub fn explain_interactions_from_artifact_bytes(
         .collect()
 }
 
-/// Predictor-aligned variant. See `explain_rows_from_artifact_bytes_with_binning`
-/// for the contract.
-pub fn explain_interactions_from_artifact_bytes_with_binning(
+pub fn explain_interactions_from_artifact_bytes_with_binning_per_output(
     artifact_bytes: &[u8],
     rows: &[Vec<f32>],
     binning: &BinningContext,

@@ -350,8 +350,53 @@ pub(crate) fn verify_additivity(
         // PreBinned, LinearRank) get the strict check.
         return Ok(());
     }
-    let tolerance = additivity_tolerance(predicted);
+    let mut tolerance = additivity_tolerance(predicted);
+    if model_has_linear_leaves(model) {
+        let mut nodes_by_key: HashMap<u64, &TrainedStump> =
+            HashMap::with_capacity(model.stumps.len());
+        let mut tree_roots: Vec<u32> = Vec::new();
+        for stump in &model.stumps {
+            let (tree_id, local_id) = decode_tree_node_id(stump.split.node_id);
+            nodes_by_key.insert(tree_local_key(tree_id, local_id), stump);
+            if local_id == 0 {
+                tree_roots.push(tree_id);
+            }
+        }
+        tree_roots.sort_unstable();
+        tree_roots.dedup();
+
+        let mut max_linear_deviation = 0.0_f64;
+        for tree_id in tree_roots {
+            let mut local_id = 0u32;
+            while let Some(stump) = nodes_by_key.get(&tree_local_key(tree_id, local_id)) {
+                let feat = stump.split.feature_index as usize;
+                let feature_value = row.get(feat).copied().unwrap_or(f32::NAN);
+                let goes_left = stump_goes_left(&stump.split, feature_value, binning);
+                let leaf = if goes_left {
+                    &stump.left_leaf_value
+                } else {
+                    &stump.right_leaf_value
+                };
+                if let alloygbm_core::LeafValue::Linear(ll) = leaf {
+                    for (w, &feat) in ll.weights.iter().zip(ll.regressor_features.iter()) {
+                        let feat_idx = feat as usize;
+                        let xj = row.get(feat_idx).copied().unwrap_or(0.0) as f64;
+                        max_linear_deviation += (w.abs() as f64) * xj.abs();
+                    }
+                }
+                local_id = if goes_left {
+                    local_id.saturating_mul(2).saturating_add(1)
+                } else {
+                    local_id.saturating_mul(2).saturating_add(2)
+                };
+            }
+        }
+        tolerance += (max_linear_deviation * (f32::EPSILON as f64)) as f32;
+    }
     if (predicted - reconstructed).abs() > tolerance {
+        let baseline = model.feature_baseline.as_deref();
+        let mut linear_terms = vec![0.0_f64; model.feature_count];
+        distribute_linear_terms_for_row(model, row, baseline, binning, &mut linear_terms);
         return Err(ShapError::ContractViolation(format!(
             "row {row_index} additivity check failed: predicted={predicted}, reconstructed={reconstructed}, tolerance={tolerance} (atol={ADDITIVITY_ATOL}, rtol={ADDITIVITY_RTOL})"
         )));
@@ -393,7 +438,8 @@ pub(crate) fn local_path_predict(
             } else {
                 &stump.right_leaf_value
             };
-            prediction += leaf.eval_row(row);
+            let val = leaf.eval_row(row);
+            prediction += val;
             local_id = if goes_left {
                 local_id.saturating_mul(2).saturating_add(1)
             } else {

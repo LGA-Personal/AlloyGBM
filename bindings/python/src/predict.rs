@@ -9,9 +9,13 @@ use alloygbm_engine::{ArtifactCompatibilityMode, TrainedModel};
 use alloygbm_predictor::{Predictor, PredictorError};
 use alloygbm_shap::{
     ShapError, explain_interactions_from_artifact_bytes,
-    explain_interactions_from_artifact_bytes_with_binning, explain_rows_from_artifact_bytes,
-    explain_rows_from_artifact_bytes_with_binning, global_importance_from_artifact_bytes,
-    global_importance_from_artifact_bytes_with_binning,
+    explain_interactions_from_artifact_bytes_per_output,
+    explain_interactions_from_artifact_bytes_with_binning,
+    explain_interactions_from_artifact_bytes_with_binning_per_output,
+    explain_rows_from_artifact_bytes, explain_rows_from_artifact_bytes_per_output,
+    explain_rows_from_artifact_bytes_with_binning,
+    explain_rows_from_artifact_bytes_with_binning_per_output,
+    global_importance_from_artifact_bytes, global_importance_from_artifact_bytes_with_binning,
 };
 use numpy::{PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::prelude::*;
@@ -367,11 +371,9 @@ fn predictor_predict_batch_canonical_dense_impl(
 pub(crate) fn shap_explain_rows_impl(
     artifact_bytes: &[u8],
     rows: &[Vec<f32>],
-) -> Result<(Vec<f32>, Vec<Vec<Vec<f32>>>), ShapError> {
+) -> Result<(f32, Vec<Vec<f32>>), ShapError> {
     let explanation = explain_rows_from_artifact_bytes(artifact_bytes, rows)?;
-    let expected_values = explanation.iter().map(|b| b.expected_value).collect();
-    let values = explanation.into_iter().map(|b| b.values).collect();
-    Ok((expected_values, values))
+    Ok((explanation.expected_value, explanation.values))
 }
 
 fn shap_explain_rows_dense_impl(
@@ -379,7 +381,7 @@ fn shap_explain_rows_dense_impl(
     row_count: usize,
     feature_count: usize,
     values: &[f32],
-) -> Result<(Vec<f32>, Vec<Vec<Vec<f32>>>), ShapError> {
+) -> Result<(f32, Vec<Vec<f32>>), ShapError> {
     let rows = dense_rows_from_flat_values(values, row_count, feature_count)
         .map_err(ShapError::InvalidInput)?;
     shap_explain_rows_impl(artifact_bytes, &rows)
@@ -389,11 +391,9 @@ fn shap_explain_rows_dense_impl(
 fn shap_explain_interactions_impl(
     artifact_bytes: &[u8],
     rows: &[Vec<f32>],
-) -> Result<(Vec<f32>, Vec<Vec<Vec<Vec<f32>>>>), ShapError> {
+) -> Result<(f32, Vec<Vec<Vec<f32>>>), ShapError> {
     let batch = explain_interactions_from_artifact_bytes(artifact_bytes, rows)?;
-    let expected_values = batch.iter().map(|b| b.expected_value).collect();
-    let values = batch.into_iter().map(|b| b.values).collect();
-    Ok((expected_values, values))
+    Ok((batch.expected_value, batch.values))
 }
 
 #[allow(clippy::type_complexity)]
@@ -402,10 +402,54 @@ fn shap_explain_interactions_dense_impl(
     row_count: usize,
     feature_count: usize,
     values: &[f32],
-) -> Result<(Vec<f32>, Vec<Vec<Vec<Vec<f32>>>>), ShapError> {
+) -> Result<(f32, Vec<Vec<Vec<f32>>>), ShapError> {
     let rows = dense_rows_from_flat_values(values, row_count, feature_count)
         .map_err(ShapError::InvalidInput)?;
     shap_explain_interactions_impl(artifact_bytes, &rows)
+}
+
+pub(crate) fn shap_explain_rows_multi_impl(
+    artifact_bytes: &[u8],
+    rows: &[Vec<f32>],
+) -> Result<(Vec<f32>, Vec<Vec<Vec<f32>>>), ShapError> {
+    let explanation = explain_rows_from_artifact_bytes_per_output(artifact_bytes, rows)?;
+    let expected_values = explanation.iter().map(|b| b.expected_value).collect();
+    let values = explanation.into_iter().map(|b| b.values).collect();
+    Ok((expected_values, values))
+}
+
+fn shap_explain_rows_dense_multi_impl(
+    artifact_bytes: &[u8],
+    row_count: usize,
+    feature_count: usize,
+    values: &[f32],
+) -> Result<(Vec<f32>, Vec<Vec<Vec<f32>>>), ShapError> {
+    let rows = dense_rows_from_flat_values(values, row_count, feature_count)
+        .map_err(ShapError::InvalidInput)?;
+    shap_explain_rows_multi_impl(artifact_bytes, &rows)
+}
+
+#[allow(clippy::type_complexity)]
+fn shap_explain_interactions_multi_impl(
+    artifact_bytes: &[u8],
+    rows: &[Vec<f32>],
+) -> Result<(Vec<f32>, Vec<Vec<Vec<Vec<f32>>>>), ShapError> {
+    let batch = explain_interactions_from_artifact_bytes_per_output(artifact_bytes, rows)?;
+    let expected_values = batch.iter().map(|b| b.expected_value).collect();
+    let values = batch.into_iter().map(|b| b.values).collect();
+    Ok((expected_values, values))
+}
+
+#[allow(clippy::type_complexity)]
+fn shap_explain_interactions_dense_multi_impl(
+    artifact_bytes: &[u8],
+    row_count: usize,
+    feature_count: usize,
+    values: &[f32],
+) -> Result<(Vec<f32>, Vec<Vec<Vec<Vec<f32>>>>), ShapError> {
+    let rows = dense_rows_from_flat_values(values, row_count, feature_count)
+        .map_err(ShapError::InvalidInput)?;
+    shap_explain_interactions_multi_impl(artifact_bytes, &rows)
 }
 
 pub(crate) fn shap_global_importance_impl(
@@ -470,7 +514,7 @@ pub(crate) fn predictor_predict_batch_canonical_dense(
 pub(crate) fn shap_explain_rows(
     artifact_bytes: &[u8],
     rows: Vec<Vec<f32>>,
-) -> PyResult<(Vec<f32>, Vec<Vec<Vec<f32>>>)> {
+) -> PyResult<(f32, Vec<Vec<f32>>)> {
     shap_explain_rows_impl(artifact_bytes, &rows).map_err(shap_error_to_pyerr)
 }
 
@@ -480,7 +524,7 @@ pub(crate) fn shap_explain_rows_dense(
     values: Vec<f32>,
     row_count: usize,
     feature_count: usize,
-) -> PyResult<(Vec<f32>, Vec<Vec<Vec<f32>>>)> {
+) -> PyResult<(f32, Vec<Vec<f32>>)> {
     shap_explain_rows_dense_impl(artifact_bytes, row_count, feature_count, &values)
         .map_err(shap_error_to_pyerr)
 }
@@ -489,7 +533,7 @@ pub(crate) fn shap_explain_rows_dense(
 pub(crate) fn shap_explain_interactions(
     artifact_bytes: &[u8],
     rows: Vec<Vec<f32>>,
-) -> PyResult<(Vec<f32>, Vec<Vec<Vec<Vec<f32>>>>)> {
+) -> PyResult<(f32, Vec<Vec<Vec<f32>>>)> {
     shap_explain_interactions_impl(artifact_bytes, &rows).map_err(shap_error_to_pyerr)
 }
 
@@ -499,7 +543,7 @@ pub(crate) fn shap_explain_interactions_dense(
     values: Vec<f32>,
     row_count: usize,
     feature_count: usize,
-) -> PyResult<(Vec<f32>, Vec<Vec<Vec<Vec<f32>>>>)> {
+) -> PyResult<(f32, Vec<Vec<Vec<f32>>>)> {
     shap_explain_interactions_dense_impl(artifact_bytes, row_count, feature_count, &values)
         .map_err(shap_error_to_pyerr)
 }
@@ -519,7 +563,7 @@ pub(crate) fn shap_explain_interactions_with_binning(
     max_data_bin: Option<u16>,
     feature_cuts: Option<Vec<Vec<f32>>>,
     linear_rank_per_feature: Option<Vec<Option<Vec<f32>>>>,
-) -> PyResult<(Vec<f32>, Vec<Vec<Vec<Vec<f32>>>>)> {
+) -> PyResult<(f32, Vec<Vec<Vec<f32>>>)> {
     let ctx = build_binning_context(
         binning_kind,
         feature_mins,
@@ -531,9 +575,7 @@ pub(crate) fn shap_explain_interactions_with_binning(
     .map_err(shap_error_to_pyerr)?;
     let batch = explain_interactions_from_artifact_bytes_with_binning(artifact_bytes, &rows, &ctx)
         .map_err(shap_error_to_pyerr)?;
-    let expected_values = batch.iter().map(|b| b.expected_value).collect();
-    let values = batch.into_iter().map(|b| b.values).collect();
-    Ok((expected_values, values))
+    Ok((batch.expected_value, batch.values))
 }
 
 #[pyfunction]
@@ -554,7 +596,7 @@ pub(crate) fn shap_explain_interactions_dense_with_binning(
     max_data_bin: Option<u16>,
     feature_cuts: Option<Vec<Vec<f32>>>,
     linear_rank_per_feature: Option<Vec<Option<Vec<f32>>>>,
-) -> PyResult<(Vec<f32>, Vec<Vec<Vec<Vec<f32>>>>)> {
+) -> PyResult<(f32, Vec<Vec<Vec<f32>>>)> {
     let rows = dense_rows_from_flat_values(&values, row_count, feature_count)
         .map_err(|msg| shap_error_to_pyerr(ShapError::InvalidInput(msg)))?;
     let ctx = build_binning_context(
@@ -568,8 +610,257 @@ pub(crate) fn shap_explain_interactions_dense_with_binning(
     .map_err(shap_error_to_pyerr)?;
     let batch = explain_interactions_from_artifact_bytes_with_binning(artifact_bytes, &rows, &ctx)
         .map_err(shap_error_to_pyerr)?;
-    let expected_values = batch.iter().map(|b| b.expected_value).collect();
-    let values = batch.into_iter().map(|b| b.values).collect();
+    Ok((batch.expected_value, batch.values))
+}
+
+#[pyfunction]
+pub(crate) fn shap_explain_rows_multi(
+    artifact_bytes: &[u8],
+    rows: Vec<Vec<f32>>,
+) -> PyResult<(Vec<f32>, Vec<Vec<Vec<f32>>>)> {
+    shap_explain_rows_multi_impl(artifact_bytes, &rows).map_err(shap_error_to_pyerr)
+}
+
+#[pyfunction]
+pub(crate) fn shap_explain_rows_dense_multi(
+    artifact_bytes: &[u8],
+    values: Vec<f32>,
+    row_count: usize,
+    feature_count: usize,
+) -> PyResult<(Vec<f32>, Vec<Vec<Vec<f32>>>)> {
+    shap_explain_rows_dense_multi_impl(artifact_bytes, row_count, feature_count, &values)
+        .map_err(shap_error_to_pyerr)
+}
+
+#[pyfunction]
+pub(crate) fn shap_explain_interactions_multi(
+    artifact_bytes: &[u8],
+    rows: Vec<Vec<f32>>,
+) -> PyResult<(Vec<f32>, Vec<Vec<Vec<Vec<f32>>>>)> {
+    shap_explain_interactions_multi_impl(artifact_bytes, &rows).map_err(shap_error_to_pyerr)
+}
+
+#[pyfunction]
+pub(crate) fn shap_explain_interactions_dense_multi(
+    artifact_bytes: &[u8],
+    values: Vec<f32>,
+    row_count: usize,
+    feature_count: usize,
+) -> PyResult<(Vec<f32>, Vec<Vec<Vec<Vec<f32>>>>)> {
+    shap_explain_interactions_dense_multi_impl(artifact_bytes, row_count, feature_count, &values)
+        .map_err(shap_error_to_pyerr)
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    artifact_bytes, rows, binning_kind, feature_mins=None, feature_maxs=None,
+    max_data_bin=None, feature_cuts=None, linear_rank_per_feature=None,
+))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn shap_explain_interactions_with_binning_multi(
+    artifact_bytes: &[u8],
+    rows: Vec<Vec<f32>>,
+    binning_kind: &str,
+    feature_mins: Option<Vec<f32>>,
+    feature_maxs: Option<Vec<f32>>,
+    max_data_bin: Option<u16>,
+    feature_cuts: Option<Vec<Vec<f32>>>,
+    linear_rank_per_feature: Option<Vec<Option<Vec<f32>>>>,
+) -> PyResult<(Vec<f32>, Vec<Vec<Vec<Vec<f32>>>>)> {
+    let ctx = build_binning_context(
+        binning_kind,
+        feature_mins,
+        feature_maxs,
+        max_data_bin,
+        feature_cuts,
+        linear_rank_per_feature,
+    )
+    .map_err(shap_error_to_pyerr)?;
+    let batches = explain_interactions_from_artifact_bytes_with_binning_per_output(
+        artifact_bytes,
+        &rows,
+        &ctx,
+    )
+    .map_err(shap_error_to_pyerr)?;
+    let expected_values = batches.iter().map(|b| b.expected_value).collect();
+    let values = batches.into_iter().map(|b| b.values).collect();
+    Ok((expected_values, values))
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    artifact_bytes, values, row_count, feature_count, binning_kind,
+    feature_mins=None, feature_maxs=None, max_data_bin=None,
+    feature_cuts=None, linear_rank_per_feature=None,
+))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn shap_explain_interactions_dense_with_binning_multi(
+    artifact_bytes: &[u8],
+    values: Vec<f32>,
+    row_count: usize,
+    feature_count: usize,
+    binning_kind: &str,
+    feature_mins: Option<Vec<f32>>,
+    feature_maxs: Option<Vec<f32>>,
+    max_data_bin: Option<u16>,
+    feature_cuts: Option<Vec<Vec<f32>>>,
+    linear_rank_per_feature: Option<Vec<Option<Vec<f32>>>>,
+) -> PyResult<(Vec<f32>, Vec<Vec<Vec<Vec<f32>>>>)> {
+    let rows = dense_rows_from_flat_values(&values, row_count, feature_count)
+        .map_err(|msg| shap_error_to_pyerr(ShapError::InvalidInput(msg)))?;
+    let ctx = build_binning_context(
+        binning_kind,
+        feature_mins,
+        feature_maxs,
+        max_data_bin,
+        feature_cuts,
+        linear_rank_per_feature,
+    )
+    .map_err(shap_error_to_pyerr)?;
+    let batches = explain_interactions_from_artifact_bytes_with_binning_per_output(
+        artifact_bytes,
+        &rows,
+        &ctx,
+    )
+    .map_err(shap_error_to_pyerr)?;
+    let expected_values = batches.iter().map(|b| b.expected_value).collect();
+    let values = batches.into_iter().map(|b| b.values).collect();
+    Ok((expected_values, values))
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    artifact_bytes, rows, binning_kind, feature_mins=None, feature_maxs=None,
+    max_data_bin=None, feature_cuts=None, linear_rank_per_feature=None,
+))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn shap_explain_rows_with_binning(
+    artifact_bytes: &[u8],
+    rows: Vec<Vec<f32>>,
+    binning_kind: &str,
+    feature_mins: Option<Vec<f32>>,
+    feature_maxs: Option<Vec<f32>>,
+    max_data_bin: Option<u16>,
+    feature_cuts: Option<Vec<Vec<f32>>>,
+    linear_rank_per_feature: Option<Vec<Option<Vec<f32>>>>,
+) -> PyResult<(f32, Vec<Vec<f32>>)> {
+    let ctx = build_binning_context(
+        binning_kind,
+        feature_mins,
+        feature_maxs,
+        max_data_bin,
+        feature_cuts,
+        linear_rank_per_feature,
+    )
+    .map_err(shap_error_to_pyerr)?;
+    let explanation = explain_rows_from_artifact_bytes_with_binning(artifact_bytes, &rows, &ctx)
+        .map_err(shap_error_to_pyerr)?;
+    Ok((explanation.expected_value, explanation.values))
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    artifact_bytes, values, row_count, feature_count, binning_kind,
+    feature_mins=None, feature_maxs=None, max_data_bin=None,
+    feature_cuts=None, linear_rank_per_feature=None,
+))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn shap_explain_rows_dense_with_binning(
+    artifact_bytes: &[u8],
+    values: Vec<f32>,
+    row_count: usize,
+    feature_count: usize,
+    binning_kind: &str,
+    feature_mins: Option<Vec<f32>>,
+    feature_maxs: Option<Vec<f32>>,
+    max_data_bin: Option<u16>,
+    feature_cuts: Option<Vec<Vec<f32>>>,
+    linear_rank_per_feature: Option<Vec<Option<Vec<f32>>>>,
+) -> PyResult<(f32, Vec<Vec<f32>>)> {
+    let rows = dense_rows_from_flat_values(&values, row_count, feature_count)
+        .map_err(|msg| shap_error_to_pyerr(ShapError::InvalidInput(msg)))?;
+    let ctx = build_binning_context(
+        binning_kind,
+        feature_mins,
+        feature_maxs,
+        max_data_bin,
+        feature_cuts,
+        linear_rank_per_feature,
+    )
+    .map_err(shap_error_to_pyerr)?;
+    let explanation = explain_rows_from_artifact_bytes_with_binning(artifact_bytes, &rows, &ctx)
+        .map_err(shap_error_to_pyerr)?;
+    Ok((explanation.expected_value, explanation.values))
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    artifact_bytes, rows, binning_kind, feature_mins=None, feature_maxs=None,
+    max_data_bin=None, feature_cuts=None, linear_rank_per_feature=None,
+))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn shap_explain_rows_with_binning_multi(
+    artifact_bytes: &[u8],
+    rows: Vec<Vec<f32>>,
+    binning_kind: &str,
+    feature_mins: Option<Vec<f32>>,
+    feature_maxs: Option<Vec<f32>>,
+    max_data_bin: Option<u16>,
+    feature_cuts: Option<Vec<Vec<f32>>>,
+    linear_rank_per_feature: Option<Vec<Option<Vec<f32>>>>,
+) -> PyResult<(Vec<f32>, Vec<Vec<Vec<f32>>>)> {
+    let ctx = build_binning_context(
+        binning_kind,
+        feature_mins,
+        feature_maxs,
+        max_data_bin,
+        feature_cuts,
+        linear_rank_per_feature,
+    )
+    .map_err(shap_error_to_pyerr)?;
+    let explanations =
+        explain_rows_from_artifact_bytes_with_binning_per_output(artifact_bytes, &rows, &ctx)
+            .map_err(shap_error_to_pyerr)?;
+    let expected_values = explanations.iter().map(|b| b.expected_value).collect();
+    let values = explanations.into_iter().map(|b| b.values).collect();
+    Ok((expected_values, values))
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    artifact_bytes, values, row_count, feature_count, binning_kind,
+    feature_mins=None, feature_maxs=None, max_data_bin=None,
+    feature_cuts=None, linear_rank_per_feature=None,
+))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn shap_explain_rows_dense_with_binning_multi(
+    artifact_bytes: &[u8],
+    values: Vec<f32>,
+    row_count: usize,
+    feature_count: usize,
+    binning_kind: &str,
+    feature_mins: Option<Vec<f32>>,
+    feature_maxs: Option<Vec<f32>>,
+    max_data_bin: Option<u16>,
+    feature_cuts: Option<Vec<Vec<f32>>>,
+    linear_rank_per_feature: Option<Vec<Option<Vec<f32>>>>,
+) -> PyResult<(Vec<f32>, Vec<Vec<Vec<f32>>>)> {
+    let rows = dense_rows_from_flat_values(&values, row_count, feature_count)
+        .map_err(|msg| shap_error_to_pyerr(ShapError::InvalidInput(msg)))?;
+    let ctx = build_binning_context(
+        binning_kind,
+        feature_mins,
+        feature_maxs,
+        max_data_bin,
+        feature_cuts,
+        linear_rank_per_feature,
+    )
+    .map_err(shap_error_to_pyerr)?;
+    let explanations =
+        explain_rows_from_artifact_bytes_with_binning_per_output(artifact_bytes, &rows, &ctx)
+            .map_err(shap_error_to_pyerr)?;
+    let expected_values = explanations.iter().map(|b| b.expected_value).collect();
+    let values = explanations.into_iter().map(|b| b.values).collect();
     Ok((expected_values, values))
 }
 
@@ -590,97 +881,6 @@ pub(crate) fn shap_global_importance_dense(
 ) -> PyResult<Vec<(String, f32)>> {
     shap_global_importance_dense_impl(artifact_bytes, row_count, feature_count, &values)
         .map_err(shap_error_to_pyerr)
-}
-
-// Predictor-aligned SHAP entry points (v0.7.3).  When the caller passes
-// the binning info already used by the prediction-time threshold
-// conversion (`feature_mins` / `feature_maxs` / `max_data_bin` for
-// linear binning, `feature_cuts` for quantile, neither for pre-binned),
-// SHAP walks paths the same way the predictor does — strict `<`
-// comparison against per-stump float thresholds.  This makes SHAP on
-// `leaf_model="linear"` artifacts trained over continuous features
-// strictly additive, lifting the legacy best-effort exemption.
-
-#[pyfunction]
-#[pyo3(signature = (
-    artifact_bytes,
-    rows,
-    binning_kind,
-    feature_mins=None,
-    feature_maxs=None,
-    max_data_bin=None,
-    feature_cuts=None,
-    linear_rank_per_feature=None,
-))]
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn shap_explain_rows_with_binning(
-    artifact_bytes: &[u8],
-    rows: Vec<Vec<f32>>,
-    binning_kind: &str,
-    feature_mins: Option<Vec<f32>>,
-    feature_maxs: Option<Vec<f32>>,
-    max_data_bin: Option<u16>,
-    feature_cuts: Option<Vec<Vec<f32>>>,
-    linear_rank_per_feature: Option<Vec<Option<Vec<f32>>>>,
-) -> PyResult<(Vec<f32>, Vec<Vec<Vec<f32>>>)> {
-    let ctx = build_binning_context(
-        binning_kind,
-        feature_mins,
-        feature_maxs,
-        max_data_bin,
-        feature_cuts,
-        linear_rank_per_feature,
-    )
-    .map_err(shap_error_to_pyerr)?;
-    let explanation = explain_rows_from_artifact_bytes_with_binning(artifact_bytes, &rows, &ctx)
-        .map_err(shap_error_to_pyerr)?;
-    let expected_values = explanation.iter().map(|b| b.expected_value).collect();
-    let values = explanation.into_iter().map(|b| b.values).collect();
-    Ok((expected_values, values))
-}
-
-#[pyfunction]
-#[pyo3(signature = (
-    artifact_bytes,
-    values,
-    row_count,
-    feature_count,
-    binning_kind,
-    feature_mins=None,
-    feature_maxs=None,
-    max_data_bin=None,
-    feature_cuts=None,
-    linear_rank_per_feature=None,
-))]
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn shap_explain_rows_dense_with_binning(
-    artifact_bytes: &[u8],
-    values: Vec<f32>,
-    row_count: usize,
-    feature_count: usize,
-    binning_kind: &str,
-    feature_mins: Option<Vec<f32>>,
-    feature_maxs: Option<Vec<f32>>,
-    max_data_bin: Option<u16>,
-    feature_cuts: Option<Vec<Vec<f32>>>,
-    linear_rank_per_feature: Option<Vec<Option<Vec<f32>>>>,
-) -> PyResult<(Vec<f32>, Vec<Vec<Vec<f32>>>)> {
-    let rows = dense_rows_from_flat_values(&values, row_count, feature_count)
-        .map_err(|msg| shap_error_to_pyerr(ShapError::InvalidInput(msg)))?;
-    let ctx = build_binning_context(
-        binning_kind,
-        feature_mins,
-        feature_maxs,
-        max_data_bin,
-        feature_cuts,
-        linear_rank_per_feature,
-    )
-    .map_err(shap_error_to_pyerr)?;
-    let explanation = explain_rows_from_artifact_bytes_with_binning(artifact_bytes, &rows, &ctx)
-        .map_err(shap_error_to_pyerr)?;
-    let expected_values = explanation.iter().map(|b| b.expected_value).collect();
-    let values = explanation.into_iter().map(|b| b.values).collect();
-    Ok((expected_values, values))
 }
 
 #[pyfunction]

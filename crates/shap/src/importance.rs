@@ -63,88 +63,63 @@ pub fn global_importance_from_shap_values(
 
     Ok(global_importance)
 }
+fn global_importance_helper(
+    artifact_bytes: &[u8],
+    rows: &[Vec<f32>],
+    binning: Option<&BinningContext>,
+) -> ShapResult<Vec<(String, f32)>> {
+    let context = load_artifact_context(artifact_bytes)?;
+    let mut total_contribution_sums = vec![0.0_f32; context.feature_names.len()];
+
+    for model in &context.models {
+        let explanation = explain_rows_from_model(model, rows, binning)?;
+        for row_values in &explanation.values {
+            for (feature_index, value) in row_values.iter().enumerate() {
+                total_contribution_sums[feature_index] += value.abs();
+            }
+        }
+    }
+
+    let n_models = context.models.len() as f32;
+    let row_count = rows.len() as f32;
+    let divisor = row_count * n_models;
+    let mut global_importance = context
+        .feature_names
+        .iter()
+        .enumerate()
+        .map(|(feature_index, feature_name)| {
+            (
+                feature_name.clone(),
+                total_contribution_sums[feature_index] / divisor,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    global_importance.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+
+    Ok(global_importance)
+}
 
 pub fn global_importance_from_artifact_bytes(
     artifact_bytes: &[u8],
     rows: &[Vec<f32>],
 ) -> ShapResult<Vec<(String, f32)>> {
-    let context = load_artifact_context(artifact_bytes)?;
-    let mut total_contribution_sums = vec![0.0_f32; context.feature_names.len()];
-    
-    for model in &context.models {
-        let explanation = explain_rows_from_model(model, rows, None)?;
-        for row_values in &explanation.values {
-            for (feature_index, value) in row_values.iter().enumerate() {
-                total_contribution_sums[feature_index] += value.abs();
-            }
-        }
-    }
-
-    let row_count = rows.len() as f32;
-    let mut global_importance = context.feature_names
-        .iter()
-        .enumerate()
-        .map(|(feature_index, feature_name)| {
-            (
-                feature_name.clone(),
-                total_contribution_sums[feature_index] / row_count,
-            )
-        })
-        .collect::<Vec<_>>();
-
-    global_importance.sort_by(|left, right| {
-        right
-            .1
-            .partial_cmp(&left.1)
-            .unwrap_or(Ordering::Equal)
-            .then_with(|| left.0.cmp(&right.0))
-    });
-
-    Ok(global_importance)
+    global_importance_helper(artifact_bytes, rows, None)
 }
 
-/// Predictor-aligned variant of `global_importance_from_artifact_bytes`.
-/// See `explain_rows_from_artifact_bytes_with_binning` for the contract.
 pub fn global_importance_from_artifact_bytes_with_binning(
     artifact_bytes: &[u8],
     rows: &[Vec<f32>],
     binning: &BinningContext,
 ) -> ShapResult<Vec<(String, f32)>> {
-    let context = load_artifact_context(artifact_bytes)?;
-    let mut total_contribution_sums = vec![0.0_f32; context.feature_names.len()];
-    
-    for model in &context.models {
-        let explanation = explain_rows_from_model(model, rows, Some(binning))?;
-        for row_values in &explanation.values {
-            for (feature_index, value) in row_values.iter().enumerate() {
-                total_contribution_sums[feature_index] += value.abs();
-            }
-        }
-    }
-
-    let row_count = rows.len() as f32;
-    let mut global_importance = context.feature_names
-        .iter()
-        .enumerate()
-        .map(|(feature_index, feature_name)| {
-            (
-                feature_name.clone(),
-                total_contribution_sums[feature_index] / row_count,
-            )
-        })
-        .collect::<Vec<_>>();
-
-    global_importance.sort_by(|left, right| {
-        right
-            .1
-            .partial_cmp(&left.1)
-            .unwrap_or(Ordering::Equal)
-            .then_with(|| left.0.cmp(&right.0))
-    });
-
-    Ok(global_importance)
+    global_importance_helper(artifact_bytes, rows, Some(binning))
 }
-
 // Legacy compatibility shim for the v0.0.1 placeholder API. Prefer
 // `explain_rows_from_artifact_bytes` for artifact-backed explanations.
 pub fn shap_values_stub(metadata: &ModelMetadata, rows: &[Vec<f32>]) -> ShapResult<Vec<Vec<f32>>> {

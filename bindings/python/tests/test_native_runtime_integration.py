@@ -241,13 +241,17 @@ class NativeRuntimeIntegrationTests(unittest.TestCase):
         expected_value, shap_values = self.alloygbm._alloygbm.shap_explain_rows(
             FIXTURE_ARTIFACT_BYTES, FIXTURE_ROWS
         )
-        self.assertEqual(len(shap_values[0]), len(FIXTURE_ROWS))
-        for row, native_shap_row in zip(FIXTURE_ROWS, shap_values[0]):
-            pred = self.alloygbm._alloygbm.predictor_predict_batch_canonical(
-                FIXTURE_ARTIFACT_BYTES, [row]
-            )[0]
-            shap_sum = sum(native_shap_row)
-            self.assertAlmostEqual(shap_sum + expected_value[0], pred, places=5)
+        self.assertEqual(len(shap_values), len(FIXTURE_ROWS))
+        self.assertEqual(len(shap_values[0]), len(FIXTURE_ROWS[0]))
+
+        predictions = list(
+            self.alloygbm._alloygbm.predictor_predict_batch(
+                FIXTURE_ARTIFACT_BYTES, FIXTURE_ROWS
+            )
+        )
+        for row_values, prediction in zip(shap_values, predictions):
+            reconstructed = expected_value + sum(row_values)
+            self.assertAlmostEqual(reconstructed, prediction, places=5)
 
     def test_runtime_native_shap_global_importance_returns_expected_shape(self) -> None:
         importance = self.alloygbm._alloygbm.shap_global_importance(
