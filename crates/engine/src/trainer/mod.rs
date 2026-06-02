@@ -1772,21 +1772,6 @@ impl Trainer {
                     "quantile_alpha must be finite and in (0.0, 1.0)".to_string(),
                 ));
             }
-            if self.params.leaf_model == LeafModelKind::Linear {
-                return Err(EngineError::InvalidConfig(
-                    "leaf_model='linear' is not supported with objective='quantile'".to_string(),
-                ));
-            }
-            if matches!(self.params.boosting_mode, BoostingMode::Dart { .. }) {
-                return Err(EngineError::InvalidConfig(
-                    "boosting_mode='dart' is not supported with objective='quantile'".to_string(),
-                ));
-            }
-            if self.params.morph_config.is_some() {
-                return Err(EngineError::InvalidConfig(
-                    "morph_config is not supported with objective='quantile'".to_string(),
-                ));
-            }
         }
         validate_training_dataset(dataset)?;
         validate_neutralization_fit_contract(&self.params, dataset, objective)?;
@@ -2268,10 +2253,19 @@ impl Trainer {
             }
 
             if let Some(alpha) = objective.quantile_alpha() {
-                let lr = morph_state
+                let mut lr = morph_state
                     .as_ref()
                     .map(|ms| ms.lr_for_iter(effective_round_index))
                     .unwrap_or(self.params.learning_rate);
+                if let Some(ms) = morph_state.as_ref() {
+                    let iter_shrinkage = (1.0
+                        - ms.config.morph_rate
+                            * (effective_round_index as f32 / total_iterations.max(1) as f32)
+                                .min(1.0))
+                    .max(0.0);
+                    lr *= iter_shrinkage;
+                }
+                let depth_penalty_base = morph_state.as_ref().map(|ms| ms.config.depth_penalty_base);
                 refine_quantile_leaf_values(
                     &mut candidate_round_stumps,
                     binned_matrix,
@@ -2281,6 +2275,8 @@ impl Trainer {
                     alpha,
                     lr,
                     controls.max_abs_leaf_value,
+                    raw_features_opt,
+                    depth_penalty_base,
                 )?;
                 candidate_predictions.copy_from_slice(&predictions);
                 apply_round_stumps_tree_walk(

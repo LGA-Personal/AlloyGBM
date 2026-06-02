@@ -141,27 +141,51 @@ def test_quantile_empirical_quantile_property() -> None:
         )
 
 
-def test_quantile_rejected_combinations() -> None:
-    # 1. GBMRegressor constructor rejects
-    with pytest.raises(ValueError, match="boosting_mode='dart'"):
-        GBMRegressor(objective="quantile", boosting_mode="dart")
-    with pytest.raises(ValueError, match="training_mode='morph'"):
-        GBMRegressor(objective="quantile", training_mode="morph")
-    with pytest.raises(ValueError, match="leaf_model='linear'"):
-        GBMRegressor(objective="quantile", leaf_model="linear")
+def test_quantile_supported_combinations() -> None:
+    rng = np.random.default_rng(42)
+    X = rng.normal(size=(100, 2)).astype(np.float32)
+    y = (2.0 * X[:, 0] + rng.normal(scale=0.5, size=100)).astype(np.float32)
 
-    # 2. GBMRegressor set_params rejects
-    model = GBMRegressor(objective="quantile")
-    with pytest.raises(ValueError, match="boosting_mode='dart'"):
-        model.set_params(boosting_mode="dart")
-    model = GBMRegressor(objective="quantile")
-    with pytest.raises(ValueError, match="training_mode='morph'"):
-        model.set_params(training_mode="morph")
-    model = GBMRegressor(objective="quantile")
-    with pytest.raises(ValueError, match="leaf_model='linear'"):
-        model.set_params(leaf_model="linear")
+    # 1. DART + Quantile
+    model_dart = GBMRegressor(
+        objective="quantile",
+        boosting_mode="dart",
+        n_estimators=5,
+        training_policy="manual",
+        deterministic=True,
+        seed=42,
+    )
+    model_dart.fit(X, y)
+    preds = model_dart.predict(X)
+    assert len(preds) == 100
 
-    # 3. GBMClassifier rejects
+    # 2. MorphBoost + Quantile
+    model_morph = GBMRegressor(
+        objective="quantile",
+        training_mode="morph",
+        n_estimators=5,
+        training_policy="manual",
+        deterministic=True,
+        seed=42,
+    )
+    model_morph.fit(X, y)
+    preds = model_morph.predict(X)
+    assert len(preds) == 100
+
+    # 3. Linear Leaves + Quantile
+    model_linear = GBMRegressor(
+        objective="quantile",
+        leaf_model="linear",
+        n_estimators=5,
+        training_policy="manual",
+        deterministic=True,
+        seed=42,
+    )
+    model_linear.fit(X, y)
+    preds = model_linear.predict(X)
+    assert len(preds) == 100
+
+    # 4. GBMClassifier rejects
     from alloygbm import GBMClassifier
     with pytest.raises(ValueError, match="GBMClassifier does not support objective='quantile'"):
         GBMClassifier(objective="quantile")
@@ -169,7 +193,7 @@ def test_quantile_rejected_combinations() -> None:
     with pytest.raises(ValueError, match="GBMClassifier does not support objective='quantile'"):
         clf.set_params(objective="quantile")
 
-    # 4. GBMRanker rejects
+    # 5. GBMRanker rejects
     from alloygbm import GBMRanker
     with pytest.raises(ValueError, match="GBMRanker does not support objective='quantile'"):
         GBMRanker(objective="quantile")
@@ -177,7 +201,7 @@ def test_quantile_rejected_combinations() -> None:
     with pytest.raises(ValueError, match="GBMRanker does not support objective='quantile'"):
         ranker.set_params(objective="quantile")
 
-    # 5. MultiLabelGBMRanker rejects
+    # 6. MultiLabelGBMRanker rejects
     from alloygbm import MultiLabelGBMRanker
     with pytest.raises(ValueError, match="MultiLabelGBMRanker does not support objective='quantile'"):
         MultiLabelGBMRanker(ranking_objective="quantile")
