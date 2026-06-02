@@ -13,7 +13,7 @@ publish = false
 [dependencies]
 alloygbm-core = { path = "../core" }
 alloygbm-categorical = { path = "../categorical" }
-rayon = "1.11"
+rayon = "1.12"
 
 [lints]
 workspace = true
