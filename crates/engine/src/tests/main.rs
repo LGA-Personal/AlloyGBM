@@ -4311,6 +4311,8 @@ fn test_refine_quantile_leaf_values() {
         0.75,
         1.0,
         100.0,
+        None,
+        None,
     )
     .expect("refinement should succeed");
 

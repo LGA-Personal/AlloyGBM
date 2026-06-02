@@ -417,6 +417,8 @@ pub(crate) fn refine_quantile_leaf_values(
     alpha: f32,
     learning_rate: f32,
     max_abs_leaf_value: f32,
+    raw_features: Option<(&[f32], usize)>,
+    depth_penalty_base: Option<f32>,
 ) -> EngineResult<()> {
     if stumps.is_empty() {
         return Ok(());
@@ -456,7 +458,36 @@ pub(crate) fn refine_quantile_leaf_values(
     for row_index in 0..binned_matrix.row_count {
         let terminal_local_node_id =
             terminal_local_node_id_for_row(row_index, binned_matrix, &stumps_by_local)?;
-        let res = targets[row_index] - predictions[row_index];
+
+        // If the routed terminal leaf has linear leaves along its path, evaluate their linear terms.
+        let mut lin_val = 0.0_f32;
+        if let Some((raw, fc)) = raw_features {
+            let row_offset = row_index * fc;
+            let mut curr_id = terminal_local_node_id;
+            while curr_id > 0 {
+                let parent_id = (curr_id - 1) / 2;
+                let is_left = (curr_id % 2) != 0;
+                if let Some(parent_stump) = stumps_by_local.get(&parent_id) {
+                    let leaf_val = if is_left {
+                        &parent_stump.left_leaf_value
+                    } else {
+                        &parent_stump.right_leaf_value
+                    };
+                    if let LeafValue::Linear(lin) = leaf_val {
+                        // Candidate-round stumps always carry `tree_weight == 1.0`
+                        // here — DART per-tree weights are stamped later, at commit
+                        // (post-loss-check). The intercept calibration below is not
+                        // tree_weight-scaled, so weighting only the slope would put
+                        // slope and intercept on inconsistent scales; accumulate the
+                        // unweighted linear contribution to match the build-time leaf.
+                        lin_val += lin.eval(raw, row_offset) - lin.intercept;
+                    }
+                }
+                curr_id = parent_id;
+            }
+        }
+
+        let res = targets[row_index] - predictions[row_index] - lin_val;
         let entry = leaf_residuals
             .entry(terminal_local_node_id)
             .or_insert_with(|| LeafResiduals {
@@ -499,10 +530,30 @@ pub(crate) fn refine_quantile_leaf_values(
             .copied()
             .unwrap_or(parent_absolute + stump.right_leaf_value.as_scalar());
 
-        let dl = (left_absolute - parent_absolute) * learning_rate;
-        let dr = (right_absolute - parent_absolute) * learning_rate;
-        stump.left_leaf_value = LeafValue::Scalar(dl);
-        stump.right_leaf_value = LeafValue::Scalar(dr);
+        let parent_depth = (32 - (local_node_id + 1).leading_zeros() - 1) as f32;
+        let child_depth = parent_depth + 1.0;
+        let depth_penalty = depth_penalty_base.map_or(1.0, |base| base.powf(child_depth / 3.0));
+        let effective_lr = learning_rate * depth_penalty;
+
+        let dl = (left_absolute - parent_absolute) * effective_lr;
+        let dr = (right_absolute - parent_absolute) * effective_lr;
+
+        match &mut stump.left_leaf_value {
+            LeafValue::Scalar(_) => {
+                stump.left_leaf_value = LeafValue::Scalar(dl);
+            }
+            LeafValue::Linear(lin) => {
+                lin.intercept = dl;
+            }
+        }
+        match &mut stump.right_leaf_value {
+            LeafValue::Scalar(_) => {
+                stump.right_leaf_value = LeafValue::Scalar(dr);
+            }
+            LeafValue::Linear(lin) => {
+                lin.intercept = dr;
+            }
+        }
     }
 
     Ok(())
