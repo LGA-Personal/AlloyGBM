@@ -57,3 +57,6 @@ docs/superpowers/
 #AI
 CLAUDE.md
 AGENTS.md
+
+# Debug symbol bundles (macOS) emitted next to the built extension
+*.dSYM/
