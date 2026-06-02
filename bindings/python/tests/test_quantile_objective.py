@@ -143,47 +143,73 @@ def test_quantile_empirical_quantile_property() -> None:
 
 def test_quantile_supported_combinations() -> None:
     rng = np.random.default_rng(42)
-    X = rng.normal(size=(100, 2)).astype(np.float32)
-    y = (2.0 * X[:, 0] + rng.normal(scale=0.5, size=100)).astype(np.float32)
+    X = rng.normal(size=(200, 2)).astype(np.float32)
+    y = (2.0 * X[:, 0] + rng.normal(scale=0.5, size=200)).astype(np.float32)
+
+    def pinball_loss(y_true: np.ndarray, y_pred: np.ndarray, alpha: float) -> float:
+        diff = y_true - y_pred
+        return float(np.mean(np.maximum(alpha * diff, (alpha - 1.0) * diff)))
+
+    # Compute a constant baseline pinball loss for validation
+    baseline_pred = np.percentile(y, 50)
+    baseline_loss = pinball_loss(y, np.full_like(y, baseline_pred), 0.5)
 
     # 1. DART + Quantile
     model_dart = GBMRegressor(
         objective="quantile",
+        quantile_alpha=0.5,
         boosting_mode="dart",
-        n_estimators=5,
+        n_estimators=10,
+        learning_rate=0.2,
         training_policy="manual",
         deterministic=True,
         seed=42,
     )
     model_dart.fit(X, y)
-    preds = model_dart.predict(X)
-    assert len(preds) == 100
+    preds = np.asarray(model_dart.predict(X))
+    assert np.isfinite(preds).all(), "DART + Quantile predictions contain non-finite values"
+    loss = pinball_loss(y, preds, 0.5)
+    assert loss < baseline_loss, f"DART + Quantile pinball loss {loss} is not better than baseline {baseline_loss}"
+    underprediction_rate = np.mean(y < preds)
+    assert np.abs(underprediction_rate - 0.5) < 0.15, f"DART + Quantile coverage is {underprediction_rate}"
 
     # 2. MorphBoost + Quantile
     model_morph = GBMRegressor(
         objective="quantile",
+        quantile_alpha=0.5,
         training_mode="morph",
-        n_estimators=5,
+        n_estimators=10,
+        learning_rate=0.2,
         training_policy="manual",
         deterministic=True,
         seed=42,
     )
     model_morph.fit(X, y)
-    preds = model_morph.predict(X)
-    assert len(preds) == 100
+    preds = np.asarray(model_morph.predict(X))
+    assert np.isfinite(preds).all(), "MorphBoost + Quantile predictions contain non-finite values"
+    loss = pinball_loss(y, preds, 0.5)
+    assert loss < baseline_loss, f"MorphBoost + Quantile pinball loss {loss} is not better than baseline {baseline_loss}"
+    underprediction_rate = np.mean(y < preds)
+    assert np.abs(underprediction_rate - 0.5) < 0.15, f"MorphBoost + Quantile coverage is {underprediction_rate}"
 
     # 3. Linear Leaves + Quantile
     model_linear = GBMRegressor(
         objective="quantile",
+        quantile_alpha=0.5,
         leaf_model="linear",
-        n_estimators=5,
+        n_estimators=10,
+        learning_rate=0.2,
         training_policy="manual",
         deterministic=True,
         seed=42,
     )
     model_linear.fit(X, y)
-    preds = model_linear.predict(X)
-    assert len(preds) == 100
+    preds = np.asarray(model_linear.predict(X))
+    assert np.isfinite(preds).all(), "Linear + Quantile predictions contain non-finite values"
+    loss = pinball_loss(y, preds, 0.5)
+    assert loss < baseline_loss, f"Linear + Quantile pinball loss {loss} is not better than baseline {baseline_loss}"
+    underprediction_rate = np.mean(y < preds)
+    assert np.abs(underprediction_rate - 0.5) < 0.15, f"Linear + Quantile coverage is {underprediction_rate}"
 
     # 4. GBMClassifier rejects
     from alloygbm import GBMClassifier
@@ -215,19 +241,20 @@ def test_quantile_supported_combinations() -> None:
 
 
 def test_quantile_linear_leaves_numeric() -> None:
-    # Set up synthetic noiseless linear data: y = 3.0 * x
+    # Set up synthetic noiseless linear data with 2 features: y = 3.0 * x0 - 2.0 * x1
     rng = np.random.default_rng(42)
-    x = rng.uniform(-1, 1, size=(200, 1)).astype(np.float32)
-    y = (3.0 * x[:, 0]).astype(np.float32)
+    x = rng.uniform(-1, 1, size=(250, 2)).astype(np.float32)
+    y = (3.0 * x[:, 0] - 2.0 * x[:, 1]).astype(np.float32)
 
     # Train standard (constant leaves) quantile regressor
+    # Use max_depth=4 to force splits beyond root (triggering depth >= 2 code path)
     model_constant = GBMRegressor(
         objective="quantile",
         quantile_alpha=0.5,
         leaf_model="constant",
-        n_estimators=5,
-        learning_rate=0.3,
-        max_depth=2,
+        n_estimators=10,
+        learning_rate=0.25,
+        max_depth=4,
         training_policy="manual",
         deterministic=True,
         seed=42,
@@ -241,9 +268,9 @@ def test_quantile_linear_leaves_numeric() -> None:
         objective="quantile",
         quantile_alpha=0.5,
         leaf_model="linear",
-        n_estimators=5,
-        learning_rate=0.3,
-        max_depth=2,
+        n_estimators=10,
+        learning_rate=0.25,
+        max_depth=4,
         training_policy="manual",
         deterministic=True,
         seed=42,
@@ -252,8 +279,8 @@ def test_quantile_linear_leaves_numeric() -> None:
     preds_linear = np.asarray(model_linear.predict(x))
     mae_linear = np.mean(np.abs(y - preds_linear))
 
-    # With linear leaves, the model should fit the linear relationship
-    # significantly better than standard constant leaves.
+    # With linear leaves and the depth >= 2 fix active, the model should fit the linear
+    # relationship significantly better than standard constant leaves.
     assert mae_linear < 0.6 * mae_constant, (
         f"Linear leaves MAE ({mae_linear}) should be significantly lower than "
         f"constant leaves MAE ({mae_constant})"

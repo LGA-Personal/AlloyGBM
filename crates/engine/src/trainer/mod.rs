@@ -2258,11 +2258,10 @@ impl Trainer {
                     .map(|ms| ms.lr_for_iter(effective_round_index))
                     .unwrap_or(self.params.learning_rate);
                 if let Some(ms) = morph_state.as_ref() {
-                    let iter_shrinkage = (1.0
+                    let iter_shrinkage = 1.0
                         - ms.config.morph_rate
                             * (effective_round_index as f32 / total_iterations.max(1) as f32)
-                                .min(1.0))
-                    .max(0.0);
+                                .min(1.0);
                     lr *= iter_shrinkage;
                 }
                 let depth_penalty_base = morph_state.as_ref().map(|ms| ms.config.depth_penalty_base);

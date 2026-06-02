@@ -459,23 +459,25 @@ pub(crate) fn refine_quantile_leaf_values(
         let terminal_local_node_id =
             terminal_local_node_id_for_row(row_index, binned_matrix, &stumps_by_local)?;
 
-        // If the routed terminal leaf is Linear, evaluate its linear terms.
+        // If the routed terminal leaf has linear leaves along its path, evaluate their linear terms.
         let mut lin_val = 0.0_f32;
-        if terminal_local_node_id > 0 {
-            let parent_node_id = (terminal_local_node_id - 1) / 2;
-            let is_left = (terminal_local_node_id % 2) != 0;
-            if let Some(parent_stump) = stumps_by_local.get(&parent_node_id) {
-                let leaf_val = if is_left {
-                    &parent_stump.left_leaf_value
-                } else {
-                    &parent_stump.right_leaf_value
-                };
-                if let LeafValue::Linear(lin) = leaf_val {
-                    if let Some((raw, fc)) = raw_features {
-                        let row_offset = row_index * fc;
-                        lin_val = lin.eval(raw, row_offset) - lin.intercept;
+        if let Some((raw, fc)) = raw_features {
+            let row_offset = row_index * fc;
+            let mut curr_id = terminal_local_node_id;
+            while curr_id > 0 {
+                let parent_id = (curr_id - 1) / 2;
+                let is_left = (curr_id % 2) != 0;
+                if let Some(parent_stump) = stumps_by_local.get(&parent_id) {
+                    let leaf_val = if is_left {
+                        &parent_stump.left_leaf_value
+                    } else {
+                        &parent_stump.right_leaf_value
+                    };
+                    if let LeafValue::Linear(lin) = leaf_val {
+                        lin_val += parent_stump.tree_weight * (lin.eval(raw, row_offset) - lin.intercept);
                     }
                 }
+                curr_id = parent_id;
             }
         }
 

@@ -14,9 +14,9 @@ The `0.12.7` release closes limitation #6 from `docs/limitations.md`: Quantile r
 
 Limitation #6 had restricted the use of the `"quantile"` objective with DART, MorphBoost, and linear leaves. This release implements full mathematical and engine-level compatibility for these settings:
 - **DART boosting** (`boosting_mode="dart"`): Leaf refinement operates correctly on dropped-out residuals by leveraging the DART prediction buffer evaluation before refinement.
-- **MorphBoost** (`training_mode="morph"`): Leaf refinement scales intercept updates by MorphBoost per-round shrinkage (`iter_shrinkage` clamped to `[0.0, 1.0]`) and depth-based penalty.
-- **Piecewise-linear leaves** (`leaf_model="linear"`): Leaf refinement calculates residual targets by subtracting the linear portion of predictions from training values, and only refines the flat leaf intercept (avoiding double-scaling of build-time solved linear slopes).
-- **Linear leaves + quantile numeric test**: Added `test_quantile_linear_leaves_numeric` to Python tests asserting that linear-leaf quantile regression fits linear relationships significantly better than standard constant-leaf models.
+- **MorphBoost** (`training_mode="morph"`): Leaf refinement scales intercept updates by MorphBoost per-round shrinkage (`iter_shrinkage` aligned to `tree_build.rs`) and depth-based penalty.
+- **Piecewise-linear leaves** (`leaf_model="linear"`): Leaf refinement calculates residual targets by subtracting the linear portion of predictions from training values (correctly walking from root to terminal leaf to accumulate parent-relative delta weights for `max_depth >= 2`), and only refines the flat leaf intercept (avoiding double-scaling of build-time solved linear slopes).
+- **Linear leaves + quantile numeric test**: Added a new robust, multi-feature, `max_depth >= 4` numeric test `test_quantile_linear_leaves_numeric` verifying that linear-leaf quantile regression fits linear relationships significantly better than standard constant-leaf models and that path-level weights accumulate correctly.
 
 ## What Shipped In v0.12.6
 
