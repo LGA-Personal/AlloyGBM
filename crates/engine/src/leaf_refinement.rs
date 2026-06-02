@@ -474,7 +474,13 @@ pub(crate) fn refine_quantile_leaf_values(
                         &parent_stump.right_leaf_value
                     };
                     if let LeafValue::Linear(lin) = leaf_val {
-                        lin_val += parent_stump.tree_weight * (lin.eval(raw, row_offset) - lin.intercept);
+                        // Candidate-round stumps always carry `tree_weight == 1.0`
+                        // here — DART per-tree weights are stamped later, at commit
+                        // (post-loss-check). The intercept calibration below is not
+                        // tree_weight-scaled, so weighting only the slope would put
+                        // slope and intercept on inconsistent scales; accumulate the
+                        // unweighted linear contribution to match the build-time leaf.
+                        lin_val += lin.eval(raw, row_offset) - lin.intercept;
                     }
                 }
                 curr_id = parent_id;
