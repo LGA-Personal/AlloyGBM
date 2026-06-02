@@ -500,9 +500,7 @@ The three GLM objectives compose with `boosting_mode="dart"`,
 residualize-target == residualize-gradient identity doesn't hold under
 log-link).
 
-The `"quantile"` objective is explicitly rejected when combined with DART,
-MorphBoost, linear leaves (`leaf_model="linear"`), classification, ranking,
-or joint multi-output training.
+The `"quantile"` objective is supported in combination with DART, MorphBoost, and piecewise-linear leaves (`leaf_model="linear"`). It is explicitly rejected when combined with classification, ranking, or joint multi-output training.
 
 Three deviance metrics are exported from `alloygbm.evaluation`:
 

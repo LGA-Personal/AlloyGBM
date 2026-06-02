@@ -280,7 +280,7 @@ Quantile regression (v0.11.1+)
    model = GBMRegressor(objective="quantile", quantile_alpha=0.9, n_estimators=100)
    model.fit(X_train, y_train)
 
-The quantile objective is supported on single-output ``GBMRegressor`` and is rejected for linear leaves, DART boosting, MorphBoost, classification, ranking, and joint multi-output training.
+The quantile objective is supported on single-output ``GBMRegressor`` (composing with linear leaves, DART boosting, and MorphBoost) and is rejected for classification, ranking, and joint multi-output training.
 
 SHAP interaction values (v0.11.0+)
 ----------------------------------

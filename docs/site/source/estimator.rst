@@ -483,9 +483,7 @@ All three GLM objectives compose with ``boosting_mode="dart"``,
 ``neutralization="split_penalty"``, and ``training_mode="morph"``.
 ``neutralization="pre_target"`` remains squared-error-only.
 
-The ``"quantile"`` objective is explicitly rejected when combined with DART,
-MorphBoost, linear leaves (``leaf_model="linear"``), classification, ranking,
-or joint multi-output training.
+The ``"quantile"`` objective is supported in combination with DART, MorphBoost, and piecewise-linear leaves (``leaf_model="linear"``). It is explicitly rejected when combined with classification, ranking, or joint multi-output training.
 
 Three deviance metrics in ``alloygbm.evaluation`` partner with the new
 objectives: ``poisson_deviance``, ``gamma_deviance``, and

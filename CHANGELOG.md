@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.12.7 (2026-06-02)
+
+Feature and compatibility release on top of v0.12.6. Closes limitation #6 from `docs/limitations.md`: Quantile regression now fully composes with DART boosting, MorphBoost training, and piecewise-linear (`leaf_model="linear"`) leaves.
+
+### Features
+
+- **Quantile objective compatibility extended.** `GBMRegressor(objective="quantile")` now successfully composes with:
+  - **DART boosting** (`boosting_mode="dart"`): leaf refinement operates correctly on dropped-out residuals.
+  - **MorphBoost** (`training_mode="morph"`): leaf refinement scales intercept updates by MorphBoost per-round shrinkage and depth-based penalty.
+  - **Piecewise-linear leaves** (`leaf_model="linear"`): leaf refinement calculates residual targets by subtracting the linear portion of predictions from training values, and only refines the flat leaf intercept (avoiding double-scaling of build-time solved linear slopes).
+- **Linear leaves + quantile numeric test.** Added a new test function `test_quantile_linear_leaves_numeric` verifying that linear-leaf quantile regression fits linear relationships significantly better than standard constant-leaf models.
+
+### Bug fixes
+
+- **Fixed double-scaling blocker** on linear leaf weights during quantile leaf refinement. Solved linear weights already carry the appropriate learning rate scale from build time and are now left untouched during intercept refinement.
+- **Fixed shrinkage sign-flip bug.** Clamped `iter_shrinkage` to `[0.0, 1.0]` (using `.max(0.0)`) in `trainer/mod.rs` to match the authoritative joint trainer formula and prevent negative scaling factors under large morph rates.
+
 ## v0.12.6 (2026-06-01)
 
 Feature release on top of v0.12.5. Closes limitation #3 from `docs/limitations.md`: SHAP values and interaction values are now supported on multiclass classifiers and multi-output (joint) rankers in addition to single-output regressors.

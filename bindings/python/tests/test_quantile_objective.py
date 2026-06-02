@@ -212,3 +212,49 @@ def test_quantile_supported_combinations() -> None:
         mranker.set_params(ranking_objective="quantile")
     with pytest.raises(ValueError, match="MultiLabelGBMRanker does not support objective='quantile'"):
         mranker.set_params(objective="quantile")
+
+
+def test_quantile_linear_leaves_numeric() -> None:
+    # Set up synthetic noiseless linear data: y = 3.0 * x
+    rng = np.random.default_rng(42)
+    x = rng.uniform(-1, 1, size=(200, 1)).astype(np.float32)
+    y = (3.0 * x[:, 0]).astype(np.float32)
+
+    # Train standard (constant leaves) quantile regressor
+    model_constant = GBMRegressor(
+        objective="quantile",
+        quantile_alpha=0.5,
+        leaf_model="constant",
+        n_estimators=5,
+        learning_rate=0.3,
+        max_depth=2,
+        training_policy="manual",
+        deterministic=True,
+        seed=42,
+    )
+    model_constant.fit(x, y)
+    preds_constant = np.asarray(model_constant.predict(x))
+    mae_constant = np.mean(np.abs(y - preds_constant))
+
+    # Train linear leaves quantile regressor
+    model_linear = GBMRegressor(
+        objective="quantile",
+        quantile_alpha=0.5,
+        leaf_model="linear",
+        n_estimators=5,
+        learning_rate=0.3,
+        max_depth=2,
+        training_policy="manual",
+        deterministic=True,
+        seed=42,
+    )
+    model_linear.fit(x, y)
+    preds_linear = np.asarray(model_linear.predict(x))
+    mae_linear = np.mean(np.abs(y - preds_linear))
+
+    # With linear leaves, the model should fit the linear relationship
+    # significantly better than standard constant leaves.
+    assert mae_linear < 0.6 * mae_constant, (
+        f"Linear leaves MAE ({mae_linear}) should be significantly lower than "
+        f"constant leaves MAE ({mae_constant})"
+    )

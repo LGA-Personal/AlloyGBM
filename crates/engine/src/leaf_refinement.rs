@@ -536,7 +536,6 @@ pub(crate) fn refine_quantile_leaf_values(
             }
             LeafValue::Linear(lin) => {
                 lin.intercept = dl;
-                lin.weights.iter_mut().for_each(|w| *w *= effective_lr);
             }
         }
         match &mut stump.right_leaf_value {
@@ -545,7 +544,6 @@ pub(crate) fn refine_quantile_leaf_values(
             }
             LeafValue::Linear(lin) => {
                 lin.intercept = dr;
-                lin.weights.iter_mut().for_each(|w| *w *= effective_lr);
             }
         }
     }

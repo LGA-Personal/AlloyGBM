@@ -4,9 +4,19 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
-The `0.12.6` release closes limitation #3 from `docs/limitations.md`: SHAP values and interaction values are now supported on multiclass classifiers and multi-output (joint) rankers in addition to single-output regressors. `GBMClassifier.shap_values(X)`, `GBMClassifier.shap_interaction_values(X)`, `MultiLabelGBMRanker.shap_values(X)`, and `MultiLabelGBMRanker.shap_interaction_values(X)` return a list of `K` arrays — one per class or output label. Four new public Rust entry points (`explain_*_per_output`) return `Vec<ShapExplanationBatch>` / `Vec<ShapInteractionBatch>`; the legacy single-output entry points are unchanged but now error on K>1 artifacts directing callers to the `_per_output` variants. `global_importance_from_artifact_bytes` averages over outputs so importance magnitudes remain comparable across single-output and multi-output models. Internal refactors: `load_artifact_context` decomposed into `unroll_multiclass` / `parse_joint_baselines` / `unroll_multi_output` helpers; `bindings/python/src/predict.rs` split into `predict.rs` + `shap_bridge.rs` so the 16 SHAP PyO3 wrappers (8 single-output + 8 `_multi`) live in their own focused module.
+The `0.12.7` release closes limitation #6 from `docs/limitations.md`: Quantile regression now fully composes with DART boosting, MorphBoost training, and piecewise-linear (`leaf_model="linear"`) leaves. Removed parameter rejections at the Python and Rust layers, integrated MorphBoost shrinkage schedules into empirical quantile leaf refinement, and supported linear leaves during refinement by residualizing targets against build-time linear predictions (without double-scaling linear coefficients).
 
-**No artifact format change. Model artifacts written by v0.12.5 load and predict identically under v0.12.6.** Test counts: 447 cargo + 648 pytest (v0.12.5 baseline 447/644 plus 4 new pytest cases in `test_shap_multiclass_multioutput.py` covering multiclass softmax additivity, multiclass + linear leaves, joint multi-output additivity, and joint multi-output interactions with symmetry + row-marginal invariants).
+**No artifact format change. Model artifacts written by v0.12.6 load and predict identically under v0.12.7.** Test counts: 448 cargo + 649 pytest (incorporating the new linear leaves + quantile numeric test).
+
+## What Shipped In v0.12.7
+
+### Quantile regression compatibility extended (#53)
+
+Limitation #6 had restricted the use of the `"quantile"` objective with DART, MorphBoost, and linear leaves. This release implements full mathematical and engine-level compatibility for these settings:
+- **DART boosting** (`boosting_mode="dart"`): Leaf refinement operates correctly on dropped-out residuals by leveraging the DART prediction buffer evaluation before refinement.
+- **MorphBoost** (`training_mode="morph"`): Leaf refinement scales intercept updates by MorphBoost per-round shrinkage (`iter_shrinkage` clamped to `[0.0, 1.0]`) and depth-based penalty.
+- **Piecewise-linear leaves** (`leaf_model="linear"`): Leaf refinement calculates residual targets by subtracting the linear portion of predictions from training values, and only refines the flat leaf intercept (avoiding double-scaling of build-time solved linear slopes).
+- **Linear leaves + quantile numeric test**: Added `test_quantile_linear_leaves_numeric` to Python tests asserting that linear-leaf quantile regression fits linear relationships significantly better than standard constant-leaf models.
 
 ## What Shipped In v0.12.6
 

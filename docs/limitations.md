@@ -1,6 +1,6 @@
 # AlloyGBM Current Limitations
 
-Last updated for v0.12.6.
+Last updated for v0.12.7.
 
 ## Remaining Limitations
 
@@ -24,11 +24,11 @@ residualize-target == residualize-gradient identity that pre_target
 relies on breaks down (the gradient under log-link is `μ − y`, not
 `pred − y`). Use `"per_round_gradient"` or `"split_penalty"` with GLM
 objectives.
-### 6. Quantile regression is rejected for linear leaves, DART, and MorphBoost
-
-The `"quantile"` objective uses empirical leaf refinement which assumes constant leaves, standard boosting (non-DART), and standard training mode (non-MorphBoost). These combinations are rejected at the Python and Rust layers.
-
 ## Resolved (Previously Limitations)
+
+### v0.12.7
+
+- **Quantile regression compatibility extended.** The `"quantile"` objective now fully composes with DART boosting, MorphBoost training, and piecewise-linear (`leaf_model="linear"`) leaves. Removed the parameter rejections at the Python and Rust layers, scaled quantile leaf refinement calculations by the MorphBoost schedule factors (`depth_penalty * iter_shrinkage`), and supported linear leaves during refinement by residualizing targets against build-time linear predictions (without double-scaling linear coefficients).
 
 ### v0.12.6
 
@@ -51,7 +51,7 @@ The `"quantile"` objective uses empirical leaf refinement which assumes constant
 
 ### v0.11.1
 
-- **Quantile regression objective shipped.** `GBMRegressor(objective="quantile", quantile_alpha=…)` adds pinball loss regression with alpha ∈ (0.0, 1.0). Uses a proxy Hessian `h_i = w_i` during split-finding, an empirical quantile leaf refinement step at the end of each round acting on the full dataset, and a fast unweighted quickselect path. Explicitly rejected for linear leaves, DART, MorphBoost, classification, ranking, and joint training.
+- **Quantile regression objective shipped.** `GBMRegressor(objective="quantile", quantile_alpha=…)` adds pinball loss regression with alpha ∈ (0.0, 1.0). Uses a proxy Hessian `h_i = w_i` (sample weight) during split-finding, an empirical quantile leaf refinement step at the end of each round acting on the full dataset, and a fast unweighted quickselect path. Explicitly rejected for classification, ranking, and joint training.
 
 ### v0.11.0
 
