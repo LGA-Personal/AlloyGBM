@@ -1766,12 +1766,12 @@ impl Trainer {
             }
         }
         validate_train_params(&self.params)?;
-        if let Some(qa) = objective.quantile_alpha() {
-            if !qa.is_finite() || qa <= 0.0 || qa >= 1.0 {
-                return Err(EngineError::InvalidConfig(
-                    "quantile_alpha must be finite and in (0.0, 1.0)".to_string(),
-                ));
-            }
+        if let Some(qa) = objective.quantile_alpha()
+            && (!qa.is_finite() || qa <= 0.0 || qa >= 1.0)
+        {
+            return Err(EngineError::InvalidConfig(
+                "quantile_alpha must be finite and in (0.0, 1.0)".to_string(),
+            ));
         }
         validate_training_dataset(dataset)?;
         validate_neutralization_fit_contract(&self.params, dataset, objective)?;
@@ -2264,7 +2264,8 @@ impl Trainer {
                                 .min(1.0);
                     lr *= iter_shrinkage;
                 }
-                let depth_penalty_base = morph_state.as_ref().map(|ms| ms.config.depth_penalty_base);
+                let depth_penalty_base =
+                    morph_state.as_ref().map(|ms| ms.config.depth_penalty_base);
                 refine_quantile_leaf_values(
                     &mut candidate_round_stumps,
                     binned_matrix,
