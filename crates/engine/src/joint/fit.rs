@@ -587,6 +587,15 @@ fn fit_joint_inner(
         if round_result.stumps.is_empty() {
             break;
         }
+
+        crate::refine_joint_quantile_leaves(
+            &mut round_result.stumps,
+            binned_matrix,
+            &predictions,
+            &effective_targets,
+            per_output_objective,
+        ).map_err(|e| e.to_string())?;
+
         rounds_completed += 1;
 
         // v0.10.0 review fix (Comment 3) + v0.10.4 MorphBoost: pre-scale the
