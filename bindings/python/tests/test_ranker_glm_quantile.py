@@ -56,12 +56,12 @@ def test_multilabel_ranker_glm_quantile_independent() -> None:
     rng = np.random.default_rng(43)
     X = rng.normal(size=(200, 3)).astype(np.float32)
     groups = np.array([0]*100 + [1]*100, dtype=np.int32)
-    
+
     # 2-label targets
     y1 = rng.poisson(np.exp(0.2 * X[:, 0])).astype(np.float32)
     y2 = (rng.gamma(shape=2.0, scale=1.0, size=200).astype(np.float32) + 0.1)
     Y = np.column_stack([y1, y2])
-    
+
     # Independent MultiLabelGBMRanker with mixed or identical objectives
     # Poisson / Gamma
     mranker = MultiLabelGBMRanker(
@@ -95,14 +95,14 @@ def test_multilabel_ranker_glm_quantile_joint() -> None:
     rng = np.random.default_rng(44)
     X = rng.normal(size=(200, 3)).astype(np.float32)
     groups = np.array([0]*100 + [1]*100, dtype=np.int32)
-    
+
     # Poisson / Gamma / Tweedie / Quantile in Joint mode
     y1 = rng.poisson(np.exp(0.2 * X[:, 0])).astype(np.float32)
     y2 = (rng.gamma(shape=2.0, scale=1.0, size=200).astype(np.float32) + 0.1)
     y3 = np.where(rng.random(200) < 0.2, 0.0, y2).astype(np.float32)
     y4 = rng.normal(size=200).astype(np.float32)
     Y = np.column_stack([y1, y2, y3, y4])
-    
+
     mranker = MultiLabelGBMRanker(
         ranking_objective=["poisson", "gamma", "tweedie", "quantile"],
         quantile_alpha=0.7,
@@ -117,3 +117,32 @@ def test_multilabel_ranker_glm_quantile_joint() -> None:
     assert np.all(preds[:, 0] > 0.0)
     assert np.all(preds[:, 1] > 0.0)
     assert np.all(preds[:, 2] > 0.0)
+
+
+def test_multilabel_ranker_glm_save_load_roundtrip(tmp_path) -> None:
+    rng = np.random.default_rng(45)
+    X = rng.normal(size=(100, 3)).astype(np.float32)
+    groups = np.array([0]*50 + [1]*50, dtype=np.int32)
+    y1 = rng.poisson(np.exp(0.2 * X[:, 0])).astype(np.float32)
+    y2 = (rng.gamma(shape=2.0, scale=1.0, size=100).astype(np.float32) + 0.1)
+    Y = np.column_stack([y1, y2])
+
+    mranker = MultiLabelGBMRanker(
+        ranking_objective=["poisson", "gamma"],
+        multi_label_mode="joint",
+        n_estimators=5,
+        seed=45,
+    )
+    mranker.fit(X, Y, group=groups)
+    preds_before = np.asarray(mranker.predict(X))
+
+    path = tmp_path / "model.alloy"
+    mranker.save_model(str(path))
+    restored = MultiLabelGBMRanker.load_model(str(path))
+    preds_after = np.asarray(restored.predict(X))
+
+    np.testing.assert_allclose(preds_before, preds_after, rtol=1e-6)
+    assert restored.ranking_objective == ["poisson", "gamma"]
+    # Check that predictions are indeed post-transformed (positive)
+    assert np.all(preds_after > 0.0)
+

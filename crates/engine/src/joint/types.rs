@@ -33,7 +33,6 @@ pub enum JointObjective {
     Quantile { alpha: f32 },
 }
 
-impl Eq for JointObjective {}
 
 impl JointObjective {
     pub fn parse(name: &str) -> Result<Self, String> {

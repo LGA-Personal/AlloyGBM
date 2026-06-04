@@ -110,8 +110,6 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
                 f"multi_label_mode must be 'independent' or 'joint', got "
                 f"{multi_label_mode!r}"
             )
-
-
         self.multi_label_mode = multi_label_mode
         self.ranking_labels = (
             [str(label) for label in ranking_labels]
@@ -835,9 +833,6 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
             for col_idx, obj in enumerate(objs):
                 if obj in ("poisson", "gamma", "tweedie"):
                     preds[:, col_idx] = np.exp(np.clip(preds[:, col_idx], -50.0, 50.0))
-                elif obj == "binary_crossentropy":
-                    x = preds[:, col_idx]
-                    preds[:, col_idx] = np.where(x >= 0, 1.0 / (1.0 + np.exp(-x)), np.exp(x) / (1.0 + np.exp(x)))
             return preds
         cols = [np.asarray(ranker.predict(X), dtype=np.float64) for ranker in self._sub_rankers]
         return np.stack(cols, axis=1)
@@ -1021,6 +1016,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
                     "continuous_feature_quantile_cuts": getattr(self, "_continuous_feature_quantile_cuts", None),
                     "continuous_feature_linear_rank_flags": getattr(self, "_continuous_feature_linear_rank_flags", None),
                     "per_label_kwargs": self._per_label_kwargs,
+                    "ranking_objective": self.ranking_objective,
                 }
                 metadata_json = json.dumps(to_list(metadata)).encode("utf-8")
                 f.write(struct.pack("<Q", len(metadata_json)))
@@ -1126,6 +1122,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
                 inst._continuous_feature_quantile_cuts = metadata.get("continuous_feature_quantile_cuts")
                 inst._continuous_feature_linear_rank_flags = metadata.get("continuous_feature_linear_rank_flags")
                 inst._per_label_kwargs = metadata.get("per_label_kwargs", {})
+                inst.ranking_objective = metadata.get("ranking_objective", "rank:ndcg")
             else:
                 inst._uses_continuous_binning = False
                 inst._per_label_kwargs = {}
