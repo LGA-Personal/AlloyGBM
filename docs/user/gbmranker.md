@@ -35,6 +35,17 @@ print("NDCG@10:", ndcg(y_test, scores, group=query_ids_test, k=10))
 - `"queryrmse"` -- Query-grouped RMSE
 - `"yetirank"` -- YetiRank (stochastic NDCG-weighted pairwise)
 
+As of v0.12.8, `GBMRanker` also accepts the regression objectives inherited from
+`GBMRegressor` via `ranking_objective=`:
+
+- `"poisson"` -- Poisson deviance (count regression; `predict()` returns `exp(raw)`)
+- `"gamma"` -- Gamma deviance (strictly positive regression; log-link)
+- `"tweedie"` -- Tweedie deviance (compound Poisson-Gamma; log-link, `tweedie_variance_power` ∈ (1, 2))
+- `"quantile"` -- Quantile regression (pinball loss, `quantile_alpha` ∈ (0.0, 1.0))
+
+These do not use the query `group` for their gradient (it is still required by
+`fit()` for API consistency) and return predictions on the natural scale.
+
 ## Parameters
 
 ### Ranker-Specific
@@ -159,7 +170,8 @@ group = [0, 0, 0, 1, 1, 2, 2, 2, 2]
 
 ## Current Scope
 
-- 5 ranking objectives implemented natively in Rust
+- 5 ranking objectives implemented natively in Rust, plus the 4 inherited
+  regression objectives (`poisson`, `gamma`, `tweedie`, `quantile`) as of v0.12.8
 - Single-label per `GBMRanker`. For multi-output ranking
   (`y` shaped `(n_rows, n_labels)`, `predict` returns the same shape) use
   `MultiLabelGBMRanker`, which trains one independent `GBMRanker` per label

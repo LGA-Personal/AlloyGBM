@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.12.8 (2026-06-04)
+
+Feature release on top of v0.12.7. Narrows limitation #4 from `docs/limitations.md`: the GLM (`"poisson"`, `"gamma"`, `"tweedie"`) and `"quantile"` objectives now work on `GBMRanker` and `MultiLabelGBMRanker` in addition to single-output `GBMRegressor`. Only the Classifier / multiclass softmax paths still reject these objectives.
+
+### Features
+
+- **GLM and Quantile objectives on `GBMRanker`.** `GBMRanker(ranking_objective="poisson" | "gamma" | "tweedie" | "quantile", …)` is now accepted. The objectives reuse `GBMRegressor`'s training path and artifact-recorded post-transform (the predictor applies `exp` for GLM objectives), so predictions come back on the natural scale. `tweedie_variance_power` and `quantile_alpha` are honored. The previous `objective="quantile"` rejection guards were removed.
+- **GLM and Quantile objectives on `MultiLabelGBMRanker`.** Both `multi_label_mode="independent"` (per-label `GBMRanker` fan-out) and `"joint"` (shared-tree trainer) accept per-label GLM/quantile objectives, including mixed lists such as `ranking_objective=["poisson", "gamma", "tweedie", "quantile"]`. In joint mode the GLM `exp` post-transform is applied on the Python predict surface (the joint predictor returns raw log-space scores); the `.alloy` bundle format (v3) now persists `ranking_objective` so the post-transform survives a `save_model`/`load_model` roundtrip.
+
+### Engine
+
+- **`JointObjective` extended** with `Poisson`, `Gamma`, `Tweedie { variance_power }`, and `Quantile { alpha }` variants. Initial predictions and gradients delegate to the existing single-output `PoissonObjective` / `GammaObjective` / `TweedieObjective` / `QuantileObjective` `ObjectiveOps` impls, so the math matches the regressor path exactly.
+- **Joint empirical-quantile leaf refinement** (`refine_joint_quantile_leaves`). After each joint round, leaves for `Quantile` outputs are refined to the empirical α-quantile of residuals over all rows in each leaf — mirroring the single-output `refine_quantile_leaf_values` pass — before the existing per-round learning-rate / MorphBoost pre-scaling applies. Non-quantile outputs are untouched.
+
+### Bug fixes
+
+- **Joint GLM/quantile predictions now survive `save_model`/`load_model`.** The joint `.alloy` bundle previously did not persist `ranking_objective`, so a reloaded model lost the per-output objective and skipped the GLM post-transform, returning raw log-space scores. The v3 bundle metadata now stores and restores `ranking_objective`.
+
 ## v0.12.7 (2026-06-02)
 
 Feature and compatibility release on top of v0.12.6. Closes limitation #6 from `docs/limitations.md`: Quantile regression now fully composes with DART boosting, MorphBoost training, and piecewise-linear (`leaf_model="linear"`) leaves.
