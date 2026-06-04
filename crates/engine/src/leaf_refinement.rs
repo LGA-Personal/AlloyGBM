@@ -721,9 +721,9 @@ pub(crate) fn refine_joint_quantile_leaves(
     }
 
     let mut current_absolute_outputs_per_output = vec![HashMap::new(); n_outputs];
-    for k in 0..n_outputs {
-        current_absolute_outputs_per_output[k].insert(0_u32, 0.0_f32);
-        populate_child_absolute_outputs_joint(0, k, &stumps_by_local, &mut current_absolute_outputs_per_output[k])?;
+    for (k, absolute_outputs) in current_absolute_outputs_per_output.iter_mut().enumerate() {
+        absolute_outputs.insert(0_u32, 0.0_f32);
+        populate_child_absolute_outputs_joint(0, k, &stumps_by_local, absolute_outputs)?;
     }
 
     let mut leaf_rows: HashMap<u32, Vec<u32>> = HashMap::new();
@@ -748,10 +748,13 @@ pub(crate) fn refine_joint_quantile_leaves(
                     let res = targets_per_output[k][r] - predictions_per_output[k][r];
                     res_vec.push(res);
                 }
-                leaf_residuals.insert(leaf_id, LeafResiduals {
-                    residuals: res_vec,
-                    weights: None,
-                });
+                leaf_residuals.insert(
+                    leaf_id,
+                    LeafResiduals {
+                        residuals: res_vec,
+                        weights: None,
+                    },
+                );
             }
             fill_refined_child_quantile_absolute_outputs(
                 0,
@@ -814,13 +817,25 @@ fn populate_child_absolute_outputs_joint(
     let (left_val, right_val) = if let Some((left_k, right_k)) = &stump.multi_output_leaf_values {
         (left_k[output_index], right_k[output_index])
     } else {
-        (stump.left_leaf_value.as_scalar(), stump.right_leaf_value.as_scalar())
+        (
+            stump.left_leaf_value.as_scalar(),
+            stump.right_leaf_value.as_scalar(),
+        )
     };
 
     absolute_outputs.insert(left_local_node_id, parent_absolute + left_val);
     absolute_outputs.insert(right_local_node_id, parent_absolute + right_val);
-    populate_child_absolute_outputs_joint(left_local_node_id, output_index, stumps_by_local, absolute_outputs)?;
-    populate_child_absolute_outputs_joint(right_local_node_id, output_index, stumps_by_local, absolute_outputs)?;
+    populate_child_absolute_outputs_joint(
+        left_local_node_id,
+        output_index,
+        stumps_by_local,
+        absolute_outputs,
+    )?;
+    populate_child_absolute_outputs_joint(
+        right_local_node_id,
+        output_index,
+        stumps_by_local,
+        absolute_outputs,
+    )?;
     Ok(())
 }
-

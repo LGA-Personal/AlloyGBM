@@ -594,7 +594,8 @@ fn fit_joint_inner(
             &predictions,
             &effective_targets,
             per_output_objective,
-        ).map_err(|e| e.to_string())?;
+        )
+        .map_err(|e| e.to_string())?;
 
         rounds_completed += 1;
 

@@ -1096,7 +1096,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
 
             inst = cls(
                 ranking_labels=names,
-                ranking_objective="rank:ndcg",  # placeholder; joint predict ignores it
+                ranking_objective="rank:ndcg",  # placeholder; overwritten from v3 metadata below
                 multi_label_mode="joint",
             )
             inst._joint_artifact_bytes = bytes(artifact)

@@ -12,8 +12,8 @@ use alloygbm_core::{GradientPair, NodeStats};
 
 use crate::{
     GammaObjective, LambdaMARTObjective, ObjectiveOps, PairwiseRankingObjective, PoissonObjective,
-    QuantileObjective, QueryRMSEObjective, SquaredErrorObjective, TweedieObjective,
-    TrainedModel, TrainedStump, XeNDCGObjective,
+    QuantileObjective, QueryRMSEObjective, SquaredErrorObjective, TrainedModel, TrainedStump,
+    TweedieObjective, XeNDCGObjective,
 };
 
 use super::TREE_NODE_STRIDE;
@@ -33,7 +33,6 @@ pub enum JointObjective {
     Quantile { alpha: f32 },
 }
 
-
 impl JointObjective {
     pub fn parse(name: &str) -> Result<Self, String> {
         match name {
@@ -44,7 +43,9 @@ impl JointObjective {
             "rank:xendcg" => Ok(Self::RankXendcg),
             "poisson" => Ok(Self::Poisson),
             "gamma" => Ok(Self::Gamma),
-            "tweedie" => Ok(Self::Tweedie { variance_power: 1.5 }),
+            "tweedie" => Ok(Self::Tweedie {
+                variance_power: 1.5,
+            }),
             "quantile" => Ok(Self::Quantile { alpha: 0.5 }),
             other => Err(format!(
                 "joint multi-output trainer does not support objective {other:?}; \
