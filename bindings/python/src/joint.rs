@@ -114,6 +114,8 @@ impl JointPredictorHandle {
     neutralization="none".to_string(),
     factor_neutralization_lambda=1e-6_f32,
     factor_penalty=0.0_f32,
+    tweedie_variance_power=None::<f32>,
+    quantile_alpha=None::<f32>,
 ))]
 pub(crate) fn train_joint_multi_label_ranker(
     x_values: Vec<f32>,
@@ -158,6 +160,8 @@ pub(crate) fn train_joint_multi_label_ranker(
     neutralization: String,
     factor_neutralization_lambda: f32,
     factor_penalty: f32,
+    tweedie_variance_power: Option<f32>,
+    quantile_alpha: Option<f32>,
 ) -> PyResult<(Vec<u8>, Vec<f32>, usize, usize)> {
     use alloygbm_engine::joint::JointObjective;
 
@@ -187,8 +191,18 @@ pub(crate) fn train_joint_multi_label_ranker(
 
     let mut per_output_objective: Vec<JointObjective> = Vec::with_capacity(n_outputs);
     for name in &per_output_objective_names {
-        let obj = JointObjective::parse(name)
-            .map_err(|e| PyValueError::new_err(format!("invalid objective {name:?}: {e}")))?;
+        let obj = match name.as_str() {
+            "poisson" => JointObjective::Poisson,
+            "gamma" => JointObjective::Gamma,
+            "tweedie" => JointObjective::Tweedie {
+                variance_power: tweedie_variance_power.unwrap_or(1.5),
+            },
+            "quantile" => JointObjective::Quantile {
+                alpha: quantile_alpha.unwrap_or(0.5),
+            },
+            other => JointObjective::parse(other)
+                .map_err(|e| PyValueError::new_err(format!("invalid objective {name:?}: {e}")))?,
+        };
         per_output_objective.push(obj);
     }
     if per_output_objective.iter().any(|o| o.requires_group()) && group_id.is_none() {
@@ -295,6 +309,8 @@ pub(crate) fn train_joint_multi_label_ranker(
         leaf_solver: parsed_leaf_solver,
         dro_config: parsed_dro_config,
         neutralization_config: parsed_neutralization_config,
+        tweedie_variance_power: tweedie_variance_power.unwrap_or(1.5),
+        quantile_alpha: quantile_alpha.unwrap_or(0.5),
         ..TrainParams::default()
     };
 
