@@ -18,6 +18,10 @@ _RANKING_OBJECTIVES = frozenset({
     "rank:xendcg",
     "queryrmse",
     "yetirank",
+    "poisson",
+    "gamma",
+    "tweedie",
+    "quantile",
 })
 
 _OBJECTIVE_NAME_MAP = {
@@ -26,6 +30,10 @@ _OBJECTIVE_NAME_MAP = {
     "rank:xendcg": "rank_xendcg",
     "queryrmse": "queryrmse",
     "yetirank": "yetirank",
+    "poisson": "poisson",
+    "gamma": "gamma",
+    "tweedie": "tweedie",
+    "quantile": "quantile",
 }
 
 
@@ -45,6 +53,10 @@ class GBMRanker(GBMRegressor):
         * ``"rank:xendcg"`` -- Cross-entropy approximation to NDCG
         * ``"queryrmse"`` -- Query-grouped RMSE
         * ``"yetirank"`` -- YetiRank (stochastic NDCG-weighted pairwise)
+        * ``"poisson"`` -- Poisson deviance (count regression)
+        * ``"gamma"`` -- Gamma deviance (strictly positive regression)
+        * ``"tweedie"`` -- Tweedie deviance (compound Poisson-Gamma regression)
+        * ``"quantile"`` -- Quantile regression
 
     Other parameters are identical to :class:`GBMRegressor`.
     """
@@ -60,8 +72,6 @@ class GBMRanker(GBMRegressor):
                 "neutralization='pre_target' is only supported for GBMRegressor "
                 "squared-error training"
             )
-        if kwargs.get("objective") == "quantile":
-            raise ValueError("GBMRanker does not support objective='quantile'")
         super().__init__(**kwargs)
         self.ranking_objective = ranking_objective
 
@@ -308,8 +318,6 @@ class GBMRanker(GBMRegressor):
                 "neutralization='pre_target' is only supported for GBMRegressor "
                 "squared-error training"
             )
-        if params.get("objective") == "quantile":
-            raise ValueError("GBMRanker does not support objective='quantile'")
         if "ranking_objective" in params:
             val = params.pop("ranking_objective")
             if val not in _RANKING_OBJECTIVES:

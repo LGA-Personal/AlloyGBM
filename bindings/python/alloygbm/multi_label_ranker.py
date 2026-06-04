@@ -110,15 +110,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
                 f"multi_label_mode must be 'independent' or 'joint', got "
                 f"{multi_label_mode!r}"
             )
-        if isinstance(ranking_objective, str):
-            if ranking_objective == "quantile":
-                raise ValueError("MultiLabelGBMRanker does not support objective='quantile'")
-        else:
-            for obj in ranking_objective:
-                if str(obj) == "quantile":
-                    raise ValueError("MultiLabelGBMRanker does not support objective='quantile'")
-        if kwargs.get("objective") == "quantile":
-            raise ValueError("MultiLabelGBMRanker does not support objective='quantile'")
+
 
         self.multi_label_mode = multi_label_mode
         self.ranking_labels = (
@@ -174,9 +166,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
                     f"ranking_objective list length {len(objs)} does not match "
                     f"y's label count {n_labels}"
                 )
-        for obj in objs:
-            if obj == "quantile":
-                raise ValueError("MultiLabelGBMRanker does not support objective='quantile'")
+
         return objs
 
     def _resolve_label_names(self, n_labels: int) -> list[str]:
@@ -213,17 +203,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
                 )
             self.multi_label_mode = tm  # type: ignore[assignment]
         if "ranking_objective" in params:
-            ro = params.get("ranking_objective")
-            if isinstance(ro, str):
-                if ro == "quantile":
-                    raise ValueError("MultiLabelGBMRanker does not support objective='quantile'")
-            elif ro is not None:
-                for obj in ro:  # type: ignore[union-attr]
-                    if str(obj) == "quantile":
-                        raise ValueError("MultiLabelGBMRanker does not support objective='quantile'")
             self.ranking_objective = params.pop("ranking_objective")  # type: ignore[assignment]
-        if "objective" in params and params.get("objective") == "quantile":
-            raise ValueError("MultiLabelGBMRanker does not support objective='quantile'")
         if "ranking_labels" in params:
             v = params.pop("ranking_labels")
             self.ranking_labels = (
@@ -418,6 +398,8 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
         "neutralization",
         "factor_neutralization_lambda",
         "factor_penalty",
+        "tweedie_variance_power",
+        "quantile_alpha",
     })
 
     @staticmethod
@@ -760,6 +742,12 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
                 kw.get("factor_neutralization_lambda", 1e-6)
             ),
             factor_penalty=float(kw.get("factor_penalty", 0.0)),
+            tweedie_variance_power=(
+                float(kw["tweedie_variance_power"]) if "tweedie_variance_power" in kw else None
+            ),
+            quantile_alpha=(
+                float(kw["quantile_alpha"]) if "quantile_alpha" in kw else None
+            ),
         )
 
         self._joint_artifact_bytes = bytes(artifact)
@@ -842,7 +830,15 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
             else:
                 flat = x_arr.reshape(-1).tolist()
             raw = self._joint_handle.predict_dense(flat)
-            return np.asarray(raw, dtype=np.float64).reshape(n_rows, self.n_labels_)
+            preds = np.asarray(raw, dtype=np.float64).reshape(n_rows, self.n_labels_)
+            objs = self._resolve_objectives(self.n_labels_)
+            for col_idx, obj in enumerate(objs):
+                if obj in ("poisson", "gamma", "tweedie"):
+                    preds[:, col_idx] = np.exp(np.clip(preds[:, col_idx], -50.0, 50.0))
+                elif obj == "binary_crossentropy":
+                    x = preds[:, col_idx]
+                    preds[:, col_idx] = np.where(x >= 0, 1.0 / (1.0 + np.exp(-x)), np.exp(x) / (1.0 + np.exp(x)))
+            return preds
         cols = [np.asarray(ranker.predict(X), dtype=np.float64) for ranker in self._sub_rankers]
         return np.stack(cols, axis=1)
 
