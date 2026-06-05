@@ -14,7 +14,7 @@ publish = false
 alloygbm-core = { path = "../core" }
 alloygbm-engine = { path = "../engine" }
 rayon = "1.11"
-wide = "0.7"
+wide = "1.4"
 
 [[bench]]
 name = "histogram_kernels"
