@@ -219,25 +219,30 @@ def test_quantile_supported_combinations() -> None:
     with pytest.raises(ValueError, match="GBMClassifier does not support objective='quantile'"):
         clf.set_params(objective="quantile")
 
-    # 5. GBMRanker rejects
+    # 5. GBMRanker accepts
     from alloygbm import GBMRanker
-    with pytest.raises(ValueError, match="GBMRanker does not support objective='quantile'"):
-        GBMRanker(objective="quantile")
-    ranker = GBMRanker()
-    with pytest.raises(ValueError, match="GBMRanker does not support objective='quantile'"):
-        ranker.set_params(objective="quantile")
+    ranker = GBMRanker(ranking_objective="quantile", n_estimators=5, seed=42)
+    groups = np.array([0]*100 + [1]*100, dtype=np.int32)
+    ranker.fit(X, y, group=groups)
+    preds = ranker.predict(X)
+    assert len(preds) == 200
 
-    # 6. MultiLabelGBMRanker rejects
+    # 6. MultiLabelGBMRanker accepts (both modes)
     from alloygbm import MultiLabelGBMRanker
-    with pytest.raises(ValueError, match="MultiLabelGBMRanker does not support objective='quantile'"):
-        MultiLabelGBMRanker(ranking_objective="quantile")
-    with pytest.raises(ValueError, match="MultiLabelGBMRanker does not support objective='quantile'"):
-        MultiLabelGBMRanker(objective="quantile")
-    mranker = MultiLabelGBMRanker()
-    with pytest.raises(ValueError, match="MultiLabelGBMRanker does not support objective='quantile'"):
-        mranker.set_params(ranking_objective="quantile")
-    with pytest.raises(ValueError, match="MultiLabelGBMRanker does not support objective='quantile'"):
-        mranker.set_params(objective="quantile")
+    Y = np.column_stack([y, y * 0.5])
+    
+    # Independent mode
+    mranker_ind = MultiLabelGBMRanker(ranking_objective="quantile", multi_label_mode="independent", n_estimators=5, seed=42)
+    mranker_ind.fit(X, Y, group=groups)
+    preds_ind = np.asarray(mranker_ind.predict(X))
+    assert preds_ind.shape == (200, 2)
+    
+    # Joint mode
+    mranker_joint = MultiLabelGBMRanker(ranking_objective="quantile", multi_label_mode="joint", n_estimators=5, seed=42)
+    mranker_joint.fit(X, Y, group=groups)
+    preds_joint = np.asarray(mranker_joint.predict(X))
+    assert preds_joint.shape == (200, 2)
+
 
 
 def test_quantile_linear_leaves_numeric() -> None:

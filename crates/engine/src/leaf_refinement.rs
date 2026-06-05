@@ -23,6 +23,7 @@ use std::collections::HashMap;
 
 use alloygbm_core::{BinnedMatrix, LeafValue};
 
+use crate::JointObjective;
 use crate::error::{EngineError, EngineResult};
 use crate::objectives::weighted_quantile;
 use crate::round::apply_tree_to_binned_predictions;
@@ -681,4 +682,160 @@ fn fill_refined_subtree_quantile_absolute_output(
         weighted_sum: absolute_output * weight_sum,
         weight_sum,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn refine_joint_quantile_leaves(
+    stumps: &mut [TrainedStump],
+    binned_matrix: &BinnedMatrix,
+    predictions_per_output: &[Vec<f32>],
+    targets_per_output: &[&[f32]],
+    per_output_objective: &[JointObjective],
+) -> EngineResult<()> {
+    if stumps.is_empty() {
+        return Ok(());
+    }
+    let n_outputs = targets_per_output.len();
+    if per_output_objective.len() != n_outputs {
+        return Err(EngineError::ContractViolation(format!(
+            "per_output_objective length {} != n_outputs {n_outputs}",
+            per_output_objective.len()
+        )));
+    }
+
+    let mut has_quantile = false;
+    for &obj in per_output_objective {
+        if matches!(obj, JointObjective::Quantile { .. }) {
+            has_quantile = true;
+            break;
+        }
+    }
+    if !has_quantile {
+        return Ok(());
+    }
+
+    let mut stumps_by_local = HashMap::new();
+    for stump in stumps.iter() {
+        let local_node_id = stump.split.node_id;
+        stumps_by_local.insert(local_node_id, stump);
+    }
+
+    let mut current_absolute_outputs_per_output = vec![HashMap::new(); n_outputs];
+    for (k, absolute_outputs) in current_absolute_outputs_per_output.iter_mut().enumerate() {
+        absolute_outputs.insert(0_u32, 0.0_f32);
+        populate_child_absolute_outputs_joint(0, k, &stumps_by_local, absolute_outputs)?;
+    }
+
+    let mut leaf_rows: HashMap<u32, Vec<u32>> = HashMap::new();
+    for row_index in 0..binned_matrix.row_count {
+        let terminal_local_node_id =
+            terminal_local_node_id_for_row(row_index, binned_matrix, &stumps_by_local)?;
+        leaf_rows
+            .entry(terminal_local_node_id)
+            .or_default()
+            .push(row_index as u32);
+    }
+
+    let mut refined_absolute_outputs_per_output = vec![HashMap::new(); n_outputs];
+    for k in 0..n_outputs {
+        refined_absolute_outputs_per_output[k].insert(0_u32, 0.0_f32);
+        if let JointObjective::Quantile { alpha } = per_output_objective[k] {
+            let mut leaf_residuals: HashMap<u32, LeafResiduals> = HashMap::new();
+            for (&leaf_id, rows) in &leaf_rows {
+                let mut res_vec = Vec::with_capacity(rows.len());
+                for &row_index in rows {
+                    let r = row_index as usize;
+                    let res = targets_per_output[k][r] - predictions_per_output[k][r];
+                    res_vec.push(res);
+                }
+                leaf_residuals.insert(
+                    leaf_id,
+                    LeafResiduals {
+                        residuals: res_vec,
+                        weights: None,
+                    },
+                );
+            }
+            fill_refined_child_quantile_absolute_outputs(
+                0,
+                &stumps_by_local,
+                &leaf_residuals,
+                alpha,
+                &current_absolute_outputs_per_output[k],
+                f32::INFINITY,
+                &mut refined_absolute_outputs_per_output[k],
+            )?;
+        }
+    }
+
+    for stump in stumps.iter_mut() {
+        let local_node_id = stump.split.node_id;
+        let left_local_node_id = left_child_node_id(local_node_id)?;
+        let right_local_node_id = right_child_node_id(local_node_id)?;
+
+        let Some((left_k, right_k)) = stump.multi_output_leaf_values.as_mut() else {
+            continue;
+        };
+
+        for k in 0..n_outputs {
+            if matches!(per_output_objective[k], JointObjective::Quantile { .. }) {
+                let parent_absolute = refined_absolute_outputs_per_output[k]
+                    .get(&local_node_id)
+                    .copied()
+                    .unwrap_or(0.0);
+                let left_absolute = refined_absolute_outputs_per_output[k]
+                    .get(&left_local_node_id)
+                    .copied()
+                    .unwrap_or(parent_absolute + left_k[k]);
+                let right_absolute = refined_absolute_outputs_per_output[k]
+                    .get(&right_local_node_id)
+                    .copied()
+                    .unwrap_or(parent_absolute + right_k[k]);
+
+                left_k[k] = left_absolute - parent_absolute;
+                right_k[k] = right_absolute - parent_absolute;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn populate_child_absolute_outputs_joint(
+    local_node_id: u32,
+    output_index: usize,
+    stumps_by_local: &HashMap<u32, &TrainedStump>,
+    absolute_outputs: &mut HashMap<u32, f32>,
+) -> EngineResult<()> {
+    let Some(stump) = stumps_by_local.get(&local_node_id) else {
+        return Ok(());
+    };
+    let parent_absolute = absolute_outputs.get(&local_node_id).copied().unwrap_or(0.0);
+    let left_local_node_id = left_child_node_id(local_node_id)?;
+    let right_local_node_id = right_child_node_id(local_node_id)?;
+
+    let (left_val, right_val) = if let Some((left_k, right_k)) = &stump.multi_output_leaf_values {
+        (left_k[output_index], right_k[output_index])
+    } else {
+        (
+            stump.left_leaf_value.as_scalar(),
+            stump.right_leaf_value.as_scalar(),
+        )
+    };
+
+    absolute_outputs.insert(left_local_node_id, parent_absolute + left_val);
+    absolute_outputs.insert(right_local_node_id, parent_absolute + right_val);
+    populate_child_absolute_outputs_joint(
+        left_local_node_id,
+        output_index,
+        stumps_by_local,
+        absolute_outputs,
+    )?;
+    populate_child_absolute_outputs_joint(
+        right_local_node_id,
+        output_index,
+        stumps_by_local,
+        absolute_outputs,
+    )?;
+    Ok(())
 }

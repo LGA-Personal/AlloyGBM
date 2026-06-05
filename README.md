@@ -41,7 +41,7 @@ maturin develop --manifest-path bindings/python/Cargo.toml --release
 
 AlloyGBM targets Python `3.11+` and uses a native Rust extension module.
 
-Wheel targets for `0.12.7`:
+Wheel targets for `0.12.8`:
 
 - macOS `arm64`
 - Linux `x86_64` (manylinux)
@@ -335,7 +335,7 @@ artifact_bytes = model.artifact_bytes
 
 - **`GBMRegressor`** -- regression with dataset-aware `training_policy`. As of v0.12.7 supports six built-in objectives: `"squared_error"` (default), `"poisson"`, `"gamma"`, `"tweedie"` (with `tweedie_variance_power` ∈ (1, 2)), `"quantile"` (with `quantile_alpha` ∈ (0.0, 1.0)), and custom callables. All three GLM objectives use a log-link (`predict()` returns `exp(raw)`).
 - **`GBMClassifier`** -- binary classification with log-loss objective, `predict_proba`, sklearn `ClassifierMixin`
-- **`GBMRanker`** -- learning-to-rank with 5 objectives: `rank:pairwise`, `rank:ndcg`, `rank:xendcg`, `queryrmse`, `yetirank`
+- **`GBMRanker`** -- learning-to-rank with 5 objectives: `rank:pairwise`, `rank:ndcg`, `rank:xendcg`, `queryrmse`, `yetirank`. As of v0.12.8 also accepts the GLM/quantile regression objectives (`poisson`, `gamma`, `tweedie`, `quantile`) via `ranking_objective=`.
 - **`MultiLabelGBMRanker`** -- multi-output ranking: `y` shaped `(n_rows, n_labels)`, `predict` returns the same shape, per-label `ranking_objective` lists supported. As of v0.10.1 also supports `multi_label_mode="joint"` for shared-tree training across all K labels via `engine::joint::fit_joint_multi_output` (default `"independent"` preserves the K-per-label `GBMRanker` fallback). v0.10.2 expanded joint-mode kwargs to include `tree_growth="leaf"` + `max_leaves`, `interaction_constraints`, `min_split_gain`, `row_subsample`, and `col_subsample`. v0.10.3 wires native-categorical splits (`categorical_feature_indices` + `max_cat_threshold`) through the joint Python bridge, adds `boosting_mode="goss"` and `boosting_mode="dart"` to the joint trainer, and supports `warm_start=True` + `init_model=...` on the joint path. v0.10.4 adds MorphBoost to the joint trainer (`training_mode="morph"` + the full `morph_*` / `lr_schedule` surface, with EMA warm-resume via the `MorphMetadata` artifact section). v0.10.5 adds joint DRO leaves (`leaf_solver="dro"` + `dro_radius` / `dro_metric`). v0.10.6 closes the last v0.10.4-deferred follow-up by adding all three factor-neutralization modes (`neutralization="pre_target" | "per_round_gradient" | "split_penalty"` + `factor_exposures=` on `fit()`) to the joint trainer — full feature parity with the single-output path.
 - All estimators are sklearn-compatible (`get_params`, `set_params`, `score`, pipeline integration)
 
@@ -406,9 +406,9 @@ Benchmark tooling and methodology live in [benchmarks/README.md](benchmarks/READ
 ## Current Limitations
 
 - CPU-only runtime (GPU backend is architecturally planned but not implemented)
-- `MultiLabelGBMRanker(multi_label_mode="joint")` supports built-in `squared_error` / `queryrmse` / `rank:*` objectives. v0.10.2 added leaf-wise growth + `max_leaves`, `interaction_constraints`, `min_split_gain`, `row_subsample`, and `col_subsample`. v0.10.3 added native-categorical Python wiring, joint GOSS, joint DART, and joint warm-start. v0.10.4 added joint MorphBoost (`training_mode="morph"` + the full morph kwargs). v0.10.5 added joint DRO leaves (`leaf_solver="dro"` + `dro_radius` / `dro_metric`). **v0.10.6** added joint factor neutralization (all three modes: `pre_target`, `per_round_gradient`, `split_penalty`) — the joint trainer now has full feature parity with the single-output path.
+- `MultiLabelGBMRanker(multi_label_mode="joint")` supports built-in `squared_error` / `queryrmse` / `rank:*` objectives, plus (as of v0.12.8) the `poisson` / `gamma` / `tweedie` / `quantile` regression objectives. v0.10.2 added leaf-wise growth + `max_leaves`, `interaction_constraints`, `min_split_gain`, `row_subsample`, and `col_subsample`. v0.10.3 added native-categorical Python wiring, joint GOSS, joint DART, and joint warm-start. v0.10.4 added joint MorphBoost (`training_mode="morph"` + the full morph kwargs). v0.10.5 added joint DRO leaves (`leaf_solver="dro"` + `dro_radius` / `dro_metric`). **v0.10.6** added joint factor neutralization (all three modes: `pre_target`, `per_round_gradient`, `split_penalty`) — the joint trainer now has full feature parity with the single-output path.
 - `leaf_solver="dro"` is a robust scalar leaf update, not a full raw-distribution Wasserstein DRO guarantee
-- Quantile regression objective (`"quantile"`) is supported with linear leaves, DART, and MorphBoost, and is rejected for classification, ranking, and joint multi-output training.
+- Quantile regression objective (`"quantile"`) is supported with linear leaves, DART, and MorphBoost, and (as of v0.12.8) on `GBMRanker` and `MultiLabelGBMRanker` (both modes). It is still rejected for classification and multiclass training.
 
 See [docs/limitations.md](docs/limitations.md) for the full list.
 

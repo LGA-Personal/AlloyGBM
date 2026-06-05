@@ -11,21 +11,26 @@
 use alloygbm_core::{GradientPair, NodeStats};
 
 use crate::{
-    LambdaMARTObjective, ObjectiveOps, PairwiseRankingObjective, QueryRMSEObjective,
-    SquaredErrorObjective, TrainedModel, TrainedStump, XeNDCGObjective,
+    GammaObjective, LambdaMARTObjective, ObjectiveOps, PairwiseRankingObjective, PoissonObjective,
+    QuantileObjective, QueryRMSEObjective, SquaredErrorObjective, TrainedModel, TrainedStump,
+    TweedieObjective, XeNDCGObjective,
 };
 
 use super::TREE_NODE_STRIDE;
 use super::helpers::bitset_bytes_to_u64;
 
 /// Runtime selector for per-output objective on the joint trainer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum JointObjective {
     SquaredError,
     QueryRmse,
     RankPairwise,
     RankNdcg,
     RankXendcg,
+    Poisson,
+    Gamma,
+    Tweedie { variance_power: f32 },
+    Quantile { alpha: f32 },
 }
 
 impl JointObjective {
@@ -36,9 +41,15 @@ impl JointObjective {
             "rank:pairwise" => Ok(Self::RankPairwise),
             "rank:ndcg" => Ok(Self::RankNdcg),
             "rank:xendcg" => Ok(Self::RankXendcg),
+            "poisson" => Ok(Self::Poisson),
+            "gamma" => Ok(Self::Gamma),
+            "tweedie" => Ok(Self::Tweedie {
+                variance_power: 1.5,
+            }),
+            "quantile" => Ok(Self::Quantile { alpha: 0.5 }),
             other => Err(format!(
                 "joint multi-output trainer does not support objective {other:?}; \
-                 supported: squared_error, queryrmse, rank:pairwise, rank:ndcg, rank:xendcg"
+                 supported: squared_error, queryrmse, rank:pairwise, rank:ndcg, rank:xendcg, poisson, gamma, tweedie, quantile"
             )),
         }
     }
@@ -57,6 +68,10 @@ impl JointObjective {
             Self::RankPairwise => "rank:pairwise",
             Self::RankNdcg => "rank:ndcg",
             Self::RankXendcg => "rank:xendcg",
+            Self::Poisson => "poisson",
+            Self::Gamma => "gamma",
+            Self::Tweedie { .. } => "tweedie",
+            Self::Quantile { .. } => "quantile",
         }
     }
 
@@ -69,6 +84,22 @@ impl JointObjective {
                 } else {
                     targets.iter().sum::<f32>() / targets.len() as f32
                 }
+            }
+            Self::Poisson => {
+                let obj = PoissonObjective;
+                obj.initial_prediction(targets, None).unwrap_or(0.0)
+            }
+            Self::Gamma => {
+                let obj = GammaObjective;
+                obj.initial_prediction(targets, None).unwrap_or(0.0)
+            }
+            Self::Tweedie { variance_power } => {
+                let obj = TweedieObjective::new(*variance_power).unwrap();
+                obj.initial_prediction(targets, None).unwrap_or(0.0)
+            }
+            Self::Quantile { alpha } => {
+                let obj = QuantileObjective { alpha: *alpha };
+                obj.initial_prediction(targets, None).unwrap_or(0.0)
             }
             // Ranking objectives use 0.0 as the conventional initial prediction
             // (gradient depends on relative score within group).
@@ -119,6 +150,26 @@ impl JointObjective {
                     "rank:xendcg objective requires group identifiers".to_string()
                 })?;
                 let obj = XeNDCGObjective::new(group_ids);
+                obj.compute_gradients(predictions, targets, None)
+                    .map_err(|e| e.to_string())
+            }
+            Self::Poisson => {
+                let obj = PoissonObjective;
+                obj.compute_gradients(predictions, targets, None)
+                    .map_err(|e| e.to_string())
+            }
+            Self::Gamma => {
+                let obj = GammaObjective;
+                obj.compute_gradients(predictions, targets, None)
+                    .map_err(|e| e.to_string())
+            }
+            Self::Tweedie { variance_power } => {
+                let obj = TweedieObjective::new(*variance_power).map_err(|e| e.to_string())?;
+                obj.compute_gradients(predictions, targets, None)
+                    .map_err(|e| e.to_string())
+            }
+            Self::Quantile { alpha } => {
+                let obj = QuantileObjective { alpha: *alpha };
                 obj.compute_gradients(predictions, targets, None)
                     .map_err(|e| e.to_string())
             }

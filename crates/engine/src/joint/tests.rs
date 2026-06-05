@@ -441,6 +441,24 @@ fn joint_objective_parses_supported_names() {
         JointObjective::parse("queryrmse").unwrap(),
         JointObjective::QueryRmse
     );
+    assert_eq!(
+        JointObjective::parse("poisson").unwrap(),
+        JointObjective::Poisson
+    );
+    assert_eq!(
+        JointObjective::parse("gamma").unwrap(),
+        JointObjective::Gamma
+    );
+    assert_eq!(
+        JointObjective::parse("tweedie").unwrap(),
+        JointObjective::Tweedie {
+            variance_power: 1.5
+        }
+    );
+    assert_eq!(
+        JointObjective::parse("quantile").unwrap(),
+        JointObjective::Quantile { alpha: 0.5 }
+    );
     assert!(JointObjective::parse("custom").is_err());
 }
 
@@ -449,6 +467,54 @@ fn joint_objective_squared_error_initial_prediction_is_mean() {
     let targets = [1.0_f32, 2.0, 3.0, 4.0];
     let baseline = JointObjective::SquaredError.initial_prediction(&targets);
     assert!((baseline - 2.5).abs() < 1e-6);
+}
+
+#[test]
+fn joint_objective_new_variants_initial_predictions_and_gradients() {
+    let targets = [1.0_f32, 2.0, 3.0, 4.0];
+
+    // Poisson initial prediction: ln(mean(y)) = ln(2.5)
+    let poisson_base = JointObjective::Poisson.initial_prediction(&targets);
+    assert!((poisson_base - 2.5_f32.ln()).abs() < 1e-6);
+
+    // Gamma initial prediction: ln(mean(y)) = ln(2.5)
+    let gamma_base = JointObjective::Gamma.initial_prediction(&targets);
+    assert!((gamma_base - 2.5_f32.ln()).abs() < 1e-6);
+
+    // Tweedie initial prediction: ln(mean(y)) = ln(2.5)
+    let tweedie_base = JointObjective::Tweedie {
+        variance_power: 1.5,
+    }
+    .initial_prediction(&targets);
+    assert!((tweedie_base - 2.5_f32.ln()).abs() < 1e-6);
+
+    // Quantile (alpha = 0.5) initial prediction: median([1, 2, 3, 4])
+    let quantile_base = JointObjective::Quantile { alpha: 0.5 }.initial_prediction(&targets);
+    assert!(quantile_base > 0.0);
+
+    // Gradients computation
+    let predictions = [1.0_f32, 1.0, 1.0, 1.0];
+    let grad_pairs = JointObjective::Poisson
+        .compute_gradients(&predictions, &targets, None)
+        .unwrap();
+    assert_eq!(grad_pairs.len(), 4);
+
+    let grad_pairs_gamma = JointObjective::Gamma
+        .compute_gradients(&predictions, &targets, None)
+        .unwrap();
+    assert_eq!(grad_pairs_gamma.len(), 4);
+
+    let grad_pairs_tweedie = JointObjective::Tweedie {
+        variance_power: 1.5,
+    }
+    .compute_gradients(&predictions, &targets, None)
+    .unwrap();
+    assert_eq!(grad_pairs_tweedie.len(), 4);
+
+    let grad_pairs_quantile = JointObjective::Quantile { alpha: 0.5 }
+        .compute_gradients(&predictions, &targets, None)
+        .unwrap();
+    assert_eq!(grad_pairs_quantile.len(), 4);
 }
 
 #[test]

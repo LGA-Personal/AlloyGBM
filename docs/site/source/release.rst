@@ -1,7 +1,40 @@
 Release and platform policy
 ===========================
 
-AlloyGBM ``0.12.7`` release notes and platform policy.
+AlloyGBM ``0.12.8`` release notes and platform policy.
+
+What's new in 0.12.8
+--------------------
+
+**Feature release on top of v0.12.7.** Narrows limitation #4 from
+``docs/limitations.md``: the GLM (``"poisson"``, ``"gamma"``, ``"tweedie"``)
+and ``"quantile"`` objectives now work on ``GBMRanker`` and
+``MultiLabelGBMRanker`` in addition to single-output ``GBMRegressor``. Only the
+Classifier / multiclass softmax paths still reject these objectives.
+
+- **GLM and Quantile objectives on ``GBMRanker``.**
+  ``GBMRanker(ranking_objective="poisson" | "gamma" | "tweedie" | "quantile", …)``
+  is now accepted. The objectives reuse ``GBMRegressor``'s training path and the
+  artifact-recorded post-transform (the predictor applies ``exp`` for GLM
+  objectives), so predictions return on the natural scale.
+  ``tweedie_variance_power`` and ``quantile_alpha`` are honored.
+
+- **GLM and Quantile objectives on ``MultiLabelGBMRanker``.** Both
+  ``multi_label_mode="independent"`` and ``"joint"`` accept per-label GLM/quantile
+  objectives, including mixed lists such as
+  ``ranking_objective=["poisson", "gamma", "tweedie", "quantile"]``. In joint mode
+  the GLM ``exp`` post-transform is applied on the Python predict surface, and the
+  ``.alloy`` bundle (v3) now persists ``ranking_objective`` so the post-transform
+  survives a ``save_model``/``load_model`` roundtrip.
+
+- **Engine.** ``JointObjective`` gained ``Poisson`` / ``Gamma`` /
+  ``Tweedie { variance_power }`` / ``Quantile { alpha }`` variants (delegating to
+  the existing single-output ``ObjectiveOps`` impls), plus a joint
+  empirical-quantile leaf-refinement pass (``refine_joint_quantile_leaves``).
+
+- **Bug fix.** Joint GLM/quantile predictions previously lost the post-transform
+  after ``save_model``/``load_model`` because the bundle did not persist
+  ``ranking_objective``; the v3 metadata now stores and restores it.
 
 What's new in 0.12.7
 --------------------

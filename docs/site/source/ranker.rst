@@ -39,6 +39,11 @@ Ranking objectives
 - ``"queryrmse"`` -- Query-grouped RMSE
 - ``"yetirank"`` -- YetiRank (stochastic NDCG-weighted pairwise)
 
+As of v0.12.8, ``GBMRanker`` also accepts the regression objectives inherited
+from ``GBMRegressor`` via ``ranking_objective=``: ``"poisson"``, ``"gamma"``,
+``"tweedie"`` (log-link GLM, ``predict()`` returns ``exp(raw)``), and
+``"quantile"`` (pinball loss, ``quantile_alpha`` ∈ (0.0, 1.0)).
+
 Parameters
 ----------
 
@@ -107,7 +112,8 @@ Early stopping
 Current scope
 -------------
 
-- 5 ranking objectives implemented natively in Rust
+- 5 ranking objectives implemented natively in Rust, plus the 4 inherited
+  regression objectives (``poisson``, ``gamma``, ``tweedie``, ``quantile``) as of v0.12.8
 - Single-label per ``GBMRanker``. For multi-output ranking, see
   :class:`~alloygbm.MultiLabelGBMRanker` (also covered in :doc:`estimator`).
   Joint shared-tree multi-label boosting is deferred to v0.10.0

@@ -1,6 +1,6 @@
 # AlloyGBM Current Limitations
 
-Last updated for v0.12.7.
+Last updated for v0.12.8.
 
 ## Remaining Limitations
 
@@ -10,11 +10,12 @@ The `BackendOps` trait is designed for hardware abstraction, but only
 `CpuBackend` exists. GPU/accelerator support is architecturally planned but
 not implemented.
 
-### 4. GLM and Quantile regression objectives on Ranker / Classifier / multiclass
+### 4. GLM and Quantile regression objectives on Classifier / multiclass
 
-`objective="poisson"`, `"gamma"`, `"tweedie"`, and `"quantile"` are supported only on
-single-output `GBMRegressor`. The Ranker, Classifier, and multiclass
-softmax paths reject these objectives.
+`objective="poisson"`, `"gamma"`, `"tweedie"`, and `"quantile"` are supported on
+single-output `GBMRegressor`, `GBMRanker`, and `MultiLabelGBMRanker`
+(both `multi_label_mode="independent"` and `"joint"`). The Classifier and
+multiclass softmax paths still reject these objectives.
 
 ### 5. `neutralization="pre_target"` is squared-error-only
 
@@ -25,6 +26,10 @@ relies on breaks down (the gradient under log-link is `μ − y`, not
 `pred − y`). Use `"per_round_gradient"` or `"split_penalty"` with GLM
 objectives.
 ## Resolved (Previously Limitations)
+
+### v0.12.8
+
+- **GLM and Quantile objectives on rankers.** `objective="poisson"`, `"gamma"`, `"tweedie"`, and `"quantile"` now work on `GBMRanker` and `MultiLabelGBMRanker` (both `multi_label_mode="independent"` and `"joint"`). Removed the Python-layer rejections, extended `JointObjective` with `Poisson`/`Gamma`/`Tweedie`/`Quantile` variants (reusing the single-output GLM/quantile `ObjectiveOps` impls for initial predictions and gradients), added a joint empirical-quantile leaf-refinement pass (`refine_joint_quantile_leaves`), and applied the GLM `exp` post-transform on the joint predictor's Python surface. The joint `.alloy` bundle (v3) now persists `ranking_objective` so post-transform survives `save_model`/`load_model`. This narrows limitation #4 to the Classifier / multiclass softmax paths.
 
 ### v0.12.7
 

@@ -4,9 +4,19 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
-The `0.12.7` release closes limitation #6 from `docs/limitations.md`: Quantile regression now fully composes with DART boosting, MorphBoost training, and piecewise-linear (`leaf_model="linear"`) leaves. Removed parameter rejections at the Python and Rust layers, integrated MorphBoost shrinkage schedules into empirical quantile leaf refinement, and supported linear leaves during refinement by residualizing targets against build-time linear predictions (without double-scaling linear coefficients).
+The `0.12.8` release narrows limitation #4 from `docs/limitations.md`: the GLM (`"poisson"`, `"gamma"`, `"tweedie"`) and `"quantile"` objectives now work on `GBMRanker` and `MultiLabelGBMRanker` (both `multi_label_mode="independent"` and `"joint"`) in addition to single-output `GBMRegressor`. Only the Classifier / multiclass softmax paths still reject these objectives.
 
-**No artifact format change. Model artifacts written by v0.12.6 load and predict identically under v0.12.7.** Test counts: 448 cargo + 649 pytest (incorporating the new linear leaves + quantile numeric test).
+**No artifact format change.** The joint `.alloy` bundle metadata grew a `ranking_objective` field (v3) but older bundles still load; binary model artifacts are unchanged. Test counts: 448 cargo + 653 pytest.
+
+## What Shipped In v0.12.8
+
+### GLM and Quantile objectives on rankers (#54)
+
+Limitation #4 had restricted `"poisson"` / `"gamma"` / `"tweedie"` / `"quantile"` to single-output `GBMRegressor`. This release extends them to the ranker estimators:
+
+- **`GBMRanker`**: accepts the GLM and quantile objectives via `ranking_objective=`. Because `GBMRanker` subclasses `GBMRegressor`, training and the artifact-recorded post-transform (predictor applies `exp` for GLM) come for free; the `objective="quantile"` rejection guards were removed.
+- **`MultiLabelGBMRanker`**: both modes accept per-label GLM/quantile objectives (including mixed lists). Independent mode fans out to per-label `GBMRanker` instances. Joint mode extends `JointObjective` with `Poisson` / `Gamma` / `Tweedie { variance_power }` / `Quantile { alpha }` variants (delegating to the existing single-output `ObjectiveOps` impls), adds a joint empirical-quantile leaf-refinement pass (`refine_joint_quantile_leaves`), and applies the GLM `exp` post-transform on the Python predict surface (the joint predictor returns raw log-space scores).
+- **Persistence fix**: the joint `.alloy` bundle now persists `ranking_objective` in its v3 metadata so the GLM post-transform survives a `save_model`/`load_model` roundtrip — previously a reloaded joint GLM model silently returned raw log-space predictions. Pinned by a new `test_multilabel_ranker_glm_save_load_roundtrip` regression test.
 
 ## What Shipped In v0.12.7
 
