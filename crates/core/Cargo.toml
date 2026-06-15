@@ -11,7 +11,7 @@ documentation.workspace = true
 publish = false
 
 [dependencies]
-wide = "0.7"
+wide = "1.5"
 
 [lints]
 workspace = true
