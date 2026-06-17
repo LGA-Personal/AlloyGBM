@@ -88,13 +88,11 @@ impl CustomPythonObjective {
                 EngineError::ContractViolation(format!("custom objective callable failed: {e}"))
             })?;
 
-            let tuple = result
-                .cast_bound::<pyo3::types::PyTuple>(py)
-                .map_err(|_| {
-                    EngineError::ContractViolation(
-                        "custom objective must return a tuple of (gradient, hessian)".to_string(),
-                    )
-                })?;
+            let tuple = result.cast_bound::<pyo3::types::PyTuple>(py).map_err(|_| {
+                EngineError::ContractViolation(
+                    "custom objective must return a tuple of (gradient, hessian)".to_string(),
+                )
+            })?;
             if tuple.len() != 2 {
                 return Err(EngineError::ContractViolation(format!(
                     "custom objective must return exactly 2 arrays, got {}",
@@ -291,14 +289,12 @@ impl CustomPythonMetricCallback {
                 EngineError::ContractViolation(format!("custom eval metric callable failed: {e}"))
             })?;
 
-            let tuple = result
-                .cast_bound::<pyo3::types::PyTuple>(py)
-                .map_err(|_| {
-                    EngineError::ContractViolation(
-                        "custom eval metric must return a tuple of (name, value, higher_is_better)"
-                            .to_string(),
-                    )
-                })?;
+            let tuple = result.cast_bound::<pyo3::types::PyTuple>(py).map_err(|_| {
+                EngineError::ContractViolation(
+                    "custom eval metric must return a tuple of (name, value, higher_is_better)"
+                        .to_string(),
+                )
+            })?;
             if tuple.len() != 3 {
                 return Err(EngineError::ContractViolation(format!(
                     "custom eval metric must return exactly 3 values (name, value, higher_is_better), got {}",
