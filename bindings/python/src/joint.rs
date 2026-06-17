@@ -17,7 +17,7 @@ use crate::quantization::{ContinuousBinningStrategy, prepare_training_matrices_f
 /// PyO3 handle that wraps `alloygbm_engine::joint::JointPredictor` for K-output
 /// prediction from Python. `MultiLabelGBMRanker(training_mode="joint")` is the
 /// primary consumer.
-#[pyclass]
+#[pyclass(skip_from_py_object)]
 #[derive(Debug, Clone)]
 pub(crate) struct JointPredictorHandle {
     predictor: alloygbm_engine::joint::JointPredictor,

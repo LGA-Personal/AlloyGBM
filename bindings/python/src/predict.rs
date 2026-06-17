@@ -12,7 +12,7 @@ use rayon::prelude::*;
 
 // -- Piece A: NativePredictorHandle ------------------------------------------
 
-#[pyclass]
+#[pyclass(skip_from_py_object)]
 #[derive(Debug, Clone)]
 pub(crate) struct NativePredictorHandle {
     predictor: Predictor,

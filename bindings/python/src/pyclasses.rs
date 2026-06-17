@@ -1,7 +1,7 @@
 use alloygbm_engine::IterationDiagnostics;
 use pyo3::prelude::*;
 
-#[pyclass]
+#[pyclass(skip_from_py_object)]
 #[derive(Debug, Clone)]
 pub(crate) struct NativeRuntimeInfo {
     #[pyo3(get)]
@@ -49,7 +49,7 @@ impl ContinuousBinningMetadataInternal {
     }
 }
 
-#[pyclass]
+#[pyclass(skip_from_py_object)]
 #[derive(Debug, Clone)]
 pub(crate) struct NativeContinuousBinningMetadata {
     #[pyo3(get)]
@@ -79,7 +79,7 @@ impl From<ContinuousBinningMetadataInternal> for NativeContinuousBinningMetadata
     }
 }
 
-#[pyclass]
+#[pyclass(skip_from_py_object)]
 #[derive(Debug, Clone)]
 pub(crate) struct NativeTrainingSummary {
     #[pyo3(get)]
@@ -125,7 +125,7 @@ pub(crate) struct NativeTrainingSummary {
 /// Python-visible view of an `engine::IterationDiagnostics` snapshot.  Field
 /// names mirror the Rust struct one-to-one.  Projection-related fields are
 /// `None` when factor neutralization isn't active for the fit.
-#[pyclass]
+#[pyclass(skip_from_py_object)]
 #[derive(Debug, Clone)]
 pub(crate) struct NativeIterationDiagnostics {
     #[pyo3(get)]
@@ -174,7 +174,7 @@ pub(crate) fn diagnostics_to_native(
         .collect()
 }
 
-#[pyclass]
+#[pyclass(skip_from_py_object)]
 #[derive(Debug, Clone)]
 pub(crate) struct NativeTrainingResult {
     #[pyo3(get)]
