@@ -1,7 +1,31 @@
 Release and platform policy
 ===========================
 
-AlloyGBM ``0.12.8`` release notes and platform policy.
+AlloyGBM ``0.12.9`` release notes and platform policy.
+
+What's new in 0.12.9
+--------------------
+
+**Security and maintenance release on top of v0.12.8.** No user-facing API
+or artifact-format changes — the public surface and trained-model behavior
+are identical to v0.12.8.
+
+- **Security: upgraded ``pyo3`` and ``numpy`` 0.24 → 0.29**, clearing two
+  advisories affecting ``pyo3`` 0.24.2 (both patched in ``pyo3`` ≥ 0.29.0):
+  RUSTSEC-2026-0177 (missing ``Sync`` bound on ``PyCFunction::new_closure``)
+  and RUSTSEC-2026-0176 (out-of-bounds read in ``nth`` / ``nth_back`` for
+  ``PyList`` / ``PyTuple`` iterators). ``cargo deny check`` now reports
+  advisories, bans, licenses, and sources all OK; the abi3-py311 wheel ABI is
+  unchanged.
+
+- **CI: GitHub Actions moved off the deprecated Node 20 runtime onto Node
+  24** (``actions/checkout`` 4 → 6, ``actions/setup-python`` 5 → 6,
+  ``actions/upload-artifact`` 4 → 7, ``actions/download-artifact`` 4 → 8,
+  ``codecov/codecov-action`` 5 → 6).
+
+- **Dependencies:** ``rayon`` 1.11 → 1.12 plus Python dev/test tooling bumps
+  (not shipped in the wheel). The ``wide`` 0.7 → 1.x SIMD major is deferred to
+  a dedicated benchmarked migration and pinned out in ``dependabot.yml``.
 
 What's new in 0.12.8
 --------------------

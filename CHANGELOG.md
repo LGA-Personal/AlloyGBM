@@ -1,5 +1,46 @@
 # Changelog
 
+## v0.12.9 (2026-06-17)
+
+Security and maintenance release on top of v0.12.8. No user-facing API or
+artifact-format changes — the public surface and trained-model behavior are
+identical to v0.12.8. This release clears the outstanding RustSec advisories
+and brings the CI action and dependency baseline current.
+
+### Security
+
+- **Upgraded `pyo3` and `numpy` 0.24 → 0.29**, clearing two advisories that
+  affected `pyo3` 0.24.2 (both patched in `pyo3` ≥ 0.29.0):
+  - **RUSTSEC-2026-0177** — missing `Sync` bound on `PyCFunction::new_closure`
+    closures (#58).
+  - **RUSTSEC-2026-0176** — out-of-bounds read in `nth` / `nth_back` for
+    `PyList` / `PyTuple` iterators (#57).
+
+  `cargo deny check` now reports `advisories`, `bans`, `licenses`, and
+  `sources` all OK. The abi3-py311 wheel ABI is unchanged.
+
+### Internal
+
+- **PyO3 0.24 → 0.29 API migration** in the Python bridge: `Bound::downcast`
+  → `Bound::cast`, `Py::downcast_bound` → `Py::cast_bound`,
+  `Python::with_gil` → `Python::attach`, and an explicit opt-out of the
+  now-deprecated auto-derived `FromPyObject` on `#[pyclass]` handle/output
+  types via `skip_from_py_object` (none are extracted from Python by value).
+
+### CI / dependencies
+
+- **GitHub Actions moved off the deprecated Node 20 runtime onto Node 24** via
+  major bumps: `actions/checkout` 4 → 6 (#25), `actions/setup-python` 5 → 6
+  (#20), `actions/upload-artifact` 4 → 7 (#22), `actions/download-artifact`
+  4 → 8 (#23), `codecov/codecov-action` 5 → 6 (#24).
+- **Rust dependency bumps:** `rayon` 1.11 → 1.12 (#55).
+- **Python dev/test tooling bumps** (`requirements-dev.txt`, not shipped):
+  `pytest` (#17), `pytest-cov` (#19), `coverage` (#21), `scikit-learn` (#16),
+  `sphinx-rtd-theme` (#18).
+- **Deferred `wide` 0.7 → 1.x** (#56): this SIMD-API-breaking major touches
+  the histogram/leaf hot paths and is pinned out in `.github/dependabot.yml`
+  pending a dedicated, benchmarked migration tracked in #59.
+
 ## v0.12.8 (2026-06-04)
 
 Feature release on top of v0.12.7. Narrows limitation #4 from `docs/limitations.md`: the GLM (`"poisson"`, `"gamma"`, `"tweedie"`) and `"quantile"` objectives now work on `GBMRanker` and `MultiLabelGBMRanker` in addition to single-output `GBMRegressor`. Only the Classifier / multiclass softmax paths still reject these objectives.
