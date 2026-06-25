@@ -12,6 +12,15 @@ updates:
     labels:
       - "dependencies"
       - "rust"
+    ignore:
+      # `wide` 0.7 -> 1.x is a SIMD-API-breaking major that touches the
+      # histogram/leaf hot paths (core/simd.rs, core/linear_histogram.rs,
+      # backend_cpu/{lib,pl_histogram}.rs) and needs a dedicated,
+      # benchmarked migration PR rather than an auto-bump.  Tracked in
+      # https://github.com/LGA-Personal/AlloyGBM/issues/59 — drop this
+      # ignore once that migration lands.
+      - dependency-name: "wide"
+        update-types: ["version-update:semver-major"]
     groups:
       # Group patch/minor dep bumps so the PR count stays sane.  Majors
       # still come in as individual PRs since they often require code

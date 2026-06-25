@@ -1,6 +1,6 @@
 # AlloyGBM Current Limitations
 
-Last updated for v0.12.8.
+Last updated for v0.12.9. (v0.12.9 was a security/maintenance release — pyo3/numpy 0.24 → 0.29 plus CI and dependency housekeeping — and changed none of the limitations below.)
 
 ## Remaining Limitations
 

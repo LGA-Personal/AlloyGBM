@@ -4,9 +4,27 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
-The `0.12.8` release narrows limitation #4 from `docs/limitations.md`: the GLM (`"poisson"`, `"gamma"`, `"tweedie"`) and `"quantile"` objectives now work on `GBMRanker` and `MultiLabelGBMRanker` (both `multi_label_mode="independent"` and `"joint"`) in addition to single-output `GBMRegressor`. Only the Classifier / multiclass softmax paths still reject these objectives.
+The `0.12.9` release is security and maintenance only: it upgrades `pyo3`/`numpy` 0.24 → 0.29 to clear two RustSec advisories, moves CI off the deprecated Node 20 action runtime, and refreshes the Rust/Python dependency baseline. No user-facing API, behavior, or artifact-format changes. The prior `0.12.8` release narrowed limitation #4 (GLM/quantile objectives on `GBMRanker` and `MultiLabelGBMRanker`); only the Classifier / multiclass softmax paths still reject those objectives.
 
-**No artifact format change.** The joint `.alloy` bundle metadata grew a `ranking_objective` field (v3) but older bundles still load; binary model artifacts are unchanged. Test counts: 448 cargo + 653 pytest.
+**No artifact format change.** Test counts: 448 cargo + 653 pytest (unchanged from v0.12.8 — the pyo3 migration is covered by the existing bridge tests).
+
+## What Shipped In v0.12.9
+
+### Security: pyo3 / numpy 0.24 → 0.29
+
+`pyo3` 0.24.2 was affected by two advisories, both patched in `pyo3` ≥ 0.29.0:
+
+- **RUSTSEC-2026-0177** (#58) — `PyCFunction::new_closure` required `Send + 'static` but not `Sync`, allowing concurrent calls into a non-`Sync` closure (sharpest under free-threaded Python).
+- **RUSTSEC-2026-0176** (#57) — `nth` / `nth_back` on `PyList` / `PyTuple` iterators used unchecked `usize` arithmetic before the bounds check, enabling out-of-bounds reads.
+
+`pyo3` and `numpy` version in lockstep, so both moved to 0.29. The 0.24 → 0.29 bridge migration: `Bound::downcast` → `Bound::cast`, `Py::downcast_bound` → `Py::cast_bound`, `Python::with_gil` → `Python::attach` (the GIL "attach" terminology change), and an explicit `skip_from_py_object` opt-out of the now-deprecated auto-derived `FromPyObject` on the `#[pyclass]` handle/output types (none are extracted from Python by value, so the derive was dead). `cargo deny check` reports advisories/bans/licenses/sources all OK; the abi3-py311 wheel ABI is unchanged.
+
+### CI and dependency housekeeping
+
+- **Node 20 → Node 24 action runtime.** `actions/checkout` 4 → 6 (#25), `actions/setup-python` 5 → 6 (#20), `actions/upload-artifact` 4 → 7 (#22), `actions/download-artifact` 4 → 8 (#23), `codecov/codecov-action` 5 → 6 (#24). The artifact-action bumps are only exercised by `publish.yml` (which does not run on PRs), so the upload/download generations were verified compatible (both v4-generation backends) before merge.
+- **Rust deps:** `rayon` 1.11 → 1.12 (#55).
+- **Python dev/test tooling** (`requirements-dev.txt`, not shipped in the wheel): `pytest` (#17), `pytest-cov` (#19), `coverage` (#21), `scikit-learn` (#16), `sphinx-rtd-theme` (#18).
+- **Deferred `wide` 0.7 → 1.x** (#56): the SIMD-API-breaking major touches the histogram/leaf hot paths (`core/simd.rs`, `core/linear_histogram.rs`, `backend_cpu/{lib,pl_histogram}.rs`), so it is pinned out in `.github/dependabot.yml` pending a dedicated, benchmarked migration tracked in #59.
 
 ## What Shipped In v0.12.8
 

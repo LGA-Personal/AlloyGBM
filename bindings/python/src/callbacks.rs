@@ -14,7 +14,7 @@ use pyo3::prelude::*;
 /// slowest) for non-contiguous or exotic dtypes.
 fn extract_f32_array(_py: Python<'_>, obj: &Bound<'_, PyAny>) -> Result<Vec<f32>, EngineError> {
     // Fast path: contiguous f32 numpy array — single memcpy via as_slice()
-    if let Ok(arr) = obj.downcast::<PyArray1<f32>>() {
+    if let Ok(arr) = obj.cast::<PyArray1<f32>>() {
         let readonly = arr.readonly();
         if let Ok(slice) = readonly.as_slice() {
             return Ok(slice.to_vec());
@@ -23,7 +23,7 @@ fn extract_f32_array(_py: Python<'_>, obj: &Bound<'_, PyAny>) -> Result<Vec<f32>
     }
     // Medium path: contiguous f64 numpy array — common when user returns
     // plain Python floats which numpy defaults to float64
-    if let Ok(arr) = obj.downcast::<PyArray1<f64>>() {
+    if let Ok(arr) = obj.cast::<PyArray1<f64>>() {
         let readonly = arr.readonly();
         if let Ok(slice) = readonly.as_slice() {
             return Ok(slice.iter().map(|&v| v as f32).collect());
@@ -76,7 +76,7 @@ impl CustomPythonObjective {
         predictions: &[f32],
         targets: &[f32],
     ) -> Result<(Vec<f32>, Vec<f32>), EngineError> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             // Create numpy arrays directly from Rust slices — avoids creating a
             // Python list and the redundant .astype("float32") call.  PyArray1::from_slice
             // produces a contiguous f32 numpy array backed by a copy of the slice
@@ -88,13 +88,11 @@ impl CustomPythonObjective {
                 EngineError::ContractViolation(format!("custom objective callable failed: {e}"))
             })?;
 
-            let tuple = result
-                .downcast_bound::<pyo3::types::PyTuple>(py)
-                .map_err(|_| {
-                    EngineError::ContractViolation(
-                        "custom objective must return a tuple of (gradient, hessian)".to_string(),
-                    )
-                })?;
+            let tuple = result.cast_bound::<pyo3::types::PyTuple>(py).map_err(|_| {
+                EngineError::ContractViolation(
+                    "custom objective must return a tuple of (gradient, hessian)".to_string(),
+                )
+            })?;
             if tuple.len() != 2 {
                 return Err(EngineError::ContractViolation(format!(
                     "custom objective must return exactly 2 arrays, got {}",
@@ -136,7 +134,7 @@ impl CustomPythonObjective {
 
     fn call_python_loss(&self, predictions: &[f32], targets: &[f32]) -> Result<f32, EngineError> {
         if let Some(ref loss_fn) = self.loss_fn {
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 let (y_true, y_pred) = make_numpy_f32_pair(py, targets, predictions);
                 let result = loss_fn.call1(py, (y_true, y_pred)).map_err(|e| {
                     EngineError::ContractViolation(format!("custom loss callable failed: {e}"))
@@ -284,21 +282,19 @@ impl CustomPythonMetricCallback {
         predictions: &[f32],
         targets: &[f32],
     ) -> Result<(String, f32, bool), EngineError> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let (y_true, y_pred) = make_numpy_f32_pair(py, targets, predictions);
 
             let result = metric_fn.call1(py, (y_true, y_pred)).map_err(|e| {
                 EngineError::ContractViolation(format!("custom eval metric callable failed: {e}"))
             })?;
 
-            let tuple = result
-                .downcast_bound::<pyo3::types::PyTuple>(py)
-                .map_err(|_| {
-                    EngineError::ContractViolation(
-                        "custom eval metric must return a tuple of (name, value, higher_is_better)"
-                            .to_string(),
-                    )
-                })?;
+            let tuple = result.cast_bound::<pyo3::types::PyTuple>(py).map_err(|_| {
+                EngineError::ContractViolation(
+                    "custom eval metric must return a tuple of (name, value, higher_is_better)"
+                        .to_string(),
+                )
+            })?;
             if tuple.len() != 3 {
                 return Err(EngineError::ContractViolation(format!(
                     "custom eval metric must return exactly 3 values (name, value, higher_is_better), got {}",
