@@ -69,10 +69,9 @@ impl FactorSplitScratch {
                 }
             } else if bin < scan_limit {
                 let bin_base = bin * factor_count;
-                for factor_index in 0..factor_count {
-                    let exposure = exposure_row[factor_index];
-                    self.bin_factor_sums[bin_base + factor_index] += exposure;
-                    self.non_missing_factor_sums[factor_index] += exposure;
+                for (factor_index, exposure) in exposure_row.iter().enumerate().take(factor_count) {
+                    self.bin_factor_sums[bin_base + factor_index] += *exposure;
+                    self.non_missing_factor_sums[factor_index] += *exposure;
                 }
             }
         }
