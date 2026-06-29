@@ -77,6 +77,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         neutralization: str = "none",
         factor_neutralization_lambda: float = 1e-6,
         factor_penalty: float = 0.0,
+        factor_exposure_transform: str = "none",
         boosting_mode: str = "standard",
         goss_top_rate: float = 0.2,
         goss_other_rate: float = 0.1,
@@ -301,6 +302,10 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             raise ValueError("factor_neutralization_lambda must be finite and >= 0")
         if not math.isfinite(float(factor_penalty)) or float(factor_penalty) < 0.0:
             raise ValueError("factor_penalty must be finite and >= 0")
+        if str(factor_exposure_transform) not in ("none", "center", "standardize"):
+            raise ValueError(
+                "factor_exposure_transform must be 'none', 'center', or 'standardize'"
+            )
         if str(neutralization) != "split_penalty" and float(factor_penalty) != 0.0:
             raise ValueError(
                 "factor_penalty is only valid with neutralization='split_penalty'"
@@ -423,6 +428,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         self.neutralization = str(neutralization)
         self.factor_neutralization_lambda = float(factor_neutralization_lambda)
         self.factor_penalty = float(factor_penalty)
+        self.factor_exposure_transform = str(factor_exposure_transform)
         # v0.8.0+: per-round boosting strategy.  Default "standard" is
         # byte-identical to v0.7.5 behaviour.  "goss" enables
         # gradient-based one-side sampling.  v0.9.0+: "dart" enables
@@ -458,6 +464,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         self.evals_result_: dict[str, dict[str, list[float]]] | None = None
         self.fit_timing_: dict[str, float] | None = None
         self.diagnostics_per_round_: list[dict] | None = None
+        self.factor_exposure_diagnostics_: dict | None = None
 
     def __repr__(self) -> str:
         return (
@@ -509,6 +516,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             f"neutralization='{self.neutralization}', "
             f"factor_neutralization_lambda={self.factor_neutralization_lambda}, "
             f"factor_penalty={self.factor_penalty}, "
+            f"factor_exposure_transform='{self.factor_exposure_transform}', "
             f"boosting_mode='{self.boosting_mode}', "
             f"goss_top_rate={self.goss_top_rate}, "
             f"goss_other_rate={self.goss_other_rate}, "
@@ -571,6 +579,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             "neutralization": self.neutralization,
             "factor_neutralization_lambda": self.factor_neutralization_lambda,
             "factor_penalty": self.factor_penalty,
+            "factor_exposure_transform": self.factor_exposure_transform,
             "boosting_mode": self.boosting_mode,
             "goss_top_rate": self.goss_top_rate,
             "goss_other_rate": self.goss_other_rate,
@@ -632,6 +641,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             "neutralization",
             "factor_neutralization_lambda",
             "factor_penalty",
+            "factor_exposure_transform",
             "boosting_mode",
             "goss_top_rate",
             "goss_other_rate",
@@ -650,6 +660,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             "neutralization" in params
             or "factor_neutralization_lambda" in params
             or "factor_penalty" in params
+            or "factor_exposure_transform" in params
             or "leaf_model" in params
         ):
             candidate_neutralization = str(
@@ -684,6 +695,17 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                 or candidate_factor_penalty < 0.0
             ):
                 raise ValueError("factor_penalty must be finite and >= 0")
+            candidate_factor_exposure_transform = str(
+                params.get("factor_exposure_transform", self.factor_exposure_transform)
+            )
+            if candidate_factor_exposure_transform not in (
+                "none",
+                "center",
+                "standardize",
+            ):
+                raise ValueError(
+                    "factor_exposure_transform must be 'none', 'center', or 'standardize'"
+                )
             candidate_leaf_model = str(params.get("leaf_model", self.leaf_model))
             if (
                 candidate_neutralization != "split_penalty"
@@ -1062,6 +1084,14 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             if not math.isfinite(fp) or fp < 0.0:
                 raise ValueError("factor_penalty must be finite and >= 0")
             self.factor_penalty = fp
+
+        if "factor_exposure_transform" in params:
+            fet = str(params["factor_exposure_transform"])
+            if fet not in ("none", "center", "standardize"):
+                raise ValueError(
+                    "factor_exposure_transform must be 'none', 'center', or 'standardize'"
+                )
+            self.factor_exposure_transform = fet
 
         if "boosting_mode" in params:
             bm = str(params["boosting_mode"])
@@ -2401,7 +2431,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         self._is_fitted = True
         return self
 
-    def predict(self, X: object) -> list[float]:
+    def predict(self, X: object) -> object:
         """Predict using the fitted native artifact."""
         if not self._is_fitted:
             raise RuntimeError("GBMRegressor must be fit before predict")
@@ -2432,6 +2462,11 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                             f"X feature count {arr.shape[1]} does not match fitted "
                             f"feature count {self._n_features_in}"
                         )
+                    predict_numpy_array = getattr(
+                        self._native_predictor_handle, "predict_numpy_array", None
+                    )
+                    if callable(predict_numpy_array):
+                        return predict_numpy_array(arr)
                     predict_numpy = getattr(
                         self._native_predictor_handle, "predict_numpy", None
                     )

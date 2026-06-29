@@ -301,7 +301,7 @@ class TestCustomObjectiveValidation(unittest.TestCase):
         self.assertIsNone(model2.objective)
         # Model should still predict correctly
         preds_after = model2.predict(X[:5])
-        self.assertEqual(preds_before, preds_after)
+        np.testing.assert_allclose(preds_before, preds_after, rtol=0.0, atol=0.0)
 
     def test_save_load_model_with_callable(self):
         """save_model / load_model works with custom objective."""
@@ -322,7 +322,7 @@ class TestCustomObjectiveValidation(unittest.TestCase):
         # Loaded model should have objective=None but still predict
         self.assertIsNone(model2.objective)
         preds_after = model2.predict(X[:5])
-        self.assertEqual(preds_before, preds_after)
+        np.testing.assert_allclose(preds_before, preds_after, rtol=0.0, atol=0.0)
 
     def test_custom_objective_with_custom_metric_and_early_stopping(self):
         """Custom objective + custom metric + early stopping together."""

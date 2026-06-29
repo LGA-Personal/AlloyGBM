@@ -245,7 +245,7 @@ class GBMRanker(GBMRegressor):
         Returns raw model scores (higher = more relevant). No post-transform
         is applied for ranking objectives.
         """
-        return super().predict(X)
+        return [float(v) for v in super().predict(X)]
 
     # -- sklearn overrides ----------------------------------------------------
 
@@ -297,6 +297,7 @@ class GBMRanker(GBMRegressor):
             f"neutralization='{self.neutralization}', "
             f"factor_neutralization_lambda={self.factor_neutralization_lambda}, "
             f"factor_penalty={self.factor_penalty}, "
+            f"factor_exposure_transform='{self.factor_exposure_transform}', "
             f"boosting_mode='{self.boosting_mode}', "
             f"goss_top_rate={self.goss_top_rate}, "
             f"goss_other_rate={self.goss_other_rate}, "

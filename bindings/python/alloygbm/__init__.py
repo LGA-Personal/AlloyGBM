@@ -1,5 +1,7 @@
 """Public Python API for the AlloyGBM gradient-boosted decision tree library."""
 
+__version__ = "0.12.9"
+
 from ._alloygbm import native_runtime_info
 from .classifier import GBMClassifier
 from .evaluation import (
@@ -28,6 +30,7 @@ __all__ = [
     "GBMRanker",
     "GBMRegressor",
     "MultiLabelGBMRanker",
+    "__version__",
     "accuracy",
     "gamma_deviance",
     "hit_rate",

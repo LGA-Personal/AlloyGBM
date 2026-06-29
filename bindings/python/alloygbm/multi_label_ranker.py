@@ -139,6 +139,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
         self.ranking_labels_: list[str] | None = None
         self.n_labels_: int | None = None
         self.rounds_completed_: list[int] | int | None = None
+        self.factor_exposure_diagnostics_: dict | None = None
 
     @property
     def continuous_binning_strategy(self) -> str:
@@ -396,6 +397,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
         "neutralization",
         "factor_neutralization_lambda",
         "factor_penalty",
+        "factor_exposure_transform",
         "tweedie_variance_power",
         "quantile_alpha",
     })
@@ -483,6 +485,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
             raise ValueError(
                 "factor_exposures were provided but neutralization='none'"
             )
+        self.factor_exposure_diagnostics_ = None
         if eval_set is not None:
             raise NotImplementedError(
                 "multi_label_mode='joint' does not support eval_set / "
@@ -636,6 +639,27 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
                 )
             if sort_idx is not None:
                 fe_arr = fe_arr[sort_idx]
+            transform = str(
+                self._per_label_kwargs.get("factor_exposure_transform", "none")
+            )
+            means = fe_arr.mean(axis=0).astype(np.float32)
+            stds = fe_arr.std(axis=0).astype(np.float32)
+            if transform == "center":
+                fe_arr = np.ascontiguousarray(fe_arr - means, dtype=np.float32)
+            elif transform == "standardize":
+                safe_stds = np.where(stds <= 1e-6, 1.0, stds).astype(np.float32)
+                fe_arr = np.ascontiguousarray(
+                    (fe_arr - means) / safe_stds, dtype=np.float32
+                )
+            elif transform != "none":
+                raise ValueError(
+                    "factor_exposure_transform must be 'none', 'center', or 'standardize'"
+                )
+            self.factor_exposure_diagnostics_ = {
+                "transform": transform,
+                "means": [float(v) for v in means],
+                "stds": [float(v) for v in stds],
+            }
             fe_values = fe_arr.reshape(-1).tolist()
             fe_row_count = int(fe_arr.shape[0])
             fe_factor_count = int(fe_arr.shape[1])

@@ -33,6 +33,7 @@ class _PersistenceMixin:
         self.rounds_completed_ = None
         self.stop_reason_ = None
         self.diagnostics_per_round_ = None
+        self.factor_exposure_diagnostics_ = None
         self.evals_result_ = None
         self.fit_timing_ = None
         self._fit_neutralization = None
