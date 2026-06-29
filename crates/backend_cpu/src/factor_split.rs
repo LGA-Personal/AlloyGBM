@@ -3,6 +3,10 @@ use alloygbm_engine::{EngineError, EngineResult, FactorSplitContext};
 pub(crate) struct FactorSplitScratch {
     left_factor_sums: Vec<f32>,
     right_factor_sums: Vec<f32>,
+    missing_factor_sums: Vec<f32>,
+    non_missing_factor_sums: Vec<f32>,
+    bin_factor_sums: Vec<f32>,
+    numeric_scan_limit: usize,
     pub(crate) categorical_bitset: Vec<u8>,
 }
 
@@ -11,6 +15,10 @@ impl FactorSplitScratch {
         Self {
             left_factor_sums: vec![0.0; factor_count],
             right_factor_sums: vec![0.0; factor_count],
+            missing_factor_sums: vec![0.0; factor_count],
+            non_missing_factor_sums: vec![0.0; factor_count],
+            bin_factor_sums: Vec::new(),
+            numeric_scan_limit: 0,
             categorical_bitset: Vec::new(),
         }
     }
@@ -18,6 +26,99 @@ impl FactorSplitScratch {
     fn clear_factor_sums(&mut self) {
         self.left_factor_sums.fill(0.0);
         self.right_factor_sums.fill(0.0);
+    }
+
+    pub(crate) fn prepare_numeric_prefix(
+        &mut self,
+        context: &FactorSplitContext<'_>,
+        feature_index: usize,
+        scan_limit: usize,
+        missing_bin: usize,
+    ) {
+        let factor_count = context.exposures.factor_count;
+        self.numeric_scan_limit = scan_limit;
+        self.left_factor_sums.resize(factor_count, 0.0);
+        self.right_factor_sums.resize(factor_count, 0.0);
+        self.missing_factor_sums.resize(factor_count, 0.0);
+        self.non_missing_factor_sums.resize(factor_count, 0.0);
+        self.bin_factor_sums
+            .resize(scan_limit.saturating_mul(factor_count), 0.0);
+
+        self.left_factor_sums.fill(0.0);
+        self.right_factor_sums.fill(0.0);
+        self.missing_factor_sums.fill(0.0);
+        self.non_missing_factor_sums.fill(0.0);
+        self.bin_factor_sums.fill(0.0);
+
+        if context.factor_penalty == 0.0 || scan_limit == 0 {
+            return;
+        }
+
+        let feature_count = context.binned_matrix.feature_count;
+        for &row_index in context.row_indices {
+            let row_index = row_index as usize;
+            let bin = context
+                .binned_matrix
+                .row_bin(row_index * feature_count + feature_index) as usize;
+            let exposure_start = row_index * factor_count;
+            let exposure_row =
+                &context.exposures.values[exposure_start..exposure_start + factor_count];
+            if bin == missing_bin {
+                for (sum, exposure) in self.missing_factor_sums.iter_mut().zip(exposure_row) {
+                    *sum += *exposure;
+                }
+            } else if bin < scan_limit {
+                let bin_base = bin * factor_count;
+                for factor_index in 0..factor_count {
+                    let exposure = exposure_row[factor_index];
+                    self.bin_factor_sums[bin_base + factor_index] += exposure;
+                    self.non_missing_factor_sums[factor_index] += exposure;
+                }
+            }
+        }
+    }
+
+    pub(crate) fn add_numeric_threshold_bin_to_left(&mut self, threshold_bin: usize) {
+        if threshold_bin >= self.numeric_scan_limit {
+            return;
+        }
+        let factor_count = self.left_factor_sums.len();
+        let bin_base = threshold_bin * factor_count;
+        for factor_index in 0..factor_count {
+            self.left_factor_sums[factor_index] += self.bin_factor_sums[bin_base + factor_index];
+        }
+    }
+
+    pub(crate) fn numeric_prefix_penalty(
+        &self,
+        default_left: bool,
+        left_leaf_value: f32,
+        right_leaf_value: f32,
+        factor_penalty: f32,
+        row_count: usize,
+    ) -> f32 {
+        if factor_penalty == 0.0 {
+            return 0.0;
+        }
+        let mut norm_sq = 0.0_f32;
+        for factor_index in 0..self.left_factor_sums.len() {
+            let prefix_left = self.left_factor_sums[factor_index];
+            let missing = self.missing_factor_sums[factor_index];
+            let non_missing_right = self.non_missing_factor_sums[factor_index] - prefix_left;
+            let left_sum = if default_left {
+                prefix_left + missing
+            } else {
+                prefix_left
+            };
+            let right_sum = if default_left {
+                non_missing_right
+            } else {
+                non_missing_right + missing
+            };
+            let load = left_sum * left_leaf_value + right_sum * right_leaf_value;
+            norm_sq += load * load;
+        }
+        factor_penalty * norm_sq / row_count.max(1) as f32
     }
 }
 
@@ -153,4 +254,89 @@ pub(crate) fn validate_factor_split_context(context: &FactorSplitContext<'_>) ->
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloygbm_core::{BinnedMatrix, FactorExposureMatrix};
+
+    fn factor_fixture() -> (BinnedMatrix, FactorExposureMatrix, Vec<u32>) {
+        let binned = BinnedMatrix::new(5, 1, 3, vec![0_u8, 1, 2, 3, alloygbm_core::MISSING_BIN_U8])
+            .expect("binned matrix");
+        let exposures = FactorExposureMatrix {
+            row_count: 5,
+            factor_count: 2,
+            values: vec![1.0, 0.0, 2.0, 1.0, 3.0, 1.0, 4.0, 2.0, 5.0, 3.0],
+        };
+        let rows = vec![0_u32, 1, 2, 3, 4];
+        (binned, exposures, rows)
+    }
+
+    #[test]
+    fn numeric_prefix_penalty_matches_row_scan_for_each_threshold_and_missing_direction() {
+        let (binned, exposures, rows) = factor_fixture();
+        let context = FactorSplitContext {
+            binned_matrix: &binned,
+            exposures: &exposures,
+            row_indices: &rows,
+            factor_penalty: 0.75,
+        };
+        let scan_limit = 4;
+        let mut prefix_scratch = FactorSplitScratch::new(exposures.factor_count);
+        prefix_scratch.prepare_numeric_prefix(
+            &context,
+            0,
+            scan_limit,
+            binned.missing_bin() as usize,
+        );
+        let mut row_scan_scratch = FactorSplitScratch::new(exposures.factor_count);
+
+        for threshold_bin in 0..scan_limit {
+            prefix_scratch.add_numeric_threshold_bin_to_left(threshold_bin);
+            for default_left in [true, false] {
+                let slow = factor_split_penalty_for_candidate(
+                    &context,
+                    &mut row_scan_scratch,
+                    FactorSplitCandidate {
+                        feature_index: 0,
+                        threshold_bin: threshold_bin as u16,
+                        default_left,
+                        categorical_bitset: None,
+                        left_leaf_value: 0.25,
+                        right_leaf_value: -0.5,
+                    },
+                );
+                let fast = prefix_scratch.numeric_prefix_penalty(
+                    default_left,
+                    0.25,
+                    -0.5,
+                    context.factor_penalty,
+                    context.row_indices.len(),
+                );
+                assert!(
+                    (slow - fast).abs() < 1e-6,
+                    "threshold={threshold_bin} default_left={default_left} slow={slow} fast={fast}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn numeric_prefix_penalty_is_zero_when_factor_penalty_is_zero() {
+        let (binned, exposures, rows) = factor_fixture();
+        let context = FactorSplitContext {
+            binned_matrix: &binned,
+            exposures: &exposures,
+            row_indices: &rows,
+            factor_penalty: 0.0,
+        };
+        let mut scratch = FactorSplitScratch::new(exposures.factor_count);
+        scratch.prepare_numeric_prefix(&context, 0, 4, binned.missing_bin() as usize);
+        scratch.add_numeric_threshold_bin_to_left(0);
+        assert_eq!(
+            scratch.numeric_prefix_penalty(true, 0.25, -0.5, 0.0, rows.len()),
+            0.0
+        );
+    }
 }
