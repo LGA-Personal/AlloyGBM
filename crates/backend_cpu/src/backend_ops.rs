@@ -445,4 +445,27 @@ impl BackendOps for CpuBackend {
 
         Some((left_leaf, right_leaf))
     }
+
+    fn compute_linear_leaf_pair_from_partitions(
+        &self,
+        gradients: &[GradientPair],
+        raw_feature_values: &[f32],
+        feature_count: usize,
+        regressor_features: &[u32],
+        left_rows: &[u32],
+        right_rows: &[u32],
+        learning_rate: f32,
+        l2_lambda: f32,
+    ) -> Option<(LinearLeaf, LinearLeaf)> {
+        pl::solve_pl_leaf_pair_from_partitions(
+            gradients,
+            raw_feature_values,
+            feature_count,
+            regressor_features,
+            left_rows,
+            right_rows,
+            learning_rate,
+            l2_lambda,
+        )
+    }
 }

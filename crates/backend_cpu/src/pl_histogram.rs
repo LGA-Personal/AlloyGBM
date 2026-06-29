@@ -270,6 +270,60 @@ mod tests {
     }
 
     #[test]
+    fn direct_partition_leaf_pair_matches_histogram_leaf_pair() {
+        let binned = fixture_binned();
+        let grads = fixture_gradients();
+        let raw = fixture_raw_values();
+        let node = all_rows_node();
+        let tiles = all_feature_tile();
+        let missing_bin_index = binned.missing_bin() as usize;
+
+        let bundle = build_linear_histograms_cpu(&binned, &grads, &node, &tiles, &[0], &raw, 4, 2)
+            .expect("linear histogram build succeeds");
+        let histogram_pair = crate::pl::leaf_linear_stats_for_split(
+            &bundle.feature_histograms[0],
+            0,
+            missing_bin_index,
+            true,
+        );
+        let histogram_left = crate::pl::solve_pl_leaf(
+            &histogram_pair.0,
+            &histogram_pair.1,
+            histogram_pair.2,
+            histogram_pair.3,
+            0.05,
+            0.01,
+            &[0],
+        );
+        let histogram_right = crate::pl::solve_pl_leaf(
+            &histogram_pair.4,
+            &histogram_pair.5,
+            histogram_pair.6,
+            histogram_pair.7,
+            0.05,
+            0.01,
+            &[0],
+        );
+
+        let direct = crate::pl::solve_pl_leaf_pair_from_partitions(
+            &grads,
+            &raw,
+            2,
+            &[0],
+            &[0],
+            &[1, 2, 3],
+            0.05,
+            0.01,
+        )
+        .expect("direct partition solve succeeds");
+
+        assert!((histogram_left.intercept - direct.0.intercept).abs() < 1e-6);
+        assert!((histogram_right.intercept - direct.1.intercept).abs() < 1e-6);
+        assert!((histogram_left.weights[0] - direct.0.weights[0]).abs() < 1e-6);
+        assert!((histogram_right.weights[0] - direct.1.weights[0]).abs() < 1e-6);
+    }
+
+    #[test]
     fn subtraction_trick_recovers_parent() {
         let binned = fixture_binned();
         let grads = fixture_gradients();

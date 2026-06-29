@@ -614,6 +614,109 @@ pub fn solve_pl_leaf(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn solve_pl_leaf_pair_from_partitions(
+    gradients: &[alloygbm_core::GradientPair],
+    raw_feature_values: &[f32],
+    feature_count: usize,
+    regressor_features: &[u32],
+    left_rows: &[u32],
+    right_rows: &[u32],
+    learning_rate: f32,
+    l2_lambda: f32,
+) -> Option<(LinearLeaf, LinearLeaf)> {
+    let d = regressor_features.len();
+    if d == 0 || d > MAX_PL_REGRESSORS || feature_count == 0 {
+        return None;
+    }
+
+    let (l_xtg, l_xthx, l_gs, l_hs) = accumulate_partition_linear_stats(
+        gradients,
+        raw_feature_values,
+        feature_count,
+        regressor_features,
+        left_rows,
+    )?;
+    let (r_xtg, r_xthx, r_gs, r_hs) = accumulate_partition_linear_stats(
+        gradients,
+        raw_feature_values,
+        feature_count,
+        regressor_features,
+        right_rows,
+    )?;
+
+    Some((
+        solve_pl_leaf(
+            &l_xtg,
+            &l_xthx,
+            l_gs,
+            l_hs,
+            learning_rate,
+            l2_lambda,
+            regressor_features,
+        ),
+        solve_pl_leaf(
+            &r_xtg,
+            &r_xthx,
+            r_gs,
+            r_hs,
+            learning_rate,
+            l2_lambda,
+            regressor_features,
+        ),
+    ))
+}
+
+fn accumulate_partition_linear_stats(
+    gradients: &[alloygbm_core::GradientPair],
+    raw_feature_values: &[f32],
+    feature_count: usize,
+    regressor_features: &[u32],
+    rows: &[u32],
+) -> Option<(
+    [f32; MAX_PL_REGRESSORS],
+    [f32; MAX_PL_MATRIX_ENTRIES],
+    f32,
+    f32,
+)> {
+    let mut xtg = [0.0_f32; MAX_PL_REGRESSORS];
+    let mut xt_hx = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
+    let mut grad_sum = 0.0_f32;
+    let mut hess_sum = 0.0_f32;
+
+    for &row_u32 in rows {
+        let row = row_u32 as usize;
+        let gp = *gradients.get(row)?;
+        let row_base = row.checked_mul(feature_count)?;
+        if row_base + feature_count > raw_feature_values.len() {
+            return None;
+        }
+
+        grad_sum += gp.grad;
+        hess_sum += gp.hess;
+
+        let mut x = [0.0_f32; MAX_PL_REGRESSORS];
+        for (slot, &feature_u32) in regressor_features.iter().enumerate() {
+            let feature = feature_u32 as usize;
+            x[slot] = if feature < feature_count {
+                let value = raw_feature_values[row_base + feature];
+                if value.is_finite() { value } else { 0.0 }
+            } else {
+                0.0
+            };
+        }
+
+        for j in 0..regressor_features.len() {
+            xtg[j] += gp.grad * x[j];
+            for k in j..regressor_features.len() {
+                xt_hx[pl_matrix_index(j, k)] += gp.hess * x[j] * x[k];
+            }
+        }
+    }
+
+    Some((xtg, xt_hx, grad_sum, hess_sum))
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
