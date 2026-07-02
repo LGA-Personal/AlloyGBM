@@ -41,7 +41,7 @@ maturin develop --manifest-path bindings/python/Cargo.toml --release
 
 AlloyGBM targets Python `3.11+` and uses a native Rust extension module.
 
-Wheel targets for `0.12.9`:
+Wheel targets for `0.12.10`:
 
 - macOS `arm64`
 - Linux `x86_64` (manylinux)
@@ -186,12 +186,16 @@ GBMRegressor(
     neutralization="none",                 # "none" | "pre_target" | "per_round_gradient" | "split_penalty"
     factor_neutralization_lambda=1e-6,      # finite, >= 0 ridge added to F^T W F
     factor_penalty=0.0,                     # finite, >= 0; only active for neutralization="split_penalty"
+    factor_exposure_transform="none",       # "none" | "center" | "standardize"
 )
 ```
 
 `factor_exposures` is dense, row-major, finite, and shaped
 `(n_rows, n_factors)`. It is fit data, not constructor state, so sklearn
 cloning remains clean and large matrices are not embedded in estimator params.
+Set `factor_exposure_transform="center"` or `"standardize"` to apply column-wise
+preprocessing before the projector/penalty calculation; fit-time means and
+standard deviations are recorded in `factor_exposure_diagnostics_`.
 
 Mode semantics:
 
@@ -357,7 +361,7 @@ artifact_bytes = model.artifact_bytes
 - GOSS (gradient-based one-side sampling, LightGBM-style) via `boosting_mode="goss"` + `goss_top_rate` / `goss_other_rate` on regression, binary classification, and ranking. As of v0.10.1, GOSS is also supported on **multiclass classification** (K ≥ 3 classes) — per-row score `s_i = Σₖ |g_{i,k}|` (LightGBM convention) drives a shared sampling mask across all K class gradient buffers. Default `boosting_mode="standard"` is byte-identical to v0.7.5.
 - DART (Dropouts meet MART) via `boosting_mode="dart"` + `dart_drop_rate` / `dart_max_drop` / `dart_normalize_type` (`"tree"` or `"forest"`) / `dart_sample_type` (`"uniform"` or `"weighted"`) on regression, binary classification, and ranking. Per-stump weights ride in a new `DartTreeWeights` artifact section emitted only when at least one stump diverges from `tree_weight = 1.0`, so Standard / GOSS artifacts stay byte-identical to v0.8.0. **DART + `warm_start` continuation** is supported (v0.10.0+) — pass a fitted DART model via `fit(..., init_model=prior_model)` to add more rounds on top. As of v0.10.1, DART is also supported on **multiclass classification** (K ≥ 3 classes) including warm-start. v0.10.2 lifts the `tree_growth="level"` restriction — multiclass DART now also works with `tree_growth="leaf"` + `max_leaves`.
 - Piecewise-linear leaves via `leaf_model="linear"` (closed-form ridge solve, faster convergence on linear-trend data)
-- Factor-neutral boosting via `neutralization` + fit-time `factor_exposures` (`pre_target`, `per_round_gradient`, `split_penalty`)
+- Factor-neutral boosting via `neutralization` + fit-time `factor_exposures` (`pre_target`, `per_round_gradient`, `split_penalty`) with optional `factor_exposure_transform`
 - LightGBM-compatible feature interaction constraints via `interaction_constraints=[[...]]` (up to 64 groups, level-wise and leaf-wise enforcement)
 - Neutralized warm-start / `init_model` continuation with matching-exposures contract
 - Per-round training diagnostics via `diagnostics_per_round_` (gradient stats, sampling counts, `neutralization_effectiveness`)

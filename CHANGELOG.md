@@ -1,5 +1,46 @@
 # Changelog
 
+## v0.12.10 (2026-07-02)
+
+Patch optimization release on top of v0.12.9. The focus is faster training and
+inference on existing workflows while preserving model behavior and the public
+prediction contracts. There is no artifact format change.
+
+### Performance
+
+- **Avoided full piecewise-linear histogram construction for selected child
+  leaves.** Linear-leaf training now builds only the selected split feature's
+  linear-bin histogram when solving the chosen child leaves, then reuses the
+  existing `leaf_linear_stats_for_split` reducer. This preserves the old
+  histogram solve order and NaN-bin sanitizer behavior while avoiding the cost
+  of rebuilding PL histograms for every feature after the split is selected.
+- **Sped up `neutralization="split_penalty"` numeric split search** with
+  per-feature factor prefix sums. Numeric threshold candidates no longer rescan
+  the node rows for every threshold, reducing split-search overhead on
+  factor-neutralized models without changing the penalty formula.
+- **Kept public regression prediction behavior stable.** The native predictor
+  retains lower-level NumPy prediction helpers for future dedicated APIs, but
+  `GBMRegressor.predict(...)` continues to return `list[float]` across native
+  and fallback paths.
+
+### Python API
+
+- **Added `factor_exposure_transform`** to the estimator family. Use
+  `"none"` (default), `"center"`, or `"standardize"` to preprocess fit-time
+  `factor_exposures` before factor projection and split-penalty calculations.
+  Fitted estimators expose `factor_exposure_diagnostics_` with the selected
+  transform plus training-column means and standard deviations.
+- **Exposed `alloygbm.__version__`** from package metadata so runtime checks can
+  report the installed package version without importing distribution metadata
+  manually.
+
+### Verification
+
+- CI is green on macOS and Ubuntu for Python 3.11, 3.12, and 3.13.
+- Local verification included `cargo test --workspace`, clippy with
+  `-D warnings`, a release `maturin develop`, and the full Python suite:
+  **452 cargo tests** and **657 pytest tests**.
+
 ## v0.12.9 (2026-06-17)
 
 Security and maintenance release on top of v0.12.8. No user-facing API or

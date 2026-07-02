@@ -39,7 +39,9 @@ All parameters from `GBMRegressor` are accepted, including:
 - `neutralization="per_round_gradient"` or `neutralization="split_penalty"` with
   `fit(..., factor_exposures=F)` for training-time factor/gradient
   neutralization. `neutralization="pre_target"` is rejected for classifiers
-  because target residualization is not well-defined for class labels. See
+  because target residualization is not well-defined for class labels.
+  `factor_exposure_transform="center"` / `"standardize"` may be used to
+  preprocess exposure columns before projection. See
   [GBMRegressor — Factor-Neutral Boosting](gbmregressor.md#factor-neutral-boosting).
 - `leaf_model="linear"` for piecewise-linear leaves (see
   [GBMRegressor — Piecewise-Linear Leaves](gbmregressor.md#piecewise-linear-leaves)).

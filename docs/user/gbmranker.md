@@ -63,7 +63,9 @@ regularization, etc.). This includes:
 - `neutralization="per_round_gradient"` or `neutralization="split_penalty"` with
   `fit(..., factor_exposures=F)` for training-time factor/gradient
   neutralization. `neutralization="pre_target"` is rejected for rankers because
-  target residualization is not well-defined for ranking relevance. See
+  target residualization is not well-defined for ranking relevance.
+  `factor_exposure_transform="center"` / `"standardize"` may be used to
+  preprocess exposure columns before projection. See
   [GBMRegressor — Factor-Neutral Boosting](gbmregressor.md#factor-neutral-boosting).
 - `leaf_model="linear"` for piecewise-linear leaves (see
   [GBMRegressor — Piecewise-Linear Leaves](gbmregressor.md#piecewise-linear-leaves)).
@@ -265,6 +267,7 @@ strategy:
 | `neutralization` | str | `"none"` | v0.10.6+. `"none"`, `"pre_target"`, `"per_round_gradient"`, or `"split_penalty"`. Active configs require `factor_exposures=` on `fit()`. |
 | `factor_neutralization_lambda` | float | `1e-6` | v0.10.6+. Ridge regularization on the projector's Gram matrix. |
 | `factor_penalty` | float | `0.0` | v0.10.6+. `split_penalty` mode's penalty multiplier. `0.0` collapses to standard byte-for-byte. |
+| `factor_exposure_transform` | str | `"none"` | v0.12.10+. `"none"`, `"center"`, or `"standardize"` preprocessing for fit-time `factor_exposures`. |
 
 `fit()` also accepts `factor_exposures=` (shape `(n_rows, n_factors)`, dtype float32). Already accepted in independent mode; honored in joint mode as of v0.10.6.
 

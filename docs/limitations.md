@@ -1,6 +1,6 @@
 # AlloyGBM Current Limitations
 
-Last updated for v0.12.9. (v0.12.9 was a security/maintenance release — pyo3/numpy 0.24 → 0.29 plus CI and dependency housekeeping — and changed none of the limitations below.)
+Last updated for v0.12.10. (v0.12.10 was a patch optimization release — PL-leaf solve speedups, faster numeric split-penalty neutralization, factor exposure preprocessing, and package-version export — and changed none of the limitations below.)
 
 ## Remaining Limitations
 

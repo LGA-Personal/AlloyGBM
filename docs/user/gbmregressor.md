@@ -230,6 +230,10 @@ leaf solver.
 - `factor_penalty: float = 0.0`
   - Finite, non-negative split exposure penalty scale. Only active for
     `neutralization="split_penalty"`.
+- `factor_exposure_transform: str = "none"`
+  - One of `"none"`, `"center"`, or `"standardize"`. Applies column-wise
+    preprocessing to fit-time `factor_exposures` before the projector and
+    split-penalty calculations.
 
 Pass factors as fit-time data:
 
@@ -242,6 +246,11 @@ model.fit(X_train, y_train, factor_exposures=F_train)
 `(n_rows, n_factors)`. It is not stored as an estimator constructor parameter,
 so sklearn cloning remains clean and large matrices are not embedded in
 estimator params.
+When `factor_exposure_transform="center"`, each factor column is mean-centered.
+When `"standardize"`, each column is centered and divided by its population
+standard deviation; near-constant columns use a safe scale of `1.0`.
+The fitted estimator records the training-column `means` and `stds` in
+`factor_exposure_diagnostics_`.
 
 Mode semantics:
 
@@ -454,6 +463,10 @@ After `fit(...)`, `GBMRegressor` may expose:
     `gradient_variance`, `hessian_l2_norm`, sampling counts
     (`n_active_rows`, `n_active_features`), and (when factor neutralization
     is active) `neutralization_effectiveness` in `[0, 1]`.
+- `factor_exposure_diagnostics_`
+  - `None` unless neutralization is active. Otherwise a dict with the selected
+    `transform` plus per-factor training `means` and `stds` used by
+    `factor_exposure_transform`.
 - `stop_reason_` / `rounds_completed_`
   - Engine's early-stop reason and actual committed round count.
 

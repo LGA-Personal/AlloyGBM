@@ -1,7 +1,38 @@
 Release and platform policy
 ===========================
 
-AlloyGBM ``0.12.9`` release notes and platform policy.
+AlloyGBM ``0.12.10`` release notes and platform policy.
+
+What's new in 0.12.10
+---------------------
+
+**Patch optimization release on top of v0.12.9.** This release focuses on
+faster training and inference on existing workflows while preserving model
+behavior and public prediction contracts. There is no artifact format change.
+
+- **Faster piecewise-linear child-leaf solves.** Linear-leaf training now builds
+  only the selected split feature's linear-bin histogram when solving the chosen
+  child leaves, then reuses the existing split-stat reducer. This preserves the
+  old histogram solve order and NaN-bin sanitizer behavior while avoiding full
+  PL histogram construction after split selection.
+
+- **Faster numeric ``split_penalty`` neutralization.** Numeric split search uses
+  per-feature factor prefix sums instead of rescanning rows for every threshold
+  candidate, reducing overhead for factor-neutralized training without changing
+  the penalty formula.
+
+- **Factor exposure preprocessing.** Estimators accept
+  ``factor_exposure_transform="none" | "center" | "standardize"`` to preprocess
+  fit-time ``factor_exposures`` before projection and split-penalty
+  calculations. Fitted estimators expose ``factor_exposure_diagnostics_`` with
+  the selected transform plus training-column means and standard deviations.
+
+- **Package version surface.** ``alloygbm.__version__`` is now exported from
+  installed package metadata.
+
+- **Prediction contract preserved.** Lower-level native NumPy prediction
+  helpers remain available internally, but ``GBMRegressor.predict(...)`` still
+  returns ``list[float]`` across native and fallback paths.
 
 What's new in 0.12.9
 --------------------

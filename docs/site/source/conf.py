@@ -11,8 +11,8 @@ sys.path.insert(0, str(PYTHON_BINDINGS))
 project = "AlloyGBM"
 copyright = "2026, Logan Ashby"
 author = "Logan Ashby"
-release = "0.12.9"
-version = "0.12.9"
+release = "0.12.10"
+version = "0.12.10"
 
 extensions = [
     "sphinx.ext.duration",

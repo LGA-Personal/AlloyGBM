@@ -204,6 +204,10 @@ Factor-neutral boosting
   term added to ``F^T W F``.
 - ``factor_penalty: float = 0.0`` -- finite, non-negative split exposure penalty
   scale. Only active for ``neutralization="split_penalty"``.
+- ``factor_exposure_transform: str = "none"`` -- one of ``"none"``,
+  ``"center"``, or ``"standardize"``. Applies column-wise preprocessing to
+  fit-time ``factor_exposures`` before the projector and split-penalty
+  calculations.
 
 Pass factors as fit-time data:
 
@@ -215,6 +219,11 @@ Pass factors as fit-time data:
 ``factor_exposures`` must be dense, row-major, finite, and shaped
 ``(n_rows, n_factors)``. It is fit data, not constructor state, so sklearn
 cloning remains clean and large matrices are not embedded in estimator params.
+With ``factor_exposure_transform="center"``, each factor column is
+mean-centered. With ``"standardize"``, each column is centered and divided by
+its population standard deviation; near-constant columns use a safe scale of
+``1.0``. The fitted estimator records the training-column ``means`` and
+``stds`` in ``factor_exposure_diagnostics_``.
 
 Mode semantics:
 
@@ -444,6 +453,9 @@ After fitting, the estimator may expose:
   The three projection-related entries are ``None`` unless factor
   neutralization (``per_round_gradient`` or ``split_penalty``) is configured;
   ``pre_target`` mode never projects per round and therefore omits them.
+- ``factor_exposure_diagnostics_`` -- ``None`` unless neutralization is active.
+  Otherwise a dict with the selected ``transform`` plus per-factor training
+  ``means`` and ``stds`` used by ``factor_exposure_transform``.
 - ``fit_timing_``
 - ``feature_names_`` -- captured from training data or auto-generated
 

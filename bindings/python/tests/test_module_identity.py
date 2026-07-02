@@ -17,7 +17,7 @@ from alloygbm import GBMRegressor
 
 
 def test_package_exposes_version():
-    assert alloygbm.__version__ == "0.12.9"
+    assert alloygbm.__version__ == "0.12.10"
 
 
 def test_gbmregressor_module_is_public_shim_path():
