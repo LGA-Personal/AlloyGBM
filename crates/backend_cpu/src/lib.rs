@@ -804,6 +804,14 @@ impl CpuBackend {
 
         let mut factor_scratch =
             factor_context.map(|ctx| FactorSplitScratch::new(ctx.exposures.factor_count));
+        if let (Some(ctx), Some(scratch)) = (factor_context, factor_scratch.as_mut()) {
+            scratch.prepare_numeric_prefix(
+                ctx,
+                feature_histogram.feature_index as usize,
+                feature_histogram.bins.len().min(missing_bin_idx),
+                missing_bin_idx,
+            );
+        }
         let mut best_candidate: Option<SplitCandidate> = None;
         let mut best_gain = 0.0_f32;
         let mut left_grad = 0.0_f32;
@@ -818,6 +826,9 @@ impl CpuBackend {
             left_hess += bin.hess_sum;
             left_grad_sq += bin.grad_sq_sum;
             left_count += bin.count;
+            if let Some(scratch) = factor_scratch.as_mut() {
+                scratch.add_numeric_threshold_bin_to_left(threshold_bin);
+            }
 
             // Skip if this isn't a valid split point (need at least the
             // next non-missing bin on the right).
@@ -941,17 +952,12 @@ impl CpuBackend {
                 if let (Some(ctx), Some(scratch)) = (factor_context, factor_scratch.as_mut()) {
                     let left_leaf_value = -left_grad_for_gain / left_denom;
                     let right_leaf_value = -right_grad_for_gain / right_denom;
-                    gain -= factor_split_penalty_for_candidate(
-                        ctx,
-                        scratch,
-                        FactorSplitCandidate {
-                            feature_index: feature_histogram.feature_index,
-                            threshold_bin: threshold_bin as u16,
-                            default_left: candidate.default_left,
-                            categorical_bitset: None,
-                            left_leaf_value,
-                            right_leaf_value,
-                        },
+                    gain -= scratch.numeric_prefix_penalty(
+                        candidate.default_left,
+                        left_leaf_value,
+                        right_leaf_value,
+                        ctx.factor_penalty,
+                        ctx.row_indices.len(),
                     );
                 }
 

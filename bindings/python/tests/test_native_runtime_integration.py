@@ -11,6 +11,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 FIXTURE_ARTIFACT_HEX = (
     "4147424d010000000200000047000000010000007f00000000000000d000000000000000"
     "020000004f010000000000000c000000000000007b22666f726d61745f76657273696f6e"
@@ -198,6 +200,25 @@ class NativeRuntimeIntegrationTests(unittest.TestCase):
             ),
             2,
         )
+
+    def test_predict_returns_list_when_native_path_available(self) -> None:
+        x = np.asarray(
+            [[0.0], [1.0], [2.0], [3.0], [4.0], [5.0], [6.0], [7.0]],
+            dtype=np.float32,
+        )
+        y = np.asarray([-3.0, -2.0, -1.0, 0.0, 0.0, 1.0, 2.0, 3.0], dtype=np.float32)
+        model = self.alloygbm.GBMRegressor(
+            n_estimators=3,
+            deterministic=True,
+            seed=11,
+        )
+        model.fit(x, y)
+
+        pred = model.predict(x)
+
+        self.assertIsInstance(pred, list)
+        self.assertEqual(len(pred), 8)
+        self.assertTrue(all(isinstance(value, float) for value in pred))
 
     def test_runtime_native_predictor_entrypoint_executes(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "serialization|artifact|header"):

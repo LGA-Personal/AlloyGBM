@@ -38,11 +38,14 @@ def bridge_train_kwargs(**overrides):
 class FactorNeutralizationTests(unittest.TestCase):
     def test_params_roundtrip(self):
         model = GBMRegressor(
-            neutralization="per_round_gradient", factor_neutralization_lambda=1e-4
+            neutralization="per_round_gradient",
+            factor_neutralization_lambda=1e-4,
+            factor_exposure_transform="center",
         )
         params = model.get_params()
         self.assertEqual(params["neutralization"], "per_round_gradient")
         self.assertEqual(params["factor_neutralization_lambda"], 1e-4)
+        self.assertEqual(params["factor_exposure_transform"], "center")
         model.set_params(neutralization="pre_target", factor_penalty=0.0)
         self.assertEqual(model.neutralization, "pre_target")
 
@@ -53,6 +56,8 @@ class FactorNeutralizationTests(unittest.TestCase):
             GBMRegressor(factor_neutralization_lambda=-1.0)
         with self.assertRaises(ValueError):
             GBMRegressor(factor_penalty=-1.0)
+        with self.assertRaises(ValueError):
+            GBMRegressor(factor_exposure_transform="bad")
 
     def test_requires_factor_exposures_when_active(self):
         x, y, _ = factor_data()
@@ -64,6 +69,41 @@ class FactorNeutralizationTests(unittest.TestCase):
         model = GBMRegressor(neutralization="per_round_gradient", n_estimators=5, seed=1)
         model.fit(x, y, factor_exposures=f)
         self.assertEqual(np.asarray(model.predict(x)).shape, (len(x),))
+
+    def test_factor_exposures_are_centered_when_requested(self):
+        x, y, f = factor_data()
+        shifted = f + np.float32(10.0)
+        model = GBMRegressor(
+            neutralization="per_round_gradient",
+            factor_exposure_transform="center",
+            n_estimators=2,
+            seed=5,
+        )
+        model.fit(x, y, factor_exposures=shifted)
+        diagnostics = model.factor_exposure_diagnostics_
+        self.assertIsNotNone(diagnostics)
+        self.assertEqual(diagnostics["transform"], "center")
+        self.assertAlmostEqual(diagnostics["means"][0], float(np.mean(shifted[:, 0])))
+        self.assertAlmostEqual(diagnostics["stds"][0], float(np.std(shifted[:, 0])))
+
+    def test_factor_exposures_are_standardized_when_requested(self):
+        x, y, f = factor_data()
+        scaled = np.column_stack([f[:, 0] * 3.0 + 5.0, np.ones(len(f), dtype=np.float32)])
+        model = GBMRegressor(
+            neutralization="split_penalty",
+            factor_penalty=0.1,
+            factor_exposure_transform="standardize",
+            n_estimators=2,
+            seed=6,
+        )
+        model.fit(x, y, factor_exposures=scaled)
+        diagnostics = model.factor_exposure_diagnostics_
+        self.assertIsNotNone(diagnostics)
+        self.assertEqual(diagnostics["transform"], "standardize")
+        self.assertAlmostEqual(
+            diagnostics["means"][0], float(np.mean(scaled[:, 0])), places=6
+        )
+        self.assertAlmostEqual(diagnostics["stds"][1], 0.0)
 
     def test_factor_neutralization_with_dro_and_morph(self):
         x, y, f = factor_data()
@@ -233,11 +273,22 @@ class FactorNeutralizationTests(unittest.TestCase):
         model = GBMClassifier(
             neutralization="per_round_gradient",
             factor_neutralization_lambda=1e-4,
+            factor_exposure_transform="center",
         )
         text = repr(model)
         self.assertIn("neutralization='per_round_gradient'", text)
         self.assertIn("factor_neutralization_lambda=0.0001", text)
         self.assertIn("factor_penalty=0.0", text)
+        self.assertIn("factor_exposure_transform='center'", text)
+        self.assertIn(
+            "factor_exposure_transform='standardize'",
+            repr(
+                GBMRanker(
+                    neutralization="per_round_gradient",
+                    factor_exposure_transform="standardize",
+                )
+            ),
+        )
 
     def test_pre_target_rejected_by_classifier_and_ranker_constructors(self):
         with self.assertRaises(ValueError):

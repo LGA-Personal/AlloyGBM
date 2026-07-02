@@ -380,8 +380,9 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
             }
 
             // ── Linear leaf path ───────────────────────────────────────────────
-            // If leaf_model == Linear, build a LinearHistogramBundle for this node
-            // and solve closed-form ridge leaves. Falls back to scalar on any error.
+            // If leaf_model == Linear, solve closed-form ridge leaves from the
+            // already-materialized child partitions. Falls back to scalar on any
+            // error.
             let linear_leaf_computation_result: Option<LinearLeafQuad> = if params.leaf_model
                 == LeafModelKind::Linear
                 && !raw_feature_values.is_empty()
@@ -390,28 +391,20 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
                 let d = binned_matrix.feature_count.min(MAX_PL_REGRESSORS);
                 let regressor_features: Vec<u32> = (0..d as u32).collect();
                 backend
-                    .build_linear_histograms(
+                    .compute_linear_leaf_pair_from_partitions(
                         binned_matrix,
                         gradients,
-                        &node,
-                        feature_tiles,
-                        &regressor_features,
                         raw_feature_values,
-                        binned_matrix.row_count,
                         binned_matrix.feature_count,
+                        split.feature_index,
+                        split.threshold_bin,
+                        split.default_left,
+                        &regressor_features,
+                        &partition.left_row_indices,
+                        &partition.right_row_indices,
+                        lr,
+                        split_options.l2_lambda,
                     )
-                    .ok()
-                    .and_then(|lin_hist| {
-                        backend.compute_linear_leaf_pair(
-                            &lin_hist,
-                            split.feature_index,
-                            split.threshold_bin as usize,
-                            split.default_left,
-                            split_options.missing_bin_index,
-                            lr,
-                            split_options.l2_lambda,
-                        )
-                    })
                     .map(|(mut ll_abs, mut rl_abs)| {
                         // Apply morph scaling to weights and intercept.
                         ll_abs.intercept *= morph_scale;
@@ -849,28 +842,20 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
             let d = binned_matrix.feature_count.min(MAX_PL_REGRESSORS);
             let regressor_features: Vec<u32> = (0..d as u32).collect();
             backend
-                .build_linear_histograms(
+                .compute_linear_leaf_pair_from_partitions(
                     binned_matrix,
                     gradients,
-                    &node,
-                    feature_tiles,
-                    &regressor_features,
                     raw_feature_values,
-                    binned_matrix.row_count,
                     binned_matrix.feature_count,
+                    split.feature_index,
+                    split.threshold_bin,
+                    split.default_left,
+                    &regressor_features,
+                    &partition.left_row_indices,
+                    &partition.right_row_indices,
+                    lr,
+                    split_options.l2_lambda,
                 )
-                .ok()
-                .and_then(|lin_hist| {
-                    backend.compute_linear_leaf_pair(
-                        &lin_hist,
-                        split.feature_index,
-                        split.threshold_bin as usize,
-                        split.default_left,
-                        split_options.missing_bin_index,
-                        lr,
-                        split_options.l2_lambda,
-                    )
-                })
                 .map(|(mut ll_abs, mut rl_abs)| {
                     ll_abs.intercept *= morph_scale;
                     rl_abs.intercept *= morph_scale;

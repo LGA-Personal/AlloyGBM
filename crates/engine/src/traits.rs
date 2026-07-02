@@ -169,6 +169,29 @@ pub trait BackendOps {
     ) -> Option<(LinearLeaf, LinearLeaf)> {
         None
     }
+
+    /// Solve linear leaves directly from the already-materialized child
+    /// partitions for a chosen split. This avoids rebuilding a full
+    /// `LinearHistogramBundle` when the standard scalar split criterion has
+    /// already selected the split.
+    #[allow(clippy::too_many_arguments)]
+    fn compute_linear_leaf_pair_from_partitions(
+        &self,
+        _binned_matrix: &BinnedMatrix,
+        _gradients: &[GradientPair],
+        _raw_feature_values: &[f32],
+        _feature_count: usize,
+        _split_feature_index: u32,
+        _threshold_bin: u16,
+        _default_left: bool,
+        _regressor_features: &[u32],
+        _left_rows: &[u32],
+        _right_rows: &[u32],
+        _learning_rate: f32,
+        _l2_lambda: f32,
+    ) -> Option<(LinearLeaf, LinearLeaf)> {
+        None
+    }
 }
 
 /// Callback invoked after each boosting round to evaluate a custom metric.

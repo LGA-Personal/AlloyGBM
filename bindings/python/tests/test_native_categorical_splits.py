@@ -434,7 +434,7 @@ class TestNativeCategoricalSplits(unittest.TestCase):
         m2 = pickle.loads(data)
 
         preds_after = m2.predict(X[:10])
-        self.assertEqual(preds_before, preds_after)
+        np.testing.assert_allclose(preds_before, preds_after, rtol=0.0, atol=0.0)
 
         # Verify mappings are preserved
         self.assertEqual(m._native_cat_mappings_, m2._native_cat_mappings_)
@@ -460,7 +460,7 @@ class TestNativeCategoricalSplits(unittest.TestCase):
         m2 = GBMRegressor.load_model(path)
 
         preds_after = m2.predict(X[:10])
-        self.assertEqual(preds_before, preds_after)
+        np.testing.assert_allclose(preds_before, preds_after, rtol=0.0, atol=0.0)
 
         # Verify mappings and params are preserved
         self.assertEqual(m._native_cat_mappings_, m2._native_cat_mappings_)

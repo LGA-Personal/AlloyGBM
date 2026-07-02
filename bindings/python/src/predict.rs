@@ -6,7 +6,7 @@ use crate::quantization::{
 };
 use alloygbm_engine::{ArtifactCompatibilityMode, TrainedModel};
 use alloygbm_predictor::{Predictor, PredictorError};
-use numpy::{PyReadonlyArray2, PyUntypedArrayMethods};
+use numpy::{PyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
@@ -62,6 +62,26 @@ impl NativePredictorHandle {
         self.predictor
             .predict_batch_dense(values, row_count, feature_count)
             .map_err(predictor_error_to_pyerr)
+    }
+
+    /// Predict from a numpy array and return a numpy array, avoiding Python list materialization.
+    fn predict_numpy_array<'py>(
+        &self,
+        py: Python<'py>,
+        array: PyReadonlyArray2<f32>,
+    ) -> PyResult<Bound<'py, PyArray1<f32>>> {
+        let shape = array.shape();
+        let row_count = shape[0];
+        let feature_count = shape[1];
+        let array_view = array.as_array();
+        let values = array_view.as_slice().ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err("numpy array must be C-contiguous")
+        })?;
+        let predictions = self
+            .predictor
+            .predict_batch_dense(values, row_count, feature_count)
+            .map_err(predictor_error_to_pyerr)?;
+        Ok(PyArray1::from_vec(py, predictions))
     }
 
     /// Predict from raw f32 bytes — zero Python-to-Rust list overhead.

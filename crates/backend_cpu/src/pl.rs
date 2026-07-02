@@ -16,8 +16,8 @@
 
 use alloygbm_core::simd::f32x8;
 use alloygbm_core::{
-    LinearFeatureHistogram, LinearLeaf, MAX_PL_MATRIX_ENTRIES, MAX_PL_REGRESSORS, NodeStats,
-    SplitCandidate, pl_matrix_index,
+    BinnedMatrix, LinearFeatureHistogram, LinearHistogramBin, LinearLeaf, MAX_PL_MATRIX_ENTRIES,
+    MAX_PL_REGRESSORS, NodeStats, SplitCandidate, pl_matrix_index,
 };
 use alloygbm_engine::{LinearContext, SplitSelectionOptions};
 
@@ -611,6 +611,146 @@ pub fn solve_pl_leaf(
         intercept,
         weights,
         regressor_features: regressor_features.to_vec(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn solve_pl_leaf_pair_from_partitions(
+    binned_matrix: &BinnedMatrix,
+    gradients: &[alloygbm_core::GradientPair],
+    raw_feature_values: &[f32],
+    feature_count: usize,
+    split_feature_index: u32,
+    threshold_bin: u16,
+    default_left: bool,
+    regressor_features: &[u32],
+    left_rows: &[u32],
+    right_rows: &[u32],
+    learning_rate: f32,
+    l2_lambda: f32,
+) -> Option<(LinearLeaf, LinearLeaf)> {
+    let d = regressor_features.len();
+    if d == 0 || d > MAX_PL_REGRESSORS || feature_count == 0 {
+        return None;
+    }
+
+    let linear_fh = accumulate_selected_split_linear_histogram(
+        binned_matrix,
+        gradients,
+        raw_feature_values,
+        feature_count,
+        split_feature_index,
+        regressor_features,
+        left_rows,
+        right_rows,
+    )?;
+    let (l_xtg, l_xthx, l_gs, l_hs, r_xtg, r_xthx, r_gs, r_hs) = leaf_linear_stats_for_split(
+        &linear_fh,
+        threshold_bin as usize,
+        binned_matrix.missing_bin() as usize,
+        default_left,
+    );
+
+    Some((
+        solve_pl_leaf(
+            &l_xtg,
+            &l_xthx,
+            l_gs,
+            l_hs,
+            learning_rate,
+            l2_lambda,
+            regressor_features,
+        ),
+        solve_pl_leaf(
+            &r_xtg,
+            &r_xthx,
+            r_gs,
+            r_hs,
+            learning_rate,
+            l2_lambda,
+            regressor_features,
+        ),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn accumulate_selected_split_linear_histogram(
+    binned_matrix: &BinnedMatrix,
+    gradients: &[alloygbm_core::GradientPair],
+    raw_feature_values: &[f32],
+    feature_count: usize,
+    split_feature_index: u32,
+    regressor_features: &[u32],
+    left_rows: &[u32],
+    right_rows: &[u32],
+) -> Option<LinearFeatureHistogram> {
+    let split_feature = split_feature_index as usize;
+    if split_feature >= binned_matrix.feature_count {
+        return None;
+    }
+    let bin_count = (binned_matrix.max_bin.max(binned_matrix.missing_bin()) as usize) + 1;
+    let mut bins = vec![LinearHistogramBin::default(); bin_count];
+
+    for &row_u32 in left_rows.iter().chain(right_rows.iter()) {
+        let row = row_u32 as usize;
+        let gp = *gradients.get(row)?;
+        let row_base = row.checked_mul(feature_count)?;
+        if row_base + feature_count > raw_feature_values.len() {
+            return None;
+        }
+        let split_bin = binned_matrix
+            .row_bin(row.checked_mul(binned_matrix.feature_count)? + split_feature)
+            as usize;
+        let bin = bins.get_mut(split_bin)?;
+
+        bin.grad_sum += gp.grad;
+        bin.hess_sum += gp.hess;
+        bin.count += 1;
+
+        let mut x = [0.0_f32; MAX_PL_REGRESSORS];
+        for (slot, &feature_u32) in regressor_features.iter().enumerate() {
+            let feature = feature_u32 as usize;
+            x[slot] = if feature < feature_count {
+                raw_feature_values[row_base + feature]
+            } else {
+                0.0
+            };
+        }
+
+        for j in 0..regressor_features.len() {
+            bin.xtg[j] += gp.grad * x[j];
+            for k in 0..regressor_features.len() {
+                bin.xt_hx[pl_matrix_index(j, k)] += gp.hess * x[j] * x[k];
+            }
+        }
+    }
+
+    for bin in &mut bins {
+        sanitize_direct_linear_bin(bin);
+    }
+
+    Some(LinearFeatureHistogram {
+        feature_index: split_feature_index,
+        bins,
+    })
+}
+
+fn sanitize_direct_linear_bin(bin: &mut LinearHistogramBin) {
+    if !bin.grad_sum.is_finite() {
+        bin.grad_sum = 0.0;
+    }
+    if !bin.hess_sum.is_finite() {
+        bin.hess_sum = 0.0;
+    }
+    for slot in &mut bin.xtg {
+        if !slot.is_finite() {
+            *slot = 0.0;
+        }
+    }
+    for slot in &mut bin.xt_hx {
+        if !slot.is_finite() {
+            *slot = 0.0;
+        }
     }
 }
 

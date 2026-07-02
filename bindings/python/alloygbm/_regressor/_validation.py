@@ -18,6 +18,7 @@ class _ValidationMixin:
 
     def _prepare_factor_exposures(self, factor_exposures, n_rows: int):
         if self.neutralization == "none":
+            self.factor_exposure_diagnostics_ = None
             if factor_exposures is not None:
                 raise ValueError("factor_exposures were provided but neutralization='none'")
             return None, 0, 0
@@ -37,6 +38,23 @@ class _ValidationMixin:
         if not np.all(np.isfinite(arr)):
             raise ValueError("factor_exposures must contain only finite values")
         arr = np.ascontiguousarray(arr, dtype=np.float32)
+        transform = getattr(self, "factor_exposure_transform", "none")
+        means = arr.mean(axis=0).astype(np.float32)
+        stds = arr.std(axis=0).astype(np.float32)
+        if transform == "center":
+            arr = np.ascontiguousarray(arr - means, dtype=np.float32)
+        elif transform == "standardize":
+            safe_stds = np.where(stds <= 1e-6, 1.0, stds).astype(np.float32)
+            arr = np.ascontiguousarray((arr - means) / safe_stds, dtype=np.float32)
+        elif transform != "none":
+            raise ValueError(
+                "factor_exposure_transform must be 'none', 'center', or 'standardize'"
+            )
+        self.factor_exposure_diagnostics_ = {
+            "transform": transform,
+            "means": [float(v) for v in means],
+            "stds": [float(v) for v in stds],
+        }
         return arr.ravel().tolist(), int(arr.shape[0]), int(arr.shape[1])
 
     def _resolve_monotone_constraints(self, feature_count: int) -> list[int]:
