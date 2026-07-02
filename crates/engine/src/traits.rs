@@ -182,6 +182,8 @@ pub trait BackendOps {
         _raw_feature_values: &[f32],
         _feature_count: usize,
         _split_feature_index: u32,
+        _threshold_bin: u16,
+        _default_left: bool,
         _regressor_features: &[u32],
         _left_rows: &[u32],
         _right_rows: &[u32],
