@@ -16,8 +16,8 @@
 
 use alloygbm_core::simd::f32x8;
 use alloygbm_core::{
-    LinearFeatureHistogram, LinearLeaf, MAX_PL_MATRIX_ENTRIES, MAX_PL_REGRESSORS, NodeStats,
-    SplitCandidate, pl_matrix_index,
+    BinnedMatrix, LinearFeatureHistogram, LinearHistogramBin, LinearLeaf, MAX_PL_MATRIX_ENTRIES,
+    MAX_PL_REGRESSORS, NodeStats, SplitCandidate, pl_matrix_index,
 };
 use alloygbm_engine::{LinearContext, SplitSelectionOptions};
 
@@ -616,9 +616,11 @@ pub fn solve_pl_leaf(
 
 #[allow(clippy::too_many_arguments)]
 pub fn solve_pl_leaf_pair_from_partitions(
+    binned_matrix: &BinnedMatrix,
     gradients: &[alloygbm_core::GradientPair],
     raw_feature_values: &[f32],
     feature_count: usize,
+    split_feature_index: u32,
     regressor_features: &[u32],
     left_rows: &[u32],
     right_rows: &[u32],
@@ -631,16 +633,20 @@ pub fn solve_pl_leaf_pair_from_partitions(
     }
 
     let (l_xtg, l_xthx, l_gs, l_hs) = accumulate_partition_linear_stats(
+        binned_matrix,
         gradients,
         raw_feature_values,
         feature_count,
+        split_feature_index,
         regressor_features,
         left_rows,
     )?;
     let (r_xtg, r_xthx, r_gs, r_hs) = accumulate_partition_linear_stats(
+        binned_matrix,
         gradients,
         raw_feature_values,
         feature_count,
+        split_feature_index,
         regressor_features,
         right_rows,
     )?;
@@ -668,9 +674,11 @@ pub fn solve_pl_leaf_pair_from_partitions(
 }
 
 fn accumulate_partition_linear_stats(
+    binned_matrix: &BinnedMatrix,
     gradients: &[alloygbm_core::GradientPair],
     raw_feature_values: &[f32],
     feature_count: usize,
+    split_feature_index: u32,
     regressor_features: &[u32],
     rows: &[u32],
 ) -> Option<(
@@ -679,10 +687,12 @@ fn accumulate_partition_linear_stats(
     f32,
     f32,
 )> {
-    let mut xtg = [0.0_f32; MAX_PL_REGRESSORS];
-    let mut xt_hx = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
-    let mut grad_sum = 0.0_f32;
-    let mut hess_sum = 0.0_f32;
+    let split_feature = split_feature_index as usize;
+    if split_feature >= binned_matrix.feature_count {
+        return None;
+    }
+    let bin_count = (binned_matrix.max_bin.max(binned_matrix.missing_bin()) as usize) + 1;
+    let mut bins = vec![LinearHistogramBin::default(); bin_count];
 
     for &row_u32 in rows {
         let row = row_u32 as usize;
@@ -691,30 +701,74 @@ fn accumulate_partition_linear_stats(
         if row_base + feature_count > raw_feature_values.len() {
             return None;
         }
+        let split_bin = binned_matrix
+            .row_bin(row.checked_mul(binned_matrix.feature_count)? + split_feature)
+            as usize;
+        let bin = bins.get_mut(split_bin)?;
 
-        grad_sum += gp.grad;
-        hess_sum += gp.hess;
+        bin.grad_sum += gp.grad;
+        bin.hess_sum += gp.hess;
+        bin.count += 1;
 
         let mut x = [0.0_f32; MAX_PL_REGRESSORS];
         for (slot, &feature_u32) in regressor_features.iter().enumerate() {
             let feature = feature_u32 as usize;
             x[slot] = if feature < feature_count {
-                let value = raw_feature_values[row_base + feature];
-                if value.is_finite() { value } else { 0.0 }
+                raw_feature_values[row_base + feature]
             } else {
                 0.0
             };
         }
 
         for j in 0..regressor_features.len() {
-            xtg[j] += gp.grad * x[j];
+            bin.xtg[j] += gp.grad * x[j];
             for k in j..regressor_features.len() {
-                xt_hx[pl_matrix_index(j, k)] += gp.hess * x[j] * x[k];
+                bin.xt_hx[pl_matrix_index(j, k)] += gp.hess * x[j] * x[k];
             }
         }
     }
 
+    let mut xtg = [0.0_f32; MAX_PL_REGRESSORS];
+    let mut xt_hx = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
+    let mut grad_sum = 0.0_f32;
+    let mut hess_sum = 0.0_f32;
+
+    for bin in &mut bins {
+        sanitize_direct_linear_bin(bin);
+        grad_sum += bin.grad_sum;
+        hess_sum += bin.hess_sum;
+        for (slot, value) in xtg
+            .iter_mut()
+            .zip(bin.xtg.iter())
+            .take(regressor_features.len())
+        {
+            *slot += *value;
+        }
+        for (slot, value) in xt_hx.iter_mut().zip(bin.xt_hx.iter()) {
+            *slot += *value;
+        }
+    }
+
     Some((xtg, xt_hx, grad_sum, hess_sum))
+}
+
+fn sanitize_direct_linear_bin(bin: &mut LinearHistogramBin) {
+    if !bin.grad_sum.is_finite() {
+        bin.grad_sum = 0.0;
+    }
+    if !bin.hess_sum.is_finite() {
+        bin.hess_sum = 0.0;
+    }
+    for slot in &mut bin.xtg {
+        if !slot.is_finite() {
+            *slot = 0.0;
+        }
+    }
+    for slot in &mut bin.xt_hx {
+        if !slot.is_finite() {
+            *slot = 0.0;
+        }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

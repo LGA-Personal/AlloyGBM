@@ -2431,7 +2431,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         self._is_fitted = True
         return self
 
-    def predict(self, X: object) -> object:
+    def predict(self, X: object) -> list[float]:
         """Predict using the fitted native artifact."""
         if not self._is_fitted:
             raise RuntimeError("GBMRegressor must be fit before predict")
@@ -2462,11 +2462,6 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                             f"X feature count {arr.shape[1]} does not match fitted "
                             f"feature count {self._n_features_in}"
                         )
-                    predict_numpy_array = getattr(
-                        self._native_predictor_handle, "predict_numpy_array", None
-                    )
-                    if callable(predict_numpy_array):
-                        return predict_numpy_array(arr)
                     predict_numpy = getattr(
                         self._native_predictor_handle, "predict_numpy", None
                     )

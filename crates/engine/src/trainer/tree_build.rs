@@ -392,9 +392,11 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
                 let regressor_features: Vec<u32> = (0..d as u32).collect();
                 backend
                     .compute_linear_leaf_pair_from_partitions(
+                        binned_matrix,
                         gradients,
                         raw_feature_values,
                         binned_matrix.feature_count,
+                        split.feature_index,
                         &regressor_features,
                         &partition.left_row_indices,
                         &partition.right_row_indices,
@@ -839,9 +841,11 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
             let regressor_features: Vec<u32> = (0..d as u32).collect();
             backend
                 .compute_linear_leaf_pair_from_partitions(
+                    binned_matrix,
                     gradients,
                     raw_feature_values,
                     binned_matrix.feature_count,
+                    split.feature_index,
                     &regressor_features,
                     &partition.left_row_indices,
                     &partition.right_row_indices,

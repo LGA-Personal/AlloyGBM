@@ -177,9 +177,11 @@ pub trait BackendOps {
     #[allow(clippy::too_many_arguments)]
     fn compute_linear_leaf_pair_from_partitions(
         &self,
+        _binned_matrix: &BinnedMatrix,
         _gradients: &[GradientPair],
         _raw_feature_values: &[f32],
         _feature_count: usize,
+        _split_feature_index: u32,
         _regressor_features: &[u32],
         _left_rows: &[u32],
         _right_rows: &[u32],

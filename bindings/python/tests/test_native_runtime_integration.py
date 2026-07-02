@@ -201,7 +201,7 @@ class NativeRuntimeIntegrationTests(unittest.TestCase):
             2,
         )
 
-    def test_predict_returns_numpy_array_when_native_path_available(self) -> None:
+    def test_predict_returns_list_when_native_path_available(self) -> None:
         x = np.asarray(
             [[0.0], [1.0], [2.0], [3.0], [4.0], [5.0], [6.0], [7.0]],
             dtype=np.float32,
@@ -216,9 +216,9 @@ class NativeRuntimeIntegrationTests(unittest.TestCase):
 
         pred = model.predict(x)
 
-        self.assertIsInstance(pred, np.ndarray)
-        self.assertEqual(pred.dtype, np.float32)
-        self.assertEqual(pred.shape, (8,))
+        self.assertIsInstance(pred, list)
+        self.assertEqual(len(pred), 8)
+        self.assertTrue(all(isinstance(value, float) for value in pred))
 
     def test_runtime_native_predictor_entrypoint_executes(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "serialization|artifact|header"):
