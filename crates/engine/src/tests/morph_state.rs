@@ -334,7 +334,7 @@ fn glm_initial_prediction_accumulates_mean_in_f64() {
 fn poisson_gradient_uses_stabilized_hessian() {
     let predictions = vec![0.0_f32, 1.0, 2.0];
     let targets = vec![1.0_f32, 2.0, 3.0];
-    let gradients = PoissonObjective
+    let gradients = PoissonObjective::new(0.7)
         .compute_gradients(&predictions, &targets, None)
         .expect("grads");
     for (idx, gp) in gradients.iter().enumerate() {
@@ -342,6 +342,20 @@ fn poisson_gradient_uses_stabilized_hessian() {
         let want_grad = mu - targets[idx];
         let want_hess = mu * 0.7_f32.exp();
         assert!((gp.grad - want_grad).abs() < 1e-5);
+        assert!((gp.hess - want_hess).abs() < 1e-5);
+    }
+}
+
+#[test]
+fn poisson_gradient_hessian_stabilizer_is_tunable() {
+    let predictions = vec![0.0_f32, 1.0, 2.0];
+    let targets = vec![1.0_f32, 2.0, 3.0];
+    let gradients = PoissonObjective::new(0.25)
+        .compute_gradients(&predictions, &targets, None)
+        .expect("grads");
+    for (idx, gp) in gradients.iter().enumerate() {
+        let mu = predictions[idx].exp();
+        let want_hess = mu * 0.25_f32.exp();
         assert!((gp.hess - want_hess).abs() < 1e-5);
     }
 }

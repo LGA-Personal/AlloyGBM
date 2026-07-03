@@ -15,7 +15,7 @@ fn glm_clamp_exp_f64(eta: f32) -> f64 {
     f64::from(eta.clamp(-50.0, 50.0)).exp()
 }
 
-const POISSON_MAX_DELTA_STEP: f32 = 0.7;
+const DEFAULT_POISSON_MAX_DELTA_STEP: f32 = 0.7;
 
 /// Weighted-mean-of-targets helper used by every GLM initial prediction.
 /// Returns `(sum, total_weight)` or an error on bad weights.
@@ -57,6 +57,47 @@ fn glm_weighted_target_sum(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PoissonObjective;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TunedPoissonObjective {
+    max_delta_step: f32,
+}
+
+impl PoissonObjective {
+    pub fn new(max_delta_step: f32) -> TunedPoissonObjective {
+        TunedPoissonObjective { max_delta_step }
+    }
+}
+
+fn poisson_compute_gradients(
+    predictions: &[f32],
+    targets: &[f32],
+    sample_weights: Option<&[f32]>,
+    max_delta_step: f32,
+) -> EngineResult<Vec<GradientPair>> {
+    if predictions.len() != targets.len() {
+        return Err(EngineError::ContractViolation(format!(
+            "predictions length {} does not match targets length {}",
+            predictions.len(),
+            targets.len()
+        )));
+    }
+    let mut gradients = Vec::with_capacity(predictions.len());
+    let hessian_scale = max_delta_step.exp();
+    for index in 0..predictions.len() {
+        let weight = sample_weights.map_or(1.0, |w| w[index]);
+        if !weight.is_finite() || weight <= 0.0 {
+            return Err(EngineError::ContractViolation(
+                "sample weights must be finite and > 0".to_string(),
+            ));
+        }
+        let mu = glm_clamp_exp(predictions[index]);
+        let grad = (mu - targets[index]) * weight;
+        let hess = mu.max(1e-7) * hessian_scale * weight;
+        gradients.push(GradientPair::new(grad, hess)?);
+    }
+    Ok(gradients)
+}
+
 impl ObjectiveOps for PoissonObjective {
     fn objective_name(&self) -> &str {
         "poisson"
@@ -95,27 +136,12 @@ impl ObjectiveOps for PoissonObjective {
         targets: &[f32],
         sample_weights: Option<&[f32]>,
     ) -> EngineResult<Vec<GradientPair>> {
-        if predictions.len() != targets.len() {
-            return Err(EngineError::ContractViolation(format!(
-                "predictions length {} does not match targets length {}",
-                predictions.len(),
-                targets.len()
-            )));
-        }
-        let mut gradients = Vec::with_capacity(predictions.len());
-        for index in 0..predictions.len() {
-            let weight = sample_weights.map_or(1.0, |w| w[index]);
-            if !weight.is_finite() || weight <= 0.0 {
-                return Err(EngineError::ContractViolation(
-                    "sample weights must be finite and > 0".to_string(),
-                ));
-            }
-            let mu = glm_clamp_exp(predictions[index]);
-            let grad = (mu - targets[index]) * weight;
-            let hess = mu.max(1e-7) * POISSON_MAX_DELTA_STEP.exp() * weight;
-            gradients.push(GradientPair::new(grad, hess)?);
-        }
-        Ok(gradients)
+        poisson_compute_gradients(
+            predictions,
+            targets,
+            sample_weights,
+            DEFAULT_POISSON_MAX_DELTA_STEP,
+        )
     }
 
     fn loss(
@@ -145,6 +171,38 @@ impl ObjectiveOps for PoissonObjective {
             return Ok(0.0);
         }
         Ok((total / weight_sum) as f32)
+    }
+}
+
+impl ObjectiveOps for TunedPoissonObjective {
+    fn objective_name(&self) -> &str {
+        "poisson"
+    }
+
+    fn initial_prediction(
+        &self,
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+    ) -> EngineResult<f32> {
+        PoissonObjective.initial_prediction(targets, sample_weights)
+    }
+
+    fn compute_gradients(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+    ) -> EngineResult<Vec<GradientPair>> {
+        poisson_compute_gradients(predictions, targets, sample_weights, self.max_delta_step)
+    }
+
+    fn loss(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        sample_weights: Option<&[f32]>,
+    ) -> EngineResult<f32> {
+        PoissonObjective.loss(predictions, targets, sample_weights)
     }
 }
 

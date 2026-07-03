@@ -185,6 +185,10 @@ pub struct TrainParams {
     /// `objective="tweedie"`.  Ignored for all other objectives.
     /// Defaults to 1.5 (a common starting point for insurance/claims data).
     pub tweedie_variance_power: f32,
+    /// Poisson max-delta-step stabilizer. The hessian is scaled by
+    /// `exp(poisson_max_delta_step)` to damp Newton updates for sparse or
+    /// skewed count data. Defaults to 0.7.
+    pub poisson_max_delta_step: f32,
     /// Quantile alpha `alpha ∈ (0.0, 1.0)` for `objective="quantile"`.
     /// Ignored for all other objectives.
     /// Defaults to 0.5 (median).
@@ -219,6 +223,7 @@ impl Default for TrainParams {
             neutralization_config: None,
             boosting_mode: BoostingMode::Standard,
             tweedie_variance_power: 1.5,
+            poisson_max_delta_step: 0.7,
             quantile_alpha: 0.5,
         }
     }

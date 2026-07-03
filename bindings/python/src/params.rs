@@ -122,6 +122,7 @@ pub(crate) fn build_train_params(
     neutralization_config: Option<FactorNeutralizationConfig>,
     boosting_mode: BoostingMode,
     tweedie_variance_power: f32,
+    poisson_max_delta_step: f32,
     quantile_alpha: f32,
 ) -> TrainParams {
     TrainParams {
@@ -150,6 +151,7 @@ pub(crate) fn build_train_params(
         neutralization_config,
         boosting_mode,
         tweedie_variance_power,
+        poisson_max_delta_step,
         quantile_alpha,
     }
 }
