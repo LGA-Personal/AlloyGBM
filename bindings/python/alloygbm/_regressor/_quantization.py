@@ -246,9 +246,32 @@ class _QuantizationMixin:
         return mins, maxs
 
     @staticmethod
+    def _try_derive_dense_sorted_feature_values_numpy(
+        flat_values: Sequence[float], row_count: int, feature_count: int
+    ) -> list[list[float]] | None:
+        try:
+            import numpy as np
+            arr = np.asarray(flat_values, dtype=np.float32).reshape(row_count, feature_count)
+        except (ImportError, TypeError, ValueError):
+            return None
+
+        sorted_values: list[list[float]] = []
+        for feature_index in range(feature_count):
+            values = arr[:, feature_index]
+            values = values[~np.isnan(values)]
+            sorted_values.append([float(value) for value in np.sort(values).tolist()])
+        return sorted_values
+
+    @staticmethod
     def _derive_dense_sorted_feature_values(
         flat_values: Sequence[float], row_count: int, feature_count: int
     ) -> list[list[float]]:
+        numpy_sorted_values = GBMRegressor._try_derive_dense_sorted_feature_values_numpy(
+            flat_values, row_count, feature_count
+        )
+        if numpy_sorted_values is not None:
+            return numpy_sorted_values
+
         sorted_values: list[list[float]] = []
         for feature_index in range(feature_count):
             values = GBMRegressor._column_values_from_flat_payload(
@@ -263,6 +286,14 @@ class _QuantizationMixin:
     def _derive_dense_feature_quantile_cuts(
         flat_values: Sequence[float], row_count: int, feature_count: int, max_bins: int
     ) -> list[list[float]]:
+        sorted_feature_values = GBMRegressor._try_derive_dense_sorted_feature_values_numpy(
+            flat_values, row_count, feature_count
+        )
+        if sorted_feature_values is not None:
+            return GBMRegressor._feature_quantile_cuts_from_sorted_values(
+                sorted_feature_values, max_bins
+            )
+
         feature_cuts: list[list[float]] = []
         for feature_index in range(feature_count):
             values = GBMRegressor._column_values_from_flat_payload(
@@ -270,22 +301,42 @@ class _QuantizationMixin:
             )
             values = [v for v in values if not math.isnan(v)]
             values.sort()
-            if len(values) <= 1:
-                feature_cuts.append([])
-                continue
-
-            bin_count = min(max_bins, len(values))
-            cuts: list[float] = []
-            for quantile_index in range(1, bin_count):
-                rank = (quantile_index * len(values)) // bin_count
-                if rank >= len(values):
-                    rank = len(values) - 1
-                cut_value = values[rank]
-                if cuts and cut_value <= cuts[-1]:
-                    continue
-                cuts.append(cut_value)
-            feature_cuts.append(cuts)
+            feature_cuts.append(
+                GBMRegressor._single_feature_quantile_cuts_from_sorted_values(
+                    values, max_bins
+                )
+            )
         return feature_cuts
+
+    @staticmethod
+    def _feature_quantile_cuts_from_sorted_values(
+        sorted_feature_values: Sequence[Sequence[float]], max_bins: int
+    ) -> list[list[float]]:
+        return [
+            GBMRegressor._single_feature_quantile_cuts_from_sorted_values(
+                values, max_bins
+            )
+            for values in sorted_feature_values
+        ]
+
+    @staticmethod
+    def _single_feature_quantile_cuts_from_sorted_values(
+        values: Sequence[float], max_bins: int
+    ) -> list[float]:
+        if len(values) <= 1:
+            return []
+
+        bin_count = min(max_bins, len(values))
+        cuts: list[float] = []
+        for quantile_index in range(1, bin_count):
+            rank = (quantile_index * len(values)) // bin_count
+            if rank >= len(values):
+                rank = len(values) - 1
+            cut_value = values[rank]
+            if cuts and cut_value <= cuts[-1]:
+                continue
+            cuts.append(cut_value)
+        return cuts
 
     @staticmethod
     def _quantize_dense_values_linear(
