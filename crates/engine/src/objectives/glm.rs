@@ -54,17 +54,26 @@ fn glm_weighted_target_sum(
 
 /// Poisson regression objective with log-link: `μ = exp(η)`, `y ~ Poisson(μ)`.
 /// Targets must be ≥ 0.  Predictions are in log-mean (η) space.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PoissonObjective;
-
+///
+/// The Newton hessian is inflated by `exp(max_delta_step)` (LightGBM's
+/// `poisson_max_delta_step` stabilizer) to damp updates on sparse or skewed
+/// count data.  `max_delta_step` defaults to 0.7.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct TunedPoissonObjective {
+pub struct PoissonObjective {
     max_delta_step: f32,
 }
 
+impl Default for PoissonObjective {
+    fn default() -> Self {
+        Self {
+            max_delta_step: DEFAULT_POISSON_MAX_DELTA_STEP,
+        }
+    }
+}
+
 impl PoissonObjective {
-    pub fn new(max_delta_step: f32) -> TunedPoissonObjective {
-        TunedPoissonObjective { max_delta_step }
+    pub fn new(max_delta_step: f32) -> Self {
+        Self { max_delta_step }
     }
 }
 
@@ -136,12 +145,7 @@ impl ObjectiveOps for PoissonObjective {
         targets: &[f32],
         sample_weights: Option<&[f32]>,
     ) -> EngineResult<Vec<GradientPair>> {
-        poisson_compute_gradients(
-            predictions,
-            targets,
-            sample_weights,
-            DEFAULT_POISSON_MAX_DELTA_STEP,
-        )
+        poisson_compute_gradients(predictions, targets, sample_weights, self.max_delta_step)
     }
 
     fn loss(
@@ -171,38 +175,6 @@ impl ObjectiveOps for PoissonObjective {
             return Ok(0.0);
         }
         Ok((total / weight_sum) as f32)
-    }
-}
-
-impl ObjectiveOps for TunedPoissonObjective {
-    fn objective_name(&self) -> &str {
-        "poisson"
-    }
-
-    fn initial_prediction(
-        &self,
-        targets: &[f32],
-        sample_weights: Option<&[f32]>,
-    ) -> EngineResult<f32> {
-        PoissonObjective.initial_prediction(targets, sample_weights)
-    }
-
-    fn compute_gradients(
-        &self,
-        predictions: &[f32],
-        targets: &[f32],
-        sample_weights: Option<&[f32]>,
-    ) -> EngineResult<Vec<GradientPair>> {
-        poisson_compute_gradients(predictions, targets, sample_weights, self.max_delta_step)
-    }
-
-    fn loss(
-        &self,
-        predictions: &[f32],
-        targets: &[f32],
-        sample_weights: Option<&[f32]>,
-    ) -> EngineResult<f32> {
-        PoissonObjective.loss(predictions, targets, sample_weights)
     }
 }
 

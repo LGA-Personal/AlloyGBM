@@ -296,7 +296,7 @@ fn iteration_diagnostics_aggregate_per_class_takes_max_effectiveness() {
 #[test]
 fn poisson_initial_prediction_is_log_of_weighted_mean() {
     let targets = vec![1.0_f32, 2.0, 3.0, 4.0, 5.0];
-    let init = PoissonObjective
+    let init = PoissonObjective::default()
         .initial_prediction(&targets, None)
         .expect("init");
     let expected = ((1.0_f32 + 2.0 + 3.0 + 4.0 + 5.0) / 5.0).ln();
@@ -310,7 +310,7 @@ fn glm_initial_prediction_accumulates_mean_in_f64() {
     targets.extend(std::iter::repeat_n(1.0_f32, 1_000));
     let expected_mean = (100_000_000.0_f64 + 1_000.0) / 1_001.0;
 
-    let poisson_init = PoissonObjective
+    let poisson_init = PoissonObjective::default()
         .initial_prediction(&targets, None)
         .expect("poisson init");
     let gamma_init = GammaObjective
@@ -367,7 +367,7 @@ fn glm_losses_accumulate_in_f64() {
     predictions.extend(std::iter::repeat_n(0.0_f32, 1_000));
     let targets = vec![0.0_f32; predictions.len()];
 
-    let poisson_loss = PoissonObjective
+    let poisson_loss = PoissonObjective::default()
         .loss(&predictions, &targets, None)
         .expect("poisson loss");
     let poisson_expected = (100_000_000.0_f64 + 1_000.0) / 1_001.0;
@@ -412,7 +412,7 @@ fn glm_losses_accumulate_in_f64() {
 #[test]
 fn poisson_rejects_negative_targets() {
     let targets = vec![1.0_f32, -0.5, 2.0];
-    let err = PoissonObjective
+    let err = PoissonObjective::default()
         .initial_prediction(&targets, None)
         .unwrap_err();
     assert!(format!("{err:?}").to_lowercase().contains("non-negative"));

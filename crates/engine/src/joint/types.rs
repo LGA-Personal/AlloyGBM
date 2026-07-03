@@ -88,7 +88,7 @@ impl JointObjective {
                 }
             }
             Self::Poisson { .. } => {
-                let obj = PoissonObjective;
+                let obj = PoissonObjective::default();
                 obj.initial_prediction(targets, None).unwrap_or(0.0)
             }
             Self::Gamma => {
