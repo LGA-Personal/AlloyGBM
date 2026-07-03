@@ -60,11 +60,22 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
                 "neutralization='pre_target' is only supported for GBMRegressor "
                 "squared-error training"
             )
-        if kwargs.get("objective") == "quantile":
-            raise ValueError("GBMClassifier does not support objective='quantile'")
+        self._validate_classifier_objective(kwargs.get("objective"))
         super().__init__(*args, **kwargs)
 
     __init__.__signature__ = _inspect.signature(GBMRegressor.__init__)  # type: ignore[attr-defined]
+
+    @staticmethod
+    def _validate_classifier_objective(objective: object) -> None:
+        if objective is None or callable(objective):
+            return
+        raise ValueError(
+            "GBMClassifier objective is auto-detected and does not accept explicit "
+            f"objective={objective!r}. Binary labels use 'binary_crossentropy' and "
+            "multiclass labels use 'multiclass_softmax'. Use "
+            f"GBMRegressor(objective={objective!r}) for regression targets or "
+            f"GBMRanker(ranking_objective={objective!r}) for grouped ranking."
+        )
 
     def _objective_name(self) -> str:
         # Custom callable objective takes priority over auto-detection.
@@ -381,8 +392,8 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
                 "neutralization='pre_target' is only supported for GBMRegressor "
                 "squared-error training"
             )
-        if params.get("objective") == "quantile":
-            raise ValueError("GBMClassifier does not support objective='quantile'")
+        if "objective" in params:
+            self._validate_classifier_objective(params.get("objective"))
         super().set_params(**params)
         return self
 
