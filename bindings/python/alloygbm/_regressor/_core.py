@@ -86,6 +86,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         dart_normalize_type: str = "tree",
         dart_sample_type: str = "uniform",
         tweedie_variance_power: float = 1.5,
+        poisson_max_delta_step: float = 0.7,
         quantile_alpha: float = 0.5,
     ) -> None:
         if not (0.0 < learning_rate <= 1.0):
@@ -233,6 +234,11 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                     "tweedie_variance_power must satisfy 1 < p < 2 when objective='tweedie' "
                     f"(got {tweedie_variance_power!r})"
                 )
+        if (
+            not math.isfinite(float(poisson_max_delta_step))
+            or float(poisson_max_delta_step) < 0.0
+        ):
+            raise ValueError("poisson_max_delta_step must be finite and >= 0")
         _validate_quantile_alpha(quantile_alpha)
         if int(max_cat_threshold) < 0:
             raise ValueError("max_cat_threshold must be >= 0")
@@ -441,6 +447,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         self.dart_normalize_type = str(dart_normalize_type)
         self.dart_sample_type = str(dart_sample_type)
         self.tweedie_variance_power = float(tweedie_variance_power)
+        self.poisson_max_delta_step = float(poisson_max_delta_step)
         self.quantile_alpha = float(quantile_alpha)
         self._fit_neutralization: str | None = None
         self._fit_factor_neutralization_lambda: float | None = None
@@ -524,6 +531,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             f"dart_max_drop={self.dart_max_drop}, "
             f"dart_normalize_type='{self.dart_normalize_type}', "
             f"dart_sample_type='{self.dart_sample_type}', "
+            f"poisson_max_delta_step={self.poisson_max_delta_step}, "
             f"quantile_alpha={self.quantile_alpha}"
             ")"
         )
@@ -588,6 +596,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             "dart_normalize_type": self.dart_normalize_type,
             "dart_sample_type": self.dart_sample_type,
             "tweedie_variance_power": self.tweedie_variance_power,
+            "poisson_max_delta_step": self.poisson_max_delta_step,
             "quantile_alpha": self.quantile_alpha,
         }
 
@@ -650,6 +659,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             "dart_normalize_type",
             "dart_sample_type",
             "tweedie_variance_power",
+            "poisson_max_delta_step",
             "quantile_alpha",
         }
         unknown = sorted(set(params) - allowed)
@@ -1140,6 +1150,11 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         if "tweedie_variance_power" in params:
             v = float(params["tweedie_variance_power"])
             self.tweedie_variance_power = v
+        if "poisson_max_delta_step" in params:
+            v = float(params["poisson_max_delta_step"])
+            if not math.isfinite(v) or v < 0.0:
+                raise ValueError("poisson_max_delta_step must be finite and >= 0")
+            self.poisson_max_delta_step = v
         if "quantile_alpha" in params:
             qa = float(params["quantile_alpha"])
             _validate_quantile_alpha(qa)
@@ -1712,6 +1727,11 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                         if self._objective_name() == "tweedie"
                         else None
                     ),
+                    poisson_max_delta_step=(
+                        self.poisson_max_delta_step
+                        if self._objective_name() == "poisson"
+                        else None
+                    ),
                     quantile_alpha=(
                         self.quantile_alpha
                         if self._objective_name() == "quantile"
@@ -1853,6 +1873,11 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                     if self._objective_name() == "tweedie"
                     else None
                 ),
+                poisson_max_delta_step=(
+                    self.poisson_max_delta_step
+                    if self._objective_name() == "poisson"
+                    else None
+                ),
                 quantile_alpha=(
                     self.quantile_alpha
                     if self._objective_name() == "quantile"
@@ -1950,6 +1975,11 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                 tweedie_variance_power=(
                     self.tweedie_variance_power
                     if self._objective_name() == "tweedie"
+                    else None
+                ),
+                poisson_max_delta_step=(
+                    self.poisson_max_delta_step
+                    if self._objective_name() == "poisson"
                     else None
                 ),
                 quantile_alpha=(
@@ -2331,6 +2361,11 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                     if self._objective_name() == "tweedie"
                     else None
                 ),
+                poisson_max_delta_step=(
+                    self.poisson_max_delta_step
+                    if self._objective_name() == "poisson"
+                    else None
+                ),
                 quantile_alpha=(
                     self.quantile_alpha
                     if self._objective_name() == "quantile"
@@ -2400,6 +2435,11 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                 tweedie_variance_power=(
                     self.tweedie_variance_power
                     if self._objective_name() == "tweedie"
+                    else None
+                ),
+                poisson_max_delta_step=(
+                    self.poisson_max_delta_step
+                    if self._objective_name() == "poisson"
                     else None
                 ),
                 quantile_alpha=(

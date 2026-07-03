@@ -115,6 +115,7 @@ impl JointPredictorHandle {
     factor_neutralization_lambda=1e-6_f32,
     factor_penalty=0.0_f32,
     tweedie_variance_power=None::<f32>,
+    poisson_max_delta_step=None::<f32>,
     quantile_alpha=None::<f32>,
 ))]
 pub(crate) fn train_joint_multi_label_ranker(
@@ -161,6 +162,7 @@ pub(crate) fn train_joint_multi_label_ranker(
     factor_neutralization_lambda: f32,
     factor_penalty: f32,
     tweedie_variance_power: Option<f32>,
+    poisson_max_delta_step: Option<f32>,
     quantile_alpha: Option<f32>,
 ) -> PyResult<(Vec<u8>, Vec<f32>, usize, usize)> {
     use alloygbm_engine::joint::JointObjective;
@@ -192,7 +194,9 @@ pub(crate) fn train_joint_multi_label_ranker(
     let mut per_output_objective: Vec<JointObjective> = Vec::with_capacity(n_outputs);
     for name in &per_output_objective_names {
         let obj = match name.as_str() {
-            "poisson" => JointObjective::Poisson,
+            "poisson" => JointObjective::Poisson {
+                max_delta_step: poisson_max_delta_step.unwrap_or(0.7),
+            },
             "gamma" => JointObjective::Gamma,
             "tweedie" => JointObjective::Tweedie {
                 variance_power: tweedie_variance_power.unwrap_or(1.5),
@@ -310,6 +314,7 @@ pub(crate) fn train_joint_multi_label_ranker(
         dro_config: parsed_dro_config,
         neutralization_config: parsed_neutralization_config,
         tweedie_variance_power: tweedie_variance_power.unwrap_or(1.5),
+        poisson_max_delta_step: poisson_max_delta_step.unwrap_or(0.7),
         quantile_alpha: quantile_alpha.unwrap_or(0.5),
         ..TrainParams::default()
     };

@@ -74,6 +74,12 @@ pub fn validate_train_params(params: &TrainParams) -> CoreResult<()> {
         ));
     }
 
+    if !params.poisson_max_delta_step.is_finite() || params.poisson_max_delta_step < 0.0 {
+        return Err(CoreError::InvalidConfig(
+            "poisson_max_delta_step must be finite and >= 0".to_string(),
+        ));
+    }
+
     for &c in &params.monotone_constraints {
         if c != -1 && c != 0 && c != 1 {
             return Err(CoreError::InvalidConfig(

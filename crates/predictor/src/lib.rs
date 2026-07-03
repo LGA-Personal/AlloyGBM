@@ -1495,6 +1495,7 @@ mod tests {
             neutralization_config: None,
             boosting_mode: alloygbm_core::BoostingMode::Standard,
             tweedie_variance_power: 1.5,
+            poisson_max_delta_step: 0.7,
             quantile_alpha: 0.5,
         }
     }

@@ -399,6 +399,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
         "factor_penalty",
         "factor_exposure_transform",
         "tweedie_variance_power",
+        "poisson_max_delta_step",
         "quantile_alpha",
     })
 
@@ -822,6 +823,11 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
             factor_penalty=float(kw.get("factor_penalty", 0.0)),
             tweedie_variance_power=(
                 float(kw["tweedie_variance_power"]) if "tweedie_variance_power" in kw else None
+            ),
+            poisson_max_delta_step=(
+                float(kw["poisson_max_delta_step"])
+                if "poisson_max_delta_step" in kw
+                else None
             ),
             quantile_alpha=(
                 float(kw["quantile_alpha"]) if "quantile_alpha" in kw else None

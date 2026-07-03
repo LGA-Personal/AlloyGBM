@@ -145,6 +145,8 @@ class GBMRegressorContractTests(unittest.TestCase):
             GBMRegressor(lambda_l2=-0.1)
         with self.assertRaisesRegex(ValueError, "min_child_hessian"):
             GBMRegressor(min_child_hessian=-0.1)
+        with self.assertRaisesRegex(ValueError, "poisson_max_delta_step"):
+            GBMRegressor(poisson_max_delta_step=-0.1)
         with self.assertRaisesRegex(ValueError, "categorical_feature_index"):
             GBMRegressor(categorical_feature_index=-1)
         with self.assertRaisesRegex(ValueError, "categorical_smoothing"):
@@ -180,6 +182,7 @@ class GBMRegressorContractTests(unittest.TestCase):
         self.assertEqual(params["lambda_l1"], 0.0)
         self.assertEqual(params["lambda_l2"], 0.0)
         self.assertEqual(params["min_child_hessian"], 0.0)
+        self.assertEqual(params["poisson_max_delta_step"], 0.7)
         self.assertEqual(params["seed"], 0)
         self.assertTrue(params["deterministic"])
         self.assertEqual(params["continuous_binning_strategy"], "linear")
@@ -206,6 +209,7 @@ class GBMRegressorContractTests(unittest.TestCase):
             lambda_l1=0.2,
             lambda_l2=0.4,
             min_child_hessian=0.6,
+            poisson_max_delta_step=0.25,
             seed=7,
             deterministic=False,
             continuous_binning_strategy="rank",
@@ -235,6 +239,7 @@ class GBMRegressorContractTests(unittest.TestCase):
         self.assertEqual(model.get_params()["lambda_l1"], 0.2)
         self.assertEqual(model.get_params()["lambda_l2"], 0.4)
         self.assertEqual(model.get_params()["min_child_hessian"], 0.6)
+        self.assertEqual(model.get_params()["poisson_max_delta_step"], 0.25)
         self.assertEqual(model.get_params()["seed"], 7)
         self.assertFalse(model.get_params()["deterministic"])
         self.assertEqual(model.get_params()["continuous_binning_strategy"], "rank")
@@ -371,6 +376,7 @@ class GBMRegressorContractTests(unittest.TestCase):
                         "dart_normalize_type": None,
                         "dart_sample_type": None,
                         "tweedie_variance_power": None,
+                        "poisson_max_delta_step": None,
                         "quantile_alpha": None,
                     }
                 ],

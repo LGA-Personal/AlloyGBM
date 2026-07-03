@@ -443,7 +443,9 @@ fn joint_objective_parses_supported_names() {
     );
     assert_eq!(
         JointObjective::parse("poisson").unwrap(),
-        JointObjective::Poisson
+        JointObjective::Poisson {
+            max_delta_step: 0.7,
+        }
     );
     assert_eq!(
         JointObjective::parse("gamma").unwrap(),
@@ -474,7 +476,10 @@ fn joint_objective_new_variants_initial_predictions_and_gradients() {
     let targets = [1.0_f32, 2.0, 3.0, 4.0];
 
     // Poisson initial prediction: ln(mean(y)) = ln(2.5)
-    let poisson_base = JointObjective::Poisson.initial_prediction(&targets);
+    let poisson_base = JointObjective::Poisson {
+        max_delta_step: 0.7,
+    }
+    .initial_prediction(&targets);
     assert!((poisson_base - 2.5_f32.ln()).abs() < 1e-6);
 
     // Gamma initial prediction: ln(mean(y)) = ln(2.5)
@@ -494,9 +499,11 @@ fn joint_objective_new_variants_initial_predictions_and_gradients() {
 
     // Gradients computation
     let predictions = [1.0_f32, 1.0, 1.0, 1.0];
-    let grad_pairs = JointObjective::Poisson
-        .compute_gradients(&predictions, &targets, None)
-        .unwrap();
+    let grad_pairs = JointObjective::Poisson {
+        max_delta_step: 0.7,
+    }
+    .compute_gradients(&predictions, &targets, None)
+    .unwrap();
     assert_eq!(grad_pairs.len(), 4);
 
     let grad_pairs_gamma = JointObjective::Gamma

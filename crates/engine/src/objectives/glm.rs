@@ -15,7 +15,7 @@ fn glm_clamp_exp_f64(eta: f32) -> f64 {
     f64::from(eta.clamp(-50.0, 50.0)).exp()
 }
 
-const POISSON_MAX_DELTA_STEP: f32 = 0.7;
+const DEFAULT_POISSON_MAX_DELTA_STEP: f32 = 0.7;
 
 /// Weighted-mean-of-targets helper used by every GLM initial prediction.
 /// Returns `(sum, total_weight)` or an error on bad weights.
@@ -54,8 +54,58 @@ fn glm_weighted_target_sum(
 
 /// Poisson regression objective with log-link: `μ = exp(η)`, `y ~ Poisson(μ)`.
 /// Targets must be ≥ 0.  Predictions are in log-mean (η) space.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PoissonObjective;
+///
+/// The Newton hessian is inflated by `exp(max_delta_step)` (LightGBM's
+/// `poisson_max_delta_step` stabilizer) to damp updates on sparse or skewed
+/// count data.  `max_delta_step` defaults to 0.7.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PoissonObjective {
+    max_delta_step: f32,
+}
+
+impl Default for PoissonObjective {
+    fn default() -> Self {
+        Self {
+            max_delta_step: DEFAULT_POISSON_MAX_DELTA_STEP,
+        }
+    }
+}
+
+impl PoissonObjective {
+    pub fn new(max_delta_step: f32) -> Self {
+        Self { max_delta_step }
+    }
+}
+
+fn poisson_compute_gradients(
+    predictions: &[f32],
+    targets: &[f32],
+    sample_weights: Option<&[f32]>,
+    max_delta_step: f32,
+) -> EngineResult<Vec<GradientPair>> {
+    if predictions.len() != targets.len() {
+        return Err(EngineError::ContractViolation(format!(
+            "predictions length {} does not match targets length {}",
+            predictions.len(),
+            targets.len()
+        )));
+    }
+    let mut gradients = Vec::with_capacity(predictions.len());
+    let hessian_scale = max_delta_step.exp();
+    for index in 0..predictions.len() {
+        let weight = sample_weights.map_or(1.0, |w| w[index]);
+        if !weight.is_finite() || weight <= 0.0 {
+            return Err(EngineError::ContractViolation(
+                "sample weights must be finite and > 0".to_string(),
+            ));
+        }
+        let mu = glm_clamp_exp(predictions[index]);
+        let grad = (mu - targets[index]) * weight;
+        let hess = mu.max(1e-7) * hessian_scale * weight;
+        gradients.push(GradientPair::new(grad, hess)?);
+    }
+    Ok(gradients)
+}
 
 impl ObjectiveOps for PoissonObjective {
     fn objective_name(&self) -> &str {
@@ -95,27 +145,7 @@ impl ObjectiveOps for PoissonObjective {
         targets: &[f32],
         sample_weights: Option<&[f32]>,
     ) -> EngineResult<Vec<GradientPair>> {
-        if predictions.len() != targets.len() {
-            return Err(EngineError::ContractViolation(format!(
-                "predictions length {} does not match targets length {}",
-                predictions.len(),
-                targets.len()
-            )));
-        }
-        let mut gradients = Vec::with_capacity(predictions.len());
-        for index in 0..predictions.len() {
-            let weight = sample_weights.map_or(1.0, |w| w[index]);
-            if !weight.is_finite() || weight <= 0.0 {
-                return Err(EngineError::ContractViolation(
-                    "sample weights must be finite and > 0".to_string(),
-                ));
-            }
-            let mu = glm_clamp_exp(predictions[index]);
-            let grad = (mu - targets[index]) * weight;
-            let hess = mu.max(1e-7) * POISSON_MAX_DELTA_STEP.exp() * weight;
-            gradients.push(GradientPair::new(grad, hess)?);
-        }
-        Ok(gradients)
+        poisson_compute_gradients(predictions, targets, sample_weights, self.max_delta_step)
     }
 
     fn loss(

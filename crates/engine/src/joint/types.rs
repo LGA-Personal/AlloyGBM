@@ -27,7 +27,7 @@ pub enum JointObjective {
     RankPairwise,
     RankNdcg,
     RankXendcg,
-    Poisson,
+    Poisson { max_delta_step: f32 },
     Gamma,
     Tweedie { variance_power: f32 },
     Quantile { alpha: f32 },
@@ -41,7 +41,9 @@ impl JointObjective {
             "rank:pairwise" => Ok(Self::RankPairwise),
             "rank:ndcg" => Ok(Self::RankNdcg),
             "rank:xendcg" => Ok(Self::RankXendcg),
-            "poisson" => Ok(Self::Poisson),
+            "poisson" => Ok(Self::Poisson {
+                max_delta_step: 0.7,
+            }),
             "gamma" => Ok(Self::Gamma),
             "tweedie" => Ok(Self::Tweedie {
                 variance_power: 1.5,
@@ -68,7 +70,7 @@ impl JointObjective {
             Self::RankPairwise => "rank:pairwise",
             Self::RankNdcg => "rank:ndcg",
             Self::RankXendcg => "rank:xendcg",
-            Self::Poisson => "poisson",
+            Self::Poisson { .. } => "poisson",
             Self::Gamma => "gamma",
             Self::Tweedie { .. } => "tweedie",
             Self::Quantile { .. } => "quantile",
@@ -85,8 +87,8 @@ impl JointObjective {
                     targets.iter().sum::<f32>() / targets.len() as f32
                 }
             }
-            Self::Poisson => {
-                let obj = PoissonObjective;
+            Self::Poisson { .. } => {
+                let obj = PoissonObjective::default();
                 obj.initial_prediction(targets, None).unwrap_or(0.0)
             }
             Self::Gamma => {
@@ -153,8 +155,8 @@ impl JointObjective {
                 obj.compute_gradients(predictions, targets, None)
                     .map_err(|e| e.to_string())
             }
-            Self::Poisson => {
-                let obj = PoissonObjective;
+            Self::Poisson { max_delta_step } => {
+                let obj = PoissonObjective::new(*max_delta_step);
                 obj.compute_gradients(predictions, targets, None)
                     .map_err(|e| e.to_string())
             }
