@@ -689,6 +689,61 @@ class GBMRegressorContractTests(unittest.TestCase):
                 [[0.0, 0.0], [1.0, 2.0], [2.0, 1.0]],
             )
 
+    def test_dense_sorted_feature_values_use_numpy_fast_path(self) -> None:
+        if importlib.util.find_spec("numpy") is None:
+            self.skipTest("numpy unavailable")
+        import numpy as np
+
+        flat_values = np.array(
+            [
+                [3.0, np.nan, 10.0],
+                [1.0, 5.0, 10.0],
+                [2.0, 5.0, 30.0],
+                [4.0, 7.0, 20.0],
+            ],
+            dtype=np.float32,
+        ).ravel()
+
+        with patch.object(
+            GBMRegressor,
+            "_column_values_from_flat_payload",
+            side_effect=AssertionError("per-column Python extraction was used"),
+        ):
+            sorted_values = GBMRegressor._derive_dense_sorted_feature_values(
+                flat_values, row_count=4, feature_count=3
+            )
+
+        self.assertEqual(
+            sorted_values,
+            [[1.0, 2.0, 3.0, 4.0], [5.0, 5.0, 7.0], [10.0, 10.0, 20.0, 30.0]],
+        )
+
+    def test_dense_quantile_cuts_use_numpy_fast_path(self) -> None:
+        if importlib.util.find_spec("numpy") is None:
+            self.skipTest("numpy unavailable")
+        import numpy as np
+
+        flat_values = np.array(
+            [
+                [3.0, np.nan, 10.0],
+                [1.0, 5.0, 10.0],
+                [2.0, 5.0, 30.0],
+                [4.0, 7.0, 20.0],
+            ],
+            dtype=np.float32,
+        ).ravel()
+
+        with patch.object(
+            GBMRegressor,
+            "_column_values_from_flat_payload",
+            side_effect=AssertionError("per-column Python extraction was used"),
+        ):
+            cuts = GBMRegressor._derive_dense_feature_quantile_cuts(
+                flat_values, row_count=4, feature_count=3, max_bins=4
+            )
+
+        self.assertEqual(cuts, [[2.0, 3.0, 4.0], [5.0, 7.0], [10.0, 20.0, 30.0]])
+
     def test_set_params_binning_strategy_after_fit_requires_refit(self) -> None:
         model = GBMRegressor().fit([[1.0, 0.0], [2.0, 0.0]], [1.0, 2.0])
         model.set_params(continuous_binning_strategy="rank")
