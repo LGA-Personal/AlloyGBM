@@ -435,6 +435,56 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
             f"a shorter array of contiguous group sizes."
         )
 
+    @staticmethod
+    def _validate_joint_native_categorical_columns(
+        x_arr: np.ndarray,
+        categorical_feature_indices: list[int],
+        max_cat_threshold: int,
+    ) -> None:
+        if max_cat_threshold <= 0 or not categorical_feature_indices:
+            return
+
+        feature_count = int(x_arr.shape[1])
+        for feature_index in categorical_feature_indices:
+            if feature_index < 0 or feature_index >= feature_count:
+                raise ValueError(
+                    f"categorical_feature_indices contains feature {feature_index}, "
+                    f"but X has {feature_count} features"
+                )
+
+            values = x_arr[:, feature_index]
+            rounded = np.rint(values)
+            if not np.all(np.isfinite(values)) or not np.all(values == rounded):
+                raise ValueError(
+                    "multi_label_mode='joint' native categorical features require "
+                    f"integer category IDs; feature {feature_index} contains "
+                    "non-integer or non-finite values"
+                )
+
+            category_ids = rounded.astype(np.int64, copy=False)
+            unique_ids = np.unique(category_ids)
+            if unique_ids.size == 0:
+                continue
+            if (
+                unique_ids[0] != 0
+                or unique_ids[-1] != unique_ids.size - 1
+                or not np.array_equal(unique_ids, np.arange(unique_ids.size))
+            ):
+                raise ValueError(
+                    "multi_label_mode='joint' native categorical features require "
+                    f"dense 0..K-1 category IDs; feature {feature_index} has "
+                    f"IDs from {int(unique_ids[0])} to {int(unique_ids[-1])}"
+                )
+            if unique_ids.size > 64:
+                raise ValueError(
+                    "multi_label_mode='joint' native categorical features support "
+                    f"at most 64 categories per feature; feature {feature_index} "
+                    f"has {int(unique_ids.size)} categories. Use "
+                    "multi_label_mode='independent' for high-cardinality native "
+                    "categorical splits, or disable native categorical handling "
+                    "for this joint fit."
+                )
+
     def _fit_joint(
         self,
         X: object,
@@ -562,6 +612,14 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
         x_arr = np.ascontiguousarray(np.asarray(X), dtype=np.float32)
         row_count = int(x_arr.shape[0])
         feature_count = int(x_arr.shape[1])
+        categorical_feature_indices = [
+            int(fi) for fi in (self._per_label_kwargs.get("categorical_feature_indices") or [])
+        ]
+        self._validate_joint_native_categorical_columns(
+            x_arr,
+            categorical_feature_indices,
+            int(self._per_label_kwargs.get("max_cat_threshold", 0)),
+        )
 
         # PR #36 review (C4): validate init_model schema before sending
         # the artifact to Rust. Without these checks, a mismatched prior
@@ -717,9 +775,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
             # The PyO3 bridge re-bins requested columns to
             # `bin_index == category_id` before calling the Rust trainer,
             # which is the invariant the joint native-cat path requires.
-            categorical_feature_indices=[
-                int(fi) for fi in (kw.get("categorical_feature_indices") or [])
-            ],
+            categorical_feature_indices=categorical_feature_indices,
             max_cat_threshold=int(kw.get("max_cat_threshold", 0)),
             # v0.10.3: joint boosting_mode (GOSS / DART).
             boosting_mode=str(kw.get("boosting_mode", "standard")),
