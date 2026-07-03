@@ -494,6 +494,31 @@ def test_joint_native_categorical_rejects_non_dense_ids():
         m.fit(X, y, group=groups)
 
 
+def test_joint_native_categorical_rejects_more_than_64_categories():
+    """The joint native-categorical split path uses a u64 bitset. Reject
+    wider categorical columns before training instead of silently disabling
+    native categorical splits in Rust."""
+    n_categories = 65
+    rows_per_category = 2
+    n = n_categories * rows_per_category
+    groups = np.repeat(np.arange(n // 10), 10).astype(np.int64)
+    cat = np.repeat(np.arange(n_categories), rows_per_category).astype(np.float32)
+    X = np.column_stack([cat, np.zeros(n, dtype=np.float32)])
+    y = np.column_stack([
+        (cat % 5).astype(np.float32),
+        (cat % 7).astype(np.float32),
+    ])
+    m = MultiLabelGBMRanker(
+        n_estimators=2,
+        multi_label_mode="joint",
+        ranking_objective="squared_error",
+        categorical_feature_indices=[0],
+        max_cat_threshold=128,
+    )
+    with pytest.raises(ValueError, match="at most 64 categories"):
+        m.fit(X, y, group=groups)
+
+
 def test_joint_native_categorical_rejects_non_integer_values():
     """PR #36 review fix (C1): the joint rebinner uses truncation
     (`v as i64`) to match JointPredictor's predict-time cast. Pure
