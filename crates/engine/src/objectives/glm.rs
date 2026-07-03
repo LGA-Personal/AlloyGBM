@@ -10,12 +10,19 @@ fn glm_clamp_exp(eta: f32) -> f32 {
     eta.clamp(-50.0, 50.0).exp()
 }
 
+#[inline]
+fn glm_clamp_exp_f64(eta: f32) -> f64 {
+    f64::from(eta.clamp(-50.0, 50.0)).exp()
+}
+
+const POISSON_MAX_DELTA_STEP: f32 = 0.7;
+
 /// Weighted-mean-of-targets helper used by every GLM initial prediction.
 /// Returns `(sum, total_weight)` or an error on bad weights.
 fn glm_weighted_target_sum(
     targets: &[f32],
     sample_weights: Option<&[f32]>,
-) -> EngineResult<(f32, f32)> {
+) -> EngineResult<(f64, f64)> {
     match sample_weights {
         Some(weights) => {
             if weights.len() != targets.len() {
@@ -25,20 +32,23 @@ fn glm_weighted_target_sum(
                     targets.len()
                 )));
             }
-            let mut sum = 0.0_f32;
-            let mut w_sum = 0.0_f32;
+            let mut sum = 0.0_f64;
+            let mut w_sum = 0.0_f64;
             for (&t, &wi) in targets.iter().zip(weights) {
                 if !wi.is_finite() || wi <= 0.0 {
                     return Err(EngineError::ContractViolation(
                         "sample weights must be finite and > 0".to_string(),
                     ));
                 }
-                sum += t * wi;
-                w_sum += wi;
+                sum += f64::from(t) * f64::from(wi);
+                w_sum += f64::from(wi);
             }
             Ok((sum, w_sum))
         }
-        None => Ok((targets.iter().sum::<f32>(), targets.len() as f32)),
+        None => Ok((
+            targets.iter().map(|&target| f64::from(target)).sum::<f64>(),
+            targets.len() as f64,
+        )),
     }
 }
 
@@ -76,7 +86,7 @@ impl ObjectiveOps for PoissonObjective {
             ));
         }
         let mean = (sum / w_sum).max(1e-7);
-        Ok(mean.ln())
+        Ok(mean.ln() as f32)
     }
 
     fn compute_gradients(
@@ -102,7 +112,7 @@ impl ObjectiveOps for PoissonObjective {
             }
             let mu = glm_clamp_exp(predictions[index]);
             let grad = (mu - targets[index]) * weight;
-            let hess = mu.max(1e-7) * weight;
+            let hess = mu.max(1e-7) * POISSON_MAX_DELTA_STEP.exp() * weight;
             gradients.push(GradientPair::new(grad, hess)?);
         }
         Ok(gradients)
@@ -121,20 +131,20 @@ impl ObjectiveOps for PoissonObjective {
                 targets.len()
             )));
         }
-        let mut total = 0.0_f32;
-        let mut weight_sum = 0.0_f32;
+        let mut total = 0.0_f64;
+        let mut weight_sum = 0.0_f64;
         for index in 0..predictions.len() {
-            let weight = sample_weights.map_or(1.0, |w| w[index]);
-            let eta = predictions[index].clamp(-50.0, 50.0);
+            let weight = f64::from(sample_weights.map_or(1.0, |w| w[index]));
+            let eta = f64::from(predictions[index].clamp(-50.0, 50.0));
             let mu = eta.exp();
             // Poisson deviance kernel (up to constants): μ − y·η
-            total += weight * (mu - targets[index] * eta);
+            total += weight * (mu - f64::from(targets[index]) * eta);
             weight_sum += weight;
         }
         if weight_sum <= 0.0 {
             return Ok(0.0);
         }
-        Ok(total / weight_sum)
+        Ok((total / weight_sum) as f32)
     }
 }
 
@@ -171,7 +181,7 @@ impl ObjectiveOps for GammaObjective {
                 "sample weight sum must be > 0".to_string(),
             ));
         }
-        Ok((sum / w_sum).max(1e-7).ln())
+        Ok((sum / w_sum).max(1e-7).ln() as f32)
     }
 
     fn compute_gradients(
@@ -217,19 +227,19 @@ impl ObjectiveOps for GammaObjective {
                 targets.len()
             )));
         }
-        let mut total = 0.0_f32;
-        let mut weight_sum = 0.0_f32;
+        let mut total = 0.0_f64;
+        let mut weight_sum = 0.0_f64;
         for index in 0..predictions.len() {
-            let weight = sample_weights.map_or(1.0, |w| w[index]);
-            let mu = glm_clamp_exp(predictions[index]).max(1e-7);
-            let r = (targets[index] / mu).max(1e-7);
+            let weight = f64::from(sample_weights.map_or(1.0, |w| w[index]));
+            let mu = glm_clamp_exp_f64(predictions[index]).max(1e-7);
+            let r = (f64::from(targets[index]) / mu).max(1e-7);
             total += weight * (r - r.ln() - 1.0);
             weight_sum += weight;
         }
         if weight_sum <= 0.0 {
             return Ok(0.0);
         }
-        Ok(total / weight_sum)
+        Ok((total / weight_sum) as f32)
     }
 }
 
@@ -281,7 +291,7 @@ impl ObjectiveOps for TweedieObjective {
                 "sample weight sum must be > 0".to_string(),
             ));
         }
-        Ok((sum / w_sum).max(1e-7).ln())
+        Ok((sum / w_sum).max(1e-7).ln() as f32)
     }
 
     fn compute_gradients(
@@ -332,12 +342,13 @@ impl ObjectiveOps for TweedieObjective {
             )));
         }
         let p = self.variance_power;
-        let mut total = 0.0_f32;
-        let mut weight_sum = 0.0_f32;
+        let mut total = 0.0_f64;
+        let mut weight_sum = 0.0_f64;
         for index in 0..predictions.len() {
-            let weight = sample_weights.map_or(1.0, |w| w[index]);
-            let mu = glm_clamp_exp(predictions[index]);
-            let y = targets[index];
+            let weight = f64::from(sample_weights.map_or(1.0, |w| w[index]));
+            let mu = glm_clamp_exp_f64(predictions[index]);
+            let y = f64::from(targets[index]);
+            let p = f64::from(p);
             let term1 = if y > 0.0 {
                 y.powf(2.0 - p) / ((1.0 - p) * (2.0 - p))
             } else {
@@ -351,6 +362,6 @@ impl ObjectiveOps for TweedieObjective {
         if weight_sum <= 0.0 {
             return Ok(0.0);
         }
-        Ok(total / weight_sum)
+        Ok((total / weight_sum) as f32)
     }
 }

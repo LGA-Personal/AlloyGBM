@@ -304,7 +304,34 @@ fn poisson_initial_prediction_is_log_of_weighted_mean() {
 }
 
 #[test]
-fn poisson_gradient_is_mu_minus_y_in_log_space() {
+fn glm_initial_prediction_accumulates_mean_in_f64() {
+    let mut targets = Vec::with_capacity(1_001);
+    targets.push(100_000_000.0_f32);
+    targets.extend(std::iter::repeat_n(1.0_f32, 1_000));
+    let expected_mean = (100_000_000.0_f64 + 1_000.0) / 1_001.0;
+
+    let poisson_init = PoissonObjective
+        .initial_prediction(&targets, None)
+        .expect("poisson init");
+    let gamma_init = GammaObjective
+        .initial_prediction(&targets, None)
+        .expect("gamma init");
+    let tweedie_init = TweedieObjective::new(1.5)
+        .expect("tweedie")
+        .initial_prediction(&targets, None)
+        .expect("tweedie init");
+
+    for init in [poisson_init, gamma_init, tweedie_init] {
+        let mean = f64::from(init).exp();
+        assert!(
+            (mean - expected_mean).abs() < 0.25,
+            "mean={mean} expected={expected_mean}"
+        );
+    }
+}
+
+#[test]
+fn poisson_gradient_uses_stabilized_hessian() {
     let predictions = vec![0.0_f32, 1.0, 2.0];
     let targets = vec![1.0_f32, 2.0, 3.0];
     let gradients = PoissonObjective
@@ -313,10 +340,59 @@ fn poisson_gradient_is_mu_minus_y_in_log_space() {
     for (idx, gp) in gradients.iter().enumerate() {
         let mu = predictions[idx].exp();
         let want_grad = mu - targets[idx];
-        let want_hess = mu;
+        let want_hess = mu * 0.7_f32.exp();
         assert!((gp.grad - want_grad).abs() < 1e-5);
         assert!((gp.hess - want_hess).abs() < 1e-5);
     }
+}
+
+#[test]
+fn glm_losses_accumulate_in_f64() {
+    let mut predictions = Vec::with_capacity(1_001);
+    predictions.push(100_000_000.0_f32.ln());
+    predictions.extend(std::iter::repeat_n(0.0_f32, 1_000));
+    let targets = vec![0.0_f32; predictions.len()];
+
+    let poisson_loss = PoissonObjective
+        .loss(&predictions, &targets, None)
+        .expect("poisson loss");
+    let poisson_expected = (100_000_000.0_f64 + 1_000.0) / 1_001.0;
+    assert!(
+        (f64::from(poisson_loss) - poisson_expected).abs() < 0.05,
+        "poisson_loss={poisson_loss} expected={poisson_expected}"
+    );
+
+    let mut gamma_targets = Vec::with_capacity(1_001);
+    gamma_targets.push(100_000_000.0_f32);
+    gamma_targets.extend(std::iter::repeat_n(2.0_f32, 1_000));
+    let gamma_predictions = vec![0.0_f32; gamma_targets.len()];
+    let gamma_loss = GammaObjective
+        .loss(&gamma_predictions, &gamma_targets, None)
+        .expect("gamma loss");
+    let gamma_big = 100_000_000.0_f64 - 100_000_000.0_f64.ln() - 1.0;
+    let gamma_small = 2.0_f64 - 2.0_f64.ln() - 1.0;
+    let gamma_expected = (gamma_big + 1_000.0 * gamma_small) / 1_001.0;
+    assert!(
+        (f64::from(gamma_loss) - gamma_expected).abs() < 0.05,
+        "gamma_loss={gamma_loss} expected={gamma_expected}"
+    );
+
+    let tweedie = TweedieObjective::new(1.5).expect("tweedie");
+    let tweedie_loss = tweedie
+        .loss(&gamma_predictions, &gamma_targets, None)
+        .expect("tweedie loss");
+    let tweedie_term = |y: f64| {
+        let p = 1.5_f64;
+        let term1 = y.powf(2.0 - p) / ((1.0 - p) * (2.0 - p));
+        let term2 = y / (1.0 - p);
+        let term3 = 1.0 / (2.0 - p);
+        2.0 * (term1 - term2 + term3)
+    };
+    let tweedie_expected = (tweedie_term(100_000_000.0) + 1_000.0 * tweedie_term(2.0)) / 1_001.0;
+    assert!(
+        (f64::from(tweedie_loss) - tweedie_expected).abs() < 0.1,
+        "tweedie_loss={tweedie_loss} expected={tweedie_expected}"
+    );
 }
 
 #[test]
