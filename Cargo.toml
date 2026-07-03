@@ -21,3 +21,7 @@ documentation = "https://alloygbm.readthedocs.io/en/latest/"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
