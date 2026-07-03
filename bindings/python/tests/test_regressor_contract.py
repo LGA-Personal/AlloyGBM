@@ -376,6 +376,7 @@ class GBMRegressorContractTests(unittest.TestCase):
                         "dart_normalize_type": None,
                         "dart_sample_type": None,
                         "tweedie_variance_power": None,
+                        "poisson_max_delta_step": None,
                         "quantile_alpha": None,
                     }
                 ],
