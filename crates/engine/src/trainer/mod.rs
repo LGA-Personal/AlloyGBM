@@ -1169,6 +1169,21 @@ impl Trainer {
                 class_stumps[class_k].extend(round_stumps);
             }
 
+            for class_k in 0..k {
+                let round_stumps = &class_stumps[class_k][pre_round_counts[class_k]..];
+                class_candidate_predictions[class_k].copy_from_slice(&class_predictions[class_k]);
+                // Tree builders update only the sampled partition rows while constructing
+                // split statistics. Rebuild the candidate by walking the accepted tree over
+                // every training row so the training state matches inference semantics.
+                apply_weighted_round_to_predictions(
+                    &mut class_candidate_predictions[class_k],
+                    binned_matrix,
+                    round_stumps,
+                    Some((&dataset.matrix.values, dataset.matrix.feature_count)),
+                    1.0,
+                )?;
+            }
+
             // v0.10.1 DART post-build: rescale the K new trees to
             // `new_w = 1/(num_dropped + 1)` and re-add each dropped
             // tree's contribution at its post-normalize weight to BOTH
@@ -1291,7 +1306,8 @@ impl Trainer {
                 dataset.sample_weights.as_deref(),
             )?;
             let loss_improvement = current_loss - candidate_loss;
-            if loss_improvement < 0.0 {
+            let loss_gate_exempt = dart_params.is_some();
+            if !loss_gate_exempt && loss_improvement < 0.0 {
                 // Truncate stumps so the model doesn't include this round's contribution.
                 // (`class_candidate_predictions` is reset from `class_predictions` at the
                 // top of each round, so the candidate state is implicitly rolled back.)
@@ -1321,7 +1337,7 @@ impl Trainer {
                     .map_or(1.0, |ms| ms.lr_loss_threshold_scale(effective_round));
                 let effective_min_loss_improvement =
                     controls.min_loss_improvement * lr_threshold_scale;
-                if loss_improvement < effective_min_loss_improvement {
+                if !loss_gate_exempt && loss_improvement < effective_min_loss_improvement {
                     if weak_improvement_streak >= controls.max_consecutive_weak_improvements {
                         for class_k in 0..k {
                             class_stumps[class_k].truncate(pre_round_counts[class_k]);
@@ -1420,11 +1436,12 @@ impl Trainer {
                     for class_k in 0..k {
                         let round_stumps = &class_stumps[class_k][pre_round_counts[class_k]..];
                         if !round_stumps.is_empty() {
-                            apply_round_stumps_tree_walk(
+                            apply_weighted_round_to_predictions(
                                 &mut val_preds[class_k],
                                 validation_ref.binned_matrix,
                                 round_stumps,
                                 val_raw,
+                                1.0,
                             )?;
                         }
                     }
@@ -2278,14 +2295,19 @@ impl Trainer {
                     raw_features_opt,
                     depth_penalty_base,
                 )?;
-                candidate_predictions.copy_from_slice(&predictions);
-                apply_round_stumps_tree_walk(
-                    &mut candidate_predictions,
-                    binned_matrix,
-                    &candidate_round_stumps,
-                    raw_features_opt,
-                )?;
             }
+
+            candidate_predictions.copy_from_slice(&predictions);
+            // Tree builders update only the sampled partition rows while constructing split
+            // statistics. Rebuild the candidate by walking the accepted tree over every
+            // training row so the training state matches inference semantics.
+            apply_weighted_round_to_predictions(
+                &mut candidate_predictions,
+                binned_matrix,
+                &candidate_round_stumps,
+                raw_features_opt,
+                1.0,
+            )?;
 
             // DART: rebuild `candidate_predictions` to reflect the
             // post-normalization weights. After `build_tree_*` returned,
@@ -2349,8 +2371,10 @@ impl Trainer {
             // boosting loop recovers on subsequent rounds. Skip the hard
             // "loss went up" early-exit for ranking objectives; rely on
             // validation early stopping (if configured) and the round cap.
-            let objective_is_ranking = objective.requires_group_id();
-            if !objective_is_ranking && loss_improvement < 0.0 {
+            // DART is also non-monotone by construction: dropout and
+            // normalization can raise training loss for a valid round.
+            let loss_gate_exempt = objective.requires_group_id() || dart_params.is_some();
+            if !loss_gate_exempt && loss_improvement < 0.0 {
                 if in_warmup_phase {
                     // DART: loss regression on warmup continue path → restore
                     // from pre-dropout backup so the next round sees the
@@ -2378,7 +2402,7 @@ impl Trainer {
                     .map_or(1.0, |ms| ms.lr_loss_threshold_scale(effective_round_index));
                 let effective_min_loss_improvement =
                     controls.min_loss_improvement * lr_threshold_scale;
-                if !objective_is_ranking && loss_improvement < effective_min_loss_improvement {
+                if !loss_gate_exempt && loss_improvement < effective_min_loss_improvement {
                     if weak_improvement_streak >= controls.max_consecutive_weak_improvements {
                         // Break path: see note above — restoration is
                         // unnecessary since the loop exits.
@@ -2432,7 +2456,7 @@ impl Trainer {
                         )?;
                     }
                 } else {
-                    apply_round_stumps_tree_walk(
+                    apply_weighted_round_to_predictions(
                         &mut next_validation_predictions,
                         validation_ref.binned_matrix,
                         &candidate_round_stumps,
@@ -2440,6 +2464,7 @@ impl Trainer {
                             &validation_ref.dataset.matrix.values as &[f32],
                             validation_ref.dataset.matrix.feature_count,
                         )),
+                        1.0,
                     )?;
                 }
                 let next_validation_loss = objective.loss(

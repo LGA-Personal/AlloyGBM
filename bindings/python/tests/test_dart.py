@@ -39,6 +39,32 @@ def test_dart_regressor_fits_and_predicts():
     assert np.isfinite(preds).all()
 
 
+def test_dart_regressor_does_not_stop_at_first_dropout_round():
+    rng = np.random.default_rng(20260702)
+    X = rng.normal(size=(1_000, 6)).astype(np.float32)
+    y = (
+        1.5 * X[:, 0]
+        - 0.8 * X[:, 1]
+        + 0.25 * np.sin(2.0 * X[:, 2])
+        + 0.05 * rng.normal(size=X.shape[0])
+    ).astype(np.float32)
+
+    model = GBMRegressor(
+        n_estimators=80,
+        max_depth=4,
+        learning_rate=0.08,
+        boosting_mode="dart",
+        dart_drop_rate=0.5,
+        dart_max_drop=10,
+        continuous_binning_strategy="quantile",
+        training_policy="manual",
+        seed=17,
+    ).fit(X, y)
+
+    assert model.n_estimators_ > 10
+    assert model.stop_reason_ == "CompletedRequestedRounds"
+
+
 def test_dart_classifier_binary_predict_proba_in_range():
     rng = np.random.default_rng(1)
     X = rng.normal(size=(200, 4)).astype(np.float32)

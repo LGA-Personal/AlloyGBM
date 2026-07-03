@@ -63,6 +63,72 @@ def test_goss_does_not_regress_significantly_vs_uniform_subsample(regression_dat
     )
 
 
+def test_uniform_row_subsample_updates_all_training_rows_after_commit():
+    rng = np.random.default_rng(20260702)
+    X = rng.normal(size=(1_200, 6)).astype("float32")
+    y = (
+        1.5 * X[:, 0]
+        - 0.8 * X[:, 1]
+        + 0.25 * np.sin(2.0 * X[:, 2])
+        + 0.05 * rng.normal(size=X.shape[0])
+    ).astype("float32")
+    baseline_rmse = float(rmse(y, np.full_like(y, float(np.mean(y)))))
+
+    model = GBMRegressor(
+        n_estimators=120,
+        max_depth=4,
+        learning_rate=0.08,
+        row_subsample=0.5,
+        continuous_binning_strategy="quantile",
+        training_policy="manual",
+        seed=17,
+    ).fit(X, y)
+
+    train_rmse = float(rmse(y, np.asarray(model.predict(X), dtype=np.float64)))
+    assert model.n_estimators_ == 120
+    assert train_rmse < baseline_rmse * 0.55, (
+        f"row_subsample fit should beat the mean predictor by a wide margin; "
+        f"train_rmse={train_rmse:.5f}, baseline_rmse={baseline_rmse:.5f}"
+    )
+
+
+def test_goss_regressor_predictions_do_not_overshoot_simple_target_range():
+    rng = np.random.default_rng(20260703)
+    X = rng.normal(size=(1_200, 6)).astype("float32")
+    y = (
+        1.5 * X[:, 0]
+        - 0.8 * X[:, 1]
+        + 0.25 * np.sin(2.0 * X[:, 2])
+        + 0.05 * rng.normal(size=X.shape[0])
+    ).astype("float32")
+    baseline_rmse = float(rmse(y, np.full_like(y, float(np.mean(y)))))
+
+    model = GBMRegressor(
+        n_estimators=120,
+        max_depth=4,
+        learning_rate=0.08,
+        boosting_mode="goss",
+        goss_top_rate=0.2,
+        goss_other_rate=0.2,
+        continuous_binning_strategy="quantile",
+        training_policy="manual",
+        seed=17,
+    ).fit(X, y)
+
+    preds = np.asarray(model.predict(X), dtype=np.float64)
+    train_rmse = float(rmse(y, preds))
+    target_span = float(np.max(y) - np.min(y))
+    allowed_low = float(np.min(y)) - 0.25 * target_span
+    allowed_high = float(np.max(y)) + 0.25 * target_span
+    assert model.n_estimators_ == 120
+    assert train_rmse < baseline_rmse * 0.65, (
+        f"GOSS should not diverge beyond a mean predictor; "
+        f"train_rmse={train_rmse:.5f}, baseline_rmse={baseline_rmse:.5f}"
+    )
+    assert float(np.min(preds)) >= allowed_low
+    assert float(np.max(preds)) <= allowed_high
+
+
 def test_goss_classifier_binary_trains_and_predicts():
     rng = np.random.default_rng(20260518)
     X = rng.normal(size=(1_000, 6)).astype("float32")

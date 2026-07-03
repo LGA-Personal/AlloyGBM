@@ -217,6 +217,10 @@ maturin develop --release      # Build and install Python extension
 4. **When adding Python parameters** -- update `__init__`, `get_params()`, `set_params()`, `__repr__`, and `_params_order` together
 5. **When adding a new objective** -- implement `ObjectiveOps`, add a variant to the objective dispatch in `engine`, update the predictor post-transform table, and add Python-side estimator support
 
+## Code Reviews
+
+Periodic deep-dive reviews (design/efficiency/accuracy) live in `docs/reviews/` — see its README for naming, metadata-header, and follow-up (`*-resolutions.md`) conventions. Check the latest review's open findings before large refactors or benchmark claims; when fixing a finding, record it in the matching resolutions doc. Latest: 2026-07-02 review of v0.12.10 (core + special modes; includes two open correctness bugs in row_subsample/GOSS and DART).
+
 ## Cutting A Release
 
 Follow [`docs/reference/release_checklist.md`](docs/reference/release_checklist.md) top-to-bottom. It's the authoritative inventory of every file that needs a version bump or content update (3 version-pin files + CHANGELOG + 14+ doc files), the stale-content `git grep` queries, the local + CI verification matrix, the tag/publish commands, and post-release bookkeeping. Skipping it is what made v0.7.1 docs drift; don't.
