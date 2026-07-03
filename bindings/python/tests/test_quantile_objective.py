@@ -213,10 +213,16 @@ def test_quantile_supported_combinations() -> None:
 
     # 4. GBMClassifier rejects
     from alloygbm import GBMClassifier
-    with pytest.raises(ValueError, match="GBMClassifier does not support objective='quantile'"):
+    with pytest.raises(
+        ValueError,
+        match="GBMClassifier objective is auto-detected.*GBMRanker",
+    ):
         GBMClassifier(objective="quantile")
     clf = GBMClassifier()
-    with pytest.raises(ValueError, match="GBMClassifier does not support objective='quantile'"):
+    with pytest.raises(
+        ValueError,
+        match="GBMClassifier objective is auto-detected.*GBMRanker",
+    ):
         clf.set_params(objective="quantile")
 
     # 5. GBMRanker accepts

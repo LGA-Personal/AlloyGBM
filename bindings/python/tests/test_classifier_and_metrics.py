@@ -93,6 +93,21 @@ class GBMClassifierTests(unittest.TestCase):
         clf = GBMClassifier()
         self.assertEqual(clf._objective_name(), "binary_crossentropy")
 
+    def test_rejects_explicit_string_objectives_with_alternative_estimators(self) -> None:
+        for objective in ("quantile", "poisson"):
+            with self.subTest(objective=objective):
+                with self.assertRaisesRegex(ValueError, "objective is auto-detected") as cm:
+                    GBMClassifier(objective=objective)
+                message = str(cm.exception)
+                self.assertIn(f"objective={objective!r}", message)
+                self.assertIn(f"GBMRegressor(objective={objective!r})", message)
+                self.assertIn(f"GBMRanker(ranking_objective={objective!r})", message)
+
+                clf = GBMClassifier()
+                with self.assertRaisesRegex(ValueError, "objective is auto-detected") as cm:
+                    clf.set_params(objective=objective)
+                self.assertIn(f"GBMRanker(ranking_objective={objective!r})", str(cm.exception))
+
     def test_accuracy_metric(self) -> None:
         self.assertEqual(accuracy([0, 1, 1, 0], [0, 1, 1, 0]), 1.0)
         self.assertEqual(accuracy([0, 1, 1, 0], [1, 0, 0, 1]), 0.0)
