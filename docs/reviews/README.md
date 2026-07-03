@@ -38,5 +38,5 @@ link it both ways.
 
 | Review | Version | Reviewer | Status |
 |---|---|---|---|
-| [Core review](2026-07-02-v0.12.10-core.md) — whole-workspace design/efficiency/accuracy | v0.12.10 | Claude Fable 5 | Open |
-| [Special-modes review](2026-07-02-v0.12.10-special-modes.md) — MorphBoost, DRO, PL trees, neutralization, objectives, DART/GOSS (incl. 2 correctness bugs) | v0.12.10 | Claude Fable 5 | Open |
+| [Core review](2026-07-02-v0.12.10-core.md) — whole-workspace design/efficiency/accuracy | v0.12.10 | Claude Fable 5 | [In progress](2026-07-02-v0.12.10-core-resolutions.md) |
+| [Special-modes review](2026-07-02-v0.12.10-special-modes.md) — MorphBoost, DRO, PL trees, neutralization, objectives, DART/GOSS (incl. 2 correctness bugs) | v0.12.10 | Claude Fable 5 | [In progress](2026-07-02-v0.12.10-special-modes-resolutions.md) |
