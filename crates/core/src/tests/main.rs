@@ -286,6 +286,32 @@ fn metadata_json_decodes_fields_independent_of_key_order() {
 }
 
 #[test]
+fn metadata_json_ignores_unknown_future_fields() {
+    let json = concat!(
+        "{",
+        "\"format_version\":1,",
+        "\"future_schema\":{\"revision\":2,\"flags\":[true,false,null],\"label\":\"v2\"},",
+        "\"feature_names\":[\"f0\"],",
+        "\"trained_device\":\"cpu\",",
+        "\"objective\":\"squared_error\"",
+        "}"
+    );
+
+    let decoded = deserialize_metadata_json(json).expect("metadata should decode");
+
+    assert_eq!(
+        decoded,
+        ModelMetadata {
+            format_version: MODEL_FORMAT_V1,
+            feature_names: vec!["f0".to_string()],
+            trained_device: Device::Cpu,
+            objective: "squared_error".to_string(),
+            num_classes: None,
+        }
+    );
+}
+
+#[test]
 fn metadata_json_rejects_unknown_device() {
     let json = "{\"format_version\":1,\"feature_names\":[\"f0\"],\"trained_device\":\"cuda\"}";
     assert!(matches!(
