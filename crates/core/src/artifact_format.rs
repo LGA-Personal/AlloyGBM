@@ -1397,9 +1397,7 @@ pub fn deserialize_metadata_json(input: &str) -> CoreResult<ModelMetadata> {
                     index = next_index;
                 }
                 _ => {
-                    return Err(CoreError::Serialization(format!(
-                        "unknown metadata field '{key}'"
-                    )));
+                    index = skip_json_value(&compact, index, 0)?;
                 }
             }
 
@@ -1726,6 +1724,139 @@ fn parse_string_array(input: &str, mut index: usize) -> CoreResult<(Vec<String>,
     }
 
     Ok((values, index))
+}
+
+const MAX_METADATA_UNKNOWN_FIELD_DEPTH: usize = 64;
+
+fn skip_json_value(input: &str, index: usize, depth: usize) -> CoreResult<usize> {
+    if depth > MAX_METADATA_UNKNOWN_FIELD_DEPTH {
+        return Err(CoreError::Serialization(format!(
+            "metadata json nesting exceeds maximum depth {MAX_METADATA_UNKNOWN_FIELD_DEPTH}"
+        )));
+    }
+    if index >= input.len() {
+        return Err(CoreError::Serialization(format!(
+            "expected json value at index {index}"
+        )));
+    }
+
+    match input.as_bytes()[index] {
+        b'"' => {
+            let (_, next_index) = parse_quoted_string(input, index)?;
+            Ok(next_index)
+        }
+        b'{' => skip_json_object(input, index, depth + 1),
+        b'[' => skip_json_array(input, index, depth + 1),
+        b't' => consume_literal(input, index, "true"),
+        b'f' => consume_literal(input, index, "false"),
+        b'n' => consume_literal(input, index, "null"),
+        b'-' | b'0'..=b'9' => skip_json_number(input, index),
+        _ => Err(CoreError::Serialization(format!(
+            "expected json value at index {index}"
+        ))),
+    }
+}
+
+fn skip_json_object(input: &str, mut index: usize, depth: usize) -> CoreResult<usize> {
+    index = consume_literal(input, index, "{")?;
+    if input[index..].starts_with('}') {
+        return Ok(index + 1);
+    }
+
+    loop {
+        let (_, next_index) = parse_quoted_string(input, index)?;
+        index = consume_literal(input, next_index, ":")?;
+        index = skip_json_value(input, index, depth)?;
+
+        if input[index..].starts_with(',') {
+            index += 1;
+            continue;
+        }
+        if input[index..].starts_with('}') {
+            return Ok(index + 1);
+        }
+        return Err(CoreError::Serialization(format!(
+            "expected ',' or '}}' at index {index}"
+        )));
+    }
+}
+
+fn skip_json_array(input: &str, mut index: usize, depth: usize) -> CoreResult<usize> {
+    index = consume_literal(input, index, "[")?;
+    if input[index..].starts_with(']') {
+        return Ok(index + 1);
+    }
+
+    loop {
+        index = skip_json_value(input, index, depth)?;
+
+        if input[index..].starts_with(',') {
+            index += 1;
+            continue;
+        }
+        if input[index..].starts_with(']') {
+            return Ok(index + 1);
+        }
+        return Err(CoreError::Serialization(format!(
+            "expected ',' or ']' at index {index}"
+        )));
+    }
+}
+
+fn skip_json_number(input: &str, mut index: usize) -> CoreResult<usize> {
+    if input[index..].starts_with('-') {
+        index += 1;
+    }
+
+    let integer_start = index;
+    while let Some(byte) = input.as_bytes().get(index) {
+        if !byte.is_ascii_digit() {
+            break;
+        }
+        index += 1;
+    }
+    if integer_start == index {
+        return Err(CoreError::Serialization(format!(
+            "expected json number at index {integer_start}"
+        )));
+    }
+
+    if input[index..].starts_with('.') {
+        index += 1;
+        let fraction_start = index;
+        while let Some(byte) = input.as_bytes().get(index) {
+            if !byte.is_ascii_digit() {
+                break;
+            }
+            index += 1;
+        }
+        if fraction_start == index {
+            return Err(CoreError::Serialization(format!(
+                "expected json number fraction at index {fraction_start}"
+            )));
+        }
+    }
+
+    if input[index..].starts_with('e') || input[index..].starts_with('E') {
+        index += 1;
+        if input[index..].starts_with('+') || input[index..].starts_with('-') {
+            index += 1;
+        }
+        let exponent_start = index;
+        while let Some(byte) = input.as_bytes().get(index) {
+            if !byte.is_ascii_digit() {
+                break;
+            }
+            index += 1;
+        }
+        if exponent_start == index {
+            return Err(CoreError::Serialization(format!(
+                "expected json number exponent at index {exponent_start}"
+            )));
+        }
+    }
+
+    Ok(index)
 }
 
 fn parse_quoted_string(input: &str, index: usize) -> CoreResult<(String, usize)> {
