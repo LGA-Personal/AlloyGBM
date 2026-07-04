@@ -28,29 +28,34 @@ impl NativePredictorHandle {
         Ok(Self { predictor })
     }
 
-    fn predict_batch(&self, rows: Vec<Vec<f32>>) -> PyResult<Vec<f32>> {
-        self.predictor
-            .predict_batch(&rows)
-            .map_err(predictor_error_to_pyerr)
+    fn predict_batch(&self, py: Python<'_>, rows: Vec<Vec<f32>>) -> PyResult<Vec<f32>> {
+        py.detach(|| {
+            self.predictor
+                .predict_batch(&rows)
+                .map_err(predictor_error_to_pyerr)
+        })
     }
 
     fn predict_dense(
         &self,
+        py: Python<'_>,
         values: Vec<f32>,
         row_count: usize,
         feature_count: usize,
     ) -> PyResult<Vec<f32>> {
-        predictor_predict_batch_dense_with_predictor(
-            &self.predictor,
-            row_count,
-            feature_count,
-            &values,
-        )
-        .map_err(predictor_error_to_pyerr)
+        py.detach(|| {
+            predictor_predict_batch_dense_with_predictor(
+                &self.predictor,
+                row_count,
+                feature_count,
+                &values,
+            )
+            .map_err(predictor_error_to_pyerr)
+        })
     }
 
     /// Predict from a numpy array (zero-copy). Requires float thresholds converted.
-    fn predict_numpy(&self, array: PyReadonlyArray2<f32>) -> PyResult<Vec<f32>> {
+    fn predict_numpy(&self, py: Python<'_>, array: PyReadonlyArray2<f32>) -> PyResult<Vec<f32>> {
         let shape = array.shape();
         let row_count = shape[0];
         let feature_count = shape[1];
@@ -59,9 +64,11 @@ impl NativePredictorHandle {
         let values = array_view.as_slice().ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err("numpy array must be C-contiguous")
         })?;
-        self.predictor
-            .predict_batch_dense(values, row_count, feature_count)
-            .map_err(predictor_error_to_pyerr)
+        py.detach(|| {
+            self.predictor
+                .predict_batch_dense(values, row_count, feature_count)
+                .map_err(predictor_error_to_pyerr)
+        })
     }
 
     /// Predict from a numpy array and return a numpy array, avoiding Python list materialization.
@@ -77,10 +84,11 @@ impl NativePredictorHandle {
         let values = array_view.as_slice().ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err("numpy array must be C-contiguous")
         })?;
-        let predictions = self
-            .predictor
-            .predict_batch_dense(values, row_count, feature_count)
-            .map_err(predictor_error_to_pyerr)?;
+        let predictions = py.detach(|| {
+            self.predictor
+                .predict_batch_dense(values, row_count, feature_count)
+                .map_err(predictor_error_to_pyerr)
+        })?;
         Ok(PyArray1::from_vec(py, predictions))
     }
 
@@ -88,19 +96,23 @@ impl NativePredictorHandle {
     /// Requires float thresholds to be converted first (convert_thresholds_to_float).
     fn predict_dense_float_bytes(
         &self,
+        py: Python<'_>,
         values_bytes: &[u8],
         row_count: usize,
         feature_count: usize,
     ) -> PyResult<Vec<f32>> {
-        self.predictor
-            .predict_batch_dense_bytes(values_bytes, row_count, feature_count)
-            .map_err(predictor_error_to_pyerr)
+        py.detach(|| {
+            self.predictor
+                .predict_batch_dense_bytes(values_bytes, row_count, feature_count)
+                .map_err(predictor_error_to_pyerr)
+        })
     }
 
     /// Quantize raw f32 bytes to bins using linear scaling, then predict.
     /// Single-pass: fuses bytes→f32 conversion with quantization (one allocation).
     fn predict_dense_quantized_linear_bytes(
         &self,
+        py: Python<'_>,
         values_bytes: &[u8],
         row_count: usize,
         feature_count: usize,
@@ -117,46 +129,49 @@ impl NativePredictorHandle {
                 "feature_mins/feature_maxs length must match feature_count",
             ));
         }
-        // Fused bytes→f32+quantize (single allocation, parallel), then predict.
-        let total = row_count * feature_count;
-        let mut quantized = vec![0.0_f32; total];
-        let chunk_size = 4096.max(row_count / rayon::current_num_threads().max(1));
-        quantized
-            .par_chunks_mut(chunk_size * feature_count)
-            .enumerate()
-            .for_each(|(chunk_idx, out_chunk)| {
-                let row_start = chunk_idx * chunk_size;
-                let rows_in_chunk = out_chunk.len() / feature_count;
-                for local_row in 0..rows_in_chunk {
-                    let row_index = row_start + local_row;
-                    let byte_base = row_index * feature_count * 4;
-                    let out_base = local_row * feature_count;
-                    for fi in 0..feature_count {
-                        let bi = byte_base + fi * 4;
-                        let value = f32::from_ne_bytes([
-                            values_bytes[bi],
-                            values_bytes[bi + 1],
-                            values_bytes[bi + 2],
-                            values_bytes[bi + 3],
-                        ]);
-                        // v0.9.0 Limitation 4 fix: preserve NaN through the
-                        // f32 cast so the predictor's `is_nan` check fires
-                        // and routes through `default_left`.
-                        out_chunk[out_base + fi] = if value.is_nan() {
-                            f32::NAN
-                        } else {
-                            quantize_linear_value(value, feature_mins[fi], feature_maxs[fi]) as f32
-                        };
+        py.detach(|| {
+            // Fused bytes→f32+quantize (single allocation, parallel), then predict.
+            let total = row_count * feature_count;
+            let mut quantized = vec![0.0_f32; total];
+            let chunk_size = 4096.max(row_count / rayon::current_num_threads().max(1));
+            quantized
+                .par_chunks_mut(chunk_size * feature_count)
+                .enumerate()
+                .for_each(|(chunk_idx, out_chunk)| {
+                    let row_start = chunk_idx * chunk_size;
+                    let rows_in_chunk = out_chunk.len() / feature_count;
+                    for local_row in 0..rows_in_chunk {
+                        let row_index = row_start + local_row;
+                        let byte_base = row_index * feature_count * 4;
+                        let out_base = local_row * feature_count;
+                        for fi in 0..feature_count {
+                            let bi = byte_base + fi * 4;
+                            let value = f32::from_ne_bytes([
+                                values_bytes[bi],
+                                values_bytes[bi + 1],
+                                values_bytes[bi + 2],
+                                values_bytes[bi + 3],
+                            ]);
+                            // v0.9.0 Limitation 4 fix: preserve NaN through the
+                            // f32 cast so the predictor's `is_nan` check fires
+                            // and routes through `default_left`.
+                            out_chunk[out_base + fi] = if value.is_nan() {
+                                f32::NAN
+                            } else {
+                                quantize_linear_value(value, feature_mins[fi], feature_maxs[fi])
+                                    as f32
+                            };
+                        }
                     }
-                }
-            });
-        predictor_predict_batch_dense_with_predictor(
-            &self.predictor,
-            row_count,
-            feature_count,
-            &quantized,
-        )
-        .map_err(predictor_error_to_pyerr)
+                });
+            predictor_predict_batch_dense_with_predictor(
+                &self.predictor,
+                row_count,
+                feature_count,
+                &quantized,
+            )
+            .map_err(predictor_error_to_pyerr)
+        })
     }
 
     /// Quantize raw float values to bins using linear scaling, then predict.
@@ -164,6 +179,7 @@ impl NativePredictorHandle {
     #[pyo3(signature = (values, row_count, feature_count, feature_mins, feature_maxs, max_data_bin=None))]
     fn predict_dense_quantized_linear(
         &self,
+        py: Python<'_>,
         values: Vec<f32>,
         row_count: usize,
         feature_count: usize,
@@ -177,21 +193,23 @@ impl NativePredictorHandle {
             ));
         }
         let mdb = max_data_bin.unwrap_or(MAX_CONTINUOUS_QUANTIZED_BIN_U8);
-        let quantized = quantize_dense_values_linear_inplace_wide(
-            &values,
-            row_count,
-            feature_count,
-            &feature_mins,
-            &feature_maxs,
-            mdb,
-        );
-        predictor_predict_batch_dense_with_predictor(
-            &self.predictor,
-            row_count,
-            feature_count,
-            &quantized,
-        )
-        .map_err(predictor_error_to_pyerr)
+        py.detach(|| {
+            let quantized = quantize_dense_values_linear_inplace_wide(
+                &values,
+                row_count,
+                feature_count,
+                &feature_mins,
+                &feature_maxs,
+                mdb,
+            );
+            predictor_predict_batch_dense_with_predictor(
+                &self.predictor,
+                row_count,
+                feature_count,
+                &quantized,
+            )
+            .map_err(predictor_error_to_pyerr)
+        })
     }
 
     /// Convert bin-index thresholds to float thresholds using per-feature min/max.
@@ -229,6 +247,7 @@ impl NativePredictorHandle {
     #[pyo3(signature = (values, row_count, feature_count, feature_mins, feature_maxs, rank_flags, feature_sorted_values, max_data_bin=None))]
     fn predict_dense_quantized_linear_rank(
         &self,
+        py: Python<'_>,
         values: Vec<f32>,
         row_count: usize,
         feature_count: usize,
@@ -249,23 +268,25 @@ impl NativePredictorHandle {
             ));
         }
         let mdb = max_data_bin.unwrap_or(MAX_CONTINUOUS_QUANTIZED_BIN_U8);
-        let quantized = quantize_dense_values_linear_rank_inplace_wide(
-            &values,
-            row_count,
-            feature_count,
-            &feature_mins,
-            &feature_maxs,
-            &rank_flags,
-            &feature_sorted_values,
-            mdb,
-        );
-        predictor_predict_batch_dense_with_predictor(
-            &self.predictor,
-            row_count,
-            feature_count,
-            &quantized,
-        )
-        .map_err(predictor_error_to_pyerr)
+        py.detach(|| {
+            let quantized = quantize_dense_values_linear_rank_inplace_wide(
+                &values,
+                row_count,
+                feature_count,
+                &feature_mins,
+                &feature_maxs,
+                &rank_flags,
+                &feature_sorted_values,
+                mdb,
+            );
+            predictor_predict_batch_dense_with_predictor(
+                &self.predictor,
+                row_count,
+                feature_count,
+                &quantized,
+            )
+            .map_err(predictor_error_to_pyerr)
+        })
     }
 
     // -- Multi-class prediction -----------------------------------------------
@@ -279,26 +300,35 @@ impl NativePredictorHandle {
     }
 
     /// Multi-class prediction returning flat Vec of length n_rows * K.
-    fn predict_multiclass(&self, rows: Vec<Vec<f32>>) -> PyResult<Vec<f32>> {
-        self.predictor
-            .predict_batch_multiclass(&rows)
-            .map_err(predictor_error_to_pyerr)
+    fn predict_multiclass(&self, py: Python<'_>, rows: Vec<Vec<f32>>) -> PyResult<Vec<f32>> {
+        py.detach(|| {
+            self.predictor
+                .predict_batch_multiclass(&rows)
+                .map_err(predictor_error_to_pyerr)
+        })
     }
 
     /// Multi-class prediction from dense flat array.
     fn predict_dense_multiclass(
         &self,
+        py: Python<'_>,
         values: Vec<f32>,
         row_count: usize,
         feature_count: usize,
     ) -> PyResult<Vec<f32>> {
-        self.predictor
-            .predict_batch_dense_multiclass(&values, row_count, feature_count)
-            .map_err(predictor_error_to_pyerr)
+        py.detach(|| {
+            self.predictor
+                .predict_batch_dense_multiclass(&values, row_count, feature_count)
+                .map_err(predictor_error_to_pyerr)
+        })
     }
 
     /// Multi-class prediction from a numpy array (zero-copy).
-    fn predict_numpy_multiclass(&self, array: PyReadonlyArray2<f32>) -> PyResult<Vec<f32>> {
+    fn predict_numpy_multiclass(
+        &self,
+        py: Python<'_>,
+        array: PyReadonlyArray2<f32>,
+    ) -> PyResult<Vec<f32>> {
         let shape = array.shape();
         let row_count = shape[0];
         let feature_count = shape[1];
@@ -306,9 +336,11 @@ impl NativePredictorHandle {
         let values = array_view.as_slice().ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err("numpy array must be C-contiguous")
         })?;
-        self.predictor
-            .predict_batch_dense_multiclass(values, row_count, feature_count)
-            .map_err(predictor_error_to_pyerr)
+        py.detach(|| {
+            self.predictor
+                .predict_batch_dense_multiclass(values, row_count, feature_count)
+                .map_err(predictor_error_to_pyerr)
+        })
     }
 }
 
@@ -379,38 +411,53 @@ fn predictor_predict_batch_canonical_dense_impl(
 
 #[pyfunction]
 pub(crate) fn predictor_predict_batch(
+    py: Python<'_>,
     artifact_bytes: &[u8],
     rows: Vec<Vec<f32>>,
 ) -> PyResult<Vec<f32>> {
-    predictor_predict_batch_impl(artifact_bytes, &rows).map_err(predictor_error_to_pyerr)
+    py.detach(|| predictor_predict_batch_impl(artifact_bytes, &rows))
+        .map_err(predictor_error_to_pyerr)
 }
 
 #[pyfunction]
 pub(crate) fn predictor_predict_batch_dense(
+    py: Python<'_>,
     artifact_bytes: &[u8],
     values: Vec<f32>,
     row_count: usize,
     feature_count: usize,
 ) -> PyResult<Vec<f32>> {
-    predictor_predict_batch_dense_impl(artifact_bytes, row_count, feature_count, &values)
-        .map_err(predictor_error_to_pyerr)
+    py.detach(|| {
+        predictor_predict_batch_dense_impl(artifact_bytes, row_count, feature_count, &values)
+    })
+    .map_err(predictor_error_to_pyerr)
 }
 
 #[pyfunction]
 pub(crate) fn predictor_predict_batch_canonical(
+    py: Python<'_>,
     artifact_bytes: &[u8],
     rows: Vec<Vec<f32>>,
 ) -> PyResult<Vec<f32>> {
-    predictor_predict_batch_canonical_impl(artifact_bytes, &rows).map_err(predictor_error_to_pyerr)
+    py.detach(|| predictor_predict_batch_canonical_impl(artifact_bytes, &rows))
+        .map_err(predictor_error_to_pyerr)
 }
 
 #[pyfunction]
 pub(crate) fn predictor_predict_batch_canonical_dense(
+    py: Python<'_>,
     artifact_bytes: &[u8],
     values: Vec<f32>,
     row_count: usize,
     feature_count: usize,
 ) -> PyResult<Vec<f32>> {
-    predictor_predict_batch_canonical_dense_impl(artifact_bytes, row_count, feature_count, &values)
-        .map_err(predictor_error_to_pyerr)
+    py.detach(|| {
+        predictor_predict_batch_canonical_dense_impl(
+            artifact_bytes,
+            row_count,
+            feature_count,
+            &values,
+        )
+    })
+    .map_err(predictor_error_to_pyerr)
 }

@@ -39,7 +39,7 @@ impl JointPredictorHandle {
 
     /// Predict K outputs for each row. Returns a flat row-major Vec<f32> of
     /// length `n_rows * n_outputs`; the Python wrapper reshapes.
-    fn predict_dense(&self, values: Vec<f32>) -> PyResult<Vec<f32>> {
+    fn predict_dense(&self, py: Python<'_>, values: Vec<f32>) -> PyResult<Vec<f32>> {
         if self.feature_count == 0 {
             return Err(PyValueError::new_err("feature_count must be > 0"));
         }
@@ -50,7 +50,7 @@ impl JointPredictorHandle {
                 self.feature_count
             )));
         }
-        Ok(self.predictor.predict_batch(&values, self.feature_count))
+        Ok(py.detach(|| self.predictor.predict_batch(&values, self.feature_count)))
     }
 
     #[getter]
