@@ -42,6 +42,41 @@ def test_default_continuous_binning_strategy_is_quantile():
     assert m.continuous_binning_strategy == "quantile"
 
 
+@pytest.mark.parametrize("strategy", ["quantile", "linear"])
+def test_joint_train_predict_binning_is_consistent(strategy):
+    # Guards against a train/predict binning mismatch: the joint trainer must
+    # bin training features with the SAME strategy the prediction path
+    # quantizes with. When they diverged (training hardcoded linear while
+    # prediction quantized by quantile) in-sample correlation collapsed from
+    # ~0.92 to ~0.5. Use a skewed (exponential) feature distribution so
+    # quantile and equal-width bins differ substantially.
+    rng = np.random.default_rng(0)
+    n = 4000
+    x = rng.exponential(scale=2.0, size=(n, 3)).astype(np.float32)
+    y = np.stack(
+        [
+            0.8 * x[:, 0] - 0.5 * x[:, 1] + 0.3 * x[:, 2],
+            0.2 * x[:, 0] + 0.6 * x[:, 2],
+        ],
+        axis=1,
+    ).astype(np.float32)
+    group = np.repeat(np.arange(n // 4), 4)[:n]
+
+    m = MultiLabelGBMRanker(
+        n_estimators=40,
+        max_depth=5,
+        learning_rate=0.1,
+        multi_label_mode="joint",
+        continuous_binning_strategy=strategy,
+        seed=1,
+    )
+    m.fit(x, y, group=group)
+    preds = m.predict(x)
+    for col in range(y.shape[1]):
+        corr = np.corrcoef(preds[:, col], y[:, col])[0, 1]
+        assert corr > 0.8, f"{strategy} label {col} corr={corr:.4f}"
+
+
 def test_invalid_multi_label_mode_rejected():
     with pytest.raises(ValueError, match="multi_label_mode"):
         MultiLabelGBMRanker(multi_label_mode="nonsense")
