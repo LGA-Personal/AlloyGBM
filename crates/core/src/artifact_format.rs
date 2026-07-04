@@ -20,6 +20,8 @@ pub const MODEL_FORMAT_V1: u32 = 1;
 pub const MODEL_BINARY_MAGIC: [u8; 4] = *b"AGBM";
 pub const MODEL_BINARY_HEADER_LEN: usize = 16;
 pub const MODEL_SECTION_DESCRIPTOR_LEN: usize = 20;
+pub const MAX_MODEL_ARTIFACT_SECTIONS: usize = 64;
+pub const MAX_MODEL_SECTION_PAYLOAD_BYTES: u64 = 512 * 1024 * 1024;
 pub const CATEGORICAL_STATE_FORMAT_V1: u32 = 1;
 const CATEGORICAL_STATE_HEADER_LEN: usize = 16;
 const CATEGORICAL_STATE_FLAG_LEAKAGE_SAFE_TARGET_ENCODING: u32 = 1;
@@ -1395,6 +1397,12 @@ pub fn serialize_model_artifact_v1(
         CoreError::Serialization("metadata json length exceeds u32::MAX".to_string())
     })?;
 
+    if sections.len() > MAX_MODEL_ARTIFACT_SECTIONS {
+        return Err(CoreError::Serialization(format!(
+            "section_count {} exceeds maximum {MAX_MODEL_ARTIFACT_SECTIONS}",
+            sections.len()
+        )));
+    }
     let section_count = u32::try_from(sections.len())
         .map_err(|_| CoreError::Serialization("section count exceeds u32::MAX".to_string()))?;
     let descriptor_table_len = sections
@@ -1413,6 +1421,12 @@ pub fn serialize_model_artifact_v1(
             return Err(CoreError::Serialization(
                 "section payload cannot be empty".to_string(),
             ));
+        }
+        if payload.len() as u64 > MAX_MODEL_SECTION_PAYLOAD_BYTES {
+            return Err(CoreError::Serialization(format!(
+                "section length {} exceeds maximum {MAX_MODEL_SECTION_PAYLOAD_BYTES}",
+                payload.len()
+            )));
         }
         let length = u64::try_from(payload.len())
             .map_err(|_| CoreError::Serialization("section length overflow".to_string()))?;
@@ -1464,6 +1478,12 @@ pub fn deserialize_model_artifact_v1(bytes: &[u8]) -> CoreResult<ParsedModelArti
     }
 
     let section_count = header.section_count as usize;
+    if section_count > MAX_MODEL_ARTIFACT_SECTIONS {
+        return Err(CoreError::Serialization(format!(
+            "section_count {section_count} exceeds maximum {MAX_MODEL_ARTIFACT_SECTIONS}"
+        )));
+    }
+    let metadata_json_len = header.metadata_json_len as usize;
     let descriptor_table_len = section_count
         .checked_mul(MODEL_SECTION_DESCRIPTOR_LEN)
         .ok_or_else(|| CoreError::Serialization("section table length overflow".to_string()))?;
@@ -1484,7 +1504,6 @@ pub fn deserialize_model_artifact_v1(bytes: &[u8]) -> CoreResult<ParsedModelArti
         descriptors.push(ModelSectionDescriptor::decode(&bytes[start..end])?);
     }
 
-    let metadata_json_len = header.metadata_json_len as usize;
     let metadata_start = descriptor_end;
     let metadata_end = metadata_start
         .checked_add(metadata_json_len)

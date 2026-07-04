@@ -427,6 +427,46 @@ fn model_artifact_deserialize_rejects_truncated_payload() {
 }
 
 #[test]
+fn model_artifact_deserialize_rejects_excessive_section_count_before_descriptor_parse() {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(
+        &ModelBinaryHeader::new((artifact_format::MAX_MODEL_ARTIFACT_SECTIONS + 1) as u32, 0)
+            .encode(),
+    );
+
+    let err = deserialize_model_artifact_v1(&bytes)
+        .expect_err("excessive section count should be rejected before descriptor parsing");
+    match err {
+        CoreError::Serialization(message) => {
+            assert!(message.contains("section_count"));
+            assert!(message.contains("exceeds"));
+        }
+        other => panic!("expected serialization error, got {other:?}"),
+    }
+}
+
+#[test]
+fn model_artifact_deserialize_rejects_excessive_section_length_before_payload_copy() {
+    let metadata = sample_metadata();
+    let sections = vec![(ModelSectionKind::Trees, vec![1_u8, 2, 3, 4])];
+    let mut bytes = serialize_model_artifact_v1(&metadata, &sections).expect("artifact encodes");
+
+    let length_offset = MODEL_BINARY_HEADER_LEN + 4 + 8;
+    bytes[length_offset..length_offset + 8]
+        .copy_from_slice(&(artifact_format::MAX_MODEL_SECTION_PAYLOAD_BYTES + 1).to_le_bytes());
+
+    let err = deserialize_model_artifact_v1(&bytes)
+        .expect_err("excessive section length should be rejected before payload copy");
+    match err {
+        CoreError::Serialization(message) => {
+            assert!(message.contains("section length"));
+            assert!(message.contains("exceeds"));
+        }
+        other => panic!("expected serialization error, got {other:?}"),
+    }
+}
+
+#[test]
 fn categorical_state_payload_roundtrip() {
     let payload = CategoricalStatePayloadV1 {
         format_version: CATEGORICAL_STATE_FORMAT_V1,

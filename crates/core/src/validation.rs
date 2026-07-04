@@ -1,6 +1,6 @@
 use crate::artifact_format::{
-    MODEL_BINARY_HEADER_LEN, MODEL_BINARY_MAGIC, MODEL_FORMAT_V1, MODEL_SECTION_DESCRIPTOR_LEN,
-    ModelIoContractV1,
+    MAX_MODEL_ARTIFACT_SECTIONS, MAX_MODEL_SECTION_PAYLOAD_BYTES, MODEL_BINARY_HEADER_LEN,
+    MODEL_BINARY_MAGIC, MODEL_FORMAT_V1, MODEL_SECTION_DESCRIPTOR_LEN, ModelIoContractV1,
 };
 use crate::binned::{BinStorage, BinnedMatrix};
 use crate::config::{BoostingMode, LeafModelKind, LeafSolverKind, TrainParams, TreeGrowth};
@@ -526,6 +526,12 @@ pub fn validate_model_contract_v1(contract: &ModelIoContractV1) -> CoreResult<()
             contract.header.section_count
         )));
     }
+    if contract.sections.len() > MAX_MODEL_ARTIFACT_SECTIONS {
+        return Err(CoreError::Serialization(format!(
+            "section_count {} exceeds maximum {MAX_MODEL_ARTIFACT_SECTIONS}",
+            contract.sections.len()
+        )));
+    }
 
     let descriptor_table_len = contract
         .sections
@@ -544,6 +550,12 @@ pub fn validate_model_contract_v1(contract: &ModelIoContractV1) -> CoreResult<()
             return Err(CoreError::Serialization(
                 "section length must be greater than 0".to_string(),
             ));
+        }
+        if section.length > MAX_MODEL_SECTION_PAYLOAD_BYTES {
+            return Err(CoreError::Serialization(format!(
+                "section length {} exceeds maximum {MAX_MODEL_SECTION_PAYLOAD_BYTES}",
+                section.length
+            )));
         }
         if section.offset < payload_start {
             return Err(CoreError::Serialization(format!(
