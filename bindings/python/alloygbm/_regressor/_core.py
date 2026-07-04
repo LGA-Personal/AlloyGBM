@@ -44,7 +44,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         min_split_gain: float = 0.0,
         seed: int = 0,
         deterministic: bool = True,
-        continuous_binning_strategy: str = "linear",
+        continuous_binning_strategy: str = "quantile",
         continuous_binning_max_bins: int = 256,
         categorical_feature_index: int | None = None,
         categorical_feature_indices: list[int] | None = None,

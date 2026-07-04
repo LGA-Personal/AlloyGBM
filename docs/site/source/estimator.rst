@@ -153,11 +153,12 @@ Reproducibility
 Continuous-feature controls
 ---------------------------
 
-- ``continuous_binning_strategy: str = "linear"``
+- ``continuous_binning_strategy: str = "quantile"``
 - ``continuous_binning_max_bins: int = 256``
 
-Supports up to 65,535 bins per feature. Use ``quantile`` when you need more
-robust handling of skewed continuous features.
+Supports up to 65,535 bins per feature. The default ``quantile`` strategy gives
+more robust handling of skewed continuous features. Use ``linear`` when you want
+equal-width bins for compatibility experiments or lower quantile-preprocessing cost.
 
 Categorical support
 -------------------

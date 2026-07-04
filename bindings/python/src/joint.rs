@@ -8,7 +8,9 @@ use crate::params::{
     parse_boosting_mode, parse_dro_config, parse_factor_exposure_matrix, parse_leaf_solver,
     parse_morph_config_from_pydict, parse_neutralization_config,
 };
-use crate::quantization::{ContinuousBinningStrategy, prepare_training_matrices_from_dense_values};
+use crate::quantization::{
+    parse_continuous_binning_strategy, prepare_training_matrices_from_dense_values,
+};
 
 // ---------------------------------------------------------------------------
 // Joint multi-output trainer + predictor handle (v0.10.1)
@@ -85,7 +87,6 @@ impl JointPredictorHandle {
     max_depth,
     min_data_in_leaf,
     lambda_l2,
-    max_bin,
     min_split_gain=0.0_f32,
     row_subsample=1.0_f32,
     col_subsample=1.0_f32,
@@ -94,6 +95,8 @@ impl JointPredictorHandle {
     max_leaves=None::<usize>,
     categorical_feature_indices=Vec::<usize>::new(),
     max_cat_threshold=0_usize,
+    continuous_binning_strategy="quantile".to_string(),
+    continuous_binning_max_bins=256_usize,
     boosting_mode="standard".to_string(),
     goss_top_rate=None::<f32>,
     goss_other_rate=None::<f32>,
@@ -132,7 +135,6 @@ pub(crate) fn train_joint_multi_label_ranker(
     max_depth: u16,
     min_data_in_leaf: u32,
     lambda_l2: f32,
-    max_bin: usize,
     min_split_gain: f32,
     row_subsample: f32,
     col_subsample: f32,
@@ -141,6 +143,8 @@ pub(crate) fn train_joint_multi_label_ranker(
     max_leaves: Option<usize>,
     categorical_feature_indices: Vec<usize>,
     max_cat_threshold: usize,
+    continuous_binning_strategy: String,
+    continuous_binning_max_bins: usize,
     boosting_mode: String,
     goss_top_rate: Option<f32>,
     goss_other_rate: Option<f32>,
@@ -217,7 +221,16 @@ pub(crate) fn train_joint_multi_label_ranker(
 
     // Build the binned matrix. The joint trainer needs only `binned_matrix`;
     // use y[:, 0] as a throwaway target since binning is target-independent
-    // for the linear and rank strategies.
+    // for all supported strategies (linear/rank/quantile derive cuts from the
+    // feature distribution, not the target).
+    //
+    // The strategy and bin count MUST match what the Python
+    // `MultiLabelGBMRanker` prediction path quantizes with (see
+    // `_uses_continuous_binning` / `_quantize_rows_for_prediction`); otherwise
+    // trained split thresholds (in training-bin space) would be applied to
+    // differently-binned prediction inputs, silently corrupting predictions.
+    let parsed_binning_strategy = parse_continuous_binning_strategy(&continuous_binning_strategy)
+        .map_err(engine_error_to_pyerr)?;
     let throwaway_targets = targets_per_output[0].clone();
     let mut prepared = prepare_training_matrices_from_dense_values(
         &x_values,
@@ -227,8 +240,8 @@ pub(crate) fn train_joint_multi_label_ranker(
         None,
         None,
         group_id.clone(),
-        ContinuousBinningStrategy::Linear,
-        max_bin,
+        parsed_binning_strategy,
+        continuous_binning_max_bins,
         false,
     )
     .map_err(engine_error_to_pyerr)?;

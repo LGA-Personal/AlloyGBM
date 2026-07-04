@@ -3443,41 +3443,71 @@ fn test_multiclass_trained_model_rounds_completed() {
                     multi_output_leaf_values: None,
                 },
             ],
-            // Class 1: same structure
-            vec![TrainedStump {
-                split: SplitCandidate {
-                    node_id: 0,
-                    feature_index: 0,
-                    threshold_bin: 1,
-                    gain: 1.0,
-                    default_left: false,
-                    is_categorical: false,
-                    categorical_bitset: None,
-                    left_stats: NodeStats {
-                        grad_sum: 0.0,
-                        hess_sum: 1.0,
-                        grad_sq_sum: 0.0,
-                        row_count: 2,
+            // Class 1: class 0 can stop producing trees before another class.
+            // Warm-start offset inference must still see the highest tree id.
+            vec![
+                TrainedStump {
+                    split: SplitCandidate {
+                        node_id: 0,
+                        feature_index: 0,
+                        threshold_bin: 1,
+                        gain: 1.0,
+                        default_left: false,
+                        is_categorical: false,
+                        categorical_bitset: None,
+                        left_stats: NodeStats {
+                            grad_sum: 0.0,
+                            hess_sum: 1.0,
+                            grad_sq_sum: 0.0,
+                            row_count: 2,
+                        },
+                        right_stats: NodeStats {
+                            grad_sum: 0.0,
+                            hess_sum: 1.0,
+                            grad_sq_sum: 0.0,
+                            row_count: 2,
+                        },
                     },
-                    right_stats: NodeStats {
-                        grad_sum: 0.0,
-                        hess_sum: 1.0,
-                        grad_sq_sum: 0.0,
-                        row_count: 2,
-                    },
+                    left_leaf_value: LeafValue::Scalar(0.1),
+                    right_leaf_value: LeafValue::Scalar(-0.1),
+                    tree_weight: 1.0,
+                    multi_output_leaf_values: None,
                 },
-                left_leaf_value: LeafValue::Scalar(0.1),
-                right_leaf_value: LeafValue::Scalar(-0.1),
-                tree_weight: 1.0,
-                multi_output_leaf_values: None,
-            }],
+                TrainedStump {
+                    split: SplitCandidate {
+                        node_id: 3 * TREE_NODE_STRIDE, // tree 3, node 0
+                        feature_index: 0,
+                        threshold_bin: 2,
+                        gain: 0.5,
+                        default_left: false,
+                        is_categorical: false,
+                        categorical_bitset: None,
+                        left_stats: NodeStats {
+                            grad_sum: 0.0,
+                            hess_sum: 1.0,
+                            grad_sq_sum: 0.0,
+                            row_count: 2,
+                        },
+                        right_stats: NodeStats {
+                            grad_sum: 0.0,
+                            hess_sum: 1.0,
+                            grad_sq_sum: 0.0,
+                            row_count: 2,
+                        },
+                    },
+                    left_leaf_value: LeafValue::Scalar(0.1),
+                    right_leaf_value: LeafValue::Scalar(-0.1),
+                    tree_weight: 1.0,
+                    multi_output_leaf_values: None,
+                },
+            ],
         ],
         categorical_state: None,
         objective: "multiclass_softmax".to_string(),
         morph_metadata: None,
         dro_metadata: None,
     };
-    assert_eq!(model.rounds_completed(), 2);
+    assert_eq!(model.rounds_completed(), 4);
 }
 
 // ── Per-round metric callback tests ─────────────────────────────────

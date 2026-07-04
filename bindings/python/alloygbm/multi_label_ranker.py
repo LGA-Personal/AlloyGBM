@@ -143,11 +143,20 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
 
     @property
     def continuous_binning_strategy(self) -> str:
-        return self._per_label_kwargs.get("continuous_binning_strategy", "linear")
+        return self._per_label_kwargs.get("continuous_binning_strategy", "quantile")
 
     @property
     def continuous_binning_max_bins(self) -> int:
-        return self._per_label_kwargs.get("continuous_binning_max_bins", 256)
+        # Falls back to the legacy ``max_bin`` kwarg so a joint fit that only
+        # set ``max_bin`` still bins training and prediction with the same
+        # count (the joint trainer now derives its continuous bin count from
+        # this property rather than a separate ``max_bin`` argument).
+        return int(
+            self._per_label_kwargs.get(
+                "continuous_binning_max_bins",
+                self._per_label_kwargs.get("max_bin", 256),
+            )
+        )
 
     @property
     def _n_features_in(self) -> int:
@@ -346,6 +355,8 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
         "min_data_in_leaf",
         "lambda_l2",
         "max_bin",
+        "continuous_binning_strategy",
+        "continuous_binning_max_bins",
         # v0.10.2 Phase 1: small/medium joint-trainer features.
         "min_split_gain",
         "row_subsample",
@@ -760,7 +771,6 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
             int(kw.get("max_depth", 6)),
             int(kw.get("min_data_in_leaf", 1)),
             float(kw.get("lambda_l2", 0.0)),
-            int(kw.get("max_bin", 256)),
             # v0.10.2 Phase 1 kwargs (keyword args so the order in the PyO3
             # signature can keep evolving across point releases).
             min_split_gain=float(kw.get("min_split_gain", 0.0)),
@@ -778,6 +788,15 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
             # which is the invariant the joint native-cat path requires.
             categorical_feature_indices=categorical_feature_indices,
             max_cat_threshold=int(kw.get("max_cat_threshold", 0)),
+            # Training must bin continuous features with the SAME strategy /
+            # bin count the prediction path quantizes with
+            # (`continuous_binning_strategy` property + metadata), or the
+            # trained split thresholds would be applied to differently-binned
+            # prediction inputs. Categorical columns are re-binned to
+            # `bin_index == category_id` inside the bridge afterward, so this
+            # only affects continuous features.
+            continuous_binning_strategy=self.continuous_binning_strategy,
+            continuous_binning_max_bins=self.continuous_binning_max_bins,
             # v0.10.3: joint boosting_mode (GOSS / DART).
             boosting_mode=str(kw.get("boosting_mode", "standard")),
             goss_top_rate=(
@@ -1094,7 +1113,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
 
                 metadata = {
                     "uses_continuous_binning": getattr(self, "_uses_continuous_binning", False),
-                    "continuous_binning_strategy": getattr(self, "continuous_binning_strategy", "linear"),
+                    "continuous_binning_strategy": getattr(self, "continuous_binning_strategy", "quantile"),
                     "continuous_binning_max_bins": getattr(self, "continuous_binning_max_bins", 256),
                     "continuous_feature_mins": getattr(self, "_continuous_feature_mins", None),
                     "continuous_feature_maxs": getattr(self, "_continuous_feature_maxs", None),
