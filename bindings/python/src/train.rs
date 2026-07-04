@@ -838,6 +838,7 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact(
+    py: Python<'_>,
     rows: Vec<Vec<f32>>,
     targets: Vec<f32>,
     learning_rate: f32,
@@ -955,37 +956,40 @@ pub(crate) fn train_regression_artifact(
 
     let (dense_values, row_count, feature_count) =
         flatten_rows(&rows).map_err(engine_error_to_pyerr)?;
-    train_regression_artifact_with_summary_dense_impl(
-        &dense_values,
-        row_count,
-        feature_count,
-        &targets,
-        None, // sample_weights
-        None, // group_id
-        factor_exposures,
-        None,
-        None,
-        None,
-        None, // validation_sample_weights
-        None, // validation_group_id
-        params,
-        effective_rounds,
-        time_index,
-        None,
-        categorical_spec.into_iter().collect(),
-        Vec::new(),
-        training_policy,
-        store_node_stats,
-        continuous_binning_strategy,
-        continuous_binning_max_bins,
-        objective,
-        None, // init_artifact_bytes
-        None, // num_classes
-        None, // custom_objective_fn
-        None, // custom_loss_fn
-        None, // custom_metric_fn
-        0,    // max_cat_threshold (disabled for non-summary paths)
-    )
+    let objective_name = objective.to_string();
+    py.detach(|| {
+        train_regression_artifact_with_summary_dense_impl(
+            &dense_values,
+            row_count,
+            feature_count,
+            &targets,
+            None, // sample_weights
+            None, // group_id
+            factor_exposures,
+            None,
+            None,
+            None,
+            None, // validation_sample_weights
+            None, // validation_group_id
+            params,
+            effective_rounds,
+            time_index,
+            None,
+            categorical_spec.into_iter().collect(),
+            Vec::new(),
+            training_policy,
+            store_node_stats,
+            continuous_binning_strategy,
+            continuous_binning_max_bins,
+            objective_name.as_str(),
+            None, // init_artifact_bytes
+            None, // num_classes
+            None, // custom_objective_fn
+            None, // custom_loss_fn
+            None, // custom_metric_fn
+            0,    // max_cat_threshold (disabled for non-summary paths)
+        )
+    })
     .map(|result| result.artifact_bytes)
     .map_err(engine_error_to_pyerr)
 }
@@ -1039,6 +1043,7 @@ pub(crate) fn train_regression_artifact(
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_dense(
+    py: Python<'_>,
     values: Vec<f32>,
     row_count: usize,
     feature_count: usize,
@@ -1154,37 +1159,40 @@ pub(crate) fn train_regression_artifact_dense(
         row_count,
     )
     .map_err(engine_error_to_pyerr)?;
-    train_regression_artifact_with_summary_dense_impl(
-        &values,
-        row_count,
-        feature_count,
-        &targets,
-        None, // sample_weights
-        None, // group_id
-        factor_exposures,
-        None,
-        None,
-        None,
-        None, // validation_sample_weights
-        None, // validation_group_id
-        params,
-        effective_rounds,
-        time_index,
-        None,
-        categorical_spec.into_iter().collect(),
-        Vec::new(),
-        training_policy,
-        store_node_stats,
-        continuous_binning_strategy,
-        continuous_binning_max_bins,
-        objective,
-        None, // init_artifact_bytes
-        None, // num_classes
-        None, // custom_objective_fn
-        None, // custom_loss_fn
-        None, // custom_metric_fn
-        0,    // max_cat_threshold (disabled for non-summary paths)
-    )
+    let objective_name = objective.to_string();
+    py.detach(|| {
+        train_regression_artifact_with_summary_dense_impl(
+            &values,
+            row_count,
+            feature_count,
+            &targets,
+            None, // sample_weights
+            None, // group_id
+            factor_exposures,
+            None,
+            None,
+            None,
+            None, // validation_sample_weights
+            None, // validation_group_id
+            params,
+            effective_rounds,
+            time_index,
+            None,
+            categorical_spec.into_iter().collect(),
+            Vec::new(),
+            training_policy,
+            store_node_stats,
+            continuous_binning_strategy,
+            continuous_binning_max_bins,
+            objective_name.as_str(),
+            None, // init_artifact_bytes
+            None, // num_classes
+            None, // custom_objective_fn
+            None, // custom_loss_fn
+            None, // custom_metric_fn
+            0,    // max_cat_threshold (disabled for non-summary paths)
+        )
+    })
     .map(|result| result.artifact_bytes)
     .map_err(engine_error_to_pyerr)
 }
@@ -1263,6 +1271,7 @@ pub(crate) fn train_regression_artifact_dense(
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_with_summary(
+    py: Python<'_>,
     rows: Vec<Vec<f32>>,
     targets: Vec<f32>,
     learning_rate: f32,
@@ -1426,40 +1435,83 @@ pub(crate) fn train_regression_artifact_with_summary(
         ));
     }
 
-    train_regression_artifact_with_summary_dense_impl(
-        &dense_values,
-        row_count,
-        feature_count,
-        &targets,
-        sample_weights,
-        group_id,
-        factor_exposures,
-        validation_payload
-            .as_ref()
-            .map(|(values, _, _)| values.as_slice()),
-        validation_row_count,
-        validation_targets.as_deref(),
-        validation_sample_weights,
-        validation_group_id,
-        params,
-        effective_rounds,
-        time_index,
-        validation_time_index,
-        categorical_specs,
-        validation_categorical_values_list,
-        training_policy,
-        store_node_stats,
-        continuous_binning_strategy,
-        continuous_binning_max_bins,
-        objective,
-        init_artifact_bytes.as_deref(),
-        num_classes,
-        custom_objective_fn,
-        custom_loss_fn,
-        custom_metric_fn,
-        max_cat_threshold,
-    )
-    .map_err(engine_error_to_pyerr)
+    let objective_name = objective.to_string();
+    let has_python_callbacks =
+        custom_objective_fn.is_some() || custom_loss_fn.is_some() || custom_metric_fn.is_some();
+
+    let result = if has_python_callbacks {
+        train_regression_artifact_with_summary_dense_impl(
+            &dense_values,
+            row_count,
+            feature_count,
+            &targets,
+            sample_weights,
+            group_id,
+            factor_exposures,
+            validation_payload
+                .as_ref()
+                .map(|(values, _, _)| values.as_slice()),
+            validation_row_count,
+            validation_targets.as_deref(),
+            validation_sample_weights,
+            validation_group_id,
+            params,
+            effective_rounds,
+            time_index,
+            validation_time_index,
+            categorical_specs,
+            validation_categorical_values_list,
+            training_policy,
+            store_node_stats,
+            continuous_binning_strategy,
+            continuous_binning_max_bins,
+            objective_name.as_str(),
+            init_artifact_bytes.as_deref(),
+            num_classes,
+            custom_objective_fn,
+            custom_loss_fn,
+            custom_metric_fn,
+            max_cat_threshold,
+        )
+    } else {
+        py.detach(|| {
+            train_regression_artifact_with_summary_dense_impl(
+                &dense_values,
+                row_count,
+                feature_count,
+                &targets,
+                sample_weights,
+                group_id,
+                factor_exposures,
+                validation_payload
+                    .as_ref()
+                    .map(|(values, _, _)| values.as_slice()),
+                validation_row_count,
+                validation_targets.as_deref(),
+                validation_sample_weights,
+                validation_group_id,
+                params,
+                effective_rounds,
+                time_index,
+                validation_time_index,
+                categorical_specs,
+                validation_categorical_values_list,
+                training_policy,
+                store_node_stats,
+                continuous_binning_strategy,
+                continuous_binning_max_bins,
+                objective_name.as_str(),
+                init_artifact_bytes.as_deref(),
+                num_classes,
+                custom_objective_fn,
+                custom_loss_fn,
+                custom_metric_fn,
+                max_cat_threshold,
+            )
+        })
+    };
+
+    result.map_err(engine_error_to_pyerr)
 }
 
 #[pyfunction(signature = (
@@ -1539,6 +1591,7 @@ pub(crate) fn train_regression_artifact_with_summary(
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_dense_with_summary(
+    py: Python<'_>,
     values: Vec<f32>,
     row_count: usize,
     feature_count: usize,
@@ -1688,38 +1741,79 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
             row_count,
         )
         .map_err(engine_error_to_pyerr)?;
-    train_regression_artifact_with_summary_dense_impl(
-        &values,
-        row_count,
-        feature_count,
-        &targets,
-        sample_weights,
-        group_id,
-        factor_exposures,
-        validation_values.as_deref(),
-        validation_row_count,
-        validation_targets.as_deref(),
-        validation_sample_weights,
-        validation_group_id,
-        params,
-        effective_rounds,
-        time_index,
-        validation_time_index,
-        categorical_specs,
-        validation_categorical_values_list,
-        training_policy,
-        store_node_stats,
-        continuous_binning_strategy,
-        continuous_binning_max_bins,
-        objective,
-        init_artifact_bytes.as_deref(),
-        num_classes,
-        custom_objective_fn,
-        custom_loss_fn,
-        custom_metric_fn,
-        max_cat_threshold,
-    )
-    .map_err(engine_error_to_pyerr)
+    let objective_name = objective.to_string();
+    let has_python_callbacks =
+        custom_objective_fn.is_some() || custom_loss_fn.is_some() || custom_metric_fn.is_some();
+
+    let result = if has_python_callbacks {
+        train_regression_artifact_with_summary_dense_impl(
+            &values,
+            row_count,
+            feature_count,
+            &targets,
+            sample_weights,
+            group_id,
+            factor_exposures,
+            validation_values.as_deref(),
+            validation_row_count,
+            validation_targets.as_deref(),
+            validation_sample_weights,
+            validation_group_id,
+            params,
+            effective_rounds,
+            time_index,
+            validation_time_index,
+            categorical_specs,
+            validation_categorical_values_list,
+            training_policy,
+            store_node_stats,
+            continuous_binning_strategy,
+            continuous_binning_max_bins,
+            objective_name.as_str(),
+            init_artifact_bytes.as_deref(),
+            num_classes,
+            custom_objective_fn,
+            custom_loss_fn,
+            custom_metric_fn,
+            max_cat_threshold,
+        )
+    } else {
+        py.detach(|| {
+            train_regression_artifact_with_summary_dense_impl(
+                &values,
+                row_count,
+                feature_count,
+                &targets,
+                sample_weights,
+                group_id,
+                factor_exposures,
+                validation_values.as_deref(),
+                validation_row_count,
+                validation_targets.as_deref(),
+                validation_sample_weights,
+                validation_group_id,
+                params,
+                effective_rounds,
+                time_index,
+                validation_time_index,
+                categorical_specs,
+                validation_categorical_values_list,
+                training_policy,
+                store_node_stats,
+                continuous_binning_strategy,
+                continuous_binning_max_bins,
+                objective_name.as_str(),
+                init_artifact_bytes.as_deref(),
+                num_classes,
+                custom_objective_fn,
+                custom_loss_fn,
+                custom_metric_fn,
+                max_cat_threshold,
+            )
+        })
+    };
+
+    result.map_err(engine_error_to_pyerr)
 }
 
 /// Reinterpret raw bytes as f32 slice (safe, no allocation).
@@ -1814,6 +1908,7 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> PyResult<Vec<f32>> {
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
+    py: Python<'_>,
     values_bytes: &[u8],
     row_count: usize,
     feature_count: usize,
@@ -1967,36 +2062,77 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
             row_count,
         )
         .map_err(engine_error_to_pyerr)?;
-    train_regression_artifact_with_summary_dense_impl(
-        &values,
-        row_count,
-        feature_count,
-        &targets,
-        sample_weights,
-        group_id,
-        factor_exposures,
-        validation_values.as_deref(),
-        validation_row_count,
-        validation_targets.as_deref(),
-        validation_sample_weights,
-        validation_group_id,
-        params,
-        effective_rounds,
-        time_index,
-        validation_time_index,
-        categorical_specs,
-        validation_categorical_values_list,
-        training_policy,
-        store_node_stats,
-        continuous_binning_strategy,
-        continuous_binning_max_bins,
-        objective,
-        init_artifact_bytes.as_deref(),
-        num_classes,
-        custom_objective_fn,
-        custom_loss_fn,
-        custom_metric_fn,
-        max_cat_threshold,
-    )
-    .map_err(engine_error_to_pyerr)
+    let objective_name = objective.to_string();
+    let has_python_callbacks =
+        custom_objective_fn.is_some() || custom_loss_fn.is_some() || custom_metric_fn.is_some();
+
+    let result = if has_python_callbacks {
+        train_regression_artifact_with_summary_dense_impl(
+            &values,
+            row_count,
+            feature_count,
+            &targets,
+            sample_weights,
+            group_id,
+            factor_exposures,
+            validation_values.as_deref(),
+            validation_row_count,
+            validation_targets.as_deref(),
+            validation_sample_weights,
+            validation_group_id,
+            params,
+            effective_rounds,
+            time_index,
+            validation_time_index,
+            categorical_specs,
+            validation_categorical_values_list,
+            training_policy,
+            store_node_stats,
+            continuous_binning_strategy,
+            continuous_binning_max_bins,
+            objective_name.as_str(),
+            init_artifact_bytes.as_deref(),
+            num_classes,
+            custom_objective_fn,
+            custom_loss_fn,
+            custom_metric_fn,
+            max_cat_threshold,
+        )
+    } else {
+        py.detach(|| {
+            train_regression_artifact_with_summary_dense_impl(
+                &values,
+                row_count,
+                feature_count,
+                &targets,
+                sample_weights,
+                group_id,
+                factor_exposures,
+                validation_values.as_deref(),
+                validation_row_count,
+                validation_targets.as_deref(),
+                validation_sample_weights,
+                validation_group_id,
+                params,
+                effective_rounds,
+                time_index,
+                validation_time_index,
+                categorical_specs,
+                validation_categorical_values_list,
+                training_policy,
+                store_node_stats,
+                continuous_binning_strategy,
+                continuous_binning_max_bins,
+                objective_name.as_str(),
+                init_artifact_bytes.as_deref(),
+                num_classes,
+                custom_objective_fn,
+                custom_loss_fn,
+                custom_metric_fn,
+                max_cat_threshold,
+            )
+        })
+    };
+
+    result.map_err(engine_error_to_pyerr)
 }
