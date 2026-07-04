@@ -1537,6 +1537,22 @@ fn default_backend_neutralization_split_penalty_context_returns_error() {
 }
 
 #[test]
+fn encode_tree_node_id_enforces_shared_slot_limit() {
+    // The last in-budget local id encodes; the first out-of-budget one is
+    // rejected at train time so the trainer can never emit a model the
+    // predictor would refuse to load (symmetric contract).
+    let last_ok = (alloygbm_core::MAX_TREE_NODE_SLOTS - 1) as u32;
+    assert!(encode_tree_node_id(0, last_ok).is_ok());
+
+    let first_over = alloygbm_core::MAX_TREE_NODE_SLOTS as u32;
+    let err = encode_tree_node_id(0, first_over).expect_err("must reject over-budget local id");
+    assert!(
+        format!("{err:?}").contains("tree-node slot limit"),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
 fn refine_regression_leaf_values_reduces_loss_for_fixed_structure() {
     let node_id = encode_tree_node_id(0, 0).expect("node id encodes");
     let mut stumps = vec![TrainedStump {

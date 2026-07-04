@@ -3,6 +3,22 @@ use crate::error::{CoreError, CoreResult};
 use crate::neutralization::FactorNeutralizationConfig;
 use crate::training_mode::MorphConfig;
 
+/// Upper bound on the number of heap-style local node slots a single tree may
+/// occupy, shared by the trainer and the predictor so the contract is
+/// symmetric: any model the trainer emits (local node id `< MAX_TREE_NODE_SLOTS`)
+/// is guaranteed to load, and any artifact the predictor accepts could have been
+/// trained.  The trainer enforces this via `encode_tree_node_id` (a split whose
+/// child would land at slot `>= MAX_TREE_NODE_SLOTS` fails fit); the predictor
+/// enforces it before allocating the per-tree `nodes_by_local_id` array, so a
+/// crafted/corrupt artifact cannot force an oversized allocation.
+///
+/// Node ids are heap-indexed (`left = 2i+1`, `right = 2i+2`), so this caps
+/// effective tree depth at ~16 while still permitting far more leaves than any
+/// realistic GBDT tree.  It is deliberately tighter than the tree-node encoding
+/// stride (`1 << 20`), which remains the multiplier separating per-tree id
+/// ranges.
+pub const MAX_TREE_NODE_SLOTS: usize = 1 << 16;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum TreeGrowth {
     /// Level-wise (breadth-first): split all nodes at depth d before depth d+1.

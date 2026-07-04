@@ -13,8 +13,11 @@ use std::fmt::{Display, Formatter};
 const PARALLEL_PREDICT_MIN_ROWS: usize = 256;
 const PARALLEL_PREDICT_MIN_WORK_ITEMS: usize = 16_384;
 // Loading artifacts is a trust boundary: sparse heap-style node IDs can
-// otherwise force large per-tree slot arrays before prediction ever runs.
-const MAX_PREDICTOR_TREE_NODE_SLOTS: usize = 1 << 16;
+// otherwise force large per-tree slot arrays before prediction ever runs. The
+// same limit is enforced at train time (`encode_tree_node_id`), so every model
+// the trainer emits loads and every artifact accepted here could have been
+// trained.
+use alloygbm_core::MAX_TREE_NODE_SLOTS;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PredictorError {
@@ -1200,9 +1203,9 @@ fn build_predictor_trees(
                 "tree {tree_id} local node_id {max_local_node_id} overflowed predictor node slot count"
             ))
         })?;
-        if required_node_slots > MAX_PREDICTOR_TREE_NODE_SLOTS {
+        if required_node_slots > MAX_TREE_NODE_SLOTS {
             return Err(PredictorError::ContractViolation(format!(
-                "tree {tree_id} local node_id {max_local_node_id} requires {required_node_slots} predictor node slots, exceeds predictor tree node slot limit {MAX_PREDICTOR_TREE_NODE_SLOTS}"
+                "tree {tree_id} local node_id {max_local_node_id} requires {required_node_slots} predictor node slots, exceeds predictor tree node slot limit {MAX_TREE_NODE_SLOTS}"
             )));
         }
         let mut nodes_by_local_id = vec![None; max_local_node_id + 1];
