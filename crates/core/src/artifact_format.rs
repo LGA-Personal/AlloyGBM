@@ -1332,51 +1332,112 @@ pub fn serialize_metadata_json(metadata: &ModelMetadata) -> String {
 pub fn deserialize_metadata_json(input: &str) -> CoreResult<ModelMetadata> {
     let compact = compact_json(input)?;
     let mut index = 0_usize;
+    let mut format_version = None;
+    let mut feature_names = None;
+    let mut trained_device_raw = None;
+    let mut objective = None;
+    let mut num_classes = None;
 
-    index = consume_literal(&compact, index, "{\"format_version\":")?;
-    let (format_version, next_index) = parse_u32(&compact, index)?;
-    index = next_index;
-
-    index = consume_literal(&compact, index, ",\"feature_names\":")?;
-    let (feature_names, next_index) = parse_string_array(&compact, index)?;
-    index = next_index;
-
-    index = consume_literal(&compact, index, ",\"trained_device\":")?;
-    let (trained_device_raw, next_index) = parse_quoted_string(&compact, index)?;
-    index = next_index;
-
-    // Optional objective field — backward compatible with older artifacts.
-    let objective = if index < compact.len() && compact.as_bytes()[index] == b',' {
-        let next = consume_literal(&compact, index, ",\"objective\":")?;
-        let (objective_raw, next_index) = parse_quoted_string(&compact, next)?;
-        index = next_index;
-        objective_raw
+    index = consume_literal(&compact, index, "{")?;
+    if compact[index..].starts_with('}') {
+        index += 1;
     } else {
-        "squared_error".to_string()
-    };
+        loop {
+            let (key, next_index) = parse_quoted_string(&compact, index)?;
+            index = consume_literal(&compact, next_index, ":")?;
+            match key.as_str() {
+                "format_version" => {
+                    if format_version.is_some() {
+                        return Err(CoreError::Serialization(
+                            "duplicate metadata field 'format_version'".to_string(),
+                        ));
+                    }
+                    let (value, next_index) = parse_u32(&compact, index)?;
+                    format_version = Some(value);
+                    index = next_index;
+                }
+                "feature_names" => {
+                    if feature_names.is_some() {
+                        return Err(CoreError::Serialization(
+                            "duplicate metadata field 'feature_names'".to_string(),
+                        ));
+                    }
+                    let (value, next_index) = parse_string_array(&compact, index)?;
+                    feature_names = Some(value);
+                    index = next_index;
+                }
+                "trained_device" => {
+                    if trained_device_raw.is_some() {
+                        return Err(CoreError::Serialization(
+                            "duplicate metadata field 'trained_device'".to_string(),
+                        ));
+                    }
+                    let (value, next_index) = parse_quoted_string(&compact, index)?;
+                    trained_device_raw = Some(value);
+                    index = next_index;
+                }
+                "objective" => {
+                    if objective.is_some() {
+                        return Err(CoreError::Serialization(
+                            "duplicate metadata field 'objective'".to_string(),
+                        ));
+                    }
+                    let (value, next_index) = parse_quoted_string(&compact, index)?;
+                    objective = Some(value);
+                    index = next_index;
+                }
+                "num_classes" => {
+                    if num_classes.is_some() {
+                        return Err(CoreError::Serialization(
+                            "duplicate metadata field 'num_classes'".to_string(),
+                        ));
+                    }
+                    let (value, next_index) = parse_u32(&compact, index)?;
+                    num_classes = Some(value);
+                    index = next_index;
+                }
+                _ => {
+                    return Err(CoreError::Serialization(format!(
+                        "unknown metadata field '{key}'"
+                    )));
+                }
+            }
 
-    // Optional num_classes field — present only for multi-class models.
-    let num_classes = if index < compact.len() && compact.as_bytes()[index] == b',' {
-        let next = consume_literal(&compact, index, ",\"num_classes\":")?;
-        let (value, next_index) = parse_u32(&compact, next)?;
-        index = next_index;
-        Some(value)
-    } else {
-        None
-    };
+            if compact[index..].starts_with(',') {
+                index += 1;
+                continue;
+            }
+            if compact[index..].starts_with('}') {
+                index += 1;
+                break;
+            }
+            return Err(CoreError::Serialization(format!(
+                "expected ',' or '}}' at index {index}"
+            )));
+        }
+    }
 
-    index = consume_literal(&compact, index, "}")?;
     if index != compact.len() {
         return Err(CoreError::Serialization(
             "unexpected trailing content in metadata json".to_string(),
         ));
     }
 
+    let format_version = format_version.ok_or_else(|| {
+        CoreError::Serialization("metadata missing required field 'format_version'".to_string())
+    })?;
+    let feature_names = feature_names.ok_or_else(|| {
+        CoreError::Serialization("metadata missing required field 'feature_names'".to_string())
+    })?;
+    let trained_device_raw = trained_device_raw.ok_or_else(|| {
+        CoreError::Serialization("metadata missing required field 'trained_device'".to_string())
+    })?;
+
     Ok(ModelMetadata {
         format_version,
         feature_names,
         trained_device: Device::parse_metadata_label(&trained_device_raw)?,
-        objective,
+        objective: objective.unwrap_or_else(|| "squared_error".to_string()),
         num_classes,
     })
 }

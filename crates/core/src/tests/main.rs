@@ -260,6 +260,32 @@ fn metadata_json_roundtrip() {
 }
 
 #[test]
+fn metadata_json_decodes_fields_independent_of_key_order() {
+    let json = concat!(
+        "{",
+        "\"trained_device\":\"cpu\",",
+        "\"num_classes\":3,",
+        "\"objective\":\"multiclass_softmax\",",
+        "\"feature_names\":[\"f0\",\"f1\"],",
+        "\"format_version\":1",
+        "}"
+    );
+
+    let decoded = deserialize_metadata_json(json).expect("metadata should decode");
+
+    assert_eq!(
+        decoded,
+        ModelMetadata {
+            format_version: MODEL_FORMAT_V1,
+            feature_names: vec!["f0".to_string(), "f1".to_string()],
+            trained_device: Device::Cpu,
+            objective: "multiclass_softmax".to_string(),
+            num_classes: Some(3),
+        }
+    );
+}
+
+#[test]
 fn metadata_json_rejects_unknown_device() {
     let json = "{\"format_version\":1,\"feature_names\":[\"f0\"],\"trained_device\":\"cuda\"}";
     assert!(matches!(
