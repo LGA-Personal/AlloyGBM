@@ -128,3 +128,47 @@ def test_native_training_without_python_callbacks_releases_gil():
     calibration_rate = calibration_progress / calibration_elapsed
     training_rate = progress / elapsed
     assert training_rate >= calibration_rate * 0.25
+
+
+def test_native_training_with_python_callbacks_releases_gil_between_invocations():
+    rng = np.random.default_rng(37)
+    x_train = rng.normal(size=(50_000, 8)).astype(np.float32)
+    y_train = (
+        0.75 * x_train[:, 0]
+        - 0.45 * x_train[:, 3]
+        + 0.3 * x_train[:, 6]
+        + 0.15 * x_train[:, 1] * x_train[:, 2]
+    ).astype(np.float32)
+    x_val = np.ascontiguousarray(x_train[:2_000])
+    y_val = np.ascontiguousarray(y_train[:2_000])
+    fixed_grad = (-y_train).astype(np.float32)
+    fixed_hess = np.ones_like(y_train, dtype=np.float32)
+
+    def squared_error_objective(y_true, y_pred):
+        return fixed_grad, fixed_hess
+
+    def custom_rmse(y_true, y_pred):
+        return "custom_constant", 1.0, False
+
+    def fit_model():
+        GBMRegressor(
+            n_estimators=80,
+            max_depth=6,
+            min_data_in_leaf=2,
+            learning_rate=0.05,
+            objective=squared_error_objective,
+            training_policy="manual",
+            continuous_binning_strategy="quantile",
+            seed=37,
+            deterministic=True,
+        ).fit(x_train, y_train, eval_set=(x_val, y_val), eval_metric=custom_rmse)
+
+    calibration_progress, calibration_elapsed = _worker_progress_during(
+        lambda: time.sleep(0.05)
+    )
+    progress, elapsed = _worker_progress_during(fit_model)
+
+    assert elapsed >= 0.02
+    calibration_rate = calibration_progress / calibration_elapsed
+    training_rate = progress / elapsed
+    assert training_rate >= calibration_rate * 0.65
