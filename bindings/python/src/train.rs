@@ -1436,10 +1436,7 @@ pub(crate) fn train_regression_artifact_with_summary(
     }
 
     let objective_name = objective.to_string();
-    let has_python_callbacks =
-        custom_objective_fn.is_some() || custom_loss_fn.is_some() || custom_metric_fn.is_some();
-
-    let result = if has_python_callbacks {
+    let result = py.detach(|| {
         train_regression_artifact_with_summary_dense_impl(
             &dense_values,
             row_count,
@@ -1473,43 +1470,7 @@ pub(crate) fn train_regression_artifact_with_summary(
             custom_metric_fn,
             max_cat_threshold,
         )
-    } else {
-        py.detach(|| {
-            train_regression_artifact_with_summary_dense_impl(
-                &dense_values,
-                row_count,
-                feature_count,
-                &targets,
-                sample_weights,
-                group_id,
-                factor_exposures,
-                validation_payload
-                    .as_ref()
-                    .map(|(values, _, _)| values.as_slice()),
-                validation_row_count,
-                validation_targets.as_deref(),
-                validation_sample_weights,
-                validation_group_id,
-                params,
-                effective_rounds,
-                time_index,
-                validation_time_index,
-                categorical_specs,
-                validation_categorical_values_list,
-                training_policy,
-                store_node_stats,
-                continuous_binning_strategy,
-                continuous_binning_max_bins,
-                objective_name.as_str(),
-                init_artifact_bytes.as_deref(),
-                num_classes,
-                custom_objective_fn,
-                custom_loss_fn,
-                custom_metric_fn,
-                max_cat_threshold,
-            )
-        })
-    };
+    });
 
     result.map_err(engine_error_to_pyerr)
 }
@@ -1742,10 +1703,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
         )
         .map_err(engine_error_to_pyerr)?;
     let objective_name = objective.to_string();
-    let has_python_callbacks =
-        custom_objective_fn.is_some() || custom_loss_fn.is_some() || custom_metric_fn.is_some();
-
-    let result = if has_python_callbacks {
+    let result = py.detach(|| {
         train_regression_artifact_with_summary_dense_impl(
             &values,
             row_count,
@@ -1777,41 +1735,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
             custom_metric_fn,
             max_cat_threshold,
         )
-    } else {
-        py.detach(|| {
-            train_regression_artifact_with_summary_dense_impl(
-                &values,
-                row_count,
-                feature_count,
-                &targets,
-                sample_weights,
-                group_id,
-                factor_exposures,
-                validation_values.as_deref(),
-                validation_row_count,
-                validation_targets.as_deref(),
-                validation_sample_weights,
-                validation_group_id,
-                params,
-                effective_rounds,
-                time_index,
-                validation_time_index,
-                categorical_specs,
-                validation_categorical_values_list,
-                training_policy,
-                store_node_stats,
-                continuous_binning_strategy,
-                continuous_binning_max_bins,
-                objective_name.as_str(),
-                init_artifact_bytes.as_deref(),
-                num_classes,
-                custom_objective_fn,
-                custom_loss_fn,
-                custom_metric_fn,
-                max_cat_threshold,
-            )
-        })
-    };
+    });
 
     result.map_err(engine_error_to_pyerr)
 }
@@ -2063,10 +1987,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
         )
         .map_err(engine_error_to_pyerr)?;
     let objective_name = objective.to_string();
-    let has_python_callbacks =
-        custom_objective_fn.is_some() || custom_loss_fn.is_some() || custom_metric_fn.is_some();
-
-    let result = if has_python_callbacks {
+    let result = py.detach(|| {
         train_regression_artifact_with_summary_dense_impl(
             &values,
             row_count,
@@ -2098,41 +2019,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
             custom_metric_fn,
             max_cat_threshold,
         )
-    } else {
-        py.detach(|| {
-            train_regression_artifact_with_summary_dense_impl(
-                &values,
-                row_count,
-                feature_count,
-                &targets,
-                sample_weights,
-                group_id,
-                factor_exposures,
-                validation_values.as_deref(),
-                validation_row_count,
-                validation_targets.as_deref(),
-                validation_sample_weights,
-                validation_group_id,
-                params,
-                effective_rounds,
-                time_index,
-                validation_time_index,
-                categorical_specs,
-                validation_categorical_values_list,
-                training_policy,
-                store_node_stats,
-                continuous_binning_strategy,
-                continuous_binning_max_bins,
-                objective_name.as_str(),
-                init_artifact_bytes.as_deref(),
-                num_classes,
-                custom_objective_fn,
-                custom_loss_fn,
-                custom_metric_fn,
-                max_cat_threshold,
-            )
-        })
-    };
+    });
 
     result.map_err(engine_error_to_pyerr)
 }
