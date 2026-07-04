@@ -95,3 +95,36 @@ def test_native_shap_global_importance_releases_gil():
     calibration_rate = calibration_progress / calibration_elapsed
     explanation_rate = progress / elapsed
     assert explanation_rate >= calibration_rate * 0.25
+
+
+def test_native_training_without_python_callbacks_releases_gil():
+    rng = np.random.default_rng(31)
+    x_train = rng.normal(size=(12_000, 8)).astype(np.float32)
+    y_train = (
+        0.9 * x_train[:, 0]
+        - 0.35 * x_train[:, 2]
+        + 0.2 * x_train[:, 5]
+        + 0.1 * x_train[:, 0] * x_train[:, 1]
+    ).astype(np.float32)
+
+    def fit_model():
+        GBMRegressor(
+            n_estimators=80,
+            max_depth=5,
+            min_data_in_leaf=2,
+            learning_rate=0.05,
+            training_policy="manual",
+            continuous_binning_strategy="quantile",
+            seed=31,
+            deterministic=True,
+        ).fit(x_train, y_train)
+
+    calibration_progress, calibration_elapsed = _worker_progress_during(
+        lambda: time.sleep(0.05)
+    )
+    progress, elapsed = _worker_progress_during(fit_model)
+
+    assert elapsed >= 0.02
+    calibration_rate = calibration_progress / calibration_elapsed
+    training_rate = progress / elapsed
+    assert training_rate >= calibration_rate * 0.25
