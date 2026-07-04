@@ -42,7 +42,7 @@ pub use artifact_format::{
 pub use binned::{BinStorage, BinnedMatrix, MISSING_BIN_U8, MISSING_BIN_U16};
 pub use config::{
     BoostingMode, DartNormalize, DartSampleType, Device, LeafModelKind, LeafSolverKind,
-    TrainParams, TreeGrowth,
+    MAX_TREE_NODE_SLOTS, TrainParams, TreeGrowth,
 };
 pub use dataset::{
     ColumnarMatrixColumnView, ColumnarMatrixView, DatasetMatrix, DatasetSchema, DenseMatrixView,

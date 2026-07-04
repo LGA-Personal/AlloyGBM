@@ -12,6 +12,12 @@ use std::fmt::{Display, Formatter};
 
 const PARALLEL_PREDICT_MIN_ROWS: usize = 256;
 const PARALLEL_PREDICT_MIN_WORK_ITEMS: usize = 16_384;
+// Loading artifacts is a trust boundary: sparse heap-style node IDs can
+// otherwise force large per-tree slot arrays before prediction ever runs. The
+// same limit is enforced at train time (`encode_tree_node_id`), so every model
+// the trainer emits loads and every artifact accepted here could have been
+// trained.
+use alloygbm_core::MAX_TREE_NODE_SLOTS;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PredictorError {
@@ -1192,6 +1198,16 @@ fn build_predictor_trees(
             .map(|(local_node_id, _)| *local_node_id as usize)
             .max()
             .unwrap_or(0);
+        let required_node_slots = max_local_node_id.checked_add(1).ok_or_else(|| {
+            PredictorError::ContractViolation(format!(
+                "tree {tree_id} local node_id {max_local_node_id} overflowed predictor node slot count"
+            ))
+        })?;
+        if required_node_slots > MAX_TREE_NODE_SLOTS {
+            return Err(PredictorError::ContractViolation(format!(
+                "tree {tree_id} local node_id {max_local_node_id} requires {required_node_slots} predictor node slots, exceeds predictor tree node slot limit {MAX_TREE_NODE_SLOTS}"
+            )));
+        }
         let mut nodes_by_local_id = vec![None; max_local_node_id + 1];
         for (local_node_id, node) in nodes {
             let local_node_id = local_node_id as usize;
@@ -1676,6 +1692,65 @@ mod tests {
                 assert_eq!(
                     message,
                     alloygbm_core::format_required_section_mode_error(report, true)
+                );
+            }
+            other => panic!("expected contract violation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn predictor_rejects_excessive_local_node_id() {
+        let excessive_local_node_id = 65_536;
+        let model = TrainedModel {
+            baseline_prediction: 0.0,
+            feature_count: 1,
+            stumps: vec![TrainedStump::new_unweighted(
+                SplitCandidate {
+                    node_id: excessive_local_node_id,
+                    feature_index: 0,
+                    threshold_bin: 0,
+                    gain: 1.0,
+                    default_left: true,
+                    is_categorical: false,
+                    categorical_bitset: None,
+                    left_stats: NodeStats {
+                        grad_sum: -1.0,
+                        hess_sum: 1.0,
+                        grad_sq_sum: 1.0,
+                        row_count: 1,
+                    },
+                    right_stats: NodeStats {
+                        grad_sum: 1.0,
+                        hess_sum: 1.0,
+                        grad_sq_sum: 1.0,
+                        row_count: 1,
+                    },
+                },
+                LeafValue::Scalar(-0.1),
+                LeafValue::Scalar(0.1),
+            )],
+            categorical_state: None,
+            node_debug_stats: None,
+            objective: "squared_error".to_string(),
+            native_categorical_feature_indices: Vec::new(),
+            morph_metadata: None,
+            dro_metadata: None,
+            feature_baseline: None,
+            neutralization_metadata: None,
+        };
+        let artifact = model.to_artifact_bytes().expect("artifact serializes");
+
+        let result = Predictor::from_artifact_bytes(&artifact);
+
+        match result {
+            Err(PredictorError::ContractViolation(message)) => {
+                assert!(
+                    message.contains("local node_id 65536"),
+                    "unexpected error message: {message}"
+                );
+                assert!(
+                    message.contains("exceeds predictor tree node slot limit"),
+                    "unexpected error message: {message}"
                 );
             }
             other => panic!("expected contract violation, got {other:?}"),

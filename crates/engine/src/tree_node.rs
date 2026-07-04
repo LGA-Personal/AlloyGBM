@@ -12,9 +12,16 @@ use std::collections::HashMap;
 pub(crate) const TREE_NODE_STRIDE: u32 = 1 << 20;
 
 pub(crate) fn encode_tree_node_id(tree_index: usize, local_node_id: u32) -> EngineResult<u32> {
-    if local_node_id >= TREE_NODE_STRIDE {
+    // Guard against trees that would need more heap-style node slots than the
+    // predictor is willing to allocate at load time. Enforcing the same shared
+    // limit here keeps the contract symmetric: a model that trains always
+    // loads. Reaching this requires an unusually deep tree (~depth 16+); the
+    // fit fails fast with a clear error instead of producing an unloadable
+    // artifact.
+    if local_node_id as usize >= alloygbm_core::MAX_TREE_NODE_SLOTS {
         return Err(EngineError::ContractViolation(format!(
-            "local node_id {local_node_id} exceeds supported tree-node stride {TREE_NODE_STRIDE}"
+            "local node_id {local_node_id} exceeds supported tree-node slot limit {}",
+            alloygbm_core::MAX_TREE_NODE_SLOTS
         )));
     }
     let tree_index_u32 = u32::try_from(tree_index).map_err(|_| {
