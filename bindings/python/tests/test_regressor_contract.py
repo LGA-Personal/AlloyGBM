@@ -185,7 +185,7 @@ class GBMRegressorContractTests(unittest.TestCase):
         self.assertEqual(params["poisson_max_delta_step"], 0.7)
         self.assertEqual(params["seed"], 0)
         self.assertTrue(params["deterministic"])
-        self.assertEqual(params["continuous_binning_strategy"], "linear")
+        self.assertEqual(params["continuous_binning_strategy"], "quantile")
         self.assertEqual(params["continuous_binning_max_bins"], 256)
         self.assertIsNone(params["categorical_feature_index"])
         self.assertEqual(params["training_policy"], "auto")
@@ -355,7 +355,7 @@ class GBMRegressorContractTests(unittest.TestCase):
                         "categorical_min_samples_leaf": 1,
                         "categorical_time_aware": False,
                         "time_index": None,
-                        "continuous_binning_strategy": "linear",
+                        "continuous_binning_strategy": "quantile",
                         "continuous_binning_max_bins": 256,
                         "objective": "squared_error",
                         "leaf_model": "constant",
@@ -477,7 +477,7 @@ class GBMRegressorContractTests(unittest.TestCase):
             original_train_loader = base_module._load_native_train_regression_artifact
             base_module._load_native_train_regression_artifact = lambda: fake_train
             try:
-                GBMRegressor().fit(
+                GBMRegressor(continuous_binning_strategy="linear").fit(
                     [[-1.2, 0.49], [0.51, 300.1], [2.6, 12.9]],
                     [0.0, 1.0, 2.0],
                 )
@@ -509,7 +509,7 @@ class GBMRegressorContractTests(unittest.TestCase):
             os.environ["ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK"] = "1"
             os.environ["ALLOYGBM_EXPERIMENT_LINEAR_TAIL_CORE_SPAN_RATIO"] = "0.05"
             try:
-                GBMRegressor().fit(
+                GBMRegressor(continuous_binning_strategy="linear").fit(
                     [
                         [0.1, 0.10],
                         [0.2, 0.20],
@@ -567,7 +567,7 @@ class GBMRegressorContractTests(unittest.TestCase):
                 lambda: fake_predictor
             )
             try:
-                model = GBMRegressor().fit(
+                model = GBMRegressor(continuous_binning_strategy="linear").fit(
                     [[-1.2, 0.49], [0.51, 300.1], [2.6, 12.9]],
                     [0.0, 1.0, 2.0],
                 )
@@ -609,7 +609,7 @@ class GBMRegressorContractTests(unittest.TestCase):
             os.environ["ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK"] = "1"
             os.environ["ALLOYGBM_EXPERIMENT_LINEAR_TAIL_CORE_SPAN_RATIO"] = "0.05"
             try:
-                model = GBMRegressor().fit(
+                model = GBMRegressor(continuous_binning_strategy="linear").fit(
                     [
                         [0.1, 0.10],
                         [0.2, 0.20],

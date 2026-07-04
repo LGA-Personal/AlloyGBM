@@ -161,16 +161,16 @@ call `fit(..., eval_set=(X_valid, y_valid))`.
 
 ## Continuous Feature Handling
 
-- `continuous_binning_strategy: str = "linear"`
+- `continuous_binning_strategy: str = "quantile"`
   - One of `linear`, `rank`, or `quantile`.
 - `continuous_binning_max_bins: int = 256`
   - Upper bound on bins used for continuous quantization. Supports up to 65,535
     bins. Higher bin counts may improve accuracy on high-cardinality features
     at the cost of additional memory.
 
-Use `quantile` when you want more robust handling of skewed continuous feature
-distributions. Use `linear` when you want the simplest and usually fastest
-default.
+The default `quantile` strategy is more robust on skewed continuous feature
+distributions. Use `linear` when you want equal-width bins for compatibility
+experiments or lower quantile-preprocessing cost.
 
 ## Categorical Support
 

@@ -143,7 +143,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
 
     @property
     def continuous_binning_strategy(self) -> str:
-        return self._per_label_kwargs.get("continuous_binning_strategy", "linear")
+        return self._per_label_kwargs.get("continuous_binning_strategy", "quantile")
 
     @property
     def continuous_binning_max_bins(self) -> int:
@@ -346,6 +346,8 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
         "min_data_in_leaf",
         "lambda_l2",
         "max_bin",
+        "continuous_binning_strategy",
+        "continuous_binning_max_bins",
         # v0.10.2 Phase 1: small/medium joint-trainer features.
         "min_split_gain",
         "row_subsample",
@@ -1094,7 +1096,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
 
                 metadata = {
                     "uses_continuous_binning": getattr(self, "_uses_continuous_binning", False),
-                    "continuous_binning_strategy": getattr(self, "continuous_binning_strategy", "linear"),
+                    "continuous_binning_strategy": getattr(self, "continuous_binning_strategy", "quantile"),
                     "continuous_binning_max_bins": getattr(self, "continuous_binning_max_bins", 256),
                     "continuous_feature_mins": getattr(self, "_continuous_feature_mins", None),
                     "continuous_feature_maxs": getattr(self, "_continuous_feature_maxs", None),

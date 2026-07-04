@@ -37,6 +37,11 @@ def test_default_multi_label_mode_is_independent():
     assert m.multi_label_mode == "independent"
 
 
+def test_default_continuous_binning_strategy_is_quantile():
+    m = MultiLabelGBMRanker(n_estimators=2)
+    assert m.continuous_binning_strategy == "quantile"
+
+
 def test_invalid_multi_label_mode_rejected():
     with pytest.raises(ValueError, match="multi_label_mode"):
         MultiLabelGBMRanker(multi_label_mode="nonsense")
@@ -371,6 +376,7 @@ def test_joint_dart_save_load_round_trip(tmp_path):
         dart_max_drop=2,
         dart_normalize_type="tree",
         dart_sample_type="uniform",
+        continuous_binning_strategy="linear",
         seed=11,
     )
     m.fit(X, y, group=groups)
@@ -450,6 +456,7 @@ def test_joint_warm_start_dart_matches_fresh_fit():
         dart_max_drop=2,
         dart_normalize_type="tree",
         dart_sample_type="uniform",
+        continuous_binning_strategy="linear",
         seed=11,
     )
     fresh = MultiLabelGBMRanker(n_estimators=10, **common)

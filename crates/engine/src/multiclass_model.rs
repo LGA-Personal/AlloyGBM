@@ -32,18 +32,13 @@ pub struct MultiClassTrainedModel {
 
 impl MultiClassTrainedModel {
     pub fn rounds_completed(&self) -> usize {
-        if self.class_stumps.is_empty() || self.class_stumps[0].is_empty() {
-            return 0;
-        }
-        // Count unique tree IDs in class 0's stumps
-        let mut max_tree_id = 0_u32;
-        for stump in &self.class_stumps[0] {
-            let tree_id = stump.split.node_id / TREE_NODE_STRIDE;
-            if tree_id > max_tree_id {
-                max_tree_id = tree_id;
-            }
-        }
-        max_tree_id as usize + 1
+        self.class_stumps
+            .iter()
+            .flat_map(|stumps| stumps.iter())
+            .map(|stump| stump.split.node_id / TREE_NODE_STRIDE)
+            .max()
+            .map(|max_tree_id| max_tree_id as usize + 1)
+            .unwrap_or(0)
     }
 
     pub fn with_categorical_state(
