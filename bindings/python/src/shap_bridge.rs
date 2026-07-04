@@ -119,40 +119,48 @@ fn shap_global_importance_dense_impl(
 
 #[pyfunction]
 pub(crate) fn shap_explain_rows(
+    py: Python<'_>,
     artifact_bytes: &[u8],
     rows: Vec<Vec<f32>>,
 ) -> PyResult<(f32, Vec<Vec<f32>>)> {
-    shap_explain_rows_impl(artifact_bytes, &rows).map_err(shap_error_to_pyerr)
+    py.detach(|| shap_explain_rows_impl(artifact_bytes, &rows))
+        .map_err(shap_error_to_pyerr)
 }
 
 #[pyfunction]
 pub(crate) fn shap_explain_rows_dense(
+    py: Python<'_>,
     artifact_bytes: &[u8],
     values: Vec<f32>,
     row_count: usize,
     feature_count: usize,
 ) -> PyResult<(f32, Vec<Vec<f32>>)> {
-    shap_explain_rows_dense_impl(artifact_bytes, row_count, feature_count, &values)
+    py.detach(|| shap_explain_rows_dense_impl(artifact_bytes, row_count, feature_count, &values))
         .map_err(shap_error_to_pyerr)
 }
 
 #[pyfunction]
 pub(crate) fn shap_explain_interactions(
+    py: Python<'_>,
     artifact_bytes: &[u8],
     rows: Vec<Vec<f32>>,
 ) -> PyResult<(f32, Vec<Vec<Vec<f32>>>)> {
-    shap_explain_interactions_impl(artifact_bytes, &rows).map_err(shap_error_to_pyerr)
+    py.detach(|| shap_explain_interactions_impl(artifact_bytes, &rows))
+        .map_err(shap_error_to_pyerr)
 }
 
 #[pyfunction]
 pub(crate) fn shap_explain_interactions_dense(
+    py: Python<'_>,
     artifact_bytes: &[u8],
     values: Vec<f32>,
     row_count: usize,
     feature_count: usize,
 ) -> PyResult<(f32, Vec<Vec<Vec<f32>>>)> {
-    shap_explain_interactions_dense_impl(artifact_bytes, row_count, feature_count, &values)
-        .map_err(shap_error_to_pyerr)
+    py.detach(|| {
+        shap_explain_interactions_dense_impl(artifact_bytes, row_count, feature_count, &values)
+    })
+    .map_err(shap_error_to_pyerr)
 }
 
 #[pyfunction]
@@ -162,6 +170,7 @@ pub(crate) fn shap_explain_interactions_dense(
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn shap_explain_interactions_with_binning(
+    py: Python<'_>,
     artifact_bytes: &[u8],
     rows: Vec<Vec<f32>>,
     binning_kind: &str,
@@ -180,7 +189,10 @@ pub(crate) fn shap_explain_interactions_with_binning(
         linear_rank_per_feature,
     )
     .map_err(shap_error_to_pyerr)?;
-    let batch = explain_interactions_from_artifact_bytes_with_binning(artifact_bytes, &rows, &ctx)
+    let batch = py
+        .detach(|| {
+            explain_interactions_from_artifact_bytes_with_binning(artifact_bytes, &rows, &ctx)
+        })
         .map_err(shap_error_to_pyerr)?;
     Ok((batch.expected_value, batch.values))
 }
@@ -193,6 +205,7 @@ pub(crate) fn shap_explain_interactions_with_binning(
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn shap_explain_interactions_dense_with_binning(
+    py: Python<'_>,
     artifact_bytes: &[u8],
     values: Vec<f32>,
     row_count: usize,
@@ -215,47 +228,65 @@ pub(crate) fn shap_explain_interactions_dense_with_binning(
         linear_rank_per_feature,
     )
     .map_err(shap_error_to_pyerr)?;
-    let batch = explain_interactions_from_artifact_bytes_with_binning(artifact_bytes, &rows, &ctx)
+    let batch = py
+        .detach(|| {
+            explain_interactions_from_artifact_bytes_with_binning(artifact_bytes, &rows, &ctx)
+        })
         .map_err(shap_error_to_pyerr)?;
     Ok((batch.expected_value, batch.values))
 }
 
 #[pyfunction]
 pub(crate) fn shap_explain_rows_multi(
+    py: Python<'_>,
     artifact_bytes: &[u8],
     rows: Vec<Vec<f32>>,
 ) -> PyResult<(Vec<f32>, Vec<Vec<Vec<f32>>>)> {
-    shap_explain_rows_multi_impl(artifact_bytes, &rows).map_err(shap_error_to_pyerr)
+    py.detach(|| shap_explain_rows_multi_impl(artifact_bytes, &rows))
+        .map_err(shap_error_to_pyerr)
 }
 
 #[pyfunction]
 pub(crate) fn shap_explain_rows_dense_multi(
+    py: Python<'_>,
     artifact_bytes: &[u8],
     values: Vec<f32>,
     row_count: usize,
     feature_count: usize,
 ) -> PyResult<(Vec<f32>, Vec<Vec<Vec<f32>>>)> {
-    shap_explain_rows_dense_multi_impl(artifact_bytes, row_count, feature_count, &values)
-        .map_err(shap_error_to_pyerr)
+    py.detach(|| {
+        shap_explain_rows_dense_multi_impl(artifact_bytes, row_count, feature_count, &values)
+    })
+    .map_err(shap_error_to_pyerr)
 }
 
 #[pyfunction]
 pub(crate) fn shap_explain_interactions_multi(
+    py: Python<'_>,
     artifact_bytes: &[u8],
     rows: Vec<Vec<f32>>,
 ) -> PyResult<(Vec<f32>, Vec<Vec<Vec<Vec<f32>>>>)> {
-    shap_explain_interactions_multi_impl(artifact_bytes, &rows).map_err(shap_error_to_pyerr)
+    py.detach(|| shap_explain_interactions_multi_impl(artifact_bytes, &rows))
+        .map_err(shap_error_to_pyerr)
 }
 
 #[pyfunction]
 pub(crate) fn shap_explain_interactions_dense_multi(
+    py: Python<'_>,
     artifact_bytes: &[u8],
     values: Vec<f32>,
     row_count: usize,
     feature_count: usize,
 ) -> PyResult<(Vec<f32>, Vec<Vec<Vec<Vec<f32>>>>)> {
-    shap_explain_interactions_dense_multi_impl(artifact_bytes, row_count, feature_count, &values)
-        .map_err(shap_error_to_pyerr)
+    py.detach(|| {
+        shap_explain_interactions_dense_multi_impl(
+            artifact_bytes,
+            row_count,
+            feature_count,
+            &values,
+        )
+    })
+    .map_err(shap_error_to_pyerr)
 }
 
 #[pyfunction]
@@ -265,6 +296,7 @@ pub(crate) fn shap_explain_interactions_dense_multi(
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn shap_explain_interactions_with_binning_multi(
+    py: Python<'_>,
     artifact_bytes: &[u8],
     rows: Vec<Vec<f32>>,
     binning_kind: &str,
@@ -283,12 +315,15 @@ pub(crate) fn shap_explain_interactions_with_binning_multi(
         linear_rank_per_feature,
     )
     .map_err(shap_error_to_pyerr)?;
-    let batches = explain_interactions_from_artifact_bytes_with_binning_per_output(
-        artifact_bytes,
-        &rows,
-        &ctx,
-    )
-    .map_err(shap_error_to_pyerr)?;
+    let batches = py
+        .detach(|| {
+            explain_interactions_from_artifact_bytes_with_binning_per_output(
+                artifact_bytes,
+                &rows,
+                &ctx,
+            )
+        })
+        .map_err(shap_error_to_pyerr)?;
     let expected_values = batches.iter().map(|b| b.expected_value).collect();
     let values = batches.into_iter().map(|b| b.values).collect();
     Ok((expected_values, values))
@@ -302,6 +337,7 @@ pub(crate) fn shap_explain_interactions_with_binning_multi(
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn shap_explain_interactions_dense_with_binning_multi(
+    py: Python<'_>,
     artifact_bytes: &[u8],
     values: Vec<f32>,
     row_count: usize,
@@ -324,12 +360,15 @@ pub(crate) fn shap_explain_interactions_dense_with_binning_multi(
         linear_rank_per_feature,
     )
     .map_err(shap_error_to_pyerr)?;
-    let batches = explain_interactions_from_artifact_bytes_with_binning_per_output(
-        artifact_bytes,
-        &rows,
-        &ctx,
-    )
-    .map_err(shap_error_to_pyerr)?;
+    let batches = py
+        .detach(|| {
+            explain_interactions_from_artifact_bytes_with_binning_per_output(
+                artifact_bytes,
+                &rows,
+                &ctx,
+            )
+        })
+        .map_err(shap_error_to_pyerr)?;
     let expected_values = batches.iter().map(|b| b.expected_value).collect();
     let values = batches.into_iter().map(|b| b.values).collect();
     Ok((expected_values, values))
@@ -342,6 +381,7 @@ pub(crate) fn shap_explain_interactions_dense_with_binning_multi(
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn shap_explain_rows_with_binning(
+    py: Python<'_>,
     artifact_bytes: &[u8],
     rows: Vec<Vec<f32>>,
     binning_kind: &str,
@@ -360,7 +400,8 @@ pub(crate) fn shap_explain_rows_with_binning(
         linear_rank_per_feature,
     )
     .map_err(shap_error_to_pyerr)?;
-    let explanation = explain_rows_from_artifact_bytes_with_binning(artifact_bytes, &rows, &ctx)
+    let explanation = py
+        .detach(|| explain_rows_from_artifact_bytes_with_binning(artifact_bytes, &rows, &ctx))
         .map_err(shap_error_to_pyerr)?;
     Ok((explanation.expected_value, explanation.values))
 }
@@ -373,6 +414,7 @@ pub(crate) fn shap_explain_rows_with_binning(
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn shap_explain_rows_dense_with_binning(
+    py: Python<'_>,
     artifact_bytes: &[u8],
     values: Vec<f32>,
     row_count: usize,
@@ -395,7 +437,8 @@ pub(crate) fn shap_explain_rows_dense_with_binning(
         linear_rank_per_feature,
     )
     .map_err(shap_error_to_pyerr)?;
-    let explanation = explain_rows_from_artifact_bytes_with_binning(artifact_bytes, &rows, &ctx)
+    let explanation = py
+        .detach(|| explain_rows_from_artifact_bytes_with_binning(artifact_bytes, &rows, &ctx))
         .map_err(shap_error_to_pyerr)?;
     Ok((explanation.expected_value, explanation.values))
 }
@@ -407,6 +450,7 @@ pub(crate) fn shap_explain_rows_dense_with_binning(
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn shap_explain_rows_with_binning_multi(
+    py: Python<'_>,
     artifact_bytes: &[u8],
     rows: Vec<Vec<f32>>,
     binning_kind: &str,
@@ -425,9 +469,11 @@ pub(crate) fn shap_explain_rows_with_binning_multi(
         linear_rank_per_feature,
     )
     .map_err(shap_error_to_pyerr)?;
-    let explanations =
-        explain_rows_from_artifact_bytes_with_binning_per_output(artifact_bytes, &rows, &ctx)
-            .map_err(shap_error_to_pyerr)?;
+    let explanations = py
+        .detach(|| {
+            explain_rows_from_artifact_bytes_with_binning_per_output(artifact_bytes, &rows, &ctx)
+        })
+        .map_err(shap_error_to_pyerr)?;
     let expected_values = explanations.iter().map(|b| b.expected_value).collect();
     let values = explanations.into_iter().map(|b| b.values).collect();
     Ok((expected_values, values))
@@ -441,6 +487,7 @@ pub(crate) fn shap_explain_rows_with_binning_multi(
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn shap_explain_rows_dense_with_binning_multi(
+    py: Python<'_>,
     artifact_bytes: &[u8],
     values: Vec<f32>,
     row_count: usize,
@@ -463,9 +510,11 @@ pub(crate) fn shap_explain_rows_dense_with_binning_multi(
         linear_rank_per_feature,
     )
     .map_err(shap_error_to_pyerr)?;
-    let explanations =
-        explain_rows_from_artifact_bytes_with_binning_per_output(artifact_bytes, &rows, &ctx)
-            .map_err(shap_error_to_pyerr)?;
+    let explanations = py
+        .detach(|| {
+            explain_rows_from_artifact_bytes_with_binning_per_output(artifact_bytes, &rows, &ctx)
+        })
+        .map_err(shap_error_to_pyerr)?;
     let expected_values = explanations.iter().map(|b| b.expected_value).collect();
     let values = explanations.into_iter().map(|b| b.values).collect();
     Ok((expected_values, values))
@@ -473,21 +522,26 @@ pub(crate) fn shap_explain_rows_dense_with_binning_multi(
 
 #[pyfunction]
 pub(crate) fn shap_global_importance(
+    py: Python<'_>,
     artifact_bytes: &[u8],
     rows: Vec<Vec<f32>>,
 ) -> PyResult<Vec<(String, f32)>> {
-    shap_global_importance_impl(artifact_bytes, &rows).map_err(shap_error_to_pyerr)
+    py.detach(|| shap_global_importance_impl(artifact_bytes, &rows))
+        .map_err(shap_error_to_pyerr)
 }
 
 #[pyfunction]
 pub(crate) fn shap_global_importance_dense(
+    py: Python<'_>,
     artifact_bytes: &[u8],
     values: Vec<f32>,
     row_count: usize,
     feature_count: usize,
 ) -> PyResult<Vec<(String, f32)>> {
-    shap_global_importance_dense_impl(artifact_bytes, row_count, feature_count, &values)
-        .map_err(shap_error_to_pyerr)
+    py.detach(|| {
+        shap_global_importance_dense_impl(artifact_bytes, row_count, feature_count, &values)
+    })
+    .map_err(shap_error_to_pyerr)
 }
 
 #[pyfunction]
@@ -503,6 +557,7 @@ pub(crate) fn shap_global_importance_dense(
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn shap_global_importance_with_binning(
+    py: Python<'_>,
     artifact_bytes: &[u8],
     rows: Vec<Vec<f32>>,
     binning_kind: &str,
@@ -521,7 +576,7 @@ pub(crate) fn shap_global_importance_with_binning(
         linear_rank_per_feature,
     )
     .map_err(shap_error_to_pyerr)?;
-    global_importance_from_artifact_bytes_with_binning(artifact_bytes, &rows, &ctx)
+    py.detach(|| global_importance_from_artifact_bytes_with_binning(artifact_bytes, &rows, &ctx))
         .map_err(shap_error_to_pyerr)
 }
 
@@ -540,6 +595,7 @@ pub(crate) fn shap_global_importance_with_binning(
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn shap_global_importance_dense_with_binning(
+    py: Python<'_>,
     artifact_bytes: &[u8],
     values: Vec<f32>,
     row_count: usize,
@@ -562,6 +618,6 @@ pub(crate) fn shap_global_importance_dense_with_binning(
         linear_rank_per_feature,
     )
     .map_err(shap_error_to_pyerr)?;
-    global_importance_from_artifact_bytes_with_binning(artifact_bytes, &rows, &ctx)
+    py.detach(|| global_importance_from_artifact_bytes_with_binning(artifact_bytes, &rows, &ctx))
         .map_err(shap_error_to_pyerr)
 }
