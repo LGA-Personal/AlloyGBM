@@ -1694,8 +1694,8 @@ fn auto_policy_disables_regression_only_guards_for_ranking_objectives() {
     let dataset = large_ranking_shaped_dataset();
     let binned = large_ranking_shaped_binned_matrix();
 
-    // Non-ranking (regression-style) path applies the density floor and
-    // variance-scaled min_loss_improvement on a 5000×16 dataset.
+    // Non-ranking (regression-style) path applies the density floor on a
+    // 5000x16 dataset, but training-loss stopping is opt-in globally.
     let regression_controls = trainer
         .iteration_controls_for_policy_ext(
             &dataset,
@@ -1705,13 +1705,17 @@ fn auto_policy_disables_regression_only_guards_for_ranking_objectives() {
             /* is_ranking */ false,
         )
         .expect("auto controls should build for regression");
-    assert!(
-        regression_controls.min_loss_improvement > 0.0,
-        "regression auto-policy must keep the min_loss_improvement guard"
+    assert_eq!(
+        regression_controls.min_loss_improvement, 0.0,
+        "regression auto-policy must not impose training-loss stopping"
+    );
+    assert_eq!(
+        regression_controls.max_consecutive_weak_improvements, 0,
+        "regression auto-policy must not impose weak-improvement cutoff"
     );
     assert!(
-        regression_controls.max_consecutive_weak_improvements >= 1,
-        "regression auto-policy must keep weak-improvement cutoff"
+        !regression_controls.training_loss_gate_enabled,
+        "regression auto-policy must leave the training-loss gate disabled"
     );
     assert!(
         regression_controls.min_split_gain > 0.0,
@@ -1740,6 +1744,10 @@ fn auto_policy_disables_regression_only_guards_for_ranking_objectives() {
     assert_eq!(
         ranking_controls.max_consecutive_weak_improvements, 0,
         "ranking auto-policy must not impose max_consecutive_weak_improvements"
+    );
+    assert!(
+        !ranking_controls.training_loss_gate_enabled,
+        "ranking auto-policy must leave the training-loss gate disabled"
     );
 }
 
@@ -2205,8 +2213,9 @@ fn fit_iterations_controls_clamp_leaf_values() {
 #[test]
 fn fit_iterations_summary_reports_loss_improvement_threshold_stop_reason() {
     let trainer = Trainer::new(TrainParams::default()).expect("valid params");
-    let controls =
-        IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0, 100.0, 0).expect("controls are valid");
+    let controls = IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0, 100.0, 0)
+        .and_then(|controls| controls.with_training_loss_gate())
+        .expect("controls are valid");
     let summary = trainer
         .fit_iterations_with_summary(
             &sample_dataset(),
@@ -2227,6 +2236,30 @@ fn fit_iterations_summary_reports_loss_improvement_threshold_stop_reason() {
     assert!(summary.loss_per_completed_round.is_empty());
     assert_eq!(summary.weak_improvement_rounds_committed, 0);
     assert_eq!(summary.initial_loss, summary.final_loss);
+}
+
+#[test]
+fn fit_iterations_default_controls_ignore_training_loss_gate_threshold() {
+    let trainer = Trainer::new(TrainParams::default()).expect("valid params");
+    let controls =
+        IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0, 100.0, 0).expect("controls are valid");
+    let summary = trainer
+        .fit_iterations_with_summary(
+            &sample_dataset(),
+            &sample_binned_matrix(),
+            &MockBackend,
+            &SquaredErrorObjective,
+            controls,
+        )
+        .expect("iterative training succeeds");
+
+    assert_eq!(summary.rounds_requested, 3);
+    assert_eq!(summary.rounds_completed, 3);
+    assert_eq!(
+        summary.stop_reason,
+        IterationStopReason::CompletedRequestedRounds
+    );
+    assert_eq!(summary.loss_per_completed_round.len(), 3);
 }
 
 #[test]
@@ -2255,8 +2288,9 @@ fn fit_iterations_summary_tracks_loss_trace_for_completed_rounds() {
 #[test]
 fn fit_iterations_summary_allows_bounded_weak_improvement_rounds() {
     let trainer = Trainer::new(TrainParams::default()).expect("valid params");
-    let controls =
-        IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0, 100.0, 1).expect("controls are valid");
+    let controls = IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0, 100.0, 1)
+        .and_then(|controls| controls.with_training_loss_gate())
+        .expect("controls are valid");
     let summary = trainer
         .fit_iterations_with_summary(
             &sample_dataset(),

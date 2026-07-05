@@ -128,12 +128,10 @@ model = GBMRegressor(
 When a non-constant LR schedule is active, AlloyGBM's auto-stopping logic
 becomes schedule-aware:
 
-- The auto-tuned `min_loss_improvement` threshold is scaled by
-  `(current_lr / max_lr)` so warmup rounds aren't classified as "stalled".
 - Empty or slightly-negative-improvement rounds during the explicit warmup
   phase do not terminate training; they are skipped.
-- After warmup, normal early-stopping logic resumes (loss going up still
-  hard-fails, etc.).
+- After warmup, use validation early stopping when you want a convergence
+  stop; training-loss stopping is disabled by default.
 
 This means the schedule is safe to use even with `n_estimators=5000` —
 training won't terminate after a handful of warmup rounds.
