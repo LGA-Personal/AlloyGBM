@@ -27,7 +27,7 @@ use arena::{
     BIN_HEAVY_THRESHOLD, HistogramArena, HistogramKernelPath, PARALLEL_TILE_WORKLOAD_THRESHOLD,
     SMALL_TILE_WORKLOAD_THRESHOLD, TINY_NODE_ROW_THRESHOLD,
 };
-use factor_split::FactorSplitScratch;
+use factor_split::{FactorSplitScratch, with_factor_split_scratch};
 use split_helpers::{
     GainStrategy, MissingDirectionCandidate, ScalarSideStats, apply_feature_weight,
     categorical_bitset_for_prefix, categorical_bitset_for_prefix_into, goes_left_for_split,
@@ -762,6 +762,36 @@ impl CpuBackend {
         strategy: GainStrategy<'_>,
         factor_context: Option<&FactorSplitContext<'_>>,
     ) -> Option<SplitCandidate> {
+        if let Some(ctx) = factor_context {
+            return with_factor_split_scratch(ctx.exposures.factor_count, |scratch| {
+                Self::best_split_for_feature_inner_with_scratch(
+                    feature_histogram,
+                    node_id,
+                    options,
+                    strategy,
+                    factor_context,
+                    Some(scratch),
+                )
+            });
+        }
+        Self::best_split_for_feature_inner_with_scratch(
+            feature_histogram,
+            node_id,
+            options,
+            strategy,
+            factor_context,
+            None,
+        )
+    }
+
+    fn best_split_for_feature_inner_with_scratch(
+        feature_histogram: &FeatureHistogram,
+        node_id: u32,
+        options: SplitSelectionOptions,
+        strategy: GainStrategy<'_>,
+        factor_context: Option<&FactorSplitContext<'_>>,
+        mut factor_scratch: Option<&mut FactorSplitScratch>,
+    ) -> Option<SplitCandidate> {
         const EPSILON: f32 = 1e-6;
 
         if feature_histogram.bins.len() < 2 {
@@ -802,9 +832,7 @@ impl CpuBackend {
         let parent_gain_term =
             split_gain_term(total_grad, total_hess, total_grad_sq, total_count, &options);
 
-        let mut factor_scratch =
-            factor_context.map(|ctx| FactorSplitScratch::new(ctx.exposures.factor_count));
-        if let (Some(ctx), Some(scratch)) = (factor_context, factor_scratch.as_mut()) {
+        if let (Some(ctx), Some(scratch)) = (factor_context, factor_scratch.as_deref_mut()) {
             scratch.prepare_numeric_prefix(
                 ctx,
                 feature_histogram.feature_index as usize,
@@ -826,7 +854,7 @@ impl CpuBackend {
             left_hess += bin.hess_sum;
             left_grad_sq += bin.grad_sq_sum;
             left_count += bin.count;
-            if let Some(scratch) = factor_scratch.as_mut() {
+            if let Some(scratch) = factor_scratch.as_deref_mut() {
                 scratch.add_numeric_threshold_bin_to_left(threshold_bin);
             }
 
@@ -949,7 +977,8 @@ impl CpuBackend {
                     }
                 };
 
-                if let (Some(ctx), Some(scratch)) = (factor_context, factor_scratch.as_mut()) {
+                if let (Some(ctx), Some(scratch)) = (factor_context, factor_scratch.as_deref_mut())
+                {
                     let left_leaf_value = -left_grad_for_gain / left_denom;
                     let right_leaf_value = -right_grad_for_gain / right_denom;
                     gain -= scratch.numeric_prefix_penalty(
@@ -1065,6 +1094,39 @@ impl CpuBackend {
         strategy: GainStrategy<'_>,
         factor_context: Option<&FactorSplitContext<'_>>,
     ) -> Option<SplitCandidate> {
+        if let Some(ctx) = factor_context {
+            return with_factor_split_scratch(ctx.exposures.factor_count, |scratch| {
+                Self::best_split_for_categorical_feature_inner_with_scratch(
+                    feature_histogram,
+                    node_id,
+                    options,
+                    num_categories,
+                    strategy,
+                    factor_context,
+                    Some(scratch),
+                )
+            });
+        }
+        Self::best_split_for_categorical_feature_inner_with_scratch(
+            feature_histogram,
+            node_id,
+            options,
+            num_categories,
+            strategy,
+            factor_context,
+            None,
+        )
+    }
+
+    fn best_split_for_categorical_feature_inner_with_scratch(
+        feature_histogram: &FeatureHistogram,
+        node_id: u32,
+        options: SplitSelectionOptions,
+        num_categories: usize,
+        strategy: GainStrategy<'_>,
+        factor_context: Option<&FactorSplitContext<'_>>,
+        mut factor_scratch: Option<&mut FactorSplitScratch>,
+    ) -> Option<SplitCandidate> {
         const EPSILON: f32 = 1e-6;
 
         if num_categories < 2 {
@@ -1154,9 +1216,7 @@ impl CpuBackend {
         let mut left_hess = 0.0_f32;
         let mut left_grad_sq = 0.0_f32;
         let mut left_count = 0_u32;
-        let mut factor_scratch =
-            factor_context.map(|ctx| FactorSplitScratch::new(ctx.exposures.factor_count));
-        if let (Some(ctx), Some(scratch)) = (factor_context, factor_scratch.as_mut()) {
+        if let (Some(ctx), Some(scratch)) = (factor_context, factor_scratch.as_deref_mut()) {
             let sorted_category_bins: Vec<u16> =
                 categories.iter().map(|category| category.0).collect();
             scratch.prepare_categorical_prefix(
@@ -1174,7 +1234,7 @@ impl CpuBackend {
             left_hess += h;
             left_grad_sq += q;
             left_count += c;
-            if let Some(scratch) = factor_scratch.as_mut() {
+            if let Some(scratch) = factor_scratch.as_deref_mut() {
                 scratch.add_categorical_prefix_bin_to_left(k);
                 categorical_bitset_for_prefix_into(
                     num_categories,
@@ -1297,7 +1357,8 @@ impl CpuBackend {
                     }
                 };
 
-                if let (Some(ctx), Some(scratch)) = (factor_context, factor_scratch.as_mut()) {
+                if let (Some(ctx), Some(scratch)) = (factor_context, factor_scratch.as_deref_mut())
+                {
                     let left_leaf_value = -left_grad_for_gain / left_denom;
                     let right_leaf_value = -right_grad_for_gain / right_denom;
                     gain -= scratch.categorical_prefix_penalty(
@@ -1314,7 +1375,7 @@ impl CpuBackend {
                 }
 
                 if gain > best_gain {
-                    let bitset = if let Some(scratch) = factor_scratch.as_ref() {
+                    let bitset = if let Some(scratch) = factor_scratch.as_deref() {
                         scratch.categorical_bitset.clone()
                     } else {
                         categorical_bitset_for_prefix(num_categories, &categories, k)

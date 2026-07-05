@@ -1,4 +1,10 @@
 use alloygbm_engine::{EngineError, EngineResult, FactorSplitContext};
+use std::cell::RefCell;
+
+thread_local! {
+    static THREAD_FACTOR_SPLIT_SCRATCH: RefCell<FactorSplitScratch> =
+        RefCell::new(FactorSplitScratch::new(0));
+}
 
 pub(crate) struct FactorSplitScratch {
     left_factor_sums: Vec<f32>,
@@ -31,6 +37,22 @@ impl FactorSplitScratch {
     fn clear_factor_sums(&mut self) {
         self.left_factor_sums.fill(0.0);
         self.right_factor_sums.fill(0.0);
+    }
+
+    fn reset_for_factor_count(&mut self, factor_count: usize) {
+        self.left_factor_sums.resize(factor_count, 0.0);
+        self.right_factor_sums.resize(factor_count, 0.0);
+        self.missing_factor_sums.resize(factor_count, 0.0);
+        self.non_missing_factor_sums.resize(factor_count, 0.0);
+        self.left_factor_sums.fill(0.0);
+        self.right_factor_sums.fill(0.0);
+        self.missing_factor_sums.fill(0.0);
+        self.non_missing_factor_sums.fill(0.0);
+        self.bin_factor_sums.clear();
+        self.categorical_bin_order.clear();
+        self.numeric_scan_limit = 0;
+        self.categorical_scan_limit = 0;
+        self.categorical_bitset.clear();
     }
 
     pub(crate) fn prepare_numeric_prefix(
@@ -243,6 +265,17 @@ impl FactorSplitScratch {
             row_count,
         )
     }
+}
+
+pub(crate) fn with_factor_split_scratch<R>(
+    factor_count: usize,
+    f: impl FnOnce(&mut FactorSplitScratch) -> R,
+) -> R {
+    THREAD_FACTOR_SPLIT_SCRATCH.with(|cell| {
+        let mut scratch = cell.borrow_mut();
+        scratch.reset_for_factor_count(factor_count);
+        f(&mut scratch)
+    })
 }
 
 #[cfg(test)]
@@ -517,5 +550,50 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn thread_local_scratch_reuses_buffers_for_same_factor_count() {
+        let (binned, exposures, rows) = factor_fixture();
+        let context = FactorSplitContext {
+            binned_matrix: &binned,
+            exposures: &exposures,
+            row_indices: &rows,
+            factor_penalty: 0.75,
+        };
+
+        let first_buffers = with_factor_split_scratch(exposures.factor_count, |scratch| {
+            scratch.prepare_numeric_prefix(&context, 0, 4, binned.missing_bin() as usize);
+            scratch.add_numeric_threshold_bin_to_left(0);
+            scratch.prepare_categorical_prefix(
+                &context,
+                0,
+                &[2_u16, 0, 3, 1],
+                binned.missing_bin() as usize,
+            );
+            (
+                scratch.left_factor_sums.as_ptr(),
+                scratch.bin_factor_sums.as_ptr(),
+                scratch.categorical_bin_order.as_ptr(),
+            )
+        });
+
+        let second_buffers = with_factor_split_scratch(exposures.factor_count, |scratch| {
+            assert!(scratch.categorical_bitset.is_empty());
+            scratch.prepare_numeric_prefix(&context, 0, 4, binned.missing_bin() as usize);
+            scratch.prepare_categorical_prefix(
+                &context,
+                0,
+                &[2_u16, 0, 3, 1],
+                binned.missing_bin() as usize,
+            );
+            (
+                scratch.left_factor_sums.as_ptr(),
+                scratch.bin_factor_sums.as_ptr(),
+                scratch.categorical_bin_order.as_ptr(),
+            )
+        });
+
+        assert_eq!(first_buffers, second_buffers);
     }
 }
