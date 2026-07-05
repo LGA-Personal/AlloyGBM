@@ -333,10 +333,10 @@ pub(super) fn build_joint_round_inner(
                             cat_factor_penalty,
                         )
                     };
-                    if let Some(cat_split) = cat_opt {
-                        if cat_split.gain > best.map(|(_, _, g, _)| g).unwrap_or(0.0) {
-                            best = Some((feature, 0, cat_split.gain, Some(cat_split.left_bitset)));
-                        }
+                    if let Some(cat_split) = cat_opt
+                        && cat_split.gain > best.map(|(_, _, g, _)| g).unwrap_or(0.0)
+                    {
+                        best = Some((feature, 0, cat_split.gain, Some(cat_split.left_bitset)));
                     }
                     continue; // skip numeric threshold sweep for categorical features
                 }
@@ -803,10 +803,10 @@ pub(super) fn build_joint_round_leafwise(
                         cat_factor_penalty,
                     )
                 };
-                if let Some(cat_split) = cat_opt {
-                    if cat_split.gain > best.map(|(_, _, g, _)| g).unwrap_or(0.0) {
-                        best = Some((feature, 0, cat_split.gain, Some(cat_split.left_bitset)));
-                    }
+                if let Some(cat_split) = cat_opt
+                    && cat_split.gain > best.map(|(_, _, g, _)| g).unwrap_or(0.0)
+                {
+                    best = Some((feature, 0, cat_split.gain, Some(cat_split.left_bitset)));
                 }
                 continue;
             }
