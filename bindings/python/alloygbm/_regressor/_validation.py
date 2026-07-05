@@ -65,6 +65,14 @@ class _ValidationMixin:
         diagnostics = getattr(self, "factor_exposure_diagnostics_", None)
         if diagnostics is None or transformed_factor_exposures is None:
             return
+        # Multiclass models have no single 1-D raw prediction vector: the base
+        # regressor predictor raises for them, and per-factor scalar exposure is
+        # not well-defined for a K-way softmax model. Post-fit prediction
+        # exposure diagnostics are scoped to scalar estimators (regressor,
+        # binary classifier, ranker) plus joint MultiLabelGBMRanker, so skip
+        # multiclass here rather than letting the predict call break fit().
+        if getattr(self, "_is_multiclass", False):
+            return
         import numpy as np
 
         # Use the base regressor predictor so classifier/ranker overrides do

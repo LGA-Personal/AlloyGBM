@@ -123,6 +123,29 @@ class FactorNeutralizationTests(unittest.TestCase):
             places=5,
         )
 
+    def test_multiclass_neutralization_fit_skips_prediction_exposure(self):
+        # Multiclass has no single 1-D raw prediction vector (the base regressor
+        # predictor raises), so post-fit exposure diagnostics must be skipped
+        # rather than break fit(). Guards a regression where fit() crashed with
+        # "use predict_batch_dense_multiclass for multi-class models".
+        rng = np.random.default_rng(11)
+        x = rng.standard_normal((90, 4)).astype(np.float32)
+        f = (x[:, 0:1] + np.float32(5.0)).astype(np.float32)
+        y = rng.integers(0, 3, size=90)
+        model = GBMClassifier(
+            neutralization="per_round_gradient",
+            factor_exposure_transform="center",
+            n_estimators=4,
+            seed=3,
+        )
+        model.fit(x, y, factor_exposures=f)  # must not raise
+        self.assertTrue(model._is_multiclass)
+        diagnostics = model.factor_exposure_diagnostics_
+        self.assertIsNotNone(diagnostics)
+        # Transform metadata is still recorded; per-prediction exposure is not.
+        self.assertIn("means", diagnostics)
+        self.assertNotIn("prediction_exposure_dot", diagnostics)
+
     def test_factor_exposures_are_standardized_when_requested(self):
         x, y, f = factor_data()
         scaled = np.column_stack([f[:, 0] * 3.0 + 5.0, np.ones(len(f), dtype=np.float32)])
