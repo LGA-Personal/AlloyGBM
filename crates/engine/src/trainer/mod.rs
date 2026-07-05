@@ -1307,7 +1307,10 @@ impl Trainer {
             )?;
             let loss_improvement = current_loss - candidate_loss;
             let loss_gate_exempt = dart_params.is_some();
-            if !loss_gate_exempt && loss_improvement < 0.0 {
+            let loss_gate_active = !loss_gate_exempt
+                && (controls.training_loss_gate_enabled
+                    || (in_warmup_phase && morph_state.is_some()));
+            if loss_gate_active && loss_improvement < 0.0 {
                 // Truncate stumps so the model doesn't include this round's contribution.
                 // (`class_candidate_predictions` is reset from `class_predictions` at the
                 // top of each round, so the candidate state is implicitly rolled back.)
@@ -1337,7 +1340,10 @@ impl Trainer {
                     .map_or(1.0, |ms| ms.lr_loss_threshold_scale(effective_round));
                 let effective_min_loss_improvement =
                     controls.min_loss_improvement * lr_threshold_scale;
-                if !loss_gate_exempt && loss_improvement < effective_min_loss_improvement {
+                if controls.training_loss_gate_enabled
+                    && !loss_gate_exempt
+                    && loss_improvement < effective_min_loss_improvement
+                {
                     if weak_improvement_streak >= controls.max_consecutive_weak_improvements {
                         for class_k in 0..k {
                             class_stumps[class_k].truncate(pre_round_counts[class_k]);
@@ -1676,15 +1682,11 @@ impl Trainer {
             .max(user_min)
             .min(row_count.saturating_div(2).max(1));
 
-        // Ranking objectives produce gradients and round-to-round loss deltas
-        // that are orders of magnitude smaller than regression/classification,
-        // because the loss is bounded by NDCG normalization and pairwise
-        // weighting. The density-based min_split_gain floor and the
-        // target-variance-scaled min_loss_improvement threshold were tuned for
-        // regression losses and cause ranking training to exit after only a
-        // handful of rounds with LossImprovementBelowThreshold. Disable both
-        // guards for ranking so the user-supplied min_split_gain (default 0.0)
-        // and n_estimators are honored.
+        // Ranking objectives produce gradients whose gain scale differs from
+        // regression/classification. The density-based min_split_gain floor
+        // was tuned for regression losses and can stop ranking early, so keep
+        // it disabled for ranking. Training-loss stopping is opt-in globally;
+        // validation early stopping is the default stopping policy.
         let auto_min_split_gain: f32 = if is_ranking {
             0.0
         } else if binned_density < 0.10 {
@@ -1695,18 +1697,8 @@ impl Trainer {
             0.0
         };
         controls.min_split_gain = auto_min_split_gain.max(self.params.min_split_gain);
-        controls.min_loss_improvement = if is_ranking || row_count < 4_096 {
-            0.0
-        } else {
-            (target_variance.max(1e-6) * 1e-5).min(0.01)
-        };
-        controls.max_consecutive_weak_improvements = if is_ranking || row_count < 4_096 {
-            0
-        } else if rounds <= 64 {
-            1
-        } else {
-            3
-        };
+        controls.min_loss_improvement = 0.0;
+        controls.max_consecutive_weak_improvements = 0;
 
         if self.params.row_subsample == 1.0 && row_count >= 2_048 {
             controls.row_subsample = if row_count >= 16_384 { 0.8 } else { 0.9 };
@@ -2374,7 +2366,10 @@ impl Trainer {
             // DART is also non-monotone by construction: dropout and
             // normalization can raise training loss for a valid round.
             let loss_gate_exempt = objective.requires_group_id() || dart_params.is_some();
-            if !loss_gate_exempt && loss_improvement < 0.0 {
+            let loss_gate_active = !loss_gate_exempt
+                && (controls.training_loss_gate_enabled
+                    || (in_warmup_phase && morph_state.is_some()));
+            if loss_gate_active && loss_improvement < 0.0 {
                 if in_warmup_phase {
                     // DART: loss regression on warmup continue path → restore
                     // from pre-dropout backup so the next round sees the
@@ -2402,7 +2397,10 @@ impl Trainer {
                     .map_or(1.0, |ms| ms.lr_loss_threshold_scale(effective_round_index));
                 let effective_min_loss_improvement =
                     controls.min_loss_improvement * lr_threshold_scale;
-                if !loss_gate_exempt && loss_improvement < effective_min_loss_improvement {
+                if controls.training_loss_gate_enabled
+                    && !loss_gate_exempt
+                    && loss_improvement < effective_min_loss_improvement
+                {
                     if weak_improvement_streak >= controls.max_consecutive_weak_improvements {
                         // Break path: see note above — restoration is
                         // unnecessary since the loop exits.

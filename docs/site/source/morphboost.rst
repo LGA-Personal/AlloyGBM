@@ -141,9 +141,10 @@ and high ``n_estimators`` (e.g. ``n_estimators=5000``,
    )
 
 When a non-constant LR schedule is active, AlloyGBM's auto-stopping logic
-becomes schedule-aware: the auto-tuned ``min_loss_improvement`` threshold
-is scaled by ``current_lr / max_lr``, and empty / slightly-negative
-rounds during the explicit warmup phase do not terminate training.
+becomes schedule-aware: empty / slightly-negative rounds during the explicit
+warmup phase do not terminate training. After warmup, use validation early
+stopping when you want a convergence stop; training-loss stopping is disabled
+by default.
 
 Combining with piecewise-linear leaves
 --------------------------------------

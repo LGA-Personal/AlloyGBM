@@ -103,6 +103,8 @@ pub struct IterationControls {
     pub min_validation_improvement: f32,
     /// Maximum number of leaves per tree. None means depth-limited only.
     pub max_leaves: Option<usize>,
+    /// Whether training-loss regressions/weak improvements can stop training.
+    pub training_loss_gate_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -414,7 +416,13 @@ impl IterationControls {
             early_stopping_rounds: None,
             min_validation_improvement: 0.0,
             max_leaves: None,
+            training_loss_gate_enabled: false,
         })
+    }
+
+    pub fn with_training_loss_gate(mut self) -> EngineResult<Self> {
+        self.training_loss_gate_enabled = true;
+        Ok(self)
     }
 
     pub fn with_max_leaves(mut self, max_leaves: Option<usize>) -> EngineResult<Self> {
