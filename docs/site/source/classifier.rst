@@ -40,7 +40,8 @@ All parameters from ``GBMRegressor`` are accepted, including
 ``leaf_solver="dro"`` for robust scalar leaves, ``leaf_model="linear"`` for
 piecewise-linear leaves (see :doc:`estimator`),
 ``neutralization="per_round_gradient"`` / ``"split_penalty"`` with
-``factor_exposure_transform`` for factor-neutral training, and
+``factor_exposure_transform`` for factor-neutral training (active
+``split_penalty`` defaults to effective ``"standardize"`` preprocessing), and
 ``training_mode="morph"`` and the MorphBoost / LR-schedule parameters
 (``morph_rate``, ``evolution_pressure``, ``morph_warmup_iters``,
 ``info_score_weight``, ``depth_penalty_base``, ``balance_penalty``,

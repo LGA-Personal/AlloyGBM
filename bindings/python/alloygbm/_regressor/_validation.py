@@ -39,6 +39,12 @@ class _ValidationMixin:
             raise ValueError("factor_exposures must contain only finite values")
         arr = np.ascontiguousarray(arr, dtype=np.float32)
         transform = getattr(self, "factor_exposure_transform", "none")
+        if (
+            transform == "none"
+            and getattr(self, "neutralization", "none") == "split_penalty"
+            and float(getattr(self, "factor_penalty", 0.0)) > 0.0
+        ):
+            transform = "standardize"
         means = arr.mean(axis=0).astype(np.float32)
         stds = arr.std(axis=0).astype(np.float32)
         if transform == "center":

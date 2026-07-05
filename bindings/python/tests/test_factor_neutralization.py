@@ -165,6 +165,39 @@ class FactorNeutralizationTests(unittest.TestCase):
         )
         self.assertAlmostEqual(diagnostics["stds"][1], 0.0)
 
+    def test_split_penalty_defaults_to_standardized_exposures(self):
+        x, y, f = factor_data()
+        scaled = np.column_stack([f[:, 0] * 100.0 + 500.0, f[:, 0] * -3.0])
+        model = GBMRegressor(
+            neutralization="split_penalty",
+            factor_penalty=0.1,
+            n_estimators=2,
+            seed=9,
+        )
+        model.fit(x, y, factor_exposures=scaled)
+        diagnostics = model.factor_exposure_diagnostics_
+        self.assertIsNotNone(diagnostics)
+        self.assertEqual(diagnostics["transform"], "standardize")
+        self.assertAlmostEqual(
+            diagnostics["means"][0], float(np.mean(scaled[:, 0])), places=5
+        )
+        self.assertAlmostEqual(
+            diagnostics["stds"][0], float(np.std(scaled[:, 0])), places=5
+        )
+
+    def test_per_round_gradient_still_defaults_to_untransformed_exposures(self):
+        x, y, f = factor_data()
+        shifted = f + np.float32(10.0)
+        model = GBMRegressor(
+            neutralization="per_round_gradient",
+            n_estimators=2,
+            seed=10,
+        )
+        model.fit(x, y, factor_exposures=shifted)
+        diagnostics = model.factor_exposure_diagnostics_
+        self.assertIsNotNone(diagnostics)
+        self.assertEqual(diagnostics["transform"], "none")
+
     def test_factor_neutralization_with_dro_and_morph(self):
         x, y, f = factor_data()
         model = GBMRegressor(

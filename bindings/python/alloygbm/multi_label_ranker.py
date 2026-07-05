@@ -713,6 +713,13 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
             transform = str(
                 self._per_label_kwargs.get("factor_exposure_transform", "none")
             )
+            if (
+                transform == "none"
+                and str(self._per_label_kwargs.get("neutralization", "none"))
+                == "split_penalty"
+                and float(self._per_label_kwargs.get("factor_penalty", 0.0)) > 0.0
+            ):
+                transform = "standardize"
             means = fe_arr.mean(axis=0).astype(np.float32)
             stds = fe_arr.std(axis=0).astype(np.float32)
             if transform == "center":

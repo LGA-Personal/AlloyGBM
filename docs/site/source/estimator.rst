@@ -208,7 +208,10 @@ Factor-neutral boosting
 - ``factor_exposure_transform: str = "none"`` -- one of ``"none"``,
   ``"center"``, or ``"standardize"``. Applies column-wise preprocessing to
   fit-time ``factor_exposures`` before the projector and split-penalty
-  calculations.
+  calculations. When ``neutralization="split_penalty"`` and
+  ``factor_penalty > 0``, the default effective transform is ``"standardize"``
+  because the penalty scale depends on exposure units. Other neutralization
+  modes still default to no transform.
 
 Pass factors as fit-time data:
 
@@ -223,7 +226,9 @@ cloning remains clean and large matrices are not embedded in estimator params.
 With ``factor_exposure_transform="center"``, each factor column is
 mean-centered. With ``"standardize"``, each column is centered and divided by
 its population standard deviation; near-constant columns use a safe scale of
-``1.0``. The fitted estimator records the training-column ``means`` and
+``1.0``. When active ``split_penalty`` uses the default constructor value
+(``"none"``), the fitted diagnostics report ``transform="standardize"`` to
+reflect the effective preprocessing actually applied. The fitted estimator records the training-column ``means`` and
 ``stds`` in ``factor_exposure_diagnostics_``. After fitting, the same
 diagnostics dict also reports post-fit prediction exposure against the
 transformed fit-time factors: ``prediction_exposure_dot`` (``F^T y_hat``, per

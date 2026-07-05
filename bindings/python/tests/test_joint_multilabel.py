@@ -961,6 +961,27 @@ def test_joint_split_penalty_changes_predictions():
     assert np.max(np.abs(baseline - neutralized)) > 1e-3
 
 
+def test_joint_split_penalty_defaults_to_standardized_exposures():
+    rng = np.random.default_rng(620)
+    X = rng.standard_normal((36, 3)).astype(np.float32)
+    y = rng.standard_normal((36, 2)).astype(np.float32)
+    fe = X[:, 0:1] * np.float32(20.0) + np.float32(100.0)
+    m = MultiLabelGBMRanker(
+        n_estimators=3,
+        multi_label_mode="joint",
+        ranking_objective="squared_error",
+        neutralization="split_penalty",
+        factor_penalty=0.5,
+    )
+    m.fit(X, y, factor_exposures=fe)
+
+    diagnostics = m.factor_exposure_diagnostics_
+    assert diagnostics is not None
+    assert diagnostics["transform"] == "standardize"
+    assert diagnostics["means"][0] == pytest.approx(float(np.mean(fe[:, 0])))
+    assert diagnostics["stds"][0] == pytest.approx(float(np.std(fe[:, 0])))
+
+
 def test_joint_factor_diagnostics_report_post_fit_prediction_exposure():
     """Joint neutralization diagnostics include F^T prediction exposure per label."""
     rng = np.random.default_rng(621)
