@@ -294,11 +294,22 @@ pub(super) fn build_joint_round_inner(
                 // outputs instead of a threshold sweep. The result carries
                 // a `left_bitset: u64` which the partition path consumes.
                 if let Some(num_cats) = cat_num_categories[feature] {
+                    let cat_factor_penalty =
+                        split_penalty_ctx.map(|(factor_penalty, exposures)| {
+                            crate::shared_histogram::MultiOutputCategoricalFactorPenaltyContext {
+                                binned_matrix,
+                                exposures,
+                                row_indices: &node.row_indices,
+                                factor_penalty,
+                                lambda_l1: params.lambda_l1,
+                                dro_config: effective_dro_config(params),
+                            }
+                        });
                     // v0.10.4: route categorical Fisher-sort through the morph
                     // variant when active; falls through to the standard
                     // variant when `morph_ctx` is None.
                     let cat_opt = if let Some(m) = morph_ctx {
-                        crate::shared_histogram::find_best_multi_output_categorical_split_morph(
+                        crate::shared_histogram::find_best_multi_output_categorical_split_morph_with_factor_penalty(
                             &node_hist,
                             feature,
                             num_cats,
@@ -310,55 +321,21 @@ pub(super) fn build_joint_round_inner(
                             m.total_iterations,
                             &m.grad_means,
                             &m.grad_stds,
+                            cat_factor_penalty,
                         )
                     } else {
-                        crate::shared_histogram::find_best_multi_output_categorical_split(
+                        crate::shared_histogram::find_best_multi_output_categorical_split_with_factor_penalty(
                             &node_hist,
                             feature,
                             num_cats,
                             lambda_l2,
                             crate::LEAF_EPSILON,
+                            cat_factor_penalty,
                         )
                     };
                     if let Some(cat_split) = cat_opt {
-                        // v0.10.6 split_penalty (categorical): subtract the
-                        // K-output factor-load penalty from the raw gain.
-                        let adj_gain = if let Some((factor_penalty, exposures)) = split_penalty_ctx
-                        {
-                            let (leaf_l, leaf_r) =
-                                crate::shared_histogram::derive_kvec_leaves_from_categorical_histogram(
-                                    &node_hist,
-                                    feature,
-                                    cat_split.left_bitset,
-                                    num_cats,
-                                    lambda_l2,
-                                    crate::LEAF_EPSILON,
-                                    params.lambda_l1,
-                                    effective_dro_config(params),
-                                );
-                            let (left_sums, right_sums) = accumulate_factor_sums_for_threshold(
-                                binned_matrix,
-                                exposures,
-                                &node.row_indices,
-                                feature,
-                                0,
-                                Some(cat_split.left_bitset),
-                            );
-                            let penalty =
-                                crate::shared_histogram::compute_multi_output_factor_split_penalty(
-                                    &left_sums,
-                                    &right_sums,
-                                    &leaf_l,
-                                    &leaf_r,
-                                    factor_penalty,
-                                    node.row_indices.len(),
-                                );
-                            cat_split.gain - penalty
-                        } else {
-                            cat_split.gain
-                        };
-                        if adj_gain > best.map(|(_, _, g, _)| g).unwrap_or(0.0) {
-                            best = Some((feature, 0, adj_gain, Some(cat_split.left_bitset)));
+                        if cat_split.gain > best.map(|(_, _, g, _)| g).unwrap_or(0.0) {
+                            best = Some((feature, 0, cat_split.gain, Some(cat_split.left_bitset)));
                         }
                     }
                     continue; // skip numeric threshold sweep for categorical features
@@ -790,9 +767,19 @@ pub(super) fn build_joint_round_leafwise(
                 continue;
             }
             if let Some(num_cats) = cat_num_categories[feature] {
+                let cat_factor_penalty = split_penalty_ctx.map(|(factor_penalty, exposures)| {
+                    crate::shared_histogram::MultiOutputCategoricalFactorPenaltyContext {
+                        binned_matrix,
+                        exposures,
+                        row_indices: &node.row_indices,
+                        factor_penalty,
+                        lambda_l1: params.lambda_l1,
+                        dro_config: effective_dro_config(params),
+                    }
+                });
                 // v0.10.4: route through morph variant when active.
                 let cat_opt = if let Some(m) = morph_ctx {
-                    crate::shared_histogram::find_best_multi_output_categorical_split_morph(
+                    crate::shared_histogram::find_best_multi_output_categorical_split_morph_with_factor_penalty(
                         &node_hist,
                         feature,
                         num_cats,
@@ -804,53 +791,21 @@ pub(super) fn build_joint_round_leafwise(
                         m.total_iterations,
                         &m.grad_means,
                         &m.grad_stds,
+                        cat_factor_penalty,
                     )
                 } else {
-                    crate::shared_histogram::find_best_multi_output_categorical_split(
+                    crate::shared_histogram::find_best_multi_output_categorical_split_with_factor_penalty(
                         &node_hist,
                         feature,
                         num_cats,
                         lambda_l2,
                         crate::LEAF_EPSILON,
+                        cat_factor_penalty,
                     )
                 };
                 if let Some(cat_split) = cat_opt {
-                    // v0.10.6 split_penalty (categorical, leaf-wise).
-                    let adj_gain = if let Some((factor_penalty, exposures)) = split_penalty_ctx {
-                        let (leaf_l, leaf_r) =
-                            crate::shared_histogram::derive_kvec_leaves_from_categorical_histogram(
-                                &node_hist,
-                                feature,
-                                cat_split.left_bitset,
-                                num_cats,
-                                lambda_l2,
-                                crate::LEAF_EPSILON,
-                                params.lambda_l1,
-                                effective_dro_config(params),
-                            );
-                        let (left_sums, right_sums) = accumulate_factor_sums_for_threshold(
-                            binned_matrix,
-                            exposures,
-                            &node.row_indices,
-                            feature,
-                            0,
-                            Some(cat_split.left_bitset),
-                        );
-                        let penalty =
-                            crate::shared_histogram::compute_multi_output_factor_split_penalty(
-                                &left_sums,
-                                &right_sums,
-                                &leaf_l,
-                                &leaf_r,
-                                factor_penalty,
-                                node.row_indices.len(),
-                            );
-                        cat_split.gain - penalty
-                    } else {
-                        cat_split.gain
-                    };
-                    if adj_gain > best.map(|(_, _, g, _)| g).unwrap_or(0.0) {
-                        best = Some((feature, 0, adj_gain, Some(cat_split.left_bitset)));
+                    if cat_split.gain > best.map(|(_, _, g, _)| g).unwrap_or(0.0) {
+                        best = Some((feature, 0, cat_split.gain, Some(cat_split.left_bitset)));
                     }
                 }
                 continue;

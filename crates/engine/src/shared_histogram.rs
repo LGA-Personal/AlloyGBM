@@ -256,6 +256,37 @@ pub fn find_best_multi_output_categorical_split_morph(
     grad_means: &[f32],
     grad_stds: &[f32],
 ) -> Option<MultiOutputCategoricalSplit> {
+    find_best_multi_output_categorical_split_morph_with_factor_penalty(
+        hist,
+        feature,
+        num_categories,
+        lambda_l2,
+        eps,
+        config,
+        precomputed,
+        iteration,
+        total_iterations,
+        grad_means,
+        grad_stds,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn find_best_multi_output_categorical_split_morph_with_factor_penalty(
+    hist: &MultiOutputHistogram,
+    feature: usize,
+    num_categories: usize,
+    lambda_l2: f32,
+    eps: f32,
+    config: &alloygbm_core::MorphConfig,
+    precomputed: &alloygbm_core::MorphPrecomputed,
+    iteration: u32,
+    total_iterations: u32,
+    grad_means: &[f32],
+    grad_stds: &[f32],
+    factor_penalty: Option<MultiOutputCategoricalFactorPenaltyContext<'_>>,
+) -> Option<MultiOutputCategoricalSplit> {
     if !(2..=64).contains(&num_categories) {
         return None;
     }
@@ -287,6 +318,10 @@ pub fn find_best_multi_output_categorical_split_morph(
         sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
     });
 
+    let mut factor_prefix = factor_penalty
+        .as_ref()
+        .map(|ctx| MultiOutputCategoricalFactorPrefix::new(ctx, feature, &order, num_categories));
+
     let mut left_g = vec![0.0_f32; k];
     let mut left_h = vec![0.0_f32; k];
     let mut left_c = vec![0u32; k];
@@ -299,6 +334,9 @@ pub fn find_best_multi_output_categorical_split_morph(
             left_g[ko] += g;
             left_h[ko] += h;
             left_c[ko] = left_c[ko].saturating_add(morph_count_proxy(h));
+        }
+        if let Some(prefix) = factor_prefix.as_mut() {
+            prefix.add_category_order_index(prefix_len);
         }
         let mut gain = 0.0_f32;
         for ko in 0..k {
@@ -323,6 +361,24 @@ pub fn find_best_multi_output_categorical_split_morph(
                 total_iterations,
                 grad_means[ko],
                 grad_stds[ko],
+            );
+        }
+        if let (Some(ctx), Some(prefix)) = (factor_penalty.as_ref(), factor_prefix.as_ref()) {
+            let (leaf_left, leaf_right) = derive_kvec_leaves_from_side_sums(
+                &left_g,
+                &left_h,
+                &total_g,
+                &total_h,
+                lambda_l2,
+                eps,
+                ctx.lambda_l1,
+                ctx.dro_config,
+            );
+            gain -= prefix.penalty(
+                &leaf_left,
+                &leaf_right,
+                ctx.factor_penalty,
+                ctx.row_indices.len(),
             );
         }
         if gain > best_gain {
@@ -446,6 +502,15 @@ pub struct MultiOutputCategoricalSplit {
     pub n_categories: u32,
 }
 
+pub struct MultiOutputCategoricalFactorPenaltyContext<'a> {
+    pub binned_matrix: &'a alloygbm_core::BinnedMatrix,
+    pub exposures: &'a alloygbm_core::FactorExposureMatrix,
+    pub row_indices: &'a [u32],
+    pub factor_penalty: f32,
+    pub lambda_l1: f32,
+    pub dro_config: Option<&'a alloygbm_core::DroConfig>,
+}
+
 /// Find the best binary partition of categories for a single feature on the
 /// multi-output joint trainer using Fisher-sort. Bin indices `0..num_categories`
 /// are treated as category IDs (the binning layer maps raw categorical
@@ -469,6 +534,25 @@ pub fn find_best_multi_output_categorical_split(
     num_categories: usize,
     lambda_l2: f32,
     eps: f32,
+) -> Option<MultiOutputCategoricalSplit> {
+    find_best_multi_output_categorical_split_with_factor_penalty(
+        hist,
+        feature,
+        num_categories,
+        lambda_l2,
+        eps,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn find_best_multi_output_categorical_split_with_factor_penalty(
+    hist: &MultiOutputHistogram,
+    feature: usize,
+    num_categories: usize,
+    lambda_l2: f32,
+    eps: f32,
+    factor_penalty: Option<MultiOutputCategoricalFactorPenaltyContext<'_>>,
 ) -> Option<MultiOutputCategoricalSplit> {
     if !(2..=64).contains(&num_categories) {
         return None;
@@ -495,6 +579,10 @@ pub fn find_best_multi_output_categorical_split(
         sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
     });
 
+    let mut factor_prefix = factor_penalty
+        .as_ref()
+        .map(|ctx| MultiOutputCategoricalFactorPrefix::new(ctx, feature, &order, num_categories));
+
     // Prefix scan over sorted order. At each split position, evaluate the
     // K-output gain for "categories[0..=prefix_len] go left, rest go right".
     let mut left_g = vec![0.0_f32; k];
@@ -506,6 +594,9 @@ pub fn find_best_multi_output_categorical_split(
             left_g[ko] += hist.data()[hist.idx(feature, cat, ko, HistComponent::Grad)];
             left_h[ko] += hist.data()[hist.idx(feature, cat, ko, HistComponent::Hess)];
         }
+        if let Some(prefix) = factor_prefix.as_mut() {
+            prefix.add_category_order_index(prefix_len);
+        }
         let term = |g: f32, h: f32| (g * g) / (h + lambda_l2 + eps);
         let mut gain = 0.0_f32;
         for ko in 0..k {
@@ -514,6 +605,24 @@ pub fn find_best_multi_output_categorical_split(
             let hl = left_h[ko];
             let hr = total_h[ko] - hl;
             gain += term(gl, hl) + term(gr, hr) - term(total_g[ko], total_h[ko]);
+        }
+        if let (Some(ctx), Some(prefix)) = (factor_penalty.as_ref(), factor_prefix.as_ref()) {
+            let (leaf_left, leaf_right) = derive_kvec_leaves_from_side_sums(
+                &left_g,
+                &left_h,
+                &total_g,
+                &total_h,
+                lambda_l2,
+                eps,
+                ctx.lambda_l1,
+                ctx.dro_config,
+            );
+            gain -= prefix.penalty(
+                &leaf_left,
+                &leaf_right,
+                ctx.factor_penalty,
+                ctx.row_indices.len(),
+            );
         }
         if gain > best_gain {
             best_gain = gain;
@@ -535,6 +644,119 @@ pub fn find_best_multi_output_categorical_split(
         left_bitset,
         n_categories: num_categories as u32,
     })
+}
+
+struct MultiOutputCategoricalFactorPrefix {
+    factor_count: usize,
+    category_factor_sums: Vec<f32>,
+    total_factor_sums: Vec<f32>,
+    left_factor_sums: Vec<f32>,
+}
+
+impl MultiOutputCategoricalFactorPrefix {
+    fn new(
+        ctx: &MultiOutputCategoricalFactorPenaltyContext<'_>,
+        feature: usize,
+        order: &[usize],
+        num_categories: usize,
+    ) -> Self {
+        let factor_count = ctx.exposures.factor_count;
+        let mut category_order = vec![usize::MAX; num_categories.min(64)];
+        for (order_index, &category) in order.iter().enumerate() {
+            if category < category_order.len() {
+                category_order[category] = order_index;
+            }
+        }
+        let mut category_factor_sums = vec![0.0_f32; order.len().saturating_mul(factor_count)];
+        let mut total_factor_sums = vec![0.0_f32; factor_count];
+        let feature_count = ctx.binned_matrix.feature_count;
+        let missing_bin = ctx.binned_matrix.missing_bin();
+        for &row_u32 in ctx.row_indices {
+            let row = row_u32 as usize;
+            let bin = ctx.binned_matrix.row_bin(row * feature_count + feature) as usize;
+            if bin as u16 == missing_bin || bin >= category_order.len() {
+                continue;
+            }
+            let order_index = category_order[bin];
+            if order_index == usize::MAX {
+                continue;
+            }
+            let exposure_start = row * factor_count;
+            let exposure_row = &ctx.exposures.values[exposure_start..exposure_start + factor_count];
+            let category_base = order_index * factor_count;
+            for factor_index in 0..factor_count {
+                let exposure = exposure_row[factor_index];
+                category_factor_sums[category_base + factor_index] += exposure;
+                total_factor_sums[factor_index] += exposure;
+            }
+        }
+        Self {
+            factor_count,
+            category_factor_sums,
+            total_factor_sums,
+            left_factor_sums: vec![0.0; factor_count],
+        }
+    }
+
+    fn add_category_order_index(&mut self, order_index: usize) {
+        let base = order_index * self.factor_count;
+        for factor_index in 0..self.factor_count {
+            self.left_factor_sums[factor_index] += self.category_factor_sums[base + factor_index];
+        }
+    }
+
+    fn penalty(
+        &self,
+        leaf_left: &[f32],
+        leaf_right: &[f32],
+        factor_penalty: f32,
+        row_count: usize,
+    ) -> f32 {
+        if factor_penalty == 0.0 || row_count == 0 {
+            return 0.0;
+        }
+        let mut penalty_sum = 0.0_f32;
+        for output_index in 0..leaf_left.len() {
+            let left_leaf = leaf_left[output_index];
+            let right_leaf = leaf_right[output_index];
+            let mut norm_sq = 0.0_f32;
+            for factor_index in 0..self.factor_count {
+                let left_sum = self.left_factor_sums[factor_index];
+                let right_sum = self.total_factor_sums[factor_index] - left_sum;
+                let load = left_sum * left_leaf + right_sum * right_leaf;
+                norm_sq += load * load;
+            }
+            penalty_sum += norm_sq;
+        }
+        factor_penalty * penalty_sum / row_count as f32
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn derive_kvec_leaves_from_side_sums(
+    left_g: &[f32],
+    left_h: &[f32],
+    total_g: &[f32],
+    total_h: &[f32],
+    lambda_l2: f32,
+    eps: f32,
+    lambda_l1: f32,
+    dro_config: Option<&alloygbm_core::DroConfig>,
+) -> (Vec<f32>, Vec<f32>) {
+    let n_outputs = left_g.len();
+    let mut left = vec![0.0_f32; n_outputs];
+    let mut right = vec![0.0_f32; n_outputs];
+    for k in 0..n_outputs {
+        let gl = left_g[k];
+        let hl = left_h[k];
+        let gr = total_g[k] - gl;
+        let hr = total_h[k] - hl;
+        let g_eff_l = alloygbm_core::leaf_effective_gradient(gl, 0.0, 1, lambda_l1, dro_config);
+        let g_eff_r = alloygbm_core::leaf_effective_gradient(gr, 0.0, 1, lambda_l1, dro_config);
+        left[k] = -g_eff_l / (hl + lambda_l2 + eps);
+        right[k] = -g_eff_r / (hr + lambda_l2 + eps);
+    }
+    (left, right)
 }
 
 /// v0.10.6: derive the K-output Newton-Raphson left/right leaf K-vectors for
@@ -999,6 +1221,43 @@ mod tests {
                 r.gain
             );
         }
+    }
+
+    #[test]
+    fn multi_output_categorical_split_penalty_scores_each_prefix() {
+        let bins = vec![0_u8, 1, 2];
+        let grads = vec![-3.0_f32, -1.0, 3.0];
+        let hess = vec![1.0_f32, 1.0, 1.0];
+        let mut hist = MultiOutputHistogram::new(1, 4, 1);
+        build_multi_output_histogram_inplace(&mut hist, 0, &bins, &grads, &hess, 1);
+
+        let raw =
+            find_best_multi_output_categorical_split(&hist, 0, 3, 0.0, 1e-6).expect("raw split");
+        assert_eq!(raw.left_bitset, 0b011);
+
+        let binned = alloygbm_core::BinnedMatrix::new(3, 1, 2, bins).expect("binned matrix");
+        let exposures =
+            alloygbm_core::FactorExposureMatrix::new(3, 1, vec![1.0, 3.0, 0.0]).unwrap();
+        let rows = vec![0_u32, 1, 2];
+        let penalized = find_best_multi_output_categorical_split_with_factor_penalty(
+            &hist,
+            0,
+            3,
+            0.0,
+            1e-6,
+            Some(MultiOutputCategoricalFactorPenaltyContext {
+                binned_matrix: &binned,
+                exposures: &exposures,
+                row_indices: &rows,
+                factor_penalty: 1.0,
+                lambda_l1: 0.0,
+                dro_config: None,
+            }),
+        )
+        .expect("penalized split");
+
+        assert_eq!(penalized.left_bitset, 0b001);
+        assert!(penalized.gain < raw.gain);
     }
 
     #[test]
