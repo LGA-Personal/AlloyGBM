@@ -1046,6 +1046,7 @@ impl Trainer {
             let mut class_original_gradient_norms: Vec<Option<f32>> = Vec::with_capacity(k);
             {
                 let mut tmp_buf: Vec<GradientPair> = Vec::with_capacity(n);
+                let mut projection_scratch: Vec<f32> = Vec::with_capacity(n);
                 for class_k in 0..k {
                     objective.compute_gradients_for_class(
                         &class_predictions,
@@ -1060,7 +1061,10 @@ impl Trainer {
                         None
                     };
                     if let Some(projector) = &gradient_projector {
-                        projector.project_gradient_pairs_in_place(&mut tmp_buf)?;
+                        projector.project_gradient_pairs_in_place_with_scratch(
+                            &mut tmp_buf,
+                            &mut projection_scratch,
+                        )?;
                     }
                     class_gradient_buffers.push(tmp_buf.clone());
                     class_original_gradient_norms.push(original_norm);
@@ -1954,6 +1958,7 @@ impl Trainer {
         let mut custom_metric_no_improvement_rounds = 0_usize;
 
         let mut gradient_buffer: Vec<GradientPair> = Vec::with_capacity(active_dataset.row_count());
+        let mut projection_scratch: Vec<f32> = Vec::with_capacity(active_dataset.row_count());
 
         // DART state: tree_weights[tree_id] tracks the multiplicative
         // weight applied to each previously-trained tree. Populated
@@ -2143,7 +2148,10 @@ impl Trainer {
                 None
             };
             if let Some(projector) = &gradient_projector {
-                projector.project_gradient_pairs_in_place(&mut gradient_buffer)?;
+                projector.project_gradient_pairs_in_place_with_scratch(
+                    &mut gradient_buffer,
+                    &mut projection_scratch,
+                )?;
             }
             let root_row_indices = select_row_indices_for_round(
                 self.params.boosting_mode,

@@ -6,6 +6,7 @@
 
 use crate::error::{EngineError, EngineResult};
 use alloygbm_core::{FactorExposureMatrix, GradientPair, TrainingDataset};
+use rayon::prelude::*;
 
 #[allow(dead_code)]
 pub(crate) struct FactorProjector<'a> {
@@ -28,17 +29,34 @@ impl<'a> FactorProjector<'a> {
                 "sample_weight length must match factor_exposures row_count".to_string(),
             ));
         }
+        validate_exposure_shape(exposures)?;
         let k = exposures.factor_count;
-        let mut gram = vec![0.0_f64; k * k];
-        for row in 0..exposures.row_count {
-            let weight = weights.map_or(1.0_f64, |w| f64::from(w[row]));
-            let f = exposures.row(row)?;
-            for a in 0..k {
-                for b in 0..=a {
-                    gram[a * k + b] += weight * f64::from(f[a]) * f64::from(f[b]);
-                }
-            }
-        }
+        let mut gram = exposures
+            .values
+            .par_chunks_exact(k)
+            .enumerate()
+            .fold(
+                || vec![0.0_f64; k * k],
+                |mut local, (row, factors)| {
+                    let weight = weights.map_or(1.0_f64, |w| f64::from(w[row]));
+                    for a in 0..k {
+                        for b in 0..=a {
+                            local[a * k + b] +=
+                                weight * f64::from(factors[a]) * f64::from(factors[b]);
+                        }
+                    }
+                    local
+                },
+            )
+            .reduce(
+                || vec![0.0_f64; k * k],
+                |mut left, right| {
+                    for (left_value, right_value) in left.iter_mut().zip(right) {
+                        *left_value += right_value;
+                    }
+                    left
+                },
+            );
         for i in 0..k {
             gram[i * k + i] += f64::from(ridge_lambda);
         }
@@ -54,52 +72,85 @@ impl<'a> FactorProjector<'a> {
         &self,
         gradients: &mut [GradientPair],
     ) -> EngineResult<()> {
+        let mut residualized = Vec::new();
+        self.project_gradient_pairs_in_place_with_scratch(gradients, &mut residualized)
+    }
+
+    pub(crate) fn project_gradient_pairs_in_place_with_scratch(
+        &self,
+        gradients: &mut [GradientPair],
+        residualized: &mut Vec<f32>,
+    ) -> EngineResult<()> {
         if gradients.len() != self.exposures.row_count {
             return Err(EngineError::ContractViolation(
                 "gradient length must match factor_exposures row_count".to_string(),
             ));
         }
-        let coefficients = self.projection_coefficients(gradients.iter().map(|g| g.grad))?;
-        let mut residualized = Vec::with_capacity(gradients.len());
-        for (row, gradient) in gradients.iter().enumerate() {
-            let residual = f64::from(gradient.grad)
-                - projected_row_value(self.exposures.row(row)?, &coefficients);
-            let residual = residual as f32;
-            if !residual.is_finite() {
-                return Err(EngineError::ContractViolation(
-                    "projected gradient must be finite".to_string(),
-                ));
-            }
-            residualized.push(residual);
+        let coefficients = self.projection_coefficients_for_gradients(gradients)?;
+        residualized.clear();
+        residualized.resize(gradients.len(), 0.0);
+        let k = self.exposures.factor_count;
+        residualized
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(row, residual)| {
+                let factors = &self.exposures.values[row * k..row * k + k];
+                *residual = (f64::from(gradients[row].grad)
+                    - projected_row_value(factors, &coefficients))
+                    as f32;
+            });
+        if residualized.iter().any(|residual| !residual.is_finite()) {
+            return Err(EngineError::ContractViolation(
+                "projected gradient must be finite".to_string(),
+            ));
         }
-        for (gradient, residual) in gradients.iter_mut().zip(residualized) {
-            gradient.grad = residual;
-        }
+        gradients
+            .par_iter_mut()
+            .zip(residualized.par_iter())
+            .for_each(|(gradient, residual)| {
+                gradient.grad = *residual;
+            });
         Ok(())
     }
 
     pub(crate) fn residualize_values_in_place(&self, values: &mut [f32]) -> EngineResult<()> {
+        let mut residualized = Vec::new();
+        self.residualize_values_in_place_with_scratch(values, &mut residualized)
+    }
+
+    pub(crate) fn residualize_values_in_place_with_scratch(
+        &self,
+        values: &mut [f32],
+        residualized: &mut Vec<f32>,
+    ) -> EngineResult<()> {
         if values.len() != self.exposures.row_count {
             return Err(EngineError::ContractViolation(
                 "value length must match factor_exposures row_count".to_string(),
             ));
         }
-        let coefficients = self.projection_coefficients(values.iter().copied())?;
-        let mut residualized = Vec::with_capacity(values.len());
-        for (row, value) in values.iter().enumerate() {
-            let residual =
-                f64::from(*value) - projected_row_value(self.exposures.row(row)?, &coefficients);
-            let residual = residual as f32;
-            if !residual.is_finite() {
-                return Err(EngineError::ContractViolation(
-                    "residualized value must be finite".to_string(),
-                ));
-            }
-            residualized.push(residual);
+        let coefficients = self.projection_coefficients_for_values(values)?;
+        residualized.clear();
+        residualized.resize(values.len(), 0.0);
+        let k = self.exposures.factor_count;
+        residualized
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(row, residual)| {
+                let factors = &self.exposures.values[row * k..row * k + k];
+                *residual =
+                    (f64::from(values[row]) - projected_row_value(factors, &coefficients)) as f32;
+            });
+        if residualized.iter().any(|residual| !residual.is_finite()) {
+            return Err(EngineError::ContractViolation(
+                "residualized value must be finite".to_string(),
+            ));
         }
-        for (value, residual) in values.iter_mut().zip(residualized) {
-            *value = residual;
-        }
+        values
+            .par_iter_mut()
+            .zip(residualized.par_iter())
+            .for_each(|(value, residual)| {
+                *value = *residual;
+            });
         Ok(())
     }
 
@@ -107,27 +158,61 @@ impl<'a> FactorProjector<'a> {
         &self,
         values: impl IntoIterator<Item = f32>,
     ) -> EngineResult<Vec<f64>> {
-        let k = self.exposures.factor_count;
-        let mut rhs = vec![0.0_f64; k];
-        let mut value_count = 0;
-        for (row, value) in values.into_iter().enumerate() {
-            if row >= self.exposures.row_count {
-                return Err(EngineError::ContractViolation(
-                    "value length must match factor_exposures row_count".to_string(),
-                ));
-            }
-            value_count += 1;
-            let weight = self.weights.map_or(1.0_f64, |w| f64::from(w[row]));
-            let f = self.exposures.row(row)?;
-            for a in 0..k {
-                rhs[a] += weight * f64::from(f[a]) * f64::from(value);
-            }
-        }
-        if value_count != self.exposures.row_count {
+        let values = values.into_iter().collect::<Vec<_>>();
+        self.projection_coefficients_for_values(&values)
+    }
+
+    fn projection_coefficients_for_gradients(
+        &self,
+        gradients: &[GradientPair],
+    ) -> EngineResult<Vec<f64>> {
+        if gradients.len() != self.exposures.row_count {
             return Err(EngineError::ContractViolation(
                 "value length must match factor_exposures row_count".to_string(),
             ));
         }
+        self.projection_coefficients_from_rows(|row| gradients[row].grad)
+    }
+
+    fn projection_coefficients_for_values(&self, values: &[f32]) -> EngineResult<Vec<f64>> {
+        if values.len() != self.exposures.row_count {
+            return Err(EngineError::ContractViolation(
+                "value length must match factor_exposures row_count".to_string(),
+            ));
+        }
+        self.projection_coefficients_from_rows(|row| values[row])
+    }
+
+    fn projection_coefficients_from_rows(
+        &self,
+        value_at: impl Fn(usize) -> f32 + Sync,
+    ) -> EngineResult<Vec<f64>> {
+        let k = self.exposures.factor_count;
+        let rhs = self
+            .exposures
+            .values
+            .par_chunks_exact(k)
+            .enumerate()
+            .fold(
+                || vec![0.0_f64; k],
+                |mut local, (row, factors)| {
+                    let weight = self.weights.map_or(1.0_f64, |w| f64::from(w[row]));
+                    let value = f64::from(value_at(row));
+                    for a in 0..k {
+                        local[a] += weight * f64::from(factors[a]) * value;
+                    }
+                    local
+                },
+            )
+            .reduce(
+                || vec![0.0_f64; k],
+                |mut left, right| {
+                    for (left_value, right_value) in left.iter_mut().zip(right) {
+                        *left_value += right_value;
+                    }
+                    left
+                },
+            );
         self.solve_cholesky(&rhs)
     }
 
@@ -185,6 +270,35 @@ fn cholesky_lower(mut matrix: Vec<f64>, k: usize) -> EngineResult<Vec<f64>> {
         }
     }
     Ok(matrix)
+}
+
+fn validate_exposure_shape(exposures: &FactorExposureMatrix) -> EngineResult<()> {
+    if exposures.row_count == 0 {
+        return Err(EngineError::ContractViolation(
+            "factor_exposures row_count must be greater than 0".to_string(),
+        ));
+    }
+    if exposures.factor_count == 0 {
+        return Err(EngineError::ContractViolation(
+            "factor_exposures factor_count must be greater than 0".to_string(),
+        ));
+    }
+    let expected_len = exposures
+        .row_count
+        .checked_mul(exposures.factor_count)
+        .ok_or_else(|| {
+            EngineError::ContractViolation(
+                "factor_exposures row_count * factor_count overflow".to_string(),
+            )
+        })?;
+    if exposures.values.len() != expected_len {
+        return Err(EngineError::ContractViolation(format!(
+            "factor_exposures values length {} does not match row_count * factor_count {}",
+            exposures.values.len(),
+            expected_len
+        )));
+    }
+    Ok(())
 }
 
 #[allow(dead_code)]

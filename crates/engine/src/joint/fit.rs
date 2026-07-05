@@ -165,10 +165,14 @@ fn fit_joint_inner(
                 let projector = crate::FactorProjector::new(exposures, None, cfg.ridge_lambda)
                     .map_err(|err| format!("pre_target projector: {err:?}"))?;
                 let mut projected: Vec<Vec<f32>> = Vec::with_capacity(n_outputs);
+                let mut projection_scratch: Vec<f32> = Vec::with_capacity(n_rows);
                 for tg in targets_per_output {
                     let mut owned = tg.clone();
                     projector
-                        .residualize_values_in_place(&mut owned)
+                        .residualize_values_in_place_with_scratch(
+                            &mut owned,
+                            &mut projection_scratch,
+                        )
                         .map_err(|err| format!("pre_target residualize: {err:?}"))?;
                     projected.push(owned);
                 }
@@ -469,9 +473,10 @@ fn fit_joint_inner(
         // so the joint GOSS scorer (which mutates `grads_per_output`) and
         // the histogram builder both see projected residuals.
         if let Some(projector) = &gradient_projector {
+            let mut projection_scratch: Vec<f32> = Vec::with_capacity(n_rows);
             for buf in grads_per_output.iter_mut() {
                 projector
-                    .project_gradient_pairs_in_place(buf)
+                    .project_gradient_pairs_in_place_with_scratch(buf, &mut projection_scratch)
                     .map_err(|err| format!("per_round_gradient projection: {err:?}"))?;
             }
         }
