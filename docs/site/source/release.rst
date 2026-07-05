@@ -24,9 +24,12 @@ behavior and public prediction contracts. There is no artifact format change.
 - **Factor exposure preprocessing.** Estimators accept
   ``factor_exposure_transform="none" | "center" | "standardize"`` to preprocess
   fit-time ``factor_exposures`` before projection and split-penalty
-  calculations. Fitted estimators expose ``factor_exposure_diagnostics_`` with
-  the selected transform, training-column means and standard deviations, and
-  post-fit prediction exposure summaries.
+  calculations. Active ``split_penalty`` now defaults to effective
+  ``"standardize"`` preprocessing because its penalty scale depends on exposure
+  units; other neutralization modes still default to no transform. Fitted
+  estimators expose ``factor_exposure_diagnostics_`` with the selected
+  transform, training-column means and standard deviations, and post-fit
+  prediction exposure summaries.
 
 - **Package version surface.** ``alloygbm.__version__`` is now exported from
   installed package metadata.

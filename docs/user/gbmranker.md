@@ -65,7 +65,8 @@ regularization, etc.). This includes:
   neutralization. `neutralization="pre_target"` is rejected for rankers because
   target residualization is not well-defined for ranking relevance.
   `factor_exposure_transform="center"` / `"standardize"` may be used to
-  preprocess exposure columns before projection. See
+  preprocess exposure columns before projection; active `split_penalty`
+  defaults to effective `"standardize"` preprocessing. See
   [GBMRegressor — Factor-Neutral Boosting](gbmregressor.md#factor-neutral-boosting).
 - `leaf_model="linear"` for piecewise-linear leaves (see
   [GBMRegressor — Piecewise-Linear Leaves](gbmregressor.md#piecewise-linear-leaves)).
