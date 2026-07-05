@@ -27,7 +27,7 @@ use arena::{
     BIN_HEAVY_THRESHOLD, HistogramArena, HistogramKernelPath, PARALLEL_TILE_WORKLOAD_THRESHOLD,
     SMALL_TILE_WORKLOAD_THRESHOLD, TINY_NODE_ROW_THRESHOLD,
 };
-use factor_split::{FactorSplitCandidate, FactorSplitScratch, factor_split_penalty_for_candidate};
+use factor_split::FactorSplitScratch;
 use split_helpers::{
     GainStrategy, MissingDirectionCandidate, ScalarSideStats, apply_feature_weight,
     categorical_bitset_for_prefix, categorical_bitset_for_prefix_into, goes_left_for_split,
@@ -1156,6 +1156,16 @@ impl CpuBackend {
         let mut left_count = 0_u32;
         let mut factor_scratch =
             factor_context.map(|ctx| FactorSplitScratch::new(ctx.exposures.factor_count));
+        if let (Some(ctx), Some(scratch)) = (factor_context, factor_scratch.as_mut()) {
+            let sorted_category_bins: Vec<u16> =
+                categories.iter().map(|category| category.0).collect();
+            scratch.prepare_categorical_prefix(
+                ctx,
+                feature_histogram.feature_index as usize,
+                &sorted_category_bins,
+                missing_bin_idx,
+            );
+        }
 
         // Try splits: first k categories go left, rest go right (k = 1..len-1).
         for k in 0..categories.len() - 1 {
@@ -1164,6 +1174,15 @@ impl CpuBackend {
             left_hess += h;
             left_grad_sq += q;
             left_count += c;
+            if let Some(scratch) = factor_scratch.as_mut() {
+                scratch.add_categorical_prefix_bin_to_left(k);
+                categorical_bitset_for_prefix_into(
+                    num_categories,
+                    &categories,
+                    k,
+                    &mut scratch.categorical_bitset,
+                );
+            }
 
             let right_grad = nm_total_grad - left_grad;
             let right_hess = nm_total_hess - left_hess;
@@ -1279,28 +1298,15 @@ impl CpuBackend {
                 };
 
                 if let (Some(ctx), Some(scratch)) = (factor_context, factor_scratch.as_mut()) {
-                    categorical_bitset_for_prefix_into(
-                        num_categories,
-                        &categories,
-                        k,
-                        &mut scratch.categorical_bitset,
-                    );
-                    let bitset = std::mem::take(&mut scratch.categorical_bitset);
                     let left_leaf_value = -left_grad_for_gain / left_denom;
                     let right_leaf_value = -right_grad_for_gain / right_denom;
-                    gain -= factor_split_penalty_for_candidate(
-                        ctx,
-                        scratch,
-                        FactorSplitCandidate {
-                            feature_index: feature_histogram.feature_index,
-                            threshold_bin: 0,
-                            default_left: candidate.default_left,
-                            categorical_bitset: Some(&bitset),
-                            left_leaf_value,
-                            right_leaf_value,
-                        },
+                    gain -= scratch.categorical_prefix_penalty(
+                        candidate.default_left,
+                        left_leaf_value,
+                        right_leaf_value,
+                        ctx.factor_penalty,
+                        ctx.row_indices.len(),
                     );
-                    scratch.categorical_bitset = bitset;
                 }
 
                 if !gain.is_finite() {
