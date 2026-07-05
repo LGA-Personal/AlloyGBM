@@ -961,6 +961,40 @@ def test_joint_split_penalty_changes_predictions():
     assert np.max(np.abs(baseline - neutralized)) > 1e-3
 
 
+def test_joint_factor_diagnostics_report_post_fit_prediction_exposure():
+    """Joint neutralization diagnostics include F^T prediction exposure per label."""
+    rng = np.random.default_rng(621)
+    X = rng.standard_normal((36, 3)).astype(np.float32)
+    y = rng.standard_normal((36, 2)).astype(np.float32)
+    fe = X[:, 0:1] + np.float32(5.0)
+    m = MultiLabelGBMRanker(
+        n_estimators=3,
+        multi_label_mode="joint",
+        ranking_objective="squared_error",
+        neutralization="per_round_gradient",
+        factor_exposure_transform="center",
+    )
+    m.fit(X, y, factor_exposures=fe)
+
+    diagnostics = m.factor_exposure_diagnostics_
+    assert diagnostics is not None
+    preds = m.predict(X)
+    transformed_fe = fe - np.mean(fe, axis=0, dtype=np.float32)
+    expected = transformed_fe.T @ preds
+    assert "prediction_exposure_dot" in diagnostics
+    assert "prediction_exposure_abs" in diagnostics
+    assert "prediction_exposure_l2" in diagnostics
+    np.testing.assert_allclose(
+        diagnostics["prediction_exposure_dot"], expected, rtol=1e-5, atol=1e-5
+    )
+    np.testing.assert_allclose(
+        diagnostics["prediction_exposure_abs"], np.abs(expected), rtol=1e-5, atol=1e-5
+    )
+    assert diagnostics["prediction_exposure_l2"] == pytest.approx(
+        float(np.linalg.norm(expected.astype(np.float64))), rel=1e-5, abs=1e-5
+    )
+
+
 def test_joint_pre_target_rejects_ranking_objectives():
     """pre_target requires squared_error per output; rank:* must be rejected."""
     rng = np.random.default_rng(63)
