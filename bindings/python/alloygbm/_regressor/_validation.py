@@ -21,7 +21,7 @@ class _ValidationMixin:
             self.factor_exposure_diagnostics_ = None
             if factor_exposures is not None:
                 raise ValueError("factor_exposures were provided but neutralization='none'")
-            return None, 0, 0
+            return None, 0, 0, None
         if factor_exposures is None:
             raise ValueError("factor_exposures are required when neutralization is active")
         import numpy as np
@@ -55,7 +55,36 @@ class _ValidationMixin:
             "means": [float(v) for v in means],
             "stds": [float(v) for v in stds],
         }
-        return arr.ravel().tolist(), int(arr.shape[0]), int(arr.shape[1])
+        return arr.ravel().tolist(), int(arr.shape[0]), int(arr.shape[1]), arr
+
+    def _record_post_fit_factor_exposure_diagnostics(
+        self,
+        X,
+        transformed_factor_exposures,
+    ) -> None:
+        diagnostics = getattr(self, "factor_exposure_diagnostics_", None)
+        if diagnostics is None or transformed_factor_exposures is None:
+            return
+        # Multiclass models have no single 1-D raw prediction vector: the base
+        # regressor predictor raises for them, and per-factor scalar exposure is
+        # not well-defined for a K-way softmax model. Post-fit prediction
+        # exposure diagnostics are scoped to scalar estimators (regressor,
+        # binary classifier, ranker) plus joint MultiLabelGBMRanker, so skip
+        # multiclass here rather than letting the predict call break fit().
+        if getattr(self, "_is_multiclass", False):
+            return
+        import numpy as np
+
+        # Use the base regressor predictor so classifier/ranker overrides do
+        # not change the fitted raw prediction vector used for exposure math.
+        predictions = np.asarray(GBMRegressor.predict(self, X), dtype=np.float64)
+        if predictions.ndim != 1 or predictions.shape[0] != transformed_factor_exposures.shape[0]:
+            return
+        exposures = np.asarray(transformed_factor_exposures, dtype=np.float64)
+        exposure_dot = exposures.T @ predictions
+        diagnostics["prediction_exposure_dot"] = [float(v) for v in exposure_dot]
+        diagnostics["prediction_exposure_abs"] = [float(abs(v)) for v in exposure_dot]
+        diagnostics["prediction_exposure_l2"] = float(np.linalg.norm(exposure_dot))
 
     def _resolve_monotone_constraints(self, feature_count: int) -> list[int]:
         """Resolve monotone_constraints to a dense list[int] for the bridge."""

@@ -250,7 +250,10 @@ When `factor_exposure_transform="center"`, each factor column is mean-centered.
 When `"standardize"`, each column is centered and divided by its population
 standard deviation; near-constant columns use a safe scale of `1.0`.
 The fitted estimator records the training-column `means` and `stds` in
-`factor_exposure_diagnostics_`.
+`factor_exposure_diagnostics_`. After fitting, the same diagnostics dict also
+reports post-fit prediction exposure against the transformed fit-time factors:
+`prediction_exposure_dot` (`F^T y_hat`, per factor), `prediction_exposure_abs`,
+and `prediction_exposure_l2`.
 
 Mode semantics:
 
@@ -279,9 +282,14 @@ boosting round:
 g_perp = g - F (F^T W F + lambda I)^-1 F^T W g
 ```
 
-Hessians are unchanged. This mode is supported for regression, binary
-classification, multiclass, and ranking. For multiclass, each class-gradient
-column is projected independently against the same factor projector.
+Hessians are unchanged. For squared error, where the Hessian is constant, this
+is an exact gradient-space residualization. For binary, GLM, ranking, and other
+non-constant-Hessian objectives, the Newton numerator is projected while the
+denominator remains the objective Hessian, so leaf values are not simply the
+projection of an unneutralized model's leaf values. This mode is supported for
+regression, binary classification, multiclass, and ranking. For multiclass,
+each class-gradient column is projected independently against the same factor
+projector.
 
 `neutralization="split_penalty"` includes per-round gradient projection and
 subtracts a factor-load penalty from split gain:
@@ -466,7 +474,11 @@ After `fit(...)`, `GBMRegressor` may expose:
 - `factor_exposure_diagnostics_`
   - `None` unless neutralization is active. Otherwise a dict with the selected
     `transform` plus per-factor training `means` and `stds` used by
-    `factor_exposure_transform`.
+    `factor_exposure_transform`. After fit it also includes
+    `prediction_exposure_dot`, `prediction_exposure_abs`, and
+    `prediction_exposure_l2`, computed from transformed fit-time exposures and
+    fitted training predictions. Joint multi-label models report the dot/abs
+    entries as factor-by-label matrices.
 - `stop_reason_` / `rounds_completed_`
   - Engine's early-stop reason and actual committed round count.
 

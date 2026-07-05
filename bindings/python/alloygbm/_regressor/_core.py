@@ -1391,6 +1391,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             factor_exposure_values,
             factor_exposure_row_count,
             factor_exposure_factor_count,
+            transformed_factor_exposures,
         ) = self._prepare_factor_exposures(factor_exposures, row_count)
 
         if init_model is not None and hasattr(init_model, "_n_features_in"):
@@ -1738,7 +1739,13 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                         else None
                     ),
                 )
-                return self._finalize_training_result(native_result, input_adaptation_seconds, feature_count=feature_count)
+                return self._finalize_training_result(
+                    native_result,
+                    input_adaptation_seconds,
+                    feature_count=feature_count,
+                    fit_X=X,
+                    transformed_factor_exposures=transformed_factor_exposures,
+                )
             except (ImportError, AttributeError):
                 pass  # Fall through to list-based path
             except Exception:
@@ -1768,6 +1775,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                 factor_exposure_values=factor_exposure_values,
                 factor_exposure_row_count=factor_exposure_row_count,
                 factor_exposure_factor_count=factor_exposure_factor_count,
+                transformed_factor_exposures=transformed_factor_exposures,
             )
 
         if dense_training_payload is not None:
@@ -2029,6 +2037,9 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         }
         self._record_fit_neutralization_contract()
         self._is_fitted = True
+        self._record_post_fit_factor_exposure_diagnostics(
+            X, transformed_factor_exposures
+        )
         return self
 
     def _finalize_training_result(
@@ -2036,6 +2047,8 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         native_result: object,
         input_adaptation_seconds: float,
         feature_count: int | None = None,
+        fit_X: object | None = None,
+        transformed_factor_exposures: object | None = None,
     ) -> "GBMRegressor":
         self._apply_continuous_binning_metadata(native_result.continuous_binning_metadata)
         if feature_count is not None:
@@ -2078,6 +2091,10 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         }
         self._record_fit_neutralization_contract()
         self._is_fitted = True
+        if fit_X is not None:
+            self._record_post_fit_factor_exposure_diagnostics(
+                fit_X, transformed_factor_exposures
+            )
         return self
 
     def _fit_with_legacy_native_bridge(
@@ -2096,6 +2113,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         factor_exposure_values: list[float] | None,
         factor_exposure_row_count: int,
         factor_exposure_factor_count: int,
+        transformed_factor_exposures: object | None,
     ) -> "GBMRegressor":
         if eval_set is not None:
             raise RuntimeError(
@@ -2469,6 +2487,9 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         }
         self._record_fit_neutralization_contract()
         self._is_fitted = True
+        self._record_post_fit_factor_exposure_diagnostics(
+            X, transformed_factor_exposures
+        )
         return self
 
     def predict(self, X: object) -> list[float]:

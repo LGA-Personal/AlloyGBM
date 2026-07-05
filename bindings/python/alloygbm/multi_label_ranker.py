@@ -698,6 +698,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
         fe_values: list[float] | None = None
         fe_row_count: int | None = None
         fe_factor_count: int | None = None
+        transformed_fe_arr: np.ndarray | None = None
         if factor_exposures is not None:
             fe_arr = np.ascontiguousarray(factor_exposures, dtype=np.float32)
             if fe_arr.ndim != 2:
@@ -730,6 +731,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
                 "means": [float(v) for v in means],
                 "stds": [float(v) for v in stds],
             }
+            transformed_fe_arr = fe_arr
             fe_values = fe_arr.reshape(-1).tolist()
             fe_row_count = int(fe_arr.shape[0])
             fe_factor_count = int(fe_arr.shape[1])
@@ -898,6 +900,22 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
         self.n_labels_ = n_labels
         self.rounds_completed_ = int(rounds_completed)
         self._is_fitted = True
+        if (
+            transformed_fe_arr is not None
+            and self.factor_exposure_diagnostics_ is not None
+        ):
+            preds = np.asarray(self.predict(x_arr), dtype=np.float64)
+            if preds.ndim == 2 and preds.shape[0] == transformed_fe_arr.shape[0]:
+                exposure_dot = np.asarray(transformed_fe_arr, dtype=np.float64).T @ preds
+                self.factor_exposure_diagnostics_["prediction_exposure_dot"] = [
+                    [float(v) for v in row] for row in exposure_dot
+                ]
+                self.factor_exposure_diagnostics_["prediction_exposure_abs"] = [
+                    [float(abs(v)) for v in row] for row in exposure_dot
+                ]
+                self.factor_exposure_diagnostics_["prediction_exposure_l2"] = float(
+                    np.linalg.norm(exposure_dot)
+                )
 
     # ── Prediction ─────────────────────────────────────────────────────
 

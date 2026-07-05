@@ -86,6 +86,66 @@ class FactorNeutralizationTests(unittest.TestCase):
         self.assertAlmostEqual(diagnostics["means"][0], float(np.mean(shifted[:, 0])))
         self.assertAlmostEqual(diagnostics["stds"][0], float(np.std(shifted[:, 0])))
 
+    def test_factor_diagnostics_report_post_fit_prediction_exposure(self):
+        x, y, f = factor_data()
+        shifted = f + np.float32(10.0)
+        model = GBMRegressor(
+            neutralization="per_round_gradient",
+            factor_exposure_transform="center",
+            n_estimators=3,
+            seed=8,
+        )
+        model.fit(x, y, factor_exposures=shifted)
+
+        diagnostics = model.factor_exposure_diagnostics_
+        self.assertIsNotNone(diagnostics)
+        predictions = np.asarray(model.predict(x), dtype=np.float32)
+        transformed_f = shifted - np.mean(shifted, axis=0, dtype=np.float32)
+        expected_dot = transformed_f.T @ predictions
+        self.assertIn("prediction_exposure_dot", diagnostics)
+        self.assertIn("prediction_exposure_abs", diagnostics)
+        self.assertIn("prediction_exposure_l2", diagnostics)
+        np.testing.assert_allclose(
+            diagnostics["prediction_exposure_dot"],
+            expected_dot.astype(np.float64),
+            rtol=1e-5,
+            atol=1e-5,
+        )
+        np.testing.assert_allclose(
+            diagnostics["prediction_exposure_abs"],
+            np.abs(expected_dot).astype(np.float64),
+            rtol=1e-5,
+            atol=1e-5,
+        )
+        self.assertAlmostEqual(
+            diagnostics["prediction_exposure_l2"],
+            float(np.linalg.norm(expected_dot.astype(np.float64))),
+            places=5,
+        )
+
+    def test_multiclass_neutralization_fit_skips_prediction_exposure(self):
+        # Multiclass has no single 1-D raw prediction vector (the base regressor
+        # predictor raises), so post-fit exposure diagnostics must be skipped
+        # rather than break fit(). Guards a regression where fit() crashed with
+        # "use predict_batch_dense_multiclass for multi-class models".
+        rng = np.random.default_rng(11)
+        x = rng.standard_normal((90, 4)).astype(np.float32)
+        f = (x[:, 0:1] + np.float32(5.0)).astype(np.float32)
+        y = rng.integers(0, 3, size=90)
+        model = GBMClassifier(
+            neutralization="per_round_gradient",
+            factor_exposure_transform="center",
+            n_estimators=4,
+            seed=3,
+        )
+        model.fit(x, y, factor_exposures=f)  # must not raise
+        self.assertTrue(model._is_multiclass)
+        diagnostics = model.factor_exposure_diagnostics_
+        self.assertIsNotNone(diagnostics)
+        # Transform metadata is still recorded; per-prediction exposure is not.
+        self.assertIn("means", diagnostics)
+        self.assertNotIn("prediction_exposure_dot", diagnostics)
+
     def test_factor_exposures_are_standardized_when_requested(self):
         x, y, f = factor_data()
         scaled = np.column_stack([f[:, 0] * 3.0 + 5.0, np.ones(len(f), dtype=np.float32)])
