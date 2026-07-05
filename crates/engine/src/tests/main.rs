@@ -1020,6 +1020,36 @@ fn factor_projector_weighted_projection_orthogonalizes_values_and_gradients() {
 }
 
 #[test]
+fn factor_projector_reuses_residual_scratch_for_values_and_gradients() {
+    let exposures = FactorExposureMatrix::new(4, 1, vec![1.0, -1.0, 2.0, -2.0]).unwrap();
+    let projector = FactorProjector::new(&exposures, None, 1e-6).unwrap();
+    let mut scratch = Vec::with_capacity(exposures.row_count);
+
+    let mut values = vec![2.0, -1.0, 3.0, -2.0];
+    projector
+        .residualize_values_in_place_with_scratch(&mut values, &mut scratch)
+        .unwrap();
+    let scratch_ptr_after_values = scratch.as_ptr();
+    assert_eq!(scratch.len(), exposures.row_count);
+
+    let mut gradients = values
+        .iter()
+        .map(|value| GradientPair {
+            grad: *value,
+            hess: 1.0,
+        })
+        .collect::<Vec<_>>();
+    projector
+        .project_gradient_pairs_in_place_with_scratch(&mut gradients, &mut scratch)
+        .unwrap();
+
+    assert_eq!(scratch.as_ptr(), scratch_ptr_after_values);
+    assert_eq!(scratch.len(), exposures.row_count);
+    assert!(gradients.iter().all(|gradient| gradient.grad.is_finite()));
+    assert!(gradients.iter().all(|gradient| gradient.hess == 1.0));
+}
+
+#[test]
 fn factor_projector_rejects_non_finite_residualized_values() {
     let exposures = FactorExposureMatrix::new(2, 1, vec![1.0, 2.0]).unwrap();
     let projector = FactorProjector::new(&exposures, None, 1e-6).unwrap();
