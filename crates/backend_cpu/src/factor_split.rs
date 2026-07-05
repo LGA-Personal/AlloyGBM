@@ -486,9 +486,9 @@ mod tests {
         let mut row_scan_scratch = FactorSplitScratch::new(exposures.factor_count);
         let mut bitset = vec![0_u8; 1];
 
-        for prefix_index in 0..sorted_categories.len() - 1 {
+        let prefix_count = sorted_categories.len() - 1;
+        for (prefix_index, &bin) in sorted_categories.iter().enumerate().take(prefix_count) {
             prefix_scratch.add_categorical_prefix_bin_to_left(prefix_index);
-            let bin = sorted_categories[prefix_index];
             bitset[(bin / 8) as usize] |= 1 << (bin % 8);
 
             for default_left in [true, false] {
