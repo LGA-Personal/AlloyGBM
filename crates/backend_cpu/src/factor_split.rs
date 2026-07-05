@@ -6,7 +6,9 @@ pub(crate) struct FactorSplitScratch {
     missing_factor_sums: Vec<f32>,
     non_missing_factor_sums: Vec<f32>,
     bin_factor_sums: Vec<f32>,
+    categorical_bin_order: Vec<usize>,
     numeric_scan_limit: usize,
+    categorical_scan_limit: usize,
     pub(crate) categorical_bitset: Vec<u8>,
 }
 
@@ -18,11 +20,14 @@ impl FactorSplitScratch {
             missing_factor_sums: vec![0.0; factor_count],
             non_missing_factor_sums: vec![0.0; factor_count],
             bin_factor_sums: Vec::new(),
+            categorical_bin_order: Vec::new(),
             numeric_scan_limit: 0,
+            categorical_scan_limit: 0,
             categorical_bitset: Vec::new(),
         }
     }
 
+    #[cfg(test)]
     fn clear_factor_sums(&mut self) {
         self.left_factor_sums.fill(0.0);
         self.right_factor_sums.fill(0.0);
@@ -88,7 +93,92 @@ impl FactorSplitScratch {
         }
     }
 
-    pub(crate) fn numeric_prefix_penalty(
+    pub(crate) fn prepare_categorical_prefix(
+        &mut self,
+        context: &FactorSplitContext<'_>,
+        feature_index: usize,
+        sorted_category_bins: &[u16],
+        missing_bin: usize,
+    ) {
+        let factor_count = context.exposures.factor_count;
+        self.categorical_scan_limit = sorted_category_bins.len();
+        self.left_factor_sums.resize(factor_count, 0.0);
+        self.right_factor_sums.resize(factor_count, 0.0);
+        self.missing_factor_sums.resize(factor_count, 0.0);
+        self.non_missing_factor_sums.resize(factor_count, 0.0);
+        self.bin_factor_sums
+            .resize(sorted_category_bins.len().saturating_mul(factor_count), 0.0);
+
+        self.left_factor_sums.fill(0.0);
+        self.right_factor_sums.fill(0.0);
+        self.missing_factor_sums.fill(0.0);
+        self.non_missing_factor_sums.fill(0.0);
+        self.bin_factor_sums.fill(0.0);
+
+        let order_map_len = sorted_category_bins
+            .iter()
+            .copied()
+            .max()
+            .map(|bin| bin as usize + 1)
+            .unwrap_or(0);
+        self.categorical_bin_order.resize(order_map_len, usize::MAX);
+        self.categorical_bin_order.fill(usize::MAX);
+        for (order_index, &bin) in sorted_category_bins.iter().enumerate() {
+            let bin = bin as usize;
+            if bin < self.categorical_bin_order.len() {
+                self.categorical_bin_order[bin] = order_index;
+            }
+        }
+
+        if context.factor_penalty == 0.0 || sorted_category_bins.is_empty() {
+            return;
+        }
+
+        let feature_count = context.binned_matrix.feature_count;
+        for &row_index in context.row_indices {
+            let row_index = row_index as usize;
+            let bin = context
+                .binned_matrix
+                .row_bin(row_index * feature_count + feature_index) as usize;
+            let exposure_start = row_index * factor_count;
+            let exposure_row =
+                &context.exposures.values[exposure_start..exposure_start + factor_count];
+            if bin == missing_bin {
+                for (sum, exposure) in self.missing_factor_sums.iter_mut().zip(exposure_row) {
+                    *sum += *exposure;
+                }
+                continue;
+            }
+
+            for (sum, exposure) in self.non_missing_factor_sums.iter_mut().zip(exposure_row) {
+                *sum += *exposure;
+            }
+            if bin < self.categorical_bin_order.len() {
+                let order_index = self.categorical_bin_order[bin];
+                if order_index != usize::MAX {
+                    let bin_base = order_index * factor_count;
+                    for (factor_index, exposure) in
+                        exposure_row.iter().enumerate().take(factor_count)
+                    {
+                        self.bin_factor_sums[bin_base + factor_index] += *exposure;
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn add_categorical_prefix_bin_to_left(&mut self, category_order_index: usize) {
+        if category_order_index >= self.categorical_scan_limit {
+            return;
+        }
+        let factor_count = self.left_factor_sums.len();
+        let bin_base = category_order_index * factor_count;
+        for factor_index in 0..factor_count {
+            self.left_factor_sums[factor_index] += self.bin_factor_sums[bin_base + factor_index];
+        }
+    }
+
+    fn prefix_penalty(
         &self,
         default_left: bool,
         left_leaf_value: f32,
@@ -119,8 +209,43 @@ impl FactorSplitScratch {
         }
         factor_penalty * norm_sq / row_count.max(1) as f32
     }
+
+    pub(crate) fn numeric_prefix_penalty(
+        &self,
+        default_left: bool,
+        left_leaf_value: f32,
+        right_leaf_value: f32,
+        factor_penalty: f32,
+        row_count: usize,
+    ) -> f32 {
+        self.prefix_penalty(
+            default_left,
+            left_leaf_value,
+            right_leaf_value,
+            factor_penalty,
+            row_count,
+        )
+    }
+
+    pub(crate) fn categorical_prefix_penalty(
+        &self,
+        default_left: bool,
+        left_leaf_value: f32,
+        right_leaf_value: f32,
+        factor_penalty: f32,
+        row_count: usize,
+    ) -> f32 {
+        self.prefix_penalty(
+            default_left,
+            left_leaf_value,
+            right_leaf_value,
+            factor_penalty,
+            row_count,
+        )
+    }
 }
 
+#[cfg(test)]
 pub(crate) struct FactorSplitCandidate<'a> {
     pub(crate) feature_index: u32,
     pub(crate) threshold_bin: u16,
@@ -130,6 +255,7 @@ pub(crate) struct FactorSplitCandidate<'a> {
     pub(crate) right_leaf_value: f32,
 }
 
+#[cfg(test)]
 pub(crate) fn factor_split_penalty_for_candidate(
     context: &FactorSplitContext<'_>,
     scratch: &mut FactorSplitScratch,
@@ -181,6 +307,7 @@ pub(crate) fn factor_split_penalty_for_candidate(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn factor_split_penalty(
     left_factor_sums: &[f32],
     right_factor_sums: &[f32],
@@ -337,5 +464,58 @@ mod tests {
             scratch.numeric_prefix_penalty(true, 0.25, -0.5, 0.0, rows.len()),
             0.0
         );
+    }
+
+    #[test]
+    fn categorical_prefix_penalty_matches_row_scan_for_each_prefix_and_missing_direction() {
+        let (binned, exposures, rows) = factor_fixture();
+        let context = FactorSplitContext {
+            binned_matrix: &binned,
+            exposures: &exposures,
+            row_indices: &rows,
+            factor_penalty: 0.75,
+        };
+        let sorted_categories = [2_u16, 0, 3, 1];
+        let mut prefix_scratch = FactorSplitScratch::new(exposures.factor_count);
+        prefix_scratch.prepare_categorical_prefix(
+            &context,
+            0,
+            &sorted_categories,
+            binned.missing_bin() as usize,
+        );
+        let mut row_scan_scratch = FactorSplitScratch::new(exposures.factor_count);
+        let mut bitset = vec![0_u8; 1];
+
+        for prefix_index in 0..sorted_categories.len() - 1 {
+            prefix_scratch.add_categorical_prefix_bin_to_left(prefix_index);
+            let bin = sorted_categories[prefix_index];
+            bitset[(bin / 8) as usize] |= 1 << (bin % 8);
+
+            for default_left in [true, false] {
+                let slow = factor_split_penalty_for_candidate(
+                    &context,
+                    &mut row_scan_scratch,
+                    FactorSplitCandidate {
+                        feature_index: 0,
+                        threshold_bin: 0,
+                        default_left,
+                        categorical_bitset: Some(&bitset),
+                        left_leaf_value: 0.25,
+                        right_leaf_value: -0.5,
+                    },
+                );
+                let fast = prefix_scratch.categorical_prefix_penalty(
+                    default_left,
+                    0.25,
+                    -0.5,
+                    context.factor_penalty,
+                    context.row_indices.len(),
+                );
+                assert!(
+                    (slow - fast).abs() < 1e-6,
+                    "prefix_index={prefix_index} default_left={default_left} slow={slow} fast={fast}"
+                );
+            }
+        }
     }
 }
