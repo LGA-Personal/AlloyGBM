@@ -1,3 +1,4 @@
+use super::fit::compute_joint_gradients;
 use super::helpers::effective_neutralization_config;
 use super::*;
 use alloygbm_core::{BinnedMatrix, GradientPair, TrainParams, TreeGrowth};
@@ -525,6 +526,34 @@ fn joint_objective_new_variants_initial_predictions_and_gradients() {
 }
 
 #[test]
+fn joint_compute_gradients_helper_preserves_output_order_and_errors() {
+    let predictions = vec![vec![0.0_f32, 0.5, 1.0], vec![1.0_f32, 1.5, 2.0]];
+    let targets = vec![vec![0.0_f32, 1.0, 2.0], vec![1.0_f32, 2.0, 3.0]];
+    let target_refs: Vec<&[f32]> = targets.iter().map(Vec::as_slice).collect();
+    let objectives = vec![JointObjective::SquaredError, JointObjective::SquaredError];
+
+    let gradients =
+        compute_joint_gradients(&predictions, &target_refs, &objectives, None).expect("gradients");
+    assert_eq!(gradients.len(), 2);
+    assert_eq!(gradients[0].len(), 3);
+    assert_eq!(gradients[1].len(), 3);
+    assert!((gradients[0][1].grad + 0.5).abs() < 1e-6);
+    assert!((gradients[1][1].grad + 0.5).abs() < 1e-6);
+
+    let err = compute_joint_gradients(
+        &predictions,
+        &target_refs,
+        &[JointObjective::SquaredError, JointObjective::RankNdcg],
+        None,
+    )
+    .expect_err("ranking objective should require groups");
+    assert!(
+        err.contains("rank:ndcg objective requires group identifiers"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn joint_end_to_end_fit_predict_roundtrip_through_artifact() {
     // 8 rows, 1 feature with bins 0/4, 2 outputs.
     // Output 0 wants left=-1, right=+1; output 1 wants left=+0.5, right=-0.5
@@ -956,6 +985,111 @@ fn joint_row_subsample_changes_trees_deterministically_per_seed() {
         (leaf_a.0[0] - leaf_full.0[0]).abs() > 1e-6 || (leaf_a.1[0] - leaf_full.1[0]).abs() > 1e-6,
         "row_subsample=0.5 should produce different leaves from row_subsample=1.0"
     );
+}
+
+#[test]
+fn joint_row_subsample_full_walk_predictions_do_not_diverge() {
+    // Special-modes review 2026-07-02 requested the same row_subsample
+    // divergence A/B on the joint path that caught the scalar trainer bug.
+    // The joint trainer is expected to fit each sampled tree on the sampled
+    // root rows, then walk the accepted tree over every training row when
+    // updating subsequent-round predictions.
+    let n_rows = 1_200usize;
+    let feature_count = 6usize;
+    let mut bins: Vec<u8> = Vec::with_capacity(n_rows * feature_count);
+    for row in 0..n_rows {
+        for feature in 0..feature_count {
+            let value = ((row * 37 + feature * 19 + (row / 7) * 11) % 64) as u8;
+            bins.push(value);
+        }
+    }
+    let binned = BinnedMatrix::new(n_rows, feature_count, 63, bins).expect("binned");
+
+    let mut target_0 = Vec::with_capacity(n_rows);
+    let mut target_1 = Vec::with_capacity(n_rows);
+    for row in 0..n_rows {
+        let f0 = binned.bins[row * feature_count] as f32 / 63.0;
+        let f1 = binned.bins[row * feature_count + 1] as f32 / 63.0;
+        let f2 = binned.bins[row * feature_count + 2] as f32 / 63.0;
+        let f3 = binned.bins[row * feature_count + 3] as f32 / 63.0;
+        let noise = ((row as f32) * 0.173).sin() * 0.025;
+        target_0.push(1.5 * f0 - 0.8 * f1 + 0.25 * (4.0 * f2).sin() + noise);
+        target_1.push(-1.1 * f0 + 0.7 * f3 + 0.2 * (3.0 * f1).cos() - noise);
+    }
+    let targets_per_output = vec![target_0, target_1];
+
+    let params = TrainParams {
+        max_depth: 4,
+        min_data_in_leaf: 5,
+        lambda_l2: 1.0,
+        learning_rate: 0.08,
+        row_subsample: 0.5,
+        seed: 17,
+        ..TrainParams::default()
+    };
+    let summary = fit_joint_multi_output(
+        &params,
+        feature_count,
+        &binned,
+        &targets_per_output,
+        None,
+        &[JointObjective::SquaredError, JointObjective::SquaredError],
+        120,
+    )
+    .expect("fit");
+    assert_eq!(summary.rounds_completed, 120);
+
+    let bytes = summary.model.clone().to_artifact_bytes().expect("encode");
+    let predictor =
+        JointPredictor::from_artifact_bytes(&bytes, summary.baselines.clone()).expect("load");
+    let mut preds_per_output = vec![Vec::with_capacity(n_rows), Vec::with_capacity(n_rows)];
+    for row in 0..n_rows {
+        let features: Vec<f32> = (0..feature_count)
+            .map(|feature| binned.bins[row * feature_count + feature] as f32)
+            .collect();
+        let pred = predictor.predict_row(&features);
+        preds_per_output[0].push(pred[0]);
+        preds_per_output[1].push(pred[1]);
+    }
+
+    let rmse = |actual: &[f32], predicted: &[f32]| -> f32 {
+        (actual
+            .iter()
+            .zip(predicted.iter())
+            .map(|(a, p)| {
+                let err = a - p;
+                err * err
+            })
+            .sum::<f32>()
+            / actual.len() as f32)
+            .sqrt()
+    };
+    for output in 0..2 {
+        let actual = &targets_per_output[output];
+        let predicted = &preds_per_output[output];
+        let mean = actual.iter().sum::<f32>() / actual.len() as f32;
+        let baseline = vec![mean; actual.len()];
+        let baseline_rmse = rmse(actual, &baseline);
+        let train_rmse = rmse(actual, predicted);
+        assert!(
+            train_rmse < baseline_rmse * 0.55,
+            "joint row_subsample output {output} should beat the mean predictor; train_rmse={train_rmse:.5}, baseline_rmse={baseline_rmse:.5}"
+        );
+
+        let target_min = actual.iter().copied().fold(f32::INFINITY, f32::min);
+        let target_max = actual.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let pred_min = predicted.iter().copied().fold(f32::INFINITY, f32::min);
+        let pred_max = predicted.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let span = target_max - target_min;
+        assert!(
+            pred_min >= target_min - 0.25 * span,
+            "joint row_subsample output {output} undershot target range: pred_min={pred_min:.5}, target_min={target_min:.5}"
+        );
+        assert!(
+            pred_max <= target_max + 0.25 * span,
+            "joint row_subsample output {output} overshot target range: pred_max={pred_max:.5}, target_max={target_max:.5}"
+        );
+    }
 }
 
 #[test]

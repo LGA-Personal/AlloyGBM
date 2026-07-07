@@ -9,6 +9,7 @@ use alloygbm_core::{
     BinnedMatrix, Device, DroMetadataPayload, FactorExposureMatrix, GradientPair, LeafValue,
     ModelMetadata, TrainParams, TreeGrowth,
 };
+use rayon::prelude::*;
 
 use crate::{TrainedModel, TrainedStump, encode_tree_node_id};
 
@@ -19,6 +20,36 @@ use super::helpers::{
     walk_tree_into_predictions,
 };
 use super::types::{JointMorphContext, JointObjective, JointTrainingSummary, JointWarmStartState};
+
+pub(super) fn compute_joint_gradients(
+    predictions: &[Vec<f32>],
+    effective_targets: &[&[f32]],
+    per_output_objective: &[JointObjective],
+    group_id: Option<&[u32]>,
+) -> Result<Vec<Vec<GradientPair>>, String> {
+    let n_outputs = predictions.len();
+    if effective_targets.len() != n_outputs {
+        return Err(format!(
+            "effective_targets length {} != n_outputs {n_outputs}",
+            effective_targets.len()
+        ));
+    }
+    if per_output_objective.len() != n_outputs {
+        return Err(format!(
+            "per_output_objective length {} != n_outputs {n_outputs}",
+            per_output_objective.len()
+        ));
+    }
+
+    (0..n_outputs)
+        .into_par_iter()
+        .map(|k| {
+            per_output_objective[k]
+                .compute_gradients(&predictions[k], effective_targets[k], group_id)
+                .map_err(|err| format!("output {k}: {err}"))
+        })
+        .collect()
+}
 
 pub fn fit_joint_multi_output(
     params: &TrainParams,
@@ -457,16 +488,14 @@ fn fit_joint_inner(
                 Vec::new()
             };
 
-        // Compute per-output gradients on current predictions.
-        let mut grads_per_output: Vec<Vec<GradientPair>> = Vec::with_capacity(n_outputs);
-        for k in 0..n_outputs {
-            let g = per_output_objective[k].compute_gradients(
-                &predictions[k],
-                effective_targets[k],
-                group_id,
-            )?;
-            grads_per_output.push(g);
-        }
+        // Compute per-output gradients on current predictions. Each output's
+        // buffer is independent, so parallelize across K.
+        let mut grads_per_output = compute_joint_gradients(
+            &predictions,
+            &effective_targets,
+            per_output_objective,
+            group_id,
+        )?;
 
         // v0.10.6: per_round_gradient — project each per-output gradient
         // buffer through the factor projector. Applied BEFORE row sampling
