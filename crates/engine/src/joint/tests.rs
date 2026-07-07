@@ -528,7 +528,7 @@ fn joint_objective_new_variants_initial_predictions_and_gradients() {
 #[test]
 fn joint_compute_gradients_helper_preserves_output_order_and_errors() {
     let predictions = vec![vec![0.0_f32, 0.5, 1.0], vec![1.0_f32, 1.5, 2.0]];
-    let targets = vec![vec![0.0_f32, 1.0, 2.0], vec![1.0_f32, 2.0, 3.0]];
+    let targets = [vec![0.0_f32, 1.0, 2.0], vec![1.0_f32, 2.0, 3.0]];
     let target_refs: Vec<&[f32]> = targets.iter().map(Vec::as_slice).collect();
     let objectives = vec![JointObjective::SquaredError, JointObjective::SquaredError];
 
@@ -1042,7 +1042,7 @@ fn joint_row_subsample_full_walk_predictions_do_not_diverge() {
     let bytes = summary.model.clone().to_artifact_bytes().expect("encode");
     let predictor =
         JointPredictor::from_artifact_bytes(&bytes, summary.baselines.clone()).expect("load");
-    let mut preds_per_output = vec![Vec::with_capacity(n_rows), Vec::with_capacity(n_rows)];
+    let mut preds_per_output = [Vec::with_capacity(n_rows), Vec::with_capacity(n_rows)];
     for row in 0..n_rows {
         let features: Vec<f32> = (0..feature_count)
             .map(|feature| binned.bins[row * feature_count + feature] as f32)
