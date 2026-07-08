@@ -57,6 +57,8 @@ struct LinearLeafCompact {
     intercept: f32,
     weights: Vec<f32>,
     feature_indices: Vec<usize>,
+    feature_means: Vec<f32>,
+    feature_inv_stds: Vec<f32>,
 }
 
 impl LinearLeafCompact {
@@ -66,11 +68,18 @@ impl LinearLeafCompact {
     #[inline]
     fn eval(&self, features: &[f32]) -> f32 {
         let mut v = self.intercept;
-        for (w, &fi) in self.weights.iter().zip(self.feature_indices.iter()) {
+        for (slot, (w, &fi)) in self
+            .weights
+            .iter()
+            .zip(self.feature_indices.iter())
+            .enumerate()
+        {
             if fi < features.len() {
                 let x = features[fi];
-                if !x.is_nan() {
-                    v += w * x;
+                if x.is_finite() {
+                    let mean = self.feature_means.get(slot).copied().unwrap_or(0.0);
+                    let inv_std = self.feature_inv_stds.get(slot).copied().unwrap_or(1.0);
+                    v += w * (x - mean) * inv_std;
                 }
             }
         }
@@ -1159,6 +1168,8 @@ fn linear_leaf_to_compact(ll: &alloygbm_core::LinearLeaf) -> LinearLeafCompact {
         intercept: ll.intercept,
         weights: ll.weights.to_vec(),
         feature_indices: ll.regressor_features.iter().map(|&f| f as usize).collect(),
+        feature_means: ll.feature_means.to_vec(),
+        feature_inv_stds: ll.feature_inv_stds.to_vec(),
     }
 }
 

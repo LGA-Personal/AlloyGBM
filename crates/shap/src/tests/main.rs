@@ -1192,16 +1192,16 @@ fn linear_fixture_model(feature_baseline: Option<Vec<f32>>) -> TrainedModel {
         feature_count: 2,
         stumps: vec![TrainedStump {
             split: split_with_counts(0, 0, 1, 6, 4),
-            left_leaf_value: LeafValue::Linear(LinearLeaf {
-                intercept: 0.4,
-                weights: vec![0.7],
-                regressor_features: vec![1],
-            }),
-            right_leaf_value: LeafValue::Linear(LinearLeaf {
-                intercept: -0.2,
-                weights: vec![-0.3],
-                regressor_features: vec![1],
-            }),
+            left_leaf_value: LeafValue::Linear(LinearLeaf::identity_scaled(
+                0.4,
+                vec![0.7],
+                vec![1],
+            )),
+            right_leaf_value: LeafValue::Linear(LinearLeaf::identity_scaled(
+                -0.2,
+                vec![-0.3],
+                vec![1],
+            )),
             tree_weight: 1.0,
             multi_output_leaf_values: None,
         }],
@@ -1325,16 +1325,16 @@ fn mixed_leaf_fixture_model() -> TrainedModel {
             },
             TrainedStump {
                 split: split_with_counts(2, 2, 0, 3, 2),
-                left_leaf_value: LeafValue::Linear(LinearLeaf {
-                    intercept: 0.1,
-                    weights: vec![0.4],
-                    regressor_features: vec![1],
-                }),
-                right_leaf_value: LeafValue::Linear(LinearLeaf {
-                    intercept: -0.2,
-                    weights: vec![0.6],
-                    regressor_features: vec![1],
-                }),
+                left_leaf_value: LeafValue::Linear(LinearLeaf::identity_scaled(
+                    0.1,
+                    vec![0.4],
+                    vec![1],
+                )),
+                right_leaf_value: LeafValue::Linear(LinearLeaf::identity_scaled(
+                    -0.2,
+                    vec![0.6],
+                    vec![1],
+                )),
                 tree_weight: 1.0,
                 multi_output_leaf_values: None,
             },

@@ -20,15 +20,19 @@ pub(crate) fn leaf_constant_part(leaf: &LeafValue, baseline: Option<&[f32]>) -> 
     match leaf {
         LeafValue::Scalar(v) => *v as f64,
         LeafValue::Linear(ll) => {
-            let mut acc = ll.intercept as f64;
+            let mut acc = ll.intercept;
             if let Some(b) = baseline {
-                for (w, &feat) in ll.weights.iter().zip(ll.regressor_features.iter()) {
-                    if let Some(&mean) = b.get(feat as usize) {
-                        acc += (*w as f64) * (mean as f64);
-                    }
+                for (slot, (w, &feat)) in ll
+                    .weights
+                    .iter()
+                    .zip(ll.regressor_features.iter())
+                    .enumerate()
+                {
+                    let raw = b.get(feat as usize).copied().unwrap_or(0.0);
+                    acc += *w * ll.slot_value(slot, raw);
                 }
             }
-            acc
+            acc as f64
         }
     }
 }
@@ -54,16 +58,22 @@ fn accumulate_linear_terms(
     baseline: Option<&[f32]>,
     phi: &mut [f64],
 ) {
-    for (w, &feat) in ll.weights.iter().zip(ll.regressor_features.iter()) {
-        let feat_idx = feat as usize;
-        if feat_idx >= phi.len() {
+    for (slot, (w, &feat)) in ll
+        .weights
+        .iter()
+        .zip(ll.regressor_features.iter())
+        .enumerate()
+    {
+        let fi = feat as usize;
+        if fi >= row.len() || fi >= phi.len() {
             continue;
         }
-        let xj = row.get(feat_idx).copied().unwrap_or(0.0) as f64;
-        let mean = baseline
-            .and_then(|b| b.get(feat_idx).copied())
-            .unwrap_or(0.0) as f64;
-        phi[feat_idx] += (*w as f64) * (xj - mean);
+        let row_term = ll.slot_value(slot, row[fi]);
+        let base_term = baseline
+            .and_then(|base| base.get(fi).copied())
+            .map(|raw| ll.slot_value(slot, raw))
+            .unwrap_or(0.0);
+        phi[fi] += (*w as f64) * ((row_term - base_term) as f64);
     }
 }
 
@@ -102,11 +112,13 @@ pub(crate) fn scale_model_by_tree_weight(model: &TrainedModel) -> TrainedModel {
 fn scale_leaf_value(leaf: &LeafValue, factor: f32) -> LeafValue {
     match leaf {
         LeafValue::Scalar(v) => LeafValue::Scalar(factor * *v),
-        LeafValue::Linear(ll) => LeafValue::Linear(alloygbm_core::LinearLeaf {
-            intercept: factor * ll.intercept,
-            weights: ll.weights.iter().map(|w| factor * *w).collect(),
-            regressor_features: ll.regressor_features.clone(),
-        }),
+        LeafValue::Linear(ll) => LeafValue::Linear(alloygbm_core::LinearLeaf::scaled(
+            factor * ll.intercept,
+            ll.weights.iter().map(|w| factor * *w).collect(),
+            ll.regressor_features.clone(),
+            ll.feature_means.clone(),
+            ll.feature_inv_stds.clone(),
+        )),
     }
 }
 

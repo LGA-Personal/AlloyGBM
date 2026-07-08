@@ -194,3 +194,105 @@ pub fn subtract_linear_histogram_bundle(
         feature_histograms,
     }
 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearFeatureScaler {
+    means: Vec<f32>,
+    inv_stds: Vec<f32>,
+}
+
+impl LinearFeatureScaler {
+    pub fn identity(feature_count: usize) -> Self {
+        Self {
+            means: vec![0.0; feature_count],
+            inv_stds: vec![1.0; feature_count],
+        }
+    }
+
+    pub fn from_raw_matrix(raw: &[f32], row_count: usize, feature_count: usize) -> Self {
+        if row_count == 0 || feature_count == 0 || raw.len() < row_count * feature_count {
+            return Self::identity(feature_count);
+        }
+
+        let mut sums = vec![0.0_f64; feature_count];
+        let mut counts = vec![0_u64; feature_count];
+        for row in 0..row_count {
+            let base = row * feature_count;
+            for feature in 0..feature_count {
+                let value = raw[base + feature];
+                if value.is_finite() {
+                    sums[feature] += value as f64;
+                    counts[feature] += 1;
+                }
+            }
+        }
+
+        let mut means = vec![0.0_f32; feature_count];
+        for feature in 0..feature_count {
+            if counts[feature] > 0 {
+                means[feature] = (sums[feature] / counts[feature] as f64) as f32;
+            }
+        }
+
+        let mut sumsq = vec![0.0_f64; feature_count];
+        for row in 0..row_count {
+            let base = row * feature_count;
+            for feature in 0..feature_count {
+                let value = raw[base + feature];
+                if value.is_finite() {
+                    let centered = value as f64 - means[feature] as f64;
+                    sumsq[feature] += centered * centered;
+                }
+            }
+        }
+
+        let mut inv_stds = vec![1.0_f32; feature_count];
+        for feature in 0..feature_count {
+            if counts[feature] > 1 {
+                let variance = sumsq[feature] / counts[feature] as f64;
+                let std = variance.sqrt();
+                if std.is_finite() && std > 1e-12 {
+                    inv_stds[feature] = (1.0 / std) as f32;
+                }
+            }
+        }
+
+        Self { means, inv_stds }
+    }
+
+    #[inline]
+    pub fn mean(&self, feature_index: u32) -> f32 {
+        self.means
+            .get(feature_index as usize)
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    #[inline]
+    pub fn inv_std(&self, feature_index: u32) -> f32 {
+        self.inv_stds
+            .get(feature_index as usize)
+            .copied()
+            .unwrap_or(1.0)
+    }
+
+    #[inline]
+    pub fn scaled_value(&self, feature_index: u32, raw_value: f32) -> f32 {
+        if !raw_value.is_finite() {
+            return 0.0;
+        }
+        (raw_value - self.mean(feature_index)) * self.inv_std(feature_index)
+    }
+
+    pub fn leaf_means_and_inv_stds(&self, regressor_features: &[u32]) -> (Vec<f32>, Vec<f32>) {
+        let means = regressor_features
+            .iter()
+            .map(|&feature| self.mean(feature))
+            .collect();
+        let inv_stds = regressor_features
+            .iter()
+            .map(|&feature| self.inv_std(feature))
+            .collect();
+        (means, inv_stds)
+    }
+}

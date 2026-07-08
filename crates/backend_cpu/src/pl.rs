@@ -607,11 +607,7 @@ pub fn solve_pl_leaf(
     let raw_alpha = cholesky_solve_alpha(xtg, xt_hx, d, l2_lambda);
     let weights: Vec<f32> = raw_alpha[..d].iter().map(|&w| learning_rate * w).collect();
 
-    LinearLeaf {
-        intercept,
-        weights,
-        regressor_features: regressor_features.to_vec(),
-    }
+    LinearLeaf::identity_scaled(intercept, weights, regressor_features.to_vec())
 }
 
 #[allow(clippy::too_many_arguments)]
