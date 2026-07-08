@@ -319,24 +319,20 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
                 split_options.l1_alpha,
                 split_options.dro_config.as_ref(),
             );
-            let lr = morph.map_or(params.learning_rate, |m| m.lr);
-            let mut raw_left_leaf_value =
-                -lr * left_grad / (left_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
-            let mut raw_right_leaf_value =
-                -lr * right_grad / (right_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
+            let child_depth = (depth + 1) as u32;
+            let scheduled_lr = morph.map_or(params.learning_rate, |m| m.scheduled_lr());
+            let leaf_scale = morph.map_or(params.learning_rate, |m| {
+                m.leaf_scale_for_depth(child_depth).total
+            });
+            let raw_left_leaf_value = -leaf_scale * left_grad
+                / (left_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
+            let raw_right_leaf_value = -leaf_scale * right_grad
+                / (right_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
 
             // Morph leaf modifications: depth penalty + per-round shrinkage.
             // Children land at depth `depth + 1` in the tree.
             let morph_scale = if let Some(m) = morph.as_ref() {
-                let child_depth = (depth + 1) as f32;
-                let depth_penalty = m.state.config.depth_penalty_base.powf(child_depth / 3.0);
-                let iter_shrinkage = 1.0
-                    - m.state.config.morph_rate
-                        * (m.iteration as f32 / m.total_iterations.max(1) as f32).min(1.0);
-                let scale = depth_penalty * iter_shrinkage;
-                raw_left_leaf_value *= scale;
-                raw_right_leaf_value *= scale;
-                scale
+                m.leaf_scale_for_depth(child_depth).multiplier
             } else {
                 1.0
             };
@@ -402,7 +398,7 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
                         &regressor_features,
                         &partition.left_row_indices,
                         &partition.right_row_indices,
-                        lr,
+                        scheduled_lr,
                         split_options.l2_lambda,
                     )
                     .map(|(mut ll_abs, mut rl_abs)| {
@@ -781,24 +777,20 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
             split_options.l1_alpha,
             split_options.dro_config.as_ref(),
         );
-        let lr = morph.map_or(params.learning_rate, |m| m.lr);
-        let mut raw_left_leaf_value =
-            -lr * left_grad / (left_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
-        let mut raw_right_leaf_value =
-            -lr * right_grad / (right_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
+        let child_depth = (pending.depth + 1) as u32;
+        let scheduled_lr = morph.map_or(params.learning_rate, |m| m.scheduled_lr());
+        let leaf_scale = morph.map_or(params.learning_rate, |m| {
+            m.leaf_scale_for_depth(child_depth).total
+        });
+        let raw_left_leaf_value = -leaf_scale * left_grad
+            / (left_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
+        let raw_right_leaf_value = -leaf_scale * right_grad
+            / (right_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
 
         // Morph leaf modifications: depth penalty + per-round shrinkage.
         // Children of `pending` land at `pending.depth + 1` in the tree.
         let morph_scale = if let Some(m) = morph.as_ref() {
-            let child_depth = (pending.depth + 1) as f32;
-            let depth_penalty = m.state.config.depth_penalty_base.powf(child_depth / 3.0);
-            let iter_shrinkage = 1.0
-                - m.state.config.morph_rate
-                    * (m.iteration as f32 / m.total_iterations.max(1) as f32).min(1.0);
-            let scale = depth_penalty * iter_shrinkage;
-            raw_left_leaf_value *= scale;
-            raw_right_leaf_value *= scale;
-            scale
+            m.leaf_scale_for_depth(child_depth).multiplier
         } else {
             1.0
         };
@@ -853,7 +845,7 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                     &regressor_features,
                     &partition.left_row_indices,
                     &partition.right_row_indices,
-                    lr,
+                    scheduled_lr,
                     split_options.l2_lambda,
                 )
                 .map(|(mut ll_abs, mut rl_abs)| {

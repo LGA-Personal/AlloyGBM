@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use alloygbm_core::{BinnedMatrix, LeafValue};
 
 use crate::JointObjective;
+use crate::MorphState;
 use crate::error::{EngineError, EngineResult};
 use crate::objectives::weighted_quantile;
 use crate::round::apply_tree_to_binned_predictions;
@@ -419,7 +420,7 @@ pub(crate) fn refine_quantile_leaf_values(
     learning_rate: f32,
     max_abs_leaf_value: f32,
     raw_features: Option<(&[f32], usize)>,
-    depth_penalty_base: Option<f32>,
+    morph_scale_context: Option<(&MorphState, usize, u32)>,
 ) -> EngineResult<()> {
     if stumps.is_empty() {
         return Ok(());
@@ -531,10 +532,14 @@ pub(crate) fn refine_quantile_leaf_values(
             .copied()
             .unwrap_or(parent_absolute + stump.right_leaf_value.as_scalar());
 
-        let parent_depth = (32 - (local_node_id + 1).leading_zeros() - 1) as f32;
-        let child_depth = parent_depth + 1.0;
-        let depth_penalty = depth_penalty_base.map_or(1.0, |base| base.powf(child_depth / 3.0));
-        let effective_lr = learning_rate * depth_penalty;
+        let parent_depth = 32 - (local_node_id + 1).leading_zeros() - 1;
+        let child_depth = parent_depth + 1;
+        let effective_lr =
+            morph_scale_context.map_or(learning_rate, |(state, iteration, total)| {
+                state
+                    .leaf_scale_for_depth(iteration, total, child_depth)
+                    .total
+            });
 
         let dl = (left_absolute - parent_absolute) * effective_lr;
         let dr = (right_absolute - parent_absolute) * effective_lr;

@@ -71,6 +71,27 @@ fn morph_state_lr_for_iter_clamps_to_last() {
 }
 
 #[test]
+fn morph_leaf_scale_matches_schedule_shrinkage_and_depth_penalty() {
+    let cfg = MorphConfig {
+        morph_warmup_iters: 5,
+        info_score_weight: 0.3,
+        depth_penalty_base: 0.729,
+        balance_penalty: false,
+        morph_rate: 0.4,
+        evolution_pressure: 0.2,
+        lr_schedule: LrSchedule::WarmupCosine { warmup_frac: 0.25 },
+    };
+    let state = MorphState::new(cfg, 1, 20, 0.2);
+    let scale = state.leaf_scale_for_depth(5, 20, 6);
+    let expected_lr = state.lr_for_iter(5);
+    let expected_shrinkage = 1.0 - cfg.morph_rate * (5.0_f32 / 20.0);
+    let expected_depth_penalty = cfg.depth_penalty_base.powf(6.0 / 3.0);
+
+    assert!((scale.total - expected_lr * expected_shrinkage * expected_depth_penalty).abs() < 1e-6);
+    assert!((scale.multiplier - expected_shrinkage * expected_depth_penalty).abs() < 1e-6);
+}
+
+#[test]
 fn morph_state_lr_threshold_scale_constant_lr() {
     let cfg = MorphConfig {
         morph_warmup_iters: 5,
