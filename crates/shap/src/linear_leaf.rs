@@ -124,15 +124,15 @@ fn scale_leaf_value(leaf: &LeafValue, factor: f32) -> LeafValue {
     }
 }
 
-/// Walk each tree for `row` and credit `wj · (xj − μj)` for every linear leaf
-/// the row visits along its path.
+/// Walk each tree for `row` and credit `wj · (z_j(row) − z_j(baseline))` for
+/// every linear leaf the row visits along its path.
 ///
 /// **This must visit every node on the row's path, not just the terminal**
 /// — `predict(x)` and `local_path_predict` both accumulate
 /// `leaf.eval_row(row)` at every visited node (the predictor loops as long
 /// as `nodes_by_local_id.get(child)` returns a stump).  The brute-force
 /// SHAP and TreeSHAP polynomial paths already handle the per-visited-node
-/// **constant** contribution `intercept + Σⱼ wⱼ·μⱼ` through
+/// **constant** contribution in standardized PL coordinates through
 /// `leaf_constant_part`.  The per-visited-node **deviation**
 /// `Σⱼ wⱼ·(z_j(row_raw_j) − z_j(baseline_raw_j))` is uncredited unless we add
 /// it here.

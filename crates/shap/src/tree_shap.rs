@@ -727,8 +727,8 @@ pub(crate) fn explain_rows_tree_shap(
 
         // E[f_tree(x)] = cover-weighted average leaf value (computed on the
         // constant-part tree).  For linear leaves, the row-dependent
-        // deviations sum to 0 in expectation (Σ wj · E[Xj - μj] = 0), so the
-        // expected_value is the same under either decomposition.
+        // deviations sum to 0 in expectation in standardized PL coordinates,
+        // so the expected_value is the same under either decomposition.
         let tree_cover = tree.cover();
         if tree_cover > 0.0 {
             expected_value_f64 += tree.cover_weighted_value_sum() / tree_cover;

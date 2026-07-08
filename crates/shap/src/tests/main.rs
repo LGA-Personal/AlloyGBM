@@ -1361,7 +1361,8 @@ fn shap_linear_leaves_attribute_deviation_to_regressor_feature() {
     // linear-deviation terms vanish and SHAP[regressor] == 0 (any
     // attribution must come purely from path effects).  Conversely, when
     // the regressor sits off-baseline, that feature picks up the
-    // deviation w_j * (x_j - μ_j) on top of any path contribution.
+    // standardized deviation w_j * (z_j(x) - z_j(baseline)) on top of any
+    // path contribution.
     let baseline = vec![0.0_f32, 0.5_f32];
     let model = linear_fixture_model(Some(baseline.clone()));
     let artifact = model.to_artifact_bytes().expect("artifact serializes");
