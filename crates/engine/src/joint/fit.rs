@@ -639,43 +639,22 @@ fn fit_joint_inner(
         // values directly without re-applying `learning_rate`.
         //
         // Standard scale: `learning_rate` (unchanged from v0.10.0).
-        // Morph scale: `morph_lr * leaf_shrink * depth_penalty` where
-        //   morph_lr = MorphState::lr_for_iter(round)
-        //   leaf_shrink = max(0, 1 - morph_rate * round/total)
-        //   depth_penalty = depth_penalty_base ^ (depth/3), depth derived from
-        //     local_node_id via `(id+1).ilog2()`.
+        // Morph scale uses MorphState::leaf_scale_for_depth, matching the
+        // scalar tree builder and quantile leaf-refinement path.
         // Depth-penalty applies per-stump because non-root leaves have larger
         // depth than root leaves.
         let standard_scale_active =
             morph_state.is_none() && (learning_rate - 1.0).abs() > f32::EPSILON;
         let morph_active = morph_state.is_some();
         if standard_scale_active || morph_active {
-            // Pre-compute morph scalars that are stump-independent.
-            let (morph_lr, leaf_shrink) = if let Some(ms) = morph_state.as_ref() {
-                let lr = ms.lr_for_iter(global_round);
-                let t = global_round as f32;
-                let total_t = total_iterations_u32.max(1) as f32;
-                let shrink = (1.0 - ms.config.morph_rate * (t / total_t)).max(0.0);
-                (lr, shrink)
-            } else {
-                (learning_rate, 1.0_f32)
-            };
-            let depth_penalty_base = morph_state
-                .as_ref()
-                .map(|ms| ms.config.depth_penalty_base)
-                .unwrap_or(1.0);
             for stump in round_result.stumps.iter_mut() {
                 // local_node_id is the pre-encode id (re-encode happens
                 // later). depth = floor(log2(id + 1)).
                 let local_id = stump.split.node_id;
                 let depth = (local_id + 1).ilog2();
-                let depth_penalty = if morph_active {
-                    depth_penalty_base.powf(depth as f32 / 3.0)
-                } else {
-                    1.0
-                };
-                let scale = if morph_active {
-                    morph_lr * leaf_shrink * depth_penalty
+                let scale = if let Some(ms) = morph_state.as_ref() {
+                    ms.leaf_scale_for_depth(global_round, total_iterations_u32, depth)
+                        .total
                 } else {
                     learning_rate
                 };

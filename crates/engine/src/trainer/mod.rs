@@ -1125,7 +1125,6 @@ impl Trainer {
                         iteration: effective_round as u32,
                         total_iterations,
                         class_idx: class_k,
-                        lr: ms.lr_for_iter(effective_round),
                     });
 
                 let raw_fv = &dataset.matrix.values;
@@ -2200,7 +2199,6 @@ impl Trainer {
                     iteration: effective_round_index as u32,
                     total_iterations,
                     class_idx: 0,
-                    lr: ms.lr_for_iter(effective_round_index),
                 });
 
             let raw_fv = &active_dataset.matrix.values;
@@ -2270,19 +2268,9 @@ impl Trainer {
             }
 
             if let Some(alpha) = objective.quantile_alpha() {
-                let mut lr = morph_state
+                let morph_scale_context = morph_state
                     .as_ref()
-                    .map(|ms| ms.lr_for_iter(effective_round_index))
-                    .unwrap_or(self.params.learning_rate);
-                if let Some(ms) = morph_state.as_ref() {
-                    let iter_shrinkage = 1.0
-                        - ms.config.morph_rate
-                            * (effective_round_index as f32 / total_iterations.max(1) as f32)
-                                .min(1.0);
-                    lr *= iter_shrinkage;
-                }
-                let depth_penalty_base =
-                    morph_state.as_ref().map(|ms| ms.config.depth_penalty_base);
+                    .map(|ms| (ms, effective_round_index, total_iterations));
                 refine_quantile_leaf_values(
                     &mut candidate_round_stumps,
                     binned_matrix,
@@ -2290,10 +2278,10 @@ impl Trainer {
                     &active_dataset.targets,
                     active_dataset.sample_weights.as_deref(),
                     alpha,
-                    lr,
+                    self.params.learning_rate,
                     controls.max_abs_leaf_value,
                     raw_features_opt,
-                    depth_penalty_base,
+                    morph_scale_context,
                 )?;
             }
 

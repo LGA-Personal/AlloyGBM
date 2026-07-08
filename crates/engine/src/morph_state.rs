@@ -18,6 +18,12 @@ pub struct MorphState {
     grad_scratch: Vec<f32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct MorphLeafScale {
+    pub(crate) total: f32,
+    pub(crate) multiplier: f32,
+}
+
 impl MorphState {
     pub fn new(config: MorphConfig, n_classes: usize, total_iterations: u32, base_lr: f32) -> Self {
         Self {
@@ -45,6 +51,23 @@ impl MorphState {
             .get(iteration)
             .copied()
             .unwrap_or_else(|| self.lr_per_iter.last().copied().unwrap_or(0.1))
+    }
+
+    pub(crate) fn leaf_scale_for_depth(
+        &self,
+        iteration: usize,
+        total_iterations: u32,
+        depth: u32,
+    ) -> MorphLeafScale {
+        let lr = self.lr_for_iter(iteration);
+        let iteration_fraction = (iteration as f32 / total_iterations.max(1) as f32).min(1.0);
+        let iter_shrinkage = 1.0 - self.config.morph_rate * iteration_fraction;
+        let depth_penalty = self.config.depth_penalty_base.powf(depth as f32 / 3.0);
+        let multiplier = iter_shrinkage * depth_penalty;
+        MorphLeafScale {
+            total: lr * multiplier,
+            multiplier,
+        }
     }
 
     /// Returns a scale factor for `min_loss_improvement` at the given iteration.
@@ -154,6 +177,15 @@ pub(crate) struct MorphTreeContext<'a> {
     pub(crate) iteration: u32,
     pub(crate) total_iterations: u32,
     pub(crate) class_idx: usize,
-    /// Resolved learning rate for this iteration (replaces `params.learning_rate`).
-    pub(crate) lr: f32,
+}
+
+impl MorphTreeContext<'_> {
+    pub(crate) fn scheduled_lr(&self) -> f32 {
+        self.state.lr_for_iter(self.iteration as usize)
+    }
+
+    pub(crate) fn leaf_scale_for_depth(&self, depth: u32) -> MorphLeafScale {
+        self.state
+            .leaf_scale_for_depth(self.iteration as usize, self.total_iterations, depth)
+    }
 }
