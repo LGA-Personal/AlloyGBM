@@ -157,6 +157,33 @@ class TestPLRegressor:
             f"(RMSE={rmse_c:.4f}) on a linear target with shallow trees"
         )
 
+    def test_linear_leaves_handle_raw_scale_features(self):
+        rng = np.random.default_rng(42)
+        n = 360
+        X = np.zeros((n, 10), dtype=np.float32)
+        X[:, 0] = rng.normal(0.0, 1.0, size=n)
+        X[:, 1] = rng.normal(0.0, 5000.0, size=n)
+        X[:, 8] = rng.normal(0.0, 0.02, size=n)
+        X[:, 9] = rng.normal(50.0, 10000.0, size=n)
+        for j in range(2, 8):
+            X[:, j] = rng.normal(0.0, 1.0 + j, size=n)
+        y = (0.6 * X[:, 8] - 0.00008 * X[:, 9] + 0.1 * X[:, 0]).astype(np.float32)
+
+        m = GBMRegressor(
+            n_estimators=30,
+            max_depth=2,
+            learning_rate=0.2,
+            lambda_l2=0.01,
+            leaf_model="linear",
+            training_policy="manual",
+            continuous_binning_strategy="quantile",
+            seed=0,
+        ).fit(X, y)
+        preds = np.asarray(m.predict(X), dtype=np.float32)
+        rmse = float(np.sqrt(np.mean((preds - y) ** 2)))
+        assert np.isfinite(preds).all()
+        assert rmse < 0.20
+
 
 # ---------------------------------------------------------------------------
 # Classifier smoke tests

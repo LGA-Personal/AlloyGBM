@@ -1,6 +1,7 @@
 use crate::histogram::NodeStats;
 
-/// A linear leaf model: `f_s(x) = intercept + Σ_j weights[j] * x[regressor_features[j]]`.
+/// A linear leaf model:
+/// `f_s(x) = intercept + Σ_j weights[j] * z_j(x[regressor_features[j]])`.
 ///
 /// `intercept` holds the standard Newton-Raphson scalar (so constant-only behaviour
 /// degrades gracefully when `weights` is all-zero).  `weights` contains the `d` linear
@@ -13,9 +14,57 @@ pub struct LinearLeaf {
     pub weights: Vec<f32>,
     /// Feature indices of the regressors (length `d`, matches `weights`).
     pub regressor_features: Vec<u32>,
+    /// Per-regressor training-set means used to standardize raw feature values.
+    pub feature_means: Vec<f32>,
+    /// Per-regressor inverse standard deviations used to standardize raw feature values.
+    pub feature_inv_stds: Vec<f32>,
 }
 
 impl LinearLeaf {
+    pub fn identity_scaled(
+        intercept: f32,
+        weights: Vec<f32>,
+        regressor_features: Vec<u32>,
+    ) -> Self {
+        let d = weights.len();
+        Self {
+            intercept,
+            weights,
+            regressor_features,
+            feature_means: vec![0.0; d],
+            feature_inv_stds: vec![1.0; d],
+        }
+    }
+
+    pub fn scaled(
+        intercept: f32,
+        weights: Vec<f32>,
+        regressor_features: Vec<u32>,
+        feature_means: Vec<f32>,
+        feature_inv_stds: Vec<f32>,
+    ) -> Self {
+        debug_assert_eq!(weights.len(), regressor_features.len());
+        debug_assert_eq!(weights.len(), feature_means.len());
+        debug_assert_eq!(weights.len(), feature_inv_stds.len());
+        Self {
+            intercept,
+            weights,
+            regressor_features,
+            feature_means,
+            feature_inv_stds,
+        }
+    }
+
+    #[inline]
+    pub fn slot_value(&self, slot: usize, raw_value: f32) -> f32 {
+        if !raw_value.is_finite() {
+            return 0.0;
+        }
+        let mean = self.feature_means.get(slot).copied().unwrap_or(0.0);
+        let inv_std = self.feature_inv_stds.get(slot).copied().unwrap_or(1.0);
+        (raw_value - mean) * inv_std
+    }
+
     /// Evaluate the leaf model for one row of raw (float) feature data.
     ///
     /// `raw_features` is the full flat row-major feature matrix; `row_offset` is
@@ -33,13 +82,15 @@ impl LinearLeaf {
     #[inline]
     pub fn eval(&self, raw_features: &[f32], row_offset: usize) -> f32 {
         let mut val = self.intercept;
-        for (w, &feat) in self.weights.iter().zip(self.regressor_features.iter()) {
+        for (slot, (w, &feat)) in self
+            .weights
+            .iter()
+            .zip(self.regressor_features.iter())
+            .enumerate()
+        {
             let idx = row_offset + feat as usize;
             if idx < raw_features.len() {
-                let x = raw_features[idx];
-                if !x.is_nan() {
-                    val += w * x;
-                }
+                val += w * self.slot_value(slot, raw_features[idx]);
             }
         }
         val
@@ -73,7 +124,9 @@ impl LeafValue {
     /// Evaluate this leaf for a single row passed as a flat feature slice.
     ///
     /// For [`LeafValue::Scalar`], returns the scalar directly.
-    /// For [`LeafValue::Linear`], computes `intercept + Σ w_j * features[regressor_j]`.
+    /// For [`LeafValue::Linear`], computes
+    /// `intercept + Σ w_j * z_j(features[regressor_j])` using the leaf's
+    /// per-slot mean and inverse-standard-deviation metadata.
     #[inline]
     pub fn eval_row(&self, features: &[f32]) -> f32 {
         match self {

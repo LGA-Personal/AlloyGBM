@@ -64,9 +64,10 @@ struct PathElement {
 /// is the total prediction contribution for samples reaching that leaf.
 ///
 /// For piecewise-linear leaves we accumulate only the "constant part"
-/// (`intercept + Σ wj * μj` when `baseline` is `Some`).  The row-dependent
-/// `wj * (xj - μj)` terms are credited back to per-feature SHAP values
-/// outside the path-based machinery — see `distribute_linear_terms_for_row`.
+/// (`intercept + Σ wj * z_j(baseline_raw_j)` when `baseline` is `Some`).
+/// The row-dependent `wj * (z_j(row_raw_j) - z_j(baseline_raw_j))` terms are
+/// credited back to per-feature SHAP values outside the path-based machinery
+/// — see `distribute_linear_terms_for_row`.
 pub(crate) fn build_std_tree(
     tree_id: u32,
     local_id: u32,
@@ -726,8 +727,8 @@ pub(crate) fn explain_rows_tree_shap(
 
         // E[f_tree(x)] = cover-weighted average leaf value (computed on the
         // constant-part tree).  For linear leaves, the row-dependent
-        // deviations sum to 0 in expectation (Σ wj · E[Xj - μj] = 0), so the
-        // expected_value is the same under either decomposition.
+        // deviations sum to 0 in expectation in standardized PL coordinates,
+        // so the expected_value is the same under either decomposition.
         let tree_cover = tree.cover();
         if tree_cover > 0.0 {
             expected_value_f64 += tree.cover_weighted_value_sum() / tree_cover;

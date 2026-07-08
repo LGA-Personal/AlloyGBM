@@ -191,9 +191,11 @@ raw-distribution Wasserstein DRO guarantee. `leaf_solver="dro"` requires
 ## Piecewise-Linear Leaves (Optional)
 
 `leaf_model="linear"` replaces scalar leaves with closed-form linear models
-solved per leaf via `α* = -(XᵀHX + λI)⁻¹ Xᵀg`. On data with linear
-within-node residual structure this typically reaches the same loss in
-fewer rounds.
+solved per leaf via `α* = -(ZᵀHZ + λI)⁻¹ Zᵀg`. Each leaf uses the distinct
+numeric features on its root-to-leaf split path, capped internally at
+`MAX_PL_REGRESSORS = 8`, and standardizes those regressor values internally
+before solving. On data with linear within-node residual structure this
+typically reaches the same loss in fewer rounds.
 
 ```python
 from alloygbm import GBMRegressor

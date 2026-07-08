@@ -57,6 +57,8 @@ struct LinearLeafCompact {
     intercept: f32,
     weights: Vec<f32>,
     feature_indices: Vec<usize>,
+    feature_means: Vec<f32>,
+    feature_inv_stds: Vec<f32>,
 }
 
 impl LinearLeafCompact {
@@ -66,11 +68,18 @@ impl LinearLeafCompact {
     #[inline]
     fn eval(&self, features: &[f32]) -> f32 {
         let mut v = self.intercept;
-        for (w, &fi) in self.weights.iter().zip(self.feature_indices.iter()) {
+        for (slot, (w, &fi)) in self
+            .weights
+            .iter()
+            .zip(self.feature_indices.iter())
+            .enumerate()
+        {
             if fi < features.len() {
                 let x = features[fi];
-                if !x.is_nan() {
-                    v += w * x;
+                if x.is_finite() {
+                    let mean = self.feature_means.get(slot).copied().unwrap_or(0.0);
+                    let inv_std = self.feature_inv_stds.get(slot).copied().unwrap_or(1.0);
+                    v += w * (x - mean) * inv_std;
                 }
             }
         }
@@ -1159,6 +1168,8 @@ fn linear_leaf_to_compact(ll: &alloygbm_core::LinearLeaf) -> LinearLeafCompact {
         intercept: ll.intercept,
         weights: ll.weights.to_vec(),
         feature_indices: ll.regressor_features.iter().map(|&f| f as usize).collect(),
+        feature_means: ll.feature_means.to_vec(),
+        feature_inv_stds: ll.feature_inv_stds.to_vec(),
     }
 }
 
@@ -1417,7 +1428,7 @@ mod tests {
         Device, LeafModelKind, ModelSectionKind, TrainParams, TrainingDataset, TreeGrowth,
         serialize_model_artifact_v1,
     };
-    use alloygbm_core::{LeafValue, NodeStats, SplitCandidate};
+    use alloygbm_core::{LeafValue, LinearLeaf, NodeStats, SplitCandidate};
     use alloygbm_engine::{SquaredErrorObjective, TrainedModel, TrainedStump, Trainer};
 
     fn predictor_stub() -> Predictor {
@@ -2236,5 +2247,85 @@ mod tests {
                 row
             );
         }
+    }
+
+    #[test]
+    fn pl_tree_predictor_uses_scaled_linear_leaf_metadata_after_artifact_roundtrip() {
+        let model = TrainedModel {
+            baseline_prediction: 0.1,
+            feature_count: 2,
+            stumps: vec![TrainedStump {
+                split: SplitCandidate {
+                    node_id: 0,
+                    feature_index: 0,
+                    threshold_bin: 1,
+                    gain: 1.0,
+                    default_left: true,
+                    is_categorical: false,
+                    categorical_bitset: None,
+                    left_stats: NodeStats {
+                        grad_sum: 0.0,
+                        hess_sum: 1.0,
+                        grad_sq_sum: 0.0,
+                        row_count: 4,
+                    },
+                    right_stats: NodeStats {
+                        grad_sum: 0.0,
+                        hess_sum: 1.0,
+                        grad_sq_sum: 0.0,
+                        row_count: 4,
+                    },
+                },
+                left_leaf_value: LeafValue::Linear(LinearLeaf::scaled(
+                    1.0,
+                    vec![2.0],
+                    vec![1],
+                    vec![10.0],
+                    vec![0.5],
+                )),
+                right_leaf_value: LeafValue::Linear(LinearLeaf::scaled(
+                    -0.5,
+                    vec![-1.5],
+                    vec![1],
+                    vec![4.0],
+                    vec![2.0],
+                )),
+                tree_weight: 1.0,
+                multi_output_leaf_values: None,
+            }],
+            categorical_state: None,
+            node_debug_stats: None,
+            objective: "squared_error".to_string(),
+            native_categorical_feature_indices: Vec::new(),
+            morph_metadata: None,
+            dro_metadata: None,
+            feature_baseline: Some(vec![0.0, 12.0]),
+            neutralization_metadata: None,
+        };
+
+        let artifact = model.to_artifact_bytes().expect("artifact serializes");
+        let predictor = Predictor::from_artifact_bytes(&artifact).expect("predictor loads");
+
+        let left_row = [0.0_f32, 14.0_f32];
+        let left_pred = predictor.predict_row(&left_row).expect("left prediction");
+        assert!(
+            (left_pred - 5.1).abs() < 1e-6,
+            "left prediction: {left_pred}"
+        );
+
+        let left_nan = predictor
+            .predict_row(&[0.0_f32, f32::NAN])
+            .expect("left NaN prediction");
+        assert!(
+            (left_nan - 1.1).abs() < 1e-6,
+            "left NaN prediction: {left_nan}"
+        );
+
+        let right_row = [3.0_f32, 3.5_f32];
+        let right_pred = predictor.predict_row(&right_row).expect("right prediction");
+        assert!(
+            (right_pred - 1.1).abs() < 1e-6,
+            "right prediction: {right_pred}"
+        );
     }
 }

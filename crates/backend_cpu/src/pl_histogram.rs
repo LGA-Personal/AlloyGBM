@@ -9,8 +9,8 @@
 
 use alloygbm_core::simd::f32x8;
 use alloygbm_core::{
-    BinnedMatrix, FeatureTile, GradientPair, LinearFeatureHistogram, LinearHistogramBin,
-    LinearHistogramBundle, MAX_PL_REGRESSORS, NodeSlice,
+    BinnedMatrix, FeatureTile, GradientPair, LinearFeatureHistogram, LinearFeatureScaler,
+    LinearHistogramBin, LinearHistogramBundle, MAX_PL_REGRESSORS, NodeSlice,
 };
 use alloygbm_engine::{EngineError, EngineResult};
 
@@ -31,6 +31,7 @@ pub fn build_linear_histograms_cpu(
     node: &NodeSlice,
     feature_tiles: &[FeatureTile],
     regressor_features: &[u32],
+    feature_scaler: &LinearFeatureScaler,
     raw_feature_values: &[f32],
     row_count: usize,
     feature_count: usize,
@@ -96,7 +97,10 @@ pub fn build_linear_histograms_cpu(
                 for (slot, &feat_raw) in x_arr.iter_mut().zip(regressor_features.iter()).take(d) {
                     let feat = feat_raw as usize;
                     *slot = if feat < feature_count && row_idx < row_count {
-                        raw_feature_values[row_idx * feature_count + feat]
+                        feature_scaler.scaled_value(
+                            feat_raw,
+                            raw_feature_values[row_idx * feature_count + feat],
+                        )
                     } else {
                         0.0
                     };
@@ -227,6 +231,7 @@ mod tests {
         let binned = fixture_binned();
         let grads = fixture_gradients();
         let raw = fixture_raw_values();
+        let scaler = LinearFeatureScaler::identity(2);
         let node = all_rows_node();
         let tiles = all_feature_tile();
 
@@ -236,6 +241,7 @@ mod tests {
             &node,
             &tiles,
             &[0], // single regressor: feature 0
+            &scaler,
             &raw,
             4,
             2,
@@ -274,12 +280,14 @@ mod tests {
         let binned = fixture_binned();
         let grads = fixture_gradients();
         let raw = fixture_raw_values();
+        let scaler = LinearFeatureScaler::identity(2);
         let node = all_rows_node();
         let tiles = all_feature_tile();
         let missing_bin_index = binned.missing_bin() as usize;
 
-        let bundle = build_linear_histograms_cpu(&binned, &grads, &node, &tiles, &[0], &raw, 4, 2)
-            .expect("linear histogram build succeeds");
+        let bundle =
+            build_linear_histograms_cpu(&binned, &grads, &node, &tiles, &[0], &scaler, &raw, 4, 2)
+                .expect("linear histogram build succeeds");
         let histogram_pair = crate::pl::leaf_linear_stats_for_split(
             &bundle.feature_histograms[0],
             0,
@@ -289,20 +297,26 @@ mod tests {
         let histogram_left = crate::pl::solve_pl_leaf(
             &histogram_pair.0,
             &histogram_pair.1,
-            histogram_pair.2,
-            histogram_pair.3,
-            0.05,
-            0.01,
+            crate::pl::LinearLeafSolveParams {
+                grad_sum: histogram_pair.2,
+                hess_sum: histogram_pair.3,
+                learning_rate: 0.05,
+                l2_lambda: 0.01,
+            },
             &[0],
+            &scaler,
         );
         let histogram_right = crate::pl::solve_pl_leaf(
             &histogram_pair.4,
             &histogram_pair.5,
-            histogram_pair.6,
-            histogram_pair.7,
-            0.05,
-            0.01,
+            crate::pl::LinearLeafSolveParams {
+                grad_sum: histogram_pair.6,
+                hess_sum: histogram_pair.7,
+                learning_rate: 0.05,
+                l2_lambda: 0.01,
+            },
             &[0],
+            &scaler,
         );
 
         let direct = crate::pl::solve_pl_leaf_pair_from_partitions(
@@ -314,6 +328,7 @@ mod tests {
             0,
             true,
             &[0],
+            &scaler,
             &[0],
             &[1, 2, 3],
             0.05,
@@ -332,6 +347,7 @@ mod tests {
         let binned = fixture_binned();
         let grads = fixture_gradients();
         let mut raw = fixture_raw_values();
+        let scaler = LinearFeatureScaler::identity(2);
         // Row 2 is in split-feature-0 bin 2 with row 3. A NaN in regressor
         // feature 1 makes the old histogram path sanitize bin 2's affected
         // linear-stat slots after aggregation, so row 3's same-bin slot
@@ -342,8 +358,9 @@ mod tests {
         let tiles = all_feature_tile();
         let missing_bin_index = binned.missing_bin() as usize;
 
-        let bundle = build_linear_histograms_cpu(&binned, &grads, &node, &tiles, &[1], &raw, 4, 2)
-            .expect("linear histogram build succeeds");
+        let bundle =
+            build_linear_histograms_cpu(&binned, &grads, &node, &tiles, &[1], &scaler, &raw, 4, 2)
+                .expect("linear histogram build succeeds");
         let histogram_pair = crate::pl::leaf_linear_stats_for_split(
             &bundle.feature_histograms[0],
             0,
@@ -353,20 +370,26 @@ mod tests {
         let histogram_left = crate::pl::solve_pl_leaf(
             &histogram_pair.0,
             &histogram_pair.1,
-            histogram_pair.2,
-            histogram_pair.3,
-            0.05,
-            0.01,
+            crate::pl::LinearLeafSolveParams {
+                grad_sum: histogram_pair.2,
+                hess_sum: histogram_pair.3,
+                learning_rate: 0.05,
+                l2_lambda: 0.01,
+            },
             &[1],
+            &scaler,
         );
         let histogram_right = crate::pl::solve_pl_leaf(
             &histogram_pair.4,
             &histogram_pair.5,
-            histogram_pair.6,
-            histogram_pair.7,
-            0.05,
-            0.01,
+            crate::pl::LinearLeafSolveParams {
+                grad_sum: histogram_pair.6,
+                hess_sum: histogram_pair.7,
+                learning_rate: 0.05,
+                l2_lambda: 0.01,
+            },
             &[1],
+            &scaler,
         );
 
         let direct = crate::pl::solve_pl_leaf_pair_from_partitions(
@@ -378,6 +401,7 @@ mod tests {
             0,
             true,
             &[1],
+            &scaler,
             &[0],
             &[1, 2, 3],
             0.05,
@@ -396,26 +420,54 @@ mod tests {
         let binned = fixture_binned();
         let grads = fixture_gradients();
         let raw = fixture_raw_values();
+        let scaler = LinearFeatureScaler::identity(2);
         let tiles = all_feature_tile();
 
         // Parent node = rows 0..3
         let parent_node = all_rows_node();
-        let parent_bundle =
-            build_linear_histograms_cpu(&binned, &grads, &parent_node, &tiles, &[0], &raw, 4, 2)
-                .expect("parent build");
+        let parent_bundle = build_linear_histograms_cpu(
+            &binned,
+            &grads,
+            &parent_node,
+            &tiles,
+            &[0],
+            &scaler,
+            &raw,
+            4,
+            2,
+        )
+        .expect("parent build");
 
         // Smaller child = rows 0..1
         let smaller_node = NodeSlice::new(2, vec![0, 1]).expect("valid");
-        let smaller_bundle =
-            build_linear_histograms_cpu(&binned, &grads, &smaller_node, &tiles, &[0], &raw, 4, 2)
-                .expect("smaller build");
+        let smaller_bundle = build_linear_histograms_cpu(
+            &binned,
+            &grads,
+            &smaller_node,
+            &tiles,
+            &[0],
+            &scaler,
+            &raw,
+            4,
+            2,
+        )
+        .expect("smaller build");
 
         // Larger child via subtraction = rows 2..3
         let larger_bundle = subtract_linear_histogram_bundle(&parent_bundle, &smaller_bundle);
         let larger_node = NodeSlice::new(3, vec![2, 3]).expect("valid");
-        let larger_direct =
-            build_linear_histograms_cpu(&binned, &grads, &larger_node, &tiles, &[0], &raw, 4, 2)
-                .expect("larger direct build");
+        let larger_direct = build_linear_histograms_cpu(
+            &binned,
+            &grads,
+            &larger_node,
+            &tiles,
+            &[0],
+            &scaler,
+            &raw,
+            4,
+            2,
+        )
+        .expect("larger direct build");
 
         // Compare every bin of every feature histogram.
         for (lfh, dfh) in larger_bundle
@@ -481,6 +533,7 @@ mod tests {
         node: &NodeSlice,
         feature_tiles: &[FeatureTile],
         regressor_features: &[u32],
+        feature_scaler: &LinearFeatureScaler,
         raw_feature_values: &[f32],
         row_count: usize,
         feature_count: usize,
@@ -513,7 +566,10 @@ mod tests {
                     for (j, &feat_j_raw) in regressor_features.iter().enumerate().take(d) {
                         let feat_j = feat_j_raw as usize;
                         let x_j = if feat_j < feature_count && row_idx < row_count {
-                            raw_feature_values[row_idx * feature_count + feat_j]
+                            feature_scaler.scaled_value(
+                                feat_j_raw,
+                                raw_feature_values[row_idx * feature_count + feat_j],
+                            )
                         } else {
                             0.0
                         };
@@ -523,7 +579,10 @@ mod tests {
                         {
                             let feat_k = feat_k_raw as usize;
                             let x_k = if feat_k < feature_count {
-                                raw_feature_values[row_idx * feature_count + feat_k]
+                                feature_scaler.scaled_value(
+                                    feat_k_raw,
+                                    raw_feature_values[row_idx * feature_count + feat_k],
+                                )
                             } else {
                                 0.0
                             };
@@ -589,6 +648,7 @@ mod tests {
         let raw: Vec<f32> = (0..row_count * feature_count)
             .map(|_| next_f32(&mut state))
             .collect();
+        let scaler = LinearFeatureScaler::from_raw_matrix(&raw, row_count, feature_count);
         let node = NodeSlice::new(1, (0..row_count as u32).collect()).expect("ok");
         let tiles = vec![FeatureTile {
             start_feature: 0,
@@ -601,6 +661,7 @@ mod tests {
             &node,
             &tiles,
             &regressor_features,
+            &scaler,
             &raw,
             row_count,
             feature_count,
@@ -612,6 +673,7 @@ mod tests {
             &node,
             &tiles,
             &regressor_features,
+            &scaler,
             &raw,
             row_count,
             feature_count,

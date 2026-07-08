@@ -74,20 +74,20 @@ SHAP explanations work with all three estimators:
 As of v0.7.1, `shap_values(...)` and `feature_importances(...)` also accept
 `leaf_model="linear"` artifacts and return an *interventional* decomposition:
 the path-based TreeSHAP / brute-force machinery attributes each leaf's
-"constant part" (`intercept + Σ wⱼ · μⱼ_global`), then per-leaf row
-deviations `wⱼ · (xⱼ − μⱼ_global)` are credited directly to the regressor
-features along the row's path. Global per-feature means `μⱼ_global` are
-captured at fit time and persisted in a new `FeatureBaseline` artifact
-section, so SHAP is self-contained — the original training data is not
-required at explain time.
+"constant part" in standardized PL coordinates, then per-leaf row deviations
+`wⱼ · (zⱼ(x) − zⱼ(baseline))` are credited directly to the regressor features
+along the row's path. The artifact stores both the global feature baseline and
+the per-leaf PL scaling metadata, so SHAP is self-contained — the original
+training data is not required at explain time.
 
 As of v0.7.4, strict additivity (`Σ shap_values + expected_value == predict(x)`
 within `atol + rtol·|predict(x)|`, default `1e-5 + 1e-4·|predict(x)|`) also
 holds for `leaf_model="linear"` artifacts on the default predictor-aligned
 binning path. v0.7.3's `BinningContext` aligns the SHAP path walker to the
-predictor's float thresholds; v0.7.4 credits `Σⱼ wⱼ·(xⱼ − μⱼ)` at every
-visited node along the row's path (matching how `predict` accumulates
-`leaf.eval_row(row)` at each visited node). The legacy non-binning
+predictor's float thresholds; v0.7.4 credits the standardized PL deviation
+`Σⱼ wⱼ·(zⱼ(x) − zⱼ(baseline))` at every visited node along the row's path
+(matching how `predict` accumulates `leaf.eval_row(row)` at each visited
+node). The legacy non-binning
 SHAP path retains a best-effort exemption for linear leaves only.
 
 ## SHAP Interaction Values (v0.11.0+)

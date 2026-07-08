@@ -77,11 +77,11 @@ satisfying ``Σ shap_values + expected_value == predict(x)``.
 As of v0.7.1, ``shap_values(...)`` and ``feature_importances(...)`` also
 accept ``leaf_model="linear"`` (piecewise-linear) artifacts and return an
 *interventional* decomposition: the path-based machinery attributes each
-leaf's "constant part" ``intercept + Σ wj · μj_global``, and per-leaf row
-deviations ``wj · (xj − μj_global)`` are credited directly to the regressor
-features along the row's path.  Global per-feature means ``μj_global`` are
-captured at fit time and stored in the artifact, so SHAP is self-contained
-— the original training data is not required at explain time.
+leaf's "constant part" in standardized PL coordinates, and per-leaf row
+deviations ``wj · (zj(x) − zj(baseline))`` are credited directly to the
+regressor features along the row's path.  The artifact stores both the global
+feature baseline and the per-leaf PL scaling metadata, so SHAP is
+self-contained — the original training data is not required at explain time.
 
 As of v0.7.4, strict additivity
 (``Σ shap_values + expected_value == predict(x)`` within
@@ -89,7 +89,7 @@ As of v0.7.4, strict additivity
 holds for ``leaf_model="linear"`` artifacts on the default
 predictor-aligned binning path.  v0.7.3's ``BinningContext`` aligns the
 SHAP path walker to the predictor's float thresholds; v0.7.4 credits
-``Σⱼ wⱼ·(xⱼ − μⱼ)`` at every visited node along the row's path (matching
+``Σⱼ wⱼ·(zⱼ(x) − zⱼ(baseline))`` at every visited node along the row's path (matching
 how ``predict`` accumulates ``leaf.eval_row(row)`` at each visited node).
 The legacy non-binning SHAP path retains a best-effort exemption for
 linear leaves only.

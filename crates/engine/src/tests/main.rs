@@ -20,6 +20,7 @@ struct EncodedFeatureCheckingBackend {
     feature_index: usize,
     expected_bins: Vec<u16>,
 }
+struct CategoricalAncestorLinearPathBackend;
 struct BadObjective;
 
 fn sample_dataset() -> TrainingDataset {
@@ -247,6 +248,50 @@ fn sample_noisy_wide_small_dataset() -> TrainingDataset {
         group_id: None,
         factor_exposures: None,
     }
+}
+
+fn categorical_ancestor_linear_path_dataset() -> TrainingDataset {
+    TrainingDataset {
+        matrix: alloygbm_core::DatasetMatrix::new(
+            8,
+            2,
+            vec![
+                0.0, 0.0, //
+                0.0, 1.0, //
+                1.0, 0.0, //
+                1.0, 1.0, //
+                2.0, 0.0, //
+                2.0, 1.0, //
+                3.0, 0.0, //
+                3.0, 1.0, //
+            ],
+        )
+        .expect("matrix is valid"),
+        targets: vec![-2.0, -1.0, -2.0, -1.0, 1.0, 2.0, 1.0, 2.0],
+        sample_weights: None,
+        time_index: None,
+        group_id: None,
+        factor_exposures: None,
+    }
+}
+
+fn categorical_ancestor_linear_path_binned_matrix() -> BinnedMatrix {
+    BinnedMatrix::new(
+        8,
+        2,
+        3,
+        vec![
+            0, 0, //
+            0, 1, //
+            1, 0, //
+            1, 1, //
+            2, 0, //
+            2, 1, //
+            3, 0, //
+            3, 1, //
+        ],
+    )
+    .expect("binned matrix is valid")
 }
 
 fn sample_trained_model() -> TrainedModel {
@@ -494,6 +539,163 @@ impl BackendOps for EncodedFeatureCheckingBackend {
     ) -> EngineResult<NodeStats> {
         MockBackend.reduce_sums(gradients, row_indices)
     }
+}
+
+impl BackendOps for CategoricalAncestorLinearPathBackend {
+    fn build_histograms(
+        &self,
+        _binned_matrix: &BinnedMatrix,
+        _gradients: &[GradientPair],
+        node: &NodeSlice,
+        _feature_tiles: &[FeatureTile],
+    ) -> EngineResult<HistogramBundle> {
+        Ok(HistogramBundle {
+            node_id: node.node_id,
+            feature_histograms: Vec::new(),
+        })
+    }
+
+    fn best_split(&self, histograms: &HistogramBundle) -> EngineResult<Option<SplitCandidate>> {
+        let (_, local_node_id) = decode_tree_node_id(histograms.node_id);
+        Ok(match local_node_id {
+            0 => Some(SplitCandidate {
+                node_id: histograms.node_id,
+                feature_index: 0,
+                threshold_bin: 0,
+                gain: 5.0,
+                default_left: false,
+                is_categorical: true,
+                categorical_bitset: Some(vec![0b0000_0011]),
+                left_stats: NodeStats {
+                    grad_sum: 0.0,
+                    hess_sum: 0.0,
+                    grad_sq_sum: 0.0,
+                    row_count: 0,
+                },
+                right_stats: NodeStats {
+                    grad_sum: 0.0,
+                    hess_sum: 0.0,
+                    grad_sq_sum: 0.0,
+                    row_count: 0,
+                },
+            }),
+            1 => Some(SplitCandidate {
+                node_id: histograms.node_id,
+                feature_index: 1,
+                threshold_bin: 0,
+                gain: 4.0,
+                default_left: false,
+                is_categorical: false,
+                categorical_bitset: None,
+                left_stats: NodeStats {
+                    grad_sum: 0.0,
+                    hess_sum: 0.0,
+                    grad_sq_sum: 0.0,
+                    row_count: 0,
+                },
+                right_stats: NodeStats {
+                    grad_sum: 0.0,
+                    hess_sum: 0.0,
+                    grad_sq_sum: 0.0,
+                    row_count: 0,
+                },
+            }),
+            _ => None,
+        })
+    }
+
+    fn apply_split(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        node: &NodeSlice,
+        split: &SplitCandidate,
+    ) -> EngineResult<PartitionResult> {
+        node.validate_bounds(binned_matrix.row_count)?;
+
+        let mut left_row_indices = Vec::new();
+        let mut right_row_indices = Vec::new();
+        for &row_index in &node.row_indices {
+            let row_index = row_index as usize;
+            let cell_index = row_index * binned_matrix.feature_count + split.feature_index as usize;
+            let bin = binned_matrix.row_bin(cell_index);
+            let goes_left = if split.is_categorical {
+                let category = bin as usize;
+                split
+                    .categorical_bitset
+                    .as_ref()
+                    .and_then(|bitset| bitset.get(category / 8).copied())
+                    .is_some_and(|byte| (byte & (1 << (category % 8))) != 0)
+            } else {
+                bin <= split.threshold_bin
+            };
+            if goes_left {
+                left_row_indices.push(row_index as u32);
+            } else {
+                right_row_indices.push(row_index as u32);
+            }
+        }
+        Ok(PartitionResult {
+            left_row_indices,
+            right_row_indices,
+        })
+    }
+
+    fn reduce_sums(
+        &self,
+        gradients: &[GradientPair],
+        row_indices: &[u32],
+    ) -> EngineResult<NodeStats> {
+        MockBackend.reduce_sums(gradients, row_indices)
+    }
+
+    fn compute_linear_leaf_pair_from_partitions(
+        &self,
+        _binned_matrix: &BinnedMatrix,
+        _gradients: &[GradientPair],
+        _raw_feature_values: &[f32],
+        _feature_count: usize,
+        _split_feature_index: u32,
+        _threshold_bin: u16,
+        _default_left: bool,
+        regressor_features: &[u32],
+        _feature_scaler: &alloygbm_core::LinearFeatureScaler,
+        _left_rows: &[u32],
+        _right_rows: &[u32],
+        _learning_rate: f32,
+        _l2_lambda: f32,
+    ) -> Option<(alloygbm_core::LinearLeaf, alloygbm_core::LinearLeaf)> {
+        let weights = vec![0.5; regressor_features.len()];
+        Some((
+            alloygbm_core::LinearLeaf::identity_scaled(
+                0.25,
+                weights.clone(),
+                regressor_features.to_vec(),
+            ),
+            alloygbm_core::LinearLeaf::identity_scaled(-0.25, weights, regressor_features.to_vec()),
+        ))
+    }
+}
+
+fn train_linear_tree_with_categorical_ancestor(tree_growth: TreeGrowth) -> TrainedModel {
+    let dataset = categorical_ancestor_linear_path_dataset();
+    let binned = categorical_ancestor_linear_path_binned_matrix();
+    let params = TrainParams {
+        max_depth: 2,
+        max_leaves: (tree_growth == TreeGrowth::Leaf).then_some(4),
+        tree_growth,
+        leaf_model: LeafModelKind::Linear,
+        ..TrainParams::default()
+    };
+    Trainer::new(params)
+        .expect("params are valid")
+        .fit_iterations(
+            &dataset,
+            &binned,
+            &CategoricalAncestorLinearPathBackend,
+            &SquaredErrorObjective,
+            1,
+        )
+        .expect("training succeeds")
 }
 
 impl ObjectiveOps for BadObjective {
@@ -3940,6 +4142,74 @@ fn test_trained_model_categorical_backward_compat() {
     assert_eq!(restored.stumps.len(), 1);
     assert!(!restored.stumps[0].split.is_categorical);
     assert!(restored.native_categorical_feature_indices.is_empty());
+}
+
+#[test]
+fn linear_leaf_level_wise_descendant_excludes_categorical_ancestor_features() {
+    let model = train_linear_tree_with_categorical_ancestor(TreeGrowth::Level);
+    assert_eq!(
+        model.stumps.len(),
+        2,
+        "expected root categorical split plus one numeric child split"
+    );
+    assert!(model.stumps[0].split.is_categorical);
+    assert!(matches!(
+        model.stumps[0].left_leaf_value,
+        LeafValue::Scalar(_)
+    ));
+    assert!(matches!(
+        model.stumps[0].right_leaf_value,
+        LeafValue::Scalar(_)
+    ));
+
+    let child = &model.stumps[1];
+    assert_eq!(child.split.feature_index, 1);
+    assert!(!child.split.is_categorical);
+
+    let left_leaf = match &child.left_leaf_value {
+        LeafValue::Linear(leaf) => leaf,
+        other => panic!("expected linear left leaf, got {other:?}"),
+    };
+    let right_leaf = match &child.right_leaf_value {
+        LeafValue::Linear(leaf) => leaf,
+        other => panic!("expected linear right leaf, got {other:?}"),
+    };
+    assert_eq!(left_leaf.regressor_features, vec![1]);
+    assert_eq!(right_leaf.regressor_features, vec![1]);
+}
+
+#[test]
+fn linear_leaf_leaf_wise_descendant_excludes_categorical_ancestor_features() {
+    let model = train_linear_tree_with_categorical_ancestor(TreeGrowth::Leaf);
+    assert_eq!(
+        model.stumps.len(),
+        2,
+        "expected root categorical split plus one numeric child split"
+    );
+    assert!(model.stumps[0].split.is_categorical);
+    assert!(matches!(
+        model.stumps[0].left_leaf_value,
+        LeafValue::Scalar(_)
+    ));
+    assert!(matches!(
+        model.stumps[0].right_leaf_value,
+        LeafValue::Scalar(_)
+    ));
+
+    let child = &model.stumps[1];
+    assert_eq!(child.split.feature_index, 1);
+    assert!(!child.split.is_categorical);
+
+    let left_leaf = match &child.left_leaf_value {
+        LeafValue::Linear(leaf) => leaf,
+        other => panic!("expected linear left leaf, got {other:?}"),
+    };
+    let right_leaf = match &child.right_leaf_value {
+        LeafValue::Linear(leaf) => leaf,
+        other => panic!("expected linear right leaf, got {other:?}"),
+    };
+    assert_eq!(left_leaf.regressor_features, vec![1]);
+    assert_eq!(right_leaf.regressor_features, vec![1]);
 }
 
 // -- Morph-mode end-to-end tests -----------------------------------------

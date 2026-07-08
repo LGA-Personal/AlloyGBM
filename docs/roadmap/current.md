@@ -77,7 +77,7 @@ Internal refactors (PR #52): `load_artifact_context` decomposed into `unroll_mul
 
 ### SHAP interaction values on `leaf_model="linear"` (#51)
 
-PL-leaf artifacts were the last remaining rejection on `GBMRegressor.shap_interaction_values(X)` after v0.11.0 shipped the interactions surface for scalar leaves. The math: each PL leaf value decomposes as `intercept + Σⱼ wⱼ·μⱼ` (constant, the same shape standard TreeSHAP wants) plus `Σⱼ wⱼ·(xⱼ − μⱼ)` (row-dependent). Standard TreeSHAP runs on the constant part; the per-row deviation is then folded onto the diagonal of the interaction matrix via `distribute_linear_terms_for_row` — the same helper that backs PL-leaf `shap_values`, so row-marginal `Σⱼ Φᵢⱼ = φᵢ` is automatic by construction, and adding to the diagonal preserves full additivity `Σᵢⱼ Φᵢⱼ + E = ŷ`. The matrix stays symmetric. The diagonal-only attribution is a pragmatic choice that loses path-feature × regressor-feature interaction credit — captured deliberately in `docs/limitations.md` as a future-research item, not claimed as the canonical algorithm.
+PL-leaf artifacts were the last remaining rejection on `GBMRegressor.shap_interaction_values(X)` after v0.11.0 shipped the interactions surface for scalar leaves. The math: each PL leaf value decomposes into a constant part in standardized PL coordinates plus `Σⱼ wⱼ·(zⱼ(x) − zⱼ(baseline))` row-dependent deviation. Standard TreeSHAP runs on the constant part; the per-row deviation is then folded onto the diagonal of the interaction matrix via `distribute_linear_terms_for_row` — the same helper that backs PL-leaf `shap_values`, so row-marginal `Σⱼ Φᵢⱼ = φᵢ` is automatic by construction, and adding to the diagonal preserves full additivity `Σᵢⱼ Φᵢⱼ + E = ŷ`. The matrix stays symmetric. The diagonal-only attribution is a pragmatic choice that loses path-feature × regressor-feature interaction credit — captured deliberately in `docs/limitations.md` as a future-research item, not claimed as the canonical algorithm.
 
 Tests pin all three invariants on both sides: the renamed `test_shap_interaction_values_accepts_linear_leaf_model` (pytest) and the new `shap_interactions_linear_leaves_satisfies_additivity` + `shap_interactions_linear_leaves_mixed_with_scalar_leaves_satisfies_additivity` (cargo) all verify additivity + symmetry + row-marginal-matches-`shap_values`. A new `test_shap_interaction_values_linear_rank_with_linear_leaves` exercises the LinearRank × linear-leaves binning combo via `ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK=1` to confirm the quantize-and-recurse path also satisfies all three invariants.
 
@@ -555,7 +555,7 @@ The `0.7.4` release closes the remaining v0.7.x SHAP-additivity
 carryover: strict additivity (`atol + rtol·|predict(x)|`) now holds for
 `leaf_model="linear"` artifacts on the default predictor-aligned binning
 path.  The fix walks the row's full path and credits
-`Σⱼ wⱼ·(xⱼ − μⱼ)` at every visited node — matching how `predict`
+`Σⱼ wⱼ·(zⱼ(x) − zⱼ(baseline))` at every visited node — matching how `predict`
 accumulates `leaf.eval_row(row)` — across `GBMRegressor`,
 `GBMClassifier`, `GBMRanker`, `training_mode="manual"` and `"morph"`,
 both binning strategies, with or without `interaction_constraints`.
@@ -668,9 +668,9 @@ artifacts.
 
 - **SHAP strict additivity for PL leaves.**  Pre-v0.7.4,
   `distribute_linear_terms_for_row` credited the per-feature deviation
-  `Σⱼ wⱼ·(xⱼ − μⱼ)` only at each tree's terminal leaf.  The predictor
+  `Σⱼ wⱼ·(zⱼ(x) − zⱼ(baseline))` only at each tree's terminal leaf.  The predictor
   accumulates `leaf.eval_row(row)` at **every visited node** along the
-  row's path, so SHAP was uncrediting one `Σⱼ wⱼ·(xⱼ − μⱼ)` per internal
+  row's path, so SHAP was uncrediting one `Σⱼ wⱼ·(zⱼ(x) − zⱼ(baseline))` per internal
   node per tree per row — producing additivity gaps on the order of the
   predictions themselves.  v0.7.4 walks the full path and credits the
   linear deviation at every visited leaf; the brute-force Shapley and
@@ -822,8 +822,9 @@ Python API surface changes.
   `benchmarks/pl_trees_benchmark.py` script with convergence-curve and λ-sweep
   analysis; report at `docs/benchmarks/pl_trees_v1.md`
 - Categorical-native splits continue to use constant leaves when
-  `max_cat_threshold > 0`; descendant leaves below a categorical root node use
-  linear leaves on all remaining numeric regressors
+  `max_cat_threshold > 0`; descendant leaves below a categorical root node can
+  still use linear leaves, but only on eligible numeric split-path regressors
+  with the categorical split feature excluded from the PL regressor path
 
 ## What Shipped In 0.4.0
 

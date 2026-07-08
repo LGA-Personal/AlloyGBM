@@ -16,8 +16,8 @@
 
 use alloygbm_core::simd::f32x8;
 use alloygbm_core::{
-    BinnedMatrix, LinearFeatureHistogram, LinearHistogramBin, LinearLeaf, MAX_PL_MATRIX_ENTRIES,
-    MAX_PL_REGRESSORS, NodeStats, SplitCandidate, pl_matrix_index,
+    BinnedMatrix, LinearFeatureHistogram, LinearFeatureScaler, LinearHistogramBin, LinearLeaf,
+    MAX_PL_MATRIX_ENTRIES, MAX_PL_REGRESSORS, NodeStats, SplitCandidate, pl_matrix_index,
 };
 use alloygbm_engine::{LinearContext, SplitSelectionOptions};
 
@@ -39,6 +39,14 @@ use alloygbm_engine::{LinearContext, SplitSelectionOptions};
 
 const XT_HX_CHUNKS: usize = MAX_PL_MATRIX_ENTRIES / 8;
 const _CHUNKS_DIVIDE_EVENLY: () = assert!(MAX_PL_MATRIX_ENTRIES.is_multiple_of(8));
+
+#[derive(Clone, Copy, Debug)]
+pub struct LinearLeafSolveParams {
+    pub grad_sum: f32,
+    pub hess_sum: f32,
+    pub learning_rate: f32,
+    pub l2_lambda: f32,
+}
 
 #[inline]
 fn load_chunk(src: &[f32; MAX_PL_MATRIX_ENTRIES], chunk: usize) -> f32x8 {
@@ -584,34 +592,38 @@ fn cholesky_solve_alpha(
 ///
 /// # Arguments
 /// * `xtg` / `xt_hx` — matrix statistics accumulated from histogram bins
-/// * `grad_sum` / `hess_sum` — scalar sums (for the Newton-Raphson intercept)
-/// * `learning_rate` — applied to both intercept and weights
-/// * `l2_lambda` — ridge regularisation
+/// * `params` — scalar sums, learning rate, and ridge regularisation
 /// * `regressor_features` — indices of the `d` regressors
 pub fn solve_pl_leaf(
     xtg: &[f32; MAX_PL_REGRESSORS],
     xt_hx: &[f32; MAX_PL_MATRIX_ENTRIES],
-    grad_sum: f32,
-    hess_sum: f32,
-    learning_rate: f32,
-    l2_lambda: f32,
+    params: LinearLeafSolveParams,
     regressor_features: &[u32],
+    feature_scaler: &LinearFeatureScaler,
 ) -> LinearLeaf {
     let d = regressor_features.len();
     const LEAF_EPS: f32 = 1e-6;
 
     // Standard Newton-Raphson intercept (same formula as scalar leaves).
-    let intercept = -learning_rate * grad_sum / (hess_sum + l2_lambda + LEAF_EPS);
+    let intercept =
+        -params.learning_rate * params.grad_sum / (params.hess_sum + params.l2_lambda + LEAF_EPS);
 
     // Linear correction weights α* = -(XᵀHX + λI)⁻¹ Xᵀg, scaled by lr.
-    let raw_alpha = cholesky_solve_alpha(xtg, xt_hx, d, l2_lambda);
-    let weights: Vec<f32> = raw_alpha[..d].iter().map(|&w| learning_rate * w).collect();
+    let raw_alpha = cholesky_solve_alpha(xtg, xt_hx, d, params.l2_lambda);
+    let weights: Vec<f32> = raw_alpha[..d]
+        .iter()
+        .map(|&w| params.learning_rate * w)
+        .collect();
+    let (feature_means, feature_inv_stds) =
+        feature_scaler.leaf_means_and_inv_stds(regressor_features);
 
-    LinearLeaf {
+    LinearLeaf::scaled(
         intercept,
         weights,
-        regressor_features: regressor_features.to_vec(),
-    }
+        regressor_features.to_vec(),
+        feature_means,
+        feature_inv_stds,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -624,6 +636,7 @@ pub fn solve_pl_leaf_pair_from_partitions(
     threshold_bin: u16,
     default_left: bool,
     regressor_features: &[u32],
+    feature_scaler: &LinearFeatureScaler,
     left_rows: &[u32],
     right_rows: &[u32],
     learning_rate: f32,
@@ -641,6 +654,7 @@ pub fn solve_pl_leaf_pair_from_partitions(
         feature_count,
         split_feature_index,
         regressor_features,
+        feature_scaler,
         left_rows,
         right_rows,
     )?;
@@ -655,20 +669,26 @@ pub fn solve_pl_leaf_pair_from_partitions(
         solve_pl_leaf(
             &l_xtg,
             &l_xthx,
-            l_gs,
-            l_hs,
-            learning_rate,
-            l2_lambda,
+            LinearLeafSolveParams {
+                grad_sum: l_gs,
+                hess_sum: l_hs,
+                learning_rate,
+                l2_lambda,
+            },
             regressor_features,
+            feature_scaler,
         ),
         solve_pl_leaf(
             &r_xtg,
             &r_xthx,
-            r_gs,
-            r_hs,
-            learning_rate,
-            l2_lambda,
+            LinearLeafSolveParams {
+                grad_sum: r_gs,
+                hess_sum: r_hs,
+                learning_rate,
+                l2_lambda,
+            },
             regressor_features,
+            feature_scaler,
         ),
     ))
 }
@@ -681,6 +701,7 @@ fn accumulate_selected_split_linear_histogram(
     feature_count: usize,
     split_feature_index: u32,
     regressor_features: &[u32],
+    feature_scaler: &LinearFeatureScaler,
     left_rows: &[u32],
     right_rows: &[u32],
 ) -> Option<LinearFeatureHistogram> {
@@ -711,7 +732,7 @@ fn accumulate_selected_split_linear_histogram(
         for (slot, &feature_u32) in regressor_features.iter().enumerate() {
             let feature = feature_u32 as usize;
             x[slot] = if feature < feature_count {
-                raw_feature_values[row_base + feature]
+                feature_scaler.scaled_value(feature_u32, raw_feature_values[row_base + feature])
             } else {
                 0.0
             };

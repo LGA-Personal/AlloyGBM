@@ -1,7 +1,7 @@
 use alloygbm_core::{
     BinnedMatrix, FeatureHistogram, FeatureTile, GradientPair, HistogramBundle,
-    LinearFeatureHistogram, LinearHistogramBundle, LinearLeaf, NodeSlice, NodeStats,
-    PartitionResult, SplitCandidate,
+    LinearFeatureHistogram, LinearFeatureScaler, LinearHistogramBundle, LinearLeaf, NodeSlice,
+    NodeStats, PartitionResult, SplitCandidate,
 };
 use alloygbm_engine::{
     BackendOps, CategoricalFeatureInfo, EngineError, EngineResult, FactorSplitContext,
@@ -337,6 +337,7 @@ impl BackendOps for CpuBackend {
         node: &NodeSlice,
         feature_tiles: &[FeatureTile],
         regressor_features: &[u32],
+        feature_scaler: &LinearFeatureScaler,
         raw_feature_values: &[f32],
         row_count: usize,
         feature_count: usize,
@@ -347,6 +348,7 @@ impl BackendOps for CpuBackend {
             node,
             feature_tiles,
             regressor_features,
+            feature_scaler,
             raw_feature_values,
             row_count,
             feature_count,
@@ -410,6 +412,7 @@ impl BackendOps for CpuBackend {
         missing_bin_index: usize,
         learning_rate: f32,
         l2_lambda: f32,
+        feature_scaler: &LinearFeatureScaler,
     ) -> Option<(LinearLeaf, LinearLeaf)> {
         let d = linear_histograms.num_regressors;
         if d == 0 {
@@ -427,20 +430,26 @@ impl BackendOps for CpuBackend {
         let left_leaf = pl::solve_pl_leaf(
             &l_xtg,
             &l_xthx,
-            l_gs,
-            l_hs,
-            learning_rate,
-            l2_lambda,
+            pl::LinearLeafSolveParams {
+                grad_sum: l_gs,
+                hess_sum: l_hs,
+                learning_rate,
+                l2_lambda,
+            },
             regressor_features,
+            feature_scaler,
         );
         let right_leaf = pl::solve_pl_leaf(
             &r_xtg,
             &r_xthx,
-            r_gs,
-            r_hs,
-            learning_rate,
-            l2_lambda,
+            pl::LinearLeafSolveParams {
+                grad_sum: r_gs,
+                hess_sum: r_hs,
+                learning_rate,
+                l2_lambda,
+            },
             regressor_features,
+            feature_scaler,
         );
 
         Some((left_leaf, right_leaf))
@@ -456,6 +465,7 @@ impl BackendOps for CpuBackend {
         threshold_bin: u16,
         default_left: bool,
         regressor_features: &[u32],
+        feature_scaler: &LinearFeatureScaler,
         left_rows: &[u32],
         right_rows: &[u32],
         learning_rate: f32,
@@ -470,6 +480,7 @@ impl BackendOps for CpuBackend {
             threshold_bin,
             default_left,
             regressor_features,
+            feature_scaler,
             left_rows,
             right_rows,
             learning_rate,

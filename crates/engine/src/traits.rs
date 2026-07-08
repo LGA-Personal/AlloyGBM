@@ -1,6 +1,6 @@
 use alloygbm_core::{
-    BinnedMatrix, FeatureTile, GradientPair, HistogramBundle, LinearHistogramBundle, LinearLeaf,
-    NodeSlice, NodeStats, PartitionResult, SplitCandidate,
+    BinnedMatrix, FeatureTile, GradientPair, HistogramBundle, LinearFeatureScaler,
+    LinearHistogramBundle, LinearLeaf, NodeSlice, NodeStats, PartitionResult, SplitCandidate,
 };
 
 use crate::error::{EngineError, EngineResult};
@@ -117,6 +117,7 @@ pub trait BackendOps {
         _node: &NodeSlice,
         _feature_tiles: &[FeatureTile],
         _regressor_features: &[u32],
+        _feature_scaler: &LinearFeatureScaler,
         _raw_feature_values: &[f32],
         _row_count: usize,
         _feature_count: usize,
@@ -166,6 +167,7 @@ pub trait BackendOps {
         _missing_bin_index: usize,
         _learning_rate: f32,
         _l2_lambda: f32,
+        _feature_scaler: &LinearFeatureScaler,
     ) -> Option<(LinearLeaf, LinearLeaf)> {
         None
     }
@@ -185,6 +187,7 @@ pub trait BackendOps {
         _threshold_bin: u16,
         _default_left: bool,
         _regressor_features: &[u32],
+        _feature_scaler: &LinearFeatureScaler,
         _left_rows: &[u32],
         _right_rows: &[u32],
         _learning_rate: f32,

@@ -9,8 +9,8 @@
 use alloygbm_categorical::fit_transform_target_encoder;
 use alloygbm_core::{
     BinnedMatrix, DatasetMatrix, FactorExposureMatrix, FeatureTile, GradientPair, HistogramBundle,
-    LeafModelKind, LeafValue, LinearLeaf, MAX_PL_REGRESSORS, NodeSlice, PartitionResult,
-    SplitCandidate, TrainParams, TrainingDataset, leaf_effective_gradient,
+    LeafModelKind, LeafValue, LinearFeatureScaler, LinearLeaf, MAX_PL_REGRESSORS, NodeSlice,
+    PartitionResult, SplitCandidate, TrainParams, TrainingDataset, leaf_effective_gradient,
 };
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
@@ -33,8 +33,16 @@ use crate::types::{
 pub(crate) const LEAF_EPSILON: f32 = 1e-6;
 
 /// Type alias for an active node entry in the level-wise tree builder.
-/// Fields: (local_node_id, row_indices, histograms, parent_leaf_value, parent_linear_leaf)
-type ActiveNodeEntry = (u32, Vec<u32>, HistogramBundle, f32, Option<LinearLeaf>);
+/// Fields:
+/// (local_node_id, row_indices, histograms, parent_leaf_value, parent_linear_leaf, path_features)
+type ActiveNodeEntry = (
+    u32,
+    Vec<u32>,
+    HistogramBundle,
+    f32,
+    Option<LinearLeaf>,
+    Vec<u32>,
+);
 
 /// Type alias for a split linear leaf pair (delta, delta, absolute, absolute).
 type LinearLeafQuad = (LinearLeaf, LinearLeaf, LinearLeaf, LinearLeaf);
@@ -185,6 +193,25 @@ pub(crate) fn find_best_split_dispatch<B: BackendOps>(
     }
 }
 
+fn linear_regressor_path_features(
+    path_features: &[u32],
+    split_feature: u32,
+    split_is_categorical: bool,
+    feature_count: usize,
+) -> Vec<u32> {
+    let split_feature_iter = (!split_is_categorical).then_some(split_feature).into_iter();
+    let mut selected = Vec::with_capacity(MAX_PL_REGRESSORS);
+    for feature in path_features.iter().copied().chain(split_feature_iter) {
+        if (feature as usize) < feature_count
+            && !selected.contains(&feature)
+            && selected.len() < MAX_PL_REGRESSORS
+        {
+            selected.push(feature);
+        }
+    }
+    selected
+}
+
 /// Build a single tree using level-wise (breadth-first) growth strategy.
 ///
 /// Splits all nodes at depth d before moving to depth d+1.
@@ -208,6 +235,11 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
 ) -> EngineResult<(Vec<TrainedStump>, IterationStopReason)> {
     let mut candidate_round_stumps = Vec::new();
     let mut round_rejection_reason = IterationStopReason::NoSplitCandidate;
+    let feature_scaler = LinearFeatureScaler::from_raw_matrix(
+        raw_feature_values,
+        binned_matrix.row_count,
+        binned_matrix.feature_count,
+    );
     let root_node_id = encode_tree_node_id(round_index, 0)?;
     let root_node = NodeSlice::new(root_node_id, root_row_indices)?;
     let root_histograms =
@@ -227,8 +259,14 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
     // can replace parent contribution via deltas (tree semantics).
     // depth is the current tree level (0-indexed); all nodes at this level share the same depth.
     // The Option<LinearLeaf> carries the parent's absolute linear leaf (for weight delta computation).
-    let mut active_nodes: Vec<ActiveNodeEntry> =
-        vec![(0_u32, root_node.row_indices, root_histograms, 0.0_f32, None)];
+    let mut active_nodes: Vec<ActiveNodeEntry> = vec![(
+        0_u32,
+        root_node.row_indices,
+        root_histograms,
+        0.0_f32,
+        None,
+        Vec::new(),
+    )];
 
     for depth in 0..(params.max_depth as usize) {
         if active_nodes.is_empty() {
@@ -236,8 +274,14 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
         }
 
         let mut next_nodes = Vec::new();
-        for (local_node_id, node_rows, histograms, parent_leaf_value, parent_linear_leaf) in
-            active_nodes
+        for (
+            local_node_id,
+            node_rows,
+            histograms,
+            parent_leaf_value,
+            parent_linear_leaf,
+            path_features,
+        ) in active_nodes
         {
             let node_id = encode_tree_node_id(round_index, local_node_id)?;
             let node = NodeSlice::new(node_id, node_rows)?;
@@ -384,8 +428,12 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
                 && !raw_feature_values.is_empty()
                 && !split.is_categorical
             {
-                let d = binned_matrix.feature_count.min(MAX_PL_REGRESSORS);
-                let regressor_features: Vec<u32> = (0..d as u32).collect();
+                let regressor_features = linear_regressor_path_features(
+                    &path_features,
+                    split.feature_index,
+                    split.is_categorical,
+                    binned_matrix.feature_count,
+                );
                 backend
                     .compute_linear_leaf_pair_from_partitions(
                         binned_matrix,
@@ -396,6 +444,7 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
                         split.threshold_bin,
                         split.default_left,
                         &regressor_features,
+                        &feature_scaler,
                         &partition.left_row_indices,
                         &partition.right_row_indices,
                         scheduled_lr,
@@ -424,13 +473,23 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
                         ll_delta.intercept -= parent_leaf_value;
                         rl_delta.intercept -= parent_leaf_value;
                         if let Some(ref p) = parent_linear_leaf {
-                            let d = p.weights.len().min(ll_delta.weights.len());
-                            for i in 0..d {
-                                ll_delta.weights[i] -= p.weights[i];
+                            for (slot, &feature) in ll_delta.regressor_features.iter().enumerate() {
+                                if let Some(parent_slot) =
+                                    p.regressor_features.iter().position(|&f| f == feature)
+                                    && slot < ll_delta.weights.len()
+                                    && parent_slot < p.weights.len()
+                                {
+                                    ll_delta.weights[slot] -= p.weights[parent_slot];
+                                }
                             }
-                            let d = p.weights.len().min(rl_delta.weights.len());
-                            for i in 0..d {
-                                rl_delta.weights[i] -= p.weights[i];
+                            for (slot, &feature) in rl_delta.regressor_features.iter().enumerate() {
+                                if let Some(parent_slot) =
+                                    p.regressor_features.iter().position(|&f| f == feature)
+                                    && slot < rl_delta.weights.len()
+                                    && parent_slot < p.weights.len()
+                                {
+                                    rl_delta.weights[slot] -= p.weights[parent_slot];
+                                }
                             }
                         }
                         (ll_delta, rl_delta, ll_abs, rl_abs)
@@ -502,6 +561,12 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
                     };
                 let left_parent_ll = linear_leaf_abs_pair.as_ref().map(|(ll, _)| ll.clone());
                 let right_parent_ll = linear_leaf_abs_pair.as_ref().map(|(_, rl)| rl.clone());
+                let child_path_features = linear_regressor_path_features(
+                    &path_features,
+                    split.feature_index,
+                    split.is_categorical,
+                    binned_matrix.feature_count,
+                );
 
                 if left_row_indices.len() <= right_row_indices.len() {
                     let left_node = NodeSlice::new(left_node_id, left_row_indices)?;
@@ -519,6 +584,7 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
                         left_histograms,
                         left_parent_val,
                         left_parent_ll,
+                        child_path_features.clone(),
                     ));
                     next_nodes.push((
                         right_local_node_id,
@@ -526,6 +592,7 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
                         right_histograms,
                         right_parent_val,
                         right_parent_ll,
+                        child_path_features.clone(),
                     ));
                 } else {
                     let right_node = NodeSlice::new(right_node_id, right_row_indices)?;
@@ -543,6 +610,7 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
                         left_histograms,
                         left_parent_val,
                         left_parent_ll,
+                        child_path_features.clone(),
                     ));
                     next_nodes.push((
                         right_local_node_id,
@@ -550,6 +618,7 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
                         right_histograms,
                         right_parent_val,
                         right_parent_ll,
+                        child_path_features.clone(),
                     ));
                 }
             }
@@ -588,6 +657,7 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
 pub(crate) struct PendingSplit {
     local_node_id: u32,
     row_indices: Vec<u32>,
+    path_features: Vec<u32>,
     split_candidate: SplitCandidate,
     histograms: HistogramBundle,
     parent_leaf_value: f32,
@@ -647,6 +717,11 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
 ) -> EngineResult<(Vec<TrainedStump>, IterationStopReason)> {
     let max_leaves = controls.max_leaves.unwrap_or(usize::MAX);
     let max_depth = params.max_depth as usize;
+    let feature_scaler = LinearFeatureScaler::from_raw_matrix(
+        raw_feature_values,
+        binned_matrix.row_count,
+        binned_matrix.feature_count,
+    );
 
     // Build root histograms and find best split.
     let root_node_id = encode_tree_node_id(round_index, 0)?;
@@ -706,6 +781,7 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
     queue.push(PendingSplit {
         local_node_id: 0,
         row_indices: root_node.row_indices,
+        path_features: Vec::new(),
         split_candidate: root_split,
         histograms: root_histograms,
         parent_leaf_value: 0.0,
@@ -831,8 +907,12 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
             && !raw_feature_values.is_empty()
             && !split.is_categorical
         {
-            let d = binned_matrix.feature_count.min(MAX_PL_REGRESSORS);
-            let regressor_features: Vec<u32> = (0..d as u32).collect();
+            let regressor_features = linear_regressor_path_features(
+                &pending.path_features,
+                split.feature_index,
+                split.is_categorical,
+                binned_matrix.feature_count,
+            );
             backend
                 .compute_linear_leaf_pair_from_partitions(
                     binned_matrix,
@@ -843,6 +923,7 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                     split.threshold_bin,
                     split.default_left,
                     &regressor_features,
+                    &feature_scaler,
                     &partition.left_row_indices,
                     &partition.right_row_indices,
                     scheduled_lr,
@@ -869,13 +950,23 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                     ll_delta.intercept -= pending.parent_leaf_value;
                     rl_delta.intercept -= pending.parent_leaf_value;
                     if let Some(ref p) = pending.parent_linear_leaf {
-                        let d = p.weights.len().min(ll_delta.weights.len());
-                        for i in 0..d {
-                            ll_delta.weights[i] -= p.weights[i];
+                        for (slot, &feature) in ll_delta.regressor_features.iter().enumerate() {
+                            if let Some(parent_slot) =
+                                p.regressor_features.iter().position(|&f| f == feature)
+                                && slot < ll_delta.weights.len()
+                                && parent_slot < p.weights.len()
+                            {
+                                ll_delta.weights[slot] -= p.weights[parent_slot];
+                            }
                         }
-                        let d = p.weights.len().min(rl_delta.weights.len());
-                        for i in 0..d {
-                            rl_delta.weights[i] -= p.weights[i];
+                        for (slot, &feature) in rl_delta.regressor_features.iter().enumerate() {
+                            if let Some(parent_slot) =
+                                p.regressor_features.iter().position(|&f| f == feature)
+                                && slot < rl_delta.weights.len()
+                                && parent_slot < p.weights.len()
+                            {
+                                rl_delta.weights[slot] -= p.weights[parent_slot];
+                            }
                         }
                     }
                     (ll_delta, rl_delta, ll_abs, rl_abs)
@@ -1007,8 +1098,16 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
             // same descended bitset because the split feature is shared.
             // (`split` itself was moved into `committed_split` above; we
             // read the feature index off the just-pushed stump instead.)
-            let split_feature_for_descend =
-                stumps.last().map(|s| s.split.feature_index).unwrap_or(0);
+            let (split_feature_for_descend, split_is_categorical_for_descend) = stumps
+                .last()
+                .map(|s| (s.split.feature_index, s.split.is_categorical))
+                .unwrap_or((0, false));
+            let child_path_features = linear_regressor_path_features(
+                &pending.path_features,
+                split_feature_for_descend,
+                split_is_categorical_for_descend,
+                binned_matrix.feature_count,
+            );
             let child_active_groups: Option<u64> = match (
                 constraint_index.as_ref(),
                 node_active_groups.get(&local_node_id).copied(),
@@ -1055,6 +1154,7 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                 queue.push(PendingSplit {
                     local_node_id: smaller_local,
                     row_indices: smaller_node.row_indices,
+                    path_features: child_path_features.clone(),
                     split_candidate: child_split,
                     histograms: smaller_histograms,
                     parent_leaf_value: smaller_parent_val,
@@ -1095,6 +1195,7 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                 queue.push(PendingSplit {
                     local_node_id: larger_local,
                     row_indices: larger_indices,
+                    path_features: child_path_features.clone(),
                     split_candidate: child_split,
                     histograms: larger_histograms,
                     parent_leaf_value: larger_parent_val,
@@ -1232,4 +1333,28 @@ pub(crate) fn validate_iteration_controls(controls: IterationControls) -> Engine
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod linear_leaf_path_tests {
+    use super::*;
+
+    #[test]
+    fn linear_regressor_features_follow_split_path_not_first_columns() {
+        let selected = linear_regressor_path_features(&[10, 3, 10], 12, false, 20);
+        assert_eq!(selected, vec![10, 3, 12]);
+    }
+
+    #[test]
+    fn linear_regressor_features_cap_at_max_pl_regressors() {
+        let path = vec![9, 8, 7, 6, 5, 4, 3, 2];
+        let selected = linear_regressor_path_features(&path, 1, false, 20);
+        assert_eq!(selected, vec![9, 8, 7, 6, 5, 4, 3, 2]);
+    }
+
+    #[test]
+    fn linear_regressor_path_skips_categorical_split_features() {
+        let selected = linear_regressor_path_features(&[10, 3], 12, true, 20);
+        assert_eq!(selected, vec![10, 3]);
+    }
 }

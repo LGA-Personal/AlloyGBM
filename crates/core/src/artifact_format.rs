@@ -896,15 +896,16 @@ pub struct LinearLeafCoefficientsPayload {
 ///
 /// Layout:
 /// ```text
-/// [u32 version=1] [u32 entry_count]
+/// [u32 version=2] [u32 entry_count]
 /// For each entry:
 ///   [u32 stump_idx] [u8 flags]
 ///   if flags & 1: [u8 d] [f32 intercept] [d × f32 weights] [d × u32 regressor_features]
+///               [d × f32 feature_means] [d × f32 feature_inv_stds]
 ///   if flags & 2: same for right leaf
 /// ```
 pub fn encode_linear_leaf_coefficients_payload(payload: &LinearLeafCoefficientsPayload) -> Vec<u8> {
     let mut buf = Vec::new();
-    buf.extend_from_slice(&1u32.to_le_bytes()); // version
+    buf.extend_from_slice(&2u32.to_le_bytes()); // version
     buf.extend_from_slice(&(payload.entries.len() as u32).to_le_bytes());
     for entry in &payload.entries {
         buf.extend_from_slice(&entry.stump_idx.to_le_bytes());
@@ -922,6 +923,14 @@ pub fn encode_linear_leaf_coefficients_payload(payload: &LinearLeafCoefficientsP
             for i in 0..d {
                 let feat = *leaf.regressor_features.get(i).unwrap_or(&0);
                 buf.extend_from_slice(&feat.to_le_bytes());
+            }
+            for i in 0..d {
+                let mean = *leaf.feature_means.get(i).unwrap_or(&0.0);
+                buf.extend_from_slice(&mean.to_le_bytes());
+            }
+            for i in 0..d {
+                let inv_std = *leaf.feature_inv_stds.get(i).unwrap_or(&1.0);
+                buf.extend_from_slice(&inv_std.to_le_bytes());
             }
         };
         if let Some(ref ll) = entry.left_leaf {
@@ -944,7 +953,7 @@ pub fn decode_linear_leaf_coefficients_payload(
         ));
     }
     let version = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-    if version != 1 {
+    if version != 1 && version != 2 {
         return Err(CoreError::Validation(format!(
             "unsupported linear leaf coefficients version: {version}"
         )));
@@ -1001,11 +1010,26 @@ pub fn decode_linear_leaf_coefficients_payload(
             for _ in 0..d {
                 regressor_features.push(read_u32(bytes, o)?);
             }
-            Ok(LinearLeaf {
+            let (feature_means, feature_inv_stds) = if version >= 2 {
+                let mut means = Vec::with_capacity(d);
+                for _ in 0..d {
+                    means.push(read_f32(bytes, o)?);
+                }
+                let mut inv_stds = Vec::with_capacity(d);
+                for _ in 0..d {
+                    inv_stds.push(read_f32(bytes, o)?);
+                }
+                (means, inv_stds)
+            } else {
+                (vec![0.0; d], vec![1.0; d])
+            };
+            Ok(LinearLeaf::scaled(
                 intercept,
                 weights,
                 regressor_features,
-            })
+                feature_means,
+                feature_inv_stds,
+            ))
         };
 
         let left_leaf = if flags & 1 != 0 {
@@ -1241,7 +1265,7 @@ pub fn decode_optional_multi_output_leaf_values_section(
 /// matches `ModelMetadata::feature_names`.  Used by SHAP for piecewise-linear
 /// leaves so that linear-leaf contributions can be decomposed into a
 /// path-attributed expected value plus per-feature deviations
-/// `wj * (xj - feature_means[j])`.
+/// `wj * (z_j(row_raw_j) - z_j(feature_means_raw_j))`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FeatureBaselinePayload {
     pub feature_means: Vec<f32>,
