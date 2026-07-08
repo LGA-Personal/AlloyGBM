@@ -91,10 +91,10 @@ class _ShapMixin:
 
         For ``leaf_model="linear"`` (piecewise-linear) artifacts this is an
         *interventional* decomposition: the path-based attribution acts on
-        each leaf's "constant part" ``intercept + Σ wj·μj_global`` and
-        per-feature deviations ``wj · (xj − μj_global)`` are credited
-        directly to each regressor at every visited node along the row's
-        path through each tree.
+        each leaf's "constant part" in standardized PL coordinates and
+        per-feature deviations ``wj · (zj(x) − zj(baseline))`` are credited
+        directly to each regressor at every visited node along the row's path
+        through each tree.  NaN regressor values contribute ``zj = 0``.
 
         As of v0.7.4, ``Σ shap_values + expected_value == predict(x)``
         holds within ``atol + rtol · |predict(x)|`` (default
@@ -227,10 +227,10 @@ class _ShapMixin:
         - ``Σ_i Σ_j values[row][i][j] + expected_value == predict(x)``
           (full additivity, mod f32 round-off).
 
-        For linear-leaf (``leaf_model="linear"``) artifacts, the linear deviation
-        ``wj · (xj − μj)`` is attributed strictly to the regressor feature's main
-        effect (the diagonal of the interaction matrix), ensuring both row-marginal
-        and full additivity are preserved.
+        For linear-leaf (``leaf_model="linear"``) artifacts, the standardized
+        linear deviation ``wj · (zj(x) − zj(baseline))`` is attributed strictly
+        to the regressor feature's main effect (the diagonal of the interaction
+        matrix), ensuring both row-marginal and full additivity are preserved.
         """
         if not self._is_fitted:
             raise RuntimeError(
