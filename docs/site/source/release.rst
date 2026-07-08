@@ -184,10 +184,10 @@ carved out when interactions originally shipped in v0.11.0.
 
 - ``GBMRegressor.shap_interaction_values(X)`` now accepts artifacts
   trained with ``leaf_model="linear"``. The row-dependent linear
-  deviation ``w_j · (x_j − μ_j)`` is credited to the diagonal of the
+  deviation ``w_j · (z_j(x) − z_j(baseline))`` is credited to the diagonal of the
   interaction matrix (the regressor feature's main effect): standard
   TreeSHAP interactions run on the constant part of each leaf
-  (``intercept + Σⱼ wⱼ·μⱼ``), then the per-row deviations are folded
+  in standardized PL coordinates, then the per-row deviations are folded
   onto ``Φ[j][j]`` via the same helper that backs PL-leaf
   ``shap_values``. Full additivity (``Σᵢⱼ Φᵢⱼ + E = ŷ``) and row-marginal
   (``Σⱼ Φᵢⱼ = φᵢ``) hold by construction; the matrix is symmetric and
@@ -969,10 +969,10 @@ Bug-fix release.  Closes the remaining v0.7.x carryover documented in
 **SHAP strict additivity for piecewise-linear leaves:**
 
 - Pre-v0.7.4 ``distribute_linear_terms_for_row`` credited the per-feature
-  deviation ``Σⱼ wⱼ·(xⱼ − μⱼ)`` only at each tree's terminal leaf.  The
+  deviation ``Σⱼ wⱼ·(zⱼ(x) − zⱼ(baseline))`` only at each tree's terminal leaf.  The
   predictor accumulates ``leaf.eval_row(row)`` at **every visited node**
   along the row's path, so SHAP was uncrediting one
-  ``Σⱼ wⱼ·(xⱼ − μⱼ)`` per internal node per tree per row — producing
+  ``Σⱼ wⱼ·(zⱼ(x) − zⱼ(baseline))`` per internal node per tree per row — producing
   additivity gaps on the order of the predictions themselves
   (~3.85 on linear-data predictions of magnitude ~10 with
   ``n_estimators=100, max_depth=6``).
@@ -1149,10 +1149,10 @@ What's new in 0.7.1
 - ``shap_values()`` now accepts ``leaf_model="linear"`` artifacts and
   returns an interventional decomposition: the path-based TreeSHAP /
   brute-force machinery attributes each leaf's "constant part"
-  (``intercept + Σ wⱼ·μⱼ_global``) while per-leaf row deviations
-  ``wⱼ · (xⱼ − μⱼ_global)`` are credited directly to each regressor.
-  Global feature means are persisted in a new ``FeatureBaseline``
-  artifact section so SHAP is self-contained at explain time.
+  in standardized PL coordinates while per-leaf row deviations
+  ``wⱼ · (zⱼ(x) − zⱼ(baseline))`` are credited directly to each regressor.
+  The artifact stores both the global feature baseline and the per-leaf PL
+  scaling metadata so SHAP is self-contained at explain time.
 
 **Per-round training diagnostics:**
 
