@@ -2308,15 +2308,24 @@ mod tests {
 
         let left_row = [0.0_f32, 14.0_f32];
         let left_pred = predictor.predict_row(&left_row).expect("left prediction");
-        assert!((left_pred - 5.1).abs() < 1e-6, "left prediction: {left_pred}");
+        assert!(
+            (left_pred - 5.1).abs() < 1e-6,
+            "left prediction: {left_pred}"
+        );
 
         let left_nan = predictor
             .predict_row(&[0.0_f32, f32::NAN])
             .expect("left NaN prediction");
-        assert!((left_nan - 1.1).abs() < 1e-6, "left NaN prediction: {left_nan}");
+        assert!(
+            (left_nan - 1.1).abs() < 1e-6,
+            "left NaN prediction: {left_nan}"
+        );
 
         let right_row = [3.0_f32, 3.5_f32];
         let right_pred = predictor.predict_row(&right_row).expect("right prediction");
-        assert!((right_pred - 1.1).abs() < 1e-6, "right prediction: {right_pred}");
+        assert!(
+            (right_pred - 1.1).abs() < 1e-6,
+            "right prediction: {right_pred}"
+        );
     }
 }
