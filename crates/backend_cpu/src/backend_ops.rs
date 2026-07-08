@@ -430,20 +430,24 @@ impl BackendOps for CpuBackend {
         let left_leaf = pl::solve_pl_leaf(
             &l_xtg,
             &l_xthx,
-            l_gs,
-            l_hs,
-            learning_rate,
-            l2_lambda,
+            pl::LinearLeafSolveParams {
+                grad_sum: l_gs,
+                hess_sum: l_hs,
+                learning_rate,
+                l2_lambda,
+            },
             regressor_features,
             feature_scaler,
         );
         let right_leaf = pl::solve_pl_leaf(
             &r_xtg,
             &r_xthx,
-            r_gs,
-            r_hs,
-            learning_rate,
-            l2_lambda,
+            pl::LinearLeafSolveParams {
+                grad_sum: r_gs,
+                hess_sum: r_hs,
+                learning_rate,
+                l2_lambda,
+            },
             regressor_features,
             feature_scaler,
         );

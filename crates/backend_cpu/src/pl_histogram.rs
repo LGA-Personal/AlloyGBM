@@ -297,20 +297,24 @@ mod tests {
         let histogram_left = crate::pl::solve_pl_leaf(
             &histogram_pair.0,
             &histogram_pair.1,
-            histogram_pair.2,
-            histogram_pair.3,
-            0.05,
-            0.01,
+            crate::pl::LinearLeafSolveParams {
+                grad_sum: histogram_pair.2,
+                hess_sum: histogram_pair.3,
+                learning_rate: 0.05,
+                l2_lambda: 0.01,
+            },
             &[0],
             &scaler,
         );
         let histogram_right = crate::pl::solve_pl_leaf(
             &histogram_pair.4,
             &histogram_pair.5,
-            histogram_pair.6,
-            histogram_pair.7,
-            0.05,
-            0.01,
+            crate::pl::LinearLeafSolveParams {
+                grad_sum: histogram_pair.6,
+                hess_sum: histogram_pair.7,
+                learning_rate: 0.05,
+                l2_lambda: 0.01,
+            },
             &[0],
             &scaler,
         );
@@ -366,20 +370,24 @@ mod tests {
         let histogram_left = crate::pl::solve_pl_leaf(
             &histogram_pair.0,
             &histogram_pair.1,
-            histogram_pair.2,
-            histogram_pair.3,
-            0.05,
-            0.01,
+            crate::pl::LinearLeafSolveParams {
+                grad_sum: histogram_pair.2,
+                hess_sum: histogram_pair.3,
+                learning_rate: 0.05,
+                l2_lambda: 0.01,
+            },
             &[1],
             &scaler,
         );
         let histogram_right = crate::pl::solve_pl_leaf(
             &histogram_pair.4,
             &histogram_pair.5,
-            histogram_pair.6,
-            histogram_pair.7,
-            0.05,
-            0.01,
+            crate::pl::LinearLeafSolveParams {
+                grad_sum: histogram_pair.6,
+                hess_sum: histogram_pair.7,
+                learning_rate: 0.05,
+                l2_lambda: 0.01,
+            },
             &[1],
             &scaler,
         );
