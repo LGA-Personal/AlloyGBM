@@ -212,14 +212,6 @@ fn linear_regressor_path_features(
     selected
 }
 
-fn linear_regressor_features_for_split(
-    path_features: &[u32],
-    split_feature: u32,
-    feature_count: usize,
-) -> Vec<u32> {
-    linear_regressor_path_features(path_features, split_feature, false, feature_count)
-}
-
 /// Build a single tree using level-wise (breadth-first) growth strategy.
 ///
 /// Splits all nodes at depth d before moving to depth d+1.
@@ -1349,14 +1341,14 @@ mod linear_leaf_path_tests {
 
     #[test]
     fn linear_regressor_features_follow_split_path_not_first_columns() {
-        let selected = linear_regressor_features_for_split(&[10, 3, 10], 12, 20);
+        let selected = linear_regressor_path_features(&[10, 3, 10], 12, false, 20);
         assert_eq!(selected, vec![10, 3, 12]);
     }
 
     #[test]
     fn linear_regressor_features_cap_at_max_pl_regressors() {
         let path = vec![9, 8, 7, 6, 5, 4, 3, 2];
-        let selected = linear_regressor_features_for_split(&path, 1, 20);
+        let selected = linear_regressor_path_features(&path, 1, false, 20);
         assert_eq!(selected, vec![9, 8, 7, 6, 5, 4, 3, 2]);
     }
 
