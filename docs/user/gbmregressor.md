@@ -377,8 +377,9 @@ the same target stream as a fresh `N + M`-round fit.
     Cholesky solve).
   - Native-bitset categorical features that use Fisher-sort splits
     (`max_cat_threshold > 0`) fall back to constant leaves for that split node;
-    descendant leaves below such a split use linear leaves on all remaining
-    numeric regressors.
+    descendant leaves below such a split can still use linear leaves, but only
+    on eligible numeric split-path regressors. The categorical split feature is
+    excluded from the PL regressor path.
   - NaN regressor values contribute the standardized mean-imputed value
     (`z_j = 0`) to the linear term. Split routing still uses AlloyGBM's native
     missing-value direction.

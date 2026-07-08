@@ -370,7 +370,9 @@ Limitations:
 
 - Native-bitset categorical splits (``max_cat_threshold > 0``) fall back to
   constant leaves at the categorical split node; descendant leaves below the
-  split use linear leaves on remaining numeric regressors.
+  split can still use linear leaves, but only on eligible numeric split-path
+  regressors. The categorical split feature is excluded from the PL regressor
+  path.
 - NaN regressor values contribute the standardized mean-imputed value
   (``z_j = 0``) to the linear term. Split routing still uses AlloyGBM's native
   missing-value direction.
