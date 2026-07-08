@@ -193,17 +193,15 @@ pub(crate) fn find_best_split_dispatch<B: BackendOps>(
     }
 }
 
-fn linear_regressor_features_for_split(
+fn linear_regressor_path_features(
     path_features: &[u32],
     split_feature: u32,
+    split_is_categorical: bool,
     feature_count: usize,
 ) -> Vec<u32> {
+    let split_feature_iter = (!split_is_categorical).then_some(split_feature).into_iter();
     let mut selected = Vec::with_capacity(MAX_PL_REGRESSORS);
-    for feature in path_features
-        .iter()
-        .copied()
-        .chain(std::iter::once(split_feature))
-    {
+    for feature in path_features.iter().copied().chain(split_feature_iter) {
         if (feature as usize) < feature_count
             && !selected.contains(&feature)
             && selected.len() < MAX_PL_REGRESSORS
@@ -212,6 +210,14 @@ fn linear_regressor_features_for_split(
         }
     }
     selected
+}
+
+fn linear_regressor_features_for_split(
+    path_features: &[u32],
+    split_feature: u32,
+    feature_count: usize,
+) -> Vec<u32> {
+    linear_regressor_path_features(path_features, split_feature, false, feature_count)
 }
 
 /// Build a single tree using level-wise (breadth-first) growth strategy.
@@ -430,9 +436,10 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
                 && !raw_feature_values.is_empty()
                 && !split.is_categorical
             {
-                let regressor_features = linear_regressor_features_for_split(
+                let regressor_features = linear_regressor_path_features(
                     &path_features,
                     split.feature_index,
+                    split.is_categorical,
                     binned_matrix.feature_count,
                 );
                 backend
@@ -562,9 +569,10 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
                     };
                 let left_parent_ll = linear_leaf_abs_pair.as_ref().map(|(ll, _)| ll.clone());
                 let right_parent_ll = linear_leaf_abs_pair.as_ref().map(|(_, rl)| rl.clone());
-                let child_path_features = linear_regressor_features_for_split(
+                let child_path_features = linear_regressor_path_features(
                     &path_features,
                     split.feature_index,
+                    split.is_categorical,
                     binned_matrix.feature_count,
                 );
 
@@ -907,9 +915,10 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
             && !raw_feature_values.is_empty()
             && !split.is_categorical
         {
-            let regressor_features = linear_regressor_features_for_split(
+            let regressor_features = linear_regressor_path_features(
                 &pending.path_features,
                 split.feature_index,
+                split.is_categorical,
                 binned_matrix.feature_count,
             );
             backend
@@ -1097,11 +1106,14 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
             // same descended bitset because the split feature is shared.
             // (`split` itself was moved into `committed_split` above; we
             // read the feature index off the just-pushed stump instead.)
-            let split_feature_for_descend =
-                stumps.last().map(|s| s.split.feature_index).unwrap_or(0);
-            let child_path_features = linear_regressor_features_for_split(
+            let (split_feature_for_descend, split_is_categorical_for_descend) = stumps
+                .last()
+                .map(|s| (s.split.feature_index, s.split.is_categorical))
+                .unwrap_or((0, false));
+            let child_path_features = linear_regressor_path_features(
                 &pending.path_features,
                 split_feature_for_descend,
+                split_is_categorical_for_descend,
                 binned_matrix.feature_count,
             );
             let child_active_groups: Option<u64> = match (
@@ -1346,5 +1358,11 @@ mod linear_leaf_path_tests {
         let path = vec![9, 8, 7, 6, 5, 4, 3, 2];
         let selected = linear_regressor_features_for_split(&path, 1, 20);
         assert_eq!(selected, vec![9, 8, 7, 6, 5, 4, 3, 2]);
+    }
+
+    #[test]
+    fn linear_regressor_path_skips_categorical_split_features() {
+        let selected = linear_regressor_path_features(&[10, 3], 12, true, 20);
+        assert_eq!(selected, vec![10, 3]);
     }
 }
