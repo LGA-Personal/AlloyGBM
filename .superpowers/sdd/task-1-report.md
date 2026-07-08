@@ -67,3 +67,62 @@ After implementation, the exact Task 1 Step 8 commands succeeded:
 - Artifact v2 writes means and inverse standard deviations; artifact v1 decode defaults to identity scaling.
 - SHAP constant/deviation decomposition now uses `slot_value(...)`, so additivity remains aligned with predictor evaluation for scaled leaves.
 - Existing SHAP linear-leaf fixtures were updated to explicit identity scaling to preserve prior behavior.
+
+## Task 1 Review Fix
+
+### Findings addressed
+
+- Added a v2 linear-leaf coefficient round-trip test covering non-identity `feature_means` and `feature_inv_stds`.
+- Added a predictor-focused artifact round-trip test that proves predictor evaluation uses scaled linear-leaf metadata.
+- Added a SHAP scaled-leaf additivity case with non-identity per-slot scaling and a same-path standardized-delta assertion.
+- Restored `leaf_constant_part` accumulation to `f64`.
+- Updated stale comments in core/SHAP docs to describe standardized slot values instead of raw `w * x` / `w * μ`.
+
+### TDD RED/GREEN evidence for new tests
+
+Red came from adding the tests first, before touching `crates/shap/src/linear_leaf.rs`.
+
+- `cargo test -p alloygbm-core linear_leaf_coefficients_v2_roundtrip_preserves_scaled_metadata -- --nocapture`
+  - red result: `1 passed; 0 failed` (the v2 write/read path was already correct; coverage was missing)
+- `cargo test -p alloygbm-predictor pl_tree_predictor_uses_scaled_linear_leaf_metadata_after_artifact_roundtrip -- --nocapture`
+  - red result: `1 passed; 0 failed` (predictor logic was already correct; coverage was missing)
+- `cargo test -p alloygbm-shap shap_scaled_linear_leaves_remain_additive -- --nocapture`
+  - initial red result: failed because the first draft used a `NaN` row and SHAP correctly rejects non-finite inputs; test was revised to finite rows while keeping non-identity scaling
+- `cargo test -p alloygbm-shap leaf_constant_part_accumulates_scaled_terms_in_f64 -- --nocapture`
+  - red result: failed with `constant part: 0`, exposing the f32 accumulation regression
+
+Green after the SHAP fix and comment updates:
+
+- `cargo test -p alloygbm-core linear_leaf_coefficients_v2_roundtrip_preserves_scaled_metadata -- --nocapture`
+  - result: `1 passed; 0 failed`
+- `cargo test -p alloygbm-predictor pl_tree_predictor_uses_scaled_linear_leaf_metadata_after_artifact_roundtrip -- --nocapture`
+  - result: `1 passed; 0 failed`
+- `cargo test -p alloygbm-shap shap_scaled_linear_leaves_remain_additive -- --nocapture`
+  - result: `1 passed; 0 failed`
+- `cargo test -p alloygbm-shap leaf_constant_part_accumulates_scaled_terms_in_f64 -- --nocapture`
+  - result: `1 passed; 0 failed`
+- `cargo test --workspace`
+  - result: passed (`475 passed; 0 failed` across workspace unit/doc tests)
+
+### Exact focused commands and result summaries
+
+- `cargo test -p alloygbm-core linear_leaf_coefficients_v2_roundtrip_preserves_scaled_metadata -- --nocapture`
+  - verifies v2 payload round-trip preserves scaled metadata and leaf evaluation
+- `cargo test -p alloygbm-predictor pl_tree_predictor_uses_scaled_linear_leaf_metadata_after_artifact_roundtrip -- --nocapture`
+  - verifies artifact decode + predictor PL evaluation use stored means/inverse stds
+- `cargo test -p alloygbm-shap shap_scaled_linear_leaves_remain_additive -- --nocapture`
+  - verifies standardized linear-leaf SHAP values reconstruct predictor output
+- `cargo test -p alloygbm-shap leaf_constant_part_accumulates_scaled_terms_in_f64 -- --nocapture`
+  - verifies the constant-part helper preserves cancellation-sensitive scaled terms
+
+### Files changed
+
+- `.superpowers/sdd/task-1-report.md`
+- `crates/core/src/artifact_format.rs`
+- `crates/core/src/leaf.rs`
+- `crates/core/src/tests/main.rs`
+- `crates/predictor/src/lib.rs`
+- `crates/shap/src/brute_force.rs`
+- `crates/shap/src/linear_leaf.rs`
+- `crates/shap/src/tests/main.rs`
+- `crates/shap/src/tree_shap.rs`

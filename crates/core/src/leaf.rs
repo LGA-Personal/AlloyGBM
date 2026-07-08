@@ -124,7 +124,9 @@ impl LeafValue {
     /// Evaluate this leaf for a single row passed as a flat feature slice.
     ///
     /// For [`LeafValue::Scalar`], returns the scalar directly.
-    /// For [`LeafValue::Linear`], computes `intercept + Σ w_j * features[regressor_j]`.
+    /// For [`LeafValue::Linear`], computes
+    /// `intercept + Σ w_j * z_j(features[regressor_j])` using the leaf's
+    /// per-slot mean and inverse-standard-deviation metadata.
     #[inline]
     pub fn eval_row(&self, features: &[f32]) -> f32 {
         match self {

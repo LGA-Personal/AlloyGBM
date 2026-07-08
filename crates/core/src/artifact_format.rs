@@ -1265,7 +1265,7 @@ pub fn decode_optional_multi_output_leaf_values_section(
 /// matches `ModelMetadata::feature_names`.  Used by SHAP for piecewise-linear
 /// leaves so that linear-leaf contributions can be decomposed into a
 /// path-attributed expected value plus per-feature deviations
-/// `wj * (xj - feature_means[j])`.
+/// `wj * (z_j(row_raw_j) - z_j(feature_means_raw_j))`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FeatureBaselinePayload {
     pub feature_means: Vec<f32>,

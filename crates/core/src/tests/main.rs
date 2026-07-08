@@ -317,6 +317,40 @@ fn linear_leaf_coefficients_v1_decode_uses_identity_scaling() {
 }
 
 #[test]
+fn linear_leaf_coefficients_v2_roundtrip_preserves_scaled_metadata() {
+    let payload = LinearLeafCoefficientsPayload {
+        entries: vec![LinearLeafEntry {
+            stump_idx: 7,
+            left_leaf: Some(LinearLeaf::scaled(
+                0.5,
+                vec![1.5, -0.25],
+                vec![1, 3],
+                vec![10.0, -2.0],
+                vec![0.5, 4.0],
+            )),
+            right_leaf: Some(LinearLeaf::scaled(
+                -0.75,
+                vec![0.4],
+                vec![0],
+                vec![1.25],
+                vec![2.0],
+            )),
+        }],
+    };
+
+    let bytes = encode_linear_leaf_coefficients_payload(&payload);
+    let decoded = decode_linear_leaf_coefficients_payload(&bytes).expect("decode v2");
+
+    assert_eq!(decoded, payload);
+
+    let left_leaf = decoded.entries[0].left_leaf.as_ref().expect("left leaf");
+    assert!((left_leaf.eval(&[0.0, 14.0, 0.0, -1.5], 0) - 3.0).abs() < 1e-6);
+
+    let right_leaf = decoded.entries[0].right_leaf.as_ref().expect("right leaf");
+    assert!((right_leaf.eval(&[2.25], 0) - 0.05).abs() < 1e-6);
+}
+
+#[test]
 fn metadata_json_ignores_unknown_future_fields() {
     let json = concat!(
         "{",

@@ -64,9 +64,10 @@ struct PathElement {
 /// is the total prediction contribution for samples reaching that leaf.
 ///
 /// For piecewise-linear leaves we accumulate only the "constant part"
-/// (`intercept + Σ wj * μj` when `baseline` is `Some`).  The row-dependent
-/// `wj * (xj - μj)` terms are credited back to per-feature SHAP values
-/// outside the path-based machinery — see `distribute_linear_terms_for_row`.
+/// (`intercept + Σ wj * z_j(baseline_raw_j)` when `baseline` is `Some`).
+/// The row-dependent `wj * (z_j(row_raw_j) - z_j(baseline_raw_j))` terms are
+/// credited back to per-feature SHAP values outside the path-based machinery
+/// — see `distribute_linear_terms_for_row`.
 pub(crate) fn build_std_tree(
     tree_id: u32,
     local_id: u32,

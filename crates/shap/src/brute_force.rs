@@ -44,11 +44,12 @@ pub(crate) fn explain_rows_brute_force(
 
         // Linear-leaf interventional decomposition: the brute-force path
         // attribution above is computed on the "constant part" of each leaf
-        // (`intercept + Σ wj * μj`).  Adding `wj * (xj - μj)` per regressor
-        // at *every visited node along the row's path* restores `predict(x)`
+        // (`intercept + Σ wj * z_j(baseline_raw_j)`). Adding
+        // `wj * (z_j(row_raw_j) - z_j(baseline_raw_j))` per regressor at
+        // *every visited node along the row's path* restores `predict(x)`
         // exactly (matching how `predict` accumulates `leaf.eval_row(row)`
         // at each visited node) while attributing the row's deviation
-        // directly to the relevant features.  See
+        // directly to the relevant features. See
         // `distribute_linear_terms_for_row` for the full path walk.
         if model_has_linear_leaves(model) {
             distribute_linear_terms_for_row(model, row, baseline, binning, &mut contributions_f64);
@@ -187,10 +188,12 @@ fn expected_subtree(
     let left_child_local = left_child_local_id(local_node_id)?;
     let right_child_local = right_child_local_id(local_node_id)?;
 
-    // Use the leaf "constant part" — `intercept + Σ wj * μj` for linear
-    // leaves — so the path-based attribution acts on a scalar-valued tree.
-    // Linear deviations `wj * (xj - μj)` are added back to phi after the
-    // Shapley computation by `distribute_linear_terms_for_row`.
+    // Use the leaf "constant part" —
+    // `intercept + Σ wj * z_j(baseline_raw_j)` for linear leaves — so the
+    // path-based attribution acts on a scalar-valued tree. Linear
+    // deviations `wj * (z_j(row_raw_j) - z_j(baseline_raw_j))` are added
+    // back to phi after the Shapley computation by
+    // `distribute_linear_terms_for_row`.
     let left_const = leaf_constant_part(&stump.left_leaf_value, baseline) as f32;
     let right_const = leaf_constant_part(&stump.right_leaf_value, baseline) as f32;
 
@@ -326,10 +329,11 @@ pub(crate) fn verify_additivity(
     // satisfy strict additivity end-to-end when called with a
     // `BinningContext` (the predictor-aligned path).  The fix combines
     // v0.7.3's float-threshold path walker with crediting
-    // `Σⱼ wⱼ·(xⱼ − μⱼ)` at every visited node along the row's path —
-    // matching how `predict` accumulates `leaf.eval_row(row)` at each
-    // visited node.  See `distribute_linear_terms_for_row` for the path
-    // walk and `leaf_constant_part` for the constant-part flow through
+    // `Σⱼ wⱼ·(z_j(row_raw_j) − z_j(baseline_raw_j))` at every visited node
+    // along the row's path — matching how `predict` accumulates
+    // `leaf.eval_row(row)` at each visited node. See
+    // `distribute_linear_terms_for_row` for the path walk and
+    // `leaf_constant_part` for the constant-part flow through
     // `expected_subtree` / `build_std_tree`.
     //
     // **v0.8.0:** the `BinningContext::LinearRank` variant joins

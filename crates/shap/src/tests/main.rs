@@ -1216,6 +1216,40 @@ fn linear_fixture_model(feature_baseline: Option<Vec<f32>>) -> TrainedModel {
     }
 }
 
+fn scaled_linear_fixture_model(feature_baseline: Option<Vec<f32>>) -> TrainedModel {
+    TrainedModel {
+        baseline_prediction: -0.2,
+        feature_count: 2,
+        stumps: vec![TrainedStump {
+            split: split_with_counts(0, 0, 1, 5, 5),
+            left_leaf_value: LeafValue::Linear(LinearLeaf::scaled(
+                0.4,
+                vec![0.7],
+                vec![1],
+                vec![10.0],
+                vec![0.5],
+            )),
+            right_leaf_value: LeafValue::Linear(LinearLeaf::scaled(
+                -0.3,
+                vec![-0.5],
+                vec![1],
+                vec![10.0],
+                vec![0.5],
+            )),
+            tree_weight: 1.0,
+            multi_output_leaf_values: None,
+        }],
+        categorical_state: None,
+        node_debug_stats: None,
+        objective: "squared_error".to_string(),
+        native_categorical_feature_indices: Vec::new(),
+        morph_metadata: None,
+        dro_metadata: None,
+        feature_baseline,
+        neutralization_metadata: None,
+    }
+}
+
 #[test]
 fn shap_linear_leaves_does_not_reject_artifact() {
     // Regression guard: TreeSHAP used to error with `NotSupported` when any
@@ -1254,6 +1288,38 @@ fn shap_linear_leaves_additivity_with_baseline_brute_force() {
 }
 
 #[test]
+fn shap_scaled_linear_leaves_remain_additive() {
+    let baseline = vec![0.0_f32, 12.0_f32];
+    let model = scaled_linear_fixture_model(Some(baseline));
+    let artifact = model.to_artifact_bytes().expect("artifact serializes");
+
+    let rows = vec![
+        vec![0.0_f32, 12.0_f32],
+        vec![0.0_f32, 14.0_f32],
+        vec![3.0_f32, 8.0_f32],
+    ];
+    let explanation =
+        explain_rows_from_artifact_bytes(&artifact, &rows).expect("explanation succeeds");
+    let predictor = Predictor::from_artifact_bytes(&artifact).expect("predictor builds");
+
+    for (row_idx, (row, phi)) in rows.iter().zip(explanation.values.iter()).enumerate() {
+        let predicted = predictor.predict_row(row).expect("predict succeeds");
+        let reconstructed = explanation.expected_value + phi.iter().sum::<f32>();
+        let tol = additivity_tolerance(predicted);
+        assert!(
+            (reconstructed - predicted).abs() <= tol,
+            "row {row_idx}: reconstructed {reconstructed} vs predicted {predicted}"
+        );
+    }
+
+    let delta_phi_feature_1 = explanation.values[1][1] - explanation.values[0][1];
+    assert!(
+        (delta_phi_feature_1 - 0.7).abs() <= ADDITIVITY_ATOL,
+        "expected standardized delta 0.7, got {delta_phi_feature_1}"
+    );
+}
+
+#[test]
 fn shap_linear_leaves_additivity_without_baseline_brute_force() {
     // Back-compat: artifact produced before v0.7.1 will not carry a
     // FeatureBaseline section.  SHAP must still satisfy additivity in
@@ -1272,6 +1338,21 @@ fn shap_linear_leaves_additivity_without_baseline_brute_force() {
         let reconstructed = explanation.expected_value + phi.iter().sum::<f32>();
         assert_close(reconstructed, predicted);
     }
+}
+
+#[test]
+fn leaf_constant_part_accumulates_scaled_terms_in_f64() {
+    let leaf = LeafValue::Linear(LinearLeaf::scaled(
+        16_777_216.0,
+        vec![1.0, -1.0],
+        vec![0, 1],
+        vec![0.0, 0.0],
+        vec![1.0, 1.0],
+    ));
+    let baseline = vec![1.0_f32, 16_777_216.0_f32];
+
+    let constant = crate::linear_leaf::leaf_constant_part(&leaf, Some(&baseline));
+    assert!((constant - 1.0).abs() < 1e-12, "constant part: {constant}");
 }
 
 #[test]
