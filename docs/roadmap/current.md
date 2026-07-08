@@ -822,8 +822,9 @@ Python API surface changes.
   `benchmarks/pl_trees_benchmark.py` script with convergence-curve and λ-sweep
   analysis; report at `docs/benchmarks/pl_trees_v1.md`
 - Categorical-native splits continue to use constant leaves when
-  `max_cat_threshold > 0`; descendant leaves below a categorical root node use
-  linear leaves on all remaining numeric regressors
+  `max_cat_threshold > 0`; descendant leaves below a categorical root node can
+  still use linear leaves, but only on eligible numeric split-path regressors
+  with the categorical split feature excluded from the PL regressor path
 
 ## What Shipped In 0.4.0
 

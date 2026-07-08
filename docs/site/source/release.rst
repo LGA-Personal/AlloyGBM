@@ -1265,7 +1265,9 @@ What's new in 0.5.0
   per-stump linear leaf data; backward-compatible with v0.4.0 artifacts.
 - Native-bitset categorical splits (``max_cat_threshold > 0``) fall back to
   constant leaves at the categorical split node; descendant numeric leaves
-  use linear leaves normally.
+  can still use linear leaves, but only on eligible numeric split-path
+  regressors with the categorical split feature excluded from the PL
+  regressor path.
 - Multi-class softmax fits each per-class tree sequence with linear leaves
   independently.
 - ``leaf_model="linear"`` composes with ``training_mode="morph"``.
