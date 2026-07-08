@@ -349,22 +349,31 @@ Piecewise-linear leaves
   - ``"constant"`` (default) -- standard scalar leaf value, identical to all
     prior AlloyGBM behaviour.
   - ``"linear"`` -- each leaf stores a small linear model
-    ``f_s(x) = b_s + Σ α_j x_j`` (up to 8 regressors per leaf, inherited from
-    the split path's feature indices; the per-leaf cap is internal and not
-    currently user-tunable). Optimal weights are solved in closed form via the
-    ridge regression ``α* = -(XᵀHX + λI)⁻¹ Xᵀg``, regularised by ``lambda_l2``.
+    ``f_s(x) = b_s + Σ α_j z_j``, where ``z_j`` is the training-time
+    standardized value of a split-path regressor feature. Each leaf uses the
+    distinct numeric features encountered on that leaf's root-to-leaf split
+    path, capped at ``MAX_PL_REGRESSORS = 8``. The cap is internal and not
+    user-tunable. Optimal weights are solved in closed form via the ridge
+    regression ``α* = -(ZᵀHZ + λI)⁻¹ Zᵀg``, regularised by the same
+    ``lambda_l2`` you pass to the estimator.
 
 Empirically, ``"linear"`` converges in fewer rounds on data with linear
 within-node residual structure (~10× faster on linearly-structured datasets,
 +3.5% RMSE on California Housing, +1.75pp accuracy on Breast Cancer), at a
-2–8× per-round training overhead. Recommended ``lambda_l2 >= 0.01`` for weight
-stability.
+2–8× per-round training overhead. Internal standardization makes the ridge
+penalty much less sensitive to raw feature units, but ``leaf_model="linear"``
+still solves small per-leaf linear systems. Use at least ``lambda_l2=0.01``
+for noisy or high-round-count fits, and increase it when the linear leaves
+visibly overfit.
 
 Limitations:
 
 - Native-bitset categorical splits (``max_cat_threshold > 0``) fall back to
   constant leaves at the categorical split node; descendant leaves below the
   split use linear leaves on remaining numeric regressors.
+- NaN regressor values contribute the standardized mean-imputed value
+  (``z_j = 0``) to the linear term. Split routing still uses AlloyGBM's native
+  missing-value direction.
 - SHAP (``shap_values``, ``feature_importances``) supports
   ``leaf_model="linear"`` with strict additivity as of v0.7.4: the
   reconstruction satisfies ``atol + rtol·|predict(x)|`` (default

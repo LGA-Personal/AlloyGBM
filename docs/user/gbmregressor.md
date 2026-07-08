@@ -347,10 +347,12 @@ the same target stream as a fresh `N + M`-round fit.
   - `"constant"` (default): standard scalar leaf value — identical to all prior
     AlloyGBM behaviour.
   - `"linear"`: each leaf stores a small linear model
-    `f_s(x) = b_s + Σ α_j x_j` (up to 8 regressors per leaf, inherited from the
-    split path's feature indices; the per-leaf cap is internal and not
-    user-tunable in v0.7.4). Optimal weights are solved in closed form:
-    `α* = -(XᵀHX + λI)⁻¹ Xᵀg`, regularised by the same `lambda_l2` you pass to
+    `f_s(x) = b_s + Σ α_j z_j`, where `z_j` is the training-time standardized
+    value of a split-path regressor feature. Each leaf uses the distinct
+    numeric features encountered on that leaf's root-to-leaf split path, capped
+    at `MAX_PL_REGRESSORS = 8`. The cap is internal and not user-tunable.
+    Optimal weights are solved in closed form:
+    `α* = -(ZᵀHZ + λI)⁻¹ Zᵀg`, regularised by the same `lambda_l2` you pass to
     the estimator.
 
   **When to use `"linear"`**: datasets where the residual signal within each tree
@@ -360,9 +362,11 @@ the same target stream as a fresh `N + M`-round fit.
   RMSE on California Housing, and +1.75pp accuracy on Breast Cancer, at a 2–8×
   training time overhead.
 
-  **Recommended `lambda_l2`**: pass at least `lambda_l2=0.01` when using
-  `leaf_model="linear"`. Without it, the closed-form ridge solve can produce
-  noisy per-leaf weights that overfit at high round counts on non-linear data.
+  **Recommended `lambda_l2`**: internal standardization makes the ridge penalty
+  much less sensitive to raw feature units, but `leaf_model="linear"` still
+  solves small per-leaf linear systems. Use at least `lambda_l2=0.01` for noisy
+  or high-round-count fits, and increase it when the linear leaves visibly
+  overfit.
 
   **Multi-class softmax**: when `GBMClassifier` is fit with K > 2 classes, each
   per-class tree sequence independently uses linear leaves.
@@ -375,6 +379,9 @@ the same target stream as a fresh `N + M`-round fit.
     (`max_cat_threshold > 0`) fall back to constant leaves for that split node;
     descendant leaves below such a split use linear leaves on all remaining
     numeric regressors.
+  - NaN regressor values contribute the standardized mean-imputed value
+    (`z_j = 0`) to the linear term. Split routing still uses AlloyGBM's native
+    missing-value direction.
   - SHAP (`shap_values`, `feature_importances`) supports
     `leaf_model="linear"` with strict additivity as of v0.7.4: the
     path-attributed leaf "constant part" plus per-visited-node row
