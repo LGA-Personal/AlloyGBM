@@ -7,6 +7,7 @@ pub struct SplitSelectionOptions {
     pub l2_lambda: f32,
     pub l1_alpha: f32,
     pub min_child_hessian: f32,
+    pub min_rows_per_leaf: usize,
     pub min_leaf_magnitude: f32,
     pub dro_config: Option<DroConfig>,
     /// Histogram index for the NaN/missing bin.
@@ -29,6 +30,7 @@ impl Default for SplitSelectionOptions {
             l2_lambda: 0.0,
             l1_alpha: 0.0,
             min_child_hessian: 0.0,
+            min_rows_per_leaf: 1,
             min_leaf_magnitude: 0.0,
             dro_config: None,
             missing_bin_index: MISSING_BIN_U8 as usize,

@@ -24,6 +24,7 @@ pub(crate) fn split_selection_options_for_training(
         l2_lambda: params.lambda_l2,
         l1_alpha: params.lambda_l1,
         min_child_hessian: params.min_child_hessian,
+        min_rows_per_leaf: 1,
         min_leaf_magnitude: env_options.min_leaf_magnitude,
         dro_config: params
             .dro_config

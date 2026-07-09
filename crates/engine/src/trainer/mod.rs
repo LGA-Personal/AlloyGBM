@@ -1127,6 +1127,8 @@ impl Trainer {
                         class_idx: class_k,
                     });
 
+                let mut round_split_options = split_options;
+                round_split_options.min_rows_per_leaf = controls.min_rows_per_leaf;
                 let raw_fv = &dataset.matrix.values;
                 let (round_stumps, _round_stop) = if self.params.tree_growth == TreeGrowth::Leaf {
                     build_tree_leaf_wise(
@@ -1136,7 +1138,7 @@ impl Trainer {
                         root_row_indices.clone(),
                         effective_round,
                         &feature_tiles,
-                        split_options,
+                        round_split_options,
                         &self.params,
                         &controls,
                         &mut class_candidate_predictions[class_k],
@@ -1154,7 +1156,7 @@ impl Trainer {
                         root_row_indices.clone(),
                         effective_round,
                         &feature_tiles,
-                        split_options,
+                        round_split_options,
                         &self.params,
                         &controls,
                         &mut class_candidate_predictions[class_k],
@@ -2201,6 +2203,8 @@ impl Trainer {
                     class_idx: 0,
                 });
 
+            let mut round_split_options = split_options;
+            round_split_options.min_rows_per_leaf = controls.min_rows_per_leaf;
             let raw_fv = &active_dataset.matrix.values;
             let (mut candidate_round_stumps, round_rejection_reason) =
                 if self.params.tree_growth == TreeGrowth::Leaf {
@@ -2211,7 +2215,7 @@ impl Trainer {
                         root_row_indices,
                         effective_round_index,
                         &feature_tiles,
-                        split_options,
+                        round_split_options,
                         &self.params,
                         &controls,
                         &mut candidate_predictions,
@@ -2229,7 +2233,7 @@ impl Trainer {
                         root_row_indices,
                         effective_round_index,
                         &feature_tiles,
-                        split_options,
+                        round_split_options,
                         &self.params,
                         &controls,
                         &mut candidate_predictions,

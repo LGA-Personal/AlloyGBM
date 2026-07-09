@@ -16,6 +16,7 @@ struct MorphGradientNeutralizationCheckingBackend {
     raw_factor_dot: f32,
     saw_morph_split: Cell<bool>,
 }
+struct SplitScannerFallbackBackend;
 struct EncodedFeatureCheckingBackend {
     feature_index: usize,
     expected_bins: Vec<u16>,
@@ -250,6 +251,32 @@ fn sample_noisy_wide_small_dataset() -> TrainingDataset {
     }
 }
 
+fn split_scanner_fallback_dataset() -> TrainingDataset {
+    TrainingDataset {
+        matrix: alloygbm_core::DatasetMatrix::new(
+            9,
+            1,
+            vec![
+                0.0, //
+                1.0, //
+                1.0, //
+                1.0, //
+                2.0, //
+                2.0, //
+                2.0, //
+                2.0, //
+                2.0, //
+            ],
+        )
+        .expect("matrix is valid"),
+        targets: vec![-20.0, -1.0, -1.0, -1.0, 4.6, 4.6, 4.6, 4.6, 4.6],
+        sample_weights: None,
+        time_index: None,
+        group_id: None,
+        factor_exposures: None,
+    }
+}
+
 fn categorical_ancestor_linear_path_dataset() -> TrainingDataset {
     TrainingDataset {
         matrix: alloygbm_core::DatasetMatrix::new(
@@ -423,6 +450,75 @@ impl BackendOps for GradientNeutralizationCheckingBackend {
 
     fn best_split(&self, histograms: &HistogramBundle) -> EngineResult<Option<SplitCandidate>> {
         MockBackend.best_split(histograms)
+    }
+
+    fn apply_split(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        node: &NodeSlice,
+        split: &SplitCandidate,
+    ) -> EngineResult<PartitionResult> {
+        MockBackend.apply_split(binned_matrix, node, split)
+    }
+
+    fn reduce_sums(
+        &self,
+        gradients: &[GradientPair],
+        row_indices: &[u32],
+    ) -> EngineResult<NodeStats> {
+        MockBackend.reduce_sums(gradients, row_indices)
+    }
+}
+
+impl BackendOps for SplitScannerFallbackBackend {
+    fn build_histograms(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: &NodeSlice,
+        feature_tiles: &[FeatureTile],
+    ) -> EngineResult<HistogramBundle> {
+        MockBackend.build_histograms(binned_matrix, gradients, node, feature_tiles)
+    }
+
+    fn best_split(&self, histograms: &HistogramBundle) -> EngineResult<Option<SplitCandidate>> {
+        MockBackend.best_split(histograms)
+    }
+
+    fn best_split_with_options(
+        &self,
+        histograms: &HistogramBundle,
+        options: SplitSelectionOptions,
+        _feature_weights: &[f32],
+        _categorical_features: &[CategoricalFeatureInfo],
+    ) -> EngineResult<Option<SplitCandidate>> {
+        let (threshold_bin, left_row_count, right_row_count, gain) =
+            if options.min_rows_per_leaf >= 4 {
+                (1, 4, 5, 5.0)
+            } else {
+                (0, 1, 8, 10.0)
+            };
+        Ok(Some(SplitCandidate {
+            node_id: histograms.node_id,
+            feature_index: 0,
+            threshold_bin,
+            gain,
+            default_left: false,
+            is_categorical: false,
+            categorical_bitset: None,
+            left_stats: NodeStats {
+                grad_sum: 0.0,
+                hess_sum: left_row_count as f32,
+                grad_sq_sum: 0.0,
+                row_count: left_row_count,
+            },
+            right_stats: NodeStats {
+                grad_sum: 0.0,
+                hess_sum: right_row_count as f32,
+                grad_sq_sum: 0.0,
+                row_count: right_row_count,
+            },
+        }))
     }
 
     fn apply_split(
@@ -2152,6 +2248,30 @@ fn fit_iterations_grows_multiple_nodes_per_round_when_depth_allows() {
     assert!(node_ids.contains(&0));
     assert!(node_ids.contains(&1));
     assert!(node_ids.contains(&2));
+}
+
+#[test]
+fn split_scanner_min_rows_falls_back_to_feasible_split() {
+    let dataset = split_scanner_fallback_dataset();
+    let binned = sample_binned_matrix_for_dataset(&dataset);
+    let trainer = Trainer::new(TrainParams::default()).expect("valid params");
+    let controls =
+        IterationControls::new(1, 0.0, 4, 0.0, 1_000_000.0, 0.0, 0).expect("controls are valid");
+    let model = trainer
+        .fit_iterations_with_controls(
+            &dataset,
+            &binned,
+            &SplitScannerFallbackBackend,
+            &SquaredErrorObjective,
+            controls,
+        )
+        .expect("iterative training succeeds");
+
+    assert_eq!(model.stumps.len(), 1);
+    let stump = &model.stumps[0];
+    assert_eq!(stump.split.threshold_bin, 1);
+    assert!(stump.split.left_stats.row_count >= 4);
+    assert!(stump.split.right_stats.row_count >= 4);
 }
 
 #[test]

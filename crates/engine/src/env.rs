@@ -26,6 +26,7 @@ pub(crate) fn split_selection_options_from_env() -> EngineResult<SplitSelectionO
         l2_lambda: parse_nonnegative_env_f32(SPLIT_L2_ENV_VAR)?,
         l1_alpha: parse_nonnegative_env_f32(SPLIT_L1_ENV_VAR)?,
         min_child_hessian: parse_nonnegative_env_f32(MIN_CHILD_HESS_ENV_VAR)?,
+        min_rows_per_leaf: 1,
         min_leaf_magnitude: parse_nonnegative_env_f32(SPLIT_MIN_LEAF_MAGNITUDE_ENV_VAR)?,
         dro_config: None,
         missing_bin_index: MISSING_BIN_U8 as usize,

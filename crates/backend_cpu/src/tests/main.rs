@@ -383,6 +383,7 @@ fn best_split_with_l2_regularization_reduces_gain_magnitude() {
                 l2_lambda: 1.0,
                 l1_alpha: 0.0,
                 min_child_hessian: 0.0,
+                min_rows_per_leaf: 1,
                 min_leaf_magnitude: 0.0,
                 dro_config: None,
                 missing_bin_index: 255,
@@ -421,6 +422,7 @@ fn best_split_with_l1_regularization_reduces_gain_magnitude() {
                 l2_lambda: 0.0,
                 l1_alpha: 0.5,
                 min_child_hessian: 0.0,
+                min_rows_per_leaf: 1,
                 min_leaf_magnitude: 0.0,
                 dro_config: None,
                 missing_bin_index: 255,
@@ -644,6 +646,7 @@ fn best_split_with_min_child_hessian_can_prune_all_splits() {
                 l2_lambda: 0.0,
                 l1_alpha: 0.0,
                 min_child_hessian: 10.0,
+                min_rows_per_leaf: 1,
                 min_leaf_magnitude: 0.0,
                 dro_config: None,
                 missing_bin_index: 255,
@@ -722,6 +725,7 @@ fn best_split_with_min_leaf_magnitude_skips_weak_leaf_updates() {
                 l2_lambda: 0.0,
                 l1_alpha: 0.0,
                 min_child_hessian: 0.0,
+                min_rows_per_leaf: 1,
                 min_leaf_magnitude: 0.06,
                 dro_config: None,
                 missing_bin_index: 255,
@@ -921,6 +925,7 @@ fn test_best_split_categorical_basic() {
         l2_lambda: 0.0,
         l1_alpha: 0.0,
         min_child_hessian: 0.0,
+        min_rows_per_leaf: 1,
         min_leaf_magnitude: 0.0,
         dro_config: None,
         missing_bin_index: nan_bin,
@@ -1160,6 +1165,7 @@ fn best_split_morph_at_warmup_matches_best_split_with_options() {
         l2_lambda: 0.0,
         l1_alpha: 0.0,
         min_child_hessian: 0.0,
+        min_rows_per_leaf: 1,
         min_leaf_magnitude: 0.0,
         dro_config: None,
         missing_bin_index: 255,
@@ -1228,6 +1234,7 @@ fn best_split_morph_at_warmup_matches_with_l1_l2_regularization() {
         l2_lambda: 1.0,
         l1_alpha: 0.5,
         min_child_hessian: 0.0,
+        min_rows_per_leaf: 1,
         min_leaf_magnitude: 0.0,
         dro_config: None,
         missing_bin_index: 255,
@@ -1288,6 +1295,7 @@ fn best_split_morph_with_dro_uses_robust_gradient_gain_signal() {
         l2_lambda: 0.1,
         l1_alpha: 0.0,
         min_child_hessian: 0.0,
+        min_rows_per_leaf: 1,
         min_leaf_magnitude: 0.0,
         dro_config: Some(DroConfig {
             radius: 0.05,
@@ -1423,6 +1431,7 @@ fn best_split_morph_at_warmup_matches_categorical_split() {
         l2_lambda: 0.0,
         l1_alpha: 0.0,
         min_child_hessian: 0.0,
+        min_rows_per_leaf: 1,
         min_leaf_magnitude: 0.0,
         dro_config: None,
         missing_bin_index: nan_bin,
@@ -1495,6 +1504,7 @@ fn make_options(
         l1_alpha,
         l2_lambda,
         min_child_hessian,
+        min_rows_per_leaf: 1,
         min_leaf_magnitude,
         dro_config: None,
         missing_bin_index,
@@ -1706,4 +1716,90 @@ fn dro_missing_bin_split_stats_match_direct_scan() {
     assert!((split.right_stats.hess_sum - expected_right.hess_sum).abs() < 1e-6);
     assert!((split.right_stats.grad_sq_sum - expected_right.grad_sq_sum).abs() < 1e-6);
     assert_eq!(split.right_stats.row_count, expected_right.count);
+}
+
+#[test]
+fn numeric_split_scanner_skips_candidates_below_min_rows_per_leaf() {
+    let fh = FeatureHistogram {
+        feature_index: 0,
+        bins: vec![
+            HistogramBin {
+                grad_sum: 20.0,
+                hess_sum: 1.0,
+                grad_sq_sum: 400.0,
+                count: 1,
+            },
+            HistogramBin {
+                grad_sum: 3.0,
+                hess_sum: 3.0,
+                grad_sq_sum: 9.0,
+                count: 3,
+            },
+            HistogramBin {
+                grad_sum: -23.0,
+                hess_sum: 5.0,
+                grad_sq_sum: 529.0,
+                count: 5,
+            },
+        ],
+    };
+    let split = CpuBackend::best_split_for_feature_inner(
+        &fh,
+        0,
+        SplitSelectionOptions {
+            min_rows_per_leaf: 4,
+            missing_bin_index: 255,
+            ..SplitSelectionOptions::default()
+        },
+        GainStrategy::Standard,
+        None,
+    )
+    .expect("expected feasible fallback split");
+
+    assert_eq!(split.threshold_bin, 1);
+    assert!(split.left_stats.row_count >= 4);
+    assert!(split.right_stats.row_count >= 4);
+}
+
+#[test]
+fn categorical_split_scanner_skips_candidates_below_min_rows_per_leaf() {
+    let num_cats = 3;
+    let fh = FeatureHistogram {
+        feature_index: 0,
+        bins: vec![
+            HistogramBin {
+                grad_sum: -20.0,
+                hess_sum: 1.0,
+                grad_sq_sum: 400.0,
+                count: 1,
+            },
+            HistogramBin {
+                grad_sum: -3.0,
+                hess_sum: 3.0,
+                grad_sq_sum: 9.0,
+                count: 3,
+            },
+            HistogramBin {
+                grad_sum: 23.0,
+                hess_sum: 5.0,
+                grad_sq_sum: 529.0,
+                count: 5,
+            },
+        ],
+    };
+    let split = CpuBackend::best_split_for_categorical_feature(
+        &fh,
+        0,
+        SplitSelectionOptions {
+            min_rows_per_leaf: 4,
+            missing_bin_index: 255,
+            ..SplitSelectionOptions::default()
+        },
+        num_cats,
+        None,
+    )
+    .expect("expected feasible categorical fallback split");
+
+    assert!(split.left_stats.row_count >= 4);
+    assert!(split.right_stats.row_count >= 4);
 }
