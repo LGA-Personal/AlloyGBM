@@ -274,6 +274,7 @@ pub fn best_split_linear_for_feature(
 
     let mut best_candidate: Option<SplitCandidate> = None;
     let mut best_gain = 0.0_f32;
+    let min_rows = options.min_rows_per_leaf as u32;
 
     for (threshold_bin, bin) in linear_fh.bins.iter().enumerate().take(scan_limit) {
         // Accumulate left side.
@@ -349,8 +350,8 @@ pub fn best_split_linear_for_feature(
                 )
             };
 
-            if eff_lc == 0
-                || eff_rc == 0
+            if eff_lc < min_rows
+                || eff_rc < min_rows
                 || eff_lh <= options.min_child_hessian
                 || eff_rh <= options.min_child_hessian
             {

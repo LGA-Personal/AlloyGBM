@@ -536,6 +536,7 @@ impl CpuBackend {
         let l1_alpha = options.l1_alpha;
         let l2_lambda = options.l2_lambda;
         let min_child_hessian = options.min_child_hessian;
+        let min_rows = options.min_rows_per_leaf as f32;
         let min_leaf_mag = options.min_leaf_magnitude;
         let nm_total_grad_v = f32x8::splat(nm_total_grad);
         let nm_total_hess_v = f32x8::splat(nm_total_hess);
@@ -548,6 +549,7 @@ impl CpuBackend {
         let l2_lambda_v = f32x8::splat(l2_lambda);
         let eps_v = f32x8::splat(EPSILON);
         let min_child_hess_v = f32x8::splat(min_child_hessian);
+        let min_rows_v = f32x8::splat(min_rows);
         let min_leaf_mag_v = f32x8::splat(min_leaf_mag);
         let parent_gain_term_v = f32x8::splat(parent_gain_term);
         let neg_inf_v = f32x8::splat(f32::NEG_INFINITY);
@@ -619,17 +621,16 @@ impl CpuBackend {
                     (lg_l1 * lg_l1) / l_denom + (rg_l1 * rg_l1) / r_denom - parent_gain_term_v;
 
                 // Validity mask:
-                //   eff_lc != 0 (lc > 0)
-                //   eff_rc != 0 (rc > 0)
+                //   eff_lc >= min_rows_per_leaf
+                //   eff_rc >= min_rows_per_leaf
                 //   eff_lh > min_child_hessian
                 //   eff_rh > min_child_hessian
-                let zero_v = f32x8::ZERO;
-                let lc_pos = eff_lc.cmp_gt(zero_v);
-                let rc_pos = eff_rc.cmp_gt(zero_v);
+                let lc_ok = eff_lc.cmp_ge(min_rows_v);
+                let rc_ok = eff_rc.cmp_ge(min_rows_v);
                 let lh_ok = eff_lh.cmp_gt(min_child_hess_v);
                 let rh_ok = eff_rh.cmp_gt(min_child_hess_v);
                 // Combine via bitwise AND on the float-mask representation.
-                let valid_mask = lc_pos & rc_pos & lh_ok & rh_ok;
+                let valid_mask = lc_ok & rc_ok & lh_ok & rh_ok;
 
                 // min_leaf_magnitude filter: candidate is rejected when BOTH
                 // sides' leaf magnitudes are below the threshold.
@@ -905,8 +906,9 @@ impl CpuBackend {
             for candidate in candidates {
                 let left = candidate.left;
                 let right = candidate.right;
-                if left.count == 0
-                    || right.count == 0
+                let min_rows = options.min_rows_per_leaf as u32;
+                if left.count < min_rows
+                    || right.count < min_rows
                     || left.hess <= options.min_child_hessian
                     || right.hess <= options.min_child_hessian
                 {
@@ -1285,8 +1287,9 @@ impl CpuBackend {
             for candidate in candidates {
                 let left = candidate.left;
                 let right = candidate.right;
-                if left.count == 0
-                    || right.count == 0
+                let min_rows = options.min_rows_per_leaf as u32;
+                if left.count < min_rows
+                    || right.count < min_rows
                     || left.hess <= options.min_child_hessian
                     || right.hess <= options.min_child_hessian
                 {
