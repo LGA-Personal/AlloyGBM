@@ -6,6 +6,7 @@
 //! these helpers so they live together.
 
 use alloygbm_core::GradientPair;
+use rayon::prelude::*;
 
 use super::{SquaredErrorObjective, resolve_boundaries_for_len, sigmoid};
 use crate::error::EngineResult;
@@ -89,6 +90,61 @@ fn log_sum_exp(values: &[f32]) -> f32 {
     }
     let sum_exp: f32 = values.iter().map(|&v| (v - max_val).exp()).sum();
     max_val + sum_exp.ln()
+}
+
+#[derive(Debug)]
+struct GroupGradientChunk {
+    start: usize,
+    grads: Vec<f32>,
+    hesses: Vec<f32>,
+}
+
+fn gradient_pairs_from_parts(grads: &[f32], hesses: &[f32]) -> EngineResult<Vec<GradientPair>> {
+    let mut pairs = Vec::with_capacity(grads.len());
+    for i in 0..grads.len() {
+        pairs.push(GradientPair::new(grads[i], hesses[i].max(1e-7))?);
+    }
+    Ok(pairs)
+}
+
+fn fill_gradient_pair_buffer(
+    grads: &[f32],
+    hesses: &[f32],
+    buffer: &mut Vec<GradientPair>,
+) -> EngineResult<()> {
+    buffer.clear();
+    if buffer.capacity() < grads.len() {
+        buffer.reserve(grads.len() - buffer.capacity());
+    }
+    for i in 0..grads.len() {
+        buffer.push(GradientPair {
+            grad: grads[i],
+            hess: hesses[i].max(1e-7),
+        });
+    }
+    Ok(())
+}
+
+fn merge_group_chunks(chunks: Vec<GroupGradientChunk>, grads: &mut [f32], hesses: &mut [f32]) {
+    for chunk in chunks {
+        let end = chunk.start + chunk.grads.len();
+        grads[chunk.start..end].copy_from_slice(&chunk.grads);
+        hesses[chunk.start..end].copy_from_slice(&chunk.hesses);
+    }
+}
+
+fn gains_for_labels(labels: &[f32]) -> Vec<f32> {
+    labels
+        .iter()
+        .map(|&label| (2.0_f32).powf(label) - 1.0)
+        .collect()
+}
+
+fn discounts_for_ranks(ranks: &[usize]) -> Vec<f32> {
+    ranks
+        .iter()
+        .map(|&rank| 1.0 / ((rank as f32 + 2.0).log2()))
+        .collect()
 }
 
 // ── QueryRMSE Objective ──────────────────────────────────────────────────
@@ -216,35 +272,45 @@ impl PairwiseRankingObjective {
         let n = predictions.len();
         let mut grads = vec![0.0_f32; n];
         let mut hesses = vec![0.0_f32; n];
-        let num_groups = self.group_boundaries.len() - 1;
+        let chunks: Vec<GroupGradientChunk> = self
+            .group_boundaries
+            .par_windows(2)
+            .map(|group| {
+                let start = group[0];
+                let end = group[1];
+                let group_len = end - start;
+                let mut group_grads = vec![0.0_f32; group_len];
+                let mut group_hesses = vec![0.0_f32; group_len];
+                for i in 0..group_len {
+                    for j in (i + 1)..group_len {
+                        if targets[start + i] == targets[start + j] {
+                            continue;
+                        }
+                        let (hi, lo) = if targets[start + i] > targets[start + j] {
+                            (i, j)
+                        } else {
+                            (j, i)
+                        };
+                        let s = predictions[start + hi] - predictions[start + lo];
+                        let rho = sigmoid(-s);
+                        let lambda = -rho;
+                        let hess_pair = rho * (1.0 - rho);
 
-        for g in 0..num_groups {
-            let start = self.group_boundaries[g];
-            let end = self.group_boundaries[g + 1];
-            for i in start..end {
-                for j in (i + 1)..end {
-                    if targets[i] == targets[j] {
-                        continue;
+                        group_grads[hi] += lambda;
+                        group_grads[lo] -= lambda;
+                        group_hesses[hi] += hess_pair;
+                        group_hesses[lo] += hess_pair;
                     }
-                    let (hi, lo) = if targets[i] > targets[j] {
-                        (i, j)
-                    } else {
-                        (j, i)
-                    };
-                    // score difference: higher-labeled doc minus lower
-                    let s = predictions[hi] - predictions[lo];
-                    // rho = sigma(-s) = 1 / (1 + exp(s))
-                    let rho = sigmoid(-s);
-                    let lambda = -rho;
-                    let hess_pair = rho * (1.0 - rho);
-
-                    grads[hi] += lambda;
-                    grads[lo] -= lambda;
-                    hesses[hi] += hess_pair;
-                    hesses[lo] += hess_pair;
                 }
-            }
-        }
+                GroupGradientChunk {
+                    start,
+                    grads: group_grads,
+                    hesses: group_hesses,
+                }
+            })
+            .collect();
+
+        merge_group_chunks(chunks, &mut grads, &mut hesses);
         Ok((grads, hesses))
     }
 }
@@ -269,12 +335,7 @@ impl ObjectiveOps for PairwiseRankingObjective {
         sample_weights: Option<&[f32]>,
     ) -> EngineResult<Vec<GradientPair>> {
         let (grads, hesses) = self.pairwise_gradients(predictions, targets, sample_weights)?;
-        let mut pairs = Vec::with_capacity(grads.len());
-        for i in 0..grads.len() {
-            let hess = hesses[i].max(1e-7);
-            pairs.push(GradientPair::new(grads[i], hess)?);
-        }
-        Ok(pairs)
+        gradient_pairs_from_parts(&grads, &hesses)
     }
 
     fn compute_gradients_into(
@@ -376,6 +437,80 @@ impl LambdaMARTObjective {
         self.validation_group_boundaries = Some(compute_group_boundaries(validation_group_id));
         self
     }
+
+    fn lambdamart_gradients(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+    ) -> EngineResult<(Vec<f32>, Vec<f32>)> {
+        let n = predictions.len();
+        let mut grads = vec![0.0_f32; n];
+        let mut hesses = vec![0.0_f32; n];
+        let chunks: Vec<GroupGradientChunk> = self
+            .group_boundaries
+            .par_windows(2)
+            .map(|group| {
+                let start = group[0];
+                let end = group[1];
+                let group_labels = &targets[start..end];
+                let group_scores = &predictions[start..end];
+                let group_len = end - start;
+                let idcg = ideal_dcg(group_labels, group_len);
+                let mut group_grads = vec![0.0_f32; group_len];
+                let mut group_hesses = vec![0.0_f32; group_len];
+                if idcg <= 0.0 {
+                    return GroupGradientChunk {
+                        start,
+                        grads: group_grads,
+                        hesses: group_hesses,
+                    };
+                }
+                let inv_idcg = 1.0 / idcg;
+                let mut order: Vec<usize> = (0..group_len).collect();
+                order.sort_by(|&a, &b| {
+                    group_scores[b]
+                        .partial_cmp(&group_scores[a])
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                let mut ranks = vec![0_usize; group_len];
+                for (rank, &idx) in order.iter().enumerate() {
+                    ranks[idx] = rank;
+                }
+                let gains = gains_for_labels(group_labels);
+                let discounts = discounts_for_ranks(&ranks);
+                for i in 0..group_len {
+                    for j in (i + 1)..group_len {
+                        if group_labels[i] == group_labels[j] {
+                            continue;
+                        }
+                        let (hi, lo) = if group_labels[i] > group_labels[j] {
+                            (i, j)
+                        } else {
+                            (j, i)
+                        };
+                        let s = group_scores[hi] - group_scores[lo];
+                        let rho = sigmoid(-s);
+                        let delta_ndcg =
+                            ((gains[hi] - gains[lo]) * (discounts[hi] - discounts[lo])).abs()
+                                * inv_idcg;
+                        let lambda = -rho * delta_ndcg;
+                        let hess_pair = rho * (1.0 - rho) * delta_ndcg;
+                        group_grads[hi] += lambda;
+                        group_grads[lo] -= lambda;
+                        group_hesses[hi] += hess_pair;
+                        group_hesses[lo] += hess_pair;
+                    }
+                }
+                GroupGradientChunk {
+                    start,
+                    grads: group_grads,
+                    hesses: group_hesses,
+                }
+            })
+            .collect();
+        merge_group_chunks(chunks, &mut grads, &mut hesses);
+        Ok((grads, hesses))
+    }
 }
 
 impl ObjectiveOps for LambdaMARTObjective {
@@ -397,75 +532,8 @@ impl ObjectiveOps for LambdaMARTObjective {
         targets: &[f32],
         _sample_weights: Option<&[f32]>,
     ) -> EngineResult<Vec<GradientPair>> {
-        let n = predictions.len();
-        let mut grads = vec![0.0_f32; n];
-        let mut hesses = vec![0.0_f32; n];
-        let num_groups = self.group_boundaries.len() - 1;
-
-        for g in 0..num_groups {
-            let start = self.group_boundaries[g];
-            let end = self.group_boundaries[g + 1];
-            let group_labels = &targets[start..end];
-            let group_scores = &predictions[start..end];
-            let group_len = end - start;
-
-            // Compute ideal DCG for normalization.
-            let idcg = ideal_dcg(group_labels, group_len);
-            if idcg <= 0.0 {
-                continue; // all labels identical, no useful pairs
-            }
-            let inv_idcg = 1.0 / idcg;
-
-            // Sort by predictions descending to get ranks.
-            let mut order: Vec<usize> = (0..group_len).collect();
-            order.sort_by(|&a, &b| {
-                group_scores[b]
-                    .partial_cmp(&group_scores[a])
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            let mut ranks = vec![0_usize; group_len];
-            for (rank, &idx) in order.iter().enumerate() {
-                ranks[idx] = rank;
-            }
-
-            for i in 0..group_len {
-                for j in (i + 1)..group_len {
-                    if group_labels[i] == group_labels[j] {
-                        continue;
-                    }
-                    let (hi, lo) = if group_labels[i] > group_labels[j] {
-                        (i, j)
-                    } else {
-                        (j, i)
-                    };
-                    let s = group_scores[hi] - group_scores[lo];
-                    let rho = sigmoid(-s);
-
-                    // ΔNDCG if positions of hi and lo were swapped.
-                    let gain_hi = (2.0_f32).powf(group_labels[hi]) - 1.0;
-                    let gain_lo = (2.0_f32).powf(group_labels[lo]) - 1.0;
-                    let discount_hi = 1.0 / ((ranks[hi] as f32 + 2.0).log2());
-                    let discount_lo = 1.0 / ((ranks[lo] as f32 + 2.0).log2());
-                    let delta_ndcg =
-                        ((gain_hi - gain_lo) * (discount_hi - discount_lo)).abs() * inv_idcg;
-
-                    let lambda = -rho * delta_ndcg;
-                    let hess_pair = rho * (1.0 - rho) * delta_ndcg;
-
-                    grads[start + hi] += lambda;
-                    grads[start + lo] -= lambda;
-                    hesses[start + hi] += hess_pair;
-                    hesses[start + lo] += hess_pair;
-                }
-            }
-        }
-
-        let mut pairs = Vec::with_capacity(n);
-        for i in 0..n {
-            let hess = hesses[i].max(1e-7);
-            pairs.push(GradientPair::new(grads[i], hess)?);
-        }
-        Ok(pairs)
+        let (grads, hesses) = self.lambdamart_gradients(predictions, targets)?;
+        gradient_pairs_from_parts(&grads, &hesses)
     }
 
     fn compute_gradients_into(
@@ -475,10 +543,9 @@ impl ObjectiveOps for LambdaMARTObjective {
         sample_weights: Option<&[f32]>,
         buffer: &mut Vec<GradientPair>,
     ) -> EngineResult<()> {
-        let pairs = self.compute_gradients(predictions, targets, sample_weights)?;
-        buffer.clear();
-        buffer.extend(pairs);
-        Ok(())
+        let _ = sample_weights;
+        let (grads, hesses) = self.lambdamart_gradients(predictions, targets)?;
+        fill_gradient_pair_buffer(&grads, &hesses, buffer)
     }
 
     fn loss(
@@ -565,38 +632,42 @@ impl ObjectiveOps for XeNDCGObjective {
         let n = predictions.len();
         let mut grads = vec![0.0_f32; n];
         let mut hesses = vec![0.0_f32; n];
-        let num_groups = self.group_boundaries.len() - 1;
+        let chunks: Vec<GroupGradientChunk> = self
+            .group_boundaries
+            .par_windows(2)
+            .map(|group| {
+                let start = group[0];
+                let end = group[1];
+                let group_len = end - start;
+                let mut group_grads = vec![0.0_f32; group_len];
+                let mut group_hesses = vec![0.0_f32; group_len];
+                if group_len <= 1 {
+                    return GroupGradientChunk {
+                        start,
+                        grads: group_grads,
+                        hesses: group_hesses,
+                    };
+                }
+                let label_slice = &targets[start..end];
+                let score_slice = &predictions[start..end];
+                let label_lse = log_sum_exp(label_slice);
+                let score_lse = log_sum_exp(score_slice);
 
-        for g in 0..num_groups {
-            let start = self.group_boundaries[g];
-            let end = self.group_boundaries[g + 1];
-            let group_len = end - start;
-            if group_len <= 1 {
-                continue;
-            }
-
-            // Ideal distribution: softmax of relevance labels.
-            let label_slice: Vec<f32> = targets[start..end].to_vec();
-            let label_lse = log_sum_exp(&label_slice);
-            // Predicted distribution: softmax of scores.
-            let score_slice: Vec<f32> = predictions[start..end].to_vec();
-            let score_lse = log_sum_exp(&score_slice);
-
-            for i in 0..group_len {
-                let ideal_prob = (label_slice[i] - label_lse).exp();
-                let pred_prob = (score_slice[i] - score_lse).exp();
-                // Gradient of cross-entropy w.r.t. scores.
-                grads[start + i] = pred_prob - ideal_prob;
-                // Hessian for Newton step.
-                hesses[start + i] = (pred_prob * (1.0 - pred_prob)).max(1e-7);
-            }
-        }
-
-        let mut pairs = Vec::with_capacity(n);
-        for i in 0..n {
-            pairs.push(GradientPair::new(grads[i], hesses[i].max(1e-7))?);
-        }
-        Ok(pairs)
+                for i in 0..group_len {
+                    let ideal_prob = (label_slice[i] - label_lse).exp();
+                    let pred_prob = (score_slice[i] - score_lse).exp();
+                    group_grads[i] = pred_prob - ideal_prob;
+                    group_hesses[i] = (pred_prob * (1.0 - pred_prob)).max(1e-7);
+                }
+                GroupGradientChunk {
+                    start,
+                    grads: group_grads,
+                    hesses: group_hesses,
+                }
+            })
+            .collect();
+        merge_group_chunks(chunks, &mut grads, &mut hesses);
+        gradient_pairs_from_parts(&grads, &hesses)
     }
 
     fn loss(
@@ -713,96 +784,95 @@ impl ObjectiveOps for YetiRankObjective {
         let n = predictions.len();
         let mut grads = vec![0.0_f32; n];
         let mut hesses = vec![0.0_f32; n];
-        let num_groups = self.group_boundaries.len() - 1;
-
-        for g in 0..num_groups {
-            let start = self.group_boundaries[g];
-            let end = self.group_boundaries[g + 1];
-            let group_len = end - start;
-            if group_len <= 1 {
-                continue;
-            }
-
-            let group_labels = &targets[start..end];
-            let group_scores = &predictions[start..end];
-
-            // Ideal DCG for normalization.
-            let idcg = ideal_dcg(group_labels, group_len);
-            if idcg <= 0.0 {
-                continue;
-            }
-            let inv_idcg = 1.0 / idcg;
-
-            // For each permutation, compute position-based weights.
-            let inv_perms = 1.0 / self.num_permutations as f32;
-
-            for perm_idx in 0..self.num_permutations {
-                // Seed deterministically from group + permutation index.
-                let mut rng_state = self
-                    .seed
-                    .wrapping_add(g as u64 * 1_000_003)
-                    .wrapping_add(perm_idx as u64 * 7);
-
-                // Create a permuted ordering biased by current scores.
-                // Add noise to scores to sample different orderings.
-                let mut noisy_order: Vec<usize> = (0..group_len).collect();
-                let mut noisy_scores = group_scores.to_vec();
-                for s in &mut noisy_scores {
-                    let r = Self::next_random(&mut rng_state);
-                    let noise = ((r as f64 / u64::MAX as f64) * 2.0 - 1.0) as f32;
-                    *s += noise * 0.5;
+        let chunks: Vec<GroupGradientChunk> = self
+            .group_boundaries
+            .par_windows(2)
+            .enumerate()
+            .map(|(group_idx, group)| {
+                let start = group[0];
+                let end = group[1];
+                let group_len = end - start;
+                let mut group_grads = vec![0.0_f32; group_len];
+                let mut group_hesses = vec![0.0_f32; group_len];
+                if group_len <= 1 {
+                    return GroupGradientChunk {
+                        start,
+                        grads: group_grads,
+                        hesses: group_hesses,
+                    };
                 }
-                noisy_order.sort_by(|&a, &b| {
-                    noisy_scores[b]
-                        .partial_cmp(&noisy_scores[a])
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-
-                // Compute ranks in this permutation.
-                let mut perm_ranks = vec![0_usize; group_len];
-                for (rank, &idx) in noisy_order.iter().enumerate() {
-                    perm_ranks[idx] = rank;
+                let group_labels = &targets[start..end];
+                let group_scores = &predictions[start..end];
+                let idcg = ideal_dcg(group_labels, group_len);
+                if idcg <= 0.0 {
+                    return GroupGradientChunk {
+                        start,
+                        grads: group_grads,
+                        hesses: group_hesses,
+                    };
                 }
+                let gains = gains_for_labels(group_labels);
+                let inv_idcg = 1.0 / idcg;
+                let inv_perms = 1.0 / self.num_permutations as f32;
 
-                // Pairwise gradients weighted by delta-NDCG in this permutation.
-                for i in 0..group_len {
-                    for j in (i + 1)..group_len {
-                        if group_labels[i] == group_labels[j] {
-                            continue;
+                for perm_idx in 0..self.num_permutations {
+                    let mut rng_state = self
+                        .seed
+                        .wrapping_add(group_idx as u64 * 1_000_003)
+                        .wrapping_add(perm_idx as u64 * 7);
+                    let mut noisy_order: Vec<usize> = (0..group_len).collect();
+                    let mut noisy_scores = group_scores.to_vec();
+                    for score in &mut noisy_scores {
+                        let r = Self::next_random(&mut rng_state);
+                        let noise = ((r as f64 / u64::MAX as f64) * 2.0 - 1.0) as f32;
+                        *score += noise * 0.5;
+                    }
+                    noisy_order.sort_by(|&a, &b| {
+                        noisy_scores[b]
+                            .partial_cmp(&noisy_scores[a])
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+
+                    let mut perm_ranks = vec![0_usize; group_len];
+                    for (rank, &idx) in noisy_order.iter().enumerate() {
+                        perm_ranks[idx] = rank;
+                    }
+                    let discounts = discounts_for_ranks(&perm_ranks);
+
+                    for i in 0..group_len {
+                        for j in (i + 1)..group_len {
+                            if group_labels[i] == group_labels[j] {
+                                continue;
+                            }
+                            let (hi, lo) = if group_labels[i] > group_labels[j] {
+                                (i, j)
+                            } else {
+                                (j, i)
+                            };
+                            let s = group_scores[hi] - group_scores[lo];
+                            let rho = sigmoid(-s);
+                            let delta_ndcg =
+                                ((gains[hi] - gains[lo]) * (discounts[hi] - discounts[lo])).abs()
+                                    * inv_idcg;
+                            let lambda = -rho * delta_ndcg * inv_perms;
+                            let hess_pair = rho * (1.0 - rho) * delta_ndcg * inv_perms;
+                            group_grads[hi] += lambda;
+                            group_grads[lo] -= lambda;
+                            group_hesses[hi] += hess_pair;
+                            group_hesses[lo] += hess_pair;
                         }
-                        let (hi, lo) = if group_labels[i] > group_labels[j] {
-                            (i, j)
-                        } else {
-                            (j, i)
-                        };
-                        let s = group_scores[hi] - group_scores[lo];
-                        let rho = sigmoid(-s);
-
-                        let gain_hi = (2.0_f32).powf(group_labels[hi]) - 1.0;
-                        let gain_lo = (2.0_f32).powf(group_labels[lo]) - 1.0;
-                        let discount_hi = 1.0 / ((perm_ranks[hi] as f32 + 2.0).log2());
-                        let discount_lo = 1.0 / ((perm_ranks[lo] as f32 + 2.0).log2());
-                        let delta_ndcg =
-                            ((gain_hi - gain_lo) * (discount_hi - discount_lo)).abs() * inv_idcg;
-
-                        let lambda = -rho * delta_ndcg * inv_perms;
-                        let hess_pair = rho * (1.0 - rho) * delta_ndcg * inv_perms;
-
-                        grads[start + hi] += lambda;
-                        grads[start + lo] -= lambda;
-                        hesses[start + hi] += hess_pair;
-                        hesses[start + lo] += hess_pair;
                     }
                 }
-            }
-        }
 
-        let mut pairs = Vec::with_capacity(n);
-        for i in 0..n {
-            let hess = hesses[i].max(1e-7);
-            pairs.push(GradientPair::new(grads[i], hess)?);
-        }
-        Ok(pairs)
+                GroupGradientChunk {
+                    start,
+                    grads: group_grads,
+                    hesses: group_hesses,
+                }
+            })
+            .collect();
+        merge_group_chunks(chunks, &mut grads, &mut hesses);
+        gradient_pairs_from_parts(&grads, &hesses)
     }
 
     fn loss(
@@ -835,5 +905,325 @@ impl ObjectiveOps for YetiRankObjective {
 
     fn supports_leaf_refinement(&self) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_gradient_pairs_close(
+        actual: &[GradientPair],
+        expected: &[GradientPair],
+        tolerance: f32,
+    ) {
+        assert_eq!(actual.len(), expected.len());
+        for (idx, (actual_pair, expected_pair)) in actual.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (actual_pair.grad - expected_pair.grad).abs() <= tolerance,
+                "grad mismatch at {idx}: actual={}, expected={}",
+                actual_pair.grad,
+                expected_pair.grad
+            );
+            assert!(
+                (actual_pair.hess - expected_pair.hess).abs() <= tolerance,
+                "hess mismatch at {idx}: actual={}, expected={}",
+                actual_pair.hess,
+                expected_pair.hess
+            );
+        }
+    }
+
+    fn pairs_from_parts(grads: &[f32], hesses: &[f32]) -> Vec<GradientPair> {
+        grads
+            .iter()
+            .zip(hesses.iter())
+            .map(|(&grad, &hess)| GradientPair::new(grad, hess.max(1e-7)).unwrap())
+            .collect()
+    }
+
+    fn serial_pairwise_reference(
+        boundaries: &[usize],
+        predictions: &[f32],
+        targets: &[f32],
+    ) -> Vec<GradientPair> {
+        let mut grads = vec![0.0_f32; predictions.len()];
+        let mut hesses = vec![0.0_f32; predictions.len()];
+
+        for group in boundaries.windows(2) {
+            let start = group[0];
+            let end = group[1];
+            for i in start..end {
+                for j in (i + 1)..end {
+                    if targets[i] == targets[j] {
+                        continue;
+                    }
+                    let (hi, lo) = if targets[i] > targets[j] {
+                        (i, j)
+                    } else {
+                        (j, i)
+                    };
+                    let rho = sigmoid(-(predictions[hi] - predictions[lo]));
+                    let lambda = -rho;
+                    let hess_pair = rho * (1.0 - rho);
+                    grads[hi] += lambda;
+                    grads[lo] -= lambda;
+                    hesses[hi] += hess_pair;
+                    hesses[lo] += hess_pair;
+                }
+            }
+        }
+
+        pairs_from_parts(&grads, &hesses)
+    }
+
+    fn serial_lambdamart_reference(
+        boundaries: &[usize],
+        predictions: &[f32],
+        targets: &[f32],
+    ) -> Vec<GradientPair> {
+        let mut grads = vec![0.0_f32; predictions.len()];
+        let mut hesses = vec![0.0_f32; predictions.len()];
+
+        for group in boundaries.windows(2) {
+            let start = group[0];
+            let end = group[1];
+            let group_labels = &targets[start..end];
+            let group_scores = &predictions[start..end];
+            let group_len = end - start;
+            let idcg = ideal_dcg(group_labels, group_len);
+            if idcg <= 0.0 {
+                continue;
+            }
+            let inv_idcg = 1.0 / idcg;
+            let mut order: Vec<usize> = (0..group_len).collect();
+            order.sort_by(|&a, &b| {
+                group_scores[b]
+                    .partial_cmp(&group_scores[a])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let mut ranks = vec![0_usize; group_len];
+            for (rank, &idx) in order.iter().enumerate() {
+                ranks[idx] = rank;
+            }
+            for i in 0..group_len {
+                for j in (i + 1)..group_len {
+                    if group_labels[i] == group_labels[j] {
+                        continue;
+                    }
+                    let (hi, lo) = if group_labels[i] > group_labels[j] {
+                        (i, j)
+                    } else {
+                        (j, i)
+                    };
+                    let rho = sigmoid(-(group_scores[hi] - group_scores[lo]));
+                    let gain_hi = (2.0_f32).powf(group_labels[hi]) - 1.0;
+                    let gain_lo = (2.0_f32).powf(group_labels[lo]) - 1.0;
+                    let discount_hi = 1.0 / ((ranks[hi] as f32 + 2.0).log2());
+                    let discount_lo = 1.0 / ((ranks[lo] as f32 + 2.0).log2());
+                    let delta_ndcg =
+                        ((gain_hi - gain_lo) * (discount_hi - discount_lo)).abs() * inv_idcg;
+                    let lambda = -rho * delta_ndcg;
+                    let hess_pair = rho * (1.0 - rho) * delta_ndcg;
+                    grads[start + hi] += lambda;
+                    grads[start + lo] -= lambda;
+                    hesses[start + hi] += hess_pair;
+                    hesses[start + lo] += hess_pair;
+                }
+            }
+        }
+
+        pairs_from_parts(&grads, &hesses)
+    }
+
+    fn serial_xendcg_reference(
+        boundaries: &[usize],
+        predictions: &[f32],
+        targets: &[f32],
+    ) -> Vec<GradientPair> {
+        let mut grads = vec![0.0_f32; predictions.len()];
+        let mut hesses = vec![0.0_f32; predictions.len()];
+
+        for group in boundaries.windows(2) {
+            let start = group[0];
+            let end = group[1];
+            let group_len = end - start;
+            if group_len <= 1 {
+                continue;
+            }
+            let label_slice = &targets[start..end];
+            let score_slice = &predictions[start..end];
+            let label_lse = log_sum_exp(label_slice);
+            let score_lse = log_sum_exp(score_slice);
+
+            for idx in 0..group_len {
+                let ideal_prob = (label_slice[idx] - label_lse).exp();
+                let pred_prob = (score_slice[idx] - score_lse).exp();
+                grads[start + idx] = pred_prob - ideal_prob;
+                hesses[start + idx] = (pred_prob * (1.0 - pred_prob)).max(1e-7);
+            }
+        }
+
+        pairs_from_parts(&grads, &hesses)
+    }
+
+    fn serial_yetirank_reference(
+        boundaries: &[usize],
+        predictions: &[f32],
+        targets: &[f32],
+        num_permutations: usize,
+        seed: u64,
+    ) -> Vec<GradientPair> {
+        let mut grads = vec![0.0_f32; predictions.len()];
+        let mut hesses = vec![0.0_f32; predictions.len()];
+
+        for (group_idx, group) in boundaries.windows(2).enumerate() {
+            let start = group[0];
+            let end = group[1];
+            let group_len = end - start;
+            if group_len <= 1 {
+                continue;
+            }
+
+            let group_labels = &targets[start..end];
+            let group_scores = &predictions[start..end];
+            let idcg = ideal_dcg(group_labels, group_len);
+            if idcg <= 0.0 {
+                continue;
+            }
+            let inv_idcg = 1.0 / idcg;
+            let inv_perms = 1.0 / num_permutations as f32;
+            for perm_idx in 0..num_permutations {
+                let mut rng_state = seed
+                    .wrapping_add(group_idx as u64 * 1_000_003)
+                    .wrapping_add(perm_idx as u64 * 7);
+                let mut noisy_order: Vec<usize> = (0..group_len).collect();
+                let mut noisy_scores = group_scores.to_vec();
+                for score in &mut noisy_scores {
+                    let r = YetiRankObjective::next_random(&mut rng_state);
+                    let noise = ((r as f64 / u64::MAX as f64) * 2.0 - 1.0) as f32;
+                    *score += noise * 0.5;
+                }
+                noisy_order.sort_by(|&a, &b| {
+                    noisy_scores[b]
+                        .partial_cmp(&noisy_scores[a])
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                let mut perm_ranks = vec![0_usize; group_len];
+                for (rank, &idx) in noisy_order.iter().enumerate() {
+                    perm_ranks[idx] = rank;
+                }
+                for i in 0..group_len {
+                    for j in (i + 1)..group_len {
+                        if group_labels[i] == group_labels[j] {
+                            continue;
+                        }
+                        let (hi, lo) = if group_labels[i] > group_labels[j] {
+                            (i, j)
+                        } else {
+                            (j, i)
+                        };
+                        let rho = sigmoid(-(group_scores[hi] - group_scores[lo]));
+                        let gain_hi = (2.0_f32).powf(group_labels[hi]) - 1.0;
+                        let gain_lo = (2.0_f32).powf(group_labels[lo]) - 1.0;
+                        let discount_hi = 1.0 / ((perm_ranks[hi] as f32 + 2.0).log2());
+                        let discount_lo = 1.0 / ((perm_ranks[lo] as f32 + 2.0).log2());
+                        let delta_ndcg =
+                            ((gain_hi - gain_lo) * (discount_hi - discount_lo)).abs() * inv_idcg;
+                        let lambda = -rho * delta_ndcg * inv_perms;
+                        let hess_pair = rho * (1.0 - rho) * delta_ndcg * inv_perms;
+                        grads[start + hi] += lambda;
+                        grads[start + lo] -= lambda;
+                        hesses[start + hi] += hess_pair;
+                        hesses[start + lo] += hess_pair;
+                    }
+                }
+            }
+        }
+
+        pairs_from_parts(&grads, &hesses)
+    }
+
+    #[test]
+    fn pairwise_parallel_gradients_match_serial_reference() {
+        let group_id = [0, 0, 0, 1, 1, 1, 1];
+        let predictions = [0.3, -0.2, 0.9, 1.1, -0.4, 0.0, 0.7];
+        let targets = [2.0, 0.0, 1.0, 3.0, 0.0, 2.0, 1.0];
+        let objective = PairwiseRankingObjective::new(&group_id);
+        let actual = objective
+            .compute_gradients(&predictions, &targets, None)
+            .unwrap();
+        let expected =
+            serial_pairwise_reference(&compute_group_boundaries(&group_id), &predictions, &targets);
+        assert_gradient_pairs_close(&actual, &expected, 1e-6);
+    }
+
+    #[test]
+    fn lambdamart_parallel_gradients_match_serial_reference() {
+        let group_id = [0, 0, 0, 0, 1, 1, 1];
+        let predictions = [0.8, -0.1, 0.4, 0.2, 1.2, -0.5, 0.3];
+        let targets = [3.0, 0.0, 2.0, 1.0, 2.0, 0.0, 1.0];
+        let objective = LambdaMARTObjective::new(&group_id);
+        let actual = objective
+            .compute_gradients(&predictions, &targets, None)
+            .unwrap();
+        let expected = serial_lambdamart_reference(
+            &compute_group_boundaries(&group_id),
+            &predictions,
+            &targets,
+        );
+        assert_gradient_pairs_close(&actual, &expected, 1e-6);
+    }
+
+    #[test]
+    fn xendcg_parallel_gradients_match_serial_reference() {
+        let group_id = [0, 0, 1, 1, 1, 2, 2];
+        let predictions = [0.2, -0.3, 1.0, 0.5, -0.8, 0.1, 0.4];
+        let targets = [1.0, 0.0, 3.0, 1.0, 0.0, 2.0, 2.0];
+        let objective = XeNDCGObjective::new(&group_id);
+        let actual = objective
+            .compute_gradients(&predictions, &targets, None)
+            .unwrap();
+        let expected =
+            serial_xendcg_reference(&compute_group_boundaries(&group_id), &predictions, &targets);
+        assert_gradient_pairs_close(&actual, &expected, 1e-6);
+    }
+
+    #[test]
+    fn yetirank_parallel_gradients_match_serial_reference() {
+        let group_id = [0, 0, 0, 1, 1, 1];
+        let predictions = [0.6, -0.2, 0.1, 0.9, 0.0, -0.5];
+        let targets = [2.0, 1.0, 0.0, 3.0, 1.0, 0.0];
+        let objective = YetiRankObjective::new(&group_id, 3, 17);
+        let actual = objective
+            .compute_gradients(&predictions, &targets, None)
+            .unwrap();
+        let expected = serial_yetirank_reference(
+            &compute_group_boundaries(&group_id),
+            &predictions,
+            &targets,
+            3,
+            17,
+        );
+        assert_gradient_pairs_close(&actual, &expected, 1e-6);
+    }
+
+    #[test]
+    fn lambdamart_compute_gradients_into_reuses_buffer() {
+        let group_id = [0, 0, 0, 1, 1];
+        let predictions = [0.4, -0.1, 0.2, 0.0, 0.5];
+        let targets = [2.0, 0.0, 1.0, 1.0, 0.0];
+        let objective = LambdaMARTObjective::new(&group_id);
+        let mut buffer = Vec::with_capacity(16);
+        let original_capacity = buffer.capacity();
+        objective
+            .compute_gradients_into(&predictions, &targets, None, &mut buffer)
+            .unwrap();
+        assert_eq!(buffer.len(), predictions.len());
+        assert_eq!(buffer.capacity(), original_capacity);
+        let direct = objective
+            .compute_gradients(&predictions, &targets, None)
+            .unwrap();
+        assert_gradient_pairs_close(&buffer, &direct, 1e-6);
     }
 }
