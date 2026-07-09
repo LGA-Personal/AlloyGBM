@@ -112,6 +112,9 @@ fn fill_gradient_pair_buffer(
     hesses: &[f32],
     buffer: &mut Vec<GradientPair>,
 ) -> EngineResult<()> {
+    for i in 0..grads.len() {
+        let _ = GradientPair::new(grads[i], hesses[i].max(1e-7))?;
+    }
     buffer.clear();
     if buffer.capacity() < grads.len() {
         buffer.reserve(grads.len() - buffer.capacity());
@@ -1225,5 +1228,26 @@ mod tests {
             .compute_gradients(&predictions, &targets, None)
             .unwrap();
         assert_gradient_pairs_close(&buffer, &direct, 1e-6);
+    }
+
+    #[test]
+    fn lambdamart_compute_gradients_into_rejects_non_finite_pairs() {
+        let group_id = [0, 0];
+        let predictions = [f32::NAN, 0.5];
+        let targets = [1.0, 0.0];
+        let objective = LambdaMARTObjective::new(&group_id);
+        let sentinel = GradientPair::new(1.0, 1.0).unwrap();
+        let mut buffer = vec![sentinel];
+
+        let err = objective
+            .compute_gradients_into(&predictions, &targets, None, &mut buffer)
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("gradient and hessian must be finite"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(buffer, vec![sentinel]);
     }
 }
