@@ -85,6 +85,32 @@ impl LinearLeafCompact {
         }
         v
     }
+
+    fn scaled(&self, scale: f32) -> Self {
+        Self {
+            intercept: self.intercept * scale,
+            weights: self.weights.iter().map(|w| w * scale).collect(),
+            feature_indices: self.feature_indices.clone(),
+            feature_means: self.feature_means.clone(),
+            feature_inv_stds: self.feature_inv_stds.clone(),
+        }
+    }
+
+    fn add_scalar(&mut self, value: f32) {
+        self.intercept += value;
+    }
+
+    fn add_scaled_linear(&mut self, other: &Self, scale: f32) {
+        self.intercept += other.intercept * scale;
+        self.weights
+            .extend(other.weights.iter().map(|weight| weight * scale));
+        self.feature_indices
+            .extend(other.feature_indices.iter().copied());
+        self.feature_means
+            .extend(other.feature_means.iter().copied());
+        self.feature_inv_stds
+            .extend(other.feature_inv_stds.iter().copied());
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -140,11 +166,36 @@ impl PredictorTreeNode {
 #[derive(Debug, Clone, PartialEq)]
 struct PredictorTree {
     nodes_by_local_id: Vec<Option<PredictorTreeNode>>,
-    /// DART per-tree multiplicative weight. `1.0` for non-DART models
-    /// and for any tree where the loader didn't find a `DartTreeWeights`
-    /// entry. Applied multiplicatively to every leaf accumulation when
-    /// traversing this tree.
+    /// DART per-tree multiplicative weight before load-time contribution
+    /// collapse. After `collapse_tree_branch_contributions`, this is reset to
+    /// `1.0` because the weight has been folded into every branch value.
     tree_weight: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PostTransformKind {
+    Identity,
+    Sigmoid,
+    ExpClamped,
+}
+
+impl PostTransformKind {
+    fn from_objective(objective: &str) -> Self {
+        match objective {
+            "binary_crossentropy" => Self::Sigmoid,
+            "poisson" | "gamma" | "tweedie" => Self::ExpClamped,
+            _ => Self::Identity,
+        }
+    }
+
+    #[inline]
+    fn apply(self, raw: f32) -> f32 {
+        match self {
+            Self::Identity => raw,
+            Self::Sigmoid => sigmoid(raw),
+            Self::ExpClamped => raw.clamp(-50.0, 50.0).exp(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -160,6 +211,7 @@ pub struct Predictor {
     num_classes: Option<usize>,
     baseline_predictions: Option<Vec<f32>>,
     class_trees: Option<Vec<Vec<PredictorTree>>>,
+    post_transform: PostTransformKind,
 }
 
 /// Determine if a prediction row goes left at a tree node.
@@ -184,8 +236,144 @@ fn predictor_went_left(node: &PredictorTreeNode, feature_value: f32, use_float: 
     }
 }
 
+#[inline]
+fn predict_tree_contribution(tree: &PredictorTree, features: &[f32], use_float: bool) -> f32 {
+    let mut local_node_id: usize = 0;
+    let mut terminal: Option<(&PredictorTreeNode, bool)> = None;
+    while let Some(Some(node)) = tree.nodes_by_local_id.get(local_node_id) {
+        let feature_value = features[node.feature_index];
+        let went_left = predictor_went_left(node, feature_value, use_float);
+        terminal = Some((node, went_left));
+        local_node_id = if went_left {
+            local_node_id * 2 + 1
+        } else {
+            local_node_id * 2 + 2
+        };
+    }
+
+    match terminal {
+        Some((node, true)) => node.eval_left_leaf(features),
+        Some((node, false)) => node.eval_right_leaf(features),
+        None => 0.0,
+    }
+}
+
+fn combine_branch_contribution(
+    prefix_scalar: f32,
+    prefix_linear: Option<&LinearLeafCompact>,
+    branch_scalar: f32,
+    branch_linear: Option<&LinearLeafCompact>,
+    tree_weight: f32,
+) -> (f32, Option<LinearLeafCompact>) {
+    match (prefix_linear, branch_linear) {
+        (None, None) => (prefix_scalar + tree_weight * branch_scalar, None),
+        (Some(prefix), None) => {
+            let mut combined = prefix.clone();
+            combined.add_scalar(tree_weight * branch_scalar);
+            (0.0, Some(combined))
+        }
+        (None, Some(branch)) => {
+            let mut combined = branch.scaled(tree_weight);
+            combined.add_scalar(prefix_scalar);
+            (0.0, Some(combined))
+        }
+        (Some(prefix), Some(branch)) => {
+            let mut combined = prefix.clone();
+            combined.add_scaled_linear(branch, tree_weight);
+            if prefix_scalar != 0.0 {
+                combined.add_scalar(prefix_scalar);
+            }
+            (0.0, Some(combined))
+        }
+    }
+}
+
+fn collapse_tree_branch_contributions(tree: &mut PredictorTree) {
+    let tree_weight = tree.tree_weight;
+    let mut stack = vec![(0_usize, 0.0_f32, None::<LinearLeafCompact>)];
+
+    while let Some((local_node_id, prefix_scalar, prefix_linear)) = stack.pop() {
+        if local_node_id >= tree.nodes_by_local_id.len()
+            || tree.nodes_by_local_id[local_node_id].is_none()
+        {
+            continue;
+        }
+
+        let (left_scalar, left_linear, right_scalar, right_linear) = {
+            let node = tree.nodes_by_local_id[local_node_id]
+                .as_ref()
+                .expect("node checked above");
+            (
+                node.left_leaf_value,
+                node.left_linear.clone(),
+                node.right_leaf_value,
+                node.right_linear.clone(),
+            )
+        };
+
+        let (collapsed_left_scalar, collapsed_left_linear) = combine_branch_contribution(
+            prefix_scalar,
+            prefix_linear.as_ref(),
+            left_scalar,
+            left_linear.as_ref(),
+            tree_weight,
+        );
+        let (collapsed_right_scalar, collapsed_right_linear) = combine_branch_contribution(
+            prefix_scalar,
+            prefix_linear.as_ref(),
+            right_scalar,
+            right_linear.as_ref(),
+            tree_weight,
+        );
+
+        {
+            let node = tree.nodes_by_local_id[local_node_id]
+                .as_mut()
+                .expect("node checked above");
+            node.left_leaf_value = collapsed_left_scalar;
+            node.left_linear = collapsed_left_linear.clone();
+            node.right_leaf_value = collapsed_right_scalar;
+            node.right_linear = collapsed_right_linear.clone();
+        }
+
+        let left_child = local_node_id * 2 + 1;
+        if matches!(tree.nodes_by_local_id.get(left_child), Some(Some(_))) {
+            stack.push((left_child, collapsed_left_scalar, collapsed_left_linear));
+        }
+        let right_child = local_node_id * 2 + 2;
+        if matches!(tree.nodes_by_local_id.get(right_child), Some(Some(_))) {
+            stack.push((right_child, collapsed_right_scalar, collapsed_right_linear));
+        }
+    }
+
+    tree.tree_weight = 1.0;
+}
+
+fn finalize_predictor_trees(
+    trees: &mut [PredictorTree],
+    feature_count: usize,
+) -> PredictorResult<()> {
+    for (tree_index, tree) in trees.iter().enumerate() {
+        for (local_node_id, node) in tree.nodes_by_local_id.iter().enumerate() {
+            if let Some(node) = node
+                && node.feature_index >= feature_count
+            {
+                return Err(PredictorError::ContractViolation(format!(
+                    "tree {tree_index} local node_id {local_node_id} split feature_index {} exceeds model feature_count {}",
+                    node.feature_index, feature_count
+                )));
+            }
+        }
+    }
+    for tree in trees {
+        collapse_tree_branch_contributions(tree);
+    }
+    Ok(())
+}
+
 impl Predictor {
     pub fn new(metadata: ModelMetadata) -> Self {
+        let post_transform = PostTransformKind::from_objective(&metadata.objective);
         Self {
             metadata,
             categorical_state: None,
@@ -195,6 +383,7 @@ impl Predictor {
             num_classes: None,
             baseline_predictions: None,
             class_trees: None,
+            post_transform,
         }
     }
 
@@ -202,6 +391,7 @@ impl Predictor {
         let parsed = deserialize_model_artifact_v1(bytes).map_err(PredictorError::from)?;
         let metadata = parsed.contract.metadata;
         let metadata_feature_count = metadata.feature_names.len();
+        let post_transform = PostTransformKind::from_objective(&metadata.objective);
         let categorical_state =
             decode_optional_categorical_state_section_v1(&parsed.sections, metadata_feature_count)
                 .map_err(PredictorError::from)?;
@@ -288,7 +478,8 @@ impl Predictor {
             // when multiclass DART lands we can apply the overlay below.
             let mut class_trees = Vec::with_capacity(num_classes);
             for stumps in &per_class_stumps {
-                let (trees, _tree_ids) = build_predictor_trees(stumps)?;
+                let (mut trees, _tree_ids) = build_predictor_trees(stumps)?;
+                finalize_predictor_trees(&mut trees, metadata_feature_count)?;
                 class_trees.push(trees);
             }
 
@@ -301,6 +492,7 @@ impl Predictor {
                 num_classes: Some(num_classes),
                 baseline_predictions: Some(baselines),
                 class_trees: Some(class_trees),
+                post_transform,
             });
         }
 
@@ -346,15 +538,6 @@ impl Predictor {
             }
         }
 
-        let (mut trees, tree_ids) = build_predictor_trees(&stumps)?;
-
-        // Decode optional DartTreeWeights and apply per-tree weights.
-        if let Some(dart_payload) = decode_optional_dart_tree_weights_section(&parsed.sections)
-            .map_err(PredictorError::from)?
-        {
-            apply_dart_tree_weights(&mut trees, &tree_ids, &stumps, &dart_payload.weights)?;
-        }
-
         if predictor_layout.feature_count != metadata_feature_count {
             return Err(PredictorError::ContractViolation(format!(
                 "predictor layout feature_count {} does not match metadata feature count {}",
@@ -374,6 +557,16 @@ impl Predictor {
             )));
         }
 
+        let (mut trees, tree_ids) = build_predictor_trees(&stumps)?;
+
+        // Decode optional DartTreeWeights and apply per-tree weights.
+        if let Some(dart_payload) = decode_optional_dart_tree_weights_section(&parsed.sections)
+            .map_err(PredictorError::from)?
+        {
+            apply_dart_tree_weights(&mut trees, &tree_ids, &stumps, &dart_payload.weights)?;
+        }
+        finalize_predictor_trees(&mut trees, metadata_feature_count)?;
+
         Ok(Self {
             metadata,
             categorical_state,
@@ -383,6 +576,7 @@ impl Predictor {
             num_classes: None,
             baseline_predictions: None,
             class_trees: None,
+            post_transform,
         })
     }
 
@@ -535,33 +729,12 @@ impl Predictor {
     fn predict_row_with_feature_count(
         &self,
         features: &[f32],
-        feature_count: usize,
+        _feature_count: usize,
     ) -> PredictorResult<f32> {
         let use_float = self.use_float_thresholds;
         let mut prediction = self.baseline_prediction;
         for tree in &self.trees {
-            let mut local_node_id: usize = 0;
-            while let Some(Some(node)) = tree.nodes_by_local_id.get(local_node_id) {
-                if node.feature_index >= feature_count {
-                    return Err(PredictorError::ContractViolation(format!(
-                        "split feature_index {} exceeds feature length {}",
-                        node.feature_index, feature_count
-                    )));
-                }
-                let feature_value = features[node.feature_index];
-                let went_left = predictor_went_left(node, feature_value, use_float);
-                let leaf = if went_left {
-                    node.eval_left_leaf(features)
-                } else {
-                    node.eval_right_leaf(features)
-                };
-                prediction += tree.tree_weight * leaf;
-                local_node_id = if went_left {
-                    local_node_id.saturating_mul(2).saturating_add(1)
-                } else {
-                    local_node_id.saturating_mul(2).saturating_add(2)
-                };
-            }
+            prediction += predict_tree_contribution(tree, features, use_float);
         }
 
         Ok(prediction)
@@ -662,33 +835,12 @@ impl Predictor {
     fn predict_row_dense_unchecked(
         &self,
         features: &[f32],
-        feature_count: usize,
+        _feature_count: usize,
     ) -> PredictorResult<f32> {
         let use_float = self.use_float_thresholds;
         let mut prediction = self.baseline_prediction;
         for tree in &self.trees {
-            let mut local_node_id: usize = 0;
-            while let Some(Some(node)) = tree.nodes_by_local_id.get(local_node_id) {
-                if node.feature_index >= feature_count {
-                    return Err(PredictorError::ContractViolation(format!(
-                        "split feature_index {} exceeds feature length {}",
-                        node.feature_index, feature_count
-                    )));
-                }
-                let feature_value = features[node.feature_index];
-                let went_left = predictor_went_left(node, feature_value, use_float);
-                let leaf = if went_left {
-                    node.eval_left_leaf(features)
-                } else {
-                    node.eval_right_leaf(features)
-                };
-                prediction += tree.tree_weight * leaf;
-                local_node_id = if went_left {
-                    local_node_id * 2 + 1
-                } else {
-                    local_node_id * 2 + 2
-                };
-            }
+            prediction += predict_tree_contribution(tree, features, use_float);
         }
         Ok(prediction)
     }
@@ -778,12 +930,7 @@ impl Predictor {
     ///   the training-side clamp in `glm_clamp_exp`.
     #[inline]
     fn post_transform(&self, raw: f32) -> f32 {
-        match self.metadata.objective.as_str() {
-            "binary_crossentropy" => sigmoid(raw),
-            "poisson" | "gamma" | "tweedie" => raw.clamp(-50.0, 50.0).exp(),
-            "quantile" => raw,
-            _ => raw,
-        }
+        self.post_transform.apply(raw)
     }
 
     /// Predict raw logits (before post-transform).
@@ -832,29 +979,8 @@ impl Predictor {
             let mut logits = baselines.clone();
             for (class_k, trees) in class_trees.iter().enumerate() {
                 for tree in trees {
-                    let mut local_node_id: usize = 0;
-                    while let Some(Some(node)) = tree.nodes_by_local_id.get(local_node_id) {
-                        if node.feature_index >= feature_count {
-                            return Err(PredictorError::ContractViolation(format!(
-                                "split feature_index {} exceeds feature length {}",
-                                node.feature_index, feature_count
-                            )));
-                        }
-                        let feature_value = features[node.feature_index];
-                        let went_left =
-                            predictor_went_left(node, feature_value, self.use_float_thresholds);
-                        let leaf = if went_left {
-                            node.eval_left_leaf(features)
-                        } else {
-                            node.eval_right_leaf(features)
-                        };
-                        logits[class_k] += tree.tree_weight * leaf;
-                        local_node_id = if went_left {
-                            local_node_id * 2 + 1
-                        } else {
-                            local_node_id * 2 + 2
-                        };
-                    }
+                    logits[class_k] +=
+                        predict_tree_contribution(tree, features, self.use_float_thresholds);
                 }
             }
             softmax_in_place(&mut logits);
@@ -919,28 +1045,7 @@ impl Predictor {
             let mut logits = baselines.clone();
             for (class_k, trees) in class_trees.iter().enumerate() {
                 for tree in trees {
-                    let mut local_node_id: usize = 0;
-                    while let Some(Some(node)) = tree.nodes_by_local_id.get(local_node_id) {
-                        if node.feature_index >= feature_count {
-                            return Err(PredictorError::ContractViolation(format!(
-                                "split feature_index {} exceeds feature length {}",
-                                node.feature_index, feature_count
-                            )));
-                        }
-                        let feature_value = features[node.feature_index];
-                        let went_left = predictor_went_left(node, feature_value, use_float);
-                        let leaf = if went_left {
-                            node.eval_left_leaf(features)
-                        } else {
-                            node.eval_right_leaf(features)
-                        };
-                        logits[class_k] += tree.tree_weight * leaf;
-                        local_node_id = if went_left {
-                            local_node_id * 2 + 1
-                        } else {
-                            local_node_id * 2 + 2
-                        };
-                    }
+                    logits[class_k] += predict_tree_contribution(tree, features, use_float);
                 }
             }
             softmax_in_place(&mut logits);
@@ -1495,6 +1600,16 @@ mod tests {
             .collect()
     }
 
+    fn assert_predictions_close(actual: &[f32], expected: &[f32]) {
+        assert_eq!(actual.len(), expected.len());
+        for (idx, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (a - e).abs() <= 1e-6,
+                "prediction {idx} differs: actual={a}, expected={e}"
+            );
+        }
+    }
+
     fn fixture_params() -> TrainParams {
         TrainParams {
             seed: 7,
@@ -1571,7 +1686,7 @@ mod tests {
 
         let engine_predictions = engine_model.predict_batch(&rows).expect("engine predicts");
         let predictor_predictions = predictor.predict_batch(&rows).expect("predictor predicts");
-        assert_eq!(engine_predictions, predictor_predictions);
+        assert_predictions_close(&predictor_predictions, &engine_predictions);
     }
 
     #[test]
@@ -1593,7 +1708,7 @@ mod tests {
         assert!(predictor.categorical_state.is_some());
         let engine_predictions = engine_model.predict_batch(&rows).expect("engine predicts");
         let predictor_predictions = predictor.predict_batch(&rows).expect("predictor predicts");
-        assert_eq!(engine_predictions, predictor_predictions);
+        assert_predictions_close(&predictor_predictions, &engine_predictions);
     }
 
     #[test]
@@ -1635,7 +1750,7 @@ mod tests {
         let rows = fixture_rows(&dataset);
         let engine_predictions = engine_model.predict_batch(&rows).expect("engine predicts");
         let predictor_predictions = predictor.predict_batch(&rows).expect("predictor predicts");
-        assert_eq!(engine_predictions, predictor_predictions);
+        assert_predictions_close(&predictor_predictions, &engine_predictions);
     }
 
     #[test]
@@ -1761,6 +1876,163 @@ mod tests {
                 );
                 assert!(
                     message.contains("exceeds predictor tree node slot limit"),
+                    "unexpected error message: {message}"
+                );
+            }
+            other => panic!("expected contract violation, got {other:?}"),
+        }
+    }
+
+    fn scalar_split(node_id: u32, feature_index: u32, threshold_bin: u16) -> SplitCandidate {
+        SplitCandidate {
+            node_id,
+            feature_index,
+            threshold_bin,
+            gain: 1.0,
+            default_left: true,
+            is_categorical: false,
+            categorical_bitset: None,
+            left_stats: NodeStats {
+                grad_sum: -1.0,
+                hess_sum: 1.0,
+                grad_sq_sum: 1.0,
+                row_count: 1,
+            },
+            right_stats: NodeStats {
+                grad_sum: 1.0,
+                hess_sum: 1.0,
+                grad_sq_sum: 1.0,
+                row_count: 1,
+            },
+        }
+    }
+
+    fn same_tree_depth_model(tree_weight: f32) -> TrainedModel {
+        TrainedModel {
+            baseline_prediction: 1.0,
+            feature_count: 2,
+            stumps: vec![
+                TrainedStump {
+                    split: scalar_split(0, 0, 0),
+                    left_leaf_value: LeafValue::Scalar(0.25),
+                    right_leaf_value: LeafValue::Scalar(-0.5),
+                    tree_weight,
+                    multi_output_leaf_values: None,
+                },
+                TrainedStump {
+                    split: scalar_split(1, 1, 0),
+                    left_leaf_value: LeafValue::Scalar(0.75),
+                    right_leaf_value: LeafValue::Scalar(-0.25),
+                    tree_weight,
+                    multi_output_leaf_values: None,
+                },
+                TrainedStump {
+                    split: scalar_split(2, 1, 0),
+                    left_leaf_value: LeafValue::Scalar(0.4),
+                    right_leaf_value: LeafValue::Scalar(-0.2),
+                    tree_weight,
+                    multi_output_leaf_values: None,
+                },
+            ],
+            categorical_state: None,
+            node_debug_stats: None,
+            objective: "squared_error".to_string(),
+            native_categorical_feature_indices: Vec::new(),
+            morph_metadata: None,
+            dro_metadata: None,
+            feature_baseline: None,
+            neutralization_metadata: None,
+        }
+    }
+
+    fn loaded_same_tree_depth_predictor(tree_weight: f32) -> Predictor {
+        let artifact = same_tree_depth_model(tree_weight)
+            .to_artifact_bytes()
+            .expect("artifact serializes");
+        Predictor::from_artifact_bytes(&artifact).expect("predictor loads")
+    }
+
+    #[test]
+    fn predictor_collapses_same_tree_scalar_deltas() {
+        let predictor = loaded_same_tree_depth_predictor(1.0);
+        let tree = &predictor.trees[0];
+
+        let root = tree.nodes_by_local_id[0].as_ref().expect("root exists");
+        assert!((root.left_leaf_value - 0.25).abs() < 1e-6);
+        assert!((root.right_leaf_value - (-0.5)).abs() < 1e-6);
+
+        let left_child = tree.nodes_by_local_id[1]
+            .as_ref()
+            .expect("left child exists");
+        assert!((left_child.left_leaf_value - 1.0).abs() < 1e-6);
+        assert!((left_child.right_leaf_value - 0.0).abs() < 1e-6);
+
+        let right_child = tree.nodes_by_local_id[2]
+            .as_ref()
+            .expect("right child exists");
+        assert!((right_child.left_leaf_value - (-0.1)).abs() < 1e-6);
+        assert!((right_child.right_leaf_value - (-0.7)).abs() < 1e-6);
+
+        assert!((predictor.predict_row(&[0.0, 0.0]).unwrap() - 2.0).abs() < 1e-6);
+        assert!((predictor.predict_row(&[0.0, 2.0]).unwrap() - 1.0).abs() < 1e-6);
+        assert!((predictor.predict_row(&[2.0, 0.0]).unwrap() - 0.9).abs() < 1e-6);
+        assert!((predictor.predict_row(&[2.0, 2.0]).unwrap() - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn predictor_collapses_dart_weighted_same_tree_deltas() {
+        let predictor = loaded_same_tree_depth_predictor(0.5);
+        let tree = &predictor.trees[0];
+
+        let root = tree.nodes_by_local_id[0].as_ref().expect("root exists");
+        assert!((root.left_leaf_value - 0.125).abs() < 1e-6);
+        assert!((root.right_leaf_value - (-0.25)).abs() < 1e-6);
+
+        let left_child = tree.nodes_by_local_id[1]
+            .as_ref()
+            .expect("left child exists");
+        assert!((left_child.left_leaf_value - 0.5).abs() < 1e-6);
+        assert!((left_child.right_leaf_value - 0.0).abs() < 1e-6);
+
+        let right_child = tree.nodes_by_local_id[2]
+            .as_ref()
+            .expect("right child exists");
+        assert!((right_child.left_leaf_value - (-0.05)).abs() < 1e-6);
+        assert!((right_child.right_leaf_value - (-0.35)).abs() < 1e-6);
+
+        assert!((predictor.predict_row(&[0.0, 0.0]).unwrap() - 1.5).abs() < 1e-6);
+        assert!((predictor.predict_row(&[0.0, 2.0]).unwrap() - 1.0).abs() < 1e-6);
+        assert!((predictor.predict_row(&[2.0, 0.0]).unwrap() - 0.95).abs() < 1e-6);
+        assert!((predictor.predict_row(&[2.0, 2.0]).unwrap() - 0.65).abs() < 1e-6);
+    }
+
+    #[test]
+    fn predictor_rejects_split_feature_index_at_load() {
+        let model = TrainedModel {
+            baseline_prediction: 0.0,
+            feature_count: 1,
+            stumps: vec![TrainedStump::new_unweighted(
+                scalar_split(0, 1, 0),
+                LeafValue::Scalar(-0.1),
+                LeafValue::Scalar(0.1),
+            )],
+            categorical_state: None,
+            node_debug_stats: None,
+            objective: "squared_error".to_string(),
+            native_categorical_feature_indices: Vec::new(),
+            morph_metadata: None,
+            dro_metadata: None,
+            feature_baseline: None,
+            neutralization_metadata: None,
+        };
+        let artifact = model.to_artifact_bytes().expect("artifact serializes");
+
+        let result = Predictor::from_artifact_bytes(&artifact);
+
+        match result {
+            Err(PredictorError::ContractViolation(message)) => {
+                assert!(
+                    message.contains("split feature_index"),
                     "unexpected error message: {message}"
                 );
             }

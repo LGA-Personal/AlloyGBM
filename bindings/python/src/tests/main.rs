@@ -206,6 +206,16 @@ fn legacy_trees_only_artifact_bytes() -> (Vec<u8>, Vec<Vec<f32>>) {
     (legacy_artifact, rows)
 }
 
+fn assert_predictions_close(actual: &[f32], expected: &[f32]) {
+    assert_eq!(actual.len(), expected.len());
+    for (idx, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (a - e).abs() <= 1e-6,
+            "prediction {idx} differs: actual={a}, expected={e}"
+        );
+    }
+}
+
 #[test]
 fn binding_bridge_predictions_match_engine_predictions() {
     let dataset = quality_fixture_dataset();
@@ -222,7 +232,7 @@ fn binding_bridge_predictions_match_engine_predictions() {
     let bridge_predictions =
         predictor_predict_batch_impl(&artifact, &rows).expect("bridge predicts");
 
-    assert_eq!(bridge_predictions, engine_predictions);
+    assert_predictions_close(&bridge_predictions, &engine_predictions);
 }
 
 #[test]
@@ -245,7 +255,7 @@ fn train_bridge_artifact_predictions_match_engine_predictions() {
     let bridge_predictions =
         predictor_predict_batch_impl(&artifact, &rows).expect("bridge predicts");
 
-    assert_eq!(bridge_predictions, engine_predictions);
+    assert_predictions_close(&bridge_predictions, &engine_predictions);
 }
 
 #[test]
@@ -258,7 +268,7 @@ fn canonical_bridge_predictions_match_engine_for_strict_artifacts() {
     let canonical_predictions = predictor_predict_batch_canonical_impl(&strict_artifact, &rows)
         .expect("canonical bridge predicts");
 
-    assert_eq!(canonical_predictions, engine_predictions);
+    assert_predictions_close(&canonical_predictions, &engine_predictions);
 }
 
 #[test]
@@ -317,7 +327,7 @@ fn train_bridge_categorical_path_matches_engine_predictions() {
     let engine_predictions = engine_model.predict_batch(&rows).expect("engine predicts");
     let bridge_predictions =
         predictor_predict_batch_impl(&bridge_artifact, &rows).expect("bridge predicts");
-    assert_eq!(bridge_predictions, engine_predictions);
+    assert_predictions_close(&bridge_predictions, &engine_predictions);
 }
 
 fn target_encoding_factor_loaded_dataset() -> TrainingDataset {
@@ -428,7 +438,7 @@ fn train_bridge_pre_target_categorical_encoding_matches_engine_residualized_targ
     let engine_predictions = engine_model.predict_batch(&rows).expect("engine predicts");
     let bridge_predictions =
         predictor_predict_batch_impl(&bridge_artifact, &rows).expect("bridge predicts");
-    assert_eq!(bridge_predictions, engine_predictions);
+    assert_predictions_close(&bridge_predictions, &engine_predictions);
 }
 
 #[test]
