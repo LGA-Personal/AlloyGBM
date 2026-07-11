@@ -239,13 +239,13 @@ class GBMRanker(GBMRegressor):
 
     # -- predict (relevance scores) -------------------------------------------
 
-    def predict(self, X: object) -> list[float]:
+    def predict(self, X: object) -> np.ndarray:
         """Predict relevance scores for samples in X.
 
         Returns raw model scores (higher = more relevant). No post-transform
         is applied for ranking objectives.
         """
-        return [float(v) for v in super().predict(X)]
+        return np.asarray(super().predict(X), dtype=np.float32).reshape(-1)
 
     # -- sklearn overrides ----------------------------------------------------
 

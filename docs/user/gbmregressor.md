@@ -442,10 +442,10 @@ shaping, and depth/iteration leaf shrinkage. See
 ## Main Methods
 
 - `fit(X, y, *, sample_weight=None, eval_set=None, eval_sample_weight=None, group=None, eval_group=None, eval_time_index=None, categorical_feature_values=None, time_index=None, factor_exposures=None)`
-- `predict(X)`
+- `predict(X)` -- returns a one-dimensional `np.ndarray` of numeric predictions
 - `shap_values(X, *, include_expected_value=False)`
 - `feature_importances(X, *, method="shap")`
-- `predict_from_artifact(artifact_bytes, X)`
+- `predict_from_artifact(artifact_bytes, X)` -- compatibility helper returning `list[float]`
 - `save_model(path)`
 - `load_model(path)` (classmethod)
 - `artifact_bytes` -- property returning the raw artifact bytes

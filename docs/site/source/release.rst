@@ -34,9 +34,11 @@ behavior and public prediction contracts. There is no artifact format change.
 - **Package version surface.** ``alloygbm.__version__`` is now exported from
   installed package metadata.
 
-- **Prediction contract preserved.** Lower-level native NumPy prediction
-  helpers remain available internally, but ``GBMRegressor.predict(...)`` still
-  returns ``list[float]`` across native and fallback paths.
+- **Numeric predictions return NumPy arrays.** ``GBMRegressor.predict(...)`` and
+  ``GBMRanker.predict(...)`` now return one-dimensional ``np.ndarray`` results
+  across native and fallback paths, avoiding per-row Python float boxing in the
+  zero-copy native prediction path. ``GBMRegressor.predict_from_artifact(...)``
+  remains a list-returning compatibility helper.
 
 What's new in 0.12.9
 --------------------

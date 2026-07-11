@@ -118,11 +118,11 @@ Trains the ranker.
 - `eval_group` -- query group IDs for the validation set. Required when
   `eval_set` is provided.
 
-### `predict(X) -> list[float]`
+### `predict(X) -> np.ndarray`
 
-Returns raw relevance scores (higher = more relevant). No post-transform is
-applied for ranking objectives. Use these scores to rank documents within a
-query.
+Returns a one-dimensional NumPy array of raw relevance scores (higher = more
+relevant). No post-transform is applied for ranking objectives. Use these scores
+to rank documents within a query.
 
 ## Evaluation
 

@@ -2,6 +2,8 @@
 
 import unittest
 
+import numpy as np
+
 from alloygbm import GBMRegressor
 
 
@@ -258,9 +260,9 @@ class TestWarmStartEdgeCases(unittest.TestCase):
         m.n_estimators = 10
         m.fit(X, y)
         preds = m.predict(X)
-        for p in preds:
-            self.assertIsInstance(p, float)
-            self.assertTrue(abs(p) < 100, f"Prediction {p} seems unreasonably large")
+        self.assertIsInstance(preds, np.ndarray)
+        self.assertTrue(np.issubdtype(preds.dtype, np.floating))
+        self.assertTrue(np.all(np.abs(preds) < 100), "Predictions seem unreasonably large")
 
 
 if __name__ == "__main__":

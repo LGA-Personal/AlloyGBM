@@ -10,6 +10,8 @@ from array import array
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
+
 
 def load_regressor_module():
     import alloygbm._regressor._core as module
@@ -276,6 +278,20 @@ class GBMRegressorContractTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "must be fit"):
             model.predict([])
 
+    def test_predict_returns_numpy_array_from_cached_native_handle(self) -> None:
+        model = GBMRegressor(n_estimators=3, max_depth=2)
+        x = np.asarray(
+            [[0.0, 1.0], [1.0, 0.0], [2.0, 1.0]], dtype=np.float32
+        )
+        y = np.asarray([0.0, 1.0, 2.0], dtype=np.float32)
+
+        model.fit(x, y)
+        predictions = model.predict(x)
+
+        self.assertIsInstance(predictions, np.ndarray)
+        self.assertEqual(predictions.shape, (3,))
+        self.assertTrue(np.issubdtype(predictions.dtype, np.floating))
+
     def test_shap_values_requires_fit(self) -> None:
         model = GBMRegressor()
         with self.assertRaisesRegex(RuntimeError, "must be fit"):
@@ -331,7 +347,8 @@ class GBMRegressorContractTests(unittest.TestCase):
                 )
 
             self.assertIs(fitted, model)
-            self.assertEqual(predictions, [1.5, 2.5])
+            self.assertIsInstance(predictions, np.ndarray)
+            np.testing.assert_allclose(predictions, [1.5, 2.5])
             self.assertEqual(
                 train_calls,
                 [
@@ -1053,7 +1070,8 @@ class GBMRegressorContractTests(unittest.TestCase):
                     original_predict_loader
                 )
 
-            self.assertEqual(predictions, [0.0, 0.0])
+            self.assertIsInstance(predictions, np.ndarray)
+            np.testing.assert_allclose(predictions, [0.0, 0.0])
             self.assertEqual(predict_calls, [[[3.0, 0.0], [4.0, 0.0]]])
 
     def test_predict_uses_cached_native_predictor_handle_when_available(self) -> None:
@@ -1097,7 +1115,8 @@ class GBMRegressorContractTests(unittest.TestCase):
 
             self.assertEqual(handle_inits, [(b"artifact", True)])
             self.assertEqual(handle_predict_calls, [[[3.0, 0.0], [4.0, 0.0]]])
-            self.assertEqual(predictions, [11.0, 12.0])
+            self.assertIsInstance(predictions, np.ndarray)
+            np.testing.assert_allclose(predictions, [11.0, 12.0])
 
     def test_predict_falls_back_to_canonical_when_cached_handle_runtime_errors(self) -> None:
         with _force_legacy_train_path():
@@ -1187,7 +1206,8 @@ class GBMRegressorContractTests(unittest.TestCase):
                     original_canonical_loader
                 )
 
-            self.assertEqual(predictions, [3.0, 3.0])
+            self.assertIsInstance(predictions, np.ndarray)
+            np.testing.assert_allclose(predictions, [3.0, 3.0])
             self.assertEqual(calls, [(b"artifact", [[1.0, 0.0], [2.0, 0.0]])])
 
     def test_predict_from_artifact_uses_compatibility_loader_not_canonical(self) -> None:

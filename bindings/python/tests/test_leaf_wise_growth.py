@@ -2,6 +2,8 @@
 
 import unittest
 
+import numpy as np
+
 from alloygbm import GBMRegressor
 
 
@@ -47,9 +49,9 @@ class TestLeafWiseGrowthBasic(unittest.TestCase):
         )
         m.fit(X, y)
         preds = m.predict(X[:5])
+        self.assertIsInstance(preds, np.ndarray)
         self.assertEqual(len(preds), 5)
-        for p in preds:
-            self.assertTrue(isinstance(p, float))
+        self.assertTrue(np.issubdtype(preds.dtype, np.floating))
 
     def test_leaf_wise_default_is_level(self):
         """Default tree_growth should be 'level'."""

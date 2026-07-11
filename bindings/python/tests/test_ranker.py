@@ -52,8 +52,9 @@ class GBMRankerObjectiveTests(unittest.TestCase):
                 )
                 ranker.fit(X, y, group=group)
                 preds = ranker.predict(X)
+                self.assertIsInstance(preds, np.ndarray)
                 self.assertEqual(len(preds), len(y))
-                self.assertTrue(all(isinstance(p, float) for p in preds))
+                self.assertTrue(np.issubdtype(preds.dtype, np.floating))
 
     def test_objective_name_mapping(self) -> None:
         self.assertEqual(GBMRanker(ranking_objective="rank:ndcg")._objective_name(), "rank_ndcg")
@@ -93,6 +94,18 @@ class GBMRankerObjectiveTests(unittest.TestCase):
         ranker.fit(X_shuffled, y_shuffled, group=group_shuffled)
         preds = ranker.predict(X_shuffled)
         self.assertEqual(len(preds), len(y))
+
+    def test_predict_returns_numpy_array(self) -> None:
+        x = np.asarray([[0.0], [1.0], [2.0], [3.0]], dtype=np.float32)
+        y = np.asarray([0.0, 1.0, 0.0, 1.0], dtype=np.float32)
+        group = [0, 0, 1, 1]
+        model = GBMRanker(n_estimators=3, max_depth=2).fit(x, y, group=group)
+
+        predictions = model.predict(x)
+
+        self.assertIsInstance(predictions, np.ndarray)
+        self.assertEqual(predictions.shape, (4,))
+        self.assertTrue(np.issubdtype(predictions.dtype, np.floating))
 
 
 class GBMRankerEarlyStoppingTests(unittest.TestCase):
