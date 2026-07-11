@@ -72,7 +72,8 @@ Methods
 
 - ``fit(X, y, *, group, eval_set=None, eval_group=None, ...)`` -- trains the
   ranker. ``group`` is required and provides per-row query identifiers.
-- ``predict(X)`` -- returns raw relevance scores (higher = more relevant)
+- ``predict(X)`` -- returns a one-dimensional ``np.ndarray`` of raw relevance
+  scores (higher = more relevant)
 
 Evaluation
 ----------

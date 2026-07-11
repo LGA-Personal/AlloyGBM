@@ -4,7 +4,7 @@
 
 AlloyGBM is a Rust-first gradient boosting system with Python bindings, supporting regression, binary and multi-class classification, and learning-to-rank. It is aimed at strong practical performance on structured tabular workloads, with particular strength on financial and time-aware problems.
 
-The `0.12.10` release is a patch optimization release: it speeds existing piecewise-linear leaf training and factor-neutral split search, preserves the public prediction contracts, and adds exposure preprocessing diagnostics for factor-neutral workflows. No artifact-format change. The remaining user-facing limitations are unchanged from v0.12.9: CPU-only runtime, Classifier / multiclass rejection of GLM and quantile objectives, and squared-error-only `neutralization="pre_target"`.
+The `0.12.10` release is a patch optimization release: it speeds existing piecewise-linear leaf training and factor-neutral split search, preserves artifact compatibility, and adds exposure preprocessing diagnostics for factor-neutral workflows. Follow-up v0.12.11 work changes numeric `GBMRegressor.predict(...)` and `GBMRanker.predict(...)` results to NumPy arrays while keeping artifact compatibility helpers list-returning. No artifact-format change. The remaining user-facing limitations are unchanged from v0.12.9: CPU-only runtime, Classifier / multiclass rejection of GLM and quantile objectives, and squared-error-only `neutralization="pre_target"`.
 
 **No artifact format change.** Test counts: 452 cargo + 657 pytest.
 
@@ -14,7 +14,7 @@ The `0.12.10` release is a patch optimization release: it speeds existing piecew
 
 - **Piecewise-linear selected-leaf solve speedup.** Linear-leaf training no longer rebuilds a full PL histogram bundle for every feature after selecting a split. It builds only the selected split feature's linear-bin histogram and reuses the existing `leaf_linear_stats_for_split` reducer, preserving solve order and NaN-bin handling while removing redundant work on the chosen child leaves.
 - **Faster numeric `split_penalty` neutralization.** Numeric split search now uses per-feature factor prefix sums instead of rescanning node rows for every threshold candidate. The penalty formula and candidate ordering stay unchanged.
-- **Inference-path contract pinning.** Native lower-level NumPy prediction helpers remain available internally, but the public `GBMRegressor.predict(...)` surface continues returning `list[float]` across native and fallback paths.
+- **Inference-path contract pinning.** Native lower-level NumPy prediction helpers remain available internally. Follow-up v0.12.11 work moves public numeric `GBMRegressor.predict(...)` and `GBMRanker.predict(...)` results to one-dimensional NumPy arrays across native and fallback paths.
 
 ### Python surface
 

@@ -2,6 +2,8 @@
 
 import unittest
 
+import numpy as np
+
 from alloygbm import GBMRegressor
 
 
@@ -175,9 +177,9 @@ class TestMultiCategoricalTraining(unittest.TestCase):
             categorical_feature_values_list=[cat_values_0, cat_values_1],
         )
         preds = m.predict(X_numeric[:5])
+        self.assertIsInstance(preds, np.ndarray)
         self.assertEqual(len(preds), 5)
-        for p in preds:
-            self.assertIsInstance(p, float)
+        self.assertTrue(np.issubdtype(preds.dtype, np.floating))
 
     def test_auto_inferred_from_dataframe(self):
         """Train with DataFrame-like that has multiple categorical columns."""

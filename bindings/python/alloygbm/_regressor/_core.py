@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 import time
 
+import numpy as np
+
 from ._validation import _ValidationMixin
 from ._quantization import _QuantizationMixin
 from ._shap import _ShapMixin
@@ -2492,7 +2494,13 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         )
         return self
 
-    def predict(self, X: object) -> list[float]:
+    @staticmethod
+    def _prediction_array(values: object) -> np.ndarray:
+        if isinstance(values, np.ndarray):
+            return values.reshape(-1)
+        return np.asarray(values, dtype=np.float32).reshape(-1)
+
+    def predict(self, X: object) -> np.ndarray:
         """Predict using the fitted native artifact."""
         if not self._is_fitted:
             raise RuntimeError("GBMRegressor must be fit before predict")
@@ -2527,7 +2535,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                         self._native_predictor_handle, "predict_numpy", None
                     )
                     if callable(predict_numpy):
-                        return list(predict_numpy(arr))
+                        return self._prediction_array(predict_numpy(arr))
             except ImportError:
                 pass
 
@@ -2546,7 +2554,9 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                         self._native_predictor_handle, "predict_dense", None
                     )
                     if callable(predict_dense):
-                        return list(predict_dense(flat_values, row_count, feature_count))
+                        return self._prediction_array(
+                            predict_dense(flat_values, row_count, feature_count)
+                        )
 
                 # Use Rust-side fused quantize+predict when native handle is available
                 if self.continuous_binning_strategy == "linear":
@@ -2560,7 +2570,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                             None,
                         )
                         if callable(predict_fn):
-                            return list(
+                            return self._prediction_array(
                                 predict_fn(
                                     flat_values,
                                     row_count,
@@ -2596,7 +2606,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                             None,
                         )
                         if callable(predict_fn):
-                            return list(
+                            return self._prediction_array(
                                 predict_fn(
                                     flat_values,
                                     row_count,
@@ -2650,9 +2660,11 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                 flat_values, row_count, feature_count = dense_payload
                 predict_dense = getattr(self._native_predictor_handle, "predict_dense", None)
                 if callable(predict_dense):
-                    return list(predict_dense(flat_values, row_count, feature_count))
+                    return self._prediction_array(
+                        predict_dense(flat_values, row_count, feature_count)
+                    )
                 predictor_predict_batch_dense = _base._load_native_predictor_predict_batch_dense()
-                return list(
+                return self._prediction_array(
                     predictor_predict_batch_dense(
                         self._artifact_bytes, flat_values, row_count, feature_count
                     )
@@ -2698,13 +2710,15 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                 if callable(predict_dense):
                     try:
                         flat_values, row_count, feature_count = rows
-                        return list(predict_dense(flat_values, row_count, feature_count))
+                        return self._prediction_array(
+                            predict_dense(flat_values, row_count, feature_count)
+                        )
                     except RuntimeError:
                         self._native_predictor_handle = None
             predict_batch = getattr(self._native_predictor_handle, "predict_batch", None)
             if callable(predict_batch) and not isinstance(rows, tuple):
                 try:
-                    return list(predict_batch(rows))
+                    return self._prediction_array(predict_batch(rows))
                 except RuntimeError:
                     self._native_predictor_handle = None
         if isinstance(rows, tuple):
@@ -2712,7 +2726,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             predictor_predict_batch_canonical_dense = (
                 _base._load_native_predictor_predict_batch_canonical_dense()
             )
-            return list(
+            return self._prediction_array(
                 predictor_predict_batch_canonical_dense(
                     self._artifact_bytes,
                     flat_values,
@@ -2721,7 +2735,9 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                 )
             )
         predictor_predict_batch_canonical = _base._load_native_predictor_predict_batch_canonical()
-        return list(predictor_predict_batch_canonical(self._artifact_bytes, rows))
+        return self._prediction_array(
+            predictor_predict_batch_canonical(self._artifact_bytes, rows)
+        )
 
     def score(self, X: object, y: object, sample_weight: object = None) -> float:
         """Return R² score for the given test data and labels."""
