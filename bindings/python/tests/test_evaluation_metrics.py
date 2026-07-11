@@ -22,9 +22,12 @@ def load_evaluation_module():
 
 
 evaluation_module = load_evaluation_module()
+accuracy = evaluation_module.accuracy
 hit_rate = evaluation_module.hit_rate
 icir = evaluation_module.icir
+log_loss = evaluation_module.log_loss
 mae = evaluation_module.mae
+ndcg = evaluation_module.ndcg
 pearson_correlation = evaluation_module.pearson_correlation
 r2_score = evaluation_module.r2_score
 rank_ic = evaluation_module.rank_ic
@@ -48,6 +51,19 @@ class _FakePandasLikeSeries:
 
     def to_numpy(self) -> _FakeNumpyLike:
         return _FakeNumpyLike(self._values)
+
+
+class _ArrayProtocolOnly:
+    def __init__(self, values: object) -> None:
+        self._values = values
+
+    def __array__(self, dtype: object = None) -> object:
+        import numpy as np
+
+        return np.asarray(self._values, dtype=dtype)
+
+    def tolist(self) -> object:
+        raise AssertionError("tolist should not be called for array-protocol inputs")
 
 
 class EvaluationMetricTests(unittest.TestCase):
@@ -106,6 +122,34 @@ class EvaluationMetricTests(unittest.TestCase):
         self.assertGreater(mae(y_true, y_pred), 0.0)
         self.assertLessEqual(r2_score(y_true, y_pred), 1.0)
         self.assertLessEqual(abs(pearson_correlation(y_true, y_pred)), 1.0)
+
+    def test_metrics_use_array_protocol_without_tolist(self) -> None:
+        y_true = _ArrayProtocolOnly([1.0, 2.0, 3.0, 4.0])
+        y_pred = _ArrayProtocolOnly([1.0, 1.5, 3.5, 5.0])
+
+        self.assertAlmostEqual(rmse(y_true, y_pred), math.sqrt(0.375), places=12)
+        self.assertAlmostEqual(mae(y_true, y_pred), 0.5, places=12)
+        self.assertLess(r2_score(y_true, y_pred), 1.0)
+        self.assertLessEqual(abs(pearson_correlation(y_true, y_pred)), 1.0)
+        self.assertLessEqual(abs(rank_ic(y_true, y_pred)), 1.0)
+        self.assertEqual(hit_rate(y_true, y_pred), 1.0)
+        self.assertGreater(icir(_ArrayProtocolOnly([0.1, 0.2, 0.0, -0.1])), 0.0)
+
+    def test_classification_metrics_use_array_protocol_without_tolist(self) -> None:
+        y_true = _ArrayProtocolOnly([0.0, 1.0, 1.0, 0.0])
+        labels = _ArrayProtocolOnly([0.0, 1.0, 0.0, 0.0])
+        probabilities = _ArrayProtocolOnly([0.1, 0.9, 0.4, 0.2])
+
+        self.assertEqual(accuracy(y_true, labels), 0.75)
+        self.assertGreater(log_loss(y_true, probabilities), 0.0)
+
+    def test_ndcg_uses_array_protocol_without_tolist(self) -> None:
+        score = ndcg(
+            _ArrayProtocolOnly([3.0, 2.0, 1.0, 0.0]),
+            _ArrayProtocolOnly([3.0, 2.0, 1.0, 0.0]),
+            group=_ArrayProtocolOnly([0, 0, 0, 0]),
+        )
+        self.assertEqual(score, 1.0)
 
     def test_mismatched_lengths_raise_value_error(self) -> None:
         y_true = [1.0, 2.0]
@@ -249,6 +293,13 @@ class EvaluationMetricTests(unittest.TestCase):
             y, _np.array([2.0, 4.0, 6.0]), variance_power=1.5
         )
         self.assertLess(d_match, d_mismatch)
+
+    def test_deviance_metrics_use_array_protocol_without_tolist(self) -> None:
+        y = _ArrayProtocolOnly([1.0, 2.0, 3.0])
+
+        self.assertAlmostEqual(poisson_deviance(y, y), 0.0, places=9)
+        self.assertAlmostEqual(gamma_deviance(y, y), 0.0, places=9)
+        self.assertAlmostEqual(tweedie_deviance(y, y, variance_power=1.5), 0.0, places=9)
 
     def test_deviance_metrics_reject_non_finite_via_shared_helper(self) -> None:
         """Regression for PR #41 review C1: routing through `_validated_pair`

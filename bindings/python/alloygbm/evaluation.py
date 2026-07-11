@@ -3,40 +3,30 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+
+import numpy as np
 
 
 def rmse(y_true: object, y_pred: object) -> float:
     """Compute root mean squared error."""
     true_values, pred_values = _validated_pair(y_true, y_pred)
-    squared_error_sum = sum(
-        (true_value - pred_value) ** 2
-        for true_value, pred_value in zip(true_values, pred_values)
-    )
-    return math.sqrt(squared_error_sum / len(true_values))
+    diff = true_values - pred_values
+    return float(np.sqrt(np.mean(diff * diff)))
 
 
 def mae(y_true: object, y_pred: object) -> float:
     """Compute mean absolute error."""
     true_values, pred_values = _validated_pair(y_true, y_pred)
-    absolute_error_sum = sum(
-        abs(true_value - pred_value)
-        for true_value, pred_value in zip(true_values, pred_values)
-    )
-    return absolute_error_sum / len(true_values)
+    return float(np.mean(np.abs(true_values - pred_values)))
 
 
 def r2_score(y_true: object, y_pred: object) -> float:
     """Compute coefficient of determination (R-squared)."""
     true_values, pred_values = _validated_pair(y_true, y_pred)
-    true_mean = sum(true_values) / len(true_values)
-    residual_sum_squares = sum(
-        (true_value - pred_value) ** 2
-        for true_value, pred_value in zip(true_values, pred_values)
-    )
-    total_sum_squares = sum(
-        (true_value - true_mean) ** 2 for true_value in true_values
-    )
+    residuals = true_values - pred_values
+    centered_true = true_values - float(np.mean(true_values))
+    residual_sum_squares = float(np.sum(residuals * residuals))
+    total_sum_squares = float(np.sum(centered_true * centered_true))
     if total_sum_squares == 0.0:
         return 1.0 if residual_sum_squares == 0.0 else 0.0
     return 1.0 - (residual_sum_squares / total_sum_squares)
@@ -46,18 +36,11 @@ def pearson_correlation(y_true: object, y_pred: object) -> float:
     """Compute Pearson correlation coefficient."""
     true_values, pred_values = _validated_pair(y_true, y_pred)
 
-    true_mean = sum(true_values) / len(true_values)
-    pred_mean = sum(pred_values) / len(pred_values)
-
-    covariance = 0.0
-    true_variance = 0.0
-    pred_variance = 0.0
-    for true_value, pred_value in zip(true_values, pred_values):
-        centered_true = true_value - true_mean
-        centered_pred = pred_value - pred_mean
-        covariance += centered_true * centered_pred
-        true_variance += centered_true * centered_true
-        pred_variance += centered_pred * centered_pred
+    centered_true = true_values - float(np.mean(true_values))
+    centered_pred = pred_values - float(np.mean(pred_values))
+    covariance = float(np.dot(centered_true, centered_pred))
+    true_variance = float(np.dot(centered_true, centered_true))
+    pred_variance = float(np.dot(centered_pred, centered_pred))
 
     if true_variance == 0.0 or pred_variance == 0.0:
         return 0.0
@@ -79,61 +62,71 @@ def hit_rate(y_true: object, y_pred: object, *, threshold: float = 0.0) -> float
         raise ValueError("threshold must be a finite numeric value")
 
     true_values, pred_values = _validated_pair(y_true, y_pred)
-    hits = 0
-    for true_value, pred_value in zip(true_values, pred_values):
-        if _direction(true_value, threshold_value) == _direction(
-            pred_value, threshold_value
-        ):
-            hits += 1
-    return hits / len(true_values)
+    true_direction = np.sign(true_values - threshold_value)
+    pred_direction = np.sign(pred_values - threshold_value)
+    return float(np.mean(true_direction == pred_direction))
 
 
 def icir(ic_values: object) -> float:
     """Compute information coefficient information ratio from IC observations."""
-    ic_series = _coerce_numeric_sequence(ic_values, "ic_values")
-    ic_mean = sum(ic_series) / len(ic_series)
-    ic_variance = sum((value - ic_mean) ** 2 for value in ic_series) / len(ic_series)
+    ic_series = _coerce_numeric_array(ic_values, "ic_values")
+    ic_mean = float(np.mean(ic_series))
+    centered = ic_series - ic_mean
+    ic_variance = float(np.mean(centered * centered))
     if math.isclose(ic_variance, 0.0, rel_tol=0.0, abs_tol=1e-15):
         return 0.0
     return ic_mean / math.sqrt(ic_variance)
 
 
-def _validated_pair(y_true: object, y_pred: object) -> tuple[list[float], list[float]]:
-    true_values = _coerce_numeric_sequence(y_true, "y_true")
-    pred_values = _coerce_numeric_sequence(y_pred, "y_pred")
+def _validated_pair(y_true: object, y_pred: object) -> tuple[np.ndarray, np.ndarray]:
+    true_values = _coerce_numeric_array(y_true, "y_true")
+    pred_values = _coerce_numeric_array(y_pred, "y_pred")
     if len(true_values) != len(pred_values):
         raise ValueError("y_true and y_pred must contain the same number of values")
     return true_values, pred_values
 
 
-def _coerce_numeric_sequence(values: object, argument_name: str) -> list[float]:
-    values_like = _coerce_sequence_like(values, argument_name)
-    if len(values_like) == 0:
+def _coerce_numeric_array(values: object, argument_name: str) -> np.ndarray:
+    arr = _coerce_array_like(values, argument_name, dtype=np.float64)
+    if arr.ndim == 0:
+        raise ValueError(
+            f"{argument_name} must be a sequence or provide to_numpy/to_list/tolist conversion"
+        )
+    if arr.ndim != 1:
+        raise ValueError(f"{argument_name} must be one-dimensional")
+    if arr.size == 0:
         raise ValueError(f"{argument_name} must contain at least one value")
-
-    normalized: list[float] = []
-    for value in values_like:
-        try:
-            numeric_value = float(value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"{argument_name} must contain only numeric values"
-            ) from exc
-        if not math.isfinite(numeric_value):
-            raise ValueError(
-                f"{argument_name} must contain only finite numeric values"
-            )
-        normalized.append(numeric_value)
-    return normalized
+    if not bool(np.all(np.isfinite(arr))):
+        raise ValueError(f"{argument_name} must contain only finite numeric values")
+    return arr
 
 
-def _coerce_sequence_like(value: object, argument_name: str) -> Sequence[object]:
+def _coerce_group_array(values: object, argument_name: str) -> np.ndarray:
+    arr = _coerce_array_like(values, argument_name, dtype=None)
+    if arr.ndim == 0:
+        raise ValueError(
+            f"{argument_name} must be a sequence or provide to_numpy/to_list/tolist conversion"
+        )
+    if arr.ndim != 1:
+        raise ValueError(f"{argument_name} must be one-dimensional")
+    return arr
+
+
+def _coerce_array_like(
+    value: object, argument_name: str, *, dtype: object | None
+) -> np.ndarray:
     current = value
+    last_error: Exception | None = None
     for _ in range(4):
-        if isinstance(current, Sequence) and not isinstance(
-            current, (str, bytes, bytearray, memoryview)
-        ):
-            return current
+        if isinstance(current, (str, bytes, bytearray, memoryview)):
+            break
+        try:
+            arr = np.asarray(current, dtype=dtype)
+        except (TypeError, ValueError) as exc:
+            last_error = exc
+        else:
+            if arr.ndim != 0 or not _has_conversion_adapter(current):
+                return arr
 
         next_value: object | None = None
         if hasattr(current, "to_numpy"):
@@ -147,46 +140,43 @@ def _coerce_sequence_like(value: object, argument_name: str) -> Sequence[object]
             break
         current = next_value
 
-    raise ValueError(
-        f"{argument_name} must be a sequence or provide to_numpy/to_list/tolist conversion"
+    if dtype is None:
+        raise ValueError(
+            f"{argument_name} must be a sequence or provide to_numpy/to_list/tolist conversion"
+        ) from last_error
+    raise ValueError(f"{argument_name} must contain only numeric values") from last_error
+
+
+def _has_conversion_adapter(value: object) -> bool:
+    return not isinstance(value, np.ndarray) and (
+        hasattr(value, "to_numpy")
+        or hasattr(value, "to_list")
+        or hasattr(value, "tolist")
     )
 
 
-def _average_ranks(values: Sequence[float]) -> list[float]:
-    ranks = [0.0] * len(values)
-    sorted_items = sorted(enumerate(values), key=lambda item: item[1])
-    index = 0
-    while index < len(sorted_items):
-        tie_end = index
-        while (
-            tie_end + 1 < len(sorted_items)
-            and sorted_items[tie_end + 1][1] == sorted_items[index][1]
-        ):
-            tie_end += 1
-        average_rank = ((index + tie_end) / 2.0) + 1.0
-        for tie_index in range(index, tie_end + 1):
-            original_index = sorted_items[tie_index][0]
-            ranks[original_index] = average_rank
-        index = tie_end + 1
+def _average_ranks(values: np.ndarray) -> np.ndarray:
+    order = np.argsort(values, kind="mergesort")
+    sorted_values = values[order]
+    tie_starts = np.concatenate(
+        ([0], np.flatnonzero(sorted_values[1:] != sorted_values[:-1]) + 1)
+    )
+    tie_ends = np.concatenate((tie_starts[1:], [len(values)]))
+    ranks = np.empty(len(values), dtype=np.float64)
+    for start, end in zip(tie_starts, tie_ends):
+        average_rank = ((float(start) + float(end - 1)) / 2.0) + 1.0
+        ranks[order[start:end]] = average_rank
     return ranks
 
 
-def _direction(value: float, threshold: float) -> int:
-    if value > threshold:
-        return 1
-    if value < threshold:
-        return -1
-    return 0
+def _first_indexed_value(values: np.ndarray, indices: np.ndarray) -> float:
+    return float(values[int(indices[0])])
 
 
 def accuracy(y_true: object, y_pred: object) -> float:
     """Compute classification accuracy (fraction of correct predictions)."""
     true_values, pred_values = _validated_pair(y_true, y_pred)
-    correct = sum(
-        1 for true_value, pred_value in zip(true_values, pred_values)
-        if true_value == pred_value
-    )
-    return correct / len(true_values)
+    return float(np.mean(true_values == pred_values))
 
 
 def log_loss(y_true: object, y_prob: object) -> float:
@@ -196,18 +186,21 @@ def log_loss(y_true: object, y_prob: object) -> float:
     predicted probabilities in (0, 1).
     """
     true_values, prob_values = _validated_pair(y_true, y_prob)
-    for i, y in enumerate(true_values):
-        if y != 0.0 and y != 1.0:
-            raise ValueError(
-                f"log_loss requires y_true values in {{0, 1}}, "
-                f"but found {y!r} at index {i}"
-            )
+    invalid = np.flatnonzero((true_values != 0.0) & (true_values != 1.0))
+    if invalid.size > 0:
+        i = int(invalid[0])
+        y = float(true_values[i])
+        raise ValueError(
+            f"log_loss requires y_true values in {{0, 1}}, "
+            f"but found {y!r} at index {i}"
+        )
     eps = 1e-15
-    total = 0.0
-    for y, p in zip(true_values, prob_values):
-        p_clamped = max(eps, min(1.0 - eps, p))
-        total += -(y * math.log(p_clamped) + (1.0 - y) * math.log(1.0 - p_clamped))
-    return total / len(true_values)
+    p_clamped = np.clip(prob_values, eps, 1.0 - eps)
+    losses = -(
+        true_values * np.log(p_clamped)
+        + (1.0 - true_values) * np.log(1.0 - p_clamped)
+    )
+    return float(np.mean(losses))
 
 
 def multiclass_log_loss(y_true: object, y_prob: object) -> float:
@@ -275,19 +268,19 @@ def ndcg(
     float
         Mean NDCG across all query groups, in [0, 1].
     """
-    true_values = _coerce_numeric_sequence(y_true, "y_true")
-    pred_values = _coerce_numeric_sequence(y_pred, "y_pred")
+    true_values = _coerce_numeric_array(y_true, "y_true")
+    pred_values = _coerce_numeric_array(y_pred, "y_pred")
     if len(true_values) != len(pred_values):
         raise ValueError("y_true and y_pred must contain the same number of values")
 
-    group_values = _coerce_sequence_like(group, "group")
+    group_values = _coerce_group_array(group, "group")
     if len(group_values) != len(true_values):
         raise ValueError("group must contain the same number of values as y_true")
 
     # Find contiguous group boundaries and validate contiguity.
     seen_groups: set[object] = set()
     boundaries = [0]
-    current_group = group_values[0] if group_values else None
+    current_group = group_values[0] if len(group_values) > 0 else None
     seen_groups.add(current_group)
     for i in range(1, len(group_values)):
         if group_values[i] != group_values[i - 1]:
@@ -317,23 +310,15 @@ def ndcg(
     return ndcg_sum / num_groups
 
 
-def _ndcg_single_group(labels: list[float], scores: list[float], k: int) -> float:
+def _ndcg_single_group(labels: np.ndarray, scores: np.ndarray, k: int) -> float:
     """NDCG for a single query group."""
-    # DCG: sort by scores descending, compute discounted gains.
-    order = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
-    dcg = 0.0
-    for rank, idx in enumerate(order[:k]):
-        gain = (2.0 ** labels[idx]) - 1.0
-        discount = 1.0 / math.log2(rank + 2.0)
-        dcg += gain * discount
-
-    # Ideal DCG: sort by labels descending.
-    sorted_labels = sorted(labels, reverse=True)
-    idcg = 0.0
-    for rank, label in enumerate(sorted_labels[:k]):
-        gain = (2.0 ** label) - 1.0
-        discount = 1.0 / math.log2(rank + 2.0)
-        idcg += gain * discount
+    order = np.argsort(-scores, kind="mergesort")[:k]
+    ideal_order = np.argsort(-labels, kind="mergesort")[:k]
+    discounts = 1.0 / np.log2(np.arange(2.0, float(k) + 2.0))
+    dcg = float(np.sum(((2.0 ** labels[order]) - 1.0) * discounts[: len(order)]))
+    idcg = float(
+        np.sum(((2.0 ** labels[ideal_order]) - 1.0) * discounts[: len(ideal_order)])
+    )
 
     if idcg <= 0.0:
         return 1.0  # degenerate: all labels identical or zero
@@ -352,17 +337,22 @@ def poisson_deviance(y_true: object, y_pred: object) -> float:
     are rejected before the GLM domain check.
     """
     true_values, pred_values = _validated_pair(y_true, y_pred)
-    total = 0.0
-    for y, mu in zip(true_values, pred_values):
-        if mu <= 0.0:
-            raise ValueError(f"y_pred must be > 0, got {mu}")
-        if y < 0.0:
-            raise ValueError(f"y_true must be >= 0, got {y}")
-        term = -(y - mu)
-        if y > 0.0:
-            term += y * math.log(y / mu)
-        total += 2.0 * term
-    return total / len(true_values)
+    invalid_pred = np.flatnonzero(pred_values <= 0.0)
+    if invalid_pred.size > 0:
+        raise ValueError(
+            f"y_pred must be > 0, got {_first_indexed_value(pred_values, invalid_pred)}"
+        )
+    invalid_true = np.flatnonzero(true_values < 0.0)
+    if invalid_true.size > 0:
+        raise ValueError(
+            f"y_true must be >= 0, got {_first_indexed_value(true_values, invalid_true)}"
+        )
+    terms = -(true_values - pred_values)
+    positive_mask = true_values > 0.0
+    terms[positive_mask] += true_values[positive_mask] * np.log(
+        true_values[positive_mask] / pred_values[positive_mask]
+    )
+    return float(np.mean(2.0 * terms))
 
 
 def gamma_deviance(y_true: object, y_pred: object) -> float:
@@ -376,14 +366,20 @@ def gamma_deviance(y_true: object, y_pred: object) -> float:
     are rejected before the GLM domain check.
     """
     true_values, pred_values = _validated_pair(y_true, y_pred)
-    total = 0.0
-    for y, mu in zip(true_values, pred_values):
-        if mu <= 0.0:
-            raise ValueError(f"y_pred must be > 0, got {mu}")
-        if y <= 0.0:
-            raise ValueError(f"y_true must be > 0, got {y}")
-        total += 2.0 * (-math.log(y / mu) + (y - mu) / mu)
-    return total / len(true_values)
+    invalid_pred = np.flatnonzero(pred_values <= 0.0)
+    if invalid_pred.size > 0:
+        raise ValueError(
+            f"y_pred must be > 0, got {_first_indexed_value(pred_values, invalid_pred)}"
+        )
+    invalid_true = np.flatnonzero(true_values <= 0.0)
+    if invalid_true.size > 0:
+        raise ValueError(
+            f"y_true must be > 0, got {_first_indexed_value(true_values, invalid_true)}"
+        )
+    terms = 2.0 * (
+        -np.log(true_values / pred_values) + (true_values - pred_values) / pred_values
+    )
+    return float(np.mean(terms))
 
 
 def tweedie_deviance(
@@ -407,17 +403,24 @@ def tweedie_deviance(
         )
     true_values, pred_values = _validated_pair(y_true, y_pred)
     p = variance_power
-    total = 0.0
-    for y, mu in zip(true_values, pred_values):
-        if mu <= 0.0:
-            raise ValueError(f"y_pred must be > 0, got {mu}")
-        if y < 0.0:
-            raise ValueError(f"y_true must be >= 0, got {y}")
-        term1 = (y ** (2.0 - p)) / ((1.0 - p) * (2.0 - p)) if y > 0.0 else 0.0
-        term2 = y * (mu ** (1.0 - p)) / (1.0 - p)
-        term3 = (mu ** (2.0 - p)) / (2.0 - p)
-        total += 2.0 * (term1 - term2 + term3)
-    return total / len(true_values)
+    invalid_pred = np.flatnonzero(pred_values <= 0.0)
+    if invalid_pred.size > 0:
+        raise ValueError(
+            f"y_pred must be > 0, got {_first_indexed_value(pred_values, invalid_pred)}"
+        )
+    invalid_true = np.flatnonzero(true_values < 0.0)
+    if invalid_true.size > 0:
+        raise ValueError(
+            f"y_true must be >= 0, got {_first_indexed_value(true_values, invalid_true)}"
+        )
+    term1 = np.zeros_like(true_values)
+    positive_mask = true_values > 0.0
+    term1[positive_mask] = (true_values[positive_mask] ** (2.0 - p)) / (
+        (1.0 - p) * (2.0 - p)
+    )
+    term2 = true_values * (pred_values ** (1.0 - p)) / (1.0 - p)
+    term3 = (pred_values ** (2.0 - p)) / (2.0 - p)
+    return float(np.mean(2.0 * (term1 - term2 + term3)))
 
 
 __all__ = [
