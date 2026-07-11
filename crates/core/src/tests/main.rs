@@ -286,6 +286,63 @@ fn metadata_json_decodes_fields_independent_of_key_order() {
 }
 
 #[test]
+fn metadata_json_decodes_standard_unicode_escapes() {
+    let json = concat!(
+        "{",
+        "\"format_version\":1,",
+        "\"feature_names\":[\"f\\u0030\",\"ticker\\u0022id\"],",
+        "\"trained_device\":\"cpu\"",
+        "}"
+    );
+
+    let decoded = deserialize_metadata_json(json).expect("metadata should decode");
+
+    assert_eq!(
+        decoded.feature_names,
+        vec!["f0".to_string(), "ticker\"id".to_string()]
+    );
+    assert_eq!(decoded.objective, "squared_error");
+}
+
+#[test]
+fn metadata_json_decodes_standard_control_escapes() {
+    let json = concat!(
+        "{",
+        "\"format_version\":1,",
+        "\"feature_names\":[\"backspace\\b\",\"formfeed\\f\"],",
+        "\"trained_device\":\"cpu\"",
+        "}"
+    );
+
+    let decoded = deserialize_metadata_json(json).expect("metadata should decode");
+
+    assert_eq!(
+        decoded.feature_names,
+        vec![
+            "backspace\u{0008}".to_string(),
+            "formfeed\u{000c}".to_string()
+        ]
+    );
+}
+
+#[test]
+fn metadata_json_rejects_duplicate_known_fields() {
+    let json = concat!(
+        "{",
+        "\"format_version\":1,",
+        "\"feature_names\":[\"f0\"],",
+        "\"format_version\":2,",
+        "\"trained_device\":\"cpu\"",
+        "}"
+    );
+
+    assert!(matches!(
+        deserialize_metadata_json(json),
+        Err(CoreError::Serialization(_))
+    ));
+}
+
+#[test]
 fn linear_leaf_scaled_eval_uses_standardized_coordinates_and_mean_imputes_nan() {
     let leaf = LinearLeaf::scaled(1.0, vec![2.0], vec![1], vec![10.0], vec![0.5]);
 

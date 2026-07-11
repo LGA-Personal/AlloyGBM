@@ -1330,137 +1330,43 @@ pub fn decode_optional_feature_baseline_section(
     let payload = decode_feature_baseline_payload(&section.payload)?;
     Ok(Some(payload))
 }
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct ModelMetadataJson {
+    format_version: u32,
+    feature_names: Vec<String>,
+    trained_device: String,
+    #[serde(default = "default_metadata_objective")]
+    objective: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    num_classes: Option<u32>,
+}
+
+fn default_metadata_objective() -> String {
+    "squared_error".to_string()
+}
+
 pub fn serialize_metadata_json(metadata: &ModelMetadata) -> String {
-    let feature_names = metadata
-        .feature_names
-        .iter()
-        .map(|name| format!("\"{}\"", escape_json_string(name)))
-        .collect::<Vec<_>>()
-        .join(",");
-
-    let num_classes_fragment = match metadata.num_classes {
-        Some(k) => format!(",\"num_classes\":{k}"),
-        None => String::new(),
+    let json = ModelMetadataJson {
+        format_version: metadata.format_version,
+        feature_names: metadata.feature_names.clone(),
+        trained_device: metadata.trained_device.as_metadata_label().to_string(),
+        objective: metadata.objective.clone(),
+        num_classes: metadata.num_classes,
     };
-
-    format!(
-        "{{\"format_version\":{},\"feature_names\":[{}],\"trained_device\":\"{}\",\"objective\":\"{}\"{}}}",
-        metadata.format_version,
-        feature_names,
-        metadata.trained_device.as_metadata_label(),
-        escape_json_string(&metadata.objective),
-        num_classes_fragment
-    )
+    serde_json::to_string(&json).expect("serializing model metadata should not fail")
 }
 
 pub fn deserialize_metadata_json(input: &str) -> CoreResult<ModelMetadata> {
-    let compact = compact_json(input)?;
-    let mut index = 0_usize;
-    let mut format_version = None;
-    let mut feature_names = None;
-    let mut trained_device_raw = None;
-    let mut objective = None;
-    let mut num_classes = None;
-
-    index = consume_literal(&compact, index, "{")?;
-    if compact[index..].starts_with('}') {
-        index += 1;
-    } else {
-        loop {
-            let (key, next_index) = parse_quoted_string(&compact, index)?;
-            index = consume_literal(&compact, next_index, ":")?;
-            match key.as_str() {
-                "format_version" => {
-                    if format_version.is_some() {
-                        return Err(CoreError::Serialization(
-                            "duplicate metadata field 'format_version'".to_string(),
-                        ));
-                    }
-                    let (value, next_index) = parse_u32(&compact, index)?;
-                    format_version = Some(value);
-                    index = next_index;
-                }
-                "feature_names" => {
-                    if feature_names.is_some() {
-                        return Err(CoreError::Serialization(
-                            "duplicate metadata field 'feature_names'".to_string(),
-                        ));
-                    }
-                    let (value, next_index) = parse_string_array(&compact, index)?;
-                    feature_names = Some(value);
-                    index = next_index;
-                }
-                "trained_device" => {
-                    if trained_device_raw.is_some() {
-                        return Err(CoreError::Serialization(
-                            "duplicate metadata field 'trained_device'".to_string(),
-                        ));
-                    }
-                    let (value, next_index) = parse_quoted_string(&compact, index)?;
-                    trained_device_raw = Some(value);
-                    index = next_index;
-                }
-                "objective" => {
-                    if objective.is_some() {
-                        return Err(CoreError::Serialization(
-                            "duplicate metadata field 'objective'".to_string(),
-                        ));
-                    }
-                    let (value, next_index) = parse_quoted_string(&compact, index)?;
-                    objective = Some(value);
-                    index = next_index;
-                }
-                "num_classes" => {
-                    if num_classes.is_some() {
-                        return Err(CoreError::Serialization(
-                            "duplicate metadata field 'num_classes'".to_string(),
-                        ));
-                    }
-                    let (value, next_index) = parse_u32(&compact, index)?;
-                    num_classes = Some(value);
-                    index = next_index;
-                }
-                _ => {
-                    index = skip_json_value(&compact, index, 0)?;
-                }
-            }
-
-            if compact[index..].starts_with(',') {
-                index += 1;
-                continue;
-            }
-            if compact[index..].starts_with('}') {
-                index += 1;
-                break;
-            }
-            return Err(CoreError::Serialization(format!(
-                "expected ',' or '}}' at index {index}"
-            )));
-        }
-    }
-
-    if index != compact.len() {
-        return Err(CoreError::Serialization(
-            "unexpected trailing content in metadata json".to_string(),
-        ));
-    }
-
-    let format_version = format_version.ok_or_else(|| {
-        CoreError::Serialization("metadata missing required field 'format_version'".to_string())
-    })?;
-    let feature_names = feature_names.ok_or_else(|| {
-        CoreError::Serialization("metadata missing required field 'feature_names'".to_string())
-    })?;
-    let trained_device_raw = trained_device_raw.ok_or_else(|| {
-        CoreError::Serialization("metadata missing required field 'trained_device'".to_string())
-    })?;
+    let json: ModelMetadataJson = serde_json::from_str(input)
+        .map_err(|err| CoreError::Serialization(format!("invalid metadata json: {err}")))?;
 
     Ok(ModelMetadata {
-        format_version,
-        feature_names,
-        trained_device: Device::parse_metadata_label(&trained_device_raw)?,
-        objective: objective.unwrap_or_else(|| "squared_error".to_string()),
-        num_classes,
+        format_version: json.format_version,
+        feature_names: json.feature_names,
+        trained_device: Device::parse_metadata_label(&json.trained_device)?,
+        objective: json.objective,
+        num_classes: json.num_classes,
     })
 }
 
@@ -1637,294 +1543,6 @@ pub fn deserialize_model_artifact_v1(bytes: &[u8]) -> CoreResult<ParsedModelArti
         metadata_json,
         sections: parsed_sections,
     })
-}
-
-fn escape_json_string(input: &str) -> String {
-    let mut escaped = String::with_capacity(input.len());
-    for ch in input.chars() {
-        match ch {
-            '\\' => escaped.push_str("\\\\"),
-            '"' => escaped.push_str("\\\""),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            _ => escaped.push(ch),
-        }
-    }
-    escaped
-}
-
-fn compact_json(input: &str) -> CoreResult<String> {
-    let mut compact = String::with_capacity(input.len());
-    let mut in_string = false;
-    let mut escaped = false;
-
-    for ch in input.chars() {
-        if in_string {
-            compact.push(ch);
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            match ch {
-                '\\' => escaped = true,
-                '"' => in_string = false,
-                _ => {}
-            }
-            continue;
-        }
-
-        if ch.is_whitespace() {
-            continue;
-        }
-
-        compact.push(ch);
-        if ch == '"' {
-            in_string = true;
-        }
-    }
-
-    if in_string || escaped {
-        return Err(CoreError::Serialization(
-            "metadata json has unterminated string".to_string(),
-        ));
-    }
-
-    Ok(compact)
-}
-
-fn consume_literal(input: &str, index: usize, literal: &str) -> CoreResult<usize> {
-    if index > input.len() || !input[index..].starts_with(literal) {
-        return Err(CoreError::Serialization(format!(
-            "expected literal '{literal}' at index {index}"
-        )));
-    }
-    Ok(index + literal.len())
-}
-
-fn parse_u32(input: &str, mut index: usize) -> CoreResult<(u32, usize)> {
-    let start = index;
-    while let Some(byte) = input.as_bytes().get(index) {
-        if !byte.is_ascii_digit() {
-            break;
-        }
-        index += 1;
-    }
-    if start == index {
-        return Err(CoreError::Serialization(format!(
-            "expected unsigned integer at index {start}"
-        )));
-    }
-    let value = input[start..index]
-        .parse::<u32>()
-        .map_err(|err| CoreError::Serialization(format!("invalid integer: {err}")))?;
-    Ok((value, index))
-}
-
-fn parse_string_array(input: &str, mut index: usize) -> CoreResult<(Vec<String>, usize)> {
-    index = consume_literal(input, index, "[")?;
-    let mut values = Vec::new();
-
-    if input[index..].starts_with(']') {
-        return Ok((values, index + 1));
-    }
-
-    loop {
-        let (value, next_index) = parse_quoted_string(input, index)?;
-        values.push(value);
-        index = next_index;
-
-        if input[index..].starts_with(',') {
-            index += 1;
-            continue;
-        }
-        if input[index..].starts_with(']') {
-            index += 1;
-            break;
-        }
-        return Err(CoreError::Serialization(format!(
-            "expected ',' or ']' at index {index}"
-        )));
-    }
-
-    Ok((values, index))
-}
-
-const MAX_METADATA_UNKNOWN_FIELD_DEPTH: usize = 64;
-
-fn skip_json_value(input: &str, index: usize, depth: usize) -> CoreResult<usize> {
-    if depth > MAX_METADATA_UNKNOWN_FIELD_DEPTH {
-        return Err(CoreError::Serialization(format!(
-            "metadata json nesting exceeds maximum depth {MAX_METADATA_UNKNOWN_FIELD_DEPTH}"
-        )));
-    }
-    if index >= input.len() {
-        return Err(CoreError::Serialization(format!(
-            "expected json value at index {index}"
-        )));
-    }
-
-    match input.as_bytes()[index] {
-        b'"' => {
-            let (_, next_index) = parse_quoted_string(input, index)?;
-            Ok(next_index)
-        }
-        b'{' => skip_json_object(input, index, depth + 1),
-        b'[' => skip_json_array(input, index, depth + 1),
-        b't' => consume_literal(input, index, "true"),
-        b'f' => consume_literal(input, index, "false"),
-        b'n' => consume_literal(input, index, "null"),
-        b'-' | b'0'..=b'9' => skip_json_number(input, index),
-        _ => Err(CoreError::Serialization(format!(
-            "expected json value at index {index}"
-        ))),
-    }
-}
-
-fn skip_json_object(input: &str, mut index: usize, depth: usize) -> CoreResult<usize> {
-    index = consume_literal(input, index, "{")?;
-    if input[index..].starts_with('}') {
-        return Ok(index + 1);
-    }
-
-    loop {
-        let (_, next_index) = parse_quoted_string(input, index)?;
-        index = consume_literal(input, next_index, ":")?;
-        index = skip_json_value(input, index, depth)?;
-
-        if input[index..].starts_with(',') {
-            index += 1;
-            continue;
-        }
-        if input[index..].starts_with('}') {
-            return Ok(index + 1);
-        }
-        return Err(CoreError::Serialization(format!(
-            "expected ',' or '}}' at index {index}"
-        )));
-    }
-}
-
-fn skip_json_array(input: &str, mut index: usize, depth: usize) -> CoreResult<usize> {
-    index = consume_literal(input, index, "[")?;
-    if input[index..].starts_with(']') {
-        return Ok(index + 1);
-    }
-
-    loop {
-        index = skip_json_value(input, index, depth)?;
-
-        if input[index..].starts_with(',') {
-            index += 1;
-            continue;
-        }
-        if input[index..].starts_with(']') {
-            return Ok(index + 1);
-        }
-        return Err(CoreError::Serialization(format!(
-            "expected ',' or ']' at index {index}"
-        )));
-    }
-}
-
-fn skip_json_number(input: &str, mut index: usize) -> CoreResult<usize> {
-    if input[index..].starts_with('-') {
-        index += 1;
-    }
-
-    let integer_start = index;
-    while let Some(byte) = input.as_bytes().get(index) {
-        if !byte.is_ascii_digit() {
-            break;
-        }
-        index += 1;
-    }
-    if integer_start == index {
-        return Err(CoreError::Serialization(format!(
-            "expected json number at index {integer_start}"
-        )));
-    }
-
-    if input[index..].starts_with('.') {
-        index += 1;
-        let fraction_start = index;
-        while let Some(byte) = input.as_bytes().get(index) {
-            if !byte.is_ascii_digit() {
-                break;
-            }
-            index += 1;
-        }
-        if fraction_start == index {
-            return Err(CoreError::Serialization(format!(
-                "expected json number fraction at index {fraction_start}"
-            )));
-        }
-    }
-
-    if input[index..].starts_with('e') || input[index..].starts_with('E') {
-        index += 1;
-        if input[index..].starts_with('+') || input[index..].starts_with('-') {
-            index += 1;
-        }
-        let exponent_start = index;
-        while let Some(byte) = input.as_bytes().get(index) {
-            if !byte.is_ascii_digit() {
-                break;
-            }
-            index += 1;
-        }
-        if exponent_start == index {
-            return Err(CoreError::Serialization(format!(
-                "expected json number exponent at index {exponent_start}"
-            )));
-        }
-    }
-
-    Ok(index)
-}
-
-fn parse_quoted_string(input: &str, index: usize) -> CoreResult<(String, usize)> {
-    if !input[index..].starts_with('"') {
-        return Err(CoreError::Serialization(format!(
-            "expected quoted string at index {index}"
-        )));
-    }
-
-    let mut output = String::new();
-    let mut escaped = false;
-    let body_start = index + 1;
-    for (relative_offset, ch) in input[body_start..].char_indices() {
-        if escaped {
-            let decoded = match ch {
-                '\\' => '\\',
-                '"' => '"',
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                other => {
-                    return Err(CoreError::Serialization(format!(
-                        "unsupported escape sequence '\\{other}'"
-                    )));
-                }
-            };
-            output.push(decoded);
-            escaped = false;
-            continue;
-        }
-
-        match ch {
-            '\\' => escaped = true,
-            '"' => {
-                let end_index = body_start + relative_offset + ch.len_utf8();
-                return Ok((output, end_index));
-            }
-            _ => output.push(ch),
-        }
-    }
-
-    Err(CoreError::Serialization(
-        "unterminated quoted string".to_string(),
-    ))
 }
 
 fn read_u32_le(bytes: &[u8], offset: usize) -> CoreResult<u32> {

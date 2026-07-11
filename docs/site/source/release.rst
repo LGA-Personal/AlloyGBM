@@ -45,6 +45,11 @@ model behavior and artifact compatibility. There is no artifact format change.
   coerce inputs through NumPy arrays and compute with vector operations while
   preserving list, NumPy, and pandas-like adapter inputs.
 
+- **Serde-backed model metadata JSON.** Model artifact metadata now uses
+  ``serde_json`` for standards-compliant JSON escaping, unknown-field skipping,
+  duplicate known-field rejection, and backward-compatible omitted objectives /
+  class counts. The binary artifact header and section layout are unchanged.
+
 What's new in 0.12.9
 --------------------
 
