@@ -7,8 +7,8 @@ What's new in 0.12.10
 ---------------------
 
 **Patch optimization release on top of v0.12.9.** This release focuses on
-faster training and inference on existing workflows while preserving model
-behavior and public prediction contracts. There is no artifact format change.
+faster training and inference on existing workflows while preserving trained
+model behavior and artifact compatibility. There is no artifact format change.
 
 - **Faster piecewise-linear child-leaf solves.** Linear-leaf training now builds
   only the selected split feature's linear-bin histogram when solving the chosen
@@ -39,6 +39,11 @@ behavior and public prediction contracts. There is no artifact format change.
   across native and fallback paths, avoiding per-row Python float boxing in the
   zero-copy native prediction path. ``GBMRegressor.predict_from_artifact(...)``
   remains a list-returning compatibility helper.
+
+- **Vectorized Python evaluation metrics.** Regression, classification,
+  ranking, finance, and GLM deviance helpers in ``alloygbm.evaluation`` now
+  coerce inputs through NumPy arrays and compute with vector operations while
+  preserving list, NumPy, and pandas-like adapter inputs.
 
 What's new in 0.12.9
 --------------------
