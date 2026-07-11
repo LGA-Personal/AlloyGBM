@@ -9,7 +9,7 @@ use alloygbm_core::GradientPair;
 use rayon::prelude::*;
 
 use super::{SquaredErrorObjective, resolve_boundaries_for_len, sigmoid};
-use crate::error::EngineResult;
+use crate::error::{EngineError, EngineResult};
 use crate::traits::ObjectiveOps;
 
 // ── Ranking helpers ───────────────────────────────────────────────────────
@@ -150,6 +150,15 @@ fn discounts_for_ranks(ranks: &[usize]) -> Vec<f32> {
         .collect()
 }
 
+fn validate_ranking_sigma(sigma: f32) -> EngineResult<f32> {
+    if !sigma.is_finite() || sigma <= 0.0 {
+        return Err(EngineError::InvalidConfig(
+            "ranking_sigma must be finite and > 0".to_string(),
+        ));
+    }
+    Ok(sigma)
+}
+
 // ── QueryRMSE Objective ──────────────────────────────────────────────────
 
 /// Query-grouped RMSE objective. Gradients are standard MSE per-document,
@@ -250,6 +259,7 @@ impl ObjectiveOps for QueryRMSEObjective {
 pub struct PairwiseRankingObjective {
     pub group_boundaries: Vec<usize>,
     pub validation_group_boundaries: Option<Vec<usize>>,
+    pub sigma: f32,
 }
 
 impl PairwiseRankingObjective {
@@ -257,7 +267,16 @@ impl PairwiseRankingObjective {
         Self {
             group_boundaries: compute_group_boundaries(group_id),
             validation_group_boundaries: None,
+            sigma: 1.0,
         }
+    }
+
+    pub fn new_with_sigma(group_id: &[u32], sigma: f32) -> EngineResult<Self> {
+        Ok(Self {
+            group_boundaries: compute_group_boundaries(group_id),
+            validation_group_boundaries: None,
+            sigma: validate_ranking_sigma(sigma)?,
+        })
     }
 
     pub fn with_validation_group(mut self, validation_group_id: &[u32]) -> Self {
@@ -295,9 +314,9 @@ impl PairwiseRankingObjective {
                             (j, i)
                         };
                         let s = predictions[start + hi] - predictions[start + lo];
-                        let rho = sigmoid(-s);
-                        let lambda = -rho;
-                        let hess_pair = rho * (1.0 - rho);
+                        let rho = sigmoid(-self.sigma * s);
+                        let lambda = -self.sigma * rho;
+                        let hess_pair = self.sigma * self.sigma * rho * (1.0 - rho);
 
                         group_grads[hi] += lambda;
                         group_grads[lo] -= lambda;
@@ -390,7 +409,7 @@ impl ObjectiveOps for PairwiseRankingObjective {
                     } else {
                         (j, i)
                     };
-                    let s = (predictions[hi] - predictions[lo]) as f64;
+                    let s = (self.sigma * (predictions[hi] - predictions[lo])) as f64;
                     let pair_loss = if s >= 0.0 {
                         (-s).exp().ln_1p()
                     } else {
@@ -426,6 +445,7 @@ impl ObjectiveOps for PairwiseRankingObjective {
 pub struct LambdaMARTObjective {
     pub group_boundaries: Vec<usize>,
     pub validation_group_boundaries: Option<Vec<usize>>,
+    pub sigma: f32,
 }
 
 impl LambdaMARTObjective {
@@ -433,7 +453,16 @@ impl LambdaMARTObjective {
         Self {
             group_boundaries: compute_group_boundaries(group_id),
             validation_group_boundaries: None,
+            sigma: 1.0,
         }
+    }
+
+    pub fn new_with_sigma(group_id: &[u32], sigma: f32) -> EngineResult<Self> {
+        Ok(Self {
+            group_boundaries: compute_group_boundaries(group_id),
+            validation_group_boundaries: None,
+            sigma: validate_ranking_sigma(sigma)?,
+        })
     }
 
     pub fn with_validation_group(mut self, validation_group_id: &[u32]) -> Self {
@@ -492,12 +521,12 @@ impl LambdaMARTObjective {
                             (j, i)
                         };
                         let s = group_scores[hi] - group_scores[lo];
-                        let rho = sigmoid(-s);
+                        let rho = sigmoid(-self.sigma * s);
                         let delta_ndcg =
                             ((gains[hi] - gains[lo]) * (discounts[hi] - discounts[lo])).abs()
                                 * inv_idcg;
-                        let lambda = -rho * delta_ndcg;
-                        let hess_pair = rho * (1.0 - rho) * delta_ndcg;
+                        let lambda = -self.sigma * rho * delta_ndcg;
+                        let hess_pair = self.sigma * self.sigma * rho * (1.0 - rho) * delta_ndcg;
                         group_grads[hi] += lambda;
                         group_grads[lo] -= lambda;
                         group_hesses[hi] += hess_pair;
@@ -736,6 +765,7 @@ pub struct YetiRankObjective {
     pub num_permutations: usize,
     /// Base seed for reproducible sampling.
     pub seed: u64,
+    pub sigma: f32,
 }
 
 impl YetiRankObjective {
@@ -745,7 +775,23 @@ impl YetiRankObjective {
             validation_group_boundaries: None,
             num_permutations,
             seed,
+            sigma: 1.0,
         }
+    }
+
+    pub fn new_with_sigma(
+        group_id: &[u32],
+        num_permutations: usize,
+        seed: u64,
+        sigma: f32,
+    ) -> EngineResult<Self> {
+        Ok(Self {
+            group_boundaries: compute_group_boundaries(group_id),
+            validation_group_boundaries: None,
+            num_permutations,
+            seed,
+            sigma: validate_ranking_sigma(sigma)?,
+        })
     }
 
     pub fn with_validation_group(mut self, validation_group_id: &[u32]) -> Self {
@@ -853,12 +899,17 @@ impl ObjectiveOps for YetiRankObjective {
                                 (j, i)
                             };
                             let s = group_scores[hi] - group_scores[lo];
-                            let rho = sigmoid(-s);
+                            let rho = sigmoid(-self.sigma * s);
                             let delta_ndcg =
                                 ((gains[hi] - gains[lo]) * (discounts[hi] - discounts[lo])).abs()
                                     * inv_idcg;
-                            let lambda = -rho * delta_ndcg * inv_perms;
-                            let hess_pair = rho * (1.0 - rho) * delta_ndcg * inv_perms;
+                            let lambda = -self.sigma * rho * delta_ndcg * inv_perms;
+                            let hess_pair = self.sigma
+                                * self.sigma
+                                * rho
+                                * (1.0 - rho)
+                                * delta_ndcg
+                                * inv_perms;
                             group_grads[hi] += lambda;
                             group_grads[lo] -= lambda;
                             group_hesses[hi] += hess_pair;
@@ -1162,6 +1213,27 @@ mod tests {
     }
 
     #[test]
+    fn pairwise_sigma_scales_logistic_margin_gradient_and_hessian() {
+        let group_id = [0, 0];
+        let predictions = [0.8, -0.2];
+        let targets = [1.0, 0.0];
+        let objective = PairwiseRankingObjective::new_with_sigma(&group_id, 2.0).unwrap();
+
+        let actual = objective
+            .compute_gradients(&predictions, &targets, None)
+            .unwrap();
+
+        let rho = sigmoid(-2.0 * (predictions[0] - predictions[1]));
+        let expected_grad = -2.0 * rho;
+        let expected_hess = 4.0 * rho * (1.0 - rho);
+        let expected = vec![
+            GradientPair::new(expected_grad, expected_hess).unwrap(),
+            GradientPair::new(-expected_grad, expected_hess).unwrap(),
+        ];
+        assert_gradient_pairs_close(&actual, &expected, 1e-6);
+    }
+
+    #[test]
     fn lambdamart_parallel_gradients_match_serial_reference() {
         let group_id = [0, 0, 0, 0, 1, 1, 1];
         let predictions = [0.8, -0.1, 0.4, 0.2, 1.2, -0.5, 0.3];
@@ -1176,6 +1248,37 @@ mod tests {
             &targets,
         );
         assert_gradient_pairs_close(&actual, &expected, 1e-6);
+    }
+
+    #[test]
+    fn lambdamart_sigma_scales_pairwise_component_without_changing_ndcg_weight() {
+        let group_id = [0, 0];
+        let predictions = [0.8, -0.2];
+        let targets = [1.0, 0.0];
+        let objective = LambdaMARTObjective::new_with_sigma(&group_id, 2.0).unwrap();
+
+        let actual = objective
+            .compute_gradients(&predictions, &targets, None)
+            .unwrap();
+
+        let rho = sigmoid(-2.0 * (predictions[0] - predictions[1]));
+        let delta_ndcg = 1.0 - 1.0 / 3.0_f32.log2();
+        let expected_grad = -2.0 * rho * delta_ndcg;
+        let expected_hess = 4.0 * rho * (1.0 - rho) * delta_ndcg;
+        let expected = vec![
+            GradientPair::new(expected_grad, expected_hess).unwrap(),
+            GradientPair::new(-expected_grad, expected_hess).unwrap(),
+        ];
+        assert_gradient_pairs_close(&actual, &expected, 1e-6);
+    }
+
+    #[test]
+    fn ranking_sigma_must_be_positive_and_finite() {
+        let group_id = [0, 0];
+
+        assert!(PairwiseRankingObjective::new_with_sigma(&group_id, 0.0).is_err());
+        assert!(LambdaMARTObjective::new_with_sigma(&group_id, -1.0).is_err());
+        assert!(YetiRankObjective::new_with_sigma(&group_id, 3, 17, f32::INFINITY).is_err());
     }
 
     #[test]

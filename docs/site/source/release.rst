@@ -50,6 +50,10 @@ model behavior and artifact compatibility. There is no artifact format change.
   duplicate known-field rejection, and backward-compatible omitted objectives /
   class counts. The binary artifact header and section layout are unchanged.
 
+- **Ranking sigma knob.** ``GBMRanker`` now accepts ``ranking_sigma`` to tune
+  the sigmoid sharpness used by ``rank:pairwise``, ``rank:ndcg``, and
+  ``yetirank``. The default remains ``1.0``.
+
 What's new in 0.12.9
 --------------------
 

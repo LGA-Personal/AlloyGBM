@@ -48,6 +48,9 @@ Parameters
 ----------
 
 - ``ranking_objective: str = "rank:ndcg"`` -- the ranking loss function
+- ``ranking_sigma: float = 1.0`` -- sigmoid sharpness for
+  ``"rank:pairwise"``, ``"rank:ndcg"``, and ``"yetirank"``; must be finite
+  and greater than zero
 
 All other parameters are inherited from ``GBMRegressor``, including
 ``leaf_solver="dro"`` for robust scalar leaves, ``leaf_model="linear"`` for

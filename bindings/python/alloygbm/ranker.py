@@ -58,15 +58,28 @@ class GBMRanker(GBMRegressor):
         * ``"tweedie"`` -- Tweedie deviance (compound Poisson-Gamma regression)
         * ``"quantile"`` -- Quantile regression
 
+    ranking_sigma : float, default ``1.0``
+        Sigmoid sharpness for pairwise ranking-family objectives
+        (``"rank:pairwise"``, ``"rank:ndcg"``, and ``"yetirank"``).
+        Higher values make pairwise score margins steeper.
     Other parameters are identical to :class:`GBMRegressor`.
     """
 
-    def __init__(self, *, ranking_objective: str = "rank:ndcg", **kwargs: object) -> None:
+    def __init__(
+        self,
+        *,
+        ranking_objective: str = "rank:ndcg",
+        ranking_sigma: float = 1.0,
+        **kwargs: object,
+    ) -> None:
         if ranking_objective not in _RANKING_OBJECTIVES:
             raise ValueError(
                 f"ranking_objective must be one of {sorted(_RANKING_OBJECTIVES)}, "
                 f"got {ranking_objective!r}"
             )
+        ranking_sigma_value = float(ranking_sigma)
+        if not np.isfinite(ranking_sigma_value) or ranking_sigma_value <= 0.0:
+            raise ValueError("ranking_sigma must be finite and > 0")
         if kwargs.get("neutralization") == "pre_target":
             raise ValueError(
                 "neutralization='pre_target' is only supported for GBMRegressor "
@@ -74,6 +87,7 @@ class GBMRanker(GBMRegressor):
             )
         super().__init__(**kwargs)
         self.ranking_objective = ranking_objective
+        self.ranking_sigma = ranking_sigma_value
 
     # Expose the combined GBMRegressor + ranking_objective signature so tools
     # that introspect via ``inspect.signature`` (sklearn clone, benchmarks,
@@ -91,6 +105,14 @@ class GBMRanker(GBMRegressor):
             _inspect.Parameter.KEYWORD_ONLY,
             default="rank:ndcg",
             annotation=str,
+        )
+    )
+    _ranker_params.append(
+        _inspect.Parameter(
+            "ranking_sigma",
+            _inspect.Parameter.KEYWORD_ONLY,
+            default=1.0,
+            annotation=float,
         )
     )
     _ranker_params.extend(
@@ -253,6 +275,7 @@ class GBMRanker(GBMRegressor):
         return (
             "GBMRanker("
             f"ranking_objective='{self.ranking_objective}', "
+            f"ranking_sigma={self.ranking_sigma}, "
             f"learning_rate={self.learning_rate}, "
             f"max_depth={self.max_depth}, "
             f"n_estimators={self.n_estimators}, "
@@ -311,6 +334,7 @@ class GBMRanker(GBMRegressor):
     def get_params(self, deep: bool = True) -> dict:
         params = super().get_params(deep=deep)
         params["ranking_objective"] = self.ranking_objective
+        params["ranking_sigma"] = self.ranking_sigma
         return params
 
     def set_params(self, **params: object) -> "GBMRanker":
@@ -327,6 +351,11 @@ class GBMRanker(GBMRegressor):
                     f"got {val!r}"
                 )
             self.ranking_objective = val
+        if "ranking_sigma" in params:
+            val = float(params.pop("ranking_sigma"))
+            if not np.isfinite(val) or val <= 0.0:
+                raise ValueError("ranking_sigma must be finite and > 0")
+            self.ranking_sigma = val
         super().set_params(**params)
         return self
 
