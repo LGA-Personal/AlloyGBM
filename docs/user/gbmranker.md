@@ -52,6 +52,10 @@ These do not use the query `group` for their gradient (it is still required by
 
 - `ranking_objective: str = "rank:ndcg"`
   - The ranking loss function. Must be one of the supported objectives above.
+- `ranking_sigma: float = 1.0`
+  - Sigmoid sharpness for `"rank:pairwise"`, `"rank:ndcg"`, and `"yetirank"`.
+    Higher values make pairwise score margins steeper. Must be finite and
+    greater than zero.
 
 ### Inherited
 

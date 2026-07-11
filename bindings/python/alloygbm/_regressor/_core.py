@@ -1573,6 +1573,11 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         )
 
         input_adaptation_seconds = time.perf_counter() - fit_start
+        ranking_sigma_kwargs = (
+            {"ranking_sigma": self.ranking_sigma}
+            if hasattr(self, "ranking_sigma")
+            else {}
+        )
 
         # Resolve custom objective / metric callables for the native bridge.
         _custom_objective_fn = self.objective if callable(self.objective) else None
@@ -1740,6 +1745,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                         if self._objective_name() == "quantile"
                         else None
                     ),
+                    **ranking_sigma_kwargs,
                 )
                 return self._finalize_training_result(
                     native_result,
@@ -1893,6 +1899,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                     if self._objective_name() == "quantile"
                     else None
                 ),
+                **ranking_sigma_kwargs,
             )
         else:
             assert training_rows is not None
@@ -1997,6 +2004,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                     if self._objective_name() == "quantile"
                     else None
                 ),
+                **ranking_sigma_kwargs,
             )
 
         self._apply_continuous_binning_metadata(native_result.continuous_binning_metadata)
@@ -2136,6 +2144,11 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             )
 
         fit_start = time.perf_counter()
+        ranking_sigma_kwargs = (
+            {"ranking_sigma": self.ranking_sigma}
+            if hasattr(self, "ranking_sigma")
+            else {}
+        )
         native_training_rows: object | None = None
         active_dense_training_payload = dense_training_payload
         rows = training_rows
@@ -2391,6 +2404,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                     if self._objective_name() == "quantile"
                     else None
                 ),
+                **ranking_sigma_kwargs,
             )
         else:
             train_regression_artifact = _base._load_native_train_regression_artifact()
@@ -2467,6 +2481,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                     if self._objective_name() == "quantile"
                     else None
                 ),
+                **ranking_sigma_kwargs,
             )
 
         self._n_features_in = feature_count

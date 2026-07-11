@@ -192,6 +192,25 @@ class GBMRankerSerializationTests(unittest.TestCase):
         params = ranker.get_params()
         self.assertEqual(params["ranking_objective"], "yetirank")
 
+    def test_ranking_sigma_param_roundtrip(self) -> None:
+        import inspect
+
+        ranker = GBMRanker(ranking_sigma=0.75)
+
+        self.assertEqual(ranker.ranking_sigma, 0.75)
+        self.assertEqual(ranker.get_params()["ranking_sigma"], 0.75)
+        self.assertIn("ranking_sigma", inspect.signature(GBMRanker.__init__).parameters)
+        self.assertIn("ranking_sigma=0.75", repr(ranker))
+
+        ranker.set_params(ranking_sigma=1.5)
+        self.assertEqual(ranker.ranking_sigma, 1.5)
+
+    def test_ranking_sigma_validation(self) -> None:
+        for invalid in (0.0, -1.0, float("inf")):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "ranking_sigma"):
+                    GBMRanker(ranking_sigma=invalid)
+
     def test_set_params_ranking_objective(self) -> None:
         ranker = GBMRanker(ranking_objective="rank:ndcg")
         ranker.set_params(ranking_objective="rank:pairwise")
@@ -202,6 +221,22 @@ class GBMRankerSerializationTests(unittest.TestCase):
         r = repr(ranker)
         self.assertIn("GBMRanker(", r)
         self.assertIn("ranking_objective='rank:ndcg'", r)
+
+    def test_ranking_sigma_changes_pairwise_fit(self) -> None:
+        X, y, group = _make_ranking_dataset(n_queries=6, docs_per_query=5, seed=11)
+        common = dict(
+            ranking_objective="rank:pairwise",
+            n_estimators=6,
+            learning_rate=0.2,
+            max_depth=3,
+            training_policy="manual",
+            seed=11,
+        )
+        low_sigma = GBMRanker(**common, ranking_sigma=0.5).fit(X, y, group=group)
+        high_sigma = GBMRanker(**common, ranking_sigma=2.0).fit(X, y, group=group)
+
+        diff = np.abs(np.asarray(low_sigma.predict(X)) - np.asarray(high_sigma.predict(X)))
+        self.assertGreater(float(diff.mean()), 1e-6)
 
 
 class GBMRankerAutoPolicyRegressionTests(unittest.TestCase):

@@ -131,6 +131,7 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
     continuous_binning_strategy: ContinuousBinningStrategy,
     continuous_binning_max_bins: usize,
     objective: &str,
+    ranking_sigma: f32,
     init_artifact_bytes: Option<&[u8]>,
     num_classes: Option<usize>,
     custom_objective_fn: Option<Py<PyAny>>,
@@ -524,14 +525,15 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
                     run_training!(&obj)
                 }
                 "rank_pairwise" => {
-                    let mut obj = PairwiseRankingObjective::new(group_id);
+                    let mut obj =
+                        PairwiseRankingObjective::new_with_sigma(group_id, ranking_sigma)?;
                     if let Some(vg) = val_group_id {
                         obj = obj.with_validation_group(vg);
                     }
                     run_training!(&obj)
                 }
                 "rank_ndcg" => {
-                    let mut obj = LambdaMARTObjective::new(group_id);
+                    let mut obj = LambdaMARTObjective::new_with_sigma(group_id, ranking_sigma)?;
                     if let Some(vg) = val_group_id {
                         obj = obj.with_validation_group(vg);
                     }
@@ -545,7 +547,8 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
                     run_training!(&obj)
                 }
                 "yetirank" => {
-                    let mut obj = YetiRankObjective::new(group_id, 10, user_seed);
+                    let mut obj =
+                        YetiRankObjective::new_with_sigma(group_id, 10, user_seed, ranking_sigma)?;
                     if let Some(vg) = val_group_id {
                         obj = obj.with_validation_group(vg);
                     }
@@ -834,7 +837,8 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
     dart_sample_type=None,
     tweedie_variance_power=None,
     poisson_max_delta_step=None,
-    quantile_alpha=None
+    quantile_alpha=None,
+    ranking_sigma=1.0
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact(
@@ -882,6 +886,7 @@ pub(crate) fn train_regression_artifact(
     tweedie_variance_power: Option<f32>,
     poisson_max_delta_step: Option<f32>,
     quantile_alpha: Option<f32>,
+    ranking_sigma: f32,
 ) -> PyResult<Vec<u8>> {
     let parsed_morph_config = morph_config
         .map(|d| parse_morph_config_from_pydict(&d))
@@ -982,6 +987,7 @@ pub(crate) fn train_regression_artifact(
             continuous_binning_strategy,
             continuous_binning_max_bins,
             objective_name.as_str(),
+            ranking_sigma,
             None, // init_artifact_bytes
             None, // num_classes
             None, // custom_objective_fn
@@ -1039,7 +1045,8 @@ pub(crate) fn train_regression_artifact(
     dart_sample_type=None,
     tweedie_variance_power=None,
     poisson_max_delta_step=None,
-    quantile_alpha=None
+    quantile_alpha=None,
+    ranking_sigma=1.0
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_dense(
@@ -1089,6 +1096,7 @@ pub(crate) fn train_regression_artifact_dense(
     tweedie_variance_power: Option<f32>,
     poisson_max_delta_step: Option<f32>,
     quantile_alpha: Option<f32>,
+    ranking_sigma: f32,
 ) -> PyResult<Vec<u8>> {
     let parsed_morph_config = morph_config
         .map(|d| parse_morph_config_from_pydict(&d))
@@ -1185,6 +1193,7 @@ pub(crate) fn train_regression_artifact_dense(
             continuous_binning_strategy,
             continuous_binning_max_bins,
             objective_name.as_str(),
+            ranking_sigma,
             None, // init_artifact_bytes
             None, // num_classes
             None, // custom_objective_fn
@@ -1267,7 +1276,8 @@ pub(crate) fn train_regression_artifact_dense(
     dart_sample_type=None,
     tweedie_variance_power=None,
     poisson_max_delta_step=None,
-    quantile_alpha=None
+    quantile_alpha=None,
+    ranking_sigma=1.0
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_with_summary(
@@ -1342,6 +1352,7 @@ pub(crate) fn train_regression_artifact_with_summary(
     tweedie_variance_power: Option<f32>,
     poisson_max_delta_step: Option<f32>,
     quantile_alpha: Option<f32>,
+    ranking_sigma: f32,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -1463,6 +1474,7 @@ pub(crate) fn train_regression_artifact_with_summary(
             continuous_binning_strategy,
             continuous_binning_max_bins,
             objective_name.as_str(),
+            ranking_sigma,
             init_artifact_bytes.as_deref(),
             num_classes,
             custom_objective_fn,
@@ -1548,7 +1560,8 @@ pub(crate) fn train_regression_artifact_with_summary(
     dart_sample_type=None,
     tweedie_variance_power=None,
     poisson_max_delta_step=None,
-    quantile_alpha=None
+    quantile_alpha=None,
+    ranking_sigma=1.0
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_dense_with_summary(
@@ -1626,6 +1639,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
     tweedie_variance_power: Option<f32>,
     poisson_max_delta_step: Option<f32>,
     quantile_alpha: Option<f32>,
+    ranking_sigma: f32,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -1728,6 +1742,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
             continuous_binning_strategy,
             continuous_binning_max_bins,
             objective_name.as_str(),
+            ranking_sigma,
             init_artifact_bytes.as_deref(),
             num_classes,
             custom_objective_fn,
@@ -1828,7 +1843,8 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> PyResult<Vec<f32>> {
     dart_sample_type=None,
     tweedie_variance_power=None,
     poisson_max_delta_step=None,
-    quantile_alpha=None
+    quantile_alpha=None,
+    ranking_sigma=1.0
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
@@ -1906,6 +1922,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
     tweedie_variance_power: Option<f32>,
     poisson_max_delta_step: Option<f32>,
     quantile_alpha: Option<f32>,
+    ranking_sigma: f32,
 ) -> PyResult<NativeTrainingResult> {
     let values = bytes_to_f32_vec(values_bytes)?;
     let targets = bytes_to_f32_vec(targets_bytes)?;
@@ -2012,6 +2029,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
             continuous_binning_strategy,
             continuous_binning_max_bins,
             objective_name.as_str(),
+            ranking_sigma,
             init_artifact_bytes.as_deref(),
             num_classes,
             custom_objective_fn,
