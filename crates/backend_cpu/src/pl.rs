@@ -261,7 +261,8 @@ fn backward_solve_pl(
 /// `0.5 · (Xᵀg)ᵀ (XᵀHX + λI)⁻¹ (Xᵀg)`.
 ///
 /// Uses a compact Cholesky factorisation on the `d×d` regularised Hessian
-/// matrix.  Returns `0.0` if `d == 0` or the matrix is not positive definite.
+/// matrix. Returns `0.0` when the system is invalid, ill-conditioned, or
+/// cannot produce a finite result.
 pub fn compute_pl_gain_one_side(
     xtg: &[f32; MAX_PL_REGRESSORS],
     xt_hx: &[f32; MAX_PL_MATRIX_ENTRIES],
@@ -619,8 +620,9 @@ pub fn leaf_linear_stats_for_split(
 
 /// Solve for PL leaf weights: `α* = -(XᵀHX + λI)⁻¹ Xᵀg`.
 ///
-/// Returns the weight vector `[α_0, …, α_{d-1}]`.  On Cholesky failure
-/// (non-PD matrix) returns all-zero (falls back to scalar leaf).
+/// Returns the weight vector `[α_0, …, α_{d-1}]`. On an invalid,
+/// ill-conditioned, or non-finite system, returns all-zero (falls back to a
+/// scalar leaf).
 fn cholesky_solve_alpha(
     xtg: &[f32; MAX_PL_REGRESSORS],
     xt_hx: &[f32; MAX_PL_MATRIX_ENTRIES],
