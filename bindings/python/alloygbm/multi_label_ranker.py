@@ -412,6 +412,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
         "tweedie_variance_power",
         "poisson_max_delta_step",
         "quantile_alpha",
+        "ranking_sigma",
     })
 
     @staticmethod
@@ -860,6 +861,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
             quantile_alpha=(
                 float(kw["quantile_alpha"]) if "quantile_alpha" in kw else None
             ),
+            ranking_sigma=float(kw.get("ranking_sigma", 1.0)),
         )
 
         self._joint_artifact_bytes = bytes(artifact)

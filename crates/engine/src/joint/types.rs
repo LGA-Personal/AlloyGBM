@@ -25,7 +25,9 @@ pub enum JointObjective {
     SquaredError,
     QueryRmse,
     RankPairwise,
+    RankPairwiseWithSigma { sigma: f32 },
     RankNdcg,
+    RankNdcgWithSigma { sigma: f32 },
     RankXendcg,
     Poisson { max_delta_step: f32 },
     Gamma,
@@ -35,11 +37,18 @@ pub enum JointObjective {
 
 impl JointObjective {
     pub fn parse(name: &str) -> Result<Self, String> {
+        Self::parse_with_ranking_sigma(name, 1.0)
+    }
+
+    pub fn parse_with_ranking_sigma(name: &str, ranking_sigma: f32) -> Result<Self, String> {
+        let sigma = validate_joint_ranking_sigma(ranking_sigma)?;
         match name {
             "squared_error" => Ok(Self::SquaredError),
             "queryrmse" => Ok(Self::QueryRmse),
-            "rank:pairwise" => Ok(Self::RankPairwise),
-            "rank:ndcg" => Ok(Self::RankNdcg),
+            "rank:pairwise" if sigma == 1.0 => Ok(Self::RankPairwise),
+            "rank:pairwise" => Ok(Self::RankPairwiseWithSigma { sigma }),
+            "rank:ndcg" if sigma == 1.0 => Ok(Self::RankNdcg),
+            "rank:ndcg" => Ok(Self::RankNdcgWithSigma { sigma }),
             "rank:xendcg" => Ok(Self::RankXendcg),
             "poisson" => Ok(Self::Poisson {
                 max_delta_step: 0.7,
@@ -59,7 +68,12 @@ impl JointObjective {
     pub fn requires_group(&self) -> bool {
         matches!(
             self,
-            Self::QueryRmse | Self::RankPairwise | Self::RankNdcg | Self::RankXendcg
+            Self::QueryRmse
+                | Self::RankPairwise
+                | Self::RankPairwiseWithSigma { .. }
+                | Self::RankNdcg
+                | Self::RankNdcgWithSigma { .. }
+                | Self::RankXendcg
         )
     }
 
@@ -67,8 +81,8 @@ impl JointObjective {
         match self {
             Self::SquaredError => "squared_error",
             Self::QueryRmse => "queryrmse",
-            Self::RankPairwise => "rank:pairwise",
-            Self::RankNdcg => "rank:ndcg",
+            Self::RankPairwise | Self::RankPairwiseWithSigma { .. } => "rank:pairwise",
+            Self::RankNdcg | Self::RankNdcgWithSigma { .. } => "rank:ndcg",
             Self::RankXendcg => "rank:xendcg",
             Self::Poisson { .. } => "poisson",
             Self::Gamma => "gamma",
@@ -140,10 +154,27 @@ impl JointObjective {
                 obj.compute_gradients(predictions, targets, None)
                     .map_err(|e| e.to_string())
             }
+            Self::RankPairwiseWithSigma { sigma } => {
+                let group_ids = group.ok_or_else(|| {
+                    "rank:pairwise objective requires group identifiers".to_string()
+                })?;
+                let obj = PairwiseRankingObjective::new_with_sigma(group_ids, *sigma)
+                    .map_err(|e| e.to_string())?;
+                obj.compute_gradients(predictions, targets, None)
+                    .map_err(|e| e.to_string())
+            }
             Self::RankNdcg => {
                 let group_ids = group
                     .ok_or_else(|| "rank:ndcg objective requires group identifiers".to_string())?;
                 let obj = LambdaMARTObjective::new(group_ids);
+                obj.compute_gradients(predictions, targets, None)
+                    .map_err(|e| e.to_string())
+            }
+            Self::RankNdcgWithSigma { sigma } => {
+                let group_ids = group
+                    .ok_or_else(|| "rank:ndcg objective requires group identifiers".to_string())?;
+                let obj = LambdaMARTObjective::new_with_sigma(group_ids, *sigma)
+                    .map_err(|e| e.to_string())?;
                 obj.compute_gradients(predictions, targets, None)
                     .map_err(|e| e.to_string())
             }
@@ -177,6 +208,13 @@ impl JointObjective {
             }
         }
     }
+}
+
+fn validate_joint_ranking_sigma(sigma: f32) -> Result<f32, String> {
+    if !sigma.is_finite() || sigma <= 0.0 {
+        return Err("ranking_sigma must be finite and > 0".to_string());
+    }
+    Ok(sigma)
 }
 
 /// Summary returned by [`fit_joint_multi_output`].

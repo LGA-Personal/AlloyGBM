@@ -439,6 +439,11 @@ fn joint_objective_parses_supported_names() {
         JointObjective::RankNdcg
     );
     assert_eq!(
+        JointObjective::parse_with_ranking_sigma("rank:pairwise", 2.0).unwrap(),
+        JointObjective::RankPairwiseWithSigma { sigma: 2.0 }
+    );
+    assert!(JointObjective::parse_with_ranking_sigma("rank:ndcg", 0.0).is_err());
+    assert_eq!(
         JointObjective::parse("queryrmse").unwrap(),
         JointObjective::QueryRmse
     );
@@ -550,6 +555,43 @@ fn joint_compute_gradients_helper_preserves_output_order_and_errors() {
     assert!(
         err.contains("rank:ndcg objective requires group identifiers"),
         "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn joint_ranking_sigma_scales_pairwise_and_ndcg_gradients() {
+    let predictions = vec![0.0_f32, 1.0, -0.5, 0.25];
+    let targets = vec![3.0_f32, 0.0, 2.0, 1.0];
+    let group_id = vec![0_u32, 0, 0, 0];
+
+    let default = JointObjective::RankPairwise
+        .compute_gradients(&predictions, &targets, Some(&group_id))
+        .expect("default sigma gradients");
+    let sharper = JointObjective::RankPairwiseWithSigma { sigma: 2.0 }
+        .compute_gradients(&predictions, &targets, Some(&group_id))
+        .expect("custom sigma gradients");
+
+    assert_ne!(default, sharper);
+    assert!(
+        sharper
+            .iter()
+            .zip(default.iter())
+            .any(|(a, b)| (a.grad - b.grad).abs() > 1e-6)
+    );
+
+    let default_ndcg = JointObjective::RankNdcg
+        .compute_gradients(&predictions, &targets, Some(&group_id))
+        .expect("default sigma ndcg gradients");
+    let sharper_ndcg = JointObjective::RankNdcgWithSigma { sigma: 2.0 }
+        .compute_gradients(&predictions, &targets, Some(&group_id))
+        .expect("custom sigma ndcg gradients");
+
+    assert_ne!(default_ndcg, sharper_ndcg);
+    assert!(
+        sharper_ndcg
+            .iter()
+            .zip(default_ndcg.iter())
+            .any(|(a, b)| (a.grad - b.grad).abs() > 1e-6)
     );
 }
 

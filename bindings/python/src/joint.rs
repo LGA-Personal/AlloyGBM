@@ -120,6 +120,7 @@ impl JointPredictorHandle {
     tweedie_variance_power=None::<f32>,
     poisson_max_delta_step=None::<f32>,
     quantile_alpha=None::<f32>,
+    ranking_sigma=1.0_f32,
 ))]
 pub(crate) fn train_joint_multi_label_ranker(
     x_values: Vec<f32>,
@@ -168,6 +169,7 @@ pub(crate) fn train_joint_multi_label_ranker(
     tweedie_variance_power: Option<f32>,
     poisson_max_delta_step: Option<f32>,
     quantile_alpha: Option<f32>,
+    ranking_sigma: f32,
 ) -> PyResult<(Vec<u8>, Vec<f32>, usize, usize)> {
     use alloygbm_engine::joint::JointObjective;
 
@@ -208,7 +210,7 @@ pub(crate) fn train_joint_multi_label_ranker(
             "quantile" => JointObjective::Quantile {
                 alpha: quantile_alpha.unwrap_or(0.5),
             },
-            other => JointObjective::parse(other)
+            other => JointObjective::parse_with_ranking_sigma(other, ranking_sigma)
                 .map_err(|e| PyValueError::new_err(format!("invalid objective {name:?}: {e}")))?,
         };
         per_output_objective.push(obj);

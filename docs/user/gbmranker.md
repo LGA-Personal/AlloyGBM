@@ -240,6 +240,7 @@ strategy:
   factor neutralization (v0.10.6+: `neutralization=` +
   `factor_exposures=` for all three modes — `pre_target`,
   `per_round_gradient`, `split_penalty`),
+  `ranking_sigma` for joint `rank:pairwise` / `rank:ndcg` objectives,
   and the built-in `squared_error` / `queryrmse` / `rank:pairwise` /
   `rank:ndcg` / `rank:xendcg` objectives. The joint trainer has
   reached full feature parity with the single-output path.
@@ -264,6 +265,7 @@ strategy:
 | `dart_max_drop` | int | `50` | Maximum trees dropped per round (DART). |
 | `dart_normalize_type` | str | `"tree"` | `"tree"` or `"forest"` normalization (DART). |
 | `dart_sample_type` | str | `"uniform"` | `"uniform"` or `"weighted"` dropout (DART). |
+| `ranking_sigma` | float | `1.0` | Sigmoid sharpness for joint `rank:pairwise` and `rank:ndcg` objectives. |
 | `categorical_feature_indices` | list[int] | `[]` | Column indices to treat as native categorical. |
 | `max_cat_threshold` | int | `0` | Max categories for Fisher-sort splits (0 = disabled). |
 | `leaf_solver` | str | `"standard"` | `"standard"` or `"dro"` (v0.10.5+). When `"dro"`, applies Wasserstein-DRO leaf shrinkage. |

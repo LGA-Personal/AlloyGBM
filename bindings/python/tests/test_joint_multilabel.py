@@ -29,6 +29,51 @@ def test_joint_mode_fits_and_predicts_with_correct_shape():
     assert np.all(np.isfinite(preds))
 
 
+def test_joint_mode_ranking_sigma_changes_ranking_fit():
+    X, y, group = _toy_ranking(n_queries=10, items_per_query=6, n_labels=2, seed=17)
+
+    default = MultiLabelGBMRanker(
+        n_estimators=5,
+        multi_label_mode="joint",
+        ranking_objective="rank:pairwise",
+        ranking_sigma=1.0,
+        seed=17,
+    )
+    sharp = MultiLabelGBMRanker(
+        n_estimators=5,
+        multi_label_mode="joint",
+        ranking_objective="rank:pairwise",
+        ranking_sigma=2.0,
+        seed=17,
+    )
+
+    default.fit(X, y, group=group)
+    sharp.fit(X, y, group=group)
+
+    assert default.get_params()["ranking_sigma"] == 1.0
+    np.testing.assert_raises(
+        AssertionError,
+        np.testing.assert_allclose,
+        default.predict(X),
+        sharp.predict(X),
+        rtol=1e-7,
+        atol=1e-7,
+    )
+
+
+def test_joint_mode_ranking_sigma_validation():
+    X, y, group = _toy_ranking(n_labels=2)
+    m = MultiLabelGBMRanker(
+        n_estimators=2,
+        multi_label_mode="joint",
+        ranking_objective="rank:ndcg",
+        ranking_sigma=0.0,
+    )
+
+    with pytest.raises(ValueError, match="ranking_sigma"):
+        m.fit(X, y, group=group)
+
+
 def test_default_multi_label_mode_is_independent():
     """Backward compatibility: callers that don't pass multi_label_mode must
     still hit the v0.7.1 independent-per-label fallback (which uses
