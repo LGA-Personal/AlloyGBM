@@ -62,6 +62,10 @@ class GBMRanker(GBMRegressor):
         Sigmoid sharpness for pairwise ranking-family objectives
         (``"rank:pairwise"``, ``"rank:ndcg"``, and ``"yetirank"``).
         Higher values make pairwise score margins steeper.
+    lambdarank_truncation_level : int | None, default ``None``
+        For ``"rank:ndcg"``, restrict pairwise LambdaMART gradients to pairs
+        where at least one document is currently ranked in the top-k positions.
+        ``None`` scores all pairs.
     Other parameters are identical to :class:`GBMRegressor`.
     """
 
@@ -70,6 +74,7 @@ class GBMRanker(GBMRegressor):
         *,
         ranking_objective: str = "rank:ndcg",
         ranking_sigma: float = 1.0,
+        lambdarank_truncation_level: int | None = None,
         **kwargs: object,
     ) -> None:
         if ranking_objective not in _RANKING_OBJECTIVES:
@@ -80,6 +85,9 @@ class GBMRanker(GBMRegressor):
         ranking_sigma_value = float(ranking_sigma)
         if not np.isfinite(ranking_sigma_value) or ranking_sigma_value <= 0.0:
             raise ValueError("ranking_sigma must be finite and > 0")
+        truncation_level = self._validate_lambdarank_truncation_level(
+            lambdarank_truncation_level
+        )
         if kwargs.get("neutralization") == "pre_target":
             raise ValueError(
                 "neutralization='pre_target' is only supported for GBMRegressor "
@@ -88,6 +96,7 @@ class GBMRanker(GBMRegressor):
         super().__init__(**kwargs)
         self.ranking_objective = ranking_objective
         self.ranking_sigma = ranking_sigma_value
+        self.lambdarank_truncation_level = truncation_level
 
     # Expose the combined GBMRegressor + ranking_objective signature so tools
     # that introspect via ``inspect.signature`` (sklearn clone, benchmarks,
@@ -113,6 +122,14 @@ class GBMRanker(GBMRegressor):
             _inspect.Parameter.KEYWORD_ONLY,
             default=1.0,
             annotation=float,
+        )
+    )
+    _ranker_params.append(
+        _inspect.Parameter(
+            "lambdarank_truncation_level",
+            _inspect.Parameter.KEYWORD_ONLY,
+            default=None,
+            annotation=int | None,
         )
     )
     _ranker_params.extend(
@@ -276,6 +293,7 @@ class GBMRanker(GBMRegressor):
             "GBMRanker("
             f"ranking_objective='{self.ranking_objective}', "
             f"ranking_sigma={self.ranking_sigma}, "
+            f"lambdarank_truncation_level={self.lambdarank_truncation_level}, "
             f"learning_rate={self.learning_rate}, "
             f"max_depth={self.max_depth}, "
             f"n_estimators={self.n_estimators}, "
@@ -335,6 +353,7 @@ class GBMRanker(GBMRegressor):
         params = super().get_params(deep=deep)
         params["ranking_objective"] = self.ranking_objective
         params["ranking_sigma"] = self.ranking_sigma
+        params["lambdarank_truncation_level"] = self.lambdarank_truncation_level
         return params
 
     def set_params(self, **params: object) -> "GBMRanker":
@@ -356,10 +375,26 @@ class GBMRanker(GBMRegressor):
             if not np.isfinite(val) or val <= 0.0:
                 raise ValueError("ranking_sigma must be finite and > 0")
             self.ranking_sigma = val
+        if "lambdarank_truncation_level" in params:
+            self.lambdarank_truncation_level = self._validate_lambdarank_truncation_level(
+                params.pop("lambdarank_truncation_level")
+            )
         super().set_params(**params)
         return self
 
     # -- internal helpers ------------------------------------------------------
+
+    @staticmethod
+    def _validate_lambdarank_truncation_level(value: object) -> int | None:
+        if value is None:
+            return None
+        try:
+            numeric = float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise ValueError("lambdarank_truncation_level must be None or an integer >= 1") from exc
+        if not np.isfinite(numeric) or not numeric.is_integer() or numeric < 1:
+            raise ValueError("lambdarank_truncation_level must be None or an integer >= 1")
+        return int(numeric)
 
     @staticmethod
     def _sort_by_group(

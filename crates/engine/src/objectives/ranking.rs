@@ -159,6 +159,15 @@ fn validate_ranking_sigma(sigma: f32) -> EngineResult<f32> {
     Ok(sigma)
 }
 
+fn validate_lambdarank_truncation_level(level: Option<usize>) -> EngineResult<Option<usize>> {
+    if matches!(level, Some(0)) {
+        return Err(EngineError::InvalidConfig(
+            "lambdarank_truncation_level must be None or >= 1".to_string(),
+        ));
+    }
+    Ok(level)
+}
+
 // ── QueryRMSE Objective ──────────────────────────────────────────────────
 
 /// Query-grouped RMSE objective. Gradients are standard MSE per-document,
@@ -446,6 +455,7 @@ pub struct LambdaMARTObjective {
     pub group_boundaries: Vec<usize>,
     pub validation_group_boundaries: Option<Vec<usize>>,
     pub sigma: f32,
+    pub truncation_level: Option<usize>,
 }
 
 impl LambdaMARTObjective {
@@ -454,14 +464,24 @@ impl LambdaMARTObjective {
             group_boundaries: compute_group_boundaries(group_id),
             validation_group_boundaries: None,
             sigma: 1.0,
+            truncation_level: None,
         }
     }
 
     pub fn new_with_sigma(group_id: &[u32], sigma: f32) -> EngineResult<Self> {
+        Self::new_with_sigma_and_truncation(group_id, sigma, None)
+    }
+
+    pub fn new_with_sigma_and_truncation(
+        group_id: &[u32],
+        sigma: f32,
+        truncation_level: Option<usize>,
+    ) -> EngineResult<Self> {
         Ok(Self {
             group_boundaries: compute_group_boundaries(group_id),
             validation_group_boundaries: None,
             sigma: validate_ranking_sigma(sigma)?,
+            truncation_level: validate_lambdarank_truncation_level(truncation_level)?,
         })
     }
 
@@ -520,6 +540,12 @@ impl LambdaMARTObjective {
                         } else {
                             (j, i)
                         };
+                        if let Some(k) = self.truncation_level
+                            && ranks[hi] >= k
+                            && ranks[lo] >= k
+                        {
+                            continue;
+                        }
                         let s = group_scores[hi] - group_scores[lo];
                         let rho = sigmoid(-self.sigma * s);
                         let delta_ndcg =
@@ -1269,6 +1295,44 @@ mod tests {
             GradientPair::new(expected_grad, expected_hess).unwrap(),
             GradientPair::new(-expected_grad, expected_hess).unwrap(),
         ];
+        assert_gradient_pairs_close(&actual, &expected, 1e-6);
+    }
+
+    #[test]
+    fn lambdamart_truncation_level_limits_pairs_to_current_top_k() {
+        let group_id = [0, 0, 0];
+        let predictions = [3.0, 2.0, 1.0];
+        let targets = [0.0, 2.0, 1.0];
+        let objective =
+            LambdaMARTObjective::new_with_sigma_and_truncation(&group_id, 1.0, Some(1)).unwrap();
+
+        let actual = objective
+            .compute_gradients(&predictions, &targets, None)
+            .unwrap();
+
+        let idcg = ideal_dcg(&targets, targets.len());
+        let inv_idcg = 1.0 / idcg;
+        let gains = gains_for_labels(&targets);
+        let discounts = discounts_for_ranks(&[0, 1, 2]);
+        let mut expected_grads = [0.0_f32; 3];
+        let mut expected_hesses = [0.0_f32; 3];
+        for (hi, lo) in [(1_usize, 0_usize), (2, 0)] {
+            let rho = sigmoid(-(predictions[hi] - predictions[lo]));
+            let delta_ndcg =
+                ((gains[hi] - gains[lo]) * (discounts[hi] - discounts[lo])).abs() * inv_idcg;
+            let lambda = -rho * delta_ndcg;
+            let hess_pair = rho * (1.0 - rho) * delta_ndcg;
+            expected_grads[hi] += lambda;
+            expected_grads[lo] -= lambda;
+            expected_hesses[hi] += hess_pair;
+            expected_hesses[lo] += hess_pair;
+        }
+        let expected = expected_grads
+            .iter()
+            .zip(expected_hesses.iter())
+            .map(|(&grad, &hess)| GradientPair::new(grad, hess).unwrap())
+            .collect::<Vec<_>>();
+
         assert_gradient_pairs_close(&actual, &expected, 1e-6);
     }
 
