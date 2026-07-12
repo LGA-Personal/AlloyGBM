@@ -122,6 +122,7 @@ impl JointPredictorHandle {
     quantile_alpha=None::<f32>,
     ranking_sigma=1.0_f32,
     lambdarank_truncation_level=None::<usize>,
+    lambdarank_normalize=false,
 ))]
 pub(crate) fn train_joint_multi_label_ranker(
     x_values: Vec<f32>,
@@ -172,6 +173,7 @@ pub(crate) fn train_joint_multi_label_ranker(
     quantile_alpha: Option<f32>,
     ranking_sigma: f32,
     lambdarank_truncation_level: Option<usize>,
+    lambdarank_normalize: bool,
 ) -> PyResult<(Vec<u8>, Vec<f32>, usize, usize)> {
     use alloygbm_engine::joint::JointObjective;
 
@@ -216,6 +218,7 @@ pub(crate) fn train_joint_multi_label_ranker(
                 other,
                 ranking_sigma,
                 lambdarank_truncation_level,
+                lambdarank_normalize,
             )
             .map_err(|e| PyValueError::new_err(format!("invalid objective {name:?}: {e}")))?,
         };

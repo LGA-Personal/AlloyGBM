@@ -1577,6 +1577,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             {
                 "ranking_sigma": self.ranking_sigma,
                 "lambdarank_truncation_level": self.lambdarank_truncation_level,
+                "lambdarank_normalize": self.lambdarank_normalize,
             }
             if hasattr(self, "ranking_sigma")
             else {}
@@ -2151,6 +2152,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             {
                 "ranking_sigma": self.ranking_sigma,
                 "lambdarank_truncation_level": self.lambdarank_truncation_level,
+                "lambdarank_normalize": self.lambdarank_normalize,
             }
             if hasattr(self, "ranking_sigma")
             else {}

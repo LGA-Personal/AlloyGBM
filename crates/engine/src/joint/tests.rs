@@ -607,6 +607,7 @@ fn joint_lambdarank_truncation_level_limits_ndcg_pairs() {
     let truncated = JointObjective::RankNdcgWithOptions {
         sigma: 1.0,
         truncation_level: Some(1),
+        normalize_lambdas: false,
     }
     .compute_gradients(&predictions, &targets, Some(&group_id))
     .expect("truncated gradients");
@@ -615,6 +616,30 @@ fn joint_lambdarank_truncation_level_limits_ndcg_pairs() {
     assert!(
         truncated[1].hess < full[1].hess,
         "doc outside top-1 should lose the pair against doc 2"
+    );
+}
+
+#[test]
+fn joint_lambdarank_normalize_changes_ndcg_gradients() {
+    let predictions = vec![2.0_f32, 0.5, -1.0];
+    let targets = vec![2.0_f32, 0.0, 1.0];
+    let group_id = vec![0_u32, 0, 0];
+
+    let unnormalized = JointObjective::RankNdcg
+        .compute_gradients(&predictions, &targets, Some(&group_id))
+        .expect("unnormalized gradients");
+    let normalized = JointObjective::RankNdcgWithOptions {
+        sigma: 1.0,
+        truncation_level: None,
+        normalize_lambdas: true,
+    }
+    .compute_gradients(&predictions, &targets, Some(&group_id))
+    .expect("normalized gradients");
+
+    assert_ne!(unnormalized, normalized);
+    assert!(
+        normalized.iter().all(|pair| pair.hess > 0.0),
+        "normalization should preserve positive Hessians"
     );
 }
 

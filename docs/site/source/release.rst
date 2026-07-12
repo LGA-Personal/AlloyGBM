@@ -53,9 +53,9 @@ model behavior and artifact compatibility. There is no artifact format change.
 - **Ranking controls.** ``GBMRanker`` now accepts ``ranking_sigma`` to tune
   the sigmoid sharpness used by ``rank:pairwise``, ``rank:ndcg``, and
   ``yetirank``. It also accepts ``lambdarank_truncation_level`` for
-  top-k-limited ``rank:ndcg`` pair generation. ``MultiLabelGBMRanker``
-  forwards both knobs in ``multi_label_mode="joint"``. Defaults preserve
-  previous behavior.
+  top-k-limited ``rank:ndcg`` pair generation and ``lambdarank_normalize`` for
+  per-query lambda normalization. ``MultiLabelGBMRanker`` forwards all three
+  knobs in ``multi_label_mode="joint"``. Defaults preserve previous behavior.
 
 What's new in 0.12.9
 --------------------
