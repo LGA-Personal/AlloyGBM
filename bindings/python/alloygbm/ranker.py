@@ -66,6 +66,10 @@ class GBMRanker(GBMRegressor):
         For ``"rank:ndcg"``, restrict pairwise LambdaMART gradients to pairs
         where at least one document is currently ranked in the top-k positions.
         ``None`` scores all pairs.
+    lambdarank_normalize : bool, default ``False``
+        For ``"rank:ndcg"``, apply per-query LambdaMART lambda normalization.
+        This can improve behavior on unbalanced query groups. ``False``
+        preserves the original unnormalized objective.
     Other parameters are identical to :class:`GBMRegressor`.
     """
 
@@ -75,6 +79,7 @@ class GBMRanker(GBMRegressor):
         ranking_objective: str = "rank:ndcg",
         ranking_sigma: float = 1.0,
         lambdarank_truncation_level: int | None = None,
+        lambdarank_normalize: bool = False,
         **kwargs: object,
     ) -> None:
         if ranking_objective not in _RANKING_OBJECTIVES:
@@ -88,6 +93,7 @@ class GBMRanker(GBMRegressor):
         truncation_level = self._validate_lambdarank_truncation_level(
             lambdarank_truncation_level
         )
+        normalize_lambdas = self._validate_lambdarank_normalize(lambdarank_normalize)
         if kwargs.get("neutralization") == "pre_target":
             raise ValueError(
                 "neutralization='pre_target' is only supported for GBMRegressor "
@@ -97,6 +103,7 @@ class GBMRanker(GBMRegressor):
         self.ranking_objective = ranking_objective
         self.ranking_sigma = ranking_sigma_value
         self.lambdarank_truncation_level = truncation_level
+        self.lambdarank_normalize = normalize_lambdas
 
     # Expose the combined GBMRegressor + ranking_objective signature so tools
     # that introspect via ``inspect.signature`` (sklearn clone, benchmarks,
@@ -130,6 +137,14 @@ class GBMRanker(GBMRegressor):
             _inspect.Parameter.KEYWORD_ONLY,
             default=None,
             annotation=int | None,
+        )
+    )
+    _ranker_params.append(
+        _inspect.Parameter(
+            "lambdarank_normalize",
+            _inspect.Parameter.KEYWORD_ONLY,
+            default=False,
+            annotation=bool,
         )
     )
     _ranker_params.extend(
@@ -294,6 +309,7 @@ class GBMRanker(GBMRegressor):
             f"ranking_objective='{self.ranking_objective}', "
             f"ranking_sigma={self.ranking_sigma}, "
             f"lambdarank_truncation_level={self.lambdarank_truncation_level}, "
+            f"lambdarank_normalize={self.lambdarank_normalize}, "
             f"learning_rate={self.learning_rate}, "
             f"max_depth={self.max_depth}, "
             f"n_estimators={self.n_estimators}, "
@@ -354,6 +370,7 @@ class GBMRanker(GBMRegressor):
         params["ranking_objective"] = self.ranking_objective
         params["ranking_sigma"] = self.ranking_sigma
         params["lambdarank_truncation_level"] = self.lambdarank_truncation_level
+        params["lambdarank_normalize"] = self.lambdarank_normalize
         return params
 
     def set_params(self, **params: object) -> "GBMRanker":
@@ -379,6 +396,10 @@ class GBMRanker(GBMRegressor):
             self.lambdarank_truncation_level = self._validate_lambdarank_truncation_level(
                 params.pop("lambdarank_truncation_level")
             )
+        if "lambdarank_normalize" in params:
+            self.lambdarank_normalize = self._validate_lambdarank_normalize(
+                params.pop("lambdarank_normalize")
+            )
         super().set_params(**params)
         return self
 
@@ -395,6 +416,12 @@ class GBMRanker(GBMRegressor):
         if not np.isfinite(numeric) or not numeric.is_integer() or numeric < 1:
             raise ValueError("lambdarank_truncation_level must be None or an integer >= 1")
         return int(numeric)
+
+    @staticmethod
+    def _validate_lambdarank_normalize(value: object) -> bool:
+        if isinstance(value, (bool, np.bool_)):
+            return bool(value)
+        raise ValueError("lambdarank_normalize must be a bool")
 
     @staticmethod
     def _sort_by_group(

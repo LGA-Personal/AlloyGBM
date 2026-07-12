@@ -50,14 +50,15 @@ fn train_regression_artifact_impl(
         ContinuousBinningStrategy::Linear,
         MAX_CONTINUOUS_QUANTIZED_BIN_U8 as usize + 1,
         "squared_error",
-        1.0,  // ranking_sigma
-        None, // lambdarank_truncation_level
-        None, // init_artifact_bytes
-        None, // num_classes
-        None, // custom_objective_fn
-        None, // custom_loss_fn
-        None, // custom_metric_fn
-        0,    // max_cat_threshold
+        1.0,   // ranking_sigma
+        None,  // lambdarank_truncation_level
+        false, // lambdarank_normalize
+        None,  // init_artifact_bytes
+        None,  // num_classes
+        None,  // custom_objective_fn
+        None,  // custom_loss_fn
+        None,  // custom_metric_fn
+        0,     // max_cat_threshold
     )
     .map(|result| result.artifact_bytes)
 }
@@ -429,6 +430,7 @@ fn train_bridge_pre_target_categorical_encoding_matches_engine_residualized_targ
         "squared_error",
         1.0,
         None,
+        false,
         None,
         None,
         None,

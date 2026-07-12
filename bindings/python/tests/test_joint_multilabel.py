@@ -105,6 +105,37 @@ def test_joint_mode_lambdarank_truncation_level_changes_ndcg_fit():
     )
 
 
+def test_joint_mode_lambdarank_normalize_changes_ndcg_fit():
+    X, y, group = _toy_ranking(n_queries=10, items_per_query=6, n_labels=2, seed=31)
+
+    unnormalized = MultiLabelGBMRanker(
+        n_estimators=5,
+        multi_label_mode="joint",
+        ranking_objective="rank:ndcg",
+        seed=31,
+    )
+    normalized = MultiLabelGBMRanker(
+        n_estimators=5,
+        multi_label_mode="joint",
+        ranking_objective="rank:ndcg",
+        lambdarank_normalize=True,
+        seed=31,
+    )
+
+    unnormalized.fit(X, y, group=group)
+    normalized.fit(X, y, group=group)
+
+    assert normalized.get_params()["lambdarank_normalize"] is True
+    np.testing.assert_raises(
+        AssertionError,
+        np.testing.assert_allclose,
+        unnormalized.predict(X),
+        normalized.predict(X),
+        rtol=1e-7,
+        atol=1e-7,
+    )
+
+
 def test_default_multi_label_mode_is_independent():
     """Backward compatibility: callers that don't pass multi_label_mode must
     still hit the v0.7.1 independent-per-label fallback (which uses

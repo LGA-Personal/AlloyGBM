@@ -133,6 +133,7 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
     objective: &str,
     ranking_sigma: f32,
     lambdarank_truncation_level: Option<usize>,
+    lambdarank_normalize: bool,
     init_artifact_bytes: Option<&[u8]>,
     num_classes: Option<usize>,
     custom_objective_fn: Option<Py<PyAny>>,
@@ -534,10 +535,11 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
                     run_training!(&obj)
                 }
                 "rank_ndcg" => {
-                    let mut obj = LambdaMARTObjective::new_with_sigma_and_truncation(
+                    let mut obj = LambdaMARTObjective::new_with_options(
                         group_id,
                         ranking_sigma,
                         lambdarank_truncation_level,
+                        lambdarank_normalize,
                     )?;
                     if let Some(vg) = val_group_id {
                         obj = obj.with_validation_group(vg);
@@ -844,7 +846,8 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
     poisson_max_delta_step=None,
     quantile_alpha=None,
     ranking_sigma=1.0,
-    lambdarank_truncation_level=None::<usize>
+    lambdarank_truncation_level=None::<usize>,
+    lambdarank_normalize=false
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact(
@@ -894,6 +897,7 @@ pub(crate) fn train_regression_artifact(
     quantile_alpha: Option<f32>,
     ranking_sigma: f32,
     lambdarank_truncation_level: Option<usize>,
+    lambdarank_normalize: bool,
 ) -> PyResult<Vec<u8>> {
     let parsed_morph_config = morph_config
         .map(|d| parse_morph_config_from_pydict(&d))
@@ -996,6 +1000,7 @@ pub(crate) fn train_regression_artifact(
             objective_name.as_str(),
             ranking_sigma,
             lambdarank_truncation_level,
+            lambdarank_normalize,
             None, // init_artifact_bytes
             None, // num_classes
             None, // custom_objective_fn
@@ -1055,7 +1060,8 @@ pub(crate) fn train_regression_artifact(
     poisson_max_delta_step=None,
     quantile_alpha=None,
     ranking_sigma=1.0,
-    lambdarank_truncation_level=None::<usize>
+    lambdarank_truncation_level=None::<usize>,
+    lambdarank_normalize=false
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_dense(
@@ -1107,6 +1113,7 @@ pub(crate) fn train_regression_artifact_dense(
     quantile_alpha: Option<f32>,
     ranking_sigma: f32,
     lambdarank_truncation_level: Option<usize>,
+    lambdarank_normalize: bool,
 ) -> PyResult<Vec<u8>> {
     let parsed_morph_config = morph_config
         .map(|d| parse_morph_config_from_pydict(&d))
@@ -1205,6 +1212,7 @@ pub(crate) fn train_regression_artifact_dense(
             objective_name.as_str(),
             ranking_sigma,
             lambdarank_truncation_level,
+            lambdarank_normalize,
             None, // init_artifact_bytes
             None, // num_classes
             None, // custom_objective_fn
@@ -1289,7 +1297,8 @@ pub(crate) fn train_regression_artifact_dense(
     poisson_max_delta_step=None,
     quantile_alpha=None,
     ranking_sigma=1.0,
-    lambdarank_truncation_level=None::<usize>
+    lambdarank_truncation_level=None::<usize>,
+    lambdarank_normalize=false
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_with_summary(
@@ -1366,6 +1375,7 @@ pub(crate) fn train_regression_artifact_with_summary(
     quantile_alpha: Option<f32>,
     ranking_sigma: f32,
     lambdarank_truncation_level: Option<usize>,
+    lambdarank_normalize: bool,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -1489,6 +1499,7 @@ pub(crate) fn train_regression_artifact_with_summary(
             objective_name.as_str(),
             ranking_sigma,
             lambdarank_truncation_level,
+            lambdarank_normalize,
             init_artifact_bytes.as_deref(),
             num_classes,
             custom_objective_fn,
@@ -1576,7 +1587,8 @@ pub(crate) fn train_regression_artifact_with_summary(
     poisson_max_delta_step=None,
     quantile_alpha=None,
     ranking_sigma=1.0,
-    lambdarank_truncation_level=None::<usize>
+    lambdarank_truncation_level=None::<usize>,
+    lambdarank_normalize=false
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_dense_with_summary(
@@ -1656,6 +1668,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
     quantile_alpha: Option<f32>,
     ranking_sigma: f32,
     lambdarank_truncation_level: Option<usize>,
+    lambdarank_normalize: bool,
 ) -> PyResult<NativeTrainingResult> {
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
@@ -1760,6 +1773,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
             objective_name.as_str(),
             ranking_sigma,
             lambdarank_truncation_level,
+            lambdarank_normalize,
             init_artifact_bytes.as_deref(),
             num_classes,
             custom_objective_fn,
@@ -1862,7 +1876,8 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> PyResult<Vec<f32>> {
     poisson_max_delta_step=None,
     quantile_alpha=None,
     ranking_sigma=1.0,
-    lambdarank_truncation_level=None::<usize>
+    lambdarank_truncation_level=None::<usize>,
+    lambdarank_normalize=false
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
@@ -1942,6 +1957,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
     quantile_alpha: Option<f32>,
     ranking_sigma: f32,
     lambdarank_truncation_level: Option<usize>,
+    lambdarank_normalize: bool,
 ) -> PyResult<NativeTrainingResult> {
     let values = bytes_to_f32_vec(values_bytes)?;
     let targets = bytes_to_f32_vec(targets_bytes)?;
@@ -2050,6 +2066,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
             objective_name.as_str(),
             ranking_sigma,
             lambdarank_truncation_level,
+            lambdarank_normalize,
             init_artifact_bytes.as_deref(),
             num_classes,
             custom_objective_fn,

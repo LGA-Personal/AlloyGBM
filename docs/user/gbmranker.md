@@ -60,6 +60,10 @@ These do not use the query `group` for their gradient (it is still required by
   - For `"rank:ndcg"`, score only LambdaMART pairs where at least one document
     is currently ranked in the top-k positions for its query. `None` preserves
     all-pairs behavior.
+- `lambdarank_normalize: bool = False`
+  - For `"rank:ndcg"`, apply per-query LambdaMART lambda normalization. This
+    can help with unbalanced query groups. `False` preserves the original
+    unnormalized objective.
 
 ### Inherited
 
@@ -244,8 +248,9 @@ strategy:
   factor neutralization (v0.10.6+: `neutralization=` +
   `factor_exposures=` for all three modes — `pre_target`,
   `per_round_gradient`, `split_penalty`),
-  `ranking_sigma` for joint `rank:pairwise` / `rank:ndcg` objectives and
-  `lambdarank_truncation_level` for joint `rank:ndcg`,
+  `ranking_sigma` for joint `rank:pairwise` / `rank:ndcg` objectives,
+  `lambdarank_truncation_level` for joint `rank:ndcg`, and
+  `lambdarank_normalize` for joint `rank:ndcg`,
   and the built-in `squared_error` / `queryrmse` / `rank:pairwise` /
   `rank:ndcg` / `rank:xendcg` objectives. The joint trainer has
   reached full feature parity with the single-output path.
@@ -272,6 +277,7 @@ strategy:
 | `dart_sample_type` | str | `"uniform"` | `"uniform"` or `"weighted"` dropout (DART). |
 | `ranking_sigma` | float | `1.0` | Sigmoid sharpness for joint `rank:pairwise` and `rank:ndcg` objectives. |
 | `lambdarank_truncation_level` | int \| None | `None` | Top-k pair truncation for joint `rank:ndcg`. |
+| `lambdarank_normalize` | bool | `False` | Per-query lambda normalization for joint `rank:ndcg`. |
 | `categorical_feature_indices` | list[int] | `[]` | Column indices to treat as native categorical. |
 | `max_cat_threshold` | int | `0` | Max categories for Fisher-sort splits (0 = disabled). |
 | `leaf_solver` | str | `"standard"` | `"standard"` or `"dro"` (v0.10.5+). When `"dro"`, applies Wasserstein-DRO leaf shrinkage. |

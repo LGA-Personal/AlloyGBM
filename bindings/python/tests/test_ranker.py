@@ -208,24 +208,37 @@ class GBMRankerSerializationTests(unittest.TestCase):
     def test_lambdarank_truncation_level_param_roundtrip(self) -> None:
         import inspect
 
-        ranker = GBMRanker(lambdarank_truncation_level=3)
+        ranker = GBMRanker(lambdarank_truncation_level=3, lambdarank_normalize=True)
 
         self.assertEqual(ranker.lambdarank_truncation_level, 3)
+        self.assertTrue(ranker.lambdarank_normalize)
         self.assertEqual(ranker.get_params()["lambdarank_truncation_level"], 3)
+        self.assertTrue(ranker.get_params()["lambdarank_normalize"])
         self.assertIn(
             "lambdarank_truncation_level",
             inspect.signature(GBMRanker.__init__).parameters,
         )
+        self.assertIn(
+            "lambdarank_normalize",
+            inspect.signature(GBMRanker.__init__).parameters,
+        )
         self.assertIn("lambdarank_truncation_level=3", repr(ranker))
+        self.assertIn("lambdarank_normalize=True", repr(ranker))
 
         ranker.set_params(lambdarank_truncation_level=None)
         self.assertIsNone(ranker.lambdarank_truncation_level)
+        ranker.set_params(lambdarank_normalize=False)
+        self.assertFalse(ranker.lambdarank_normalize)
 
     def test_lambdarank_truncation_level_validation(self) -> None:
         for invalid in (0, -1, 1.5, float("inf")):
             with self.subTest(invalid=invalid):
                 with self.assertRaisesRegex(ValueError, "lambdarank_truncation_level"):
                     GBMRanker(lambdarank_truncation_level=invalid)
+        for invalid in (0, 1, "yes"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "lambdarank_normalize"):
+                    GBMRanker(lambdarank_normalize=invalid)
 
     def test_ranking_sigma_validation(self) -> None:
         for invalid in (0.0, -1.0, float("inf")):
@@ -274,6 +287,22 @@ class GBMRankerSerializationTests(unittest.TestCase):
         top2 = GBMRanker(**common, lambdarank_truncation_level=2).fit(X, y, group=group)
 
         diff = np.abs(np.asarray(full.predict(X)) - np.asarray(top2.predict(X)))
+        self.assertGreater(float(diff.mean()), 1e-6)
+
+    def test_lambdarank_normalize_changes_ndcg_fit(self) -> None:
+        X, y, group = _make_ranking_dataset(n_queries=8, docs_per_query=6, seed=11)
+        common = dict(
+            ranking_objective="rank:ndcg",
+            n_estimators=8,
+            learning_rate=0.2,
+            max_depth=3,
+            training_policy="manual",
+            seed=11,
+        )
+        unnormalized = GBMRanker(**common).fit(X, y, group=group)
+        normalized = GBMRanker(**common, lambdarank_normalize=True).fit(X, y, group=group)
+
+        diff = np.abs(np.asarray(unnormalized.predict(X)) - np.asarray(normalized.predict(X)))
         self.assertGreater(float(diff.mean()), 1e-6)
 
 

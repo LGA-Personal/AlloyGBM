@@ -35,6 +35,7 @@ pub enum JointObjective {
     RankNdcgWithOptions {
         sigma: f32,
         truncation_level: Option<usize>,
+        normalize_lambdas: bool,
     },
     RankXendcg,
     Poisson {
@@ -55,13 +56,14 @@ impl JointObjective {
     }
 
     pub fn parse_with_ranking_sigma(name: &str, ranking_sigma: f32) -> Result<Self, String> {
-        Self::parse_with_ranking_options(name, ranking_sigma, None)
+        Self::parse_with_ranking_options(name, ranking_sigma, None, false)
     }
 
     pub fn parse_with_ranking_options(
         name: &str,
         ranking_sigma: f32,
         lambdarank_truncation_level: Option<usize>,
+        lambdarank_normalize: bool,
     ) -> Result<Self, String> {
         let sigma = validate_joint_ranking_sigma(ranking_sigma)?;
         validate_joint_lambdarank_truncation_level(lambdarank_truncation_level)?;
@@ -70,15 +72,20 @@ impl JointObjective {
             "queryrmse" => Ok(Self::QueryRmse),
             "rank:pairwise" if sigma == 1.0 => Ok(Self::RankPairwise),
             "rank:pairwise" => Ok(Self::RankPairwiseWithSigma { sigma }),
-            "rank:ndcg" if sigma == 1.0 && lambdarank_truncation_level.is_none() => {
+            "rank:ndcg"
+                if sigma == 1.0
+                    && lambdarank_truncation_level.is_none()
+                    && !lambdarank_normalize =>
+            {
                 Ok(Self::RankNdcg)
             }
-            "rank:ndcg" if lambdarank_truncation_level.is_none() => {
+            "rank:ndcg" if lambdarank_truncation_level.is_none() && !lambdarank_normalize => {
                 Ok(Self::RankNdcgWithSigma { sigma })
             }
             "rank:ndcg" => Ok(Self::RankNdcgWithOptions {
                 sigma,
                 truncation_level: lambdarank_truncation_level,
+                normalize_lambdas: lambdarank_normalize,
             }),
             "rank:xendcg" => Ok(Self::RankXendcg),
             "poisson" => Ok(Self::Poisson {
@@ -215,13 +222,15 @@ impl JointObjective {
             Self::RankNdcgWithOptions {
                 sigma,
                 truncation_level,
+                normalize_lambdas,
             } => {
                 let group_ids = group
                     .ok_or_else(|| "rank:ndcg objective requires group identifiers".to_string())?;
-                let obj = LambdaMARTObjective::new_with_sigma_and_truncation(
+                let obj = LambdaMARTObjective::new_with_options(
                     group_ids,
                     *sigma,
                     *truncation_level,
+                    *normalize_lambdas,
                 )
                 .map_err(|e| e.to_string())?;
                 obj.compute_gradients(predictions, targets, None)

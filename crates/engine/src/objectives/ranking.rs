@@ -456,6 +456,7 @@ pub struct LambdaMARTObjective {
     pub validation_group_boundaries: Option<Vec<usize>>,
     pub sigma: f32,
     pub truncation_level: Option<usize>,
+    pub normalize_lambdas: bool,
 }
 
 impl LambdaMARTObjective {
@@ -465,11 +466,12 @@ impl LambdaMARTObjective {
             validation_group_boundaries: None,
             sigma: 1.0,
             truncation_level: None,
+            normalize_lambdas: false,
         }
     }
 
     pub fn new_with_sigma(group_id: &[u32], sigma: f32) -> EngineResult<Self> {
-        Self::new_with_sigma_and_truncation(group_id, sigma, None)
+        Self::new_with_options(group_id, sigma, None, false)
     }
 
     pub fn new_with_sigma_and_truncation(
@@ -477,11 +479,21 @@ impl LambdaMARTObjective {
         sigma: f32,
         truncation_level: Option<usize>,
     ) -> EngineResult<Self> {
+        Self::new_with_options(group_id, sigma, truncation_level, false)
+    }
+
+    pub fn new_with_options(
+        group_id: &[u32],
+        sigma: f32,
+        truncation_level: Option<usize>,
+        normalize_lambdas: bool,
+    ) -> EngineResult<Self> {
         Ok(Self {
             group_boundaries: compute_group_boundaries(group_id),
             validation_group_boundaries: None,
             sigma: validate_ranking_sigma(sigma)?,
             truncation_level: validate_lambdarank_truncation_level(truncation_level)?,
+            normalize_lambdas,
         })
     }
 
@@ -530,6 +542,12 @@ impl LambdaMARTObjective {
                 }
                 let gains = gains_for_labels(group_labels);
                 let discounts = discounts_for_ranks(&ranks);
+                let score_span = self
+                    .normalize_lambdas
+                    .then(|| (order.first(), order.last()))
+                    .and_then(|(first, last)| first.zip(last))
+                    .map(|(&best, &worst)| (group_scores[best], group_scores[worst]));
+                let mut sum_lambdas = 0.0_f32;
                 for i in 0..group_len {
                     for j in (i + 1)..group_len {
                         if group_labels[i] == group_labels[j] {
@@ -548,15 +566,30 @@ impl LambdaMARTObjective {
                         }
                         let s = group_scores[hi] - group_scores[lo];
                         let rho = sigmoid(-self.sigma * s);
-                        let delta_ndcg =
+                        let mut delta_ndcg =
                             ((gains[hi] - gains[lo]) * (discounts[hi] - discounts[lo])).abs()
                                 * inv_idcg;
+                        if let Some((best_score, worst_score)) = score_span
+                            && best_score != worst_score
+                        {
+                            delta_ndcg /= 0.01 + s.abs();
+                        }
                         let lambda = -self.sigma * rho * delta_ndcg;
                         let hess_pair = self.sigma * self.sigma * rho * (1.0 - rho) * delta_ndcg;
                         group_grads[hi] += lambda;
                         group_grads[lo] -= lambda;
                         group_hesses[hi] += hess_pair;
                         group_hesses[lo] += hess_pair;
+                        if self.normalize_lambdas {
+                            sum_lambdas += -2.0 * lambda;
+                        }
+                    }
+                }
+                if self.normalize_lambdas && sum_lambdas > 0.0 {
+                    let norm_factor = (1.0 + sum_lambdas).log2() / sum_lambdas;
+                    for idx in 0..group_len {
+                        group_grads[idx] *= norm_factor;
+                        group_hesses[idx] *= norm_factor;
                     }
                 }
                 GroupGradientChunk {
@@ -1331,6 +1364,50 @@ mod tests {
             .iter()
             .zip(expected_hesses.iter())
             .map(|(&grad, &hess)| GradientPair::new(grad, hess).unwrap())
+            .collect::<Vec<_>>();
+
+        assert_gradient_pairs_close(&actual, &expected, 1e-6);
+    }
+
+    #[test]
+    fn lambdamart_normalization_scales_query_lambdas() {
+        let group_id = [0, 0, 0];
+        let predictions = [2.0, 0.5, -1.0];
+        let targets = [2.0, 0.0, 1.0];
+        let objective = LambdaMARTObjective::new_with_options(&group_id, 1.0, None, true).unwrap();
+
+        let actual = objective
+            .compute_gradients(&predictions, &targets, None)
+            .unwrap();
+
+        let idcg = ideal_dcg(&targets, targets.len());
+        let inv_idcg = 1.0 / idcg;
+        let gains = gains_for_labels(&targets);
+        let discounts = discounts_for_ranks(&[0, 1, 2]);
+        let mut expected_grads = [0.0_f32; 3];
+        let mut expected_hesses = [0.0_f32; 3];
+        let mut sum_lambdas = 0.0_f32;
+        for (hi, lo) in [(0_usize, 1_usize), (0, 2), (2, 1)] {
+            let delta_score = predictions[hi] - predictions[lo];
+            let rho = sigmoid(-delta_score);
+            let delta_ndcg = ((gains[hi] - gains[lo]) * (discounts[hi] - discounts[lo])).abs()
+                * inv_idcg
+                / (0.01 + delta_score.abs());
+            let lambda = -rho * delta_ndcg;
+            let hess_pair = rho * (1.0 - rho) * delta_ndcg;
+            expected_grads[hi] += lambda;
+            expected_grads[lo] -= lambda;
+            expected_hesses[hi] += hess_pair;
+            expected_hesses[lo] += hess_pair;
+            sum_lambdas += -2.0 * lambda;
+        }
+        let norm_factor = (1.0 + sum_lambdas).log2() / sum_lambdas;
+        let expected = expected_grads
+            .iter()
+            .zip(expected_hesses.iter())
+            .map(|(&grad, &hess)| {
+                GradientPair::new(grad * norm_factor, hess * norm_factor).unwrap()
+            })
             .collect::<Vec<_>>();
 
         assert_gradient_pairs_close(&actual, &expected, 1e-6);

@@ -54,6 +54,9 @@ Parameters
 - ``lambdarank_truncation_level: int | None = None`` -- for ``"rank:ndcg"``,
   restrict LambdaMART gradients to pairs where at least one document is
   currently in the top-k positions for its query; ``None`` scores all pairs
+- ``lambdarank_normalize: bool = False`` -- for ``"rank:ndcg"``, apply
+  per-query LambdaMART lambda normalization; ``False`` preserves the original
+  unnormalized objective
 
 All other parameters are inherited from ``GBMRegressor``, including
 ``leaf_solver="dro"`` for robust scalar leaves, ``leaf_model="linear"`` for
