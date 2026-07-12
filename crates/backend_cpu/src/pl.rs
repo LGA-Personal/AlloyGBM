@@ -39,6 +39,7 @@ use alloygbm_engine::{LinearContext, SplitSelectionOptions};
 
 const XT_HX_CHUNKS: usize = MAX_PL_MATRIX_ENTRIES / 8;
 const _CHUNKS_DIVIDE_EVENLY: () = assert!(MAX_PL_MATRIX_ENTRIES.is_multiple_of(8));
+const MAX_PL_DIAGONAL_RATIO: f64 = 1_000_000.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct LinearLeafSolveParams {
@@ -140,11 +141,128 @@ fn diff_xtg(
     *dst = (bv - cv).to_array();
 }
 
+fn factor_regularized_pl_hessian(
+    xt_hx: &[f32; MAX_PL_MATRIX_ENTRIES],
+    d: usize,
+    l2_lambda: f32,
+) -> Option<[f64; MAX_PL_MATRIX_ENTRIES]> {
+    if d == 0 || d > MAX_PL_REGRESSORS || !l2_lambda.is_finite() {
+        return None;
+    }
+
+    let mut a = [0.0_f64; MAX_PL_MATRIX_ENTRIES];
+    let mut min_diagonal = f64::INFINITY;
+    let mut max_diagonal = 0.0_f64;
+
+    for j in 0..d {
+        for k in j..d {
+            let value = f64::from(xt_hx[pl_matrix_index(j, k)]);
+            if !value.is_finite() {
+                return None;
+            }
+            a[j * d + k] = value;
+            a[k * d + j] = value;
+        }
+        let diagonal = a[j * d + j] + f64::from(l2_lambda);
+        if !diagonal.is_finite() || diagonal <= 0.0 {
+            return None;
+        }
+        a[j * d + j] = diagonal;
+        min_diagonal = min_diagonal.min(diagonal);
+        max_diagonal = max_diagonal.max(diagonal);
+    }
+
+    if max_diagonal / min_diagonal > MAX_PL_DIAGONAL_RATIO {
+        return None;
+    }
+
+    let mut l = [0.0_f64; MAX_PL_MATRIX_ENTRIES];
+    for i in 0..d {
+        for j in 0..=i {
+            let mut sum = a[i * d + j];
+            for k in 0..j {
+                sum -= l[i * d + k] * l[j * d + k];
+            }
+            if i == j {
+                if !sum.is_finite() || sum <= 0.0 {
+                    return None;
+                }
+                l[i * d + j] = sum.sqrt();
+            } else {
+                let pivot = l[j * d + j];
+                if !pivot.is_finite() || pivot <= 0.0 {
+                    return None;
+                }
+                let value = sum / pivot;
+                if !value.is_finite() {
+                    return None;
+                }
+                l[i * d + j] = value;
+            }
+        }
+    }
+
+    Some(l)
+}
+
+fn forward_solve_pl(
+    l: &[f64; MAX_PL_MATRIX_ENTRIES],
+    rhs: &[f32; MAX_PL_REGRESSORS],
+    d: usize,
+) -> Option<[f64; MAX_PL_REGRESSORS]> {
+    let mut y = [0.0_f64; MAX_PL_REGRESSORS];
+    for i in 0..d {
+        let mut sum = f64::from(rhs[i]);
+        if !sum.is_finite() {
+            return None;
+        }
+        for k in 0..i {
+            sum -= l[i * d + k] * y[k];
+        }
+        let pivot = l[i * d + i];
+        if !sum.is_finite() || !pivot.is_finite() || pivot <= 0.0 {
+            return None;
+        }
+        y[i] = sum / pivot;
+        if !y[i].is_finite() {
+            return None;
+        }
+    }
+    Some(y)
+}
+
+fn backward_solve_pl(
+    l: &[f64; MAX_PL_MATRIX_ENTRIES],
+    rhs: &[f64; MAX_PL_REGRESSORS],
+    d: usize,
+) -> Option<[f64; MAX_PL_REGRESSORS]> {
+    let mut alpha = [0.0_f64; MAX_PL_REGRESSORS];
+    for i in (0..d).rev() {
+        let mut sum = rhs[i];
+        if !sum.is_finite() {
+            return None;
+        }
+        for k in (i + 1)..d {
+            sum -= l[k * d + i] * alpha[k];
+        }
+        let pivot = l[i * d + i];
+        if !sum.is_finite() || !pivot.is_finite() || pivot <= 0.0 {
+            return None;
+        }
+        alpha[i] = sum / pivot;
+        if !alpha[i].is_finite() {
+            return None;
+        }
+    }
+    Some(alpha)
+}
+
 /// Compute the PL gain for one side of a split:
 /// `0.5 · (Xᵀg)ᵀ (XᵀHX + λI)⁻¹ (Xᵀg)`.
 ///
 /// Uses a compact Cholesky factorisation on the `d×d` regularised Hessian
-/// matrix.  Returns `0.0` if `d == 0` or the matrix is not positive definite.
+/// matrix. Returns `0.0` when the system is invalid, ill-conditioned, or
+/// cannot produce a finite result.
 pub fn compute_pl_gain_one_side(
     xtg: &[f32; MAX_PL_REGRESSORS],
     xt_hx: &[f32; MAX_PL_MATRIX_ENTRIES],
@@ -155,50 +273,28 @@ pub fn compute_pl_gain_one_side(
         return 0.0;
     }
 
-    // Build the full d×d regularised Hessian matrix A = XᵀHX + λI (row-major).
-    // Only the upper triangle is stored in xt_hx; mirror it to fill the lower.
-    let mut a = [0.0_f32; MAX_PL_REGRESSORS * MAX_PL_REGRESSORS];
-    for j in 0..d {
-        for k in j..d {
-            let val = xt_hx[pl_matrix_index(j, k)];
-            a[j * d + k] = val;
-            a[k * d + j] = val;
-        }
-        a[j * d + j] += l2_lambda;
-    }
+    let l = match factor_regularized_pl_hessian(xt_hx, d, l2_lambda) {
+        Some(l) => l,
+        None => return 0.0,
+    };
+    let y = match forward_solve_pl(&l, xtg, d) {
+        Some(y) => y,
+        None => return 0.0,
+    };
 
-    // Cholesky factorisation: A = L Lᵀ, stored in the lower triangle of `l`.
-    let mut l = [0.0_f32; MAX_PL_REGRESSORS * MAX_PL_REGRESSORS];
-    for i in 0..d {
-        for j in 0..=i {
-            let mut s = a[i * d + j];
-            for k in 0..j {
-                s -= l[i * d + k] * l[j * d + k];
-            }
-            if i == j {
-                if s <= 0.0 {
-                    return 0.0; // Not positive definite — skip this candidate.
-                }
-                l[i * d + j] = s.sqrt();
-            } else {
-                l[i * d + j] = s / l[j * d + j];
-            }
-        }
+    let sq = y[..d].iter().fold(0.0_f64, |acc, &yi| acc + yi * yi);
+    if !sq.is_finite() {
+        return 0.0;
     }
-
-    // Forward substitution: solve L y = xtg.
-    let mut y = [0.0_f32; MAX_PL_REGRESSORS];
-    for i in 0..d {
-        let mut s = xtg[i];
-        for k in 0..i {
-            s -= l[i * d + k] * y[k];
-        }
-        y[i] = s / l[i * d + i];
+    let gain = 0.5_f64 * sq;
+    if !gain.is_finite() {
+        return 0.0;
     }
-
-    // gain = 0.5 · yᵀy  (since xᵀ A⁻¹ x = |L⁻¹ x|² = |y|²)
-    let sq: f32 = y[..d].iter().map(|&yi| yi * yi).sum();
-    0.5 * sq
+    let gain_f32 = gain as f32;
+    if !gain_f32.is_finite() {
+        return 0.0;
+    }
+    gain_f32
 }
 
 /// Find the best numeric split for a single feature using the PL gain criterion.
@@ -524,8 +620,9 @@ pub fn leaf_linear_stats_for_split(
 
 /// Solve for PL leaf weights: `α* = -(XᵀHX + λI)⁻¹ Xᵀg`.
 ///
-/// Returns the weight vector `[α_0, …, α_{d-1}]`.  On Cholesky failure
-/// (non-PD matrix) returns all-zero (falls back to scalar leaf).
+/// Returns the weight vector `[α_0, …, α_{d-1}]`. On an invalid,
+/// ill-conditioned, or non-finite system, returns all-zero (falls back to a
+/// scalar leaf).
 fn cholesky_solve_alpha(
     xtg: &[f32; MAX_PL_REGRESSORS],
     xt_hx: &[f32; MAX_PL_MATRIX_ENTRIES],
@@ -536,57 +633,33 @@ fn cholesky_solve_alpha(
         return [0.0; MAX_PL_REGRESSORS];
     }
 
-    // Build full d×d matrix A = XᵀHX + λI.
-    let mut a = [0.0_f32; MAX_PL_REGRESSORS * MAX_PL_REGRESSORS];
-    for j in 0..d {
-        for k in j..d {
-            let val = xt_hx[pl_matrix_index(j, k)];
-            a[j * d + k] = val;
-            a[k * d + j] = val;
+    let l = match factor_regularized_pl_hessian(xt_hx, d, l2_lambda) {
+        Some(l) => l,
+        None => return [0.0; MAX_PL_REGRESSORS],
+    };
+    let mut y = match forward_solve_pl(&l, xtg, d) {
+        Some(y) => y,
+        None => return [0.0; MAX_PL_REGRESSORS],
+    };
+    for yi in &mut y[..d] {
+        if !yi.is_finite() {
+            return [0.0; MAX_PL_REGRESSORS];
         }
-        a[j * d + j] += l2_lambda;
+        *yi = -*yi;
     }
-
-    // Cholesky: A = L Lᵀ.
-    let mut l = [0.0_f32; MAX_PL_REGRESSORS * MAX_PL_REGRESSORS];
+    let alpha = match backward_solve_pl(&l, &y, d) {
+        Some(alpha) => alpha,
+        None => return [0.0; MAX_PL_REGRESSORS],
+    };
+    let mut alpha_f32 = [0.0_f32; MAX_PL_REGRESSORS];
     for i in 0..d {
-        for j in 0..=i {
-            let mut s = a[i * d + j];
-            for k in 0..j {
-                s -= l[i * d + k] * l[j * d + k];
-            }
-            if i == j {
-                if s <= 0.0 {
-                    return [0.0; MAX_PL_REGRESSORS]; // Fallback to scalar.
-                }
-                l[i * d + j] = s.sqrt();
-            } else {
-                l[i * d + j] = s / l[j * d + j];
-            }
+        let value = alpha[i] as f32;
+        if !value.is_finite() {
+            return [0.0; MAX_PL_REGRESSORS];
         }
+        alpha_f32[i] = value;
     }
-
-    // Forward substitution: L y = -Xᵀg.
-    let mut y = [0.0_f32; MAX_PL_REGRESSORS];
-    for i in 0..d {
-        let mut s = -xtg[i]; // Note: solving for -Xᵀg (gives α* = -(XᵀHX+λI)⁻¹ Xᵀg)
-        for k in 0..i {
-            s -= l[i * d + k] * y[k];
-        }
-        y[i] = s / l[i * d + i];
-    }
-
-    // Backward substitution: Lᵀ α = y.
-    let mut alpha = [0.0_f32; MAX_PL_REGRESSORS];
-    for i in (0..d).rev() {
-        let mut s = y[i];
-        for k in (i + 1)..d {
-            s -= l[k * d + i] * alpha[k];
-        }
-        alpha[i] = s / l[i * d + i];
-    }
-
-    alpha
+    alpha_f32
 }
 
 /// Build a [`LinearLeaf`] from the accumulated statistics for one side of a split.
@@ -903,6 +976,38 @@ mod tests {
         assert!(
             (gain - expected).abs() < 1e-5,
             "gain={gain} expected={expected}"
+        );
+    }
+
+    #[test]
+    fn gain_and_linear_weights_reject_ill_conditioned_positive_definite_matrix() {
+        let mut xtg = [0.0_f32; MAX_PL_REGRESSORS];
+        let mut xt_hx = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
+        xtg[..2].copy_from_slice(&[1.0, -1.0]);
+        xt_hx[pl_matrix_index(0, 0)] = 1.0;
+        xt_hx[pl_matrix_index(1, 1)] = 1_000_001.0;
+
+        assert_eq!(compute_pl_gain_one_side(&xtg, &xt_hx, 2, 0.0), 0.0);
+        assert_eq!(
+            cholesky_solve_alpha(&xtg, &xt_hx, 2, 0.0),
+            [0.0; MAX_PL_REGRESSORS]
+        );
+    }
+
+    #[test]
+    fn gain_is_finite_for_large_well_conditioned_statistics() {
+        let mut xtg = [0.0_f32; MAX_PL_REGRESSORS];
+        let mut xt_hx = [0.0_f32; MAX_PL_MATRIX_ENTRIES];
+        xtg[..2].copy_from_slice(&[1.0e10, -1.0e10]);
+        xt_hx[pl_matrix_index(0, 0)] = 1.0e20;
+        xt_hx[pl_matrix_index(1, 1)] = 1.0e20;
+
+        let gain = compute_pl_gain_one_side(&xtg, &xt_hx, 2, 0.0);
+        assert!((gain - 1.0).abs() < 1.0e-5, "gain={gain}");
+        assert!(
+            cholesky_solve_alpha(&xtg, &xt_hx, 2, 0.0)[..2]
+                .iter()
+                .all(|weight| weight.is_finite())
         );
     }
 
