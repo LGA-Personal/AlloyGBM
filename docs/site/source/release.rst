@@ -52,7 +52,9 @@ model behavior and artifact compatibility. There is no artifact format change.
 
 - **Ranking sigma knob.** ``GBMRanker`` now accepts ``ranking_sigma`` to tune
   the sigmoid sharpness used by ``rank:pairwise``, ``rank:ndcg``, and
-  ``yetirank``. The default remains ``1.0``.
+  ``yetirank``. ``MultiLabelGBMRanker(multi_label_mode="joint")`` forwards the
+  same knob to joint ``rank:pairwise`` and ``rank:ndcg`` objectives. The
+  default remains ``1.0``.
 
 What's new in 0.12.9
 --------------------
