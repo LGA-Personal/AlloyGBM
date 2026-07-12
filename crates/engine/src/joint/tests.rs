@@ -596,6 +596,29 @@ fn joint_ranking_sigma_scales_pairwise_and_ndcg_gradients() {
 }
 
 #[test]
+fn joint_lambdarank_truncation_level_limits_ndcg_pairs() {
+    let predictions = vec![3.0_f32, 2.0, 1.0];
+    let targets = vec![0.0_f32, 2.0, 1.0];
+    let group_id = vec![0_u32, 0, 0];
+
+    let full = JointObjective::RankNdcg
+        .compute_gradients(&predictions, &targets, Some(&group_id))
+        .expect("full gradients");
+    let truncated = JointObjective::RankNdcgWithOptions {
+        sigma: 1.0,
+        truncation_level: Some(1),
+    }
+    .compute_gradients(&predictions, &targets, Some(&group_id))
+    .expect("truncated gradients");
+
+    assert_ne!(full, truncated);
+    assert!(
+        truncated[1].hess < full[1].hess,
+        "doc outside top-1 should lose the pair against doc 2"
+    );
+}
+
+#[test]
 fn joint_end_to_end_fit_predict_roundtrip_through_artifact() {
     // 8 rows, 1 feature with bins 0/4, 2 outputs.
     // Output 0 wants left=-1, right=+1; output 1 wants left=+0.5, right=-0.5

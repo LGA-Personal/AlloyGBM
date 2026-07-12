@@ -413,6 +413,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
         "poisson_max_delta_step",
         "quantile_alpha",
         "ranking_sigma",
+        "lambdarank_truncation_level",
     })
 
     @staticmethod
@@ -765,6 +766,11 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
             ic_list: list[list[int]] = []
         else:
             ic_list = [[int(x) for x in group] for group in ic_raw]
+        joint_lambdarank_truncation_level = (
+            GBMRanker._validate_lambdarank_truncation_level(
+                kw.get("lambdarank_truncation_level")
+            )
+        )
         artifact, baselines, _fc, rounds_completed = _native.train_joint_multi_label_ranker(
             x_flat,
             row_count,
@@ -862,6 +868,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
                 float(kw["quantile_alpha"]) if "quantile_alpha" in kw else None
             ),
             ranking_sigma=float(kw.get("ranking_sigma", 1.0)),
+            lambdarank_truncation_level=joint_lambdarank_truncation_level,
         )
 
         self._joint_artifact_bytes = bytes(artifact)

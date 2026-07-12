@@ -50,11 +50,12 @@ model behavior and artifact compatibility. There is no artifact format change.
   duplicate known-field rejection, and backward-compatible omitted objectives /
   class counts. The binary artifact header and section layout are unchanged.
 
-- **Ranking sigma knob.** ``GBMRanker`` now accepts ``ranking_sigma`` to tune
+- **Ranking controls.** ``GBMRanker`` now accepts ``ranking_sigma`` to tune
   the sigmoid sharpness used by ``rank:pairwise``, ``rank:ndcg``, and
-  ``yetirank``. ``MultiLabelGBMRanker(multi_label_mode="joint")`` forwards the
-  same knob to joint ``rank:pairwise`` and ``rank:ndcg`` objectives. The
-  default remains ``1.0``.
+  ``yetirank``. It also accepts ``lambdarank_truncation_level`` for
+  top-k-limited ``rank:ndcg`` pair generation. ``MultiLabelGBMRanker``
+  forwards both knobs in ``multi_label_mode="joint"``. Defaults preserve
+  previous behavior.
 
 What's new in 0.12.9
 --------------------

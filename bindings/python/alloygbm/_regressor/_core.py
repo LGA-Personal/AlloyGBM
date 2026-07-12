@@ -1574,7 +1574,10 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
 
         input_adaptation_seconds = time.perf_counter() - fit_start
         ranking_sigma_kwargs = (
-            {"ranking_sigma": self.ranking_sigma}
+            {
+                "ranking_sigma": self.ranking_sigma,
+                "lambdarank_truncation_level": self.lambdarank_truncation_level,
+            }
             if hasattr(self, "ranking_sigma")
             else {}
         )
@@ -2145,7 +2148,10 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
 
         fit_start = time.perf_counter()
         ranking_sigma_kwargs = (
-            {"ranking_sigma": self.ranking_sigma}
+            {
+                "ranking_sigma": self.ranking_sigma,
+                "lambdarank_truncation_level": self.lambdarank_truncation_level,
+            }
             if hasattr(self, "ranking_sigma")
             else {}
         )

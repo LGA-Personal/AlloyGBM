@@ -25,14 +25,28 @@ pub enum JointObjective {
     SquaredError,
     QueryRmse,
     RankPairwise,
-    RankPairwiseWithSigma { sigma: f32 },
+    RankPairwiseWithSigma {
+        sigma: f32,
+    },
     RankNdcg,
-    RankNdcgWithSigma { sigma: f32 },
+    RankNdcgWithSigma {
+        sigma: f32,
+    },
+    RankNdcgWithOptions {
+        sigma: f32,
+        truncation_level: Option<usize>,
+    },
     RankXendcg,
-    Poisson { max_delta_step: f32 },
+    Poisson {
+        max_delta_step: f32,
+    },
     Gamma,
-    Tweedie { variance_power: f32 },
-    Quantile { alpha: f32 },
+    Tweedie {
+        variance_power: f32,
+    },
+    Quantile {
+        alpha: f32,
+    },
 }
 
 impl JointObjective {
@@ -41,14 +55,31 @@ impl JointObjective {
     }
 
     pub fn parse_with_ranking_sigma(name: &str, ranking_sigma: f32) -> Result<Self, String> {
+        Self::parse_with_ranking_options(name, ranking_sigma, None)
+    }
+
+    pub fn parse_with_ranking_options(
+        name: &str,
+        ranking_sigma: f32,
+        lambdarank_truncation_level: Option<usize>,
+    ) -> Result<Self, String> {
         let sigma = validate_joint_ranking_sigma(ranking_sigma)?;
+        validate_joint_lambdarank_truncation_level(lambdarank_truncation_level)?;
         match name {
             "squared_error" => Ok(Self::SquaredError),
             "queryrmse" => Ok(Self::QueryRmse),
             "rank:pairwise" if sigma == 1.0 => Ok(Self::RankPairwise),
             "rank:pairwise" => Ok(Self::RankPairwiseWithSigma { sigma }),
-            "rank:ndcg" if sigma == 1.0 => Ok(Self::RankNdcg),
-            "rank:ndcg" => Ok(Self::RankNdcgWithSigma { sigma }),
+            "rank:ndcg" if sigma == 1.0 && lambdarank_truncation_level.is_none() => {
+                Ok(Self::RankNdcg)
+            }
+            "rank:ndcg" if lambdarank_truncation_level.is_none() => {
+                Ok(Self::RankNdcgWithSigma { sigma })
+            }
+            "rank:ndcg" => Ok(Self::RankNdcgWithOptions {
+                sigma,
+                truncation_level: lambdarank_truncation_level,
+            }),
             "rank:xendcg" => Ok(Self::RankXendcg),
             "poisson" => Ok(Self::Poisson {
                 max_delta_step: 0.7,
@@ -73,6 +104,7 @@ impl JointObjective {
                 | Self::RankPairwiseWithSigma { .. }
                 | Self::RankNdcg
                 | Self::RankNdcgWithSigma { .. }
+                | Self::RankNdcgWithOptions { .. }
                 | Self::RankXendcg
         )
     }
@@ -82,7 +114,9 @@ impl JointObjective {
             Self::SquaredError => "squared_error",
             Self::QueryRmse => "queryrmse",
             Self::RankPairwise | Self::RankPairwiseWithSigma { .. } => "rank:pairwise",
-            Self::RankNdcg | Self::RankNdcgWithSigma { .. } => "rank:ndcg",
+            Self::RankNdcg | Self::RankNdcgWithSigma { .. } | Self::RankNdcgWithOptions { .. } => {
+                "rank:ndcg"
+            }
             Self::RankXendcg => "rank:xendcg",
             Self::Poisson { .. } => "poisson",
             Self::Gamma => "gamma",
@@ -178,6 +212,21 @@ impl JointObjective {
                 obj.compute_gradients(predictions, targets, None)
                     .map_err(|e| e.to_string())
             }
+            Self::RankNdcgWithOptions {
+                sigma,
+                truncation_level,
+            } => {
+                let group_ids = group
+                    .ok_or_else(|| "rank:ndcg objective requires group identifiers".to_string())?;
+                let obj = LambdaMARTObjective::new_with_sigma_and_truncation(
+                    group_ids,
+                    *sigma,
+                    *truncation_level,
+                )
+                .map_err(|e| e.to_string())?;
+                obj.compute_gradients(predictions, targets, None)
+                    .map_err(|e| e.to_string())
+            }
             Self::RankXendcg => {
                 let group_ids = group.ok_or_else(|| {
                     "rank:xendcg objective requires group identifiers".to_string()
@@ -215,6 +264,13 @@ fn validate_joint_ranking_sigma(sigma: f32) -> Result<f32, String> {
         return Err("ranking_sigma must be finite and > 0".to_string());
     }
     Ok(sigma)
+}
+
+fn validate_joint_lambdarank_truncation_level(level: Option<usize>) -> Result<(), String> {
+    if matches!(level, Some(0)) {
+        return Err("lambdarank_truncation_level must be None or >= 1".to_string());
+    }
+    Ok(())
 }
 
 /// Summary returned by [`fit_joint_multi_output`].
