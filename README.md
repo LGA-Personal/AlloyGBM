@@ -268,8 +268,10 @@ match" error.
 ### Piecewise-Linear Leaves
 
 Set `leaf_model="linear"` on any estimator to replace scalar leaves with small
-closed-form linear models (`f_s(x) = b_s + Σ α_j x_j`). Weights are solved via
-ridge regression `α* = -(XᵀHX + λI)⁻¹ Xᵀg` regularised by `lambda_l2`. This
+closed-form linear models (`f_s(x) = b_s + Σ α_j z_j`). The regressors are the
+distinct numeric split-path features, capped at eight per leaf, and `z_j` is
+standardized during fitting. Weights are solved via ridge regression
+`α* = -(XᵀHX + λI)⁻¹ Xᵀg` regularised by `lambda_l2`. This
 typically converges in fewer rounds on data with linear within-node residual
 structure (e.g. California Housing), at a 2–8× per-round training overhead.
 
@@ -292,6 +294,12 @@ with `training_mode="morph"`. As of v0.7.1, SHAP works on `leaf_model="linear"`
 artifacts as a best-effort interventional decomposition (exact additivity is
 relaxed for continuous-feature PL artifacts; see
 [docs/limitations.md](docs/limitations.md)).
+
+Missing regressor values contribute the standardized mean-imputed value
+(`z_j = 0`) to a linear term; the tree split still learns its own missing-value
+direction. Internal standardization makes `lambda_l2` much less sensitive to
+raw feature units, but `lambda_l2 >= 0.01` remains a sensible default for
+noisy or long fits.
 
 ### Time-Aware Validation
 
