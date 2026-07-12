@@ -188,6 +188,10 @@ Additional lighter-weight scripts target specific features:
 - `benchmarks/pl_trees_benchmark.py` — piecewise-linear-leaf
   convergence-curve and λ-sweep analysis across regression, classification,
   and ranking scenarios. Report at `docs/benchmarks/pl_trees_v1.md`.
+- `benchmarks/dro_robustness.py` — deterministic clean-holdout comparison of
+  standard and DRO leaves after clean versus outlier-contaminated training.
+  It includes scalar and joint shared-tree paths. Report at
+  `docs/benchmarks/dro_robustness_v1.md`.
 
 ```bash
 # Quick MorphBoost comparison report
@@ -195,6 +199,9 @@ python3 benchmarks/morph_report.py
 
 # MorphBoost component ablation
 python3 benchmarks/morph_ablation.py
+
+# DRO clean-holdout robustness report (two-seed smoke profile)
+python3 benchmarks/dro_robustness.py --quick
 
 # Numerai benchmark (slow; downloads data on first run)
 python3 benchmarks/numerai_benchmark.py --feature-set small \

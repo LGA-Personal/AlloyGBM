@@ -181,8 +181,11 @@ DRO leaf solver
 - ``leaf_solver: str = "standard"`` -- ``"standard"`` keeps the usual scalar
   Newton leaf update; ``"dro"`` enables a fast robust scalar update that
   penalizes weak leaf signal by within-leaf gradient dispersion.
-- ``dro_radius: float = 0.05`` -- non-negative penalty scale. ``0.0`` preserves
-  standard-leaf predictions while recording DRO metadata.
+- ``dro_radius: float = 0.05`` -- non-negative per-standard-error multiplier.
+  For a leaf with ``n`` rows and within-leaf gradient standard deviation
+  ``sigma(g)``, it adds ``dro_radius * sqrt(n) * sigma(g)`` to the soft-threshold
+  on the gradient sum (or ``dro_radius * sigma(g) / sqrt(n)`` on the gradient
+  mean). ``0.0`` preserves standard-leaf predictions while recording DRO metadata.
 - ``dro_metric: str = "wasserstein"`` -- the only accepted value today. It
   denotes a Wasserstein-inspired closed-form robust counterpart over leaf
   gradient uncertainty.
@@ -191,7 +194,16 @@ This is not a full Wasserstein optimizer over raw feature/target
 distributions. Inference speed is unchanged because robust scalar leaf values
 are stored directly in the artifact. ``leaf_solver="dro"`` works on all three
 estimators, composes with ``training_mode="morph"``, and requires
-``leaf_model="constant"``.
+``leaf_model="constant"``. The radius remains objective- and target-scale
+dependent and adds to ``lambda_l1`` in the same threshold, so ``0.05`` is a
+baseline to tune on validation data rather than a portable robustness guarantee.
+See ``docs/benchmarks/dro_robustness_v1.md`` for the deterministic default-radius
+clean-holdout result.
+
+``MultiLabelGBMRanker(multi_label_mode="joint")`` accepts the same DRO
+parameters, but applies them only to final per-output leaf values. Its shared
+histogram does not retain the gradient-square statistics needed for robust split
+gain, so joint split selection remains standard.
 
 Factor-neutral boosting
 -----------------------

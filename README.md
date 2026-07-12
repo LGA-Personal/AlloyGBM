@@ -148,9 +148,12 @@ identical parameter semantics.
 ### DRO Leaf Solver (Robust Scalar Leaves)
 
 Set `leaf_solver="dro"` to use a fast Wasserstein-inspired robust Newton update
-for scalar leaves. The solver penalizes each candidate leaf by within-leaf
-gradient dispersion, reducing sensitivity to noisy or weak leaf signals while
-keeping prediction speed identical to standard constant leaves.
+for scalar leaves. It soft-thresholds each leaf gradient sum by
+`lambda_l1 + dro_radius * sqrt(n) * sigma(g)`, where `sigma(g)` is the
+within-leaf gradient standard deviation. On the gradient-mean scale,
+`dro_radius` is therefore a per-standard-error (`sigma(g) / sqrt(n)`) multiplier.
+Inference remains identical in cost to standard constant leaves because the
+resulting leaf values are stored in the artifact.
 
 ```python
 from alloygbm import GBMRegressor
@@ -171,7 +174,11 @@ model.fit(X_train, y_train)
 `GBMRanker`, and composes with `training_mode="morph"`. It requires
 `leaf_model="constant"`; piecewise-linear leaves still use the standard PL
 solver. `dro_radius=0.0` preserves standard-leaf predictions while retaining
-DRO metadata in the artifact.
+DRO metadata in the artifact. The radius is still objective- and target-scale
+dependent, and adds to `lambda_l1` in the same threshold, so tune it on a
+validation split rather than treating `0.05` as a transferable robustness
+guarantee. The deterministic [DRO benchmark](docs/benchmarks/dro_robustness_v1.md)
+records the current default-radius evidence, including the joint shared-tree path.
 
 ### Factor-Neutral Boosting
 

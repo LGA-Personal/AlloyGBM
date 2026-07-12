@@ -20,6 +20,8 @@ Current benchmark entry points:
 - cross-library runner guide: `benchmarks/README.md`
 - MorphBoost-focused harnesses (`morph_report.py`, `morph_ablation.py`,
   `numerai_benchmark.py`): see `benchmarks/README.md`
+- deterministic DRO clean-holdout harness: `benchmarks/dro_robustness.py`
+  with report at [dro_robustness_v1.md](dro_robustness_v1.md)
 - comparative inspiration and follow-ups: `docs/plans/perpetual_inspiration_for_alloygbm.md`
 - older benchmark writeups: `docs/archive/benchmarks/`
 
