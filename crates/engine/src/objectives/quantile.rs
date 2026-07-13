@@ -220,36 +220,143 @@ pub(crate) fn weighted_quantile(
         return Ok(vals[k]);
     }
 
+    let weights = weights.expect("weighted branch requires weights");
     let mut pairs = Vec::with_capacity(values.len());
     let mut total_weight = 0.0_f64;
-    for i in 0..values.len() {
-        let w = weights.map_or(1.0, |ws| ws[i]);
-        if !w.is_finite() || w <= 0.0 {
+    for (value, weight) in values.iter().copied().zip(weights.iter().copied()) {
+        if !weight.is_finite() || weight <= 0.0 {
             return Err(EngineError::ContractViolation(
                 "sample weights must be finite and > 0".to_string(),
             ));
         }
-        if !values[i].is_finite() {
+        if !value.is_finite() {
             return Err(EngineError::ContractViolation(
                 "values must be finite".to_string(),
             ));
         }
-        pairs.push((values[i], w));
-        total_weight += w as f64;
+        pairs.push(WeightedValue { value, weight });
+        total_weight += weight as f64;
     }
 
-    pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
-
     let threshold = alpha as f64 * total_weight;
-    let mut cum_weight = 0.0_f64;
-    for &(val, weight) in &pairs {
-        cum_weight += weight as f64;
-        if cum_weight >= threshold {
-            return Ok(val);
+    #[cfg(not(test))]
+    let selected = weighted_quantile_select(&mut pairs, threshold);
+    #[cfg(test)]
+    let selected = weighted_quantile_select(&mut pairs, threshold, &mut 0);
+    Ok(selected)
+}
+
+#[derive(Clone, Copy)]
+struct WeightedValue {
+    value: f32,
+    weight: f32,
+}
+
+/// Select the first value whose cumulative positive weight reaches `threshold`.
+///
+/// Each loop selects a median-by-count pivot, then partitions the active range
+/// into values less than, equal to, and greater than that pivot while summing
+/// the first two weight groups. The next active range is at most half as large,
+/// making the partition work linear in the leaf size.
+fn weighted_quantile_select(
+    pairs: &mut [WeightedValue],
+    mut threshold: f64,
+    #[cfg(test)] partitioned_items: &mut usize,
+) -> f32 {
+    let mut start = 0;
+    let mut end = pairs.len();
+
+    loop {
+        let active_len = end - start;
+        debug_assert!(active_len > 0);
+        let pivot_index = start + active_len / 2;
+        pairs[start..end].select_nth_unstable_by(active_len / 2, |left, right| {
+            left.value.total_cmp(&right.value)
+        });
+        let pivot_value = pairs[pivot_index].value;
+
+        #[cfg(test)]
+        {
+            *partitioned_items += active_len;
+        }
+        let (less_end, equal_end, less_weight, equal_weight) =
+            partition_weighted_values(pairs, start, end, pivot_value);
+
+        if less_weight > 0.0 && threshold <= less_weight {
+            end = less_end;
+        } else if threshold <= less_weight + equal_weight || equal_end == end {
+            return pivot_value;
+        } else {
+            threshold -= less_weight + equal_weight;
+            start = equal_end;
+        }
+    }
+}
+
+fn partition_weighted_values(
+    pairs: &mut [WeightedValue],
+    start: usize,
+    end: usize,
+    pivot_value: f32,
+) -> (usize, usize, f64, f64) {
+    let mut less_end = start;
+    let mut scan = start;
+    let mut greater_start = end;
+    let mut less_weight = 0.0_f64;
+    let mut equal_weight = 0.0_f64;
+
+    while scan < greater_start {
+        match pairs[scan].value.total_cmp(&pivot_value) {
+            Ordering::Less => {
+                less_weight += pairs[scan].weight as f64;
+                pairs.swap(less_end, scan);
+                less_end += 1;
+                scan += 1;
+            }
+            Ordering::Equal => {
+                equal_weight += pairs[scan].weight as f64;
+                scan += 1;
+            }
+            Ordering::Greater => {
+                greater_start -= 1;
+                pairs.swap(scan, greater_start);
+            }
         }
     }
 
-    Ok(pairs.last().unwrap().0)
+    (less_end, greater_start, less_weight, equal_weight)
+}
+
+#[cfg(test)]
+fn weighted_quantile_with_partition_count_for_test(
+    values: &[f32],
+    weights: &[f32],
+    alpha: f32,
+) -> EngineResult<(f32, usize)> {
+    let mut pairs = Vec::with_capacity(values.len());
+    let mut total_weight = 0.0_f64;
+    for (value, weight) in values.iter().copied().zip(weights.iter().copied()) {
+        if !value.is_finite() {
+            return Err(EngineError::ContractViolation(
+                "values must be finite".to_string(),
+            ));
+        }
+        if !weight.is_finite() || weight <= 0.0 {
+            return Err(EngineError::ContractViolation(
+                "sample weights must be finite and > 0".to_string(),
+            ));
+        }
+        pairs.push(WeightedValue { value, weight });
+        total_weight += weight as f64;
+    }
+
+    let mut partitioned_items = 0;
+    let selected = weighted_quantile_select(
+        &mut pairs,
+        alpha as f64 * total_weight,
+        &mut partitioned_items,
+    );
+    Ok((selected, partitioned_items))
 }
 
 /// Resolves group boundaries for a given data length.
@@ -275,4 +382,77 @@ pub(crate) fn resolve_boundaries_for_len(
     }
     // Fallback: treat entire slice as a single group.
     vec![0, data_len]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{weighted_quantile, weighted_quantile_with_partition_count_for_test};
+
+    fn sorted_weighted_quantile_reference(values: &[f32], weights: &[f32], alpha: f32) -> f32 {
+        let mut pairs: Vec<(f32, f32)> = values
+            .iter()
+            .copied()
+            .zip(weights.iter().copied())
+            .collect();
+        pairs.sort_by(|left, right| left.0.total_cmp(&right.0));
+        let threshold = alpha as f64 * weights.iter().map(|&weight| weight as f64).sum::<f64>();
+        let mut cumulative_weight = 0.0_f64;
+        for (value, weight) in pairs {
+            cumulative_weight += weight as f64;
+            if cumulative_weight >= threshold {
+                return value;
+            }
+        }
+        values.iter().copied().max_by(f32::total_cmp).unwrap()
+    }
+
+    #[test]
+    fn weighted_quantile_matches_sorted_reference_at_ties_and_weight_boundaries() {
+        let values = [-4.0, -4.0, -1.0, 0.0, 0.0, 3.0, 8.0];
+        let weights = [0.25, 2.75, 1.0, 4.0, 0.5, 3.0, 0.5];
+        let total_weight: f32 = weights.iter().sum();
+        let alphas = [
+            0.0,
+            0.25 / total_weight,
+            3.0 / total_weight,
+            4.0 / total_weight,
+            8.5 / total_weight,
+            0.99,
+            1.0,
+            1.25,
+            f32::NAN,
+        ];
+
+        for alpha in alphas {
+            assert_eq!(
+                weighted_quantile(&values, Some(&weights), alpha).unwrap(),
+                sorted_weighted_quantile_reference(&values, &weights, alpha),
+                "alpha={alpha}"
+            );
+        }
+    }
+
+    #[test]
+    fn weighted_quantile_partitions_large_leaves_in_linear_work() {
+        let values: Vec<f32> = (0..65_537)
+            .map(|index| ((index as u64 * 48_271) % 65_537) as f32)
+            .collect();
+        let weights: Vec<f32> = (0..values.len())
+            .map(|index| 1.0 + (index % 11) as f32)
+            .collect();
+        let alpha = 0.93;
+
+        let (selected, partitioned_items) =
+            weighted_quantile_with_partition_count_for_test(&values, &weights, alpha).unwrap();
+
+        assert_eq!(
+            selected,
+            weighted_quantile(&values, Some(&weights), alpha).unwrap()
+        );
+        assert!(
+            partitioned_items < values.len() * 2,
+            "weighted selection partitioned {partitioned_items} items for {} inputs",
+            values.len()
+        );
+    }
 }
