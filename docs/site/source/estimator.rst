@@ -13,9 +13,7 @@ Core parameters
 - ``n_estimators: int = 6``
   - requested boosting rounds
 - ``row_subsample: float = 1.0``
-  - per-round row sampling fraction; ignored when
-    ``boosting_mode="goss"`` (GOSS uses gradient-based sampling
-    instead).
+  - per-round row sampling fraction; ignored when ``boosting_mode="goss"`` (GOSS uses gradient-based sampling instead).
 - ``col_subsample: float = 1.0``
   - per-round feature sampling fraction
 - ``quantile_alpha: float = 0.5``

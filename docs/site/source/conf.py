@@ -26,6 +26,25 @@ extensions = [
 autosummary_generate = True
 autodoc_mock_imports = ["alloygbm._alloygbm"]
 
+# scikit-learn dynamically attaches ``set_*_request`` metadata-routing methods
+# to every estimator subclass. Their docstrings reference sklearn's own
+# glossary terms/labels (``meta-estimator``, ``metadata_routing``) that don't
+# resolve in our docs, producing spurious warnings that block ``sphinx -W``.
+# Exclude those inherited sklearn plumbing methods from autodoc output.
+autodoc_default_options = {
+    "exclude-members": ",".join(
+        [
+            "set_fit_request",
+            "set_predict_request",
+            "set_score_request",
+            "set_partial_fit_request",
+            "set_transform_request",
+            "set_inverse_transform_request",
+            "set_output",
+        ]
+    ),
+}
+
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3/", None),
     "sphinx": ("https://www.sphinx-doc.org/en/master/", None),
