@@ -188,6 +188,13 @@ Wasserstein-inspired gradient-uncertainty counterpart. It is not a full
 raw-distribution Wasserstein DRO guarantee. `leaf_solver="dro"` requires
 `leaf_model="constant"` and composes with `training_mode="morph"`.
 
+For a leaf with `n` rows, `dro_radius` is a per-standard-error multiplier: the
+training update adds `dro_radius * sqrt(n) * sigma(g)` to the gradient-sum
+soft-threshold, or `dro_radius * sigma(g) / sqrt(n)` on the gradient-mean
+scale. Its useful range depends on the objective, target scale, and `lambda_l1`,
+so tune it on validation data. The default-radius clean-holdout result is kept in
+the [DRO robustness benchmark](../benchmarks/dro_robustness_v1.md).
+
 ## Piecewise-Linear Leaves (Optional)
 
 `leaf_model="linear"` replaces scalar leaves with closed-form linear models

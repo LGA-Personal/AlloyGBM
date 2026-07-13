@@ -203,8 +203,11 @@ provided, they are merged.
   - `"dro"`: a fast robust scalar update that penalizes weak leaf signal by
     within-leaf gradient dispersion before solving the leaf value.
 - `dro_radius: float = 0.05`
-  - Non-negative radius scaling the gradient-uncertainty penalty. `0.0`
-    preserves standard-leaf predictions while recording DRO metadata.
+  - Non-negative per-standard-error multiplier. For a leaf with `n` rows and
+    within-leaf gradient standard deviation `sigma(g)`, the solver adds
+    `dro_radius * sqrt(n) * sigma(g)` to the soft-threshold on the gradient
+    sum (equivalently `dro_radius * sigma(g) / sqrt(n)` on the gradient mean).
+    `0.0` preserves standard-leaf predictions while recording DRO metadata.
 - `dro_metric: str = "wasserstein"`
   - Accepted value for v0.7.4. It denotes the Wasserstein-inspired
     closed-form robust counterpart over leaf gradient uncertainty.
@@ -215,10 +218,22 @@ guaranteed live-market stability. It modifies split gain and final scalar leaf
 values consistently using the same robust effective gradient. Inference speed is
 unchanged because leaf values are baked into the artifact.
 
+`dro_radius` is dimensionless relative to the within-leaf gradient dispersion,
+but its practical effect remains objective- and target-scale dependent and it
+adds directly to `lambda_l1` in the same threshold. Treat `0.05` as a baseline,
+not a portable default: tune it on a validation split that reflects the expected
+label noise. The deterministic [DRO robustness benchmark](../benchmarks/dro_robustness_v1.md)
+records clean-holdout results for the default radius.
+
 `leaf_solver="dro"` works on `GBMRegressor`, `GBMClassifier`, and `GBMRanker`,
 and composes with `training_mode="morph"`. It requires
 `leaf_model="constant"` in v0.7.4; `leaf_model="linear"` continues to use the PL
 leaf solver.
+
+`MultiLabelGBMRanker(multi_label_mode="joint")` accepts the same DRO parameters,
+but applies them only when final per-output leaf values are computed. Its shared
+histogram does not retain the gradient-square statistics needed for robust split
+gain, so joint split selection remains standard.
 
 ## Factor-Neutral Boosting
 

@@ -161,6 +161,19 @@ high-``n_estimators`` runs:
        lr_warmup_frac=0.1,
    )
 
+DRO leaf solver (optional)
+--------------------------
+
+``leaf_solver="dro"`` applies a Wasserstein-inspired robust update to constant
+leaves. ``dro_radius`` is a per-standard-error multiplier: for a leaf with
+``n`` rows, its threshold contribution is ``dro_radius * sqrt(n) * sigma(g)``
+on the gradient sum, or ``dro_radius * sigma(g) / sqrt(n)`` on the gradient
+mean. It remains objective- and target-scale dependent and interacts directly
+with ``lambda_l1``, so tune it on validation data. The default is ``0.05`` and
+``0.0`` preserves standard-leaf predictions. See
+``docs/benchmarks/dro_robustness_v1.md`` for the deterministic clean-holdout
+benchmark. The solver requires ``leaf_model="constant"``.
+
 Validation and early stopping
 -----------------------------
 
