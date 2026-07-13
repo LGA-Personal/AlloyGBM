@@ -330,6 +330,7 @@ def poisson_deviance(y_true: object, y_pred: object) -> float:
 
     For ``y >= 0`` and ``mu > 0``:
         ``D = 2 · mean_i [ y_i · log(y_i / mu_i) − (y_i − mu_i) ]``
+
     With the convention ``y log(y/mu) → 0`` when ``y → 0``.
 
     Inputs are coerced via the same path as other metrics, so numpy arrays,
@@ -387,10 +388,12 @@ def tweedie_deviance(
 ) -> float:
     """Mean Tweedie deviance for ``variance_power p ∈ (1, 2)``.
 
-    For ``y >= 0``, ``mu > 0``, ``1 < p < 2``:
-        ``D = 2 · mean_i [ y^(2-p) / ((1-p)(2-p))
-                          − y · mu^(1-p) / (1-p)
-                          + mu^(2-p) / (2-p) ]``
+    For ``y >= 0``, ``mu > 0``, ``1 < p < 2``::
+
+        D = 2 · mean_i [ y^(2-p) / ((1-p)(2-p))
+                        − y · mu^(1-p) / (1-p)
+                        + mu^(2-p) / (2-p) ]
+
     The ``y^(2-p)`` term is 0 when ``y == 0``.
 
     Inputs are coerced via the same path as other metrics, so numpy arrays,

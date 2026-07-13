@@ -44,7 +44,7 @@ The native runtime info object confirms that the extension module loaded
 correctly.
 
 Platform policy for ``0.12.10``
------------------------------
+-------------------------------
 
 - officially targeted wheel platforms:
   - macOS ``arm64``

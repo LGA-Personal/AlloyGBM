@@ -42,6 +42,7 @@ class GBMRanker(GBMRegressor):
 
     Trains a ranking model using one of several learning-to-rank objectives.
     All ranking objectives require ``group`` to be provided in :meth:`fit`.
+    Parameters not listed below are identical to :class:`GBMRegressor`.
 
     Parameters
     ----------
@@ -70,7 +71,6 @@ class GBMRanker(GBMRegressor):
         For ``"rank:ndcg"``, apply per-query LambdaMART lambda normalization.
         This can improve behavior on unbalanced query groups. ``False``
         preserves the original unnormalized objective.
-    Other parameters are identical to :class:`GBMRegressor`.
     """
 
     def __init__(

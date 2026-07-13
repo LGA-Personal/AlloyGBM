@@ -1084,7 +1084,8 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
     def save_model(self, path: str) -> None:
         """Serialise a multi-label ranker into a self-describing bundle.
 
-        Format v2 (v0.10.1+):
+        Format v2 (v0.10.1+)::
+
             magic[4]      = b"MLRK"
             version[u32]  = 2
             mode[u32]     = 0 (independent) | 1 (joint)
