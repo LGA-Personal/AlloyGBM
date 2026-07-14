@@ -8,6 +8,66 @@ The `0.12.10` release is a patch optimization release: it speeds existing piecew
 
 **No artifact format change.** Test counts: 452 cargo + 657 pytest.
 
+## Deferred Architectural Backlog
+
+The following findings from the [July 2026 core review](../reviews/2026-07-02-v0.12.10-core-resolutions.md)
+are individually **roadmap-deferred**. They are not small review-resolution follow-ups: each
+changes a hot-path ownership model, a stored representation, or an input contract. A future
+project must first meet the stated re-entry condition, then carry its own design, benchmark, and
+regression plan.
+
+### SoA histogram layout
+
+**Decision: roadmap-deferred.** Keeping histogram statistics in a structure-of-arrays layout
+through split selection would change the shared CPU histogram contract used by scalar, DRO,
+piecewise-linear, categorical, and factor-neutral paths. It should be evaluated together with
+histogram and partition-buffer ownership rather than as a local allocation cleanup. Re-open it
+only after profiles on representative dense, wide, and sparse-like workloads attribute a material
+share of fit time or allocation traffic to histogram materialization, and after the proposed
+layout has an equivalence plan for every gain strategy.
+
+### Node-level parallelism
+
+**Decision: roadmap-deferred.** Parallelizing nodes within a level requires explicit ownership of
+histograms and row partitions, a nested-Rayon policy, and a deterministic reduction/order for
+otherwise tied split candidates. It must also preserve the sibling-subtraction optimization. Re-open
+it after the histogram/partition ownership model is settled and a profile shows that small nodes
+are underutilizing the available CPU despite the existing per-node parallel kernels.
+
+### Duplicate row-major bin storage
+
+**Decision: roadmap-deferred.** Removing the unconditional row-major copy could materially reduce
+fit memory, but the column-major histogram path and row-first kernels have shape-dependent
+tradeoffs. Re-open it with peak-memory and throughput measurements across narrow/deep and
+wide/shallow fits, then choose and benchmark either a column-only representation or a documented
+layout-selection heuristic. The change must preserve categorical and missing-value bin semantics.
+
+### Compact predictor nodes
+
+**Decision: roadmap-deferred.** The current slot bound prevents sparse heap-indexed trees from
+causing unbounded load allocations, but a compact node array is a separate predictor-representation
+project. It must keep artifact compatibility while loading scalar, linear-leaf, native-categorical,
+DART, multiclass, and SHAP-relevant state into a compact representation with side tables for rare
+data. Re-open it with a loader-translation design, memory and batch-prediction baselines, and
+artifact/prediction parity coverage.
+
+### Exclusive Feature Bundling (EFB)
+
+**Decision: roadmap-deferred.** EFB needs a sparse-input and feature-conflict contract, plus
+well-defined behavior for feature names, importances, constraints, categorical columns, persistence,
+and explanation output. The dense-first public surface does not currently provide that contract.
+Re-open it after selecting the supported sparse input forms and collecting sparse or one-hot
+workloads that establish a measurable training or memory payoff against the current binning path.
+
+### Approximate quantile sketches
+
+**Decision: roadmap-deferred.** The NumPy sorted-values path and quantile binning default already
+cover the current correctness and ordinary-size performance need. A sketch is justified only for
+very large matrices, where it needs an explicit error budget, deterministic merge behavior, a
+fallback threshold, and comparison against the exact-sort baseline. Re-open it with those semantics
+and large-N accuracy, memory, and preprocessing benchmarks; it is not a substitute for the
+existing exact quantile path.
+
 ## What Shipped In v0.12.10
 
 ### Optimization pass
