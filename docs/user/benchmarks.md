@@ -26,6 +26,9 @@ A focused MorphBoost-vs-peers comparison script is also provided at
 `benchmarks/numerai_benchmark.py`. A dedicated PL-trees benchmark with
 convergence-curve and λ-sweep analysis lives at `benchmarks/pl_trees_benchmark.py`;
 results are reported in `docs/benchmarks/pl_trees_v1.md`.
+A deterministic large-query LambdaMART and skewed-count GLM harness lives at
+`benchmarks/objective_benchmark.py`; its current results are recorded in
+`docs/benchmarks/objective_benchmark_v1.md`.
 
 The comparative runner also emits a temporal/panel stability table for scenarios
 whose names include `time`, `temporal`, or `panel`. It reports mean score,

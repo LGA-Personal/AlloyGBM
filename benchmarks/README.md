@@ -193,6 +193,9 @@ Additional lighter-weight scripts target specific features:
   standard and DRO leaves after clean versus outlier-contaminated training.
   It includes scalar and joint shared-tree paths. Report at
   `docs/benchmarks/dro_robustness_v1.md`.
+- `benchmarks/objective_benchmark.py` — deterministic held-out validation for
+  large-query LambdaMART truncation and skewed-count Poisson/Gamma/Tweedie
+  objectives. Report at `docs/benchmarks/objective_benchmark_v1.md`.
 
 ```bash
 # Quick MorphBoost comparison report
@@ -206,6 +209,9 @@ python3 benchmarks/morph_ablation.py --quick --gate
 
 # DRO clean-holdout robustness report (two-seed smoke profile)
 python3 benchmarks/dro_robustness.py --quick
+
+# Large-query LambdaMART and skewed-count GLM validation
+python3 benchmarks/objective_benchmark.py --gate
 
 # Numerai benchmark (slow; downloads data on first run)
 python3 benchmarks/numerai_benchmark.py --feature-set small \

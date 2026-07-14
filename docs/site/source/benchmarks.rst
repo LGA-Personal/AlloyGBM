@@ -34,6 +34,9 @@ harnesses are also provided:
 - ``benchmarks/pl_trees_benchmark.py`` -- piecewise-linear-leaf
   convergence-curve and λ-sweep analysis. Report at
   ``docs/benchmarks/pl_trees_v1.md``.
+- ``benchmarks/objective_benchmark.py`` -- deterministic large-query
+  LambdaMART and skewed-count GLM validation. Report at
+  ``docs/benchmarks/objective_benchmark_v1.md``.
 
 The suite spans three task types with the following scenarios:
 
