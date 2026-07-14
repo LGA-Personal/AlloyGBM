@@ -67,7 +67,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         morph_rate: float = 0.1,
         evolution_pressure: float = 0.2,
         morph_warmup_iters: int = 5,
-        info_score_weight: float = 0.3,
+        info_score_weight: float = 0.1,
         depth_penalty_base: float = 0.9,
         balance_penalty: bool = True,
         lr_schedule: str = "constant",

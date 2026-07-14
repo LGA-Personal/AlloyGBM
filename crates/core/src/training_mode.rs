@@ -21,7 +21,7 @@ pub struct MorphConfig {
     pub evolution_pressure: f32,
     /// Number of pure-gradient rounds before info-score blending kicks in.
     pub morph_warmup_iters: u32,
-    /// Blend weight on info component: gain = (1-w) * grad + w * info * tanh(t/20)
+    /// Maximum blend weight on the normalized information component.
     pub info_score_weight: f32,
     /// Base for leaf depth penalty: leaf *= depth_penalty_base ^ (depth/3)
     pub depth_penalty_base: f32,
@@ -37,7 +37,7 @@ impl Default for MorphConfig {
             morph_rate: 0.1,
             evolution_pressure: 0.2,
             morph_warmup_iters: 5,
-            info_score_weight: 0.3,
+            info_score_weight: 0.1,
             depth_penalty_base: 0.9,
             balance_penalty: true,
             lr_schedule: LrSchedule::Constant,
@@ -46,14 +46,14 @@ impl Default for MorphConfig {
 }
 
 /// Per-round constants for morph gain computation. Compute once per round (not per bin).
-/// Eliminates redundant `tanh`, `(1.0 - info_score_weight)`, and warmup-branch
+/// Eliminates redundant ramp, blend-coefficient, and warmup-branch
 /// computation in the inner per-bin gain loop.
 #[derive(Debug, Clone, Copy)]
 pub struct MorphPrecomputed {
     pub in_warmup: bool,
-    /// `tanh(iteration / 20)` — only meaningful post-warmup
+    /// Horizon-scaled information ramp — only meaningful post-warmup.
     pub morph_weight: f32,
-    /// `1.0 - info_score_weight` (post-warmup; 1.0 in warmup)
+    /// Complement of `info_score_coeff` (post-warmup; 1.0 in warmup)
     pub gradient_score_coeff: f32,
     /// `info_score_weight * morph_weight` (post-warmup; 0.0 in warmup)
     pub info_score_coeff: f32,
@@ -64,7 +64,12 @@ pub struct MorphPrecomputed {
 }
 
 impl MorphPrecomputed {
-    pub fn for_iteration(iteration: u32, cfg: &MorphConfig) -> Self {
+    /// Builds constants for one training round across the complete fit horizon.
+    ///
+    /// The ramp reaches `tanh(1)` one third into the fit and approaches one by
+    /// the final round. This keeps its shape proportional to `n_estimators`
+    /// instead of saturating after a fixed number of rounds.
+    pub fn for_iteration(iteration: u32, total_iterations: u32, cfg: &MorphConfig) -> Self {
         let in_warmup = iteration < cfg.morph_warmup_iters;
         if in_warmup {
             return Self {
@@ -76,12 +81,13 @@ impl MorphPrecomputed {
                 info_score_negligible: true,
             };
         }
-        let morph_weight = (iteration as f32 / 20.0).tanh();
+        let progress = iteration as f32 / total_iterations.max(1) as f32;
+        let morph_weight = (3.0 * progress).tanh();
         let info_score_coeff = cfg.info_score_weight * morph_weight;
         Self {
             in_warmup: false,
             morph_weight,
-            gradient_score_coeff: 1.0 - cfg.info_score_weight,
+            gradient_score_coeff: 1.0 - info_score_coeff,
             info_score_coeff,
             balance_penalty: cfg.balance_penalty,
             info_score_negligible: info_score_coeff.abs() < 1e-6,

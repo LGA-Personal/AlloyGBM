@@ -426,7 +426,7 @@ MorphBoost training mode. See :doc:`morphboost` for the full guide.
 - ``morph_rate: float = 0.1`` -- per-iteration leaf shrinkage rate.
 - ``evolution_pressure: float = 0.2`` -- EMA-driven gain shaping strength.
 - ``morph_warmup_iters: int = 5`` -- rounds before the morph blend engages.
-- ``info_score_weight: float = 0.3`` -- mixing weight for the
+- ``info_score_weight: float = 0.1`` -- maximum mixing weight for the
   information-theoretic gain term.
 - ``depth_penalty_base: float = 0.9`` -- depth-based leaf penalty base.
 - ``balance_penalty: bool = True`` -- whether to penalize imbalanced splits.

@@ -5,7 +5,7 @@ Toggles each morph component independently on 3 representative datasets and
 prints a markdown summary table.
 
 Usage::
-    python benchmarks/morph_ablation.py [--quick]
+    python benchmarks/morph_ablation.py [--quick] [--gate]
 """
 
 from __future__ import annotations
@@ -61,9 +61,6 @@ ABLATION_CONFIGS = {
     "morph_no_warmup": {"training_mode": "morph", "morph_warmup_iters": 0},
 }
 
-# balance_penalty is not yet a top-level Python param (it's in MorphConfig internals) — skip that variant
-
-
 # --- Metrics ---
 
 def _rmse(y_true, y_pred):
@@ -85,6 +82,49 @@ class Result:
     train_sec: float
 
 
+@dataclass(frozen=True)
+class GateResult:
+    dataset: str
+    passed: bool
+    detail: str
+
+
+def evaluate_calibration_gates(results: list[Result]) -> list[GateResult]:
+    """Compare calibrated MorphBoost with the auto-mode control.
+
+    The deterministic synthetic fixtures are a regression guard, not a claim
+    that MorphBoost must win every task. Gates reject non-finite output and a
+    large quality regression against the matching auto-mode run.
+    """
+    by_dataset = {r.dataset: {} for r in results}
+    for result in results:
+        by_dataset[result.dataset][result.config] = result
+
+    gates = []
+    for dataset, configs in sorted(by_dataset.items()):
+        baseline = configs.get("baseline_auto")
+        calibrated = configs.get("morph_full")
+        if baseline is None or calibrated is None:
+            gates.append(GateResult(dataset, False, "missing auto or calibrated MorphBoost result"))
+            continue
+        if not np.isfinite(baseline.metric) or not np.isfinite(calibrated.metric):
+            gates.append(GateResult(dataset, False, "non-finite A/B metric"))
+            continue
+
+        if calibrated.metric_name == "Accuracy":
+            passed = calibrated.metric >= baseline.metric - 0.08
+            detail = (
+                f"accuracy delta={calibrated.metric - baseline.metric:+.4f} "
+                "(limit -0.0800)"
+            )
+        else:
+            ratio = calibrated.metric / max(abs(baseline.metric), 1e-12)
+            passed = ratio <= 1.35
+            detail = f"error ratio={ratio:.3f} (limit 1.350)"
+        gates.append(GateResult(dataset, passed, detail))
+    return gates
+
+
 def run_ablation(quick: bool = False) -> list[Result]:
     from alloygbm import GBMClassifier, GBMRanker, GBMRegressor
 
@@ -95,8 +135,6 @@ def run_ablation(quick: bool = False) -> list[Result]:
     # Regression
     X_tr, y_tr, X_te, y_te = _regression_dataset(n=n)
     for name, kwargs in ABLATION_CONFIGS.items():
-        if "balance_penalty" in kwargs:
-            continue
         tm = kwargs.get("training_mode", "auto")
         extra = {k: v for k, v in kwargs.items() if k != "training_mode"}
         try:
@@ -113,8 +151,6 @@ def run_ablation(quick: bool = False) -> list[Result]:
     # Binary classification
     X_tr, y_tr, X_te, y_te = _binary_dataset(n=n)
     for name, kwargs in ABLATION_CONFIGS.items():
-        if "balance_penalty" in kwargs:
-            continue
         tm = kwargs.get("training_mode", "auto")
         extra = {k: v for k, v in kwargs.items() if k != "training_mode"}
         try:
@@ -132,8 +168,6 @@ def run_ablation(quick: bool = False) -> list[Result]:
     if not quick:
         X_tr, y_tr, g_tr, X_te, y_te, g_te = _ranking_dataset(n=n)
         for name, kwargs in ABLATION_CONFIGS.items():
-            if "balance_penalty" in kwargs:
-                continue
             tm = kwargs.get("training_mode", "auto")
             extra = {k: v for k, v in kwargs.items() if k != "training_mode"}
             try:
@@ -169,12 +203,31 @@ def print_markdown_table(results: list[Result]) -> None:
                 print(f"| {cfg} | {r.metric:.4f} | {r.train_sec:.2f} |")
 
 
+def print_gate_summary(gates: list[GateResult]) -> None:
+    print("\n### Calibrated MorphBoost A/B gates\n")
+    print("| Dataset | Result | Detail |")
+    print("|---|---|---|")
+    for gate in gates:
+        result = "pass" if gate.passed else "FAIL"
+        print(f"| {gate.dataset} | {result} | {gate.detail} |")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--quick", action="store_true", help="Use smaller datasets")
+    parser.add_argument(
+        "--gate",
+        action="store_true",
+        help="Fail when calibrated MorphBoost is non-finite or materially regresses versus auto",
+    )
     args = parser.parse_args()
     results = run_ablation(quick=args.quick)
     print_markdown_table(results)
+    if args.gate:
+        gates = evaluate_calibration_gates(results)
+        print_gate_summary(gates)
+        if not all(gate.passed for gate in gates):
+            raise SystemExit("calibrated MorphBoost A/B gate failed")
 
 
 if __name__ == "__main__":

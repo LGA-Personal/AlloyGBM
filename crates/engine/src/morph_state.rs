@@ -42,7 +42,7 @@ impl MorphState {
             grad_mean: stats.mean,
             grad_std: stats.std,
             config: self.config,
-            precomputed: MorphPrecomputed::for_iteration(iteration, &self.config),
+            precomputed: MorphPrecomputed::for_iteration(iteration, total, &self.config),
         }
     }
 

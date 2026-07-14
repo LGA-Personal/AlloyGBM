@@ -838,7 +838,7 @@ fn morph_config_default_matches_paper() {
     assert_eq!(cfg.morph_rate, 0.1);
     assert_eq!(cfg.evolution_pressure, 0.2);
     assert_eq!(cfg.morph_warmup_iters, 5);
-    assert_eq!(cfg.info_score_weight, 0.3);
+    assert_eq!(cfg.info_score_weight, 0.1);
     assert_eq!(cfg.depth_penalty_base, 0.9);
     assert!(cfg.balance_penalty);
     assert_eq!(cfg.lr_schedule, LrSchedule::Constant);

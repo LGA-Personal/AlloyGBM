@@ -181,7 +181,8 @@ Additional lighter-weight scripts target specific features:
   drop the flag for 300-round comparisons.
 - `benchmarks/morph_ablation.py` — toggles MorphBoost components individually
   (warmup, balance penalty, lr_schedule) on synthetic data to attribute
-  per-component impact.
+  per-component impact. `--gate` also compares calibrated MorphBoost with the
+  matching `auto` run and fails on non-finite output or a material regression.
 - `benchmarks/numerai_benchmark.py` — Numerai-tournament-style residualized
   regression at scale, evaluating numerai_corr, Sharpe, and MMC. Includes
   the `alloygbm_morph` and `alloygbm_morph_cosine` arms.
@@ -199,6 +200,9 @@ python3 benchmarks/morph_report.py
 
 # MorphBoost component ablation
 python3 benchmarks/morph_ablation.py
+
+# Fast calibrated-MorphBoost A/B regression gate
+python3 benchmarks/morph_ablation.py --quick --gate
 
 # DRO clean-holdout robustness report (two-seed smoke profile)
 python3 benchmarks/dro_robustness.py --quick
