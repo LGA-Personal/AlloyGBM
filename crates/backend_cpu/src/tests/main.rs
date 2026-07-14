@@ -505,7 +505,7 @@ fn morph_neutralization_split_penalty_reduces_factor_loaded_gain() {
         grad_mean: 0.0,
         grad_std: 1.0,
         config: cfg,
-        precomputed: MorphPrecomputed::for_iteration(10, &cfg),
+        precomputed: MorphPrecomputed::for_iteration(10, 100, &cfg),
     };
     let no_penalty = backend
         .best_split_morph(
@@ -1181,7 +1181,7 @@ fn best_split_morph_at_warmup_matches_best_split_with_options() {
         grad_mean: 0.0,
         grad_std: 1.0,
         config: cfg,
-        precomputed: MorphPrecomputed::for_iteration(0, &cfg),
+        precomputed: MorphPrecomputed::for_iteration(0, 100, &cfg),
     };
 
     let standard = backend
@@ -1250,7 +1250,7 @@ fn best_split_morph_at_warmup_matches_with_l1_l2_regularization() {
         grad_mean: 0.0,
         grad_std: 1.0,
         config: cfg,
-        precomputed: MorphPrecomputed::for_iteration(0, &cfg),
+        precomputed: MorphPrecomputed::for_iteration(0, 100, &cfg),
     };
 
     let standard = backend
@@ -1315,7 +1315,7 @@ fn best_split_morph_with_dro_uses_robust_gradient_gain_signal() {
         grad_mean: 0.0,
         grad_std: 1.0,
         config: cfg,
-        precomputed: MorphPrecomputed::for_iteration(10, &cfg),
+        precomputed: MorphPrecomputed::for_iteration(10, 100, &cfg),
     };
 
     let split = backend
@@ -1452,7 +1452,7 @@ fn best_split_morph_at_warmup_matches_categorical_split() {
         grad_mean: 0.0,
         grad_std: 1.0,
         config: cfg,
-        precomputed: MorphPrecomputed::for_iteration(0, &cfg),
+        precomputed: MorphPrecomputed::for_iteration(0, 100, &cfg),
     };
 
     let backend = CpuBackend;

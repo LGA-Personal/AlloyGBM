@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+from benchmarks.morph_ablation import Result, evaluate_calibration_gates
 from alloygbm._morph import (
     apply_interaction_importance_bonus,
     build_morph_config_dict,
@@ -50,8 +51,27 @@ def test_resolve_unknown_schedule_raises():
 def test_build_morph_config_dict_defaults():
     d = build_morph_config_dict()
     assert d["morph_rate"] == 0.1
+    assert d["info_score_weight"] == 0.1
     assert d["lr_schedule"] == "constant"
     assert d["balance_penalty"] is True
+
+
+def test_morph_ablation_gate_accepts_bounded_regression():
+    gates = evaluate_calibration_gates([
+        Result("baseline_auto", "regression", 1.0, "RMSE", 0.1),
+        Result("morph_full", "regression", 1.34, "RMSE", 0.1),
+    ])
+    assert len(gates) == 1
+    assert gates[0].passed
+
+
+def test_morph_ablation_gate_rejects_material_regression():
+    gates = evaluate_calibration_gates([
+        Result("baseline_auto", "binary_classification", 0.90, "Accuracy", 0.1),
+        Result("morph_full", "binary_classification", 0.81, "Accuracy", 0.1),
+    ])
+    assert len(gates) == 1
+    assert not gates[0].passed
 
 
 def test_apply_interaction_importance_bonus_passthrough():

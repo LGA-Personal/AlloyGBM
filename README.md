@@ -109,7 +109,7 @@ print("NDCG@10:", ndcg(y_test, scores, group=query_ids_test, k=10))
 
 MorphBoost is an opt-in training mode that blends the standard gradient gain
 with a normalized information-theoretic term. Across rounds, the blend ramps
-in via a `tanh(iter/20)` warmup, an EMA over per-class gradient statistics
+in via a horizon-scaled `tanh(3 * iter / n_estimators)` ramp, an EMA over per-class gradient statistics
 shapes split selection, and leaf magnitudes are scaled by a depth penalty
 and per-iteration shrinkage. See the
 [MorphBoost paper](https://arxiv.org/pdf/2511.13234) for the formulation.
@@ -124,7 +124,7 @@ model = GBMRegressor(
     learning_rate=0.05,
     training_mode="morph",      # opt in
     morph_rate=0.1,             # per-round leaf shrinkage
-    info_score_weight=0.3,      # blend weight for info-theoretic term
+    info_score_weight=0.1,      # maximum blend weight for info-theoretic term
     depth_penalty_base=0.9,     # multiplier per depth level
     balance_penalty=True,       # penalize highly imbalanced splits
     seed=7,

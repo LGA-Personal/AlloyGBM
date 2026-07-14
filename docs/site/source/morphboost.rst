@@ -27,13 +27,15 @@ For every candidate split, the gain is
 
 .. code-block:: text
 
-   gradient_score = standard XGBoost-style gradient gain
-   info_score     = normalized information-gain term over the partition
-   morph_weight   = tanh(iteration / 20)            # ramps in over training
+   raw_gradient_gain = standard XGBoost-style gradient gain
+   gradient_score     = raw_gradient_gain / ((parent_hessian + lambda_l2) * ema_grad_std**2)
+   info_score         = normalized information-gain term over the partition
+   morph_weight       = tanh(3 * iteration / n_estimators)  # horizon-scaled ramp
+   info_weight        = info_score_weight * morph_weight
 
-   gain = (1 - info_score_weight) * gradient_score
-        +  info_score_weight * info_score * morph_weight
-        +  optional balance penalty
+   gain = (1 - info_weight) * gradient_score
+        +  info_weight * info_score
+        +  optional post-warmup balance penalty
 
 In addition:
 
@@ -92,8 +94,9 @@ behavior.
      - Initial rounds for which the morph blend collapses to the pure
        gradient gain.
    * - ``info_score_weight``
-     - ``0.3``
-     - Mixing weight for the information-theoretic term post-warmup.
+     - ``0.1``
+     - Maximum mixing weight for the information-theoretic term. Its effective
+       value ramps from zero after warmup to this value over the fit horizon.
        Range ``[0.0, 1.0]``. ``0.0`` disables the info-theoretic term.
    * - ``depth_penalty_base``
      - ``0.9``

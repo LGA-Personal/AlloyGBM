@@ -466,17 +466,21 @@ fn morph_gain_per_output(
             }
             let g_mean = g_sum / count as f32;
             let g_norm = (g_mean - grad_mean) / (grad_std + INFO_EPS);
-            g_norm.abs() * (1.0 + g_mean.abs()).ln() / smoothing
+            g_norm.abs() * (1.0 + g_norm.abs()).ln() / smoothing
         };
         let info_l = info_side(g_l, c_l);
         let info_r = info_side(g_r, c_r);
         let info_p = info_side(g_l + g_r, c_l.saturating_add(c_r));
         let info_score = info_l + info_r - info_p;
-        pre.gradient_score_coeff * gradient_score + pre.info_score_coeff * info_score
+        let curvature = (p_h + lambda_l2).max(GAIN_EPSILON);
+        let gradient_scale = grad_std.abs().max(INFO_EPS);
+        let normalized_gradient_score =
+            gradient_score / (curvature * gradient_scale * gradient_scale).max(INFO_EPS);
+        pre.gradient_score_coeff * normalized_gradient_score + pre.info_score_coeff * info_score
     };
 
     // Balance penalty for very-unbalanced splits.
-    if pre.balance_penalty {
+    if !pre.in_warmup && pre.balance_penalty {
         let total = c_l.saturating_add(c_r);
         if total > 0 {
             let min_side = c_l.min(c_r);
@@ -1089,7 +1093,7 @@ mod tests {
             }
         }
         let cfg = MorphConfig::default(); // morph_warmup_iters = 5
-        let pre = MorphPrecomputed::for_iteration(0, &cfg);
+        let pre = MorphPrecomputed::for_iteration(0, 100, &cfg);
         let grad_means = vec![0.0_f32; 2];
         let grad_stds = vec![1.0_f32; 2];
         let morph_gain = compute_multi_output_split_gain_morph(
@@ -1130,7 +1134,7 @@ mod tests {
             info_score_weight: 0.5,
             ..MorphConfig::default()
         };
-        let pre = MorphPrecomputed::for_iteration(10, &cfg);
+        let pre = MorphPrecomputed::for_iteration(10, 100, &cfg);
         let grad_means = vec![0.5_f32; 2];
         let grad_stds = vec![1.0_f32; 2];
         let morph_gain = compute_multi_output_split_gain_morph(
@@ -1154,6 +1158,61 @@ mod tests {
     }
 
     #[test]
+    fn multi_output_morph_gain_is_invariant_to_gradient_scale() {
+        use alloygbm_core::{MorphConfig, MorphPrecomputed};
+        let mut histogram = MultiOutputHistogram::new(1, 3, 1);
+        for (bin, gradient) in [3.0_f32, -1.0, 0.5].into_iter().enumerate() {
+            let grad_idx = histogram.idx(0, bin, 0, HistComponent::Grad);
+            let hess_idx = histogram.idx(0, bin, 0, HistComponent::Hess);
+            histogram.data_mut()[grad_idx] = gradient;
+            histogram.data_mut()[hess_idx] = 1.0;
+        }
+        let cfg = MorphConfig {
+            morph_warmup_iters: 0,
+            balance_penalty: false,
+            ..MorphConfig::default()
+        };
+        let pre = MorphPrecomputed::for_iteration(30, 100, &cfg);
+        let base = compute_multi_output_split_gain_morph(
+            &histogram,
+            0,
+            0,
+            0.0,
+            1e-6,
+            &cfg,
+            &pre,
+            30,
+            100,
+            &[0.1],
+            &[0.5],
+        );
+
+        let mut scaled_histogram = histogram.clone();
+        for bin in 0..scaled_histogram.n_bins {
+            let grad_idx = scaled_histogram.idx(0, bin, 0, HistComponent::Grad);
+            scaled_histogram.data_mut()[grad_idx] *= 10.0;
+        }
+        let scaled = compute_multi_output_split_gain_morph(
+            &scaled_histogram,
+            0,
+            0,
+            0.0,
+            1e-6,
+            &cfg,
+            &pre,
+            30,
+            100,
+            &[1.0],
+            &[5.0],
+        );
+
+        assert!(
+            (base - scaled).abs() < 1e-6,
+            "joint MorphBoost gain must be independent of gradient units: base={base}, scaled={scaled}"
+        );
+    }
+
+    #[test]
     fn multi_output_morph_categorical_in_warmup_matches_standard() {
         // Warmup byte-equivalence for the categorical Fisher-sort variant.
         use alloygbm_core::{MorphConfig, MorphPrecomputed};
@@ -1173,7 +1232,7 @@ mod tests {
             h.data_mut()[hi] = hess;
         }
         let cfg = MorphConfig::default();
-        let pre = MorphPrecomputed::for_iteration(0, &cfg);
+        let pre = MorphPrecomputed::for_iteration(0, 100, &cfg);
         let grad_means = vec![0.0_f32; 2];
         let grad_stds = vec![1.0_f32; 2];
         let std_result = find_best_multi_output_categorical_split(&h, 0, 3, 0.0, 1e-6)

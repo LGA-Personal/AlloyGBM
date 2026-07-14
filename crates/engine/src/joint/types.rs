@@ -394,7 +394,11 @@ impl JointMorphContext {
         let grad_stds: Vec<f32> = state.ema_stats.iter().map(|s| s.std).collect();
         Self {
             config: state.config,
-            precomputed: alloygbm_core::MorphPrecomputed::for_iteration(iteration, &state.config),
+            precomputed: alloygbm_core::MorphPrecomputed::for_iteration(
+                iteration,
+                total_iterations,
+                &state.config,
+            ),
             iteration,
             total_iterations,
             grad_means,

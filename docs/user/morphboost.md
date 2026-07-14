@@ -39,13 +39,15 @@ upgrade.
 For every candidate split, the gain is
 
 ```
-gradient_score = standard XGBoost-style gradient gain
-info_score     = normalized information-gain term over the partition
-morph_weight   = tanh(iteration / 20)            # ramps in over training
+raw_gradient_gain = standard XGBoost-style gradient gain
+gradient_score     = raw_gradient_gain / ((parent_hessian + lambda_l2) * ema_grad_std**2)
+info_score         = normalized information-gain term over the partition
+morph_weight       = tanh(3 * iteration / n_estimators)  # horizon-scaled ramp
+info_weight        = info_score_weight * morph_weight
 
-gain = (1 - info_score_weight) * gradient_score
-     +  info_score_weight * info_score * morph_weight
-     +  optional balance penalty
+gain = (1 - info_weight) * gradient_score
+     +  info_weight * info_score
+     +  optional post-warmup balance penalty
 ```
 
 In addition:
@@ -91,7 +93,7 @@ on the estimator; the table below notes any mode-specific behavior.
 | `morph_rate` | `0.1` | Per-iteration leaf shrinkage rate. Larger values shrink late-round leaves more aggressively. Range `[0.0, 1.0]`. |
 | `evolution_pressure` | `0.2` | Strength of EMA-driven gain shaping. Range `[0.0, 1.0]`. |
 | `morph_warmup_iters` | `5` | Number of initial rounds for which the morph blend collapses to the pure gradient gain. Helps stabilize early training. |
-| `info_score_weight` | `0.3` | Mixing weight between the gradient-gain term and the information-theoretic term in the post-warmup blend. Range `[0.0, 1.0]`. Setting to `0.0` disables the info term entirely (gradient-gain only). |
+| `info_score_weight` | `0.1` | Maximum mixing weight for the information-theoretic term. Its effective value ramps from zero after warmup to this value over the fit horizon. Range `[0.0, 1.0]`. Setting to `0.0` disables the info term entirely (gradient-gain only). |
 | `depth_penalty_base` | `0.9` | Base of the depth penalty applied to leaf magnitudes (`depth_penalty_base ** (child_depth / 3.0)`). Range `(0.0, 1.0]`. `1.0` disables the penalty. |
 | `balance_penalty` | `True` | Whether to apply a small penalty to highly imbalanced splits. |
 | `lr_schedule` | `"constant"` | Per-iteration LR schedule. One of `"constant"` or `"warmup_cosine"`. Independent of MorphBoost — usable on its own. |
@@ -140,11 +142,14 @@ training won't terminate after a handful of warmup rounds.
 
 - Start from the defaults. They are not aggressive.
 - If you suspect the info term is dominating, reduce `info_score_weight` to
-  `0.1` or `0.2`.
+  `0.1` or `0.2`; its influence is comparable across node sizes and target
+  scales, so the same setting transfers more predictably between runs.
 - If your trees are growing too aggressively at depth, lower
   `depth_penalty_base` from `0.9` to `0.85`.
-- If the morph blend is engaging too quickly on a short run
-  (`n_estimators < 100`), increase `morph_warmup_iters`.
+- The blend is horizon-scaled: it reaches its main transition around one third
+  of the requested rounds and approaches its configured maximum near the end.
+  Increase `morph_warmup_iters` only when you explicitly want more pure-gradient
+  initial rounds.
 - For long, low-LR runs (`n_estimators >= 1500`, `learning_rate <= 0.02`),
   try `lr_schedule="warmup_cosine"` — empirically improves stability.
 

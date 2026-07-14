@@ -59,7 +59,7 @@ pub struct MorphContext {
     pub grad_mean: f32,
     pub grad_std: f32,
     pub config: MorphConfig,
-    /// Per-round constants (`tanh(iter/20)`, blend coefficients, warmup branch)
+    /// Per-round horizon-scaled blend coefficients and warmup branch
     /// hoisted out of the per-bin gain inner loop. Computed once via
     /// [`MorphPrecomputed::for_iteration`] when the context is built.
     pub precomputed: MorphPrecomputed,

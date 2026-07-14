@@ -110,7 +110,7 @@ def build_morph_config_dict(
     morph_rate=0.1,
     evolution_pressure=0.2,
     morph_warmup_iters=5,
-    info_score_weight=0.3,
+    info_score_weight=0.1,
     depth_penalty_base=0.9,
     balance_penalty=True,
     lr_schedule="constant",

@@ -427,7 +427,7 @@ shaping, and depth/iteration leaf shrinkage. See
 - `morph_warmup_iters: int = 5`
   - Initial rounds for which the morph blend collapses to the pure
     gradient gain.
-- `info_score_weight: float = 0.3`
+- `info_score_weight: float = 0.1`
   - Mixing weight for the information-theoretic term post-warmup. Set to
     `0.0` to disable the info-theoretic term entirely.
 - `depth_penalty_base: float = 0.9`
