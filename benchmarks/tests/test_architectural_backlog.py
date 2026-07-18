@@ -139,6 +139,37 @@ class ArchitecturalBacklogBenchmarkTests(unittest.TestCase):
                     any(not gate.passed for gate in common.compare_reports(baseline, report))
                 )
 
+    def test_activation_gate_requires_every_repetition_to_agree(self) -> None:
+        # A boolean contract metric that disagrees across repetitions (here the
+        # first repetition did not take the candidate path) must fail the
+        # activation gate. Aggregating by last-value would mask a non-last
+        # disagreeing repetition and let the gate pass spuriously.
+        common = _module("common")
+        baseline = common.synthetic_report_for_tests(mode="baseline", profile="full")
+        candidate = common.synthetic_report_for_tests(mode="candidate", profile="full")
+
+        one_rep_inactive = common.replace_metric(
+            candidate,
+            scenario="efb",
+            case="exclusive_one_hot",
+            repetition=0,
+            metric="candidate_active",
+            value=False,
+        )
+        aggregated = common.aggregate_report(one_rep_inactive)
+        active_by_case = {
+            case: metrics.get("candidate_active")
+            for (scenario, case), metrics in aggregated.items()
+            if scenario == "efb"
+        }
+        self.assertIn(False, active_by_case.values())
+
+        gates = common.compare_reports(baseline, one_rep_inactive)
+        self.assertTrue(
+            any("efb: activation" in gate.name and not gate.passed for gate in gates),
+            gates,
+        )
+
     def test_comparator_checks_each_repetition_and_efb_artifact(self) -> None:
         common = _module("common")
         baseline = common.synthetic_report_for_tests(mode="baseline", profile="full")

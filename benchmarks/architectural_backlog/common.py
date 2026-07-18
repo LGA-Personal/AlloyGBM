@@ -365,8 +365,16 @@ def aggregate_report(report: BenchmarkReport) -> dict[tuple[str, str], dict[str,
                 for value in values
                 if isinstance(value, (int, float)) and not isinstance(value, bool)
             ]
+            booleans = [value for value in values if isinstance(value, bool)]
             if len(numeric) == len(values):
                 metrics[metric_name] = statistics.median(numeric)
+            elif len(booleans) == len(values):
+                # Boolean contract metrics (e.g. candidate_active / fallback
+                # flags) must hold on every repetition. Aggregate with
+                # conjunction so a single disagreeing repetition fails the
+                # activation/fallback gate instead of being masked by the
+                # last value.
+                metrics[metric_name] = all(booleans)
             elif all(value == values[0] for value in values):
                 metrics[metric_name] = values[0]
             else:
@@ -815,7 +823,10 @@ def compare_reports(
         ) is not None:
             baseline_rss = float(base[key]["fit_peak_rss_mb"])
             candidate_rss = float(cand[key]["fit_peak_rss_mb"])
-            ratio = candidate_rss / baseline_rss
+            # A zero baseline RSS is a measured value; use _ratio's zero-safe
+            # semantics so the memory gate fails cleanly instead of raising
+            # ZeroDivisionError.
+            ratio = _ratio(cand[key], base[key], "fit_peak_rss_mb")
             reduction = baseline_rss - candidate_rss
             gates.append(
                 _gate(
