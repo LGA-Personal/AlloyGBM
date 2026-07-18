@@ -196,6 +196,10 @@ Additional lighter-weight scripts target specific features:
 - `benchmarks/objective_benchmark.py` — deterministic held-out validation for
   large-query LambdaMART truncation and skewed-count Poisson/Gamma/Tweedie
   objectives. Report at `docs/benchmarks/objective_benchmark_v1.md`.
+- `benchmarks/architectural_backlog/` — isolated baseline/candidate harness for
+  SoA histograms, node-level parallelism, duplicate bin storage, compact
+  predictor nodes, EFB, and approximate quantile sketches. Methodology and
+  baseline report are in `docs/benchmarks/architectural_backlog_v1.md`.
 
 ```bash
 # Quick MorphBoost comparison report
@@ -212,6 +216,21 @@ python3 benchmarks/dro_robustness.py --quick
 
 # Large-query LambdaMART and skewed-count GLM validation
 python3 benchmarks/objective_benchmark.py --gate
+
+# Fast smoke run for all six deferred architecture projects
+python3 -m benchmarks.architectural_backlog.run \
+  --profile quick --mode baseline --gate
+
+# Full baseline capture (three isolated repetitions per case)
+python3 -m benchmarks.architectural_backlog.run \
+  --profile full --mode baseline \
+  --output benchmarks/results/architectural_backlog_baseline.json --gate
+
+# Same-host candidate comparison from an implementation branch
+python3 -m benchmarks.architectural_backlog.run \
+  --profile full --mode candidate \
+  --baseline benchmarks/results/architectural_backlog_baseline.json \
+  --output benchmarks/results/architectural_backlog_candidate.json --gate
 
 # Numerai benchmark (slow; downloads data on first run)
 python3 benchmarks/numerai_benchmark.py --feature-set small \

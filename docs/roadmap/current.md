@@ -8,65 +8,65 @@ The `0.12.10` release is a patch optimization release: it speeds existing piecew
 
 **No artifact format change.** Test counts: 452 cargo + 657 pytest.
 
-## Deferred Architectural Backlog
+## Architectural Backlog
 
 The following findings from the [July 2026 core review](../reviews/2026-07-02-v0.12.10-core-resolutions.md)
-are individually **roadmap-deferred**. They are not small review-resolution follow-ups: each
-changes a hot-path ownership model, a stored representation, or an input contract. A future
-project must first meet the stated re-entry condition, then carry its own design, benchmark, and
-regression plan.
+are not small review-resolution follow-ups: each changes a hot-path ownership model, a stored
+representation, or an input contract. The shared
+[architecture benchmark pack](../benchmarks/architectural_backlog_v1.md) now supplies deterministic
+baselines and acceptance gates, and each project has an independent implementation plan. The
+production work remains open until its plan is implemented and passes a same-host candidate run.
 
 ### SoA histogram layout
 
-**Decision: roadmap-deferred.** Keeping histogram statistics in a structure-of-arrays layout
+**Status: implementation planned.** Keeping histogram statistics in a structure-of-arrays layout
 through split selection would change the shared CPU histogram contract used by scalar, DRO,
 piecewise-linear, categorical, and factor-neutral paths. It should be evaluated together with
-histogram and partition-buffer ownership rather than as a local allocation cleanup. Re-open it
-only after profiles on representative dense, wide, and sparse-like workloads attribute a material
-share of fit time or allocation traffic to histogram materialization, and after the proposed
-layout has an equivalence plan for every gain strategy.
+histogram and partition-buffer ownership rather than as a local allocation cleanup. The
+[SoA implementation plan](../benchmarks/architectural_backlog_soa_histograms_implementation.md)
+defines the ownership migration, gain-strategy regression matrix, and performance gates.
 
 ### Node-level parallelism
 
-**Decision: roadmap-deferred.** Parallelizing nodes within a level requires explicit ownership of
+**Status: implementation planned after SoA.** Parallelizing nodes within a level requires explicit ownership of
 histograms and row partitions, a nested-Rayon policy, and a deterministic reduction/order for
-otherwise tied split candidates. It must also preserve the sibling-subtraction optimization. Re-open
-it after the histogram/partition ownership model is settled and a profile shows that small nodes
-are underutilizing the available CPU despite the existing per-node parallel kernels.
+otherwise tied split candidates. It must also preserve the sibling-subtraction optimization. The
+[node-parallelism plan](../benchmarks/architectural_backlog_node_parallelism_implementation.md)
+sequences this after the histogram ownership work and requires one- and eight-thread evidence.
 
 ### Duplicate row-major bin storage
 
-**Decision: roadmap-deferred.** Removing the unconditional row-major copy could materially reduce
+**Status: implementation planned.** Removing the unconditional row-major copy could materially reduce
 fit memory, but the column-major histogram path and row-first kernels have shape-dependent
-tradeoffs. Re-open it with peak-memory and throughput measurements across narrow/deep and
-wide/shallow fits, then choose and benchmark either a column-only representation or a documented
-layout-selection heuristic. The change must preserve categorical and missing-value bin semantics.
+tradeoffs. The [duplicate-bin plan](../benchmarks/architectural_backlog_duplicate_bins_implementation.md)
+uses wide/shallow and tall/narrow u8/u16 arms to choose and validate the retained layout while
+preserving categorical and missing-value bin semantics.
 
 ### Compact predictor nodes
 
-**Decision: roadmap-deferred.** The current slot bound prevents sparse heap-indexed trees from
+**Status: implementation planned.** The current slot bound prevents sparse heap-indexed trees from
 causing unbounded load allocations, but a compact node array is a separate predictor-representation
 project. It must keep artifact compatibility while loading scalar, linear-leaf, native-categorical,
 DART, multiclass, and SHAP-relevant state into a compact representation with side tables for rare
-data. Re-open it with a loader-translation design, memory and batch-prediction baselines, and
-artifact/prediction parity coverage.
+data. The [compact-node plan](../benchmarks/architectural_backlog_compact_nodes_implementation.md)
+pins loader translation, sparse-spine memory, batch-prediction, and artifact parity requirements.
 
 ### Exclusive Feature Bundling (EFB)
 
-**Decision: roadmap-deferred.** EFB needs a sparse-input and feature-conflict contract, plus
+**Status: implementation planned.** EFB needs a feature-conflict contract, plus
 well-defined behavior for feature names, importances, constraints, categorical columns, persistence,
-and explanation output. The dense-first public surface does not currently provide that contract.
-Re-open it after selecting the supported sparse input forms and collecting sparse or one-hot
-workloads that establish a measurable training or memory payoff against the current binning path.
+and explanation output. The [EFB plan](../benchmarks/architectural_backlog_efb_implementation.md)
+starts with exact zero-conflict dense one-hot groups, explicitly falls back on conflicts and excluded
+features, and requires a measurable training or memory payoff before broader sparse-input work.
 
 ### Approximate quantile sketches
 
-**Decision: roadmap-deferred.** The NumPy sorted-values path and quantile binning default already
+**Status: implementation planned.** The NumPy sorted-values path and quantile binning default already
 cover the current correctness and ordinary-size performance need. A sketch is justified only for
 very large matrices, where it needs an explicit error budget, deterministic merge behavior, a
-fallback threshold, and comparison against the exact-sort baseline. Re-open it with those semantics
-and large-N accuracy, memory, and preprocessing benchmarks; it is not a substitute for the
-existing exact quantile path.
+fallback threshold, and comparison against the exact-sort baseline. The
+[quantile-sketch plan](../benchmarks/architectural_backlog_quantile_sketches_implementation.md)
+defines those semantics and keeps exact quantiles as the small-matrix/default fallback.
 
 ## What Shipped In v0.12.10
 

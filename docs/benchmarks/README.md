@@ -25,6 +25,9 @@ Current benchmark entry points:
 - deterministic large-query LambdaMART and skewed-count GLM harness:
   `benchmarks/objective_benchmark.py` with report at
   [objective_benchmark_v1.md](objective_benchmark_v1.md)
+- isolated baseline/candidate architecture harness for the six July-review
+  projects: `benchmarks/architectural_backlog/` with methodology and baseline
+  at [architectural_backlog_v1.md](architectural_backlog_v1.md)
 - comparative inspiration and follow-ups: `docs/plans/perpetual_inspiration_for_alloygbm.md`
 - older benchmark writeups: `docs/archive/benchmarks/`
 

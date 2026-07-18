@@ -164,8 +164,9 @@ keeping per-node feature parallelism disabled. Quick mode uses `2^14` rows,
 
 The parent launches identical workers with `RAYON_NUM_THREADS=1` and
 `RAYON_NUM_THREADS=8`; Rayon is configured before importing AlloyGBM. The report
-includes fit time, native training time, RMSE, prediction digest, and the
-four-thread/one-thread ratio.
+includes fit time, native training time, RMSE, prediction digest, and emitted
+stump count. Full runs require at least 3,500 stumps so lower-level pressure
+cannot silently disappear through regularization or fixture drift.
 
 Candidate gates:
 
