@@ -134,7 +134,19 @@ class RunModelComparisonTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            sorted(factories.keys()), ["alloygbm", "lightgbm", "xgboost"]
+            set(factories),
+            {
+                "alloygbm",
+                "alloygbm_dro",
+                "alloygbm_factor_neutral",
+                "alloygbm_factor_neutral_dro",
+                "alloygbm_linear",
+                "alloygbm_morph",
+                "alloygbm_morph_cosine",
+                "alloygbm_morph_linear",
+                "lightgbm",
+                "xgboost",
+            },
         )
 
     def test_model_factories_include_catboost_when_available(self) -> None:
@@ -198,7 +210,21 @@ class RunModelComparisonTests(unittest.TestCase):
             alloy_continuous_binning_strategy="linear",
             alloy_continuous_binning_max_bins=256,
         )
-        self.assertEqual(sorted(factories.keys()), ["alloygbm", "lightgbm", "xgboost"])
+        self.assertEqual(
+            set(factories),
+            {
+                "alloygbm",
+                "alloygbm_dro",
+                "alloygbm_factor_neutral",
+                "alloygbm_factor_neutral_dro",
+                "alloygbm_linear",
+                "alloygbm_morph",
+                "alloygbm_morph_cosine",
+                "alloygbm_morph_linear",
+                "lightgbm",
+                "xgboost",
+            },
+        )
 
     def test_benchmark_record_includes_task_type(self) -> None:
         self.assertTrue(hasattr(RUNNER.BenchmarkRecord, "__dataclass_fields__"))
