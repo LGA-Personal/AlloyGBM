@@ -25,6 +25,7 @@ benchmarks/architectural_backlog/
   scenarios.py
   run.py
 benchmarks/tests/test_architectural_backlog.py
+crates/engine/examples/sparse_predictor_fixture.rs
 docs/benchmarks/architectural_backlog_v1.md
 docs/benchmarks/architectural_backlog_*_implementation.md
 ```
@@ -134,7 +135,8 @@ gain paths:
 
 | Case | Full shape | Trees | Special setting |
 | --- | ---: | ---: | --- |
-| `standard_wide` | 100,000 x 64 | 60 | scalar leaves |
+| `standard_wide` | 100,000 x 128 | 50 | scalar leaves, 64 bins |
+| `standard_deep` | 200,000 x 24 | 60 | scalar leaves, depth 10 |
 | `dro_wide` | 75,000 x 48 | 40 | DRO leaf robustness |
 | `linear_leaf` | 30,000 x 16 | 24 | `leaf_model="linear"` |
 
@@ -154,23 +156,27 @@ The special-mode cases are regression guards, not required speed wins.
 
 ### 2. Node-Level Parallelism
 
-The fixture uses 160,000 rows, 8 features, depth 10, 36 level-wise trees, small
-leaf minima, and a target with balanced nonlinear interactions. It creates many
-small nodes while limiting feature-level parallel work. Quick mode uses 20,000
-rows, depth 7, and 6 trees.
+The full fixture is a Boolean hypercube with `2^20` rows, 14 features, 12
+informative binary bits, distinct power-of-two target weights, and one manual
+level-wise depth-12 tree. It creates up to 2,048 small nodes at a level while
+keeping per-node feature parallelism disabled. Quick mode uses `2^14` rows,
+10 features, and depth 8.
 
 The parent launches identical workers with `RAYON_NUM_THREADS=1` and
-`RAYON_NUM_THREADS=4`; Rayon is configured before importing AlloyGBM. The report
+`RAYON_NUM_THREADS=8`; Rayon is configured before importing AlloyGBM. The report
 includes fit time, native training time, RMSE, prediction digest, and the
 four-thread/one-thread ratio.
 
 Candidate gates:
 
-- one- and four-thread prediction digests equal the corresponding baseline and
-  each other;
+- each thread-count prediction digest equals its corresponding baseline;
+- repeated runs at one thread and repeated runs at eight threads are internally
+  deterministic; cross-thread artifacts are compared structurally/tolerantly
+  because existing parallel partition reductions may change f32 order;
 - one-thread fit time is no worse than `1.05x` baseline;
-- four-thread native training time is at most `0.85x` baseline;
-- four-thread time is at most `0.80x` the candidate's one-thread time.
+- eight-thread native training time is at most `0.85x` baseline;
+- eight-thread time is at most `0.80x` the candidate's one-thread time;
+- peak RSS is no more than `1.25x` baseline.
 
 The last gate proves useful scaling rather than merely moving work between
 threads.
@@ -181,10 +187,13 @@ Two one-tree, shallow fixtures isolate binned-matrix construction and storage:
 
 | Case | Full shape | Purpose |
 | --- | ---: | --- |
-| `wide_shallow` | 30,000 x 512 | feature-dominant allocation |
-| `tall_narrow` | 600,000 x 16 | row-dominant allocation |
+| `wide_shallow_u8` / `wide_shallow_u16` | 30,000 x 512 | feature-dominant allocation |
+| `tall_narrow_u8` / `tall_narrow_u16` | 600,000 x 16 | row-dominant allocation |
 
-Quick shapes are 2,000 x 64 and 20,000 x 8. RSS is sampled after the input array
+The u8 arms use 64 bins; the u16 arms use 256 bins. This matters because the
+current u8 constructor retains four bytes per cell across legacy/adaptive
+row/column mirrors, while u16 retains six bytes per cell. Quick shapes are
+2,000 x 64 and 20,000 x 8. RSS is sampled after the input array
 and target exist, so the reported delta focuses on adaptation, binning, and
 native training allocations rather than fixture construction. The report also
 records input bytes, fit time, input-adaptation time, and prediction digest.
@@ -192,7 +201,8 @@ records input bytes, fit time, input-adaptation time, and prediction digest.
 Candidate gates:
 
 - prediction digests exactly match baseline;
-- fit and input-adaptation time are no worse than `1.05x` baseline;
+- native training time is no worse than `1.03x` baseline;
+- native bridge preparation time is at most `0.95x` baseline;
 - peak RSS delta is at most `0.80x` baseline in both full cases.
 
 The memory gate is intentionally below the theoretical 50% binned-storage cut
@@ -200,10 +210,12 @@ because raw inputs and unrelated fit buffers remain live.
 
 ### 4. Compact Predictor Nodes
 
-The orchestrator trains and saves a deterministic leaf-wise model before timing
-workers. The full fixture uses 80 trees, `max_leaves=96`, depth up to 15, and a
-piecewise target that encourages asymmetric paths. Quick mode uses 8 trees and
-24 leaves.
+The orchestrator uses a Rust example to construct a deterministic artifact with
+eight 16-node right-spine trees. Each spine ends at heap-local node id `65,534`,
+so the current loader allocates 65,535 slots for only 16 populated nodes. The
+artifact contains 128 stumps and remains only a few KiB; it does not rely on
+best-split ordering to induce a sparse shape. Quick mode uses one right-spine
+tree.
 
 Each fresh worker records RSS before and after `GBMRegressor.load_model`, warms
 the native predictor, then measures repeated prediction over a fixed 100,000-row
@@ -215,8 +227,9 @@ Candidate gates:
 
 - artifact bytes and prediction digest exactly match baseline;
 - load time is no worse than `1.10x` baseline;
-- loaded-model RSS delta is at most `0.70x` baseline;
-- prediction time per row is at most `0.80x` baseline.
+- loaded-model RSS delta is at most `0.25x` baseline;
+- deep-spine prediction time per row is at most `0.85x` baseline;
+- a balanced shallow control is no slower than `1.05x` baseline.
 
 Scalar parity is the performance gate. The implementation plan separately
 requires unit parity for linear, categorical, DART, multiclass, and SHAP paths.
@@ -232,7 +245,7 @@ The fixture creates grouped one-hot features with a nonlinear held-out target:
 
 There are 32 groups of 16 features. Quick mode uses 4,000 rows and 64 features.
 Baseline mode fits the current unbundled estimator. Candidate mode requires the
-future `feature_bundling="auto"` estimator parameter and records that the
+future `feature_bundling="exact"` estimator parameter and records that the
 candidate path was activated.
 
 The report includes fit time, RSS delta, RMSE, prediction digest, original and
@@ -242,9 +255,10 @@ Candidate gates:
 
 - candidate activation is confirmed;
 - exclusive-case RMSE is within `1e-6` absolute of baseline;
-- controlled-conflict RMSE is at most `1.01x` baseline;
-- exclusive-case fit time and RSS are each at most `0.75x` baseline;
-- controlled-conflict fit time and RSS do not exceed `1.05x` baseline.
+- controlled-conflict input is deterministically refused for bundling and
+  follows the unbundled path with identical artifacts;
+- exclusive-case total fit time improves by at least 15% or RSS by at least 20%;
+- a dense non-bundleable control does not slow down by more than 3%.
 
 The controlled-conflict case may reject unsafe bundles; correctness takes
 priority over forcing a performance win.
@@ -257,22 +271,29 @@ and 16 features; quick mode uses 25,000 rows and 8 features. Baseline mode uses
 the exact quantile path. Candidate mode requires the future
 `quantile_sketch_max_rows=65536` parameter.
 
-The worker measures fit/input-adaptation time and RSS, reads the fitted quantile
+The worker measures fit/native-bridge preparation time and RSS, reads the fitted quantile
 cuts, and evaluates each cut against the empirical CDF of the source column. It
-reports mean and maximum absolute rank error plus held-out RMSE from a shallow
-model.
+reports mean, p99, and maximum interval rank error on continuous columns plus
+held-out RMSE from a shallow model. Duplicate and constant columns are checked
+separately for finite, strictly increasing cuts because deduplication removes the
+requested-quantile identity needed for a meaningful rank-error score.
 
 Candidate gates:
 
 - candidate activation is confirmed;
-- mean absolute rank error is at most `0.005`;
-- maximum absolute rank error is at most `0.02`;
+- mean absolute rank error is at most `0.0025`;
+- p99 absolute rank error is at most `0.0075`;
+- maximum absolute rank error is at most `0.01`;
 - held-out RMSE is at most `1.01x` baseline;
-- input-adaptation time is at most `0.60x` baseline;
-- peak RSS delta is at most `0.75x` baseline.
+- native bridge preparation time is at most `0.60x` baseline;
+- total fit time is no worse than `1.05x` baseline;
+- end-to-end peak RSS delta is at most `0.90x` baseline and falls by at least
+  32 MiB in the full case.
 
 Repeated values and NaNs must preserve strictly increasing, finite cut arrays
-and existing missing-bin behavior.
+and existing missing-bin behavior. The implementation plan must first pin the
+current Rust/Python upper-tail bin contract and must return native cut metadata
+to joint mode instead of re-deriving prediction cuts in Python.
 
 ## Quick Versus Full Gates
 
