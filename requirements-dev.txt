@@ -32,7 +32,7 @@ scikit-learn>=1.8.0
 pandas>=2.0
 
 # Benchmarks (cross-library comparison)
-lightgbm>=4.0
+lightgbm>=4.6.0
 xgboost>=2.0
 catboost>=1.2
 
