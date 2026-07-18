@@ -13,7 +13,14 @@ from typing import Any
 
 import numpy as np
 
-from .common import CaseResult, peak_rss_mb, prediction_digest, rmse, rss_delta_mb
+from .common import (
+    CaseResult,
+    current_rss_mb,
+    peak_rss_mb,
+    prediction_digest,
+    rmse,
+    rss_delta_mb,
+)
 from .fixtures import Fixture, make_fixture
 
 
@@ -77,7 +84,7 @@ def _fit_regressor(
 ) -> tuple[CaseResult, object]:
     from alloygbm import GBMRegressor
 
-    before = peak_rss_mb()
+    before = current_rss_mb()
     estimator = GBMRegressor(**parameters)
     started = time.perf_counter()
     estimator.fit(fixture.X, fixture.y)
@@ -94,7 +101,8 @@ def _fit_regressor(
             timing.get("native_bridge_prepare_seconds", 0.0)
         ),
         "native_train_seconds": float(timing.get("native_train_seconds", fit_seconds)),
-        "peak_rss_delta_mb": rss_delta_mb(before, after),
+        "peak_rss_mb": after,
+        "fit_peak_rss_mb": rss_delta_mb(before, after),
         "rmse": rmse(fixture.y_test, predictions),
         "prediction_digest": prediction_digest(predictions),
     }
@@ -233,7 +241,7 @@ def _compact_case(
         artifact = _predictor_artifact(
             tree_count, Path(tmp) / f"{shape}.agbm", shape
         )
-    before = peak_rss_mb()
+    before = current_rss_mb()
     started = time.perf_counter()
     predictor = NativePredictorHandle(artifact)
     load_seconds = time.perf_counter() - started
@@ -250,7 +258,8 @@ def _compact_case(
     metrics = {
         "fit_seconds": load_seconds,
         "load_seconds": load_seconds,
-        "peak_rss_delta_mb": rss_delta_mb(before, after),
+        "peak_rss_mb": after,
+        "fit_peak_rss_mb": rss_delta_mb(before, after),
         "predict_seconds_per_row": float(np.median(timings)) / len(X),
         "artifact_bytes": len(artifact),
         "artifact_digest": hashlib.sha256(artifact).hexdigest(),
@@ -320,7 +329,7 @@ def _efb_case(
 def _rank_errors(X: np.ndarray, cuts_by_feature: object) -> tuple[float, float, float]:
     errors: list[float] = []
     if cuts_by_feature is None:
-        return 0.0, 0.0, 0.0
+        raise RuntimeError("quantile cut metadata is missing")
     for feature_index, raw_cuts in enumerate(cuts_by_feature):
         cuts = np.asarray(raw_cuts, dtype=np.float64)
         if not len(cuts):
@@ -339,7 +348,7 @@ def _rank_errors(X: np.ndarray, cuts_by_feature: object) -> tuple[float, float, 
         right = np.searchsorted(values, cuts, side="right") / len(values)
         errors.extend(np.maximum(left - expected, expected - right).clip(min=0.0))
     if not errors:
-        return 0.0, 0.0, 0.0
+        raise RuntimeError("quantile cut metadata contains no scoreable cuts")
     array = np.asarray(errors)
     return float(array.mean()), float(np.quantile(array, 0.99)), float(array.max())
 

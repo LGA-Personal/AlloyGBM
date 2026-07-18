@@ -84,5 +84,5 @@ Commit: `git commit -am "Default training to column-major bins"`
 ```
 
 - [ ] **Step 1: Verify exact prediction digests, native training no worse than 3%, and bridge preparation at most 95% of baseline.**
-- [ ] **Step 2: Verify RSS delta is at most 80% of baseline for both wide and tall cases.**
+- [ ] **Step 2: Verify incremental peak RSS is at most 80% of baseline for both wide and tall cases.**
 - [ ] **Step 3: Commit the benchmark evidence separately.**

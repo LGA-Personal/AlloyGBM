@@ -82,15 +82,18 @@ The worker records:
 
 - elapsed wall time from `time.perf_counter()`;
 - `fit_timing_` components when available;
-- process peak RSS normalized to MiB using `resource.getrusage` on macOS and
-  Linux;
+- live RSS immediately before fit/load plus process peak RSS afterward,
+  normalized to MiB; their difference is the incremental fit/load peak;
 - dimensions, seed, estimator parameters, and active thread count;
 - held-out RMSE or rank error where quality can change;
 - a SHA-256 digest of canonical `float32` predictions where behavior must be
   invariant.
 
-RSS fields are nullable on unsupported platforms. A missing RSS value skips only
-memory gates; it does not convert a missing measurement into zero.
+Live RSS uses `/proc/self/statm` on Linux and `ps` on macOS; peak RSS uses
+`resource.getrusage`. Fixtures avoid whole-matrix float64 temporaries so a
+pre-fit allocation does not establish an unrelated high-water mark. RSS fields
+are nullable on unsupported platforms. A missing RSS value skips only memory
+gates; zero remains a measured value and does not remove a gate.
 
 The environment manifest records git SHA, dirty state, AlloyGBM version and
 extension path, Python and NumPy versions, platform, machine architecture,
@@ -142,7 +145,7 @@ gain paths:
 
 Quick shapes are 8,000 x 16, 6,000 x 12, and 2,000 x 8 with 4 trees. All use
 deterministic quantile binning, manual policy, depth 6, and a fixed held-out
-split. The worker reports fit time, native training time, RSS delta, RMSE, and
+split. The worker reports fit time, native training time, incremental peak RSS, RMSE, and
 prediction digest.
 
 Candidate gates on a full same-host run:
@@ -194,9 +197,9 @@ Two one-tree, shallow fixtures isolate binned-matrix construction and storage:
 The u8 arms use 64 bins; the u16 arms use 256 bins. This matters because the
 current u8 constructor retains four bytes per cell across legacy/adaptive
 row/column mirrors, while u16 retains six bytes per cell. Quick shapes are
-2,000 x 64 and 20,000 x 8. RSS is sampled after the input array
-and target exist, so the reported delta focuses on adaptation, binning, and
-native training allocations rather than fixture construction. The report also
+2,000 x 64 and 20,000 x 8. Live RSS is sampled after the input array
+and target exist, so the incremental peak focuses on adaptation, binning, and
+native training allocations rather than fixture storage. The report also
 records input bytes, fit time, input-adaptation time, and prediction digest.
 
 Candidate gates:
@@ -204,7 +207,7 @@ Candidate gates:
 - prediction digests exactly match baseline;
 - native training time is no worse than `1.03x` baseline;
 - native bridge preparation time is at most `0.95x` baseline;
-- peak RSS delta is at most `0.80x` baseline in both full cases.
+- incremental peak RSS is at most `0.80x` baseline in both full cases.
 
 The memory gate is intentionally below the theoretical 50% binned-storage cut
 because raw inputs and unrelated fit buffers remain live.
@@ -218,9 +221,9 @@ artifact contains 128 stumps and remains only a few KiB; it does not rely on
 best-split ordering to induce a sparse shape. Quick mode uses one right-spine
 tree.
 
-Each fresh worker records RSS before and after `GBMRegressor.load_model`, warms
+Each fresh worker records live RSS before and peak RSS after loading the native artifact, warms
 the native predictor, then measures repeated prediction over a fixed 100,000-row
-batch (5,000 rows in quick mode). It reports load time, loaded-model RSS delta,
+batch (5,000 rows in quick mode). It reports load time, incremental load peak,
 prediction time per row, artifact bytes, and prediction digest. Artifact size is
 descriptive because the compact representation is load-time-only.
 
@@ -228,7 +231,7 @@ Candidate gates:
 
 - artifact bytes and prediction digest exactly match baseline;
 - load time is no worse than `1.10x` baseline;
-- loaded-model RSS delta is at most `0.25x` baseline;
+- incremental load peak is at most `0.25x` baseline;
 - deep-spine prediction time per row is at most `0.85x` baseline;
 - a balanced shallow control is no slower than `1.05x` baseline.
 
@@ -249,7 +252,7 @@ Baseline mode fits the current unbundled estimator. Candidate mode requires the
 future `feature_bundling="exact"` estimator parameter and records that the
 candidate path was activated.
 
-The report includes fit time, RSS delta, RMSE, prediction digest, original and
+The report includes fit time, incremental peak RSS, RMSE, prediction digest, original and
 effective feature counts when exposed, and conflict diagnostics when exposed.
 
 Candidate gates:
@@ -288,7 +291,7 @@ Candidate gates:
 - held-out RMSE is at most `1.01x` baseline;
 - native bridge preparation time is at most `0.60x` baseline;
 - total fit time is no worse than `1.05x` baseline;
-- end-to-end peak RSS delta is at most `0.90x` baseline and falls by at least
+- incremental peak RSS is at most `0.90x` baseline and falls by at least
   32 MiB in the full case.
 
 Repeated values and NaNs must preserve strictly increasing, finite cut arrays

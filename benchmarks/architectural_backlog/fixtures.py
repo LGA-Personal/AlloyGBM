@@ -20,9 +20,10 @@ class Fixture:
 def _regression_fixture(rows: int, features: int, seed: int) -> Fixture:
     rng = np.random.default_rng(seed)
     total = rows + max(256, rows // 5)
-    X = rng.normal(size=(total, features)).astype(np.float32)
-    weights = rng.normal(scale=0.25, size=features).astype(np.float32)
-    y = (X @ weights + 0.35 * X[:, 0] * X[:, 1] + rng.normal(scale=0.15, size=total)).astype(np.float32)
+    X = rng.standard_normal(size=(total, features), dtype=np.float32)
+    weights = rng.standard_normal(size=features, dtype=np.float32) * np.float32(0.25)
+    noise = rng.standard_normal(size=total, dtype=np.float32) * np.float32(0.15)
+    y = X @ weights + np.float32(0.35) * X[:, 0] * X[:, 1] + noise
     return Fixture(
         X=X[:rows],
         y=y[:rows],

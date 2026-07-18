@@ -18,6 +18,7 @@ from .common import (
     environment_manifest,
     quality_gates,
     render_markdown,
+    select_scenarios,
     validate_report,
 )
 from .scenarios import SCENARIO_CASES, run_case
@@ -97,6 +98,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _worker(args)
     if args.baseline and args.mode != "candidate":
         raise ValueError("--baseline is only valid with --mode candidate")
+    if args.mode == "candidate" and args.baseline is None:
+        raise ValueError("candidate mode requires --baseline")
 
     selected = args.scenario or list(SCENARIO_CASES)
     repetitions = 1 if args.profile == "quick" else 3
@@ -124,6 +127,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     validate_report(report)
     if args.baseline:
         baseline = BenchmarkReport.from_json(args.baseline.read_text(encoding="utf-8"))
+        baseline = select_scenarios(baseline, selected)
         gates = compare_reports(baseline, report)
     else:
         gates = quality_gates(report)

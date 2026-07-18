@@ -18,7 +18,62 @@ import numpy as np
 
 
 SCHEMA_VERSION = 1
-ENVIRONMENT_KEYS = ("platform", "machine", "logical_cpus", "python_major_minor")
+ENVIRONMENT_KEYS = (
+    "platform",
+    "machine",
+    "logical_cpus",
+    "python_major_minor",
+    "rayon_num_threads",
+)
+REQUIRED_METRICS = {
+    "soa_histograms": {
+        "fit_seconds",
+        "native_train_seconds",
+        "fit_peak_rss_mb",
+        "rmse",
+        "prediction_digest",
+    },
+    "node_parallelism": {
+        "fit_seconds",
+        "native_train_seconds",
+        "fit_peak_rss_mb",
+        "rmse",
+        "prediction_digest",
+        "stump_count",
+    },
+    "duplicate_bins": {
+        "fit_seconds",
+        "native_bridge_prepare_seconds",
+        "native_train_seconds",
+        "fit_peak_rss_mb",
+        "prediction_digest",
+    },
+    "compact_nodes": {
+        "load_seconds",
+        "predict_seconds_per_row",
+        "fit_peak_rss_mb",
+        "artifact_digest",
+        "prediction_digest",
+    },
+    "efb": {
+        "fit_seconds",
+        "fit_peak_rss_mb",
+        "rmse",
+        "artifact_digest",
+        "prediction_digest",
+        "candidate_active",
+    },
+    "quantile_sketches": {
+        "fit_seconds",
+        "native_bridge_prepare_seconds",
+        "fit_peak_rss_mb",
+        "rmse",
+        "mean_rank_error",
+        "p99_rank_error",
+        "max_rank_error",
+        "candidate_active",
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -156,6 +211,26 @@ def peak_rss_mb() -> float | None:
     return normalize_max_rss_mb(raw_value, sys.platform)
 
 
+def current_rss_mb() -> float | None:
+    if sys.platform.startswith("linux"):
+        try:
+            resident_pages = int(Path("/proc/self/statm").read_text().split()[1])
+            return resident_pages * os.sysconf("SC_PAGE_SIZE") / (1024.0 * 1024.0)
+        except (OSError, ValueError, IndexError):
+            return None
+    if sys.platform == "darwin":
+        try:
+            rss_kib = int(
+                subprocess.check_output(
+                    ["ps", "-o", "rss=", "-p", str(os.getpid())], text=True
+                ).strip()
+            )
+            return rss_kib / 1024.0
+        except (OSError, subprocess.CalledProcessError, ValueError):
+            return None
+    return None
+
+
 def rss_delta_mb(before: float | None, after: float | None) -> float | None:
     if before is None or after is None:
         return None
@@ -183,16 +258,49 @@ def validate_report(report: BenchmarkReport) -> None:
     if not report.results:
         raise ValueError("benchmark report has no results")
     seen: set[tuple[str, str, int]] = set()
+    repetitions: dict[tuple[str, str], set[int]] = {}
     for result in report.results:
         key = (result.scenario, result.case, result.repetition)
         if key in seen:
             raise ValueError(f"duplicate result key {key!r}")
         seen.add(key)
+        repetitions.setdefault((result.scenario, result.case), set()).add(
+            result.repetition
+        )
+        required = REQUIRED_METRICS.get(result.scenario)
+        if required is None:
+            raise ValueError(f"unknown scenario {result.scenario!r}")
+        missing_metrics = sorted(required - set(result.metrics))
+        if missing_metrics:
+            raise ValueError(f"missing metrics {missing_metrics!r} for {key!r}")
         for metric_name, value in result.metrics.items():
             if isinstance(value, bool) or value is None or isinstance(value, str):
                 continue
             if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
                 raise ValueError(f"metric {metric_name!r} for {key!r} is not finite")
+            if float(value) < 0.0:
+                raise ValueError(f"metric {metric_name!r} for {key!r} is negative")
+    expected_repetitions = set(range(1 if report.profile == "quick" else 3))
+    for case_key, observed in repetitions.items():
+        if observed != expected_repetitions:
+            raise ValueError(
+                f"repetitions for {case_key!r} are {sorted(observed)!r}; "
+                f"expected {sorted(expected_repetitions)!r}"
+            )
+
+
+def select_scenarios(
+    report: BenchmarkReport, scenarios: Iterable[str]
+) -> BenchmarkReport:
+    selected = set(scenarios)
+    filtered = replace(
+        report,
+        results=tuple(
+            result for result in report.results if result.scenario in selected
+        ),
+    )
+    validate_report(filtered)
+    return filtered
 
 
 def _group_results(report: BenchmarkReport) -> dict[tuple[str, str], list[CaseResult]]:
@@ -260,6 +368,85 @@ def compare_reports(
             "; ".join(mismatches) if mismatches else "compatible",
         )
     )
+    baseline_results = {
+        (result.scenario, result.case, result.repetition): result
+        for result in baseline.results
+    }
+    candidate_results = {
+        (result.scenario, result.case, result.repetition): result
+        for result in candidate.results
+    }
+    result_keys_match = set(baseline_results) == set(candidate_results)
+    gates.append(
+        _gate(
+            "report: repetition coverage",
+            "contract",
+            result_keys_match,
+            "exact match"
+            if result_keys_match
+            else (
+                f"missing={sorted(set(baseline_results) - set(candidate_results))} "
+                f"extra={sorted(set(candidate_results) - set(baseline_results))}"
+            ),
+        )
+    )
+    if not result_keys_match:
+        return gates
+
+    invariant_scenarios = {
+        "soa_histograms",
+        "node_parallelism",
+        "duplicate_bins",
+        "compact_nodes",
+    }
+    for result_key in sorted(baseline_results):
+        baseline_result = baseline_results[result_key]
+        candidate_result = candidate_results[result_key]
+        inputs_match = (
+            baseline_result.dimensions == candidate_result.dimensions
+            and all(
+                candidate_result.parameters.get(name) == value
+                for name, value in baseline_result.parameters.items()
+            )
+        )
+        gates.append(
+            _gate(
+                f"report: {result_key} inputs",
+                "contract",
+                inputs_match,
+                "dimensions and baseline parameters",
+            )
+        )
+        if baseline_result.scenario in invariant_scenarios:
+            parity = candidate_result.metrics.get(
+                "prediction_digest"
+            ) == baseline_result.metrics.get("prediction_digest")
+            gates.append(
+                _gate(
+                    f"{baseline_result.scenario}: {baseline_result.case} "
+                    f"repetition {baseline_result.repetition} parity",
+                    "quality",
+                    parity,
+                    "prediction digest",
+                )
+            )
+        if baseline_result.scenario == "compact_nodes" or (
+            baseline_result.scenario == "efb"
+            and baseline_result.case
+            in {"exclusive_one_hot", "controlled_conflict"}
+        ):
+            parity = candidate_result.metrics.get(
+                "artifact_digest"
+            ) == baseline_result.metrics.get("artifact_digest")
+            gates.append(
+                _gate(
+                    f"{baseline_result.scenario}: {baseline_result.case} "
+                    f"repetition {baseline_result.repetition} artifact parity",
+                    "quality",
+                    parity,
+                    "artifact digest",
+                )
+            )
     base = aggregate_report(baseline)
     cand = aggregate_report(candidate)
     missing = sorted(set(base) - set(cand))
@@ -374,6 +561,20 @@ def compare_reports(
             ]
         )
 
+    exclusive = ("efb", "exclusive_one_hot")
+    if exclusive in base:
+        parity = cand[exclusive].get("artifact_digest") == base[exclusive].get(
+            "artifact_digest"
+        )
+        gates.append(
+            _gate(
+                "efb: exclusive artifact parity",
+                "quality",
+                parity,
+                "artifact digest",
+            )
+        )
+
     for key in sorted(base):
         if key[0] != "compact_nodes":
             continue
@@ -455,10 +656,10 @@ def compare_reports(
                 f"ratio={fit_ratio:.3f}",
             )
         )
-        if base[key].get("peak_rss_delta_mb") and cand[key].get(
-            "peak_rss_delta_mb"
-        ):
-            rss_ratio = _ratio(cand[key], base[key], "peak_rss_delta_mb")
+        if base[key].get("fit_peak_rss_mb") is not None and cand[key].get(
+            "fit_peak_rss_mb"
+        ) is not None:
+            rss_ratio = _ratio(cand[key], base[key], "fit_peak_rss_mb")
             gates.append(
                 _gate(
                     f"soa_histograms: {key[1]} memory regression",
@@ -479,17 +680,17 @@ def compare_reports(
         one_key = ("node_parallelism", "threads_1")
         eight_key = ("node_parallelism", "threads_8")
         ratio = _ratio(cand[eight_key], base[eight_key], "native_train_seconds")
-        one_ratio = _ratio(cand[one_key], base[one_key], "native_train_seconds")
+        one_ratio = _ratio(cand[one_key], base[one_key], "fit_seconds")
         one = float(cand[one_key]["native_train_seconds"])
         eight = float(cand[eight_key]["native_train_seconds"])
         gates.append(_gate("node_parallelism: one-thread regression", "performance", one_ratio <= 1.05, f"ratio={one_ratio:.3f}"))
         gates.append(_gate("node_parallelism: eight-thread speed", "performance", ratio <= 0.85, f"ratio={ratio:.3f}"))
         gates.append(_gate("node_parallelism: scaling", "performance", one / max(eight, 1e-12) >= 1.25, f"speedup={one / max(eight, 1e-12):.3f}"))
         for key in (one_key, eight_key):
-            if base[key].get("peak_rss_delta_mb") and cand[key].get(
-                "peak_rss_delta_mb"
-            ):
-                rss_ratio = _ratio(cand[key], base[key], "peak_rss_delta_mb")
+            if base[key].get("fit_peak_rss_mb") is not None and cand[key].get(
+                "fit_peak_rss_mb"
+            ) is not None:
+                rss_ratio = _ratio(cand[key], base[key], "fit_peak_rss_mb")
                 gates.append(_gate(f"node_parallelism: {key[1]} memory", "performance", rss_ratio <= 1.25, f"ratio={rss_ratio:.3f}"))
 
     for key in sorted(base):
@@ -506,20 +707,20 @@ def compare_reports(
                 _gate(f"duplicate_bins: {case} bridge preparation", "performance", bridge_ratio <= 0.95, f"ratio={bridge_ratio:.3f}"),
             ]
         )
-        if base[key].get("peak_rss_delta_mb") and cand[key].get(
-            "peak_rss_delta_mb"
-        ):
-            ratio = _ratio(cand[key], base[key], "peak_rss_delta_mb")
+        if base[key].get("fit_peak_rss_mb") is not None and cand[key].get(
+            "fit_peak_rss_mb"
+        ) is not None:
+            ratio = _ratio(cand[key], base[key], "fit_peak_rss_mb")
             gates.append(_gate(f"duplicate_bins: {case} memory", "performance", ratio <= 0.80, f"ratio={ratio:.3f}"))
 
     if ("compact_nodes", "sparse_spines") in base:
         key = ("compact_nodes", "sparse_spines")
         predict_ratio = _ratio(cand[key], base[key], "predict_seconds_per_row")
         load_ratio = _ratio(cand[key], base[key], "load_seconds")
-        if base[key].get("peak_rss_delta_mb") and cand[key].get(
-            "peak_rss_delta_mb"
-        ):
-            rss_ratio = _ratio(cand[key], base[key], "peak_rss_delta_mb")
+        if base[key].get("fit_peak_rss_mb") is not None and cand[key].get(
+            "fit_peak_rss_mb"
+        ) is not None:
+            rss_ratio = _ratio(cand[key], base[key], "fit_peak_rss_mb")
             gates.append(_gate("compact_nodes: sparse memory", "performance", rss_ratio <= 0.25, f"ratio={rss_ratio:.3f}"))
         gates.append(_gate("compact_nodes: sparse load", "performance", load_ratio <= 1.10, f"ratio={load_ratio:.3f}"))
         gates.append(_gate("compact_nodes: sparse throughput", "performance", predict_ratio <= 0.85, f"ratio={predict_ratio:.3f}"))
@@ -532,8 +733,12 @@ def compare_reports(
         key = ("efb", "exclusive_one_hot")
         active = bool(cand[key].get("candidate_active"))
         time_ratio = _ratio(cand[key], base[key], "fit_seconds")
-        rss_base = float(base[key].get("peak_rss_delta_mb") or 0.0)
-        rss_ratio = _ratio(cand[key], base[key], "peak_rss_delta_mb") if rss_base else 1.0
+        rss_base = base[key].get("fit_peak_rss_mb")
+        rss_ratio = (
+            _ratio(cand[key], base[key], "fit_peak_rss_mb")
+            if rss_base is not None
+            else 1.0
+        )
         gates.append(_gate("efb: material benefit", "performance", time_ratio <= 0.85 or rss_ratio <= 0.80, f"time={time_ratio:.3f} rss={rss_ratio:.3f}"))
     dense = ("efb", "dense_control")
     if dense in base:
@@ -562,11 +767,11 @@ def compare_reports(
                 ),
             ]
         )
-        if base[key].get("peak_rss_delta_mb") and cand[key].get(
-            "peak_rss_delta_mb"
-        ):
-            baseline_rss = float(base[key]["peak_rss_delta_mb"])
-            candidate_rss = float(cand[key]["peak_rss_delta_mb"])
+        if base[key].get("fit_peak_rss_mb") is not None and cand[key].get(
+            "fit_peak_rss_mb"
+        ) is not None:
+            baseline_rss = float(base[key]["fit_peak_rss_mb"])
+            candidate_rss = float(cand[key]["fit_peak_rss_mb"])
             ratio = candidate_rss / baseline_rss
             reduction = baseline_rss - candidate_rss
             gates.append(
@@ -624,10 +829,18 @@ def render_markdown(report: BenchmarkReport, gates: Sequence[GateResult]) -> str
         rows = [(key, value) for key, value in aggregated.items() if key[0] == scenario]
         if not rows:
             continue
-        lines.extend(["", f"## {title_names[scenario]}", "", "| Case | Fit (s) | RSS delta (MiB) | Quality |", "| --- | ---: | ---: | ---: |"])
+        lines.extend(
+            [
+                "",
+                f"## {title_names[scenario]}",
+                "",
+                "| Case | Fit (s) | Incremental peak RSS (MiB) | Quality |",
+                "| --- | ---: | ---: | ---: |",
+            ]
+        )
         for (_, case), metrics in sorted(rows):
             fit = metrics.get("fit_seconds")
-            rss = metrics.get("peak_rss_delta_mb")
+            rss = metrics.get("fit_peak_rss_mb")
             quality = metrics.get("rmse", metrics.get("max_rank_error", "n/a"))
             fit_text = "n/a" if fit is None else f"{float(fit):.6f}"
             rss_text = "n/a" if rss is None else f"{float(rss):.2f}"
@@ -646,10 +859,15 @@ def replace_metric(
     case: str,
     metric: str,
     value: Any,
+    repetition: int | None = None,
 ) -> BenchmarkReport:
     results = []
     for result in report.results:
-        if result.scenario == scenario and result.case == case:
+        if (
+            result.scenario == scenario
+            and result.case == case
+            and (repetition is None or result.repetition == repetition)
+        ):
             metrics = dict(result.metrics)
             metrics[metric] = value
             result = replace(result, metrics=metrics)
@@ -667,33 +885,51 @@ def synthetic_report_for_tests(*, mode: str, profile: str) -> BenchmarkReport:
         "quantile_sketches": ["large_skewed"],
     }
     results = []
-    for scenario, scenario_cases in cases.items():
-        for case in scenario_cases:
-            is_candidate = mode == "candidate"
-            metrics: dict[str, Any] = {
-                "fit_seconds": 0.8 if is_candidate else 1.0,
-                "load_seconds": 0.8 if is_candidate else 1.0,
-                "native_bridge_prepare_seconds": 0.5 if is_candidate else 1.0,
-                "native_train_seconds": 0.7 if is_candidate else 1.0,
-                "peak_rss_delta_mb": 20.0 if is_candidate else 100.0,
-                "predict_seconds_per_row": 0.7 if is_candidate else 1.0,
-                "stump_count": 4000,
-                "rmse": 1.0,
-                "prediction_digest": "a" * 64,
-                "candidate_active": is_candidate,
-                "mean_rank_error": 0.001,
-                "p99_rank_error": 0.003,
-                "max_rank_error": 0.005,
-            }
-            if scenario == "node_parallelism" and case == "threads_1":
-                metrics["native_train_seconds"] = 1.0
-            if scenario == "node_parallelism" and case == "threads_8":
-                metrics["native_train_seconds"] = 0.6 if is_candidate else 1.0
-            results.append(CaseResult(scenario, case, 0, metrics, {"rows": 1}, {}))
+    repetition_count = 1 if profile == "quick" else 3
+    for repetition in range(repetition_count):
+        for scenario, scenario_cases in cases.items():
+            for case in scenario_cases:
+                is_candidate = mode == "candidate"
+                metrics: dict[str, Any] = {
+                    "fit_seconds": 0.8 if is_candidate else 1.0,
+                    "load_seconds": 0.8 if is_candidate else 1.0,
+                    "native_bridge_prepare_seconds": (
+                        0.5 if is_candidate else 1.0
+                    ),
+                    "native_train_seconds": 0.7 if is_candidate else 1.0,
+                    "fit_peak_rss_mb": 20.0 if is_candidate else 100.0,
+                    "peak_rss_mb": 50.0 if is_candidate else 130.0,
+                    "predict_seconds_per_row": 0.7 if is_candidate else 1.0,
+                    "stump_count": 4000,
+                    "rmse": 1.0,
+                    "prediction_digest": "a" * 64,
+                    "artifact_digest": "b" * 64,
+                    "candidate_active": is_candidate,
+                    "mean_rank_error": 0.001,
+                    "p99_rank_error": 0.003,
+                    "max_rank_error": 0.005,
+                }
+                if scenario == "node_parallelism" and case == "threads_1":
+                    metrics["native_train_seconds"] = 1.0
+                if scenario == "node_parallelism" and case == "threads_8":
+                    metrics["native_train_seconds"] = (
+                        0.6 if is_candidate else 1.0
+                    )
+                results.append(
+                    CaseResult(
+                        scenario,
+                        case,
+                        repetition,
+                        metrics,
+                        {"rows": 1},
+                        {"seed": 17 + repetition},
+                    )
+                )
     environment = {
         "platform": "darwin",
         "machine": "arm64",
         "logical_cpus": 10,
         "python_major_minor": "3.13",
+        "rayon_num_threads": None,
     }
     return BenchmarkReport(SCHEMA_VERSION, profile, mode, environment, tuple(results))

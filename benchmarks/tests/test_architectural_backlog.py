@@ -46,21 +46,11 @@ class ArchitecturalBacklogBenchmarkTests(unittest.TestCase):
 
     def test_report_roundtrip_and_duplicate_key_validation(self) -> None:
         common = _module("common")
-        result = common.CaseResult(
-            scenario="duplicate_bins",
-            case="wide_shallow_u8",
-            repetition=0,
-            metrics={"fit_seconds": 1.0, "peak_rss_delta_mb": 20.0},
-            dimensions={"rows": 2000, "features": 64},
-            parameters={"max_bins": 64},
+        report = common.select_scenarios(
+            common.synthetic_report_for_tests(mode="baseline", profile="quick"),
+            ["duplicate_bins"],
         )
-        report = common.BenchmarkReport(
-            schema_version=1,
-            profile="quick",
-            mode="baseline",
-            environment=common.environment_manifest(),
-            results=(result,),
-        )
+        result = report.results[0]
 
         decoded = common.BenchmarkReport.from_json(report.to_json())
         self.assertEqual(decoded, report)
@@ -82,6 +72,7 @@ class ArchitecturalBacklogBenchmarkTests(unittest.TestCase):
             "machine": "arm64",
             "logical_cpus": 10,
             "python_major_minor": "3.13",
+            "rayon_num_threads": None,
         }
         self.assertEqual(common.environment_mismatches(baseline, dict(baseline)), [])
         candidate = dict(baseline, logical_cpus=8)
@@ -89,12 +80,18 @@ class ArchitecturalBacklogBenchmarkTests(unittest.TestCase):
             common.environment_mismatches(baseline, candidate),
             ["logical_cpus: baseline=10 candidate=8"],
         )
+        threaded = dict(baseline, rayon_num_threads="8")
+        self.assertEqual(
+            common.environment_mismatches(baseline, threaded),
+            ["rayon_num_threads: baseline=None candidate=8"],
+        )
 
     def test_rss_normalization_handles_macos_and_linux_units(self) -> None:
         common = _module("common")
         self.assertAlmostEqual(common.normalize_max_rss_mb(10 * 1024 * 1024, "darwin"), 10.0)
         self.assertAlmostEqual(common.normalize_max_rss_mb(10 * 1024, "linux"), 10.0)
         self.assertIsNone(common.normalize_max_rss_mb(1234, "win32"))
+        self.assertGreater(common.current_rss_mb(), 0.0)
 
     def test_comparator_separates_quality_and_performance_gates(self) -> None:
         common = _module("common")
@@ -118,7 +115,7 @@ class ArchitecturalBacklogBenchmarkTests(unittest.TestCase):
 
         failure_metrics = {
             "node_parallelism": ("threads_8", "native_train_seconds", 2.0),
-            "duplicate_bins": ("wide_shallow_u8", "peak_rss_delta_mb", 100.0),
+            "duplicate_bins": ("wide_shallow_u8", "fit_peak_rss_mb", 100.0),
             "compact_nodes": ("sparse_spines", "predict_seconds_per_row", 2.0),
             "efb": ("exclusive_one_hot", "candidate_active", False),
             "quantile_sketches": ("large_skewed", "max_rank_error", 0.02),
@@ -135,6 +132,68 @@ class ArchitecturalBacklogBenchmarkTests(unittest.TestCase):
                 self.assertTrue(
                     any(not gate.passed for gate in common.compare_reports(baseline, report))
                 )
+
+    def test_comparator_checks_each_repetition_and_efb_artifact(self) -> None:
+        common = _module("common")
+        baseline = common.synthetic_report_for_tests(mode="baseline", profile="full")
+        candidate = common.synthetic_report_for_tests(mode="candidate", profile="full")
+
+        mismatched_prediction = common.replace_metric(
+            candidate,
+            scenario="soa_histograms",
+            case="standard_wide",
+            repetition=0,
+            metric="prediction_digest",
+            value="x" * 64,
+        )
+        gates = common.compare_reports(baseline, mismatched_prediction)
+        self.assertTrue(
+            any("repetition 0 parity" in gate.name and not gate.passed for gate in gates)
+        )
+
+        mismatched_artifact = common.replace_metric(
+            candidate,
+            scenario="efb",
+            case="exclusive_one_hot",
+            repetition=1,
+            metric="artifact_digest",
+            value="y" * 64,
+        )
+        gates = common.compare_reports(baseline, mismatched_artifact)
+        self.assertTrue(
+            any("repetition 1 artifact parity" in gate.name and not gate.passed for gate in gates)
+        )
+
+    def test_scenario_selection_and_report_validation_are_strict(self) -> None:
+        common = _module("common")
+        baseline = common.synthetic_report_for_tests(mode="baseline", profile="full")
+        selected = common.select_scenarios(baseline, ["compact_nodes"])
+        self.assertEqual({result.scenario for result in selected.results}, {"compact_nodes"})
+        self.assertEqual(len(selected.results), 3)
+        candidate = common.select_scenarios(
+            common.synthetic_report_for_tests(mode="candidate", profile="full"),
+            ["compact_nodes"],
+        )
+        self.assertTrue(
+            all(gate.passed for gate in common.compare_reports(selected, candidate))
+        )
+
+        negative = common.replace_metric(
+            selected,
+            scenario="compact_nodes",
+            case="sparse_spines",
+            metric="load_seconds",
+            value=-1.0,
+        )
+        with self.assertRaisesRegex(ValueError, "negative"):
+            common.validate_report(negative)
+
+    def test_quantile_rank_errors_require_cut_metadata(self) -> None:
+        scenarios = _module("scenarios")
+        import numpy as np
+
+        with self.assertRaisesRegex(RuntimeError, "metadata is missing"):
+            scenarios._rank_errors(np.ones((4, 1), dtype=np.float32), None)
 
     def test_quick_baseline_case_runs_a_real_model(self) -> None:
         scenarios = _module("scenarios")
