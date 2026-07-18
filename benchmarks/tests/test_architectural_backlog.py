@@ -5,8 +5,10 @@ from __future__ import annotations
 import importlib
 import json
 import math
+import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 
@@ -91,7 +93,11 @@ class ArchitecturalBacklogBenchmarkTests(unittest.TestCase):
         self.assertAlmostEqual(common.normalize_max_rss_mb(10 * 1024 * 1024, "darwin"), 10.0)
         self.assertAlmostEqual(common.normalize_max_rss_mb(10 * 1024, "linux"), 10.0)
         self.assertIsNone(common.normalize_max_rss_mb(1234, "win32"))
-        self.assertGreater(common.current_rss_mb(), 0.0)
+        current = common.current_rss_mb()
+        if sys.platform == "darwin" or sys.platform.startswith("linux"):
+            self.assertGreater(current, 0.0)
+        else:
+            self.assertIsNone(current)
 
     def test_comparator_separates_quality_and_performance_gates(self) -> None:
         common = _module("common")
@@ -187,6 +193,24 @@ class ArchitecturalBacklogBenchmarkTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "negative"):
             common.validate_report(negative)
+        wrong_type = common.replace_metric(
+            selected,
+            scenario="compact_nodes",
+            case="sparse_spines",
+            metric="load_seconds",
+            value="fast",
+        )
+        with self.assertRaisesRegex(ValueError, "must be numeric"):
+            common.validate_report(wrong_type)
+        unknown_case = replace(
+            selected,
+            results=(
+                replace(selected.results[0], case="unknown_case"),
+                *selected.results[1:],
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "unknown case"):
+            common.validate_report(unknown_case)
 
     def test_quantile_rank_errors_require_cut_metadata(self) -> None:
         scenarios = _module("scenarios")
@@ -194,6 +218,10 @@ class ArchitecturalBacklogBenchmarkTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "metadata is missing"):
             scenarios._rank_errors(np.ones((4, 1), dtype=np.float32), None)
+        with self.assertRaisesRegex(RuntimeError, "feature count"):
+            scenarios._rank_errors(
+                np.ones((4, 2), dtype=np.float32), [[0.5]]
+            )
 
     def test_quick_baseline_case_runs_a_real_model(self) -> None:
         scenarios = _module("scenarios")

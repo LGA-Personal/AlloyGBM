@@ -14,6 +14,7 @@ from typing import Any
 import numpy as np
 
 from .common import (
+    SCENARIO_CASES,
     CaseResult,
     current_rss_mb,
     peak_rss_mb,
@@ -22,26 +23,6 @@ from .common import (
     rss_delta_mb,
 )
 from .fixtures import Fixture, make_fixture
-
-
-SCENARIO_CASES: dict[str, tuple[str, ...]] = {
-    "soa_histograms": (
-        "standard_wide",
-        "standard_deep",
-        "dro_wide",
-        "linear_leaf",
-    ),
-    "node_parallelism": ("threads_1", "threads_8"),
-    "duplicate_bins": (
-        "wide_shallow_u8",
-        "wide_shallow_u16",
-        "tall_narrow_u8",
-        "tall_narrow_u16",
-    ),
-    "compact_nodes": ("sparse_spines", "shallow_control"),
-    "efb": ("exclusive_one_hot", "controlled_conflict", "dense_control"),
-    "quantile_sketches": ("large_skewed",),
-}
 
 
 def _artifact_stump_count(artifact: bytes) -> int | None:
@@ -330,6 +311,10 @@ def _rank_errors(X: np.ndarray, cuts_by_feature: object) -> tuple[float, float, 
     errors: list[float] = []
     if cuts_by_feature is None:
         raise RuntimeError("quantile cut metadata is missing")
+    if len(cuts_by_feature) != X.shape[1]:
+        raise RuntimeError(
+            "quantile cut metadata feature count does not match the fixture"
+        )
     for feature_index, raw_cuts in enumerate(cuts_by_feature):
         cuts = np.asarray(raw_cuts, dtype=np.float64)
         if not len(cuts):

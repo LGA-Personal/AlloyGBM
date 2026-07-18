@@ -18,6 +18,24 @@ import numpy as np
 
 
 SCHEMA_VERSION = 1
+SCENARIO_CASES: dict[str, tuple[str, ...]] = {
+    "soa_histograms": (
+        "standard_wide",
+        "standard_deep",
+        "dro_wide",
+        "linear_leaf",
+    ),
+    "node_parallelism": ("threads_1", "threads_8"),
+    "duplicate_bins": (
+        "wide_shallow_u8",
+        "wide_shallow_u16",
+        "tall_narrow_u8",
+        "tall_narrow_u16",
+    ),
+    "compact_nodes": ("sparse_spines", "shallow_control"),
+    "efb": ("exclusive_one_hot", "controlled_conflict", "dense_control"),
+    "quantile_sketches": ("large_skewed",),
+}
 ENVIRONMENT_KEYS = (
     "platform",
     "machine",
@@ -74,6 +92,9 @@ REQUIRED_METRICS = {
         "candidate_active",
     },
 }
+STRING_METRICS = {"artifact_digest", "prediction_digest"}
+BOOLEAN_METRICS = {"candidate_active"}
+NULLABLE_NUMERIC_METRICS = {"fit_peak_rss_mb", "peak_rss_mb"}
 
 
 @dataclass(frozen=True)
@@ -270,9 +291,31 @@ def validate_report(report: BenchmarkReport) -> None:
         required = REQUIRED_METRICS.get(result.scenario)
         if required is None:
             raise ValueError(f"unknown scenario {result.scenario!r}")
+        if result.case not in SCENARIO_CASES[result.scenario]:
+            raise ValueError(
+                f"unknown case {result.scenario}/{result.case}"
+            )
         missing_metrics = sorted(required - set(result.metrics))
         if missing_metrics:
             raise ValueError(f"missing metrics {missing_metrics!r} for {key!r}")
+        for metric_name in required:
+            value = result.metrics[metric_name]
+            if metric_name in STRING_METRICS:
+                if not isinstance(value, str) or not value:
+                    raise ValueError(
+                        f"metric {metric_name!r} for {key!r} must be a string"
+                    )
+            elif metric_name in BOOLEAN_METRICS:
+                if not isinstance(value, bool):
+                    raise ValueError(
+                        f"metric {metric_name!r} for {key!r} must be boolean"
+                    )
+            elif value is None and metric_name in NULLABLE_NUMERIC_METRICS:
+                continue
+            elif not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise ValueError(
+                    f"metric {metric_name!r} for {key!r} must be numeric"
+                )
         for metric_name, value in result.metrics.items():
             if isinstance(value, bool) or value is None or isinstance(value, str):
                 continue
