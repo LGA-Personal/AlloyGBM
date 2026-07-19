@@ -132,45 +132,75 @@ struct PredictorLayoutPayload {
     feature_count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-struct PredictorTreeNode {
-    feature_index: usize,
+const NO_COMPACT_INDEX: u32 = u32::MAX;
+const NODE_FLAG_DEFAULT_LEFT: u8 = 1 << 0;
+const NODE_FLAG_CATEGORICAL: u8 = 1 << 1;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CompactPredictorNode {
+    feature_index: u32,
     threshold_bin: f32,
-    default_left: bool,
-    is_categorical: bool,
-    categorical_bitset: Option<Vec<u8>>,
+    left_child: u32,
+    right_child: u32,
     left_leaf_value: f32,
     right_leaf_value: f32,
-    left_linear: Option<LinearLeafCompact>,
-    right_linear: Option<LinearLeafCompact>,
-}
-
-impl PredictorTreeNode {
-    #[inline]
-    fn eval_left_leaf(&self, features: &[f32]) -> f32 {
-        match &self.left_linear {
-            Some(ll) => ll.eval(features),
-            None => self.left_leaf_value,
-        }
-    }
-
-    #[inline]
-    fn eval_right_leaf(&self, features: &[f32]) -> f32 {
-        match &self.right_linear {
-            Some(rl) => rl.eval(features),
-            None => self.right_leaf_value,
-        }
-    }
+    categorical_index: u32,
+    left_linear_index: u32,
+    right_linear_index: u32,
+    flags: u8,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct PredictorTree {
-    nodes_by_local_id: Vec<Option<PredictorTreeNode>>,
+struct CompactPredictorTree {
+    nodes: Vec<CompactPredictorNode>,
+    categorical_bitsets: Vec<Vec<u8>>,
+    linear_leaves: Vec<LinearLeafCompact>,
+    root_index: u32,
     /// DART per-tree multiplicative weight before load-time contribution
-    /// collapse. After `collapse_tree_branch_contributions`, this is reset to
-    /// `1.0` because the weight has been folded into every branch value.
+    /// collapse. The final runtime value is always `1.0`.
     tree_weight: f32,
 }
+
+impl CompactPredictorNode {
+    #[inline]
+    fn default_left(self) -> bool {
+        self.flags & NODE_FLAG_DEFAULT_LEFT != 0
+    }
+
+    #[inline]
+    fn is_categorical(self) -> bool {
+        self.flags & NODE_FLAG_CATEGORICAL != 0
+    }
+
+    #[inline]
+    fn child_index(self, went_left: bool) -> u32 {
+        if went_left {
+            self.left_child
+        } else {
+            self.right_child
+        }
+    }
+}
+
+impl CompactPredictorTree {
+    #[inline]
+    fn linear_leaf(&self, index: u32) -> Option<&LinearLeafCompact> {
+        (index != NO_COMPACT_INDEX).then(|| &self.linear_leaves[index as usize])
+    }
+
+    #[inline]
+    fn eval_leaf(&self, node: CompactPredictorNode, went_left: bool, features: &[f32]) -> f32 {
+        let (scalar, linear_index) = if went_left {
+            (node.left_leaf_value, node.left_linear_index)
+        } else {
+            (node.right_leaf_value, node.right_linear_index)
+        };
+        self.linear_leaf(linear_index)
+            .map_or(scalar, |leaf| leaf.eval(features))
+    }
+}
+
+type PredictorTree = CompactPredictorTree;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PostTransformKind {
@@ -217,14 +247,19 @@ pub struct Predictor {
 /// Determine if a prediction row goes left at a tree node.
 /// Handles continuous (threshold comparison) and categorical (bitset membership) splits.
 #[inline]
-fn predictor_went_left(node: &PredictorTreeNode, feature_value: f32, use_float: bool) -> bool {
+fn predictor_went_left(
+    tree: &PredictorTree,
+    node: CompactPredictorNode,
+    feature_value: f32,
+    use_float: bool,
+) -> bool {
     if feature_value.is_nan() {
-        node.default_left
-    } else if node.is_categorical {
+        node.default_left()
+    } else if node.is_categorical() {
         let cat_id = feature_value as u16;
-        node.categorical_bitset
-            .as_ref()
-            .map_or(node.default_left, |bs| {
+        (node.categorical_index != NO_COMPACT_INDEX)
+            .then(|| &tree.categorical_bitsets[node.categorical_index as usize])
+            .map_or(node.default_left(), |bs| {
                 let byte_idx = (cat_id / 8) as usize;
                 let bit_idx = (cat_id % 8) as usize;
                 byte_idx < bs.len() && (bs[byte_idx] & (1 << bit_idx)) != 0
@@ -238,22 +273,17 @@ fn predictor_went_left(node: &PredictorTreeNode, feature_value: f32, use_float: 
 
 #[inline]
 fn predict_tree_contribution(tree: &PredictorTree, features: &[f32], use_float: bool) -> f32 {
-    let mut local_node_id: usize = 0;
-    let mut terminal: Option<(&PredictorTreeNode, bool)> = None;
-    while let Some(Some(node)) = tree.nodes_by_local_id.get(local_node_id) {
-        let feature_value = features[node.feature_index];
-        let went_left = predictor_went_left(node, feature_value, use_float);
+    let mut node_index = tree.root_index;
+    let mut terminal: Option<(CompactPredictorNode, bool)> = None;
+    while let Some(node) = tree.nodes.get(node_index as usize).copied() {
+        let feature_value = features[node.feature_index as usize];
+        let went_left = predictor_went_left(tree, node, feature_value, use_float);
         terminal = Some((node, went_left));
-        local_node_id = if went_left {
-            local_node_id * 2 + 1
-        } else {
-            local_node_id * 2 + 2
-        };
+        node_index = node.child_index(went_left);
     }
 
     match terminal {
-        Some((node, true)) => node.eval_left_leaf(features),
-        Some((node, false)) => node.eval_right_leaf(features),
+        Some((node, went_left)) => tree.eval_leaf(node, went_left, features),
         None => 0.0,
     }
 }
@@ -288,61 +318,80 @@ fn combine_branch_contribution(
     }
 }
 
+fn store_collapsed_linear_leaf(
+    tree: &mut PredictorTree,
+    existing_index: u32,
+    leaf: Option<LinearLeafCompact>,
+) -> u32 {
+    let Some(leaf) = leaf else {
+        return NO_COMPACT_INDEX;
+    };
+    if existing_index != NO_COMPACT_INDEX {
+        tree.linear_leaves[existing_index as usize] = leaf;
+        existing_index
+    } else {
+        let index = tree.linear_leaves.len() as u32;
+        tree.linear_leaves.push(leaf);
+        index
+    }
+}
+
 fn collapse_tree_branch_contributions(tree: &mut PredictorTree) {
     let tree_weight = tree.tree_weight;
-    let mut stack = vec![(0_usize, 0.0_f32, None::<LinearLeafCompact>)];
+    let mut stack = vec![(tree.root_index, 0.0_f32, None::<LinearLeafCompact>)];
 
-    while let Some((local_node_id, prefix_scalar, prefix_linear)) = stack.pop() {
-        if local_node_id >= tree.nodes_by_local_id.len()
-            || tree.nodes_by_local_id[local_node_id].is_none()
-        {
+    while let Some((node_index, prefix_scalar, prefix_linear)) = stack.pop() {
+        let Some(node) = tree.nodes.get(node_index as usize).copied() else {
             continue;
-        }
-
-        let (left_scalar, left_linear, right_scalar, right_linear) = {
-            let node = tree.nodes_by_local_id[local_node_id]
-                .as_ref()
-                .expect("node checked above");
-            (
-                node.left_leaf_value,
-                node.left_linear.clone(),
-                node.right_leaf_value,
-                node.right_linear.clone(),
-            )
         };
+
+        let left_linear = tree.linear_leaf(node.left_linear_index).cloned();
+        let right_linear = tree.linear_leaf(node.right_linear_index).cloned();
 
         let (collapsed_left_scalar, collapsed_left_linear) = combine_branch_contribution(
             prefix_scalar,
             prefix_linear.as_ref(),
-            left_scalar,
+            node.left_leaf_value,
             left_linear.as_ref(),
             tree_weight,
         );
         let (collapsed_right_scalar, collapsed_right_linear) = combine_branch_contribution(
             prefix_scalar,
             prefix_linear.as_ref(),
-            right_scalar,
+            node.right_leaf_value,
             right_linear.as_ref(),
             tree_weight,
         );
 
-        {
-            let node = tree.nodes_by_local_id[local_node_id]
-                .as_mut()
-                .expect("node checked above");
-            node.left_leaf_value = collapsed_left_scalar;
-            node.left_linear = collapsed_left_linear.clone();
-            node.right_leaf_value = collapsed_right_scalar;
-            node.right_linear = collapsed_right_linear.clone();
-        }
+        let collapsed_left_index = store_collapsed_linear_leaf(
+            tree,
+            node.left_linear_index,
+            collapsed_left_linear.clone(),
+        );
+        let collapsed_right_index = store_collapsed_linear_leaf(
+            tree,
+            node.right_linear_index,
+            collapsed_right_linear.clone(),
+        );
+        let compact_node = &mut tree.nodes[node_index as usize];
+        compact_node.left_leaf_value = collapsed_left_scalar;
+        compact_node.left_linear_index = collapsed_left_index;
+        compact_node.right_leaf_value = collapsed_right_scalar;
+        compact_node.right_linear_index = collapsed_right_index;
 
-        let left_child = local_node_id * 2 + 1;
-        if matches!(tree.nodes_by_local_id.get(left_child), Some(Some(_))) {
-            stack.push((left_child, collapsed_left_scalar, collapsed_left_linear));
+        if node.left_child != NO_COMPACT_INDEX {
+            stack.push((
+                node.left_child,
+                collapsed_left_scalar,
+                collapsed_left_linear,
+            ));
         }
-        let right_child = local_node_id * 2 + 2;
-        if matches!(tree.nodes_by_local_id.get(right_child), Some(Some(_))) {
-            stack.push((right_child, collapsed_right_scalar, collapsed_right_linear));
+        if node.right_child != NO_COMPACT_INDEX {
+            stack.push((
+                node.right_child,
+                collapsed_right_scalar,
+                collapsed_right_linear,
+            ));
         }
     }
 
@@ -354,12 +403,10 @@ fn finalize_predictor_trees(
     feature_count: usize,
 ) -> PredictorResult<()> {
     for (tree_index, tree) in trees.iter().enumerate() {
-        for (local_node_id, node) in tree.nodes_by_local_id.iter().enumerate() {
-            if let Some(node) = node
-                && node.feature_index >= feature_count
-            {
+        for (node_index, node) in tree.nodes.iter().enumerate() {
+            if node.feature_index as usize >= feature_count {
                 return Err(PredictorError::ContractViolation(format!(
-                    "tree {tree_index} local node_id {local_node_id} split feature_index {} exceeds model feature_count {}",
+                    "tree {tree_index} compact node {node_index} split feature_index {} exceeds model feature_count {}",
                     node.feature_index, feature_count
                 )));
             }
@@ -603,7 +650,7 @@ impl Predictor {
             )));
         }
         let divisor = max_data_bin as f32;
-        let convert = |node: &mut PredictorTreeNode, fi: usize| {
+        let convert = |node: &mut CompactPredictorNode, fi: usize| {
             let min_val = feature_mins[fi];
             let max_val = feature_maxs[fi];
             let span = max_val - min_val;
@@ -615,16 +662,16 @@ impl Predictor {
             }
         };
         for tree in &mut self.trees {
-            for node in tree.nodes_by_local_id.iter_mut().flatten() {
-                let fi = node.feature_index;
+            for node in &mut tree.nodes {
+                let fi = node.feature_index as usize;
                 convert(node, fi);
             }
         }
         if let Some(class_trees) = &mut self.class_trees {
             for trees in class_trees.iter_mut() {
                 for tree in trees.iter_mut() {
-                    for node in tree.nodes_by_local_id.iter_mut().flatten() {
-                        let fi = node.feature_index;
+                    for node in &mut tree.nodes {
+                        let fi = node.feature_index as usize;
                         convert(node, fi);
                     }
                 }
@@ -649,7 +696,7 @@ impl Predictor {
                 feature_count
             )));
         }
-        let convert = |node: &mut PredictorTreeNode, fi: usize| {
+        let convert = |node: &mut CompactPredictorNode, fi: usize| {
             let cuts = &feature_cuts[fi];
             let bin = node.threshold_bin as usize;
             node.threshold_bin = if bin < cuts.len() {
@@ -659,16 +706,16 @@ impl Predictor {
             };
         };
         for tree in &mut self.trees {
-            for node in tree.nodes_by_local_id.iter_mut().flatten() {
-                let fi = node.feature_index;
+            for node in &mut tree.nodes {
+                let fi = node.feature_index as usize;
                 convert(node, fi);
             }
         }
         if let Some(class_trees) = &mut self.class_trees {
             for trees in class_trees.iter_mut() {
                 for tree in trees.iter_mut() {
-                    for node in tree.nodes_by_local_id.iter_mut().flatten() {
-                        let fi = node.feature_index;
+                    for node in &mut tree.nodes {
+                        let fi = node.feature_index as usize;
                         convert(node, fi);
                     }
                 }
@@ -683,14 +730,14 @@ impl Predictor {
     /// The float equivalent: `value < threshold_bin + 0.5`.
     pub fn convert_bin_thresholds_to_float_prebinned(&mut self) -> PredictorResult<()> {
         for tree in &mut self.trees {
-            for node in tree.nodes_by_local_id.iter_mut().flatten() {
+            for node in &mut tree.nodes {
                 node.threshold_bin += 0.5;
             }
         }
         if let Some(class_trees) = &mut self.class_trees {
             for trees in class_trees.iter_mut() {
                 for tree in trees.iter_mut() {
-                    for node in tree.nodes_by_local_id.iter_mut().flatten() {
+                    for node in &mut tree.nodes {
                         node.threshold_bin += 0.5;
                     }
                 }
@@ -1285,57 +1332,104 @@ fn linear_leaf_to_compact(ll: &alloygbm_core::LinearLeaf) -> LinearLeafCompact {
 fn build_predictor_trees(
     stumps: &[PredictorStump],
 ) -> PredictorResult<(Vec<PredictorTree>, Vec<u32>)> {
-    let mut grouped_by_tree: BTreeMap<u32, Vec<(u32, PredictorTreeNode)>> = BTreeMap::new();
-    let mut first_stump_idx_per_tree: BTreeMap<u32, usize> = BTreeMap::new();
-    for (stump_idx, stump) in stumps.iter().enumerate() {
+    let mut grouped_by_tree: BTreeMap<u32, Vec<(u32, &PredictorStump)>> = BTreeMap::new();
+    for stump in stumps {
         let (tree_id, local_node_id) = decode_tree_node_id(stump.node_id);
-        first_stump_idx_per_tree.entry(tree_id).or_insert(stump_idx);
-        grouped_by_tree.entry(tree_id).or_default().push((
-            local_node_id,
-            PredictorTreeNode {
-                feature_index: stump.feature_index as usize,
-                threshold_bin: stump.threshold_bin as f32,
-                default_left: stump.default_left,
-                is_categorical: stump.is_categorical,
-                categorical_bitset: stump.categorical_bitset.clone(),
-                left_leaf_value: stump.left_leaf_value,
-                right_leaf_value: stump.right_leaf_value,
-                left_linear: stump.left_linear.clone(),
-                right_linear: stump.right_linear.clone(),
-            },
-        ));
+        grouped_by_tree
+            .entry(tree_id)
+            .or_default()
+            .push((local_node_id, stump));
     }
 
     let mut trees = Vec::with_capacity(grouped_by_tree.len());
     let mut tree_ids = Vec::with_capacity(grouped_by_tree.len());
     for (tree_id, nodes) in grouped_by_tree {
-        let max_local_node_id = nodes
-            .iter()
-            .map(|(local_node_id, _)| *local_node_id as usize)
-            .max()
-            .unwrap_or(0);
-        let required_node_slots = max_local_node_id.checked_add(1).ok_or_else(|| {
-            PredictorError::ContractViolation(format!(
-                "tree {tree_id} local node_id {max_local_node_id} overflowed predictor node slot count"
-            ))
-        })?;
-        if required_node_slots > MAX_TREE_NODE_SLOTS {
-            return Err(PredictorError::ContractViolation(format!(
-                "tree {tree_id} local node_id {max_local_node_id} requires {required_node_slots} predictor node slots, exceeds predictor tree node slot limit {MAX_TREE_NODE_SLOTS}"
-            )));
-        }
-        let mut nodes_by_local_id = vec![None; max_local_node_id + 1];
-        for (local_node_id, node) in nodes {
-            let local_node_id = local_node_id as usize;
-            if nodes_by_local_id[local_node_id].is_some() {
+        let mut compact_index_by_local_id = BTreeMap::new();
+        for (compact_index, (local_node_id, _)) in nodes.iter().enumerate() {
+            let required_node_slots = *local_node_id as usize + 1;
+            if required_node_slots > MAX_TREE_NODE_SLOTS {
+                return Err(PredictorError::ContractViolation(format!(
+                    "tree {tree_id} local node_id {local_node_id} requires {required_node_slots} predictor node slots, exceeds predictor tree node slot limit {MAX_TREE_NODE_SLOTS}"
+                )));
+            }
+            if compact_index_by_local_id
+                .insert(*local_node_id, compact_index as u32)
+                .is_some()
+            {
                 return Err(PredictorError::ContractViolation(format!(
                     "tree {tree_id} contains duplicate local node_id {local_node_id}"
                 )));
             }
-            nodes_by_local_id[local_node_id] = Some(node);
         }
-        trees.push(PredictorTree {
-            nodes_by_local_id,
+
+        let mut compact_nodes = Vec::with_capacity(nodes.len());
+        let mut categorical_bitsets = Vec::new();
+        let mut linear_leaves = Vec::new();
+        for (local_node_id, stump) in nodes {
+            let left_local_id = local_node_id
+                .checked_mul(2)
+                .and_then(|id| id.checked_add(1));
+            let right_local_id = local_node_id
+                .checked_mul(2)
+                .and_then(|id| id.checked_add(2));
+            let left_child = left_local_id
+                .and_then(|id| compact_index_by_local_id.get(&id).copied())
+                .unwrap_or(NO_COMPACT_INDEX);
+            let right_child = right_local_id
+                .and_then(|id| compact_index_by_local_id.get(&id).copied())
+                .unwrap_or(NO_COMPACT_INDEX);
+
+            let categorical_index =
+                stump
+                    .categorical_bitset
+                    .as_ref()
+                    .map_or(NO_COMPACT_INDEX, |bitset| {
+                        let index = categorical_bitsets.len() as u32;
+                        categorical_bitsets.push(bitset.clone());
+                        index
+                    });
+            let left_linear_index = stump.left_linear.as_ref().map_or(NO_COMPACT_INDEX, |leaf| {
+                let index = linear_leaves.len() as u32;
+                linear_leaves.push(leaf.clone());
+                index
+            });
+            let right_linear_index = stump
+                .right_linear
+                .as_ref()
+                .map_or(NO_COMPACT_INDEX, |leaf| {
+                    let index = linear_leaves.len() as u32;
+                    linear_leaves.push(leaf.clone());
+                    index
+                });
+            let mut flags = 0_u8;
+            if stump.default_left {
+                flags |= NODE_FLAG_DEFAULT_LEFT;
+            }
+            if stump.is_categorical {
+                flags |= NODE_FLAG_CATEGORICAL;
+            }
+
+            compact_nodes.push(CompactPredictorNode {
+                feature_index: stump.feature_index,
+                threshold_bin: stump.threshold_bin as f32,
+                left_child,
+                right_child,
+                left_leaf_value: stump.left_leaf_value,
+                right_leaf_value: stump.right_leaf_value,
+                categorical_index,
+                left_linear_index,
+                right_linear_index,
+                flags,
+            });
+        }
+        trees.push(CompactPredictorTree {
+            nodes: compact_nodes,
+            categorical_bitsets,
+            linear_leaves,
+            root_index: compact_index_by_local_id
+                .get(&0)
+                .copied()
+                .unwrap_or(NO_COMPACT_INDEX),
             tree_weight: 1.0,
         });
         tree_ids.push(tree_id);
@@ -1535,6 +1629,102 @@ mod tests {
     };
     use alloygbm_core::{LeafValue, LinearLeaf, NodeStats, SplitCandidate};
     use alloygbm_engine::{SquaredErrorObjective, TrainedModel, TrainedStump, Trainer};
+
+    #[test]
+    fn compact_predictor_node_stays_within_inline_size_budget() {
+        assert_eq!(std::mem::size_of::<CompactPredictorNode>(), 40);
+    }
+
+    #[test]
+    fn compact_predictor_tree_keeps_rare_payloads_in_side_tables() {
+        let linear_leaf = LinearLeafCompact {
+            intercept: 0.5,
+            weights: vec![1.25],
+            feature_indices: vec![0],
+            feature_means: vec![0.0],
+            feature_inv_stds: vec![1.0],
+        };
+        let tree = CompactPredictorTree {
+            nodes: Vec::new(),
+            categorical_bitsets: vec![vec![0b0000_0101]],
+            linear_leaves: vec![linear_leaf.clone()],
+            root_index: NO_COMPACT_INDEX,
+            tree_weight: 1.0,
+        };
+
+        assert_eq!(tree.categorical_bitsets, vec![vec![0b0000_0101]]);
+        assert_eq!(tree.linear_leaves, vec![linear_leaf]);
+    }
+
+    #[test]
+    fn sparse_right_spine_loads_only_populated_compact_nodes() {
+        let mut local_node_id = 0_u32;
+        let mut stumps = Vec::new();
+        for _ in 0..16 {
+            stumps.push(PredictorStump {
+                node_id: local_node_id,
+                feature_index: 0,
+                threshold_bin: 0,
+                default_left: false,
+                is_categorical: false,
+                categorical_bitset: None,
+                left_leaf_value: -0.25,
+                right_leaf_value: 0.25,
+                left_linear: None,
+                right_linear: None,
+            });
+            local_node_id = local_node_id * 2 + 2;
+        }
+
+        let (trees, tree_ids) = build_predictor_trees(&stumps).expect("spine loads");
+
+        assert_eq!(tree_ids, vec![0]);
+        assert_eq!(trees[0].nodes.len(), 16);
+        assert_eq!(trees[0].root_index, 0);
+        for (index, node) in trees[0].nodes.iter().enumerate() {
+            assert_eq!(node.left_child, NO_COMPACT_INDEX);
+            let expected_right = if index + 1 < trees[0].nodes.len() {
+                (index + 1) as u32
+            } else {
+                NO_COMPACT_INDEX
+            };
+            assert_eq!(node.right_child, expected_right);
+        }
+        assert_eq!(local_node_id, 131_070);
+    }
+
+    #[test]
+    fn loaded_compact_tree_indexes_categorical_and_linear_side_tables() {
+        let linear_leaf = LinearLeafCompact {
+            intercept: 0.5,
+            weights: vec![1.25],
+            feature_indices: vec![0],
+            feature_means: vec![0.0],
+            feature_inv_stds: vec![1.0],
+        };
+        let stump = PredictorStump {
+            node_id: 0,
+            feature_index: 0,
+            threshold_bin: 0,
+            default_left: true,
+            is_categorical: true,
+            categorical_bitset: Some(vec![0b0000_0101]),
+            left_leaf_value: -0.25,
+            right_leaf_value: 0.25,
+            left_linear: Some(linear_leaf.clone()),
+            right_linear: None,
+        };
+
+        let (trees, _) = build_predictor_trees(&[stump]).expect("tree loads");
+        let tree = &trees[0];
+        let node = tree.nodes[0];
+
+        assert_eq!(node.categorical_index, 0);
+        assert_eq!(node.left_linear_index, 0);
+        assert_eq!(node.right_linear_index, NO_COMPACT_INDEX);
+        assert_eq!(tree.categorical_bitsets, vec![vec![0b0000_0101]]);
+        assert_eq!(tree.linear_leaves, vec![linear_leaf]);
+    }
 
     fn predictor_stub() -> Predictor {
         let metadata = ModelMetadata {
@@ -1957,19 +2147,15 @@ mod tests {
         let predictor = loaded_same_tree_depth_predictor(1.0);
         let tree = &predictor.trees[0];
 
-        let root = tree.nodes_by_local_id[0].as_ref().expect("root exists");
+        let root = &tree.nodes[0];
         assert!((root.left_leaf_value - 0.25).abs() < 1e-6);
         assert!((root.right_leaf_value - (-0.5)).abs() < 1e-6);
 
-        let left_child = tree.nodes_by_local_id[1]
-            .as_ref()
-            .expect("left child exists");
+        let left_child = &tree.nodes[1];
         assert!((left_child.left_leaf_value - 1.0).abs() < 1e-6);
         assert!((left_child.right_leaf_value - 0.0).abs() < 1e-6);
 
-        let right_child = tree.nodes_by_local_id[2]
-            .as_ref()
-            .expect("right child exists");
+        let right_child = &tree.nodes[2];
         assert!((right_child.left_leaf_value - (-0.1)).abs() < 1e-6);
         assert!((right_child.right_leaf_value - (-0.7)).abs() < 1e-6);
 
@@ -1984,19 +2170,15 @@ mod tests {
         let predictor = loaded_same_tree_depth_predictor(0.5);
         let tree = &predictor.trees[0];
 
-        let root = tree.nodes_by_local_id[0].as_ref().expect("root exists");
+        let root = &tree.nodes[0];
         assert!((root.left_leaf_value - 0.125).abs() < 1e-6);
         assert!((root.right_leaf_value - (-0.25)).abs() < 1e-6);
 
-        let left_child = tree.nodes_by_local_id[1]
-            .as_ref()
-            .expect("left child exists");
+        let left_child = &tree.nodes[1];
         assert!((left_child.left_leaf_value - 0.5).abs() < 1e-6);
         assert!((left_child.right_leaf_value - 0.0).abs() < 1e-6);
 
-        let right_child = tree.nodes_by_local_id[2]
-            .as_ref()
-            .expect("right child exists");
+        let right_child = &tree.nodes[2];
         assert!((right_child.left_leaf_value - (-0.05)).abs() < 1e-6);
         assert!((right_child.right_leaf_value - (-0.35)).abs() < 1e-6);
 

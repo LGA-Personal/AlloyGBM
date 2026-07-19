@@ -82,6 +82,25 @@ runtime slots add about 129 MiB at load. This
 large signal supports a strict memory gate while the balanced shallow artifact
 guards ordinary prediction throughput.
 
+### Compact-node candidate
+
+The compact runtime implementation was measured on 2026-07-18 from the same
+host with a fresh baseline at `bdee724` and candidate commit `6a58019`. Both
+runs used three fresh subprocesses per case.
+
+| Case | Variant | Load (s) | Incremental peak RSS (MiB) | Predict (ns/row) |
+| --- | --- | ---: | ---: | ---: |
+| `sparse_spines` | baseline | 0.014867 | 128.52 | 49.96 |
+| `sparse_spines` | compact | 0.000110 | 1.58 | 35.59 |
+| `shallow_control` | baseline | 0.000098 | 1.58 | 10.81 |
+| `shallow_control` | compact | 0.000087 | 1.59 | 10.83 |
+
+The compact loader reduced sparse-spine incremental load RSS by 98.8%, load
+time by 99.3%, and prediction time per row by 28.8%. The shallow control moved
+by less than 1% in RSS and prediction throughput. Artifact and prediction
+digests matched exactly in every repetition, so all compact-node candidate
+gates passed.
+
 ## Exclusive Feature Bundling
 
 | Case | Fit (s) | Native train (s) | Incremental peak RSS (MiB) | RMSE |
@@ -108,6 +127,7 @@ at least 10% and 32 MiB without materially changing held-out quality.
 ## Result
 
 All baseline schema, finite-value, fixture-depth, and deterministic-fixture
-gates passed. Production implementation remains open for all six projects; the
-independent plans in this directory define code changes, regression tests,
-commit boundaries, and candidate commands.
+gates passed. Compact predictor nodes have passed their production candidate
+gates; implementation remains open for the other five projects. The independent
+plans in this directory define their code changes, regression tests, commit
+boundaries, and candidate commands.
