@@ -16,6 +16,16 @@ pub trait BackendOps {
         node: &NodeSlice,
         feature_tiles: &[FeatureTile],
     ) -> EngineResult<HistogramBundle>;
+    fn build_histograms_with_grad_sq(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: &NodeSlice,
+        feature_tiles: &[FeatureTile],
+        _include_grad_sq: bool,
+    ) -> EngineResult<HistogramBundle> {
+        self.build_histograms(binned_matrix, gradients, node, feature_tiles)
+    }
     fn best_split(&self, histograms: &HistogramBundle) -> EngineResult<Option<SplitCandidate>>;
     fn best_split_with_options(
         &self,

@@ -134,10 +134,8 @@ fn build_histograms_baseline_reference(
         }
     }
 
-    HistogramBundle {
-        node_id: node.node_id,
-        feature_histograms,
-    }
+    HistogramBundle::from_feature_histograms(node.node_id, feature_histograms, false)
+        .expect("reference histograms have a valid layout")
 }
 
 fn main() {

@@ -51,8 +51,8 @@ pub use dataset::{
 pub use dro::{DroConfig, DroMetric};
 pub use error::{CoreError, CoreResult};
 pub use histogram::{
-    FeatureHistogram, FeatureTile, GradientPair, HistogramBin, HistogramBundle, NodeSlice,
-    NodeStats, leaf_effective_gradient, leaf_gain_term,
+    FeatureHistogram, FeatureTile, GradientPair, HistogramBin, HistogramBundle,
+    HistogramFeatureView, NodeSlice, NodeStats, leaf_effective_gradient, leaf_gain_term,
 };
 pub use leaf::{LeafValue, LinearLeaf, PartitionResult, SplitCandidate};
 pub use linear_histogram::{

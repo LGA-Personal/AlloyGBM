@@ -125,11 +125,12 @@ impl Trainer {
         let feature_tiles = vec![FeatureTile::new(0, binned_matrix.feature_count as u32)?];
         let split_options = split_selection_options_from_env()?;
 
-        let histograms = backend.build_histograms(
+        let histograms = backend.build_histograms_with_grad_sq(
             binned_matrix,
             &fit_contract.gradients,
             &root_node,
             &feature_tiles,
+            split_options.requires_grad_sq(),
         )?;
         let factor_context = factor_split_context_for_node(
             &self.params,
