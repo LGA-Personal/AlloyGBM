@@ -49,7 +49,7 @@ pub use split_options::{
 };
 
 mod traits;
-pub use traits::{BackendOps, ObjectiveOps, PerRoundMetricCallback};
+pub use traits::{BackendOps, HistogramExecution, ObjectiveOps, PerRoundMetricCallback};
 
 mod objectives;
 pub use objectives::{

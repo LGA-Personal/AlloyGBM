@@ -4,7 +4,8 @@ use alloygbm_categorical::TargetEncoderConfig;
 use alloygbm_core::{
     CoreError, Device, DroConfig, LeafSolverKind, MorphConfig, NeutralizationKind,
 };
-use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+use std::time::Duration;
 
 struct MockBackend;
 struct GradientNeutralizationCheckingBackend {
@@ -14,7 +15,7 @@ struct GradientNeutralizationCheckingBackend {
 struct MorphGradientNeutralizationCheckingBackend {
     exposures: FactorExposureMatrix,
     raw_factor_dot: f32,
-    saw_morph_split: Cell<bool>,
+    saw_morph_split: AtomicBool,
 }
 struct SplitScannerFallbackBackend;
 struct EncodedFeatureCheckingBackend {
@@ -22,6 +23,10 @@ struct EncodedFeatureCheckingBackend {
     expected_bins: Vec<u16>,
 }
 struct CategoricalAncestorLinearPathBackend;
+struct ConcurrentHistogramBackend {
+    active_builds: AtomicUsize,
+    max_active_builds: AtomicUsize,
+}
 struct BadObjective;
 
 fn sample_dataset() -> TrainingDataset {
@@ -58,6 +63,26 @@ fn sample_binned_matrix() -> BinnedMatrix {
         ],
     )
     .expect("binned matrix is valid")
+}
+
+fn node_parallelism_fixture() -> (TrainingDataset, BinnedMatrix) {
+    const ROWS: usize = 8_192;
+    let values = (0..ROWS).map(|row| (row % 8) as f32).collect::<Vec<_>>();
+    let targets = (0..ROWS)
+        .map(|row| (row % 8) as f32 - 3.5)
+        .collect::<Vec<_>>();
+    let bins = (0..ROWS).map(|row| (row % 8) as u8).collect::<Vec<_>>();
+    let dataset = TrainingDataset {
+        matrix: alloygbm_core::DatasetMatrix::new(ROWS, 1, values)
+            .expect("parallel fixture matrix is valid"),
+        targets,
+        sample_weights: None,
+        time_index: None,
+        group_id: None,
+        factor_exposures: None,
+    };
+    let binned = BinnedMatrix::new(ROWS, 1, 7, bins).expect("parallel fixture bins are valid");
+    (dataset, binned)
 }
 
 fn factor_dominated_dataset() -> TrainingDataset {
@@ -431,6 +456,45 @@ impl BackendOps for MockBackend {
     }
 }
 
+impl BackendOps for ConcurrentHistogramBackend {
+    fn build_histograms(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: &NodeSlice,
+        feature_tiles: &[FeatureTile],
+    ) -> EngineResult<HistogramBundle> {
+        let active = self.active_builds.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+        self.max_active_builds
+            .fetch_max(active, AtomicOrdering::SeqCst);
+        std::thread::sleep(Duration::from_millis(5));
+        let result = MockBackend.build_histograms(binned_matrix, gradients, node, feature_tiles);
+        self.active_builds.fetch_sub(1, AtomicOrdering::SeqCst);
+        result
+    }
+
+    fn best_split(&self, histograms: &HistogramBundle) -> EngineResult<Option<SplitCandidate>> {
+        MockBackend.best_split(histograms)
+    }
+
+    fn apply_split(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        node: &NodeSlice,
+        split: &SplitCandidate,
+    ) -> EngineResult<PartitionResult> {
+        MockBackend.apply_split(binned_matrix, node, split)
+    }
+
+    fn reduce_sums(
+        &self,
+        gradients: &[GradientPair],
+        row_indices: &[u32],
+    ) -> EngineResult<NodeStats> {
+        MockBackend.reduce_sums(gradients, row_indices)
+    }
+}
+
 impl BackendOps for GradientNeutralizationCheckingBackend {
     fn build_histograms(
         &self,
@@ -575,7 +639,7 @@ impl BackendOps for MorphGradientNeutralizationCheckingBackend {
         factor_context: Option<&FactorSplitContext<'_>>,
     ) -> EngineResult<Option<SplitCandidate>> {
         assert!(factor_context.is_none());
-        self.saw_morph_split.set(true);
+        self.saw_morph_split.store(true, AtomicOrdering::SeqCst);
         MockBackend.best_split(histograms)
     }
 
@@ -846,6 +910,34 @@ fn trainer_validates_fit_contract() {
 }
 
 #[test]
+fn level_wise_training_overlaps_independent_node_histogram_builds() {
+    let (dataset, binned) = node_parallelism_fixture();
+    let backend = ConcurrentHistogramBackend {
+        active_builds: AtomicUsize::new(0),
+        max_active_builds: AtomicUsize::new(0),
+    };
+    let trainer = Trainer::new(TrainParams {
+        max_depth: 3,
+        ..TrainParams::default()
+    })
+    .expect("parallel fixture params are valid");
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .expect("test pool should build")
+        .install(|| {
+            trainer
+                .fit_iterations(&dataset, &binned, &backend, &SquaredErrorObjective, 1)
+                .expect("parallel fixture should train")
+        });
+
+    assert!(
+        backend.max_active_builds.load(AtomicOrdering::SeqCst) > 1,
+        "independent active nodes should build histograms concurrently"
+    );
+}
+
+#[test]
 fn trainer_rejects_gradient_length_mismatch() {
     let trainer = Trainer::new(TrainParams::default()).expect("valid default params");
     let result = trainer.validate_fit_contract(&sample_dataset(), &BadObjective);
@@ -1003,7 +1095,7 @@ fn morph_neutralization_split_path_sees_per_round_projected_gradients() {
     let backend = MorphGradientNeutralizationCheckingBackend {
         exposures: dataset.factor_exposures.as_ref().unwrap().clone(),
         raw_factor_dot,
-        saw_morph_split: Cell::new(false),
+        saw_morph_split: AtomicBool::new(false),
     };
     let params = TrainParams {
         neutralization_config: Some(alloygbm_core::FactorNeutralizationConfig {
@@ -1021,7 +1113,7 @@ fn morph_neutralization_split_path_sees_per_round_projected_gradients() {
         .unwrap();
 
     assert!(
-        backend.saw_morph_split.get(),
+        backend.saw_morph_split.load(AtomicOrdering::SeqCst),
         "Morph split path was not used"
     );
     assert_eq!(model.rounds_completed(), 3);

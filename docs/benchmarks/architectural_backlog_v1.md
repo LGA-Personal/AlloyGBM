@@ -80,6 +80,26 @@ The fixture reaches 4,002 splits, including 1,955 active depth-11 nodes. The
 current serial active-node loop shows effectively no 1-to-8-thread improvement,
 which confirms that the candidate benchmark measures the reviewed bottleneck.
 
+### Node-parallelism candidate
+
+The node-parallel implementation was measured on 2026-07-19 from the same host with a fresh
+baseline at `519a9d4` and candidate implementation commit `29241f1`. Both runs used three fresh
+subprocesses per thread count; the table reports medians.
+
+| Threads | Variant | Fit (s) | Native train (s) | Incremental peak RSS (MiB) |
+| ---: | --- | ---: | ---: | ---: |
+| 1 | baseline | 0.592 | 0.482 | 273.23 |
+| 1 | node parallel | 0.575 | 0.467 | 277.17 |
+| 8 | baseline | 0.589 | 0.479 | 271.67 |
+| 8 | node parallel | 0.392 | 0.285 | 286.72 |
+
+Median eight-thread native training improved by 40.5%, candidate one-to-eight-thread scaling was
+1.64x, and single-thread native time improved by 3.0%. Prediction digests, RMSE, artifact size, and
+the 4,002-stump structure matched across all runs; artifact bytes were stable across repeated runs
+at each thread count. Incremental fit RSS increased by 3.94 MiB at one thread and 15.05 MiB at
+eight threads because active proposals own their child work concurrently. All timing and
+determinism gates passed; the memory increase is the accepted throughput tradeoff for this project.
+
 ## Duplicate Bin Storage
 
 | Case | Fit (s) | Bridge prepare (s) | Native train (s) | Incremental peak RSS (MiB) |
@@ -150,7 +170,7 @@ at least 10% and 32 MiB without materially changing held-out quality.
 ## Result
 
 All baseline schema, finite-value, fixture-depth, and deterministic-fixture
-gates passed. SoA histograms and compact predictor nodes have passed their production candidate
-gates; implementation remains open for the other four projects. The independent
+gates passed. SoA histograms, node-level parallelism, and compact predictor nodes have passed their
+production candidate gates; implementation remains open for the other three projects. The independent
 plans in this directory define their code changes, regression tests, commit
 boundaries, and candidate commands.
