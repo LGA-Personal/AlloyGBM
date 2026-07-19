@@ -70,11 +70,11 @@ Commit: `git commit -am "Load artifacts into compact predictor trees"`
 **Files:**
 - Modify: `crates/predictor/src/lib.rs`
 - Test: `crates/predictor/src/lib.rs`
-- Test: `bindings/python/tests/test_persistence.py`
+- Test: `bindings/python/tests/test_native_runtime_integration.py`
 - Test: `bindings/python/tests/test_shap_additivity_tolerance.py`
 
-- [x] **Step 1: Add exact scalar tests** for dense/batch APIs, NaN/default routing, categorical unknowns, objective transforms, and DART.
-- [x] **Step 2: Add tolerance-preserving linear, multiclass, and SHAP-additivity tests.**
+- [x] **Step 1: Audit exact scalar coverage** for dense/batch APIs, NaN/default routing, categorical unknowns, objective transforms, and DART; add compact layout, child-resolution, and side-table tests where the new representation creates a new invariant.
+- [x] **Step 2: Run the existing tolerance-preserving linear, multiclass, native-runtime, persistence, and SHAP-additivity suites.** No Python behavior changed, so representation-specific assertions remain in the predictor crate rather than duplicating end-to-end tests.
 - [x] **Step 3: Replace heap arithmetic traversal with explicit compact child indices and side-table lookup.**
 - [x] **Step 4: Delete `nodes_by_local_id` only after all predictor paths compile.**
 - [x] **Step 5: Run full Rust/Python suites and commit.**

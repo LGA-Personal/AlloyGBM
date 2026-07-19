@@ -1632,7 +1632,7 @@ mod tests {
 
     #[test]
     fn compact_predictor_node_stays_within_inline_size_budget() {
-        assert!(std::mem::size_of::<CompactPredictorNode>() <= 48);
+        assert_eq!(std::mem::size_of::<CompactPredictorNode>(), 40);
     }
 
     #[test]
