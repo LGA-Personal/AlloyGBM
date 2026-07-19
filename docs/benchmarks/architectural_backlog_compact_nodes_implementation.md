@@ -8,6 +8,11 @@
 
 **Tech Stack:** Rust 1.92, existing artifact decoder, predictor crate, PyO3 native predictor handle.
 
+**Status:** Completed by the compact predictor follow-up. The implementation uses private
+`u32::MAX` sentinel indices behind typed accessors instead of `Option<u32>` fields because the
+literal interface sketched below would exceed its own 48-byte inline-node budget. The resulting
+runtime node is 40 bytes.
+
 ## Global Constraints
 
 - Artifact bytes and public persistence remain unchanged.
@@ -40,9 +45,9 @@ struct CompactPredictorNode {
 }
 ```
 
-- [ ] **Step 1: Add failing size and side-table tests.** Require the inline node to remain at or below 48 bytes on 64-bit targets.
-- [ ] **Step 2: Add `CompactPredictorTree` with node, categorical, and linear side tables.**
-- [ ] **Step 3: Commit without switching production traversal.**
+- [x] **Step 1: Add failing size and side-table tests.** Require the inline node to remain at or below 48 bytes on 64-bit targets.
+- [x] **Step 2: Add `CompactPredictorTree` with node, categorical, and linear side tables.**
+- [x] **Step 3: Commit without switching production traversal.** The type and traversal changes landed together so the intermediate commit did not retain dead runtime types.
 
 Commit: `git commit -am "Add compact predictor runtime types"`
 
@@ -52,11 +57,11 @@ Commit: `git commit -am "Add compact predictor runtime types"`
 - Modify: `crates/predictor/src/lib.rs`
 - Test: `crates/predictor/src/lib.rs`
 
-- [ ] **Step 1: Add a failing right-spine test** with local ids ending at 65,534 and assert compact node count equals populated stump count.
-- [ ] **Step 2: Build a temporary `BTreeMap<local_id, compact_index>`, validate duplicates/bounds, and resolve child indices.**
-- [ ] **Step 3: Populate side tables in deterministic stump order.**
-- [ ] **Step 4: Preserve feature validation and collapse contributions before discarding transient stumps.**
-- [ ] **Step 5: Run predictor tests and commit.**
+- [x] **Step 1: Add a failing right-spine test** with local ids ending at 65,534 and assert compact node count equals populated stump count.
+- [x] **Step 2: Build a temporary `BTreeMap<local_id, compact_index>`, validate duplicates/bounds, and resolve child indices.**
+- [x] **Step 3: Populate side tables in deterministic stump order.**
+- [x] **Step 4: Preserve feature validation and collapse contributions before discarding transient stumps.**
+- [x] **Step 5: Run predictor tests and commit.**
 
 Commit: `git commit -am "Load artifacts into compact predictor trees"`
 
@@ -68,11 +73,11 @@ Commit: `git commit -am "Load artifacts into compact predictor trees"`
 - Test: `bindings/python/tests/test_persistence.py`
 - Test: `bindings/python/tests/test_shap_additivity_tolerance.py`
 
-- [ ] **Step 1: Add exact scalar tests** for dense/batch APIs, NaN/default routing, categorical unknowns, objective transforms, and DART.
-- [ ] **Step 2: Add tolerance-preserving linear, multiclass, and SHAP-additivity tests.**
-- [ ] **Step 3: Replace heap arithmetic traversal with explicit compact child indices and side-table lookup.**
-- [ ] **Step 4: Delete `nodes_by_local_id` only after all predictor paths compile.**
-- [ ] **Step 5: Run full Rust/Python suites and commit.**
+- [x] **Step 1: Add exact scalar tests** for dense/batch APIs, NaN/default routing, categorical unknowns, objective transforms, and DART.
+- [x] **Step 2: Add tolerance-preserving linear, multiclass, and SHAP-additivity tests.**
+- [x] **Step 3: Replace heap arithmetic traversal with explicit compact child indices and side-table lookup.**
+- [x] **Step 4: Delete `nodes_by_local_id` only after all predictor paths compile.**
+- [x] **Step 5: Run full Rust/Python suites and commit.**
 
 Commit: `git commit -am "Traverse compact predictor nodes"`
 
@@ -84,6 +89,6 @@ Commit: `git commit -am "Traverse compact predictor nodes"`
   --baseline benchmarks/results/architectural_backlog_baseline.json --gate
 ```
 
-- [ ] **Step 1: Confirm exact artifact and prediction digests.**
-- [ ] **Step 2: Require at least 75% loaded-RSS reduction, 15% deep-spine throughput improvement, and no shallow-control regression above 5%.**
-- [ ] **Step 3: Commit evidence separately.**
+- [x] **Step 1: Confirm exact artifact and prediction digests.**
+- [x] **Step 2: Require at least 75% loaded-RSS reduction, 15% deep-spine throughput improvement, and no shallow-control regression above 5%.**
+- [x] **Step 3: Commit evidence separately.**

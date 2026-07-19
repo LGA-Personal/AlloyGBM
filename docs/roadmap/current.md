@@ -44,12 +44,14 @@ preserving categorical and missing-value bin semantics.
 
 ### Compact predictor nodes
 
-**Status: implementation planned.** The current slot bound prevents sparse heap-indexed trees from
-causing unbounded load allocations, but a compact node array is a separate predictor-representation
-project. It must keep artifact compatibility while loading scalar, linear-leaf, native-categorical,
-DART, multiclass, and SHAP-relevant state into a compact representation with side tables for rare
-data. The [compact-node plan](../benchmarks/architectural_backlog_compact_nodes_implementation.md)
-pins loader translation, sparse-spine memory, batch-prediction, and artifact parity requirements.
+**Status: implemented in the compact predictor follow-up.** Artifact heap-local IDs are translated
+once at load into contiguous 40-byte runtime nodes with explicit child indices. Native-categorical
+bitsets and linear leaves live in side tables, while artifact bytes and SHAP's artifact traversal
+remain unchanged. The full same-host candidate run preserved artifact and prediction digests,
+reduced sparse-spine incremental load RSS from 128.52 MiB to 1.58 MiB, and improved prediction
+throughput by 28.8% without a material shallow-control regression. See the
+[candidate evidence](../benchmarks/architectural_backlog_v1.md#compact-node-candidate) and completed
+[implementation plan](../benchmarks/architectural_backlog_compact_nodes_implementation.md).
 
 ### Exclusive Feature Bundling (EFB)
 
