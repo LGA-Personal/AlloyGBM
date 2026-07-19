@@ -42,11 +42,16 @@ single-thread regression. Eight-thread incremental fit RSS increased by 15.05 Mi
 
 ### Duplicate row-major bin storage
 
-**Status: implementation planned.** Removing the unconditional row-major copy could materially reduce
-fit memory, but the column-major histogram path and row-first kernels have shape-dependent
-tradeoffs. The [duplicate-bin plan](../benchmarks/architectural_backlog_duplicate_bins_implementation.md)
-uses wide/shallow and tall/narrow u8/u16 arms to choose and validate the retained layout while
-preserving categorical and missing-value bin semantics.
+**Status: implemented.** `BinnedMatrix` no longer carries legacy u8 mirrors, and row-major adaptive
+storage is optional. Standard Python training quantizes directly into one column-major u8/u16
+payload; the row-oriented joint trainer explicitly requests dual storage. Native categorical
+remapping updates every present layout, and flat row access remains available for compatibility.
+Exact quantile-cut construction now reduces each sorted column immediately and caps concurrent sort
+scratch, avoiding a second bridge-level memory peak. The full same-host candidate run preserved all
+prediction digests, reduced median incremental fit RSS by 31.3%-43.3%, and improved bridge
+preparation by 9.6%-25.9% with no native-training regression. See the
+[candidate evidence](../benchmarks/architectural_backlog_v1.md#duplicate-bin-candidate) and
+[completed implementation plan](../benchmarks/architectural_backlog_duplicate_bins_implementation.md).
 
 ### Compact predictor nodes
 

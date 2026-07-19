@@ -25,10 +25,10 @@
 - Modify: all `rg '\.(bins|bins_col)\b' crates` call sites
 - Test: `crates/core/src/tests/main.rs`
 
-- [ ] **Step 1: Add u8/u16 accessor parity tests** covering ordinary, maximum, and missing bins.
-- [ ] **Step 2: Replace direct reads with `row_bin`, `col_bin`, `has_col_major`, or typed slices exposed by `BinStorage`.**
-- [ ] **Step 3: Run `cargo test --workspace` and confirm no direct legacy-vector reads remain.**
-- [ ] **Step 4: Commit.**
+- [x] **Step 1: Add u8/u16 accessor parity tests** covering ordinary, maximum, and missing bins.
+- [x] **Step 2: Replace direct reads with `row_bin`, `col_bin`, `has_col_major`, or typed slices exposed by `BinStorage`.**
+- [x] **Step 3: Run `cargo test --workspace` and confirm no direct legacy-vector reads remain.**
+- [x] **Step 4: Commit.**
 
 Commit: `git commit -am "Route binned matrix reads through adaptive storage"`
 
@@ -43,9 +43,9 @@ Commit: `git commit -am "Route binned matrix reads through adaptive storage"`
 - `BinnedMatrix` retains `bins_adaptive` and `bins_col_adaptive`; delete `bins` and `bins_col`.
 - `set_bin(row, feature, value)` updates every storage layout that is present.
 
-- [ ] **Step 1: Add a failing allocation-size test** asserting u8 construction stores no more than two `row_count * feature_count` payloads and u16 construction stores no u8 mirror.
-- [ ] **Step 2: Delete legacy vectors and update validation.**
-- [ ] **Step 3: Run core/backend/engine tests and commit.**
+- [x] **Step 1: Add a failing allocation-size test** asserting u8 construction stores no more than two `row_count * feature_count` payloads and u16 construction stores no u8 mirror.
+- [x] **Step 2: Delete legacy vectors and update validation.**
+- [x] **Step 3: Run core/backend/engine tests and commit.**
 
 Commit: `git commit -am "Remove legacy binned matrix mirrors"`
 
@@ -68,10 +68,10 @@ pub enum BinnedLayout {
 }
 ```
 
-- [ ] **Step 1: Add failing column-only construction and categorical `set_bin` tests.**
-- [ ] **Step 2: Build column-major storage directly from dense values where possible; avoid constructing then transposing a retained row payload.**
-- [ ] **Step 3: Make row-only kernels request `Dual` explicitly; default Python training to `ColumnMajor`.**
-- [ ] **Step 4: Run the full suite and commit.**
+- [x] **Step 1: Add failing column-only construction and categorical `set_bin` tests.**
+- [x] **Step 2: Build column-major storage directly from dense values where possible; avoid constructing then transposing a retained row payload.**
+- [x] **Step 3: Make row-only kernels request `Dual` explicitly; default Python training to `ColumnMajor`.**
+- [x] **Step 4: Run the full suite and commit.**
 
 Commit: `git commit -am "Default training to column-major bins"`
 
@@ -83,6 +83,14 @@ Commit: `git commit -am "Default training to column-major bins"`
   --baseline benchmarks/results/architectural_backlog_baseline.json --gate
 ```
 
-- [ ] **Step 1: Verify exact prediction digests, native training no worse than 3%, and bridge preparation at most 95% of baseline.**
-- [ ] **Step 2: Verify incremental peak RSS is at most 80% of baseline for both wide and tall cases.**
-- [ ] **Step 3: Commit the benchmark evidence separately.**
+- [x] **Step 1: Verify exact prediction digests, native training no worse than 3%, and bridge preparation at most 95% of baseline.**
+- [x] **Step 2: Verify incremental peak RSS is at most 80% of baseline for both wide and tall cases.**
+- [x] **Step 3: Commit the benchmark evidence separately.**
+
+## Outcome
+
+Implemented by `96724b3`. Standard Python training uses direct column-major u8/u16 construction;
+joint training keeps dual storage because its shared-tree kernels are row-oriented. A full
+three-repetition same-host run preserved prediction digests and RMSE, kept native training within
+the 3% gate, reduced bridge preparation by 9.6%-25.9%, and reduced incremental fit RSS by
+31.3%-43.3% across all four benchmark arms.

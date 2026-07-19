@@ -113,6 +113,28 @@ The u16 arms consume more memory and bridge-preparation time than their u8
 counterparts. Candidate gates require exact prediction parity, at least a 20%
 RSS reduction, and no native-training regression.
 
+### Duplicate-bin candidate
+
+The column-major implementation was measured on 2026-07-19 from the same host with a fresh
+baseline at `38229ec` and candidate implementation commit `96724b3`. Both runs used three fresh
+subprocesses per case; the table reports medians.
+
+| Case | Variant | Bridge prepare (s) | Native train (s) | Incremental peak RSS (MiB) |
+| --- | --- | ---: | ---: | ---: |
+| `wide_shallow_u8` | baseline | 0.06837 | 0.00859 | 246.19 |
+| `wide_shallow_u8` | column-only | 0.06181 | 0.00807 | 139.50 |
+| `wide_shallow_u16` | baseline | 0.08558 | 0.00809 | 282.69 |
+| `wide_shallow_u16` | column-only | 0.06344 | 0.00824 | 163.47 |
+| `tall_narrow_u8` | baseline | 0.04269 | 0.01975 | 210.34 |
+| `tall_narrow_u8` | column-only | 0.03770 | 0.01985 | 144.45 |
+| `tall_narrow_u16` | baseline | 0.05141 | 0.02063 | 228.83 |
+| `tall_narrow_u16` | column-only | 0.03997 | 0.02056 | 153.97 |
+
+Prediction digests and held-out RMSE matched exactly in every repetition. Incremental fit RSS fell
+by 43.3%, 42.2%, 31.3%, and 32.7% respectively; bridge preparation improved by 9.6%-25.9%.
+Native training remained within the 3% regression budget in every arm, so all duplicate-bin
+candidate gates passed.
+
 ## Compact Predictor Nodes
 
 | Case | Load (s) | Incremental peak RSS (MiB) | Predict (ns/row) | Artifact bytes |
