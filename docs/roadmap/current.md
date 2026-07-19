@@ -30,11 +30,15 @@ time by 31.6% for `standard_wide` and 35.4% for `standard_deep`. See the
 
 ### Node-level parallelism
 
-**Status: implementation planned after SoA.** Parallelizing nodes within a level requires explicit ownership of
-histograms and row partitions, a nested-Rayon policy, and a deterministic reduction/order for
-otherwise tied split candidates. It must also preserve the sibling-subtraction optimization. The
-[node-parallelism plan](../benchmarks/architectural_backlog_node_parallelism_implementation.md)
-sequences this after the histogram ownership work and requires one- and eight-thread evidence.
+**Status: implemented.** Level-wise training computes independent node proposals in parallel and
+commits them in ascending local-node order. Workers own their histograms and partitions, retain
+sibling subtraction, and use sequential histogram kernels to avoid nested Rayon work; root,
+single-node, and small levels retain the existing per-node parallel path. Leaf-wise growth is
+unchanged. The full same-host candidate run preserved prediction digests and RMSE, improved median
+eight-thread native training by 40.5%, and delivered 1.64x one-to-eight-thread scaling with no
+single-thread regression. Eight-thread incremental fit RSS increased by 15.05 MiB. See the
+[candidate evidence](../benchmarks/architectural_backlog_v1.md#node-parallelism-candidate) and
+[completed implementation plan](../benchmarks/architectural_backlog_node_parallelism_implementation.md).
 
 ### Duplicate row-major bin storage
 
