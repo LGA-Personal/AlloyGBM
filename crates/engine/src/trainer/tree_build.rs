@@ -12,6 +12,7 @@ use alloygbm_core::{
     LeafModelKind, LeafValue, LinearFeatureScaler, LinearLeaf, MAX_PL_REGRESSORS, NodeSlice,
     PartitionResult, SplitCandidate, TrainParams, TrainingDataset, leaf_effective_gradient,
 };
+use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
@@ -23,7 +24,7 @@ use crate::trainer::interaction::{
     InteractionConstraintIndex, filter_histogram_bundle_by_features,
 };
 use crate::trainer::validate::{factor_split_context_for_node, validate_training_alignment};
-use crate::traits::BackendOps;
+use crate::traits::{BackendOps, HistogramExecution};
 use crate::tree_node::{encode_tree_node_id, left_child_node_id, right_child_node_id};
 use crate::types::{
     CategoricalTargetEncodingSpec, IterationControls, IterationStopReason, TrainedStump,
@@ -43,6 +44,71 @@ type ActiveNodeEntry = (
     Option<LinearLeaf>,
     Vec<u32>,
 );
+
+const MIN_NODE_PARALLEL_WORK: usize = 4_096;
+
+struct LevelNodeProposal {
+    local_node_id: u32,
+    node_active_groups: Option<u64>,
+    split: SplitCandidate,
+    partition: PartitionResult,
+    left_leaf_value: f32,
+    right_leaf_value: f32,
+    linear_leaf_pair: Option<(LinearLeaf, LinearLeaf)>,
+    children: Option<(ActiveNodeEntry, ActiveNodeEntry)>,
+}
+
+struct LevelNodeOutcome {
+    local_node_id: u32,
+    rejection_reason: Option<IterationStopReason>,
+    proposal: Option<LevelNodeProposal>,
+}
+
+impl LevelNodeOutcome {
+    fn no_split(local_node_id: u32) -> Self {
+        Self {
+            local_node_id,
+            rejection_reason: None,
+            proposal: None,
+        }
+    }
+
+    fn rejected(local_node_id: u32, rejection_reason: IterationStopReason) -> Self {
+        Self {
+            local_node_id,
+            rejection_reason: Some(rejection_reason),
+            proposal: None,
+        }
+    }
+
+    fn proposed(proposal: LevelNodeProposal) -> Self {
+        Self {
+            local_node_id: proposal.local_node_id,
+            rejection_reason: None,
+            proposal: Some(proposal),
+        }
+    }
+}
+
+struct LevelProposalContext<'a, B> {
+    backend: &'a B,
+    binned_matrix: &'a BinnedMatrix,
+    gradients: &'a [GradientPair],
+    round_index: usize,
+    depth: usize,
+    feature_tiles: &'a [FeatureTile],
+    split_options: SplitSelectionOptions,
+    params: &'a TrainParams,
+    controls: &'a IterationControls,
+    feature_weights: &'a [f32],
+    categorical_features: &'a [CategoricalFeatureInfo],
+    morph: Option<MorphTreeContext<'a>>,
+    raw_feature_values: &'a [f32],
+    feature_scaler: &'a LinearFeatureScaler,
+    factor_exposures: Option<&'a FactorExposureMatrix>,
+    constraint_index: Option<&'a InteractionConstraintIndex>,
+    histogram_execution: HistogramExecution,
+}
 
 /// Type alias for a split linear leaf pair (delta, delta, absolute, absolute).
 type LinearLeafQuad = (LinearLeaf, LinearLeaf, LinearLeaf, LinearLeaf);
@@ -212,6 +278,355 @@ fn linear_regressor_path_features(
     selected
 }
 
+fn should_parallelize_level(
+    active_nodes: &[ActiveNodeEntry],
+    feature_tiles: &[FeatureTile],
+) -> bool {
+    if active_nodes.len() < 2 || rayon::current_num_threads() < 2 {
+        return false;
+    }
+    let selected_feature_count = feature_tiles
+        .iter()
+        .map(|tile| (tile.end_feature - tile.start_feature) as usize)
+        .sum::<usize>()
+        .max(1);
+    let row_count = active_nodes
+        .iter()
+        .map(|(_, rows, _, _, _, _)| rows.len())
+        .sum::<usize>();
+    row_count.saturating_mul(selected_feature_count) >= MIN_NODE_PARALLEL_WORK
+}
+
+fn sort_level_outcomes(outcomes: &mut [LevelNodeOutcome]) {
+    outcomes.sort_unstable_by_key(|outcome| outcome.local_node_id);
+}
+
+fn propose_level_node<B: BackendOps>(
+    context: &LevelProposalContext<'_, B>,
+    active_node: ActiveNodeEntry,
+    node_active_groups: Option<u64>,
+) -> EngineResult<LevelNodeOutcome> {
+    let (
+        local_node_id,
+        node_rows,
+        histograms,
+        parent_leaf_value,
+        parent_linear_leaf,
+        path_features,
+    ) = active_node;
+    let node_id = encode_tree_node_id(context.round_index, local_node_id)?;
+    let node = NodeSlice::new(node_id, node_rows)?;
+    let factor_context = factor_split_context_for_node(
+        context.params,
+        context.binned_matrix,
+        context.factor_exposures,
+        &node.row_indices,
+    );
+    let filtered_histograms_storage;
+    let histograms_for_split = match (context.constraint_index, node_active_groups) {
+        (Some(index), Some(active_groups)) => {
+            filtered_histograms_storage =
+                filter_histogram_bundle_by_features(&histograms, |feature| {
+                    index.feature_allowed(active_groups, feature)
+                });
+            &filtered_histograms_storage
+        }
+        _ => &histograms,
+    };
+    let Some(mut split) = find_best_split_dispatch(
+        context.backend,
+        histograms_for_split,
+        context.split_options,
+        context.feature_weights,
+        context.categorical_features,
+        context.morph.as_ref(),
+        factor_context.as_ref(),
+    )?
+    else {
+        return Ok(LevelNodeOutcome::no_split(local_node_id));
+    };
+    if !split.gain.is_finite() || split.gain <= context.controls.min_split_gain {
+        return Ok(LevelNodeOutcome::rejected(
+            local_node_id,
+            IterationStopReason::GainBelowThreshold,
+        ));
+    }
+
+    let (partition, left_stats, right_stats) = context.backend.apply_split_with_stats(
+        context.binned_matrix,
+        context.gradients,
+        &node,
+        &split,
+    )?;
+    if partition.left_row_indices.len() + partition.right_row_indices.len()
+        != node.row_indices.len()
+    {
+        return Err(EngineError::ContractViolation(
+            "split partition does not cover all node rows".to_string(),
+        ));
+    }
+    if partition.left_row_indices.is_empty()
+        || partition.right_row_indices.is_empty()
+        || partition.left_row_indices.len() < context.controls.min_rows_per_leaf
+        || partition.right_row_indices.len() < context.controls.min_rows_per_leaf
+    {
+        return Ok(LevelNodeOutcome::rejected(
+            local_node_id,
+            IterationStopReason::LeafRowsBelowThreshold,
+        ));
+    }
+    if left_stats.hess_sum <= 0.0 || right_stats.hess_sum <= 0.0 {
+        return Err(EngineError::ContractViolation(
+            "backend produced non-positive hessian sums".to_string(),
+        ));
+    }
+
+    let left_grad = leaf_effective_gradient(
+        left_stats.grad_sum,
+        left_stats.grad_sq_sum,
+        left_stats.row_count,
+        context.split_options.l1_alpha,
+        context.split_options.dro_config.as_ref(),
+    );
+    let right_grad = leaf_effective_gradient(
+        right_stats.grad_sum,
+        right_stats.grad_sq_sum,
+        right_stats.row_count,
+        context.split_options.l1_alpha,
+        context.split_options.dro_config.as_ref(),
+    );
+    let child_depth = (context.depth + 1) as u32;
+    let scheduled_lr = context
+        .morph
+        .map_or(context.params.learning_rate, |morph| morph.scheduled_lr());
+    let leaf_scale = context.morph.map_or(context.params.learning_rate, |morph| {
+        morph.leaf_scale_for_depth(child_depth).total
+    });
+    let raw_left_leaf_value = -leaf_scale * left_grad
+        / (left_stats.hess_sum + context.split_options.l2_lambda + LEAF_EPSILON);
+    let raw_right_leaf_value = -leaf_scale * right_grad
+        / (right_stats.hess_sum + context.split_options.l2_lambda + LEAF_EPSILON);
+    let morph_scale = context.morph.map_or(1.0, |morph| {
+        morph.leaf_scale_for_depth(child_depth).multiplier
+    });
+
+    let left_leaf_absolute = raw_left_leaf_value.clamp(
+        -context.controls.max_abs_leaf_value,
+        context.controls.max_abs_leaf_value,
+    );
+    let right_leaf_absolute = raw_right_leaf_value.clamp(
+        -context.controls.max_abs_leaf_value,
+        context.controls.max_abs_leaf_value,
+    );
+    let left_leaf_value = left_leaf_absolute - parent_leaf_value;
+    let right_leaf_value = right_leaf_absolute - parent_leaf_value;
+    if left_leaf_value.abs() < context.controls.min_abs_leaf_value
+        && right_leaf_value.abs() < context.controls.min_abs_leaf_value
+    {
+        return Ok(LevelNodeOutcome::rejected(
+            local_node_id,
+            IterationStopReason::LeafMagnitudeBelowThreshold,
+        ));
+    }
+
+    if !context.params.monotone_constraints.is_empty() {
+        let feature_index = split.feature_index as usize;
+        if feature_index < context.params.monotone_constraints.len() {
+            let constraint = context.params.monotone_constraints[feature_index];
+            if (constraint == 1 && left_leaf_absolute > right_leaf_absolute)
+                || (constraint == -1 && left_leaf_absolute < right_leaf_absolute)
+            {
+                return Ok(LevelNodeOutcome::rejected(
+                    local_node_id,
+                    IterationStopReason::MonotoneConstraintViolation,
+                ));
+            }
+        }
+    }
+
+    let linear_leaf_computation_result: Option<LinearLeafQuad> = if context.params.leaf_model
+        == LeafModelKind::Linear
+        && !context.raw_feature_values.is_empty()
+        && !split.is_categorical
+    {
+        let regressor_features = linear_regressor_path_features(
+            &path_features,
+            split.feature_index,
+            split.is_categorical,
+            context.binned_matrix.feature_count,
+        );
+        context
+            .backend
+            .compute_linear_leaf_pair_from_partitions(
+                context.binned_matrix,
+                context.gradients,
+                context.raw_feature_values,
+                context.binned_matrix.feature_count,
+                split.feature_index,
+                split.threshold_bin,
+                split.default_left,
+                &regressor_features,
+                context.feature_scaler,
+                &partition.left_row_indices,
+                &partition.right_row_indices,
+                scheduled_lr,
+                context.split_options.l2_lambda,
+            )
+            .map(|(mut left_absolute, mut right_absolute)| {
+                left_absolute.intercept *= morph_scale;
+                right_absolute.intercept *= morph_scale;
+                for weight in &mut left_absolute.weights {
+                    *weight *= morph_scale;
+                }
+                for weight in &mut right_absolute.weights {
+                    *weight *= morph_scale;
+                }
+                left_absolute.intercept = left_absolute.intercept.clamp(
+                    -context.controls.max_abs_leaf_value,
+                    context.controls.max_abs_leaf_value,
+                );
+                right_absolute.intercept = right_absolute.intercept.clamp(
+                    -context.controls.max_abs_leaf_value,
+                    context.controls.max_abs_leaf_value,
+                );
+                let mut left_delta = left_absolute.clone();
+                let mut right_delta = right_absolute.clone();
+                left_delta.intercept -= parent_leaf_value;
+                right_delta.intercept -= parent_leaf_value;
+                if let Some(parent) = parent_linear_leaf.as_ref() {
+                    for (slot, &feature) in left_delta.regressor_features.iter().enumerate() {
+                        if let Some(parent_slot) = parent
+                            .regressor_features
+                            .iter()
+                            .position(|&candidate| candidate == feature)
+                            && slot < left_delta.weights.len()
+                            && parent_slot < parent.weights.len()
+                        {
+                            left_delta.weights[slot] -= parent.weights[parent_slot];
+                        }
+                    }
+                    for (slot, &feature) in right_delta.regressor_features.iter().enumerate() {
+                        if let Some(parent_slot) = parent
+                            .regressor_features
+                            .iter()
+                            .position(|&candidate| candidate == feature)
+                            && slot < right_delta.weights.len()
+                            && parent_slot < parent.weights.len()
+                        {
+                            right_delta.weights[slot] -= parent.weights[parent_slot];
+                        }
+                    }
+                }
+                (left_delta, right_delta, left_absolute, right_absolute)
+            })
+    } else {
+        None
+    };
+    let (linear_leaf_pair, linear_leaf_abs_pair): LinearLeafPairSplit =
+        match linear_leaf_computation_result {
+            Some((left_delta, right_delta, left_absolute, right_absolute)) => (
+                Some((left_delta, right_delta)),
+                Some((left_absolute, right_absolute)),
+            ),
+            None => (None, None),
+        };
+
+    split.left_stats = left_stats;
+    split.right_stats = right_stats;
+
+    let children = if context.depth + 1 < context.params.max_depth as usize {
+        let left_local_node_id = left_child_node_id(local_node_id)?;
+        let right_local_node_id = right_child_node_id(local_node_id)?;
+        let left_node_id = encode_tree_node_id(context.round_index, left_local_node_id)?;
+        let right_node_id = encode_tree_node_id(context.round_index, right_local_node_id)?;
+        let (left_parent_value, right_parent_value) = linear_leaf_abs_pair.as_ref().map_or(
+            (left_leaf_absolute, right_leaf_absolute),
+            |(left, right)| (left.intercept, right.intercept),
+        );
+        let left_parent_linear = linear_leaf_abs_pair.as_ref().map(|(left, _)| left.clone());
+        let right_parent_linear = linear_leaf_abs_pair
+            .as_ref()
+            .map(|(_, right)| right.clone());
+        let child_path_features = linear_regressor_path_features(
+            &path_features,
+            split.feature_index,
+            split.is_categorical,
+            context.binned_matrix.feature_count,
+        );
+
+        let (left_rows, left_histograms, right_rows, right_histograms) =
+            if partition.left_row_indices.len() <= partition.right_row_indices.len() {
+                let left_node = NodeSlice::new(left_node_id, partition.left_row_indices.clone())?;
+                let left_histograms = context.backend.build_histograms_with_execution(
+                    context.binned_matrix,
+                    context.gradients,
+                    &left_node,
+                    context.feature_tiles,
+                    context.split_options.requires_grad_sq(),
+                    context.histogram_execution,
+                )?;
+                let right_histograms =
+                    subtract_histogram_bundle(&histograms, &left_histograms, right_node_id)?;
+                (
+                    left_node.row_indices,
+                    left_histograms,
+                    partition.right_row_indices.clone(),
+                    right_histograms,
+                )
+            } else {
+                let right_node =
+                    NodeSlice::new(right_node_id, partition.right_row_indices.clone())?;
+                let right_histograms = context.backend.build_histograms_with_execution(
+                    context.binned_matrix,
+                    context.gradients,
+                    &right_node,
+                    context.feature_tiles,
+                    context.split_options.requires_grad_sq(),
+                    context.histogram_execution,
+                )?;
+                let left_histograms =
+                    subtract_histogram_bundle(&histograms, &right_histograms, left_node_id)?;
+                (
+                    partition.left_row_indices.clone(),
+                    left_histograms,
+                    right_node.row_indices,
+                    right_histograms,
+                )
+            };
+        Some((
+            (
+                left_local_node_id,
+                left_rows,
+                left_histograms,
+                left_parent_value,
+                left_parent_linear,
+                child_path_features.clone(),
+            ),
+            (
+                right_local_node_id,
+                right_rows,
+                right_histograms,
+                right_parent_value,
+                right_parent_linear,
+                child_path_features,
+            ),
+        ))
+    } else {
+        None
+    };
+
+    Ok(LevelNodeOutcome::proposed(LevelNodeProposal {
+        local_node_id,
+        node_active_groups,
+        split,
+        partition,
+        left_leaf_value,
+        right_leaf_value,
+        linear_leaf_pair,
+        children,
+    }))
+}
+
 /// Build a single tree using level-wise (breadth-first) growth strategy.
 ///
 /// Splits all nodes at depth d before moving to depth d+1.
@@ -242,12 +657,13 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
     );
     let root_node_id = encode_tree_node_id(round_index, 0)?;
     let root_node = NodeSlice::new(root_node_id, root_row_indices)?;
-    let root_histograms = backend.build_histograms_with_grad_sq(
+    let root_histograms = backend.build_histograms_with_execution(
         binned_matrix,
         gradients,
         &root_node,
         feature_tiles,
         split_options.requires_grad_sq(),
+        HistogramExecution::Parallel,
     )?;
     // Interaction-constraint bookkeeping (no-op when empty).  We track the
     // bitset of still-active groups per node so that the split search can
@@ -278,144 +694,70 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
             break;
         }
 
+        let parallelize_nodes = should_parallelize_level(&active_nodes, feature_tiles);
+        let histogram_execution = if parallelize_nodes {
+            HistogramExecution::Sequential
+        } else {
+            HistogramExecution::Parallel
+        };
+        let context = LevelProposalContext {
+            backend,
+            binned_matrix,
+            gradients,
+            round_index,
+            depth,
+            feature_tiles,
+            split_options,
+            params,
+            controls,
+            feature_weights,
+            categorical_features,
+            morph,
+            raw_feature_values,
+            feature_scaler: &feature_scaler,
+            factor_exposures,
+            constraint_index: constraint_index.as_ref(),
+            histogram_execution,
+        };
+        let work_items = active_nodes
+            .into_iter()
+            .map(|active_node| {
+                let active_groups = node_active_groups.get(&active_node.0).copied();
+                (active_node, active_groups)
+            })
+            .collect::<Vec<_>>();
+        let outcomes = if parallelize_nodes {
+            work_items
+                .into_par_iter()
+                .map(|(active_node, active_groups)| {
+                    propose_level_node(&context, active_node, active_groups)
+                })
+                .collect::<Vec<_>>()
+        } else {
+            work_items
+                .into_iter()
+                .map(|(active_node, active_groups)| {
+                    propose_level_node(&context, active_node, active_groups)
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut outcomes = outcomes
+            .into_iter()
+            .collect::<EngineResult<Vec<LevelNodeOutcome>>>()?;
+        sort_level_outcomes(&mut outcomes);
+
         let mut next_nodes = Vec::new();
-        for (
-            local_node_id,
-            node_rows,
-            histograms,
-            parent_leaf_value,
-            parent_linear_leaf,
-            path_features,
-        ) in active_nodes
-        {
-            let node_id = encode_tree_node_id(round_index, local_node_id)?;
-            let node = NodeSlice::new(node_id, node_rows)?;
-            let factor_context = factor_split_context_for_node(
-                params,
-                binned_matrix,
-                factor_exposures,
-                &node.row_indices,
-            );
-            // Filter histogram bundle by interaction constraints (no-op when
-            // no constraints are active).  Cloning the bundle here is the
-            // simplest way to plug filtering in without changing the
-            // `BackendOps` trait surface; the clone is `O(allowed_features
-            // × bins)` and only runs on constrained fits.
-            let node_active = node_active_groups.get(&local_node_id).copied();
-            let filtered_histograms_storage;
-            let histograms_for_split = match (constraint_index.as_ref(), node_active) {
-                (Some(idx), Some(active_groups)) => {
-                    filtered_histograms_storage =
-                        filter_histogram_bundle_by_features(&histograms, |f| {
-                            idx.feature_allowed(active_groups, f)
-                        });
-                    &filtered_histograms_storage
-                }
-                _ => &histograms,
-            };
-            let Some(mut split) = find_best_split_dispatch(
-                backend,
-                histograms_for_split,
-                split_options,
-                feature_weights,
-                categorical_features,
-                morph.as_ref(),
-                factor_context.as_ref(),
-            )?
-            else {
+        for outcome in outcomes {
+            if let Some(reason) = outcome.rejection_reason {
+                round_rejection_reason = reason;
+                continue;
+            }
+            let Some(mut proposal) = outcome.proposal else {
                 continue;
             };
-            if !split.gain.is_finite() || split.gain <= controls.min_split_gain {
-                round_rejection_reason = IterationStopReason::GainBelowThreshold;
-                continue;
-            }
 
-            let (partition, left_stats, right_stats) =
-                backend.apply_split_with_stats(binned_matrix, gradients, &node, &split)?;
-            if partition.left_row_indices.len() + partition.right_row_indices.len()
-                != node.row_indices.len()
-            {
-                return Err(EngineError::ContractViolation(
-                    "split partition does not cover all node rows".to_string(),
-                ));
-            }
-            if partition.left_row_indices.is_empty()
-                || partition.right_row_indices.is_empty()
-                || partition.left_row_indices.len() < controls.min_rows_per_leaf
-                || partition.right_row_indices.len() < controls.min_rows_per_leaf
-            {
-                round_rejection_reason = IterationStopReason::LeafRowsBelowThreshold;
-                continue;
-            }
-
-            if left_stats.hess_sum <= 0.0 || right_stats.hess_sum <= 0.0 {
-                return Err(EngineError::ContractViolation(
-                    "backend produced non-positive hessian sums".to_string(),
-                ));
-            }
-
-            let left_grad = leaf_effective_gradient(
-                left_stats.grad_sum,
-                left_stats.grad_sq_sum,
-                left_stats.row_count,
-                split_options.l1_alpha,
-                split_options.dro_config.as_ref(),
-            );
-            let right_grad = leaf_effective_gradient(
-                right_stats.grad_sum,
-                right_stats.grad_sq_sum,
-                right_stats.row_count,
-                split_options.l1_alpha,
-                split_options.dro_config.as_ref(),
-            );
-            let child_depth = (depth + 1) as u32;
-            let scheduled_lr = morph.map_or(params.learning_rate, |m| m.scheduled_lr());
-            let leaf_scale = morph.map_or(params.learning_rate, |m| {
-                m.leaf_scale_for_depth(child_depth).total
-            });
-            let raw_left_leaf_value = -leaf_scale * left_grad
-                / (left_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
-            let raw_right_leaf_value = -leaf_scale * right_grad
-                / (right_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
-
-            // Morph leaf modifications: depth penalty + per-round shrinkage.
-            // Children land at depth `depth + 1` in the tree.
-            let morph_scale = if let Some(m) = morph.as_ref() {
-                m.leaf_scale_for_depth(child_depth).multiplier
-            } else {
-                1.0
-            };
-
-            let left_leaf_absolute = raw_left_leaf_value
-                .clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value);
-            let right_leaf_absolute = raw_right_leaf_value
-                .clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value);
-            let left_leaf_value = left_leaf_absolute - parent_leaf_value;
-            let right_leaf_value = right_leaf_absolute - parent_leaf_value;
-            if left_leaf_value.abs() < controls.min_abs_leaf_value
-                && right_leaf_value.abs() < controls.min_abs_leaf_value
-            {
-                round_rejection_reason = IterationStopReason::LeafMagnitudeBelowThreshold;
-                continue;
-            }
-
-            // Monotone constraint enforcement.
-            if !params.monotone_constraints.is_empty() {
-                let fi = split.feature_index as usize;
-                if fi < params.monotone_constraints.len() {
-                    let constraint = params.monotone_constraints[fi];
-                    if constraint == 1 && left_leaf_absolute > right_leaf_absolute {
-                        round_rejection_reason = IterationStopReason::MonotoneConstraintViolation;
-                        continue;
-                    }
-                    if constraint == -1 && left_leaf_absolute < right_leaf_absolute {
-                        round_rejection_reason = IterationStopReason::MonotoneConstraintViolation;
-                        continue;
-                    }
-                }
-            }
-
-            // max_leaves enforcement.
+            // Admission and all externally visible mutation remain ordered by
+            // local node id, regardless of proposal completion order.
             if let Some(max_leaves) = controls.max_leaves {
                 let leaves_after_split = candidate_round_stumps.len() + 2;
                 if leaves_after_split > max_leaves {
@@ -424,224 +766,56 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
                 }
             }
 
-            // ── Linear leaf path ───────────────────────────────────────────────
-            // If leaf_model == Linear, solve closed-form ridge leaves from the
-            // already-materialized child partitions. Falls back to scalar on any
-            // error.
-            let linear_leaf_computation_result: Option<LinearLeafQuad> = if params.leaf_model
-                == LeafModelKind::Linear
-                && !raw_feature_values.is_empty()
-                && !split.is_categorical
-            {
-                let regressor_features = linear_regressor_path_features(
-                    &path_features,
-                    split.feature_index,
-                    split.is_categorical,
-                    binned_matrix.feature_count,
-                );
-                backend
-                    .compute_linear_leaf_pair_from_partitions(
-                        binned_matrix,
-                        gradients,
-                        raw_feature_values,
-                        binned_matrix.feature_count,
-                        split.feature_index,
-                        split.threshold_bin,
-                        split.default_left,
-                        &regressor_features,
-                        &feature_scaler,
-                        &partition.left_row_indices,
-                        &partition.right_row_indices,
-                        scheduled_lr,
-                        split_options.l2_lambda,
-                    )
-                    .map(|(mut ll_abs, mut rl_abs)| {
-                        // Apply morph scaling to weights and intercept.
-                        ll_abs.intercept *= morph_scale;
-                        rl_abs.intercept *= morph_scale;
-                        for w in &mut ll_abs.weights {
-                            *w *= morph_scale;
-                        }
-                        for w in &mut rl_abs.weights {
-                            *w *= morph_scale;
-                        }
-                        // Clamp intercepts (absolute values).
-                        ll_abs.intercept = ll_abs
-                            .intercept
-                            .clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value);
-                        rl_abs.intercept = rl_abs
-                            .intercept
-                            .clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value);
-                        // Compute delta versions (parent-relative).
-                        let mut ll_delta = ll_abs.clone();
-                        let mut rl_delta = rl_abs.clone();
-                        ll_delta.intercept -= parent_leaf_value;
-                        rl_delta.intercept -= parent_leaf_value;
-                        if let Some(ref p) = parent_linear_leaf {
-                            for (slot, &feature) in ll_delta.regressor_features.iter().enumerate() {
-                                if let Some(parent_slot) =
-                                    p.regressor_features.iter().position(|&f| f == feature)
-                                    && slot < ll_delta.weights.len()
-                                    && parent_slot < p.weights.len()
-                                {
-                                    ll_delta.weights[slot] -= p.weights[parent_slot];
-                                }
-                            }
-                            for (slot, &feature) in rl_delta.regressor_features.iter().enumerate() {
-                                if let Some(parent_slot) =
-                                    p.regressor_features.iter().position(|&f| f == feature)
-                                    && slot < rl_delta.weights.len()
-                                    && parent_slot < p.weights.len()
-                                {
-                                    rl_delta.weights[slot] -= p.weights[parent_slot];
-                                }
-                            }
-                        }
-                        (ll_delta, rl_delta, ll_abs, rl_abs)
-                    })
-            } else {
-                None
-            };
-            // Split into delta pair (for storage/prediction) and absolute pair (for child tracking).
-            let (linear_leaf_pair, linear_leaf_abs_pair): LinearLeafPairSplit =
-                match linear_leaf_computation_result {
-                    Some((ll_d, rl_d, ll_a, rl_a)) => (Some((ll_d, rl_d)), Some((ll_a, rl_a))),
-                    None => (None, None),
-                };
-
-            // Apply candidate_predictions update.
-            if let Some((ref ll, ref rl)) = linear_leaf_pair {
-                let fc = binned_matrix.feature_count;
-                for &row in &partition.left_row_indices {
-                    let r = row as usize;
-                    if r < candidate_predictions.len() {
-                        candidate_predictions[r] += ll.eval(raw_feature_values, r * fc);
+            if let Some((ref left_leaf, ref right_leaf)) = proposal.linear_leaf_pair {
+                let feature_count = binned_matrix.feature_count;
+                for &row in &proposal.partition.left_row_indices {
+                    let row = row as usize;
+                    if row < candidate_predictions.len() {
+                        candidate_predictions[row] +=
+                            left_leaf.eval(raw_feature_values, row * feature_count);
                     }
                 }
-                for &row in &partition.right_row_indices {
-                    let r = row as usize;
-                    if r < candidate_predictions.len() {
-                        candidate_predictions[r] += rl.eval(raw_feature_values, r * fc);
+                for &row in &proposal.partition.right_row_indices {
+                    let row = row as usize;
+                    if row < candidate_predictions.len() {
+                        candidate_predictions[row] +=
+                            right_leaf.eval(raw_feature_values, row * feature_count);
                     }
                 }
             } else {
                 apply_partition_leaf_updates(
                     candidate_predictions,
-                    &partition,
-                    left_leaf_value,
-                    right_leaf_value,
+                    &proposal.partition,
+                    proposal.left_leaf_value,
+                    proposal.right_leaf_value,
                 )?;
             }
 
-            split.left_stats = left_stats;
-            split.right_stats = right_stats;
-
-            let PartitionResult {
-                left_row_indices,
-                right_row_indices,
-            } = partition;
-            if depth + 1 < params.max_depth as usize {
-                let left_local_node_id = left_child_node_id(local_node_id)?;
-                let right_local_node_id = right_child_node_id(local_node_id)?;
-                let left_node_id = encode_tree_node_id(round_index, left_local_node_id)?;
-                let right_node_id = encode_tree_node_id(round_index, right_local_node_id)?;
-
-                // Propagate interaction-constraint active groups to children.
-                // Splitting on an unconstrained feature leaves the active
-                // set unchanged; a constrained feature narrows it.
-                if let (Some(idx), Some(active_groups)) = (constraint_index.as_ref(), node_active) {
-                    let child_groups = idx.descend(active_groups, split.feature_index);
-                    node_active_groups.insert(left_local_node_id, child_groups);
-                    node_active_groups.insert(right_local_node_id, child_groups);
+            if let Some((left_child, right_child)) = proposal.children.take() {
+                if let (Some(index), Some(active_groups)) =
+                    (constraint_index.as_ref(), proposal.node_active_groups)
+                {
+                    let child_groups = index.descend(active_groups, proposal.split.feature_index);
+                    node_active_groups.insert(left_child.0, child_groups);
+                    node_active_groups.insert(right_child.0, child_groups);
                 }
-
-                // Determine the parent-leaf values to track for children.
-                // When we have linear leaves, the scalar parent value uses the intercept,
-                // and we also pass the full absolute linear leaf for weight delta computation.
-                let (left_parent_val, right_parent_val) =
-                    if let Some((ref ll_a, ref rl_a)) = linear_leaf_abs_pair {
-                        (ll_a.intercept, rl_a.intercept)
-                    } else {
-                        (left_leaf_absolute, right_leaf_absolute)
-                    };
-                let left_parent_ll = linear_leaf_abs_pair.as_ref().map(|(ll, _)| ll.clone());
-                let right_parent_ll = linear_leaf_abs_pair.as_ref().map(|(_, rl)| rl.clone());
-                let child_path_features = linear_regressor_path_features(
-                    &path_features,
-                    split.feature_index,
-                    split.is_categorical,
-                    binned_matrix.feature_count,
-                );
-
-                if left_row_indices.len() <= right_row_indices.len() {
-                    let left_node = NodeSlice::new(left_node_id, left_row_indices)?;
-                    let left_histograms = backend.build_histograms_with_grad_sq(
-                        binned_matrix,
-                        gradients,
-                        &left_node,
-                        feature_tiles,
-                        split_options.requires_grad_sq(),
-                    )?;
-                    let right_histograms =
-                        subtract_histogram_bundle(&histograms, &left_histograms, right_node_id)?;
-                    next_nodes.push((
-                        left_local_node_id,
-                        left_node.row_indices,
-                        left_histograms,
-                        left_parent_val,
-                        left_parent_ll,
-                        child_path_features.clone(),
-                    ));
-                    next_nodes.push((
-                        right_local_node_id,
-                        right_row_indices,
-                        right_histograms,
-                        right_parent_val,
-                        right_parent_ll,
-                        child_path_features.clone(),
-                    ));
-                } else {
-                    let right_node = NodeSlice::new(right_node_id, right_row_indices)?;
-                    let right_histograms = backend.build_histograms_with_grad_sq(
-                        binned_matrix,
-                        gradients,
-                        &right_node,
-                        feature_tiles,
-                        split_options.requires_grad_sq(),
-                    )?;
-                    let left_histograms =
-                        subtract_histogram_bundle(&histograms, &right_histograms, left_node_id)?;
-                    next_nodes.push((
-                        left_local_node_id,
-                        left_row_indices,
-                        left_histograms,
-                        left_parent_val,
-                        left_parent_ll,
-                        child_path_features.clone(),
-                    ));
-                    next_nodes.push((
-                        right_local_node_id,
-                        right_node.row_indices,
-                        right_histograms,
-                        right_parent_val,
-                        right_parent_ll,
-                        child_path_features.clone(),
-                    ));
-                }
+                next_nodes.push(left_child);
+                next_nodes.push(right_child);
             }
 
-            let (final_left_leaf, final_right_leaf) = if let Some((ll, rl)) = linear_leaf_pair {
-                (LeafValue::Linear(ll), LeafValue::Linear(rl))
-            } else {
-                (
-                    LeafValue::Scalar(left_leaf_value),
-                    LeafValue::Scalar(right_leaf_value),
-                )
-            };
+            let (left_leaf_value, right_leaf_value) =
+                if let Some((left_leaf, right_leaf)) = proposal.linear_leaf_pair {
+                    (LeafValue::Linear(left_leaf), LeafValue::Linear(right_leaf))
+                } else {
+                    (
+                        LeafValue::Scalar(proposal.left_leaf_value),
+                        LeafValue::Scalar(proposal.right_leaf_value),
+                    )
+                };
             candidate_round_stumps.push(TrainedStump {
-                split,
-                left_leaf_value: final_left_leaf,
-                right_leaf_value: final_right_leaf,
+                split: proposal.split,
+                left_leaf_value,
+                right_leaf_value,
                 tree_weight: 1.0,
                 multi_output_leaf_values: None,
             });
@@ -1349,5 +1523,25 @@ mod linear_leaf_path_tests {
     fn linear_regressor_path_skips_categorical_split_features() {
         let selected = linear_regressor_path_features(&[10, 3], 12, true, 20);
         assert_eq!(selected, vec![10, 3]);
+    }
+
+    #[test]
+    fn level_node_outcomes_commit_in_local_node_order() {
+        let mut outcomes = vec![
+            LevelNodeOutcome::no_split(6),
+            LevelNodeOutcome::no_split(2),
+            LevelNodeOutcome::no_split(5),
+            LevelNodeOutcome::no_split(1),
+        ];
+
+        sort_level_outcomes(&mut outcomes);
+
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(|outcome| outcome.local_node_id)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 5, 6]
+        );
     }
 }

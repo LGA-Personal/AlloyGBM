@@ -48,6 +48,52 @@ fn quality_fixture_dataset() -> TrainingDataset {
     }
 }
 
+fn node_parallelism_fixture() -> (TrainingDataset, BinnedMatrix) {
+    const ROW_COUNT: usize = 8_192;
+    const FEATURE_COUNT: usize = 8;
+    let mut values = Vec::with_capacity(ROW_COUNT * FEATURE_COUNT);
+    let mut bins = Vec::with_capacity(ROW_COUNT * FEATURE_COUNT);
+    let mut targets = Vec::with_capacity(ROW_COUNT);
+    for row in 0..ROW_COUNT {
+        let bin = (row % 256) as u8;
+        for _ in 0..FEATURE_COUNT {
+            values.push(bin as f32);
+            bins.push(bin);
+        }
+        let centered = bin as f32 - 127.5;
+        targets.push(centered.signum() * centered.abs().sqrt());
+    }
+    (
+        TrainingDataset {
+            matrix: DatasetMatrix::new(ROW_COUNT, FEATURE_COUNT, values)
+                .expect("parallel fixture matrix is valid"),
+            targets,
+            sample_weights: None,
+            time_index: None,
+            group_id: None,
+            factor_exposures: None,
+        },
+        BinnedMatrix::new(ROW_COUNT, FEATURE_COUNT, 255, bins)
+            .expect("parallel fixture bins are valid"),
+    )
+}
+
+fn train_node_parallelism_fixture(thread_count: usize) -> alloygbm_engine::TrainedModel {
+    let (dataset, binned) = node_parallelism_fixture();
+    let mut params = fixture_params();
+    params.max_depth = 8;
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(thread_count)
+        .build()
+        .expect("test pool should build")
+        .install(|| {
+            Trainer::new(params)
+                .expect("parallel fixture params are valid")
+                .fit_iterations(&dataset, &binned, &CpuBackend, &SquaredErrorObjective, 1)
+                .expect("parallel fixture should train")
+        })
+}
+
 fn quality_fixture_binned_matrix() -> BinnedMatrix {
     BinnedMatrix::new(
         8,
@@ -965,6 +1011,37 @@ fn cpu_backend_deterministic_training_has_stable_artifact_bytes() {
     let bytes_a = model_a.to_artifact_bytes().expect("artifact serializes");
     let bytes_b = model_b.to_artifact_bytes().expect("artifact serializes");
     assert_eq!(bytes_a, bytes_b);
+}
+
+#[test]
+fn node_parallel_training_has_stable_artifacts_at_eight_threads() {
+    let model_a = train_node_parallelism_fixture(8);
+    let model_b = train_node_parallelism_fixture(8);
+
+    assert_eq!(
+        model_a.to_artifact_bytes().expect("artifact serializes"),
+        model_b.to_artifact_bytes().expect("artifact serializes")
+    );
+}
+
+#[test]
+fn node_parallel_training_matches_single_thread_predictions() {
+    let (dataset, _) = node_parallelism_fixture();
+    let rows = fixture_rows(&dataset);
+    let single_thread = train_node_parallelism_fixture(1)
+        .predict_batch(&rows)
+        .expect("single-thread predictions succeed");
+    let eight_threads = train_node_parallelism_fixture(8)
+        .predict_batch(&rows)
+        .expect("eight-thread predictions succeed");
+
+    assert_eq!(single_thread.len(), eight_threads.len());
+    for (row, (single, parallel)) in single_thread.iter().zip(&eight_threads).enumerate() {
+        assert!(
+            (single - parallel).abs() <= 1e-6,
+            "prediction drift at row {row}: single={single}, parallel={parallel}"
+        );
+    }
 }
 
 // ── Native categorical split tests ──────────────────────────────────

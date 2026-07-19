@@ -14,7 +14,7 @@ pub enum HistogramExecution {
     Parallel,
 }
 
-pub trait BackendOps {
+pub trait BackendOps: Sync {
     fn build_histograms(
         &self,
         binned_matrix: &BinnedMatrix,
