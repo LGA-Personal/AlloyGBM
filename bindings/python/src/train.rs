@@ -21,7 +21,7 @@ use crate::{DEFAULT_TRAIN_ROUNDS, MAX_SUPPORTED_TRAIN_ROUNDS};
 
 use alloygbm_backend_cpu::CpuBackend;
 use alloygbm_core::{
-    DatasetMatrix, FactorExposureMatrix, NeutralizationKind, TrainParams, TreeGrowth,
+    BinnedLayout, DatasetMatrix, FactorExposureMatrix, NeutralizationKind, TrainParams, TreeGrowth,
 };
 use alloygbm_engine::{
     BinaryCrossEntropyObjective, CategoricalFeatureInfo, CategoricalTargetEncodingSpec,
@@ -165,6 +165,7 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
         continuous_binning_strategy,
         continuous_binning_max_bins,
         need_dense_values,
+        BinnedLayout::ColumnMajor,
     )?;
     prepared.dataset.factor_exposures = factor_exposures;
 

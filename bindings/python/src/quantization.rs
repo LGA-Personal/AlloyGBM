@@ -1,6 +1,6 @@
 use crate::pyclasses::ContinuousBinningMetadataInternal;
 use alloygbm_core::{
-    BinnedMatrix, DatasetMatrix, DenseMatrixView, MISSING_BIN_U8, TrainingDataset,
+    BinnedLayout, BinnedMatrix, DatasetMatrix, DenseMatrixView, MISSING_BIN_U8, TrainingDataset,
 };
 use alloygbm_engine::EngineError;
 use rayon::prelude::*;
@@ -313,29 +313,55 @@ fn derive_dense_feature_quantile_cuts(
     feature_count: usize,
     max_bins: usize,
 ) -> Vec<Vec<f32>> {
-    let sorted_values = derive_dense_sorted_feature_values(values, row_count, feature_count);
-    sorted_values
-        .into_par_iter()
-        .map(|column| {
-            if column.len() <= 1 {
-                return Vec::new();
+    let derive_feature_cuts = |feature_index: usize| {
+        let mut column = Vec::with_capacity(row_count);
+        for row_index in 0..row_count {
+            let value = values[row_index * feature_count + feature_index];
+            if !value.is_nan() {
+                column.push(value);
             }
-            let bin_count = max_bins.min(column.len());
-            let mut cuts = Vec::new();
-            for quantile_index in 1..bin_count {
-                let mut rank = (quantile_index * column.len()) / bin_count;
-                if rank >= column.len() {
-                    rank = column.len() - 1;
-                }
-                let cut_value = column[rank];
-                if cuts.last().copied().is_some_and(|last| cut_value <= last) {
-                    continue;
-                }
-                cuts.push(cut_value);
+        }
+        column.sort_unstable_by(f32::total_cmp);
+        if column.len() <= 1 {
+            return Vec::new();
+        }
+        let bin_count = max_bins.min(column.len());
+        let mut cuts = Vec::with_capacity(bin_count.saturating_sub(1));
+        for quantile_index in 1..bin_count {
+            let mut rank = (quantile_index * column.len()) / bin_count;
+            if rank >= column.len() {
+                rank = column.len() - 1;
             }
-            cuts
-        })
-        .collect()
+            let cut_value = column[rank];
+            if cuts.last().copied().is_some_and(|last| cut_value <= last) {
+                continue;
+            }
+            cuts.push(cut_value);
+        }
+        cuts
+    };
+
+    const SORT_SCRATCH_BUDGET_BYTES: usize = 20 * 1024 * 1024;
+    let bytes_per_column = row_count.saturating_mul(size_of::<f32>()).max(1);
+    let columns_per_batch = (SORT_SCRATCH_BUDGET_BYTES / bytes_per_column).max(1);
+    if columns_per_batch >= rayon::current_num_threads() || columns_per_batch >= feature_count {
+        return (0..feature_count)
+            .into_par_iter()
+            .map(derive_feature_cuts)
+            .collect();
+    }
+
+    let mut cuts = Vec::with_capacity(feature_count);
+    for start in (0..feature_count).step_by(columns_per_batch) {
+        let end = (start + columns_per_batch).min(feature_count);
+        cuts.extend(
+            (start..end)
+                .into_par_iter()
+                .map(&derive_feature_cuts)
+                .collect::<Vec<_>>(),
+        );
+    }
+    cuts
 }
 
 fn derive_linear_tail_rank_plan(
@@ -452,12 +478,13 @@ pub(crate) fn prepare_validation_matrices_from_dense_values(
                 group_id,
                 factor_exposures: None,
             };
-            let binned_matrix = BinnedMatrix::new_u16(
+            let binned_matrix = BinnedMatrix::new_u16_with_layout(
                 row_count,
                 feature_count,
                 if max_bin_seen == 0 { 1 } else { max_bin_seen },
                 nan_bin,
                 bins_u16,
+                BinnedLayout::ColumnMajor,
             )?;
             return Ok(PreparedTrainingMatrices {
                 dataset,
@@ -502,11 +529,12 @@ pub(crate) fn prepare_validation_matrices_from_dense_values(
                 group_id,
                 factor_exposures: None,
             };
-            let binned_matrix = BinnedMatrix::new(
+            let binned_matrix = BinnedMatrix::new_with_layout(
                 row_count,
                 feature_count,
                 if max_bin_seen == 0 { 1 } else { max_bin_seen },
                 bins,
+                BinnedLayout::ColumnMajor,
             )?;
             return Ok(PreparedTrainingMatrices {
                 dataset,
@@ -540,12 +568,13 @@ pub(crate) fn prepare_validation_matrices_from_dense_values(
             group_id,
             factor_exposures: None,
         };
-        let binned_matrix = BinnedMatrix::new_u16(
+        let binned_matrix = BinnedMatrix::new_u16_with_layout(
             row_count,
             feature_count,
             if max_bin == 0 { 1 } else { max_bin },
             nan_bin,
             bins_u16,
+            BinnedLayout::ColumnMajor,
         )?;
         Ok(PreparedTrainingMatrices {
             dataset,
@@ -573,11 +602,12 @@ pub(crate) fn prepare_validation_matrices_from_dense_values(
             group_id,
             factor_exposures: None,
         };
-        let binned_matrix = BinnedMatrix::new(
+        let binned_matrix = BinnedMatrix::new_with_layout(
             row_count,
             feature_count,
             if max_bin == 0 { 1 } else { max_bin },
             bins,
+            BinnedLayout::ColumnMajor,
         )?;
         Ok(PreparedTrainingMatrices {
             dataset,
@@ -932,6 +962,233 @@ fn quantize_dense_values_with_metadata_wide(
     Ok((dense_values, bins, max_bin))
 }
 
+fn quantize_dense_values_to_column_major(
+    values: &[f32],
+    row_count: usize,
+    feature_count: usize,
+    strategy: ContinuousBinningStrategy,
+    metadata: &ContinuousBinningMetadataInternal,
+) -> Result<(Vec<f32>, Vec<u8>, u16), EngineError> {
+    let mins_ref = match strategy {
+        ContinuousBinningStrategy::Linear => {
+            Some(metadata.feature_mins.as_ref().ok_or_else(|| {
+                EngineError::ContractViolation("continuous linear minima are missing".to_string())
+            })?)
+        }
+        _ => None,
+    };
+    let maxs_ref = match strategy {
+        ContinuousBinningStrategy::Linear => {
+            Some(metadata.feature_maxs.as_ref().ok_or_else(|| {
+                EngineError::ContractViolation("continuous linear maxima are missing".to_string())
+            })?)
+        }
+        _ => None,
+    };
+    let sorted_ref = match strategy {
+        ContinuousBinningStrategy::Rank => {
+            Some(metadata.feature_sorted_values.as_ref().ok_or_else(|| {
+                EngineError::ContractViolation(
+                    "continuous rank sorted values are missing".to_string(),
+                )
+            })?)
+        }
+        ContinuousBinningStrategy::Linear => metadata.feature_sorted_values.as_ref(),
+        _ => None,
+    };
+    let cuts_ref = match strategy {
+        ContinuousBinningStrategy::Quantile => {
+            Some(metadata.feature_quantile_cuts.as_ref().ok_or_else(|| {
+                EngineError::ContractViolation("continuous quantile cuts are missing".to_string())
+            })?)
+        }
+        _ => None,
+    };
+    let rank_flags = metadata.feature_linear_rank_flags.as_ref();
+    let quantize = |feature_index: usize, value: f32| {
+        if value.is_nan() {
+            MISSING_BIN_U8
+        } else {
+            match strategy {
+                ContinuousBinningStrategy::Linear => {
+                    if rank_flags.is_some_and(|flags| flags[feature_index]) {
+                        let sorted = sorted_ref.expect("sorted values validated");
+                        quantize_rank_value(value, &sorted[feature_index])
+                    } else {
+                        let mins = mins_ref.expect("mins validated");
+                        let maxs = maxs_ref.expect("maxs validated");
+                        quantize_linear_value(value, mins[feature_index], maxs[feature_index])
+                    }
+                }
+                ContinuousBinningStrategy::Rank => {
+                    let sorted = sorted_ref.expect("sorted values validated");
+                    quantize_rank_value(value, &sorted[feature_index])
+                }
+                ContinuousBinningStrategy::Quantile => {
+                    let cuts = cuts_ref.expect("cuts validated");
+                    cuts[feature_index].partition_point(|probe| *probe <= value) as u8
+                }
+            }
+        }
+    };
+
+    let mut bins = vec![0_u8; row_count * feature_count];
+    let max_bin = if strategy == ContinuousBinningStrategy::Quantile {
+        let cuts = cuts_ref.expect("cuts validated");
+        bins.par_chunks_mut(row_count.max(1))
+            .enumerate()
+            .map(|(feature_index, column)| {
+                let feature_cuts = &cuts[feature_index];
+                let mut local_max = 0_u8;
+                for (row_index, destination) in column.iter_mut().enumerate() {
+                    let value = values[row_index * feature_count + feature_index];
+                    let bin = if value.is_nan() {
+                        MISSING_BIN_U8
+                    } else {
+                        feature_cuts.partition_point(|probe| *probe <= value) as u8
+                    };
+                    local_max = local_max.max(bin);
+                    *destination = bin;
+                }
+                u16::from(local_max)
+            })
+            .reduce(|| 0_u16, u16::max)
+    } else {
+        bins.par_chunks_mut(row_count.max(1))
+            .enumerate()
+            .map(|(feature_index, column)| {
+                let mut local_max = 0_u8;
+                for (row_index, destination) in column.iter_mut().enumerate() {
+                    let value = values[row_index * feature_count + feature_index];
+                    let bin = quantize(feature_index, value);
+                    local_max = local_max.max(bin);
+                    *destination = bin;
+                }
+                u16::from(local_max)
+            })
+            .reduce(|| 0_u16, u16::max)
+    };
+
+    Ok((Vec::new(), bins, max_bin))
+}
+
+fn quantize_dense_values_to_column_major_wide(
+    values: &[f32],
+    row_count: usize,
+    feature_count: usize,
+    strategy: ContinuousBinningStrategy,
+    metadata: &ContinuousBinningMetadataInternal,
+    max_data_bin: u16,
+) -> Result<(Vec<f32>, Vec<u16>, u16), EngineError> {
+    let nan_bin = max_data_bin + 1;
+    let mins_ref = match strategy {
+        ContinuousBinningStrategy::Linear => {
+            Some(metadata.feature_mins.as_ref().ok_or_else(|| {
+                EngineError::ContractViolation("continuous linear minima are missing".to_string())
+            })?)
+        }
+        _ => None,
+    };
+    let maxs_ref = match strategy {
+        ContinuousBinningStrategy::Linear => {
+            Some(metadata.feature_maxs.as_ref().ok_or_else(|| {
+                EngineError::ContractViolation("continuous linear maxima are missing".to_string())
+            })?)
+        }
+        _ => None,
+    };
+    let sorted_ref = match strategy {
+        ContinuousBinningStrategy::Rank => {
+            Some(metadata.feature_sorted_values.as_ref().ok_or_else(|| {
+                EngineError::ContractViolation(
+                    "continuous rank sorted values are missing".to_string(),
+                )
+            })?)
+        }
+        ContinuousBinningStrategy::Linear => metadata.feature_sorted_values.as_ref(),
+        _ => None,
+    };
+    let cuts_ref = match strategy {
+        ContinuousBinningStrategy::Quantile => {
+            Some(metadata.feature_quantile_cuts.as_ref().ok_or_else(|| {
+                EngineError::ContractViolation("continuous quantile cuts are missing".to_string())
+            })?)
+        }
+        _ => None,
+    };
+    let rank_flags = metadata.feature_linear_rank_flags.as_ref();
+    let quantize = |feature_index: usize, value: f32| {
+        if value.is_nan() {
+            nan_bin
+        } else {
+            match strategy {
+                ContinuousBinningStrategy::Linear => {
+                    if rank_flags.is_some_and(|flags| flags[feature_index]) {
+                        let sorted = sorted_ref.expect("sorted values validated");
+                        quantize_rank_value_wide(value, &sorted[feature_index], max_data_bin)
+                    } else {
+                        let mins = mins_ref.expect("mins validated");
+                        let maxs = maxs_ref.expect("maxs validated");
+                        quantize_linear_value_wide(
+                            value,
+                            mins[feature_index],
+                            maxs[feature_index],
+                            max_data_bin,
+                        )
+                    }
+                }
+                ContinuousBinningStrategy::Rank => {
+                    let sorted = sorted_ref.expect("sorted values validated");
+                    quantize_rank_value_wide(value, &sorted[feature_index], max_data_bin)
+                }
+                ContinuousBinningStrategy::Quantile => {
+                    let cuts = cuts_ref.expect("cuts validated");
+                    cuts[feature_index].partition_point(|probe| *probe <= value) as u16
+                }
+            }
+        }
+    };
+
+    let mut bins = vec![0_u16; row_count * feature_count];
+    let max_bin = if strategy == ContinuousBinningStrategy::Quantile {
+        let cuts = cuts_ref.expect("cuts validated");
+        bins.par_chunks_mut(row_count.max(1))
+            .enumerate()
+            .map(|(feature_index, column)| {
+                let feature_cuts = &cuts[feature_index];
+                let mut local_max = 0_u16;
+                for (row_index, destination) in column.iter_mut().enumerate() {
+                    let value = values[row_index * feature_count + feature_index];
+                    let bin = if value.is_nan() {
+                        nan_bin
+                    } else {
+                        feature_cuts.partition_point(|probe| *probe <= value) as u16
+                    };
+                    local_max = local_max.max(bin);
+                    *destination = bin;
+                }
+                local_max
+            })
+            .reduce(|| 0_u16, u16::max)
+    } else {
+        bins.par_chunks_mut(row_count.max(1))
+            .enumerate()
+            .map(|(feature_index, column)| {
+                let mut local_max = 0_u16;
+                for (row_index, destination) in column.iter_mut().enumerate() {
+                    let value = values[row_index * feature_count + feature_index];
+                    let bin = quantize(feature_index, value);
+                    local_max = local_max.max(bin);
+                    *destination = bin;
+                }
+                local_max
+            })
+            .reduce(|| 0_u16, u16::max)
+    };
+
+    Ok((Vec::new(), bins, max_bin))
+}
+
 pub(crate) fn prepare_training_matrices_from_dense_values(
     values: &[f32],
     row_count: usize,
@@ -943,6 +1200,7 @@ pub(crate) fn prepare_training_matrices_from_dense_values(
     strategy: ContinuousBinningStrategy,
     max_bins: usize,
     need_dense_values: bool,
+    binned_layout: BinnedLayout,
 ) -> Result<PreparedTrainingMatrices, EngineError> {
     validate_continuous_binning_max_bins(max_bins)?;
     let dense_view = DenseMatrixView::new(row_count, feature_count, values)?;
@@ -1038,6 +1296,7 @@ pub(crate) fn prepare_training_matrices_from_dense_values(
     };
 
     // Encode bins and build BinnedMatrix — u8 fast path or u16 wide path.
+    let direct_column_major = binned_layout == BinnedLayout::ColumnMajor && !need_dense_values;
     if use_wide {
         let max_data_bin = (max_bins - 2) as u16;
         let nan_bin = max_data_bin + 1;
@@ -1050,7 +1309,15 @@ pub(crate) fn prepare_training_matrices_from_dense_values(
                 Vec::new()
             };
             let mut max_bin = 0_u16;
-            for (index, &value) in values.iter().enumerate() {
+            let source_indices: Box<dyn Iterator<Item = usize>> = if direct_column_major {
+                Box::new((0..feature_count).flat_map(|feature| {
+                    (0..row_count).map(move |row| row * feature_count + feature)
+                }))
+            } else {
+                Box::new(0..values.len())
+            };
+            for index in source_indices {
+                let value = values[index];
                 let rounded = value.round();
                 if rounded > 65535.0 {
                     return Err(EngineError::ContractViolation(format!(
@@ -1065,6 +1332,15 @@ pub(crate) fn prepare_training_matrices_from_dense_values(
                 }
             }
             (dense_values_out, bins_u16, max_bin)
+        } else if direct_column_major {
+            quantize_dense_values_to_column_major_wide(
+                values,
+                row_count,
+                feature_count,
+                strategy,
+                &metadata,
+                max_data_bin,
+            )?
         } else {
             quantize_dense_values_with_metadata_wide(
                 values,
@@ -1088,13 +1364,25 @@ pub(crate) fn prepare_training_matrices_from_dense_values(
             group_id,
             factor_exposures: None,
         };
-        let binned_matrix = BinnedMatrix::new_u16(
-            row_count,
-            feature_count,
-            if max_bin == 0 { 1 } else { max_bin },
-            nan_bin,
-            bins_u16,
-        )?;
+        let max_bin = if max_bin == 0 { 1 } else { max_bin };
+        let binned_matrix = if direct_column_major {
+            BinnedMatrix::new_u16_from_column_major(
+                row_count,
+                feature_count,
+                max_bin,
+                nan_bin,
+                bins_u16,
+            )?
+        } else {
+            BinnedMatrix::new_u16_with_layout(
+                row_count,
+                feature_count,
+                max_bin,
+                nan_bin,
+                bins_u16,
+                binned_layout,
+            )?
+        };
         Ok(PreparedTrainingMatrices {
             dataset,
             binned_matrix,
@@ -1110,7 +1398,15 @@ pub(crate) fn prepare_training_matrices_from_dense_values(
                 Vec::new()
             };
             let mut max_bin = 0_u16;
-            for (index, &value) in values.iter().enumerate() {
+            let source_indices: Box<dyn Iterator<Item = usize>> = if direct_column_major {
+                Box::new((0..feature_count).flat_map(|feature| {
+                    (0..row_count).map(move |row| row * feature_count + feature)
+                }))
+            } else {
+                Box::new(0..values.len())
+            };
+            for index in source_indices {
+                let value = values[index];
                 let rounded = value.round();
                 if rounded > 255.0 {
                     return Err(EngineError::ContractViolation(format!(
@@ -1125,6 +1421,14 @@ pub(crate) fn prepare_training_matrices_from_dense_values(
                 }
             }
             (dense_values_out, bins, max_bin)
+        } else if direct_column_major {
+            quantize_dense_values_to_column_major(
+                values,
+                row_count,
+                feature_count,
+                strategy,
+                &metadata,
+            )?
         } else {
             quantize_dense_values_with_metadata(
                 values,
@@ -1147,12 +1451,12 @@ pub(crate) fn prepare_training_matrices_from_dense_values(
             group_id,
             factor_exposures: None,
         };
-        let binned_matrix = BinnedMatrix::new(
-            row_count,
-            feature_count,
-            if max_bin == 0 { 1 } else { max_bin },
-            bins,
-        )?;
+        let max_bin = if max_bin == 0 { 1 } else { max_bin };
+        let binned_matrix = if direct_column_major {
+            BinnedMatrix::new_from_column_major(row_count, feature_count, max_bin, bins)?
+        } else {
+            BinnedMatrix::new_with_layout(row_count, feature_count, max_bin, bins, binned_layout)?
+        };
         Ok(PreparedTrainingMatrices {
             dataset,
             binned_matrix,

@@ -119,7 +119,7 @@ fn build_histograms_baseline_reference(
             for &row_index in &node.row_indices {
                 let row_index = row_index as usize;
                 let cell_index = row_index * binned_matrix.feature_count + feature_index as usize;
-                let bin_index = binned_matrix.bins[cell_index] as usize;
+                let bin_index = binned_matrix.row_bin(cell_index) as usize;
                 let gradient = gradients[row_index];
                 let target_bin = &mut bins[bin_index];
                 target_bin.grad_sum += gradient.grad;

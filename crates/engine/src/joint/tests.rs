@@ -41,7 +41,7 @@ fn joint_pre_target_residualizes_targets() {
         let predictor =
             JointPredictor::from_artifact_bytes(&bytes, summary.baselines.clone()).expect("load");
         (0..row_count)
-            .map(|r| predictor.predict_row(&[binned.bins[r] as f32]))
+            .map(|r| predictor.predict_row(&[binned.row_bin(r) as f32]))
             .collect()
     };
 
@@ -321,7 +321,7 @@ fn joint_per_round_gradient_neutralization_changes_model() {
         let predictor =
             JointPredictor::from_artifact_bytes(&bytes, summary.baselines.clone()).expect("load");
         (0..row_count)
-            .map(|r| predictor.predict_row(&[binned.bins[r] as f32]))
+            .map(|r| predictor.predict_row(&[binned.row_bin(r) as f32]))
             .collect()
     };
 
@@ -849,8 +849,12 @@ fn joint_round_trip_max_depth_two_matches_training_predictions() {
 
     // Build the dense f32 feature matrix that matches the binned layout
     // for prediction (raw bin values are passed as features).
-    let row_f =
-        |i: usize| -> Vec<f32> { vec![binned.bins[i * 2] as f32, binned.bins[i * 2 + 1] as f32] };
+    let row_f = |i: usize| -> Vec<f32> {
+        vec![
+            binned.row_bin(i * 2) as f32,
+            binned.row_bin(i * 2 + 1) as f32,
+        ]
+    };
     let p0 = predictor.predict_row(&row_f(0)); // (bin 0, bin 0)
     let p2 = predictor.predict_row(&row_f(2)); // (bin 0, bin 1)
     let p6 = predictor.predict_row(&row_f(6)); // (bin 3, bin 0)
@@ -1098,10 +1102,10 @@ fn joint_row_subsample_full_walk_predictions_do_not_diverge() {
     let mut target_0 = Vec::with_capacity(n_rows);
     let mut target_1 = Vec::with_capacity(n_rows);
     for row in 0..n_rows {
-        let f0 = binned.bins[row * feature_count] as f32 / 63.0;
-        let f1 = binned.bins[row * feature_count + 1] as f32 / 63.0;
-        let f2 = binned.bins[row * feature_count + 2] as f32 / 63.0;
-        let f3 = binned.bins[row * feature_count + 3] as f32 / 63.0;
+        let f0 = binned.row_bin(row * feature_count) as f32 / 63.0;
+        let f1 = binned.row_bin(row * feature_count + 1) as f32 / 63.0;
+        let f2 = binned.row_bin(row * feature_count + 2) as f32 / 63.0;
+        let f3 = binned.row_bin(row * feature_count + 3) as f32 / 63.0;
         let noise = ((row as f32) * 0.173).sin() * 0.025;
         target_0.push(1.5 * f0 - 0.8 * f1 + 0.25 * (4.0 * f2).sin() + noise);
         target_1.push(-1.1 * f0 + 0.7 * f3 + 0.2 * (3.0 * f1).cos() - noise);
@@ -1135,7 +1139,7 @@ fn joint_row_subsample_full_walk_predictions_do_not_diverge() {
     let mut preds_per_output = [Vec::with_capacity(n_rows), Vec::with_capacity(n_rows)];
     for row in 0..n_rows {
         let features: Vec<f32> = (0..feature_count)
-            .map(|feature| binned.bins[row * feature_count + feature] as f32)
+            .map(|feature| binned.row_bin(row * feature_count + feature) as f32)
             .collect();
         let pred = predictor.predict_row(&features);
         preds_per_output[0].push(pred[0]);
@@ -2139,12 +2143,12 @@ fn joint_dart_round_trips_through_predictor() {
     let bytes = summary.model.clone().to_artifact_bytes().expect("artifact");
     let predictor =
         JointPredictor::from_artifact_bytes(&bytes, summary.baselines.clone()).expect("load");
-    // Reconstruct a few rows' raw features from binned_matrix.bins
+    // Reconstruct a few rows' raw features through the row accessor
     // (the test fixture put bin == raw feature value modulo 8) and
     // verify finite predictions.
     for row in 0..5 {
         let feats: Vec<f32> = (0..feature_count)
-            .map(|f| binned_matrix.bins[row * feature_count + f] as f32)
+            .map(|f| binned_matrix.row_bin(row * feature_count + f) as f32)
             .collect();
         let p = predictor.predict_row(&feats);
         assert_eq!(p.len(), 2);
@@ -2493,7 +2497,7 @@ fn joint_warm_start_continues_from_prior_state() {
         .expect("pred resume");
     for row in 0..5 {
         let feats: Vec<f32> = (0..feature_count)
-            .map(|f| binned_matrix.bins[row * feature_count + f] as f32)
+            .map(|f| binned_matrix.row_bin(row * feature_count + f) as f32)
             .collect();
         let pf = p_fresh.predict_row(&feats);
         let pr = p_resume.predict_row(&feats);

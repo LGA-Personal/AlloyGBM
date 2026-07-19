@@ -246,7 +246,7 @@ pub(super) fn build_joint_round_inner(
                 for &row in &node.row_indices {
                     // Row-major: bins[row * feature_count + feature].
                     let idx = row as usize * feature_count + feature;
-                    subset_bins.push(binned_matrix.bins[idx]);
+                    subset_bins.push(binned_matrix.row_bin(idx).min(u16::from(u8::MAX)) as u8);
                 }
                 // Subset packed_grads/hess for these rows.
                 let mut subset_g: Vec<f32> = Vec::with_capacity(node.row_indices.len() * n_outputs);
@@ -428,7 +428,9 @@ pub(super) fn build_joint_round_inner(
             let mut right_rows: Vec<u32> = Vec::new();
             let mut missing_rows: Vec<u32> = Vec::new();
             for &row in &node.row_indices {
-                let bin = binned_matrix.bins[row as usize * feature_count + feature];
+                let bin = binned_matrix
+                    .row_bin(row as usize * feature_count + feature)
+                    .min(u16::from(u8::MAX)) as u8;
                 if bin == MISSING_BIN_U8 {
                     missing_rows.push(row);
                 } else if let Some(bs) = cat_bitset {
@@ -733,7 +735,7 @@ pub(super) fn build_joint_round_leafwise(
             let mut subset_bins: Vec<u8> = Vec::with_capacity(node.row_indices.len());
             for &row in &node.row_indices {
                 let idx = row as usize * feature_count + feature;
-                subset_bins.push(binned_matrix.bins[idx]);
+                subset_bins.push(binned_matrix.row_bin(idx).min(u16::from(u8::MAX)) as u8);
             }
             let mut subset_g: Vec<f32> = Vec::with_capacity(node.row_indices.len() * n_outputs);
             let mut subset_h: Vec<f32> = Vec::with_capacity(node.row_indices.len() * n_outputs);
@@ -886,7 +888,9 @@ pub(super) fn build_joint_round_leafwise(
         let mut right_rows: Vec<u32> = Vec::new();
         let mut missing_rows: Vec<u32> = Vec::new();
         for &row in &node.row_indices {
-            let bin = binned_matrix.bins[row as usize * feature_count + feature];
+            let bin = binned_matrix
+                .row_bin(row as usize * feature_count + feature)
+                .min(u16::from(u8::MAX)) as u8;
             if bin == MISSING_BIN_U8 {
                 missing_rows.push(row);
             } else if let Some(bs) = cat_bitset {

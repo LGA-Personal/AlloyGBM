@@ -212,8 +212,6 @@ fn binned_matrix_rejects_bin_above_max() {
         feature_count: 2,
         max_bin: 7,
         nan_bin_index: MISSING_BIN_U8 as u16,
-        bins: vec![3, 8],
-        bins_col: vec![3, 8],
         bins_adaptive: BinStorage::U8(vec![3, 8]),
         bins_col_adaptive: BinStorage::U8(vec![3, 8]),
     };
@@ -221,6 +219,144 @@ fn binned_matrix_rejects_bin_above_max() {
         validate_binned_matrix(&matrix),
         Err(CoreError::Validation(_))
     ));
+}
+
+#[test]
+fn binned_matrix_accessors_preserve_u8_bins_and_missing_sentinel() {
+    let matrix = BinnedMatrix::new(2, 3, 254, vec![0, 254, MISSING_BIN_U8, 17, 1, 253])
+        .expect("u8 matrix should be valid");
+
+    assert_eq!(
+        (0..6)
+            .map(|index| matrix.row_bin(index))
+            .collect::<Vec<_>>(),
+        vec![0, 254, 255, 17, 1, 253]
+    );
+    assert_eq!(
+        (0..6)
+            .map(|index| matrix.col_bin(index))
+            .collect::<Vec<_>>(),
+        vec![0, 17, 254, 1, 255, 253]
+    );
+    assert_eq!(matrix.missing_bin(), u16::from(MISSING_BIN_U8));
+}
+
+#[test]
+fn binned_matrix_accessors_preserve_u16_bins_and_missing_sentinel() {
+    let matrix = BinnedMatrix::new_u16(
+        2,
+        3,
+        65_534,
+        MISSING_BIN_U16,
+        vec![0, 65_534, MISSING_BIN_U16, 300, 1, 65_533],
+    )
+    .expect("u16 matrix should be valid");
+
+    assert_eq!(
+        (0..6)
+            .map(|index| matrix.row_bin(index))
+            .collect::<Vec<_>>(),
+        vec![0, 65_534, 65_535, 300, 1, 65_533]
+    );
+    assert_eq!(
+        (0..6)
+            .map(|index| matrix.col_bin(index))
+            .collect::<Vec<_>>(),
+        vec![0, 300, 65_534, 1, 65_535, 65_533]
+    );
+    assert_eq!(matrix.missing_bin(), MISSING_BIN_U16);
+}
+
+#[test]
+fn column_major_layout_stores_one_u8_payload_and_supports_row_access() {
+    let matrix = BinnedMatrix::new_with_layout(
+        2,
+        3,
+        254,
+        vec![0, 2, MISSING_BIN_U8, 1, 3, 4],
+        BinnedLayout::ColumnMajor,
+    )
+    .expect("column-major u8 matrix should be valid");
+
+    assert_eq!(matrix.layout(), BinnedLayout::ColumnMajor);
+    assert!(!matrix.has_row_major());
+    assert!(matrix.has_col_major());
+    assert_eq!(matrix.storage_bytes(), 6);
+    assert_eq!(matrix.row_bin(2), u16::from(MISSING_BIN_U8));
+    assert_eq!(matrix.row_bin(4), 3);
+}
+
+#[test]
+fn column_major_layout_stores_one_u16_payload_and_supports_row_access() {
+    let matrix = BinnedMatrix::new_u16_with_layout(
+        2,
+        2,
+        1_024,
+        1_025,
+        vec![0, 1_024, 300, 1_025],
+        BinnedLayout::ColumnMajor,
+    )
+    .expect("column-major u16 matrix should be valid");
+
+    assert_eq!(matrix.layout(), BinnedLayout::ColumnMajor);
+    assert!(!matrix.has_row_major());
+    assert_eq!(matrix.storage_bytes(), 8);
+    assert_eq!(matrix.row_bin(1), 1_024);
+    assert_eq!(matrix.row_bin(3), 1_025);
+}
+
+#[test]
+fn column_major_constructor_accepts_native_u8_storage_order() {
+    let matrix = BinnedMatrix::new_from_column_major(2, 3, 7, vec![0, 3, 1, 4, 2, 5])
+        .expect("column-major u8 matrix should be valid");
+
+    assert_eq!(matrix.layout(), BinnedLayout::ColumnMajor);
+    assert_eq!(matrix.storage_bytes(), 6);
+    assert_eq!(
+        (0..6)
+            .map(|index| matrix.row_bin(index))
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2, 3, 4, 5]
+    );
+}
+
+#[test]
+fn column_major_constructor_accepts_native_u16_storage_order() {
+    let matrix =
+        BinnedMatrix::new_u16_from_column_major(2, 3, 512, 513, vec![0, 300, 1, 400, 2, 500])
+            .expect("column-major u16 matrix should be valid");
+
+    assert_eq!(matrix.layout(), BinnedLayout::ColumnMajor);
+    assert_eq!(matrix.storage_bytes(), 12);
+    assert_eq!(
+        (0..6)
+            .map(|index| matrix.row_bin(index))
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2, 300, 400, 500]
+    );
+}
+
+#[test]
+fn dual_layout_stores_both_adaptive_payloads() {
+    let matrix = BinnedMatrix::new_with_layout(2, 2, 4, vec![0, 1, 2, 4], BinnedLayout::Dual)
+        .expect("dual matrix should be valid");
+
+    assert_eq!(matrix.layout(), BinnedLayout::Dual);
+    assert!(matrix.has_row_major());
+    assert_eq!(matrix.storage_bytes(), 8);
+}
+
+#[test]
+fn column_major_set_bin_updates_both_access_patterns() {
+    let mut matrix =
+        BinnedMatrix::new_with_layout(2, 2, 7, vec![0, 1, 2, 3], BinnedLayout::ColumnMajor)
+            .expect("column-major matrix should be valid");
+
+    matrix.set_bin(1, 0, 7);
+
+    assert_eq!(matrix.row_bin(2), 7);
+    assert_eq!(matrix.col_bin(1), 7);
+    assert!(!matrix.has_row_major());
 }
 
 #[test]
