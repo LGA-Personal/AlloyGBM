@@ -1,7 +1,6 @@
 use alloygbm_core::{
-    BinnedMatrix, Device, FeatureHistogram, FeatureTile, GradientPair, HistogramBin,
-    HistogramBundle, NodeSlice, NodeStats, PartitionResult, SplitCandidate,
-    leaf_effective_gradient,
+    BinnedMatrix, Device, FeatureTile, GradientPair, HistogramBundle, HistogramFeatureView,
+    NodeSlice, NodeStats, PartitionResult, SplitCandidate, leaf_effective_gradient,
 };
 use alloygbm_engine::{
     CategoricalFeatureInfo, EngineError, EngineResult, FactorSplitContext, MorphContext,
@@ -38,7 +37,7 @@ pub use alloygbm_core::simd;
 
 thread_local! {
     /// Per-thread reusable histogram arena to avoid repeated allocation.
-    static THREAD_ARENA: RefCell<HistogramArena> = RefCell::new(HistogramArena::new(0, 0));
+    static THREAD_ARENA: RefCell<HistogramArena> = RefCell::new(HistogramArena::new(0, 0, false));
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -63,57 +62,18 @@ impl CpuBackend {
         }
     }
 
-    pub(crate) fn materialize_tile_histograms(
-        start_feature: usize,
-        bin_count: usize,
-        grad_sums: &[f32],
-        hess_sums: &[f32],
-        grad_sq_sums: &[f32],
-        counts: &[u32],
-        feature_histograms: &mut Vec<FeatureHistogram>,
-    ) {
-        let tile_feature_count = grad_sums.len() / bin_count;
-        for local_feature_index in 0..tile_feature_count {
-            let base = local_feature_index * bin_count;
-            let mut bins = Vec::with_capacity(bin_count);
-            for bin_index in 0..bin_count {
-                let flat_index = base + bin_index;
-                bins.push(HistogramBin {
-                    grad_sum: grad_sums[flat_index],
-                    hess_sum: hess_sums[flat_index],
-                    grad_sq_sum: grad_sq_sums[flat_index],
-                    count: counts[flat_index],
-                });
-            }
-
-            feature_histograms.push(FeatureHistogram {
-                feature_index: (start_feature + local_feature_index) as u32,
-                bins,
-            });
-        }
-    }
-
-    fn build_tile_histograms_per_feature(
+    fn build_tile_histograms_per_feature<const INCLUDE_GRAD_SQ: bool>(
         binned_matrix: &BinnedMatrix,
         gradients: &[GradientPair],
         node: &NodeSlice,
         start_feature: usize,
         end_feature: usize,
-        bin_count: usize,
-        feature_histograms: &mut Vec<FeatureHistogram>,
+        arena: &mut HistogramArena,
     ) {
         let row_count = binned_matrix.row_count;
         let use_col_major = binned_matrix.has_col_major();
         for feature_index in start_feature..end_feature {
-            let mut bins = vec![
-                HistogramBin {
-                    grad_sum: 0.0,
-                    hess_sum: 0.0,
-                    grad_sq_sum: 0.0,
-                    count: 0,
-                };
-                bin_count
-            ];
+            let base = (feature_index - start_feature) * arena.bin_count;
 
             if use_col_major {
                 // Column-major: sequential bin reads — cache-friendly
@@ -122,11 +82,14 @@ impl CpuBackend {
                     let row_index = row_index as usize;
                     let bin_index = binned_matrix.col_bin(col_base + row_index) as usize;
                     let gradient = gradients[row_index];
-                    let target_bin = &mut bins[bin_index];
-                    target_bin.grad_sum += gradient.grad;
-                    target_bin.hess_sum += gradient.hess;
-                    target_bin.grad_sq_sum += gradient.grad * gradient.grad;
-                    target_bin.count += 1;
+                    let target = base + bin_index;
+                    arena.grad_sums[target] += gradient.grad;
+                    arena.hess_sums[target] += gradient.hess;
+                    if INCLUDE_GRAD_SQ {
+                        arena.grad_sq_sums.as_mut().expect("DRO arena")[target] +=
+                            gradient.grad * gradient.grad;
+                    }
+                    arena.counts[target] += 1;
                 }
             } else {
                 for &row_index in &node.row_indices {
@@ -134,18 +97,16 @@ impl CpuBackend {
                     let cell_index = row_index * binned_matrix.feature_count + feature_index;
                     let bin_index = binned_matrix.row_bin(cell_index) as usize;
                     let gradient = gradients[row_index];
-                    let target_bin = &mut bins[bin_index];
-                    target_bin.grad_sum += gradient.grad;
-                    target_bin.hess_sum += gradient.hess;
-                    target_bin.grad_sq_sum += gradient.grad * gradient.grad;
-                    target_bin.count += 1;
+                    let target = base + bin_index;
+                    arena.grad_sums[target] += gradient.grad;
+                    arena.hess_sums[target] += gradient.hess;
+                    if INCLUDE_GRAD_SQ {
+                        arena.grad_sq_sums.as_mut().expect("DRO arena")[target] +=
+                            gradient.grad * gradient.grad;
+                    }
+                    arena.counts[target] += 1;
                 }
             }
-
-            feature_histograms.push(FeatureHistogram {
-                feature_index: feature_index as u32,
-                bins,
-            });
         }
     }
 
@@ -169,7 +130,8 @@ impl CpuBackend {
                 let flat_index = local_feature_index * arena.bin_count + bin_index;
                 arena.grad_sums[flat_index] += gradient.grad;
                 arena.hess_sums[flat_index] += gradient.hess;
-                arena.grad_sq_sums[flat_index] += gradient.grad * gradient.grad;
+                arena.grad_sq_sums.as_mut().expect("DRO arena")[flat_index] +=
+                    gradient.grad * gradient.grad;
                 arena.counts[flat_index] += 1;
             }
         }
@@ -191,7 +153,8 @@ impl CpuBackend {
         node: &NodeSlice,
         tile: &FeatureTile,
         bin_count: usize,
-    ) -> EngineResult<Vec<FeatureHistogram>> {
+        include_grad_sq: bool,
+    ) -> EngineResult<HistogramBundle> {
         let feature_count = binned_matrix.feature_count;
         if tile.end_feature as usize > feature_count {
             return Err(EngineError::ContractViolation(format!(
@@ -204,51 +167,55 @@ impl CpuBackend {
         let end_feature = tile.end_feature as usize;
         let tile_feature_count = end_feature - start_feature;
         let tile_workload = node.row_indices.len().saturating_mul(tile_feature_count);
-        let mut feature_histograms = Vec::with_capacity(tile_feature_count);
-
-        match Self::select_histogram_kernel_path(node.row_indices.len(), tile_workload, bin_count) {
-            HistogramKernelPath::TinyNodeScalar | HistogramKernelPath::BinHeavyPerFeatureScalar => {
-                Self::build_tile_histograms_per_feature(
+        THREAD_ARENA.with(|cell| {
+            let mut arena = cell.borrow_mut();
+            arena.resize_for_tile(tile_feature_count, bin_count, include_grad_sq);
+            let use_per_feature = matches!(
+                Self::select_histogram_kernel_path(
+                    node.row_indices.len(),
+                    tile_workload,
+                    bin_count
+                ),
+                HistogramKernelPath::TinyNodeScalar | HistogramKernelPath::BinHeavyPerFeatureScalar
+            ) || binned_matrix.has_col_major();
+            match (use_per_feature, include_grad_sq) {
+                (true, false) => Self::build_tile_histograms_per_feature::<false>(
                     binned_matrix,
                     gradients,
                     node,
                     start_feature,
                     end_feature,
-                    bin_count,
-                    &mut feature_histograms,
-                );
+                    &mut arena,
+                ),
+                (true, true) => Self::build_tile_histograms_per_feature::<true>(
+                    binned_matrix,
+                    gradients,
+                    node,
+                    start_feature,
+                    end_feature,
+                    &mut arena,
+                ),
+                (false, false) => Self::build_tile_histograms_row_first_unrolled::<false>(
+                    binned_matrix,
+                    gradients,
+                    node,
+                    start_feature,
+                    end_feature,
+                    &mut arena,
+                ),
+                (false, true) => Self::build_tile_histograms_row_first_unrolled::<true>(
+                    binned_matrix,
+                    gradients,
+                    node,
+                    start_feature,
+                    end_feature,
+                    &mut arena,
+                ),
             }
-            HistogramKernelPath::ArenaRowFirstUnrolled => {
-                if binned_matrix.has_col_major() {
-                    // Feature-first with column-major bins: 3KB working set per feature (fits L1).
-                    Self::build_tile_histograms_per_feature(
-                        binned_matrix,
-                        gradients,
-                        node,
-                        start_feature,
-                        end_feature,
-                        bin_count,
-                        &mut feature_histograms,
-                    );
-                } else {
-                    THREAD_ARENA.with(|cell| {
-                        let mut arena = cell.borrow_mut();
-                        arena.resize_for_tile(tile_feature_count, bin_count);
-                        Self::build_tile_histograms_row_first_unrolled(
-                            binned_matrix,
-                            gradients,
-                            node,
-                            start_feature,
-                            end_feature,
-                            &mut arena,
-                        );
-                        arena.materialize(start_feature, &mut feature_histograms);
-                    });
-                }
-            }
-        }
-
-        Ok(feature_histograms)
+            arena
+                .to_bundle(node.node_id, start_feature)
+                .map_err(EngineError::from)
+        })
     }
 
     pub(crate) fn build_histograms_internal(
@@ -257,6 +224,7 @@ impl CpuBackend {
         node: &NodeSlice,
         feature_tiles: &[FeatureTile],
         parallel_tiles: bool,
+        include_grad_sq: bool,
     ) -> EngineResult<HistogramBundle> {
         if gradients.len() != binned_matrix.row_count {
             return Err(EngineError::ContractViolation(format!(
@@ -273,14 +241,8 @@ impl CpuBackend {
         node.validate_bounds(binned_matrix.row_count)?;
 
         let bin_count = binned_matrix.max_bin as usize + 1;
-        let selected_feature_count = feature_tiles
-            .iter()
-            .map(|tile| (tile.end_feature - tile.start_feature) as usize)
-            .sum();
-        let mut feature_histograms = Vec::with_capacity(selected_feature_count);
-
-        if parallel_tiles {
-            let per_tile_histograms = feature_tiles
+        let mut per_tile_histograms = if parallel_tiles {
+            feature_tiles
                 .par_iter()
                 .map(|tile| {
                     Self::build_feature_histograms_for_tile(
@@ -289,32 +251,38 @@ impl CpuBackend {
                         node,
                         tile,
                         bin_count,
+                        include_grad_sq,
                     )
                 })
-                .collect::<Vec<_>>();
-
-            for tile_histograms in per_tile_histograms {
-                feature_histograms.extend(tile_histograms?);
-            }
+                .collect::<Vec<_>>()
         } else {
-            for tile in feature_tiles {
-                feature_histograms.extend(Self::build_feature_histograms_for_tile(
-                    binned_matrix,
-                    gradients,
-                    node,
-                    tile,
-                    bin_count,
-                )?);
-            }
+            feature_tiles
+                .iter()
+                .map(|tile| {
+                    Self::build_feature_histograms_for_tile(
+                        binned_matrix,
+                        gradients,
+                        node,
+                        tile,
+                        bin_count,
+                        include_grad_sq,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut histograms = per_tile_histograms
+            .drain(..1)
+            .next()
+            .expect("feature tiles are non-empty")?;
+        for tile_histograms in per_tile_histograms {
+            histograms
+                .append(tile_histograms?)
+                .map_err(EngineError::from)?;
         }
-
-        Ok(HistogramBundle {
-            node_id: node.node_id,
-            feature_histograms,
-        })
+        Ok(histograms)
     }
 
-    fn build_tile_histograms_row_first_unrolled(
+    fn build_tile_histograms_row_first_unrolled<const INCLUDE_GRAD_SQ: bool>(
         binned_matrix: &BinnedMatrix,
         gradients: &[GradientPair],
         node: &NodeSlice,
@@ -369,42 +337,66 @@ impl CpuBackend {
 
                 arena.grad_sums[idx0] += gradient0.grad;
                 arena.hess_sums[idx0] += gradient0.hess;
-                arena.grad_sq_sums[idx0] += gradient0.grad * gradient0.grad;
+                if INCLUDE_GRAD_SQ {
+                    arena.grad_sq_sums.as_mut().expect("DRO arena")[idx0] +=
+                        gradient0.grad * gradient0.grad;
+                }
                 arena.counts[idx0] += 1;
 
                 arena.grad_sums[idx1] += gradient1.grad;
                 arena.hess_sums[idx1] += gradient1.hess;
-                arena.grad_sq_sums[idx1] += gradient1.grad * gradient1.grad;
+                if INCLUDE_GRAD_SQ {
+                    arena.grad_sq_sums.as_mut().expect("DRO arena")[idx1] +=
+                        gradient1.grad * gradient1.grad;
+                }
                 arena.counts[idx1] += 1;
 
                 arena.grad_sums[idx2] += gradient2.grad;
                 arena.hess_sums[idx2] += gradient2.hess;
-                arena.grad_sq_sums[idx2] += gradient2.grad * gradient2.grad;
+                if INCLUDE_GRAD_SQ {
+                    arena.grad_sq_sums.as_mut().expect("DRO arena")[idx2] +=
+                        gradient2.grad * gradient2.grad;
+                }
                 arena.counts[idx2] += 1;
 
                 arena.grad_sums[idx3] += gradient3.grad;
                 arena.hess_sums[idx3] += gradient3.hess;
-                arena.grad_sq_sums[idx3] += gradient3.grad * gradient3.grad;
+                if INCLUDE_GRAD_SQ {
+                    arena.grad_sq_sums.as_mut().expect("DRO arena")[idx3] +=
+                        gradient3.grad * gradient3.grad;
+                }
                 arena.counts[idx3] += 1;
 
                 arena.grad_sums[idx4] += gradient4.grad;
                 arena.hess_sums[idx4] += gradient4.hess;
-                arena.grad_sq_sums[idx4] += gradient4.grad * gradient4.grad;
+                if INCLUDE_GRAD_SQ {
+                    arena.grad_sq_sums.as_mut().expect("DRO arena")[idx4] +=
+                        gradient4.grad * gradient4.grad;
+                }
                 arena.counts[idx4] += 1;
 
                 arena.grad_sums[idx5] += gradient5.grad;
                 arena.hess_sums[idx5] += gradient5.hess;
-                arena.grad_sq_sums[idx5] += gradient5.grad * gradient5.grad;
+                if INCLUDE_GRAD_SQ {
+                    arena.grad_sq_sums.as_mut().expect("DRO arena")[idx5] +=
+                        gradient5.grad * gradient5.grad;
+                }
                 arena.counts[idx5] += 1;
 
                 arena.grad_sums[idx6] += gradient6.grad;
                 arena.hess_sums[idx6] += gradient6.hess;
-                arena.grad_sq_sums[idx6] += gradient6.grad * gradient6.grad;
+                if INCLUDE_GRAD_SQ {
+                    arena.grad_sq_sums.as_mut().expect("DRO arena")[idx6] +=
+                        gradient6.grad * gradient6.grad;
+                }
                 arena.counts[idx6] += 1;
 
                 arena.grad_sums[idx7] += gradient7.grad;
                 arena.hess_sums[idx7] += gradient7.hess;
-                arena.grad_sq_sums[idx7] += gradient7.grad * gradient7.grad;
+                if INCLUDE_GRAD_SQ {
+                    arena.grad_sq_sums.as_mut().expect("DRO arena")[idx7] +=
+                        gradient7.grad * gradient7.grad;
+                }
                 arena.counts[idx7] += 1;
             }
         }
@@ -418,14 +410,17 @@ impl CpuBackend {
                 let flat_index = local_feature_index * arena.bin_count + bin_index;
                 arena.grad_sums[flat_index] += gradient.grad;
                 arena.hess_sums[flat_index] += gradient.hess;
-                arena.grad_sq_sums[flat_index] += gradient.grad * gradient.grad;
+                if INCLUDE_GRAD_SQ {
+                    arena.grad_sq_sums.as_mut().expect("DRO arena")[flat_index] +=
+                        gradient.grad * gradient.grad;
+                }
                 arena.counts[flat_index] += 1;
             }
         }
     }
 
     fn best_split_for_feature(
-        feature_histogram: &FeatureHistogram,
+        feature_histogram: HistogramFeatureView<'_>,
         node_id: u32,
         options: SplitSelectionOptions,
         factor_context: Option<&FactorSplitContext<'_>>,
@@ -457,7 +452,7 @@ impl CpuBackend {
     /// GainStrategy::Standard)` within float-rounding tolerance (verified by
     /// the parity tests in this module).
     fn best_split_for_feature_standard_simd(
-        feature_histogram: &FeatureHistogram,
+        feature_histogram: HistogramFeatureView<'_>,
         node_id: u32,
         options: SplitSelectionOptions,
     ) -> Option<SplitCandidate> {
@@ -466,29 +461,34 @@ impl CpuBackend {
 
         const EPSILON: f32 = 1e-6;
 
-        if feature_histogram.bins.len() < 2 {
+        if feature_histogram.len() < 2 {
             return None;
         }
 
+        let grad_sums = feature_histogram.grad_sums();
+        let hess_sums = feature_histogram.hess_sums();
+        let counts = feature_histogram.counts();
+
         // Extract missing-value stats if the histogram covers the NaN bin.
         let missing_bin_idx = options.missing_bin_index;
-        let (missing_grad, missing_hess, missing_grad_sq, missing_count) =
-            if missing_bin_idx < feature_histogram.bins.len() {
-                let mb = &feature_histogram.bins[missing_bin_idx];
-                (mb.grad_sum, mb.hess_sum, mb.grad_sq_sum, mb.count)
+        let (missing_grad, missing_hess, missing_count) =
+            if missing_bin_idx < feature_histogram.len() {
+                (
+                    grad_sums[missing_bin_idx],
+                    hess_sums[missing_bin_idx],
+                    counts[missing_bin_idx],
+                )
             } else {
-                (0.0_f32, 0.0_f32, 0.0_f32, 0_u32)
+                (0.0_f32, 0.0_f32, 0_u32)
             };
 
         let mut total_grad = 0.0_f32;
         let mut total_hess = 0.0_f32;
-        let mut total_grad_sq = 0.0_f32;
         let mut total_count = 0_u32;
-        for bin in &feature_histogram.bins {
-            total_grad += bin.grad_sum;
-            total_hess += bin.hess_sum;
-            total_grad_sq += bin.grad_sq_sum;
-            total_count += bin.count;
+        for index in 0..feature_histogram.len() {
+            total_grad += grad_sums[index];
+            total_hess += hess_sums[index];
+            total_count += counts[index];
         }
 
         if total_hess <= options.min_child_hessian {
@@ -497,14 +497,13 @@ impl CpuBackend {
 
         let nm_total_grad = total_grad - missing_grad;
         let nm_total_hess = total_hess - missing_hess;
-        let nm_total_grad_sq = total_grad_sq - missing_grad_sq;
         let nm_total_count = total_count.saturating_sub(missing_count);
 
         let parent_denom = total_hess + options.l2_lambda + EPSILON;
         let parent_grad = l1_threshold_gradient(total_grad, options.l1_alpha);
         let parent_gain_term = (parent_grad * parent_grad) / parent_denom;
 
-        let scan_limit = feature_histogram.bins.len().min(missing_bin_idx);
+        let scan_limit = feature_histogram.len().min(missing_bin_idx);
         if scan_limit == 0 {
             return None;
         }
@@ -513,21 +512,17 @@ impl CpuBackend {
         // inherently sequential, so we keep it in scalar code.
         let mut cum_left_grad = vec![0.0_f32; scan_limit];
         let mut cum_left_hess = vec![0.0_f32; scan_limit];
-        let mut cum_left_grad_sq = vec![0.0_f32; scan_limit];
         let mut cum_left_count = vec![0_u32; scan_limit];
         {
             let mut g = 0.0_f32;
             let mut h = 0.0_f32;
-            let mut q = 0.0_f32;
             let mut c = 0_u32;
-            for (i, bin) in feature_histogram.bins.iter().enumerate().take(scan_limit) {
-                g += bin.grad_sum;
-                h += bin.hess_sum;
-                q += bin.grad_sq_sum;
-                c += bin.count;
+            for i in 0..scan_limit {
+                g += grad_sums[i];
+                h += hess_sums[i];
+                c += counts[i];
                 cum_left_grad[i] = g;
                 cum_left_hess[i] = h;
-                cum_left_grad_sq[i] = q;
                 cum_left_count[i] = c;
             }
         }
@@ -688,11 +683,9 @@ impl CpuBackend {
         let threshold_bin = best_threshold;
         let left_grad = cum_left_grad[threshold_bin];
         let left_hess = cum_left_hess[threshold_bin];
-        let left_grad_sq = cum_left_grad_sq[threshold_bin];
         let left_count = cum_left_count[threshold_bin];
         let right_grad = nm_total_grad - left_grad;
         let right_hess = nm_total_hess - left_hess;
-        let right_grad_sq = nm_total_grad_sq - left_grad_sq;
         let right_count = nm_total_count.saturating_sub(left_count);
 
         let (eff_lg, eff_lh, eff_lq, eff_lc, eff_rg, eff_rh, eff_rq, eff_rc) = if best_default_left
@@ -700,29 +693,29 @@ impl CpuBackend {
             (
                 left_grad + missing_grad,
                 left_hess + missing_hess,
-                left_grad_sq + missing_grad_sq,
+                0.0,
                 left_count + missing_count,
                 right_grad,
                 right_hess,
-                right_grad_sq,
+                0.0,
                 right_count,
             )
         } else {
             (
                 left_grad,
                 left_hess,
-                left_grad_sq,
+                0.0,
                 left_count,
                 right_grad + missing_grad,
                 right_hess + missing_hess,
-                right_grad_sq + missing_grad_sq,
+                0.0,
                 right_count + missing_count,
             )
         };
 
         Some(SplitCandidate {
             node_id,
-            feature_index: feature_histogram.feature_index,
+            feature_index: feature_histogram.feature_index(),
             threshold_bin: threshold_bin as u16,
             gain: best_gain,
             default_left: best_default_left,
@@ -757,7 +750,7 @@ impl CpuBackend {
     ///
     /// The ONLY divergence point is the gain formula, controlled by `GainStrategy`.
     fn best_split_for_feature_inner(
-        feature_histogram: &FeatureHistogram,
+        feature_histogram: HistogramFeatureView<'_>,
         node_id: u32,
         options: SplitSelectionOptions,
         strategy: GainStrategy<'_>,
@@ -786,7 +779,7 @@ impl CpuBackend {
     }
 
     fn best_split_for_feature_inner_with_scratch(
-        feature_histogram: &FeatureHistogram,
+        feature_histogram: HistogramFeatureView<'_>,
         node_id: u32,
         options: SplitSelectionOptions,
         strategy: GainStrategy<'_>,
@@ -795,15 +788,15 @@ impl CpuBackend {
     ) -> Option<SplitCandidate> {
         const EPSILON: f32 = 1e-6;
 
-        if feature_histogram.bins.len() < 2 {
+        if feature_histogram.len() < 2 {
             return None;
         }
 
         // Extract missing-value stats if the histogram covers the NaN bin.
         let missing_bin_idx = options.missing_bin_index;
         let (missing_grad, missing_hess, missing_grad_sq, missing_count) =
-            if missing_bin_idx < feature_histogram.bins.len() {
-                let mb = &feature_histogram.bins[missing_bin_idx];
+            if missing_bin_idx < feature_histogram.len() {
+                let mb = feature_histogram.bin(missing_bin_idx).expect("bounded bin");
                 (mb.grad_sum, mb.hess_sum, mb.grad_sq_sum, mb.count)
             } else {
                 (0.0, 0.0, 0.0, 0)
@@ -813,7 +806,7 @@ impl CpuBackend {
         let mut total_hess = 0.0_f32;
         let mut total_grad_sq = 0.0_f32;
         let mut total_count = 0_u32;
-        for bin in &feature_histogram.bins {
+        for bin in feature_histogram.bins() {
             total_grad += bin.grad_sum;
             total_hess += bin.hess_sum;
             total_grad_sq += bin.grad_sq_sum;
@@ -836,8 +829,8 @@ impl CpuBackend {
         if let (Some(ctx), Some(scratch)) = (factor_context, factor_scratch.as_deref_mut()) {
             scratch.prepare_numeric_prefix(
                 ctx,
-                feature_histogram.feature_index as usize,
-                feature_histogram.bins.len().min(missing_bin_idx),
+                feature_histogram.feature_index() as usize,
+                feature_histogram.len().min(missing_bin_idx),
                 missing_bin_idx,
             );
         }
@@ -849,8 +842,8 @@ impl CpuBackend {
         let mut left_count = 0_u32;
 
         // Scan only non-missing bins (0..min(num_bins-1, MISSING_BIN-1)).
-        let scan_limit = feature_histogram.bins.len().min(missing_bin_idx);
-        for (threshold_bin, bin) in feature_histogram.bins.iter().enumerate().take(scan_limit) {
+        let scan_limit = feature_histogram.len().min(missing_bin_idx);
+        for (threshold_bin, bin) in feature_histogram.bins().enumerate().take(scan_limit) {
             left_grad += bin.grad_sum;
             left_hess += bin.hess_sum;
             left_grad_sq += bin.grad_sq_sum;
@@ -1000,7 +993,7 @@ impl CpuBackend {
                     best_gain = gain;
                     best_candidate = Some(SplitCandidate {
                         node_id,
-                        feature_index: feature_histogram.feature_index,
+                        feature_index: feature_histogram.feature_index(),
                         threshold_bin: threshold_bin as u16,
                         gain,
                         default_left: candidate.default_left,
@@ -1034,7 +1027,7 @@ impl CpuBackend {
     /// 3. Prefix scan over sorted order to find best binary partition
     /// 4. Build bitset from the best partition
     fn best_split_for_categorical_feature(
-        feature_histogram: &FeatureHistogram,
+        feature_histogram: HistogramFeatureView<'_>,
         node_id: u32,
         options: SplitSelectionOptions,
         num_categories: usize,
@@ -1055,7 +1048,7 @@ impl CpuBackend {
     /// Thin wrapper around `best_split_for_categorical_feature_inner` with
     /// `GainStrategy::Morph`.
     pub(crate) fn best_split_morph_categorical_feature(
-        feature_histogram: &FeatureHistogram,
+        feature_histogram: HistogramFeatureView<'_>,
         node_id: u32,
         options: &SplitSelectionOptions,
         num_categories: usize,
@@ -1089,7 +1082,7 @@ impl CpuBackend {
     ///
     /// The ONLY divergence point is the gain formula, controlled by `GainStrategy`.
     fn best_split_for_categorical_feature_inner(
-        feature_histogram: &FeatureHistogram,
+        feature_histogram: HistogramFeatureView<'_>,
         node_id: u32,
         options: SplitSelectionOptions,
         num_categories: usize,
@@ -1121,7 +1114,7 @@ impl CpuBackend {
     }
 
     fn best_split_for_categorical_feature_inner_with_scratch(
-        feature_histogram: &FeatureHistogram,
+        feature_histogram: HistogramFeatureView<'_>,
         node_id: u32,
         options: SplitSelectionOptions,
         num_categories: usize,
@@ -1138,8 +1131,8 @@ impl CpuBackend {
         // Extract missing-value stats.
         let missing_bin_idx = options.missing_bin_index;
         let (missing_grad, missing_hess, missing_grad_sq, missing_count) =
-            if missing_bin_idx < feature_histogram.bins.len() {
-                let mb = &feature_histogram.bins[missing_bin_idx];
+            if missing_bin_idx < feature_histogram.len() {
+                let mb = feature_histogram.bin(missing_bin_idx).expect("bounded bin");
                 (mb.grad_sum, mb.hess_sum, mb.grad_sq_sum, mb.count)
             } else {
                 (0.0, 0.0, 0.0, 0)
@@ -1153,10 +1146,10 @@ impl CpuBackend {
         let mut nm_total_count = 0_u32;
 
         let scan_limit = num_categories
-            .min(feature_histogram.bins.len())
+            .min(feature_histogram.len())
             .min(missing_bin_idx);
         for bin_id in 0..scan_limit {
-            let bin = &feature_histogram.bins[bin_id];
+            let bin = feature_histogram.bin(bin_id).expect("bounded bin");
             if bin.count > 0 {
                 categories.push((
                     bin_id as u16,
@@ -1223,7 +1216,7 @@ impl CpuBackend {
                 categories.iter().map(|category| category.0).collect();
             scratch.prepare_categorical_prefix(
                 ctx,
-                feature_histogram.feature_index as usize,
+                feature_histogram.feature_index() as usize,
                 &sorted_category_bins,
                 missing_bin_idx,
             );
@@ -1386,7 +1379,7 @@ impl CpuBackend {
                     best_gain = gain;
                     best_candidate = Some(SplitCandidate {
                         node_id,
-                        feature_index: feature_histogram.feature_index,
+                        feature_index: feature_histogram.feature_index(),
                         threshold_bin: 0, // unused for categorical
                         gain,
                         default_left: candidate.default_left,
@@ -1421,8 +1414,8 @@ impl CpuBackend {
         categorical_features: &[CategoricalFeatureInfo],
         factor_context: Option<&FactorSplitContext<'_>>,
     ) -> Option<SplitCandidate> {
-        let find_best = |fh: &FeatureHistogram| -> Option<SplitCandidate> {
-            let fi = fh.feature_index as usize;
+        let find_best = |fh: HistogramFeatureView<'_>| -> Option<SplitCandidate> {
+            let fi = fh.feature_index() as usize;
             if let Some(cat_info) = categorical_features.iter().find(|c| c.feature_index == fi) {
                 Self::best_split_for_categorical_feature(
                     fh,
@@ -1436,11 +1429,10 @@ impl CpuBackend {
             }
         };
 
-        if histograms.feature_histograms.len() >= Self::PARALLEL_SPLIT_FEATURE_THRESHOLD {
-            histograms
-                .feature_histograms
-                .par_iter()
-                .filter_map(&find_best)
+        if histograms.feature_count() >= Self::PARALLEL_SPLIT_FEATURE_THRESHOLD {
+            (0..histograms.feature_count())
+                .into_par_iter()
+                .filter_map(|index| find_best(histograms.feature(index).expect("bounded feature")))
                 .reduce_with(|a, b| {
                     if apply_feature_weight(&b, feature_weights)
                         > apply_feature_weight(&a, feature_weights)
@@ -1451,19 +1443,15 @@ impl CpuBackend {
                     }
                 })
         } else {
-            histograms
-                .feature_histograms
-                .iter()
-                .filter_map(&find_best)
-                .reduce(|a, b| {
-                    if apply_feature_weight(&b, feature_weights)
-                        > apply_feature_weight(&a, feature_weights)
-                    {
-                        b
-                    } else {
-                        a
-                    }
-                })
+            histograms.features().filter_map(find_best).reduce(|a, b| {
+                if apply_feature_weight(&b, feature_weights)
+                    > apply_feature_weight(&a, feature_weights)
+                {
+                    b
+                } else {
+                    a
+                }
+            })
         }
     }
 
@@ -1471,7 +1459,7 @@ impl CpuBackend {
     ///
     /// Thin wrapper around `best_split_for_feature_inner` with `GainStrategy::Morph`.
     pub(crate) fn best_split_morph_numeric_feature(
-        feature_histogram: &FeatureHistogram,
+        feature_histogram: HistogramFeatureView<'_>,
         node_id: u32,
         options: &SplitSelectionOptions,
         morph: &MorphContext,

@@ -118,13 +118,5 @@ pub(crate) fn filter_histogram_bundle_by_features(
     bundle: &HistogramBundle,
     is_allowed: impl Fn(u32) -> bool,
 ) -> HistogramBundle {
-    HistogramBundle {
-        node_id: bundle.node_id,
-        feature_histograms: bundle
-            .feature_histograms
-            .iter()
-            .filter(|fh| is_allowed(fh.feature_index))
-            .cloned()
-            .collect(),
-    }
+    bundle.filtered(is_allowed)
 }

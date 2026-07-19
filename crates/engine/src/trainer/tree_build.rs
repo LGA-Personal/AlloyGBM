@@ -242,8 +242,13 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
     );
     let root_node_id = encode_tree_node_id(round_index, 0)?;
     let root_node = NodeSlice::new(root_node_id, root_row_indices)?;
-    let root_histograms =
-        backend.build_histograms(binned_matrix, gradients, &root_node, feature_tiles)?;
+    let root_histograms = backend.build_histograms_with_grad_sq(
+        binned_matrix,
+        gradients,
+        &root_node,
+        feature_tiles,
+        split_options.requires_grad_sq(),
+    )?;
     // Interaction-constraint bookkeeping (no-op when empty).  We track the
     // bitset of still-active groups per node so that the split search can
     // skip features that no surviving group allows on this path.
@@ -570,11 +575,12 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
 
                 if left_row_indices.len() <= right_row_indices.len() {
                     let left_node = NodeSlice::new(left_node_id, left_row_indices)?;
-                    let left_histograms = backend.build_histograms(
+                    let left_histograms = backend.build_histograms_with_grad_sq(
                         binned_matrix,
                         gradients,
                         &left_node,
                         feature_tiles,
+                        split_options.requires_grad_sq(),
                     )?;
                     let right_histograms =
                         subtract_histogram_bundle(&histograms, &left_histograms, right_node_id)?;
@@ -596,11 +602,12 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
                     ));
                 } else {
                     let right_node = NodeSlice::new(right_node_id, right_row_indices)?;
-                    let right_histograms = backend.build_histograms(
+                    let right_histograms = backend.build_histograms_with_grad_sq(
                         binned_matrix,
                         gradients,
                         &right_node,
                         feature_tiles,
+                        split_options.requires_grad_sq(),
                     )?;
                     let left_histograms =
                         subtract_histogram_bundle(&histograms, &right_histograms, left_node_id)?;
@@ -726,8 +733,13 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
     // Build root histograms and find best split.
     let root_node_id = encode_tree_node_id(round_index, 0)?;
     let root_node = NodeSlice::new(root_node_id, root_row_indices)?;
-    let root_histograms =
-        backend.build_histograms(binned_matrix, gradients, &root_node, feature_tiles)?;
+    let root_histograms = backend.build_histograms_with_grad_sq(
+        binned_matrix,
+        gradients,
+        &root_node,
+        feature_tiles,
+        split_options.requires_grad_sq(),
+    )?;
     // Interaction-constraint bookkeeping (no-op when empty).  See the
     // matching block in `build_tree_level_wise` for the design rationale —
     // we filter histograms per node at split-search time so constrained
@@ -1085,8 +1097,13 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
             };
 
             let smaller_node = NodeSlice::new(smaller_node_id, smaller_indices)?;
-            let smaller_histograms =
-                backend.build_histograms(binned_matrix, gradients, &smaller_node, feature_tiles)?;
+            let smaller_histograms = backend.build_histograms_with_grad_sq(
+                binned_matrix,
+                gradients,
+                &smaller_node,
+                feature_tiles,
+                split_options.requires_grad_sq(),
+            )?;
             let larger_histograms = subtract_histogram_bundle(
                 &pending.histograms,
                 &smaller_histograms,
@@ -1223,34 +1240,15 @@ pub(crate) fn subtract_histogram_bundle_into(
     node_id: u32,
     dest: &mut HistogramBundle,
 ) -> EngineResult<()> {
-    if parent.feature_histograms.len() != child.feature_histograms.len() {
+    if parent.feature_count() != child.feature_count() {
         return Err(EngineError::ContractViolation(format!(
             "parent histogram feature count {} does not match child histogram feature count {}",
-            parent.feature_histograms.len(),
-            child.feature_histograms.len()
+            parent.feature_count(),
+            child.feature_count()
         )));
     }
-    dest.node_id = node_id;
-    for ((dest_fh, parent_fh), child_fh) in dest
-        .feature_histograms
-        .iter_mut()
-        .zip(&parent.feature_histograms)
-        .zip(&child.feature_histograms)
-    {
-        dest_fh.feature_index = parent_fh.feature_index;
-        for ((dest_bin, parent_bin), child_bin) in dest_fh
-            .bins
-            .iter_mut()
-            .zip(&parent_fh.bins)
-            .zip(&child_fh.bins)
-        {
-            dest_bin.grad_sum = parent_bin.grad_sum - child_bin.grad_sum;
-            dest_bin.hess_sum = parent_bin.hess_sum - child_bin.hess_sum;
-            dest_bin.grad_sq_sum = parent_bin.grad_sq_sum - child_bin.grad_sq_sum;
-            dest_bin.count = parent_bin.count - child_bin.count;
-        }
-    }
-    Ok(())
+    dest.subtract_into(parent, child, node_id)
+        .map_err(EngineError::from)
 }
 
 pub(crate) fn subtract_histogram_bundle(
@@ -1259,16 +1257,11 @@ pub(crate) fn subtract_histogram_bundle(
     node_id: u32,
 ) -> EngineResult<HistogramBundle> {
     // Pre-allocate a dest with the same structure, then delegate to the in-place variant.
-    let feature_indices: Vec<u32> = parent
-        .feature_histograms
-        .iter()
-        .map(|fh| fh.feature_index)
-        .collect();
-    let bin_count = parent
-        .feature_histograms
-        .first()
-        .map_or(0, |fh| fh.bins.len());
-    let mut dest = HistogramBundle::new_zeroed(&feature_indices, bin_count);
+    let mut dest = HistogramBundle::new_zeroed_with_grad_sq(
+        parent.feature_indices(),
+        parent.bin_count(),
+        parent.has_grad_sq_sums(),
+    );
     subtract_histogram_bundle_into(parent, child, node_id, &mut dest)?;
     Ok(dest)
 }

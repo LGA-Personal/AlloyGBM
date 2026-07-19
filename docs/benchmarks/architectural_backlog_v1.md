@@ -46,6 +46,29 @@ should retain their same-host baseline and candidate JSON as PR or CI artifacts.
 the largest memory delta. DRO and linear-leaf arms establish special-mode
 parity guards rather than requiring speedups.
 
+### SoA histogram candidate
+
+The SoA implementation was measured on 2026-07-18 from the same host with a
+fresh baseline at `e9450c2` and candidate implementation commit `7c4206a`.
+Both runs used three fresh subprocesses per case; the table reports medians.
+
+| Case | Variant | Fit (s) | Native train (s) | Incremental peak RSS (MiB) |
+| --- | --- | ---: | ---: | ---: |
+| `standard_wide` | baseline | 1.916 | 1.826 | 213.28 |
+| `standard_wide` | SoA | 1.311 | 1.242 | 212.06 |
+| `standard_deep` | baseline | 6.943 | 6.890 | 130.42 |
+| `standard_deep` | SoA | 4.487 | 4.448 | 126.16 |
+| `dro_wide` | baseline | 0.957 | 0.929 | 67.00 |
+| `dro_wide` | SoA | 0.646 | 0.624 | 67.23 |
+| `linear_leaf` | baseline | 0.348 | 0.339 | 17.06 |
+| `linear_leaf` | SoA | 0.236 | 0.229 | 17.08 |
+
+Median fit time improved by 31.6% for `standard_wide`, 35.4% for
+`standard_deep`, 32.5% for `dro_wide`, and 32.1% for `linear_leaf`. Median
+incremental fit RSS changed by -1.22 MiB, -4.27 MiB, +0.23 MiB, and +0.02 MiB,
+respectively. Artifact and prediction digests matched exactly in every
+repetition, so all SoA candidate gates passed.
+
 ## Node-Level Parallelism
 
 | Threads | Fit (s) | Native train (s) | Incremental peak RSS (MiB) | Stumps | RMSE |
@@ -127,7 +150,7 @@ at least 10% and 32 MiB without materially changing held-out quality.
 ## Result
 
 All baseline schema, finite-value, fixture-depth, and deterministic-fixture
-gates passed. Compact predictor nodes have passed their production candidate
-gates; implementation remains open for the other five projects. The independent
+gates passed. SoA histograms and compact predictor nodes have passed their production candidate
+gates; implementation remains open for the other four projects. The independent
 plans in this directory define their code changes, regression tests, commit
 boundaries, and candidate commands.

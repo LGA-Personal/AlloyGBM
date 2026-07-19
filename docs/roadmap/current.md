@@ -19,12 +19,14 @@ production work remains open until its plan is implemented and passes a same-hos
 
 ### SoA histogram layout
 
-**Status: implementation planned.** Keeping histogram statistics in a structure-of-arrays layout
-through split selection would change the shared CPU histogram contract used by scalar, DRO,
-piecewise-linear, categorical, and factor-neutral paths. It should be evaluated together with
-histogram and partition-buffer ownership rather than as a local allocation cleanup. The
-[SoA implementation plan](../benchmarks/architectural_backlog_soa_histograms_implementation.md)
-defines the ownership migration, gain-strategy regression matrix, and performance gates.
+**Status: implemented.** Scalar CPU histograms now remain in owned structure-of-arrays storage
+through split selection and sibling subtraction. Split scanners borrow aligned per-feature views,
+and the standard accumulation kernels omit squared-gradient allocation and arithmetic; DRO opts
+into that column explicitly. PL matrix histograms remain a separate representation. A full
+same-host candidate run preserved every artifact and prediction digest while reducing median fit
+time by 31.6% for `standard_wide` and 35.4% for `standard_deep`. See the
+[candidate evidence](../benchmarks/architectural_backlog_v1.md#soa-histogram-candidate) and
+[completed implementation plan](../benchmarks/architectural_backlog_soa_histograms_implementation.md).
 
 ### Node-level parallelism
 

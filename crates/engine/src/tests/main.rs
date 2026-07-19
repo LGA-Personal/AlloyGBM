@@ -342,10 +342,9 @@ impl BackendOps for MockBackend {
         node: &NodeSlice,
         _feature_tiles: &[FeatureTile],
     ) -> EngineResult<HistogramBundle> {
-        Ok(HistogramBundle {
-            node_id: node.node_id,
-            feature_histograms: Vec::new(),
-        })
+        let mut bundle = HistogramBundle::new_zeroed(&[], 0);
+        bundle.node_id = node.node_id;
+        Ok(bundle)
     }
 
     fn best_split(&self, histograms: &HistogramBundle) -> EngineResult<Option<SplitCandidate>> {
@@ -645,10 +644,9 @@ impl BackendOps for CategoricalAncestorLinearPathBackend {
         node: &NodeSlice,
         _feature_tiles: &[FeatureTile],
     ) -> EngineResult<HistogramBundle> {
-        Ok(HistogramBundle {
-            node_id: node.node_id,
-            feature_histograms: Vec::new(),
-        })
+        let mut bundle = HistogramBundle::new_zeroed(&[], 0);
+        bundle.node_id = node.node_id;
+        Ok(bundle)
     }
 
     fn best_split(&self, histograms: &HistogramBundle) -> EngineResult<Option<SplitCandidate>> {
@@ -1842,10 +1840,7 @@ fn default_backend_neutralization_split_penalty_context_returns_error() {
         row_indices: &rows,
         factor_penalty: 0.1,
     };
-    let histograms = HistogramBundle {
-        node_id: 0,
-        feature_histograms: Vec::new(),
-    };
+    let histograms = HistogramBundle::new_zeroed(&[], 0);
 
     let err = MockBackend
         .best_split_with_factor_context(
@@ -3160,9 +3155,9 @@ fn artifact_compatibility_report_classifies_legacy_trees_only_payload() {
 
 #[test]
 fn subtract_histogram_bundle_derives_complementary_child() {
-    let parent = HistogramBundle {
-        node_id: 7,
-        feature_histograms: vec![
+    let parent = HistogramBundle::from_feature_histograms(
+        7,
+        vec![
             alloygbm_core::FeatureHistogram {
                 feature_index: 0,
                 bins: vec![
@@ -3198,10 +3193,12 @@ fn subtract_histogram_bundle_derives_complementary_child() {
                 ],
             },
         ],
-    };
-    let child = HistogramBundle {
-        node_id: 15,
-        feature_histograms: vec![
+        true,
+    )
+    .expect("valid parent histogram");
+    let child = HistogramBundle::from_feature_histograms(
+        15,
+        vec![
             alloygbm_core::FeatureHistogram {
                 feature_index: 0,
                 bins: vec![
@@ -3237,27 +3234,31 @@ fn subtract_histogram_bundle_derives_complementary_child() {
                 ],
             },
         ],
-    };
+        true,
+    )
+    .expect("valid child histogram");
 
     let complement =
         subtract_histogram_bundle(&parent, &child, 16).expect("subtraction should succeed");
     assert_eq!(complement.node_id, 16);
-    assert_eq!(complement.feature_histograms.len(), 2);
-    assert_eq!(complement.feature_histograms[0].bins[0].count, 2);
-    assert_eq!(complement.feature_histograms[0].bins[1].count, 1);
-    assert!((complement.feature_histograms[0].bins[0].grad_sum - 1.0).abs() < 1e-6);
-    assert!((complement.feature_histograms[0].bins[1].grad_sum + 0.75).abs() < 1e-6);
-    assert!((complement.feature_histograms[0].bins[0].grad_sq_sum - 6.0).abs() < 1e-6);
-    assert!((complement.feature_histograms[0].bins[1].grad_sq_sum - 5.5).abs() < 1e-6);
-    assert!((complement.feature_histograms[1].bins[0].hess_sum - 1.5).abs() < 1e-6);
-    assert!((complement.feature_histograms[1].bins[1].hess_sum - 0.75).abs() < 1e-6);
+    assert_eq!(complement.feature_count(), 2);
+    let feature0 = complement.feature(0).expect("feature 0");
+    let feature1 = complement.feature(1).expect("feature 1");
+    assert_eq!(feature0.bin(0).expect("bin").count, 2);
+    assert_eq!(feature0.bin(1).expect("bin").count, 1);
+    assert!((feature0.bin(0).expect("bin").grad_sum - 1.0).abs() < 1e-6);
+    assert!((feature0.bin(1).expect("bin").grad_sum + 0.75).abs() < 1e-6);
+    assert!((feature0.bin(0).expect("bin").grad_sq_sum - 6.0).abs() < 1e-6);
+    assert!((feature0.bin(1).expect("bin").grad_sq_sum - 5.5).abs() < 1e-6);
+    assert!((feature1.bin(0).expect("bin").hess_sum - 1.5).abs() < 1e-6);
+    assert!((feature1.bin(1).expect("bin").hess_sum - 0.75).abs() < 1e-6);
 }
 
 #[test]
 fn subtract_histogram_bundle_into_matches_allocating_variant() {
-    let parent = HistogramBundle {
-        node_id: 7,
-        feature_histograms: vec![alloygbm_core::FeatureHistogram {
+    let parent = HistogramBundle::from_feature_histograms(
+        7,
+        vec![alloygbm_core::FeatureHistogram {
             feature_index: 0,
             bins: vec![
                 alloygbm_core::HistogramBin {
@@ -3274,10 +3275,12 @@ fn subtract_histogram_bundle_into_matches_allocating_variant() {
                 },
             ],
         }],
-    };
-    let child = HistogramBundle {
-        node_id: 15,
-        feature_histograms: vec![alloygbm_core::FeatureHistogram {
+        true,
+    )
+    .expect("valid parent histogram");
+    let child = HistogramBundle::from_feature_histograms(
+        15,
+        vec![alloygbm_core::FeatureHistogram {
             feature_index: 0,
             bins: vec![
                 alloygbm_core::HistogramBin {
@@ -3294,7 +3297,9 @@ fn subtract_histogram_bundle_into_matches_allocating_variant() {
                 },
             ],
         }],
-    };
+        true,
+    )
+    .expect("valid child histogram");
 
     // Allocating variant
     let allocated =
@@ -3305,41 +3310,44 @@ fn subtract_histogram_bundle_into_matches_allocating_variant() {
     subtract_histogram_bundle_into(&parent, &child, 16, &mut dest)
         .expect("in-place subtraction should succeed");
 
-    assert_eq!(allocated.node_id, dest.node_id);
-    assert_eq!(
-        allocated.feature_histograms.len(),
-        dest.feature_histograms.len()
-    );
-    for (a, d) in allocated
-        .feature_histograms
-        .iter()
-        .zip(&dest.feature_histograms)
-    {
-        assert_eq!(a.feature_index, d.feature_index);
-        for (ab, db) in a.bins.iter().zip(&d.bins) {
-            assert!((ab.grad_sum - db.grad_sum).abs() < 1e-6);
-            assert!((ab.hess_sum - db.hess_sum).abs() < 1e-6);
-            assert_eq!(ab.count, db.count);
-        }
-    }
+    assert_eq!(allocated, dest);
 }
 
 #[test]
 fn histogram_bundle_reset_zeros_all_bins() {
     let mut bundle = HistogramBundle::new_zeroed(&[0, 1], 3);
-    // Set some values
-    bundle.feature_histograms[0].bins[0].grad_sum = 5.0;
-    bundle.feature_histograms[0].bins[0].hess_sum = 3.0;
-    bundle.feature_histograms[0].bins[0].count = 10;
-    bundle.feature_histograms[1].bins[2].grad_sum = -2.5;
-    bundle.feature_histograms[1].bins[2].count = 7;
+    bundle
+        .set_bin(
+            0,
+            0,
+            alloygbm_core::HistogramBin {
+                grad_sum: 5.0,
+                hess_sum: 3.0,
+                grad_sq_sum: 25.0,
+                count: 10,
+            },
+        )
+        .expect("set first bin");
+    bundle
+        .set_bin(
+            1,
+            2,
+            alloygbm_core::HistogramBin {
+                grad_sum: -2.5,
+                hess_sum: 1.0,
+                grad_sq_sum: 6.25,
+                count: 7,
+            },
+        )
+        .expect("set second bin");
 
     bundle.reset(42);
     assert_eq!(bundle.node_id, 42);
-    for fh in &bundle.feature_histograms {
-        for bin in &fh.bins {
+    for feature in bundle.features() {
+        for bin in feature.bins() {
             assert_eq!(bin.grad_sum, 0.0);
             assert_eq!(bin.hess_sum, 0.0);
+            assert_eq!(bin.grad_sq_sum, 0.0);
             assert_eq!(bin.count, 0);
         }
     }
@@ -3349,12 +3357,10 @@ fn histogram_bundle_reset_zeros_all_bins() {
 fn histogram_bundle_new_zeroed_creates_correct_structure() {
     let features = [0, 3, 7];
     let bundle = HistogramBundle::new_zeroed(&features, 5);
-    assert_eq!(bundle.feature_histograms.len(), 3);
-    assert_eq!(bundle.feature_histograms[0].feature_index, 0);
-    assert_eq!(bundle.feature_histograms[1].feature_index, 3);
-    assert_eq!(bundle.feature_histograms[2].feature_index, 7);
-    for fh in &bundle.feature_histograms {
-        assert_eq!(fh.bins.len(), 5);
+    assert_eq!(bundle.feature_count(), 3);
+    assert_eq!(bundle.feature_indices(), &[0, 3, 7]);
+    for feature in bundle.features() {
+        assert_eq!(feature.len(), 5);
     }
 }
 

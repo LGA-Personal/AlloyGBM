@@ -38,6 +38,12 @@ impl Default for SplitSelectionOptions {
     }
 }
 
+impl SplitSelectionOptions {
+    pub fn requires_grad_sq(self) -> bool {
+        self.dro_config.is_some_and(|config| config.radius > 0.0)
+    }
+}
+
 /// Per-node context for split exposure penalties over scalar leaves.
 ///
 /// This is passed separately from [`SplitSelectionOptions`] so the hot no-penalty

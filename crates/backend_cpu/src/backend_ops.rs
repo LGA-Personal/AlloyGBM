@@ -1,5 +1,5 @@
 use alloygbm_core::{
-    BinnedMatrix, FeatureHistogram, FeatureTile, GradientPair, HistogramBundle,
+    BinnedMatrix, FeatureTile, GradientPair, HistogramBundle, HistogramFeatureView,
     LinearFeatureHistogram, LinearFeatureScaler, LinearHistogramBundle, LinearLeaf, NodeSlice,
     NodeStats, PartitionResult, SplitCandidate,
 };
@@ -22,6 +22,17 @@ impl BackendOps for CpuBackend {
         node: &NodeSlice,
         feature_tiles: &[FeatureTile],
     ) -> EngineResult<HistogramBundle> {
+        self.build_histograms_with_grad_sq(binned_matrix, gradients, node, feature_tiles, false)
+    }
+
+    fn build_histograms_with_grad_sq(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: &NodeSlice,
+        feature_tiles: &[FeatureTile],
+        include_grad_sq: bool,
+    ) -> EngineResult<HistogramBundle> {
         let selected_feature_count = feature_tiles
             .iter()
             .map(|tile| (tile.end_feature - tile.start_feature) as usize)
@@ -37,6 +48,7 @@ impl BackendOps for CpuBackend {
             node,
             feature_tiles,
             parallel_tiles,
+            include_grad_sq,
         )
     }
 
@@ -116,8 +128,8 @@ impl BackendOps for CpuBackend {
         if let Some(ctx) = factor_context {
             validate_factor_split_context(ctx)?;
         }
-        let find_best = |fh: &FeatureHistogram| -> Option<SplitCandidate> {
-            let fi = fh.feature_index as usize;
+        let find_best = |fh: HistogramFeatureView<'_>| -> Option<SplitCandidate> {
+            let fi = fh.feature_index() as usize;
             if let Some(cat_info) = categorical_features.iter().find(|c| c.feature_index == fi) {
                 Self::best_split_morph_categorical_feature(
                     fh,
@@ -138,36 +150,30 @@ impl BackendOps for CpuBackend {
             }
         };
 
-        let result =
-            if histograms.feature_histograms.len() >= Self::PARALLEL_SPLIT_FEATURE_THRESHOLD {
-                histograms
-                    .feature_histograms
-                    .par_iter()
-                    .filter_map(find_best)
-                    .reduce_with(|a, b| {
-                        if apply_feature_weight(&b, feature_weights)
-                            > apply_feature_weight(&a, feature_weights)
-                        {
-                            b
-                        } else {
-                            a
-                        }
-                    })
-            } else {
-                histograms
-                    .feature_histograms
-                    .iter()
-                    .filter_map(find_best)
-                    .reduce(|a, b| {
-                        if apply_feature_weight(&b, feature_weights)
-                            > apply_feature_weight(&a, feature_weights)
-                        {
-                            b
-                        } else {
-                            a
-                        }
-                    })
-            };
+        let result = if histograms.feature_count() >= Self::PARALLEL_SPLIT_FEATURE_THRESHOLD {
+            (0..histograms.feature_count())
+                .into_par_iter()
+                .filter_map(|index| find_best(histograms.feature(index).expect("bounded feature")))
+                .reduce_with(|a, b| {
+                    if apply_feature_weight(&b, feature_weights)
+                        > apply_feature_weight(&a, feature_weights)
+                    {
+                        b
+                    } else {
+                        a
+                    }
+                })
+        } else {
+            histograms.features().filter_map(find_best).reduce(|a, b| {
+                if apply_feature_weight(&b, feature_weights)
+                    > apply_feature_weight(&a, feature_weights)
+                {
+                    b
+                } else {
+                    a
+                }
+            })
+        };
 
         Ok(result)
     }

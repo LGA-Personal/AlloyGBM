@@ -1,8 +1,8 @@
 use crate::factor_split::factor_split_penalty;
 use crate::*;
 use alloygbm_core::{
-    DatasetMatrix, FactorExposureMatrix, FeatureTile, LeafModelKind, TrainParams, TrainingDataset,
-    TreeGrowth,
+    DatasetMatrix, FactorExposureMatrix, FeatureHistogram, FeatureTile, HistogramBin,
+    LeafModelKind, TrainParams, TrainingDataset, TreeGrowth,
 };
 use alloygbm_engine::{BackendOps, FactorSplitContext, SquaredErrorObjective, Trainer};
 
@@ -143,6 +143,15 @@ fn sample_node() -> NodeSlice {
     NodeSlice::new(0, vec![0, 1, 2, 3]).expect("node is valid")
 }
 
+fn with_histogram_feature<R>(
+    feature: &FeatureHistogram,
+    f: impl FnOnce(HistogramFeatureView<'_>) -> R,
+) -> R {
+    let bundle = HistogramBundle::from_feature_histograms(0, vec![feature.clone()], true)
+        .expect("valid histogram fixture");
+    f(bundle.feature(0).expect("fixture feature"))
+}
+
 #[test]
 fn build_histograms_aggregates_bins() {
     let backend = CpuBackend;
@@ -155,16 +164,41 @@ fn build_histograms_aggregates_bins() {
         )
         .expect("histograms should build");
 
-    assert_eq!(histograms.feature_histograms.len(), 2);
-    let feature0 = &histograms.feature_histograms[0];
-    assert_eq!(feature0.feature_index, 0);
-    assert_eq!(feature0.bins.len(), 4);
-    assert_eq!(feature0.bins[0].count, 1);
-    assert_eq!(feature0.bins[1].count, 1);
-    assert_eq!(feature0.bins[2].count, 1);
-    assert_eq!(feature0.bins[3].count, 1);
-    assert!((feature0.bins[0].grad_sum - 2.0).abs() < 1e-6);
-    assert!((feature0.bins[3].grad_sum + 2.0).abs() < 1e-6);
+    assert_eq!(histograms.feature_count(), 2);
+    assert!(!histograms.has_grad_sq_sums());
+    let feature0 = histograms.feature(0).expect("first feature");
+    assert_eq!(feature0.feature_index(), 0);
+    assert_eq!(feature0.len(), 4);
+    assert_eq!(feature0.bin(0).expect("bin").count, 1);
+    assert_eq!(feature0.bin(1).expect("bin").count, 1);
+    assert_eq!(feature0.bin(2).expect("bin").count, 1);
+    assert_eq!(feature0.bin(3).expect("bin").count, 1);
+    assert!((feature0.bin(0).expect("bin").grad_sum - 2.0).abs() < 1e-6);
+    assert!((feature0.bin(3).expect("bin").grad_sum + 2.0).abs() < 1e-6);
+}
+
+#[test]
+fn squared_gradient_column_is_allocated_only_when_requested() {
+    let backend = CpuBackend;
+    let matrix = sample_binned_matrix();
+    let gradients = sample_gradients();
+    let node = sample_node();
+    let tiles = [FeatureTile::new(0, 2).expect("feature tile is valid")];
+
+    let standard = backend
+        .build_histograms(&matrix, &gradients, &node, &tiles)
+        .expect("standard histograms should build");
+    let dro = backend
+        .build_histograms_with_grad_sq(&matrix, &gradients, &node, &tiles, true)
+        .expect("DRO histograms should build");
+
+    assert!(!standard.has_grad_sq_sums());
+    assert!(dro.has_grad_sq_sums());
+    assert_eq!(standard.feature(0).expect("feature").grad_sq_sums(), None);
+    assert_eq!(
+        dro.feature(0).expect("feature").grad_sq_sums(),
+        Some(&[4.0, 1.0, 1.0, 4.0][..])
+    );
 }
 
 #[test]
@@ -212,21 +246,22 @@ fn histogram_tile_strategies_are_equivalent() {
     let node = sample_node();
     let bin_count = matrix.max_bin as usize + 1;
 
-    let mut per_feature = Vec::new();
-    CpuBackend::build_tile_histograms_per_feature(
+    let mut per_feature_arena = HistogramArena::new(2, bin_count, true);
+    CpuBackend::build_tile_histograms_per_feature::<true>(
         &matrix,
         &gradients,
         &node,
         0,
         2,
-        bin_count,
-        &mut per_feature,
+        &mut per_feature_arena,
     );
+    let per_feature = per_feature_arena
+        .to_bundle(0, 0)
+        .expect("per-feature histogram bundle");
 
-    let mut row_first = Vec::new();
-    let mut arena = HistogramArena::new(2, bin_count);
+    let mut arena = HistogramArena::new(2, bin_count, true);
     CpuBackend::build_tile_histograms_row_first(&matrix, &gradients, &node, 0, 2, &mut arena);
-    arena.materialize(0, &mut row_first);
+    let row_first = arena.to_bundle(0, 0).expect("row-first histogram bundle");
 
     assert_eq!(per_feature, row_first);
 }
@@ -280,12 +315,24 @@ fn build_histograms_parallel_tiles_match_sequential() {
         FeatureTile::new(1, 2).expect("feature tile should be valid"),
     ];
 
-    let sequential =
-        CpuBackend::build_histograms_internal(&matrix, &gradients, &node, &feature_tiles, false)
-            .expect("sequential histograms should build");
-    let parallel =
-        CpuBackend::build_histograms_internal(&matrix, &gradients, &node, &feature_tiles, true)
-            .expect("parallel histograms should build");
+    let sequential = CpuBackend::build_histograms_internal(
+        &matrix,
+        &gradients,
+        &node,
+        &feature_tiles,
+        false,
+        false,
+    )
+    .expect("sequential histograms should build");
+    let parallel = CpuBackend::build_histograms_internal(
+        &matrix,
+        &gradients,
+        &node,
+        &feature_tiles,
+        true,
+        false,
+    )
+    .expect("parallel histograms should build");
 
     assert_eq!(sequential, parallel);
     assert_eq!(
@@ -311,20 +358,21 @@ fn unrolled_row_first_histograms_match_per_feature() {
         NodeSlice::new(0, (0..matrix.row_count as u32).collect()).expect("node indices are valid");
     let bin_count = matrix.max_bin as usize + 1;
 
-    let mut per_feature = Vec::new();
-    CpuBackend::build_tile_histograms_per_feature(
+    let mut per_feature_arena = HistogramArena::new(matrix.feature_count, bin_count, true);
+    CpuBackend::build_tile_histograms_per_feature::<true>(
         &matrix,
         &gradients,
         &node,
         0,
         matrix.feature_count,
-        bin_count,
-        &mut per_feature,
+        &mut per_feature_arena,
     );
+    let per_feature = per_feature_arena
+        .to_bundle(0, 0)
+        .expect("per-feature histogram bundle");
 
-    let mut unrolled = Vec::new();
-    let mut unrolled_arena = HistogramArena::new(matrix.feature_count, bin_count);
-    CpuBackend::build_tile_histograms_row_first_unrolled(
+    let mut unrolled_arena = HistogramArena::new(matrix.feature_count, bin_count, true);
+    CpuBackend::build_tile_histograms_row_first_unrolled::<true>(
         &matrix,
         &gradients,
         &node,
@@ -332,7 +380,9 @@ fn unrolled_row_first_histograms_match_per_feature() {
         matrix.feature_count,
         &mut unrolled_arena,
     );
-    unrolled_arena.materialize(0, &mut unrolled);
+    let unrolled = unrolled_arena
+        .to_bundle(0, 0)
+        .expect("unrolled histogram bundle");
 
     assert_eq!(per_feature, unrolled);
 }
@@ -662,9 +712,9 @@ fn best_split_with_min_child_hessian_can_prune_all_splits() {
 #[test]
 fn best_split_with_min_leaf_magnitude_skips_weak_leaf_updates() {
     let backend = CpuBackend;
-    let histograms = HistogramBundle {
-        node_id: 0,
-        feature_histograms: vec![
+    let histograms = HistogramBundle::from_feature_histograms(
+        0,
+        vec![
             FeatureHistogram {
                 feature_index: 0,
                 bins: vec![
@@ -712,7 +762,9 @@ fn best_split_with_min_leaf_magnitude_skips_weak_leaf_updates() {
                 ],
             },
         ],
-    };
+        true,
+    )
+    .expect("valid histogram bundle");
 
     let unfiltered = backend
         .best_split(&histograms)
@@ -931,7 +983,9 @@ fn test_best_split_categorical_basic() {
         missing_bin_index: nan_bin,
     };
 
-    let result = CpuBackend::best_split_for_categorical_feature(&fh, 0, options, num_cats, None);
+    let result = with_histogram_feature(&fh, |view| {
+        CpuBackend::best_split_for_categorical_feature(view, 0, options, num_cats, None)
+    });
     assert!(result.is_some(), "should find a split");
     let split = result.unwrap();
     assert!(split.is_categorical);
@@ -1004,8 +1058,10 @@ fn dro_categorical_split_stats_match_direct_scan() {
         ..SplitSelectionOptions::default()
     };
 
-    let split = CpuBackend::best_split_for_categorical_feature(&fh, 0, options, num_cats, None)
-        .expect("dro categorical split should exist");
+    let split = with_histogram_feature(&fh, |view| {
+        CpuBackend::best_split_for_categorical_feature(view, 0, options, num_cats, None)
+    })
+    .expect("dro categorical split should exist");
     let bitset = split
         .categorical_bitset
         .as_ref()
@@ -1081,7 +1137,9 @@ fn test_best_split_categorical_single_populated() {
     };
 
     let options = SplitSelectionOptions::default();
-    let result = CpuBackend::best_split_for_categorical_feature(&fh, 0, options, num_cats, None);
+    let result = with_histogram_feature(&fh, |view| {
+        CpuBackend::best_split_for_categorical_feature(view, 0, options, num_cats, None)
+    });
     assert!(
         result.is_none(),
         "single populated category should not split"
@@ -1422,10 +1480,8 @@ fn best_split_morph_at_warmup_matches_categorical_split() {
         feature_index: 0,
         bins,
     };
-    let histograms = HistogramBundle {
-        node_id: 0,
-        feature_histograms: vec![feature_histogram],
-    };
+    let histograms = HistogramBundle::from_feature_histograms(0, vec![feature_histogram], true)
+        .expect("valid histogram bundle");
 
     let options = SplitSelectionOptions {
         l2_lambda: 0.0,
@@ -1526,9 +1582,12 @@ fn simd_standard_bin_scan_matches_scalar() {
         bins,
     };
     let options = make_options(0.05, 0.1, 1.0, 0.0, 31);
-    let scalar =
-        CpuBackend::best_split_for_feature_inner(&fh, 0, options, GainStrategy::Standard, None);
-    let simd = CpuBackend::best_split_for_feature_standard_simd(&fh, 0, options);
+    let scalar = with_histogram_feature(&fh, |view| {
+        CpuBackend::best_split_for_feature_inner(view, 0, options, GainStrategy::Standard, None)
+    });
+    let simd = with_histogram_feature(&fh, |view| {
+        CpuBackend::best_split_for_feature_standard_simd(view, 0, options)
+    });
     match (scalar, simd) {
         (Some(s), Some(v)) => {
             assert_eq!(s.threshold_bin, v.threshold_bin, "threshold_bin mismatch");
@@ -1564,9 +1623,12 @@ fn simd_standard_bin_scan_matches_scalar_with_l1() {
         bins,
     };
     let options = make_options(0.10, 0.1, 0.5, 0.0, 15);
-    let scalar =
-        CpuBackend::best_split_for_feature_inner(&fh, 0, options, GainStrategy::Standard, None);
-    let simd = CpuBackend::best_split_for_feature_standard_simd(&fh, 0, options);
+    let scalar = with_histogram_feature(&fh, |view| {
+        CpuBackend::best_split_for_feature_inner(view, 0, options, GainStrategy::Standard, None)
+    });
+    let simd = with_histogram_feature(&fh, |view| {
+        CpuBackend::best_split_for_feature_standard_simd(view, 0, options)
+    });
     match (scalar, simd) {
         (Some(s), Some(v)) => {
             assert_eq!(s.threshold_bin, v.threshold_bin);
@@ -1593,9 +1655,12 @@ fn simd_standard_bin_scan_matches_scalar_with_min_leaf_magnitude() {
         bins,
     };
     let options = make_options(0.0, 0.1, 0.0, 0.05, 15);
-    let scalar =
-        CpuBackend::best_split_for_feature_inner(&fh, 0, options, GainStrategy::Standard, None);
-    let simd = CpuBackend::best_split_for_feature_standard_simd(&fh, 0, options);
+    let scalar = with_histogram_feature(&fh, |view| {
+        CpuBackend::best_split_for_feature_inner(view, 0, options, GainStrategy::Standard, None)
+    });
+    let simd = with_histogram_feature(&fh, |view| {
+        CpuBackend::best_split_for_feature_standard_simd(view, 0, options)
+    });
     match (scalar, simd) {
         (Some(s), Some(v)) => {
             assert_eq!(s.threshold_bin, v.threshold_bin);
@@ -1630,9 +1695,12 @@ fn simd_standard_bin_scan_matches_scalar_with_missing_bin() {
         bins,
     };
     let options = make_options(0.0, 0.1, 0.5, 0.0, 15);
-    let scalar =
-        CpuBackend::best_split_for_feature_inner(&fh, 0, options, GainStrategy::Standard, None);
-    let simd = CpuBackend::best_split_for_feature_standard_simd(&fh, 0, options);
+    let scalar = with_histogram_feature(&fh, |view| {
+        CpuBackend::best_split_for_feature_inner(view, 0, options, GainStrategy::Standard, None)
+    });
+    let simd = with_histogram_feature(&fh, |view| {
+        CpuBackend::best_split_for_feature_standard_simd(view, 0, options)
+    });
     match (scalar, simd) {
         (Some(s), Some(v)) => {
             assert_eq!(s.threshold_bin, v.threshold_bin);
@@ -1676,9 +1744,10 @@ fn dro_missing_bin_split_stats_match_direct_scan() {
         ..SplitSelectionOptions::default()
     };
 
-    let split =
-        CpuBackend::best_split_for_feature_inner(&fh, 0, options, GainStrategy::Standard, None)
-            .expect("dro split with missing bin should exist");
+    let split = with_histogram_feature(&fh, |view| {
+        CpuBackend::best_split_for_feature_inner(view, 0, options, GainStrategy::Standard, None)
+    })
+    .expect("dro split with missing bin should exist");
     let mut expected_left = HistogramBin {
         grad_sum: 0.0,
         hess_sum: 0.0,
@@ -1743,17 +1812,19 @@ fn numeric_split_scanner_skips_candidates_below_min_rows_per_leaf() {
             },
         ],
     };
-    let split = CpuBackend::best_split_for_feature_inner(
-        &fh,
-        0,
-        SplitSelectionOptions {
-            min_rows_per_leaf: 4,
-            missing_bin_index: 255,
-            ..SplitSelectionOptions::default()
-        },
-        GainStrategy::Standard,
-        None,
-    )
+    let split = with_histogram_feature(&fh, |view| {
+        CpuBackend::best_split_for_feature_inner(
+            view,
+            0,
+            SplitSelectionOptions {
+                min_rows_per_leaf: 4,
+                missing_bin_index: 255,
+                ..SplitSelectionOptions::default()
+            },
+            GainStrategy::Standard,
+            None,
+        )
+    })
     .expect("expected feasible fallback split");
 
     assert_eq!(split.threshold_bin, 1);
@@ -1787,17 +1858,19 @@ fn categorical_split_scanner_skips_candidates_below_min_rows_per_leaf() {
             },
         ],
     };
-    let split = CpuBackend::best_split_for_categorical_feature(
-        &fh,
-        0,
-        SplitSelectionOptions {
-            min_rows_per_leaf: 4,
-            missing_bin_index: 255,
-            ..SplitSelectionOptions::default()
-        },
-        num_cats,
-        None,
-    )
+    let split = with_histogram_feature(&fh, |view| {
+        CpuBackend::best_split_for_categorical_feature(
+            view,
+            0,
+            SplitSelectionOptions {
+                min_rows_per_leaf: 4,
+                missing_bin_index: 255,
+                ..SplitSelectionOptions::default()
+            },
+            num_cats,
+            None,
+        )
+    })
     .expect("expected feasible categorical fallback split");
 
     assert!(split.left_stats.row_count >= 4);
