@@ -55,7 +55,19 @@ struct LevelNodeProposal {
     left_leaf_value: f32,
     right_leaf_value: f32,
     linear_leaf_pair: Option<(LinearLeaf, LinearLeaf)>,
-    children: Option<(ActiveNodeEntry, ActiveNodeEntry)>,
+    children: Option<LevelNodeChildren>,
+}
+
+struct LevelNodeChildren {
+    left_local_node_id: u32,
+    right_local_node_id: u32,
+    left_histograms: HistogramBundle,
+    right_histograms: HistogramBundle,
+    left_parent_value: f32,
+    right_parent_value: f32,
+    left_parent_linear: Option<LinearLeaf>,
+    right_parent_linear: Option<LinearLeaf>,
+    path_features: Vec<u32>,
 }
 
 struct LevelNodeOutcome {
@@ -534,7 +546,7 @@ fn propose_level_node<B: BackendOps>(
     split.left_stats = left_stats;
     split.right_stats = right_stats;
 
-    let children = if context.depth + 1 < context.params.max_depth as usize {
+    let (partition, children) = if context.depth + 1 < context.params.max_depth as usize {
         let left_local_node_id = left_child_node_id(local_node_id)?;
         let right_local_node_id = right_child_node_id(local_node_id)?;
         let left_node_id = encode_tree_node_id(context.round_index, left_local_node_id)?;
@@ -554,9 +566,13 @@ fn propose_level_node<B: BackendOps>(
             context.binned_matrix.feature_count,
         );
 
-        let (left_rows, left_histograms, right_rows, right_histograms) =
-            if partition.left_row_indices.len() <= partition.right_row_indices.len() {
-                let left_node = NodeSlice::new(left_node_id, partition.left_row_indices.clone())?;
+        let PartitionResult {
+            left_row_indices,
+            right_row_indices,
+        } = partition;
+        let (partition, left_histograms, right_histograms) =
+            if left_row_indices.len() <= right_row_indices.len() {
+                let left_node = NodeSlice::new(left_node_id, left_row_indices)?;
                 let left_histograms = context.backend.build_histograms_with_execution(
                     context.binned_matrix,
                     context.gradients,
@@ -568,14 +584,15 @@ fn propose_level_node<B: BackendOps>(
                 let right_histograms =
                     subtract_histogram_bundle(&histograms, &left_histograms, right_node_id)?;
                 (
-                    left_node.row_indices,
+                    PartitionResult {
+                        left_row_indices: left_node.row_indices,
+                        right_row_indices,
+                    },
                     left_histograms,
-                    partition.right_row_indices.clone(),
                     right_histograms,
                 )
             } else {
-                let right_node =
-                    NodeSlice::new(right_node_id, partition.right_row_indices.clone())?;
+                let right_node = NodeSlice::new(right_node_id, right_row_indices)?;
                 let right_histograms = context.backend.build_histograms_with_execution(
                     context.binned_matrix,
                     context.gradients,
@@ -587,32 +604,30 @@ fn propose_level_node<B: BackendOps>(
                 let left_histograms =
                     subtract_histogram_bundle(&histograms, &right_histograms, left_node_id)?;
                 (
-                    partition.left_row_indices.clone(),
+                    PartitionResult {
+                        left_row_indices,
+                        right_row_indices: right_node.row_indices,
+                    },
                     left_histograms,
-                    right_node.row_indices,
                     right_histograms,
                 )
             };
-        Some((
-            (
+        (
+            partition,
+            Some(LevelNodeChildren {
                 left_local_node_id,
-                left_rows,
-                left_histograms,
-                left_parent_value,
-                left_parent_linear,
-                child_path_features.clone(),
-            ),
-            (
                 right_local_node_id,
-                right_rows,
+                left_histograms,
                 right_histograms,
+                left_parent_value,
                 right_parent_value,
+                left_parent_linear,
                 right_parent_linear,
-                child_path_features,
-            ),
-        ))
+                path_features: child_path_features,
+            }),
+        )
     } else {
-        None
+        (partition, None)
     };
 
     Ok(LevelNodeOutcome::proposed(LevelNodeProposal {
@@ -791,7 +806,27 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
                 )?;
             }
 
-            if let Some((left_child, right_child)) = proposal.children.take() {
+            if let Some(children) = proposal.children.take() {
+                let PartitionResult {
+                    left_row_indices,
+                    right_row_indices,
+                } = proposal.partition;
+                let left_child = (
+                    children.left_local_node_id,
+                    left_row_indices,
+                    children.left_histograms,
+                    children.left_parent_value,
+                    children.left_parent_linear,
+                    children.path_features.clone(),
+                );
+                let right_child = (
+                    children.right_local_node_id,
+                    right_row_indices,
+                    children.right_histograms,
+                    children.right_parent_value,
+                    children.right_parent_linear,
+                    children.path_features,
+                );
                 if let (Some(index), Some(active_groups)) =
                     (constraint_index.as_ref(), proposal.node_active_groups)
                 {
