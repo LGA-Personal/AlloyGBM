@@ -5,7 +5,7 @@ use alloygbm_core::{
 };
 use alloygbm_engine::{
     BackendOps, CategoricalFeatureInfo, EngineError, EngineResult, FactorSplitContext,
-    LinearContext, MorphContext, SplitSelectionOptions,
+    HistogramExecution, LinearContext, MorphContext, SplitSelectionOptions,
 };
 use rayon::prelude::*;
 
@@ -22,7 +22,14 @@ impl BackendOps for CpuBackend {
         node: &NodeSlice,
         feature_tiles: &[FeatureTile],
     ) -> EngineResult<HistogramBundle> {
-        self.build_histograms_with_grad_sq(binned_matrix, gradients, node, feature_tiles, false)
+        self.build_histograms_with_execution(
+            binned_matrix,
+            gradients,
+            node,
+            feature_tiles,
+            false,
+            HistogramExecution::Parallel,
+        )
     }
 
     fn build_histograms_with_grad_sq(
@@ -33,15 +40,35 @@ impl BackendOps for CpuBackend {
         feature_tiles: &[FeatureTile],
         include_grad_sq: bool,
     ) -> EngineResult<HistogramBundle> {
+        self.build_histograms_with_execution(
+            binned_matrix,
+            gradients,
+            node,
+            feature_tiles,
+            include_grad_sq,
+            HistogramExecution::Parallel,
+        )
+    }
+
+    fn build_histograms_with_execution(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: &NodeSlice,
+        feature_tiles: &[FeatureTile],
+        include_grad_sq: bool,
+        execution: HistogramExecution,
+    ) -> EngineResult<HistogramBundle> {
         let selected_feature_count = feature_tiles
             .iter()
             .map(|tile| (tile.end_feature - tile.start_feature) as usize)
             .sum();
-        let parallel_tiles = Self::should_parallelize_tiles(
-            feature_tiles.len(),
-            node.row_indices.len(),
-            selected_feature_count,
-        );
+        let parallel_tiles = execution == HistogramExecution::Parallel
+            && Self::should_parallelize_tiles(
+                feature_tiles.len(),
+                node.row_indices.len(),
+                selected_feature_count,
+            );
         Self::build_histograms_internal(
             binned_matrix,
             gradients,

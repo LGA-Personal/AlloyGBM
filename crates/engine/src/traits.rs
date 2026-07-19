@@ -8,6 +8,12 @@ use crate::split_options::{
     CategoricalFeatureInfo, FactorSplitContext, LinearContext, MorphContext, SplitSelectionOptions,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistogramExecution {
+    Sequential,
+    Parallel,
+}
+
 pub trait BackendOps {
     fn build_histograms(
         &self,
@@ -25,6 +31,23 @@ pub trait BackendOps {
         _include_grad_sq: bool,
     ) -> EngineResult<HistogramBundle> {
         self.build_histograms(binned_matrix, gradients, node, feature_tiles)
+    }
+    fn build_histograms_with_execution(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: &NodeSlice,
+        feature_tiles: &[FeatureTile],
+        include_grad_sq: bool,
+        _execution: HistogramExecution,
+    ) -> EngineResult<HistogramBundle> {
+        self.build_histograms_with_grad_sq(
+            binned_matrix,
+            gradients,
+            node,
+            feature_tiles,
+            include_grad_sq,
+        )
     }
     fn best_split(&self, histograms: &HistogramBundle) -> EngineResult<Option<SplitCandidate>>;
     fn best_split_with_options(

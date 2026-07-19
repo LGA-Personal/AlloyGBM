@@ -4,7 +4,9 @@ use alloygbm_core::{
     DatasetMatrix, FactorExposureMatrix, FeatureHistogram, FeatureTile, HistogramBin,
     LeafModelKind, TrainParams, TrainingDataset, TreeGrowth,
 };
-use alloygbm_engine::{BackendOps, FactorSplitContext, SquaredErrorObjective, Trainer};
+use alloygbm_engine::{
+    BackendOps, FactorSplitContext, HistogramExecution, SquaredErrorObjective, Trainer,
+};
 
 fn sample_binned_matrix() -> BinnedMatrix {
     BinnedMatrix::new(
@@ -343,6 +345,44 @@ fn build_histograms_parallel_tiles_match_sequential() {
             .best_split(&parallel)
             .expect("parallel split should succeed")
     );
+}
+
+#[test]
+fn explicit_histogram_execution_policies_are_equivalent() {
+    let backend = CpuBackend;
+    let matrix = quality_fixture_binned_matrix();
+    let gradients = (0..matrix.row_count)
+        .map(|row_index| {
+            GradientPair::new((row_index as f32 - 3.5) * 0.5, 1.0 + row_index as f32 * 0.1)
+                .expect("gradient pair is finite")
+        })
+        .collect::<Vec<_>>();
+    let node =
+        NodeSlice::new(0, (0..matrix.row_count as u32).collect()).expect("node indices are valid");
+    let tiles = [FeatureTile::new(0, matrix.feature_count as u32).expect("valid feature tile")];
+
+    let sequential = backend
+        .build_histograms_with_execution(
+            &matrix,
+            &gradients,
+            &node,
+            &tiles,
+            false,
+            HistogramExecution::Sequential,
+        )
+        .expect("sequential histograms should build");
+    let parallel = backend
+        .build_histograms_with_execution(
+            &matrix,
+            &gradients,
+            &node,
+            &tiles,
+            false,
+            HistogramExecution::Parallel,
+        )
+        .expect("parallel histograms should build");
+
+    assert_eq!(sequential, parallel);
 }
 
 #[test]
