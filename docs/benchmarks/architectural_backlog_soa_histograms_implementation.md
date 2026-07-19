@@ -4,7 +4,7 @@
 
 **Goal:** Keep scalar histogram statistics in structure-of-arrays storage through split selection and avoid computing `grad_sq_sum` when DRO is inactive.
 
-**Architecture:** Replace the materialized `Vec<FeatureHistogram>` handoff with borrowed per-feature views over `HistogramArena`. Make squared-gradient storage optional and retain the existing PL histogram bundle as a separate path. Preserve split iteration order and emitted artifacts exactly.
+**Architecture:** Replace the materialized `Vec<FeatureHistogram>` handoff with an owned SoA bundle whose split scanners borrow aligned per-feature views. Make squared-gradient storage optional and retain the existing PL histogram bundle as a separate path. Preserve split iteration order and emitted artifacts exactly.
 
 **Tech Stack:** Rust 1.92, Rayon, existing `alloygbm-core`, `alloygbm-backend-cpu`, and workspace tests.
 
@@ -26,9 +26,9 @@
 
 **Interfaces:**
 - Produces: `HistogramFeatureView<'a>` with `grad_sums`, `hess_sums`, optional `grad_sq_sums`, and `counts` slices.
-- Produces: `HistogramBundleView<'a>` that resolves a feature index without allocation.
+- Produces: `HistogramBundle::feature` and `HistogramBundle::features`, which resolve borrowed feature views without allocation.
 
-- [ ] **Step 1: Write failing layout/view tests**
+- [x] **Step 1: Write failing layout/view tests**
 
 ```rust
 #[test]
@@ -42,15 +42,15 @@ fn histogram_feature_view_reads_aligned_soa_bins() {
 }
 ```
 
-- [ ] **Step 2: Run the focused test and confirm it fails because the view API is absent**
+- [x] **Step 2: Run the focused test and confirm it fails because the view API is absent**
 
 Run: `cargo test -p alloygbm-backend-cpu histogram_feature_view_reads_aligned_soa_bins`
 
-- [ ] **Step 3: Add the view types and checked slice construction**
+- [x] **Step 3: Add the view types and checked slice construction**
 
 Use `feature_index * bin_count..(feature_index + 1) * bin_count`; return a contract error for inconsistent slice lengths. Represent squared gradients as `Option<&[f32]>`.
 
-- [ ] **Step 4: Run backend tests and commit**
+- [x] **Step 4: Run backend tests and commit**
 
 Run: `cargo test -p alloygbm-backend-cpu`
 
@@ -68,10 +68,10 @@ Commit: `git commit -am "Add borrowed SoA histogram views"`
 - Consumes: `SplitSelectionOptions::dro_config`.
 - Produces: `HistogramArena::prepare(feature_count, bin_count, include_grad_sq)`.
 
-- [ ] **Step 1: Add a failing standard-path test** proving the arena has no squared-gradient buffer when `dro_config` is absent and a DRO test proving the values match the current reducer.
-- [ ] **Step 2: Run both tests and confirm the standard case fails on the unconditional allocation.**
-- [ ] **Step 3: Change accumulation kernels to branch once per histogram build, not once per row/bin.** Keep separate with-DRO and without-DRO loops so the standard inner loop performs no square or extra write.
-- [ ] **Step 4: Run `cargo test -p alloygbm-backend-cpu` and commit.**
+- [x] **Step 1: Add a failing standard-path test** proving the arena has no squared-gradient buffer when `dro_config` is absent and a DRO test proving the values match the current reducer.
+- [x] **Step 2: Run both tests and confirm the standard case fails on the unconditional allocation.**
+- [x] **Step 3: Change accumulation kernels to branch once per histogram build, not once per row/bin.** Keep separate with-DRO and without-DRO loops so the standard inner loop performs no square or extra write.
+- [x] **Step 4: Run `cargo test -p alloygbm-backend-cpu` and commit.**
 
 Commit: `git commit -am "Skip squared gradients outside DRO"`
 
@@ -87,24 +87,24 @@ Commit: `git commit -am "Skip squared gradients outside DRO"`
 - Changes `BackendOps::build_histograms` to return an owned SoA bundle whose feature views borrow from that bundle.
 - Keeps PL statistics and native-categorical bitsets in explicit side structures.
 
-- [ ] **Step 1: Add an equivalence test** that runs every numeric threshold and both missing directions through the old materialized reference helper and new SoA scanner.
-- [ ] **Step 2: Verify RED by calling the not-yet-existing SoA scanner.**
-- [ ] **Step 3: Port prefix scans and histogram subtraction to aligned slices.** Preserve feature order, threshold order, and tie-breaking.
-- [ ] **Step 4: Delete `materialize_tile_histograms` only after all call sites use views.**
-- [ ] **Step 5: Run `cargo test --workspace` and commit.**
+- [x] **Step 1: Add equivalence coverage** for numeric, categorical, missing-direction, tile strategy, and sibling-subtraction behavior.
+- [x] **Step 2: Verify RED by calling the not-yet-existing SoA scanner.**
+- [x] **Step 3: Port prefix scans and histogram subtraction to aligned slices.** Preserve feature order, threshold order, and tie-breaking.
+- [x] **Step 4: Delete `materialize_tile_histograms` only after all call sites use views.**
+- [x] **Step 5: Run `cargo test --workspace` and commit.**
 
 Commit: `git commit -am "Scan SoA histograms without materialization"`
 
 ### Task 4: Verify Special Modes And Performance
 
 **Files:**
-- Test: `bindings/python/tests/test_dro.py`
-- Test: `bindings/python/tests/test_linear_leaves.py`
+- Test: `bindings/python/tests/test_dro_leaf_solver.py`
+- Test: `bindings/python/tests/test_pl_trees.py`
 - Test: `crates/backend_cpu/src/tests/main.rs`
 
-- [ ] **Step 1: Add deterministic artifact/prediction parity tests** for standard, DRO, PL, native-categorical, MorphBoost, and factor-neutral gain dispatch.
-- [ ] **Step 2: Run `cargo fmt --all --check`, clippy, workspace tests, and the Python suite.**
-- [ ] **Step 3: Run the full benchmark comparison.**
+- [x] **Step 1: Add deterministic artifact/prediction parity tests** for standard, DRO, PL, native-categorical, MorphBoost, and factor-neutral gain dispatch.
+- [x] **Step 2: Run `cargo fmt --all --check`, clippy, workspace tests, and the Python suite.**
+- [x] **Step 3: Run the full benchmark comparison.**
 
 ```bash
 .venv/bin/python -m benchmarks.architectural_backlog.run \
@@ -112,4 +112,4 @@ Commit: `git commit -am "Scan SoA histograms without materialization"`
   --baseline benchmarks/results/architectural_backlog_baseline.json --gate
 ```
 
-- [ ] **Step 4: Commit benchmark evidence and resolution update separately from production code.**
+- [x] **Step 4: Commit benchmark evidence and resolution update separately from production code.**
