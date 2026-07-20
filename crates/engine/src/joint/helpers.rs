@@ -84,7 +84,9 @@ pub(super) fn accumulate_factor_sums_for_threshold(
     let mut left = vec![0.0_f32; factor_count];
     let mut right = vec![0.0_f32; factor_count];
     for &row in row_indices {
-        let bin = binned.bins[row as usize * feature_count + feature];
+        let bin = binned
+            .row_bin(row as usize * feature_count + feature)
+            .min(u16::from(u8::MAX)) as u8;
         if bin == MISSING_BIN_U8 {
             continue;
         }
@@ -174,7 +176,9 @@ pub(super) fn walk_tree_into_predictions(
             };
             let feature = stump.split.feature_index as usize;
             let threshold_bin = stump.split.threshold_bin as usize;
-            let bin = binned_matrix.bins[row * feature_count + feature];
+            let bin = binned_matrix
+                .row_bin(row * feature_count + feature)
+                .min(u16::from(u8::MAX)) as u8;
             let went_left = if bin == MISSING_BIN_U8 {
                 stump.split.default_left
             } else if stump.split.is_categorical {

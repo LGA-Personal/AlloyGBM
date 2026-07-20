@@ -178,17 +178,11 @@ pub(crate) fn apply_single_categorical_target_encoding(
         factor_exposures: dataset.factor_exposures.clone(),
     };
 
-    let mut encoded_bins_payload = binned_matrix.bins.clone();
+    let mut encoded_binned_matrix = binned_matrix.clone();
+    encoded_binned_matrix.max_bin = encoded_binned_matrix.max_bin.max(encoded_max_bin);
     for (row_index, &encoded_bin) in encoded_bins.iter().enumerate() {
-        let offset = row_index * feature_count + spec.feature_index;
-        encoded_bins_payload[offset] = encoded_bin;
+        encoded_binned_matrix.set_bin(row_index, spec.feature_index, u16::from(encoded_bin));
     }
-    let encoded_binned_matrix = BinnedMatrix::new(
-        row_count,
-        feature_count,
-        binned_matrix.max_bin.max(encoded_max_bin),
-        encoded_bins_payload,
-    )?;
 
     Ok((encoded_dataset, encoded_binned_matrix))
 }

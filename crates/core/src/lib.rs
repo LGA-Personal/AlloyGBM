@@ -39,7 +39,7 @@ pub use artifact_format::{
     required_section_compatibility_report, serialize_metadata_json, serialize_model_artifact_v1,
     validate_categorical_state_payload_v1,
 };
-pub use binned::{BinStorage, BinnedMatrix, MISSING_BIN_U8, MISSING_BIN_U16};
+pub use binned::{BinStorage, BinnedLayout, BinnedMatrix, MISSING_BIN_U8, MISSING_BIN_U16};
 pub use config::{
     BoostingMode, DartNormalize, DartSampleType, Device, LeafModelKind, LeafSolverKind,
     MAX_TREE_NODE_SLOTS, TrainParams, TreeGrowth,

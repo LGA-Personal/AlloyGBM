@@ -2,9 +2,8 @@ use alloygbm_categorical::{
     TargetEncoderConfig, fit_target_encoder, fit_transform_target_encoder, transform_target_encoder,
 };
 use alloygbm_core::{
-    BinnedMatrix, CATEGORICAL_STATE_FORMAT_V1, CategoricalStatePayloadV1, DatasetMatrix,
-    FactorExposureMatrix, FactorNeutralizationConfig, NeutralizationKind, TrainParams,
-    TrainingDataset,
+    CATEGORICAL_STATE_FORMAT_V1, CategoricalStatePayloadV1, DatasetMatrix, FactorExposureMatrix,
+    FactorNeutralizationConfig, NeutralizationKind, TrainParams, TrainingDataset,
 };
 use alloygbm_engine::{CategoricalTargetEncodingSpec, EngineError};
 use pyo3::prelude::*;
@@ -400,8 +399,8 @@ pub(crate) fn apply_categorical_encoding_to_training_matrices_multi(
     let row_count = prepared.dataset.row_count();
     let feature_count = prepared.dataset.matrix.feature_count;
     let mut dense_values = prepared.dataset.matrix.values.clone();
-    let mut bins = prepared.binned_matrix.bins.clone();
-    let mut max_bin = prepared.binned_matrix.max_bin;
+    let mut binned_matrix = prepared.binned_matrix;
+    let mut max_bin = binned_matrix.max_bin;
     let mut any_time_aware = false;
 
     for spec in categorical_specs {
@@ -435,7 +434,11 @@ pub(crate) fn apply_categorical_encoding_to_training_matrices_multi(
         for (row_index, &encoded_value) in encoded_values.iter().enumerate() {
             let offset = row_index * feature_count + spec.feature_index;
             dense_values[offset] = encoded_value;
-            bins[offset] = encoded_bins[row_index];
+            binned_matrix.set_bin(
+                row_index,
+                spec.feature_index,
+                u16::from(encoded_bins[row_index]),
+            );
         }
     }
 
@@ -457,7 +460,10 @@ pub(crate) fn apply_categorical_encoding_to_training_matrices_multi(
                 group_id: prepared.dataset.group_id,
                 factor_exposures: prepared.dataset.factor_exposures,
             },
-            binned_matrix: BinnedMatrix::new(row_count, feature_count, max_bin, bins)?,
+            binned_matrix: {
+                binned_matrix.max_bin = max_bin;
+                binned_matrix
+            },
             metadata: prepared.metadata,
         },
         categorical_state,
@@ -489,8 +495,8 @@ pub(crate) fn apply_categorical_encoding_to_validation_matrices_multi(
     let row_count = prepared.dataset.row_count();
     let feature_count = prepared.dataset.matrix.feature_count;
     let mut dense_values = prepared.dataset.matrix.values.clone();
-    let mut bins = prepared.binned_matrix.bins.clone();
-    let mut max_bin = prepared.binned_matrix.max_bin;
+    let mut binned_matrix = prepared.binned_matrix;
+    let mut max_bin = binned_matrix.max_bin;
 
     for (training_spec, validation_spec) in training_specs.iter().zip(validation_specs) {
         if validation_spec.feature_index >= feature_count {
@@ -522,7 +528,11 @@ pub(crate) fn apply_categorical_encoding_to_validation_matrices_multi(
         for (row_index, &encoded_value) in encoded_values.iter().enumerate() {
             let offset = row_index * feature_count + validation_spec.feature_index;
             dense_values[offset] = encoded_value;
-            bins[offset] = encoded_bins[row_index];
+            binned_matrix.set_bin(
+                row_index,
+                validation_spec.feature_index,
+                u16::from(encoded_bins[row_index]),
+            );
         }
     }
 
@@ -535,7 +545,10 @@ pub(crate) fn apply_categorical_encoding_to_validation_matrices_multi(
             group_id: prepared.dataset.group_id,
             factor_exposures: prepared.dataset.factor_exposures,
         },
-        binned_matrix: BinnedMatrix::new(row_count, feature_count, max_bin, bins)?,
+        binned_matrix: {
+            binned_matrix.max_bin = max_bin;
+            binned_matrix
+        },
         metadata: prepared.metadata,
     })
 }

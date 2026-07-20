@@ -465,9 +465,16 @@ pub fn validate_binned_matrix(matrix: &BinnedMatrix) -> CoreResult<()> {
         ));
     }
     let expected_len = matrix.row_count * matrix.feature_count;
-    if matrix.bins_adaptive.len() != expected_len {
+    if matrix.bins_col_adaptive.len() != expected_len {
         return Err(CoreError::Validation(format!(
-            "bins length {} does not match row_count * feature_count {}",
+            "column-major bins length {} does not match row_count * feature_count {}",
+            matrix.bins_col_adaptive.len(),
+            expected_len
+        )));
+    }
+    if matrix.has_row_major() && matrix.bins_adaptive.len() != expected_len {
+        return Err(CoreError::Validation(format!(
+            "row-major bins length {} does not match row_count * feature_count {}",
             matrix.bins_adaptive.len(),
             expected_len
         )));
@@ -475,7 +482,7 @@ pub fn validate_binned_matrix(matrix: &BinnedMatrix) -> CoreResult<()> {
     // Validate that no bin exceeds max_bin using adaptive storage.
     // The NaN sentinel bin is also allowed (it may exceed max_bin).
     let nan_bin = matrix.nan_bin_index;
-    match &matrix.bins_adaptive {
+    match &matrix.bins_col_adaptive {
         BinStorage::U8(bins) => {
             for &bin in bins {
                 let b = u16::from(bin);

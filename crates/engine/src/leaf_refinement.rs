@@ -285,10 +285,10 @@ fn terminal_local_node_id_for_row(
             .ok_or_else(|| {
                 EngineError::ContractViolation("binned cell index overflow".to_string())
             })?;
-        if cell_index >= binned_matrix.bins_adaptive.len() {
+        if cell_index >= binned_matrix.cell_count() {
             return Err(EngineError::ContractViolation(format!(
                 "binned cell index {cell_index} is out of bounds for bins length {}",
-                binned_matrix.bins_adaptive.len()
+                binned_matrix.cell_count()
             )));
         }
         let bin = binned_matrix.row_bin(cell_index);

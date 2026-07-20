@@ -45,6 +45,27 @@ impl BinStorage {
     pub fn is_u8(&self) -> bool {
         matches!(self, Self::U8(_))
     }
+
+    #[inline]
+    fn set(&mut self, index: usize, value: u16) {
+        match self {
+            Self::U8(bins) => bins[index] = value.min(u16::from(u8::MAX)) as u8,
+            Self::U16(bins) => bins[index] = value,
+        }
+    }
+
+    fn storage_bytes(&self) -> usize {
+        match self {
+            Self::U8(bins) => bins.len(),
+            Self::U16(bins) => bins.len() * size_of::<u16>(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinnedLayout {
+    ColumnMajor,
+    Dual,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,14 +77,10 @@ pub struct BinnedMatrix {
     /// For u8 mode: always 255 (MISSING_BIN_U8).
     /// For u16 mode: max_data_bin + 1 (dynamic, avoids wasteful 65535 sentinel).
     pub nan_bin_index: u16,
-    /// Row-major: bins[row * feature_count + feature]
-    pub bins: Vec<u8>,
-    /// Column-major: bins_col[feature * row_count + row] — for cache-friendly histogram building.
-    pub bins_col: Vec<u8>,
-    /// Row-major adaptive storage (mirrors `bins` but supports u16).
-    pub bins_adaptive: BinStorage,
-    /// Column-major adaptive storage (mirrors `bins_col` but supports u16).
-    pub bins_col_adaptive: BinStorage,
+    /// Optional row-major adaptive storage. Empty for column-major-only matrices.
+    pub(crate) bins_adaptive: BinStorage,
+    /// Required column-major adaptive storage used by histogram construction.
+    pub(crate) bins_col_adaptive: BinStorage,
 }
 
 impl BinnedMatrix {
@@ -74,18 +91,47 @@ impl BinnedMatrix {
         max_bin: u16,
         bins: Vec<u8>,
     ) -> CoreResult<Self> {
+        Self::new_with_layout(row_count, feature_count, max_bin, bins, BinnedLayout::Dual)
+    }
+
+    pub fn new_with_layout(
+        row_count: usize,
+        feature_count: usize,
+        max_bin: u16,
+        bins: Vec<u8>,
+        layout: BinnedLayout,
+    ) -> CoreResult<Self> {
         let bins_col = transpose_bins_to_column_major_u8(&bins, row_count, feature_count);
-        let bins_adaptive = BinStorage::U8(bins.clone());
-        let bins_col_adaptive = BinStorage::U8(bins_col.clone());
+        let bins_adaptive = match layout {
+            BinnedLayout::ColumnMajor => BinStorage::U8(Vec::new()),
+            BinnedLayout::Dual => BinStorage::U8(bins),
+        };
         let matrix = Self {
             row_count,
             feature_count,
             max_bin,
             nan_bin_index: MISSING_BIN_U8 as u16,
-            bins,
-            bins_col,
             bins_adaptive,
-            bins_col_adaptive,
+            bins_col_adaptive: BinStorage::U8(bins_col),
+        };
+        validate_binned_matrix(&matrix)?;
+        Ok(matrix)
+    }
+
+    /// Create a column-major-only matrix from bins already ordered by feature, then row.
+    pub fn new_from_column_major(
+        row_count: usize,
+        feature_count: usize,
+        max_bin: u16,
+        bins_col: Vec<u8>,
+    ) -> CoreResult<Self> {
+        let matrix = Self {
+            row_count,
+            feature_count,
+            max_bin,
+            nan_bin_index: MISSING_BIN_U8 as u16,
+            bins_adaptive: BinStorage::U8(Vec::new()),
+            bins_col_adaptive: BinStorage::U8(bins_col),
         };
         validate_binned_matrix(&matrix)?;
         Ok(matrix)
@@ -100,24 +146,56 @@ impl BinnedMatrix {
         nan_bin_index: u16,
         bins_u16: Vec<u16>,
     ) -> CoreResult<Self> {
-        // For backward compatibility, also create u8 vecs (clamped) for legacy code paths.
-        let bins_u8: Vec<u8> = bins_u16
-            .iter()
-            .map(|&b| if b >= 255 { 255 } else { b as u8 })
-            .collect();
-        let bins_col_u8 = transpose_bins_to_column_major_u8(&bins_u8, row_count, feature_count);
+        Self::new_u16_with_layout(
+            row_count,
+            feature_count,
+            max_bin,
+            nan_bin_index,
+            bins_u16,
+            BinnedLayout::Dual,
+        )
+    }
+
+    pub fn new_u16_with_layout(
+        row_count: usize,
+        feature_count: usize,
+        max_bin: u16,
+        nan_bin_index: u16,
+        bins_u16: Vec<u16>,
+        layout: BinnedLayout,
+    ) -> CoreResult<Self> {
         let bins_col_u16 = transpose_bins_to_column_major_u16(&bins_u16, row_count, feature_count);
-        let bins_adaptive = BinStorage::U16(bins_u16);
-        let bins_col_adaptive = BinStorage::U16(bins_col_u16);
+        let bins_adaptive = match layout {
+            BinnedLayout::ColumnMajor => BinStorage::U16(Vec::new()),
+            BinnedLayout::Dual => BinStorage::U16(bins_u16),
+        };
         let matrix = Self {
             row_count,
             feature_count,
             max_bin,
             nan_bin_index,
-            bins: bins_u8,
-            bins_col: bins_col_u8,
             bins_adaptive,
-            bins_col_adaptive,
+            bins_col_adaptive: BinStorage::U16(bins_col_u16),
+        };
+        validate_binned_matrix(&matrix)?;
+        Ok(matrix)
+    }
+
+    /// Create a column-major-only wide matrix from bins ordered by feature, then row.
+    pub fn new_u16_from_column_major(
+        row_count: usize,
+        feature_count: usize,
+        max_bin: u16,
+        nan_bin_index: u16,
+        bins_col_u16: Vec<u16>,
+    ) -> CoreResult<Self> {
+        let matrix = Self {
+            row_count,
+            feature_count,
+            max_bin,
+            nan_bin_index,
+            bins_adaptive: BinStorage::U16(Vec::new()),
+            bins_col_adaptive: BinStorage::U16(bins_col_u16),
         };
         validate_binned_matrix(&matrix)?;
         Ok(matrix)
@@ -125,7 +203,7 @@ impl BinnedMatrix {
 
     /// Whether this matrix uses u16 bin storage.
     pub fn is_wide_bins(&self) -> bool {
-        matches!(self.bins_adaptive, BinStorage::U16(_))
+        matches!(self.bins_col_adaptive, BinStorage::U16(_))
     }
 
     /// Read a bin value from column-major adaptive storage.
@@ -139,7 +217,23 @@ impl BinnedMatrix {
     /// `index` is the flat offset (row * feature_count + feature).
     #[inline]
     pub fn row_bin(&self, index: usize) -> u16 {
-        self.bins_adaptive.get(index)
+        if self.has_row_major() {
+            self.bins_adaptive.get(index)
+        } else {
+            let row = index / self.feature_count;
+            let feature = index % self.feature_count;
+            self.bin_at(row, feature)
+        }
+    }
+
+    /// Read a bin by row and feature without converting between flat layouts.
+    #[inline]
+    pub fn bin_at(&self, row: usize, feature: usize) -> u16 {
+        if self.has_row_major() {
+            self.bins_adaptive.get(row * self.feature_count + feature)
+        } else {
+            self.bins_col_adaptive.get(feature * self.row_count + row)
+        }
     }
 
     /// The sentinel value used for missing/NaN bins in this matrix.
@@ -154,43 +248,36 @@ impl BinnedMatrix {
         !self.bins_col_adaptive.is_empty()
     }
 
+    #[inline]
+    pub fn has_row_major(&self) -> bool {
+        !self.bins_adaptive.is_empty()
+    }
+
+    pub fn layout(&self) -> BinnedLayout {
+        if self.has_row_major() {
+            BinnedLayout::Dual
+        } else {
+            BinnedLayout::ColumnMajor
+        }
+    }
+
+    pub fn storage_bytes(&self) -> usize {
+        self.bins_adaptive.storage_bytes() + self.bins_col_adaptive.storage_bytes()
+    }
+
+    pub fn cell_count(&self) -> usize {
+        self.row_count * self.feature_count
+    }
+
     /// Set the bin value at (row, feature) in all storage arrays.
     /// Used for re-mapping native categorical feature columns after binning.
     pub fn set_bin(&mut self, row: usize, feature: usize, value: u16) {
         let row_idx = row * self.feature_count + feature;
         let col_idx = feature * self.row_count + row;
-        let val_u8 = if value >= 255 { 255u8 } else { value as u8 };
-
-        if row_idx < self.bins.len() {
-            self.bins[row_idx] = val_u8;
+        if self.has_row_major() {
+            self.bins_adaptive.set(row_idx, value);
         }
-        if col_idx < self.bins_col.len() {
-            self.bins_col[col_idx] = val_u8;
-        }
-        match &mut self.bins_adaptive {
-            BinStorage::U8(v) => {
-                if row_idx < v.len() {
-                    v[row_idx] = val_u8;
-                }
-            }
-            BinStorage::U16(v) => {
-                if row_idx < v.len() {
-                    v[row_idx] = value;
-                }
-            }
-        }
-        match &mut self.bins_col_adaptive {
-            BinStorage::U8(v) => {
-                if col_idx < v.len() {
-                    v[col_idx] = val_u8;
-                }
-            }
-            BinStorage::U16(v) => {
-                if col_idx < v.len() {
-                    v[col_idx] = value;
-                }
-            }
-        }
+        self.bins_col_adaptive.set(col_idx, value);
     }
 }
 

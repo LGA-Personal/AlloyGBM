@@ -1,14 +1,14 @@
 use crate::categorical_bridge::{flatten_rows, resolve_categorical_spec};
 use crate::predict::{predictor_predict_batch_canonical_impl, predictor_predict_batch_impl};
-use crate::quantization::ContinuousBinningStrategy;
+use crate::quantization::{ContinuousBinningStrategy, prepare_training_matrices_from_dense_values};
 use crate::shap_bridge::{shap_explain_rows_impl, shap_global_importance_impl};
 use crate::train::train_regression_artifact_with_summary_dense_impl;
 use crate::{DEFAULT_TRAIN_ROUNDS, MAX_CONTINUOUS_QUANTIZED_BIN_U8};
 use alloygbm_backend_cpu::CpuBackend;
 use alloygbm_categorical::TargetEncoderConfig;
 use alloygbm_core::{
-    BinnedMatrix, DatasetMatrix, FactorExposureMatrix, FactorNeutralizationConfig, LeafModelKind,
-    ModelSectionKind, NeutralizationKind, TrainParams, TrainingDataset, TreeGrowth,
+    BinnedLayout, BinnedMatrix, DatasetMatrix, FactorExposureMatrix, FactorNeutralizationConfig,
+    LeafModelKind, ModelSectionKind, NeutralizationKind, TrainParams, TrainingDataset, TreeGrowth,
     deserialize_model_artifact_v1, serialize_model_artifact_v1,
 };
 use alloygbm_engine::{
@@ -117,6 +117,99 @@ fn binned_matrix_from_fixture_dataset(dataset: &TrainingDataset) -> BinnedMatrix
     }
     BinnedMatrix::new(dataset.row_count(), dataset.matrix.feature_count, 3, bins)
         .expect("binned matrix is valid")
+}
+
+#[test]
+fn dense_training_preparation_uses_column_major_u8_bins() {
+    let prepared = prepare_training_matrices_from_dense_values(
+        &[0.1, 1.2, 0.3, 1.4],
+        2,
+        2,
+        &[0.0, 1.0],
+        None,
+        None,
+        None,
+        ContinuousBinningStrategy::Quantile,
+        64,
+        false,
+        BinnedLayout::ColumnMajor,
+    )
+    .expect("u8 training matrices should prepare");
+
+    assert!(!prepared.binned_matrix.has_row_major());
+    assert_eq!(prepared.binned_matrix.storage_bytes(), 4);
+}
+
+#[test]
+fn dense_training_preparation_uses_column_major_u16_bins() {
+    let prepared = prepare_training_matrices_from_dense_values(
+        &[0.1, 1.2, 0.3, 1.4],
+        2,
+        2,
+        &[0.0, 1.0],
+        None,
+        None,
+        None,
+        ContinuousBinningStrategy::Quantile,
+        512,
+        false,
+        BinnedLayout::ColumnMajor,
+    )
+    .expect("u16 training matrices should prepare");
+
+    assert!(!prepared.binned_matrix.has_row_major());
+    assert_eq!(prepared.binned_matrix.storage_bytes(), 8);
+}
+
+#[test]
+fn direct_column_major_quantization_matches_dual_layout() {
+    let values = [
+        0.1,
+        4.0,
+        f32::NAN,
+        -2.0,
+        0.5,
+        3.0,
+        7.0,
+        -1.0,
+        0.9,
+        2.0,
+        8.0,
+        0.0,
+    ];
+    for max_bins in [64, 512] {
+        let prepare = |layout| {
+            prepare_training_matrices_from_dense_values(
+                &values,
+                3,
+                4,
+                &[0.0, 1.0, 2.0],
+                None,
+                None,
+                None,
+                ContinuousBinningStrategy::Quantile,
+                max_bins,
+                false,
+                layout,
+            )
+            .expect("training matrices should prepare")
+        };
+        let column_major = prepare(BinnedLayout::ColumnMajor);
+        let dual = prepare(BinnedLayout::Dual);
+
+        assert_eq!(
+            column_major.binned_matrix.max_bin,
+            dual.binned_matrix.max_bin
+        );
+        assert_eq!(
+            (0..values.len())
+                .map(|index| column_major.binned_matrix.row_bin(index))
+                .collect::<Vec<_>>(),
+            (0..values.len())
+                .map(|index| dual.binned_matrix.row_bin(index))
+                .collect::<Vec<_>>()
+        );
+    }
 }
 
 fn fixture_rows(dataset: &TrainingDataset) -> Vec<Vec<f32>> {

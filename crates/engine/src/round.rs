@@ -88,18 +88,16 @@ pub(crate) fn apply_weighted_round_to_predictions(
         let (_, local_id) = decode_tree_node_id(stump.split.node_id);
         stump_by_local.insert(local_id, stump);
     }
-    let feature_count = binned_matrix.feature_count;
     let missing_bin = u16::from(MISSING_BIN_U8);
 
     for (row_index, prediction) in predictions.iter_mut().enumerate() {
-        let row_base = row_index * feature_count;
         let mut local_id = 0_u32;
         loop {
             let Some(stump) = stump_by_local.get(&local_id) else {
                 break;
             };
             let feature_index = stump.split.feature_index as usize;
-            let bin = binned_matrix.row_bin(row_base + feature_index);
+            let bin = binned_matrix.col_bin(feature_index * binned_matrix.row_count + row_index);
             let went_left = if bin == missing_bin {
                 // Missing-value routing — predictor's `is_nan` short-circuit
                 // produces the same `default_left` outcome.
@@ -163,10 +161,7 @@ pub(crate) fn apply_round_stumps_tree_walk(
         let (_, local_id) = decode_tree_node_id(stump.split.node_id);
         stump_by_local.insert(local_id, stump);
     }
-    let feature_count = binned_matrix.feature_count;
-
     for (row_index, prediction) in predictions.iter_mut().enumerate() {
-        let row_base = row_index * feature_count;
         // Walk the tree starting from the root (local_node_id = 0)
         let mut local_id = 0_u32;
         loop {
@@ -174,7 +169,7 @@ pub(crate) fn apply_round_stumps_tree_walk(
                 break; // reached a leaf — no stump at this node
             };
             let feature_index = stump.split.feature_index as usize;
-            let bin = binned_matrix.row_bin(row_base + feature_index);
+            let bin = binned_matrix.col_bin(feature_index * binned_matrix.row_count + row_index);
             // v0.10.0 review fix (Comment 1): multiply leaf contribution by
             // `stump.tree_weight` so warm-start prior predictions reflect
             // saved DART weights. For non-DART stumps tree_weight == 1.0,

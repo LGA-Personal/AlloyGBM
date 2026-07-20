@@ -318,7 +318,7 @@ fn fit_joint_inner(
         // PR #36 review (C2): validate that every prior stump's
         // `feature_index` is `< feature_count` BEFORE replay. Without
         // this check `walk_tree_into_predictions` indexes
-        // `binned_matrix.bins[row * feature_count + feature]` which
+        // the row-major bin offset, which
         // panics across the PyO3 boundary if the prior fit was trained
         // on more features than the current one. Surface a clean
         // validation error instead.

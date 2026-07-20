@@ -1,4 +1,4 @@
-use alloygbm_core::{TrainParams, TreeGrowth};
+use alloygbm_core::{BinnedLayout, TrainParams, TreeGrowth};
 use alloygbm_engine::CategoricalFeatureInfo;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -254,6 +254,7 @@ pub(crate) fn train_joint_multi_label_ranker(
         parsed_binning_strategy,
         continuous_binning_max_bins,
         false,
+        BinnedLayout::Dual,
     )
     .map_err(engine_error_to_pyerr)?;
 
