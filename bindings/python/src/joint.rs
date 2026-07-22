@@ -13,6 +13,14 @@ use crate::quantization::{
     parse_continuous_binning_strategy, prepare_training_matrices_from_dense_values,
 };
 
+type JointTrainingBridgeResult = (
+    Vec<u8>,
+    Vec<f32>,
+    usize,
+    usize,
+    NativeContinuousBinningMetadata,
+);
+
 // ---------------------------------------------------------------------------
 // Joint multi-output trainer + predictor handle (v0.10.1)
 // ---------------------------------------------------------------------------
@@ -177,13 +185,7 @@ pub(crate) fn train_joint_multi_label_ranker(
     ranking_sigma: f32,
     lambdarank_truncation_level: Option<usize>,
     lambdarank_normalize: bool,
-) -> PyResult<(
-    Vec<u8>,
-    Vec<f32>,
-    usize,
-    usize,
-    NativeContinuousBinningMetadata,
-)> {
+) -> PyResult<JointTrainingBridgeResult> {
     use alloygbm_engine::joint::JointObjective;
 
     if targets_per_output.len() != n_outputs {

@@ -153,10 +153,14 @@ Continuous-feature controls
 
 - ``continuous_binning_strategy: str = "quantile"``
 - ``continuous_binning_max_bins: int = 256``
+- ``quantile_sketch_max_rows: int | None = None`` -- optional positive row cap
+  for deterministic sampled quantile-cut construction. ``None`` keeps exact
+  full-column sorting.
 
 Supports up to 65,535 bins per feature. The default ``quantile`` strategy gives
-more robust handling of skewed continuous features. Use ``linear`` when you want
-equal-width bins for compatibility experiments or lower quantile-preprocessing cost.
+more robust handling of skewed continuous features. Fitted estimators expose
+``feature_quantile_cut_methods_`` with one ``"exact"`` or ``"sketch"`` value
+per feature, and persisted models retain the native cuts and methods.
 
 Categorical support
 -------------------

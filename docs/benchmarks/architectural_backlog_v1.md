@@ -189,10 +189,27 @@ sketches must meet the mean/p99/max error budgets of `0.0025`, `0.0075`, and
 `0.01`, reduce bridge preparation to at most 60% of baseline, and reduce RSS by
 at least 10% and 32 MiB without materially changing held-out quality.
 
+### Approximate quantile sketch candidate
+
+The deterministic sampled implementation was measured on 2026-07-22 from the same host with a
+fresh baseline at `eb8a1d1` (after duplicate row-major bin storage was removed) and candidate
+implementation commit `e39056a`. Both runs used three fresh subprocesses on the 1,000,000 x 16
+fixture; the table reports medians.
+
+| Variant | Fit (s) | Bridge prepare (s) | Incremental peak RSS (MiB) | RMSE |
+| --- | ---: | ---: | ---: | ---: |
+| exact baseline | 0.614722 | 0.085902 | 145.86 | 0.684098 |
+| 65,536-row sketch | 0.550490 | 0.025254 | 81.36 | 0.685505 |
+
+The sketch's mean/p99/max interval rank errors were 0.001132, 0.003974, and 0.004347. Held-out
+RMSE was 1.002x baseline, bridge preparation was 0.294x, total fit was 0.896x, and incremental
+fit RSS fell by 64.50 MiB to 0.558x baseline. Every activation, accuracy, timing, and memory gate
+passed. Exact sorting remains the default unless `quantile_sketch_max_rows` is set.
+
 ## Result
 
-All baseline schema, finite-value, fixture-depth, and deterministic-fixture
-gates passed. SoA histograms, node-level parallelism, and compact predictor nodes have passed their
-production candidate gates; implementation remains open for the other three projects. The independent
-plans in this directory define their code changes, regression tests, commit
-boundaries, and candidate commands.
+All baseline schema, finite-value, fixture-depth, and deterministic-fixture gates passed. SoA
+histograms, node-level parallelism, duplicate bin storage, compact predictor nodes, and approximate
+quantile sketches have passed their production candidate gates. EFB remains open. The independent
+plans in this directory define the code changes, regression tests, commit boundaries, and candidate
+commands.
