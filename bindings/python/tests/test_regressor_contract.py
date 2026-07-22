@@ -374,6 +374,7 @@ class GBMRegressorContractTests(unittest.TestCase):
                         "time_index": None,
                         "continuous_binning_strategy": "quantile",
                         "continuous_binning_max_bins": 256,
+                        "quantile_sketch_max_rows": None,
                         "objective": "squared_error",
                         "leaf_model": "constant",
                         "leaf_solver": "standard",

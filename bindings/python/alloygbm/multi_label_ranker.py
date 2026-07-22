@@ -122,6 +122,14 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
         # Stash kwargs so we can clone the same configuration into every
         # per-label `GBMRanker`.  `_per_label_kwargs` is the canonical store.
         self._per_label_kwargs: dict[str, Any] = dict(kwargs)
+        if "quantile_sketch_max_rows" in self._per_label_kwargs:
+            value = self._per_label_kwargs["quantile_sketch_max_rows"]
+            normalized = int(value) if value is not None else None
+            if normalized is not None and normalized <= 0:
+                raise ValueError(
+                    "quantile_sketch_max_rows must be greater than 0 when set"
+                )
+            self._per_label_kwargs["quantile_sketch_max_rows"] = normalized
         self._is_fitted = False
         self._sub_rankers: list[GBMRanker] = []
         # Joint-mode state (populated only when multi_label_mode == "joint")
@@ -136,6 +144,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
         self._continuous_feature_linear_rank_flags = None
         self._continuous_feature_sorted_values = None
         self._continuous_feature_quantile_cuts = None
+        self.feature_quantile_cut_methods_: list[str] | None = None
         self.ranking_labels_: list[str] | None = None
         self.n_labels_: int | None = None
         self.rounds_completed_: list[int] | int | None = None
@@ -157,6 +166,11 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
                 self._per_label_kwargs.get("max_bin", 256),
             )
         )
+
+    @property
+    def quantile_sketch_max_rows(self) -> int | None:
+        value = self._per_label_kwargs.get("quantile_sketch_max_rows")
+        return int(value) if value is not None else None
 
     @property
     def _n_features_in(self) -> int:
@@ -217,6 +231,14 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
             self.ranking_labels = (
                 [str(label) for label in v] if v is not None else None  # type: ignore[union-attr]
             )
+        if "quantile_sketch_max_rows" in params:
+            value = params["quantile_sketch_max_rows"]
+            normalized = int(value) if value is not None else None
+            if normalized is not None and normalized <= 0:
+                raise ValueError(
+                    "quantile_sketch_max_rows must be greater than 0 when set"
+                )
+            params["quantile_sketch_max_rows"] = normalized
         self._per_label_kwargs.update(params)
         return self
 
@@ -332,6 +354,12 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
 
         self.ranking_labels_ = names
         self.n_labels_ = n_labels
+        self.feature_quantile_cut_methods_ = (
+            list(self._sub_rankers[0].feature_quantile_cut_methods_)
+            if self._sub_rankers
+            and self._sub_rankers[0].feature_quantile_cut_methods_ is not None
+            else None
+        )
         self._is_fitted = True
         return self
 
@@ -357,6 +385,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
         "max_bin",
         "continuous_binning_strategy",
         "continuous_binning_max_bins",
+        "quantile_sketch_max_rows",
         # v0.10.2 Phase 1: small/medium joint-trainer features.
         "min_split_gain",
         "row_subsample",
@@ -817,6 +846,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
             # only affects continuous features.
             continuous_binning_strategy=self.continuous_binning_strategy,
             continuous_binning_max_bins=self.continuous_binning_max_bins,
+            quantile_sketch_max_rows=self.quantile_sketch_max_rows,
             # v0.10.3: joint boosting_mode (GOSS / DART).
             boosting_mode=str(kw.get("boosting_mode", "standard")),
             goss_top_rate=(
@@ -916,6 +946,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
                 self._continuous_feature_quantile_cuts = self._derive_continuous_feature_quantile_cuts(
                     x_arr, self.continuous_binning_max_bins
                 )
+                self.feature_quantile_cut_methods_ = ["exact"] * feature_count
 
         self.ranking_labels_ = names
         self.n_labels_ = n_labels
@@ -1159,6 +1190,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
                     "continuous_feature_maxs": getattr(self, "_continuous_feature_maxs", None),
                     "continuous_feature_sorted_values": getattr(self, "_continuous_feature_sorted_values", None),
                     "continuous_feature_quantile_cuts": getattr(self, "_continuous_feature_quantile_cuts", None),
+                    "feature_quantile_cut_methods": getattr(self, "feature_quantile_cut_methods_", None),
                     "continuous_feature_linear_rank_flags": getattr(self, "_continuous_feature_linear_rank_flags", None),
                     "per_label_kwargs": self._per_label_kwargs,
                     "ranking_objective": self.ranking_objective,
@@ -1265,6 +1297,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
                 inst._continuous_feature_maxs = metadata.get("continuous_feature_maxs")
                 inst._continuous_feature_sorted_values = metadata.get("continuous_feature_sorted_values")
                 inst._continuous_feature_quantile_cuts = metadata.get("continuous_feature_quantile_cuts")
+                inst.feature_quantile_cut_methods_ = metadata.get("feature_quantile_cut_methods")
                 inst._continuous_feature_linear_rank_flags = metadata.get("continuous_feature_linear_rank_flags")
                 inst._per_label_kwargs = metadata.get("per_label_kwargs", {})
                 inst.ranking_objective = metadata.get("ranking_objective", "rank:ndcg")

@@ -1221,10 +1221,16 @@ pub(crate) fn prepare_training_matrices_from_dense_values(
     group_id: Option<Vec<u32>>,
     strategy: ContinuousBinningStrategy,
     max_bins: usize,
+    quantile_sketch_max_rows: Option<usize>,
     need_dense_values: bool,
     binned_layout: BinnedLayout,
 ) -> Result<PreparedTrainingMatrices, EngineError> {
     validate_continuous_binning_max_bins(max_bins)?;
+    if quantile_sketch_max_rows == Some(0) {
+        return Err(EngineError::ContractViolation(
+            "quantile_sketch_max_rows must be greater than 0 when set".to_string(),
+        ));
+    }
     let dense_view = DenseMatrixView::new(row_count, feature_count, values)?;
     if targets.len() != dense_view.row_count {
         return Err(EngineError::ContractViolation(format!(
@@ -1275,6 +1281,7 @@ pub(crate) fn prepare_training_matrices_from_dense_values(
                             None
                         },
                         feature_quantile_cuts: None,
+                        feature_quantile_cut_methods: None,
                         feature_linear_rank_flags: Some(rank_flags),
                     }
                 } else {
@@ -1284,6 +1291,7 @@ pub(crate) fn prepare_training_matrices_from_dense_values(
                         feature_maxs: Some(feature_maxs),
                         feature_sorted_values: None,
                         feature_quantile_cuts: None,
+                        feature_quantile_cut_methods: None,
                         feature_linear_rank_flags: None,
                     }
                 }
@@ -1298,6 +1306,7 @@ pub(crate) fn prepare_training_matrices_from_dense_values(
                     feature_count,
                 )),
                 feature_quantile_cuts: None,
+                feature_quantile_cut_methods: None,
                 feature_linear_rank_flags: None,
             },
             ContinuousBinningStrategy::Quantile => ContinuousBinningMetadataInternal {
@@ -1311,6 +1320,7 @@ pub(crate) fn prepare_training_matrices_from_dense_values(
                     feature_count,
                     max_bins,
                 )),
+                feature_quantile_cut_methods: Some(vec!["exact".to_string(); feature_count]),
                 feature_linear_rank_flags: None,
             },
         };

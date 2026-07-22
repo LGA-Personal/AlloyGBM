@@ -839,6 +839,9 @@ class _QuantizationMixin:
         self._continuous_feature_quantile_cuts = getattr(
             metadata, "feature_quantile_cuts", None
         )
+        self.feature_quantile_cut_methods_ = getattr(
+            metadata, "feature_quantile_cut_methods", None
+        )
         self._continuous_feature_linear_rank_flags = getattr(
             metadata, "feature_linear_rank_flags", None
         )

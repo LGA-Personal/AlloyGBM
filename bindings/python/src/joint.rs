@@ -97,6 +97,7 @@ impl JointPredictorHandle {
     max_cat_threshold=0_usize,
     continuous_binning_strategy="quantile".to_string(),
     continuous_binning_max_bins=256_usize,
+    quantile_sketch_max_rows=None::<usize>,
     boosting_mode="standard".to_string(),
     goss_top_rate=None::<f32>,
     goss_other_rate=None::<f32>,
@@ -148,6 +149,7 @@ pub(crate) fn train_joint_multi_label_ranker(
     max_cat_threshold: usize,
     continuous_binning_strategy: String,
     continuous_binning_max_bins: usize,
+    quantile_sketch_max_rows: Option<usize>,
     boosting_mode: String,
     goss_top_rate: Option<f32>,
     goss_other_rate: Option<f32>,
@@ -253,6 +255,7 @@ pub(crate) fn train_joint_multi_label_ranker(
         group_id.clone(),
         parsed_binning_strategy,
         continuous_binning_max_bins,
+        quantile_sketch_max_rows,
         false,
         BinnedLayout::Dual,
     )

@@ -49,6 +49,7 @@ fn train_regression_artifact_impl(
         store_node_debug_stats,
         ContinuousBinningStrategy::Linear,
         MAX_CONTINUOUS_QUANTIZED_BIN_U8 as usize + 1,
+        None,
         "squared_error",
         1.0,   // ranking_sigma
         None,  // lambdarank_truncation_level
@@ -131,6 +132,7 @@ fn dense_training_preparation_uses_column_major_u8_bins() {
         None,
         ContinuousBinningStrategy::Quantile,
         64,
+        None,
         false,
         BinnedLayout::ColumnMajor,
     )
@@ -152,6 +154,7 @@ fn dense_training_preparation_uses_column_major_u16_bins() {
         None,
         ContinuousBinningStrategy::Quantile,
         512,
+        None,
         false,
         BinnedLayout::ColumnMajor,
     )
@@ -189,6 +192,7 @@ fn direct_column_major_quantization_matches_dual_layout() {
                 None,
                 ContinuousBinningStrategy::Quantile,
                 max_bins,
+                None,
                 false,
                 layout,
             )
@@ -232,6 +236,7 @@ fn quantile_upper_tail_does_not_collide_with_missing_bin() {
             None,
             ContinuousBinningStrategy::Quantile,
             256,
+            None,
             false,
             layout,
         )
@@ -550,6 +555,7 @@ fn train_bridge_pre_target_categorical_encoding_matches_engine_residualized_targ
         false,
         ContinuousBinningStrategy::Linear,
         MAX_CONTINUOUS_QUANTIZED_BIN_U8 as usize + 1,
+        None,
         "squared_error",
         1.0,
         None,
