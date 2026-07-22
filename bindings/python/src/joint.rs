@@ -8,9 +8,18 @@ use crate::params::{
     parse_boosting_mode, parse_dro_config, parse_factor_exposure_matrix, parse_leaf_solver,
     parse_morph_config_from_pydict, parse_neutralization_config,
 };
+use crate::pyclasses::NativeContinuousBinningMetadata;
 use crate::quantization::{
     parse_continuous_binning_strategy, prepare_training_matrices_from_dense_values,
 };
+
+type JointTrainingBridgeResult = (
+    Vec<u8>,
+    Vec<f32>,
+    usize,
+    usize,
+    NativeContinuousBinningMetadata,
+);
 
 // ---------------------------------------------------------------------------
 // Joint multi-output trainer + predictor handle (v0.10.1)
@@ -97,6 +106,7 @@ impl JointPredictorHandle {
     max_cat_threshold=0_usize,
     continuous_binning_strategy="quantile".to_string(),
     continuous_binning_max_bins=256_usize,
+    quantile_sketch_max_rows=None::<usize>,
     boosting_mode="standard".to_string(),
     goss_top_rate=None::<f32>,
     goss_other_rate=None::<f32>,
@@ -148,6 +158,7 @@ pub(crate) fn train_joint_multi_label_ranker(
     max_cat_threshold: usize,
     continuous_binning_strategy: String,
     continuous_binning_max_bins: usize,
+    quantile_sketch_max_rows: Option<usize>,
     boosting_mode: String,
     goss_top_rate: Option<f32>,
     goss_other_rate: Option<f32>,
@@ -174,7 +185,7 @@ pub(crate) fn train_joint_multi_label_ranker(
     ranking_sigma: f32,
     lambdarank_truncation_level: Option<usize>,
     lambdarank_normalize: bool,
-) -> PyResult<(Vec<u8>, Vec<f32>, usize, usize)> {
+) -> PyResult<JointTrainingBridgeResult> {
     use alloygbm_engine::joint::JointObjective;
 
     if targets_per_output.len() != n_outputs {
@@ -253,6 +264,7 @@ pub(crate) fn train_joint_multi_label_ranker(
         group_id.clone(),
         parsed_binning_strategy,
         continuous_binning_max_bins,
+        quantile_sketch_max_rows,
         false,
         BinnedLayout::Dual,
     )
@@ -583,5 +595,6 @@ pub(crate) fn train_joint_multi_label_ranker(
         summary.baselines,
         feature_count,
         summary.rounds_completed,
+        prepared.metadata.into(),
     ))
 }

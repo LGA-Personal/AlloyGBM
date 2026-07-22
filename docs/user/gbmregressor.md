@@ -167,10 +167,16 @@ call `fit(..., eval_set=(X_valid, y_valid))`.
   - Upper bound on bins used for continuous quantization. Supports up to 65,535
     bins. Higher bin counts may improve accuracy on high-cardinality features
     at the cost of additional memory.
+- `quantile_sketch_max_rows: int | None = None`
+  - Optional positive row cap for quantile-cut construction. When a fit has
+    more rows than the cap, AlloyGBM derives cuts from a deterministic,
+    evenly distributed row sample. `None` preserves exact full-column sorting.
 
 The default `quantile` strategy is more robust on skewed continuous feature
 distributions. Use `linear` when you want equal-width bins for compatibility
-experiments or lower quantile-preprocessing cost.
+experiments. After fitting, `feature_quantile_cut_methods_` reports `"exact"`
+or `"sketch"` for each feature; persisted models retain the selected cuts and
+methods.
 
 ## Categorical Support
 

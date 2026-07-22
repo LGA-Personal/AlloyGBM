@@ -74,12 +74,16 @@ features, and requires a measurable training or memory payoff before broader spa
 
 ### Approximate quantile sketches
 
-**Status: implementation planned.** The NumPy sorted-values path and quantile binning default already
-cover the current correctness and ordinary-size performance need. A sketch is justified only for
-very large matrices, where it needs an explicit error budget, deterministic merge behavior, a
-fallback threshold, and comparison against the exact-sort baseline. The
-[quantile-sketch plan](../benchmarks/architectural_backlog_quantile_sketches_implementation.md)
-defines those semantics and keeps exact quantiles as the small-matrix/default fallback.
+**Status: implemented.** `quantile_sketch_max_rows` opts large quantile-binned fits into a
+deterministic, evenly distributed row sample while `None` and row counts at or below the cap retain
+exact full-column sorting. Native cut metadata is shared by training, prediction, joint
+multi-output fits, and persistence; `feature_quantile_cut_methods_` reports activation per feature.
+The implementation also removes the dense bridge's redundant NumPy-to-bytes matrix copy. On the
+fresh post-duplicate-storage baseline, the full candidate held mean/p99/max rank error to
+0.00113/0.00397/0.00435 and RMSE to 1.002x, reduced bridge preparation to 0.294x, total fit to
+0.896x, and incremental fit RSS from 145.86 MiB to 81.36 MiB. See the
+[candidate evidence](../benchmarks/architectural_backlog_v1.md#approximate-quantile-sketch-candidate)
+and [completed plan](../benchmarks/architectural_backlog_quantile_sketches_implementation.md).
 
 ## What Shipped In v0.12.10
 

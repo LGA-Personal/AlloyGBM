@@ -48,6 +48,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         deterministic: bool = True,
         continuous_binning_strategy: str = "quantile",
         continuous_binning_max_bins: int = 256,
+        quantile_sketch_max_rows: int | None = None,
         categorical_feature_index: int | None = None,
         categorical_feature_indices: list[int] | None = None,
         training_policy: str = "auto",
@@ -156,6 +157,13 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                 "continuous_binning_max_bins must be in "
                 f"[{_MIN_CONTINUOUS_QUANTIZED_BINS}, {_MAX_CONTINUOUS_QUANTIZED_BIN + 1}]"
             )
+        sketch_max_rows = (
+            int(quantile_sketch_max_rows)
+            if quantile_sketch_max_rows is not None
+            else None
+        )
+        if sketch_max_rows is not None and sketch_max_rows <= 0:
+            raise ValueError("quantile_sketch_max_rows must be greater than 0 when set")
         if monotone_constraints is not None:
             if isinstance(monotone_constraints, dict):
                 for v in monotone_constraints.values():
@@ -389,6 +397,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         self.deterministic = bool(deterministic)
         self.continuous_binning_strategy = str(continuous_binning_strategy)
         self.continuous_binning_max_bins = max_bins
+        self.quantile_sketch_max_rows = sketch_max_rows
         self.categorical_feature_index = (
             int(categorical_feature_index)
             if categorical_feature_index is not None
@@ -464,6 +473,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         self._continuous_feature_maxs: list[float] | None = None
         self._continuous_feature_sorted_values: list[list[float]] | None = None
         self._continuous_feature_quantile_cuts: list[list[float]] | None = None
+        self.feature_quantile_cut_methods_: list[str] | None = None
         self._continuous_feature_linear_rank_flags: list[bool] | None = None
         self.feature_names_in_: list[str] | None = None
         self._native_cat_mappings_: dict[int, dict[str, int]] | None = None
@@ -494,6 +504,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             f"deterministic={self.deterministic}, "
             f"continuous_binning_strategy='{self.continuous_binning_strategy}', "
             f"continuous_binning_max_bins={self.continuous_binning_max_bins}, "
+            f"quantile_sketch_max_rows={self.quantile_sketch_max_rows}, "
             f"categorical_feature_index={self.categorical_feature_index}, "
             f"categorical_feature_indices={self.categorical_feature_indices}, "
             f"training_policy='{self.training_policy}', "
@@ -558,6 +569,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             "deterministic": self.deterministic,
             "continuous_binning_strategy": self.continuous_binning_strategy,
             "continuous_binning_max_bins": self.continuous_binning_max_bins,
+            "quantile_sketch_max_rows": self.quantile_sketch_max_rows,
             "categorical_feature_index": self.categorical_feature_index,
             "categorical_feature_indices": self.categorical_feature_indices,
             "training_policy": self.training_policy,
@@ -621,6 +633,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             "deterministic",
             "continuous_binning_strategy",
             "continuous_binning_max_bins",
+            "quantile_sketch_max_rows",
             "categorical_feature_index",
             "categorical_feature_indices",
             "training_policy",
@@ -842,6 +855,20 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             if max_bins != self.continuous_binning_max_bins and self._is_fitted:
                 self._reset_fitted_state()
             self.continuous_binning_max_bins = max_bins
+
+        if "quantile_sketch_max_rows" in params:
+            sketch_max_rows = (
+                int(params["quantile_sketch_max_rows"])
+                if params["quantile_sketch_max_rows"] is not None
+                else None
+            )
+            if sketch_max_rows is not None and sketch_max_rows <= 0:
+                raise ValueError(
+                    "quantile_sketch_max_rows must be greater than 0 when set"
+                )
+            if sketch_max_rows != self.quantile_sketch_max_rows and self._is_fitted:
+                self._reset_fitted_state()
+            self.quantile_sketch_max_rows = sketch_max_rows
 
         if "categorical_feature_index" in params:
             if params["categorical_feature_index"] is None:
@@ -1480,7 +1507,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         validation_X: object | None = None
         validation_targets: list[float] | None = None
         validation_dense_payload: tuple[list[float], int, int] | None = None
-        validation_dense_bytes_payload: tuple[bytes, int, int] | None = None
+        validation_dense_bytes_payload: tuple[object, int, int] | None = None
         validation_rows: list[list[float]] | None = None
         validation_categorical_values: list[str] | None = None
         validation_categorical_values_list: list[list[str]] | None = None
@@ -1681,6 +1708,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                     time_index=validated_time_index,
                     continuous_binning_strategy=self.continuous_binning_strategy,
                     continuous_binning_max_bins=self.continuous_binning_max_bins,
+                    quantile_sketch_max_rows=self.quantile_sketch_max_rows,
                     objective=self._objective_name(),
                     monotone_constraints=self._resolve_monotone_constraints(feature_count),
                     feature_weights=self._resolve_feature_weights(feature_count),
@@ -1837,6 +1865,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                 time_index=validated_time_index,
                 continuous_binning_strategy=self.continuous_binning_strategy,
                 continuous_binning_max_bins=self.continuous_binning_max_bins,
+                quantile_sketch_max_rows=self.quantile_sketch_max_rows,
                 objective=self._objective_name(),
                 monotone_constraints=self._resolve_monotone_constraints(feature_count),
                 feature_weights=self._resolve_feature_weights(feature_count),
@@ -1942,6 +1971,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                 time_index=validated_time_index,
                 continuous_binning_strategy=self.continuous_binning_strategy,
                 continuous_binning_max_bins=self.continuous_binning_max_bins,
+                quantile_sketch_max_rows=self.quantile_sketch_max_rows,
                 objective=self._objective_name(),
                 monotone_constraints=self._resolve_monotone_constraints(feature_count),
                 feature_weights=self._resolve_feature_weights(feature_count),
@@ -2361,6 +2391,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                 time_index=time_index,
                 continuous_binning_strategy=self.continuous_binning_strategy,
                 continuous_binning_max_bins=self.continuous_binning_max_bins,
+                quantile_sketch_max_rows=self.quantile_sketch_max_rows,
                 objective=self._objective_name(),
                 leaf_model=self.leaf_model,
                 leaf_solver=self.leaf_solver,
@@ -2438,6 +2469,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                 time_index=time_index,
                 continuous_binning_strategy=self.continuous_binning_strategy,
                 continuous_binning_max_bins=self.continuous_binning_max_bins,
+                quantile_sketch_max_rows=self.quantile_sketch_max_rows,
                 objective=self._objective_name(),
                 leaf_model=self.leaf_model,
                 leaf_solver=self.leaf_solver,

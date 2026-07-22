@@ -154,6 +154,12 @@ fn quantize_rank_value_wide(value: f32, sorted_values: &[f32], max_data_bin: u16
     round_half_away_from_zero(scaled).clamp(0, max_data_bin as i32) as u16
 }
 
+#[inline]
+fn quantize_quantile_value(value: f32, cuts: &[f32], max_data_bin: u16) -> u16 {
+    cuts.partition_point(|probe| *probe <= value)
+        .min(usize::from(max_data_bin)) as u16
+}
+
 /// Parameterized linear quantize for predict-time: supports arbitrary max_data_bin.
 ///
 /// v0.9.0: NaN inputs are passed through as `f32::NAN` instead of
@@ -307,61 +313,87 @@ fn derive_dense_sorted_feature_values(
         .collect()
 }
 
+fn quantile_cuts_from_sorted_values(sorted_values: &[f32], max_bins: usize) -> Vec<f32> {
+    if sorted_values.len() <= 1 {
+        return Vec::new();
+    }
+    let bin_count = max_bins.min(sorted_values.len());
+    let mut cuts = Vec::with_capacity(bin_count.saturating_sub(1));
+    for quantile_index in 1..bin_count {
+        let rank = ((quantile_index as u128 * sorted_values.len() as u128) / bin_count as u128)
+            .min((sorted_values.len() - 1) as u128) as usize;
+        let cut_value = sorted_values[rank];
+        if cuts.last().copied().is_some_and(|last| cut_value <= last) {
+            continue;
+        }
+        cuts.push(cut_value);
+    }
+    cuts
+}
+
+fn evenly_spaced_row_index(sample_index: usize, sample_count: usize, row_count: usize) -> usize {
+    if sample_count <= 1 {
+        return row_count / 2;
+    }
+    ((sample_index as u128 * row_count.saturating_sub(1) as u128)
+        / sample_count.saturating_sub(1) as u128) as usize
+}
+
 fn derive_dense_feature_quantile_cuts(
     values: &[f32],
     row_count: usize,
     feature_count: usize,
     max_bins: usize,
-) -> Vec<Vec<f32>> {
+    sketch_max_rows: Option<usize>,
+) -> (Vec<Vec<f32>>, Vec<String>) {
+    let sampled_row_count = sketch_max_rows.filter(|max_rows| row_count > *max_rows);
+    let selected_row_count = sampled_row_count.unwrap_or(row_count);
     let derive_feature_cuts = |feature_index: usize| {
-        let mut column = Vec::with_capacity(row_count);
-        for row_index in 0..row_count {
+        let mut column = Vec::with_capacity(selected_row_count);
+        for selected_index in 0..selected_row_count {
+            let row_index = if sampled_row_count.is_some() {
+                evenly_spaced_row_index(selected_index, selected_row_count, row_count)
+            } else {
+                selected_index
+            };
             let value = values[row_index * feature_count + feature_index];
             if !value.is_nan() {
                 column.push(value);
             }
         }
         column.sort_unstable_by(f32::total_cmp);
-        if column.len() <= 1 {
-            return Vec::new();
-        }
-        let bin_count = max_bins.min(column.len());
-        let mut cuts = Vec::with_capacity(bin_count.saturating_sub(1));
-        for quantile_index in 1..bin_count {
-            let mut rank = (quantile_index * column.len()) / bin_count;
-            if rank >= column.len() {
-                rank = column.len() - 1;
-            }
-            let cut_value = column[rank];
-            if cuts.last().copied().is_some_and(|last| cut_value <= last) {
-                continue;
-            }
-            cuts.push(cut_value);
-        }
-        cuts
+        quantile_cuts_from_sorted_values(&column, max_bins)
     };
 
     const SORT_SCRATCH_BUDGET_BYTES: usize = 20 * 1024 * 1024;
-    let bytes_per_column = row_count.saturating_mul(size_of::<f32>()).max(1);
+    let bytes_per_column = selected_row_count.saturating_mul(size_of::<f32>()).max(1);
     let columns_per_batch = (SORT_SCRATCH_BUDGET_BYTES / bytes_per_column).max(1);
-    if columns_per_batch >= rayon::current_num_threads() || columns_per_batch >= feature_count {
-        return (0..feature_count)
+    let cuts = if columns_per_batch >= rayon::current_num_threads()
+        || columns_per_batch >= feature_count
+    {
+        (0..feature_count)
             .into_par_iter()
             .map(derive_feature_cuts)
-            .collect();
-    }
-
-    let mut cuts = Vec::with_capacity(feature_count);
-    for start in (0..feature_count).step_by(columns_per_batch) {
-        let end = (start + columns_per_batch).min(feature_count);
-        cuts.extend(
-            (start..end)
-                .into_par_iter()
-                .map(&derive_feature_cuts)
-                .collect::<Vec<_>>(),
-        );
-    }
-    cuts
+            .collect()
+    } else {
+        let mut cuts = Vec::with_capacity(feature_count);
+        for start in (0..feature_count).step_by(columns_per_batch) {
+            let end = (start + columns_per_batch).min(feature_count);
+            cuts.extend(
+                (start..end)
+                    .into_par_iter()
+                    .map(&derive_feature_cuts)
+                    .collect::<Vec<_>>(),
+            );
+        }
+        cuts
+    };
+    let method = if sampled_row_count.is_some() {
+        "sketch"
+    } else {
+        "exact"
+    };
+    (cuts, vec![method.to_string(); feature_count])
 }
 
 fn derive_linear_tail_rank_plan(
@@ -589,6 +621,7 @@ pub(crate) fn prepare_validation_matrices_from_dense_values(
             strategy,
             training_metadata,
             need_dense_values,
+            (max_bins - 2) as u8,
         )?;
         let dataset = TrainingDataset {
             matrix: if need_dense_values {
@@ -624,6 +657,7 @@ fn quantize_dense_values_with_metadata(
     strategy: ContinuousBinningStrategy,
     metadata: &ContinuousBinningMetadataInternal,
     need_dense_values: bool,
+    max_data_bin: u8,
 ) -> Result<(Vec<f32>, Vec<u8>, u16), EngineError> {
     // Validate metadata upfront so parallel closures don't need to return Result.
     let mins_ref = match strategy {
@@ -712,8 +746,11 @@ fn quantize_dense_values_with_metadata(
                                 }
                                 ContinuousBinningStrategy::Quantile => {
                                     let cuts = cuts_ref.expect("cuts validated");
-                                    cuts[feature_index].partition_point(|probe| *probe <= value)
-                                        as u8
+                                    quantize_quantile_value(
+                                        value,
+                                        &cuts[feature_index],
+                                        u16::from(max_data_bin),
+                                    ) as u8
                                 }
                             }
                         };
@@ -762,8 +799,11 @@ fn quantize_dense_values_with_metadata(
                                 }
                                 ContinuousBinningStrategy::Quantile => {
                                     let cuts = cuts_ref.expect("cuts validated");
-                                    cuts[feature_index].partition_point(|probe| *probe <= value)
-                                        as u8
+                                    quantize_quantile_value(
+                                        value,
+                                        &cuts[feature_index],
+                                        u16::from(max_data_bin),
+                                    ) as u8
                                 }
                             }
                         };
@@ -886,8 +926,11 @@ fn quantize_dense_values_with_metadata_wide(
                                 }
                                 ContinuousBinningStrategy::Quantile => {
                                     let cuts = cuts_ref.expect("cuts validated");
-                                    cuts[feature_index].partition_point(|probe| *probe <= value)
-                                        as u16
+                                    quantize_quantile_value(
+                                        value,
+                                        &cuts[feature_index],
+                                        max_data_bin,
+                                    )
                                 }
                             }
                         };
@@ -945,8 +988,11 @@ fn quantize_dense_values_with_metadata_wide(
                                 }
                                 ContinuousBinningStrategy::Quantile => {
                                     let cuts = cuts_ref.expect("cuts validated");
-                                    cuts[feature_index].partition_point(|probe| *probe <= value)
-                                        as u16
+                                    quantize_quantile_value(
+                                        value,
+                                        &cuts[feature_index],
+                                        max_data_bin,
+                                    )
                                 }
                             }
                         };
@@ -968,6 +1014,7 @@ fn quantize_dense_values_to_column_major(
     feature_count: usize,
     strategy: ContinuousBinningStrategy,
     metadata: &ContinuousBinningMetadataInternal,
+    max_data_bin: u8,
 ) -> Result<(Vec<f32>, Vec<u8>, u16), EngineError> {
     let mins_ref = match strategy {
         ContinuousBinningStrategy::Linear => {
@@ -1026,7 +1073,8 @@ fn quantize_dense_values_to_column_major(
                 }
                 ContinuousBinningStrategy::Quantile => {
                     let cuts = cuts_ref.expect("cuts validated");
-                    cuts[feature_index].partition_point(|probe| *probe <= value) as u8
+                    quantize_quantile_value(value, &cuts[feature_index], u16::from(max_data_bin))
+                        as u8
                 }
             }
         }
@@ -1045,7 +1093,7 @@ fn quantize_dense_values_to_column_major(
                     let bin = if value.is_nan() {
                         MISSING_BIN_U8
                     } else {
-                        feature_cuts.partition_point(|probe| *probe <= value) as u8
+                        quantize_quantile_value(value, feature_cuts, u16::from(max_data_bin)) as u8
                     };
                     local_max = local_max.max(bin);
                     *destination = bin;
@@ -1143,7 +1191,7 @@ fn quantize_dense_values_to_column_major_wide(
                 }
                 ContinuousBinningStrategy::Quantile => {
                     let cuts = cuts_ref.expect("cuts validated");
-                    cuts[feature_index].partition_point(|probe| *probe <= value) as u16
+                    quantize_quantile_value(value, &cuts[feature_index], max_data_bin)
                 }
             }
         }
@@ -1162,7 +1210,7 @@ fn quantize_dense_values_to_column_major_wide(
                     let bin = if value.is_nan() {
                         nan_bin
                     } else {
-                        feature_cuts.partition_point(|probe| *probe <= value) as u16
+                        quantize_quantile_value(value, feature_cuts, max_data_bin)
                     };
                     local_max = local_max.max(bin);
                     *destination = bin;
@@ -1199,10 +1247,16 @@ pub(crate) fn prepare_training_matrices_from_dense_values(
     group_id: Option<Vec<u32>>,
     strategy: ContinuousBinningStrategy,
     max_bins: usize,
+    quantile_sketch_max_rows: Option<usize>,
     need_dense_values: bool,
     binned_layout: BinnedLayout,
 ) -> Result<PreparedTrainingMatrices, EngineError> {
     validate_continuous_binning_max_bins(max_bins)?;
+    if quantile_sketch_max_rows == Some(0) {
+        return Err(EngineError::ContractViolation(
+            "quantile_sketch_max_rows must be greater than 0 when set".to_string(),
+        ));
+    }
     let dense_view = DenseMatrixView::new(row_count, feature_count, values)?;
     if targets.len() != dense_view.row_count {
         return Err(EngineError::ContractViolation(format!(
@@ -1253,6 +1307,7 @@ pub(crate) fn prepare_training_matrices_from_dense_values(
                             None
                         },
                         feature_quantile_cuts: None,
+                        feature_quantile_cut_methods: None,
                         feature_linear_rank_flags: Some(rank_flags),
                     }
                 } else {
@@ -1262,6 +1317,7 @@ pub(crate) fn prepare_training_matrices_from_dense_values(
                         feature_maxs: Some(feature_maxs),
                         feature_sorted_values: None,
                         feature_quantile_cuts: None,
+                        feature_quantile_cut_methods: None,
                         feature_linear_rank_flags: None,
                     }
                 }
@@ -1276,21 +1332,27 @@ pub(crate) fn prepare_training_matrices_from_dense_values(
                     feature_count,
                 )),
                 feature_quantile_cuts: None,
+                feature_quantile_cut_methods: None,
                 feature_linear_rank_flags: None,
             },
-            ContinuousBinningStrategy::Quantile => ContinuousBinningMetadataInternal {
-                uses_continuous_binning: true,
-                feature_mins: None,
-                feature_maxs: None,
-                feature_sorted_values: None,
-                feature_quantile_cuts: Some(derive_dense_feature_quantile_cuts(
+            ContinuousBinningStrategy::Quantile => {
+                let (cuts, methods) = derive_dense_feature_quantile_cuts(
                     values,
                     row_count,
                     feature_count,
                     max_bins,
-                )),
-                feature_linear_rank_flags: None,
-            },
+                    quantile_sketch_max_rows,
+                );
+                ContinuousBinningMetadataInternal {
+                    uses_continuous_binning: true,
+                    feature_mins: None,
+                    feature_maxs: None,
+                    feature_sorted_values: None,
+                    feature_quantile_cuts: Some(cuts),
+                    feature_quantile_cut_methods: Some(methods),
+                    feature_linear_rank_flags: None,
+                }
+            }
         };
         (meta, wide_bins)
     };
@@ -1428,6 +1490,7 @@ pub(crate) fn prepare_training_matrices_from_dense_values(
                 feature_count,
                 strategy,
                 &metadata,
+                (max_bins - 2) as u8,
             )?
         } else {
             quantize_dense_values_with_metadata(
@@ -1437,6 +1500,7 @@ pub(crate) fn prepare_training_matrices_from_dense_values(
                 strategy,
                 &metadata,
                 need_dense_values,
+                (max_bins - 2) as u8,
             )?
         };
         let dataset = TrainingDataset {

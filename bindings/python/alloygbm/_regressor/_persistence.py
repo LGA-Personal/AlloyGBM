@@ -25,6 +25,7 @@ class _PersistenceMixin:
         self._continuous_feature_maxs = None
         self._continuous_feature_sorted_values = None
         self._continuous_feature_quantile_cuts = None
+        self.feature_quantile_cut_methods_ = None
         self._continuous_feature_linear_rank_flags = None
         self.feature_names_in_ = None
         self.best_iteration_ = None
@@ -90,6 +91,7 @@ class _PersistenceMixin:
             "continuous_feature_maxs": self._continuous_feature_maxs,
             "continuous_feature_sorted_values": self._continuous_feature_sorted_values,
             "continuous_feature_quantile_cuts": self._continuous_feature_quantile_cuts,
+            "feature_quantile_cut_methods": self.feature_quantile_cut_methods_,
             "continuous_feature_linear_rank_flags": self._continuous_feature_linear_rank_flags,
             "best_iteration": self.best_iteration_,
             "best_score": self.best_score_,
@@ -169,6 +171,9 @@ class _PersistenceMixin:
         )
         model._continuous_feature_quantile_cuts = metadata.get(
             "continuous_feature_quantile_cuts"
+        )
+        model.feature_quantile_cut_methods_ = metadata.get(
+            "feature_quantile_cut_methods"
         )
         model._continuous_feature_linear_rank_flags = metadata.get(
             "continuous_feature_linear_rank_flags"

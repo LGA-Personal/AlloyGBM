@@ -33,6 +33,7 @@ pub(crate) struct ContinuousBinningMetadataInternal {
     pub(crate) feature_maxs: Option<Vec<f32>>,
     pub(crate) feature_sorted_values: Option<Vec<Vec<f32>>>,
     pub(crate) feature_quantile_cuts: Option<Vec<Vec<f32>>>,
+    pub(crate) feature_quantile_cut_methods: Option<Vec<String>>,
     pub(crate) feature_linear_rank_flags: Option<Vec<bool>>,
 }
 
@@ -44,6 +45,7 @@ impl ContinuousBinningMetadataInternal {
             feature_maxs: None,
             feature_sorted_values: None,
             feature_quantile_cuts: None,
+            feature_quantile_cut_methods: None,
             feature_linear_rank_flags: None,
         }
     }
@@ -63,6 +65,8 @@ pub(crate) struct NativeContinuousBinningMetadata {
     #[pyo3(get)]
     feature_quantile_cuts: Option<Vec<Vec<f32>>>,
     #[pyo3(get)]
+    feature_quantile_cut_methods: Option<Vec<String>>,
+    #[pyo3(get)]
     feature_linear_rank_flags: Option<Vec<bool>>,
 }
 
@@ -74,6 +78,7 @@ impl From<ContinuousBinningMetadataInternal> for NativeContinuousBinningMetadata
             feature_maxs: value.feature_maxs,
             feature_sorted_values: value.feature_sorted_values,
             feature_quantile_cuts: value.feature_quantile_cuts,
+            feature_quantile_cut_methods: value.feature_quantile_cut_methods,
             feature_linear_rank_flags: value.feature_linear_rank_flags,
         }
     }

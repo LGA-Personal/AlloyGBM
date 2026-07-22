@@ -217,6 +217,51 @@ def test_joint_mode_save_load_round_trip(tmp_path):
     assert restored.n_labels_ == y.shape[1]
 
 
+def test_joint_quantile_sketch_reuses_native_cuts_and_persists(monkeypatch, tmp_path):
+    X, y, group = _toy_ranking(n_queries=12, items_per_query=5, n_features=3)
+
+    def reject_python_cut_derivation(*_args, **_kwargs):
+        raise AssertionError("joint fit re-derived quantile cuts in Python")
+
+    monkeypatch.setattr(
+        MultiLabelGBMRanker,
+        "_derive_continuous_feature_quantile_cuts",
+        reject_python_cut_derivation,
+    )
+    model = MultiLabelGBMRanker(
+        n_estimators=4,
+        max_depth=3,
+        multi_label_mode="joint",
+        quantile_sketch_max_rows=16,
+    ).fit(X, y, group=group)
+
+    assert model.feature_quantile_cut_methods_ == ["sketch"] * X.shape[1]
+    assert all(len(cuts) <= 15 for cuts in model._continuous_feature_quantile_cuts)
+    predictions = model.predict(X)
+
+    path = tmp_path / "joint-sketch.alloy"
+    model.save_model(path)
+    restored = MultiLabelGBMRanker.load_model(path)
+    assert restored.quantile_sketch_max_rows == 16
+    assert restored.feature_quantile_cut_methods_ == ["sketch"] * X.shape[1]
+    assert (
+        restored._continuous_feature_quantile_cuts
+        == model._continuous_feature_quantile_cuts
+    )
+    np.testing.assert_array_equal(restored.predict(X), predictions)
+
+
+def test_joint_quantile_sketch_limit_at_row_count_stays_exact():
+    X, y, group = _toy_ranking(n_queries=4, items_per_query=5, n_features=3)
+    model = MultiLabelGBMRanker(
+        n_estimators=2,
+        multi_label_mode="joint",
+        quantile_sketch_max_rows=len(X),
+    ).fit(X, y, group=group)
+
+    assert model.feature_quantile_cut_methods_ == ["exact"] * X.shape[1]
+
+
 def test_v1_bundle_still_loads_as_independent(tmp_path):
     """Bundles written before v0.10.1 had no mode byte and always meant
     independent training. The v2 loader must still accept them."""

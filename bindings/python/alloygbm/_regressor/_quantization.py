@@ -167,8 +167,8 @@ class _QuantizationMixin:
     @staticmethod
     def _native_matrix_bytes_payload(
         X: object,
-    ) -> tuple[bytes, int, int] | None:
-        """Return raw f32 bytes of the matrix for zero-copy transfer to Rust."""
+    ) -> tuple[object, int, int] | None:
+        """Return a contiguous f32 matrix for the native dense bridge."""
         try:
             import numpy as np
             candidate = GBMRegressor._native_matrix_fast_path_candidate(X)
@@ -176,7 +176,7 @@ class _QuantizationMixin:
                 return None
             row_count, feature_count = GBMRegressor._native_matrix_shape(candidate)
             arr = np.ascontiguousarray(candidate, dtype=np.float32)
-            return (arr.tobytes(), row_count, feature_count)
+            return (arr, row_count, feature_count)
         except ImportError:
             return None
 
@@ -838,6 +838,9 @@ class _QuantizationMixin:
         )
         self._continuous_feature_quantile_cuts = getattr(
             metadata, "feature_quantile_cuts", None
+        )
+        self.feature_quantile_cut_methods_ = getattr(
+            metadata, "feature_quantile_cut_methods", None
         )
         self._continuous_feature_linear_rank_flags = getattr(
             metadata, "feature_linear_rank_flags", None

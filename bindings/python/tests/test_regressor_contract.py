@@ -374,6 +374,7 @@ class GBMRegressorContractTests(unittest.TestCase):
                         "time_index": None,
                         "continuous_binning_strategy": "quantile",
                         "continuous_binning_max_bins": 256,
+                        "quantile_sketch_max_rows": None,
                         "objective": "squared_error",
                         "leaf_model": "constant",
                         "leaf_solver": "standard",
@@ -766,6 +767,33 @@ class GBMRegressorContractTests(unittest.TestCase):
             )
 
         self.assertEqual(cuts, [[2.0, 3.0, 4.0], [5.0, 7.0], [10.0, 20.0, 30.0]])
+
+    def test_native_dense_payload_reuses_contiguous_float32_array(self) -> None:
+        values = np.arange(12, dtype=np.float32).reshape(4, 3)
+
+        payload = GBMRegressor._native_matrix_bytes_payload(values)
+
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertIs(payload[0], values)
+        self.assertEqual(payload[1:], (4, 3))
+
+    def test_quantile_upper_tail_reserves_missing_bin(self) -> None:
+        cuts = [[float(value) for value in range(1, 256)]]
+
+        dense = GBMRegressor._quantize_dense_values_quantile(
+            [300.0, np.nan],
+            row_count=2,
+            feature_count=1,
+            feature_quantile_cuts=cuts,
+            max_bins=256,
+        )
+        rows = GBMRegressor._quantize_rows_quantile(
+            [[300.0], [np.nan]], cuts, max_bins=256
+        )
+
+        self.assertEqual(dense, [254.0, 255.0])
+        self.assertEqual(rows, [[254.0], [255.0]])
 
     def test_set_params_binning_strategy_after_fit_requires_refit(self) -> None:
         model = GBMRegressor().fit([[1.0, 0.0], [2.0, 0.0]], [1.0, 2.0])

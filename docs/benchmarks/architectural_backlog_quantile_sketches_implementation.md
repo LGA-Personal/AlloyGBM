@@ -24,9 +24,9 @@
 - Test: `bindings/python/src/tests.rs`
 - Test: `bindings/python/tests/test_regressor_contract.py`
 
-- [ ] **Step 1: Add a failing parity test** comparing native and Python quantization for values above the final cut at `max_bins=256`, including NaN.
-- [ ] **Step 2: Make both paths reserve the missing sentinel and clamp ordinary values to the same maximum data bin.**
-- [ ] **Step 3: Run bridge and Python contract tests; commit this correctness fix separately.**
+- [x] **Step 1: Add a failing parity test** comparing native and Python quantization for values above the final cut at `max_bins=256`, including NaN.
+- [x] **Step 2: Make both paths reserve the missing sentinel and clamp ordinary values to the same maximum data bin.**
+- [x] **Step 3: Run bridge and Python contract tests; commit this correctness fix separately.**
 
 Commit: `git commit -am "Align native quantile upper-tail bins"`
 
@@ -44,10 +44,10 @@ Commit: `git commit -am "Align native quantile upper-tail bins"`
 - Adds constructor/get-set/repr parameter `quantile_sketch_max_rows`.
 - Adds fitted `feature_quantile_cut_methods_`, one value of `"exact"` or `"sketch"` per feature.
 
-- [ ] **Step 1: Write failing API round-trip, validation, persistence, and diagnostic tests.**
-- [ ] **Step 2: Thread the optional positive row limit to every quantile-training bridge.**
-- [ ] **Step 3: Keep exact behavior and report `"exact"` until the sketch implementation lands.**
-- [ ] **Step 4: Run tests and commit.**
+- [x] **Step 1: Write failing API round-trip, validation, persistence, and diagnostic tests.**
+- [x] **Step 2: Thread the optional positive row limit to every quantile-training bridge.**
+- [x] **Step 3: Keep exact behavior and report `"exact"` until the sketch implementation lands.**
+- [x] **Step 4: Run tests and commit.**
 
 Commit: `git commit -am "Add quantile sketch configuration"`
 
@@ -60,10 +60,10 @@ Commit: `git commit -am "Add quantile sketch configuration"`
 **Interfaces:**
 - Adds `derive_dense_feature_quantile_cuts_sampled(values, rows, features, max_bins, max_rows)`.
 
-- [ ] **Step 1: Add failing tests** for exact fallback, deterministic sampled indices, skewed rank error, duplicate plateaus, constants, NaNs, and 1-thread/4-thread equality.
-- [ ] **Step 2: For each feature, select a deterministic evenly distributed row sample capped at `max_rows`, discard NaNs, sort with `f32::total_cmp`, and reuse the exact cut selector.**
-- [ ] **Step 3: Keep feature-level Rayon collection ordered; do not use unordered reductions.**
-- [ ] **Step 4: Return method diagnostics with cut metadata; run bridge tests and commit.**
+- [x] **Step 1: Add failing tests** for exact fallback, deterministic sampled indices, skewed rank error, duplicate plateaus, constants, NaNs, and 1-thread/4-thread equality.
+- [x] **Step 2: For each feature, select a deterministic evenly distributed row sample capped at `max_rows`, discard NaNs, sort with `f32::total_cmp`, and reuse the exact cut selector.**
+- [x] **Step 3: Keep feature-level Rayon collection ordered; do not use unordered reductions.**
+- [x] **Step 4: Return method diagnostics with cut metadata; run bridge tests and commit.**
 
 Commit: `git commit -am "Derive quantile cuts from deterministic samples"`
 
@@ -74,10 +74,10 @@ Commit: `git commit -am "Derive quantile cuts from deterministic samples"`
 - Modify: `bindings/python/alloygbm/multi_label_ranker.py`
 - Test: `bindings/python/tests/test_joint_multilabel.py`
 
-- [ ] **Step 1: Add a failing joint sketch test** proving fitted native cuts equal prediction/persistence cuts after save/load.
-- [ ] **Step 2: Return native continuous-binning metadata from joint training and remove Python re-derivation for that fit.**
-- [ ] **Step 3: Preserve exact behavior when the threshold is `None` or row count is below it.**
-- [ ] **Step 4: Run joint tests and commit.**
+- [x] **Step 1: Add a failing joint sketch test** proving fitted native cuts equal prediction/persistence cuts after save/load.
+- [x] **Step 2: Return native continuous-binning metadata from joint training and remove Python re-derivation for that fit.**
+- [x] **Step 3: Preserve exact behavior when the threshold is `None` or row count is below it.**
+- [x] **Step 4: Run joint tests and commit.**
 
 Commit: `git commit -am "Reuse native quantile cuts in joint mode"`
 
@@ -89,6 +89,9 @@ Commit: `git commit -am "Reuse native quantile cuts in joint mode"`
   --baseline benchmarks/results/architectural_backlog_baseline.json --gate
 ```
 
-- [ ] **Step 1: Require activation, mean/p99/max rank error at or below 0.0025/0.0075/0.01, and RMSE no worse than 1%.**
-- [ ] **Step 2: Require native bridge preparation at most 60% of baseline, total fit no worse than 5%, and at least 32 MiB end-to-end RSS reduction.**
-- [ ] **Step 3: Run full fmt, clippy, Rust, and Python suites; commit evidence separately.**
+- [x] **Step 1: Require activation, mean/p99/max rank error at or below 0.0025/0.0075/0.01, and RMSE no worse than 1%.**
+- [x] **Step 2: Require native bridge preparation at most 60% of baseline, total fit no worse than 5%, and at least 32 MiB end-to-end RSS reduction.**
+- [x] **Step 3: Run full fmt, clippy, Rust, and Python suites; commit evidence separately.**
+
+Candidate evidence is recorded in
+[`architectural_backlog_v1.md`](architectural_backlog_v1.md#approximate-quantile-sketch-candidate).
