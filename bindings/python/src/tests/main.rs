@@ -212,6 +212,36 @@ fn direct_column_major_quantization_matches_dual_layout() {
     }
 }
 
+#[test]
+fn quantile_upper_tail_does_not_collide_with_missing_bin() {
+    let row_count = 513;
+    let values = (0..512)
+        .map(|value| value as f32 + 0.25)
+        .chain(std::iter::once(f32::NAN))
+        .collect::<Vec<_>>();
+    let targets = vec![0.0; row_count];
+
+    for layout in [BinnedLayout::ColumnMajor, BinnedLayout::Dual] {
+        let prepared = prepare_training_matrices_from_dense_values(
+            &values,
+            row_count,
+            1,
+            &targets,
+            None,
+            None,
+            None,
+            ContinuousBinningStrategy::Quantile,
+            256,
+            false,
+            layout,
+        )
+        .expect("quantile training matrices should prepare");
+
+        assert_eq!(prepared.binned_matrix.row_bin(511), 254);
+        assert_eq!(prepared.binned_matrix.row_bin(512), 255);
+    }
+}
+
 fn fixture_rows(dataset: &TrainingDataset) -> Vec<Vec<f32>> {
     dataset
         .matrix

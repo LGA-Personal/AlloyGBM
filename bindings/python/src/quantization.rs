@@ -154,6 +154,12 @@ fn quantize_rank_value_wide(value: f32, sorted_values: &[f32], max_data_bin: u16
     round_half_away_from_zero(scaled).clamp(0, max_data_bin as i32) as u16
 }
 
+#[inline]
+fn quantize_quantile_value(value: f32, cuts: &[f32], max_data_bin: u16) -> u16 {
+    cuts.partition_point(|probe| *probe <= value)
+        .min(usize::from(max_data_bin)) as u16
+}
+
 /// Parameterized linear quantize for predict-time: supports arbitrary max_data_bin.
 ///
 /// v0.9.0: NaN inputs are passed through as `f32::NAN` instead of
@@ -589,6 +595,7 @@ pub(crate) fn prepare_validation_matrices_from_dense_values(
             strategy,
             training_metadata,
             need_dense_values,
+            (max_bins - 2) as u8,
         )?;
         let dataset = TrainingDataset {
             matrix: if need_dense_values {
@@ -624,6 +631,7 @@ fn quantize_dense_values_with_metadata(
     strategy: ContinuousBinningStrategy,
     metadata: &ContinuousBinningMetadataInternal,
     need_dense_values: bool,
+    max_data_bin: u8,
 ) -> Result<(Vec<f32>, Vec<u8>, u16), EngineError> {
     // Validate metadata upfront so parallel closures don't need to return Result.
     let mins_ref = match strategy {
@@ -712,8 +720,11 @@ fn quantize_dense_values_with_metadata(
                                 }
                                 ContinuousBinningStrategy::Quantile => {
                                     let cuts = cuts_ref.expect("cuts validated");
-                                    cuts[feature_index].partition_point(|probe| *probe <= value)
-                                        as u8
+                                    quantize_quantile_value(
+                                        value,
+                                        &cuts[feature_index],
+                                        u16::from(max_data_bin),
+                                    ) as u8
                                 }
                             }
                         };
@@ -762,8 +773,11 @@ fn quantize_dense_values_with_metadata(
                                 }
                                 ContinuousBinningStrategy::Quantile => {
                                     let cuts = cuts_ref.expect("cuts validated");
-                                    cuts[feature_index].partition_point(|probe| *probe <= value)
-                                        as u8
+                                    quantize_quantile_value(
+                                        value,
+                                        &cuts[feature_index],
+                                        u16::from(max_data_bin),
+                                    ) as u8
                                 }
                             }
                         };
@@ -886,8 +900,11 @@ fn quantize_dense_values_with_metadata_wide(
                                 }
                                 ContinuousBinningStrategy::Quantile => {
                                     let cuts = cuts_ref.expect("cuts validated");
-                                    cuts[feature_index].partition_point(|probe| *probe <= value)
-                                        as u16
+                                    quantize_quantile_value(
+                                        value,
+                                        &cuts[feature_index],
+                                        max_data_bin,
+                                    )
                                 }
                             }
                         };
@@ -945,8 +962,11 @@ fn quantize_dense_values_with_metadata_wide(
                                 }
                                 ContinuousBinningStrategy::Quantile => {
                                     let cuts = cuts_ref.expect("cuts validated");
-                                    cuts[feature_index].partition_point(|probe| *probe <= value)
-                                        as u16
+                                    quantize_quantile_value(
+                                        value,
+                                        &cuts[feature_index],
+                                        max_data_bin,
+                                    )
                                 }
                             }
                         };
@@ -968,6 +988,7 @@ fn quantize_dense_values_to_column_major(
     feature_count: usize,
     strategy: ContinuousBinningStrategy,
     metadata: &ContinuousBinningMetadataInternal,
+    max_data_bin: u8,
 ) -> Result<(Vec<f32>, Vec<u8>, u16), EngineError> {
     let mins_ref = match strategy {
         ContinuousBinningStrategy::Linear => {
@@ -1026,7 +1047,8 @@ fn quantize_dense_values_to_column_major(
                 }
                 ContinuousBinningStrategy::Quantile => {
                     let cuts = cuts_ref.expect("cuts validated");
-                    cuts[feature_index].partition_point(|probe| *probe <= value) as u8
+                    quantize_quantile_value(value, &cuts[feature_index], u16::from(max_data_bin))
+                        as u8
                 }
             }
         }
@@ -1045,7 +1067,7 @@ fn quantize_dense_values_to_column_major(
                     let bin = if value.is_nan() {
                         MISSING_BIN_U8
                     } else {
-                        feature_cuts.partition_point(|probe| *probe <= value) as u8
+                        quantize_quantile_value(value, feature_cuts, u16::from(max_data_bin)) as u8
                     };
                     local_max = local_max.max(bin);
                     *destination = bin;
@@ -1143,7 +1165,7 @@ fn quantize_dense_values_to_column_major_wide(
                 }
                 ContinuousBinningStrategy::Quantile => {
                     let cuts = cuts_ref.expect("cuts validated");
-                    cuts[feature_index].partition_point(|probe| *probe <= value) as u16
+                    quantize_quantile_value(value, &cuts[feature_index], max_data_bin)
                 }
             }
         }
@@ -1162,7 +1184,7 @@ fn quantize_dense_values_to_column_major_wide(
                     let bin = if value.is_nan() {
                         nan_bin
                     } else {
-                        feature_cuts.partition_point(|probe| *probe <= value) as u16
+                        quantize_quantile_value(value, feature_cuts, max_data_bin)
                     };
                     local_max = local_max.max(bin);
                     *destination = bin;
@@ -1428,6 +1450,7 @@ pub(crate) fn prepare_training_matrices_from_dense_values(
                 feature_count,
                 strategy,
                 &metadata,
+                (max_bins - 2) as u8,
             )?
         } else {
             quantize_dense_values_with_metadata(
@@ -1437,6 +1460,7 @@ pub(crate) fn prepare_training_matrices_from_dense_values(
                 strategy,
                 &metadata,
                 need_dense_values,
+                (max_bins - 2) as u8,
             )?
         };
         let dataset = TrainingDataset {
