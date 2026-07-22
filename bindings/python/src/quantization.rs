@@ -313,61 +313,87 @@ fn derive_dense_sorted_feature_values(
         .collect()
 }
 
+fn quantile_cuts_from_sorted_values(sorted_values: &[f32], max_bins: usize) -> Vec<f32> {
+    if sorted_values.len() <= 1 {
+        return Vec::new();
+    }
+    let bin_count = max_bins.min(sorted_values.len());
+    let mut cuts = Vec::with_capacity(bin_count.saturating_sub(1));
+    for quantile_index in 1..bin_count {
+        let rank = ((quantile_index as u128 * sorted_values.len() as u128) / bin_count as u128)
+            .min((sorted_values.len() - 1) as u128) as usize;
+        let cut_value = sorted_values[rank];
+        if cuts.last().copied().is_some_and(|last| cut_value <= last) {
+            continue;
+        }
+        cuts.push(cut_value);
+    }
+    cuts
+}
+
+fn evenly_spaced_row_index(sample_index: usize, sample_count: usize, row_count: usize) -> usize {
+    if sample_count <= 1 {
+        return row_count / 2;
+    }
+    ((sample_index as u128 * row_count.saturating_sub(1) as u128)
+        / sample_count.saturating_sub(1) as u128) as usize
+}
+
 fn derive_dense_feature_quantile_cuts(
     values: &[f32],
     row_count: usize,
     feature_count: usize,
     max_bins: usize,
-) -> Vec<Vec<f32>> {
+    sketch_max_rows: Option<usize>,
+) -> (Vec<Vec<f32>>, Vec<String>) {
+    let sampled_row_count = sketch_max_rows.filter(|max_rows| row_count > *max_rows);
+    let selected_row_count = sampled_row_count.unwrap_or(row_count);
     let derive_feature_cuts = |feature_index: usize| {
-        let mut column = Vec::with_capacity(row_count);
-        for row_index in 0..row_count {
+        let mut column = Vec::with_capacity(selected_row_count);
+        for selected_index in 0..selected_row_count {
+            let row_index = if sampled_row_count.is_some() {
+                evenly_spaced_row_index(selected_index, selected_row_count, row_count)
+            } else {
+                selected_index
+            };
             let value = values[row_index * feature_count + feature_index];
             if !value.is_nan() {
                 column.push(value);
             }
         }
         column.sort_unstable_by(f32::total_cmp);
-        if column.len() <= 1 {
-            return Vec::new();
-        }
-        let bin_count = max_bins.min(column.len());
-        let mut cuts = Vec::with_capacity(bin_count.saturating_sub(1));
-        for quantile_index in 1..bin_count {
-            let mut rank = (quantile_index * column.len()) / bin_count;
-            if rank >= column.len() {
-                rank = column.len() - 1;
-            }
-            let cut_value = column[rank];
-            if cuts.last().copied().is_some_and(|last| cut_value <= last) {
-                continue;
-            }
-            cuts.push(cut_value);
-        }
-        cuts
+        quantile_cuts_from_sorted_values(&column, max_bins)
     };
 
     const SORT_SCRATCH_BUDGET_BYTES: usize = 20 * 1024 * 1024;
-    let bytes_per_column = row_count.saturating_mul(size_of::<f32>()).max(1);
+    let bytes_per_column = selected_row_count.saturating_mul(size_of::<f32>()).max(1);
     let columns_per_batch = (SORT_SCRATCH_BUDGET_BYTES / bytes_per_column).max(1);
-    if columns_per_batch >= rayon::current_num_threads() || columns_per_batch >= feature_count {
-        return (0..feature_count)
+    let cuts = if columns_per_batch >= rayon::current_num_threads()
+        || columns_per_batch >= feature_count
+    {
+        (0..feature_count)
             .into_par_iter()
             .map(derive_feature_cuts)
-            .collect();
-    }
-
-    let mut cuts = Vec::with_capacity(feature_count);
-    for start in (0..feature_count).step_by(columns_per_batch) {
-        let end = (start + columns_per_batch).min(feature_count);
-        cuts.extend(
-            (start..end)
-                .into_par_iter()
-                .map(&derive_feature_cuts)
-                .collect::<Vec<_>>(),
-        );
-    }
-    cuts
+            .collect()
+    } else {
+        let mut cuts = Vec::with_capacity(feature_count);
+        for start in (0..feature_count).step_by(columns_per_batch) {
+            let end = (start + columns_per_batch).min(feature_count);
+            cuts.extend(
+                (start..end)
+                    .into_par_iter()
+                    .map(&derive_feature_cuts)
+                    .collect::<Vec<_>>(),
+            );
+        }
+        cuts
+    };
+    let method = if sampled_row_count.is_some() {
+        "sketch"
+    } else {
+        "exact"
+    };
+    (cuts, vec![method.to_string(); feature_count])
 }
 
 fn derive_linear_tail_rank_plan(
@@ -1309,20 +1335,24 @@ pub(crate) fn prepare_training_matrices_from_dense_values(
                 feature_quantile_cut_methods: None,
                 feature_linear_rank_flags: None,
             },
-            ContinuousBinningStrategy::Quantile => ContinuousBinningMetadataInternal {
-                uses_continuous_binning: true,
-                feature_mins: None,
-                feature_maxs: None,
-                feature_sorted_values: None,
-                feature_quantile_cuts: Some(derive_dense_feature_quantile_cuts(
+            ContinuousBinningStrategy::Quantile => {
+                let (cuts, methods) = derive_dense_feature_quantile_cuts(
                     values,
                     row_count,
                     feature_count,
                     max_bins,
-                )),
-                feature_quantile_cut_methods: Some(vec!["exact".to_string(); feature_count]),
-                feature_linear_rank_flags: None,
-            },
+                    quantile_sketch_max_rows,
+                );
+                ContinuousBinningMetadataInternal {
+                    uses_continuous_binning: true,
+                    feature_mins: None,
+                    feature_maxs: None,
+                    feature_sorted_values: None,
+                    feature_quantile_cuts: Some(cuts),
+                    feature_quantile_cut_methods: Some(methods),
+                    feature_linear_rank_flags: None,
+                }
+            }
         };
         (meta, wide_bins)
     };

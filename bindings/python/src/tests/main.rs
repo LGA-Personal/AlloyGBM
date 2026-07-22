@@ -247,6 +247,130 @@ fn quantile_upper_tail_does_not_collide_with_missing_bin() {
     }
 }
 
+fn prepare_quantile_fixture(
+    values: &[f32],
+    row_count: usize,
+    feature_count: usize,
+    sketch_max_rows: Option<usize>,
+) -> crate::quantization::PreparedTrainingMatrices {
+    prepare_training_matrices_from_dense_values(
+        values,
+        row_count,
+        feature_count,
+        &vec![0.0; row_count],
+        None,
+        None,
+        None,
+        ContinuousBinningStrategy::Quantile,
+        256,
+        sketch_max_rows,
+        false,
+        BinnedLayout::ColumnMajor,
+    )
+    .expect("quantile training matrices should prepare")
+}
+
+#[test]
+fn quantile_sketch_uses_exact_fallback_and_even_row_coverage() {
+    let values = (0..20).map(|row| row as f32 + 0.25).collect::<Vec<_>>();
+
+    let exact = prepare_quantile_fixture(&values, 20, 1, None);
+    let below_cap = prepare_quantile_fixture(&values, 20, 1, Some(20));
+    let sampled = prepare_quantile_fixture(&values, 20, 1, Some(5));
+
+    assert_eq!(
+        exact.metadata.feature_quantile_cuts,
+        below_cap.metadata.feature_quantile_cuts
+    );
+    assert_eq!(
+        below_cap.metadata.feature_quantile_cut_methods,
+        Some(vec!["exact".to_string()])
+    );
+    assert_eq!(
+        sampled.metadata.feature_quantile_cut_methods,
+        Some(vec!["sketch".to_string()])
+    );
+    assert_eq!(
+        sampled.metadata.feature_quantile_cuts,
+        Some(vec![vec![4.25, 9.25, 14.25, 19.25]])
+    );
+}
+
+#[test]
+fn quantile_sketch_is_identical_across_rayon_thread_counts() {
+    let values = (0..4096)
+        .flat_map(|row| {
+            [
+                (row as f32 * 0.013).sin(),
+                ((row * 37) % 997) as f32 + 0.125,
+                if row % 11 == 0 {
+                    f32::NAN
+                } else {
+                    (row % 23) as f32 + 0.5
+                },
+            ]
+        })
+        .collect::<Vec<_>>();
+    let derive = |threads| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("thread pool builds")
+            .install(|| {
+                prepare_quantile_fixture(&values, 4096, 3, Some(257))
+                    .metadata
+                    .feature_quantile_cuts
+            })
+    };
+
+    assert_eq!(derive(1), derive(4));
+}
+
+#[test]
+fn quantile_sketch_preserves_rank_accuracy_and_pathological_columns() {
+    let row_count = 10_000;
+    let values = (0..row_count)
+        .flat_map(|row| {
+            let unit = row as f32 / (row_count - 1) as f32;
+            [
+                unit.powi(5) + 0.001,
+                if row % 7 == 0 { f32::NAN } else { 3.25 },
+                (row % 17) as f32 + 0.125,
+            ]
+        })
+        .collect::<Vec<_>>();
+    let prepared = prepare_quantile_fixture(&values, row_count, 3, Some(1_024));
+    let cuts = prepared
+        .metadata
+        .feature_quantile_cuts
+        .expect("quantile cuts exist");
+
+    for feature_cuts in &cuts {
+        assert!(feature_cuts.iter().all(|cut| cut.is_finite()));
+        assert!(feature_cuts.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+    assert!(cuts[1].len() <= 1);
+    assert!(cuts[2].len() <= 17);
+
+    let sorted = (0..row_count)
+        .map(|row| (row as f32 / (row_count - 1) as f32).powi(5) + 0.001)
+        .collect::<Vec<_>>();
+    let bin_count = cuts[0].len() + 1;
+    let max_rank_error = cuts[0]
+        .iter()
+        .enumerate()
+        .map(|(index, cut)| {
+            let observed = sorted.partition_point(|probe| probe <= cut) as f64 / row_count as f64;
+            let expected = (index + 1) as f64 / bin_count as f64;
+            (observed - expected).abs()
+        })
+        .fold(0.0_f64, f64::max);
+    assert!(
+        max_rank_error <= 0.01,
+        "max rank error was {max_rank_error}"
+    );
+}
+
 fn fixture_rows(dataset: &TrainingDataset) -> Vec<Vec<f32>> {
     dataset
         .matrix

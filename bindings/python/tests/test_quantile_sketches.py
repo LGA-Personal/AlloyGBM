@@ -69,6 +69,43 @@ def test_classifier_and_independent_multilabel_expose_exact_methods() -> None:
     assert multilabel.feature_quantile_cut_methods_ == ["exact", "exact"]
 
 
+def test_sketch_activation_is_deterministic_and_persists(tmp_path) -> None:
+    x, y = _continuous_fixture()
+    params = {
+        "n_estimators": 2,
+        "max_depth": 2,
+        "quantile_sketch_max_rows": 8,
+    }
+    first = GBMRegressor(**params).fit(x, y)
+    second = GBMRegressor(**params).fit(x, y)
+
+    assert first.feature_quantile_cut_methods_ == ["sketch", "sketch"]
+    assert first._continuous_feature_quantile_cuts == second._continuous_feature_quantile_cuts
+    assert all(len(cuts) <= 7 for cuts in first._continuous_feature_quantile_cuts)
+
+    path = tmp_path / "sketched-quantile.agbm"
+    first.save_model(path)
+    restored = GBMRegressor.load_model(path)
+    assert restored.quantile_sketch_max_rows == 8
+    assert restored.feature_quantile_cut_methods_ == ["sketch", "sketch"]
+    assert (
+        restored._continuous_feature_quantile_cuts
+        == first._continuous_feature_quantile_cuts
+    )
+    np.testing.assert_array_equal(restored.predict(x), first.predict(x))
+
+
+def test_sketch_limit_at_row_count_keeps_exact_cuts() -> None:
+    x, y = _continuous_fixture()
+    exact = GBMRegressor(n_estimators=2).fit(x, y)
+    bounded = GBMRegressor(
+        n_estimators=2, quantile_sketch_max_rows=len(x)
+    ).fit(x, y)
+
+    assert bounded.feature_quantile_cut_methods_ == ["exact", "exact"]
+    assert bounded._continuous_feature_quantile_cuts == exact._continuous_feature_quantile_cuts
+
+
 def test_changing_sketch_limit_after_fit_requires_refit() -> None:
     x, y = _continuous_fixture()
     model = GBMRegressor(n_estimators=2).fit(x, y)
