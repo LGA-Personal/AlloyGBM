@@ -804,7 +804,13 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
         joint_lambdarank_normalize = GBMRanker._validate_lambdarank_normalize(
             kw.get("lambdarank_normalize", False)
         )
-        artifact, baselines, _fc, rounds_completed = _native.train_joint_multi_label_ranker(
+        (
+            artifact,
+            baselines,
+            _fc,
+            rounds_completed,
+            continuous_binning_metadata,
+        ) = _native.train_joint_multi_label_ranker(
             x_flat,
             row_count,
             feature_count,
@@ -934,19 +940,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
                 ) from e
             raise
         self._artifact_bytes = self._joint_artifact_bytes
-        self._uses_continuous_binning = not self._rows_are_pre_binned(x_arr)
-        if self._uses_continuous_binning:
-            strategy = self.continuous_binning_strategy
-            if strategy == "linear":
-                self._continuous_feature_mins = np.nanmin(x_arr, axis=0)
-                self._continuous_feature_maxs = np.nanmax(x_arr, axis=0)
-                self._continuous_feature_linear_rank_flags = None
-                self._continuous_feature_sorted_values = None
-            elif strategy == "quantile":
-                self._continuous_feature_quantile_cuts = self._derive_continuous_feature_quantile_cuts(
-                    x_arr, self.continuous_binning_max_bins
-                )
-                self.feature_quantile_cut_methods_ = ["exact"] * feature_count
+        self._apply_continuous_binning_metadata(continuous_binning_metadata)
 
         self.ranking_labels_ = names
         self.n_labels_ = n_labels
@@ -1260,6 +1254,12 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
                 inst.rounds_completed_ = [
                     int(r.rounds_completed_ or 0) for r in rankers
                 ]
+                inst.feature_quantile_cut_methods_ = (
+                    list(rankers[0].feature_quantile_cut_methods_)
+                    if rankers
+                    and rankers[0].feature_quantile_cut_methods_ is not None
+                    else None
+                )
                 return inst
 
             # Joint mode (mode_int == 1)

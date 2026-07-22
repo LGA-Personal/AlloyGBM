@@ -8,6 +8,7 @@ use crate::params::{
     parse_boosting_mode, parse_dro_config, parse_factor_exposure_matrix, parse_leaf_solver,
     parse_morph_config_from_pydict, parse_neutralization_config,
 };
+use crate::pyclasses::NativeContinuousBinningMetadata;
 use crate::quantization::{
     parse_continuous_binning_strategy, prepare_training_matrices_from_dense_values,
 };
@@ -176,7 +177,13 @@ pub(crate) fn train_joint_multi_label_ranker(
     ranking_sigma: f32,
     lambdarank_truncation_level: Option<usize>,
     lambdarank_normalize: bool,
-) -> PyResult<(Vec<u8>, Vec<f32>, usize, usize)> {
+) -> PyResult<(
+    Vec<u8>,
+    Vec<f32>,
+    usize,
+    usize,
+    NativeContinuousBinningMetadata,
+)> {
     use alloygbm_engine::joint::JointObjective;
 
     if targets_per_output.len() != n_outputs {
@@ -586,5 +593,6 @@ pub(crate) fn train_joint_multi_label_ranker(
         summary.baselines,
         feature_count,
         summary.rounds_completed,
+        prepared.metadata.into(),
     ))
 }
