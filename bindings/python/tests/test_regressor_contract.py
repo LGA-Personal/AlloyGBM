@@ -768,6 +768,16 @@ class GBMRegressorContractTests(unittest.TestCase):
 
         self.assertEqual(cuts, [[2.0, 3.0, 4.0], [5.0, 7.0], [10.0, 20.0, 30.0]])
 
+    def test_native_dense_payload_reuses_contiguous_float32_array(self) -> None:
+        values = np.arange(12, dtype=np.float32).reshape(4, 3)
+
+        payload = GBMRegressor._native_matrix_bytes_payload(values)
+
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertIs(payload[0], values)
+        self.assertEqual(payload[1:], (4, 3))
+
     def test_quantile_upper_tail_reserves_missing_bin(self) -> None:
         cuts = [[float(value) for value in range(1, 256)]]
 

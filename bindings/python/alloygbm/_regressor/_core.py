@@ -1507,7 +1507,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         validation_X: object | None = None
         validation_targets: list[float] | None = None
         validation_dense_payload: tuple[list[float], int, int] | None = None
-        validation_dense_bytes_payload: tuple[bytes, int, int] | None = None
+        validation_dense_bytes_payload: tuple[object, int, int] | None = None
         validation_rows: list[list[float]] | None = None
         validation_categorical_values: list[str] | None = None
         validation_categorical_values_list: list[list[str]] | None = None

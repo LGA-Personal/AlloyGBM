@@ -32,8 +32,10 @@ use alloygbm_engine::{
     Trainer, TrainingPolicyMode, TweedieObjective, WarmStartState, XeNDCGObjective,
     YetiRankObjective,
 };
+use numpy::{PyArray2, PyArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 use std::time::Instant;
 
 fn build_native_training_summary_from_multiclass(
@@ -1816,6 +1818,20 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> PyResult<Vec<f32>> {
     Ok(result)
 }
 
+fn dense_input_to_f32_vec(input: &Bound<'_, PyAny>) -> PyResult<Vec<f32>> {
+    if let Ok(array) = input.cast::<PyArray2<f32>>() {
+        let readonly = array.readonly();
+        let values = readonly
+            .as_slice()
+            .map_err(|_| PyValueError::new_err("values array must be C-contiguous float32"))?;
+        return Ok(values.to_vec());
+    }
+    let bytes = input.cast::<PyBytes>().map_err(|_| {
+        PyValueError::new_err("values_bytes must be bytes or a C-contiguous float32 array")
+    })?;
+    bytes_to_f32_vec(bytes.as_bytes())
+}
+
 #[pyfunction(signature = (
     values_bytes,
     row_count,
@@ -1898,7 +1914,7 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> PyResult<Vec<f32>> {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
     py: Python<'_>,
-    values_bytes: &[u8],
+    values_bytes: &Bound<'_, PyAny>,
     row_count: usize,
     feature_count: usize,
     targets_bytes: &[u8],
@@ -1918,7 +1934,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
     sample_weights: Option<Vec<f32>>,
     group_id: Option<Vec<u32>>,
     min_split_gain: f32,
-    validation_values_bytes: Option<&[u8]>,
+    validation_values_bytes: Option<&Bound<'_, PyAny>>,
     validation_row_count: Option<usize>,
     validation_targets_bytes: Option<&[u8]>,
     validation_sample_weights: Option<Vec<f32>>,
@@ -1976,9 +1992,11 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
     lambdarank_truncation_level: Option<usize>,
     lambdarank_normalize: bool,
 ) -> PyResult<NativeTrainingResult> {
-    let values = bytes_to_f32_vec(values_bytes)?;
+    let values = dense_input_to_f32_vec(values_bytes)?;
     let targets = bytes_to_f32_vec(targets_bytes)?;
-    let validation_values = validation_values_bytes.map(bytes_to_f32_vec).transpose()?;
+    let validation_values = validation_values_bytes
+        .map(dense_input_to_f32_vec)
+        .transpose()?;
     let validation_targets = validation_targets_bytes.map(bytes_to_f32_vec).transpose()?;
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
