@@ -4,6 +4,7 @@ pub mod config;
 pub mod dataset;
 pub mod dro;
 pub mod error;
+pub mod feature_bundling;
 pub mod histogram;
 pub mod leaf;
 pub mod linear_histogram;
@@ -50,6 +51,9 @@ pub use dataset::{
 };
 pub use dro::{DroConfig, DroMetric};
 pub use error::{CoreError, CoreResult};
+pub use feature_bundling::{
+    FeatureBundleAssignment, FeatureBundleMap, discover_exact_feature_bundles,
+};
 pub use histogram::{
     FeatureHistogram, FeatureTile, GradientPair, HistogramBin, HistogramBundle,
     HistogramFeatureView, NodeSlice, NodeStats, leaf_effective_gradient, leaf_gain_term,

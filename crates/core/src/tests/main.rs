@@ -212,6 +212,9 @@ fn binned_matrix_rejects_bin_above_max() {
         feature_count: 2,
         max_bin: 7,
         nan_bin_index: MISSING_BIN_U8 as u16,
+        storage_feature_count: 2,
+        storage_max_bin: 7,
+        feature_bundle_map: None,
         bins_adaptive: BinStorage::U8(vec![3, 8]),
         bins_col_adaptive: BinStorage::U8(vec![3, 8]),
     };
@@ -1486,4 +1489,112 @@ fn neutralization_metadata_rejects_bad_kind() {
     });
     bytes[2] = 99; // bogus kind byte
     assert!(decode_neutralization_metadata_payload(&bytes).is_err());
+}
+
+#[test]
+fn exact_feature_bundles_are_deterministic_and_reduce_storage() {
+    let matrix = BinnedMatrix::new(
+        4,
+        5,
+        1,
+        vec![
+            1, 0, 0, 0, 1, //
+            0, 1, 0, 0, 1, //
+            0, 0, 1, 0, 1, //
+            0, 0, 0, 0, 1,
+        ],
+    )
+    .expect("fixture");
+    let excluded = vec![false, false, false, false, true];
+
+    let first = discover_exact_feature_bundles(&matrix, &excluded).expect("bundle map");
+    let second = discover_exact_feature_bundles(&matrix, &excluded).expect("bundle map");
+
+    assert_eq!(first, second);
+    assert_eq!(first.original_feature_count(), 5);
+    assert_eq!(first.effective_feature_count(), 3);
+    assert_eq!(first.bundle_count(), 1);
+    assert_eq!(first.bundled_feature_count(), 3);
+    assert_eq!(first.skipped_feature_count(), 2);
+    assert_eq!(first.bundle_members(0), Some(&[0, 1, 2][..]));
+
+    let bundled = matrix
+        .clone()
+        .with_exact_feature_bundles(first)
+        .expect("bundled matrix");
+    assert_eq!(bundled.feature_count, 5);
+    assert_eq!(bundled.effective_feature_count(), 3);
+    assert!(bundled.storage_bytes() < matrix.storage_bytes());
+    for row in 0..matrix.row_count {
+        for feature in 0..matrix.feature_count {
+            assert_eq!(
+                bundled.bin_at(row, feature),
+                matrix.bin_at(row, feature),
+                "logical bin mismatch at row {row}, feature {feature}"
+            );
+        }
+    }
+}
+
+#[test]
+fn exact_feature_bundles_use_stable_density_first_order() {
+    let matrix = BinnedMatrix::new(
+        5,
+        3,
+        1,
+        vec![
+            0, 1, 0, //
+            1, 0, 0, //
+            0, 1, 0, //
+            0, 0, 1, //
+            0, 0, 0,
+        ],
+    )
+    .expect("fixture");
+
+    let map = discover_exact_feature_bundles(&matrix, &[false; 3]).expect("bundle map");
+
+    assert_eq!(map.bundle_members(0), Some(&[1, 0, 2][..]));
+}
+
+#[test]
+fn exact_feature_bundles_separate_conflicting_features() {
+    let matrix = BinnedMatrix::new(
+        3,
+        3,
+        1,
+        vec![
+            1, 1, 0, //
+            0, 0, 1, //
+            0, 0, 0,
+        ],
+    )
+    .expect("fixture");
+
+    let map = discover_exact_feature_bundles(&matrix, &[false; 3]).expect("bundle map");
+
+    assert_ne!(
+        map.assignment(0).expect("feature 0").storage_feature,
+        map.assignment(1).expect("feature 1").storage_feature
+    );
+    assert!(map.observed_conflict_count() > 0);
+}
+
+#[test]
+fn exact_feature_bundles_skip_nan_and_all_zero_columns() {
+    let matrix = BinnedMatrix::new(
+        3,
+        4,
+        1,
+        vec![1, 0, MISSING_BIN_U8, 0, 0, 1, 0, 0, 0, 0, 0, 0],
+    )
+    .expect("fixture");
+
+    let map = discover_exact_feature_bundles(&matrix, &[false; 4]).expect("bundle map");
+
+    assert_eq!(map.bundle_count(), 1);
+    assert_eq!(map.bundled_feature_count(), 2);
+    assert_eq!(map.skipped_feature_count(), 2);
+    assert!(!map.assignment(2).expect("NaN feature").is_bundled());
+    assert!(!map.assignment(3).expect("zero feature").is_bundled());
 }

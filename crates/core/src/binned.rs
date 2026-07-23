@@ -1,5 +1,6 @@
 use crate::error::CoreResult;
 use crate::validate_binned_matrix;
+use crate::{CoreError, FeatureBundleMap};
 
 pub const MISSING_BIN_U8: u8 = 255;
 pub const MISSING_BIN_U16: u16 = 65535;
@@ -77,6 +78,9 @@ pub struct BinnedMatrix {
     /// For u8 mode: always 255 (MISSING_BIN_U8).
     /// For u16 mode: max_data_bin + 1 (dynamic, avoids wasteful 65535 sentinel).
     pub nan_bin_index: u16,
+    pub(crate) storage_feature_count: usize,
+    pub(crate) storage_max_bin: u16,
+    pub(crate) feature_bundle_map: Option<FeatureBundleMap>,
     /// Optional row-major adaptive storage. Empty for column-major-only matrices.
     pub(crate) bins_adaptive: BinStorage,
     /// Required column-major adaptive storage used by histogram construction.
@@ -111,6 +115,9 @@ impl BinnedMatrix {
             feature_count,
             max_bin,
             nan_bin_index: MISSING_BIN_U8 as u16,
+            storage_feature_count: feature_count,
+            storage_max_bin: max_bin,
+            feature_bundle_map: None,
             bins_adaptive,
             bins_col_adaptive: BinStorage::U8(bins_col),
         };
@@ -130,6 +137,9 @@ impl BinnedMatrix {
             feature_count,
             max_bin,
             nan_bin_index: MISSING_BIN_U8 as u16,
+            storage_feature_count: feature_count,
+            storage_max_bin: max_bin,
+            feature_bundle_map: None,
             bins_adaptive: BinStorage::U8(Vec::new()),
             bins_col_adaptive: BinStorage::U8(bins_col),
         };
@@ -174,6 +184,9 @@ impl BinnedMatrix {
             feature_count,
             max_bin,
             nan_bin_index,
+            storage_feature_count: feature_count,
+            storage_max_bin: max_bin,
+            feature_bundle_map: None,
             bins_adaptive,
             bins_col_adaptive: BinStorage::U16(bins_col_u16),
         };
@@ -194,6 +207,9 @@ impl BinnedMatrix {
             feature_count,
             max_bin,
             nan_bin_index,
+            storage_feature_count: feature_count,
+            storage_max_bin: max_bin,
+            feature_bundle_map: None,
             bins_adaptive: BinStorage::U16(Vec::new()),
             bins_col_adaptive: BinStorage::U16(bins_col_u16),
         };
@@ -210,7 +226,12 @@ impl BinnedMatrix {
     /// `index` is the flat offset (feature * row_count + row).
     #[inline]
     pub fn col_bin(&self, index: usize) -> u16 {
-        self.bins_col_adaptive.get(index)
+        if self.feature_bundle_map.is_none() {
+            return self.bins_col_adaptive.get(index);
+        }
+        let feature = index / self.row_count;
+        let row = index % self.row_count;
+        self.bin_at(row, feature)
     }
 
     /// Read a bin value from row-major adaptive storage.
@@ -229,6 +250,14 @@ impl BinnedMatrix {
     /// Read a bin by row and feature without converting between flat layouts.
     #[inline]
     pub fn bin_at(&self, row: usize, feature: usize) -> u16 {
+        if let Some(map) = &self.feature_bundle_map {
+            let assignment = map
+                .assignment(feature)
+                .expect("logical feature index is validated by callers");
+            let storage_index = assignment.storage_feature * self.row_count + row;
+            let storage_bin = self.bins_col_adaptive.get(storage_index);
+            return assignment.decode(storage_bin, self.nan_bin_index);
+        }
         if self.has_row_major() {
             self.bins_adaptive.get(row * self.feature_count + feature)
         } else {
@@ -272,12 +301,109 @@ impl BinnedMatrix {
     /// Set the bin value at (row, feature) in all storage arrays.
     /// Used for re-mapping native categorical feature columns after binning.
     pub fn set_bin(&mut self, row: usize, feature: usize, value: u16) {
+        assert!(
+            self.feature_bundle_map.is_none(),
+            "cannot mutate logical bins after feature bundling"
+        );
         let row_idx = row * self.feature_count + feature;
         let col_idx = feature * self.row_count + row;
         if self.has_row_major() {
             self.bins_adaptive.set(row_idx, value);
         }
         self.bins_col_adaptive.set(col_idx, value);
+    }
+
+    pub fn effective_feature_count(&self) -> usize {
+        self.storage_feature_count
+    }
+
+    pub fn feature_bundle_map(&self) -> Option<&FeatureBundleMap> {
+        self.feature_bundle_map.as_ref()
+    }
+
+    #[inline]
+    pub fn storage_col_bin(&self, storage_feature: usize, row: usize) -> u16 {
+        self.bins_col_adaptive
+            .get(storage_feature * self.row_count + row)
+    }
+
+    pub fn with_exact_feature_bundles(self, map: FeatureBundleMap) -> CoreResult<Self> {
+        if self.feature_bundle_map.is_some() {
+            return Err(CoreError::Validation(
+                "binned matrix already has a feature bundle map".to_string(),
+            ));
+        }
+        if map.original_feature_count() != self.feature_count {
+            return Err(CoreError::Validation(format!(
+                "bundle map feature count {} does not match matrix feature_count {}",
+                map.original_feature_count(),
+                self.feature_count
+            )));
+        }
+        if map.bundle_count() == 0 {
+            return Ok(self);
+        }
+
+        let storage_feature_count = map.effective_feature_count();
+        let storage_max_bin = map.storage_max_bin();
+        let use_u8 = storage_max_bin <= u16::from(u8::MAX - 1);
+        let nan_bin_index = if use_u8 {
+            u16::from(MISSING_BIN_U8)
+        } else {
+            storage_max_bin + 1
+        };
+        let mut encoded = vec![0_u16; self.row_count * storage_feature_count];
+        for feature in 0..self.feature_count {
+            let assignment = map
+                .assignment(feature)
+                .expect("bundle map covers every original feature");
+            for row in 0..self.row_count {
+                let original_bin = self.bin_at(row, feature);
+                let encoded_bin = if original_bin == self.missing_bin() {
+                    nan_bin_index
+                } else if assignment.is_bundled() {
+                    if original_bin == 0 {
+                        0
+                    } else {
+                        assignment.bin_offset + original_bin - 1
+                    }
+                } else {
+                    original_bin
+                };
+                let target = assignment.storage_feature * self.row_count + row;
+                if assignment.is_bundled() && encoded_bin != 0 && encoded[target] != 0 {
+                    return Err(CoreError::Validation(format!(
+                        "bundle map conflict at row {row}, storage feature {}",
+                        assignment.storage_feature
+                    )));
+                }
+                if encoded_bin != 0 {
+                    encoded[target] = encoded_bin;
+                }
+            }
+        }
+        let bins_col_adaptive = if use_u8 {
+            BinStorage::U8(encoded.into_iter().map(|bin| bin as u8).collect())
+        } else {
+            BinStorage::U16(encoded)
+        };
+        let bundled = Self {
+            row_count: self.row_count,
+            feature_count: self.feature_count,
+            max_bin: self.max_bin,
+            nan_bin_index,
+            storage_feature_count,
+            storage_max_bin,
+            feature_bundle_map: Some(map),
+            bins_adaptive: if use_u8 {
+                BinStorage::U8(Vec::new())
+            } else {
+                BinStorage::U16(Vec::new())
+            },
+            bins_col_adaptive,
+        };
+        validate_binned_matrix(&bundled)?;
+        Ok(bundled)
     }
 }
 
