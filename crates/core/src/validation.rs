@@ -464,7 +464,25 @@ pub fn validate_binned_matrix(matrix: &BinnedMatrix) -> CoreResult<()> {
             "max_bin must be greater than 0".to_string(),
         ));
     }
-    let expected_len = matrix.row_count * matrix.feature_count;
+    if matrix.storage_feature_count == 0 {
+        return Err(CoreError::Validation(
+            "storage_feature_count must be greater than 0".to_string(),
+        ));
+    }
+    if matrix.storage_max_bin == 0 {
+        return Err(CoreError::Validation(
+            "storage_max_bin must be greater than 0".to_string(),
+        ));
+    }
+    if let Some(map) = &matrix.feature_bundle_map
+        && (map.original_feature_count() != matrix.feature_count
+            || map.effective_feature_count() != matrix.storage_feature_count)
+    {
+        return Err(CoreError::Validation(
+            "feature bundle map dimensions do not match binned matrix".to_string(),
+        ));
+    }
+    let expected_len = matrix.row_count * matrix.storage_feature_count;
     if matrix.bins_col_adaptive.len() != expected_len {
         return Err(CoreError::Validation(format!(
             "column-major bins length {} does not match row_count * feature_count {}",
@@ -479,27 +497,27 @@ pub fn validate_binned_matrix(matrix: &BinnedMatrix) -> CoreResult<()> {
             expected_len
         )));
     }
-    // Validate that no bin exceeds max_bin using adaptive storage.
+    // Validate that no stored bin exceeds the physical storage range.
     // The NaN sentinel bin is also allowed (it may exceed max_bin).
     let nan_bin = matrix.nan_bin_index;
     match &matrix.bins_col_adaptive {
         BinStorage::U8(bins) => {
             for &bin in bins {
                 let b = u16::from(bin);
-                if b > matrix.max_bin && b != nan_bin {
+                if b > matrix.storage_max_bin && b != nan_bin {
                     return Err(CoreError::Validation(format!(
-                        "bin value {bin} exceeds max_bin {}",
-                        matrix.max_bin
+                        "bin value {bin} exceeds storage_max_bin {}",
+                        matrix.storage_max_bin
                     )));
                 }
             }
         }
         BinStorage::U16(bins) => {
             for &bin in bins {
-                if bin > matrix.max_bin && bin != nan_bin {
+                if bin > matrix.storage_max_bin && bin != nan_bin {
                     return Err(CoreError::Validation(format!(
-                        "bin value {bin} exceeds max_bin {}",
-                        matrix.max_bin
+                        "bin value {bin} exceeds storage_max_bin {}",
+                        matrix.storage_max_bin
                     )));
                 }
             }

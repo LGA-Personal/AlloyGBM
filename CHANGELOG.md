@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- **Added opt-in exact exclusive feature bundling.**
+  `feature_bundling="exact"` deterministically compresses contiguous,
+  zero-conflict sparse numeric groups during training while preserving
+  original feature indices in artifacts, prediction, importance, and SHAP
+  output. Categorical and constrained features are excluded, validation
+  conflicts fall back to the original matrix, fitted diagnostics report
+  activation and effective feature counts, and `"off"` remains the default.
+
+### Performance
+
+- On the full 80,000-row one-hot benchmark, exact bundling reduced 512 logical
+  features to 32 physical columns, improved median native training time by
+  33.3%, and improved total fit time by 21.3%. Dense input remained inactive
+  with no measured regression, and artifact and prediction digests matched the
+  unbundled baseline in every repetition.
+
 ## v0.12.10 (2026-07-02)
 
 Patch optimization release on top of v0.12.9. The focus is faster training and

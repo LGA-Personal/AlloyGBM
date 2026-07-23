@@ -66,11 +66,20 @@ throughput by 28.8% without a material shallow-control regression. See the
 
 ### Exclusive Feature Bundling (EFB)
 
-**Status: implementation planned.** EFB needs a feature-conflict contract, plus
-well-defined behavior for feature names, importances, constraints, categorical columns, persistence,
-and explanation output. The [EFB plan](../benchmarks/architectural_backlog_efb_implementation.md)
-starts with exact zero-conflict dense one-hot groups, explicitly falls back on conflicts and excluded
-features, and requires a measurable training or memory payoff before broader sparse-input work.
+**Status: implemented.** `feature_bundling="exact"` opts dense numeric input
+into deterministic, zero-conflict training-only bundles; `"off"` remains the
+default. Emitted trees retain original feature indices, so prediction,
+feature names, importances, SHAP output, persistence, and artifact bytes keep
+their existing contracts. Categorical, monotone-constrained,
+interaction-constrained, missing-valued, and greater-than-quarter-occupied
+features are skipped. Non-canonical training conflicts or any validation
+conflict leave the original matrix active. Independent multi-label fits are
+supported; joint mode explicitly rejects active EFB. On the full one-hot
+fixture, exact mode reduced 512 logical features to 32 physical columns,
+improved native training by 33.3%, and improved total fit by 21.3%, while the
+dense control stayed inactive with no regression. See the
+[candidate evidence](../benchmarks/architectural_backlog_v1.md#exclusive-feature-bundling-candidate)
+and [completed plan](../benchmarks/architectural_backlog_efb_implementation.md).
 
 ### Approximate quantile sketches
 

@@ -181,6 +181,39 @@ pub(crate) fn diagnostics_to_native(
 
 #[pyclass(skip_from_py_object)]
 #[derive(Debug, Clone)]
+pub(crate) struct NativeFeatureBundlingDiagnostics {
+    #[pyo3(get)]
+    pub(crate) active: bool,
+    #[pyo3(get)]
+    pub(crate) original_feature_count: usize,
+    #[pyo3(get)]
+    pub(crate) effective_feature_count: usize,
+    #[pyo3(get)]
+    pub(crate) bundle_count: usize,
+    #[pyo3(get)]
+    pub(crate) bundled_feature_count: usize,
+    #[pyo3(get)]
+    pub(crate) skipped_feature_count: usize,
+    #[pyo3(get)]
+    pub(crate) observed_conflict_count: usize,
+}
+
+impl NativeFeatureBundlingDiagnostics {
+    pub(crate) fn inactive(feature_count: usize) -> Self {
+        Self {
+            active: false,
+            original_feature_count: feature_count,
+            effective_feature_count: feature_count,
+            bundle_count: 0,
+            bundled_feature_count: 0,
+            skipped_feature_count: 0,
+            observed_conflict_count: 0,
+        }
+    }
+}
+
+#[pyclass(skip_from_py_object)]
+#[derive(Debug, Clone)]
 pub(crate) struct NativeTrainingResult {
     #[pyo3(get)]
     pub(crate) artifact_bytes: Vec<u8>,
@@ -188,6 +221,8 @@ pub(crate) struct NativeTrainingResult {
     pub(crate) summary: NativeTrainingSummary,
     #[pyo3(get)]
     pub(crate) continuous_binning_metadata: NativeContinuousBinningMetadata,
+    #[pyo3(get)]
+    pub(crate) feature_bundling_diagnostics: NativeFeatureBundlingDiagnostics,
     /// Per-feature category→ID mappings for native categorical splits.
     /// Keys are feature indices, values are dicts {category_name: integer_id}.
     #[pyo3(get)]

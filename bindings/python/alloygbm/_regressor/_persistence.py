@@ -35,6 +35,15 @@ class _PersistenceMixin:
         self.stop_reason_ = None
         self.diagnostics_per_round_ = None
         self.factor_exposure_diagnostics_ = None
+        self.feature_bundling_diagnostics_ = {
+            "active": False,
+            "original_feature_count": 0,
+            "effective_feature_count": 0,
+            "bundle_count": 0,
+            "bundled_feature_count": 0,
+            "skipped_feature_count": 0,
+            "observed_conflict_count": 0,
+        }
         self.evals_result_ = None
         self.fit_timing_ = None
         self._fit_neutralization = None
@@ -64,6 +73,18 @@ class _PersistenceMixin:
 
     def __setstate__(self, state: dict) -> None:
         self.__dict__.update(state)
+        if not hasattr(self, "feature_bundling"):
+            self.feature_bundling = "off"
+        if not hasattr(self, "feature_bundling_diagnostics_"):
+            self.feature_bundling_diagnostics_ = {
+                "active": False,
+                "original_feature_count": 0,
+                "effective_feature_count": 0,
+                "bundle_count": 0,
+                "bundled_feature_count": 0,
+                "skipped_feature_count": 0,
+                "observed_conflict_count": 0,
+            }
         self._native_predictor_handle = None
         self._float_thresholds_converted = False
         self._predictor_needs_rebuild = True
@@ -92,6 +113,7 @@ class _PersistenceMixin:
             "continuous_feature_sorted_values": self._continuous_feature_sorted_values,
             "continuous_feature_quantile_cuts": self._continuous_feature_quantile_cuts,
             "feature_quantile_cut_methods": self.feature_quantile_cut_methods_,
+            "feature_bundling_diagnostics": self.feature_bundling_diagnostics_,
             "continuous_feature_linear_rank_flags": self._continuous_feature_linear_rank_flags,
             "best_iteration": self.best_iteration_,
             "best_score": self.best_score_,
@@ -174,6 +196,18 @@ class _PersistenceMixin:
         )
         model.feature_quantile_cut_methods_ = metadata.get(
             "feature_quantile_cut_methods"
+        )
+        model.feature_bundling_diagnostics_ = metadata.get(
+            "feature_bundling_diagnostics",
+            {
+                "active": False,
+                "original_feature_count": model._n_features_in,
+                "effective_feature_count": model._n_features_in,
+                "bundle_count": 0,
+                "bundled_feature_count": 0,
+                "skipped_feature_count": 0,
+                "observed_conflict_count": 0,
+            },
         )
         model._continuous_feature_linear_rank_flags = metadata.get(
             "continuous_feature_linear_rank_flags"

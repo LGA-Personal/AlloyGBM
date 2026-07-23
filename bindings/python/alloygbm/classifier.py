@@ -349,6 +349,7 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
             f"continuous_binning_strategy='{self.continuous_binning_strategy}', "
             f"continuous_binning_max_bins={self.continuous_binning_max_bins}, "
             f"quantile_sketch_max_rows={self.quantile_sketch_max_rows}, "
+            f"feature_bundling='{self.feature_bundling}', "
             f"categorical_feature_index={self.categorical_feature_index}, "
             f"categorical_feature_indices={self.categorical_feature_indices}, "
             f"training_policy='{self.training_policy}', "

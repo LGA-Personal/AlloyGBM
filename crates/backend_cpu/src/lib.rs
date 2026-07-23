@@ -8,6 +8,7 @@ use alloygbm_engine::{
 };
 use rayon::prelude::*;
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 
 mod arena;
 mod backend_ops;
@@ -155,6 +156,16 @@ impl CpuBackend {
         bin_count: usize,
         include_grad_sq: bool,
     ) -> EngineResult<HistogramBundle> {
+        if binned_matrix.feature_bundle_map().is_some() {
+            return Self::build_feature_histograms_for_bundled_tile(
+                binned_matrix,
+                gradients,
+                node,
+                tile,
+                bin_count,
+                include_grad_sq,
+            );
+        }
         let feature_count = binned_matrix.feature_count;
         if tile.end_feature as usize > feature_count {
             return Err(EngineError::ContractViolation(format!(
@@ -211,6 +222,71 @@ impl CpuBackend {
                     end_feature,
                     &mut arena,
                 ),
+            }
+            arena
+                .to_bundle(node.node_id, start_feature)
+                .map_err(EngineError::from)
+        })
+    }
+
+    pub(crate) fn build_feature_histograms_for_bundled_tile(
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: &NodeSlice,
+        tile: &FeatureTile,
+        bin_count: usize,
+        include_grad_sq: bool,
+    ) -> EngineResult<HistogramBundle> {
+        let map = binned_matrix.feature_bundle_map().ok_or_else(|| {
+            EngineError::ContractViolation(
+                "bundled histogram kernel requires a feature bundle map".to_string(),
+            )
+        })?;
+        let start_feature = tile.start_feature as usize;
+        let end_feature = tile.end_feature as usize;
+        if end_feature > binned_matrix.feature_count {
+            return Err(EngineError::ContractViolation(format!(
+                "feature tile end {} exceeds feature_count {}",
+                tile.end_feature, binned_matrix.feature_count
+            )));
+        }
+        let mut storage_groups = BTreeMap::new();
+        for feature in start_feature..end_feature {
+            let assignment = map.assignment(feature).ok_or_else(|| {
+                EngineError::ContractViolation(format!(
+                    "feature bundle map is missing feature {feature}"
+                ))
+            })?;
+            storage_groups
+                .entry(assignment.storage_feature)
+                .or_insert_with(Vec::new)
+                .push((feature - start_feature, assignment));
+        }
+
+        THREAD_ARENA.with(|cell| {
+            let mut arena = cell.borrow_mut();
+            arena.resize_for_tile(end_feature - start_feature, bin_count, include_grad_sq);
+            for (storage_feature, assignments) in storage_groups {
+                for &row_index in &node.row_indices {
+                    let row_index = row_index as usize;
+                    let storage_bin = binned_matrix.storage_col_bin(storage_feature, row_index);
+                    let gradient = gradients[row_index];
+                    for &(local_feature, assignment) in &assignments {
+                        let bin = assignment.decode(
+                            storage_bin,
+                            binned_matrix.nan_bin_index,
+                            binned_matrix.missing_bin(),
+                        );
+                        let target = local_feature * arena.bin_count + usize::from(bin);
+                        arena.grad_sums[target] += gradient.grad;
+                        arena.hess_sums[target] += gradient.hess;
+                        if include_grad_sq {
+                            arena.grad_sq_sums.as_mut().expect("DRO arena")[target] +=
+                                gradient.grad * gradient.grad;
+                        }
+                        arena.counts[target] += 1;
+                    }
+                }
             }
             arena
                 .to_bundle(node.node_id, start_feature)

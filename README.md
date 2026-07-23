@@ -367,6 +367,8 @@ artifact_bytes = model.artifact_bytes
 - Leaf-wise (best-first) tree growth via `tree_growth="leaf"`
 - Warm-starting / incremental training via `warm_start=True`
 - Up to 65,535 bins per feature (`continuous_binning_max_bins`)
+- Opt-in exact exclusive feature bundling for sparse numeric/one-hot columns
+  via `feature_bundling="exact"`
 - Multiple categorical column support via `categorical_feature_indices`
 - Early stopping with `best_iteration_`, `best_score_`, `evals_result_`
 - Objective-aware training metric tracking (RMSE, log-loss, accuracy, NDCG)
@@ -427,6 +429,9 @@ Benchmark tooling and methodology live in [benchmarks/README.md](benchmarks/READ
 - CPU-only runtime (GPU backend is architecturally planned but not implemented)
 - `MultiLabelGBMRanker(multi_label_mode="joint")` supports built-in `squared_error` / `queryrmse` / `rank:*` objectives, plus (as of v0.12.8) the `poisson` / `gamma` / `tweedie` / `quantile` regression objectives. v0.10.2 added leaf-wise growth + `max_leaves`, `interaction_constraints`, `min_split_gain`, `row_subsample`, and `col_subsample`. v0.10.3 added native-categorical Python wiring, joint GOSS, joint DART, and joint warm-start. v0.10.4 added joint MorphBoost (`training_mode="morph"` + the full morph kwargs). v0.10.5 added joint DRO leaves (`leaf_solver="dro"` + `dro_radius` / `dro_metric`). **v0.10.6** added joint factor neutralization (all three modes: `pre_target`, `per_round_gradient`, `split_penalty`). Joint mode also accepts `ranking_sigma`, `lambdarank_truncation_level`, and `lambdarank_normalize` — the joint trainer now has full feature parity with the single-output path.
 - `leaf_solver="dro"` is a robust scalar leaf update, not a full raw-distribution Wasserstein DRO guarantee
+- `feature_bundling="exact"` is a conservative, training-only optimization for
+  zero-conflict sparse numeric groups; it is not supported by joint
+  `MultiLabelGBMRanker`
 - Quantile regression objective (`"quantile"`) is supported with linear leaves, DART, and MorphBoost, and (as of v0.12.8) on `GBMRanker` and `MultiLabelGBMRanker` (both modes). It is still rejected for classification and multiclass training.
 
 See [docs/limitations.md](docs/limitations.md) for the full list.

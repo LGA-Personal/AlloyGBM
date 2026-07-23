@@ -12,7 +12,10 @@ use crate::params::{
     parse_neutralization_config, parse_training_policy, parse_tree_growth,
     validate_neutralization_leaf_model,
 };
-use crate::pyclasses::{NativeTrainingResult, NativeTrainingSummary, diagnostics_to_native};
+use crate::pyclasses::{
+    NativeFeatureBundlingDiagnostics, NativeTrainingResult, NativeTrainingSummary,
+    diagnostics_to_native,
+};
 use crate::quantization::{
     ContinuousBinningStrategy, parse_continuous_binning_strategy,
     prepare_training_matrices_from_dense_values, prepare_validation_matrices_from_dense_values,
@@ -21,7 +24,9 @@ use crate::{DEFAULT_TRAIN_ROUNDS, MAX_SUPPORTED_TRAIN_ROUNDS};
 
 use alloygbm_backend_cpu::CpuBackend;
 use alloygbm_core::{
-    BinnedLayout, DatasetMatrix, FactorExposureMatrix, NeutralizationKind, TrainParams, TreeGrowth,
+    BinnedLayout, BinnedMatrix, DatasetMatrix, FactorExposureMatrix, FeatureBundleMap,
+    NeutralizationKind, TrainParams, TreeGrowth, count_exact_feature_bundle_conflicts,
+    discover_exact_feature_bundles,
 };
 use alloygbm_engine::{
     BinaryCrossEntropyObjective, CategoricalFeatureInfo, CategoricalTargetEncodingSpec,
@@ -37,6 +42,16 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use std::time::Instant;
+
+fn replace_with_exact_feature_bundles(
+    matrix: &mut BinnedMatrix,
+    map: FeatureBundleMap,
+) -> Result<(), EngineError> {
+    let placeholder = BinnedMatrix::new_from_column_major(1, 1, 1, vec![0])?;
+    let unbundled = std::mem::replace(matrix, placeholder);
+    *matrix = unbundled.with_exact_feature_bundles(map)?;
+    Ok(())
+}
 
 fn build_native_training_summary_from_multiclass(
     summary: &MultiClassIterationRunSummary,
@@ -133,6 +148,7 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
     continuous_binning_strategy: ContinuousBinningStrategy,
     continuous_binning_max_bins: usize,
     quantile_sketch_max_rows: Option<usize>,
+    feature_bundling: &str,
     objective: &str,
     ranking_sigma: f32,
     lambdarank_truncation_level: Option<usize>,
@@ -144,6 +160,13 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
     custom_metric_fn: Option<Py<PyAny>>,
     max_cat_threshold: usize,
 ) -> Result<NativeTrainingResult, EngineError> {
+    if !matches!(feature_bundling, "off" | "exact") {
+        return Err(EngineError::InvalidConfig(format!(
+            "feature_bundling must be 'off' or 'exact', got '{feature_bundling}'"
+        )));
+    }
+    let mut feature_bundling_diagnostics =
+        NativeFeatureBundlingDiagnostics::inactive(feature_count);
     let bridge_start = Instant::now();
     // Warm-start with neutralization is supported as of v0.7.1.  The Python
     // wrapper enforces that callers supply the same `factor_exposures`
@@ -269,7 +292,11 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
         categorical_state = Some(state);
     }
 
-    let validation_prepared = match (validation_values, validation_row_count, validation_targets) {
+    let mut validation_prepared = match (
+        validation_values,
+        validation_row_count,
+        validation_targets,
+    ) {
         (Some(values), Some(row_count), Some(targets)) => {
             if feature_count == 0 {
                 return Err(EngineError::ContractViolation(
@@ -367,6 +394,57 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
             ));
         }
     };
+
+    if feature_bundling == "exact" {
+        let mut excluded_features = vec![false; feature_count];
+        for spec in &categorical_specs {
+            excluded_features[spec.feature_index] = true;
+        }
+        for (feature, &constraint) in params.monotone_constraints.iter().enumerate() {
+            if constraint != 0 && feature < feature_count {
+                excluded_features[feature] = true;
+            }
+        }
+        for group in &params.interaction_constraints {
+            for &feature in group {
+                let feature = feature as usize;
+                if feature < feature_count {
+                    excluded_features[feature] = true;
+                }
+            }
+        }
+
+        let map = discover_exact_feature_bundles(&prepared.binned_matrix, &excluded_features)?;
+        let validation_conflicts = validation_prepared
+            .as_ref()
+            .map(|validation| count_exact_feature_bundle_conflicts(&validation.binned_matrix, &map))
+            .transpose()?
+            .unwrap_or(0);
+        let active = map.bundle_count() > 0 && validation_conflicts == 0;
+        feature_bundling_diagnostics = NativeFeatureBundlingDiagnostics {
+            active,
+            original_feature_count: feature_count,
+            effective_feature_count: if active {
+                map.effective_feature_count()
+            } else {
+                feature_count
+            },
+            bundle_count: if active { map.bundle_count() } else { 0 },
+            bundled_feature_count: if active {
+                map.bundled_feature_count()
+            } else {
+                0
+            },
+            skipped_feature_count: map.skipped_feature_count(),
+            observed_conflict_count: map.observed_conflict_count() + validation_conflicts,
+        };
+        if active {
+            if let Some(validation) = validation_prepared.as_mut() {
+                replace_with_exact_feature_bundles(&mut validation.binned_matrix, map.clone())?;
+            }
+            replace_with_exact_feature_bundles(&mut prepared.binned_matrix, map)?;
+        }
+    }
 
     // Warm-start: load existing single-output model if init_artifact_bytes is provided.
     // Multiclass warm-start is handled separately in the multiclass_softmax branch
@@ -756,6 +834,7 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
                 artifact_bytes,
                 summary: native_summary,
                 continuous_binning_metadata: prepared.metadata.into(),
+                feature_bundling_diagnostics,
                 native_cat_mappings: native_cat_mappings.clone(),
             });
         }
@@ -802,6 +881,7 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
             objective,
         ),
         continuous_binning_metadata: prepared.metadata.into(),
+        feature_bundling_diagnostics,
         native_cat_mappings,
     })
 }
@@ -1005,6 +1085,7 @@ pub(crate) fn train_regression_artifact(
             continuous_binning_strategy,
             continuous_binning_max_bins,
             quantile_sketch_max_rows,
+            "off",
             objective_name.as_str(),
             ranking_sigma,
             lambdarank_truncation_level,
@@ -1220,6 +1301,7 @@ pub(crate) fn train_regression_artifact_dense(
             continuous_binning_strategy,
             continuous_binning_max_bins,
             quantile_sketch_max_rows,
+            "off",
             objective_name.as_str(),
             ranking_sigma,
             lambdarank_truncation_level,
@@ -1272,6 +1354,7 @@ pub(crate) fn train_regression_artifact_dense(
     continuous_binning_strategy="linear",
     continuous_binning_max_bins=255,
     quantile_sketch_max_rows=None,
+    feature_bundling="off",
     objective="squared_error",
     monotone_constraints=Vec::new(),
     feature_weights=Vec::new(),
@@ -1350,6 +1433,7 @@ pub(crate) fn train_regression_artifact_with_summary(
     continuous_binning_strategy: &str,
     continuous_binning_max_bins: usize,
     quantile_sketch_max_rows: Option<usize>,
+    feature_bundling: &str,
     objective: &str,
     monotone_constraints: Vec<i8>,
     feature_weights: Vec<f32>,
@@ -1510,6 +1594,7 @@ pub(crate) fn train_regression_artifact_with_summary(
             continuous_binning_strategy,
             continuous_binning_max_bins,
             quantile_sketch_max_rows,
+            feature_bundling,
             objective_name.as_str(),
             ranking_sigma,
             lambdarank_truncation_level,
@@ -1565,6 +1650,7 @@ pub(crate) fn train_regression_artifact_with_summary(
     continuous_binning_strategy="linear",
     continuous_binning_max_bins=255,
     quantile_sketch_max_rows=None,
+    feature_bundling="off",
     objective="squared_error",
     monotone_constraints=Vec::new(),
     feature_weights=Vec::new(),
@@ -1646,6 +1732,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
     continuous_binning_strategy: &str,
     continuous_binning_max_bins: usize,
     quantile_sketch_max_rows: Option<usize>,
+    feature_bundling: &str,
     objective: &str,
     monotone_constraints: Vec<i8>,
     feature_weights: Vec<f32>,
@@ -1787,6 +1874,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
             continuous_binning_strategy,
             continuous_binning_max_bins,
             quantile_sketch_max_rows,
+            feature_bundling,
             objective_name.as_str(),
             ranking_sigma,
             lambdarank_truncation_level,
@@ -1871,6 +1959,7 @@ fn dense_input_to_f32_vec(input: &Bound<'_, PyAny>) -> PyResult<Vec<f32>> {
     continuous_binning_strategy="linear",
     continuous_binning_max_bins=255,
     quantile_sketch_max_rows=None,
+    feature_bundling="off",
     objective="squared_error",
     monotone_constraints=Vec::new(),
     feature_weights=Vec::new(),
@@ -1952,6 +2041,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
     continuous_binning_strategy: &str,
     continuous_binning_max_bins: usize,
     quantile_sketch_max_rows: Option<usize>,
+    feature_bundling: &str,
     objective: &str,
     monotone_constraints: Vec<i8>,
     feature_weights: Vec<f32>,
@@ -2099,6 +2189,7 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
             continuous_binning_strategy,
             continuous_binning_max_bins,
             quantile_sketch_max_rows,
+            feature_bundling,
             objective_name.as_str(),
             ranking_sigma,
             lambdarank_truncation_level,

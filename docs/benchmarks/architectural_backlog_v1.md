@@ -178,6 +178,31 @@ The exact one-hot case provides a substantial memory and training-time target.
 The conflict arm must fall back unchanged, and the non-bundleable dense arm
 prevents detection overhead from becoming a general regression.
 
+### Exclusive feature bundling candidate
+
+The opt-in exact implementation was measured on 2026-07-22 from the same host
+with `feature_bundling="off"` as the fresh baseline and candidate commit
+`63d320b`. Both modes used three fresh subprocesses per case; the table reports
+medians.
+
+| Case | Variant | Effective features | Fit (s) | Native train (s) | Incremental peak RSS (MiB) |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `exclusive_one_hot` | off | 512 | 1.30599 | 0.99891 | 203.20 |
+| `exclusive_one_hot` | exact | 32 | 1.02842 | 0.66660 | 221.52 |
+| `controlled_conflict` | off | 512 | 1.48405 | 1.16160 | 203.44 |
+| `controlled_conflict` | exact fallback | 512 | 1.46329 | 1.12767 | 214.53 |
+| `dense_control` | off | 512 | 1.37241 | 1.15257 | 223.55 |
+| `dense_control` | exact inactive | 512 | 1.33299 | 1.10934 | 223.20 |
+
+Exact bundling reduced the exclusive fixture to 32 physical columns, improved
+native training by 33.3%, and improved total fit time by 21.3%. Its temporary
+discovery map increased incremental fit RSS by 9.0%, so the candidate passes
+the material-benefit gate on time rather than memory. Controlled conflicts
+fell back with byte-identical artifacts and predictions; dense input stayed
+inactive and was 2.9% faster in this run. Artifact and prediction digests
+matched the off baseline in all nine repetitions, and every EFB quality and
+performance gate passed.
+
 ## Approximate Quantile Sketches
 
 | Rows x features | Fit (s) | Bridge prepare (s) | Native train (s) | Incremental peak RSS (MiB) | RMSE |
@@ -209,7 +234,7 @@ passed. Exact sorting remains the default unless `quantile_sketch_max_rows` is s
 ## Result
 
 All baseline schema, finite-value, fixture-depth, and deterministic-fixture gates passed. SoA
-histograms, node-level parallelism, duplicate bin storage, compact predictor nodes, and approximate
-quantile sketches have passed their production candidate gates. EFB remains open. The independent
-plans in this directory define the code changes, regression tests, commit boundaries, and candidate
+histograms, node-level parallelism, duplicate bin storage, compact predictor nodes, exact EFB, and
+approximate quantile sketches have passed their production candidate gates. The independent plans
+in this directory record the code changes, regression tests, commit boundaries, and candidate
 commands.

@@ -16,8 +16,8 @@ use crate::predict::{
     predictor_predict_batch_canonical_dense, predictor_predict_batch_dense,
 };
 use crate::pyclasses::{
-    NativeContinuousBinningMetadata, NativeIterationDiagnostics, NativeRuntimeInfo,
-    NativeTrainingResult, NativeTrainingSummary, native_runtime_info,
+    NativeContinuousBinningMetadata, NativeFeatureBundlingDiagnostics, NativeIterationDiagnostics,
+    NativeRuntimeInfo, NativeTrainingResult, NativeTrainingSummary, native_runtime_info,
 };
 use crate::shap_bridge::{
     shap_explain_interactions, shap_explain_interactions_dense,
@@ -68,6 +68,7 @@ fn _alloygbm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<NativePredictorHandle>()?;
     m.add_class::<JointPredictorHandle>()?;
     m.add_class::<NativeContinuousBinningMetadata>()?;
+    m.add_class::<NativeFeatureBundlingDiagnostics>()?;
     m.add_class::<NativeTrainingSummary>()?;
     m.add_class::<NativeTrainingResult>()?;
     m.add_class::<NativeIterationDiagnostics>()?;

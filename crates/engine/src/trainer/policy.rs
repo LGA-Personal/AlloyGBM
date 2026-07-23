@@ -29,7 +29,7 @@ pub(crate) fn split_selection_options_for_training(
         dro_config: params
             .dro_config
             .filter(|config| params.leaf_solver == LeafSolverKind::Dro && config.radius > 0.0),
-        missing_bin_index: binned_matrix.nan_bin_index as usize,
+        missing_bin_index: binned_matrix.missing_bin() as usize,
     };
     if !user_set_regularization {
         options.l2_lambda = env_options.l2_lambda;

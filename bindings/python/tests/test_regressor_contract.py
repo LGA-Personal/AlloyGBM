@@ -161,6 +161,8 @@ class GBMRegressorContractTests(unittest.TestCase):
             GBMRegressor(continuous_binning_max_bins=1)
         with self.assertRaisesRegex(ValueError, "continuous_binning_max_bins"):
             GBMRegressor(continuous_binning_max_bins=65536)
+        with self.assertRaisesRegex(ValueError, "feature_bundling"):
+            GBMRegressor(feature_bundling="approximate")
         with self.assertRaisesRegex(ValueError, "leaf_solver"):
             GBMRegressor(leaf_solver="invalid")
         with self.assertRaisesRegex(ValueError, "dro_radius"):
@@ -189,6 +191,7 @@ class GBMRegressorContractTests(unittest.TestCase):
         self.assertTrue(params["deterministic"])
         self.assertEqual(params["continuous_binning_strategy"], "quantile")
         self.assertEqual(params["continuous_binning_max_bins"], 256)
+        self.assertEqual(params["feature_bundling"], "off")
         self.assertIsNone(params["categorical_feature_index"])
         self.assertEqual(params["training_policy"], "auto")
         self.assertFalse(params["store_node_stats"])
@@ -216,6 +219,7 @@ class GBMRegressorContractTests(unittest.TestCase):
             deterministic=False,
             continuous_binning_strategy="rank",
             continuous_binning_max_bins=128,
+            feature_bundling="exact",
             categorical_feature_index=1,
             training_policy="manual",
             store_node_stats=True,
@@ -246,6 +250,7 @@ class GBMRegressorContractTests(unittest.TestCase):
         self.assertFalse(model.get_params()["deterministic"])
         self.assertEqual(model.get_params()["continuous_binning_strategy"], "rank")
         self.assertEqual(model.get_params()["continuous_binning_max_bins"], 128)
+        self.assertEqual(model.get_params()["feature_bundling"], "exact")
         self.assertEqual(model.get_params()["categorical_feature_index"], 1)
         self.assertEqual(model.get_params()["training_policy"], "manual")
         self.assertTrue(model.get_params()["store_node_stats"])
@@ -267,6 +272,25 @@ class GBMRegressorContractTests(unittest.TestCase):
         model = GBMRegressor()
         with self.assertRaisesRegex(ValueError, "continuous_binning_max_bins"):
             model.set_params(continuous_binning_max_bins=0)
+
+    def test_feature_bundling_contract_is_visible_before_fit(self) -> None:
+        model = GBMRegressor()
+
+        self.assertIn("feature_bundling='off'", repr(model))
+        self.assertEqual(
+            model.feature_bundling_diagnostics_,
+            {
+                "active": False,
+                "original_feature_count": 0,
+                "effective_feature_count": 0,
+                "bundle_count": 0,
+                "bundled_feature_count": 0,
+                "skipped_feature_count": 0,
+                "observed_conflict_count": 0,
+            },
+        )
+        with self.assertRaisesRegex(ValueError, "feature_bundling"):
+            model.set_params(feature_bundling="unsafe")
 
     def test_set_params_rejects_invalid_n_estimators(self) -> None:
         model = GBMRegressor()

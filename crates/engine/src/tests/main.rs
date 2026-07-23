@@ -2,7 +2,8 @@ use super::*;
 use crate::factor::apply_pre_target_neutralization;
 use alloygbm_categorical::TargetEncoderConfig;
 use alloygbm_core::{
-    CoreError, Device, DroConfig, LeafSolverKind, MorphConfig, NeutralizationKind,
+    CoreError, Device, DroConfig, LeafSolverKind, MISSING_BIN_U8, MorphConfig, NeutralizationKind,
+    discover_exact_feature_bundles,
 };
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 use std::time::Duration;
@@ -1592,6 +1593,59 @@ fn dro_zero_radius_uses_standard_split_options() {
     assert!(
         options.dro_config.is_none(),
         "zero-radius DRO should keep standard split-selection fast paths"
+    );
+}
+
+#[test]
+fn split_options_use_logical_missing_bin_for_bundled_storage() {
+    let matrix = BinnedMatrix::new(
+        8,
+        3,
+        u16::from(MISSING_BIN_U8),
+        vec![
+            200,
+            0,
+            MISSING_BIN_U8,
+            0,
+            200,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ],
+    )
+    .expect("fixture");
+    let map = discover_exact_feature_bundles(&matrix, &[false; 3]).expect("bundle map");
+    let bundled = matrix
+        .with_exact_feature_bundles(map)
+        .expect("bundled matrix");
+
+    let options = split_selection_options_for_training(
+        &TrainParams::default(),
+        None,
+        &sample_dataset(),
+        &bundled,
+    )
+    .expect("split options");
+
+    assert_eq!(
+        options.missing_bin_index,
+        usize::from(bundled.missing_bin())
     );
 }
 
