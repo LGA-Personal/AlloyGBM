@@ -2,7 +2,7 @@ use crate::factor_split::factor_split_penalty;
 use crate::*;
 use alloygbm_core::{
     DatasetMatrix, FactorExposureMatrix, FeatureHistogram, FeatureTile, HistogramBin,
-    LeafModelKind, TrainParams, TrainingDataset, TreeGrowth,
+    LeafModelKind, TrainParams, TrainingDataset, TreeGrowth, discover_exact_feature_bundles,
 };
 use alloygbm_engine::{
     BackendOps, FactorSplitContext, HistogramExecution, SquaredErrorObjective, Trainer,
@@ -223,6 +223,49 @@ fn build_histograms_aggregates_bins() {
     assert_eq!(feature0.bin(3).expect("bin").count, 1);
     assert!((feature0.bin(0).expect("bin").grad_sum - 2.0).abs() < 1e-6);
     assert!((feature0.bin(3).expect("bin").grad_sum + 2.0).abs() < 1e-6);
+}
+
+#[test]
+fn bundled_histogram_kernel_matches_unbundled_feature_histograms() {
+    let matrix = BinnedMatrix::new(
+        6,
+        4,
+        1,
+        vec![
+            1, 0, 0, 0, //
+            0, 1, 0, 0, //
+            0, 0, 1, 0, //
+            0, 0, 0, 1, //
+            1, 0, 0, 0, //
+            0, 1, 0, 0,
+        ],
+    )
+    .expect("fixture");
+    let map = discover_exact_feature_bundles(&matrix, &[false; 4]).expect("bundle map");
+    let bundled = matrix
+        .clone()
+        .with_exact_feature_bundles(map)
+        .expect("bundled matrix");
+    let gradients = vec![
+        GradientPair::new(1.0, 1.0).expect("gradient"),
+        GradientPair::new(-0.5, 1.5).expect("gradient"),
+        GradientPair::new(2.0, 0.75).expect("gradient"),
+        GradientPair::new(-1.0, 2.0).expect("gradient"),
+        GradientPair::new(0.25, 1.25).expect("gradient"),
+        GradientPair::new(-2.0, 0.5).expect("gradient"),
+    ];
+    let node = NodeSlice::new(7, (0..6).collect()).expect("node");
+    let tile = FeatureTile::new(0, 4).expect("tile");
+
+    let expected =
+        CpuBackend::build_feature_histograms_for_tile(&matrix, &gradients, &node, &tile, 2, true)
+            .expect("unbundled histograms");
+    let actual = CpuBackend::build_feature_histograms_for_bundled_tile(
+        &bundled, &gradients, &node, &tile, 2, true,
+    )
+    .expect("bundled histograms");
+
+    assert_eq!(actual, expected);
 }
 
 #[test]

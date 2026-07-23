@@ -52,7 +52,8 @@ pub use dataset::{
 pub use dro::{DroConfig, DroMetric};
 pub use error::{CoreError, CoreResult};
 pub use feature_bundling::{
-    FeatureBundleAssignment, FeatureBundleMap, discover_exact_feature_bundles,
+    FeatureBundleAssignment, FeatureBundleMap, count_exact_feature_bundle_conflicts,
+    discover_exact_feature_bundles,
 };
 pub use histogram::{
     FeatureHistogram, FeatureTile, GradientPair, HistogramBin, HistogramBundle,

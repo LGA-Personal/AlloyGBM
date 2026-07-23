@@ -1573,6 +1573,7 @@ fn exact_feature_bundles_separate_conflicting_features() {
 
     let map = discover_exact_feature_bundles(&matrix, &[false; 3]).expect("bundle map");
 
+    assert_eq!(map.bundle_count(), 0);
     assert_ne!(
         map.assignment(0).expect("feature 0").storage_feature,
         map.assignment(1).expect("feature 1").storage_feature
@@ -1597,4 +1598,20 @@ fn exact_feature_bundles_skip_nan_and_all_zero_columns() {
     assert_eq!(map.skipped_feature_count(), 2);
     assert!(!map.assignment(2).expect("NaN feature").is_bundled());
     assert!(!map.assignment(3).expect("zero feature").is_bundled());
+}
+
+#[test]
+fn exact_feature_bundle_compatibility_detects_validation_conflicts() {
+    let training = BinnedMatrix::new(3, 2, 1, vec![1, 0, 0, 1, 0, 0]).expect("training");
+    let validation = BinnedMatrix::new(2, 2, 1, vec![1, 1, 0, 0]).expect("validation");
+    let map = discover_exact_feature_bundles(&training, &[false; 2]).expect("bundle map");
+
+    assert_eq!(
+        count_exact_feature_bundle_conflicts(&training, &map).expect("training check"),
+        0
+    );
+    assert_eq!(
+        count_exact_feature_bundle_conflicts(&validation, &map).expect("validation check"),
+        1
+    );
 }

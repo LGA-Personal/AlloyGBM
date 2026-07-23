@@ -14,7 +14,7 @@ impl FeatureBundleAssignment {
         self.bundled
     }
 
-    pub(crate) fn decode(self, storage_bin: u16, missing_bin: u16) -> u16 {
+    pub fn decode(self, storage_bin: u16, missing_bin: u16) -> u16 {
         if storage_bin == missing_bin {
             return missing_bin;
         }
@@ -158,6 +158,10 @@ pub fn discover_exact_feature_bundles(
             .cmp(&left.nonzero_count)
             .then_with(|| left.feature.cmp(&right.feature))
     });
+    let feature_rows = candidates
+        .iter()
+        .map(|candidate| (candidate.feature, candidate.rows.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
 
     let mut pending = Vec::<PendingBundle>::new();
     let mut observed_conflict_count = 0;
@@ -191,11 +195,56 @@ pub fn discover_exact_feature_bundles(
         }
     }
 
-    let bundles = pending
-        .into_iter()
-        .filter(|bundle| bundle.members.len() >= 2)
-        .map(|bundle| bundle.members)
-        .collect::<Vec<_>>();
+    // Confirm that greedy coloring recovered contiguous one-hot groups rather
+    // than an arbitrary coloring of a partial-conflict graph. This keeps the
+    // first public "exact" mode conservative and makes controlled conflicts
+    // fall back instead of silently changing the inferred feature grouping.
+    let mut contiguous = Vec::<PendingBundle>::new();
+    let mut previous_feature = None;
+    for (&feature, rows) in &feature_rows {
+        let append = previous_feature == feature.checked_sub(1)
+            && contiguous
+                .last()
+                .is_some_and(|bundle| !conflicts(&bundle.occupied_rows, rows));
+        if append {
+            let bundle = contiguous.last_mut().expect("append requires a bundle");
+            for (occupied, feature_rows) in bundle.occupied_rows.iter_mut().zip(rows) {
+                *occupied |= *feature_rows;
+            }
+            bundle.members.push(feature);
+        } else {
+            contiguous.push(PendingBundle {
+                members: vec![feature],
+                occupied_rows: rows.clone(),
+                bin_span: 0,
+            });
+        }
+        previous_feature = Some(feature);
+    }
+    let normalize = |groups: &[PendingBundle]| {
+        let mut groups = groups
+            .iter()
+            .filter(|group| group.members.len() >= 2)
+            .map(|group| {
+                let mut members = group.members.clone();
+                members.sort_unstable();
+                members
+            })
+            .collect::<Vec<_>>();
+        groups.sort_unstable();
+        groups
+    };
+    let canonical = normalize(&pending) == normalize(&contiguous);
+    observed_conflict_count += usize::from(!canonical);
+    let bundles = if canonical {
+        pending
+            .into_iter()
+            .filter(|bundle| bundle.members.len() >= 2)
+            .map(|bundle| bundle.members)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let mut assignments = vec![
         FeatureBundleAssignment {
             original_feature: 0,
@@ -249,4 +298,36 @@ pub fn discover_exact_feature_bundles(
         observed_conflict_count,
         storage_max_bin,
     })
+}
+
+pub fn count_exact_feature_bundle_conflicts(
+    matrix: &BinnedMatrix,
+    map: &FeatureBundleMap,
+) -> CoreResult<usize> {
+    if matrix.feature_count != map.original_feature_count {
+        return Err(CoreError::Validation(format!(
+            "bundle map feature count {} does not match matrix feature_count {}",
+            map.original_feature_count, matrix.feature_count
+        )));
+    }
+    let missing = matrix.missing_bin();
+    let mut conflict_count = 0;
+    for members in &map.bundles {
+        for row in 0..matrix.row_count {
+            let mut active_count = 0;
+            for &feature in members {
+                let bin = matrix.bin_at(row, feature);
+                if bin == missing {
+                    conflict_count += 1;
+                    active_count = 0;
+                    break;
+                }
+                active_count += usize::from(bin != 0);
+            }
+            if active_count > 1 {
+                conflict_count += active_count - 1;
+            }
+        }
+    }
+    Ok(conflict_count)
 }

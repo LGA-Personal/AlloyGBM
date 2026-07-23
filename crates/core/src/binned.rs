@@ -311,6 +311,9 @@ impl BinnedMatrix {
             self.bins_adaptive.set(row_idx, value);
         }
         self.bins_col_adaptive.set(col_idx, value);
+        if value != self.nan_bin_index {
+            self.storage_max_bin = self.storage_max_bin.max(value);
+        }
     }
 
     pub fn effective_feature_count(&self) -> usize {

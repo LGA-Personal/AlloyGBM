@@ -130,6 +130,12 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
                     "quantile_sketch_max_rows must be greater than 0 when set"
                 )
             self._per_label_kwargs["quantile_sketch_max_rows"] = normalized
+        feature_bundling = str(
+            self._per_label_kwargs.get("feature_bundling", "off")
+        )
+        if feature_bundling not in {"off", "exact"}:
+            raise ValueError("feature_bundling must be 'off' or 'exact'")
+        self._per_label_kwargs["feature_bundling"] = feature_bundling
         self._is_fitted = False
         self._sub_rankers: list[GBMRanker] = []
         # Joint-mode state (populated only when multi_label_mode == "joint")
@@ -149,6 +155,15 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
         self.n_labels_: int | None = None
         self.rounds_completed_: list[int] | int | None = None
         self.factor_exposure_diagnostics_: dict | None = None
+        self.feature_bundling_diagnostics_: dict[str, int | bool] = {
+            "active": False,
+            "original_feature_count": 0,
+            "effective_feature_count": 0,
+            "bundle_count": 0,
+            "bundled_feature_count": 0,
+            "skipped_feature_count": 0,
+            "observed_conflict_count": 0,
+        }
 
     @property
     def continuous_binning_strategy(self) -> str:
@@ -171,6 +186,10 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
     def quantile_sketch_max_rows(self) -> int | None:
         value = self._per_label_kwargs.get("quantile_sketch_max_rows")
         return int(value) if value is not None else None
+
+    @property
+    def feature_bundling(self) -> str:
+        return str(self._per_label_kwargs.get("feature_bundling", "off"))
 
     @property
     def _n_features_in(self) -> int:
@@ -239,6 +258,11 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
                     "quantile_sketch_max_rows must be greater than 0 when set"
                 )
             params["quantile_sketch_max_rows"] = normalized
+        if "feature_bundling" in params:
+            feature_bundling = str(params["feature_bundling"])
+            if feature_bundling not in {"off", "exact"}:
+                raise ValueError("feature_bundling must be 'off' or 'exact'")
+            params["feature_bundling"] = feature_bundling
         self._per_label_kwargs.update(params)
         return self
 
@@ -360,6 +384,10 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
             and self._sub_rankers[0].feature_quantile_cut_methods_ is not None
             else None
         )
+        if self._sub_rankers:
+            self.feature_bundling_diagnostics_ = dict(
+                self._sub_rankers[0].feature_bundling_diagnostics_
+            )
         self._is_fitted = True
         return self
 
@@ -580,6 +608,11 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
                 "factor_exposures were provided but neutralization='none'"
             )
         self.factor_exposure_diagnostics_ = None
+        if self.feature_bundling != "off":
+            raise NotImplementedError(
+                "feature_bundling='exact' is not supported by "
+                "multi_label_mode='joint'; use multi_label_mode='independent'"
+            )
         if eval_set is not None:
             raise NotImplementedError(
                 "multi_label_mode='joint' does not support eval_set / "
