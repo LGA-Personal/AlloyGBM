@@ -256,7 +256,7 @@ impl BinnedMatrix {
                 .expect("logical feature index is validated by callers");
             let storage_index = assignment.storage_feature * self.row_count + row;
             let storage_bin = self.bins_col_adaptive.get(storage_index);
-            return assignment.decode(storage_bin, self.nan_bin_index);
+            return assignment.decode(storage_bin, self.nan_bin_index, map.logical_missing_bin());
         }
         if self.has_row_major() {
             self.bins_adaptive.get(row * self.feature_count + feature)
@@ -268,7 +268,9 @@ impl BinnedMatrix {
     /// The sentinel value used for missing/NaN bins in this matrix.
     #[inline]
     pub fn missing_bin(&self) -> u16 {
-        self.nan_bin_index
+        self.feature_bundle_map
+            .as_ref()
+            .map_or(self.nan_bin_index, FeatureBundleMap::logical_missing_bin)
     }
 
     /// Whether column-major adaptive storage is available (non-empty).
@@ -369,6 +371,12 @@ impl BinnedMatrix {
                     if original_bin == 0 {
                         0
                     } else {
+                        if original_bin > assignment.bin_span {
+                            return Err(CoreError::Validation(format!(
+                                "feature {feature} bin {original_bin} exceeds trained bundle span {}",
+                                assignment.bin_span
+                            )));
+                        }
                         assignment.bin_offset + original_bin - 1
                     }
                 } else {

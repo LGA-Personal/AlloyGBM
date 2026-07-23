@@ -2,7 +2,8 @@ use crate::factor_split::factor_split_penalty;
 use crate::*;
 use alloygbm_core::{
     DatasetMatrix, FactorExposureMatrix, FeatureHistogram, FeatureTile, HistogramBin,
-    LeafModelKind, TrainParams, TrainingDataset, TreeGrowth, discover_exact_feature_bundles,
+    LeafModelKind, MISSING_BIN_U8, TrainParams, TrainingDataset, TreeGrowth,
+    discover_exact_feature_bundles,
 };
 use alloygbm_engine::{
     BackendOps, FactorSplitContext, HistogramExecution, SquaredErrorObjective, Trainer,
@@ -262,6 +263,61 @@ fn bundled_histogram_kernel_matches_unbundled_feature_histograms() {
             .expect("unbundled histograms");
     let actual = CpuBackend::build_feature_histograms_for_bundled_tile(
         &bundled, &gradients, &node, &tile, 2, true,
+    )
+    .expect("bundled histograms");
+
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn bundled_histograms_preserve_logical_missing_bins_on_unbundled_features() {
+    let matrix = BinnedMatrix::new(
+        8,
+        3,
+        u16::from(MISSING_BIN_U8),
+        vec![
+            200,
+            0,
+            MISSING_BIN_U8,
+            0,
+            200,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ],
+    )
+    .expect("fixture");
+    let map = discover_exact_feature_bundles(&matrix, &[false; 3]).expect("bundle map");
+    let bundled = matrix
+        .clone()
+        .with_exact_feature_bundles(map)
+        .expect("bundled matrix");
+    let gradients = vec![GradientPair::new(1.0, 1.0).expect("gradient"); 8];
+    let node = NodeSlice::new(8, (0..8).collect()).expect("node");
+    let tile = FeatureTile::new(0, 3).expect("tile");
+
+    let expected = CpuBackend::build_feature_histograms_for_tile(
+        &matrix, &gradients, &node, &tile, 256, false,
+    )
+    .expect("unbundled histograms");
+    let actual = CpuBackend::build_feature_histograms_for_bundled_tile(
+        &bundled, &gradients, &node, &tile, 256, false,
     )
     .expect("bundled histograms");
 

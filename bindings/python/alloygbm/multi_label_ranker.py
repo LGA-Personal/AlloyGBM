@@ -1293,6 +1293,10 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
                     and rankers[0].feature_quantile_cut_methods_ is not None
                     else None
                 )
+                if rankers:
+                    inst.feature_bundling_diagnostics_ = dict(
+                        rankers[0].feature_bundling_diagnostics_
+                    )
                 return inst
 
             # Joint mode (mode_int == 1)

@@ -272,7 +272,11 @@ impl CpuBackend {
                     let storage_bin = binned_matrix.storage_col_bin(storage_feature, row_index);
                     let gradient = gradients[row_index];
                     for &(local_feature, assignment) in &assignments {
-                        let bin = assignment.decode(storage_bin, binned_matrix.missing_bin());
+                        let bin = assignment.decode(
+                            storage_bin,
+                            binned_matrix.nan_bin_index,
+                            binned_matrix.missing_bin(),
+                        );
                         let target = local_feature * arena.bin_count + usize::from(bin);
                         arena.grad_sums[target] += gradient.grad;
                         arena.hess_sums[target] += gradient.hess;

@@ -14,9 +14,14 @@ impl FeatureBundleAssignment {
         self.bundled
     }
 
-    pub fn decode(self, storage_bin: u16, missing_bin: u16) -> u16 {
-        if storage_bin == missing_bin {
-            return missing_bin;
+    pub fn decode(
+        self,
+        storage_bin: u16,
+        storage_missing_bin: u16,
+        logical_missing_bin: u16,
+    ) -> u16 {
+        if storage_bin == storage_missing_bin {
+            return logical_missing_bin;
         }
         if !self.bundled {
             return storage_bin;
@@ -39,6 +44,7 @@ pub struct FeatureBundleMap {
     skipped_feature_count: usize,
     observed_conflict_count: usize,
     storage_max_bin: u16,
+    logical_missing_bin: u16,
 }
 
 impl FeatureBundleMap {
@@ -77,6 +83,10 @@ impl FeatureBundleMap {
     pub(crate) fn storage_max_bin(&self) -> u16 {
         self.storage_max_bin
     }
+
+    pub(crate) fn logical_missing_bin(&self) -> u16 {
+        self.logical_missing_bin
+    }
 }
 
 #[derive(Debug)]
@@ -113,6 +123,7 @@ pub fn discover_exact_feature_bundles(
     }
 
     let word_count = matrix.row_count.div_ceil(64);
+    let sparse_occupancy_limit = matrix.row_count.div_ceil(4).max(2);
     let missing = matrix.missing_bin();
     let mut feature_max_bins = vec![0_u16; matrix.feature_count];
     let mut candidates = Vec::new();
@@ -141,7 +152,7 @@ pub fn discover_exact_feature_bundles(
                     if bin != 0 {
                         rows[row / 64] |= 1_u64 << (row % 64);
                         nonzero_count += 1;
-                        if nonzero_count > matrix.row_count / 2 {
+                        if nonzero_count > sparse_occupancy_limit {
                             too_dense = true;
                             break;
                         }
@@ -158,7 +169,7 @@ pub fn discover_exact_feature_bundles(
                     if bin != 0 {
                         rows[row / 64] |= 1_u64 << (row % 64);
                         nonzero_count += 1;
-                        if nonzero_count > matrix.row_count / 2 {
+                        if nonzero_count > sparse_occupancy_limit {
                             too_dense = true;
                             break;
                         }
@@ -263,7 +274,7 @@ pub fn discover_exact_feature_bundles(
     };
     let canonical = normalize(&pending) == normalize(&contiguous);
     observed_conflict_count += usize::from(!canonical);
-    let bundles = if canonical {
+    let bundles = if canonical && matrix.max_bin < u16::MAX {
         pending
             .into_iter()
             .filter(|bundle| bundle.members.len() >= 2)
@@ -324,6 +335,7 @@ pub fn discover_exact_feature_bundles(
         skipped_feature_count,
         observed_conflict_count,
         storage_max_bin,
+        logical_missing_bin: missing,
     })
 }
 
@@ -344,7 +356,12 @@ pub fn count_exact_feature_bundle_conflicts(
             let mut active_count = 0;
             for &feature in members {
                 let bin = matrix.bin_at(row, feature);
-                if bin == missing {
+                let assignment = map
+                    .assignment(feature)
+                    .expect("bundle members have assignments");
+                if bin == missing
+                    || (bin != 0 && assignment.is_bundled() && bin > assignment.bin_span)
+                {
                     conflict_count += 1;
                     active_count = 0;
                     break;

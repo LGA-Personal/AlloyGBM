@@ -1601,7 +1601,7 @@ fn exact_feature_bundles_skip_nan_and_all_zero_columns() {
 }
 
 #[test]
-fn exact_feature_bundles_skip_features_above_half_occupancy() {
+fn exact_feature_bundles_skip_features_above_quarter_occupancy() {
     let matrix = BinnedMatrix::new_from_column_major(
         4,
         3,
@@ -1622,6 +1622,26 @@ fn exact_feature_bundles_skip_features_above_half_occupancy() {
 }
 
 #[test]
+fn exact_feature_bundles_reject_noncontiguous_candidate_groups() {
+    let matrix = BinnedMatrix::new(
+        4,
+        3,
+        1,
+        vec![
+            1, 1, 0, //
+            0, 1, 0, //
+            0, 1, 1, //
+            0, 1, 0,
+        ],
+    )
+    .expect("matrix");
+
+    let map = discover_exact_feature_bundles(&matrix, &[false, true, false]).expect("bundle map");
+
+    assert_eq!(map.bundle_count(), 0);
+}
+
+#[test]
 fn exact_feature_bundle_compatibility_detects_validation_conflicts() {
     let training = BinnedMatrix::new(3, 2, 1, vec![1, 0, 0, 1, 0, 0]).expect("training");
     let validation = BinnedMatrix::new(2, 2, 1, vec![1, 1, 0, 0]).expect("validation");
@@ -1635,4 +1655,32 @@ fn exact_feature_bundle_compatibility_detects_validation_conflicts() {
         count_exact_feature_bundle_conflicts(&validation, &map).expect("validation check"),
         1
     );
+}
+
+#[test]
+fn exact_feature_bundle_compatibility_detects_bins_beyond_training_span() {
+    let training = BinnedMatrix::new(4, 2, 1, vec![1, 0, 0, 1, 0, 0, 0, 0]).expect("training");
+    let validation = BinnedMatrix::new(2, 2, 2, vec![2, 0, 0, 1]).expect("validation");
+    let map = discover_exact_feature_bundles(&training, &[false; 2]).expect("bundle map");
+
+    assert_eq!(
+        count_exact_feature_bundle_conflicts(&validation, &map).expect("validation check"),
+        1
+    );
+}
+
+#[test]
+fn exact_feature_bundles_decline_exhausted_u16_storage() {
+    let matrix = BinnedMatrix::new_u16_from_column_major(
+        4,
+        2,
+        u16::MAX,
+        u16::MAX - 1,
+        vec![1, 0, 0, 0, 0, 1, 0, 0],
+    )
+    .expect("matrix");
+
+    let map = discover_exact_feature_bundles(&matrix, &[false; 2]).expect("bundle map");
+
+    assert_eq!(map.bundle_count(), 0);
 }
