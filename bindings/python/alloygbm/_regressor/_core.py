@@ -49,6 +49,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         continuous_binning_strategy: str = "quantile",
         continuous_binning_max_bins: int = 256,
         quantile_sketch_max_rows: int | None = None,
+        feature_bundling: str = "off",
         categorical_feature_index: int | None = None,
         categorical_feature_indices: list[int] | None = None,
         training_policy: str = "auto",
@@ -164,6 +165,8 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         )
         if sketch_max_rows is not None and sketch_max_rows <= 0:
             raise ValueError("quantile_sketch_max_rows must be greater than 0 when set")
+        if feature_bundling not in {"off", "exact"}:
+            raise ValueError("feature_bundling must be 'off' or 'exact'")
         if monotone_constraints is not None:
             if isinstance(monotone_constraints, dict):
                 for v in monotone_constraints.values():
@@ -398,6 +401,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         self.continuous_binning_strategy = str(continuous_binning_strategy)
         self.continuous_binning_max_bins = max_bins
         self.quantile_sketch_max_rows = sketch_max_rows
+        self.feature_bundling = str(feature_bundling)
         self.categorical_feature_index = (
             int(categorical_feature_index)
             if categorical_feature_index is not None
@@ -484,6 +488,15 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         self.fit_timing_: dict[str, float] | None = None
         self.diagnostics_per_round_: list[dict] | None = None
         self.factor_exposure_diagnostics_: dict | None = None
+        self.feature_bundling_diagnostics_: dict[str, int | bool] = {
+            "active": False,
+            "original_feature_count": 0,
+            "effective_feature_count": 0,
+            "bundle_count": 0,
+            "bundled_feature_count": 0,
+            "skipped_feature_count": 0,
+            "observed_conflict_count": 0,
+        }
 
     def __repr__(self) -> str:
         return (
@@ -505,6 +518,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             f"continuous_binning_strategy='{self.continuous_binning_strategy}', "
             f"continuous_binning_max_bins={self.continuous_binning_max_bins}, "
             f"quantile_sketch_max_rows={self.quantile_sketch_max_rows}, "
+            f"feature_bundling='{self.feature_bundling}', "
             f"categorical_feature_index={self.categorical_feature_index}, "
             f"categorical_feature_indices={self.categorical_feature_indices}, "
             f"training_policy='{self.training_policy}', "
@@ -570,6 +584,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             "continuous_binning_strategy": self.continuous_binning_strategy,
             "continuous_binning_max_bins": self.continuous_binning_max_bins,
             "quantile_sketch_max_rows": self.quantile_sketch_max_rows,
+            "feature_bundling": self.feature_bundling,
             "categorical_feature_index": self.categorical_feature_index,
             "categorical_feature_indices": self.categorical_feature_indices,
             "training_policy": self.training_policy,
@@ -634,6 +649,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             "continuous_binning_strategy",
             "continuous_binning_max_bins",
             "quantile_sketch_max_rows",
+            "feature_bundling",
             "categorical_feature_index",
             "categorical_feature_indices",
             "training_policy",
@@ -869,6 +885,14 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             if sketch_max_rows != self.quantile_sketch_max_rows and self._is_fitted:
                 self._reset_fitted_state()
             self.quantile_sketch_max_rows = sketch_max_rows
+
+        if "feature_bundling" in params:
+            feature_bundling = str(params["feature_bundling"])
+            if feature_bundling not in {"off", "exact"}:
+                raise ValueError("feature_bundling must be 'off' or 'exact'")
+            if feature_bundling != self.feature_bundling and self._is_fitted:
+                self._reset_fitted_state()
+            self.feature_bundling = feature_bundling
 
         if "categorical_feature_index" in params:
             if params["categorical_feature_index"] is None:
@@ -1709,6 +1733,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                     continuous_binning_strategy=self.continuous_binning_strategy,
                     continuous_binning_max_bins=self.continuous_binning_max_bins,
                     quantile_sketch_max_rows=self.quantile_sketch_max_rows,
+                    feature_bundling=self.feature_bundling,
                     objective=self._objective_name(),
                     monotone_constraints=self._resolve_monotone_constraints(feature_count),
                     feature_weights=self._resolve_feature_weights(feature_count),
@@ -1866,6 +1891,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                 continuous_binning_strategy=self.continuous_binning_strategy,
                 continuous_binning_max_bins=self.continuous_binning_max_bins,
                 quantile_sketch_max_rows=self.quantile_sketch_max_rows,
+                feature_bundling=self.feature_bundling,
                 objective=self._objective_name(),
                 monotone_constraints=self._resolve_monotone_constraints(feature_count),
                 feature_weights=self._resolve_feature_weights(feature_count),
@@ -1972,6 +1998,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                 continuous_binning_strategy=self.continuous_binning_strategy,
                 continuous_binning_max_bins=self.continuous_binning_max_bins,
                 quantile_sketch_max_rows=self.quantile_sketch_max_rows,
+                feature_bundling=self.feature_bundling,
                 objective=self._objective_name(),
                 monotone_constraints=self._resolve_monotone_constraints(feature_count),
                 feature_weights=self._resolve_feature_weights(feature_count),
@@ -2043,6 +2070,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
 
         self._apply_continuous_binning_metadata(native_result.continuous_binning_metadata)
         self._n_features_in = feature_count
+        self._apply_feature_bundling_diagnostics(native_result, feature_count)
         self._artifact_bytes = bytes(native_result.artifact_bytes)
         self._native_predictor_handle = self._build_native_predictor_handle(
             self._artifact_bytes
@@ -2097,6 +2125,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         self._apply_continuous_binning_metadata(native_result.continuous_binning_metadata)
         if feature_count is not None:
             self._n_features_in = feature_count
+        self._apply_feature_bundling_diagnostics(native_result, self._n_features_in)
         self._artifact_bytes = bytes(native_result.artifact_bytes)
         self._native_predictor_handle = self._build_native_predictor_handle(
             self._artifact_bytes
@@ -2141,6 +2170,31 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             )
         return self
 
+    def _apply_feature_bundling_diagnostics(
+        self, native_result: object, feature_count: int
+    ) -> None:
+        diagnostics = getattr(native_result, "feature_bundling_diagnostics", None)
+        if diagnostics is None:
+            self.feature_bundling_diagnostics_ = {
+                "active": False,
+                "original_feature_count": int(feature_count),
+                "effective_feature_count": int(feature_count),
+                "bundle_count": 0,
+                "bundled_feature_count": 0,
+                "skipped_feature_count": 0,
+                "observed_conflict_count": 0,
+            }
+            return
+        self.feature_bundling_diagnostics_ = {
+            "active": bool(diagnostics.active),
+            "original_feature_count": int(diagnostics.original_feature_count),
+            "effective_feature_count": int(diagnostics.effective_feature_count),
+            "bundle_count": int(diagnostics.bundle_count),
+            "bundled_feature_count": int(diagnostics.bundled_feature_count),
+            "skipped_feature_count": int(diagnostics.skipped_feature_count),
+            "observed_conflict_count": int(diagnostics.observed_conflict_count),
+        }
+
     def _fit_with_legacy_native_bridge(
         self,
         *,
@@ -2159,6 +2213,11 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         factor_exposure_factor_count: int,
         transformed_factor_exposures: object | None,
     ) -> "GBMRegressor":
+        if self.feature_bundling != "off":
+            raise RuntimeError(
+                "feature_bundling='exact' requires a native alloygbm build "
+                "with training summary support"
+            )
         if eval_set is not None:
             raise RuntimeError(
                 "eval_set requires a native alloygbm build with training summary support"
