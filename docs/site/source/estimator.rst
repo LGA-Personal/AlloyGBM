@@ -156,11 +156,30 @@ Continuous-feature controls
 - ``quantile_sketch_max_rows: int | None = None`` -- optional positive row cap
   for deterministic sampled quantile-cut construction. ``None`` keeps exact
   full-column sorting.
+- ``feature_bundling: str = "off"`` -- set to ``"exact"`` for deterministic,
+  zero-conflict training-time bundling of sparse numeric features.
 
 Supports up to 65,535 bins per feature. The default ``quantile`` strategy gives
 more robust handling of skewed continuous features. Fitted estimators expose
 ``feature_quantile_cut_methods_`` with one ``"exact"`` or ``"sketch"`` value
 per feature, and persisted models retain the native cuts and methods.
+
+Exact feature bundling
+----------------------
+
+``feature_bundling="exact"`` can reduce histogram work for dense matrices that
+contain contiguous one-hot or otherwise mutually exclusive sparse numeric
+columns. Bundling is training-only: trees, feature names, importances, SHAP
+arrays, and persisted artifacts continue to use original feature indices.
+``feature_bundling_diagnostics_`` reports activation, original/effective
+feature counts, bundle counts, skipped features, and observed conflicts.
+
+The first implementation skips categorical, monotone-constrained,
+interaction-constrained, missing-valued, greater-than-quarter-occupied, and
+all-zero columns. It refuses non-canonical conflict patterns and falls back
+for validation conflicts. Independent ``MultiLabelGBMRanker`` fits support
+exact bundling; joint mode does not. The default remains ``"off"`` because
+discovery has a small cost on non-bundleable input.
 
 Categorical support
 -------------------

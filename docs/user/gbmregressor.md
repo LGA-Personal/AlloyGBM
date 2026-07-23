@@ -171,12 +171,33 @@ call `fit(..., eval_set=(X_valid, y_valid))`.
   - Optional positive row cap for quantile-cut construction. When a fit has
     more rows than the cap, AlloyGBM derives cuts from a deterministic,
     evenly distributed row sample. `None` preserves exact full-column sorting.
+- `feature_bundling: str = "off"`
+  - `"exact"` enables deterministic, zero-conflict bundling of sparse numeric
+    features during training. `"off"` preserves the standard matrix layout.
 
 The default `quantile` strategy is more robust on skewed continuous feature
 distributions. Use `linear` when you want equal-width bins for compatibility
 experiments. After fitting, `feature_quantile_cut_methods_` reports `"exact"`
 or `"sketch"` for each feature; persisted models retain the selected cuts and
 methods.
+
+### Exact feature bundling
+
+`feature_bundling="exact"` can reduce histogram work for dense matrices that
+contain contiguous one-hot or otherwise mutually exclusive sparse numeric
+columns. Bundling is training-only: trees, feature names, importances, SHAP
+arrays, and persisted artifacts continue to use the original feature indices.
+`feature_bundling_diagnostics_` reports whether bundling activated and gives
+the original/effective feature counts, bundle counts, skipped features, and
+observed conflicts.
+
+The first implementation is intentionally conservative. It skips categorical,
+monotone-constrained, interaction-constrained, missing-valued,
+greater-than-quarter-occupied, and all-zero columns. It also refuses
+non-canonical conflict patterns and falls back for validation conflicts.
+`MultiLabelGBMRanker(multi_label_mode="independent")` supports exact bundling;
+joint mode does not. The default remains `"off"` because discovery has a
+small cost when input is not bundleable.
 
 ## Categorical Support
 

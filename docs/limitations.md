@@ -25,6 +25,17 @@ residualize-target == residualize-gradient identity that pre_target
 relies on breaks down (the gradient under log-link is `μ − y`, not
 `pred − y`). Use `"per_round_gradient"` or `"split_penalty"` with GLM
 objectives.
+
+### 6. Exact feature bundling is conservative and training-only
+
+`feature_bundling="exact"` targets contiguous, zero-conflict sparse numeric
+groups in otherwise dense input. It skips categorical, constrained,
+missing-valued, all-zero, and greater-than-quarter-occupied columns; ambiguous
+conflict patterns and validation conflicts leave the original matrix active.
+It does not add a sparse-matrix input API or approximate conflict handling.
+Independent `MultiLabelGBMRanker` fits are supported, but
+`multi_label_mode="joint"` rejects active feature bundling.
+
 ## Resolved (Previously Limitations)
 
 ### v0.12.8

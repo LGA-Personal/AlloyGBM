@@ -12,6 +12,9 @@
 
 - Public option: `feature_bundling="off" | "exact"`, default `"off"` in the first release.
 - Skip categorical, monotone-constrained, interaction-constrained, or conflict-unsafe features rather than weakening their semantics.
+- Limit candidates to contiguous original-column groups with at most 25%
+  occupancy per feature. This first contract targets encoded one-hot blocks
+  rather than arbitrary conflict-graph coloring.
 - Emitted stumps retain original feature indices, so no artifact section is added.
 - Deterministic input and seed must produce deterministic bundle maps and artifacts.
 
@@ -30,9 +33,9 @@
 - Adds `feature_bundling: str = "off"`.
 - Adds fitted `feature_bundling_diagnostics_` with original/effective feature counts, bundle count, skipped-feature count, and observed conflict count.
 
-- [ ] **Step 1: Write failing constructor/get-set/repr/persistence tests.**
-- [ ] **Step 2: Add validation and thread the enum to native training without changing behavior.**
-- [ ] **Step 3: Return inactive diagnostics for `"off"`; run contract tests and commit.**
+- [x] **Step 1: Write failing constructor/get-set/repr/persistence tests.**
+- [x] **Step 2: Add validation and thread the enum to native training without changing behavior.**
+- [x] **Step 3: Return inactive diagnostics for `"off"`; run contract tests and commit.**
 
 Commit: `git commit -am "Add EFB configuration contract"`
 
@@ -45,12 +48,13 @@ Commit: `git commit -am "Add EFB configuration contract"`
 
 **Interfaces:**
 - Produces `FeatureBundleMap` with original feature id, bundle id, bin offset, and bin span.
-- Consumes nonzero row sets plus excluded-feature masks.
+- Consumes nonzero row sets plus excluded-feature masks and accepts only
+  canonical contiguous groups.
 
-- [ ] **Step 1: Add failing tests** for perfect exclusivity, deterministic first-fit ordering, excluded features, all-zero columns, NaNs, and conflicts.
-- [ ] **Step 2: Implement stable greedy bundling ordered by descending nonzero count then original feature id.**
-- [ ] **Step 3: Permit only zero-conflict bundles in this first implementation.**
-- [ ] **Step 4: Run core tests and commit.**
+- [x] **Step 1: Add failing tests** for perfect exclusivity, deterministic first-fit ordering, excluded features, all-zero columns, NaNs, and conflicts.
+- [x] **Step 2: Implement stable greedy bundling ordered by descending nonzero count then original feature id.**
+- [x] **Step 3: Permit only canonical contiguous zero-conflict bundles in this first implementation.**
+- [x] **Step 4: Run core tests and commit.**
 
 Commit: `git commit -am "Build deterministic exclusive feature bundles"`
 
@@ -64,19 +68,19 @@ Commit: `git commit -am "Build deterministic exclusive feature bundles"`
 - Test: `crates/backend_cpu/src/tests/main.rs`
 - Test: `bindings/python/tests/test_regressor_contract.py`
 
-- [ ] **Step 1: Add a failing equivalence test** where bundled and unbundled zero-conflict one-hot data select the same original feature and threshold.
-- [ ] **Step 2: Encode each original feature into its bundle's disjoint bin range.**
-- [ ] **Step 3: Scan bundle segments as original-feature candidate ranges; decode accepted candidates before engine/artifact handoff.**
-- [ ] **Step 4: Ensure missing bins and zero/default bins cannot alias another feature's segment.**
-- [ ] **Step 5: Run workspace tests and commit.**
+- [x] **Step 1: Add a failing equivalence test** where bundled and unbundled zero-conflict one-hot data select the same original feature and threshold.
+- [x] **Step 2: Encode each original feature into its bundle's disjoint bin range.**
+- [x] **Step 3: Scan bundle segments as original-feature candidate ranges; decode accepted candidates before engine/artifact handoff.**
+- [x] **Step 4: Ensure missing bins and zero/default bins cannot alias another feature's segment.**
+- [x] **Step 5: Run workspace tests and commit.**
 
 Commit: `git commit -am "Train with exclusive feature bundles"`
 
 ### Task 4: Verify Public Contracts And Benchmark
 
-- [ ] **Step 1: Add persistence, feature importance, SHAP, categorical-skip, monotone-skip, and interaction-skip tests.**
-- [ ] **Step 2: Run full Rust/Python suites.**
-- [ ] **Step 3: Run the benchmark.**
+- [x] **Step 1: Add persistence, feature importance, SHAP, categorical-skip, monotone-skip, and interaction-skip tests.**
+- [x] **Step 2: Run full Rust/Python suites.**
+- [x] **Step 3: Run the benchmark.**
 
 ```bash
 .venv/bin/python -m benchmarks.architectural_backlog.run \
@@ -84,4 +88,4 @@ Commit: `git commit -am "Train with exclusive feature bundles"`
   --baseline benchmarks/results/architectural_backlog_baseline.json --gate
 ```
 
-- [ ] **Step 4: Require candidate activation, byte-equivalent zero-conflict artifacts, deterministic conflict refusal, and either 15% total-fit or 20% RSS improvement.**
+- [x] **Step 4: Require candidate activation, byte-equivalent zero-conflict artifacts, deterministic conflict refusal, and either 15% total-fit or 20% RSS improvement.**
