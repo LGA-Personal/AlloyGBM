@@ -1601,6 +1601,27 @@ fn exact_feature_bundles_skip_nan_and_all_zero_columns() {
 }
 
 #[test]
+fn exact_feature_bundles_skip_features_above_half_occupancy() {
+    let matrix = BinnedMatrix::new_from_column_major(
+        4,
+        3,
+        1,
+        vec![
+            1, 1, 1, 0, // Too dense for the sparse-bundle contract.
+            0, 0, 0, 1, // Sparse candidates remain eligible.
+            1, 0, 0, 0,
+        ],
+    )
+    .expect("matrix");
+
+    let map = discover_exact_feature_bundles(&matrix, &[false; 3]).expect("bundle map");
+
+    assert!(!map.assignment(0).expect("dense assignment").is_bundled());
+    assert_eq!(map.skipped_feature_count(), 1);
+    assert_eq!(map.bundle_count(), 1);
+}
+
+#[test]
 fn exact_feature_bundle_compatibility_detects_validation_conflicts() {
     let training = BinnedMatrix::new(3, 2, 1, vec![1, 0, 0, 1, 0, 0]).expect("training");
     let validation = BinnedMatrix::new(2, 2, 1, vec![1, 1, 0, 0]).expect("validation");

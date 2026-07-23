@@ -669,7 +669,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
         # `init_model` and `warm_start` are managed separately above
         # so they're allowed in `_per_label_kwargs` without appearing
         # in the bridge-forwarded set.
-        _MANAGED_KWARGS = {"init_model", "warm_start"}
+        _MANAGED_KWARGS = {"feature_bundling", "init_model", "warm_start"}
         unsupported = (
             set(self._per_label_kwargs.keys())
             - self._JOINT_SUPPORTED_KWARGS

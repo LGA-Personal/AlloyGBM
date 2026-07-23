@@ -50,6 +50,7 @@ fn train_regression_artifact_impl(
         ContinuousBinningStrategy::Linear,
         MAX_CONTINUOUS_QUANTIZED_BIN_U8 as usize + 1,
         None,
+        "off",
         "squared_error",
         1.0,   // ranking_sigma
         None,  // lambdarank_truncation_level
@@ -680,6 +681,7 @@ fn train_bridge_pre_target_categorical_encoding_matches_engine_residualized_targ
         ContinuousBinningStrategy::Linear,
         MAX_CONTINUOUS_QUANTIZED_BIN_U8 as usize + 1,
         None,
+        "off",
         "squared_error",
         1.0,
         None,

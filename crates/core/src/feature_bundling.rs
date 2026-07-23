@@ -1,4 +1,4 @@
-use crate::{BinnedMatrix, CoreError, CoreResult};
+use crate::{BinStorage, BinnedMatrix, CoreError, CoreResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FeatureBundleAssignment {
@@ -127,20 +127,47 @@ pub fn discover_exact_feature_bundles(
         let mut nonzero_count = 0;
         let mut max_bin = 0_u16;
         let mut has_missing = false;
-        for row in 0..matrix.row_count {
-            let bin = matrix.bin_at(row, feature);
-            if bin == missing {
-                has_missing = true;
-                break;
+        let mut too_dense = false;
+        let start = feature * matrix.row_count;
+        match &matrix.bins_col_adaptive {
+            BinStorage::U8(bins) => {
+                for (row, &raw_bin) in bins[start..start + matrix.row_count].iter().enumerate() {
+                    let bin = u16::from(raw_bin);
+                    if bin == missing {
+                        has_missing = true;
+                        break;
+                    }
+                    max_bin = max_bin.max(bin);
+                    if bin != 0 {
+                        rows[row / 64] |= 1_u64 << (row % 64);
+                        nonzero_count += 1;
+                        if nonzero_count > matrix.row_count / 2 {
+                            too_dense = true;
+                            break;
+                        }
+                    }
+                }
             }
-            max_bin = max_bin.max(bin);
-            if bin != 0 {
-                rows[row / 64] |= 1_u64 << (row % 64);
-                nonzero_count += 1;
+            BinStorage::U16(bins) => {
+                for (row, &bin) in bins[start..start + matrix.row_count].iter().enumerate() {
+                    if bin == missing {
+                        has_missing = true;
+                        break;
+                    }
+                    max_bin = max_bin.max(bin);
+                    if bin != 0 {
+                        rows[row / 64] |= 1_u64 << (row % 64);
+                        nonzero_count += 1;
+                        if nonzero_count > matrix.row_count / 2 {
+                            too_dense = true;
+                            break;
+                        }
+                    }
+                }
             }
         }
         feature_max_bins[feature] = max_bin;
-        if has_missing || nonzero_count == 0 {
+        if has_missing || too_dense || nonzero_count == 0 {
             skipped_feature_count += 1;
             continue;
         }

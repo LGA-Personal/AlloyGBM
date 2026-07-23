@@ -360,8 +360,9 @@ impl BinnedMatrix {
             let assignment = map
                 .assignment(feature)
                 .expect("bundle map covers every original feature");
+            let source_start = feature * self.row_count;
             for row in 0..self.row_count {
-                let original_bin = self.bin_at(row, feature);
+                let original_bin = self.bins_col_adaptive.get(source_start + row);
                 let encoded_bin = if original_bin == self.missing_bin() {
                     nan_bin_index
                 } else if assignment.is_bundled() {
