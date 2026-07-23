@@ -123,7 +123,7 @@ pub fn discover_exact_feature_bundles(
     }
 
     let word_count = matrix.row_count.div_ceil(64);
-    let sparse_occupancy_limit = matrix.row_count.div_ceil(4).max(2);
+    let sparse_occupancy_limit = matrix.row_count / 4;
     let missing = matrix.missing_bin();
     let mut feature_max_bins = vec![0_u16; matrix.feature_count];
     let mut candidates = Vec::new();

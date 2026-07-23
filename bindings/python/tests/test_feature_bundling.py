@@ -94,6 +94,7 @@ class ExactFeatureBundlingTests(unittest.TestCase):
 
     def test_wide_bundle_storage_preserves_skipped_nan_feature(self) -> None:
         X, y = _exclusive_fixture(rows=128, width=4)
+        y[0] = 100.0
         X = np.column_stack([X, np.zeros(len(X), dtype=np.float32)])
         X[0, -1] = np.nan
         parameters = {

@@ -1539,7 +1539,7 @@ fn exact_feature_bundles_are_deterministic_and_reduce_storage() {
 #[test]
 fn exact_feature_bundles_use_stable_density_first_order() {
     let matrix = BinnedMatrix::new(
-        5,
+        8,
         3,
         1,
         vec![
@@ -1547,6 +1547,8 @@ fn exact_feature_bundles_use_stable_density_first_order() {
             1, 0, 0, //
             0, 1, 0, //
             0, 0, 1, //
+            0, 0, 0, 0, 0, 0, //
+            0, 0, 0, //
             0, 0, 0,
         ],
     )
@@ -1560,12 +1562,17 @@ fn exact_feature_bundles_use_stable_density_first_order() {
 #[test]
 fn exact_feature_bundles_separate_conflicting_features() {
     let matrix = BinnedMatrix::new(
-        3,
+        8,
         3,
         1,
         vec![
             1, 1, 0, //
             0, 0, 1, //
+            0, 0, 0, //
+            0, 0, 0, //
+            0, 0, 0, //
+            0, 0, 0, //
+            0, 0, 0, //
             0, 0, 0,
         ],
     )
@@ -1584,10 +1591,43 @@ fn exact_feature_bundles_separate_conflicting_features() {
 #[test]
 fn exact_feature_bundles_skip_nan_and_all_zero_columns() {
     let matrix = BinnedMatrix::new(
-        3,
+        8,
         4,
         1,
-        vec![1, 0, MISSING_BIN_U8, 0, 0, 1, 0, 0, 0, 0, 0, 0],
+        vec![
+            1,
+            0,
+            MISSING_BIN_U8,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ],
     )
     .expect("fixture");
 
@@ -1622,6 +1662,16 @@ fn exact_feature_bundles_skip_features_above_quarter_occupancy() {
 }
 
 #[test]
+fn exact_feature_bundles_enforce_quarter_occupancy_on_small_inputs() {
+    let matrix = BinnedMatrix::new(4, 2, 1, vec![1, 0, 1, 0, 0, 1, 0, 1]).expect("matrix");
+
+    let map = discover_exact_feature_bundles(&matrix, &[false; 2]).expect("bundle map");
+
+    assert_eq!(map.bundle_count(), 0);
+    assert_eq!(map.skipped_feature_count(), 2);
+}
+
+#[test]
 fn exact_feature_bundles_reject_noncontiguous_candidate_groups() {
     let matrix = BinnedMatrix::new(
         4,
@@ -1643,7 +1693,13 @@ fn exact_feature_bundles_reject_noncontiguous_candidate_groups() {
 
 #[test]
 fn exact_feature_bundle_compatibility_detects_validation_conflicts() {
-    let training = BinnedMatrix::new(3, 2, 1, vec![1, 0, 0, 1, 0, 0]).expect("training");
+    let training = BinnedMatrix::new(
+        8,
+        2,
+        1,
+        vec![1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    )
+    .expect("training");
     let validation = BinnedMatrix::new(2, 2, 1, vec![1, 1, 0, 0]).expect("validation");
     let map = discover_exact_feature_bundles(&training, &[false; 2]).expect("bundle map");
 
