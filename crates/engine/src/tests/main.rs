@@ -4857,6 +4857,61 @@ fn test_multiclass_trained_model_artifact_roundtrip() {
     assert_eq!(restored.class_stumps[1].len(), 1);
     assert_eq!(restored.class_stumps[2].len(), 0);
     assert_eq!(restored.objective, "multiclass_softmax");
+    assert!(
+        restored
+            .class_stumps
+            .iter()
+            .flatten()
+            .all(|stump| stump.tree_weight == 1.0)
+    );
+    let parsed = alloygbm_core::deserialize_model_artifact_v1(&bytes)
+        .expect("legacy-compatible multiclass artifact parses");
+    assert!(
+        parsed
+            .sections
+            .iter()
+            .all(|section| section.descriptor.kind != ModelSectionKind::DartTreeWeights),
+        "unit-weight multiclass artifacts must remain compatible without a DART section"
+    );
+}
+
+#[test]
+fn multiclass_dart_artifact_roundtrip_preserves_class_major_stump_weights() {
+    let mut class_0_root = multiclass_dart_bookkeeping_stump(1);
+    class_0_root.tree_weight = 0.25;
+    let mut class_0_child = multiclass_dart_bookkeeping_stump(1);
+    class_0_child.split.node_id += 1;
+    class_0_child.tree_weight = 0.25;
+    let mut class_1_root = multiclass_dart_bookkeeping_stump(3);
+    class_1_root.tree_weight = 0.75;
+    let model = MultiClassTrainedModel {
+        num_classes: 2,
+        baseline_predictions: vec![0.0, 0.0],
+        feature_count: 1,
+        class_stumps: vec![vec![class_0_root, class_0_child], vec![class_1_root]],
+        categorical_state: None,
+        objective: "multiclass_softmax".to_string(),
+        morph_metadata: None,
+        dro_metadata: None,
+    };
+
+    let bytes = model.to_artifact_bytes().expect("serialize DART model");
+    let parsed =
+        alloygbm_core::deserialize_model_artifact_v1(&bytes).expect("DART artifact parses");
+    let payload = alloygbm_core::decode_optional_dart_tree_weights_section(&parsed.sections)
+        .expect("DART section decodes")
+        .expect("non-unit multiclass weights must emit the existing DART section");
+    assert_eq!(payload.weights, vec![0.25, 0.25, 0.75]);
+
+    let restored =
+        MultiClassTrainedModel::from_artifact_bytes(&bytes).expect("deserialize DART model");
+    let restored_weights = restored
+        .class_stumps
+        .iter()
+        .flatten()
+        .map(|stump| stump.tree_weight)
+        .collect::<Vec<_>>();
+    assert_eq!(restored_weights, vec![0.25, 0.25, 0.75]);
 }
 
 #[test]

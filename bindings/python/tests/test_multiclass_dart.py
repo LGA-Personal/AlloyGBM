@@ -61,6 +61,56 @@ def test_multiclass_dart_pickle_round_trip():
     np.testing.assert_allclose(p1, p2, rtol=1e-6)
 
 
+def test_multiclass_dart_save_load_preserves_weighted_predictions(tmp_path):
+    X, y = _toy_multiclass(n_rows=320, seed=83)
+    model = GBMClassifier(
+        n_estimators=9,
+        boosting_mode="dart",
+        dart_drop_rate=0.8,
+        dart_max_drop=4,
+        max_depth=3,
+        min_data_in_leaf=4,
+        seed=29,
+    )
+    model.fit(X, y)
+    expected = model.predict_proba(X)
+
+    path = tmp_path / "weighted-multiclass-dart.alloy"
+    model.save_model(str(path))
+    restored = GBMClassifier.load_model(str(path))
+
+    np.testing.assert_allclose(
+        restored.predict_proba(X), expected, rtol=1e-6, atol=1e-7
+    )
+
+
+def test_multiclass_dart_weighted_warm_start_matches_uninterrupted_fit():
+    X, y = _toy_multiclass(n_rows=360, seed=89)
+    common = dict(
+        boosting_mode="dart",
+        dart_drop_rate=0.75,
+        dart_max_drop=4,
+        max_depth=3,
+        min_data_in_leaf=4,
+        training_policy="manual",
+        seed=31,
+    )
+    uninterrupted = GBMClassifier(n_estimators=10, **common).fit(X, y)
+    prefix = GBMClassifier(n_estimators=6, **common).fit(X, y)
+    continued = GBMClassifier(
+        n_estimators=4,
+        warm_start=True,
+        **common,
+    ).fit(X, y, init_model=prefix)
+
+    np.testing.assert_allclose(
+        continued.predict_proba(X),
+        uninterrupted.predict_proba(X),
+        rtol=1e-5,
+        atol=1e-6,
+    )
+
+
 def test_multiclass_dart_warm_start_continues_without_error():
     X, y = _toy_multiclass()
     base = GBMClassifier(

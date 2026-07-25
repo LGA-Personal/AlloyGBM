@@ -1,13 +1,15 @@
 use alloygbm_core::{
-    CategoricalStatePayloadV1, Device, DroMetadataPayload, LeafValue,
+    CategoricalStatePayloadV1, DartTreeWeightsPayload, Device, DroMetadataPayload, LeafValue,
     LinearLeafCoefficientsPayload, LinearLeafEntry, MODEL_FORMAT_V1, ModelMetadata,
     ModelSectionKind, MorphMetadataPayload, NodeStats, SplitCandidate,
-    decode_optional_categorical_state_section_v1, decode_optional_dro_metadata_artifact_section,
+    decode_optional_categorical_state_section_v1, decode_optional_dart_tree_weights_section,
+    decode_optional_dro_metadata_artifact_section,
     decode_optional_linear_leaf_coefficients_section,
     decode_optional_morph_metadata_artifact_section, deserialize_model_artifact_v1,
-    encode_categorical_state_payload_v1, encode_dro_metadata_payload,
-    encode_linear_leaf_coefficients_payload, encode_morph_metadata_payload,
-    serialize_model_artifact_v1, validate_categorical_state_payload_v1,
+    encode_categorical_state_payload_v1, encode_dart_tree_weights_payload,
+    encode_dro_metadata_payload, encode_linear_leaf_coefficients_payload,
+    encode_morph_metadata_payload, serialize_model_artifact_v1,
+    validate_categorical_state_payload_v1,
 };
 
 use crate::artifact::{read_f32_le, read_u16_le, read_u32_le, required_single_section};
@@ -183,6 +185,26 @@ impl MultiClassTrainedModel {
                 ));
             }
         }
+        // Reuse the optional per-stump DART overlay. Multiclass stump payloads
+        // are class-major, so the weights use the same class-major flattening.
+        if self
+            .class_stumps
+            .iter()
+            .flatten()
+            .any(|stump| (stump.tree_weight - 1.0).abs() > f32::EPSILON)
+        {
+            sections.push((
+                ModelSectionKind::DartTreeWeights,
+                encode_dart_tree_weights_payload(&DartTreeWeightsPayload {
+                    weights: self
+                        .class_stumps
+                        .iter()
+                        .flatten()
+                        .map(|stump| stump.tree_weight)
+                        .collect(),
+                }),
+            ));
+        }
 
         serialize_model_artifact_v1(&metadata, &sections).map_err(EngineError::from)
     }
@@ -301,6 +323,22 @@ impl MultiClassTrainedModel {
             .map_err(EngineError::from)?;
         let dro_metadata = decode_optional_dro_metadata_artifact_section(&parsed.sections)
             .map_err(EngineError::from)?;
+
+        // Pre-DART multiclass artifacts have no overlay and retain the 1.0
+        // defaults assigned while decoding MultiClassTrees.
+        if let Some(dart_payload) = decode_optional_dart_tree_weights_section(&parsed.sections)
+            .map_err(EngineError::from)?
+        {
+            if dart_payload.weights.len() != total_stumps {
+                return Err(EngineError::ContractViolation(format!(
+                    "multiclass DartTreeWeights length {} != flattened stump count {total_stumps}",
+                    dart_payload.weights.len(),
+                )));
+            }
+            for (stump, &weight) in class_stumps.iter_mut().flatten().zip(&dart_payload.weights) {
+                stump.tree_weight = weight;
+            }
+        }
 
         // Decode optional linear leaf coefficients and backfill class_stumps.
         // Global stump index uses prefix-sum offsets (same encoding as serialization).

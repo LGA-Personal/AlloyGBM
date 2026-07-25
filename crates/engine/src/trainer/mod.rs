@@ -937,7 +937,7 @@ impl Trainer {
         if round_index_offset > 0 {
             for class_k in 0..k {
                 if !class_stumps[class_k].is_empty() {
-                    apply_round_stumps_tree_walk(
+                    apply_tree_to_binned_predictions(
                         &mut class_predictions[class_k],
                         binned_matrix,
                         &class_stumps[class_k],
@@ -968,7 +968,7 @@ impl Trainer {
             ));
             for class_k in 0..k {
                 if !class_stumps[class_k].is_empty() {
-                    apply_round_stumps_tree_walk(
+                    apply_tree_to_binned_predictions(
                         &mut val_preds[class_k],
                         validation_ref.binned_matrix,
                         &class_stumps[class_k],
