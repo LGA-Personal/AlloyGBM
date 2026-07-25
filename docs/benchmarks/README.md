@@ -25,6 +25,12 @@ Current benchmark entry points:
 - deterministic large-query LambdaMART and skewed-count GLM harness:
   `benchmarks/objective_benchmark.py` with report at
   [objective_benchmark_v1.md](objective_benchmark_v1.md)
+- deterministic July-review evidence harness:
+  `benchmarks/review_guardrails.py` with report at
+  [review_guardrails_v1.md](review_guardrails_v1.md). Its DART profile keeps
+  the 200-round `0.20 / 50` stress arm visible; only explicit default-like
+  profiles (`drop_rate <= 0.10`) use the 1.50x RMSE quality gate, and timing
+  remains descriptive.
 - isolated baseline/candidate architecture harness for the six July-review
   projects: `benchmarks/architectural_backlog/` with methodology and baseline
   at [architectural_backlog_v1.md](architectural_backlog_v1.md)

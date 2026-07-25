@@ -103,6 +103,14 @@ jobs:
       - name: Run pytest suite
         run: python -m pytest bindings/python/tests/ -q
 
+      - name: Review benchmark contract tests
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python -m pytest benchmarks/tests/test_review_guardrails.py -q
+
+      - name: Review benchmark quality gates
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python benchmarks/review_guardrails.py --quick --gate
+
       - name: Import smoke
         run: python -c "import alloygbm; print(alloygbm.native_runtime_info())"
 
