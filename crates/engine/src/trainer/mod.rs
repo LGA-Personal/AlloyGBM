@@ -107,6 +107,37 @@ pub(crate) fn append_multiclass_dart_phantom_round(
     dart_state.dropped_per_round.push(Vec::new());
 }
 
+/// Records a skipped multiclass warmup iteration in the same logical-round
+/// coordinate space as accepted rounds. Early-stop truncation indexes these
+/// vectors by `rounds_completed`, so a phantom slot must be present everywhere
+/// rather than only in DART's internal flat-tree state.
+#[allow(clippy::too_many_arguments)]
+fn append_multiclass_phantom_round_bookkeeping(
+    stumps_per_round_per_class: &mut Vec<Vec<usize>>,
+    loss_per_completed_round: &mut Vec<f32>,
+    validation_loss_per_completed_round: &mut Vec<f32>,
+    sampled_rows_per_completed_round: &mut Vec<usize>,
+    sampled_features_per_completed_round: &mut Vec<usize>,
+    diagnostics_per_round: &mut Vec<IterationDiagnostics>,
+    class_count: usize,
+    current_loss: f32,
+    current_validation_loss: Option<f32>,
+    sampled_row_count: usize,
+    sampled_feature_count: usize,
+    per_class_diagnostics: &[IterationDiagnostics],
+) {
+    stumps_per_round_per_class.push(vec![0; class_count]);
+    loss_per_completed_round.push(current_loss);
+    if let Some(validation_loss) = current_validation_loss {
+        validation_loss_per_completed_round.push(validation_loss);
+    }
+    sampled_rows_per_completed_round.push(sampled_row_count);
+    sampled_features_per_completed_round.push(sampled_feature_count);
+    diagnostics_per_round.push(IterationDiagnostics::aggregate_per_class(
+        per_class_diagnostics,
+    ));
+}
+
 pub(crate) fn replay_multiclass_dart_tree_weights(
     initial_weights: &[f32],
     kept_dropped_per_round: &[Vec<usize>],
@@ -1398,6 +1429,20 @@ impl Trainer {
                             &class_stumps,
                         );
                     }
+                    append_multiclass_phantom_round_bookkeeping(
+                        &mut stumps_per_round_per_class,
+                        &mut loss_per_completed_round,
+                        &mut validation_loss_per_completed_round,
+                        &mut sampled_rows_per_completed_round,
+                        &mut sampled_features_per_completed_round,
+                        &mut diagnostics_per_round,
+                        k,
+                        current_loss,
+                        current_validation_loss,
+                        sampled_row_count,
+                        sampled_feature_count,
+                        &per_class_diagnostics,
+                    );
                     rounds_completed += 1;
                     continue;
                 }
@@ -1445,6 +1490,20 @@ impl Trainer {
                             &class_stumps,
                         );
                     }
+                    append_multiclass_phantom_round_bookkeeping(
+                        &mut stumps_per_round_per_class,
+                        &mut loss_per_completed_round,
+                        &mut validation_loss_per_completed_round,
+                        &mut sampled_rows_per_completed_round,
+                        &mut sampled_features_per_completed_round,
+                        &mut diagnostics_per_round,
+                        k,
+                        current_loss,
+                        current_validation_loss,
+                        sampled_row_count,
+                        sampled_feature_count,
+                        &per_class_diagnostics,
+                    );
                     rounds_completed += 1;
                     continue;
                 }
@@ -1629,15 +1688,21 @@ impl Trainer {
             // zero-stump class trees stay as phantom slots and
             // `dart_round_counts` reflects 0 for them).
             if let Some((new_w, _drop_factor, new_dropped_weights)) = dart_round_finalize.as_ref() {
-                // Keep the round-major DART state dense even when a
-                // preceding warmup iteration committed no class trees.
-                while dart_state.dropped_per_round.len() < effective_round {
-                    append_multiclass_dart_phantom_round(
-                        &mut dart_state,
-                        &mut dart_round_start_offsets,
-                        &mut dart_round_counts,
-                        &class_stumps,
-                    );
+                // Every skipped warmup round is recorded above in both the
+                // DART arrays and the summary bookkeeping. Do not synthesize
+                // an internal-only phantom here: that would make early-stop
+                // truncation index a sparse stump-count vector again.
+                if dart_state.dropped_per_round.len() != effective_round
+                    || dart_round_start_offsets
+                        .iter()
+                        .any(|starts| starts.len() != effective_round)
+                    || dart_round_counts
+                        .iter()
+                        .any(|counts| counts.len() != effective_round)
+                {
+                    return Err(EngineError::ContractViolation(format!(
+                        "multiclass DART logical-round bookkeeping is not dense before round {effective_round}"
+                    )));
                 }
                 // Rescale dropped trees' weights in place.
                 for (i, &flat_idx) in dropped_tree_indices.iter().enumerate() {
@@ -1692,6 +1757,7 @@ impl Trainer {
                         .sum::<usize>();
                 class_stumps[class_k].truncate(keep_count);
             }
+            stumps_per_round_per_class.truncate(best_round);
             loss_per_completed_round.truncate(best_round);
             validation_loss_per_completed_round.truncate(best_round);
             sampled_rows_per_completed_round.truncate(best_round);

@@ -4637,6 +4637,143 @@ fn multiclass_dart_empty_morph_warmup_preserves_the_next_round_index() {
 }
 
 #[test]
+fn multiclass_dart_empty_morph_warmup_plateau_truncates_dense_logical_rounds() {
+    let mut dataset = multiclass_factor_dominated_dataset();
+    dataset.factor_exposures = None;
+    let binned = sample_binned_matrix_for_dataset(&dataset);
+    let params = TrainParams {
+        learning_rate: 0.1,
+        seed: 17,
+        deterministic: true,
+        min_data_in_leaf: 1,
+        lambda_l2: 0.0,
+        morph_config: Some(MorphConfig {
+            morph_rate: 0.0,
+            evolution_pressure: 0.0,
+            morph_warmup_iters: u32::MAX,
+            info_score_weight: 0.0,
+            depth_penalty_base: 1.0,
+            balance_penalty: false,
+            lr_schedule: alloygbm_core::LrSchedule::WarmupCosine { warmup_frac: 0.5 },
+        }),
+        boosting_mode: BoostingMode::Dart {
+            drop_rate: 0.99,
+            max_drop: 2,
+            normalize_type: alloygbm_core::DartNormalize::Tree,
+            sample_type: alloygbm_core::DartSampleType::Uniform,
+        },
+        ..TrainParams::default()
+    };
+    let controls = IterationControls::new(4, 0.0, 1, 0.15, 1_000_000.0, 0.0, 0)
+        .expect("controls")
+        .with_validation_early_stopping(1, 0.03)
+        .expect("validation controls");
+    let objective = MultiClassSoftmaxObjective::new(2).expect("objective");
+    let summary = Trainer::new(params)
+        .expect("trainer")
+        .fit_multiclass_iterations_with_validation_summary(
+            &dataset,
+            &binned,
+            ValidationDatasetRef {
+                dataset: &dataset,
+                binned_matrix: &binned,
+            },
+            &MockBackend,
+            &objective,
+            controls,
+        )
+        .expect("DART MorphBoost validation fit");
+
+    assert_eq!(
+        summary.stop_reason,
+        IterationStopReason::ValidationLossPlateau
+    );
+    assert_eq!(summary.best_validation_round, Some(2));
+    assert_eq!(summary.rounds_completed, 2);
+    let retained_tree_ids: Vec<Vec<u32>> = summary
+        .model
+        .class_stumps
+        .iter()
+        .map(|stumps| {
+            stumps
+                .iter()
+                .map(|stump| stump.split.node_id / TREE_NODE_STRIDE)
+                .collect()
+        })
+        .collect();
+    assert_eq!(retained_tree_ids, vec![vec![1], vec![1]]);
+
+    let first_material_drops = select_dropouts(
+        2,
+        0.99,
+        2,
+        alloygbm_core::DartSampleType::Uniform,
+        &[1.0, 1.0],
+        17,
+        1,
+    );
+    let expected_weight = 1.0 / (first_material_drops.len() as f32 + 1.0);
+    for stumps in &summary.model.class_stumps {
+        assert!(!stumps.is_empty());
+        assert!(
+            stumps
+                .iter()
+                .all(|stump| (stump.tree_weight - expected_weight).abs() <= 1.0e-6)
+        );
+    }
+
+    let raw_predictions = multiclass_dart_repeated_walk_predictions(
+        &summary.model,
+        &binned,
+        &dataset.matrix.values,
+        dataset.matrix.feature_count,
+    );
+    const EXPECTED_CLASS_0: [f32; 6] = [
+        0.0333333,
+        0.0333333,
+        -0.066666536,
+        0.0333333,
+        0.0333333,
+        -0.066666536,
+    ];
+    const EXPECTED_CLASS_1: [f32; 6] = [
+        -0.0333333,
+        -0.0333333,
+        0.066666536,
+        -0.0333333,
+        -0.0333333,
+        0.066666536,
+    ];
+    assert_multiclass_raw_predictions_close(
+        &raw_predictions,
+        &[&EXPECTED_CLASS_0, &EXPECTED_CLASS_1],
+    );
+    let replayed_loss = objective
+        .loss(
+            &raw_predictions,
+            &dataset.targets,
+            dataset.sample_weights.as_deref(),
+        )
+        .expect("replayed training loss");
+    assert!((summary.final_loss - replayed_loss).abs() <= 1.0e-6);
+    assert!(
+        (summary.final_validation_loss.expect("validation loss") - replayed_loss).abs() <= 1.0e-6
+    );
+    assert_eq!(summary.loss_per_completed_round.len(), 2);
+    assert_eq!(summary.validation_loss_per_completed_round.len(), 2);
+    assert_eq!(summary.sampled_rows_per_completed_round.len(), 2);
+    assert_eq!(summary.sampled_features_per_completed_round.len(), 2);
+    assert_eq!(summary.diagnostics_per_round.len(), 2);
+    assert!((summary.loss_per_completed_round[1] - summary.final_loss).abs() <= 1.0e-6);
+    assert!(
+        (summary.validation_loss_per_completed_round[1]
+            - summary.final_validation_loss.expect("validation loss"))
+        .abs()
+            <= 1.0e-6
+    );
+}
+
+#[test]
 fn test_multiclass_trained_model_artifact_roundtrip() {
     // Create a minimal model manually
     let model = MultiClassTrainedModel {
