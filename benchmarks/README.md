@@ -196,6 +196,11 @@ Additional lighter-weight scripts target specific features:
 - `benchmarks/objective_benchmark.py` — deterministic held-out validation for
   large-query LambdaMART truncation and skewed-count Poisson/Gamma/Tweedie
   objectives. Report at `docs/benchmarks/objective_benchmark_v1.md`.
+- `benchmarks/review_guardrails.py` — deterministic July-review evidence for
+  quantile split selection, GOSS rates, and DART dropout profiles. The full
+  report is `docs/benchmarks/review_guardrails_v1.md`; `--quick --gate` is the
+  CI-sized contract run. DART timings are descriptive, and its 1.50x quality
+  gate applies only to explicit default-like profiles (`drop_rate <= 0.10`).
 - `benchmarks/architectural_backlog/` — isolated baseline/candidate harness for
   SoA histograms, node-level parallelism, duplicate bin storage, compact
   predictor nodes, EFB, and approximate quantile sketches. Methodology and
@@ -216,6 +221,11 @@ python3 benchmarks/dro_robustness.py --quick
 
 # Large-query LambdaMART and skewed-count GLM validation
 python3 benchmarks/objective_benchmark.py --gate
+
+# July-review evidence capture (full) and CI-sized contract run
+python3 benchmarks/review_guardrails.py --gate \
+  --output docs/benchmarks/review_guardrails_v1.md
+python3 benchmarks/review_guardrails.py --quick --gate
 
 # Fast smoke run for all six deferred architecture projects
 python3 -m benchmarks.architectural_backlog.run \

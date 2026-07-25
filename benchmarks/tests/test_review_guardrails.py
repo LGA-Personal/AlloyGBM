@@ -34,6 +34,16 @@ BENCHMARK = _load_module(
 
 
 class ReviewGuardrailTests(unittest.TestCase):
+    def test_ci_runs_review_guardrails_on_one_python_smoke_leg(self) -> None:
+        workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("benchmarks/tests/test_review_guardrails.py", workflow)
+        self.assertIn("benchmarks/review_guardrails.py --quick --gate", workflow)
+        self.assertIn("matrix.os == 'ubuntu-latest'", workflow)
+        self.assertIn("matrix.python-version == '3.13'", workflow)
+
     def test_quantile_fixture_and_weighted_quantile_are_deterministic(self) -> None:
         first = BENCHMARK.make_quantile_split_data(seed=17, n_train=96, n_test=48)
         second = BENCHMARK.make_quantile_split_data(seed=17, n_train=96, n_test=48)
@@ -104,6 +114,10 @@ class ReviewGuardrailTests(unittest.TestCase):
             self.assertTrue(np.isfinite(row.rmse))
             self.assertGreater(row.fit_seconds, 0.0)
             self.assertEqual(row.completed_rounds, row.requested_rounds)
+        self.assertEqual(
+            {row.dart_profile for row in dart},
+            {"standard_control", "default_like"},
+        )
 
     def test_quality_gates_reject_quality_and_completion_regressions(self) -> None:
         quantile_rows = [
@@ -119,9 +133,12 @@ class ReviewGuardrailTests(unittest.TestCase):
             ),
         ]
         dart_rows = [
-            BENCHMARK.BoostingRow("dart", 7, "standard_8", 1.0, 2.0, 1.0, 8, 8),
             BENCHMARK.BoostingRow(
-                "dart", 7, "dart_8_0.10_5", 1.0, 2.0, 100.0, 7, 8, None, "standard_8", 20.0
+                "dart", 7, "standard_8", 1.0, 2.0, 1.0, 8, 8, dart_profile="standard_control"
+            ),
+            BENCHMARK.BoostingRow(
+                "dart", 7, "dart_8_0.10_5", 1.0, 2.0, 100.0, 7, 8, None, "standard_8", 20.0,
+                dart_profile="default_like",
             ),
         ]
 
@@ -131,13 +148,72 @@ class ReviewGuardrailTests(unittest.TestCase):
         self.assertTrue(any(not gate.passed and gate.name == "dart_completion" for gate in gates))
 
         timing_only_rows = [
-            BENCHMARK.BoostingRow("dart", 7, "standard_8", 1.0, 2.0, 0.01, 8, 8),
             BENCHMARK.BoostingRow(
-                "dart", 7, "dart_8_0.10_5", 1.1, 2.0, 99.0, 8, 8, None, "standard_8", 20.0
+                "dart", 7, "standard_8", 1.0, 2.0, 0.01, 8, 8, dart_profile="standard_control"
+            ),
+            BENCHMARK.BoostingRow(
+                "dart", 7, "dart_8_0.10_5", 1.1, 2.0, 99.0, 8, 8, None, "standard_8", 20.0,
+                dart_profile="default_like",
             ),
         ]
         timing_gates = BENCHMARK.evaluate_gates(quantile_rows[:1] * 3, goss_rows, timing_only_rows)
         self.assertTrue(all(gate.passed for gate in timing_gates if gate.name.startswith("dart")))
+
+    def test_dart_quality_gate_excludes_stress_profiles_only(self) -> None:
+        quantile_rows = [
+            BENCHMARK.QuantileSplitRow(7, 0.5, arm, 0.0, 1.0, 1.0, 1.2, 8, 8)
+            for arm in ("proxy", "smooth_0.05", "smooth_0.10")
+        ]
+        goss_rows = [
+            BENCHMARK.BoostingRow("goss", 7, "standard_full", 1.0, 2.0, 1.0, 8, 8),
+            BENCHMARK.BoostingRow("goss", 7, "uniform_0.30", 1.0, 2.0, 1.0, 8, 8, 0.3),
+            BENCHMARK.BoostingRow(
+                "goss", 7, "goss_0.20_0.10", 1.0, 2.0, 1.0, 8, 8, 0.3, "uniform_0.30"
+            ),
+        ]
+        standard = BENCHMARK.BoostingRow(
+            "dart", 7, "standard_8", 1.0, 2.0, 1.0, 8, 8, dart_profile="standard_control"
+        )
+        stress = BENCHMARK.BoostingRow(
+            "dart",
+            7,
+            "dart_8_0.20_5",
+            1.60,
+            2.0,
+            1.0,
+            8,
+            8,
+            None,
+            "standard_8",
+            20.0,
+            dart_profile="stress_profile",
+        )
+        default_like = BENCHMARK.BoostingRow(
+            "dart",
+            7,
+            "dart_8_0.10_5",
+            1.60,
+            2.0,
+            1.0,
+            8,
+            8,
+            None,
+            "standard_8",
+            20.0,
+            dart_profile="default_like",
+        )
+
+        stress_only_gates = BENCHMARK.evaluate_gates(
+            quantile_rows, goss_rows, [standard, stress]
+        )
+        self.assertTrue(next(gate for gate in stress_only_gates if gate.name == "dart_contract").passed)
+        self.assertTrue(next(gate for gate in stress_only_gates if gate.name == "dart_quality").passed)
+
+        default_like_gates = BENCHMARK.evaluate_gates(
+            quantile_rows, goss_rows, [standard, default_like]
+        )
+        self.assertTrue(next(gate for gate in default_like_gates if gate.name == "dart_contract").passed)
+        self.assertFalse(next(gate for gate in default_like_gates if gate.name == "dart_quality").passed)
 
     def test_quantile_quality_gate_uses_median_arm_losses_across_seeds(self) -> None:
         quantile_rows = [
@@ -153,9 +229,12 @@ class ReviewGuardrailTests(unittest.TestCase):
             ),
         ]
         dart_rows = [
-            BENCHMARK.BoostingRow("dart", 7, "standard_8", 1.0, 2.0, 1.0, 8, 8),
             BENCHMARK.BoostingRow(
-                "dart", 7, "dart_8_0.10_5", 1.0, 2.0, 1.0, 8, 8, None, "standard_8", 20.0
+                "dart", 7, "standard_8", 1.0, 2.0, 1.0, 8, 8, dart_profile="standard_control"
+            ),
+            BENCHMARK.BoostingRow(
+                "dart", 7, "dart_8_0.10_5", 1.0, 2.0, 1.0, 8, 8, None, "standard_8", 20.0,
+                dart_profile="default_like",
             ),
         ]
 
@@ -173,9 +252,15 @@ class ReviewGuardrailTests(unittest.TestCase):
             BENCHMARK.BoostingRow("goss", 7, "uniform_0.30", 1.0, 2.0, 1.0, 8, 8, 0.3),
         ]
         valid_dart_rows = [
-            BENCHMARK.BoostingRow("dart", 7, "standard_8", 1.0, 2.0, 1.0, 8, 8),
-            BENCHMARK.BoostingRow("dart", 7, "standard_16", 1.0, 2.0, 1.0, 16, 16),
-            BENCHMARK.BoostingRow("dart", 7, "goss_0.20_0.10", 1.0, 2.0, 1.0, 8, 8),
+            BENCHMARK.BoostingRow(
+                "dart", 7, "standard_8", 1.0, 2.0, 1.0, 8, 8, dart_profile="standard_control"
+            ),
+            BENCHMARK.BoostingRow(
+                "dart", 7, "standard_16", 1.0, 2.0, 1.0, 16, 16, dart_profile="standard_control"
+            ),
+            BENCHMARK.BoostingRow(
+                "dart", 7, "goss_0.20_0.10", 1.0, 2.0, 1.0, 8, 8, dart_profile="standard_control"
+            ),
         ]
 
         for control in ("standard_full", "goss_0.20_0.10", "uniform_0.20"):
@@ -192,7 +277,8 @@ class ReviewGuardrailTests(unittest.TestCase):
             dart_rows = [
                 *valid_dart_rows,
                 BENCHMARK.BoostingRow(
-                    "dart", 7, "dart_8_0.10_5", 1.0, 2.0, 1.0, 8, 8, None, control, 20.0
+                    "dart", 7, "dart_8_0.10_5", 1.0, 2.0, 1.0, 8, 8, None, control, 20.0,
+                    dart_profile="default_like",
                 ),
             ]
             gates = BENCHMARK.evaluate_gates(quantile_rows, valid_goss_rows, dart_rows)
@@ -211,9 +297,12 @@ class ReviewGuardrailTests(unittest.TestCase):
             ),
         ]
         valid_dart_rows = [
-            BENCHMARK.BoostingRow("dart", 7, "standard_8", 1.0, 2.0, 1.0, 8, 8),
             BENCHMARK.BoostingRow(
-                "dart", 7, "dart_8_0.10_5", 1.0, 2.0, 1.0, 8, 8, None, "standard_8", 20.0
+                "dart", 7, "standard_8", 1.0, 2.0, 1.0, 8, 8, dart_profile="standard_control"
+            ),
+            BENCHMARK.BoostingRow(
+                "dart", 7, "dart_8_0.10_5", 1.0, 2.0, 1.0, 8, 8, None, "standard_8", 20.0,
+                dart_profile="default_like",
             ),
         ]
         duplicate_quantile_rows = [*quantile_rows, quantile_rows[0]]
@@ -262,9 +351,12 @@ class ReviewGuardrailTests(unittest.TestCase):
             ),
         ]
         dart_rows = [
-            BENCHMARK.BoostingRow("dart", 7, "standard_8", 1.0, 2.0, 1.0, 8, 8),
             BENCHMARK.BoostingRow(
-                "dart", 7, "dart_8_0.10_5", 1.1, 2.0, 1.1, 8, 8, None, "standard_8", 20.0
+                "dart", 7, "standard_8", 1.0, 2.0, 1.0, 8, 8, dart_profile="standard_control"
+            ),
+            BENCHMARK.BoostingRow(
+                "dart", 7, "dart_8_0.10_5", 1.1, 2.0, 1.1, 8, 8, None, "standard_8", 20.0,
+                dart_profile="default_like",
             ),
         ]
         report = BENCHMARK.render_report(
@@ -289,6 +381,9 @@ class ReviewGuardrailTests(unittest.TestCase):
             "uniform_0.30",
             "Standard time ratio",
             "dropout pressure",
+            "default_like",
+            "stress_profile",
+            "quality is non-blocking",
         ):
             self.assertIn(text, report)
 

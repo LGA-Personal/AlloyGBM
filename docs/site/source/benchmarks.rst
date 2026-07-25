@@ -37,6 +37,12 @@ harnesses are also provided:
 - ``benchmarks/objective_benchmark.py`` -- deterministic large-query
   LambdaMART and skewed-count GLM validation. Report at
   ``docs/benchmarks/objective_benchmark_v1.md``.
+- ``benchmarks/review_guardrails.py`` -- deterministic July-review evidence
+  for smoothed-pinball split selection, GOSS rates, and DART dropout profiles.
+  The report is ``docs/benchmarks/review_guardrails_v1.md``. DART timing is
+  descriptive; the 1.50x RMSE gate applies only to explicit default-like
+  profiles with ``drop_rate <= 0.10``, while the stress profile remains
+  reported and contract-checked.
 
 The suite spans three task types with the following scenarios:
 
@@ -116,6 +122,13 @@ Focused regression comparison:
    python3 benchmarks/run_model_comparison.py \
      --force-prepare \
      --scenarios california_housing bike_sharing dense_numeric panel_time_series dow_jones_financial
+
+Review-evidence capture:
+
+.. code-block:: console
+
+   python3 benchmarks/review_guardrails.py --gate \
+     --output docs/benchmarks/review_guardrails_v1.md
 
 Classification only:
 

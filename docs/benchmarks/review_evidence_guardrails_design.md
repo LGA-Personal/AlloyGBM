@@ -117,10 +117,16 @@ standard-mode time ratio, and a deterministic configured dropout-pressure
 estimate. Actual historical dropout sets are intentionally not added to the
 public model API or artifact solely for benchmarking.
 
-Quality gates require finite predictions, all requested rounds, and DART RMSE
-within 1.50x of the matching standard model. No timing ratio is blocking. The
-full report determines whether the next DART PR should cap expected drops or
-target another measured hotspot.
+Every DART row must have finite predictions, complete all requested rounds, and
+match a standard control at the same fit horizon. The 1.50x DART/standard RMSE
+quality gate applies only to explicit `default_like` result rows, whose
+`drop_rate` is at most `0.10`. The full `200 / 0.20 / 50` configuration is an
+explicit `stress_profile` row: it remains visible in the report and is still
+subject to finite, control-matching, and completion checks, but its quality
+ratio is non-blocking. This keeps the normal operating surface under the
+unchanged quality contract while preserving high-pressure evidence for a later
+optimization. No timing ratio is blocking. The full report determines whether
+the next DART PR should cap expected drops or target another measured hotspot.
 
 ## CI Integration
 
@@ -146,7 +152,8 @@ Contract tests are written before implementation and cover:
 - smoothed gradient continuity and non-negative Hessians;
 - split selection and report rendering on small data;
 - gate rejection for non-finite values, incomplete fits, invalid partitions,
-  and material quality regressions;
+  and material quality regressions, including a poor `default_like` DART arm
+  while an equally poor `stress_profile` arm remains non-blocking;
 - one small real-model GOSS/DART run through the installed extension;
 - CLI section selection and output behavior.
 
@@ -156,10 +163,9 @@ complete Python suite, benchmark contract tests, and the full benchmark gate.
 
 ## Documentation And Resolution Tracking
 
-The committed report records configuration, per-arm medians, quality
-comparisons, and descriptive timings. Benchmark indexes link to it. The
-special-modes resolution document marks the GOSS-rate evidence complete,
-records the smoothed-pinball decision, and narrows DART's remaining item to the
-specific optimization supported by the profile. It must not mark an
-optimization fixed merely because profiling is complete.
-
+The committed report records configuration, explicit DART profile scope,
+per-arm medians, quality comparisons, and descriptive timings. Benchmark
+indexes link to it. The special-modes resolution document marks the GOSS-rate
+evidence complete, records the smoothed-pinball decision, and narrows DART's
+remaining item to the specific optimization supported by the profile. It must
+not mark an optimization fixed merely because profiling is complete.

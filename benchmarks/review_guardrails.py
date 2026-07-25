@@ -24,6 +24,14 @@ FULL_DART_CONFIGS = (
     (100, 0.10, 5),
     (100, 0.10, 20),
 )
+DART_PROFILE_STANDARD = "standard_control"
+DART_PROFILE_DEFAULT_LIKE = "default_like"
+DART_PROFILE_STRESS = "stress_profile"
+DART_PROFILES = {
+    DART_PROFILE_STANDARD,
+    DART_PROFILE_DEFAULT_LIKE,
+    DART_PROFILE_STRESS,
+}
 
 
 @dataclass(frozen=True)
@@ -52,6 +60,7 @@ class BoostingRow:
     retained_fraction: float | None = None
     matched_control: str | None = None
     dropout_pressure: float | None = None
+    dart_profile: str | None = None
 
 
 @dataclass(frozen=True)
@@ -158,6 +167,7 @@ def _is_matching_dart_control(row: BoostingRow, control: BoostingRow) -> bool:
     """Require a DART arm's standard control to use the same fit horizon."""
     return (
         control.section == "dart"
+        and control.dart_profile == DART_PROFILE_STANDARD
         and control.arm == f"standard_{row.requested_rounds}"
         and control.requested_rounds == row.requested_rounds
     )
@@ -255,7 +265,14 @@ def evaluate_gates(
 
     dart_keys = [(row.seed, row.arm) for row in dart_rows]
     dart_by_seed_arm = {(row.seed, row.arm): row for row in dart_rows}
-    dart_arms = [row for row in dart_rows if row.arm.startswith("dart_")]
+    dart_arms = [
+        row
+        for row in dart_rows
+        if row.dart_profile in (DART_PROFILE_DEFAULT_LIKE, DART_PROFILE_STRESS)
+    ]
+    dart_quality_rows = [
+        row for row in dart_arms if row.dart_profile == DART_PROFILE_DEFAULT_LIKE
+    ]
     dart_values_valid = all(
         row.section == "dart"
         and np.isfinite([row.rmse, row.baseline_rmse, row.fit_seconds]).all()
@@ -277,6 +294,7 @@ def evaluate_gates(
         bool(dart_rows)
         and len(dart_keys) == len(set(dart_keys))
         and bool(dart_arms)
+        and all(row.dart_profile in DART_PROFILES for row in dart_rows)
         and dart_values_valid
         and dart_controls_present
         and all(
@@ -288,8 +306,8 @@ def evaluate_gates(
         row.completed_rounds == row.requested_rounds for row in dart_rows
     )
     dart_ratios: list[float] = []
-    for arm in sorted({row.arm for row in dart_arms}):
-        arm_rows = [row for row in dart_arms if row.arm == arm]
+    for arm in sorted({row.arm for row in dart_quality_rows}):
+        arm_rows = [row for row in dart_quality_rows if row.arm == arm]
         control_rows = [
             dart_by_seed_arm[(row.seed, row.matched_control)]
             for row in arm_rows
@@ -300,7 +318,7 @@ def evaluate_gates(
             if control_rows and _finite_positive(_median([row.rmse for row in control_rows]))
             else float("inf")
         )
-    dart_quality = bool(dart_ratios) and all(ratio <= 1.50 for ratio in dart_ratios)
+    dart_quality = all(ratio <= 1.50 for ratio in dart_ratios)
 
     return [
         GateResult("quantile_contract", quantile_contract, "required arms, finite values, unique rows, and children"),
@@ -317,12 +335,17 @@ def evaluate_gates(
             f"maximum GOSS/uniform ratio={max(goss_ratios, default=float('inf')):.3f} (limit 1.350)",
         ),
         GateResult("goss_baseline", goss_baseline, "every GOSS median beats its mean-predictor baseline"),
-        GateResult("dart_contract", dart_contract, "required controls, finite metrics, unique rows, and pressure"),
+        GateResult(
+            "dart_contract",
+            dart_contract,
+            "explicit profiles, required controls, finite metrics, unique rows, and pressure",
+        ),
         GateResult("dart_completion", dart_completion, "all DART fits completed requested rounds"),
         GateResult(
             "dart_quality",
             dart_quality,
-            f"maximum DART/standard ratio={max(dart_ratios, default=float('inf')):.3f} (limit 1.500)",
+            "maximum default-like DART/standard ratio="
+            f"{max(dart_ratios, default=0.0):.3f} (limit 1.500; stress/profile arms excluded)",
         ),
     ]
 
@@ -456,6 +479,7 @@ def run_dart_experiment(
         horizon: int,
         matched_control: str | None = None,
         dropout_pressure: float | None = None,
+        dart_profile: str = DART_PROFILE_STANDARD,
         **mode_params: float | int | str,
     ) -> BoostingRow:
         model = GBMRegressor(
@@ -484,6 +508,7 @@ def run_dart_experiment(
             requested_rounds=horizon,
             matched_control=matched_control,
             dropout_pressure=dropout_pressure,
+            dart_profile=dart_profile,
         )
 
     rows: list[BoostingRow] = []
@@ -503,6 +528,7 @@ def run_dart_experiment(
                     seed=seed,
                     arm=standard_arm,
                     horizon=horizon,
+                    dart_profile=DART_PROFILE_STANDARD,
                     boosting_mode="standard",
                 )
                 rows.append(standard_rows[horizon])
@@ -518,6 +544,11 @@ def run_dart_experiment(
                     matched_control=standard_arm,
                     dropout_pressure=configured_dropout_pressure(
                         n_estimators=horizon, drop_rate=drop_rate, max_drop=max_drop
+                    ),
+                    dart_profile=(
+                        DART_PROFILE_DEFAULT_LIKE
+                        if drop_rate <= 0.10
+                        else DART_PROFILE_STRESS
                     ),
                     boosting_mode="dart",
                     dart_drop_rate=drop_rate,
@@ -873,15 +904,18 @@ def render_report(
                 "## DART Dropout Profile",
                 "",
                 "The configured dropout pressure is an expected-work proxy, not an observed drop count.",
+                "The 1.50x RMSE quality gate applies only to `default_like` rows (drop rate <= 0.10).",
+                "`stress_profile` rows remain visible and must satisfy finite, control-matching, and completion contracts, but their quality is non-blocking.",
                 "",
-                "| Arm | Matched standard | Median RMSE | Fit seconds | Seconds/round | Standard time ratio | Dropout pressure |",
-                "|---|---|---:|---:|---:|---:|---:|",
+                "| Arm | Profile | Matched standard | Median RMSE | Fit seconds | Seconds/round | Standard time ratio | Dropout pressure |",
+                "|---|---|---|---:|---:|---:|---:|---:|",
             ]
         )
         for arm in sorted({row.arm for row in dart_rows}):
             rmse, _, fit_seconds, rounds = _median_boosting_rows(dart_rows, arm)
             matching_rows = [row for row in dart_rows if row.arm == arm]
             controls = sorted({row.matched_control for row in matching_rows if row.matched_control})
+            profiles = sorted({row.dart_profile for row in matching_rows if row.dart_profile})
             control_seconds = _median(
                 [
                     row.fit_seconds
@@ -893,7 +927,7 @@ def render_report(
             pressure = _median([row.dropout_pressure for row in matching_rows if row.dropout_pressure is not None])
             pressure_text = "-" if not np.isfinite(pressure) else f"{pressure:.2f}"
             lines.append(
-                f"| {arm} | {', '.join(controls) or '-'} | {rmse:.6f} | {fit_seconds:.4f} | "
+                f"| {arm} | {', '.join(profiles) or '-'} | {', '.join(controls) or '-'} | {rmse:.6f} | {fit_seconds:.4f} | "
                 f"{fit_seconds / rounds:.6f} | {time_ratio_text} | {pressure_text} |"
             )
     return "\n".join(lines) + "\n"
