@@ -14,6 +14,9 @@
 
 ### Performance
 
+- **Avoided a repeated DART dropped-tree walk during normalization.** Training
+  now aggregates selected dropped-tree contributions while forming the
+  dropout prediction state, then reuses that aggregate for normalization.
 - On the full 80,000-row one-hot benchmark, exact bundling reduced 512 logical
   features to 32 physical columns, improved median native training time by
   33.3%, and improved total fit time by 21.3%. Dense input remained inactive

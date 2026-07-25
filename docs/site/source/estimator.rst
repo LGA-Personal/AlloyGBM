@@ -54,7 +54,10 @@ Boosting mode
 - ``dart_drop_rate: float = 0.1`` -- per-tree drop probability per
   round when ``boosting_mode="dart"``.  Must be in ``(0, 1)``.
 - ``dart_max_drop: int = 50`` -- cap on the number of trees dropped
-  per round.  Must be ``>= 1``.
+  and therefore on dropped-tree traversal work per round.  Must be
+  ``>= 1``.  DART uses reusable aggregate scratch storage to restore
+  normalized dropped-tree contributions without a second walk over
+  those trees.
 - ``dart_normalize_type: str = "tree"`` -- rescale policy after the
   new tree is fit.  ``"tree"`` mode sets new-tree weight to
   ``1 / (K + 1)`` and each dropped-tree weight to ``K / (K + 1)``;
