@@ -28,6 +28,48 @@ fn assert_joint_close(actual: &[Vec<f32>], expected: &[Vec<f32>], tolerance: f32
     }
 }
 
+fn joint_repeated_walk_predictions(
+    summary: &JointTrainingSummary,
+    binned_matrix: &BinnedMatrix,
+    feature_count: usize,
+) -> Vec<Vec<f32>> {
+    let n_rows = binned_matrix.row_count;
+    let mut predictions: Vec<Vec<f32>> = summary
+        .baselines
+        .iter()
+        .map(|&baseline| vec![baseline; n_rows])
+        .collect();
+    let mut start = 0_usize;
+    while start < summary.model.stumps.len() {
+        let tree_id = summary.model.stumps[start].split.node_id / TREE_NODE_STRIDE;
+        let mut end = start + 1;
+        while end < summary.model.stumps.len()
+            && summary.model.stumps[end].split.node_id / TREE_NODE_STRIDE == tree_id
+        {
+            end += 1;
+        }
+        let tree_weight = summary.model.stumps[start].tree_weight;
+        assert!(
+            summary.model.stumps[start..end]
+                .iter()
+                .all(|stump| (stump.tree_weight - tree_weight).abs() <= f32::EPSILON),
+            "tree {tree_id} has inconsistent DART weights"
+        );
+        walk_tree_into_predictions(
+            &summary.model.stumps[start..end],
+            binned_matrix,
+            feature_count,
+            n_rows,
+            summary.baselines.len(),
+            &mut predictions,
+            1.0,
+            tree_weight,
+        );
+        start = end;
+    }
+    predictions
+}
+
 fn joint_dart_aggregate_tree() -> Vec<TrainedStump> {
     let stats = NodeStats {
         grad_sum: 0.0,
@@ -2334,6 +2376,99 @@ fn joint_dart_round_trips_through_predictor() {
         assert!(p[0].is_finite(), "row {row} output 0 = {}", p[0]);
         assert!(p[1].is_finite(), "row {row} output 1 = {}", p[1]);
     }
+}
+
+#[test]
+fn joint_dart_aggregate_matches_repeated_walk_oracle_across_multiple_drops() {
+    use alloygbm_core::{BoostingMode, DartNormalize, DartSampleType};
+
+    let n_rows = 12;
+    let feature_count = 2;
+    let bins = vec![
+        0, 0, 1, 0, 2, 1, 3, 1, 0, 1, 1, 1, 2, 0, 3, 0, 0, 0, 1, 0, 2, 1, 3, 1,
+    ];
+    let binned_matrix = BinnedMatrix::new(n_rows, feature_count, 3, bins).expect("binned");
+    let targets_0 = vec![
+        2.0, 1.6, -1.2, -1.6, 1.8, 1.2, -1.0, -1.4, 2.1, 1.5, -1.1, -1.5,
+    ];
+    let targets_1 = vec![
+        -0.5, 0.8, 2.0, 2.4, -0.7, 0.6, 1.8, 2.2, -0.4, 0.9, 1.9, 2.5,
+    ];
+    let params = TrainParams {
+        seed: 41,
+        max_depth: 2,
+        min_data_in_leaf: 1,
+        lambda_l2: 0.0,
+        boosting_mode: BoostingMode::Dart {
+            drop_rate: 0.99,
+            max_drop: 2,
+            normalize_type: DartNormalize::Forest,
+            sample_type: DartSampleType::Uniform,
+        },
+        ..TrainParams::default()
+    };
+    let summary = fit_joint_multi_output(
+        &params,
+        feature_count,
+        &binned_matrix,
+        &[targets_0, targets_1],
+        None,
+        &[JointObjective::SquaredError, JointObjective::SquaredError],
+        5,
+    )
+    .expect("joint DART fit");
+    assert_eq!(summary.rounds_completed, 5);
+
+    let mut drops_with_multiple_trees = 0_usize;
+    let mut replayed_weights = Vec::new();
+    for round in 0..summary.rounds_completed {
+        let drops = crate::select_dropouts(
+            replayed_weights.len(),
+            0.99,
+            2,
+            DartSampleType::Uniform,
+            &replayed_weights,
+            41,
+            round,
+        );
+        drops_with_multiple_trees += usize::from(drops.len() >= 2);
+        crate::apply_normalization(&mut replayed_weights, &drops, DartNormalize::Forest, round);
+    }
+    assert!(
+        drops_with_multiple_trees >= 2,
+        "fixture must cover multiple dropped trees in more than one round"
+    );
+
+    let repeated_walk = joint_repeated_walk_predictions(&summary, &binned_matrix, feature_count);
+    let bytes = summary.model.clone().to_artifact_bytes().expect("artifact");
+    let predictor =
+        JointPredictor::from_artifact_bytes(&bytes, summary.baselines.clone()).expect("predictor");
+    let mut predictor_rows = vec![vec![0.0_f32; n_rows]; 2];
+    for row in 0..n_rows {
+        let features = (0..feature_count)
+            .map(|feature| binned_matrix.row_bin(row * feature_count + feature) as f32)
+            .collect::<Vec<_>>();
+        let prediction = predictor.predict_row(&features);
+        for output in 0..2 {
+            predictor_rows[output][row] = prediction[output];
+        }
+    }
+    assert_joint_close(&predictor_rows, &repeated_walk, 5.0e-6);
+    // Pinned raw scores from the explicit repeated-walk reference. This
+    // catches a stale contribution scratch buffer and a missing final
+    // forest-normalization drop factor even when model/predictor parity alone
+    // would still hold.
+    let expected_raw = vec![
+        vec![
+            0.3289012, 0.28998762, 0.10514818, 0.07596298, 0.3289012, 0.28998762, 0.10514818,
+            0.07596298, 0.3289012, 0.28998762, 0.10514818, 0.07596298,
+        ],
+        vec![
+            1.0040029, 1.0988548, 1.1815461, 1.2155957, 1.0040029, 1.0988548, 1.1815461, 1.2155957,
+            1.0040029, 1.0988548, 1.1815461, 1.2155957,
+        ],
+    ];
+    assert_joint_close(&repeated_walk, &expected_raw, 5.0e-6);
 }
 
 #[test]
