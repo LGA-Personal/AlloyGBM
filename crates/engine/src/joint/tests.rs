@@ -2443,14 +2443,17 @@ fn joint_dart_aggregate_matches_repeated_walk_oracle_across_multiple_drops() {
     let bytes = summary.model.clone().to_artifact_bytes().expect("artifact");
     let predictor =
         JointPredictor::from_artifact_bytes(&bytes, summary.baselines.clone()).expect("predictor");
-    let mut predictor_rows = vec![vec![0.0_f32; n_rows]; 2];
+    let mut predictor_rows = (0..2)
+        .map(|_| Vec::with_capacity(n_rows))
+        .collect::<Vec<_>>();
     for row in 0..n_rows {
         let features = (0..feature_count)
             .map(|feature| binned_matrix.row_bin(row * feature_count + feature) as f32)
             .collect::<Vec<_>>();
         let prediction = predictor.predict_row(&features);
-        for output in 0..2 {
-            predictor_rows[output][row] = prediction[output];
+        assert_eq!(prediction.len(), predictor_rows.len());
+        for (output_rows, value) in predictor_rows.iter_mut().zip(prediction) {
+            output_rows.push(value);
         }
     }
     assert_joint_close(&predictor_rows, &repeated_walk, 5.0e-6);
