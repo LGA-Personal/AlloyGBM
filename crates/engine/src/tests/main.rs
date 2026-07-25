@@ -3253,6 +3253,51 @@ fn dart_early_stopping_truncation_recomputes_tree_weights() {
 }
 
 #[test]
+fn dart_aggregate_forest_validation_preserves_predictor_parity() {
+    let dataset = sample_dataset();
+    let binned = sample_binned_matrix();
+    let validation = ValidationDatasetRef {
+        dataset: &dataset,
+        binned_matrix: &binned,
+    };
+    let params = TrainParams {
+        boosting_mode: BoostingMode::Dart {
+            drop_rate: 0.5,
+            max_drop: 3,
+            normalize_type: alloygbm_core::DartNormalize::Forest,
+            sample_type: alloygbm_core::DartSampleType::Uniform,
+        },
+        seed: 42,
+        deterministic: true,
+        ..TrainParams::default()
+    };
+    let controls =
+        IterationControls::new(8, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).expect("controls are valid");
+    let trainer = Trainer::new(params).expect("DART params pass validation");
+    let model = trainer
+        .fit_iterations_with_validation_summary(
+            &dataset,
+            &binned,
+            validation,
+            &MockBackend,
+            &SquaredErrorObjective,
+            controls,
+        )
+        .expect("DART training with validation succeeds")
+        .model;
+
+    let artifact = model.to_artifact_bytes().expect("serialize DART model");
+    let loaded =
+        TrainedModel::from_artifact_bytes_with_mode(&artifact, ArtifactCompatibilityMode::Strict)
+            .expect("reload DART model");
+    for row in [[0.0_f32, 0.0], [1.0, 0.0], [2.0, 1.0], [3.0, 1.0]] {
+        let training_prediction = model.predict_row(&row).expect("in-memory prediction");
+        let loaded_prediction = loaded.predict_row(&row).expect("loaded prediction");
+        assert!((training_prediction - loaded_prediction).abs() <= 2.0e-5);
+    }
+}
+
+#[test]
 fn artifact_compatibility_report_classifies_dual_section_payload() {
     let model = sample_trained_model();
     let bytes = model.to_artifact_bytes().expect("artifact serializes");
