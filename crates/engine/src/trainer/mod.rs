@@ -34,6 +34,235 @@ pub struct Trainer {
     categorical_features: Vec<CategoricalFeatureInfo>,
 }
 
+type MulticlassDartRoundBookkeeping = (Vec<Vec<usize>>, Vec<Vec<usize>>);
+
+pub(crate) fn allocate_dart_contribution_buffer(
+    dart_enabled: bool,
+    row_count: usize,
+) -> Option<Vec<f32>> {
+    dart_enabled.then(|| vec![0.0; row_count])
+}
+
+/// Rebuilds the per-class DART slice map from persisted multiclass stumps.
+///
+/// Warm-start state can contain skipped rounds, so the map is indexed by the
+/// encoded tree id rather than the number of tree groups encountered. A zero
+/// count is a phantom logical round and intentionally has no stump slice.
+pub(crate) fn reconstruct_multiclass_dart_round_bookkeeping(
+    class_stumps: &[Vec<TrainedStump>],
+    round_count: usize,
+) -> EngineResult<MulticlassDartRoundBookkeeping> {
+    let mut round_start_offsets = Vec::with_capacity(class_stumps.len());
+    let mut round_counts = Vec::with_capacity(class_stumps.len());
+
+    for (class_k, stumps) in class_stumps.iter().enumerate() {
+        let mut starts = vec![stumps.len(); round_count];
+        let mut counts = vec![0_usize; round_count];
+        let mut start = 0_usize;
+        let mut previous_tree_id = None;
+        while start < stumps.len() {
+            let (tree_id, _) = decode_tree_node_id(stumps[start].split.node_id);
+            let tree_id = tree_id as usize;
+            if tree_id >= round_count {
+                return Err(EngineError::ContractViolation(format!(
+                    "warm-start class {class_k} tree_id {tree_id} is outside initial_rounds_completed {round_count}"
+                )));
+            }
+            if previous_tree_id.is_some_and(|previous| tree_id <= previous) {
+                return Err(EngineError::ContractViolation(format!(
+                    "warm-start class {class_k} tree ids must be strictly increasing; found {tree_id} after {}",
+                    previous_tree_id.expect("checked above"),
+                )));
+            }
+            let mut end = start + 1;
+            while end < stumps.len() {
+                let (next_tree_id, _) = decode_tree_node_id(stumps[end].split.node_id);
+                if next_tree_id as usize != tree_id {
+                    break;
+                }
+                end += 1;
+            }
+            starts[tree_id] = start;
+            counts[tree_id] = end - start;
+            previous_tree_id = Some(tree_id);
+            start = end;
+        }
+        round_start_offsets.push(starts);
+        round_counts.push(counts);
+    }
+
+    Ok((round_start_offsets, round_counts))
+}
+
+pub(crate) fn append_multiclass_dart_phantom_round(
+    dart_state: &mut DartState,
+    round_start_offsets: &mut [Vec<usize>],
+    round_counts: &mut [Vec<usize>],
+    class_stumps: &[Vec<TrainedStump>],
+) {
+    for ((starts, counts), stumps) in round_start_offsets
+        .iter_mut()
+        .zip(round_counts.iter_mut())
+        .zip(class_stumps)
+    {
+        starts.push(stumps.len());
+        counts.push(0);
+    }
+    dart_state
+        .tree_weights
+        .extend(std::iter::repeat_n(1.0, class_stumps.len()));
+    dart_state.dropped_per_round.push(Vec::new());
+}
+
+pub(crate) fn multiclass_dart_material_classes(
+    dropped_tree_indices: &[usize],
+    class_count: usize,
+    round_counts: &[Vec<usize>],
+) -> EngineResult<Vec<usize>> {
+    if class_count == 0 || round_counts.len() != class_count {
+        return Err(EngineError::ContractViolation(
+            "multiclass DART material-class lookup received inconsistent class counts".to_string(),
+        ));
+    }
+
+    let mut material_classes = Vec::with_capacity(dropped_tree_indices.len().min(class_count));
+    for &flat_tree_id in dropped_tree_indices {
+        let prior_round = flat_tree_id / class_count;
+        let class_k = flat_tree_id % class_count;
+        let stump_count = round_counts[class_k].get(prior_round).copied().unwrap_or(0);
+        if stump_count > 0 && !material_classes.contains(&class_k) {
+            material_classes.push(class_k);
+        }
+    }
+    Ok(material_classes)
+}
+
+pub(crate) fn clear_multiclass_dart_contributions(
+    contributions: &mut [Vec<f32>],
+    material_classes: &[usize],
+) -> EngineResult<()> {
+    if let Some(&class_k) = material_classes
+        .iter()
+        .find(|&&class_k| class_k >= contributions.len())
+    {
+        return Err(EngineError::ContractViolation(format!(
+            "multiclass DART material class {class_k} is outside contribution count {}",
+            contributions.len(),
+        )));
+    }
+    for &class_k in material_classes {
+        contributions[class_k].fill(0.0);
+    }
+    Ok(())
+}
+
+pub(crate) fn apply_multiclass_dart_contributions(
+    predictions: &mut [Vec<f32>],
+    contributions: &[Vec<f32>],
+    material_classes: &[usize],
+    factor: f32,
+) -> EngineResult<()> {
+    if predictions.len() != contributions.len() {
+        return Err(EngineError::ContractViolation(format!(
+            "multiclass DART prediction count {} does not match contribution count {}",
+            predictions.len(),
+            contributions.len(),
+        )));
+    }
+    for &class_k in material_classes {
+        let Some(prediction) = predictions.get(class_k) else {
+            return Err(EngineError::ContractViolation(format!(
+                "multiclass DART material class {class_k} is outside prediction count {}",
+                predictions.len(),
+            )));
+        };
+        if prediction.len() != contributions[class_k].len() {
+            return Err(EngineError::ContractViolation(format!(
+                "multiclass DART class {class_k} prediction length {} does not match contribution length {}",
+                prediction.len(),
+                contributions[class_k].len(),
+            )));
+        }
+    }
+    for &class_k in material_classes {
+        apply_scaled_prediction_buffer(&mut predictions[class_k], &contributions[class_k], factor)?;
+    }
+    Ok(())
+}
+
+/// Records a skipped multiclass warmup iteration in the same logical-round
+/// coordinate space as accepted rounds. Early-stop truncation indexes these
+/// vectors by `rounds_completed`, so a phantom slot must be present everywhere
+/// rather than only in DART's internal flat-tree state.
+#[allow(clippy::too_many_arguments)]
+fn append_multiclass_phantom_round_bookkeeping(
+    stumps_per_round_per_class: &mut Vec<Vec<usize>>,
+    loss_per_completed_round: &mut Vec<f32>,
+    validation_loss_per_completed_round: &mut Vec<f32>,
+    sampled_rows_per_completed_round: &mut Vec<usize>,
+    sampled_features_per_completed_round: &mut Vec<usize>,
+    diagnostics_per_round: &mut Vec<IterationDiagnostics>,
+    class_count: usize,
+    current_loss: f32,
+    current_validation_loss: Option<f32>,
+    sampled_row_count: usize,
+    sampled_feature_count: usize,
+    per_class_diagnostics: &[IterationDiagnostics],
+) {
+    stumps_per_round_per_class.push(vec![0; class_count]);
+    loss_per_completed_round.push(current_loss);
+    if let Some(validation_loss) = current_validation_loss {
+        validation_loss_per_completed_round.push(validation_loss);
+    }
+    sampled_rows_per_completed_round.push(sampled_row_count);
+    sampled_features_per_completed_round.push(sampled_feature_count);
+    diagnostics_per_round.push(IterationDiagnostics::aggregate_per_class(
+        per_class_diagnostics,
+    ));
+}
+
+pub(crate) fn replay_multiclass_dart_tree_weights(
+    initial_weights: &[f32],
+    kept_dropped_per_round: &[Vec<usize>],
+    class_count: usize,
+    normalize_type: alloygbm_core::DartNormalize,
+) -> EngineResult<Vec<f32>> {
+    if class_count == 0 || !initial_weights.len().is_multiple_of(class_count) {
+        return Err(EngineError::ContractViolation(
+            "multiclass DART replay received a non-round-major warm-start weight prefix"
+                .to_string(),
+        ));
+    }
+    let initial_round_count = initial_weights.len() / class_count;
+    if kept_dropped_per_round.len() < initial_round_count {
+        return Err(EngineError::ContractViolation(
+            "multiclass DART replay history is shorter than its warm-start prefix".to_string(),
+        ));
+    }
+
+    let mut weights = initial_weights.to_vec();
+    for dropped in &kept_dropped_per_round[initial_round_count..] {
+        let dropped_count = dropped.len() as f32;
+        let new_weight = 1.0 / (dropped_count + 1.0);
+        let dropped_factor = match normalize_type {
+            alloygbm_core::DartNormalize::Tree => dropped_count / (dropped_count + 1.0),
+            alloygbm_core::DartNormalize::Forest => 1.0 / (dropped_count + 1.0),
+        };
+        let retained_weight_count = weights.len();
+        for &flat_tree_id in dropped {
+            let weight = weights.get_mut(flat_tree_id).ok_or_else(|| {
+                EngineError::ContractViolation(format!(
+                    "multiclass DART replay dropout index {flat_tree_id} is outside the retained prefix {}",
+                    retained_weight_count,
+                ))
+            })?;
+            *weight *= dropped_factor;
+        }
+        weights.extend(std::iter::repeat_n(new_weight, class_count));
+    }
+    Ok(weights)
+}
+
 impl Trainer {
     pub fn new(params: TrainParams) -> EngineResult<Self> {
         validate_train_params(&params)?;
@@ -791,7 +1020,7 @@ impl Trainer {
         if round_index_offset > 0 {
             for class_k in 0..k {
                 if !class_stumps[class_k].is_empty() {
-                    apply_round_stumps_tree_walk(
+                    apply_tree_to_binned_predictions(
                         &mut class_predictions[class_k],
                         binned_matrix,
                         &class_stumps[class_k],
@@ -822,7 +1051,7 @@ impl Trainer {
             ));
             for class_k in 0..k {
                 if !class_stumps[class_k].is_empty() {
-                    apply_round_stumps_tree_walk(
+                    apply_tree_to_binned_predictions(
                         &mut val_preds[class_k],
                         validation_ref.binned_matrix,
                         &class_stumps[class_k],
@@ -832,18 +1061,36 @@ impl Trainer {
             }
         }
 
+        let mut dart_train_contribution: Option<Vec<Vec<f32>>> = dart_params.is_some().then(|| {
+            class_predictions
+                .iter()
+                .map(|predictions| vec![0.0; predictions.len()])
+                .collect()
+        });
+        let mut dart_validation_contribution: Option<Vec<Vec<f32>>> = if dart_params.is_some() {
+            validation_class_predictions.as_ref().map(|predictions| {
+                predictions
+                    .iter()
+                    .map(|output_predictions| vec![0.0; output_predictions.len()])
+                    .collect()
+            })
+        } else {
+            None
+        };
+
         let initial_loss = objective.loss(
             &class_predictions,
             &dataset.targets,
             dataset.sample_weights.as_deref(),
         )?;
         let initial_validation_loss = if let Some(v) = validation {
-            let val_preds: Vec<Vec<f32>> = baselines
-                .iter()
-                .map(|&b| vec![b; v.dataset.row_count()])
-                .collect();
+            let val_preds = validation_class_predictions.as_ref().ok_or_else(|| {
+                EngineError::ContractViolation(
+                    "validation predictions were not initialized".to_string(),
+                )
+            })?;
             Some(objective.loss(
-                &val_preds,
+                val_preds,
                 &v.dataset.targets,
                 v.dataset.sample_weights.as_deref(),
             )?)
@@ -933,41 +1180,13 @@ impl Trainer {
             for _ in 0..round_index_offset {
                 dart_state.dropped_per_round.push(Vec::new());
             }
-            // Reconstruct per-class `dart_round_start_offsets` and
-            // `dart_round_counts` for warm-start by grouping
-            // `class_stumps[class_k]` by tree_id (decoded from
-            // `stump.split.node_id`). All stumps of the same class-tree
-            // share a tree_id, and distinct tree_ids appear in
-            // round-order, so this gives the contiguous slice
-            // boundaries the dropout/normalize code needs.
-            for class_k in 0..k {
-                let class_total = class_stumps[class_k].len();
-                let mut i = 0_usize;
-                while i < class_total {
-                    let (tid_first, _) =
-                        decode_tree_node_id(class_stumps[class_k][i].split.node_id);
-                    let start = i;
-                    let mut j = i + 1;
-                    while j < class_total {
-                        let (tid, _) = decode_tree_node_id(class_stumps[class_k][j].split.node_id);
-                        if tid != tid_first {
-                            break;
-                        }
-                        j += 1;
-                    }
-                    dart_round_start_offsets[class_k].push(start);
-                    dart_round_counts[class_k].push(j - start);
-                    i = j;
-                }
-                // Pad with phantom (count=0) entries up to
-                // round_index_offset so the array length matches the
-                // warm-start round count.
-                while dart_round_start_offsets[class_k].len() < round_index_offset {
-                    dart_round_start_offsets[class_k].push(class_total);
-                    dart_round_counts[class_k].push(0);
-                }
-            }
+            (dart_round_start_offsets, dart_round_counts) =
+                reconstruct_multiclass_dart_round_bookkeeping(&class_stumps, round_index_offset)?;
         }
+        // Historical DART dropout selections are intentionally not persisted
+        // across warm starts. Preserve the supplied weight prefix so an
+        // early-stop replay only replays the new logical rounds.
+        let initial_dart_tree_weights = dart_state.tree_weights.clone();
 
         for round_index in 0..effective_round_cap {
             let effective_round = round_index + round_index_offset;
@@ -994,8 +1213,13 @@ impl Trainer {
             // ensemble — matching the single-output DART semantics
             // (PR review C1).
             let mut dart_predictions_backup: Option<Vec<Vec<f32>>> = None;
-            let dropped_tree_indices: Vec<usize> =
+            let (dropped_tree_indices, material_dropped_classes): (Vec<usize>, Vec<usize>) =
                 if let Some((drop_rate, max_drop, _normalize_type, sample_type)) = dart_params {
+                    let dart_contribution = dart_train_contribution.as_mut().ok_or_else(|| {
+                        EngineError::ContractViolation(
+                            "multiclass DART contribution buffer was not initialized".to_string(),
+                        )
+                    })?;
                     let drops = select_dropouts(
                         dart_state.tree_weights.len(),
                         drop_rate,
@@ -1005,6 +1229,9 @@ impl Trainer {
                         sampling_seed_base,
                         effective_round,
                     );
+                    let material_classes =
+                        multiclass_dart_material_classes(&drops, k, &dart_round_counts)?;
+                    clear_multiclass_dart_contributions(dart_contribution, &material_classes)?;
                     if !drops.is_empty() {
                         dart_predictions_backup = Some(class_predictions.clone());
                     }
@@ -1025,17 +1252,19 @@ impl Trainer {
                         // mutable. (Stumps don't change between subtract
                         // and re-add — the slice can be reused later.)
                         let stump_slice = class_stumps[class_k][start..start + count].to_vec();
-                        apply_weighted_round_to_predictions(
+                        apply_weighted_round_to_predictions_and_accumulator(
                             &mut class_predictions[class_k],
+                            &mut dart_contribution[class_k],
                             binned_matrix,
                             &stump_slice,
                             Some((&dataset.matrix.values, dataset.matrix.feature_count)),
                             -w_old,
+                            w_old,
                         )?;
                     }
-                    drops
+                    (drops, material_classes)
                 } else {
-                    Vec::new()
+                    (Vec::new(), Vec::new())
                 };
 
             // v0.10.1: pre-compute per-class gradient buffers BEFORE sampling
@@ -1212,7 +1441,7 @@ impl Trainer {
             // bookkeeping into the commit branch; `None` when DART is
             // off or the round had no dropouts (in which case new
             // trees get `tree_weight = 1.0`).
-            let dart_round_finalize: Option<(f32, Vec<f32>)> =
+            let dart_round_finalize: Option<(f32, f32, Vec<f32>)> =
                 if let Some((_, _, normalize_type, _)) = dart_params {
                     let n_dropped = dropped_tree_indices.len() as f32;
                     let new_w = 1.0 / (n_dropped + 1.0);
@@ -1236,40 +1465,24 @@ impl Trainer {
                         .iter()
                         .map(|&fi| dart_state.tree_weights[fi] * drop_factor)
                         .collect();
-                    // Re-add each dropped tree's WHOLE slice at the rescaled
-                    // weight to BOTH class_predictions (so post-round
-                    // commit captures the full ensemble) AND
-                    // class_candidate_predictions (so candidate_loss is
-                    // computed against the correct full ensemble).
-                    for (i, &flat_idx) in dropped_tree_indices.iter().enumerate() {
-                        let prior_round = flat_idx / k;
-                        let class_k = flat_idx % k;
-                        let count = dart_round_counts[class_k]
-                            .get(prior_round)
-                            .copied()
-                            .unwrap_or(0);
-                        if count == 0 {
-                            continue;
-                        }
-                        let start = dart_round_start_offsets[class_k][prior_round];
-                        let stump_slice = class_stumps[class_k][start..start + count].to_vec();
-                        let w_new = new_dropped_weights[i];
-                        apply_weighted_round_to_predictions(
-                            &mut class_predictions[class_k],
-                            binned_matrix,
-                            &stump_slice,
-                            Some((&dataset.matrix.values, dataset.matrix.feature_count)),
-                            w_new,
-                        )?;
-                        apply_weighted_round_to_predictions(
-                            &mut class_candidate_predictions[class_k],
-                            binned_matrix,
-                            &stump_slice,
-                            Some((&dataset.matrix.values, dataset.matrix.feature_count)),
-                            w_new,
-                        )?;
-                    }
-                    Some((new_w, new_dropped_weights))
+                    let dart_contribution = dart_train_contribution.as_ref().ok_or_else(|| {
+                        EngineError::ContractViolation(
+                            "multiclass DART contribution buffer was not initialized".to_string(),
+                        )
+                    })?;
+                    apply_multiclass_dart_contributions(
+                        &mut class_predictions,
+                        dart_contribution,
+                        &material_dropped_classes,
+                        drop_factor,
+                    )?;
+                    apply_multiclass_dart_contributions(
+                        &mut class_candidate_predictions,
+                        dart_contribution,
+                        &material_dropped_classes,
+                        drop_factor,
+                    )?;
+                    Some((new_w, drop_factor, new_dropped_weights))
                 } else {
                     None
                 };
@@ -1292,6 +1505,28 @@ impl Trainer {
                     if let Some(backup) = dart_predictions_backup.take() {
                         class_predictions = backup;
                     }
+                    if dart_params.is_some() {
+                        append_multiclass_dart_phantom_round(
+                            &mut dart_state,
+                            &mut dart_round_start_offsets,
+                            &mut dart_round_counts,
+                            &class_stumps,
+                        );
+                    }
+                    append_multiclass_phantom_round_bookkeeping(
+                        &mut stumps_per_round_per_class,
+                        &mut loss_per_completed_round,
+                        &mut validation_loss_per_completed_round,
+                        &mut sampled_rows_per_completed_round,
+                        &mut sampled_features_per_completed_round,
+                        &mut diagnostics_per_round,
+                        k,
+                        current_loss,
+                        current_validation_loss,
+                        sampled_row_count,
+                        sampled_feature_count,
+                        &per_class_diagnostics,
+                    );
                     rounds_completed += 1;
                     continue;
                 }
@@ -1331,6 +1566,28 @@ impl Trainer {
                     if let Some(backup) = dart_predictions_backup.take() {
                         class_predictions = backup;
                     }
+                    if dart_params.is_some() {
+                        append_multiclass_dart_phantom_round(
+                            &mut dart_state,
+                            &mut dart_round_start_offsets,
+                            &mut dart_round_counts,
+                            &class_stumps,
+                        );
+                    }
+                    append_multiclass_phantom_round_bookkeeping(
+                        &mut stumps_per_round_per_class,
+                        &mut loss_per_completed_round,
+                        &mut validation_loss_per_completed_round,
+                        &mut sampled_rows_per_completed_round,
+                        &mut sampled_features_per_completed_round,
+                        &mut diagnostics_per_round,
+                        k,
+                        current_loss,
+                        current_validation_loss,
+                        sampled_row_count,
+                        sampled_feature_count,
+                        &per_class_diagnostics,
+                    );
                     rounds_completed += 1;
                     continue;
                 }
@@ -1383,7 +1640,20 @@ impl Trainer {
                     &validation_ref.dataset.matrix.values as &[f32],
                     validation_ref.dataset.matrix.feature_count,
                 ));
-                if let Some((new_w, new_dropped_weights)) = dart_round_finalize.as_ref() {
+                if let Some((new_w, drop_factor, _new_dropped_weights)) =
+                    dart_round_finalize.as_ref()
+                {
+                    let dart_contribution =
+                        dart_validation_contribution.as_mut().ok_or_else(|| {
+                            EngineError::ContractViolation(
+                                "validation multiclass DART contribution buffer was not initialized"
+                                    .to_string(),
+                            )
+                        })?;
+                    clear_multiclass_dart_contributions(
+                        dart_contribution,
+                        &material_dropped_classes,
+                    )?;
                     // 1. Subtract each dropped class-tree at w_old.
                     for &flat_idx in &dropped_tree_indices {
                         let prior_round = flat_idx / k;
@@ -1398,12 +1668,14 @@ impl Trainer {
                         let start = dart_round_start_offsets[class_k][prior_round];
                         let stump_slice = class_stumps[class_k][start..start + count].to_vec();
                         let w_old = dart_state.tree_weights[flat_idx];
-                        apply_weighted_round_to_predictions(
+                        apply_weighted_round_to_predictions_and_accumulator(
                             &mut val_preds[class_k],
+                            &mut dart_contribution[class_k],
                             validation_ref.binned_matrix,
                             &stump_slice,
                             val_raw,
                             -w_old,
+                            w_old,
                         )?;
                     }
                     // 2. Add the new K class-trees at new_w.
@@ -1420,28 +1692,14 @@ impl Trainer {
                             *new_w,
                         )?;
                     }
-                    // 3. Re-add each dropped class-tree at its new weight.
-                    for (i, &flat_idx) in dropped_tree_indices.iter().enumerate() {
-                        let prior_round = flat_idx / k;
-                        let class_k = flat_idx % k;
-                        let count = dart_round_counts[class_k]
-                            .get(prior_round)
-                            .copied()
-                            .unwrap_or(0);
-                        if count == 0 {
-                            continue;
-                        }
-                        let start = dart_round_start_offsets[class_k][prior_round];
-                        let stump_slice = class_stumps[class_k][start..start + count].to_vec();
-                        let w_new = new_dropped_weights[i];
-                        apply_weighted_round_to_predictions(
-                            &mut val_preds[class_k],
-                            validation_ref.binned_matrix,
-                            &stump_slice,
-                            val_raw,
-                            w_new,
-                        )?;
-                    }
+                    // 3. Re-add all dropped class-trees at their shared
+                    // post-normalization factor.
+                    apply_multiclass_dart_contributions(
+                        val_preds,
+                        dart_contribution,
+                        &material_dropped_classes,
+                        *drop_factor,
+                    )?;
                 } else {
                     // Non-DART (or DART with no dropouts AND new trees
                     // not yet rescaled): plain unit-weight tree walk.
@@ -1513,7 +1771,23 @@ impl Trainer {
             // trees that actually produced stumps this round (so
             // zero-stump class trees stay as phantom slots and
             // `dart_round_counts` reflects 0 for them).
-            if let Some((new_w, new_dropped_weights)) = dart_round_finalize.as_ref() {
+            if let Some((new_w, _drop_factor, new_dropped_weights)) = dart_round_finalize.as_ref() {
+                // Every skipped warmup round is recorded above in both the
+                // DART arrays and the summary bookkeeping. Do not synthesize
+                // an internal-only phantom here: that would make early-stop
+                // truncation index a sparse stump-count vector again.
+                if dart_state.dropped_per_round.len() != effective_round
+                    || dart_round_start_offsets
+                        .iter()
+                        .any(|starts| starts.len() != effective_round)
+                    || dart_round_counts
+                        .iter()
+                        .any(|counts| counts.len() != effective_round)
+                {
+                    return Err(EngineError::ContractViolation(format!(
+                        "multiclass DART logical-round bookkeeping is not dense before round {effective_round}"
+                    )));
+                }
                 // Rescale dropped trees' weights in place.
                 for (i, &flat_idx) in dropped_tree_indices.iter().enumerate() {
                     dart_state.tree_weights[flat_idx] = new_dropped_weights[i];
@@ -1567,12 +1841,61 @@ impl Trainer {
                         .sum::<usize>();
                 class_stumps[class_k].truncate(keep_count);
             }
+            stumps_per_round_per_class.truncate(best_round);
             loss_per_completed_round.truncate(best_round);
             validation_loss_per_completed_round.truncate(best_round);
             sampled_rows_per_completed_round.truncate(best_round);
             sampled_features_per_completed_round.truncate(best_round);
             diagnostics_per_round.truncate(best_round);
+            // DART normalization from a discarded logical round may have
+            // changed retained tree weights. Keep all prefix slots (including
+            // warm-start and phantom slots) through the selected logical
+            // round, then replay only the new retained rounds from the
+            // persisted warm-start weight prefix.
+            if let Some((_, _, normalize_type, _)) = dart_params {
+                let truncate_at = round_index_offset + best_round;
+                for class_k in 0..k {
+                    dart_round_start_offsets[class_k].truncate(truncate_at);
+                    dart_round_counts[class_k].truncate(truncate_at);
+                }
+                let kept_dropped_per_round = dart_state
+                    .dropped_per_round
+                    .iter()
+                    .take(truncate_at)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if kept_dropped_per_round.len() != truncate_at {
+                    return Err(EngineError::ContractViolation(format!(
+                        "multiclass DART history length {} is shorter than retained logical rounds {truncate_at}",
+                        kept_dropped_per_round.len(),
+                    )));
+                }
+                dart_state.tree_weights = replay_multiclass_dart_tree_weights(
+                    &initial_dart_tree_weights,
+                    &kept_dropped_per_round,
+                    k,
+                    normalize_type,
+                )?;
+                dart_state.dropped_per_round = kept_dropped_per_round;
+            }
             rounds_completed = best_round;
+            current_loss = loss_per_completed_round
+                .last()
+                .copied()
+                .unwrap_or(initial_loss);
+            current_validation_loss = best_validation_loss.or(initial_validation_loss);
+        }
+
+        if dart_params.is_some() {
+            for (class_k, stumps) in class_stumps.iter_mut().enumerate() {
+                for stump in stumps {
+                    let (tree_id, _) = decode_tree_node_id(stump.split.node_id);
+                    let flat_tree_id = tree_id as usize * k + class_k;
+                    if let Some(&weight) = dart_state.tree_weights.get(flat_tree_id) {
+                        stump.tree_weight = weight;
+                    }
+                }
+            }
         }
 
         let final_loss = current_loss;
@@ -1882,6 +2205,11 @@ impl Trainer {
         } else {
             None
         };
+        let mut dart_train_contribution =
+            allocate_dart_contribution_buffer(dart_params.is_some(), predictions.len());
+        let mut dart_validation_contribution = validation_predictions.as_ref().and_then(|values| {
+            allocate_dart_contribution_buffer(dart_params.is_some(), values.len())
+        });
         let mut stumps = initial_stumps;
         let initial_stump_count = stumps.len();
         // `stumps_per_completed_round` stays NEW-ROUND-ONLY (its original
@@ -2071,6 +2399,11 @@ impl Trainer {
             let mut dart_validation_backup: Option<Vec<f32>> = None;
             let dropped_tree_ids: Vec<usize> =
                 if let Some((drop_rate, max_drop, _normalize_type, sample_type)) = dart_params {
+                    let train_contribution = dart_train_contribution.as_mut().ok_or_else(|| {
+                        EngineError::ContractViolation(
+                            "DART contribution buffer was not initialized".to_string(),
+                        )
+                    })?;
                     let drops = select_dropouts(
                         dart_state.tree_weights.len(),
                         drop_rate,
@@ -2080,6 +2413,10 @@ impl Trainer {
                         sampling_seed_base,
                         effective_round_index,
                     );
+                    train_contribution.fill(0.0);
+                    if let Some(contribution) = dart_validation_contribution.as_mut() {
+                        contribution.fill(0.0);
+                    }
                     if !drops.is_empty() {
                         dart_predictions_backup = Some(predictions.clone());
                         dart_validation_backup = validation_predictions.clone();
@@ -2089,26 +2426,32 @@ impl Trainer {
                         let start = round_start_offsets[tree_id];
                         let count = dart_round_counts[tree_id];
                         let stump_slice = &stumps[start..start + count];
-                        apply_weighted_round_to_predictions(
+                        apply_weighted_round_to_predictions_and_accumulator(
                             &mut predictions,
+                            train_contribution,
                             binned_matrix,
                             stump_slice,
                             raw_features_opt,
                             -w_old,
+                            w_old,
                         )?;
-                        if let (Some(vp), Some(validation_ref)) =
-                            (validation_predictions.as_mut(), validation)
-                        {
+                        if let (Some(vp), Some(validation_ref), Some(contribution)) = (
+                            validation_predictions.as_mut(),
+                            validation,
+                            dart_validation_contribution.as_mut(),
+                        ) {
                             let val_raw = Some((
                                 &validation_ref.dataset.matrix.values as &[f32],
                                 validation_ref.dataset.matrix.feature_count,
                             ));
-                            apply_weighted_round_to_predictions(
+                            apply_weighted_round_to_predictions_and_accumulator(
                                 vp,
+                                contribution,
                                 validation_ref.binned_matrix,
                                 stump_slice,
                                 val_raw,
                                 -w_old,
+                                w_old,
                             )?;
                         }
                     }
@@ -2311,10 +2654,10 @@ impl Trainer {
             // weights locally; the mutation of `dart_state.tree_weights`
             // only happens on commit (post-loss-check).
             //
-            // `dart_round_finalize = Some((new_w, new_dropped_weights))`
+            // `dart_round_finalize = Some((new_w, drop_factor, new_dropped_weights))`
             // on a DART round; `None` otherwise. The commit path
             // consumes this to update `dart_state`.
-            let dart_round_finalize: Option<(f32, Vec<f32>)> =
+            let dart_round_finalize: Option<(f32, f32, Vec<f32>)> =
                 if let Some((_, _, normalize_type, _)) = dart_params {
                     let k = dropped_tree_ids.len() as f32;
                     let new_w = 1.0 / (k + 1.0);
@@ -2328,25 +2671,26 @@ impl Trainer {
                         let f_t = candidate_predictions[r] - predictions[r];
                         candidate_predictions[r] = predictions[r] + new_w * f_t;
                     }
-                    // Step 2: re-add each dropped tree to candidate_predictions
-                    // at its new (post-normalize) weight.
+                    // Step 2: collect the post-normalization weights for
+                    // commit, then restore the aggregate dropped-tree
+                    // contribution at the common normalization factor.
                     let mut new_dropped_weights = Vec::with_capacity(dropped_tree_ids.len());
                     for &tree_id in &dropped_tree_ids {
                         let w_old = dart_state.tree_weights[tree_id];
                         let w_new = w_old * drop_factor;
                         new_dropped_weights.push(w_new);
-                        let start = round_start_offsets[tree_id];
-                        let count = dart_round_counts[tree_id];
-                        let stump_slice = &stumps[start..start + count];
-                        apply_weighted_round_to_predictions(
-                            &mut candidate_predictions,
-                            binned_matrix,
-                            stump_slice,
-                            raw_features_opt,
-                            w_new,
-                        )?;
                     }
-                    Some((new_w, new_dropped_weights))
+                    let contribution = dart_train_contribution.as_ref().ok_or_else(|| {
+                        EngineError::ContractViolation(
+                            "DART contribution buffer was not initialized".to_string(),
+                        )
+                    })?;
+                    apply_scaled_prediction_buffer(
+                        &mut candidate_predictions,
+                        contribution,
+                        drop_factor,
+                    )?;
+                    Some((new_w, drop_factor, new_dropped_weights))
                 } else {
                     None
                 };
@@ -2430,7 +2774,7 @@ impl Trainer {
                 // new tree at `new_w` (not 1.0) and re-add dropped trees
                 // at their new weights. Otherwise fall back to the
                 // existing unit-weight tree walk.
-                if let Some((new_w, new_dropped_weights)) = &dart_round_finalize {
+                if let Some((new_w, drop_factor, _new_dropped_weights)) = &dart_round_finalize {
                     let val_raw = Some((
                         &validation_ref.dataset.matrix.values as &[f32],
                         validation_ref.dataset.matrix.feature_count,
@@ -2442,18 +2786,16 @@ impl Trainer {
                         val_raw,
                         *new_w,
                     )?;
-                    for (i, &tree_id) in dropped_tree_ids.iter().enumerate() {
-                        let start = round_start_offsets[tree_id];
-                        let count = dart_round_counts[tree_id];
-                        let stump_slice = &stumps[start..start + count];
-                        apply_weighted_round_to_predictions(
-                            &mut next_validation_predictions,
-                            validation_ref.binned_matrix,
-                            stump_slice,
-                            val_raw,
-                            new_dropped_weights[i],
-                        )?;
-                    }
+                    let contribution = dart_validation_contribution.as_ref().ok_or_else(|| {
+                        EngineError::ContractViolation(
+                            "validation DART contribution buffer was not initialized".to_string(),
+                        )
+                    })?;
+                    apply_scaled_prediction_buffer(
+                        &mut next_validation_predictions,
+                        contribution,
+                        *drop_factor,
+                    )?;
                 } else {
                     apply_weighted_round_to_predictions(
                         &mut next_validation_predictions,
@@ -2582,7 +2924,7 @@ impl Trainer {
                     dart_state.tree_weights.push(1.0);
                     dart_state.dropped_per_round.push(Vec::new());
                 }
-                if let Some((new_w, new_dropped_weights)) = dart_round_finalize {
+                if let Some((new_w, _drop_factor, new_dropped_weights)) = dart_round_finalize {
                     for (i, &tree_id) in dropped_tree_ids.iter().enumerate() {
                         dart_state.tree_weights[tree_id] = new_dropped_weights[i];
                     }

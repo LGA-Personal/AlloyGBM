@@ -61,6 +61,85 @@ def test_multiclass_dart_pickle_round_trip():
     np.testing.assert_allclose(p1, p2, rtol=1e-6)
 
 
+def test_multiclass_dart_save_load_preserves_weighted_predictions(tmp_path):
+    X, y = _toy_multiclass(n_rows=320, seed=83)
+    model = GBMClassifier(
+        n_estimators=9,
+        boosting_mode="dart",
+        dart_drop_rate=0.8,
+        dart_max_drop=4,
+        max_depth=3,
+        min_data_in_leaf=4,
+        seed=29,
+    )
+    model.fit(X, y)
+    expected = model.predict_proba(X)
+
+    path = tmp_path / "weighted-multiclass-dart.alloy"
+    model.save_model(str(path))
+    restored = GBMClassifier.load_model(str(path))
+
+    np.testing.assert_allclose(
+        restored.predict_proba(X), expected, rtol=1e-6, atol=1e-7
+    )
+
+
+def test_multiclass_dart_weighted_warm_start_matches_uninterrupted_fit():
+    X, y = _toy_multiclass(n_rows=360, seed=89)
+    common = dict(
+        boosting_mode="dart",
+        dart_drop_rate=0.75,
+        dart_max_drop=4,
+        max_depth=3,
+        min_data_in_leaf=4,
+        training_policy="manual",
+        seed=31,
+    )
+    uninterrupted = GBMClassifier(n_estimators=10, **common).fit(X, y)
+    prefix = GBMClassifier(n_estimators=6, **common).fit(X, y)
+    continued = GBMClassifier(
+        n_estimators=4,
+        warm_start=True,
+        **common,
+    ).fit(X, y, init_model=prefix)
+
+    np.testing.assert_allclose(
+        continued.predict_proba(X),
+        uninterrupted.predict_proba(X),
+        rtol=1e-5,
+        atol=1e-6,
+    )
+
+
+def test_multiclass_dart_warm_start_matches_with_missing_values():
+    X, y = _toy_multiclass(n_rows=360, seed=97)
+    rng = np.random.default_rng(101)
+    X[rng.random(X.shape) < 0.22] = np.nan
+    common = dict(
+        boosting_mode="dart",
+        dart_drop_rate=0.75,
+        dart_max_drop=4,
+        max_depth=3,
+        min_data_in_leaf=4,
+        training_policy="manual",
+        seed=37,
+    )
+    uninterrupted = GBMClassifier(n_estimators=10, **common).fit(X, y)
+    prefix = GBMClassifier(n_estimators=6, **common).fit(X, y)
+    continued = GBMClassifier(
+        n_estimators=4,
+        warm_start=True,
+        **common,
+    ).fit(X, y, init_model=prefix)
+
+    np.testing.assert_allclose(
+        continued.predict_proba(X),
+        uninterrupted.predict_proba(X),
+        rtol=1e-5,
+        atol=1e-6,
+    )
+
+
 def test_multiclass_dart_warm_start_continues_without_error():
     X, y = _toy_multiclass()
     base = GBMClassifier(
@@ -347,3 +426,54 @@ def test_multiclass_dart_with_validation_early_stopping():
     restored = pickle.loads(pickle.dumps(m))
     p2 = restored.predict_proba(X)
     np.testing.assert_allclose(p1, p2, rtol=1e-5, atol=1e-6)
+
+
+def test_multiclass_dart_aggregate_level_wise_validation_round_trip():
+    import pickle
+
+    X, y = _toy_multiclass(n_rows=360, n_features=5, n_classes=3, seed=71)
+    model = GBMClassifier(
+        n_estimators=8,
+        boosting_mode="dart",
+        dart_drop_rate=0.65,
+        dart_max_drop=4,
+        max_depth=3,
+        min_data_in_leaf=5,
+        seed=29,
+    )
+    model.fit(X, y, eval_set=(X[::3], y[::3]))
+    probabilities = model.predict_proba(X)
+    assert np.isfinite(probabilities).all()
+    assert np.allclose(probabilities.sum(axis=1), 1.0, atol=1e-5)
+    np.testing.assert_allclose(
+        probabilities,
+        pickle.loads(pickle.dumps(model)).predict_proba(X),
+        rtol=1e-5,
+        atol=1e-6,
+    )
+
+
+def test_multiclass_dart_aggregate_leaf_wise_validation_round_trip():
+    import pickle
+
+    X, y = _toy_multiclass(n_rows=360, n_features=5, n_classes=3, seed=73)
+    model = GBMClassifier(
+        n_estimators=8,
+        boosting_mode="dart",
+        dart_drop_rate=0.65,
+        dart_max_drop=4,
+        tree_growth="leaf",
+        max_leaves=6,
+        min_data_in_leaf=5,
+        seed=29,
+    )
+    model.fit(X, y, eval_set=(X[::3], y[::3]))
+    probabilities = model.predict_proba(X)
+    assert np.isfinite(probabilities).all()
+    assert np.allclose(probabilities.sum(axis=1), 1.0, atol=1e-5)
+    np.testing.assert_allclose(
+        probabilities,
+        pickle.loads(pickle.dumps(model)).predict_proba(X),
+        rtol=1e-5,
+        atol=1e-6,
+    )

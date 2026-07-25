@@ -1276,6 +1276,40 @@ def test_joint_per_round_gradient_with_dart():
     assert m.predict(X).shape == (32, 2)
 
 
+def test_joint_dart_aggregate_leaf_wise_save_load_round_trip(tmp_path):
+    rng = np.random.default_rng(74)
+    n = 144
+    X = rng.standard_normal((n, 4)).astype(np.float32)
+    y = np.column_stack(
+        [
+            (X[:, 0] - X[:, 1] + rng.normal(0, 0.05, n)),
+            (X[:, 2] + 0.5 * X[:, 3] + rng.normal(0, 0.05, n)),
+        ]
+    ).astype(np.float32)
+    group = np.repeat(np.arange(n // 12), 12).astype(np.int64)
+    model = MultiLabelGBMRanker(
+        n_estimators=8,
+        learning_rate=0.1,
+        multi_label_mode="joint",
+        ranking_objective="squared_error",
+        boosting_mode="dart",
+        dart_drop_rate=0.65,
+        dart_max_drop=4,
+        tree_growth="leaf",
+        max_leaves=6,
+        min_data_in_leaf=4,
+        seed=29,
+    )
+    model.fit(X, y, group=group)
+    predictions = model.predict(X)
+    assert predictions.shape == (n, 2)
+    assert np.isfinite(predictions).all()
+    path = tmp_path / "joint_dart_aggregate.alloy"
+    model.save_model(str(path))
+    restored = MultiLabelGBMRanker.load_model(str(path))
+    np.testing.assert_allclose(restored.predict(X), predictions, rtol=1e-5, atol=1e-5)
+
+
 def test_joint_per_round_gradient_with_warm_start():
     """neutralization composes with warm-start (same exposures both fits)."""
     rng = np.random.default_rng(73)

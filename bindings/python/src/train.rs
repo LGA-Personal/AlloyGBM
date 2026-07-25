@@ -123,6 +123,59 @@ fn build_native_training_summary(
     }
 }
 
+fn multiclass_warm_start_dart_weights(
+    model: &MultiClassTrainedModel,
+) -> Result<Option<Vec<f32>>, EngineError> {
+    if !model
+        .class_stumps
+        .iter()
+        .flatten()
+        .any(|stump| (stump.tree_weight - 1.0).abs() > f32::EPSILON)
+    {
+        return Ok(None);
+    }
+
+    let round_count = model.rounds_completed();
+    let class_count = model.num_classes;
+    let mut weights = vec![1.0_f32; round_count * class_count];
+    const TREE_NODE_STRIDE: u32 = 1 << 20;
+
+    for (class_k, stumps) in model.class_stumps.iter().enumerate() {
+        let mut start = 0_usize;
+        let mut previous_tree_id = None;
+        while start < stumps.len() {
+            let tree_id = (stumps[start].split.node_id / TREE_NODE_STRIDE) as usize;
+            if tree_id >= round_count {
+                return Err(EngineError::ContractViolation(format!(
+                    "multiclass warm-start class {class_k} tree_id {tree_id} is outside round count {round_count}"
+                )));
+            }
+            if previous_tree_id.is_some_and(|previous| tree_id <= previous) {
+                return Err(EngineError::ContractViolation(format!(
+                    "multiclass warm-start class {class_k} tree ids must be strictly increasing"
+                )));
+            }
+            let tree_weight = stumps[start].tree_weight;
+            let mut end = start + 1;
+            while end < stumps.len()
+                && (stumps[end].split.node_id / TREE_NODE_STRIDE) as usize == tree_id
+            {
+                if (stumps[end].tree_weight - tree_weight).abs() > f32::EPSILON {
+                    return Err(EngineError::ContractViolation(format!(
+                        "multiclass warm-start class {class_k} tree {tree_id} has inconsistent stump weights"
+                    )));
+                }
+                end += 1;
+            }
+            weights[tree_id * class_count + class_k] = tree_weight;
+            previous_tree_id = Some(tree_id);
+            start = end;
+        }
+    }
+
+    Ok(Some(weights))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_with_summary_dense_impl(
     values: &[f32],
@@ -692,76 +745,10 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
                     .as_ref()
                     .filter(|m| !m.ema_stats.is_empty())
                     .map(|m| m.ema_stats.clone());
-                // v0.10.1: capture multiclass DART tree_weights from
-                // the prior fit, if any.  Flat layout: round-major ×
-                // class-k (matches
-                // `MultiClassWarmStartState::initial_dart_tree_weights`).
-                //
-                // PR review follow-up: each class's stumps are stored
-                // FLAT across all rounds (a level-wise tree with
-                // depth>=2 contributes multiple stumps per round), so
-                // `class_stumps[class_k][r]` is the r-th *stump* —
-                // NOT the r-th *tree*. Walk each class's stump list
-                // grouping by `tree_id` (decoded from
-                // `stump.split.node_id`) to recover one weight per
-                // (round, class) tree.  This mirrors the engine-side
-                // warm-start reconstruction in
-                // `fit_multiclass_iterations_impl` so the flat
-                // `r * K + class_k` indexing the engine consumes
-                // stays consistent.
-                let k_for_warm = init_mc_model.num_classes;
-                const TREE_NODE_STRIDE: u32 = 1 << 20;
-                let any_dart_weight = init_mc_model
-                    .class_stumps
-                    .iter()
-                    .flat_map(|s| s.iter())
-                    .any(|s| (s.tree_weight - 1.0).abs() > f32::EPSILON);
-                let initial_dart_tree_weights = if any_dart_weight {
-                    // Per-class list of per-tree weights, in
-                    // round-order (which matches the encounter order
-                    // of distinct `tree_id`s in `class_stumps[k]`).
-                    let mut per_class_tree_weights: Vec<Vec<f32>> = vec![Vec::new(); k_for_warm];
-                    for (tree_weights, stumps) in per_class_tree_weights
-                        .iter_mut()
-                        .take(k_for_warm)
-                        .zip(init_mc_model.class_stumps.iter())
-                    {
-                        let n = stumps.len();
-                        let mut i = 0_usize;
-                        while i < n {
-                            let tid_first = stumps[i].split.node_id / TREE_NODE_STRIDE;
-                            // Take the first stump's weight as the
-                            // per-tree weight (the engine's
-                            // `apply_dart_tree_weights` predictor
-                            // helper uses the same convention).
-                            tree_weights.push(stumps[i].tree_weight);
-                            // Advance past every stump that shares
-                            // this tree_id.
-                            let mut j = i + 1;
-                            while j < n && stumps[j].split.node_id / TREE_NODE_STRIDE == tid_first {
-                                j += 1;
-                            }
-                            i = j;
-                        }
-                    }
-                    // Assemble the flat round-major × class-k array.
-                    // Phantom (zero-tree) rounds get a placeholder
-                    // weight of 1.0 so the array length equals
-                    // `initial_rounds * K` — matches the engine
-                    // contract and is consistent with how the
-                    // single-output DART path treats phantom
-                    // rounds-skipped-during-warmup.
-                    let mut flat: Vec<f32> = Vec::with_capacity(initial_rounds * k_for_warm);
-                    for r in 0..initial_rounds {
-                        for tree_weights in per_class_tree_weights.iter().take(k_for_warm) {
-                            let w = tree_weights.get(r).copied().unwrap_or(1.0);
-                            flat.push(w);
-                        }
-                    }
-                    Some(flat)
-                } else {
-                    None
-                };
+                // Build the round-major × class-k warm-start prefix from
+                // encoded tree ids. Missing leading or internal ids are
+                // phantom logical rounds and retain the neutral 1.0 weight.
+                let initial_dart_tree_weights = multiclass_warm_start_dart_weights(&init_mc_model)?;
                 Some(MultiClassWarmStartState {
                     baseline_predictions: init_mc_model.baseline_predictions,
                     class_stumps: init_mc_model.class_stumps,
@@ -1609,6 +1596,74 @@ pub(crate) fn train_regression_artifact_with_summary(
     });
 
     result.map_err(engine_error_to_pyerr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloygbm_core::{LeafValue, NodeStats, SplitCandidate};
+    use alloygbm_engine::TrainedStump;
+
+    fn weighted_stump(tree_id: u32, local_node_id: u32, tree_weight: f32) -> TrainedStump {
+        let stats = NodeStats {
+            grad_sum: 0.0,
+            hess_sum: 1.0,
+            grad_sq_sum: 0.0,
+            row_count: 1,
+        };
+        TrainedStump {
+            split: SplitCandidate {
+                node_id: tree_id * (1 << 20) + local_node_id,
+                feature_index: 0,
+                threshold_bin: 0,
+                gain: 1.0,
+                default_left: false,
+                is_categorical: false,
+                categorical_bitset: None,
+                left_stats: stats.clone(),
+                right_stats: stats,
+            },
+            left_leaf_value: LeafValue::Scalar(-0.25),
+            right_leaf_value: LeafValue::Scalar(0.25),
+            tree_weight,
+            multi_output_leaf_values: None,
+        }
+    }
+
+    #[test]
+    fn multiclass_warm_start_weights_follow_encoded_tree_ids_with_phantom_gaps() {
+        let model = MultiClassTrainedModel {
+            num_classes: 2,
+            baseline_predictions: vec![0.0, 0.0],
+            feature_count: 1,
+            class_stumps: vec![
+                vec![
+                    weighted_stump(1, 0, 0.25),
+                    weighted_stump(1, 1, 0.25),
+                    weighted_stump(3, 0, 0.5),
+                ],
+                vec![weighted_stump(3, 0, 0.75)],
+            ],
+            categorical_state: None,
+            objective: "multiclass_softmax".to_string(),
+            morph_metadata: None,
+            dro_metadata: None,
+        };
+
+        let weights = multiclass_warm_start_dart_weights(&model)
+            .expect("valid multiclass DART layout")
+            .expect("non-unit weights");
+
+        assert_eq!(
+            weights,
+            vec![
+                1.0, 1.0, // leading phantom round 0
+                0.25, 1.0, // material class 0 only in round 1
+                1.0, 1.0, // internal phantom round 2
+                0.5, 0.75, // both classes material in round 3
+            ]
+        );
+    }
 }
 
 #[pyfunction(signature = (

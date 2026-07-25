@@ -31,6 +31,10 @@ Current benchmark entry points:
   the 200-round `0.20 / 50` stress arm visible; only explicit default-like
   profiles (`drop_rate <= 0.10`) use the 1.50x RMSE quality gate, and timing
   remains descriptive.
+- descriptive high-class-count, low-drop-cap multiclass DART scratch harness:
+  `benchmarks/multiclass_dart_scratch_benchmark.py` with report at
+  [multiclass_dart_scratch_v1.md](multiclass_dart_scratch_v1.md). It has no
+  timing gate.
 - isolated baseline/candidate architecture harness for the six July-review
   projects: `benchmarks/architectural_backlog/` with methodology and baseline
   at [architectural_backlog_v1.md](architectural_backlog_v1.md)

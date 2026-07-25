@@ -518,14 +518,33 @@ impl Predictor {
                 }
             }
 
-            // Multiclass does not yet support DART (see v0.9.0 rejection in
-            // engine fit_multiclass_iterations_impl), so even if a future
-            // artifact carries DartTreeWeights here we keep the per-tree
-            // weight at 1.0 across classes. This is forward-compatible:
-            // when multiclass DART lands we can apply the overlay below.
+            let dart_weights = decode_optional_dart_tree_weights_section(&parsed.sections)
+                .map_err(PredictorError::from)?
+                .map(|payload| payload.weights);
+            let total_stumps = per_class_stumps.iter().map(Vec::len).sum::<usize>();
+            if let Some(weights) = dart_weights.as_ref()
+                && weights.len() != total_stumps
+            {
+                return Err(PredictorError::ContractViolation(format!(
+                    "multiclass DartTreeWeights length {} != flattened stump count {total_stumps}",
+                    weights.len(),
+                )));
+            }
+
             let mut class_trees = Vec::with_capacity(num_classes);
+            let mut class_offset = 0_usize;
             for stumps in &per_class_stumps {
-                let (mut trees, _tree_ids) = build_predictor_trees(stumps)?;
+                let (mut trees, tree_ids) = build_predictor_trees(stumps)?;
+                if let Some(weights) = dart_weights.as_ref() {
+                    let class_end = class_offset + stumps.len();
+                    apply_dart_tree_weights(
+                        &mut trees,
+                        &tree_ids,
+                        stumps,
+                        &weights[class_offset..class_end],
+                    )?;
+                    class_offset = class_end;
+                }
                 finalize_predictor_trees(&mut trees, metadata_feature_count)?;
                 class_trees.push(trees);
             }
@@ -1623,9 +1642,9 @@ mod tests {
     use super::*;
     use alloygbm_backend_cpu::CpuBackend;
     use alloygbm_core::{
-        BinnedMatrix, CATEGORICAL_STATE_FORMAT_V1, CategoricalStatePayloadV1, DatasetMatrix,
-        Device, LeafModelKind, ModelSectionKind, TrainParams, TrainingDataset, TreeGrowth,
-        serialize_model_artifact_v1,
+        BinnedMatrix, BoostingMode, CATEGORICAL_STATE_FORMAT_V1, CategoricalStatePayloadV1,
+        DartNormalize, DartSampleType, DatasetMatrix, Device, LeafModelKind, ModelSectionKind,
+        TrainParams, TrainingDataset, TreeGrowth, serialize_model_artifact_v1,
     };
     use alloygbm_core::{LeafValue, LinearLeaf, NodeStats, SplitCandidate};
     use alloygbm_engine::{SquaredErrorObjective, TrainedModel, TrainedStump, Trainer};
@@ -2348,6 +2367,109 @@ mod tests {
         let predictor = Predictor::from_artifact_bytes(&artifact).unwrap();
         assert!(predictor.is_multiclass());
         assert_eq!(predictor.num_classes(), Some(3));
+    }
+
+    #[test]
+    fn multiclass_dart_artifact_predictor_raw_scores_match_weighted_training_state() {
+        let dataset = multiclass_fixture_dataset();
+        let binned_matrix = multiclass_fixture_binned_matrix();
+        let params = TrainParams {
+            max_depth: 1,
+            min_data_in_leaf: 1,
+            lambda_l2: 0.0,
+            seed: 29,
+            deterministic: true,
+            boosting_mode: BoostingMode::Dart {
+                drop_rate: 0.85,
+                max_drop: 4,
+                normalize_type: DartNormalize::Tree,
+                sample_type: DartSampleType::Uniform,
+            },
+            ..TrainParams::default()
+        };
+        let controls =
+            alloygbm_engine::IterationControls::new(6, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).unwrap();
+        let summary = alloygbm_engine::Trainer::new(params)
+            .unwrap()
+            .fit_multiclass_iterations_with_summary(
+                &dataset,
+                &binned_matrix,
+                &CpuBackend,
+                &alloygbm_engine::MultiClassSoftmaxObjective::new(3).unwrap(),
+                controls,
+            )
+            .unwrap();
+        assert!(
+            summary
+                .model
+                .class_stumps
+                .iter()
+                .flatten()
+                .any(|stump| (stump.tree_weight - 1.0).abs() > f32::EPSILON)
+        );
+
+        let rows = (0..binned_matrix.row_count)
+            .map(|row| {
+                (0..binned_matrix.feature_count)
+                    .map(|feature| {
+                        binned_matrix.row_bin(row * binned_matrix.feature_count + feature) as f32
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let mut training_raw = summary
+            .model
+            .baseline_predictions
+            .iter()
+            .map(|&baseline| vec![baseline; rows.len()])
+            .collect::<Vec<_>>();
+        for (class_k, stumps) in summary.model.class_stumps.iter().enumerate() {
+            for stump in stumps {
+                const TREE_NODE_STRIDE: u32 = 1 << 20;
+                assert_eq!(
+                    stump.split.node_id % TREE_NODE_STRIDE,
+                    0,
+                    "max_depth=1 fixture must produce root-only class trees"
+                );
+                for (row_index, row) in rows.iter().enumerate() {
+                    let bin = row[stump.split.feature_index as usize] as u16;
+                    let leaf = if bin <= stump.split.threshold_bin {
+                        stump.left_leaf_value.as_scalar()
+                    } else {
+                        stump.right_leaf_value.as_scalar()
+                    };
+                    training_raw[class_k][row_index] += stump.tree_weight * leaf;
+                }
+            }
+        }
+
+        let bytes = summary.model.to_artifact_bytes().unwrap();
+        let predictor = Predictor::from_artifact_bytes(&bytes).unwrap();
+        let baselines = predictor.baseline_predictions.as_ref().unwrap();
+        let class_trees = predictor.class_trees.as_ref().unwrap();
+        let mut artifact_raw = baselines
+            .iter()
+            .map(|&baseline| vec![baseline; rows.len()])
+            .collect::<Vec<_>>();
+        for (row_index, row) in rows.iter().enumerate() {
+            for (class_k, trees) in class_trees.iter().enumerate() {
+                for tree in trees {
+                    artifact_raw[class_k][row_index] +=
+                        predict_tree_contribution(tree, row, predictor.use_float_thresholds);
+                }
+            }
+        }
+
+        for (class_k, (actual_rows, expected_rows)) in
+            artifact_raw.iter().zip(&training_raw).enumerate()
+        {
+            for (row, (&actual, &expected)) in actual_rows.iter().zip(expected_rows).enumerate() {
+                assert!(
+                    (actual - expected).abs() <= 1.0e-6,
+                    "class {class_k}, row {row}: artifact raw score {actual} != weighted training state {expected}"
+                );
+            }
+        }
     }
 
     #[test]

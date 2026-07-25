@@ -25,18 +25,21 @@ use alloygbm_core::{DartNormalize, DartSampleType};
 
 use crate::mixed_hash;
 
-/// Per-fit DART state. `tree_weights` parallels `TrainedModel.stumps`
-/// (one entry per stump, in stump order). `dropped_per_round[r]`
-/// records which stump indices were dropped before fitting the
-/// round-`r` tree (purely diagnostic — not currently persisted).
+/// Per-fit DART state. `tree_weights` stores one entry per logical tree
+/// for single-output/joint training and one flat class-tree entry for
+/// multiclass training. `dropped_per_round[r]` records the logical-tree
+/// indices dropped before fitting round `r`: single-output and joint modes
+/// use logical-tree indices, while multiclass uses flat class-tree indices
+/// (purely diagnostic — not currently persisted).
 #[derive(Debug, Clone, Default)]
 pub struct DartState {
-    /// One entry per stump in stump-order; consumed by the trainer
-    /// when stamping `TrainedStump::tree_weight` after the loop.
+    /// One entry per logical tree for single-output/joint training and
+    /// one flat class-tree entry for multiclass training; consumed by
+    /// the trainer when stamping `TrainedStump::tree_weight` after the loop.
     pub tree_weights: Vec<f32>,
     /// Per-round dropout record (round index = outer Vec index).
-    /// Inner Vec is the stump indices that were dropped before
-    /// fitting that round's new tree.
+    /// Inner Vec holds logical-tree indices, or flat class-tree indices for
+    /// multiclass, dropped before fitting that round's new tree.
     pub dropped_per_round: Vec<Vec<usize>>,
 }
 
@@ -226,6 +229,12 @@ mod tests {
         let a = select_dropouts(50, 0.3, 50, DartSampleType::Uniform, &weights, 123, 7);
         let b = select_dropouts(50, 0.3, 50, DartSampleType::Uniform, &weights, 123, 7);
         assert_eq!(a, b, "same (seed, round) must produce same dropouts");
+        assert_eq!(
+            a,
+            vec![
+                1, 2, 5, 7, 12, 20, 23, 24, 25, 34, 36, 37, 39, 40, 45, 48, 49
+            ]
+        );
     }
 
     #[test]
@@ -256,9 +265,7 @@ mod tests {
         // K=2: drop_w = 1/3, new_w = 1/3.
         let mut weights = vec![1.0, 1.0, 1.0];
         apply_normalization(&mut weights, &[0, 1], DartNormalize::Forest, 2);
-        assert!((weights[0] - 1.0 / 3.0).abs() < 1e-6);
-        assert!((weights[1] - 1.0 / 3.0).abs() < 1e-6);
-        assert!((weights[2] - 1.0 / 3.0).abs() < 1e-6);
+        assert_eq!(weights, vec![1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0]);
     }
 
     #[test]
