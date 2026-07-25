@@ -347,3 +347,54 @@ def test_multiclass_dart_with_validation_early_stopping():
     restored = pickle.loads(pickle.dumps(m))
     p2 = restored.predict_proba(X)
     np.testing.assert_allclose(p1, p2, rtol=1e-5, atol=1e-6)
+
+
+def test_multiclass_dart_aggregate_level_wise_validation_round_trip():
+    import pickle
+
+    X, y = _toy_multiclass(n_rows=360, n_features=5, n_classes=3, seed=71)
+    model = GBMClassifier(
+        n_estimators=8,
+        boosting_mode="dart",
+        dart_drop_rate=0.65,
+        dart_max_drop=4,
+        max_depth=3,
+        min_data_in_leaf=5,
+        seed=29,
+    )
+    model.fit(X, y, eval_set=(X[::3], y[::3]))
+    probabilities = model.predict_proba(X)
+    assert np.isfinite(probabilities).all()
+    assert np.allclose(probabilities.sum(axis=1), 1.0, atol=1e-5)
+    np.testing.assert_allclose(
+        probabilities,
+        pickle.loads(pickle.dumps(model)).predict_proba(X),
+        rtol=1e-5,
+        atol=1e-6,
+    )
+
+
+def test_multiclass_dart_aggregate_leaf_wise_validation_round_trip():
+    import pickle
+
+    X, y = _toy_multiclass(n_rows=360, n_features=5, n_classes=3, seed=73)
+    model = GBMClassifier(
+        n_estimators=8,
+        boosting_mode="dart",
+        dart_drop_rate=0.65,
+        dart_max_drop=4,
+        tree_growth="leaf",
+        max_leaves=6,
+        min_data_in_leaf=5,
+        seed=29,
+    )
+    model.fit(X, y, eval_set=(X[::3], y[::3]))
+    probabilities = model.predict_proba(X)
+    assert np.isfinite(probabilities).all()
+    assert np.allclose(probabilities.sum(axis=1), 1.0, atol=1e-5)
+    np.testing.assert_allclose(
+        probabilities,
+        pickle.loads(pickle.dumps(model)).predict_proba(X),
+        rtol=1e-5,
+        atol=1e-6,
+    )

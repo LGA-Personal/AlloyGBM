@@ -162,6 +162,93 @@ pub(super) fn walk_tree_into_predictions(
     sign: f32,
     scale: f32,
 ) {
+    walk_tree_into_predictions_internal(
+        tree_stumps,
+        binned_matrix,
+        feature_count,
+        n_rows,
+        n_outputs,
+        predictions,
+        None,
+        sign,
+        scale,
+    );
+}
+
+/// DART variant of [`walk_tree_into_predictions`]. Routes each row once while
+/// subtracting or adding the weighted tree contribution to `predictions` and
+/// collecting the positive weighted contribution in `accumulator`.
+///
+/// All output-major buffers must exactly match `n_outputs * n_rows`. The
+/// validation happens before routing so malformed buffers cannot receive a
+/// partial update.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn walk_tree_into_predictions_and_accumulator(
+    tree_stumps: &[TrainedStump],
+    binned_matrix: &BinnedMatrix,
+    feature_count: usize,
+    n_rows: usize,
+    n_outputs: usize,
+    predictions: &mut [Vec<f32>],
+    accumulator: &mut [Vec<f32>],
+    sign: f32,
+    scale: f32,
+) -> Result<(), String> {
+    if predictions.len() != n_outputs {
+        return Err(format!(
+            "prediction output count {} != n_outputs {n_outputs}",
+            predictions.len()
+        ));
+    }
+    if accumulator.len() != n_outputs {
+        return Err(format!(
+            "accumulator output count {} != n_outputs {n_outputs}",
+            accumulator.len()
+        ));
+    }
+    for (output, prediction) in predictions.iter().enumerate() {
+        if prediction.len() != n_rows {
+            return Err(format!(
+                "prediction output {output} row count {} != n_rows {n_rows}",
+                prediction.len()
+            ));
+        }
+    }
+    for (output, contribution) in accumulator.iter().enumerate() {
+        if contribution.len() != n_rows {
+            return Err(format!(
+                "accumulator output {output} row count {} != n_rows {n_rows}",
+                contribution.len()
+            ));
+        }
+    }
+
+    walk_tree_into_predictions_internal(
+        tree_stumps,
+        binned_matrix,
+        feature_count,
+        n_rows,
+        n_outputs,
+        predictions,
+        Some(accumulator),
+        sign,
+        scale,
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn walk_tree_into_predictions_internal(
+    tree_stumps: &[TrainedStump],
+    binned_matrix: &BinnedMatrix,
+    feature_count: usize,
+    n_rows: usize,
+    n_outputs: usize,
+    predictions: &mut [Vec<f32>],
+    mut accumulator: Option<&mut [Vec<f32>]>,
+    sign: f32,
+    scale: f32,
+) {
     let stumps_by_local: std::collections::HashMap<u32, &TrainedStump> = tree_stumps
         .iter()
         .map(|s| (s.split.node_id % TREE_NODE_STRIDE, s))
@@ -204,6 +291,9 @@ pub(super) fn walk_tree_into_predictions(
             let delta = if last_went_left { left_k } else { right_k };
             for (k, pred_vec) in predictions.iter_mut().enumerate().take(n_outputs) {
                 pred_vec[row] += sign * scale * delta[k];
+                if let Some(contribution) = accumulator.as_deref_mut() {
+                    contribution[k][row] += scale * delta[k];
+                }
             }
         }
     }

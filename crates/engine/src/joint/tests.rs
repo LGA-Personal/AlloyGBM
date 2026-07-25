@@ -1,7 +1,186 @@
 use super::fit::compute_joint_gradients;
-use super::helpers::effective_neutralization_config;
+use super::helpers::{
+    effective_neutralization_config, walk_tree_into_predictions,
+    walk_tree_into_predictions_and_accumulator,
+};
 use super::*;
-use alloygbm_core::{BinnedMatrix, GradientPair, TrainParams, TreeGrowth};
+use crate::TrainedStump;
+use alloygbm_core::{
+    BinnedMatrix, GradientPair, LeafValue, NodeStats, SplitCandidate, TrainParams, TreeGrowth,
+};
+
+fn assert_joint_close(actual: &[Vec<f32>], expected: &[Vec<f32>], tolerance: f32) {
+    assert_eq!(actual.len(), expected.len(), "output counts differ");
+    for (output, (actual_rows, expected_rows)) in actual.iter().zip(expected).enumerate() {
+        assert_eq!(
+            actual_rows.len(),
+            expected_rows.len(),
+            "row counts differ for output {output}"
+        );
+        for (row, (&actual_value, &expected_value)) in
+            actual_rows.iter().zip(expected_rows).enumerate()
+        {
+            assert!(
+                (actual_value - expected_value).abs() <= tolerance,
+                "output {output}, row {row}: expected {expected_value}, got {actual_value}"
+            );
+        }
+    }
+}
+
+fn joint_dart_aggregate_tree() -> Vec<TrainedStump> {
+    let stats = NodeStats {
+        grad_sum: 0.0,
+        hess_sum: 1.0,
+        grad_sq_sum: 0.0,
+        row_count: 4,
+    };
+    vec![
+        TrainedStump {
+            split: SplitCandidate {
+                node_id: 0,
+                feature_index: 0,
+                threshold_bin: 1,
+                gain: 1.0,
+                default_left: false,
+                is_categorical: false,
+                categorical_bitset: None,
+                left_stats: stats.clone(),
+                right_stats: stats.clone(),
+            },
+            left_leaf_value: LeafValue::Scalar(0.0),
+            right_leaf_value: LeafValue::Scalar(0.0),
+            tree_weight: 1.0,
+            multi_output_leaf_values: Some((vec![1.0, 2.0], vec![-1.0, -2.0])),
+        },
+        TrainedStump {
+            split: SplitCandidate {
+                node_id: 1,
+                feature_index: 0,
+                threshold_bin: 0,
+                gain: 1.0,
+                default_left: false,
+                is_categorical: false,
+                categorical_bitset: None,
+                left_stats: stats.clone(),
+                right_stats: stats,
+            },
+            left_leaf_value: LeafValue::Scalar(0.0),
+            right_leaf_value: LeafValue::Scalar(0.0),
+            tree_weight: 1.0,
+            multi_output_leaf_values: Some((vec![3.0, 4.0], vec![5.0, 6.0])),
+        },
+    ]
+}
+
+#[test]
+fn joint_dart_aggregate_walker_matches_repeated_walks() {
+    let binned = BinnedMatrix::new(4, 1, 3, vec![0, 1, 2, 3]).expect("binned");
+    let tree = joint_dart_aggregate_tree();
+    let old_weight = 0.25;
+    let initial = vec![vec![10.0; 4], vec![-10.0; 4]];
+
+    let mut optimized_predictions = initial.clone();
+    let mut aggregate = vec![vec![0.0; 4], vec![0.0; 4]];
+    walk_tree_into_predictions_and_accumulator(
+        &tree,
+        &binned,
+        1,
+        4,
+        2,
+        &mut optimized_predictions,
+        &mut aggregate,
+        -1.0,
+        old_weight,
+    )
+    .expect("aggregate walk");
+
+    let mut reference_predictions = initial;
+    walk_tree_into_predictions(
+        &tree,
+        &binned,
+        1,
+        4,
+        2,
+        &mut reference_predictions,
+        -1.0,
+        old_weight,
+    );
+    let mut reference_contribution = vec![vec![0.0; 4], vec![0.0; 4]];
+    walk_tree_into_predictions(
+        &tree,
+        &binned,
+        1,
+        4,
+        2,
+        &mut reference_contribution,
+        1.0,
+        old_weight,
+    );
+
+    assert_joint_close(&optimized_predictions, &reference_predictions, 1.0e-6);
+    assert_joint_close(&aggregate, &reference_contribution, 1.0e-6);
+}
+
+#[test]
+fn joint_dart_aggregate_walker_rejects_wrong_output_count_without_updates() {
+    let binned = BinnedMatrix::new(4, 1, 3, vec![0, 1, 2, 3]).expect("binned");
+    let tree = joint_dart_aggregate_tree();
+    let mut predictions = vec![vec![10.0; 4]];
+    let mut aggregate = vec![vec![0.0; 4], vec![0.0; 4]];
+    let prediction_before = predictions.clone();
+    let aggregate_before = aggregate.clone();
+
+    let error = walk_tree_into_predictions_and_accumulator(
+        &tree,
+        &binned,
+        1,
+        4,
+        2,
+        &mut predictions,
+        &mut aggregate,
+        -1.0,
+        0.25,
+    )
+    .expect_err("wrong output count must error");
+
+    assert!(
+        error.contains("prediction output count"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(predictions, prediction_before);
+    assert_eq!(aggregate, aggregate_before);
+}
+
+#[test]
+fn joint_dart_aggregate_walker_rejects_wrong_row_count_without_updates() {
+    let binned = BinnedMatrix::new(4, 1, 3, vec![0, 1, 2, 3]).expect("binned");
+    let tree = joint_dart_aggregate_tree();
+    let mut predictions = vec![vec![10.0; 4], vec![-10.0; 4]];
+    let mut aggregate = vec![vec![0.0; 4], vec![0.0; 3]];
+    let prediction_before = predictions.clone();
+    let aggregate_before = aggregate.clone();
+
+    let error = walk_tree_into_predictions_and_accumulator(
+        &tree,
+        &binned,
+        1,
+        4,
+        2,
+        &mut predictions,
+        &mut aggregate,
+        -1.0,
+        0.25,
+    )
+    .expect_err("wrong row count must error");
+
+    assert!(
+        error.contains("accumulator output 1 row count"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(predictions, prediction_before);
+    assert_eq!(aggregate, aggregate_before);
+}
 
 #[test]
 fn joint_pre_target_residualizes_targets() {

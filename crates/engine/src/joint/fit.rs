@@ -11,13 +11,13 @@ use alloygbm_core::{
 };
 use rayon::prelude::*;
 
-use crate::{TrainedModel, TrainedStump, encode_tree_node_id};
+use crate::{TrainedModel, TrainedStump, apply_scaled_prediction_buffer, encode_tree_node_id};
 
 use super::TREE_NODE_STRIDE;
 use super::build_round::{build_joint_round_inner, build_joint_round_leafwise};
 use super::helpers::{
     effective_dro_config, effective_neutralization_config, select_joint_row_indices_for_round,
-    walk_tree_into_predictions,
+    walk_tree_into_predictions, walk_tree_into_predictions_and_accumulator,
 };
 use super::types::{JointMorphContext, JointObjective, JointTrainingSummary, JointWarmStartState};
 
@@ -309,6 +309,12 @@ fn fit_joint_inner(
     let mut dart_state = crate::DartState::default();
     let mut dart_round_start_offsets: Vec<usize> = Vec::new();
     let mut dart_round_counts: Vec<usize> = Vec::new();
+    let mut dart_contribution: Option<Vec<Vec<f32>>> = dart_params.is_some().then(|| {
+        predictions
+            .iter()
+            .map(|output_predictions| vec![0.0; output_predictions.len()])
+            .collect()
+    });
 
     // v0.10.3: warm-start — replay prior-stump contributions onto
     // `predictions` so the new round's gradients see the correct
@@ -453,6 +459,12 @@ fn fit_joint_inner(
         // single-output DART flow at crates/engine/src/lib.rs:4895).
         let dropped_tree_ids: Vec<usize> =
             if let Some((drop_rate, max_drop, _normalize_type, sample_type)) = dart_params {
+                let contribution = dart_contribution.as_mut().ok_or_else(|| {
+                    "joint DART contribution buffer was not initialized".to_string()
+                })?;
+                for output_contribution in contribution.iter_mut() {
+                    output_contribution.fill(0.0);
+                }
                 if dart_state.tree_weights.is_empty() {
                     Vec::new()
                 } else {
@@ -470,16 +482,18 @@ fn fit_joint_inner(
                         let start = dart_round_start_offsets[tree_id];
                         let count = dart_round_counts[tree_id];
                         if count > 0 {
-                            walk_tree_into_predictions(
+                            walk_tree_into_predictions_and_accumulator(
                                 &all_stumps[start..start + count],
                                 binned_matrix,
                                 feature_count,
                                 n_rows,
                                 n_outputs,
                                 &mut predictions,
+                                contribution,
                                 -1.0,
                                 w_old,
-                            );
+                            )
+                            .map_err(|err| format!("joint DART aggregate subtraction: {err}"))?;
                         }
                     }
                     drops
@@ -743,25 +757,20 @@ fn fit_joint_inner(
                     delta_scale,
                 );
             }
-            // 2. Re-add each dropped tree at its post-normalize weight
-            //    `w_new = w_old * drop_factor`.
-            for &tree_id in &dropped_tree_ids {
-                let w_old = dart_state.tree_weights[tree_id];
-                let w_new = w_old * drop_factor;
-                let start = dart_round_start_offsets[tree_id];
-                let count = dart_round_counts[tree_id];
-                if count > 0 {
-                    walk_tree_into_predictions(
-                        &all_stumps[start..start + count],
-                        binned_matrix,
-                        feature_count,
-                        n_rows,
-                        n_outputs,
-                        &mut predictions,
-                        1.0,
-                        w_new,
-                    );
-                }
+            // 2. Re-add all dropped trees at their shared post-normalize
+            // factor. The contribution buffer was built in dropout order.
+            let contribution = dart_contribution
+                .as_ref()
+                .ok_or_else(|| "joint DART contribution buffer was not initialized".to_string())?;
+            for (output_predictions, output_contribution) in
+                predictions.iter_mut().zip(contribution)
+            {
+                apply_scaled_prediction_buffer(
+                    output_predictions,
+                    output_contribution,
+                    drop_factor,
+                )
+                .map_err(|err| format!("joint DART aggregate finalization: {err}"))?;
             }
             // 3. Push placeholder weight for the new tree, then run
             //    `apply_normalization` which rescales dropped trees in
