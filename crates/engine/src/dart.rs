@@ -27,9 +27,10 @@ use crate::mixed_hash;
 
 /// Per-fit DART state. `tree_weights` stores one entry per logical tree
 /// for single-output/joint training and one flat class-tree entry for
-/// multiclass training. `dropped_per_round[r]`
-/// records which stump indices were dropped before fitting the
-/// round-`r` tree (purely diagnostic — not currently persisted).
+/// multiclass training. `dropped_per_round[r]` records the logical-tree
+/// indices dropped before fitting round `r`: single-output and joint modes
+/// use logical-tree indices, while multiclass uses flat class-tree indices
+/// (purely diagnostic — not currently persisted).
 #[derive(Debug, Clone, Default)]
 pub struct DartState {
     /// One entry per logical tree for single-output/joint training and
@@ -37,8 +38,8 @@ pub struct DartState {
     /// the trainer when stamping `TrainedStump::tree_weight` after the loop.
     pub tree_weights: Vec<f32>,
     /// Per-round dropout record (round index = outer Vec index).
-    /// Inner Vec is the stump indices that were dropped before
-    /// fitting that round's new tree.
+    /// Inner Vec holds logical-tree indices, or flat class-tree indices for
+    /// multiclass, dropped before fitting that round's new tree.
     pub dropped_per_round: Vec<Vec<usize>>,
 }
 

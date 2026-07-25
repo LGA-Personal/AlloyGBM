@@ -3253,7 +3253,7 @@ fn dart_early_stopping_truncation_recomputes_tree_weights() {
 }
 
 #[test]
-fn dart_aggregate_forest_validation_preserves_predictor_parity() {
+fn dart_aggregate_forest_validation_matches_repeated_walk_baseline() {
     // Captured from the pre-integration repeated-walk implementation at
     // 5e32458. The aggregate path only changes f32 association order, so
     // keep this tight enough to catch an omitted or wrongly-scaled re-add.
