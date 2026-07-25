@@ -3399,6 +3399,15 @@ fn dart_aggregate_forest_validation_matches_repeated_walk_baseline() {
 }
 
 #[test]
+fn single_output_dart_scratch_is_allocated_only_when_dart_is_enabled() {
+    assert_eq!(allocate_dart_contribution_buffer(false, 4), None);
+    assert_eq!(
+        allocate_dart_contribution_buffer(true, 4),
+        Some(vec![0.0; 4])
+    );
+}
+
+#[test]
 fn artifact_compatibility_report_classifies_dual_section_payload() {
     let model = sample_trained_model();
     let bytes = model.to_artifact_bytes().expect("artifact serializes");

@@ -36,6 +36,13 @@ pub struct Trainer {
 
 type MulticlassDartRoundBookkeeping = (Vec<Vec<usize>>, Vec<Vec<usize>>);
 
+pub(crate) fn allocate_dart_contribution_buffer(
+    dart_enabled: bool,
+    row_count: usize,
+) -> Option<Vec<f32>> {
+    dart_enabled.then(|| vec![0.0; row_count])
+}
+
 /// Rebuilds the per-class DART slice map from persisted multiclass stumps.
 ///
 /// Warm-start state can contain skipped rounds, so the map is indexed by the
@@ -2198,10 +2205,11 @@ impl Trainer {
         } else {
             None
         };
-        let mut dart_train_contribution = vec![0.0_f32; predictions.len()];
-        let mut dart_validation_contribution = validation_predictions
-            .as_ref()
-            .map(|values| vec![0.0_f32; values.len()]);
+        let mut dart_train_contribution =
+            allocate_dart_contribution_buffer(dart_params.is_some(), predictions.len());
+        let mut dart_validation_contribution = validation_predictions.as_ref().and_then(|values| {
+            allocate_dart_contribution_buffer(dart_params.is_some(), values.len())
+        });
         let mut stumps = initial_stumps;
         let initial_stump_count = stumps.len();
         // `stumps_per_completed_round` stays NEW-ROUND-ONLY (its original
@@ -2391,6 +2399,11 @@ impl Trainer {
             let mut dart_validation_backup: Option<Vec<f32>> = None;
             let dropped_tree_ids: Vec<usize> =
                 if let Some((drop_rate, max_drop, _normalize_type, sample_type)) = dart_params {
+                    let train_contribution = dart_train_contribution.as_mut().ok_or_else(|| {
+                        EngineError::ContractViolation(
+                            "DART contribution buffer was not initialized".to_string(),
+                        )
+                    })?;
                     let drops = select_dropouts(
                         dart_state.tree_weights.len(),
                         drop_rate,
@@ -2400,7 +2413,7 @@ impl Trainer {
                         sampling_seed_base,
                         effective_round_index,
                     );
-                    dart_train_contribution.fill(0.0);
+                    train_contribution.fill(0.0);
                     if let Some(contribution) = dart_validation_contribution.as_mut() {
                         contribution.fill(0.0);
                     }
@@ -2415,7 +2428,7 @@ impl Trainer {
                         let stump_slice = &stumps[start..start + count];
                         apply_weighted_round_to_predictions_and_accumulator(
                             &mut predictions,
-                            &mut dart_train_contribution,
+                            train_contribution,
                             binned_matrix,
                             stump_slice,
                             raw_features_opt,
@@ -2667,9 +2680,14 @@ impl Trainer {
                         let w_new = w_old * drop_factor;
                         new_dropped_weights.push(w_new);
                     }
+                    let contribution = dart_train_contribution.as_ref().ok_or_else(|| {
+                        EngineError::ContractViolation(
+                            "DART contribution buffer was not initialized".to_string(),
+                        )
+                    })?;
                     apply_scaled_prediction_buffer(
                         &mut candidate_predictions,
-                        &dart_train_contribution,
+                        contribution,
                         drop_factor,
                     )?;
                     Some((new_w, drop_factor, new_dropped_weights))
