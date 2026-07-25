@@ -4513,6 +4513,70 @@ fn multiclass_dart_bookkeeping_keeps_internal_and_warmup_phantom_slots_dense() {
 }
 
 #[test]
+fn multiclass_dart_material_classes_preserve_flat_order_and_skip_phantoms() {
+    let round_counts = vec![
+        vec![0, 1], // class 0: round 0 phantom, round 1 material
+        vec![1, 0], // class 1: round 0 material, round 1 phantom
+        vec![1, 1], // class 2: material in both rounds
+        vec![0, 1], // class 3: round 0 phantom, round 1 material
+    ];
+    let selected_flat_tree_ids = vec![0, 1, 2, 4, 6, 7];
+
+    let material_classes =
+        multiclass_dart_material_classes(&selected_flat_tree_ids, 4, &round_counts)
+            .expect("valid flat DART selection");
+
+    assert_eq!(material_classes, vec![1, 2, 0, 3]);
+    assert_eq!(
+        selected_flat_tree_ids.len(),
+        6,
+        "phantom selections remain part of the normalization count"
+    );
+}
+
+#[test]
+fn multiclass_dart_contribution_mutation_is_limited_to_material_classes() {
+    let material_classes = vec![2, 0];
+    let mut contributions = vec![
+        vec![11.0, 12.0],
+        vec![21.0, 22.0],
+        vec![31.0, 32.0],
+        vec![41.0, 42.0],
+    ];
+
+    clear_multiclass_dart_contributions(&mut contributions, &material_classes)
+        .expect("material contribution slices clear");
+    assert_eq!(contributions[0], vec![0.0, 0.0]);
+    assert_eq!(contributions[1], vec![21.0, 22.0]);
+    assert_eq!(contributions[2], vec![0.0, 0.0]);
+    assert_eq!(contributions[3], vec![41.0, 42.0]);
+
+    contributions[0].copy_from_slice(&[1.0, 2.0]);
+    contributions[2].copy_from_slice(&[3.0, 4.0]);
+    let mut predictions = vec![
+        vec![100.0, 100.0],
+        vec![200.0, 200.0],
+        vec![300.0, 300.0],
+        vec![400.0, 400.0],
+    ];
+    apply_multiclass_dart_contributions(&mut predictions, &contributions, &material_classes, 0.5)
+        .expect("material contribution slices finalize");
+
+    assert_eq!(predictions[0], vec![100.5, 101.0]);
+    assert_eq!(
+        predictions[1],
+        vec![200.0, 200.0],
+        "stale untouched scratch must not be finalized"
+    );
+    assert_eq!(predictions[2], vec![301.5, 302.0]);
+    assert_eq!(
+        predictions[3],
+        vec![400.0, 400.0],
+        "stale untouched scratch must not be finalized"
+    );
+}
+
+#[test]
 fn multiclass_dart_replay_keeps_the_non_unit_warm_start_weight_prefix() {
     let initial_weights = vec![0.5_f32, 0.75, 0.4, 0.9];
     let kept_history = vec![Vec::new(), Vec::new(), vec![1, 2]];

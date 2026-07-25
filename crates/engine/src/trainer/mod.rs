@@ -107,6 +107,82 @@ pub(crate) fn append_multiclass_dart_phantom_round(
     dart_state.dropped_per_round.push(Vec::new());
 }
 
+pub(crate) fn multiclass_dart_material_classes(
+    dropped_tree_indices: &[usize],
+    class_count: usize,
+    round_counts: &[Vec<usize>],
+) -> EngineResult<Vec<usize>> {
+    if class_count == 0 || round_counts.len() != class_count {
+        return Err(EngineError::ContractViolation(
+            "multiclass DART material-class lookup received inconsistent class counts".to_string(),
+        ));
+    }
+
+    let mut material_classes = Vec::with_capacity(dropped_tree_indices.len().min(class_count));
+    for &flat_tree_id in dropped_tree_indices {
+        let prior_round = flat_tree_id / class_count;
+        let class_k = flat_tree_id % class_count;
+        let stump_count = round_counts[class_k].get(prior_round).copied().unwrap_or(0);
+        if stump_count > 0 && !material_classes.contains(&class_k) {
+            material_classes.push(class_k);
+        }
+    }
+    Ok(material_classes)
+}
+
+pub(crate) fn clear_multiclass_dart_contributions(
+    contributions: &mut [Vec<f32>],
+    material_classes: &[usize],
+) -> EngineResult<()> {
+    if let Some(&class_k) = material_classes
+        .iter()
+        .find(|&&class_k| class_k >= contributions.len())
+    {
+        return Err(EngineError::ContractViolation(format!(
+            "multiclass DART material class {class_k} is outside contribution count {}",
+            contributions.len(),
+        )));
+    }
+    for &class_k in material_classes {
+        contributions[class_k].fill(0.0);
+    }
+    Ok(())
+}
+
+pub(crate) fn apply_multiclass_dart_contributions(
+    predictions: &mut [Vec<f32>],
+    contributions: &[Vec<f32>],
+    material_classes: &[usize],
+    factor: f32,
+) -> EngineResult<()> {
+    if predictions.len() != contributions.len() {
+        return Err(EngineError::ContractViolation(format!(
+            "multiclass DART prediction count {} does not match contribution count {}",
+            predictions.len(),
+            contributions.len(),
+        )));
+    }
+    for &class_k in material_classes {
+        let Some(prediction) = predictions.get(class_k) else {
+            return Err(EngineError::ContractViolation(format!(
+                "multiclass DART material class {class_k} is outside prediction count {}",
+                predictions.len(),
+            )));
+        };
+        if prediction.len() != contributions[class_k].len() {
+            return Err(EngineError::ContractViolation(format!(
+                "multiclass DART class {class_k} prediction length {} does not match contribution length {}",
+                prediction.len(),
+                contributions[class_k].len(),
+            )));
+        }
+    }
+    for &class_k in material_classes {
+        apply_scaled_prediction_buffer(&mut predictions[class_k], &contributions[class_k], factor)?;
+    }
+    Ok(())
+}
+
 /// Records a skipped multiclass warmup iteration in the same logical-round
 /// coordinate space as accepted rounds. Early-stop truncation indexes these
 /// vectors by `rounds_completed`, so a phantom slot must be present everywhere
@@ -1129,16 +1205,13 @@ impl Trainer {
             // ensemble — matching the single-output DART semantics
             // (PR review C1).
             let mut dart_predictions_backup: Option<Vec<Vec<f32>>> = None;
-            let dropped_tree_indices: Vec<usize> =
+            let (dropped_tree_indices, material_dropped_classes): (Vec<usize>, Vec<usize>) =
                 if let Some((drop_rate, max_drop, _normalize_type, sample_type)) = dart_params {
                     let dart_contribution = dart_train_contribution.as_mut().ok_or_else(|| {
                         EngineError::ContractViolation(
                             "multiclass DART contribution buffer was not initialized".to_string(),
                         )
                     })?;
-                    for contribution in dart_contribution.iter_mut() {
-                        contribution.fill(0.0);
-                    }
                     let drops = select_dropouts(
                         dart_state.tree_weights.len(),
                         drop_rate,
@@ -1148,6 +1221,9 @@ impl Trainer {
                         sampling_seed_base,
                         effective_round,
                     );
+                    let material_classes =
+                        multiclass_dart_material_classes(&drops, k, &dart_round_counts)?;
+                    clear_multiclass_dart_contributions(dart_contribution, &material_classes)?;
                     if !drops.is_empty() {
                         dart_predictions_backup = Some(class_predictions.clone());
                     }
@@ -1178,9 +1254,9 @@ impl Trainer {
                             w_old,
                         )?;
                     }
-                    drops
+                    (drops, material_classes)
                 } else {
-                    Vec::new()
+                    (Vec::new(), Vec::new())
                 };
 
             // v0.10.1: pre-compute per-class gradient buffers BEFORE sampling
@@ -1386,18 +1462,18 @@ impl Trainer {
                             "multiclass DART contribution buffer was not initialized".to_string(),
                         )
                     })?;
-                    for class_k in 0..k {
-                        apply_scaled_prediction_buffer(
-                            &mut class_predictions[class_k],
-                            &dart_contribution[class_k],
-                            drop_factor,
-                        )?;
-                        apply_scaled_prediction_buffer(
-                            &mut class_candidate_predictions[class_k],
-                            &dart_contribution[class_k],
-                            drop_factor,
-                        )?;
-                    }
+                    apply_multiclass_dart_contributions(
+                        &mut class_predictions,
+                        dart_contribution,
+                        &material_dropped_classes,
+                        drop_factor,
+                    )?;
+                    apply_multiclass_dart_contributions(
+                        &mut class_candidate_predictions,
+                        dart_contribution,
+                        &material_dropped_classes,
+                        drop_factor,
+                    )?;
                     Some((new_w, drop_factor, new_dropped_weights))
                 } else {
                     None
@@ -1566,9 +1642,10 @@ impl Trainer {
                                     .to_string(),
                             )
                         })?;
-                    for contribution in dart_contribution.iter_mut() {
-                        contribution.fill(0.0);
-                    }
+                    clear_multiclass_dart_contributions(
+                        dart_contribution,
+                        &material_dropped_classes,
+                    )?;
                     // 1. Subtract each dropped class-tree at w_old.
                     for &flat_idx in &dropped_tree_indices {
                         let prior_round = flat_idx / k;
@@ -1609,13 +1686,12 @@ impl Trainer {
                     }
                     // 3. Re-add all dropped class-trees at their shared
                     // post-normalization factor.
-                    for class_k in 0..k {
-                        apply_scaled_prediction_buffer(
-                            &mut val_preds[class_k],
-                            &dart_contribution[class_k],
-                            *drop_factor,
-                        )?;
-                    }
+                    apply_multiclass_dart_contributions(
+                        val_preds,
+                        dart_contribution,
+                        &material_dropped_classes,
+                        *drop_factor,
+                    )?;
                 } else {
                     // Non-DART (or DART with no dropouts AND new trees
                     // not yet rescaled): plain unit-weight tree walk.
