@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -100,6 +101,111 @@ class ReviewGuardrailTests(unittest.TestCase):
             self.assertTrue(np.isfinite(row.rmse))
             self.assertGreater(row.fit_seconds, 0.0)
             self.assertEqual(row.completed_rounds, row.requested_rounds)
+
+    def test_quality_gates_reject_quality_and_completion_regressions(self) -> None:
+        quantile_rows = [
+            BENCHMARK.QuantileSplitRow(7, 0.5, "proxy", 0.0, 1.0, 1.0, 1.0, 8, 8),
+            BENCHMARK.QuantileSplitRow(7, 0.5, "smooth_0.05", 0.0, 1.0, 1.11, 1.0, 8, 8),
+            BENCHMARK.QuantileSplitRow(7, 0.5, "smooth_0.10", 0.0, 1.0, 1.0, 1.0, 8, 8),
+        ]
+        goss_rows = [
+            BENCHMARK.BoostingRow("goss", 7, "standard_full", 1.0, 2.0, 1.0, 8, 8),
+            BENCHMARK.BoostingRow("goss", 7, "uniform_0.30", 1.0, 2.0, 1.0, 8, 8, 0.3),
+            BENCHMARK.BoostingRow(
+                "goss", 7, "goss_0.20_0.10", 1.36, 2.0, 1.0, 8, 8, 0.3, "uniform_0.30"
+            ),
+        ]
+        dart_rows = [
+            BENCHMARK.BoostingRow("dart", 7, "standard_8", 1.0, 2.0, 1.0, 8, 8),
+            BENCHMARK.BoostingRow(
+                "dart", 7, "dart_8_0.10_5", 1.0, 2.0, 100.0, 7, 8, None, "standard_8", 20.0
+            ),
+        ]
+
+        gates = BENCHMARK.evaluate_gates(quantile_rows, goss_rows, dart_rows)
+        self.assertTrue(any(not gate.passed and gate.name == "quantile_quality" for gate in gates))
+        self.assertTrue(any(not gate.passed and gate.name == "goss_quality" for gate in gates))
+        self.assertTrue(any(not gate.passed and gate.name == "dart_completion" for gate in gates))
+
+        timing_only_rows = [
+            BENCHMARK.BoostingRow("dart", 7, "standard_8", 1.0, 2.0, 0.01, 8, 8),
+            BENCHMARK.BoostingRow(
+                "dart", 7, "dart_8_0.10_5", 1.1, 2.0, 99.0, 8, 8, None, "standard_8", 20.0
+            ),
+        ]
+        timing_gates = BENCHMARK.evaluate_gates(quantile_rows[:1] * 3, goss_rows, timing_only_rows)
+        self.assertTrue(all(gate.passed for gate in timing_gates if gate.name.startswith("dart")))
+
+    def test_quantile_quality_gate_uses_median_arm_losses_across_seeds(self) -> None:
+        quantile_rows = [
+            BENCHMARK.QuantileSplitRow(seed, 0.5, arm, 0.0, 1.0, loss, 1.0, 8, 8)
+            for seed, loss in ((7, 1.11), (13, 0.89))
+            for arm in ("proxy", "smooth_0.05", "smooth_0.10")
+        ]
+        goss_rows = [
+            BENCHMARK.BoostingRow("goss", 7, "standard_full", 1.0, 2.0, 1.0, 8, 8),
+            BENCHMARK.BoostingRow("goss", 7, "uniform_0.30", 1.0, 2.0, 1.0, 8, 8, 0.3),
+            BENCHMARK.BoostingRow(
+                "goss", 7, "goss_0.20_0.10", 1.0, 2.0, 1.0, 8, 8, 0.3, "uniform_0.30"
+            ),
+        ]
+        dart_rows = [
+            BENCHMARK.BoostingRow("dart", 7, "standard_8", 1.0, 2.0, 1.0, 8, 8),
+            BENCHMARK.BoostingRow(
+                "dart", 7, "dart_8_0.10_5", 1.0, 2.0, 1.0, 8, 8, None, "standard_8", 20.0
+            ),
+        ]
+
+        gates = BENCHMARK.evaluate_gates(quantile_rows, goss_rows, dart_rows)
+        self.assertTrue(next(gate for gate in gates if gate.name == "quantile_quality").passed)
+
+    def test_report_and_cli_render_requested_sections(self) -> None:
+        quantile_rows = [
+            BENCHMARK.QuantileSplitRow(7, 0.5, "proxy", 0.0, 1.0, 1.0, 1.2, 8, 8),
+            BENCHMARK.QuantileSplitRow(7, 0.5, "smooth_0.05", 0.0, 1.0, 0.9, 1.2, 8, 8),
+            BENCHMARK.QuantileSplitRow(7, 0.5, "smooth_0.10", 0.0, 1.0, 0.95, 1.2, 8, 8),
+        ]
+        goss_rows = [
+            BENCHMARK.BoostingRow("goss", 7, "standard_full", 1.0, 2.0, 1.0, 8, 8),
+            BENCHMARK.BoostingRow("goss", 7, "uniform_0.30", 1.0, 2.0, 0.9, 8, 8, 0.3),
+            BENCHMARK.BoostingRow(
+                "goss", 7, "goss_0.20_0.10", 1.1, 2.0, 1.1, 8, 8, 0.3, "uniform_0.30"
+            ),
+        ]
+        dart_rows = [
+            BENCHMARK.BoostingRow("dart", 7, "standard_8", 1.0, 2.0, 1.0, 8, 8),
+            BENCHMARK.BoostingRow(
+                "dart", 7, "dart_8_0.10_5", 1.1, 2.0, 1.1, 8, 8, None, "standard_8", 20.0
+            ),
+        ]
+        report = BENCHMARK.render_report(
+            quantile_rows=quantile_rows,
+            goss_rows=goss_rows,
+            dart_rows=dart_rows,
+            seeds=(7,),
+            quick=True,
+        )
+        for text in (
+            "Configuration",
+            "## Quantile Split Selection",
+            "## GOSS Rate Sweep",
+            "## DART Dropout Profile",
+            "Timing is descriptive",
+            "smooth_0.05",
+            "uniform_0.30",
+            "Standard time ratio",
+            "dropout pressure",
+        ):
+            self.assertIn(text, report)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output = Path(temporary_directory) / "quantile.md"
+            exit_code = BENCHMARK.main(["--quick", "--section", "quantile", "--output", str(output)])
+            self.assertEqual(exit_code, 0)
+            selected_report = output.read_text(encoding="utf-8")
+        self.assertIn("## Quantile Split Selection", selected_report)
+        self.assertNotIn("## GOSS Rate Sweep", selected_report)
+        self.assertNotIn("## DART Dropout Profile", selected_report)
 
 
 if __name__ == "__main__":

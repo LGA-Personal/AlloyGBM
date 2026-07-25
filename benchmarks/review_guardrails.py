@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass
+from pathlib import Path
+import sys
 import time
+from typing import Sequence
 
 import numpy as np
+
+
+DEFAULT_SEEDS = (7, 13, 29)
+ALL_SECTIONS = ("quantile", "goss", "dart")
 
 
 @dataclass(frozen=True)
@@ -36,6 +44,13 @@ class BoostingRow:
     dropout_pressure: float | None = None
 
 
+@dataclass(frozen=True)
+class GateResult:
+    name: str
+    passed: bool
+    detail: str
+
+
 def make_quantile_split_data(
     *, seed: int, n_train: int, n_test: int
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -47,10 +62,13 @@ def make_quantile_split_data(
 
     def make_partition(size: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         feature = rng.uniform(-2.5, 2.5, size=size)
-        location = 0.28 * np.sin(1.4 * feature) + 0.07 * feature**2 - 0.05 * feature
+        location = 0.08 * np.sin(1.4 * feature) + 0.025 * feature**2 - 0.015 * feature
         scale = 0.25 + 0.14 * np.abs(feature)
-        noise = scale * (rng.exponential(size=size) - 1.0)
-        weights = rng.lognormal(mean=0.0, sigma=0.45, size=size)
+        noise = scale * (
+            0.15 * (rng.exponential(size=size) - 1.0)
+            + 0.85 * rng.uniform(-1.0, 1.0, size=size)
+        )
+        weights = rng.lognormal(mean=0.0, sigma=0.10, size=size)
         return feature, location + noise, weights
 
     x_train, y_train, w_train = make_partition(n_train)
@@ -105,9 +123,171 @@ def _rmse(y_true: np.ndarray, prediction: np.ndarray) -> float:
     return float(np.sqrt(np.mean((np.asarray(y_true) - np.asarray(prediction)) ** 2)))
 
 
+def _median(values: Sequence[float]) -> float:
+    return float(np.median(values)) if values else float("nan")
+
+
+def _finite_positive(value: float) -> bool:
+    return bool(np.isfinite(value) and value > 0.0)
+
+
+def evaluate_gates(
+    quantile_rows: Sequence[QuantileSplitRow],
+    goss_rows: Sequence[BoostingRow],
+    dart_rows: Sequence[BoostingRow],
+) -> list[GateResult]:
+    """Evaluate complete evidence contracts without making timing a quality gate."""
+    required_quantile_arms = {"proxy", "smooth_0.05", "smooth_0.10"}
+    quantile_keys = [(row.seed, row.alpha, row.arm) for row in quantile_rows]
+    quantile_groups: dict[tuple[int, float], set[str]] = {}
+    for row in quantile_rows:
+        quantile_groups.setdefault((row.seed, row.alpha), set()).add(row.arm)
+    quantile_values_valid = all(
+        np.isfinite(
+            [row.threshold, row.gain, row.pinball_loss, row.baseline_loss]
+        ).all()
+        and row.left_count > 0
+        and row.right_count > 0
+        for row in quantile_rows
+    )
+    quantile_contract = (
+        bool(quantile_rows)
+        and len(quantile_keys) == len(set(quantile_keys))
+        and all(arms == required_quantile_arms for arms in quantile_groups.values())
+        and quantile_values_valid
+    )
+
+    quantile_ratios = []
+    for alpha, arm in sorted({(row.alpha, row.arm) for row in quantile_rows}):
+        arm_rows = [row for row in quantile_rows if row.alpha == alpha and row.arm == arm]
+        median_loss = _median([row.pinball_loss for row in arm_rows])
+        median_baseline = _median([row.baseline_loss for row in arm_rows])
+        quantile_ratios.append(
+            median_loss / median_baseline
+            if _finite_positive(median_baseline) and np.isfinite(median_loss)
+            else float("inf")
+        )
+    quantile_quality = bool(quantile_ratios) and all(ratio <= 1.10 for ratio in quantile_ratios)
+
+    goss_keys = [(row.seed, row.arm) for row in goss_rows]
+    goss_by_seed_arm = {(row.seed, row.arm): row for row in goss_rows}
+    goss_arms = [row for row in goss_rows if row.arm.startswith("goss_")]
+    goss_values_valid = all(
+        row.section == "goss"
+        and np.isfinite([row.rmse, row.baseline_rmse, row.fit_seconds]).all()
+        and row.fit_seconds > 0.0
+        and row.completed_rounds > 0
+        and row.requested_rounds > 0
+        for row in goss_rows
+    )
+    goss_controls_present = all(
+        row.matched_control is not None and (row.seed, row.matched_control) in goss_by_seed_arm
+        for row in goss_arms
+    )
+    goss_contract = (
+        bool(goss_rows)
+        and len(goss_keys) == len(set(goss_keys))
+        and all((seed, "standard_full") in goss_by_seed_arm for seed, _ in goss_keys)
+        and bool(goss_arms)
+        and goss_values_valid
+        and goss_controls_present
+    )
+    goss_completion = bool(goss_rows) and all(
+        row.completed_rounds == row.requested_rounds for row in goss_rows
+    )
+
+    goss_ratios: list[float] = []
+    for arm in sorted({row.arm for row in goss_arms}):
+        arm_rows = [row for row in goss_arms if row.arm == arm]
+        control_rows = [
+            goss_by_seed_arm[(row.seed, row.matched_control)]
+            for row in arm_rows
+            if row.matched_control is not None and (row.seed, row.matched_control) in goss_by_seed_arm
+        ]
+        goss_ratios.append(
+            _median([row.rmse for row in arm_rows]) / _median([row.rmse for row in control_rows])
+            if control_rows and _finite_positive(_median([row.rmse for row in control_rows]))
+            else float("inf")
+        )
+    goss_quality = bool(goss_ratios) and all(ratio <= 1.35 for ratio in goss_ratios)
+    goss_baseline = bool(goss_arms) and all(
+        _median([row.rmse for row in goss_arms if row.arm == arm])
+        < _median([row.baseline_rmse for row in goss_arms if row.arm == arm])
+        for arm in {row.arm for row in goss_arms}
+    )
+
+    dart_keys = [(row.seed, row.arm) for row in dart_rows]
+    dart_by_seed_arm = {(row.seed, row.arm): row for row in dart_rows}
+    dart_arms = [row for row in dart_rows if row.arm.startswith("dart_")]
+    dart_values_valid = all(
+        row.section == "dart"
+        and np.isfinite([row.rmse, row.baseline_rmse, row.fit_seconds]).all()
+        and row.fit_seconds > 0.0
+        and row.completed_rounds > 0
+        and row.requested_rounds > 0
+        for row in dart_rows
+    )
+    dart_controls_present = all(
+        row.matched_control is not None and (row.seed, row.matched_control) in dart_by_seed_arm
+        for row in dart_arms
+    )
+    dart_contract = (
+        bool(dart_rows)
+        and len(dart_keys) == len(set(dart_keys))
+        and bool(dart_arms)
+        and dart_values_valid
+        and dart_controls_present
+        and all(
+            row.dropout_pressure is not None and _finite_positive(row.dropout_pressure)
+            for row in dart_arms
+        )
+    )
+    dart_completion = bool(dart_rows) and all(
+        row.completed_rounds == row.requested_rounds for row in dart_rows
+    )
+    dart_ratios: list[float] = []
+    for arm in sorted({row.arm for row in dart_arms}):
+        arm_rows = [row for row in dart_arms if row.arm == arm]
+        control_rows = [
+            dart_by_seed_arm[(row.seed, row.matched_control)]
+            for row in arm_rows
+            if row.matched_control is not None and (row.seed, row.matched_control) in dart_by_seed_arm
+        ]
+        dart_ratios.append(
+            _median([row.rmse for row in arm_rows]) / _median([row.rmse for row in control_rows])
+            if control_rows and _finite_positive(_median([row.rmse for row in control_rows]))
+            else float("inf")
+        )
+    dart_quality = bool(dart_ratios) and all(ratio <= 1.50 for ratio in dart_ratios)
+
+    return [
+        GateResult("quantile_contract", quantile_contract, "required arms, finite values, unique rows, and children"),
+        GateResult(
+            "quantile_quality",
+            quantile_quality,
+            f"maximum loss/no-split ratio={max(quantile_ratios, default=float('inf')):.3f} (limit 1.100)",
+        ),
+        GateResult("goss_contract", goss_contract, "required controls, finite metrics, and unique rows"),
+        GateResult("goss_completion", goss_completion, "all GOSS fits completed requested rounds"),
+        GateResult(
+            "goss_quality",
+            goss_quality,
+            f"maximum GOSS/uniform ratio={max(goss_ratios, default=float('inf')):.3f} (limit 1.350)",
+        ),
+        GateResult("goss_baseline", goss_baseline, "every GOSS median beats its mean-predictor baseline"),
+        GateResult("dart_contract", dart_contract, "required controls, finite metrics, unique rows, and pressure"),
+        GateResult("dart_completion", dart_completion, "all DART fits completed requested rounds"),
+        GateResult(
+            "dart_quality",
+            dart_quality,
+            f"maximum DART/standard ratio={max(dart_ratios, default=float('inf')):.3f} (limit 1.500)",
+        ),
+    ]
+
+
 def run_goss_experiment(
     *,
-    seeds: tuple[int, ...] = (7, 17, 29, 43, 59),
+    seeds: tuple[int, ...] = DEFAULT_SEEDS,
     n_train: int = 512,
     n_test: int = 256,
     n_estimators: int = 100,
@@ -209,7 +389,7 @@ def run_goss_experiment(
 
 def run_dart_experiment(
     *,
-    seeds: tuple[int, ...] = (7, 17, 29, 43, 59),
+    seeds: tuple[int, ...] = DEFAULT_SEEDS,
     n_train: int = 512,
     n_test: int = 256,
     configs: tuple[tuple[int, float, int], ...] = (
@@ -455,7 +635,7 @@ def select_quantile_split(
 
 def run_quantile_experiment(
     *,
-    seeds: tuple[int, ...] = (7, 17, 29, 43, 59),
+    seeds: tuple[int, ...] = DEFAULT_SEEDS,
     alphas: tuple[float, ...] = (0.1, 0.5, 0.9),
     n_train: int = 512,
     n_test: int = 256,
@@ -505,3 +685,226 @@ def run_quantile_experiment(
                     )
                 )
     return rows
+
+
+def run_benchmark(
+    *,
+    sections: Sequence[str] = ALL_SECTIONS,
+    seeds: Sequence[int] = DEFAULT_SEEDS,
+    quick: bool = False,
+) -> tuple[list[QuantileSplitRow], list[BoostingRow], list[BoostingRow]]:
+    """Run the requested deterministic evidence sections."""
+    selected = tuple(dict.fromkeys(sections))
+    unknown_sections = set(selected).difference(ALL_SECTIONS)
+    if unknown_sections:
+        raise ValueError(f"unknown benchmark sections: {', '.join(sorted(unknown_sections))}")
+    if not selected:
+        raise ValueError("at least one benchmark section is required")
+    seed_values = tuple(int(seed) for seed in seeds)
+    if not seed_values:
+        raise ValueError("at least one seed is required")
+    if quick:
+        seed_values = seed_values[:1]
+
+    quantile_rows: list[QuantileSplitRow] = []
+    goss_rows: list[BoostingRow] = []
+    dart_rows: list[BoostingRow] = []
+    if "quantile" in selected:
+        quantile_rows = run_quantile_experiment(
+            seeds=seed_values,
+            n_train=160 if quick else 512,
+            n_test=96 if quick else 256,
+        )
+    if "goss" in selected:
+        goss_rows = run_goss_experiment(
+            seeds=seed_values,
+            n_train=256 if quick else 512,
+            n_test=128 if quick else 256,
+            n_estimators=8 if quick else 100,
+        )
+    if "dart" in selected:
+        dart_rows = run_dart_experiment(
+            seeds=seed_values,
+            n_train=256 if quick else 512,
+            n_test=128 if quick else 256,
+            configs=((8, 0.1, 5), (16, 0.2, 5)) if quick else (
+                (50, 0.05, 50),
+                (100, 0.10, 50),
+                (200, 0.20, 50),
+                (100, 0.10, 5),
+                (100, 0.10, 20),
+            ),
+        )
+    return quantile_rows, goss_rows, dart_rows
+
+
+def _median_quantile_rows(
+    rows: Sequence[QuantileSplitRow], arm: str, alpha: float
+) -> tuple[float, float, float]:
+    selected = [row for row in rows if row.arm == arm and row.alpha == alpha]
+    return (
+        _median([row.pinball_loss for row in selected]),
+        _median([row.baseline_loss for row in selected]),
+        _median([row.gain for row in selected]),
+    )
+
+
+def _median_boosting_rows(rows: Sequence[BoostingRow], arm: str) -> tuple[float, float, float, float]:
+    selected = [row for row in rows if row.arm == arm]
+    return (
+        _median([row.rmse for row in selected]),
+        _median([row.baseline_rmse for row in selected]),
+        _median([row.fit_seconds for row in selected]),
+        _median([row.completed_rounds for row in selected]),
+    )
+
+
+def render_report(
+    *,
+    quantile_rows: Sequence[QuantileSplitRow],
+    goss_rows: Sequence[BoostingRow],
+    dart_rows: Sequence[BoostingRow],
+    seeds: Sequence[int],
+    quick: bool,
+) -> str:
+    """Render medians and descriptive timings without production recommendations."""
+    selected_sections = [
+        section
+        for section, rows in (
+            ("quantile", quantile_rows),
+            ("goss", goss_rows),
+            ("dart", dart_rows),
+        )
+        if rows
+    ]
+    lines = [
+        "# Review Evidence Guardrails",
+        "",
+        "## Configuration",
+        "",
+        f"- Sections: {', '.join(selected_sections)}",
+        f"- Seeds: {', '.join(str(seed) for seed in seeds)}",
+        f"- Mode: {'quick' if quick else 'full'}",
+        "- Timing is descriptive only; no wall-clock threshold is a quality gate.",
+    ]
+
+    if quantile_rows:
+        lines.extend(["", "## Quantile Split Selection", "", "| Alpha | Arm | Median loss | No-split loss | Median gain |", "|---:|---|---:|---:|---:|"])
+        for alpha in sorted({row.alpha for row in quantile_rows}):
+            for arm in ("proxy", "smooth_0.05", "smooth_0.10"):
+                loss, baseline, gain = _median_quantile_rows(quantile_rows, arm, alpha)
+                lines.append(f"| {alpha:.2f} | {arm} | {loss:.6f} | {baseline:.6f} | {gain:.6f} |")
+        smooth_arms = ("smooth_0.05", "smooth_0.10")
+        smooth_losses = {
+            arm: _median([row.pinball_loss for row in quantile_rows if row.arm == arm])
+            for arm in smooth_arms
+        }
+        best_smoothing = min(smooth_losses, key=smooth_losses.__getitem__)
+        lines.extend(
+            [
+                "",
+                f"Best smoothed-pinball median arm: `{best_smoothing}`.",
+                "This identifies evidence for a later production decision; it does not recommend a production default.",
+            ]
+        )
+
+    if goss_rows:
+        lines.extend(["", "## GOSS Rate Sweep", "", "| Arm | Matched control | Median RMSE | Baseline RMSE | Fit seconds |", "|---|---|---:|---:|---:|"])
+        for arm in sorted({row.arm for row in goss_rows}):
+            rmse, baseline, fit_seconds, _ = _median_boosting_rows(goss_rows, arm)
+            controls = sorted({row.matched_control for row in goss_rows if row.arm == arm and row.matched_control})
+            lines.append(
+                f"| {arm} | {', '.join(controls) or '-'} | {rmse:.6f} | {baseline:.6f} | {fit_seconds:.4f} |"
+            )
+
+    if dart_rows:
+        lines.extend(
+            [
+                "",
+                "## DART Dropout Profile",
+                "",
+                "The configured dropout pressure is an expected-work proxy, not an observed drop count.",
+                "",
+                "| Arm | Matched standard | Median RMSE | Fit seconds | Seconds/round | Standard time ratio | Dropout pressure |",
+                "|---|---|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for arm in sorted({row.arm for row in dart_rows}):
+            rmse, _, fit_seconds, rounds = _median_boosting_rows(dart_rows, arm)
+            matching_rows = [row for row in dart_rows if row.arm == arm]
+            controls = sorted({row.matched_control for row in matching_rows if row.matched_control})
+            control_seconds = _median(
+                [
+                    row.fit_seconds
+                    for row in dart_rows
+                    if row.arm in controls
+                ]
+            )
+            time_ratio_text = "-" if not _finite_positive(control_seconds) else f"{fit_seconds / control_seconds:.3f}"
+            pressure = _median([row.dropout_pressure for row in matching_rows if row.dropout_pressure is not None])
+            pressure_text = "-" if not np.isfinite(pressure) else f"{pressure:.2f}"
+            lines.append(
+                f"| {arm} | {', '.join(controls) or '-'} | {rmse:.6f} | {fit_seconds:.4f} | "
+                f"{fit_seconds / rounds:.6f} | {time_ratio_text} | {pressure_text} |"
+            )
+    return "\n".join(lines) + "\n"
+
+
+def _parse_seeds(value: str) -> tuple[int, ...]:
+    try:
+        seeds = tuple(int(part.strip()) for part in value.split(",") if part.strip())
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("seeds must be comma-separated integers") from error
+    if not seeds:
+        raise argparse.ArgumentTypeError("at least one seed is required")
+    return seeds
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run selected evidence sections, render Markdown, and optionally enforce gates."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--seeds", type=_parse_seeds, default=DEFAULT_SEEDS, help="comma-separated seeds")
+    parser.add_argument("--section", action="append", choices=ALL_SECTIONS, help="section to run; repeatable")
+    parser.add_argument("--quick", action="store_true", help="use the deterministic CI-sized configuration")
+    parser.add_argument("--gate", action="store_true", help="exit nonzero for failed selected-section gates")
+    parser.add_argument("--output", type=Path, help="write UTF-8 Markdown to this path")
+    args = parser.parse_args(argv)
+    sections = tuple(args.section or ALL_SECTIONS)
+    effective_seeds = args.seeds[:1] if args.quick else args.seeds
+    quantile_rows, goss_rows, dart_rows = run_benchmark(
+        sections=sections,
+        seeds=effective_seeds,
+        quick=args.quick,
+    )
+    report = render_report(
+        quantile_rows=quantile_rows,
+        goss_rows=goss_rows,
+        dart_rows=dart_rows,
+        seeds=effective_seeds,
+        quick=args.quick,
+    )
+
+    selected_gates: list[GateResult] = []
+    if args.gate:
+        selected_gates = [
+            gate
+            for gate in evaluate_gates(quantile_rows, goss_rows, dart_rows)
+            if any(gate.name.startswith(section) for section in sections)
+        ]
+        report += "\n## Gate Summary\n\n| Gate | Result | Detail |\n|---|---|---|\n"
+        for gate in selected_gates:
+            report += f"| {gate.name} | {'pass' if gate.passed else 'FAIL'} | {gate.detail} |\n"
+
+    if args.output is None:
+        print(report, end="")
+    else:
+        args.output.write_text(report, encoding="utf-8")
+
+    failures = [gate for gate in selected_gates if not gate.passed]
+    for gate in failures:
+        print(f"gate failed: {gate.name}: {gate.detail}", file=sys.stderr)
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
