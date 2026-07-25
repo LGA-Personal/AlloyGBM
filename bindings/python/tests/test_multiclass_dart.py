@@ -111,6 +111,35 @@ def test_multiclass_dart_weighted_warm_start_matches_uninterrupted_fit():
     )
 
 
+def test_multiclass_dart_warm_start_matches_with_missing_values():
+    X, y = _toy_multiclass(n_rows=360, seed=97)
+    rng = np.random.default_rng(101)
+    X[rng.random(X.shape) < 0.22] = np.nan
+    common = dict(
+        boosting_mode="dart",
+        dart_drop_rate=0.75,
+        dart_max_drop=4,
+        max_depth=3,
+        min_data_in_leaf=4,
+        training_policy="manual",
+        seed=37,
+    )
+    uninterrupted = GBMClassifier(n_estimators=10, **common).fit(X, y)
+    prefix = GBMClassifier(n_estimators=6, **common).fit(X, y)
+    continued = GBMClassifier(
+        n_estimators=4,
+        warm_start=True,
+        **common,
+    ).fit(X, y, init_model=prefix)
+
+    np.testing.assert_allclose(
+        continued.predict_proba(X),
+        uninterrupted.predict_proba(X),
+        rtol=1e-5,
+        atol=1e-6,
+    )
+
+
 def test_multiclass_dart_warm_start_continues_without_error():
     X, y = _toy_multiclass()
     base = GBMClassifier(

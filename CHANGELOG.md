@@ -9,7 +9,8 @@
   class-major stump order, artifact-backed prediction applies those weights,
   and warm starts rebuild dense round-major class-tree weights from encoded
   tree IDs, including phantom gaps. Warm-start validation loss now evaluates
-  the replayed prior ensemble rather than baseline-only scores.
+  the replayed prior ensemble rather than baseline-only scores, and replay
+  shares predictor-equivalent missing-value and native-categorical routing.
 
 ### Features
 

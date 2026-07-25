@@ -116,6 +116,25 @@ pub(crate) fn apply_weighted_round_to_predictions_and_accumulator(
     )
 }
 
+#[inline]
+fn binned_split_went_left(stump: &TrainedStump, bin: u16) -> bool {
+    if bin == u16::from(MISSING_BIN_U8) {
+        stump.split.default_left
+    } else if stump.split.is_categorical {
+        stump
+            .split
+            .categorical_bitset
+            .as_ref()
+            .map_or(stump.split.default_left, |bitset| {
+                let byte_index = (bin / 8) as usize;
+                let bit_index = (bin % 8) as usize;
+                byte_index < bitset.len() && (bitset[byte_index] & (1 << bit_index)) != 0
+            })
+    } else {
+        bin <= stump.split.threshold_bin
+    }
+}
+
 fn apply_weighted_round_to_predictions_internal(
     predictions: &mut [f32],
     mut accumulator: Option<(&mut [f32], f32)>,
@@ -135,8 +154,6 @@ fn apply_weighted_round_to_predictions_internal(
         let (_, local_id) = decode_tree_node_id(stump.split.node_id);
         stump_by_local.insert(local_id, stump);
     }
-    let missing_bin = u16::from(MISSING_BIN_U8);
-
     for (row_index, prediction) in predictions.iter_mut().enumerate() {
         let mut local_id = 0_u32;
         loop {
@@ -145,26 +162,7 @@ fn apply_weighted_round_to_predictions_internal(
             };
             let feature_index = stump.split.feature_index as usize;
             let bin = binned_matrix.col_bin(feature_index * binned_matrix.row_count + row_index);
-            let went_left = if bin == missing_bin {
-                // Missing-value routing — predictor's `is_nan` short-circuit
-                // produces the same `default_left` outcome.
-                stump.split.default_left
-            } else if stump.split.is_categorical {
-                // Native categorical split: consult the bitset (same
-                // routing as `predictor_went_left`).
-                stump
-                    .split
-                    .categorical_bitset
-                    .as_ref()
-                    .map_or(stump.split.default_left, |bs| {
-                        let cat_id = bin;
-                        let byte_idx = (cat_id / 8) as usize;
-                        let bit_idx = (cat_id % 8) as usize;
-                        byte_idx < bs.len() && (bs[byte_idx] & (1 << bit_idx)) != 0
-                    })
-            } else {
-                bin <= stump.split.threshold_bin
-            };
+            let went_left = binned_split_went_left(stump, bin);
             let leaf_contribution = if went_left {
                 if let Some((raw, fc)) = raw_features
                     && !raw.is_empty()
@@ -244,7 +242,8 @@ pub(crate) fn apply_round_stumps_tree_walk(
             // so this is a no-op and preserves byte-identical numerics for
             // every existing caller (Standard/GOSS/Morph/DRO/linear).
             let tree_weight = stump.tree_weight;
-            if bin <= stump.split.threshold_bin {
+            let went_left = binned_split_went_left(stump, bin);
+            if went_left {
                 let leaf_value = if let Some((raw, fc)) = raw_features
                     && !raw.is_empty()
                 {
@@ -448,6 +447,39 @@ mod tests {
             LeafValue::Scalar(-1.25),
         )];
         assert_aggregate_matches_reference(vec![1.0; 4], binned, stumps, None)
+    }
+
+    #[test]
+    fn replay_walk_respects_learned_missing_direction() -> EngineResult<()> {
+        let binned =
+            BinnedMatrix::new(3, 1, 2, vec![0, MISSING_BIN_U8, 2]).expect("valid binned matrix");
+        let stumps = vec![TrainedStump::new_unweighted(
+            scalar_split(1, true, false, None),
+            LeafValue::Scalar(2.0),
+            LeafValue::Scalar(-3.0),
+        )];
+        let mut predictions = vec![0.0; 3];
+
+        apply_tree_to_binned_predictions(&mut predictions, &binned, &stumps, None)?;
+
+        assert_close(&predictions, &[2.0, 2.0, -3.0]);
+        Ok(())
+    }
+
+    #[test]
+    fn replay_walk_respects_native_categorical_bitset() -> EngineResult<()> {
+        let binned = BinnedMatrix::new(4, 1, 3, vec![0, 1, 2, 3]).expect("valid binned matrix");
+        let stumps = vec![TrainedStump::new_unweighted(
+            scalar_split(0, false, true, Some(vec![0b0000_0101])),
+            LeafValue::Scalar(0.75),
+            LeafValue::Scalar(-1.25),
+        )];
+        let mut predictions = vec![0.0; 4];
+
+        apply_tree_to_binned_predictions(&mut predictions, &binned, &stumps, None)?;
+
+        assert_close(&predictions, &[0.75, -1.25, 0.75, -1.25]);
+        Ok(())
     }
 
     #[test]
