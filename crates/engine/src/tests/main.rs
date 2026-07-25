@@ -3254,27 +3254,95 @@ fn dart_early_stopping_truncation_recomputes_tree_weights() {
 
 #[test]
 fn dart_aggregate_forest_validation_preserves_predictor_parity() {
-    let dataset = sample_dataset();
-    let binned = sample_binned_matrix();
+    // Captured from the pre-integration repeated-walk implementation at
+    // 5e32458. The aggregate path only changes f32 association order, so
+    // keep this tight enough to catch an omitted or wrongly-scaled re-add.
+    const F32_REGROUPING_TOLERANCE: f32 = 5.0e-6;
+    let dataset = TrainingDataset {
+        matrix: alloygbm_core::DatasetMatrix::new(
+            6,
+            2,
+            vec![
+                0.0, 0.0, //
+                1.0, 0.0, //
+                2.0, 1.0, //
+                3.0, 1.0, //
+                4.0, 0.0, //
+                5.0, 1.0, //
+            ],
+        )
+        .expect("training matrix is valid"),
+        targets: vec![2.5, 1.0, -0.5, -2.0, 0.75, -1.25],
+        sample_weights: None,
+        time_index: None,
+        group_id: None,
+        factor_exposures: None,
+    };
+    let binned = BinnedMatrix::new(
+        6,
+        2,
+        5,
+        vec![
+            0, 0, //
+            1, 0, //
+            2, 1, //
+            3, 1, //
+            4, 0, //
+            5, 1, //
+        ],
+    )
+    .expect("training bins are valid");
+    let validation_dataset = TrainingDataset {
+        matrix: alloygbm_core::DatasetMatrix::new(
+            5,
+            2,
+            vec![
+                5.0, 1.0, //
+                4.0, 0.0, //
+                3.0, 1.0, //
+                1.0, 0.0, //
+                0.0, 0.0, //
+            ],
+        )
+        .expect("validation matrix is valid"),
+        targets: vec![-1.5, 1.25, -2.25, 0.5, 2.75],
+        sample_weights: None,
+        time_index: None,
+        group_id: None,
+        factor_exposures: None,
+    };
+    let validation_binned = BinnedMatrix::new(
+        5,
+        2,
+        5,
+        vec![
+            5, 1, //
+            4, 0, //
+            3, 1, //
+            1, 0, //
+            0, 0, //
+        ],
+    )
+    .expect("validation bins are valid");
     let validation = ValidationDatasetRef {
-        dataset: &dataset,
-        binned_matrix: &binned,
+        dataset: &validation_dataset,
+        binned_matrix: &validation_binned,
     };
     let params = TrainParams {
         boosting_mode: BoostingMode::Dart {
-            drop_rate: 0.5,
+            drop_rate: 0.7,
             max_drop: 3,
             normalize_type: alloygbm_core::DartNormalize::Forest,
             sample_type: alloygbm_core::DartSampleType::Uniform,
         },
-        seed: 42,
+        seed: 17,
         deterministic: true,
         ..TrainParams::default()
     };
     let controls =
         IterationControls::new(8, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).expect("controls are valid");
     let trainer = Trainer::new(params).expect("DART params pass validation");
-    let model = trainer
+    let summary = trainer
         .fit_iterations_with_validation_summary(
             &dataset,
             &binned,
@@ -3283,18 +3351,51 @@ fn dart_aggregate_forest_validation_preserves_predictor_parity() {
             &SquaredErrorObjective,
             controls,
         )
-        .expect("DART training with validation succeeds")
-        .model;
+        .expect("DART training with validation succeeds");
 
-    let artifact = model.to_artifact_bytes().expect("serialize DART model");
-    let loaded =
-        TrainedModel::from_artifact_bytes_with_mode(&artifact, ArtifactCompatibilityMode::Strict)
-            .expect("reload DART model");
-    for row in [[0.0_f32, 0.0], [1.0, 0.0], [2.0, 1.0], [3.0, 1.0]] {
-        let training_prediction = model.predict_row(&row).expect("in-memory prediction");
-        let loaded_prediction = loaded.predict_row(&row).expect("loaded prediction");
-        assert!((training_prediction - loaded_prediction).abs() <= 2.0e-5);
+    assert_eq!(summary.rounds_completed, 8);
+    for (row, expected) in [
+        ([0.0_f32, 0.0], 0.26476493),
+        ([1.0, 0.0], 0.15215223),
+        ([2.0, 1.0], 0.039539497),
+        ([3.0, 1.0], 0.0145144),
+        ([4.0, 0.0], 0.0145144),
+        ([5.0, 1.0], 0.0145144),
+    ] {
+        let actual = summary
+            .model
+            .predict_row(&row)
+            .expect("training prediction");
+        assert!(
+            (actual - expected).abs() <= F32_REGROUPING_TOLERANCE,
+            "training prediction changed for {row:?}: expected {expected}, got {actual}"
+        );
     }
+    for (row, expected) in [
+        ([5.0_f32, 1.0], 0.0145144),
+        ([4.0, 0.0], 0.0145144),
+        ([3.0, 1.0], 0.0145144),
+        ([1.0, 0.0], 0.15215223),
+        ([0.0, 0.0], 0.26476493),
+    ] {
+        let actual = summary
+            .model
+            .predict_row(&row)
+            .expect("validation prediction");
+        assert!(
+            (actual - expected).abs() <= F32_REGROUPING_TOLERANCE,
+            "validation prediction changed for {row:?}: expected {expected}, got {actual}"
+        );
+    }
+    assert!((summary.final_loss - 2.0340717).abs() <= F32_REGROUPING_TOLERANCE);
+    assert!(
+        (summary
+            .final_validation_loss
+            .expect("validation loss is recorded")
+            - 3.0491192)
+            .abs()
+            <= F32_REGROUPING_TOLERANCE
+    );
 }
 
 #[test]
