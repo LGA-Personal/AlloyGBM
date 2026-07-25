@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 
 import numpy as np
 
@@ -18,6 +19,21 @@ class QuantileSplitRow:
     baseline_loss: float
     left_count: int
     right_count: int
+
+
+@dataclass(frozen=True)
+class BoostingRow:
+    section: str
+    seed: int
+    arm: str
+    rmse: float
+    baseline_rmse: float
+    fit_seconds: float
+    completed_rounds: int
+    requested_rounds: int
+    retained_fraction: float | None = None
+    matched_control: str | None = None
+    dropout_pressure: float | None = None
 
 
 def make_quantile_split_data(
@@ -43,6 +59,250 @@ def make_quantile_split_data(
         np.ascontiguousarray(values, dtype=np.float64)
         for values in (x_train, y_train, w_train, x_test, y_test, w_test)
     )  # type: ignore[return-value]
+
+
+def make_boosting_data(
+    *, seed: int, n_train: int, n_test: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Build deterministic float32 train/test data for boosting experiments."""
+    if n_train < 1 or n_test < 1:
+        raise ValueError("n_train and n_test must be positive")
+    rng = np.random.default_rng(seed)
+
+    def make_partition(size: int) -> tuple[np.ndarray, np.ndarray]:
+        features = rng.normal(size=(size, 5)).astype(np.float32)
+        target = (
+            1.1 * np.sin(features[:, 0])
+            + 0.65 * features[:, 1] * features[:, 2]
+            - 0.3 * features[:, 3] ** 2
+            + 0.2 * features[:, 4]
+            + rng.normal(scale=0.18, size=size)
+        )
+        return np.ascontiguousarray(features), np.ascontiguousarray(target, dtype=np.float32)
+
+    x_train, y_train = make_partition(n_train)
+    x_test, y_test = make_partition(n_test)
+    return x_train, y_train, x_test, y_test
+
+
+def configured_dropout_pressure(*, n_estimators: int, drop_rate: float, max_drop: int) -> float:
+    """Estimate configured DART dropout work, not the observed drop count."""
+    if n_estimators < 1:
+        raise ValueError("n_estimators must be positive")
+    if not np.isfinite(drop_rate) or not 0.0 < drop_rate < 1.0:
+        raise ValueError("drop_rate must be finite and in (0.0, 1.0)")
+    if max_drop < 1:
+        raise ValueError("max_drop must be positive")
+    return float(
+        sum(
+            min(max_drop, max(1.0, drop_rate * existing_rounds))
+            for existing_rounds in range(1, n_estimators)
+        )
+    )
+
+
+def _rmse(y_true: np.ndarray, prediction: np.ndarray) -> float:
+    return float(np.sqrt(np.mean((np.asarray(y_true) - np.asarray(prediction)) ** 2)))
+
+
+def run_goss_experiment(
+    *,
+    seeds: tuple[int, ...] = (7, 17, 29, 43, 59),
+    n_train: int = 512,
+    n_test: int = 256,
+    n_estimators: int = 100,
+    rates: tuple[tuple[float, float], ...] = ((0.1, 0.1), (0.2, 0.1), (0.2, 0.2), (0.3, 0.1)),
+) -> list[BoostingRow]:
+    """Compare full, uniform-subsample, and GOSS models for each rate pair."""
+    from alloygbm import GBMRegressor
+
+    def fit_row(
+        x_train: np.ndarray,
+        y_train: np.ndarray,
+        x_test: np.ndarray,
+        y_test: np.ndarray,
+        *,
+        seed: int,
+        arm: str,
+        retained_fraction: float | None = None,
+        matched_control: str | None = None,
+        **mode_params: float | str,
+    ) -> BoostingRow:
+        model = GBMRegressor(
+            n_estimators=n_estimators,
+            max_depth=4,
+            learning_rate=0.06,
+            lambda_l2=1.0,
+            seed=seed,
+            deterministic=True,
+            training_policy="manual",
+            continuous_binning_strategy="quantile",
+            **mode_params,
+        )
+        started = time.perf_counter()
+        model.fit(x_train, y_train)
+        elapsed = max(time.perf_counter() - started, np.finfo(np.float64).eps)
+        baseline_prediction = np.full_like(y_test, np.mean(y_train), dtype=np.float32)
+        return BoostingRow(
+            section="goss",
+            seed=seed,
+            arm=arm,
+            rmse=_rmse(y_test, model.predict(x_test)),
+            baseline_rmse=_rmse(y_test, baseline_prediction),
+            fit_seconds=float(elapsed),
+            completed_rounds=int(model.n_estimators_),
+            requested_rounds=n_estimators,
+            retained_fraction=retained_fraction,
+            matched_control=matched_control,
+        )
+
+    rows: list[BoostingRow] = []
+    for seed in seeds:
+        x_train, y_train, x_test, y_test = make_boosting_data(
+            seed=seed, n_train=n_train, n_test=n_test
+        )
+        rows.append(
+            fit_row(
+                x_train,
+                y_train,
+                x_test,
+                y_test,
+                seed=seed,
+                arm="standard_full",
+                boosting_mode="standard",
+            )
+        )
+        uniform_rows: dict[float, BoostingRow] = {}
+        for top_rate, other_rate in rates:
+            retained = top_rate + other_rate
+            uniform_arm = f"uniform_{retained:.2f}"
+            if retained not in uniform_rows:
+                uniform_rows[retained] = fit_row(
+                    x_train,
+                    y_train,
+                    x_test,
+                    y_test,
+                    seed=seed,
+                    arm=uniform_arm,
+                    retained_fraction=retained,
+                    boosting_mode="standard",
+                    row_subsample=retained,
+                )
+                rows.append(uniform_rows[retained])
+            rows.append(
+                fit_row(
+                    x_train,
+                    y_train,
+                    x_test,
+                    y_test,
+                    seed=seed,
+                    arm=f"goss_{top_rate:.2f}_{other_rate:.2f}",
+                    retained_fraction=retained,
+                    matched_control=uniform_arm,
+                    boosting_mode="goss",
+                    goss_top_rate=top_rate,
+                    goss_other_rate=other_rate,
+                )
+            )
+    return rows
+
+
+def run_dart_experiment(
+    *,
+    seeds: tuple[int, ...] = (7, 17, 29, 43, 59),
+    n_train: int = 512,
+    n_test: int = 256,
+    configs: tuple[tuple[int, float, int], ...] = (
+        (50, 0.05, 50),
+        (100, 0.10, 50),
+        (200, 0.20, 50),
+        (100, 0.10, 5),
+        (100, 0.10, 20),
+    ),
+) -> list[BoostingRow]:
+    """Profile DART versus standard boosting across representative settings."""
+    from alloygbm import GBMRegressor
+
+    def fit_row(
+        x_train: np.ndarray,
+        y_train: np.ndarray,
+        x_test: np.ndarray,
+        y_test: np.ndarray,
+        *,
+        seed: int,
+        arm: str,
+        horizon: int,
+        matched_control: str | None = None,
+        dropout_pressure: float | None = None,
+        **mode_params: float | int | str,
+    ) -> BoostingRow:
+        model = GBMRegressor(
+            n_estimators=horizon,
+            max_depth=4,
+            learning_rate=0.06,
+            lambda_l2=1.0,
+            seed=seed,
+            deterministic=True,
+            training_policy="manual",
+            continuous_binning_strategy="quantile",
+            **mode_params,
+        )
+        started = time.perf_counter()
+        model.fit(x_train, y_train)
+        elapsed = max(time.perf_counter() - started, np.finfo(np.float64).eps)
+        baseline_prediction = np.full_like(y_test, np.mean(y_train), dtype=np.float32)
+        return BoostingRow(
+            section="dart",
+            seed=seed,
+            arm=arm,
+            rmse=_rmse(y_test, model.predict(x_test)),
+            baseline_rmse=_rmse(y_test, baseline_prediction),
+            fit_seconds=float(elapsed),
+            completed_rounds=int(model.n_estimators_),
+            requested_rounds=horizon,
+            matched_control=matched_control,
+            dropout_pressure=dropout_pressure,
+        )
+
+    rows: list[BoostingRow] = []
+    for seed in seeds:
+        x_train, y_train, x_test, y_test = make_boosting_data(
+            seed=seed, n_train=n_train, n_test=n_test
+        )
+        standard_rows: dict[int, BoostingRow] = {}
+        for horizon, drop_rate, max_drop in configs:
+            standard_arm = f"standard_{horizon}"
+            if horizon not in standard_rows:
+                standard_rows[horizon] = fit_row(
+                    x_train,
+                    y_train,
+                    x_test,
+                    y_test,
+                    seed=seed,
+                    arm=standard_arm,
+                    horizon=horizon,
+                    boosting_mode="standard",
+                )
+                rows.append(standard_rows[horizon])
+            rows.append(
+                fit_row(
+                    x_train,
+                    y_train,
+                    x_test,
+                    y_test,
+                    seed=seed,
+                    arm=f"dart_{horizon}_{drop_rate:.2f}_{max_drop}",
+                    horizon=horizon,
+                    matched_control=standard_arm,
+                    dropout_pressure=configured_dropout_pressure(
+                        n_estimators=horizon, drop_rate=drop_rate, max_drop=max_drop
+                    ),
+                    boosting_mode="dart",
+                    dart_drop_rate=drop_rate,
+                    dart_max_drop=max_drop,
+                )
+            )
+    return rows
 
 
 def _validate_alpha(alpha: float) -> None:

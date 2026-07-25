@@ -74,6 +74,33 @@ class ReviewGuardrailTests(unittest.TestCase):
         )
         self.assertTrue(all(row.left_count >= 8 and row.right_count >= 8 for row in rows))
 
+    def test_boosting_fixture_and_dropout_pressure_are_deterministic(self) -> None:
+        first = BENCHMARK.make_boosting_data(seed=19, n_train=128, n_test=64)
+        second = BENCHMARK.make_boosting_data(seed=19, n_train=128, n_test=64)
+        for left, right in zip(first, second, strict=True):
+            np.testing.assert_array_equal(left, right)
+
+        low_cap = BENCHMARK.configured_dropout_pressure(
+            n_estimators=100, drop_rate=0.2, max_drop=5
+        )
+        high_cap = BENCHMARK.configured_dropout_pressure(
+            n_estimators=100, drop_rate=0.2, max_drop=50
+        )
+        self.assertLess(0.0, low_cap)
+        self.assertLess(low_cap, high_cap)
+
+    def test_small_goss_and_dart_runs_are_finite_and_complete(self) -> None:
+        goss = BENCHMARK.run_goss_experiment(
+            seeds=(7,), n_train=192, n_test=96, n_estimators=8, rates=((0.2, 0.1),)
+        )
+        dart = BENCHMARK.run_dart_experiment(
+            seeds=(7,), n_train=192, n_test=96, configs=((8, 0.1, 5),)
+        )
+        for row in [*goss, *dart]:
+            self.assertTrue(np.isfinite(row.rmse))
+            self.assertGreater(row.fit_seconds, 0.0)
+            self.assertEqual(row.completed_rounds, row.requested_rounds)
+
 
 if __name__ == "__main__":
     unittest.main()
