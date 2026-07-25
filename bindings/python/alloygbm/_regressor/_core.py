@@ -1328,7 +1328,6 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
 
         # ── Resolve warm-start artifact bytes ──────────────────────────
         init_artifact_bytes: bytes | None = None
-        inherited_rounds = 0
         if init_model is not None:
             if not hasattr(init_model, "_artifact_bytes") or init_model._artifact_bytes is None:
                 raise ValueError("init_model must be a fitted GBMRegressor with artifact bytes")
@@ -1358,13 +1357,6 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                         f"current objective '{current_objective}'"
                     )
             init_artifact_bytes = init_model._artifact_bytes
-            inherited_rounds = int(
-                getattr(
-                    init_model,
-                    "rounds_completed_",
-                    getattr(init_model, "n_estimators_", 0),
-                )
-            )
         elif self.warm_start and self._is_fitted and self._artifact_bytes is not None:
             fit_neutralization, fit_lambda, fit_penalty = (
                 self._fitted_neutralization_contract()
@@ -1379,13 +1371,6 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                 fit_neutralization, factor_exposures
             )
             init_artifact_bytes = self._artifact_bytes
-            inherited_rounds = int(
-                getattr(
-                    self,
-                    "rounds_completed_",
-                    getattr(self, "n_estimators_", 0),
-                )
-            )
 
         # ── Normalize categorical configuration to plural form ──────────
         # effective_categorical_indices: list of column indices (or None if no categoricals)
@@ -1825,7 +1810,6 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                     feature_count=feature_count,
                     fit_X=X,
                     transformed_factor_exposures=transformed_factor_exposures,
-                    inherited_rounds=inherited_rounds,
                 )
             except (ImportError, AttributeError):
                 pass  # Fall through to list-based path
@@ -2107,9 +2091,8 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             if summary.best_validation_loss is not None
             else None
         )
-        total_rounds_completed = inherited_rounds + int(summary.rounds_completed)
-        self.n_estimators_ = total_rounds_completed
-        self.rounds_completed_ = total_rounds_completed
+        self.n_estimators_ = int(summary.rounds_completed)
+        self.rounds_completed_ = int(summary.rounds_completed)
         self.stop_reason_ = (
             str(summary.stop_reason) if summary.stop_reason is not None else None
         )
@@ -2138,7 +2121,6 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         feature_count: int | None = None,
         fit_X: object | None = None,
         transformed_factor_exposures: object | None = None,
-        inherited_rounds: int = 0,
     ) -> "GBMRegressor":
         self._apply_continuous_binning_metadata(native_result.continuous_binning_metadata)
         if feature_count is not None:
@@ -2164,9 +2146,8 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             if summary.best_validation_loss is not None
             else None
         )
-        total_rounds_completed = inherited_rounds + int(summary.rounds_completed)
-        self.n_estimators_ = total_rounds_completed
-        self.rounds_completed_ = total_rounds_completed
+        self.n_estimators_ = int(summary.rounds_completed)
+        self.rounds_completed_ = int(summary.rounds_completed)
         self.stop_reason_ = (
             str(summary.stop_reason) if summary.stop_reason is not None else None
         )
