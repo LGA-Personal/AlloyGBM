@@ -124,7 +124,10 @@ fn apply_weighted_round_to_predictions_internal(
     raw_features: Option<(&[f32], usize)>,
     prediction_factor: f32,
 ) -> EngineResult<()> {
-    if stumps.is_empty() || prediction_factor == 0.0 {
+    let accumulator_factor_is_zero = accumulator
+        .as_ref()
+        .is_none_or(|(_, factor)| *factor == 0.0);
+    if stumps.is_empty() || (prediction_factor == 0.0 && accumulator_factor_is_zero) {
         return Ok(());
     }
     let mut stump_by_local: HashMap<u32, &TrainedStump> = HashMap::with_capacity(stumps.len());
@@ -394,6 +397,34 @@ mod tests {
             LeafValue::Scalar(-0.5),
         )];
         assert_aggregate_matches_reference(vec![10.0, 20.0, 30.0, 40.0], binned, stumps, None)
+    }
+
+    #[test]
+    fn aggregate_walk_populates_accumulator_when_prediction_factor_is_zero() -> EngineResult<()> {
+        let binned = BinnedMatrix::new(4, 1, 3, vec![0, 1, 2, 3]).expect("valid binned matrix");
+        let stumps = vec![TrainedStump::new_unweighted(
+            scalar_split(1, true, false, None),
+            LeafValue::Scalar(1.5),
+            LeafValue::Scalar(-0.5),
+        )];
+        let initial = vec![10.0, 20.0, 30.0, 40.0];
+        let mut predictions = initial.clone();
+        let mut aggregate = vec![0.0; initial.len()];
+        apply_weighted_round_to_predictions_and_accumulator(
+            &mut predictions,
+            &mut aggregate,
+            &binned,
+            &stumps,
+            None,
+            0.0,
+            0.25,
+        )?;
+        assert_close(&predictions, &initial);
+
+        let mut expected_aggregate = vec![0.0; initial.len()];
+        apply_weighted_round_to_predictions(&mut expected_aggregate, &binned, &stumps, None, 0.25)?;
+        assert_close(&aggregate, &expected_aggregate);
+        Ok(())
     }
 
     #[test]
