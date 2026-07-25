@@ -1077,12 +1077,13 @@ impl Trainer {
             dataset.sample_weights.as_deref(),
         )?;
         let initial_validation_loss = if let Some(v) = validation {
-            let val_preds: Vec<Vec<f32>> = baselines
-                .iter()
-                .map(|&b| vec![b; v.dataset.row_count()])
-                .collect();
+            let val_preds = validation_class_predictions.as_ref().ok_or_else(|| {
+                EngineError::ContractViolation(
+                    "validation predictions were not initialized".to_string(),
+                )
+            })?;
             Some(objective.loss(
-                &val_preds,
+                val_preds,
                 &v.dataset.targets,
                 v.dataset.sample_weights.as_deref(),
             )?)

@@ -4457,6 +4457,118 @@ fn multiclass_dart_early_stop_replays_retained_weights_and_summary_losses() {
     );
 }
 
+#[test]
+fn multiclass_warm_start_validation_baseline_replays_the_prior_model() {
+    const CLASSES: usize = 3;
+    let (training, training_binned, validation, validation_binned) =
+        multiclass_dart_aggregate_fixture();
+    let params = TrainParams {
+        seed: 37,
+        deterministic: true,
+        max_depth: 2,
+        min_data_in_leaf: 1,
+        lambda_l2: 0.0,
+        ..TrainParams::default()
+    };
+    let objective = MultiClassSoftmaxObjective::new(CLASSES).expect("objective");
+    let prior_controls =
+        IterationControls::new(6, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).expect("prior controls");
+    let trainer = Trainer::new(params).expect("trainer");
+    let prior = trainer
+        .fit_multiclass_iterations_with_summary(
+            &training,
+            &training_binned,
+            &MockBackend,
+            &objective,
+            prior_controls,
+        )
+        .expect("prior multiclass fit");
+    assert_eq!(prior.rounds_completed, 6);
+
+    let prior_validation_raw = multiclass_dart_repeated_walk_predictions(
+        &prior.model,
+        &validation_binned,
+        &validation.matrix.values,
+        validation.matrix.feature_count,
+    );
+    let expected_prior_validation_loss = objective
+        .loss(
+            &prior_validation_raw,
+            &validation.targets,
+            validation.sample_weights.as_deref(),
+        )
+        .expect("prior validation loss");
+    let baseline_validation_raw = prior
+        .model
+        .baseline_predictions
+        .iter()
+        .map(|&baseline| vec![baseline; validation.row_count()])
+        .collect::<Vec<_>>();
+    let baseline_only_validation_loss = objective
+        .loss(
+            &baseline_validation_raw,
+            &validation.targets,
+            validation.sample_weights.as_deref(),
+        )
+        .expect("baseline-only validation loss");
+    let prior_improvement = baseline_only_validation_loss - expected_prior_validation_loss;
+    assert!(
+        prior_improvement > 0.05,
+        "fixture needs a nontrivial prior model; baseline={baseline_only_validation_loss}, prior={expected_prior_validation_loss}"
+    );
+
+    let continuation_controls = IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
+        .expect("continuation controls")
+        .with_validation_early_stopping(1, prior_improvement * 0.5)
+        .expect("validation controls");
+    let warm_start = MultiClassWarmStartState {
+        baseline_predictions: prior.model.baseline_predictions.clone(),
+        class_stumps: prior.model.class_stumps.clone(),
+        initial_rounds_completed: prior.rounds_completed,
+        initial_ema_stats: None,
+        initial_dart_tree_weights: None,
+    };
+    let summary = trainer
+        .fit_multiclass_iterations_warm_start_with_validation_summary(
+            &training,
+            &training_binned,
+            ValidationDatasetRef {
+                dataset: &validation,
+                binned_matrix: &validation_binned,
+            },
+            &MockBackend,
+            &objective,
+            continuation_controls,
+            warm_start,
+        )
+        .expect("warm-start validation fit");
+
+    assert!(
+        (summary
+            .initial_validation_loss
+            .expect("initial validation loss")
+            - expected_prior_validation_loss)
+            .abs()
+            <= 1.0e-6
+    );
+    assert_eq!(
+        summary.stop_reason,
+        IterationStopReason::ValidationLossPlateau
+    );
+    assert_eq!(summary.best_validation_round, Some(0));
+    assert_eq!(summary.rounds_completed, 0);
+    assert!(summary.validation_loss_per_completed_round.is_empty());
+    assert!(
+        (summary
+            .final_validation_loss
+            .expect("final validation loss")
+            - expected_prior_validation_loss)
+            .abs()
+            <= 1.0e-6
+    );
+    assert_eq!(summary.model.class_stumps, prior.model.class_stumps);
+}
+
 fn multiclass_dart_bookkeeping_stump(tree_id: u32) -> TrainedStump {
     let stats = NodeStats {
         grad_sum: 0.0,
