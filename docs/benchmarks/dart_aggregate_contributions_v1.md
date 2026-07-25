@@ -13,6 +13,7 @@ configuration, dropout selection, normalization policy, or any quality gate.
 
 Recorded baseline source: `2bbab7ef0f522ceff63ea25e244797fbcbe5405e`.
 Optimized source: `e0c1d7f95aafe255ab7357ad13df9043e7525602`.
+Final-review source: `136bbd7`.
 
 The baseline was generated with the same full DART command and recorded in
 `/tmp/alloygbm-dart-baseline.md` before this branch's changes. That report did
@@ -61,6 +62,38 @@ rendered median DART fit time) and from `7.342x` to `4.171x` matched-standard
 time (a 43.2% reduction in the ratio). These are descriptive,
 machine-dependent timings, not a CI performance contract; no wall-clock gate
 was added.
+
+## Final-Review Rerun
+
+The full DART section was rerun after the artifact, multiclass scratch,
+warm-start validation, and conditional scalar-allocation corrections. The
+scalar allocation change touches the standard controls in this report, so the
+saved evidence was not reused unchanged.
+
+```bash
+/Users/lashby/Projects/AlloyGBM/.venv/bin/maturin develop --release
+/Users/lashby/Projects/AlloyGBM/.venv/bin/python benchmarks/review_guardrails.py \
+  --section dart --gate --output /tmp/alloygbm-dart-final-review.md
+```
+
+Captured on 2026-07-25 on the same Apple M4 development machine:
+
+| Arm | Profile | Final fit s | Final standard ratio | Median RMSE |
+|---|---|---:|---:|---:|
+| `dart_100_0.10_20` | default_like | 0.0235 | 2.012 | 0.972166 |
+| `dart_100_0.10_5` | default_like | 0.0203 | 1.741 | 0.946906 |
+| `dart_100_0.10_50` | default_like | 0.0240 | 2.057 | 0.972166 |
+| `dart_200_0.20_50` | stress_profile | 0.1112 | 4.908 | 1.046686 |
+| `dart_50_0.05_50` | default_like | 0.0079 | 1.285 | 0.941141 |
+| `standard_100` | standard_control | 0.0117 | - | 0.671367 |
+| `standard_200` | standard_control | 0.0227 | - | 0.571675 |
+| `standard_50` | standard_control | 0.0062 | - | 0.746986 |
+
+The final-source stress median remains below the recorded baseline
+(`0.1112s` versus `0.1648s`; `4.908x` versus `7.342x`) but is slower than the
+earlier optimized capture. These short timings are machine- and run-dependent;
+the rerun is compatibility evidence, not a stable estimate of the exact speed
+change. All three DART gates passed again, and no wall-clock gate was added.
 
 ## Gates and Remaining Work
 

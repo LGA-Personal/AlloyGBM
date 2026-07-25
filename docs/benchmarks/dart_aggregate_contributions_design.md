@@ -1,6 +1,6 @@
 # DART Aggregate Contribution Design
 
-Status: approved for implementation
+Status: implemented with final-review corrections
 
 Date: 2026-07-25
 
@@ -154,7 +154,19 @@ tree slices, validation, and warm-start offsets remain unchanged.
 
 Each selected flat tree contributes only to its class slice. The aggregate
 buffer replaces both repeated train re-add walks and the corresponding
-validation re-add walks.
+validation re-add walks. Clearing and finalization track distinct class slices
+with material dropped trees in first-selection order, so a round capped at
+`max_drop` does not scan all `classes * rows` scratch values. Phantom selected
+class-trees remain in the dropout and normalization count even though they
+touch no scratch slice.
+
+Multiclass DART weights reuse the existing optional `DartTreeWeights` section.
+The overlay is flattened in the same class-major stump order as
+`MultiClassTrees`; no artifact section kind or public parameter is added.
+Engine and predictor decoders keep `1.0` defaults when the optional section is
+absent. Python warm starts rebuild the trainer's round-major class-tree prefix
+by encoded `tree_id`, inserting `1.0` slots for leading and internal phantom
+rounds rather than compacting by encounter order.
 
 ### Joint trainer
 
@@ -192,8 +204,9 @@ To minimize numerical drift:
 
 - Scratch length mismatches return a contract error rather than truncating or
   panicking.
-- Scratch buffers are cleared before each dropout phase, including rounds with
-  no selected trees.
+- Active scalar or joint scratch buffers are cleared before each DART dropout
+  phase. Multiclass clears only distinct material class slices and finalizes
+  the same slices.
 - Empty and phantom trees contribute zero.
 - Existing full-prediction backups remain authoritative for rejected rounds.
 - Scratch storage is ephemeral and never serialized.
@@ -223,7 +236,8 @@ Add explicit mismatch-length error tests.
 - Cover single-output validation, early stopping, warm start, ranking, and
   forest normalization.
 - Cover multiclass multi-stump trees, leaf-wise growth, validation, warm
-  start, and artifact round trips.
+  start, weighted artifact/predictor parity, save/load, and phantom-gap
+  reconstruction.
 - Cover joint training-time versus predictor parity and warm start.
 
 Existing suites remain the primary compatibility contract.
@@ -262,6 +276,25 @@ Update:
 - changing any DART default;
 - adding an expected-drop parameter or automatic policy;
 - persistent per-tree prediction storage;
-- artifact format changes;
-- prediction-time changes; and
+- new artifact section kinds;
+- prediction algorithm changes beyond applying persisted DART weights; and
 - unrelated scanner or histogram optimization.
+
+## Final-Review Corrections
+
+The final review broadened this work from traversal reuse to the correctness
+boundaries exercised by multiclass DART:
+
+- final trainer weights now survive engine serialization, predictor decoding,
+  Python save/load, and weighted continuation through the existing optional
+  DART overlay;
+- multiclass warm-start replay walks every prior logical tree and initial
+  validation loss evaluates those replayed validation scores;
+- scratch clear/finalize work is proportional to distinct material dropped
+  classes, while flat dropout order and phantom normalization counts remain
+  unchanged; and
+- single-output scratch is allocated only for DART.
+
+These corrections do not calibrate or close the separate expected-drop policy
+question. The high-pressure stress profile remains descriptive and
+non-blocking for quality.

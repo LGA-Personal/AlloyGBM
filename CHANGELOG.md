@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Fixed
+
+- **Preserved multiclass DART weights across artifacts and warm starts.**
+  Multiclass artifacts now reuse the optional `DartTreeWeights` section in
+  class-major stump order, artifact-backed prediction applies those weights,
+  and warm starts rebuild dense round-major class-tree weights from encoded
+  tree IDs, including phantom gaps. Warm-start validation loss now evaluates
+  the replayed prior ensemble rather than baseline-only scores.
+
 ### Features
 
 - **Added opt-in exact exclusive feature bundling.**
@@ -17,6 +26,8 @@
 - **Avoided a repeated DART dropped-tree walk during normalization.** Training
   now aggregates selected dropped-tree contributions while forming the
   dropout prediction state, then reuses that aggregate for normalization.
+  Multiclass finalization clears and applies only class slices with material
+  dropped trees; standard and GOSS fits no longer allocate scalar DART scratch.
 - On the full 80,000-row one-hot benchmark, exact bundling reduced 512 logical
   features to 32 physical columns, improved median native training time by
   33.3%, and improved total fit time by 21.3%. Dense input remained inactive
