@@ -15,15 +15,9 @@ import numpy as np
 DEFAULT_SEEDS = (7, 13, 29)
 ALL_SECTIONS = ("quantile", "goss", "dart")
 QUANTILE_ALPHAS = (0.1, 0.5, 0.9)
+QUANTILE_ARMS = ("proxy", "smooth_0.05", "smooth_0.10")
 GOSS_RATES = ((0.1, 0.1), (0.2, 0.1), (0.2, 0.2), (0.3, 0.1))
-QUICK_DART_CONFIGS = ((8, 0.1, 5), (16, 0.2, 5))
-FULL_DART_CONFIGS = (
-    (50, 0.05, 50),
-    (100, 0.10, 50),
-    (200, 0.20, 50),
-    (100, 0.10, 5),
-    (100, 0.10, 20),
-)
+SMOOTHING_TIE_ABS_TOLERANCE = 1e-12
 DART_PROFILE_STANDARD = "standard_control"
 DART_PROFILE_DEFAULT_LIKE = "default_like"
 DART_PROFILE_STRESS = "stress_profile"
@@ -32,6 +26,38 @@ DART_PROFILES = {
     DART_PROFILE_DEFAULT_LIKE,
     DART_PROFILE_STRESS,
 }
+
+
+@dataclass(frozen=True)
+class DartConfig:
+    horizon: int
+    drop_rate: float
+    max_drop: int
+    profile: str
+
+
+QUICK_DART_CONFIGS = (
+    DartConfig(8, 0.10, 5, DART_PROFILE_DEFAULT_LIKE),
+    DartConfig(16, 0.20, 5, DART_PROFILE_STRESS),
+)
+FULL_DART_CONFIGS = (
+    DartConfig(50, 0.05, 50, DART_PROFILE_DEFAULT_LIKE),
+    DartConfig(100, 0.10, 50, DART_PROFILE_DEFAULT_LIKE),
+    DartConfig(200, 0.20, 50, DART_PROFILE_STRESS),
+    DartConfig(100, 0.10, 5, DART_PROFILE_DEFAULT_LIKE),
+    DartConfig(100, 0.10, 20, DART_PROFILE_DEFAULT_LIKE),
+)
+
+
+@dataclass(frozen=True)
+class ExpectedMatrix:
+    sections: tuple[str, ...]
+    seeds: tuple[int, ...]
+    quantile_alphas: tuple[float, ...]
+    quantile_arms: tuple[str, ...]
+    goss_rates: tuple[tuple[float, float], ...]
+    goss_rounds: int
+    dart_configs: tuple[DartConfig, ...]
 
 
 @dataclass(frozen=True)
@@ -173,17 +199,60 @@ def _is_matching_dart_control(row: BoostingRow, control: BoostingRow) -> bool:
     )
 
 
+def make_expected_matrix(
+    *,
+    sections: Sequence[str],
+    seeds: Sequence[int],
+    quick: bool,
+    quantile_alphas: Sequence[float] = QUANTILE_ALPHAS,
+    quantile_arms: Sequence[str] = QUANTILE_ARMS,
+    goss_rates: Sequence[tuple[float, float]] = GOSS_RATES,
+    goss_rounds: int | None = None,
+    dart_configs: Sequence[DartConfig] | None = None,
+) -> ExpectedMatrix:
+    """Build the explicit request contract used to evaluate benchmark evidence."""
+    selected = tuple(dict.fromkeys(sections))
+    unknown_sections = set(selected).difference(ALL_SECTIONS)
+    if unknown_sections:
+        raise ValueError(f"unknown benchmark sections: {', '.join(sorted(unknown_sections))}")
+    if not selected:
+        raise ValueError("at least one benchmark section is required")
+    seed_values = tuple(int(seed) for seed in seeds)
+    if not seed_values:
+        raise ValueError("at least one seed is required")
+    return ExpectedMatrix(
+        sections=selected,
+        seeds=seed_values,
+        quantile_alphas=tuple(float(alpha) for alpha in quantile_alphas),
+        quantile_arms=tuple(quantile_arms),
+        goss_rates=tuple(
+            (float(top_rate), float(other_rate))
+            for top_rate, other_rate in goss_rates
+        ),
+        goss_rounds=(8 if quick else 100) if goss_rounds is None else goss_rounds,
+        dart_configs=tuple(
+            dart_configs
+            if dart_configs is not None
+            else QUICK_DART_CONFIGS if quick else FULL_DART_CONFIGS
+        ),
+    )
+
+
 def evaluate_gates(
     quantile_rows: Sequence[QuantileSplitRow],
     goss_rows: Sequence[BoostingRow],
     dart_rows: Sequence[BoostingRow],
+    *,
+    expected: ExpectedMatrix,
 ) -> list[GateResult]:
     """Evaluate complete evidence contracts without making timing a quality gate."""
-    required_quantile_arms = {"proxy", "smooth_0.05", "smooth_0.10"}
     quantile_keys = [(row.seed, row.alpha, row.arm) for row in quantile_rows]
-    quantile_groups: dict[tuple[int, float], set[str]] = {}
-    for row in quantile_rows:
-        quantile_groups.setdefault((row.seed, row.alpha), set()).add(row.arm)
+    expected_quantile_keys = {
+        (seed, alpha, arm)
+        for seed in expected.seeds
+        for alpha in expected.quantile_alphas
+        for arm in expected.quantile_arms
+    }
     quantile_values_valid = all(
         np.isfinite(
             [row.threshold, row.gain, row.pinball_loss, row.baseline_loss]
@@ -194,8 +263,8 @@ def evaluate_gates(
     )
     quantile_contract = (
         bool(quantile_rows)
-        and len(quantile_keys) == len(set(quantile_keys))
-        and all(arms == required_quantile_arms for arms in quantile_groups.values())
+        and set(quantile_keys) == expected_quantile_keys
+        and len(quantile_keys) == len(expected_quantile_keys)
         and quantile_values_valid
     )
 
@@ -214,27 +283,61 @@ def evaluate_gates(
     goss_keys = [(row.seed, row.arm) for row in goss_rows]
     goss_by_seed_arm = {(row.seed, row.arm): row for row in goss_rows}
     goss_arms = [row for row in goss_rows if row.arm.startswith("goss_")]
+    expected_retained = {
+        top_rate + other_rate for top_rate, other_rate in expected.goss_rates
+    }
+    expected_goss_keys = {
+        (seed, arm)
+        for seed in expected.seeds
+        for arm in (
+            "standard_full",
+            *(f"uniform_{retained:.2f}" for retained in expected_retained),
+            *(
+                f"goss_{top_rate:.2f}_{other_rate:.2f}"
+                for top_rate, other_rate in expected.goss_rates
+            ),
+        )
+    }
     goss_values_valid = all(
         row.section == "goss"
         and np.isfinite([row.rmse, row.baseline_rmse, row.fit_seconds]).all()
         and row.fit_seconds > 0.0
         and row.completed_rounds > 0
-        and row.requested_rounds > 0
+        and row.requested_rounds == expected.goss_rounds
         for row in goss_rows
     )
-    goss_controls_present = all(
-        row.matched_control is not None
-        and (row.seed, row.matched_control) in goss_by_seed_arm
-        and _is_matching_goss_control(
-            row,
-            goss_by_seed_arm[(row.seed, row.matched_control)],
+    goss_controls_present = True
+    for seed in expected.seeds:
+        standard = goss_by_seed_arm.get((seed, "standard_full"))
+        goss_controls_present &= (
+            standard is not None
+            and standard.retained_fraction is None
+            and standard.matched_control is None
         )
-        for row in goss_arms
-    )
+        for retained in expected_retained:
+            uniform_arm = f"uniform_{retained:.2f}"
+            uniform = goss_by_seed_arm.get((seed, uniform_arm))
+            goss_controls_present &= (
+                uniform is not None
+                and uniform.retained_fraction == retained
+                and uniform.matched_control is None
+            )
+        for top_rate, other_rate in expected.goss_rates:
+            retained = top_rate + other_rate
+            arm = f"goss_{top_rate:.2f}_{other_rate:.2f}"
+            row = goss_by_seed_arm.get((seed, arm))
+            control = goss_by_seed_arm.get((seed, f"uniform_{retained:.2f}"))
+            goss_controls_present &= (
+                row is not None
+                and control is not None
+                and row.retained_fraction == retained
+                and row.matched_control == f"uniform_{retained:.2f}"
+                and _is_matching_goss_control(row, control)
+            )
     goss_contract = (
         bool(goss_rows)
-        and len(goss_keys) == len(set(goss_keys))
-        and all((seed, "standard_full") in goss_by_seed_arm for seed, _ in goss_keys)
+        and set(goss_keys) == expected_goss_keys
+        and len(goss_keys) == len(expected_goss_keys)
         and bool(goss_arms)
         and goss_values_valid
         and goss_controls_present
@@ -265,6 +368,20 @@ def evaluate_gates(
 
     dart_keys = [(row.seed, row.arm) for row in dart_rows]
     dart_by_seed_arm = {(row.seed, row.arm): row for row in dart_rows}
+    expected_dart_keys = {
+        (seed, arm)
+        for seed in expected.seeds
+        for arm in (
+            *(
+                f"standard_{horizon}"
+                for horizon in {config.horizon for config in expected.dart_configs}
+            ),
+            *(
+                f"dart_{config.horizon}_{config.drop_rate:.2f}_{config.max_drop}"
+                for config in expected.dart_configs
+            ),
+        )
+    }
     dart_arms = [
         row
         for row in dart_rows
@@ -281,18 +398,32 @@ def evaluate_gates(
         and row.requested_rounds > 0
         for row in dart_rows
     )
-    dart_controls_present = all(
-        row.matched_control is not None
-        and (row.seed, row.matched_control) in dart_by_seed_arm
-        and _is_matching_dart_control(
-            row,
-            dart_by_seed_arm[(row.seed, row.matched_control)],
-        )
-        for row in dart_arms
-    )
+    dart_controls_present = True
+    for seed in expected.seeds:
+        for horizon in {config.horizon for config in expected.dart_configs}:
+            standard = dart_by_seed_arm.get((seed, f"standard_{horizon}"))
+            dart_controls_present &= (
+                standard is not None
+                and standard.requested_rounds == horizon
+                and standard.dart_profile == DART_PROFILE_STANDARD
+                and standard.matched_control is None
+            )
+        for config in expected.dart_configs:
+            arm = f"dart_{config.horizon}_{config.drop_rate:.2f}_{config.max_drop}"
+            row = dart_by_seed_arm.get((seed, arm))
+            control = dart_by_seed_arm.get((seed, f"standard_{config.horizon}"))
+            dart_controls_present &= (
+                row is not None
+                and control is not None
+                and row.requested_rounds == config.horizon
+                and row.dart_profile == config.profile
+                and row.matched_control == f"standard_{config.horizon}"
+                and _is_matching_dart_control(row, control)
+            )
     dart_contract = (
         bool(dart_rows)
-        and len(dart_keys) == len(set(dart_keys))
+        and set(dart_keys) == expected_dart_keys
+        and len(dart_keys) == len(expected_dart_keys)
         and bool(dart_arms)
         and all(row.dart_profile in DART_PROFILES for row in dart_rows)
         and dart_values_valid
@@ -320,33 +451,52 @@ def evaluate_gates(
         )
     dart_quality = all(ratio <= 1.50 for ratio in dart_ratios)
 
+    gates_by_section = {
+        "quantile": [
+            GateResult(
+                "quantile_contract",
+                quantile_contract,
+                "exact requested seed/alpha/arm matrix, finite values, unique rows, and children",
+            ),
+            GateResult(
+                "quantile_quality",
+                quantile_quality,
+                f"maximum loss/no-split ratio={max(quantile_ratios, default=float('inf')):.3f} (limit 1.100)",
+            ),
+        ],
+        "goss": [
+            GateResult(
+                "goss_contract",
+                goss_contract,
+                "exact requested seed/rate/control matrix, finite metrics, and unique rows",
+            ),
+            GateResult("goss_completion", goss_completion, "all GOSS fits completed requested rounds"),
+            GateResult(
+                "goss_quality",
+                goss_quality,
+                f"maximum GOSS/uniform ratio={max(goss_ratios, default=float('inf')):.3f} (limit 1.350)",
+            ),
+            GateResult("goss_baseline", goss_baseline, "every GOSS median beats its mean-predictor baseline"),
+        ],
+        "dart": [
+            GateResult(
+                "dart_contract",
+                dart_contract,
+                "exact requested seed/config/profile/control matrix, finite metrics, unique rows, and pressure",
+            ),
+            GateResult("dart_completion", dart_completion, "all DART fits completed requested rounds"),
+            GateResult(
+                "dart_quality",
+                dart_quality,
+                "maximum default-like DART/standard ratio="
+                f"{max(dart_ratios, default=0.0):.3f} (limit 1.500; stress/profile arms excluded)",
+            ),
+        ],
+    }
     return [
-        GateResult("quantile_contract", quantile_contract, "required arms, finite values, unique rows, and children"),
-        GateResult(
-            "quantile_quality",
-            quantile_quality,
-            f"maximum loss/no-split ratio={max(quantile_ratios, default=float('inf')):.3f} (limit 1.100)",
-        ),
-        GateResult("goss_contract", goss_contract, "required controls, finite metrics, and unique rows"),
-        GateResult("goss_completion", goss_completion, "all GOSS fits completed requested rounds"),
-        GateResult(
-            "goss_quality",
-            goss_quality,
-            f"maximum GOSS/uniform ratio={max(goss_ratios, default=float('inf')):.3f} (limit 1.350)",
-        ),
-        GateResult("goss_baseline", goss_baseline, "every GOSS median beats its mean-predictor baseline"),
-        GateResult(
-            "dart_contract",
-            dart_contract,
-            "explicit profiles, required controls, finite metrics, unique rows, and pressure",
-        ),
-        GateResult("dart_completion", dart_completion, "all DART fits completed requested rounds"),
-        GateResult(
-            "dart_quality",
-            dart_quality,
-            "maximum default-like DART/standard ratio="
-            f"{max(dart_ratios, default=0.0):.3f} (limit 1.500; stress/profile arms excluded)",
-        ),
+        gate
+        for section in expected.sections
+        for gate in gates_by_section[section]
     ]
 
 
@@ -457,13 +607,7 @@ def run_dart_experiment(
     seeds: tuple[int, ...] = DEFAULT_SEEDS,
     n_train: int = 512,
     n_test: int = 256,
-    configs: tuple[tuple[int, float, int], ...] = (
-        (50, 0.05, 50),
-        (100, 0.10, 50),
-        (200, 0.20, 50),
-        (100, 0.10, 5),
-        (100, 0.10, 20),
-    ),
+    configs: tuple[DartConfig, ...] = FULL_DART_CONFIGS,
 ) -> list[BoostingRow]:
     """Profile DART versus standard boosting across representative settings."""
     from alloygbm import GBMRegressor
@@ -517,7 +661,10 @@ def run_dart_experiment(
             seed=seed, n_train=n_train, n_test=n_test
         )
         standard_rows: dict[int, BoostingRow] = {}
-        for horizon, drop_rate, max_drop in configs:
+        for config in configs:
+            horizon = config.horizon
+            drop_rate = config.drop_rate
+            max_drop = config.max_drop
             standard_arm = f"standard_{horizon}"
             if horizon not in standard_rows:
                 standard_rows[horizon] = fit_row(
@@ -545,11 +692,7 @@ def run_dart_experiment(
                     dropout_pressure=configured_dropout_pressure(
                         n_estimators=horizon, drop_rate=drop_rate, max_drop=max_drop
                     ),
-                    dart_profile=(
-                        DART_PROFILE_DEFAULT_LIKE
-                        if drop_rate <= 0.10
-                        else DART_PROFILE_STRESS
-                    ),
+                    dart_profile=config.profile,
                     boosting_mode="dart",
                     dart_drop_rate=drop_rate,
                     dart_max_drop=max_drop,
@@ -559,8 +702,8 @@ def run_dart_experiment(
 
 
 def _validate_alpha(alpha: float) -> None:
-    if not np.isfinite(alpha) or not 0.0 <= alpha <= 1.0:
-        raise ValueError("alpha must be finite and in [0.0, 1.0]")
+    if not np.isfinite(alpha) or not 0.0 < alpha < 1.0:
+        raise ValueError("alpha must be finite and in (0.0, 1.0)")
 
 
 def weighted_quantile(values: np.ndarray, weights: np.ndarray, alpha: float) -> float:
@@ -614,7 +757,7 @@ def proxy_pinball_grad_hess(
     weights = np.asarray(weights, dtype=np.float64)
     if residual.shape != weights.shape:
         raise ValueError("residual and weights must have matching shapes")
-    gradient = np.where(residual < 0.0, 1.0 - alpha, -alpha) * weights
+    gradient = np.where(residual <= 0.0, 1.0 - alpha, -alpha) * weights
     return gradient, weights.copy()
 
 
@@ -840,8 +983,8 @@ def render_report(
     dart_configs = QUICK_DART_CONFIGS if quick else FULL_DART_CONFIGS
     goss_rates = ", ".join(f"({top_rate:.2f}, {other_rate:.2f})" for top_rate, other_rate in GOSS_RATES)
     dart_config_text = ", ".join(
-        f"({horizon}, {drop_rate:.2f}, {max_drop})"
-        for horizon, drop_rate, max_drop in dart_configs
+        f"({config.horizon}, {config.drop_rate:.2f}, {config.max_drop}, {config.profile})"
+        for config in dart_configs
     )
     selected_sections = [
         section
@@ -879,11 +1022,33 @@ def render_report(
             arm: _median([row.pinball_loss for row in quantile_rows if row.arm == arm])
             for arm in smooth_arms
         }
-        best_smoothing = min(smooth_losses, key=smooth_losses.__getitem__)
+        first_arm, second_arm = smooth_arms
+        if np.isclose(
+            smooth_losses[first_arm],
+            smooth_losses[second_arm],
+            rtol=0.0,
+            atol=SMOOTHING_TIE_ABS_TOLERANCE,
+        ):
+            smoothing_result = (
+                "Smoothed-pinball median tie "
+                f"(absolute tolerance `{SMOOTHING_TIE_ABS_TOLERANCE:.0e}`): "
+                f"`{first_arm}={smooth_losses[first_arm]:.17f}`, "
+                f"`{second_arm}={smooth_losses[second_arm]:.17f}`."
+            )
+        else:
+            best_smoothing, other_smoothing = sorted(
+                smooth_arms,
+                key=lambda arm: (smooth_losses[arm], arm),
+            )
+            smoothing_result = (
+                f"Best smoothed-pinball median arm: `{best_smoothing}` "
+                f"(`{smooth_losses[best_smoothing]:.17f}` versus "
+                f"`{smooth_losses[other_smoothing]:.17f}`)."
+            )
         lines.extend(
             [
                 "",
-                f"Best smoothed-pinball median arm: `{best_smoothing}`.",
+                smoothing_result,
                 "This identifies evidence for a later production decision; it does not recommend a production default.",
             ]
         )
@@ -904,7 +1069,7 @@ def render_report(
                 "## DART Dropout Profile",
                 "",
                 "The configured dropout pressure is an expected-work proxy, not an observed drop count.",
-                "The 1.50x RMSE quality gate applies only to `default_like` rows (drop rate <= 0.10).",
+                "The 1.50x RMSE quality gate applies only to explicitly configured `default_like` rows.",
                 "`stress_profile` rows remain visible and must satisfy finite, control-matching, and completion contracts, but their quality is non-blocking.",
                 "Standard-time ratios use unrounded median fit times; displayed fit times are rounded.",
                 "",
@@ -970,11 +1135,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     selected_gates: list[GateResult] = []
     if args.gate:
-        selected_gates = [
-            gate
-            for gate in evaluate_gates(quantile_rows, goss_rows, dart_rows)
-            if any(gate.name.startswith(section) for section in sections)
-        ]
+        expected = make_expected_matrix(
+            sections=sections,
+            seeds=effective_seeds,
+            quick=args.quick,
+        )
+        selected_gates = evaluate_gates(
+            quantile_rows,
+            goss_rows,
+            dart_rows,
+            expected=expected,
+        )
         report += "\n## Gate Summary\n\n| Gate | Result | Detail |\n|---|---|---|\n"
         for gate in selected_gates:
             report += f"| {gate.name} | {'pass' if gate.passed else 'FAIL'} | {gate.detail} |\n"
