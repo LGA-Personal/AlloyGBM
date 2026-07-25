@@ -906,6 +906,7 @@ def render_report(
                 "The configured dropout pressure is an expected-work proxy, not an observed drop count.",
                 "The 1.50x RMSE quality gate applies only to `default_like` rows (drop rate <= 0.10).",
                 "`stress_profile` rows remain visible and must satisfy finite, control-matching, and completion contracts, but their quality is non-blocking.",
+                "Standard-time ratios use unrounded median fit times; displayed fit times are rounded.",
                 "",
                 "| Arm | Profile | Matched standard | Median RMSE | Fit seconds | Seconds/round | Standard time ratio | Dropout pressure |",
                 "|---|---|---|---:|---:|---:|---:|---:|",

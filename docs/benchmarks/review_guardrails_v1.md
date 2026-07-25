@@ -33,31 +33,32 @@ This identifies evidence for a later production decision; it does not recommend 
 
 | Arm | Matched control | Median RMSE | Baseline RMSE | Fit seconds |
 |---|---|---:|---:|---:|
-| goss_0.10_0.10 | uniform_0.20 | 0.417081 | 1.173886 | 0.0118 |
-| goss_0.20_0.10 | uniform_0.30 | 0.452279 | 1.173886 | 0.0119 |
-| goss_0.20_0.20 | uniform_0.40 | 0.507839 | 1.173886 | 0.0118 |
-| goss_0.30_0.10 | uniform_0.40 | 0.490197 | 1.173886 | 0.0117 |
+| goss_0.10_0.10 | uniform_0.20 | 0.417081 | 1.173886 | 0.0113 |
+| goss_0.20_0.10 | uniform_0.30 | 0.452279 | 1.173886 | 0.0118 |
+| goss_0.20_0.20 | uniform_0.40 | 0.507839 | 1.173886 | 0.0119 |
+| goss_0.30_0.10 | uniform_0.40 | 0.490197 | 1.173886 | 0.0119 |
 | standard_full | - | 0.671367 | 1.173886 | 0.0120 |
-| uniform_0.20 | - | 0.545133 | 1.173886 | 0.0095 |
-| uniform_0.30 | - | 0.553216 | 1.173886 | 0.0104 |
-| uniform_0.40 | - | 0.539075 | 1.173886 | 0.0107 |
+| uniform_0.20 | - | 0.545133 | 1.173886 | 0.0093 |
+| uniform_0.30 | - | 0.553216 | 1.173886 | 0.0101 |
+| uniform_0.40 | - | 0.539075 | 1.173886 | 0.0106 |
 
 ## DART Dropout Profile
 
 The configured dropout pressure is an expected-work proxy, not an observed drop count.
 The 1.50x RMSE quality gate applies only to `default_like` rows (drop rate <= 0.10).
 `stress_profile` rows remain visible and must satisfy finite, control-matching, and completion contracts, but their quality is non-blocking.
+Standard-time ratios use unrounded median fit times; displayed fit times are rounded.
 
 | Arm | Profile | Matched standard | Median RMSE | Fit seconds | Seconds/round | Standard time ratio | Dropout pressure |
 |---|---|---|---:|---:|---:|---:|---:|
-| dart_100_0.10_20 | default_like | standard_100 | 0.972156 | 0.0339 | 0.000339 | 2.832 | 499.50 |
-| dart_100_0.10_5 | default_like | standard_100 | 0.946943 | 0.0279 | 0.000279 | 2.335 | 377.00 |
-| dart_100_0.10_50 | default_like | standard_100 | 0.972156 | 0.0335 | 0.000335 | 2.804 | 499.50 |
-| dart_200_0.20_50 | stress_profile | standard_200 | 1.046657 | 0.1881 | 0.000940 | 8.158 | 3982.00 |
-| dart_50_0.05_50 | default_like | standard_50 | 0.941069 | 0.0095 | 0.000190 | 1.509 | 70.75 |
-| standard_100 | standard_control | - | 0.671367 | 0.0120 | 0.000120 | - | - |
-| standard_200 | standard_control | - | 0.571675 | 0.0231 | 0.000115 | - | - |
-| standard_50 | standard_control | - | 0.746986 | 0.0063 | 0.000126 | - | - |
+| dart_100_0.10_20 | default_like | standard_100 | 0.972156 | 0.0321 | 0.000321 | 2.663 | 499.50 |
+| dart_100_0.10_5 | default_like | standard_100 | 0.946943 | 0.0266 | 0.000266 | 2.201 | 377.00 |
+| dart_100_0.10_50 | default_like | standard_100 | 0.972156 | 0.0323 | 0.000323 | 2.672 | 499.50 |
+| dart_200_0.20_50 | stress_profile | standard_200 | 1.046657 | 0.1665 | 0.000833 | 7.288 | 3982.00 |
+| dart_50_0.05_50 | default_like | standard_50 | 0.941069 | 0.0094 | 0.000188 | 1.510 | 70.75 |
+| standard_100 | standard_control | - | 0.671367 | 0.0121 | 0.000121 | - | - |
+| standard_200 | standard_control | - | 0.571675 | 0.0229 | 0.000114 | - | - |
+| standard_50 | standard_control | - | 0.746986 | 0.0062 | 0.000125 | - | - |
 
 ## Gate Summary
 

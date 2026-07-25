@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import redirect_stderr
 import importlib.util
 from io import StringIO
+import re
 import sys
 import tempfile
 import unittest
@@ -38,11 +39,27 @@ class ReviewGuardrailTests(unittest.TestCase):
         workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
         )
+        step_blocks = [
+            block.rstrip()
+            for block in re.findall(r"(?ms)^      - name: .*?(?=^      - name:|\Z)", workflow)
+        ]
+        condition = "matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'"
+        expected_steps = (
+            (
+                "Review benchmark contract tests",
+                "python -m pytest benchmarks/tests/test_review_guardrails.py -q",
+            ),
+            (
+                "Review benchmark quality gates",
+                "python benchmarks/review_guardrails.py --quick --gate",
+            ),
+        )
 
-        self.assertIn("benchmarks/tests/test_review_guardrails.py", workflow)
-        self.assertIn("benchmarks/review_guardrails.py --quick --gate", workflow)
-        self.assertIn("matrix.os == 'ubuntu-latest'", workflow)
-        self.assertIn("matrix.python-version == '3.13'", workflow)
+        for name, command in expected_steps:
+            self.assertIn(
+                f"      - name: {name}\n        if: {condition}\n        run: {command}",
+                step_blocks,
+            )
 
     def test_quantile_fixture_and_weighted_quantile_are_deterministic(self) -> None:
         first = BENCHMARK.make_quantile_split_data(seed=17, n_train=96, n_test=48)
@@ -384,6 +401,7 @@ class ReviewGuardrailTests(unittest.TestCase):
             "default_like",
             "stress_profile",
             "quality is non-blocking",
+            "Standard-time ratios use unrounded median fit times; displayed fit times are rounded.",
         ):
             self.assertIn(text, report)
 
