@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stderr
 import importlib.util
+from io import StringIO
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -159,6 +162,92 @@ class ReviewGuardrailTests(unittest.TestCase):
         gates = BENCHMARK.evaluate_gates(quantile_rows, goss_rows, dart_rows)
         self.assertTrue(next(gate for gate in gates if gate.name == "quantile_quality").passed)
 
+    def test_control_contracts_reject_wrong_goss_and_dart_matches(self) -> None:
+        quantile_rows = [
+            BENCHMARK.QuantileSplitRow(7, 0.5, arm, 0.0, 1.0, 1.0, 1.2, 8, 8)
+            for arm in ("proxy", "smooth_0.05", "smooth_0.10")
+        ]
+        valid_goss_rows = [
+            BENCHMARK.BoostingRow("goss", 7, "standard_full", 1.0, 2.0, 1.0, 8, 8),
+            BENCHMARK.BoostingRow("goss", 7, "uniform_0.20", 1.0, 2.0, 1.0, 8, 8, 0.2),
+            BENCHMARK.BoostingRow("goss", 7, "uniform_0.30", 1.0, 2.0, 1.0, 8, 8, 0.3),
+        ]
+        valid_dart_rows = [
+            BENCHMARK.BoostingRow("dart", 7, "standard_8", 1.0, 2.0, 1.0, 8, 8),
+            BENCHMARK.BoostingRow("dart", 7, "standard_16", 1.0, 2.0, 1.0, 16, 16),
+            BENCHMARK.BoostingRow("dart", 7, "goss_0.20_0.10", 1.0, 2.0, 1.0, 8, 8),
+        ]
+
+        for control in ("standard_full", "goss_0.20_0.10", "uniform_0.20"):
+            goss_rows = [
+                *valid_goss_rows,
+                BENCHMARK.BoostingRow(
+                    "goss", 7, "goss_0.20_0.10", 1.0, 2.0, 1.0, 8, 8, 0.3, control
+                ),
+            ]
+            gates = BENCHMARK.evaluate_gates(quantile_rows, goss_rows, valid_dart_rows)
+            self.assertFalse(next(gate for gate in gates if gate.name == "goss_contract").passed)
+
+        for control in ("goss_0.20_0.10", "standard_16"):
+            dart_rows = [
+                *valid_dart_rows,
+                BENCHMARK.BoostingRow(
+                    "dart", 7, "dart_8_0.10_5", 1.0, 2.0, 1.0, 8, 8, None, control, 20.0
+                ),
+            ]
+            gates = BENCHMARK.evaluate_gates(quantile_rows, valid_goss_rows, dart_rows)
+            self.assertFalse(next(gate for gate in gates if gate.name == "dart_contract").passed)
+
+    def test_contract_gates_reject_duplicate_and_nonfinite_rows(self) -> None:
+        quantile_rows = [
+            BENCHMARK.QuantileSplitRow(7, 0.5, arm, 0.0, 1.0, 1.0, 1.2, 8, 8)
+            for arm in ("proxy", "smooth_0.05", "smooth_0.10")
+        ]
+        valid_goss_rows = [
+            BENCHMARK.BoostingRow("goss", 7, "standard_full", 1.0, 2.0, 1.0, 8, 8),
+            BENCHMARK.BoostingRow("goss", 7, "uniform_0.30", 1.0, 2.0, 1.0, 8, 8, 0.3),
+            BENCHMARK.BoostingRow(
+                "goss", 7, "goss_0.20_0.10", 1.0, 2.0, 1.0, 8, 8, 0.3, "uniform_0.30"
+            ),
+        ]
+        valid_dart_rows = [
+            BENCHMARK.BoostingRow("dart", 7, "standard_8", 1.0, 2.0, 1.0, 8, 8),
+            BENCHMARK.BoostingRow(
+                "dart", 7, "dart_8_0.10_5", 1.0, 2.0, 1.0, 8, 8, None, "standard_8", 20.0
+            ),
+        ]
+        duplicate_quantile_rows = [*quantile_rows, quantile_rows[0]]
+        nonfinite_goss_rows = [
+            *valid_goss_rows[:-1],
+            BENCHMARK.BoostingRow(
+                "goss", 7, "goss_0.20_0.10", float("nan"), 2.0, 1.0, 8, 8, 0.3, "uniform_0.30"
+            ),
+        ]
+
+        gates = BENCHMARK.evaluate_gates(
+            duplicate_quantile_rows, nonfinite_goss_rows, valid_dart_rows
+        )
+        self.assertFalse(next(gate for gate in gates if gate.name == "quantile_contract").passed)
+        self.assertFalse(next(gate for gate in gates if gate.name == "goss_contract").passed)
+
+    def test_cli_reports_failed_selected_gate_to_stderr_and_returns_nonzero(self) -> None:
+        failed_goss_rows = [
+            BENCHMARK.BoostingRow("goss", 7, "standard_full", 1.0, 2.0, 1.0, 8, 8),
+            BENCHMARK.BoostingRow("goss", 7, "uniform_0.30", 1.0, 2.0, 1.0, 8, 8, 0.3),
+            BENCHMARK.BoostingRow(
+                "goss", 7, "goss_0.20_0.10", 1.5, 2.0, 1.0, 8, 8, 0.3, "uniform_0.30"
+            ),
+        ]
+        stderr = StringIO()
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output = Path(temporary_directory) / "failed-gate.md"
+            with patch.object(BENCHMARK, "run_benchmark", return_value=([], failed_goss_rows, [])):
+                with redirect_stderr(stderr):
+                    exit_code = BENCHMARK.main(["--section", "goss", "--gate", "--output", str(output)])
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("gate failed: goss_quality", stderr.getvalue())
+
     def test_report_and_cli_render_requested_sections(self) -> None:
         quantile_rows = [
             BENCHMARK.QuantileSplitRow(7, 0.5, "proxy", 0.0, 1.0, 1.0, 1.2, 8, 8),
@@ -187,6 +276,11 @@ class ReviewGuardrailTests(unittest.TestCase):
         )
         for text in (
             "Configuration",
+            "Quantile fixture: 160 training rows, 96 held-out rows",
+            "Boosting fixture: 256 training rows, 128 held-out rows",
+            "Model settings: depth 4, learning rate 0.06, lambda_l2=1.0",
+            "GOSS rates: (0.10, 0.10), (0.20, 0.10), (0.20, 0.20), (0.30, 0.10)",
+            "DART configs: (8, 0.10, 5), (16, 0.20, 5)",
             "## Quantile Split Selection",
             "## GOSS Rate Sweep",
             "## DART Dropout Profile",

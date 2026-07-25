@@ -14,6 +14,16 @@ import numpy as np
 
 DEFAULT_SEEDS = (7, 13, 29)
 ALL_SECTIONS = ("quantile", "goss", "dart")
+QUANTILE_ALPHAS = (0.1, 0.5, 0.9)
+GOSS_RATES = ((0.1, 0.1), (0.2, 0.1), (0.2, 0.2), (0.3, 0.1))
+QUICK_DART_CONFIGS = ((8, 0.1, 5), (16, 0.2, 5))
+FULL_DART_CONFIGS = (
+    (50, 0.05, 50),
+    (100, 0.10, 50),
+    (200, 0.20, 50),
+    (100, 0.10, 5),
+    (100, 0.10, 20),
+)
 
 
 @dataclass(frozen=True)
@@ -131,6 +141,28 @@ def _finite_positive(value: float) -> bool:
     return bool(np.isfinite(value) and value > 0.0)
 
 
+def _is_matching_goss_control(row: BoostingRow, control: BoostingRow) -> bool:
+    """Require a GOSS arm's uniform control to retain the same row fraction."""
+    if row.retained_fraction is None or control.retained_fraction is None:
+        return False
+    if not np.isfinite(row.retained_fraction) or not np.isfinite(control.retained_fraction):
+        return False
+    return (
+        control.section == "goss"
+        and control.arm == f"uniform_{row.retained_fraction:.2f}"
+        and control.retained_fraction == row.retained_fraction
+    )
+
+
+def _is_matching_dart_control(row: BoostingRow, control: BoostingRow) -> bool:
+    """Require a DART arm's standard control to use the same fit horizon."""
+    return (
+        control.section == "dart"
+        and control.arm == f"standard_{row.requested_rounds}"
+        and control.requested_rounds == row.requested_rounds
+    )
+
+
 def evaluate_gates(
     quantile_rows: Sequence[QuantileSplitRow],
     goss_rows: Sequence[BoostingRow],
@@ -181,7 +213,12 @@ def evaluate_gates(
         for row in goss_rows
     )
     goss_controls_present = all(
-        row.matched_control is not None and (row.seed, row.matched_control) in goss_by_seed_arm
+        row.matched_control is not None
+        and (row.seed, row.matched_control) in goss_by_seed_arm
+        and _is_matching_goss_control(
+            row,
+            goss_by_seed_arm[(row.seed, row.matched_control)],
+        )
         for row in goss_arms
     )
     goss_contract = (
@@ -228,7 +265,12 @@ def evaluate_gates(
         for row in dart_rows
     )
     dart_controls_present = all(
-        row.matched_control is not None and (row.seed, row.matched_control) in dart_by_seed_arm
+        row.matched_control is not None
+        and (row.seed, row.matched_control) in dart_by_seed_arm
+        and _is_matching_dart_control(
+            row,
+            dart_by_seed_arm[(row.seed, row.matched_control)],
+        )
         for row in dart_arms
     )
     dart_contract = (
@@ -291,7 +333,7 @@ def run_goss_experiment(
     n_train: int = 512,
     n_test: int = 256,
     n_estimators: int = 100,
-    rates: tuple[tuple[float, float], ...] = ((0.1, 0.1), (0.2, 0.1), (0.2, 0.2), (0.3, 0.1)),
+    rates: tuple[tuple[float, float], ...] = GOSS_RATES,
 ) -> list[BoostingRow]:
     """Compare full, uniform-subsample, and GOSS models for each rate pair."""
     from alloygbm import GBMRegressor
@@ -636,7 +678,7 @@ def select_quantile_split(
 def run_quantile_experiment(
     *,
     seeds: tuple[int, ...] = DEFAULT_SEEDS,
-    alphas: tuple[float, ...] = (0.1, 0.5, 0.9),
+    alphas: tuple[float, ...] = QUANTILE_ALPHAS,
     n_train: int = 512,
     n_test: int = 256,
 ) -> list[QuantileSplitRow]:
@@ -727,13 +769,7 @@ def run_benchmark(
             seeds=seed_values,
             n_train=256 if quick else 512,
             n_test=128 if quick else 256,
-            configs=((8, 0.1, 5), (16, 0.2, 5)) if quick else (
-                (50, 0.05, 50),
-                (100, 0.10, 50),
-                (200, 0.20, 50),
-                (100, 0.10, 5),
-                (100, 0.10, 20),
-            ),
+            configs=QUICK_DART_CONFIGS if quick else FULL_DART_CONFIGS,
         )
     return quantile_rows, goss_rows, dart_rows
 
@@ -768,6 +804,14 @@ def render_report(
     quick: bool,
 ) -> str:
     """Render medians and descriptive timings without production recommendations."""
+    quantile_train, quantile_test = (160, 96) if quick else (512, 256)
+    boosting_train, boosting_test = (256, 128) if quick else (512, 256)
+    dart_configs = QUICK_DART_CONFIGS if quick else FULL_DART_CONFIGS
+    goss_rates = ", ".join(f"({top_rate:.2f}, {other_rate:.2f})" for top_rate, other_rate in GOSS_RATES)
+    dart_config_text = ", ".join(
+        f"({horizon}, {drop_rate:.2f}, {max_drop})"
+        for horizon, drop_rate, max_drop in dart_configs
+    )
     selected_sections = [
         section
         for section, rows in (
@@ -785,6 +829,11 @@ def render_report(
         f"- Sections: {', '.join(selected_sections)}",
         f"- Seeds: {', '.join(str(seed) for seed in seeds)}",
         f"- Mode: {'quick' if quick else 'full'}",
+        f"- Quantile fixture: {quantile_train} training rows, {quantile_test} held-out rows.",
+        f"- Boosting fixture: {boosting_train} training rows, {boosting_test} held-out rows.",
+        "- Model settings: depth 4, learning rate 0.06, lambda_l2=1.0, manual policy, deterministic quantile binning.",
+        f"- GOSS rates: {goss_rates}.",
+        f"- DART configs: {dart_config_text}.",
         "- Timing is descriptive only; no wall-clock threshold is a quality gate.",
     ]
 
