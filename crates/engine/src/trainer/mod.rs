@@ -1,6 +1,8 @@
 //! Trainer module — gradient-boosting iteration controller.
 
 mod interaction;
+#[allow(dead_code)]
+mod monotone;
 mod policy;
 mod tree_build;
 mod validate;
