@@ -303,3 +303,39 @@ def test_policy_metadata_normalizer_rejects_invalid_ranges(
 @pytest.mark.parametrize("value", [None, [], (), 0, "policy"])
 def test_policy_metadata_normalizer_is_total_over_arbitrary_metadata(value: object) -> None:
     assert _resolved_training_policy_from_metadata(value) is None
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["min_split_gain", "row_subsample", "col_subsample", "effective_split_l2"],
+)
+def test_policy_metadata_normalizer_and_wrapper_load_reject_huge_float_ints(
+    field: str,
+    tmp_path,
+) -> None:
+    metadata_policy = valid_policy_metadata()
+    metadata_policy[field] = int("9" * 4_000)
+
+    assert _resolved_training_policy_from_metadata(metadata_policy) is None
+
+    X, y = make_dense_fixture(rows=128, features=4, classes=None)
+    model = GBMRegressor(n_estimators=4, training_policy="auto", seed=7).fit(X, y)
+    path = tmp_path / f"huge-{field}.agbm"
+    model.save_model(str(path))
+
+    payload = path.read_bytes()
+    metadata_len = int.from_bytes(payload[4:8], "little")
+    metadata = json.loads(payload[8 : 8 + metadata_len])
+    artifact = payload[8 + metadata_len :]
+    metadata["resolved_training_policy"] = metadata_policy
+    serialized_metadata = json.dumps(metadata).encode("utf-8")
+    path.write_bytes(
+        b"AGBP"
+        + len(serialized_metadata).to_bytes(4, "little")
+        + serialized_metadata
+        + artifact
+    )
+
+    restored = GBMRegressor.load_model(str(path))
+
+    assert restored.resolved_training_policy_ is None

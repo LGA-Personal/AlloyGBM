@@ -75,10 +75,13 @@ def _resolved_training_policy_from_metadata(
         return None
     if type(auto_split_l2_applied) is not bool:
         return None
-    min_split_gain = float(min_split_gain)
-    row_subsample = float(row_subsample)
-    col_subsample = float(col_subsample)
-    effective_split_l2 = float(effective_split_l2)
+    try:
+        min_split_gain = float(min_split_gain)
+        row_subsample = float(row_subsample)
+        col_subsample = float(col_subsample)
+        effective_split_l2 = float(effective_split_l2)
+    except OverflowError:
+        return None
     if (
         not all(
             math.isfinite(item)
