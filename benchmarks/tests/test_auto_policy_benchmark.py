@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -170,22 +171,41 @@ def balanced_records(
         ("large-wide-reg", "large-wide", "regression", None, None),
     )
     for fixture, stratum, objective, current_accuracy, current_ndcg in cases:
+        current_loss = 1.0 if current_ndcg is None else 1.0 - current_ndcg
+        candidate_loss = current_loss * candidate_loss_ratio
         rows.extend(
             paired_records(
                 candidate_arm=candidate_arm,
                 fixture=fixture,
                 shape_stratum=stratum,
                 objective=objective,
-                current_loss=1.0,
-                candidate_loss=candidate_loss_ratio,
+                current_loss=current_loss,
+                candidate_loss=candidate_loss,
                 current_accuracy=current_accuracy,
                 candidate_accuracy=(
                     current_accuracy if current_accuracy is not None else None
                 ),
                 current_ndcg=current_ndcg,
-                candidate_ndcg=current_ndcg,
+                candidate_ndcg=(
+                    None if current_ndcg is None else 1.0 - candidate_loss
+                ),
                 candidate_fit_seconds=candidate_fit_seconds,
             )
+        )
+    return rows
+
+
+def complete_balanced_records() -> list[object]:
+    rows = balanced_records(
+        candidate_arm="manual_default", candidate_loss_ratio=0.995
+    )
+    for arm in ("no_gain_floor", "quality_first"):
+        rows.extend(
+            row
+            for row in balanced_records(
+                candidate_arm=arm, candidate_loss_ratio=0.995
+            )
+            if row.arm != "current_auto"
         )
     return rows
 
@@ -457,37 +477,140 @@ def test_manual_policy_rejects_wrong_scalar_categories_before_comparison(
         )
 
 
-def test_temporary_split_l2_sets_and_deletes_previously_absent_value(
+def test_fit_arm_clears_all_training_experiments_and_sets_only_required_split_l2(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv(BENCHMARK.SPLIT_L2_ENV_VAR, raising=False)
-    estimator = SimpleNamespace(lambda_l2=3.5)
-    observed: list[tuple[str | None, float]] = []
+    ambient = {
+        name: f"ambient-{index}"
+        for index, name in enumerate(BENCHMARK.TRAINING_EXPERIMENT_ENV_VARS)
+    }
+    for name, value in ambient.items():
+        monkeypatch.setenv(name, value)
+    observed: list[dict[str, str]] = []
 
-    def fit_callback() -> None:
-        observed.append(
-            (os.environ.get(BENCHMARK.SPLIT_L2_ENV_VAR), estimator.lambda_l2)
-        )
+    class RecordingRegressor:
+        def __init__(self, **params: object) -> None:
+            self.params = params
+            self.rounds_completed_ = 10
+            self.resolved_training_policy_ = {
+                **sample_resolved_policy(
+                    min_split_gain=0.0,
+                    row_subsample=0.8,
+                    col_subsample=0.5,
+                    effective_split_l2=2.0,
+                ),
+                "requested_mode": "manual",
+            }
 
-    with BENCHMARK.temporary_split_l2(2.0):
-        fit_callback()
+        def fit(self, X: np.ndarray, y: np.ndarray) -> "RecordingRegressor":
+            observed.append(
+                {
+                    name: os.environ[name]
+                    for name in BENCHMARK.TRAINING_EXPERIMENT_ENV_VARS
+                    if name in os.environ
+                }
+            )
+            return self
 
-    assert observed == [("2.0", 3.5)]
-    assert BENCHMARK.SPLIT_L2_ENV_VAR not in os.environ
-    assert estimator.lambda_l2 == 3.5
+        def predict(self, X: np.ndarray) -> np.ndarray:
+            return np.zeros(len(X), dtype=np.float32)
+
+    import alloygbm
+
+    monkeypatch.setattr(alloygbm, "GBMRegressor", RecordingRegressor)
+    spec = BENCHMARK.FixtureSpec(
+        "fit-env", "small-narrow", "regression", 8, 2, 40
+    )
+    fixture = SimpleNamespace(
+        X_train=np.zeros((8, 2), dtype=np.float32),
+        y_train=np.zeros(8, dtype=np.float32),
+        X_test=np.zeros((2, 2), dtype=np.float32),
+        y_test=np.zeros(2, dtype=np.float32),
+    )
+    current_policy = sample_resolved_policy(
+        auto_split_l2_applied=True,
+        effective_split_l2=2.0,
+    )
+
+    BENCHMARK._fit_arm(
+        spec,
+        fixture,
+        seed=7,
+        arm="no_gain_floor",
+        current_policy=current_policy,
+    )
+
+    assert observed == [{BENCHMARK.SPLIT_L2_ENV_VAR: "2.0"}]
+    assert {
+        name: os.environ.get(name)
+        for name in BENCHMARK.TRAINING_EXPERIMENT_ENV_VARS
+    } == ambient
 
 
-def test_temporary_split_l2_restores_existing_value_after_error(
+def test_fit_arm_restores_exact_training_experiment_environment_after_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv(BENCHMARK.SPLIT_L2_ENV_VAR, "7.25")
+    present_names = BENCHMARK.TRAINING_EXPERIMENT_ENV_VARS[::2]
+    ambient = {name: f"ambient-{index}" for index, name in enumerate(present_names)}
+    for name in BENCHMARK.TRAINING_EXPERIMENT_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    for name, value in ambient.items():
+        monkeypatch.setenv(name, value)
 
-    with pytest.raises(RuntimeError, match="fit failed"):
-        with BENCHMARK.temporary_split_l2(None):
-            assert BENCHMARK.SPLIT_L2_ENV_VAR not in os.environ
+    class FailingRegressor:
+        def __init__(self, **params: object) -> None:
+            pass
+
+        def fit(self, X: np.ndarray, y: np.ndarray) -> None:
+            assert all(
+                name not in os.environ
+                for name in BENCHMARK.TRAINING_EXPERIMENT_ENV_VARS
+            )
             raise RuntimeError("fit failed")
 
-    assert os.environ[BENCHMARK.SPLIT_L2_ENV_VAR] == "7.25"
+    import alloygbm
+
+    monkeypatch.setattr(alloygbm, "GBMRegressor", FailingRegressor)
+    spec = BENCHMARK.FixtureSpec(
+        "fit-env-error", "small-narrow", "regression", 8, 2, 40
+    )
+    fixture = SimpleNamespace(
+        X_train=np.zeros((8, 2), dtype=np.float32),
+        y_train=np.zeros(8, dtype=np.float32),
+    )
+
+    with pytest.raises(RuntimeError, match="fit failed"):
+        BENCHMARK._fit_arm(
+            spec,
+            fixture,
+            seed=7,
+            arm="current_auto",
+            current_policy=None,
+        )
+
+    assert {
+        name: os.environ.get(name)
+        for name in BENCHMARK.TRAINING_EXPERIMENT_ENV_VARS
+    } == {
+        name: ambient.get(name)
+        for name in BENCHMARK.TRAINING_EXPERIMENT_ENV_VARS
+    }
+
+
+def test_known_training_experiment_list_covers_engine_and_python_sources() -> None:
+    source_roots = (
+        REPO_ROOT / "crates" / "engine" / "src",
+        REPO_ROOT / "bindings" / "python" / "src",
+        REPO_ROOT / "bindings" / "python" / "alloygbm",
+    )
+    observed: set[str] = set()
+    pattern = re.compile(r"ALLOYGBM_EXPERIMENT_[A-Z0-9_]+")
+    for root in source_roots:
+        for path in root.rglob("*"):
+            if path.suffix in {".py", ".rs"}:
+                observed.update(pattern.findall(path.read_text(encoding="utf-8")))
+
+    assert observed == set(BENCHMARK.TRAINING_EXPERIMENT_ENV_VARS)
 
 
 def test_candidate_is_rejected_by_one_protected_shape_regression() -> None:
@@ -529,7 +652,7 @@ def test_candidate_is_rejected_when_ndcg_at_10_drops() -> None:
     rows = paired_records(
         objective="ranking",
         current_loss=0.20,
-        candidate_loss=0.19,
+        candidate_loss=0.221,
         current_ndcg=0.80,
         candidate_ndcg=0.779,
     )
@@ -550,14 +673,15 @@ def test_candidate_is_rejected_when_ndcg_at_10_drops() -> None:
     ],
 )
 def test_candidate_is_rejected_for_non_finite_values(field: str, value: float) -> None:
+    is_ranking = field == "ndcg_at_10"
     kwargs = {
-        "objective": "ranking" if field == "ndcg_at_10" else "binary",
-        "current_loss": 1.0,
-        "candidate_loss": 0.98,
-        "current_accuracy": 0.8,
-        "candidate_accuracy": 0.8,
-        "current_ndcg": 0.75 if field == "ndcg_at_10" else None,
-        "candidate_ndcg": 0.75 if field == "ndcg_at_10" else None,
+        "objective": "ranking" if is_ranking else "binary",
+        "current_loss": 0.25 if is_ranking else 1.0,
+        "candidate_loss": 0.25 if is_ranking else 0.98,
+        "current_accuracy": None if is_ranking else 0.8,
+        "candidate_accuracy": None if is_ranking else 0.8,
+        "current_ndcg": 0.75 if is_ranking else None,
+        "candidate_ndcg": 0.75 if is_ranking else None,
     }
     rows = paired_records(**kwargs)
     rows[-1] = BENCHMARK.BenchmarkRecord(
@@ -583,6 +707,91 @@ def test_candidate_is_rejected_for_zero_rounds_or_recorded_error() -> None:
     assert "completed_rounds" in zero_result.detail
     assert not error_result.passed
     assert "native fit failed" in error_result.detail
+
+
+@pytest.mark.parametrize("objective", ["unknown", "", "Regression"])
+def test_evaluate_gates_rejects_unknown_objectives(objective: str) -> None:
+    spec = BENCHMARK.FixtureSpec(
+        "unknown-objective", "small-narrow", objective, 512, 8, 10
+    )
+    rows = [
+        record(
+            fixture=spec.name,
+            objective=objective,
+            arm=arm,
+            primary_metric=1.0,
+        )
+        for arm in BENCHMARK.ARMS
+    ]
+
+    result = BENCHMARK.evaluate_gates(rows, specs=(spec,), seeds=(7,))
+
+    assert not result.passed
+    assert not result.evidence_valid
+    assert "objective" in result.detail
+
+
+@pytest.mark.parametrize(
+    ("objective", "changes", "field"),
+    [
+        ("regression", {"primary_metric": -0.1}, "primary_metric"),
+        ("sparse_regression", {"primary_metric": float("inf")}, "primary_metric"),
+        ("regression", {"fit_seconds": -0.1}, "fit_seconds"),
+        ("regression", {"fit_seconds": float("nan")}, "fit_seconds"),
+        ("regression", {"completed_rounds": 0}, "completed_rounds"),
+        ("regression", {"accuracy": 0.5}, "accuracy"),
+        ("sparse_regression", {"ndcg_at_10": float("nan")}, "ndcg_at_10"),
+        ("binary", {"accuracy": None}, "accuracy"),
+        ("binary", {"accuracy": -0.1}, "accuracy"),
+        ("multiclass", {"accuracy": 1.1}, "accuracy"),
+        ("multiclass", {"accuracy": float("inf")}, "accuracy"),
+        ("binary", {"ndcg_at_10": float("-inf")}, "ndcg_at_10"),
+        ("ranking", {"accuracy": float("nan")}, "accuracy"),
+        ("ranking", {"ndcg_at_10": None}, "ndcg_at_10"),
+        ("ranking", {"ndcg_at_10": -0.1, "primary_metric": 1.1}, "ndcg_at_10"),
+        ("ranking", {"ndcg_at_10": 1.1, "primary_metric": 0.0}, "ndcg_at_10"),
+        ("ranking", {"ndcg_at_10": float("inf")}, "ndcg_at_10"),
+        ("ranking", {"primary_metric": 1.1}, "primary_metric"),
+    ],
+)
+def test_evaluate_gates_enforces_objective_record_schema(
+    objective: str,
+    changes: dict[str, object],
+    field: str,
+) -> None:
+    rows = complete_balanced_records()
+    index = next(
+        index
+        for index, row in enumerate(rows)
+        if row.objective == objective and row.arm == "current_auto"
+    )
+    rows[index] = replace(rows[index], **changes)
+
+    result = BENCHMARK.evaluate_gates(
+        rows, specs=BALANCED_SPECS, seeds=(7,)
+    )
+
+    assert not result.passed
+    assert not result.evidence_valid
+    assert field in result.detail
+
+
+def test_evaluate_gates_requires_ranking_loss_to_equal_one_minus_ndcg() -> None:
+    rows = complete_balanced_records()
+    index = next(
+        index
+        for index, row in enumerate(rows)
+        if row.objective == "ranking" and row.arm == "current_auto"
+    )
+    rows[index] = replace(rows[index], primary_metric=0.2800001)
+
+    result = BENCHMARK.evaluate_gates(
+        rows, specs=BALANCED_SPECS, seeds=(7,)
+    )
+
+    assert not result.passed
+    assert not result.evidence_valid
+    assert "1 - ndcg_at_10" in result.detail
 
 
 def test_candidate_is_rejected_by_a_worse_shape_median() -> None:
@@ -1067,26 +1276,30 @@ def test_markdown_report_computes_no_gain_floor_record_difference_summary(
     rows = []
     no_gain_index = 0
     for spec in BENCHMARK.full_specs():
-        for seed in BENCHMARK.SEEDS:
-            for arm in BENCHMARK.ARMS:
-                primary_metric = 1.0
-                if arm == "no_gain_floor":
-                    primary_metric = no_gain_ratios.get(no_gain_index, 1.0)
-                    no_gain_index += 1
-                rows.append(
+            for seed in BENCHMARK.SEEDS:
+                for arm in BENCHMARK.ARMS:
+                    primary_metric = 0.3 if spec.objective == "ranking" else 1.0
+                    if arm == "no_gain_floor":
+                        primary_metric *= no_gain_ratios.get(no_gain_index, 1.0)
+                        no_gain_index += 1
+                    rows.append(
                     record(
                         fixture=spec.name,
                         shape_stratum=spec.shape_stratum,
                         objective=spec.objective,
                         seed=seed,
                         arm=arm,
-                        primary_metric=primary_metric,
+                            primary_metric=primary_metric,
                         accuracy=(
                             0.8
                             if spec.objective in {"binary", "multiclass"}
                             else None
                         ),
-                        ndcg_at_10=(0.7 if spec.objective == "ranking" else None),
+                            ndcg_at_10=(
+                                1.0 - primary_metric
+                                if spec.objective == "ranking"
+                                else None
+                            ),
                     )
                 )
     report_path = tmp_path / "report.md"
@@ -1115,25 +1328,30 @@ def test_markdown_report_has_all_candidate_exact_shape_objective_ratios(
     rows = []
     for spec in specs:
         for seed in BENCHMARK.SEEDS:
-            for arm in BENCHMARK.ARMS:
-                rows.append(
+                for arm in BENCHMARK.ARMS:
+                    primary_metric = (
+                        0.3 if spec.objective == "ranking" else 1.0
+                    )
+                    if arm != "current_auto":
+                        primary_metric *= 0.995
+                    rows.append(
                     record(
                         fixture=spec.name,
                         shape_stratum=spec.shape_stratum,
                         objective=spec.objective,
                         seed=seed,
                         arm=arm,
-                        primary_metric=(
-                            1.0 if arm == "current_auto" else 0.995
-                        ),
+                            primary_metric=primary_metric,
                         accuracy=(
                             0.8
                             if spec.objective in {"binary", "multiclass"}
                             else None
                         ),
-                        ndcg_at_10=(
-                            0.7 if spec.objective == "ranking" else None
-                        ),
+                            ndcg_at_10=(
+                                1.0 - primary_metric
+                                if spec.objective == "ranking"
+                                else None
+                            ),
                     )
                 )
     report_path = tmp_path / "report.md"

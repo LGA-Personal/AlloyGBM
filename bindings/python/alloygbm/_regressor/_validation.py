@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import math
+import sys
 from collections.abc import Sequence
+
+
+_MAX_SUPPORTED_TRAIN_ROUNDS = 4_096
 
 
 def _resolved_training_policy_to_dict(summary: object) -> dict[str, object] | None:
@@ -63,7 +67,16 @@ def _resolved_training_policy_from_metadata(
         effective_round_cap,
         min_rows_per_leaf,
     )
-    if any(type(item) is not int or item <= 0 for item in integer_values):
+    if any(
+        type(item) is not int or item <= 0 or item > sys.maxsize
+        for item in integer_values
+    ):
+        return None
+    if (
+        requested_rounds > _MAX_SUPPORTED_TRAIN_ROUNDS
+        or effective_round_cap > _MAX_SUPPORTED_TRAIN_ROUNDS
+        or effective_round_cap > requested_rounds
+    ):
         return None
     float_values = (
         min_split_gain,

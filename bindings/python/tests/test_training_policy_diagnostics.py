@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import numpy as np
 import pytest
 
@@ -170,6 +171,32 @@ def test_save_load_model_round_trips_resolved_policy(tmp_path) -> None:
     assert restored.resolved_training_policy_ == model.resolved_training_policy_
 
 
+@pytest.mark.parametrize(
+    ("estimator", "fit_kwargs"),
+    [
+        (GBMClassifier(n_estimators=3, training_policy="manual", seed=7), {}),
+        (
+            GBMRanker(n_estimators=3, training_policy="auto", seed=7),
+            {"group": np.repeat(np.arange(20), 6)},
+        ),
+    ],
+)
+def test_classifier_and_ranker_save_load_round_trip_resolved_policy(
+    estimator, fit_kwargs: dict[str, object], tmp_path
+) -> None:
+    if isinstance(estimator, GBMClassifier):
+        X, y = make_dense_fixture(rows=120, features=6, classes=2)
+    else:
+        X, y = make_dense_fixture(rows=120, features=6, classes=None)
+    estimator.fit(X, y, **fit_kwargs)
+    path = tmp_path / f"{type(estimator).__name__}.agbm"
+
+    estimator.save_model(str(path))
+    restored = type(estimator).load_model(str(path))
+
+    assert restored.resolved_training_policy_ == estimator.resolved_training_policy_
+
+
 def test_load_model_without_policy_metadata_returns_none(tmp_path) -> None:
     X, y = make_dense_fixture(rows=128, features=4, classes=None)
     model = GBMRegressor(n_estimators=4, training_policy="auto", seed=7).fit(X, y)
@@ -300,6 +327,43 @@ def test_policy_metadata_normalizer_rejects_invalid_ranges(
     assert _resolved_training_policy_from_metadata(metadata) is None
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("requested_rounds", 4_097),
+        ("effective_round_cap", 4_097),
+        ("requested_rounds", sys.maxsize + 1),
+        ("effective_round_cap", sys.maxsize + 1),
+        ("min_rows_per_leaf", sys.maxsize + 1),
+    ],
+)
+def test_policy_metadata_normalizer_rejects_unsupported_integer_bounds(
+    field: str, value: int
+) -> None:
+    metadata = valid_policy_metadata()
+    metadata[field] = value
+
+    assert _resolved_training_policy_from_metadata(metadata) is None
+
+
+def test_policy_metadata_normalizer_rejects_round_cap_above_request() -> None:
+    metadata = valid_policy_metadata()
+    metadata["requested_rounds"] = 31
+    metadata["effective_round_cap"] = 32
+
+    assert _resolved_training_policy_from_metadata(metadata) is None
+
+
+def test_policy_metadata_normalizer_allows_large_supported_min_rows() -> None:
+    metadata = valid_policy_metadata()
+    metadata["min_rows_per_leaf"] = 4_097
+
+    normalized = _resolved_training_policy_from_metadata(metadata)
+
+    assert normalized is not None
+    assert normalized["min_rows_per_leaf"] == 4_097
+
+
 @pytest.mark.parametrize("value", [None, [], (), 0, "policy"])
 def test_policy_metadata_normalizer_is_total_over_arbitrary_metadata(value: object) -> None:
     assert _resolved_training_policy_from_metadata(value) is None
@@ -328,6 +392,65 @@ def test_policy_metadata_normalizer_and_wrapper_load_reject_huge_float_ints(
     metadata = json.loads(payload[8 : 8 + metadata_len])
     artifact = payload[8 + metadata_len :]
     metadata["resolved_training_policy"] = metadata_policy
+    serialized_metadata = json.dumps(metadata).encode("utf-8")
+    path.write_bytes(
+        b"AGBP"
+        + len(serialized_metadata).to_bytes(4, "little")
+        + serialized_metadata
+        + artifact
+    )
+
+    restored = GBMRegressor.load_model(str(path))
+
+    assert restored.resolved_training_policy_ is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("requested_rounds", 4_097),
+        ("effective_round_cap", 4_097),
+        ("min_rows_per_leaf", sys.maxsize + 1),
+    ],
+)
+def test_wrapper_load_rejects_unsupported_policy_integer_bounds(
+    field: str, value: int, tmp_path
+) -> None:
+    X, y = make_dense_fixture(rows=128, features=4, classes=None)
+    model = GBMRegressor(n_estimators=4, training_policy="auto", seed=7).fit(X, y)
+    path = tmp_path / f"invalid-{field}.agbm"
+    model.save_model(str(path))
+
+    payload = path.read_bytes()
+    metadata_len = int.from_bytes(payload[4:8], "little")
+    metadata = json.loads(payload[8 : 8 + metadata_len])
+    artifact = payload[8 + metadata_len :]
+    metadata["resolved_training_policy"][field] = value
+    serialized_metadata = json.dumps(metadata).encode("utf-8")
+    path.write_bytes(
+        b"AGBP"
+        + len(serialized_metadata).to_bytes(4, "little")
+        + serialized_metadata
+        + artifact
+    )
+
+    restored = GBMRegressor.load_model(str(path))
+
+    assert restored.resolved_training_policy_ is None
+
+
+def test_wrapper_load_rejects_round_cap_above_request(tmp_path) -> None:
+    X, y = make_dense_fixture(rows=128, features=4, classes=None)
+    model = GBMRegressor(n_estimators=4, training_policy="auto", seed=7).fit(X, y)
+    path = tmp_path / "invalid-round-relationship.agbm"
+    model.save_model(str(path))
+
+    payload = path.read_bytes()
+    metadata_len = int.from_bytes(payload[4:8], "little")
+    metadata = json.loads(payload[8 : 8 + metadata_len])
+    artifact = payload[8 + metadata_len :]
+    metadata["resolved_training_policy"]["requested_rounds"] = 31
+    metadata["resolved_training_policy"]["effective_round_cap"] = 32
     serialized_metadata = json.dumps(metadata).encode("utf-8")
     path.write_bytes(
         b"AGBP"

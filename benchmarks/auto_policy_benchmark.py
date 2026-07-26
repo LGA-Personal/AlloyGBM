@@ -31,7 +31,17 @@ OBJECTIVES = (
     "multiclass",
     "ranking",
 )
-SPLIT_L2_ENV_VAR = "ALLOYGBM_EXPERIMENT_SPLIT_L2"
+TRAINING_EXPERIMENT_ENV_VARS = (
+    "ALLOYGBM_EXPERIMENT_SPLIT_L2",
+    "ALLOYGBM_EXPERIMENT_SPLIT_L1",
+    "ALLOYGBM_EXPERIMENT_MIN_CHILD_HESS",
+    "ALLOYGBM_EXPERIMENT_SPLIT_MIN_LEAF_MAGNITUDE",
+    "ALLOYGBM_EXPERIMENT_FORCE_MANUAL_POLICY",
+    "ALLOYGBM_EXPERIMENT_ENABLE_LEAF_REFINEMENT",
+    "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_RANK",
+    "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_CORE_SPAN_RATIO",
+)
+SPLIT_L2_ENV_VAR = TRAINING_EXPERIMENT_ENV_VARS[0]
 POLICY_KEYS = {
     "requested_mode",
     "requested_rounds",
@@ -422,20 +432,27 @@ def derive_candidate_params(
 
 
 @contextmanager
-def temporary_split_l2(value: float | None) -> Iterator[None]:
-    """Temporarily set split-only L2 and restore the exact prior environment."""
-    previous = os.environ.get(SPLIT_L2_ENV_VAR)
+def isolated_training_experiments(split_l2: float | None) -> Iterator[None]:
+    """Isolate one serial fit from process-wide training experiment settings.
+
+    This API is intentionally single-process and serial because environment
+    variables are process-global.
+    """
+    previous = {
+        name: os.environ.get(name) for name in TRAINING_EXPERIMENT_ENV_VARS
+    }
     try:
-        if value is None:
-            os.environ.pop(SPLIT_L2_ENV_VAR, None)
-        else:
-            os.environ[SPLIT_L2_ENV_VAR] = str(float(value))
+        for name in TRAINING_EXPERIMENT_ENV_VARS:
+            os.environ.pop(name, None)
+        if split_l2 is not None:
+            os.environ[SPLIT_L2_ENV_VAR] = str(float(split_l2))
         yield
     finally:
-        if previous is None:
-            os.environ.pop(SPLIT_L2_ENV_VAR, None)
-        else:
-            os.environ[SPLIT_L2_ENV_VAR] = previous
+        for name in TRAINING_EXPERIMENT_ENV_VARS:
+            os.environ.pop(name, None)
+        for name, value in previous.items():
+            if value is not None:
+                os.environ[name] = value
 
 
 def _manual_split_l2(
@@ -532,7 +549,7 @@ def _fit_arm(
         estimator = GBMRanker(ranking_objective="rank:ndcg", **params)
 
     started = time.perf_counter()
-    with temporary_split_l2(split_l2):
+    with isolated_training_experiments(split_l2):
         if spec.objective == "ranking":
             estimator.fit(
                 fixture.X_train,
@@ -686,17 +703,56 @@ def _record_issue(record: BenchmarkRecord) -> str | None:
     context = f"{record.fixture} seed={record.seed} arm={record.arm}"
     if record.error is not None:
         return f"{context}: {record.error}"
-    if record.completed_rounds <= 0:
+    if record.objective not in OBJECTIVES:
+        return f"{context}: objective must be one of {OBJECTIVES}"
+    if (
+        isinstance(record.completed_rounds, bool)
+        or not isinstance(record.completed_rounds, (int, np.integer))
+        or record.completed_rounds <= 0
+    ):
         return f"{context}: completed_rounds must be greater than zero"
     for field in ("primary_metric", "fit_seconds"):
-        if not math.isfinite(float(getattr(record, field))):
-            return f"{context}: {field} must be finite"
+        value = getattr(record, field)
+        try:
+            finite_value = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return f"{context}: {field} must be a finite, non-negative number"
+        if isinstance(value, (bool, np.bool_)) or not math.isfinite(finite_value):
+            return f"{context}: {field} must be a finite, non-negative number"
+        if finite_value < 0.0:
+            return f"{context}: {field} must be non-negative"
+    if record.objective in {"regression", "sparse_regression"}:
+        if record.accuracy is not None:
+            return f"{context}: accuracy must be None for regression"
+        if record.ndcg_at_10 is not None:
+            return f"{context}: ndcg_at_10 must be None for regression"
     if record.objective in {"binary", "multiclass"}:
-        if record.accuracy is None or not math.isfinite(record.accuracy):
-            return f"{context}: accuracy must be finite"
+        if record.accuracy is None or not math.isfinite(float(record.accuracy)):
+            return f"{context}: accuracy must be finite and in [0, 1]"
+        if not 0.0 <= float(record.accuracy) <= 1.0:
+            return f"{context}: accuracy must be in [0, 1]"
+        if record.ndcg_at_10 is not None:
+            return f"{context}: ndcg_at_10 must be None for classification"
     if record.objective == "ranking":
-        if record.ndcg_at_10 is None or not math.isfinite(record.ndcg_at_10):
-            return f"{context}: ndcg_at_10 must be finite"
+        if record.accuracy is not None:
+            return f"{context}: accuracy must be None for ranking"
+        if record.ndcg_at_10 is None or not math.isfinite(float(record.ndcg_at_10)):
+            return f"{context}: ndcg_at_10 must be finite and in [0, 1]"
+        if not 0.0 <= float(record.ndcg_at_10) <= 1.0:
+            return f"{context}: ndcg_at_10 must be in [0, 1]"
+        if not 0.0 <= float(record.primary_metric) <= 1.0:
+            return f"{context}: primary_metric must be in [0, 1] for ranking"
+        expected_loss = 1.0 - float(record.ndcg_at_10)
+        if not math.isclose(
+            float(record.primary_metric),
+            expected_loss,
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        ):
+            return (
+                f"{context}: primary_metric must equal 1 - ndcg_at_10 "
+                f"(expected {expected_loss!r})"
+            )
     return None
 
 
