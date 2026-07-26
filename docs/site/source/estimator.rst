@@ -104,6 +104,13 @@ Stopping and policy controls
 recommended default for practical use. ``manual`` is more appropriate for
 controlled ablation work.
 
+After fitting, ``resolved_training_policy_`` reports the requested policy
+mode, requested and effective round counts, effective leaf/split thresholds,
+effective row/column sampling, and split-L2 selection. It is a diagnostic
+dictionary, not a constructor parameter or model-artifact field. It can be
+``None`` only for an older or mocked native summary, older saved wrapper
+metadata, or an unfitted or reset estimator.
+
 Early stopping is explicit-only. If ``early_stopping_rounds`` is set, call
 ``fit(..., eval_set=(X_valid, y_valid))``.
 

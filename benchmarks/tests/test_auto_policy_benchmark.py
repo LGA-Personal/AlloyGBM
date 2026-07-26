@@ -1,0 +1,1525 @@
+"""Contract tests for the deterministic auto-policy calibration benchmark."""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import re
+import sys
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+BENCHMARK_PATH = REPO_ROOT / "benchmarks" / "auto_policy_benchmark.py"
+
+
+def _load_benchmark():
+    spec = importlib.util.spec_from_file_location(
+        "auto_policy_benchmark_module", BENCHMARK_PATH
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"failed to load benchmark from {BENCHMARK_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+BENCHMARK = _load_benchmark()
+
+BALANCED_SPECS = (
+    BENCHMARK.FixtureSpec(
+        "small-narrow-reg", "small-narrow", "regression", 512, 8, 10
+    ),
+    BENCHMARK.FixtureSpec(
+        "small-wide-sparse", "small-wide", "sparse_regression", 512, 128, 10
+    ),
+    BENCHMARK.FixtureSpec(
+        "medium-narrow-bin", "medium-narrow", "binary", 2_048, 16, 10
+    ),
+    BENCHMARK.FixtureSpec(
+        "medium-wide-multi", "medium-wide", "multiclass", 2_048, 128, 10
+    ),
+    BENCHMARK.FixtureSpec(
+        "large-narrow-rank", "large-narrow", "ranking", 16_384, 16, 10
+    ),
+    BENCHMARK.FixtureSpec(
+        "large-wide-reg", "large-wide", "regression", 16_384, 128, 10
+    ),
+)
+
+
+def sample_resolved_policy(
+    *,
+    min_split_gain: float = 0.001,
+    row_subsample: float = 0.8,
+    col_subsample: float = 0.5,
+    auto_split_l2_applied: bool = False,
+    effective_split_l2: float = 0.0,
+) -> dict[str, object]:
+    return {
+        "requested_mode": "auto",
+        "requested_rounds": 40,
+        "effective_round_cap": 40,
+        "min_rows_per_leaf": 12,
+        "min_split_gain": min_split_gain,
+        "row_subsample": row_subsample,
+        "col_subsample": col_subsample,
+        "auto_split_l2_applied": auto_split_l2_applied,
+        "effective_split_l2": effective_split_l2,
+    }
+
+
+def record(
+    *,
+    fixture: str = "fixture",
+    shape_stratum: str = "small-narrow",
+    objective: str = "regression",
+    seed: int = 7,
+    arm: str,
+    primary_metric: float,
+    accuracy: float | None = None,
+    ndcg_at_10: float | None = None,
+    completed_rounds: int = 10,
+    fit_seconds: float = 1.0,
+    resolved_policy: dict[str, object] | None = None,
+    error: str | None = None,
+) -> object:
+    return BENCHMARK.BenchmarkRecord(
+        fixture=fixture,
+        shape_stratum=shape_stratum,
+        objective=objective,
+        seed=seed,
+        arm=arm,
+        primary_metric=primary_metric,
+        accuracy=accuracy,
+        ndcg_at_10=ndcg_at_10,
+        completed_rounds=completed_rounds,
+        fit_seconds=fit_seconds,
+        resolved_policy=(
+            sample_resolved_policy()
+            if resolved_policy is None
+            else resolved_policy
+        ),
+        error=error,
+    )
+
+
+def paired_records(
+    *,
+    candidate_arm: str = "quality_first",
+    fixture: str = "fixture",
+    shape_stratum: str = "small-narrow",
+    objective: str = "regression",
+    seed: int = 7,
+    current_loss: float = 1.0,
+    candidate_loss: float = 0.98,
+    current_accuracy: float | None = None,
+    candidate_accuracy: float | None = None,
+    current_ndcg: float | None = None,
+    candidate_ndcg: float | None = None,
+    candidate_rounds: int = 10,
+    candidate_fit_seconds: float = 1.0,
+    candidate_error: str | None = None,
+) -> list[object]:
+    return [
+        record(
+            fixture=fixture,
+            shape_stratum=shape_stratum,
+            objective=objective,
+            seed=seed,
+            arm="current_auto",
+            primary_metric=current_loss,
+            accuracy=current_accuracy,
+            ndcg_at_10=current_ndcg,
+        ),
+        record(
+            fixture=fixture,
+            shape_stratum=shape_stratum,
+            objective=objective,
+            seed=seed,
+            arm=candidate_arm,
+            primary_metric=candidate_loss,
+            accuracy=candidate_accuracy,
+            ndcg_at_10=candidate_ndcg,
+            completed_rounds=candidate_rounds,
+            fit_seconds=candidate_fit_seconds,
+            error=candidate_error,
+        ),
+    ]
+
+
+def balanced_records(
+    *,
+    candidate_arm: str = "quality_first",
+    candidate_loss_ratio: float = 0.98,
+    candidate_fit_seconds: float = 1.0,
+) -> list[object]:
+    rows: list[object] = []
+    cases = (
+        ("small-narrow-reg", "small-narrow", "regression", None, None),
+        ("small-wide-sparse", "small-wide", "sparse_regression", None, None),
+        ("medium-narrow-bin", "medium-narrow", "binary", 0.80, None),
+        ("medium-wide-multi", "medium-wide", "multiclass", 0.75, None),
+        ("large-narrow-rank", "large-narrow", "ranking", None, 0.72),
+        ("large-wide-reg", "large-wide", "regression", None, None),
+    )
+    for fixture, stratum, objective, current_accuracy, current_ndcg in cases:
+        current_loss = 1.0 if current_ndcg is None else 1.0 - current_ndcg
+        candidate_loss = current_loss * candidate_loss_ratio
+        rows.extend(
+            paired_records(
+                candidate_arm=candidate_arm,
+                fixture=fixture,
+                shape_stratum=stratum,
+                objective=objective,
+                current_loss=current_loss,
+                candidate_loss=candidate_loss,
+                current_accuracy=current_accuracy,
+                candidate_accuracy=(
+                    current_accuracy if current_accuracy is not None else None
+                ),
+                current_ndcg=current_ndcg,
+                candidate_ndcg=(
+                    None if current_ndcg is None else 1.0 - candidate_loss
+                ),
+                candidate_fit_seconds=candidate_fit_seconds,
+            )
+        )
+    return rows
+
+
+def complete_balanced_records() -> list[object]:
+    rows = balanced_records(
+        candidate_arm="manual_default", candidate_loss_ratio=0.995
+    )
+    for arm in ("no_gain_floor", "quality_first"):
+        rows.extend(
+            row
+            for row in balanced_records(
+                candidate_arm=arm, candidate_loss_ratio=0.995
+            )
+            if row.arm != "current_auto"
+        )
+    return rows
+
+
+def test_full_matrix_crosses_rows_and_columns_independently() -> None:
+    specs = BENCHMARK.full_specs()
+    shapes = {(spec.rows, spec.features) for spec in specs}
+    assert shapes == {
+        (512, 8),
+        (1_023, 16),
+        (512, 128),
+        (1_023, 256),
+        (2_048, 16),
+        (8_192, 16),
+        (2_048, 128),
+        (8_192, 256),
+        (16_384, 16),
+        (16_384, 256),
+    }
+    assert {spec.objective for spec in specs} == {
+        "regression",
+        "sparse_regression",
+        "binary",
+        "multiclass",
+        "ranking",
+    }
+    assert len(specs) == 10 * 5
+    assert all(
+        spec.rounds == 300
+        for spec in specs
+        if spec.shape_stratum == "small-wide"
+    )
+    assert all(
+        spec.rounds < 300
+        for spec in specs
+        if spec.shape_stratum != "small-wide"
+    )
+    for shape in shapes:
+        assert {
+            spec.objective
+            for spec in specs
+            if (spec.rows, spec.features) == shape
+        } == {"regression", "sparse_regression", "binary", "multiclass", "ranking"}
+
+
+def test_shape_strata_cover_boundary_combinations() -> None:
+    assert BENCHMARK.classify_shape(512, 8) == "small-narrow"
+    assert BENCHMARK.classify_shape(512, 128) == "small-wide"
+    assert BENCHMARK.classify_shape(2_048, 16) == "medium-narrow"
+    assert BENCHMARK.classify_shape(2_048, 128) == "medium-wide"
+    assert BENCHMARK.classify_shape(16_384, 16) == "large-narrow"
+    assert BENCHMARK.classify_shape(16_384, 256) == "large-wide"
+
+
+def test_quick_matrix_covers_all_strata_and_rotates_all_objectives() -> None:
+    specs = BENCHMARK.quick_specs()
+
+    assert len(specs) == 6
+    assert {spec.shape_stratum for spec in specs} == {
+        "small-narrow",
+        "small-wide",
+        "medium-narrow",
+        "medium-wide",
+        "large-narrow",
+        "large-wide",
+    }
+    assert {spec.objective for spec in specs} == {
+        "regression",
+        "sparse_regression",
+        "binary",
+        "multiclass",
+        "ranking",
+    }
+    assert all(spec.rounds <= 12 for spec in specs)
+
+
+@pytest.mark.parametrize(
+    "objective",
+    ["regression", "sparse_regression", "binary", "multiclass", "ranking"],
+)
+def test_same_seed_fixtures_are_byte_identical_and_different_seeds_differ(
+    objective: str,
+) -> None:
+    spec = BENCHMARK.FixtureSpec(
+        name=f"determinism-{objective}",
+        shape_stratum=BENCHMARK.classify_shape(512, 128),
+        objective=objective,
+        rows=512,
+        features=128,
+        rounds=5,
+    )
+
+    first = BENCHMARK.make_fixture(spec, seed=7)
+    second = BENCHMARK.make_fixture(spec, seed=7)
+    different = BENCHMARK.make_fixture(spec, seed=13)
+
+    for left, right in zip(first.arrays(), second.arrays(), strict=True):
+        np.testing.assert_array_equal(left, right)
+    assert any(
+        not np.array_equal(left, right)
+        for left, right in zip(first.arrays(), different.arrays(), strict=True)
+    )
+
+
+@pytest.mark.parametrize(
+    "objective", ["regression", "sparse_regression", "binary", "multiclass"]
+)
+def test_non_ranking_fixtures_are_contiguous_and_targets_contain_signal(
+    objective: str,
+) -> None:
+    features = 128 if objective == "sparse_regression" else 16
+    spec = BENCHMARK.FixtureSpec(
+        name=f"signal-{objective}",
+        shape_stratum=BENCHMARK.classify_shape(512, features),
+        objective=objective,
+        rows=512,
+        features=features,
+        rounds=5,
+    )
+
+    fixture = BENCHMARK.make_fixture(spec, seed=7)
+
+    assert fixture.X_train.dtype == np.float32
+    assert fixture.X_test.dtype == np.float32
+    assert fixture.y_train.dtype == np.float32
+    assert fixture.y_test.dtype == np.float32
+    assert fixture.X_train.flags.c_contiguous
+    assert fixture.X_test.flags.c_contiguous
+    assert fixture.y_train.flags.c_contiguous
+    assert fixture.y_test.flags.c_contiguous
+    assert not np.array_equal(fixture.X_train[: len(fixture.X_test)], fixture.X_test)
+    assert fixture.target_signal > 0.10
+    if objective in {"binary", "multiclass"}:
+        assert len(np.unique(fixture.y_train)) == (2 if objective == "binary" else 4)
+
+
+def test_sparse_fixture_density_is_below_ten_percent() -> None:
+    spec = BENCHMARK.FixtureSpec(
+        name="sparse",
+        shape_stratum="small-wide",
+        objective="sparse_regression",
+        rows=512,
+        features=128,
+        rounds=5,
+    )
+
+    fixture = BENCHMARK.make_fixture(spec, seed=7)
+
+    assert np.count_nonzero(fixture.X_train) / fixture.X_train.size < 0.10
+    assert np.count_nonzero(fixture.X_test) / fixture.X_test.size < 0.10
+
+
+def test_ranking_groups_cover_every_row_and_targets_are_query_local() -> None:
+    spec = BENCHMARK.FixtureSpec(
+        name="ranking",
+        shape_stratum="small-narrow",
+        objective="ranking",
+        rows=512,
+        features=16,
+        rounds=5,
+    )
+
+    fixture = BENCHMARK.make_fixture(spec, seed=7)
+
+    assert fixture.group_train is not None
+    assert fixture.group_test is not None
+    assert sum(np.unique(fixture.group_train, return_counts=True)[1]) == spec.rows
+    assert sum(np.unique(fixture.group_test, return_counts=True)[1]) == len(
+        fixture.y_test
+    )
+    assert fixture.target_signal > 0.10
+    for labels in (
+        fixture.y_train[fixture.group_train == group]
+        for group in np.unique(fixture.group_train)
+    ):
+        assert labels.min() == 0.0
+        assert labels.max() == 4.0
+
+
+def test_candidate_arms_change_only_declared_controls() -> None:
+    resolved = sample_resolved_policy(
+        min_split_gain=0.001,
+        row_subsample=0.8,
+        col_subsample=0.5,
+        auto_split_l2_applied=True,
+        effective_split_l2=2.0,
+    )
+
+    no_gain = BENCHMARK.derive_candidate_params("no_gain_floor", resolved)
+    quality = BENCHMARK.derive_candidate_params("quality_first", resolved)
+
+    assert no_gain == {
+        "training_policy": "manual",
+        "n_estimators": 40,
+        "min_data_in_leaf": 12,
+        "min_split_gain": 0.0,
+        "row_subsample": 0.8,
+        "col_subsample": 0.5,
+    }
+    assert quality == {
+        "training_policy": "manual",
+        "n_estimators": 40,
+        "min_data_in_leaf": 12,
+        "min_split_gain": 0.0,
+        "row_subsample": 1.0,
+        "col_subsample": 1.0,
+    }
+    assert "lambda_l2" not in no_gain
+    assert "lambda_l2" not in quality
+
+
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    [
+        (lambda policy: policy.pop("row_subsample"), "row_subsample"),
+        (lambda policy: policy.__setitem__("effective_round_cap", 0), "effective_round_cap"),
+        (lambda policy: policy.__setitem__("min_split_gain", float("nan")), "min_split_gain"),
+        (lambda policy: policy.__setitem__("requested_mode", "manual"), "requested_mode"),
+    ],
+)
+def test_candidate_derivation_rejects_malformed_current_auto_diagnostics(
+    mutation, match: str
+) -> None:
+    resolved = sample_resolved_policy()
+    mutation(resolved)
+
+    with pytest.raises(ValueError, match=match):
+        BENCHMARK.derive_candidate_params("quality_first", resolved)
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value", "params_override"),
+    [
+        ("requested_rounds", 40.0, {}),
+        ("min_split_gain", 0, {}),
+        ("row_subsample", True, {"row_subsample": 1.0}),
+        ("auto_split_l2_applied", 0, {}),
+    ],
+)
+def test_manual_policy_rejects_wrong_scalar_categories_before_comparison(
+    field: str,
+    bad_value: object,
+    params_override: dict[str, object],
+) -> None:
+    resolved = {
+        **sample_resolved_policy(
+            min_split_gain=0.0,
+            row_subsample=0.8,
+            col_subsample=0.5,
+        ),
+        "requested_mode": "manual",
+        field: bad_value,
+    }
+    params = {
+        "n_estimators": 40,
+        "min_data_in_leaf": 12,
+        "min_split_gain": 0.0,
+        "row_subsample": 0.8,
+        "col_subsample": 0.5,
+        **params_override,
+    }
+
+    with pytest.raises(ValueError, match=field):
+        BENCHMARK._validate_manual_policy(
+            resolved,
+            params=params,
+            split_l2=None,
+            context="manual-test",
+        )
+
+
+def test_fit_arm_clears_all_training_experiments_and_sets_only_required_split_l2(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ambient = {
+        name: f"ambient-{index}"
+        for index, name in enumerate(BENCHMARK.TRAINING_EXPERIMENT_ENV_VARS)
+    }
+    for name, value in ambient.items():
+        monkeypatch.setenv(name, value)
+    observed: list[dict[str, str]] = []
+
+    class RecordingRegressor:
+        def __init__(self, **params: object) -> None:
+            self.params = params
+            self.rounds_completed_ = 10
+            self.resolved_training_policy_ = {
+                **sample_resolved_policy(
+                    min_split_gain=0.0,
+                    row_subsample=0.8,
+                    col_subsample=0.5,
+                    effective_split_l2=2.0,
+                ),
+                "requested_mode": "manual",
+            }
+
+        def fit(self, X: np.ndarray, y: np.ndarray) -> "RecordingRegressor":
+            observed.append(
+                {
+                    name: os.environ[name]
+                    for name in BENCHMARK.TRAINING_EXPERIMENT_ENV_VARS
+                    if name in os.environ
+                }
+            )
+            return self
+
+        def predict(self, X: np.ndarray) -> np.ndarray:
+            return np.zeros(len(X), dtype=np.float32)
+
+    import alloygbm
+
+    monkeypatch.setattr(alloygbm, "GBMRegressor", RecordingRegressor)
+    spec = BENCHMARK.FixtureSpec(
+        "fit-env", "small-narrow", "regression", 8, 2, 40
+    )
+    fixture = SimpleNamespace(
+        X_train=np.zeros((8, 2), dtype=np.float32),
+        y_train=np.zeros(8, dtype=np.float32),
+        X_test=np.zeros((2, 2), dtype=np.float32),
+        y_test=np.zeros(2, dtype=np.float32),
+    )
+    current_policy = sample_resolved_policy(
+        auto_split_l2_applied=True,
+        effective_split_l2=2.0,
+    )
+
+    BENCHMARK._fit_arm(
+        spec,
+        fixture,
+        seed=7,
+        arm="no_gain_floor",
+        current_policy=current_policy,
+    )
+
+    assert observed == [{BENCHMARK.SPLIT_L2_ENV_VAR: "2.0"}]
+    assert {
+        name: os.environ.get(name)
+        for name in BENCHMARK.TRAINING_EXPERIMENT_ENV_VARS
+    } == ambient
+
+
+def test_fit_arm_restores_exact_training_experiment_environment_after_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    present_names = BENCHMARK.TRAINING_EXPERIMENT_ENV_VARS[::2]
+    ambient = {name: f"ambient-{index}" for index, name in enumerate(present_names)}
+    for name in BENCHMARK.TRAINING_EXPERIMENT_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    for name, value in ambient.items():
+        monkeypatch.setenv(name, value)
+
+    class FailingRegressor:
+        def __init__(self, **params: object) -> None:
+            pass
+
+        def fit(self, X: np.ndarray, y: np.ndarray) -> None:
+            assert all(
+                name not in os.environ
+                for name in BENCHMARK.TRAINING_EXPERIMENT_ENV_VARS
+            )
+            raise RuntimeError("fit failed")
+
+    import alloygbm
+
+    monkeypatch.setattr(alloygbm, "GBMRegressor", FailingRegressor)
+    spec = BENCHMARK.FixtureSpec(
+        "fit-env-error", "small-narrow", "regression", 8, 2, 40
+    )
+    fixture = SimpleNamespace(
+        X_train=np.zeros((8, 2), dtype=np.float32),
+        y_train=np.zeros(8, dtype=np.float32),
+    )
+
+    with pytest.raises(RuntimeError, match="fit failed"):
+        BENCHMARK._fit_arm(
+            spec,
+            fixture,
+            seed=7,
+            arm="current_auto",
+            current_policy=None,
+        )
+
+    assert {
+        name: os.environ.get(name)
+        for name in BENCHMARK.TRAINING_EXPERIMENT_ENV_VARS
+    } == {
+        name: ambient.get(name)
+        for name in BENCHMARK.TRAINING_EXPERIMENT_ENV_VARS
+    }
+
+
+def test_known_training_experiment_list_covers_engine_and_python_sources() -> None:
+    source_roots = (
+        REPO_ROOT / "crates" / "engine" / "src",
+        REPO_ROOT / "bindings" / "python" / "src",
+        REPO_ROOT / "bindings" / "python" / "alloygbm",
+    )
+    observed: set[str] = set()
+    pattern = re.compile(r"ALLOYGBM_EXPERIMENT_[A-Z0-9_]+")
+    for root in source_roots:
+        for path in root.rglob("*"):
+            if path.suffix in {".py", ".rs"}:
+                observed.update(pattern.findall(path.read_text(encoding="utf-8")))
+
+    assert observed == set(BENCHMARK.TRAINING_EXPERIMENT_ENV_VARS)
+
+
+def test_candidate_is_rejected_by_one_protected_shape_regression() -> None:
+    rows = balanced_records(candidate_loss_ratio=0.98)
+    rows.extend(
+        paired_records(
+            fixture="small-wide-regression",
+            shape_stratum="small-wide",
+            candidate_loss=1.031,
+        )
+    )
+
+    result = BENCHMARK.evaluate_candidate(rows, "quality_first")
+
+    assert not result.passed
+    assert "small-wide" in result.detail
+    assert "3%" in result.detail
+
+
+@pytest.mark.parametrize("objective", ["binary", "multiclass"])
+def test_candidate_is_rejected_when_classification_accuracy_drops(
+    objective: str,
+) -> None:
+    rows = paired_records(
+        objective=objective,
+        current_loss=1.0,
+        candidate_loss=0.98,
+        current_accuracy=0.80,
+        candidate_accuracy=0.779,
+    )
+
+    result = BENCHMARK.evaluate_candidate(rows, "quality_first")
+
+    assert not result.passed
+    assert "accuracy" in result.detail
+
+
+def test_candidate_is_rejected_when_ndcg_at_10_drops() -> None:
+    rows = paired_records(
+        objective="ranking",
+        current_loss=0.20,
+        candidate_loss=0.221,
+        current_ndcg=0.80,
+        candidate_ndcg=0.779,
+    )
+
+    result = BENCHMARK.evaluate_candidate(rows, "quality_first")
+
+    assert not result.passed
+    assert "NDCG@10" in result.detail
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("primary_metric", float("nan")),
+        ("accuracy", float("inf")),
+        ("ndcg_at_10", float("-inf")),
+        ("fit_seconds", float("nan")),
+    ],
+)
+def test_candidate_is_rejected_for_non_finite_values(field: str, value: float) -> None:
+    is_ranking = field == "ndcg_at_10"
+    kwargs = {
+        "objective": "ranking" if is_ranking else "binary",
+        "current_loss": 0.25 if is_ranking else 1.0,
+        "candidate_loss": 0.25 if is_ranking else 0.98,
+        "current_accuracy": None if is_ranking else 0.8,
+        "candidate_accuracy": None if is_ranking else 0.8,
+        "current_ndcg": 0.75 if is_ranking else None,
+        "candidate_ndcg": 0.75 if is_ranking else None,
+    }
+    rows = paired_records(**kwargs)
+    rows[-1] = BENCHMARK.BenchmarkRecord(
+        **{**rows[-1].__dict__, field: value}
+    )
+
+    result = BENCHMARK.evaluate_candidate(rows, "quality_first")
+
+    assert not result.passed
+    assert field in result.detail
+    assert "fixture" in result.detail
+    assert "seed=7" in result.detail
+
+
+def test_candidate_is_rejected_for_zero_rounds_or_recorded_error() -> None:
+    zero_rounds = paired_records(candidate_rounds=0)
+    errored = paired_records(candidate_error="native fit failed")
+
+    zero_result = BENCHMARK.evaluate_candidate(zero_rounds, "quality_first")
+    error_result = BENCHMARK.evaluate_candidate(errored, "quality_first")
+
+    assert not zero_result.passed
+    assert "completed_rounds" in zero_result.detail
+    assert not error_result.passed
+    assert "native fit failed" in error_result.detail
+
+
+@pytest.mark.parametrize("objective", ["unknown", "", "Regression"])
+def test_evaluate_gates_rejects_unknown_objectives(objective: str) -> None:
+    spec = BENCHMARK.FixtureSpec(
+        "unknown-objective", "small-narrow", objective, 512, 8, 10
+    )
+    rows = [
+        record(
+            fixture=spec.name,
+            objective=objective,
+            arm=arm,
+            primary_metric=1.0,
+        )
+        for arm in BENCHMARK.ARMS
+    ]
+
+    result = BENCHMARK.evaluate_gates(rows, specs=(spec,), seeds=(7,))
+
+    assert not result.passed
+    assert not result.evidence_valid
+    assert "objective" in result.detail
+
+
+@pytest.mark.parametrize(
+    ("objective", "changes", "field"),
+    [
+        ("regression", {"primary_metric": -0.1}, "primary_metric"),
+        ("regression", {"primary_metric": "0.1"}, "primary_metric"),
+        ("regression", {"primary_metric": True}, "primary_metric"),
+        ("sparse_regression", {"primary_metric": float("inf")}, "primary_metric"),
+        ("regression", {"fit_seconds": -0.1}, "fit_seconds"),
+        ("regression", {"fit_seconds": "0.1"}, "fit_seconds"),
+        ("regression", {"fit_seconds": float("nan")}, "fit_seconds"),
+        ("regression", {"completed_rounds": 0}, "completed_rounds"),
+        ("regression", {"accuracy": 0.5}, "accuracy"),
+        ("sparse_regression", {"ndcg_at_10": float("nan")}, "ndcg_at_10"),
+        ("binary", {"accuracy": None}, "accuracy"),
+        ("binary", {"accuracy": -0.1}, "accuracy"),
+        ("binary", {"accuracy": "0.5"}, "accuracy"),
+        ("multiclass", {"accuracy": 1.1}, "accuracy"),
+        ("multiclass", {"accuracy": float("inf")}, "accuracy"),
+        ("binary", {"ndcg_at_10": float("-inf")}, "ndcg_at_10"),
+        ("ranking", {"accuracy": float("nan")}, "accuracy"),
+        ("ranking", {"ndcg_at_10": None}, "ndcg_at_10"),
+        ("ranking", {"ndcg_at_10": -0.1, "primary_metric": 1.1}, "ndcg_at_10"),
+        ("ranking", {"ndcg_at_10": 1.1, "primary_metric": 0.0}, "ndcg_at_10"),
+        ("ranking", {"ndcg_at_10": "0.8"}, "ndcg_at_10"),
+        ("ranking", {"ndcg_at_10": float("inf")}, "ndcg_at_10"),
+        ("ranking", {"primary_metric": 1.1}, "primary_metric"),
+    ],
+)
+def test_evaluate_gates_enforces_objective_record_schema(
+    objective: str,
+    changes: dict[str, object],
+    field: str,
+) -> None:
+    rows = complete_balanced_records()
+    index = next(
+        index
+        for index, row in enumerate(rows)
+        if row.objective == objective and row.arm == "current_auto"
+    )
+    rows[index] = replace(rows[index], **changes)
+
+    result = BENCHMARK.evaluate_gates(
+        rows, specs=BALANCED_SPECS, seeds=(7,)
+    )
+
+    assert not result.passed
+    assert not result.evidence_valid
+    assert field in result.detail
+
+
+def test_evaluate_gates_requires_ranking_loss_to_equal_one_minus_ndcg() -> None:
+    rows = complete_balanced_records()
+    index = next(
+        index
+        for index, row in enumerate(rows)
+        if row.objective == "ranking" and row.arm == "current_auto"
+    )
+    rows[index] = replace(rows[index], primary_metric=0.2800001)
+
+    result = BENCHMARK.evaluate_gates(
+        rows, specs=BALANCED_SPECS, seeds=(7,)
+    )
+
+    assert not result.passed
+    assert not result.evidence_valid
+    assert "1 - ndcg_at_10" in result.detail
+
+
+def test_candidate_is_rejected_by_a_worse_shape_median() -> None:
+    rows = balanced_records(candidate_loss_ratio=0.98)
+    for seed in (7, 13, 29):
+        rows.extend(
+            paired_records(
+                fixture=f"small-wide-{seed}",
+                shape_stratum="small-wide",
+                seed=seed,
+                current_loss=1.0,
+                candidate_loss=1.001,
+            )
+        )
+
+    result = BENCHMARK.evaluate_candidate(rows, "quality_first")
+
+    assert not result.passed
+    assert "shape median" in result.detail
+    assert "small-wide" in result.detail
+
+
+def test_candidate_requires_at_least_one_percent_overall_improvement() -> None:
+    rows = balanced_records(candidate_loss_ratio=0.9901)
+
+    result = BENCHMARK.evaluate_candidate(rows, "quality_first")
+
+    assert not result.passed
+    assert "1%" in result.detail
+
+
+def test_exactly_one_percent_overall_improvement_qualifies() -> None:
+    rows = balanced_records(candidate_loss_ratio=0.99)
+
+    result = BENCHMARK.evaluate_candidate(rows, "quality_first")
+
+    assert result.passed
+    assert result.overall_loss_ratio == pytest.approx(0.99)
+
+
+def test_behavioral_distance_precedes_fit_time_within_quality_band() -> None:
+    rows = [
+        *balanced_records(
+            candidate_arm="no_gain_floor",
+            candidate_loss_ratio=0.989,
+            candidate_fit_seconds=2.0,
+        ),
+        *[
+            row
+            for row in balanced_records(
+                candidate_arm="quality_first",
+                candidate_loss_ratio=0.985,
+                candidate_fit_seconds=0.5,
+            )
+            if row.arm != "current_auto"
+        ],
+        *[
+            row
+            for row in balanced_records(
+                candidate_arm="manual_default",
+                candidate_loss_ratio=0.995,
+                candidate_fit_seconds=0.25,
+            )
+            if row.arm != "current_auto"
+        ],
+    ]
+
+    result = BENCHMARK.evaluate_gates(rows, specs=BALANCED_SPECS, seeds=(7,))
+
+    assert result.passed
+    assert result.selected_arm == "no_gain_floor"
+
+
+def test_fit_time_breaks_tie_only_after_quality_band_and_behavioral_distance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        BENCHMARK,
+        "BEHAVIORAL_DISTANCE",
+        {"no_gain_floor": 1, "quality_first": 1, "manual_default": 3},
+    )
+    rows = [
+        *balanced_records(
+            candidate_arm="no_gain_floor",
+            candidate_loss_ratio=0.987,
+            candidate_fit_seconds=2.0,
+        ),
+        *[
+            row
+            for row in balanced_records(
+                candidate_arm="quality_first",
+                candidate_loss_ratio=0.985,
+                candidate_fit_seconds=0.5,
+            )
+            if row.arm != "current_auto"
+        ],
+        *[
+            row
+            for row in balanced_records(
+                candidate_arm="manual_default",
+                candidate_loss_ratio=0.995,
+                candidate_fit_seconds=0.1,
+            )
+            if row.arm != "current_auto"
+        ],
+    ]
+
+    result = BENCHMARK.evaluate_gates(rows, specs=BALANCED_SPECS, seeds=(7,))
+
+    assert result.selected_arm == "quality_first"
+
+
+def test_fit_time_cannot_rescue_candidate_outside_quality_band() -> None:
+    rows = [
+        *balanced_records(
+            candidate_arm="quality_first",
+            candidate_loss_ratio=0.98,
+            candidate_fit_seconds=2.0,
+        ),
+        *[
+            row
+            for row in balanced_records(
+                candidate_arm="no_gain_floor",
+                candidate_loss_ratio=0.989,
+                candidate_fit_seconds=0.01,
+            )
+            if row.arm != "current_auto"
+        ],
+        *[
+            row
+            for row in balanced_records(
+                candidate_arm="manual_default",
+                candidate_loss_ratio=0.995,
+                candidate_fit_seconds=0.001,
+            )
+            if row.arm != "current_auto"
+        ],
+    ]
+
+    result = BENCHMARK.evaluate_gates(rows, specs=BALANCED_SPECS, seeds=(7,))
+
+    assert result.selected_arm == "quality_first"
+
+
+def test_fit_time_cannot_rescue_candidate_that_fails_quality_gates() -> None:
+    rows = [
+        *balanced_records(
+            candidate_arm="no_gain_floor",
+            candidate_loss_ratio=0.989,
+            candidate_fit_seconds=2.0,
+        ),
+        *[
+            row
+            for row in balanced_records(
+                candidate_arm="quality_first",
+                candidate_loss_ratio=0.995,
+                candidate_fit_seconds=0.001,
+            )
+            if row.arm != "current_auto"
+        ],
+        *[
+            row
+            for row in balanced_records(
+                candidate_arm="manual_default",
+                candidate_loss_ratio=0.995,
+                candidate_fit_seconds=0.001,
+            )
+            if row.arm != "current_auto"
+        ],
+    ]
+
+    result = BENCHMARK.evaluate_gates(rows, specs=BALANCED_SPECS, seeds=(7,))
+
+    assert result.selected_arm == "no_gain_floor"
+
+
+def test_present_records_cannot_define_a_complete_matrix() -> None:
+    rows = balanced_records(
+        candidate_arm="quality_first", candidate_loss_ratio=0.995
+    )
+
+    result = BENCHMARK.evaluate_gates(rows, specs=BALANCED_SPECS, seeds=(7,))
+
+    assert not result.passed
+    assert not result.evidence_valid
+    assert "manual_default" in result.detail
+    assert "no_gain_floor" in result.detail
+
+
+def test_evaluate_gates_requires_explicit_expected_matrix_context() -> None:
+    rows = balanced_records(candidate_loss_ratio=0.995)
+
+    with pytest.raises(TypeError, match="specs"):
+        BENCHMARK.evaluate_gates(rows)
+
+
+def test_complete_valid_evidence_keeps_current_when_no_candidate_qualifies() -> None:
+    rows = [
+        *balanced_records(
+            candidate_arm="manual_default", candidate_loss_ratio=0.995
+        ),
+        *[
+            row
+            for row in balanced_records(
+                candidate_arm="no_gain_floor", candidate_loss_ratio=0.995
+            )
+            if row.arm != "current_auto"
+        ],
+        *[
+            row
+            for row in balanced_records(
+                candidate_arm="quality_first", candidate_loss_ratio=0.995
+            )
+            if row.arm != "current_auto"
+        ],
+    ]
+
+    result = BENCHMARK.evaluate_gates(rows, specs=BALANCED_SPECS, seeds=(7,))
+
+    assert result.passed
+    assert result.selected_arm == "current_auto"
+    assert "keep current" in result.detail
+
+
+def test_matrix_completeness_reports_missing_fixture_seed_and_arm() -> None:
+    specs = (
+        BENCHMARK.FixtureSpec(
+            name="expected",
+            shape_stratum="small-narrow",
+            objective="regression",
+            rows=512,
+            features=8,
+            rounds=5,
+        ),
+    )
+    rows = paired_records(candidate_arm="quality_first")
+
+    result = BENCHMARK.evaluate_gates(rows, specs=specs, seeds=(7,))
+
+    assert not result.passed
+    assert "expected" in result.detail
+    assert "manual_default" in result.detail
+    assert "seed=7" in result.detail
+
+
+def test_json_and_markdown_outputs_include_outcome_and_records(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        *balanced_records(
+            candidate_arm="manual_default", candidate_loss_ratio=0.995
+        ),
+        *[
+            row
+            for row in balanced_records(
+                candidate_arm="no_gain_floor", candidate_loss_ratio=0.995
+            )
+            if row.arm != "current_auto"
+        ],
+        *[
+            row
+            for row in balanced_records(
+                candidate_arm="quality_first", candidate_loss_ratio=0.995
+            )
+            if row.arm != "current_auto"
+        ],
+    ]
+    result = BENCHMARK.evaluate_gates(rows, specs=BALANCED_SPECS, seeds=(7,))
+    json_path = tmp_path / "records.json"
+    report_path = tmp_path / "report.md"
+
+    BENCHMARK.write_json(json_path, rows, result)
+    BENCHMARK.write_report(
+        report_path,
+        rows,
+        specs=BALANCED_SPECS,
+        seeds=(7,),
+        command="benchmark --gate",
+    )
+
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    report = report_path.read_text(encoding="utf-8")
+    assert payload["gate"]["selected_arm"] == "current_auto"
+    assert len(payload["records"]) == len(rows)
+    assert "# Auto-Policy Calibration Benchmark" in report
+    assert "benchmark --gate" in report
+    assert "## Environment" in report
+    assert "Python:" in report
+    assert "Timing is descriptive only" in report
+
+
+def test_markdown_report_records_complete_runtime_environment(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        *balanced_records(
+            candidate_arm="manual_default", candidate_loss_ratio=0.995
+        ),
+        *[
+            row
+            for row in balanced_records(
+                candidate_arm="no_gain_floor", candidate_loss_ratio=0.995
+            )
+            if row.arm != "current_auto"
+        ],
+        *[
+            row
+            for row in balanced_records(
+                candidate_arm="quality_first", candidate_loss_ratio=0.995
+            )
+            if row.arm != "current_auto"
+        ],
+    ]
+    result = BENCHMARK.evaluate_gates(rows, specs=BALANCED_SPECS, seeds=(7,))
+    report_path = tmp_path / "report.md"
+
+    BENCHMARK.write_report(
+        report_path,
+        rows,
+        specs=BALANCED_SPECS,
+        seeds=(7,),
+        command="benchmark --gate",
+    )
+
+    report = report_path.read_text(encoding="utf-8")
+    assert re.search(r"- Git commit: `[0-9a-f]{40}`", report)
+    assert "- OS/platform: `" in report
+    assert "- Architecture: `" in report
+    assert "- Python: `" in report
+    assert "- Rust: `rustc " in report
+    assert "- NumPy: `" in report
+    assert "- AlloyGBM: `" in report
+
+
+def test_markdown_report_preserves_declared_source_commit(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        *balanced_records(
+            candidate_arm="manual_default", candidate_loss_ratio=0.995
+        ),
+        *[
+            row
+            for row in balanced_records(
+                candidate_arm="no_gain_floor", candidate_loss_ratio=0.995
+            )
+            if row.arm != "current_auto"
+        ],
+        *[
+            row
+            for row in balanced_records(
+                candidate_arm="quality_first", candidate_loss_ratio=0.995
+            )
+            if row.arm != "current_auto"
+        ],
+    ]
+    report_path = tmp_path / "report.md"
+    source_commit = "a" * 40
+
+    BENCHMARK.write_report(
+        report_path,
+        rows,
+        specs=BALANCED_SPECS,
+        seeds=(7,),
+        command="benchmark --gate",
+        source_commit=source_commit,
+    )
+
+    report = report_path.read_text(encoding="utf-8")
+    assert f"- Git commit: `{source_commit}`" in report
+
+
+def test_markdown_report_discloses_public_auto_split_l2_observations(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        record(
+            fixture="first",
+            arm="current_auto",
+            primary_metric=1.0,
+            resolved_policy=sample_resolved_policy(effective_split_l2=0.0),
+        ),
+        record(
+            fixture="second",
+            arm="current_auto",
+            primary_metric=1.0,
+            resolved_policy=sample_resolved_policy(effective_split_l2=2.5),
+        ),
+    ]
+    report_path = tmp_path / "report.md"
+    specs = (
+        BENCHMARK.FixtureSpec(
+            "first", "small-narrow", "regression", 512, 8, 10
+        ),
+        BENCHMARK.FixtureSpec(
+            "second", "small-narrow", "regression", 1_023, 16, 10
+        ),
+    )
+
+    BENCHMARK.write_report(
+        report_path,
+        rows,
+        specs=specs,
+        seeds=(7,),
+        command="benchmark --gate",
+    )
+
+    report = report_path.read_text(encoding="utf-8")
+    assert "## Resolved Policy Observations" in report
+    assert (
+        "- Current-auto records activating automatic split-L2: `0 of 2`"
+        in report
+    )
+    assert (
+        "- Distinct current-auto effective split-L2 values: "
+        "`0.000000, 2.500000`"
+    ) in report
+    assert (
+        "Python public current-auto did not activate the engine-only "
+        "auto split-L2 rule in this matrix."
+    ) in report
+
+
+def test_markdown_report_exposes_matrix_gates_ratios_decision_and_diagnostics(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        *balanced_records(
+            candidate_arm="manual_default", candidate_loss_ratio=0.995
+        ),
+        *[
+            row
+            for row in balanced_records(
+                candidate_arm="no_gain_floor", candidate_loss_ratio=0.995
+            )
+            if row.arm != "current_auto"
+        ],
+        *[
+            row
+            for row in balanced_records(
+                candidate_arm="quality_first", candidate_loss_ratio=0.995
+            )
+            if row.arm != "current_auto"
+        ],
+    ]
+    result = BENCHMARK.evaluate_gates(rows, specs=BALANCED_SPECS, seeds=(7,))
+    report_path = tmp_path / "report.md"
+
+    BENCHMARK.write_report(
+        report_path,
+        rows,
+        specs=BALANCED_SPECS,
+        seeds=(7,),
+        command="benchmark --gate",
+    )
+
+    report = report_path.read_text(encoding="utf-8")
+    assert "- Complete records: `24`" in report
+    assert "- Distinct fixtures: `6`" in report
+    assert "- Distinct objectives: `5`" in report
+    assert "- Distinct seeds: `1`" in report
+    assert "- Distinct arms: `4`" in report
+    assert "## Candidate Gate Results" in report
+    assert "| manual_default | fail | 0.995000 |" in report
+    assert "| no_gain_floor | fail | 0.995000 |" in report
+    assert "| quality_first | fail | 0.995000 |" in report
+    assert "## Exact-Shape/Objective Loss Ratios" in report
+    assert "| no_gain_floor | 512 | 8 | regression | 0.995000 |" in report
+    assert "## Decision" in report
+    assert "Keep the production auto-policy heuristics unchanged." in report
+    assert "## Resolved Policy Diagnostics" in report
+    assert "Min split gain" in report
+    assert "Effective split-L2" in report
+
+
+def test_markdown_report_computes_no_gain_floor_record_difference_summary(
+    tmp_path: Path,
+) -> None:
+    differing_indices = (0, 14, 29, 30, 44, 59, 60, 74, 89, 90, 104, 119, 134)
+    differing_ratios = (0.99940224, 1.00038293) + (1.0001,) * 11
+    no_gain_ratios = dict(zip(differing_indices, differing_ratios, strict=True))
+    rows = []
+    no_gain_index = 0
+    for spec in BENCHMARK.full_specs():
+            for seed in BENCHMARK.SEEDS:
+                for arm in BENCHMARK.ARMS:
+                    primary_metric = 0.3 if spec.objective == "ranking" else 1.0
+                    if arm == "no_gain_floor":
+                        primary_metric *= no_gain_ratios.get(no_gain_index, 1.0)
+                        no_gain_index += 1
+                    rows.append(
+                    record(
+                        fixture=spec.name,
+                        shape_stratum=spec.shape_stratum,
+                        objective=spec.objective,
+                        seed=seed,
+                        arm=arm,
+                            primary_metric=primary_metric,
+                        accuracy=(
+                            0.8
+                            if spec.objective in {"binary", "multiclass"}
+                            else None
+                        ),
+                            ndcg_at_10=(
+                                1.0 - primary_metric
+                                if spec.objective == "ranking"
+                                else None
+                            ),
+                    )
+                )
+    report_path = tmp_path / "report.md"
+
+    BENCHMARK.write_report(
+        report_path,
+        rows,
+        specs=BENCHMARK.full_specs(),
+        seeds=BENCHMARK.SEEDS,
+        command="benchmark --gate",
+    )
+
+    report = report_path.read_text(encoding="utf-8")
+    assert "- Differing record-level primary metrics: `13 of 150`" in report
+    assert "- Normalized-loss ratio range: `0.99940224` to `1.00038293`" in report
+    assert (
+        "- Overall and protected-stratum median normalized-loss ratios: "
+        "`1.000000`" in report
+    )
+
+
+def test_markdown_report_has_all_candidate_exact_shape_objective_ratios(
+    tmp_path: Path,
+) -> None:
+    specs = BENCHMARK.full_specs()
+    rows = []
+    for spec in specs:
+        for seed in BENCHMARK.SEEDS:
+                for arm in BENCHMARK.ARMS:
+                    primary_metric = (
+                        0.3 if spec.objective == "ranking" else 1.0
+                    )
+                    if arm != "current_auto":
+                        primary_metric *= 0.995
+                    rows.append(
+                    record(
+                        fixture=spec.name,
+                        shape_stratum=spec.shape_stratum,
+                        objective=spec.objective,
+                        seed=seed,
+                        arm=arm,
+                            primary_metric=primary_metric,
+                        accuracy=(
+                            0.8
+                            if spec.objective in {"binary", "multiclass"}
+                            else None
+                        ),
+                            ndcg_at_10=(
+                                1.0 - primary_metric
+                                if spec.objective == "ranking"
+                                else None
+                            ),
+                    )
+                )
+    report_path = tmp_path / "report.md"
+
+    BENCHMARK.write_report(
+        report_path,
+        rows,
+        specs=specs,
+        seeds=BENCHMARK.SEEDS,
+        command="benchmark --gate",
+    )
+
+    report = report_path.read_text(encoding="utf-8")
+    ratio_section = report.split(
+        "## Exact-Shape/Objective Loss Ratios\n", maxsplit=1
+    )[1].split("\n## ", maxsplit=1)[0]
+    data_rows = [
+        line
+        for line in ratio_section.splitlines()
+        if line.startswith("| ") and not line.startswith("| Arm ")
+    ]
+    observed_shapes = {
+        (int(parts[2]), int(parts[3]))
+        for line in data_rows
+        for parts in ([part.strip() for part in line.split("|")],)
+    }
+
+    assert len(data_rows) == 150
+    assert observed_shapes == {
+        (512, 8),
+        (1_023, 16),
+        (512, 128),
+        (1_023, 256),
+        (2_048, 16),
+        (8_192, 16),
+        (2_048, 128),
+        (8_192, 256),
+        (16_384, 16),
+        (16_384, 256),
+    }
+    assert "| no_gain_floor | 2048 | 16 | regression | 0.995000 |" in report
+    assert "| no_gain_floor | 8192 | 16 | regression | 0.995000 |" in report
+
+
+def test_markdown_report_suppresses_decision_for_missing_key_and_duplicate(
+    tmp_path: Path,
+) -> None:
+    specs = (
+        BENCHMARK.FixtureSpec(
+            "expected", "small-narrow", "regression", 512, 8, 10
+        ),
+    )
+    rows = [
+        record(arm="current_auto", fixture="expected", primary_metric=1.0),
+        record(arm="manual_default", fixture="expected", primary_metric=0.98),
+        record(arm="no_gain_floor", fixture="expected", primary_metric=0.98),
+        record(arm="no_gain_floor", fixture="expected", primary_metric=0.98),
+    ]
+    report_path = tmp_path / "report.md"
+
+    BENCHMARK.write_report(
+        report_path,
+        rows,
+        specs=specs,
+        seeds=(7,),
+        command="benchmark --gate",
+    )
+
+    report = report_path.read_text(encoding="utf-8")
+    assert "- Matrix evidence complete: `false`" in report
+    assert "missing expected seed=7 arm=quality_first" in report
+    assert "duplicate expected seed=7 arm=no_gain_floor" in report
+    assert (
+        "Candidate gate results were not computed because matrix evidence "
+        "is incomplete or invalid."
+    ) in report
+    assert (
+        "No production decision is supported because matrix evidence is "
+        "incomplete or invalid."
+    ) in report
+    assert "| no_gain_floor | pass |" not in report
+    assert "Keep the production auto-policy heuristics unchanged." not in report
+
+
+def test_markdown_report_suppresses_decision_for_error_record(
+    tmp_path: Path,
+) -> None:
+    specs = (
+        BENCHMARK.FixtureSpec(
+            "expected", "small-narrow", "regression", 512, 8, 10
+        ),
+    )
+    rows = [
+        record(arm="current_auto", fixture="expected", primary_metric=1.0),
+        record(arm="manual_default", fixture="expected", primary_metric=0.98),
+        record(arm="no_gain_floor", fixture="expected", primary_metric=0.98),
+        record(
+            arm="quality_first",
+            fixture="expected",
+            primary_metric=0.98,
+            error="fit failed",
+        ),
+    ]
+    report_path = tmp_path / "report.md"
+
+    BENCHMARK.write_report(
+        report_path,
+        rows,
+        specs=specs,
+        seeds=(7,),
+        command="benchmark --gate",
+    )
+
+    report = report_path.read_text(encoding="utf-8")
+    assert "- Matrix evidence complete: `false`" in report
+    assert "fit failed" in report
+    assert (
+        "Candidate gate results were not computed because matrix evidence "
+        "is incomplete or invalid."
+    ) in report
+    assert (
+        "No production decision is supported because matrix evidence is "
+        "incomplete or invalid."
+    ) in report
+    assert "| quality_first | pass |" not in report
+    assert "Keep the production auto-policy heuristics unchanged." not in report
+
+
+def test_invalid_records_still_write_standards_compliant_json(
+    tmp_path: Path,
+) -> None:
+    rows = paired_records(candidate_error="fit failed")
+    rows[-1] = BENCHMARK.BenchmarkRecord(
+        **{**rows[-1].__dict__, "primary_metric": float("nan")}
+    )
+    specs = (
+        BENCHMARK.FixtureSpec(
+            "fixture", "small-narrow", "regression", 512, 8, 10
+        ),
+    )
+    result = BENCHMARK.evaluate_gates(rows, specs=specs, seeds=(7,))
+    json_path = tmp_path / "invalid.json"
+
+    BENCHMARK.write_json(json_path, rows, result)
+
+    payload = json.loads(
+        json_path.read_text(encoding="utf-8"),
+        parse_constant=lambda value: (_ for _ in ()).throw(
+            ValueError(f"non-standard JSON constant: {value}")
+        ),
+    )
+    assert payload["records"][-1]["primary_metric"] is None
+    assert payload["records"][-1]["error"] == "fit failed"
+
+
+def test_ci_workflow_contains_compact_auto_policy_leg() -> None:
+    workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    condition = "matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'"
+
+    assert "name: Auto-policy benchmark contract tests" in workflow
+    assert "run: python -m pytest benchmarks/tests/test_auto_policy_benchmark.py -q" in workflow
+    assert "name: Auto-policy benchmark sentinel gates" in workflow
+    assert "run: python benchmarks/auto_policy_benchmark.py --quick --gate" in workflow
+    assert workflow.count(f"if: {condition}") >= 4

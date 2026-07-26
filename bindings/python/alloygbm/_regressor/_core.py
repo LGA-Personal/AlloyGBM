@@ -7,7 +7,7 @@ import time
 
 import numpy as np
 
-from ._validation import _ValidationMixin
+from ._validation import _ValidationMixin, _resolved_training_policy_to_dict
 from ._quantization import _QuantizationMixin
 from ._shap import _ShapMixin
 from ._persistence import _PersistenceMixin
@@ -2099,6 +2099,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         self.diagnostics_per_round_ = _diagnostics_to_dicts(
             getattr(summary, "diagnostics_per_round", None)
         )
+        self.resolved_training_policy_ = _resolved_training_policy_to_dict(summary)
         self.evals_result_ = self._build_evals_result(summary)
         total_fit_seconds = time.perf_counter() - fit_start
         self.fit_timing_ = {
@@ -2154,6 +2155,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         self.diagnostics_per_round_ = _diagnostics_to_dicts(
             getattr(summary, "diagnostics_per_round", None)
         )
+        self.resolved_training_policy_ = _resolved_training_policy_to_dict(summary)
         self.evals_result_ = self._build_evals_result(summary)
         total_fit_seconds = time.perf_counter() - self._fit_start_time
         self.fit_timing_ = {

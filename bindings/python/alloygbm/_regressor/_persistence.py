@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from . import _base
 from ._base import _max_data_bin_for_max_bins
+from ._validation import _resolved_training_policy_from_metadata
 
 
 class _PersistenceMixin:
@@ -34,6 +35,7 @@ class _PersistenceMixin:
         self.rounds_completed_ = None
         self.stop_reason_ = None
         self.diagnostics_per_round_ = None
+        self.resolved_training_policy_ = None
         self.factor_exposure_diagnostics_ = None
         self.feature_bundling_diagnostics_ = {
             "active": False,
@@ -85,6 +87,8 @@ class _PersistenceMixin:
                 "skipped_feature_count": 0,
                 "observed_conflict_count": 0,
             }
+        if not hasattr(self, "resolved_training_policy_"):
+            self.resolved_training_policy_ = None
         self._native_predictor_handle = None
         self._float_thresholds_converted = False
         self._predictor_needs_rebuild = True
@@ -120,6 +124,9 @@ class _PersistenceMixin:
             "n_estimators_actual": self.n_estimators_,
             "evals_result": self.evals_result_,
             "feature_names_in": self.feature_names_in_,
+            "resolved_training_policy": _resolved_training_policy_from_metadata(
+                self.resolved_training_policy_
+            ),
             "fit_neutralization": self._fit_neutralization,
             "fit_factor_neutralization_lambda": self._fit_factor_neutralization_lambda,
             "fit_factor_penalty": self._fit_factor_penalty,
@@ -217,6 +224,9 @@ class _PersistenceMixin:
         model.n_estimators_ = metadata.get("n_estimators_actual")
         model.evals_result_ = metadata.get("evals_result")
         model.feature_names_in_ = metadata.get("feature_names_in")
+        model.resolved_training_policy_ = _resolved_training_policy_from_metadata(
+            metadata.get("resolved_training_policy")
+        )
         saved_cat_mappings = metadata.get("native_cat_mappings")
         if saved_cat_mappings:
             model._native_cat_mappings_ = {

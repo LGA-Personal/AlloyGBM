@@ -3,7 +3,123 @@
 from __future__ import annotations
 
 import math
+import sys
 from collections.abc import Sequence
+
+
+_MAX_SUPPORTED_TRAIN_ROUNDS = 4_096
+_MAX_NATIVE_MIN_ROWS_PER_LEAF = (1 << 32) - 1
+
+
+def _resolved_training_policy_to_dict(summary: object) -> dict[str, object] | None:
+    native = getattr(summary, "resolved_training_policy", None)
+    if native is None:
+        return None
+    return {
+        "requested_mode": str(native.requested_mode),
+        "requested_rounds": int(native.requested_rounds),
+        "effective_round_cap": int(native.effective_round_cap),
+        "min_rows_per_leaf": int(native.min_rows_per_leaf),
+        "min_split_gain": float(native.min_split_gain),
+        "row_subsample": float(native.row_subsample),
+        "col_subsample": float(native.col_subsample),
+        "auto_split_l2_applied": bool(native.auto_split_l2_applied),
+        "effective_split_l2": float(native.effective_split_l2),
+    }
+
+
+_RESOLVED_TRAINING_POLICY_METADATA_KEYS = frozenset(
+    {
+        "requested_mode",
+        "requested_rounds",
+        "effective_round_cap",
+        "min_rows_per_leaf",
+        "min_split_gain",
+        "row_subsample",
+        "col_subsample",
+        "auto_split_l2_applied",
+        "effective_split_l2",
+    }
+)
+
+
+def _resolved_training_policy_from_metadata(
+    value: object,
+) -> dict[str, object] | None:
+    """Return a normalized policy only for the exact JSON metadata contract."""
+    if (
+        type(value) is not dict
+        or set(value) != _RESOLVED_TRAINING_POLICY_METADATA_KEYS
+    ):
+        return None
+    requested_mode = value["requested_mode"]
+    requested_rounds = value["requested_rounds"]
+    effective_round_cap = value["effective_round_cap"]
+    min_rows_per_leaf = value["min_rows_per_leaf"]
+    min_split_gain = value["min_split_gain"]
+    row_subsample = value["row_subsample"]
+    col_subsample = value["col_subsample"]
+    auto_split_l2_applied = value["auto_split_l2_applied"]
+    effective_split_l2 = value["effective_split_l2"]
+    if type(requested_mode) is not str or requested_mode not in {"auto", "manual"}:
+        return None
+    integer_values = (requested_rounds, effective_round_cap, min_rows_per_leaf)
+    if any(
+        type(item) is not int or item <= 0 or item > sys.maxsize
+        for item in integer_values
+    ):
+        return None
+    if (
+        requested_rounds > _MAX_SUPPORTED_TRAIN_ROUNDS
+        or effective_round_cap > _MAX_SUPPORTED_TRAIN_ROUNDS
+        or effective_round_cap > requested_rounds
+        or min_rows_per_leaf > _MAX_NATIVE_MIN_ROWS_PER_LEAF
+    ):
+        return None
+    float_values = (
+        min_split_gain,
+        row_subsample,
+        col_subsample,
+        effective_split_l2,
+    )
+    if any(type(item) not in {int, float} for item in float_values):
+        return None
+    if type(auto_split_l2_applied) is not bool:
+        return None
+    try:
+        min_split_gain = float(min_split_gain)
+        row_subsample = float(row_subsample)
+        col_subsample = float(col_subsample)
+        effective_split_l2 = float(effective_split_l2)
+    except OverflowError:
+        return None
+    if (
+        not all(
+            math.isfinite(item)
+            for item in (
+                min_split_gain,
+                row_subsample,
+                col_subsample,
+                effective_split_l2,
+            )
+        )
+        or min_split_gain < 0.0
+        or not 0.0 < row_subsample <= 1.0
+        or not 0.0 < col_subsample <= 1.0
+        or effective_split_l2 < 0.0
+    ):
+        return None
+    return {
+        "requested_mode": requested_mode,
+        "requested_rounds": requested_rounds,
+        "effective_round_cap": effective_round_cap,
+        "min_rows_per_leaf": min_rows_per_leaf,
+        "min_split_gain": min_split_gain,
+        "row_subsample": row_subsample,
+        "col_subsample": col_subsample,
+        "auto_split_l2_applied": auto_split_l2_applied,
+        "effective_split_l2": effective_split_l2,
+    }
 
 
 class _ValidationMixin:

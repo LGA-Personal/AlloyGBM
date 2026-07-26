@@ -47,3 +47,16 @@ standard `alloygbm` arm. Use the runner's `--models` flag to filter which
 arms run; see [user/morphboost.md](../user/morphboost.md) for parameter
 semantics and the [paper](https://arxiv.org/pdf/2511.13234) for the
 formulation.
+
+## Auto-policy calibration
+
+`auto_policy_benchmark.py` exercises independent row/column shape strata
+across regression, classification, and ranking objectives. The compact CI
+sentinel is:
+
+```bash
+python benchmarks/auto_policy_benchmark.py --quick --gate
+```
+
+The full three-seed evidence and selection decision are recorded in
+[auto_policy_calibration_v1.md](auto_policy_calibration_v1.md).

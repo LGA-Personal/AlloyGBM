@@ -111,6 +111,14 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
         run: python benchmarks/review_guardrails.py --quick --gate
 
+      - name: Auto-policy benchmark contract tests
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python -m pytest benchmarks/tests/test_auto_policy_benchmark.py -q
+
+      - name: Auto-policy benchmark sentinel gates
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python benchmarks/auto_policy_benchmark.py --quick --gate
+
       - name: Import smoke
         run: python -c "import alloygbm; print(alloygbm.native_runtime_info())"
 

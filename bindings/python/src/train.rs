@@ -13,8 +13,8 @@ use crate::params::{
     validate_neutralization_leaf_model,
 };
 use crate::pyclasses::{
-    NativeFeatureBundlingDiagnostics, NativeTrainingResult, NativeTrainingSummary,
-    diagnostics_to_native,
+    NativeFeatureBundlingDiagnostics, NativeResolvedTrainingPolicy, NativeTrainingResult,
+    NativeTrainingSummary, diagnostics_to_native,
 };
 use crate::quantization::{
     ContinuousBinningStrategy, parse_continuous_binning_strategy,
@@ -85,6 +85,9 @@ fn build_native_training_summary_from_multiclass(
         custom_metric_values: summary.custom_metric_per_round.clone(),
         custom_metric_name: summary.custom_metric_name.clone(),
         diagnostics_per_round: diagnostics_to_native(&summary.diagnostics_per_round),
+        resolved_training_policy: NativeResolvedTrainingPolicy::from(
+            &summary.resolved_training_policy,
+        ),
     }
 }
 
@@ -120,6 +123,9 @@ fn build_native_training_summary(
         custom_metric_values: summary.custom_metric_per_round.clone(),
         custom_metric_name: summary.custom_metric_name.clone(),
         diagnostics_per_round: diagnostics_to_native(&summary.diagnostics_per_round),
+        resolved_training_policy: NativeResolvedTrainingPolicy::from(
+            &summary.resolved_training_policy,
+        ),
     }
 }
 

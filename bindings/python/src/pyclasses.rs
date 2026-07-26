@@ -1,4 +1,4 @@
-use alloygbm_engine::IterationDiagnostics;
+use alloygbm_engine::{IterationDiagnostics, ResolvedTrainingPolicy, TrainingPolicyMode};
 use pyo3::prelude::*;
 
 #[pyclass(skip_from_py_object)]
@@ -86,6 +86,48 @@ impl From<ContinuousBinningMetadataInternal> for NativeContinuousBinningMetadata
 
 #[pyclass(skip_from_py_object)]
 #[derive(Debug, Clone)]
+pub(crate) struct NativeResolvedTrainingPolicy {
+    #[pyo3(get)]
+    requested_mode: String,
+    #[pyo3(get)]
+    requested_rounds: usize,
+    #[pyo3(get)]
+    effective_round_cap: usize,
+    #[pyo3(get)]
+    min_rows_per_leaf: usize,
+    #[pyo3(get)]
+    min_split_gain: f32,
+    #[pyo3(get)]
+    row_subsample: f32,
+    #[pyo3(get)]
+    col_subsample: f32,
+    #[pyo3(get)]
+    auto_split_l2_applied: bool,
+    #[pyo3(get)]
+    effective_split_l2: f32,
+}
+
+impl From<&ResolvedTrainingPolicy> for NativeResolvedTrainingPolicy {
+    fn from(value: &ResolvedTrainingPolicy) -> Self {
+        Self {
+            requested_mode: match value.requested_mode {
+                TrainingPolicyMode::Auto => "auto".to_string(),
+                TrainingPolicyMode::Manual => "manual".to_string(),
+            },
+            requested_rounds: value.requested_rounds,
+            effective_round_cap: value.effective_round_cap,
+            min_rows_per_leaf: value.min_rows_per_leaf,
+            min_split_gain: value.min_split_gain,
+            row_subsample: value.row_subsample,
+            col_subsample: value.col_subsample,
+            auto_split_l2_applied: value.auto_split_l2_applied,
+            effective_split_l2: value.effective_split_l2,
+        }
+    }
+}
+
+#[pyclass(skip_from_py_object)]
+#[derive(Debug, Clone)]
 pub(crate) struct NativeTrainingSummary {
     #[pyo3(get)]
     pub(crate) rounds_requested: usize,
@@ -125,6 +167,8 @@ pub(crate) struct NativeTrainingSummary {
     /// equals `rounds_completed` after a successful fit.
     #[pyo3(get)]
     pub(crate) diagnostics_per_round: Vec<NativeIterationDiagnostics>,
+    #[pyo3(get)]
+    pub(crate) resolved_training_policy: NativeResolvedTrainingPolicy,
 }
 
 /// Python-visible view of an `engine::IterationDiagnostics` snapshot.  Field
