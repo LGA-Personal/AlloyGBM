@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -86,6 +87,7 @@ def record(
     ndcg_at_10: float | None = None,
     completed_rounds: int = 10,
     fit_seconds: float = 1.0,
+    resolved_policy: dict[str, object] | None = None,
     error: str | None = None,
 ) -> object:
     return BENCHMARK.BenchmarkRecord(
@@ -99,7 +101,11 @@ def record(
         ndcg_at_10=ndcg_at_10,
         completed_rounds=completed_rounds,
         fit_seconds=fit_seconds,
-        resolved_policy=sample_resolved_policy(),
+        resolved_policy=(
+            sample_resolved_policy()
+            if resolved_policy is None
+            else resolved_policy
+        ),
         error=error,
     )
 
@@ -860,6 +866,132 @@ def test_json_and_markdown_outputs_include_outcome_and_records(
     assert "## Environment" in report
     assert "Python:" in report
     assert "Timing is descriptive only" in report
+
+
+def test_markdown_report_records_complete_runtime_environment(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        *balanced_records(
+            candidate_arm="manual_default", candidate_loss_ratio=0.995
+        ),
+        *[
+            row
+            for row in balanced_records(
+                candidate_arm="no_gain_floor", candidate_loss_ratio=0.995
+            )
+            if row.arm != "current_auto"
+        ],
+        *[
+            row
+            for row in balanced_records(
+                candidate_arm="quality_first", candidate_loss_ratio=0.995
+            )
+            if row.arm != "current_auto"
+        ],
+    ]
+    result = BENCHMARK.evaluate_gates(rows, specs=BALANCED_SPECS, seeds=(7,))
+    report_path = tmp_path / "report.md"
+
+    BENCHMARK.write_report(report_path, rows, result, command="benchmark --gate")
+
+    report = report_path.read_text(encoding="utf-8")
+    assert re.search(r"- Git commit: `[0-9a-f]{40}`", report)
+    assert "- OS/platform: `" in report
+    assert "- Architecture: `" in report
+    assert "- Python: `" in report
+    assert "- Rust: `rustc " in report
+    assert "- NumPy: `" in report
+    assert "- AlloyGBM: `" in report
+
+
+def test_markdown_report_discloses_public_auto_split_l2_observations(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        record(
+            fixture="first",
+            arm="current_auto",
+            primary_metric=1.0,
+            resolved_policy=sample_resolved_policy(effective_split_l2=0.0),
+        ),
+        record(
+            fixture="second",
+            arm="current_auto",
+            primary_metric=1.0,
+            resolved_policy=sample_resolved_policy(effective_split_l2=2.5),
+        ),
+    ]
+    report_path = tmp_path / "report.md"
+    result = BENCHMARK.GateResult(
+        name="selection",
+        passed=True,
+        detail="keep current",
+        selected_arm="current_auto",
+    )
+
+    BENCHMARK.write_report(report_path, rows, result, command="benchmark --gate")
+
+    report = report_path.read_text(encoding="utf-8")
+    assert "## Resolved Policy Observations" in report
+    assert (
+        "- Current-auto records activating automatic split-L2: `0 of 2`"
+        in report
+    )
+    assert (
+        "- Distinct current-auto effective split-L2 values: "
+        "`0.000000, 2.500000`"
+    ) in report
+    assert (
+        "Python public current-auto did not activate the engine-only "
+        "auto split-L2 rule in this matrix."
+    ) in report
+
+
+def test_markdown_report_exposes_matrix_gates_ratios_decision_and_diagnostics(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        *balanced_records(
+            candidate_arm="manual_default", candidate_loss_ratio=0.995
+        ),
+        *[
+            row
+            for row in balanced_records(
+                candidate_arm="no_gain_floor", candidate_loss_ratio=0.995
+            )
+            if row.arm != "current_auto"
+        ],
+        *[
+            row
+            for row in balanced_records(
+                candidate_arm="quality_first", candidate_loss_ratio=0.995
+            )
+            if row.arm != "current_auto"
+        ],
+    ]
+    result = BENCHMARK.evaluate_gates(rows, specs=BALANCED_SPECS, seeds=(7,))
+    report_path = tmp_path / "report.md"
+
+    BENCHMARK.write_report(report_path, rows, result, command="benchmark --gate")
+
+    report = report_path.read_text(encoding="utf-8")
+    assert "- Complete records: `24`" in report
+    assert "- Distinct fixtures: `6`" in report
+    assert "- Distinct objectives: `5`" in report
+    assert "- Distinct seeds: `1`" in report
+    assert "- Distinct arms: `4`" in report
+    assert "## Candidate Gate Results" in report
+    assert "| manual_default | fail | 0.995000 |" in report
+    assert "| no_gain_floor | fail | 0.995000 |" in report
+    assert "| quality_first | fail | 0.995000 |" in report
+    assert "## Shape/Objective Loss Ratios" in report
+    assert "| no_gain_floor | small-narrow | regression | 0.995000 |" in report
+    assert "## Decision" in report
+    assert "Keep the production auto-policy heuristics unchanged." in report
+    assert "## Resolved Policy Diagnostics" in report
+    assert "Min split gain" in report
+    assert "Effective split-L2" in report
 
 
 def test_invalid_records_still_write_standards_compliant_json(

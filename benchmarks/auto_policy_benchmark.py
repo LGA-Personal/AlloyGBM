@@ -9,6 +9,7 @@ import math
 import os
 import platform
 import shlex
+import subprocess
 import sys
 import time
 from collections import Counter, defaultdict
@@ -990,6 +991,111 @@ def _format_optional(value: float | None) -> str:
     return "" if value is None else f"{value:.6f}"
 
 
+def _command_output(command: Sequence[str], *, cwd: Path | None = None) -> str:
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return "unavailable"
+    return completed.stdout.strip() or "unavailable"
+
+
+def _environment_lines() -> list[str]:
+    repo_root = Path(__file__).resolve().parents[1]
+    try:
+        from alloygbm import __version__ as alloygbm_version
+    except ImportError:
+        alloygbm_version = "unavailable"
+    return [
+        f"- Git commit: `{_command_output(('git', 'rev-parse', 'HEAD'), cwd=repo_root)}`",
+        f"- OS/platform: `{platform.platform()}`",
+        f"- Architecture: `{platform.machine()}`",
+        f"- Python: `{platform.python_version()}`",
+        f"- Rust: `{_command_output(('rustc', '--version'))}`",
+        f"- NumPy: `{np.__version__}`",
+        f"- AlloyGBM: `{alloygbm_version}`",
+    ]
+
+
+def _shape_identity(record: BenchmarkRecord) -> str:
+    suffix = f"-{record.objective}"
+    if record.fixture.endswith(suffix):
+        return record.fixture[: -len(suffix)]
+    return record.fixture
+
+
+def _candidate_gate_results(
+    records: Sequence[BenchmarkRecord],
+) -> list[GateResult]:
+    return [evaluate_candidate(records, arm) for arm in ARMS[1:]]
+
+
+def _shape_objective_ratios(
+    records: Sequence[BenchmarkRecord],
+) -> list[tuple[str, str, str, float]]:
+    current = {
+        _record_key(row): row for row in records if row.arm == "current_auto"
+    }
+    grouped: dict[tuple[str, str, str], list[float]] = defaultdict(list)
+    for row in records:
+        if row.arm == "current_auto":
+            continue
+        current_row = current.get(_record_key(row))
+        if current_row is None:
+            continue
+        if _record_issue(row) is not None or _record_issue(current_row) is not None:
+            continue
+        grouped[(row.arm, row.shape_stratum, row.objective)].append(
+            _loss_ratio(row.primary_metric, current_row.primary_metric)
+        )
+    return [(*key, median(values)) for key, values in sorted(grouped.items())]
+
+
+def _policy_observation_lines(
+    records: Sequence[BenchmarkRecord],
+) -> list[str]:
+    current_policies = [
+        row.resolved_policy
+        for row in records
+        if row.arm == "current_auto"
+        and "auto_split_l2_applied" in row.resolved_policy
+        and "effective_split_l2" in row.resolved_policy
+    ]
+    activation_count = sum(
+        bool(policy["auto_split_l2_applied"]) for policy in current_policies
+    )
+    effective_values = sorted(
+        {float(policy["effective_split_l2"]) for policy in current_policies}
+    )
+    formatted_values = (
+        ", ".join(f"{value:.6f}" for value in effective_values)
+        if effective_values
+        else "none"
+    )
+    lines = [
+        "## Resolved Policy Observations",
+        "",
+        "- Current-auto records activating automatic split-L2: "
+        f"`{activation_count} of {len(current_policies)}`",
+        "- Distinct current-auto effective split-L2 values: "
+        f"`{formatted_values}`",
+    ]
+    if activation_count == 0:
+        lines.extend(
+            [
+                "",
+                "Python public current-auto did not activate the engine-only "
+                "auto split-L2 rule in this matrix.",
+            ]
+        )
+    return lines
+
+
 def write_report(
     path: Path,
     records: Sequence[BenchmarkRecord],
@@ -997,12 +1103,11 @@ def write_report(
     *,
     command: str,
 ) -> None:
-    """Write a compact Markdown evidence report."""
+    """Write a reproducible Markdown evidence report."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        from alloygbm import __version__ as alloygbm_version
-    except ImportError:
-        alloygbm_version = "unavailable"
+    complete_records = sum(_record_issue(row) is None for row in records)
+    candidate_results = _candidate_gate_results(records)
+    ratio_rows = _shape_objective_ratios(records)
     lines = [
         "# Auto-Policy Calibration Benchmark",
         "",
@@ -1013,10 +1118,17 @@ def write_report(
         "",
         "## Environment",
         "",
-        f"- Python: `{platform.python_version()}`",
-        f"- Platform: `{platform.platform()}`",
-        f"- NumPy: `{np.__version__}`",
-        f"- AlloyGBM: `{alloygbm_version}`",
+        *_environment_lines(),
+        "",
+        "## Matrix Completeness",
+        "",
+        f"- Complete records: `{complete_records}`",
+        f"- Total records: `{len(records)}`",
+        f"- Distinct fixtures: `{len({row.fixture for row in records})}`",
+        f"- Distinct shapes: `{len({_shape_identity(row) for row in records})}`",
+        f"- Distinct objectives: `{len({row.objective for row in records})}`",
+        f"- Distinct seeds: `{len({row.seed for row in records})}`",
+        f"- Distinct arms: `{len({row.arm for row in records})}`",
         "",
         "## Gate Detail",
         "",
@@ -1024,11 +1136,105 @@ def write_report(
         gate.detail,
         "```",
         "",
-        "## Records",
+        "## Candidate Gate Results",
         "",
-        "| Fixture | Stratum | Objective | Seed | Arm | Primary loss | Accuracy | NDCG@10 | Rounds | Fit seconds | Error |",
-        "|---|---|---|---:|---|---:|---:|---:|---:|---:|---|",
+        "| Arm | Result | Overall loss ratio |",
+        "|---|---|---:|",
     ]
+    for result in candidate_results:
+        ratio = _format_optional(result.overall_loss_ratio)
+        status = "pass" if result.passed else "fail"
+        lines.append(f"| {result.name} | {status} | {ratio} |")
+    for result in candidate_results:
+        lines.extend(
+            [
+                "",
+                f"### {result.name}",
+                "",
+                "```text",
+                result.detail,
+                "```",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "## Shape/Objective Loss Ratios",
+            "",
+            "| Arm | Stratum | Objective | Median normalized loss |",
+            "|---|---|---|---:|",
+        ]
+    )
+    for arm, stratum, objective, ratio in ratio_rows:
+        lines.append(f"| {arm} | {stratum} | {objective} | {ratio:.6f} |")
+    lines.extend(
+        [
+            "",
+            *_policy_observation_lines(records),
+            "",
+            "## Decision",
+            "",
+        ]
+    )
+    if gate.selected_arm == "current_auto":
+        lines.extend(
+            [
+                "Keep the production auto-policy heuristics unchanged. Neither "
+                "experimental candidate met the predeclared 1% overall improvement "
+                "requirement without a protected shape/objective regression.",
+            ]
+        )
+    elif gate.selected_arm in {"no_gain_floor", "quality_first"}:
+        lines.append(
+            f"Apply the production policy change represented by "
+            f"`{gate.selected_arm}`."
+        )
+    elif gate.selected_arm == "manual_default":
+        lines.append(
+            "The selected `manual_default` comparison arm does not map to a "
+            "predeclared production heuristic edit; production behavior requires "
+            "an explicit follow-up decision."
+        )
+    else:
+        lines.append(
+            "The evidence gate failed, so no production heuristic decision is "
+            "supported."
+        )
+    lines.extend(
+        [
+            "",
+            "## Resolved Policy Diagnostics",
+            "",
+            "| Fixture | Seed | Arm | Mode | Requested rounds | Round cap | "
+            "Min rows | Min split gain | Row sample | Col sample | "
+            "Auto split-L2 | Effective split-L2 |",
+            "|---|---:|---|---|---:|---:|---:|---:|---:|---:|---|---:|",
+        ]
+    )
+    for row in records:
+        policy = row.resolved_policy
+        lines.append(
+            f"| {row.fixture} | {row.seed} | {row.arm} | "
+            f"{policy.get('requested_mode', '')} | "
+            f"{policy.get('requested_rounds', '')} | "
+            f"{policy.get('effective_round_cap', '')} | "
+            f"{policy.get('min_rows_per_leaf', '')} | "
+            f"{policy.get('min_split_gain', '')} | "
+            f"{policy.get('row_subsample', '')} | "
+            f"{policy.get('col_subsample', '')} | "
+            f"{policy.get('auto_split_l2_applied', '')} | "
+            f"{policy.get('effective_split_l2', '')} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Records",
+            "",
+            "| Fixture | Stratum | Objective | Seed | Arm | Primary loss | "
+            "Accuracy | NDCG@10 | Rounds | Fit seconds | Error |",
+            "|---|---|---|---:|---|---:|---:|---:|---:|---:|---|",
+        ]
+    )
     for row in records:
         lines.append(
             f"| {row.fixture} | {row.shape_stratum} | {row.objective} | "
