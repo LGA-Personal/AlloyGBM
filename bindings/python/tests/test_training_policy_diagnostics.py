@@ -334,6 +334,7 @@ def test_policy_metadata_normalizer_rejects_invalid_ranges(
         ("effective_round_cap", 4_097),
         ("requested_rounds", sys.maxsize + 1),
         ("effective_round_cap", sys.maxsize + 1),
+        ("min_rows_per_leaf", 1 << 32),
         ("min_rows_per_leaf", sys.maxsize + 1),
     ],
 )
@@ -356,12 +357,12 @@ def test_policy_metadata_normalizer_rejects_round_cap_above_request() -> None:
 
 def test_policy_metadata_normalizer_allows_large_supported_min_rows() -> None:
     metadata = valid_policy_metadata()
-    metadata["min_rows_per_leaf"] = 4_097
+    metadata["min_rows_per_leaf"] = (1 << 32) - 1
 
     normalized = _resolved_training_policy_from_metadata(metadata)
 
     assert normalized is not None
-    assert normalized["min_rows_per_leaf"] == 4_097
+    assert normalized["min_rows_per_leaf"] == (1 << 32) - 1
 
 
 @pytest.mark.parametrize("value", [None, [], (), 0, "policy"])
@@ -410,6 +411,7 @@ def test_policy_metadata_normalizer_and_wrapper_load_reject_huge_float_ints(
     [
         ("requested_rounds", 4_097),
         ("effective_round_cap", 4_097),
+        ("min_rows_per_leaf", 1 << 32),
         ("min_rows_per_leaf", sys.maxsize + 1),
     ],
 )
@@ -437,6 +439,31 @@ def test_wrapper_load_rejects_unsupported_policy_integer_bounds(
     restored = GBMRegressor.load_model(str(path))
 
     assert restored.resolved_training_policy_ is None
+
+
+def test_wrapper_load_accepts_native_min_rows_upper_bound(tmp_path) -> None:
+    X, y = make_dense_fixture(rows=128, features=4, classes=None)
+    model = GBMRegressor(n_estimators=4, training_policy="auto", seed=7).fit(X, y)
+    path = tmp_path / "max-supported-min-rows.agbm"
+    model.save_model(str(path))
+
+    payload = path.read_bytes()
+    metadata_len = int.from_bytes(payload[4:8], "little")
+    metadata = json.loads(payload[8 : 8 + metadata_len])
+    artifact = payload[8 + metadata_len :]
+    metadata["resolved_training_policy"]["min_rows_per_leaf"] = (1 << 32) - 1
+    serialized_metadata = json.dumps(metadata).encode("utf-8")
+    path.write_bytes(
+        b"AGBP"
+        + len(serialized_metadata).to_bytes(4, "little")
+        + serialized_metadata
+        + artifact
+    )
+
+    restored = GBMRegressor.load_model(str(path))
+
+    assert restored.resolved_training_policy_ is not None
+    assert restored.resolved_training_policy_["min_rows_per_leaf"] == (1 << 32) - 1
 
 
 def test_wrapper_load_rejects_round_cap_above_request(tmp_path) -> None:

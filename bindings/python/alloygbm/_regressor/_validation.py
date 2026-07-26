@@ -8,6 +8,7 @@ from collections.abc import Sequence
 
 
 _MAX_SUPPORTED_TRAIN_ROUNDS = 4_096
+_MAX_NATIVE_MIN_ROWS_PER_LEAF = (1 << 32) - 1
 
 
 def _resolved_training_policy_to_dict(summary: object) -> dict[str, object] | None:
@@ -62,11 +63,7 @@ def _resolved_training_policy_from_metadata(
     effective_split_l2 = value["effective_split_l2"]
     if type(requested_mode) is not str or requested_mode not in {"auto", "manual"}:
         return None
-    integer_values = (
-        requested_rounds,
-        effective_round_cap,
-        min_rows_per_leaf,
-    )
+    integer_values = (requested_rounds, effective_round_cap, min_rows_per_leaf)
     if any(
         type(item) is not int or item <= 0 or item > sys.maxsize
         for item in integer_values
@@ -76,6 +73,7 @@ def _resolved_training_policy_from_metadata(
         requested_rounds > _MAX_SUPPORTED_TRAIN_ROUNDS
         or effective_round_cap > _MAX_SUPPORTED_TRAIN_ROUNDS
         or effective_round_cap > requested_rounds
+        or min_rows_per_leaf > _MAX_NATIVE_MIN_ROWS_PER_LEAF
     ):
         return None
     float_values = (
