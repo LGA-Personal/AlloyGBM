@@ -23,6 +23,74 @@ def _resolved_training_policy_to_dict(summary: object) -> dict[str, object] | No
     }
 
 
+def _normalize_resolved_training_policy_metadata(
+    value: object,
+) -> dict[str, object] | None:
+    """Return a JSON metadata policy only when it matches the public contract."""
+    if not isinstance(value, dict):
+        return None
+    try:
+        requested_mode = value["requested_mode"]
+        requested_rounds = value["requested_rounds"]
+        effective_round_cap = value["effective_round_cap"]
+        min_rows_per_leaf = value["min_rows_per_leaf"]
+        min_split_gain = value["min_split_gain"]
+        row_subsample = value["row_subsample"]
+        col_subsample = value["col_subsample"]
+        auto_split_l2_applied = value["auto_split_l2_applied"]
+        effective_split_l2 = value["effective_split_l2"]
+    except KeyError:
+        return None
+    if requested_mode not in {"auto", "manual"}:
+        return None
+    integer_values = (
+        requested_rounds,
+        effective_round_cap,
+        min_rows_per_leaf,
+    )
+    if any(
+        isinstance(item, bool) or not isinstance(item, int) or item <= 0
+        for item in integer_values
+    ):
+        return None
+    if not isinstance(auto_split_l2_applied, bool):
+        return None
+    try:
+        min_split_gain = float(min_split_gain)
+        row_subsample = float(row_subsample)
+        col_subsample = float(col_subsample)
+        effective_split_l2 = float(effective_split_l2)
+    except (TypeError, ValueError):
+        return None
+    if (
+        not all(
+            math.isfinite(item)
+            for item in (
+                min_split_gain,
+                row_subsample,
+                col_subsample,
+                effective_split_l2,
+            )
+        )
+        or min_split_gain < 0.0
+        or not 0.0 < row_subsample <= 1.0
+        or not 0.0 < col_subsample <= 1.0
+        or effective_split_l2 < 0.0
+    ):
+        return None
+    return {
+        "requested_mode": requested_mode,
+        "requested_rounds": requested_rounds,
+        "effective_round_cap": effective_round_cap,
+        "min_rows_per_leaf": min_rows_per_leaf,
+        "min_split_gain": min_split_gain,
+        "row_subsample": row_subsample,
+        "col_subsample": col_subsample,
+        "auto_split_l2_applied": auto_split_l2_applied,
+        "effective_split_l2": effective_split_l2,
+    }
+
+
 class _ValidationMixin:
     """Mixin carrying validation/resolution methods for GBMRegressor.
 

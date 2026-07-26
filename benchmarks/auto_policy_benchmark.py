@@ -1059,6 +1059,60 @@ def _shape_objective_ratios(
     return [(*key, median(values)) for key, values in sorted(grouped.items())]
 
 
+def _candidate_loss_ratio_rows(
+    records: Sequence[BenchmarkRecord], candidate_arm: str
+) -> list[tuple[str, float]]:
+    current = {
+        _record_key(row): row for row in records if row.arm == "current_auto"
+    }
+    ratios = []
+    for row in records:
+        if row.arm != candidate_arm:
+            continue
+        current_row = current.get(_record_key(row))
+        if current_row is None:
+            continue
+        if _record_issue(row) is not None or _record_issue(current_row) is not None:
+            continue
+        ratios.append(
+            (
+                row.shape_stratum,
+                _loss_ratio(row.primary_metric, current_row.primary_metric),
+            )
+        )
+    return ratios
+
+
+def _no_gain_floor_observation_lines(
+    records: Sequence[BenchmarkRecord],
+) -> list[str]:
+    ratio_rows = _candidate_loss_ratio_rows(records, "no_gain_floor")
+    if not ratio_rows:
+        return []
+    ratios = [ratio for _stratum, ratio in ratio_rows]
+    differing = [ratio for ratio in ratios if ratio != 1.0]
+    protected_ratios: defaultdict[str, list[float]] = defaultdict(list)
+    for stratum, ratio in ratio_rows:
+        protected_ratios[stratum].append(ratio)
+    median_labels = {
+        f"{median(ratios):.6f}",
+        *(f"{median(values):.6f}" for values in protected_ratios.values()),
+    }
+    return [
+        "",
+        "### no_gain_floor record-level differences",
+        "",
+        "- Differing record-level primary metrics: "
+        f"`{len(differing)} of {len(ratios)}`",
+        "- Normalized-loss ratio range: "
+        f"`{min(differing):.8f}` to `{max(differing):.8f}`"
+        if differing
+        else "- Normalized-loss ratio range: `none`",
+        "- Overall and protected-stratum median normalized-loss ratios: "
+        f"`{', '.join(sorted(median_labels))}`",
+    ]
+
+
 def _policy_observation_lines(
     records: Sequence[BenchmarkRecord],
 ) -> list[str]:
@@ -1174,6 +1228,8 @@ def write_report(
                     "```",
                 ]
             )
+            if result.name == "no_gain_floor":
+                lines.extend(_no_gain_floor_observation_lines(records))
     else:
         lines.append(
             "Candidate gate results were not computed because matrix evidence "

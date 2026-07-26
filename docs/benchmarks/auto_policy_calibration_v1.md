@@ -70,6 +70,12 @@ overall median primary loss does not reach the required 1% improvement (0.9998x)
 overall median primary loss does not reach the required 1% improvement (1.0000x)
 ```
 
+### no_gain_floor record-level differences
+
+- Differing record-level primary metrics: `13 of 150`
+- Normalized-loss ratio range: `0.99940224` to `1.00038293`
+- Overall and protected-stratum median normalized-loss ratios: `1.000000`
+
 ### quality_first
 
 ```text

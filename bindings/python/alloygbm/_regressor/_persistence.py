@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from . import _base
 from ._base import _max_data_bin_for_max_bins
+from ._validation import _normalize_resolved_training_policy_metadata
 
 
 class _PersistenceMixin:
@@ -123,6 +124,9 @@ class _PersistenceMixin:
             "n_estimators_actual": self.n_estimators_,
             "evals_result": self.evals_result_,
             "feature_names_in": self.feature_names_in_,
+            "resolved_training_policy": _normalize_resolved_training_policy_metadata(
+                self.resolved_training_policy_
+            ),
             "fit_neutralization": self._fit_neutralization,
             "fit_factor_neutralization_lambda": self._fit_factor_neutralization_lambda,
             "fit_factor_penalty": self._fit_factor_penalty,
@@ -220,6 +224,9 @@ class _PersistenceMixin:
         model.n_estimators_ = metadata.get("n_estimators_actual")
         model.evals_result_ = metadata.get("evals_result")
         model.feature_names_in_ = metadata.get("feature_names_in")
+        model.resolved_training_policy_ = _normalize_resolved_training_policy_metadata(
+            metadata.get("resolved_training_policy")
+        )
         saved_cat_mappings = metadata.get("native_cat_mappings")
         if saved_cat_mappings:
             model._native_cat_mappings_ = {

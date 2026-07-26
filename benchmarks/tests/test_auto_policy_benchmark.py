@@ -1058,6 +1058,56 @@ def test_markdown_report_exposes_matrix_gates_ratios_decision_and_diagnostics(
     assert "Effective split-L2" in report
 
 
+def test_markdown_report_computes_no_gain_floor_record_difference_summary(
+    tmp_path: Path,
+) -> None:
+    differing_indices = (0, 14, 29, 30, 44, 59, 60, 74, 89, 90, 104, 119, 134)
+    differing_ratios = (0.99940224, 1.00038293) + (1.0001,) * 11
+    no_gain_ratios = dict(zip(differing_indices, differing_ratios, strict=True))
+    rows = []
+    no_gain_index = 0
+    for spec in BENCHMARK.full_specs():
+        for seed in BENCHMARK.SEEDS:
+            for arm in BENCHMARK.ARMS:
+                primary_metric = 1.0
+                if arm == "no_gain_floor":
+                    primary_metric = no_gain_ratios.get(no_gain_index, 1.0)
+                    no_gain_index += 1
+                rows.append(
+                    record(
+                        fixture=spec.name,
+                        shape_stratum=spec.shape_stratum,
+                        objective=spec.objective,
+                        seed=seed,
+                        arm=arm,
+                        primary_metric=primary_metric,
+                        accuracy=(
+                            0.8
+                            if spec.objective in {"binary", "multiclass"}
+                            else None
+                        ),
+                        ndcg_at_10=(0.7 if spec.objective == "ranking" else None),
+                    )
+                )
+    report_path = tmp_path / "report.md"
+
+    BENCHMARK.write_report(
+        report_path,
+        rows,
+        specs=BENCHMARK.full_specs(),
+        seeds=BENCHMARK.SEEDS,
+        command="benchmark --gate",
+    )
+
+    report = report_path.read_text(encoding="utf-8")
+    assert "- Differing record-level primary metrics: `13 of 150`" in report
+    assert "- Normalized-loss ratio range: `0.99940224` to `1.00038293`" in report
+    assert (
+        "- Overall and protected-stratum median normalized-loss ratios: "
+        "`1.000000`" in report
+    )
+
+
 def test_markdown_report_has_all_candidate_exact_shape_objective_ratios(
     tmp_path: Path,
 ) -> None:

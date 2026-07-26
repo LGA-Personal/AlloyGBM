@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import numpy as np
 import pytest
 
@@ -125,3 +126,53 @@ def test_reset_fitted_state_clears_resolved_policy() -> None:
     model._reset_fitted_state()
 
     assert model.resolved_training_policy_ is None
+
+
+def test_save_load_model_round_trips_resolved_policy(tmp_path) -> None:
+    X, y = make_dense_fixture(rows=128, features=4, classes=None)
+    model = GBMRegressor(
+        n_estimators=4,
+        training_policy="manual",
+        min_data_in_leaf=7,
+        min_split_gain=0.35,
+        row_subsample=0.65,
+        col_subsample=0.75,
+        lambda_l2=1.25,
+        seed=7,
+    ).fit(X, y)
+    path = tmp_path / "policy.agbm"
+
+    model.save_model(str(path))
+
+    payload = path.read_bytes()
+    metadata_len = int.from_bytes(payload[4:8], "little")
+    metadata = json.loads(payload[8 : 8 + metadata_len])
+    restored = GBMRegressor.load_model(str(path))
+
+    assert metadata["resolved_training_policy"] == model.resolved_training_policy_
+    assert restored.resolved_training_policy_ == model.resolved_training_policy_
+
+
+def test_load_model_without_policy_metadata_returns_none(tmp_path) -> None:
+    X, y = make_dense_fixture(rows=128, features=4, classes=None)
+    model = GBMRegressor(n_estimators=4, training_policy="auto", seed=7).fit(X, y)
+    path = tmp_path / "policy.agbm"
+
+    model.save_model(str(path))
+
+    payload = path.read_bytes()
+    metadata_len = int.from_bytes(payload[4:8], "little")
+    metadata = json.loads(payload[8 : 8 + metadata_len])
+    artifact = payload[8 + metadata_len :]
+    metadata.pop("resolved_training_policy", None)
+    legacy_metadata = json.dumps(metadata).encode("utf-8")
+    path.write_bytes(
+        b"AGBP"
+        + len(legacy_metadata).to_bytes(4, "little")
+        + legacy_metadata
+        + artifact
+    )
+
+    restored = GBMRegressor.load_model(str(path))
+
+    assert restored.resolved_training_policy_ is None
