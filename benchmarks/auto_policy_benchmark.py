@@ -340,8 +340,11 @@ def make_fixture(spec: FixtureSpec, seed: int) -> BenchmarkFixture:
     )
 
 
-def _validated_current_policy(
-    resolved: object, *, context: str = "current_auto"
+def _validated_policy_fields(
+    resolved: object,
+    *,
+    expected_mode: str,
+    context: str,
 ) -> dict[str, object]:
     if not isinstance(resolved, dict):
         raise ValueError(f"{context}: resolved_training_policy_ must be a dictionary")
@@ -350,8 +353,8 @@ def _validated_current_policy(
         raise ValueError(
             f"{context}: resolved_training_policy_ missing keys: {sorted(missing)}"
         )
-    if resolved["requested_mode"] != "auto":
-        raise ValueError(f"{context}: requested_mode must be 'auto'")
+    if resolved["requested_mode"] != expected_mode:
+        raise ValueError(f"{context}: requested_mode must be {expected_mode!r}")
     for key in ("requested_rounds", "effective_round_cap", "min_rows_per_leaf"):
         value = resolved[key]
         if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
@@ -365,10 +368,8 @@ def _validated_current_policy(
         "effective_split_l2",
     ):
         value = resolved[key]
-        if isinstance(value, bool) or not isinstance(
-            value, (int, float, np.integer, np.floating)
-        ):
-            raise ValueError(f"{context}: {key} must be numeric")
+        if not isinstance(value, (float, np.floating)):
+            raise ValueError(f"{context}: {key} must be a floating-point value")
         if not math.isfinite(float(value)):
             raise ValueError(f"{context}: {key} must be finite")
     if float(resolved["min_split_gain"]) < 0.0:
@@ -381,6 +382,16 @@ def _validated_current_policy(
     if not isinstance(resolved["auto_split_l2_applied"], (bool, np.bool_)):
         raise ValueError(f"{context}: auto_split_l2_applied must be boolean")
     return dict(resolved)
+
+
+def _validated_current_policy(
+    resolved: object, *, context: str = "current_auto"
+) -> dict[str, object]:
+    return _validated_policy_fields(
+        resolved,
+        expected_mode="auto",
+        context=context,
+    )
 
 
 def derive_candidate_params(
@@ -453,11 +464,11 @@ def _validate_manual_policy(
     split_l2: float | None,
     context: str,
 ) -> dict[str, object]:
-    if not isinstance(resolved, dict):
-        raise ValueError(f"{context}: resolved_training_policy_ must be a dictionary")
-    missing = POLICY_KEYS - set(resolved)
-    if missing:
-        raise ValueError(f"{context}: resolved policy missing keys: {sorted(missing)}")
+    validated = _validated_policy_fields(
+        resolved,
+        expected_mode="manual",
+        context=context,
+    )
     expected = {
         "requested_mode": "manual",
         "requested_rounds": int(params["n_estimators"]),
@@ -470,7 +481,7 @@ def _validate_manual_policy(
         "effective_split_l2": 0.0 if split_l2 is None else float(split_l2),
     }
     for key, expected_value in expected.items():
-        actual = resolved[key]
+        actual = validated[key]
         matches = (
             math.isclose(float(actual), float(expected_value), rel_tol=1e-6, abs_tol=1e-7)
             if isinstance(expected_value, float)
@@ -480,7 +491,7 @@ def _validate_manual_policy(
             raise ValueError(
                 f"{context}: resolved {key}={actual!r}, expected {expected_value!r}"
             )
-    return dict(resolved)
+    return validated
 
 
 def _fit_arm(
@@ -827,40 +838,39 @@ def _format_matrix_key(key: tuple[str, str, str, int, str]) -> str:
 def evaluate_gates(
     records: Sequence[BenchmarkRecord],
     *,
-    specs: Sequence[FixtureSpec] | None = None,
-    seeds: Sequence[int] | None = None,
+    specs: Sequence[FixtureSpec],
+    seeds: Sequence[int],
 ) -> GateResult:
-    """Validate matrix evidence and select a qualifying candidate or current auto."""
-    if specs is not None or seeds is not None:
-        if specs is None or seeds is None:
-            raise ValueError("specs and seeds must be provided together")
-        observed = [
-            (
-                row.fixture,
-                row.shape_stratum,
-                row.objective,
-                row.seed,
-                row.arm,
-            )
-            for row in records
+    """Validate a declared matrix and select a candidate or current auto."""
+    if specs is None or seeds is None:
+        raise ValueError("specs and seeds must declare the expected matrix")
+    observed = [
+        (
+            row.fixture,
+            row.shape_stratum,
+            row.objective,
+            row.seed,
+            row.arm,
+        )
+        for row in records
+    ]
+    expected = _expected_record_keys(specs, seeds)
+    observed_set = set(observed)
+    missing = sorted(expected - observed_set)
+    unexpected = sorted(observed_set - expected)
+    duplicates = sorted(key for key, count in Counter(observed).items() if count > 1)
+    if missing or unexpected or duplicates:
+        details = [
+            *[f"missing {_format_matrix_key(key)}" for key in missing],
+            *[f"unexpected {_format_matrix_key(key)}" for key in unexpected],
+            *[f"duplicate {_format_matrix_key(key)}" for key in duplicates],
         ]
-        expected = _expected_record_keys(specs, seeds)
-        observed_set = set(observed)
-        missing = sorted(expected - observed_set)
-        unexpected = sorted(observed_set - expected)
-        duplicates = sorted(key for key, count in Counter(observed).items() if count > 1)
-        if missing or unexpected or duplicates:
-            details = [
-                *[f"missing {_format_matrix_key(key)}" for key in missing],
-                *[f"unexpected {_format_matrix_key(key)}" for key in unexpected],
-                *[f"duplicate {_format_matrix_key(key)}" for key in duplicates],
-            ]
-            return GateResult(
-                name="matrix",
-                passed=False,
-                detail="\n".join(details),
-                evidence_valid=False,
-            )
+        return GateResult(
+            name="matrix",
+            passed=False,
+            detail="\n".join(details),
+            evidence_valid=False,
+        )
 
     current_rows = [row for row in records if row.arm == "current_auto"]
     current_issues = [
@@ -889,13 +899,13 @@ def evaluate_gates(
             evidence_valid=False,
         )
 
-    qualifiers = [result for result in results if result.passed]
+    quality_qualified = [result for result in results if result.passed]
     rejection_detail = "\n".join(
         f"{result.name} rejected: {result.detail}"
         for result in results
         if not result.passed
     )
-    if not qualifiers:
+    if not quality_qualified:
         detail = "keep current: no candidate meets every quality gate"
         if rejection_detail:
             detail = f"{detail}\n{rejection_detail}"
@@ -908,24 +918,26 @@ def evaluate_gates(
 
     best_ratio = min(
         result.overall_loss_ratio
-        for result in qualifiers
+        for result in quality_qualified
         if result.overall_loss_ratio is not None
     )
-    close = [
+    quality_equivalent = [
         result
-        for result in qualifiers
+        for result in quality_qualified
         if result.overall_loss_ratio is not None
         and result.overall_loss_ratio <= best_ratio + 0.005 + 1e-12
     ]
-    fit_medians = {
+    median_fit_seconds_for_final_tie_break = {
         arm: median(row.fit_seconds for row in records if row.arm == arm)
         for arm in candidate_arms
     }
+    # Timing is descriptive until this final ordering: every remaining arm has
+    # passed all quality gates and lies inside the 0.5% quality-equivalence band.
     selected = min(
-        close,
+        quality_equivalent,
         key=lambda result: (
             BEHAVIORAL_DISTANCE[result.name],
-            fit_medians[result.name],
+            median_fit_seconds_for_final_tie_break[result.name],
             result.name,
         ),
     )
