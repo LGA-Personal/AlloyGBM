@@ -699,6 +699,18 @@ def _record_key(record: BenchmarkRecord) -> tuple[str, str, str, int]:
     )
 
 
+def _finite_real(value: object) -> float | None:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(
+        value, (int, float, np.integer, np.floating)
+    ):
+        return None
+    try:
+        finite_value = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return finite_value if math.isfinite(finite_value) else None
+
+
 def _record_issue(record: BenchmarkRecord) -> str | None:
     context = f"{record.fixture} seed={record.seed} arm={record.arm}"
     if record.error is not None:
@@ -713,11 +725,8 @@ def _record_issue(record: BenchmarkRecord) -> str | None:
         return f"{context}: completed_rounds must be greater than zero"
     for field in ("primary_metric", "fit_seconds"):
         value = getattr(record, field)
-        try:
-            finite_value = float(value)
-        except (TypeError, ValueError, OverflowError):
-            return f"{context}: {field} must be a finite, non-negative number"
-        if isinstance(value, (bool, np.bool_)) or not math.isfinite(finite_value):
+        finite_value = _finite_real(value)
+        if finite_value is None:
             return f"{context}: {field} must be a finite, non-negative number"
         if finite_value < 0.0:
             return f"{context}: {field} must be non-negative"
@@ -727,24 +736,27 @@ def _record_issue(record: BenchmarkRecord) -> str | None:
         if record.ndcg_at_10 is not None:
             return f"{context}: ndcg_at_10 must be None for regression"
     if record.objective in {"binary", "multiclass"}:
-        if record.accuracy is None or not math.isfinite(float(record.accuracy)):
+        accuracy = _finite_real(record.accuracy)
+        if accuracy is None:
             return f"{context}: accuracy must be finite and in [0, 1]"
-        if not 0.0 <= float(record.accuracy) <= 1.0:
+        if not 0.0 <= accuracy <= 1.0:
             return f"{context}: accuracy must be in [0, 1]"
         if record.ndcg_at_10 is not None:
             return f"{context}: ndcg_at_10 must be None for classification"
     if record.objective == "ranking":
         if record.accuracy is not None:
             return f"{context}: accuracy must be None for ranking"
-        if record.ndcg_at_10 is None or not math.isfinite(float(record.ndcg_at_10)):
+        ndcg_at_10 = _finite_real(record.ndcg_at_10)
+        if ndcg_at_10 is None:
             return f"{context}: ndcg_at_10 must be finite and in [0, 1]"
-        if not 0.0 <= float(record.ndcg_at_10) <= 1.0:
+        if not 0.0 <= ndcg_at_10 <= 1.0:
             return f"{context}: ndcg_at_10 must be in [0, 1]"
-        if not 0.0 <= float(record.primary_metric) <= 1.0:
+        primary_metric = _finite_real(record.primary_metric)
+        if primary_metric is None or not 0.0 <= primary_metric <= 1.0:
             return f"{context}: primary_metric must be in [0, 1] for ranking"
-        expected_loss = 1.0 - float(record.ndcg_at_10)
+        expected_loss = 1.0 - ndcg_at_10
         if not math.isclose(
-            float(record.primary_metric),
+            primary_metric,
             expected_loss,
             rel_tol=1e-12,
             abs_tol=1e-12,
