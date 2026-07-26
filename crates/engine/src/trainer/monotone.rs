@@ -129,6 +129,17 @@ pub(crate) fn project_monotone_tree(
         return Ok(());
     }
 
+    let mut projected = stumps.to_vec();
+    project_monotone_tree_in_place(&mut projected, constraints, max_abs_leaf_value)?;
+    stumps.clone_from_slice(&projected);
+    Ok(())
+}
+
+fn project_monotone_tree_in_place(
+    stumps: &mut [TrainedStump],
+    constraints: &[i8],
+    max_abs_leaf_value: f32,
+) -> EngineResult<()> {
     let mut stumps_by_local = HashMap::with_capacity(stumps.len());
     let mut tree_id = None;
     for (index, stump) in stumps.iter().enumerate() {
@@ -200,16 +211,46 @@ pub(crate) fn project_monotone_forest(
             stumps.len()
         )));
     }
+    validate_forest_round_tree_ids(stumps, stumps_per_round)?;
 
+    let mut projected = stumps.to_vec();
     let mut cursor = 0_usize;
     for &round_stump_count in stumps_per_round {
         let round_end = cursor + round_stump_count;
         if round_stump_count != 0 {
-            project_monotone_tree(
-                &mut stumps[cursor..round_end],
+            project_monotone_tree_in_place(
+                &mut projected[cursor..round_end],
                 constraints,
                 max_abs_leaf_value,
             )?;
+        }
+        cursor = round_end;
+    }
+    stumps.clone_from_slice(&projected);
+    Ok(())
+}
+
+fn validate_forest_round_tree_ids(
+    stumps: &[TrainedStump],
+    stumps_per_round: &[usize],
+) -> EngineResult<()> {
+    let mut cursor = 0_usize;
+    for (round_index, &round_stump_count) in stumps_per_round.iter().enumerate() {
+        let round_end = cursor + round_stump_count;
+        if round_stump_count != 0 {
+            let expected_tree_id = u32::try_from(round_index).map_err(|_| {
+                EngineError::InvalidConfig(format!(
+                    "monotone logical round index {round_index} exceeds u32::MAX"
+                ))
+            })?;
+            for stump in &stumps[cursor..round_end] {
+                let (tree_id, _) = decode_tree_node_id(stump.split.node_id);
+                if tree_id != expected_tree_id {
+                    return Err(EngineError::InvalidConfig(format!(
+                        "monotone logical round {round_index} requires tree id {expected_tree_id}, found {tree_id}"
+                    )));
+                }
+            }
         }
         cursor = round_end;
     }
@@ -257,6 +298,12 @@ fn scalar_leaf_value(leaf: &LeafValue, local_node_id: u32, side: &str) -> Engine
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ReconstructibleChild {
+    delta: f32,
+    absolute: f32,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn project_monotone_node(
     local_node_id: u32,
@@ -284,24 +331,27 @@ fn project_monotone_node(
         left_raw,
         right_raw,
     )?;
-    let bounded_left_delta = if bounded.left_output.to_bits() == left_raw.to_bits() {
-        left_delta
-    } else {
-        bounded.left_output - parent_absolute
-    };
-    let bounded_right_delta = if bounded.right_output.to_bits() == right_raw.to_bits() {
-        right_delta
-    } else {
-        bounded.right_output - parent_absolute
-    };
-    if !bounded_left_delta.is_finite() || !bounded_right_delta.is_finite() {
-        return Err(EngineError::InvalidConfig(format!(
-            "monotone tree local node {local_node_id} produced non-finite parent-relative deltas"
-        )));
-    }
+    let left = reconstructible_child(
+        parent_absolute,
+        left_delta,
+        left_raw,
+        bounded.left_output,
+        bounded.left_bounds,
+        local_node_id,
+        "left",
+    )?;
+    let right = reconstructible_child(
+        parent_absolute,
+        right_delta,
+        right_raw,
+        bounded.right_output,
+        bounded.right_bounds,
+        local_node_id,
+        "right",
+    )?;
 
-    stumps[index].left_leaf_value = LeafValue::Scalar(bounded_left_delta);
-    stumps[index].right_leaf_value = LeafValue::Scalar(bounded_right_delta);
+    stumps[index].left_leaf_value = LeafValue::Scalar(left.delta);
+    stumps[index].right_leaf_value = LeafValue::Scalar(right.delta);
     visited[index] = true;
 
     let left_local_node_id = left_child_node_id(local_node_id).map_err(|error| {
@@ -317,7 +367,7 @@ fn project_monotone_node(
     if stumps_by_local.contains_key(&left_local_node_id) {
         project_monotone_node(
             left_local_node_id,
-            bounded.left_output,
+            left.absolute,
             bounded.left_bounds,
             stumps,
             stumps_by_local,
@@ -328,7 +378,7 @@ fn project_monotone_node(
     if stumps_by_local.contains_key(&right_local_node_id) {
         project_monotone_node(
             right_local_node_id,
-            bounded.right_output,
+            right.absolute,
             bounded.right_bounds,
             stumps,
             stumps_by_local,
@@ -337,6 +387,104 @@ fn project_monotone_node(
         )?;
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reconstructible_child(
+    parent_absolute: f32,
+    original_delta: f32,
+    original_absolute: f32,
+    bounded_output: f32,
+    bounds: MonotoneBounds,
+    local_node_id: u32,
+    side: &str,
+) -> EngineResult<ReconstructibleChild> {
+    if bounded_output.to_bits() == original_absolute.to_bits() {
+        return Ok(ReconstructibleChild {
+            delta: original_delta,
+            absolute: original_absolute,
+        });
+    }
+
+    let first_key = first_delta_key_reconstructing_at_least(parent_absolute, bounds.lower);
+    let last_key = last_delta_key_reconstructing_at_most(parent_absolute, bounds.upper);
+    if first_key > last_key {
+        return Err(EngineError::InvalidConfig(format!(
+            "monotone tree local node {local_node_id} has no finite {side} delta reconstructing inside [{}, {}]",
+            bounds.lower, bounds.upper
+        )));
+    }
+
+    let ideal_delta = bounded_output - parent_absolute;
+    let ideal_key = if ideal_delta == f32::NEG_INFINITY {
+        MIN_FINITE_F32_KEY
+    } else if ideal_delta == f32::INFINITY {
+        MAX_FINITE_F32_KEY
+    } else {
+        ordered_f32_key(ideal_delta)
+    };
+    let delta = f32_from_ordered_key(ideal_key.clamp(first_key, last_key));
+    let absolute = parent_absolute + delta;
+    if !delta.is_finite()
+        || !absolute.is_finite()
+        || absolute < bounds.lower
+        || absolute > bounds.upper
+    {
+        return Err(EngineError::InvalidConfig(format!(
+            "monotone tree local node {local_node_id} produced an unreconstructible {side} output"
+        )));
+    }
+    Ok(ReconstructibleChild { delta, absolute })
+}
+
+const MIN_FINITE_F32_KEY: u32 = 0x0080_0000;
+const MAX_FINITE_F32_KEY: u32 = 0xff7f_ffff;
+const F32_SIGN_MASK: u32 = 0x8000_0000;
+
+fn first_delta_key_reconstructing_at_least(parent_absolute: f32, lower: f32) -> u32 {
+    let mut low = MIN_FINITE_F32_KEY;
+    let mut high = MAX_FINITE_F32_KEY;
+    while low < high {
+        let midpoint = low + (high - low) / 2;
+        if parent_absolute + f32_from_ordered_key(midpoint) >= lower {
+            high = midpoint;
+        } else {
+            low = midpoint + 1;
+        }
+    }
+    low
+}
+
+fn last_delta_key_reconstructing_at_most(parent_absolute: f32, upper: f32) -> u32 {
+    let mut low = MIN_FINITE_F32_KEY;
+    let mut high = MAX_FINITE_F32_KEY;
+    while low < high {
+        let midpoint = low + (high - low).div_ceil(2);
+        if parent_absolute + f32_from_ordered_key(midpoint) <= upper {
+            low = midpoint;
+        } else {
+            high = midpoint - 1;
+        }
+    }
+    low
+}
+
+fn ordered_f32_key(value: f32) -> u32 {
+    let bits = value.to_bits();
+    if bits & F32_SIGN_MASK == 0 {
+        bits ^ F32_SIGN_MASK
+    } else {
+        !bits
+    }
+}
+
+fn f32_from_ordered_key(key: u32) -> f32 {
+    let bits = if key & F32_SIGN_MASK == 0 {
+        !key
+    } else {
+        key ^ F32_SIGN_MASK
+    };
+    f32::from_bits(bits)
 }
 
 fn stump_matches_projection(original: &TrainedStump, bounded: &TrainedStump) -> bool {
@@ -668,6 +816,57 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::excessive_precision)]
+    fn projected_deltas_reconstruct_inside_bounds_and_reach_a_fixed_point() {
+        let parent = -0.17484642565250397_f32;
+        let boundary = 0.23322775959968567_f32;
+        let boundary_delta = 0.40807420015335083_f32;
+        let right_root = 0.6413019299507141_f32;
+        let mut stumps = vec![
+            scalar_stump(0, 0, 0, parent, right_root),
+            scalar_stump(0, 1, 1, boundary_delta, boundary_delta),
+        ];
+
+        project_monotone_tree(&mut stumps, &[1, 0], 1.0).expect("projection succeeds");
+
+        let LeafValue::Scalar(projected_parent) = stumps[0].left_leaf_value else {
+            panic!("expected scalar root output");
+        };
+        assert_eq!(projected_parent.to_bits(), parent.to_bits());
+        for leaf in [&stumps[1].left_leaf_value, &stumps[1].right_leaf_value] {
+            let LeafValue::Scalar(delta) = leaf else {
+                panic!("expected scalar descendant output");
+            };
+            let reconstructed = projected_parent + delta;
+            assert!(
+                reconstructed >= -1.0 && reconstructed <= boundary,
+                "reconstructed output {reconstructed} escaped [-1, {boundary}]"
+            );
+        }
+
+        let once = scalar_bits(&stumps);
+        project_monotone_tree(&mut stumps, &[1, 0], 1.0).expect("second projection succeeds");
+        assert_eq!(scalar_bits(&stumps), once);
+    }
+
+    #[test]
+    #[allow(clippy::excessive_precision)]
+    fn warm_start_validation_rejects_unreconstructible_boundary_delta() {
+        let stumps = vec![
+            scalar_stump(0, 0, 0, -0.17484642565250397, 0.6413019299507141),
+            scalar_stump(0, 1, 1, 0.40807420015335083, 0.40807420015335083),
+        ];
+        let error = validate_monotone_forest(&stumps, &[2], &[1, 0], 1.0)
+            .expect_err("unreconstructible boundary delta must violate the contract");
+        assert!(matches!(
+            error,
+            EngineError::InvalidConfig(message)
+                if message.contains("warm-start tree")
+                    && message.contains("monotone contract")
+        ));
+    }
+
+    #[test]
     fn decreasing_root_projection_mirrors_increasing_order() {
         let mut stumps = vec![scalar_stump(0, 0, 0, -2.0, 4.0)];
         project_monotone_tree(&mut stumps, &[-1], 10.0).expect("projection succeeds");
@@ -775,12 +974,14 @@ mod tests {
     #[test]
     fn disconnected_local_nodes_are_rejected() {
         let mut stumps = vec![
-            scalar_stump(0, 0, 0, -1.0, 1.0),
+            scalar_stump(0, 0, 0, 5.0, -1.0),
             scalar_stump(0, 3, 0, -1.0, 1.0),
         ];
+        let before = scalar_bits(&stumps);
         let error = project_monotone_tree(&mut stumps, &[1], 10.0)
             .expect_err("disconnected local ids must fail");
         assert!(matches!(error, EngineError::InvalidConfig(_)));
+        assert_eq!(scalar_bits(&stumps), before);
     }
 
     #[test]
@@ -806,6 +1007,19 @@ mod tests {
     }
 
     #[test]
+    fn forest_rejects_duplicate_or_non_sequential_tree_ids() {
+        for second_tree_id in [0, 2] {
+            let mut stumps = vec![
+                scalar_stump(0, 0, 0, -1.0, 1.0),
+                scalar_stump(second_tree_id, 0, 0, -1.0, 1.0),
+            ];
+            let error = project_monotone_forest(&mut stumps, &[1, 1], &[1], 10.0)
+                .expect_err("tree ids must match their logical round indices");
+            assert!(matches!(error, EngineError::InvalidConfig(_)));
+        }
+    }
+
+    #[test]
     fn forest_projection_accepts_zero_count_rounds() {
         let mut stumps = vec![scalar_stump(1, 0, 0, 5.0, -1.0)];
         project_monotone_forest(&mut stumps, &[0, 1], &[1], 10.0)
@@ -814,6 +1028,30 @@ mod tests {
             scalar_bits(&stumps),
             vec![(2.0_f32.to_bits(), 2.0_f32.to_bits())]
         );
+    }
+
+    #[test]
+    fn forest_projection_accounts_for_zero_count_round_ids() {
+        let mut stumps = vec![
+            scalar_stump(0, 0, 0, -1.0, 1.0),
+            scalar_stump(2, 0, 0, -2.0, 2.0),
+        ];
+        project_monotone_forest(&mut stumps, &[1, 0, 1], &[1], 10.0)
+            .expect("zero-count logical round advances the expected tree id");
+    }
+
+    #[test]
+    fn forest_projection_is_transactional_when_a_later_tree_is_disconnected() {
+        let mut stumps = vec![
+            scalar_stump(0, 0, 0, 5.0, -1.0),
+            scalar_stump(1, 0, 0, 4.0, -2.0),
+            scalar_stump(1, 3, 0, -1.0, 1.0),
+        ];
+        let before = scalar_bits(&stumps);
+        let error = project_monotone_forest(&mut stumps, &[1, 2], &[1], 10.0)
+            .expect_err("disconnected later tree must fail");
+        assert!(matches!(error, EngineError::InvalidConfig(_)));
+        assert_eq!(scalar_bits(&stumps), before);
     }
 
     #[test]
