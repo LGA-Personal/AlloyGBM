@@ -7,8 +7,13 @@ mod validate;
 
 pub(crate) use interaction::InteractionConstraintIndex;
 #[cfg(test)]
-pub(crate) use policy::should_apply_auto_split_l2;
-pub(crate) use policy::split_selection_options_for_training;
+pub(crate) use policy::{
+    AUTO_SPLIT_L2_NOISY_SMALL_WIDE, should_apply_auto_split_l2,
+    split_selection_options_for_training,
+};
+pub(crate) use policy::{
+    resolve_training_policy, split_selection_options_with_resolution_for_training,
+};
 pub(crate) use tree_build::{
     LEAF_EPSILON, apply_single_categorical_target_encoding, build_tree_leaf_wise,
     build_tree_level_wise, validate_iteration_controls,
@@ -602,15 +607,17 @@ impl Trainer {
         policy_mode: TrainingPolicyMode,
         is_ranking: bool,
     ) -> EngineResult<IterationControls> {
-        if experiment_force_manual_policy_enabled() {
-            return self.default_iteration_controls(rounds);
-        }
-        match policy_mode {
-            TrainingPolicyMode::Manual => self.default_iteration_controls(rounds),
-            TrainingPolicyMode::Auto => {
-                self.auto_iteration_controls(dataset, binned_matrix, rounds, is_ranking)
-            }
-        }
+        let controls = if experiment_force_manual_policy_enabled() {
+            self.default_iteration_controls(rounds)?
+        } else {
+            match policy_mode {
+                TrainingPolicyMode::Manual => self.default_iteration_controls(rounds),
+                TrainingPolicyMode::Auto => {
+                    self.auto_iteration_controls(dataset, binned_matrix, rounds, is_ranking)
+                }
+            }?
+        };
+        Ok(controls.with_policy_request(rounds, policy_mode))
     }
 
     pub fn fit_iterations_with_controls<B: BackendOps, O: ObjectiveOps>(
@@ -944,8 +951,14 @@ impl Trainer {
         }
 
         let sampling_seed_base = sampling_seed_base(self.params.seed, self.params.deterministic);
-        let split_options =
-            split_selection_options_for_training(&self.params, None, dataset, binned_matrix)?;
+        let split_resolution = split_selection_options_with_resolution_for_training(
+            &self.params,
+            None,
+            dataset,
+            binned_matrix,
+        )?;
+        let resolved_training_policy = resolve_training_policy(controls, &split_resolution);
+        let split_options = split_resolution.options;
         let feature_count = binned_matrix.feature_count;
         let gradient_projector = if let Some(config) = gradient_neutralization_config(&self.params)
         {
@@ -1926,6 +1939,7 @@ impl Trainer {
             },
             rounds_requested: effective_round_cap,
             effective_round_cap,
+            resolved_training_policy,
             rounds_completed,
             stop_reason,
             initial_loss,
@@ -2142,12 +2156,14 @@ impl Trainer {
             None
         };
         let sampling_seed_base = sampling_seed_base(self.params.seed, self.params.deterministic);
-        let split_options = split_selection_options_for_training(
+        let split_resolution = split_selection_options_with_resolution_for_training(
             &self.params,
             execution.policy_mode,
             active_dataset,
             binned_matrix,
         )?;
+        let resolved_training_policy = resolve_training_policy(controls, &split_resolution);
+        let split_options = split_resolution.options;
 
         // Warm-start: use existing model's baseline + apply existing
         // trees.  `warm_ema_stats` captures the MorphBoost EMA snapshot
@@ -3151,6 +3167,7 @@ impl Trainer {
             model,
             rounds_requested: controls.rounds,
             effective_round_cap,
+            resolved_training_policy,
             rounds_completed,
             stop_reason,
             initial_loss,

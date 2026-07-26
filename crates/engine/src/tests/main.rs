@@ -277,6 +277,58 @@ fn sample_noisy_wide_small_dataset() -> TrainingDataset {
     }
 }
 
+fn policy_fixture(
+    row_count: usize,
+    feature_count: usize,
+    target_scale: f32,
+) -> (TrainingDataset, BinnedMatrix) {
+    let mut values = Vec::with_capacity(row_count * feature_count);
+    let mut codes = Vec::with_capacity(row_count * feature_count);
+    for row in 0..row_count {
+        for feature in 0..feature_count {
+            let value = ((row + feature) % 2) as f32;
+            values.push(value);
+            codes.push(value as u8);
+        }
+    }
+    let targets = (0..row_count)
+        .map(|row| {
+            if row % 2 == 0 {
+                target_scale
+            } else {
+                -target_scale
+            }
+        })
+        .collect();
+    let dataset = TrainingDataset {
+        matrix: alloygbm_core::DatasetMatrix::new(row_count, feature_count, values)
+            .expect("policy fixture matrix is valid"),
+        targets,
+        sample_weights: None,
+        time_index: None,
+        group_id: None,
+        factor_exposures: None,
+    };
+    let matrix = BinnedMatrix::new(row_count, feature_count, 1, codes)
+        .expect("policy fixture binned matrix is valid");
+    (dataset, matrix)
+}
+
+fn trainer() -> Trainer {
+    Trainer::new(TrainParams::default()).expect("default policy parameters are valid")
+}
+
+fn trainer_with_policy_params() -> Trainer {
+    Trainer::new(TrainParams {
+        min_data_in_leaf: 12,
+        min_split_gain: 0.37,
+        row_subsample: 0.75,
+        col_subsample: 0.6,
+        ..TrainParams::default()
+    })
+    .expect("policy parameters are valid")
+}
+
 fn split_scanner_fallback_dataset() -> TrainingDataset {
     TrainingDataset {
         matrix: alloygbm_core::DatasetMatrix::new(
@@ -2121,6 +2173,180 @@ fn auto_policy_preserves_default_controls_on_small_datasets() {
     assert_eq!(auto.col_subsample, manual.col_subsample);
 }
 
+#[test]
+fn auto_policy_resolves_every_row_and_feature_boundary() {
+    let row_cases = [
+        (1_023, 1, 1.0),
+        (1_024, 4, 1.0),
+        (2_047, 4, 1.0),
+        (2_048, 8, 0.9),
+        (8_191, 8, 0.9),
+        (8_192, 16, 0.9),
+        (16_383, 16, 0.9),
+        (16_384, 16, 0.8),
+    ];
+    for (rows, min_rows, row_subsample) in row_cases {
+        let (dataset, matrix) = policy_fixture(rows, 16, 1.0);
+        let controls = trainer()
+            .iteration_controls_for_policy_ext(
+                &dataset,
+                &matrix,
+                300,
+                TrainingPolicyMode::Auto,
+                false,
+            )
+            .expect("auto controls should resolve");
+        assert_eq!(controls.min_rows_per_leaf, min_rows, "rows={rows}");
+        assert_eq!(controls.row_subsample, row_subsample, "rows={rows}");
+        assert_eq!(controls.requested_rounds, 300, "rows={rows}");
+        assert_eq!(
+            controls.requested_policy_mode,
+            TrainingPolicyMode::Auto,
+            "rows={rows}"
+        );
+    }
+
+    let feature_cases = [
+        (31, 1.0),
+        (32, 0.8),
+        (127, 0.8),
+        (128, 0.65),
+        (255, 0.65),
+        (256, 0.5),
+    ];
+    for (features, col_subsample) in feature_cases {
+        let (dataset, matrix) = policy_fixture(2_048, features, 1.0);
+        let controls = trainer()
+            .iteration_controls_for_policy_ext(
+                &dataset,
+                &matrix,
+                32,
+                TrainingPolicyMode::Auto,
+                false,
+            )
+            .expect("auto controls should resolve");
+        assert_eq!(controls.col_subsample, col_subsample, "features={features}");
+    }
+}
+
+#[test]
+fn manual_policy_snapshot_is_an_identity_view_of_requested_controls() {
+    let (dataset, matrix) = policy_fixture(2_048, 128, 2.0);
+    let controls = trainer_with_policy_params()
+        .iteration_controls_for_policy(&dataset, &matrix, 37, TrainingPolicyMode::Manual)
+        .expect("manual controls should resolve");
+    let split_resolution = split_selection_options_with_resolution_for_training(
+        trainer_with_policy_params().params(),
+        Some(TrainingPolicyMode::Manual),
+        &dataset,
+        &matrix,
+    )
+    .expect("manual split options should resolve");
+    let resolved = resolve_training_policy(controls, &split_resolution);
+
+    assert_eq!(resolved.requested_mode, TrainingPolicyMode::Manual);
+    assert_eq!(resolved.requested_rounds, 37);
+    assert_eq!(resolved.effective_round_cap, 37);
+    assert_eq!(resolved.min_rows_per_leaf, 12);
+    assert_eq!(resolved.min_split_gain, 0.37);
+    assert_eq!(resolved.row_subsample, 0.75);
+    assert_eq!(resolved.col_subsample, 0.6);
+    assert!(!resolved.auto_split_l2_applied);
+}
+
+#[test]
+fn auto_policy_snapshot_preserves_user_control_overrides() {
+    let (dataset, matrix) = policy_fixture(2_048, 128, 1.0);
+    let controls = trainer_with_policy_params()
+        .iteration_controls_for_policy(&dataset, &matrix, 37, TrainingPolicyMode::Auto)
+        .expect("auto controls should resolve");
+    let split_resolution = split_selection_options_with_resolution_for_training(
+        trainer_with_policy_params().params(),
+        Some(TrainingPolicyMode::Auto),
+        &dataset,
+        &matrix,
+    )
+    .expect("auto split options should resolve");
+    let resolved = resolve_training_policy(controls, &split_resolution);
+
+    assert_eq!(resolved.requested_mode, TrainingPolicyMode::Auto);
+    assert_eq!(resolved.min_rows_per_leaf, 12);
+    assert_eq!(resolved.min_split_gain, 0.37);
+    assert_eq!(resolved.row_subsample, 0.75);
+    assert_eq!(resolved.col_subsample, 0.6);
+}
+
+#[test]
+fn auto_policy_snapshot_reports_small_wide_cap_and_split_l2() {
+    let dataset = sample_noisy_wide_small_dataset();
+    let matrix = sample_wide_small_binned_matrix();
+    let controls = trainer()
+        .iteration_controls_for_policy(&dataset, &matrix, 1_200, TrainingPolicyMode::Auto)
+        .expect("auto controls should resolve");
+    let split_resolution = split_selection_options_with_resolution_for_training(
+        trainer().params(),
+        Some(TrainingPolicyMode::Auto),
+        &dataset,
+        &matrix,
+    )
+    .expect("auto split options should resolve");
+    let resolved = resolve_training_policy(controls, &split_resolution);
+
+    assert_eq!(resolved.requested_rounds, 1_200);
+    assert_eq!(resolved.effective_round_cap, 96);
+    assert!(resolved.auto_split_l2_applied);
+    assert_eq!(resolved.effective_split_l2, AUTO_SPLIT_L2_NOISY_SMALL_WIDE);
+}
+
+#[test]
+fn scalar_summary_carries_the_resolved_manual_policy() {
+    let controls =
+        IterationControls::new(1, 10.0, 1, 0.0, 1_000_000.0, 0.0, 0).expect("controls are valid");
+    let summary = trainer()
+        .fit_iterations_with_summary(
+            &sample_dataset(),
+            &sample_binned_matrix(),
+            &MockBackend,
+            &SquaredErrorObjective,
+            controls,
+        )
+        .expect("iterative training succeeds");
+
+    assert_eq!(
+        summary.resolved_training_policy.requested_mode,
+        TrainingPolicyMode::Manual
+    );
+    assert_eq!(summary.resolved_training_policy.requested_rounds, 1);
+    assert_eq!(summary.resolved_training_policy.effective_round_cap, 1);
+    assert_eq!(summary.resolved_training_policy.min_split_gain, 10.0);
+}
+
+#[test]
+fn multiclass_auto_policy_does_not_apply_scalar_split_l2() {
+    let mut dataset = sample_wide_small_dataset();
+    dataset.targets = vec![0.0, 5.0, 0.0, 5.0];
+    let matrix = sample_wide_small_binned_matrix();
+    let controls = trainer()
+        .iteration_controls_for_policy(&dataset, &matrix, 300, TrainingPolicyMode::Auto)
+        .expect("auto controls should resolve");
+    let summary = trainer()
+        .fit_multiclass_iterations_with_summary(
+            &dataset,
+            &matrix,
+            &MockBackend,
+            &MultiClassSoftmaxObjective::new(6).expect("objective"),
+            controls,
+        )
+        .expect("multiclass training succeeds");
+
+    assert_eq!(
+        summary.resolved_training_policy.requested_mode,
+        TrainingPolicyMode::Auto
+    );
+    assert!(!summary.resolved_training_policy.auto_split_l2_applied);
+    assert_eq!(summary.resolved_training_policy.effective_split_l2, 0.0);
+}
+
 fn large_ranking_shaped_dataset() -> TrainingDataset {
     // 5000 rows × 16 features, targets are graded 0-4 relevance labels.
     let row_count = 5000usize;
@@ -2218,6 +2444,17 @@ fn auto_policy_disables_regression_only_guards_for_ranking_objectives() {
         !ranking_controls.training_loss_gate_enabled,
         "ranking auto-policy must leave the training-loss gate disabled"
     );
+
+    let split_resolution = split_selection_options_with_resolution_for_training(
+        trainer.params(),
+        Some(TrainingPolicyMode::Auto),
+        &dataset,
+        &binned,
+    )
+    .expect("ranking split options should resolve");
+    let resolved = resolve_training_policy(ranking_controls, &split_resolution);
+    assert_eq!(resolved.requested_mode, TrainingPolicyMode::Auto);
+    assert_eq!(resolved.min_split_gain, 0.0);
 }
 
 #[test]

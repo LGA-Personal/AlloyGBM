@@ -105,6 +105,10 @@ pub struct IterationControls {
     pub max_leaves: Option<usize>,
     /// Whether training-loss regressions/weak improvements can stop training.
     pub training_loss_gate_enabled: bool,
+    /// Original round request before any policy cap is applied.
+    pub requested_rounds: usize,
+    /// Public policy mode requested by the caller.
+    pub requested_policy_mode: TrainingPolicyMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +131,7 @@ pub struct IterationRunSummary {
     pub model: crate::TrainedModel,
     pub rounds_requested: usize,
     pub effective_round_cap: usize,
+    pub resolved_training_policy: ResolvedTrainingPolicy,
     pub rounds_completed: usize,
     pub stop_reason: IterationStopReason,
     pub initial_loss: f32,
@@ -315,6 +320,19 @@ pub enum TrainingPolicyMode {
     Auto,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResolvedTrainingPolicy {
+    pub requested_mode: TrainingPolicyMode,
+    pub requested_rounds: usize,
+    pub effective_round_cap: usize,
+    pub min_rows_per_leaf: usize,
+    pub min_split_gain: f32,
+    pub row_subsample: f32,
+    pub col_subsample: f32,
+    pub auto_split_l2_applied: bool,
+    pub effective_split_l2: f32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PolicyFitRequest {
     pub(crate) rounds: usize,
@@ -417,7 +435,19 @@ impl IterationControls {
             min_validation_improvement: 0.0,
             max_leaves: None,
             training_loss_gate_enabled: false,
+            requested_rounds: rounds,
+            requested_policy_mode: TrainingPolicyMode::Manual,
         })
+    }
+
+    pub(crate) fn with_policy_request(
+        mut self,
+        requested_rounds: usize,
+        policy_mode: TrainingPolicyMode,
+    ) -> Self {
+        self.requested_rounds = requested_rounds;
+        self.requested_policy_mode = policy_mode;
+        self
     }
 
     pub fn with_training_loss_gate(mut self) -> EngineResult<Self> {

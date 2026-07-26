@@ -15,7 +15,7 @@ use alloygbm_core::{
 use crate::artifact::{read_f32_le, read_u16_le, read_u32_le, required_single_section};
 use crate::error::{EngineError, EngineResult};
 use crate::tree_node::TREE_NODE_STRIDE;
-use crate::{IterationDiagnostics, IterationStopReason, TrainedStump};
+use crate::{IterationDiagnostics, IterationStopReason, ResolvedTrainingPolicy, TrainedStump};
 
 /// Trained multi-class model: K tree sequences (one per class).
 #[derive(Debug, Clone, PartialEq)]
@@ -387,6 +387,7 @@ pub struct MultiClassIterationRunSummary {
     pub model: MultiClassTrainedModel,
     pub rounds_requested: usize,
     pub effective_round_cap: usize,
+    pub resolved_training_policy: ResolvedTrainingPolicy,
     pub rounds_completed: usize,
     pub stop_reason: IterationStopReason,
     pub initial_loss: f32,
