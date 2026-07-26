@@ -17,10 +17,12 @@
 
 ## Matrix Completeness
 
+- Matrix evidence complete: `true`
+- Expected records: `600`
 - Complete records: `600`
 - Total records: `600`
 - Distinct fixtures: `50`
-- Distinct shapes: `10`
+- Declared exact shapes: `10`
 - Distinct objectives: `5`
 - Distinct seeds: `3`
 - Distinct arms: `4`
@@ -76,100 +78,160 @@ medium-narrow shape median is worse than current auto (1.0033x)
 overall median primary loss does not reach the required 1% improvement (1.0000x)
 ```
 
-## Shape/Objective Loss Ratios
+## Exact-Shape/Objective Loss Ratios
 
-| Arm | Stratum | Objective | Median normalized loss |
-|---|---|---|---:|
-| manual_default | large-narrow | binary | 0.995075 |
-| manual_default | large-narrow | multiclass | 0.999599 |
-| manual_default | large-narrow | ranking | 0.981461 |
-| manual_default | large-narrow | regression | 1.012979 |
-| manual_default | large-narrow | sparse_regression | 0.971733 |
-| manual_default | large-wide | binary | 0.950614 |
-| manual_default | large-wide | multiclass | 0.976919 |
-| manual_default | large-wide | ranking | 0.759015 |
-| manual_default | large-wide | regression | 0.692186 |
-| manual_default | large-wide | sparse_regression | 0.876017 |
-| manual_default | medium-narrow | binary | 1.001708 |
-| manual_default | medium-narrow | multiclass | 1.004446 |
-| manual_default | medium-narrow | ranking | 1.059769 |
-| manual_default | medium-narrow | regression | 1.015753 |
-| manual_default | medium-narrow | sparse_regression | 0.998653 |
-| manual_default | medium-wide | binary | 0.958035 |
-| manual_default | medium-wide | multiclass | 0.994932 |
-| manual_default | medium-wide | ranking | 0.806764 |
-| manual_default | medium-wide | regression | 0.762909 |
-| manual_default | medium-wide | sparse_regression | 0.954740 |
-| manual_default | small-narrow | binary | 1.000000 |
-| manual_default | small-narrow | multiclass | 1.000000 |
-| manual_default | small-narrow | ranking | 1.000000 |
-| manual_default | small-narrow | regression | 1.000000 |
-| manual_default | small-narrow | sparse_regression | 1.000000 |
-| manual_default | small-wide | binary | 1.000000 |
-| manual_default | small-wide | multiclass | 1.636279 |
-| manual_default | small-wide | ranking | 0.848028 |
-| manual_default | small-wide | regression | 0.999893 |
-| manual_default | small-wide | sparse_regression | 1.024674 |
-| no_gain_floor | large-narrow | binary | 1.000000 |
-| no_gain_floor | large-narrow | multiclass | 1.000000 |
-| no_gain_floor | large-narrow | ranking | 1.000000 |
-| no_gain_floor | large-narrow | regression | 1.000000 |
-| no_gain_floor | large-narrow | sparse_regression | 1.000000 |
-| no_gain_floor | large-wide | binary | 1.000000 |
-| no_gain_floor | large-wide | multiclass | 1.000000 |
-| no_gain_floor | large-wide | ranking | 1.000000 |
-| no_gain_floor | large-wide | regression | 1.000000 |
-| no_gain_floor | large-wide | sparse_regression | 1.000000 |
-| no_gain_floor | medium-narrow | binary | 1.000000 |
-| no_gain_floor | medium-narrow | multiclass | 1.000000 |
-| no_gain_floor | medium-narrow | ranking | 1.000000 |
-| no_gain_floor | medium-narrow | regression | 1.000000 |
-| no_gain_floor | medium-narrow | sparse_regression | 1.000000 |
-| no_gain_floor | medium-wide | binary | 1.000000 |
-| no_gain_floor | medium-wide | multiclass | 1.000000 |
-| no_gain_floor | medium-wide | ranking | 1.000000 |
-| no_gain_floor | medium-wide | regression | 1.000000 |
-| no_gain_floor | medium-wide | sparse_regression | 1.000000 |
-| no_gain_floor | small-narrow | binary | 1.000000 |
-| no_gain_floor | small-narrow | multiclass | 1.000000 |
-| no_gain_floor | small-narrow | ranking | 1.000000 |
-| no_gain_floor | small-narrow | regression | 1.000000 |
-| no_gain_floor | small-narrow | sparse_regression | 1.000000 |
-| no_gain_floor | small-wide | binary | 1.000000 |
-| no_gain_floor | small-wide | multiclass | 1.000000 |
-| no_gain_floor | small-wide | ranking | 1.000000 |
-| no_gain_floor | small-wide | regression | 1.000000 |
-| no_gain_floor | small-wide | sparse_regression | 1.000000 |
-| quality_first | large-narrow | binary | 1.000919 |
-| quality_first | large-narrow | multiclass | 0.995014 |
-| quality_first | large-narrow | ranking | 1.032240 |
-| quality_first | large-narrow | regression | 1.008771 |
-| quality_first | large-narrow | sparse_regression | 0.994838 |
-| quality_first | large-wide | binary | 0.954241 |
-| quality_first | large-wide | multiclass | 0.979088 |
-| quality_first | large-wide | ranking | 0.779419 |
-| quality_first | large-wide | regression | 0.690238 |
-| quality_first | large-wide | sparse_regression | 0.906911 |
-| quality_first | medium-narrow | binary | 1.003264 |
-| quality_first | medium-narrow | multiclass | 1.002836 |
-| quality_first | medium-narrow | ranking | 1.024807 |
-| quality_first | medium-narrow | regression | 1.011270 |
-| quality_first | medium-narrow | sparse_regression | 0.995603 |
-| quality_first | medium-wide | binary | 0.957608 |
-| quality_first | medium-wide | multiclass | 0.988431 |
-| quality_first | medium-wide | ranking | 0.830360 |
-| quality_first | medium-wide | regression | 0.761380 |
-| quality_first | medium-wide | sparse_regression | 0.933252 |
-| quality_first | small-narrow | binary | 1.000000 |
-| quality_first | small-narrow | multiclass | 1.000000 |
-| quality_first | small-narrow | ranking | 1.000000 |
-| quality_first | small-narrow | regression | 1.000000 |
-| quality_first | small-narrow | sparse_regression | 1.000000 |
-| quality_first | small-wide | binary | 1.000000 |
-| quality_first | small-wide | multiclass | 1.000000 |
-| quality_first | small-wide | ranking | 1.000000 |
-| quality_first | small-wide | regression | 1.000000 |
-| quality_first | small-wide | sparse_regression | 1.000000 |
+| Arm | Rows | Features | Objective | Median normalized loss |
+|---|---:|---:|---|---:|
+| manual_default | 512 | 8 | binary | 1.000000 |
+| manual_default | 512 | 8 | multiclass | 1.000000 |
+| manual_default | 512 | 8 | ranking | 1.000000 |
+| manual_default | 512 | 8 | regression | 1.000000 |
+| manual_default | 512 | 8 | sparse_regression | 1.000000 |
+| manual_default | 512 | 128 | binary | 1.000000 |
+| manual_default | 512 | 128 | multiclass | 1.508581 |
+| manual_default | 512 | 128 | ranking | 0.873694 |
+| manual_default | 512 | 128 | regression | 0.999842 |
+| manual_default | 512 | 128 | sparse_regression | 1.015368 |
+| manual_default | 1023 | 16 | binary | 1.000000 |
+| manual_default | 1023 | 16 | multiclass | 1.000000 |
+| manual_default | 1023 | 16 | ranking | 1.000000 |
+| manual_default | 1023 | 16 | regression | 1.000000 |
+| manual_default | 1023 | 16 | sparse_regression | 1.000000 |
+| manual_default | 1023 | 256 | binary | 1.000000 |
+| manual_default | 1023 | 256 | multiclass | 1.763043 |
+| manual_default | 1023 | 256 | ranking | 0.822361 |
+| manual_default | 1023 | 256 | regression | 1.001346 |
+| manual_default | 1023 | 256 | sparse_regression | 1.026128 |
+| manual_default | 2048 | 16 | binary | 1.001104 |
+| manual_default | 2048 | 16 | multiclass | 1.030913 |
+| manual_default | 2048 | 16 | ranking | 1.132879 |
+| manual_default | 2048 | 16 | regression | 1.024207 |
+| manual_default | 2048 | 16 | sparse_regression | 0.993572 |
+| manual_default | 2048 | 128 | binary | 0.977187 |
+| manual_default | 2048 | 128 | multiclass | 1.011608 |
+| manual_default | 2048 | 128 | ranking | 0.820401 |
+| manual_default | 2048 | 128 | regression | 0.864736 |
+| manual_default | 2048 | 128 | sparse_regression | 1.040410 |
+| manual_default | 8192 | 16 | binary | 1.002311 |
+| manual_default | 8192 | 16 | multiclass | 1.000556 |
+| manual_default | 8192 | 16 | ranking | 0.986659 |
+| manual_default | 8192 | 16 | regression | 1.005969 |
+| manual_default | 8192 | 16 | sparse_regression | 1.003735 |
+| manual_default | 8192 | 256 | binary | 0.952046 |
+| manual_default | 8192 | 256 | multiclass | 0.984553 |
+| manual_default | 8192 | 256 | ranking | 0.793127 |
+| manual_default | 8192 | 256 | regression | 0.703464 |
+| manual_default | 8192 | 256 | sparse_regression | 0.940113 |
+| manual_default | 16384 | 16 | binary | 0.995075 |
+| manual_default | 16384 | 16 | multiclass | 0.999599 |
+| manual_default | 16384 | 16 | ranking | 0.981461 |
+| manual_default | 16384 | 16 | regression | 1.012979 |
+| manual_default | 16384 | 16 | sparse_regression | 0.971733 |
+| manual_default | 16384 | 256 | binary | 0.950614 |
+| manual_default | 16384 | 256 | multiclass | 0.976919 |
+| manual_default | 16384 | 256 | ranking | 0.759015 |
+| manual_default | 16384 | 256 | regression | 0.692186 |
+| manual_default | 16384 | 256 | sparse_regression | 0.876017 |
+| no_gain_floor | 512 | 8 | binary | 1.000000 |
+| no_gain_floor | 512 | 8 | multiclass | 1.000000 |
+| no_gain_floor | 512 | 8 | ranking | 1.000000 |
+| no_gain_floor | 512 | 8 | regression | 1.000000 |
+| no_gain_floor | 512 | 8 | sparse_regression | 1.000000 |
+| no_gain_floor | 512 | 128 | binary | 1.000000 |
+| no_gain_floor | 512 | 128 | multiclass | 1.000000 |
+| no_gain_floor | 512 | 128 | ranking | 1.000000 |
+| no_gain_floor | 512 | 128 | regression | 1.000000 |
+| no_gain_floor | 512 | 128 | sparse_regression | 1.000000 |
+| no_gain_floor | 1023 | 16 | binary | 1.000000 |
+| no_gain_floor | 1023 | 16 | multiclass | 1.000000 |
+| no_gain_floor | 1023 | 16 | ranking | 1.000000 |
+| no_gain_floor | 1023 | 16 | regression | 1.000000 |
+| no_gain_floor | 1023 | 16 | sparse_regression | 1.000000 |
+| no_gain_floor | 1023 | 256 | binary | 1.000000 |
+| no_gain_floor | 1023 | 256 | multiclass | 1.000000 |
+| no_gain_floor | 1023 | 256 | ranking | 1.000000 |
+| no_gain_floor | 1023 | 256 | regression | 1.000000 |
+| no_gain_floor | 1023 | 256 | sparse_regression | 1.000000 |
+| no_gain_floor | 2048 | 16 | binary | 1.000000 |
+| no_gain_floor | 2048 | 16 | multiclass | 1.000000 |
+| no_gain_floor | 2048 | 16 | ranking | 1.000000 |
+| no_gain_floor | 2048 | 16 | regression | 1.000000 |
+| no_gain_floor | 2048 | 16 | sparse_regression | 1.000000 |
+| no_gain_floor | 2048 | 128 | binary | 1.000000 |
+| no_gain_floor | 2048 | 128 | multiclass | 1.000000 |
+| no_gain_floor | 2048 | 128 | ranking | 1.000000 |
+| no_gain_floor | 2048 | 128 | regression | 1.000000 |
+| no_gain_floor | 2048 | 128 | sparse_regression | 1.000000 |
+| no_gain_floor | 8192 | 16 | binary | 1.000000 |
+| no_gain_floor | 8192 | 16 | multiclass | 1.000001 |
+| no_gain_floor | 8192 | 16 | ranking | 1.000000 |
+| no_gain_floor | 8192 | 16 | regression | 1.000000 |
+| no_gain_floor | 8192 | 16 | sparse_regression | 1.000000 |
+| no_gain_floor | 8192 | 256 | binary | 1.000000 |
+| no_gain_floor | 8192 | 256 | multiclass | 1.000000 |
+| no_gain_floor | 8192 | 256 | ranking | 1.000000 |
+| no_gain_floor | 8192 | 256 | regression | 1.000000 |
+| no_gain_floor | 8192 | 256 | sparse_regression | 1.000000 |
+| no_gain_floor | 16384 | 16 | binary | 1.000000 |
+| no_gain_floor | 16384 | 16 | multiclass | 1.000000 |
+| no_gain_floor | 16384 | 16 | ranking | 1.000000 |
+| no_gain_floor | 16384 | 16 | regression | 1.000000 |
+| no_gain_floor | 16384 | 16 | sparse_regression | 1.000000 |
+| no_gain_floor | 16384 | 256 | binary | 1.000000 |
+| no_gain_floor | 16384 | 256 | multiclass | 1.000000 |
+| no_gain_floor | 16384 | 256 | ranking | 1.000000 |
+| no_gain_floor | 16384 | 256 | regression | 1.000000 |
+| no_gain_floor | 16384 | 256 | sparse_regression | 1.000000 |
+| quality_first | 512 | 8 | binary | 1.000000 |
+| quality_first | 512 | 8 | multiclass | 1.000000 |
+| quality_first | 512 | 8 | ranking | 1.000000 |
+| quality_first | 512 | 8 | regression | 1.000000 |
+| quality_first | 512 | 8 | sparse_regression | 1.000000 |
+| quality_first | 512 | 128 | binary | 1.000000 |
+| quality_first | 512 | 128 | multiclass | 1.000000 |
+| quality_first | 512 | 128 | ranking | 1.000000 |
+| quality_first | 512 | 128 | regression | 1.000000 |
+| quality_first | 512 | 128 | sparse_regression | 1.000000 |
+| quality_first | 1023 | 16 | binary | 1.000000 |
+| quality_first | 1023 | 16 | multiclass | 1.000000 |
+| quality_first | 1023 | 16 | ranking | 1.000000 |
+| quality_first | 1023 | 16 | regression | 1.000000 |
+| quality_first | 1023 | 16 | sparse_regression | 1.000000 |
+| quality_first | 1023 | 256 | binary | 1.000000 |
+| quality_first | 1023 | 256 | multiclass | 1.000000 |
+| quality_first | 1023 | 256 | ranking | 1.000000 |
+| quality_first | 1023 | 256 | regression | 1.000000 |
+| quality_first | 1023 | 256 | sparse_regression | 1.000000 |
+| quality_first | 2048 | 16 | binary | 1.002019 |
+| quality_first | 2048 | 16 | multiclass | 1.003368 |
+| quality_first | 2048 | 16 | ranking | 1.034745 |
+| quality_first | 2048 | 16 | regression | 1.019049 |
+| quality_first | 2048 | 16 | sparse_regression | 0.989685 |
+| quality_first | 2048 | 128 | binary | 0.970324 |
+| quality_first | 2048 | 128 | multiclass | 0.996395 |
+| quality_first | 2048 | 128 | ranking | 0.828771 |
+| quality_first | 2048 | 128 | regression | 0.869294 |
+| quality_first | 2048 | 128 | sparse_regression | 1.015584 |
+| quality_first | 8192 | 16 | binary | 1.004508 |
+| quality_first | 8192 | 16 | multiclass | 1.002303 |
+| quality_first | 8192 | 16 | ranking | 1.014869 |
+| quality_first | 8192 | 16 | regression | 1.003200 |
+| quality_first | 8192 | 16 | sparse_regression | 0.996476 |
+| quality_first | 8192 | 256 | binary | 0.954115 |
+| quality_first | 8192 | 256 | multiclass | 0.984869 |
+| quality_first | 8192 | 256 | ranking | 0.831949 |
+| quality_first | 8192 | 256 | regression | 0.697408 |
+| quality_first | 8192 | 256 | sparse_regression | 0.908515 |
+| quality_first | 16384 | 16 | binary | 1.000919 |
+| quality_first | 16384 | 16 | multiclass | 0.995014 |
+| quality_first | 16384 | 16 | ranking | 1.032240 |
+| quality_first | 16384 | 16 | regression | 1.008771 |
+| quality_first | 16384 | 16 | sparse_regression | 0.994838 |
+| quality_first | 16384 | 256 | binary | 0.954241 |
+| quality_first | 16384 | 256 | multiclass | 0.979088 |
+| quality_first | 16384 | 256 | ranking | 0.779419 |
+| quality_first | 16384 | 256 | regression | 0.690238 |
+| quality_first | 16384 | 256 | sparse_regression | 0.906911 |
 
 ## Resolved Policy Observations
 

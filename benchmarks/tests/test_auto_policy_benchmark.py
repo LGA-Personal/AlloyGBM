@@ -855,7 +855,13 @@ def test_json_and_markdown_outputs_include_outcome_and_records(
     report_path = tmp_path / "report.md"
 
     BENCHMARK.write_json(json_path, rows, result)
-    BENCHMARK.write_report(report_path, rows, result, command="benchmark --gate")
+    BENCHMARK.write_report(
+        report_path,
+        rows,
+        specs=BALANCED_SPECS,
+        seeds=(7,),
+        command="benchmark --gate",
+    )
 
     payload = json.loads(json_path.read_text(encoding="utf-8"))
     report = report_path.read_text(encoding="utf-8")
@@ -893,7 +899,13 @@ def test_markdown_report_records_complete_runtime_environment(
     result = BENCHMARK.evaluate_gates(rows, specs=BALANCED_SPECS, seeds=(7,))
     report_path = tmp_path / "report.md"
 
-    BENCHMARK.write_report(report_path, rows, result, command="benchmark --gate")
+    BENCHMARK.write_report(
+        report_path,
+        rows,
+        specs=BALANCED_SPECS,
+        seeds=(7,),
+        command="benchmark --gate",
+    )
 
     report = report_path.read_text(encoding="utf-8")
     assert re.search(r"- Git commit: `[0-9a-f]{40}`", report)
@@ -903,6 +915,44 @@ def test_markdown_report_records_complete_runtime_environment(
     assert "- Rust: `rustc " in report
     assert "- NumPy: `" in report
     assert "- AlloyGBM: `" in report
+
+
+def test_markdown_report_preserves_declared_source_commit(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        *balanced_records(
+            candidate_arm="manual_default", candidate_loss_ratio=0.995
+        ),
+        *[
+            row
+            for row in balanced_records(
+                candidate_arm="no_gain_floor", candidate_loss_ratio=0.995
+            )
+            if row.arm != "current_auto"
+        ],
+        *[
+            row
+            for row in balanced_records(
+                candidate_arm="quality_first", candidate_loss_ratio=0.995
+            )
+            if row.arm != "current_auto"
+        ],
+    ]
+    report_path = tmp_path / "report.md"
+    source_commit = "a" * 40
+
+    BENCHMARK.write_report(
+        report_path,
+        rows,
+        specs=BALANCED_SPECS,
+        seeds=(7,),
+        command="benchmark --gate",
+        source_commit=source_commit,
+    )
+
+    report = report_path.read_text(encoding="utf-8")
+    assert f"- Git commit: `{source_commit}`" in report
 
 
 def test_markdown_report_discloses_public_auto_split_l2_observations(
@@ -923,14 +973,22 @@ def test_markdown_report_discloses_public_auto_split_l2_observations(
         ),
     ]
     report_path = tmp_path / "report.md"
-    result = BENCHMARK.GateResult(
-        name="selection",
-        passed=True,
-        detail="keep current",
-        selected_arm="current_auto",
+    specs = (
+        BENCHMARK.FixtureSpec(
+            "first", "small-narrow", "regression", 512, 8, 10
+        ),
+        BENCHMARK.FixtureSpec(
+            "second", "small-narrow", "regression", 1_023, 16, 10
+        ),
     )
 
-    BENCHMARK.write_report(report_path, rows, result, command="benchmark --gate")
+    BENCHMARK.write_report(
+        report_path,
+        rows,
+        specs=specs,
+        seeds=(7,),
+        command="benchmark --gate",
+    )
 
     report = report_path.read_text(encoding="utf-8")
     assert "## Resolved Policy Observations" in report
@@ -973,7 +1031,13 @@ def test_markdown_report_exposes_matrix_gates_ratios_decision_and_diagnostics(
     result = BENCHMARK.evaluate_gates(rows, specs=BALANCED_SPECS, seeds=(7,))
     report_path = tmp_path / "report.md"
 
-    BENCHMARK.write_report(report_path, rows, result, command="benchmark --gate")
+    BENCHMARK.write_report(
+        report_path,
+        rows,
+        specs=BALANCED_SPECS,
+        seeds=(7,),
+        command="benchmark --gate",
+    )
 
     report = report_path.read_text(encoding="utf-8")
     assert "- Complete records: `24`" in report
@@ -985,13 +1049,167 @@ def test_markdown_report_exposes_matrix_gates_ratios_decision_and_diagnostics(
     assert "| manual_default | fail | 0.995000 |" in report
     assert "| no_gain_floor | fail | 0.995000 |" in report
     assert "| quality_first | fail | 0.995000 |" in report
-    assert "## Shape/Objective Loss Ratios" in report
-    assert "| no_gain_floor | small-narrow | regression | 0.995000 |" in report
+    assert "## Exact-Shape/Objective Loss Ratios" in report
+    assert "| no_gain_floor | 512 | 8 | regression | 0.995000 |" in report
     assert "## Decision" in report
     assert "Keep the production auto-policy heuristics unchanged." in report
     assert "## Resolved Policy Diagnostics" in report
     assert "Min split gain" in report
     assert "Effective split-L2" in report
+
+
+def test_markdown_report_has_all_candidate_exact_shape_objective_ratios(
+    tmp_path: Path,
+) -> None:
+    specs = BENCHMARK.full_specs()
+    rows = []
+    for spec in specs:
+        for seed in BENCHMARK.SEEDS:
+            for arm in BENCHMARK.ARMS:
+                rows.append(
+                    record(
+                        fixture=spec.name,
+                        shape_stratum=spec.shape_stratum,
+                        objective=spec.objective,
+                        seed=seed,
+                        arm=arm,
+                        primary_metric=(
+                            1.0 if arm == "current_auto" else 0.995
+                        ),
+                        accuracy=(
+                            0.8
+                            if spec.objective in {"binary", "multiclass"}
+                            else None
+                        ),
+                        ndcg_at_10=(
+                            0.7 if spec.objective == "ranking" else None
+                        ),
+                    )
+                )
+    report_path = tmp_path / "report.md"
+
+    BENCHMARK.write_report(
+        report_path,
+        rows,
+        specs=specs,
+        seeds=BENCHMARK.SEEDS,
+        command="benchmark --gate",
+    )
+
+    report = report_path.read_text(encoding="utf-8")
+    ratio_section = report.split(
+        "## Exact-Shape/Objective Loss Ratios\n", maxsplit=1
+    )[1].split("\n## ", maxsplit=1)[0]
+    data_rows = [
+        line
+        for line in ratio_section.splitlines()
+        if line.startswith("| ") and not line.startswith("| Arm ")
+    ]
+    observed_shapes = {
+        (int(parts[2]), int(parts[3]))
+        for line in data_rows
+        for parts in ([part.strip() for part in line.split("|")],)
+    }
+
+    assert len(data_rows) == 150
+    assert observed_shapes == {
+        (512, 8),
+        (1_023, 16),
+        (512, 128),
+        (1_023, 256),
+        (2_048, 16),
+        (8_192, 16),
+        (2_048, 128),
+        (8_192, 256),
+        (16_384, 16),
+        (16_384, 256),
+    }
+    assert "| no_gain_floor | 2048 | 16 | regression | 0.995000 |" in report
+    assert "| no_gain_floor | 8192 | 16 | regression | 0.995000 |" in report
+
+
+def test_markdown_report_suppresses_decision_for_missing_key_and_duplicate(
+    tmp_path: Path,
+) -> None:
+    specs = (
+        BENCHMARK.FixtureSpec(
+            "expected", "small-narrow", "regression", 512, 8, 10
+        ),
+    )
+    rows = [
+        record(arm="current_auto", fixture="expected", primary_metric=1.0),
+        record(arm="manual_default", fixture="expected", primary_metric=0.98),
+        record(arm="no_gain_floor", fixture="expected", primary_metric=0.98),
+        record(arm="no_gain_floor", fixture="expected", primary_metric=0.98),
+    ]
+    report_path = tmp_path / "report.md"
+
+    BENCHMARK.write_report(
+        report_path,
+        rows,
+        specs=specs,
+        seeds=(7,),
+        command="benchmark --gate",
+    )
+
+    report = report_path.read_text(encoding="utf-8")
+    assert "- Matrix evidence complete: `false`" in report
+    assert "missing expected seed=7 arm=quality_first" in report
+    assert "duplicate expected seed=7 arm=no_gain_floor" in report
+    assert (
+        "Candidate gate results were not computed because matrix evidence "
+        "is incomplete or invalid."
+    ) in report
+    assert (
+        "No production decision is supported because matrix evidence is "
+        "incomplete or invalid."
+    ) in report
+    assert "| no_gain_floor | pass |" not in report
+    assert "Keep the production auto-policy heuristics unchanged." not in report
+
+
+def test_markdown_report_suppresses_decision_for_error_record(
+    tmp_path: Path,
+) -> None:
+    specs = (
+        BENCHMARK.FixtureSpec(
+            "expected", "small-narrow", "regression", 512, 8, 10
+        ),
+    )
+    rows = [
+        record(arm="current_auto", fixture="expected", primary_metric=1.0),
+        record(arm="manual_default", fixture="expected", primary_metric=0.98),
+        record(arm="no_gain_floor", fixture="expected", primary_metric=0.98),
+        record(
+            arm="quality_first",
+            fixture="expected",
+            primary_metric=0.98,
+            error="fit failed",
+        ),
+    ]
+    report_path = tmp_path / "report.md"
+
+    BENCHMARK.write_report(
+        report_path,
+        rows,
+        specs=specs,
+        seeds=(7,),
+        command="benchmark --gate",
+    )
+
+    report = report_path.read_text(encoding="utf-8")
+    assert "- Matrix evidence complete: `false`" in report
+    assert "fit failed" in report
+    assert (
+        "Candidate gate results were not computed because matrix evidence "
+        "is incomplete or invalid."
+    ) in report
+    assert (
+        "No production decision is supported because matrix evidence is "
+        "incomplete or invalid."
+    ) in report
+    assert "| quality_first | pass |" not in report
+    assert "Keep the production auto-policy heuristics unchanged." not in report
 
 
 def test_invalid_records_still_write_standards_compliant_json(

@@ -1005,14 +1005,17 @@ def _command_output(command: Sequence[str], *, cwd: Path | None = None) -> str:
     return completed.stdout.strip() or "unavailable"
 
 
-def _environment_lines() -> list[str]:
+def _environment_lines(*, source_commit: str | None = None) -> list[str]:
     repo_root = Path(__file__).resolve().parents[1]
     try:
         from alloygbm import __version__ as alloygbm_version
     except ImportError:
         alloygbm_version = "unavailable"
+    git_commit = source_commit or _command_output(
+        ("git", "rev-parse", "HEAD"), cwd=repo_root
+    )
     return [
-        f"- Git commit: `{_command_output(('git', 'rev-parse', 'HEAD'), cwd=repo_root)}`",
+        f"- Git commit: `{git_commit}`",
         f"- OS/platform: `{platform.platform()}`",
         f"- Architecture: `{platform.machine()}`",
         f"- Python: `{platform.python_version()}`",
@@ -1020,13 +1023,6 @@ def _environment_lines() -> list[str]:
         f"- NumPy: `{np.__version__}`",
         f"- AlloyGBM: `{alloygbm_version}`",
     ]
-
-
-def _shape_identity(record: BenchmarkRecord) -> str:
-    suffix = f"-{record.objective}"
-    if record.fixture.endswith(suffix):
-        return record.fixture[: -len(suffix)]
-    return record.fixture
 
 
 def _candidate_gate_results(
@@ -1037,11 +1033,15 @@ def _candidate_gate_results(
 
 def _shape_objective_ratios(
     records: Sequence[BenchmarkRecord],
-) -> list[tuple[str, str, str, float]]:
+    specs: Sequence[FixtureSpec],
+) -> list[tuple[str, int, int, str, float]]:
     current = {
         _record_key(row): row for row in records if row.arm == "current_auto"
     }
-    grouped: dict[tuple[str, str, str], list[float]] = defaultdict(list)
+    specs_by_record_identity = {
+        (spec.name, spec.shape_stratum, spec.objective): spec for spec in specs
+    }
+    grouped: dict[tuple[str, int, int, str], list[float]] = defaultdict(list)
     for row in records:
         if row.arm == "current_auto":
             continue
@@ -1050,7 +1050,10 @@ def _shape_objective_ratios(
             continue
         if _record_issue(row) is not None or _record_issue(current_row) is not None:
             continue
-        grouped[(row.arm, row.shape_stratum, row.objective)].append(
+        spec = specs_by_record_identity[
+            (row.fixture, row.shape_stratum, row.objective)
+        ]
+        grouped[(row.arm, spec.rows, spec.features, row.objective)].append(
             _loss_ratio(row.primary_metric, current_row.primary_metric)
         )
     return [(*key, median(values)) for key, values in sorted(grouped.items())]
@@ -1099,15 +1102,23 @@ def _policy_observation_lines(
 def write_report(
     path: Path,
     records: Sequence[BenchmarkRecord],
-    gate: GateResult,
     *,
+    specs: Sequence[FixtureSpec],
+    seeds: Sequence[int],
     command: str,
+    source_commit: str | None = None,
 ) -> None:
     """Write a reproducible Markdown evidence report."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    gate = evaluate_gates(records, specs=specs, seeds=seeds)
     complete_records = sum(_record_issue(row) is None for row in records)
-    candidate_results = _candidate_gate_results(records)
-    ratio_rows = _shape_objective_ratios(records)
+    candidate_results = (
+        _candidate_gate_results(records) if gate.evidence_valid else []
+    )
+    ratio_rows = (
+        _shape_objective_ratios(records, specs) if gate.evidence_valid else []
+    )
+    exact_shapes = {(spec.rows, spec.features) for spec in specs}
     lines = [
         "# Auto-Policy Calibration Benchmark",
         "",
@@ -1118,14 +1129,16 @@ def write_report(
         "",
         "## Environment",
         "",
-        *_environment_lines(),
+        *_environment_lines(source_commit=source_commit),
         "",
         "## Matrix Completeness",
         "",
+        f"- Matrix evidence complete: `{str(gate.evidence_valid).lower()}`",
+        f"- Expected records: `{len(_expected_record_keys(specs, seeds))}`",
         f"- Complete records: `{complete_records}`",
         f"- Total records: `{len(records)}`",
         f"- Distinct fixtures: `{len({row.fixture for row in records})}`",
-        f"- Distinct shapes: `{len({_shape_identity(row) for row in records})}`",
+        f"- Declared exact shapes: `{len(exact_shapes)}`",
         f"- Distinct objectives: `{len({row.objective for row in records})}`",
         f"- Distinct seeds: `{len({row.seed for row in records})}`",
         f"- Distinct arms: `{len({row.arm for row in records})}`",
@@ -1138,35 +1151,58 @@ def write_report(
         "",
         "## Candidate Gate Results",
         "",
-        "| Arm | Result | Overall loss ratio |",
-        "|---|---|---:|",
     ]
-    for result in candidate_results:
-        ratio = _format_optional(result.overall_loss_ratio)
-        status = "pass" if result.passed else "fail"
-        lines.append(f"| {result.name} | {status} | {ratio} |")
-    for result in candidate_results:
+    if gate.evidence_valid:
         lines.extend(
             [
-                "",
-                f"### {result.name}",
-                "",
-                "```text",
-                result.detail,
-                "```",
+                "| Arm | Result | Overall loss ratio |",
+                "|---|---|---:|",
             ]
+        )
+        for result in candidate_results:
+            ratio = _format_optional(result.overall_loss_ratio)
+            status = "pass" if result.passed else "fail"
+            lines.append(f"| {result.name} | {status} | {ratio} |")
+        for result in candidate_results:
+            lines.extend(
+                [
+                    "",
+                    f"### {result.name}",
+                    "",
+                    "```text",
+                    result.detail,
+                    "```",
+                ]
+            )
+    else:
+        lines.append(
+            "Candidate gate results were not computed because matrix evidence "
+            "is incomplete or invalid."
         )
     lines.extend(
         [
             "",
-            "## Shape/Objective Loss Ratios",
+            "## Exact-Shape/Objective Loss Ratios",
             "",
-            "| Arm | Stratum | Objective | Median normalized loss |",
-            "|---|---|---|---:|",
         ]
     )
-    for arm, stratum, objective, ratio in ratio_rows:
-        lines.append(f"| {arm} | {stratum} | {objective} | {ratio:.6f} |")
+    if gate.evidence_valid:
+        lines.extend(
+            [
+                "| Arm | Rows | Features | Objective | Median normalized loss |",
+                "|---|---:|---:|---|---:|",
+            ]
+        )
+        for arm, rows, features, objective, ratio in ratio_rows:
+            lines.append(
+                f"| {arm} | {rows} | {features} | {objective} | "
+                f"{ratio:.6f} |"
+            )
+    else:
+        lines.append(
+            "Exact-shape/objective loss ratios were not computed because "
+            "matrix evidence is incomplete or invalid."
+        )
     lines.extend(
         [
             "",
@@ -1176,7 +1212,12 @@ def write_report(
             "",
         ]
     )
-    if gate.selected_arm == "current_auto":
+    if not gate.evidence_valid:
+        lines.append(
+            "No production decision is supported because matrix evidence is "
+            "incomplete or invalid."
+        )
+    elif gate.selected_arm == "current_auto":
         lines.extend(
             [
                 "Keep the production auto-policy heuristics unchanged. Neither "
@@ -1273,7 +1314,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.output_json is not None:
         write_json(args.output_json, records, gate)
     if args.output_report is not None:
-        write_report(args.output_report, records, gate, command=command)
+        write_report(
+            args.output_report,
+            records,
+            specs=specs,
+            seeds=seeds,
+            command=command,
+        )
 
     print(f"Selected outcome: {gate.selected_arm or 'gate failure'}")
     print(gate.detail)
