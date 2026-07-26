@@ -7,6 +7,9 @@ import numpy as np
 import pytest
 
 from alloygbm import GBMClassifier, GBMRanker, GBMRegressor
+from alloygbm._regressor._validation import (
+    _resolved_training_policy_from_metadata,
+)
 
 
 POLICY_KEYS = {
@@ -20,6 +23,20 @@ POLICY_KEYS = {
     "auto_split_l2_applied",
     "effective_split_l2",
 }
+
+
+def valid_policy_metadata() -> dict[str, object]:
+    return {
+        "requested_mode": "auto",
+        "requested_rounds": 40,
+        "effective_round_cap": 32,
+        "min_rows_per_leaf": 12,
+        "min_split_gain": 0.0,
+        "row_subsample": 0.8,
+        "col_subsample": 0.5,
+        "auto_split_l2_applied": False,
+        "effective_split_l2": 2.0,
+    }
 
 
 def make_dense_fixture(
@@ -176,3 +193,113 @@ def test_load_model_without_policy_metadata_returns_none(tmp_path) -> None:
     restored = GBMRegressor.load_model(str(path))
 
     assert restored.resolved_training_policy_ is None
+
+
+def test_policy_metadata_normalizer_returns_a_fresh_normalized_dictionary() -> None:
+    metadata = valid_policy_metadata()
+
+    normalized = _resolved_training_policy_from_metadata(metadata)
+
+    assert normalized == metadata
+    assert normalized is not metadata
+
+
+@pytest.mark.parametrize(
+    "value",
+    [[], {}, 1, True, None],
+)
+def test_policy_metadata_normalizer_rejects_non_string_mode(value: object) -> None:
+    metadata = valid_policy_metadata()
+    metadata["requested_mode"] = value
+
+    assert _resolved_training_policy_from_metadata(metadata) is None
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["min_split_gain", "row_subsample", "col_subsample", "effective_split_l2"],
+)
+@pytest.mark.parametrize("value", [True, "0.5"])
+def test_policy_metadata_normalizer_rejects_non_numeric_float_categories(
+    field: str, value: object
+) -> None:
+    metadata = valid_policy_metadata()
+    metadata[field] = value
+
+    assert _resolved_training_policy_from_metadata(metadata) is None
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["requested_rounds", "effective_round_cap", "min_rows_per_leaf"],
+)
+@pytest.mark.parametrize("value", [40.0, True, "40"])
+def test_policy_metadata_normalizer_rejects_non_integer_categories(
+    field: str, value: object
+) -> None:
+    metadata = valid_policy_metadata()
+    metadata[field] = value
+
+    assert _resolved_training_policy_from_metadata(metadata) is None
+
+
+@pytest.mark.parametrize("value", [0, 1, "false", [], {}])
+def test_policy_metadata_normalizer_rejects_non_boolean_provenance(
+    value: object,
+) -> None:
+    metadata = valid_policy_metadata()
+    metadata["auto_split_l2_applied"] = value
+
+    assert _resolved_training_policy_from_metadata(metadata) is None
+
+
+def test_policy_metadata_normalizer_requires_exact_stable_keys() -> None:
+    missing_key = valid_policy_metadata()
+    missing_key.pop("effective_split_l2")
+    extra_key = valid_policy_metadata()
+    extra_key["unknown_future_field"] = "unexpected"
+
+    assert _resolved_training_policy_from_metadata(missing_key) is None
+    assert _resolved_training_policy_from_metadata(extra_key) is None
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize(
+    "field",
+    ["min_split_gain", "row_subsample", "col_subsample", "effective_split_l2"],
+)
+def test_policy_metadata_normalizer_rejects_non_finite_float_values(
+    field: str, value: float
+) -> None:
+    metadata = valid_policy_metadata()
+    metadata[field] = value
+
+    assert _resolved_training_policy_from_metadata(metadata) is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("requested_rounds", 0),
+        ("effective_round_cap", 0),
+        ("min_rows_per_leaf", 0),
+        ("min_split_gain", -0.1),
+        ("row_subsample", 0.0),
+        ("row_subsample", 1.1),
+        ("col_subsample", 0.0),
+        ("col_subsample", 1.1),
+        ("effective_split_l2", -0.1),
+    ],
+)
+def test_policy_metadata_normalizer_rejects_invalid_ranges(
+    field: str, value: object
+) -> None:
+    metadata = valid_policy_metadata()
+    metadata[field] = value
+
+    assert _resolved_training_policy_from_metadata(metadata) is None
+
+
+@pytest.mark.parametrize("value", [None, [], (), 0, "policy"])
+def test_policy_metadata_normalizer_is_total_over_arbitrary_metadata(value: object) -> None:
+    assert _resolved_training_policy_from_metadata(value) is None

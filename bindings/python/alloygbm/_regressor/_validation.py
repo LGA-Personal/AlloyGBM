@@ -23,45 +23,62 @@ def _resolved_training_policy_to_dict(summary: object) -> dict[str, object] | No
     }
 
 
-def _normalize_resolved_training_policy_metadata(
+_RESOLVED_TRAINING_POLICY_METADATA_KEYS = frozenset(
+    {
+        "requested_mode",
+        "requested_rounds",
+        "effective_round_cap",
+        "min_rows_per_leaf",
+        "min_split_gain",
+        "row_subsample",
+        "col_subsample",
+        "auto_split_l2_applied",
+        "effective_split_l2",
+    }
+)
+
+
+def _resolved_training_policy_from_metadata(
     value: object,
 ) -> dict[str, object] | None:
-    """Return a JSON metadata policy only when it matches the public contract."""
-    if not isinstance(value, dict):
+    """Return a normalized policy only for the exact JSON metadata contract."""
+    if (
+        type(value) is not dict
+        or set(value) != _RESOLVED_TRAINING_POLICY_METADATA_KEYS
+    ):
         return None
-    try:
-        requested_mode = value["requested_mode"]
-        requested_rounds = value["requested_rounds"]
-        effective_round_cap = value["effective_round_cap"]
-        min_rows_per_leaf = value["min_rows_per_leaf"]
-        min_split_gain = value["min_split_gain"]
-        row_subsample = value["row_subsample"]
-        col_subsample = value["col_subsample"]
-        auto_split_l2_applied = value["auto_split_l2_applied"]
-        effective_split_l2 = value["effective_split_l2"]
-    except KeyError:
-        return None
-    if requested_mode not in {"auto", "manual"}:
+    requested_mode = value["requested_mode"]
+    requested_rounds = value["requested_rounds"]
+    effective_round_cap = value["effective_round_cap"]
+    min_rows_per_leaf = value["min_rows_per_leaf"]
+    min_split_gain = value["min_split_gain"]
+    row_subsample = value["row_subsample"]
+    col_subsample = value["col_subsample"]
+    auto_split_l2_applied = value["auto_split_l2_applied"]
+    effective_split_l2 = value["effective_split_l2"]
+    if type(requested_mode) is not str or requested_mode not in {"auto", "manual"}:
         return None
     integer_values = (
         requested_rounds,
         effective_round_cap,
         min_rows_per_leaf,
     )
-    if any(
-        isinstance(item, bool) or not isinstance(item, int) or item <= 0
-        for item in integer_values
-    ):
+    if any(type(item) is not int or item <= 0 for item in integer_values):
         return None
-    if not isinstance(auto_split_l2_applied, bool):
+    float_values = (
+        min_split_gain,
+        row_subsample,
+        col_subsample,
+        effective_split_l2,
+    )
+    if any(type(item) not in {int, float} for item in float_values):
         return None
-    try:
-        min_split_gain = float(min_split_gain)
-        row_subsample = float(row_subsample)
-        col_subsample = float(col_subsample)
-        effective_split_l2 = float(effective_split_l2)
-    except (TypeError, ValueError):
+    if type(auto_split_l2_applied) is not bool:
         return None
+    min_split_gain = float(min_split_gain)
+    row_subsample = float(row_subsample)
+    col_subsample = float(col_subsample)
+    effective_split_l2 = float(effective_split_l2)
     if (
         not all(
             math.isfinite(item)
