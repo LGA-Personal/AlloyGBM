@@ -14,6 +14,15 @@
 
 ### Features
 
+- **Added fitted auto-policy diagnostics and calibration evidence.**
+  `resolved_training_policy_` reports the requested policy mode, requested and
+  effective round counts, effective leaf/split thresholds, effective
+  row/column sampling, and split-L2 selection after fitting. A predeclared
+  ten-shape, five-objective, three-seed matrix selected `current_auto` after
+  `manual_default`, `no_gain_floor`, and `quality_first` failed their quality
+  gates; production heuristics remain unchanged. Public Python `current_auto`
+  did not activate split-only L2 in any of the 150 calibration records.
+
 - **Added opt-in exact exclusive feature bundling.**
   `feature_bundling="exact"` deterministically compresses contiguous,
   zero-conflict sparse numeric groups during training while preserving
