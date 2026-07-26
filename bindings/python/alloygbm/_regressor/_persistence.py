@@ -34,6 +34,7 @@ class _PersistenceMixin:
         self.rounds_completed_ = None
         self.stop_reason_ = None
         self.diagnostics_per_round_ = None
+        self.resolved_training_policy_ = None
         self.factor_exposure_diagnostics_ = None
         self.feature_bundling_diagnostics_ = {
             "active": False,
@@ -85,6 +86,8 @@ class _PersistenceMixin:
                 "skipped_feature_count": 0,
                 "observed_conflict_count": 0,
             }
+        if not hasattr(self, "resolved_training_policy_"):
+            self.resolved_training_policy_ = None
         self._native_predictor_handle = None
         self._float_thresholds_converted = False
         self._predictor_needs_rebuild = True

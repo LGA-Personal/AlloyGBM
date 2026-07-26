@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from pathlib import Path
 
@@ -359,6 +360,40 @@ class NativeRuntimeIntegrationTests(unittest.TestCase):
         self.assertGreater(len({round(value, 6) for value in predictions_a}), 1)
         for value_a, value_b in zip(predictions_a, predictions_b):
             self.assertAlmostEqual(value_a, value_b, places=6)
+
+    def test_summary_without_resolved_policy_is_compatible(self) -> None:
+        model = self.alloygbm.GBMRegressor()
+        native_result = SimpleNamespace(
+            artifact_bytes=FIXTURE_ARTIFACT_BYTES,
+            summary=SimpleNamespace(
+                rounds_requested=1,
+                rounds_completed=1,
+                best_validation_round=None,
+                best_validation_loss=None,
+                train_rmse=[1.0],
+                validation_rmse=[],
+                train_loss=[1.0],
+                validation_loss=[],
+                objective="squared_error",
+                stop_reason="CompletedRequestedRounds",
+                bridge_prepare_seconds=0.0,
+                native_train_seconds=0.0,
+            ),
+            continuous_binning_metadata=SimpleNamespace(
+                uses_continuous_binning=False,
+                feature_mins=None,
+                feature_maxs=None,
+                feature_sorted_values=None,
+                feature_quantile_cuts=None,
+                feature_quantile_cut_methods=None,
+                feature_linear_rank_flags=None,
+            ),
+        )
+
+        model._fit_start_time = 0.0
+        model._finalize_training_result(native_result, 0.0, feature_count=2)
+
+        self.assertIsNone(model.resolved_training_policy_)
 
     def test_public_regressor_n_estimators_controls_training_rounds(self) -> None:
         model_short = self.alloygbm.GBMRegressor(

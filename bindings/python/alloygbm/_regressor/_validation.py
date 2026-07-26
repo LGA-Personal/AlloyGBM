@@ -6,6 +6,23 @@ import math
 from collections.abc import Sequence
 
 
+def _resolved_training_policy_to_dict(summary: object) -> dict[str, object] | None:
+    native = getattr(summary, "resolved_training_policy", None)
+    if native is None:
+        return None
+    return {
+        "requested_mode": str(native.requested_mode),
+        "requested_rounds": int(native.requested_rounds),
+        "effective_round_cap": int(native.effective_round_cap),
+        "min_rows_per_leaf": int(native.min_rows_per_leaf),
+        "min_split_gain": float(native.min_split_gain),
+        "row_subsample": float(native.row_subsample),
+        "col_subsample": float(native.col_subsample),
+        "auto_split_l2_applied": bool(native.auto_split_l2_applied),
+        "effective_split_l2": float(native.effective_split_l2),
+    }
+
+
 class _ValidationMixin:
     """Mixin carrying validation/resolution methods for GBMRegressor.
 
