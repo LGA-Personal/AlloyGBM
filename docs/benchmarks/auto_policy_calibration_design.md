@@ -153,9 +153,12 @@ Candidate arms use manual mode with explicit values derived from the
 adding benchmark-only production modes. When current auto selected the
 split-only small-wide L2 rule, the harness reproduces it for the manual
 candidate through the existing `ALLOYGBM_EXPERIMENT_SPLIT_L2` environment
-setting. The harness is single-process and serial, restores the previous
-environment value after every fit, and never substitutes estimator
-`lambda_l2`, which would also change leaf regularization.
+setting. Before every fit, the harness snapshots the complete known set of
+training-affecting `ALLOYGBM_EXPERIMENT_*` variables, clears all of them, sets
+only split-L2 when the selected arm requires it, and restores every exact prior
+value or absence in `finally`. This process-global API is explicitly
+single-process and serial. It never substitutes estimator `lambda_l2`, which
+would also change leaf regularization.
 
 ## Metrics and Selection Rules
 
@@ -229,6 +232,8 @@ introduced.
   validation succeed.
 - Invalid candidate records cause the benchmark gate to fail with fixture,
   seed, arm, and field context.
+- Every record must satisfy the objective-specific metric schema, including
+  finite ranges and the ranking identity `primary_metric == 1 - ndcg_at_10`.
 - Candidate generation refuses missing or malformed resolved diagnostics
   rather than guessing effective controls.
 - Manual user values remain lower bounds or explicit values exactly as in the
