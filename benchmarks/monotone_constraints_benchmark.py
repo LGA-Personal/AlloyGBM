@@ -136,28 +136,52 @@ def target_components(X: np.ndarray, *, direction: int) -> dict[str, np.ndarray]
     }
 
 
-def make_fixture(scenario: Scenario) -> Fixture:
-    """Generate a deterministic finite float32 train/holdout fixture."""
-    rng = np.random.default_rng(scenario.seed)
-    X = rng.uniform(-1.0, 1.0, size=(scenario.n_rows, scenario.n_features)).astype(
+def _holdout_row_count(training_rows: int) -> int:
+    return max(512, min(4_096, training_rows // 4))
+
+
+def _make_partition(
+    scenario: Scenario,
+    *,
+    rng: np.random.Generator,
+    n_rows: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    X = rng.uniform(-1.0, 1.0, size=(n_rows, scenario.n_features)).astype(
         np.float32
     )
     components = target_components(X, direction=scenario.direction)
     latent = components["main"] + components["interaction"] + components["nuisance"]
     if scenario.objective == "regression":
-        target = latent + rng.normal(0.0, 0.15, size=scenario.n_rows).astype(np.float32)
+        target = latent + rng.normal(0.0, 0.15, size=n_rows).astype(np.float32)
     else:
         probabilities = 1.0 / (1.0 + np.exp(-np.clip(latent, -12.0, 12.0)))
-        target = (rng.random(scenario.n_rows) < probabilities).astype(np.float32)
+        target = (rng.random(n_rows) < probabilities).astype(np.float32)
         if np.unique(target).size < 2:
             target[:2] = np.asarray([0.0, 1.0], dtype=np.float32)
+    return (
+        np.ascontiguousarray(X),
+        np.ascontiguousarray(target, dtype=np.float32),
+    )
 
-    split = scenario.n_rows * 3 // 4
+
+def make_fixture(scenario: Scenario) -> Fixture:
+    """Generate independent deterministic float32 training and holdout data."""
+    train_seed, holdout_seed = np.random.SeedSequence(scenario.seed).spawn(2)
+    X_train, y_train = _make_partition(
+        scenario,
+        rng=np.random.default_rng(train_seed),
+        n_rows=scenario.n_rows,
+    )
+    X_holdout, y_holdout = _make_partition(
+        scenario,
+        rng=np.random.default_rng(holdout_seed),
+        n_rows=_holdout_row_count(scenario.n_rows),
+    )
     return Fixture(
-        np.ascontiguousarray(X[:split]),
-        np.ascontiguousarray(target[:split], dtype=np.float32),
-        np.ascontiguousarray(X[split:]),
-        np.ascontiguousarray(target[split:], dtype=np.float32),
+        X_train,
+        y_train,
+        X_holdout,
+        y_holdout,
     )
 
 
@@ -201,8 +225,8 @@ def _estimator_kwargs(scenario: Scenario, *, constrained: bool, rounds: int) -> 
     kwargs: dict[str, object] = {
         "n_estimators": rounds,
         "learning_rate": 0.1,
-        "max_depth": 4,
-        "min_data_in_leaf": 4,
+        "max_depth": 3,
+        "min_data_in_leaf": 8,
         "min_split_gain": 0.0,
         "row_subsample": 1.0,
         "col_subsample": 1.0,
@@ -511,6 +535,7 @@ def render_markdown(report: dict[str, object]) -> str:
             "- Regression constrained/unconstrained loss ratio at most `1.25`.",
             "- Binary constrained error degradation at most `0.08`.",
             "- The constrained model must beat the constant predictor.",
+            "- Scenario rows are training rows; holdouts use an independent deterministic stream with 512 to 4,096 rows.",
             "- Fit timing is descriptive only and never gates acceptance.",
             "",
             "## Summary",

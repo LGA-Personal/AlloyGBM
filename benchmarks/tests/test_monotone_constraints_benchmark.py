@@ -118,6 +118,90 @@ def test_fixture_is_deterministic_finite_float32_and_nontrivial(objective) -> No
     assert not np.allclose(components["interaction"], 0.0)
     assert not np.allclose(components["nuisance"], 0.0)
 
+    fixed = np.asarray([[0.4, -0.5, 0.25, -0.75]], dtype=np.float32)
+    fixed_components = BENCHMARK.target_components(fixed, direction=-1)
+    np.testing.assert_array_equal(
+        fixed_components["main"], np.asarray([-1.0], dtype=np.float32)
+    )
+    np.testing.assert_allclose(
+        fixed_components["interaction"],
+        np.asarray([0.15], dtype=np.float32),
+        rtol=0.0,
+        atol=1e-7,
+    )
+    np.testing.assert_allclose(
+        fixed_components["nuisance"],
+        np.asarray([-0.3680377], dtype=np.float32),
+        rtol=0.0,
+        atol=1e-7,
+    )
+
+
+@pytest.mark.parametrize(
+    ("training_rows", "holdout_rows"),
+    [(128, 512), (4_096, 1_024), (32_768, 4_096)],
+)
+def test_fixture_uses_advertised_training_rows_and_bounded_holdout(
+    training_rows, holdout_rows
+) -> None:
+    scenario = BENCHMARK.Scenario(
+        "shape-contract", training_rows, 2, "regression", 1, "level", 0
+    )
+
+    fixture = BENCHMARK.make_fixture(scenario)
+
+    assert fixture.X_train.shape == (training_rows, 2)
+    assert fixture.y_train.shape == (training_rows,)
+    assert fixture.X_holdout.shape == (holdout_rows, 2)
+    assert fixture.y_holdout.shape == (holdout_rows,)
+
+
+def test_binary_fixture_has_independent_balanced_train_and_holdout() -> None:
+    scenario = BENCHMARK.Scenario(
+        "binary-partitions", 128, 2, "binary", 1, "level", 0
+    )
+
+    fixture = BENCHMARK.make_fixture(scenario)
+    repeated = BENCHMARK.make_fixture(scenario)
+
+    assert set(np.unique(fixture.y_train)) == {0.0, 1.0}
+    assert set(np.unique(fixture.y_holdout)) == {0.0, 1.0}
+    for first, second in zip(fixture.arrays(), repeated.arrays(), strict=True):
+        np.testing.assert_array_equal(first, second)
+    train_rows = {row.tobytes() for row in fixture.X_train}
+    holdout_rows = {row.tobytes() for row in fixture.X_holdout}
+    assert train_rows.isdisjoint(holdout_rows)
+
+
+def test_holdout_rng_stream_is_independent_of_training_row_count() -> None:
+    smaller = BENCHMARK.Scenario(
+        "independent-holdout", 128, 2, "binary", -1, "level", 1
+    )
+    larger = BENCHMARK.Scenario(
+        "independent-holdout", 256, 2, "binary", -1, "level", 1
+    )
+
+    smaller_fixture = BENCHMARK.make_fixture(smaller)
+    larger_fixture = BENCHMARK.make_fixture(larger)
+
+    np.testing.assert_array_equal(
+        smaller_fixture.X_holdout, larger_fixture.X_holdout
+    )
+    np.testing.assert_array_equal(
+        smaller_fixture.y_holdout, larger_fixture.y_holdout
+    )
+
+
+def test_all_scenarios_use_shared_conservative_regularization() -> None:
+    scenarios = (*BENCHMARK.quick_scenarios(), *BENCHMARK.full_scenarios())
+
+    for scenario in scenarios:
+        kwargs = BENCHMARK._estimator_kwargs(
+            scenario, constrained=True, rounds=BENCHMARK.FULL_ROUNDS
+        )
+        assert kwargs["max_depth"] == 3
+        assert kwargs["min_data_in_leaf"] == 8
+
 
 def test_grid_validation_changes_only_feature_zero_for_each_context() -> None:
     class CapturingEstimator:
@@ -189,7 +273,7 @@ def test_gate_rejects_invalid_record_conditions(overrides, expected_fragment) ->
     assert any(expected_fragment in failure for failure in failures)
 
 
-def test_gate_rejects_missing_records_and_ignores_timing_ratio() -> None:
+def test_gate_preserves_thresholds_rejects_missing_records_and_ignores_timing() -> None:
     report = _report()
     report["records"].pop()
     failures = BENCHMARK.evaluate_gate(report)
@@ -198,6 +282,30 @@ def test_gate_rejects_missing_records_and_ignores_timing_ratio() -> None:
     report = _report()
     report["records"][0]["fit_time_ratio"] = 10_000.0
     assert BENCHMARK.evaluate_gate(report) == []
+
+    report = _report()
+    regression = report["records"][0]
+    regression.update(
+        constrained_loss=1.25,
+        unconstrained_loss=1.0,
+        constant_loss=2.0,
+    )
+    binary = next(row for row in report["records"] if row["objective"] == "binary")
+    binary.update(
+        constrained_loss=0.08,
+        unconstrained_loss=0.0,
+        constant_loss=1.0,
+    )
+    assert BENCHMARK.evaluate_gate(report) == []
+
+    regression["constrained_loss"] = np.nextafter(1.25, np.inf)
+    failures = BENCHMARK.evaluate_gate(report)
+    assert any("regression loss ratio" in failure for failure in failures)
+
+    regression["constrained_loss"] = 1.25
+    binary["constrained_loss"] = np.nextafter(0.08, np.inf)
+    failures = BENCHMARK.evaluate_gate(report)
+    assert any("binary error degradation" in failure for failure in failures)
 
 
 @pytest.mark.parametrize("mutation", ["missing", "unexpected", "duplicate"])
@@ -256,6 +364,27 @@ def test_quick_gate_passes_on_installed_implementation() -> None:
         assert record["unconstrained_finite"]
         assert record["constrained_completed"]
         assert record["unconstrained_completed"]
+
+
+def test_full_canonical_gate_accepts_complete_synthetic_evidence() -> None:
+    scenarios = BENCHMARK.full_scenarios()
+    records = [
+        _record(
+            scenario,
+            requested_rounds=BENCHMARK.FULL_ROUNDS,
+            constrained_completed_rounds=BENCHMARK.FULL_ROUNDS,
+            unconstrained_completed_rounds=BENCHMARK.FULL_ROUNDS,
+        )
+        for scenario in scenarios
+    ]
+    report = {
+        "quick": False,
+        "rounds": BENCHMARK.FULL_ROUNDS,
+        "scenarios": [scenario.name for scenario in scenarios],
+        "records": records,
+    }
+
+    assert BENCHMARK.evaluate_gate(report) == []
 
 
 def test_cli_writes_rendered_markdown(tmp_path) -> None:
