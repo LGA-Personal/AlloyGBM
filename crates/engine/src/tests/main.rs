@@ -2,13 +2,14 @@ use super::*;
 use crate::factor::apply_pre_target_neutralization;
 use alloygbm_categorical::TargetEncoderConfig;
 use alloygbm_core::{
-    CoreError, Device, DroConfig, LeafSolverKind, MISSING_BIN_U8, MorphConfig, NeutralizationKind,
-    discover_exact_feature_bundles,
+    CoreError, Device, DroConfig, FeatureHistogram, HistogramBin, LeafSolverKind, MISSING_BIN_U8,
+    MorphConfig, NeutralizationKind, discover_exact_feature_bundles, leaf_gain_term,
 };
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 use std::time::Duration;
 
 struct MockBackend;
+struct MonotoneRegressionBackend;
 struct GradientNeutralizationCheckingBackend {
     exposures: FactorExposureMatrix,
     weights: Option<Vec<f32>>,
@@ -314,6 +315,175 @@ fn policy_fixture(
     (dataset, matrix)
 }
 
+struct CounterexampleRng {
+    state: u64,
+}
+
+impl CounterexampleRng {
+    fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    fn uniform_unit(&mut self) -> f32 {
+        self.state = self.state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut value = self.state;
+        value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        value ^= value >> 31;
+        ((value >> 40) as f32 + 0.5) / (1_u32 << 24) as f32
+    }
+
+    fn standard_normal(&mut self) -> f32 {
+        let radius = (-2.0 * self.uniform_unit().ln()).sqrt();
+        let angle = std::f32::consts::TAU * self.uniform_unit();
+        radius * angle.cos()
+    }
+}
+
+fn monotone_bound_propagation_fixture() -> (TrainingDataset, BinnedMatrix, Vec<Vec<f32>>) {
+    const ROW_COUNT: usize = 512;
+    const FEATURE_COUNT: usize = 3;
+    const DATA_BIN_COUNT: usize = 254;
+
+    let mut rng = CounterexampleRng::new(0);
+    let mut values = Vec::with_capacity(ROW_COUNT * FEATURE_COUNT);
+    for _ in 0..ROW_COUNT * FEATURE_COUNT {
+        values.push(-2.0 + 4.0 * rng.uniform_unit());
+    }
+    let targets = values
+        .chunks_exact(FEATURE_COUNT)
+        .map(|row| {
+            1.2 * row[0]
+                + 2.5 * (2.2 * row[1]).sin()
+                + 1.5 * row[0] * row[2]
+                + 0.35 * rng.standard_normal()
+        })
+        .collect::<Vec<_>>();
+
+    let mut bins = vec![0_u8; values.len()];
+    let mut sorted_features = Vec::with_capacity(FEATURE_COUNT);
+    for feature in 0..FEATURE_COUNT {
+        let mut sorted = (0..ROW_COUNT)
+            .map(|row| (values[row * FEATURE_COUNT + feature], row))
+            .collect::<Vec<_>>();
+        sorted.sort_unstable_by(|left, right| left.0.total_cmp(&right.0));
+        for (rank, &(_, row)) in sorted.iter().enumerate() {
+            bins[row * FEATURE_COUNT + feature] =
+                ((rank * DATA_BIN_COUNT) / ROW_COUNT).min(DATA_BIN_COUNT - 1) as u8;
+        }
+        sorted_features.push(sorted.into_iter().map(|(value, _)| value).collect());
+    }
+
+    let dataset = TrainingDataset {
+        matrix: alloygbm_core::DatasetMatrix::new(ROW_COUNT, FEATURE_COUNT, values)
+            .expect("counterexample matrix is valid"),
+        targets,
+        sample_weights: None,
+        time_index: None,
+        group_id: None,
+        factor_exposures: None,
+    };
+    let binned_matrix =
+        BinnedMatrix::new(ROW_COUNT, FEATURE_COUNT, (DATA_BIN_COUNT - 1) as u16, bins)
+            .expect("counterexample quantile bins are valid");
+    (dataset, binned_matrix, sorted_features)
+}
+
+fn quantile_bin_for_sweep(sorted_values: &[f32], value: f32) -> f32 {
+    const DATA_BIN_COUNT: usize = 254;
+    let rank = sorted_values.partition_point(|candidate| *candidate <= value);
+    ((rank * DATA_BIN_COUNT) / sorted_values.len()).min(DATA_BIN_COUNT - 1) as f32
+}
+
+fn fit_monotone_bound_propagation_fixture(tree_growth: TreeGrowth, direction: i8) -> TrainedModel {
+    let (mut dataset, binned_matrix, _) = monotone_bound_propagation_fixture();
+    if direction == -1 {
+        for target in &mut dataset.targets {
+            *target = -*target;
+        }
+    }
+    let params = TrainParams {
+        seed: 0,
+        learning_rate: 0.2,
+        max_depth: 4,
+        monotone_constraints: vec![direction, 0, 0],
+        max_leaves: (tree_growth == TreeGrowth::Leaf).then_some(16),
+        tree_growth,
+        ..TrainParams::default()
+    };
+    Trainer::new(params)
+        .expect("counterexample parameters are valid")
+        .fit_iterations(
+            &dataset,
+            &binned_matrix,
+            &MonotoneRegressionBackend,
+            &SquaredErrorObjective,
+            12,
+        )
+        .expect("counterexample training succeeds")
+}
+
+fn assert_monotone_bound_propagation(tree_growth: TreeGrowth, direction: i8) {
+    let (_, _, sorted_features) = monotone_bound_propagation_fixture();
+    let model = fit_monotone_bound_propagation_fixture(tree_growth, direction);
+    let fixed_feature_1 = quantile_bin_for_sweep(&sorted_features[1], -2.0);
+    let fixed_feature_2 = quantile_bin_for_sweep(&sorted_features[2], -2.0);
+    let predictions = (0..=128)
+        .map(|step| {
+            let feature_0 = -2.0 + 4.0 * step as f32 / 128.0;
+            model
+                .predict_row(&[
+                    quantile_bin_for_sweep(&sorted_features[0], feature_0),
+                    fixed_feature_1,
+                    fixed_feature_2,
+                ])
+                .expect("counterexample prediction succeeds")
+        })
+        .collect::<Vec<_>>();
+
+    for (index, pair) in predictions.windows(2).enumerate() {
+        let directed_difference = direction as f32 * (pair[1] - pair[0]);
+        assert!(
+            directed_difference >= -1e-6,
+            "growth={tree_growth:?} direction={direction} prediction step {index} violated \
+             monotonicity: {} -> {} (directed difference {directed_difference})",
+            pair[0],
+            pair[1],
+        );
+    }
+}
+
+fn assert_scalar_stumps_bit_identical(left: &TrainedModel, right: &TrainedModel) {
+    assert_eq!(
+        left.baseline_prediction.to_bits(),
+        right.baseline_prediction.to_bits()
+    );
+    assert_eq!(left.stumps.len(), right.stumps.len());
+    for (left_stump, right_stump) in left.stumps.iter().zip(&right.stumps) {
+        assert_eq!(left_stump.split, right_stump.split);
+        assert_eq!(
+            left_stump.tree_weight.to_bits(),
+            right_stump.tree_weight.to_bits()
+        );
+        assert_eq!(
+            left_stump.multi_output_leaf_values,
+            right_stump.multi_output_leaf_values
+        );
+        let (LeafValue::Scalar(left_left), LeafValue::Scalar(right_left)) =
+            (&left_stump.left_leaf_value, &right_stump.left_leaf_value)
+        else {
+            panic!("parity fixture must emit scalar left leaves");
+        };
+        let (LeafValue::Scalar(left_right), LeafValue::Scalar(right_right)) =
+            (&left_stump.right_leaf_value, &right_stump.right_leaf_value)
+        else {
+            panic!("parity fixture must emit scalar right leaves");
+        };
+        assert_eq!(left_left.to_bits(), right_left.to_bits());
+        assert_eq!(left_right.to_bits(), right_right.to_bits());
+    }
+}
+
 fn trainer() -> Trainer {
     Trainer::new(TrainParams::default()).expect("default policy parameters are valid")
 }
@@ -506,6 +676,184 @@ impl BackendOps for MockBackend {
             grad_sq_sum,
             row_count: row_indices.len() as u32,
         })
+    }
+}
+
+impl BackendOps for MonotoneRegressionBackend {
+    fn build_histograms(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: &NodeSlice,
+        feature_tiles: &[FeatureTile],
+    ) -> EngineResult<HistogramBundle> {
+        let bin_count = usize::from(binned_matrix.max_bin) + 1;
+        let mut feature_histograms = Vec::new();
+        for feature_index in feature_tiles
+            .iter()
+            .flat_map(|tile| tile.start_feature..tile.end_feature)
+        {
+            let mut bins = vec![
+                HistogramBin {
+                    grad_sum: 0.0,
+                    hess_sum: 0.0,
+                    grad_sq_sum: 0.0,
+                    count: 0,
+                };
+                bin_count
+            ];
+            for &row_index in &node.row_indices {
+                let row = row_index as usize;
+                let gradient = gradients.get(row).ok_or_else(|| {
+                    EngineError::ContractViolation(
+                        "monotone regression row index is out of bounds".to_string(),
+                    )
+                })?;
+                let bin = binned_matrix
+                    .row_bin(row * binned_matrix.feature_count + feature_index as usize)
+                    as usize;
+                let stats = bins.get_mut(bin).ok_or_else(|| {
+                    EngineError::ContractViolation(
+                        "monotone regression bin index is out of bounds".to_string(),
+                    )
+                })?;
+                stats.grad_sum += gradient.grad;
+                stats.hess_sum += gradient.hess;
+                stats.grad_sq_sum += gradient.grad * gradient.grad;
+                stats.count += 1;
+            }
+            feature_histograms.push(FeatureHistogram {
+                feature_index,
+                bins,
+            });
+        }
+        HistogramBundle::from_feature_histograms(node.node_id, feature_histograms, true)
+            .map_err(EngineError::from)
+    }
+
+    fn best_split(&self, histograms: &HistogramBundle) -> EngineResult<Option<SplitCandidate>> {
+        self.best_split_with_options(histograms, SplitSelectionOptions::default(), &[], &[])
+    }
+
+    fn best_split_with_options(
+        &self,
+        histograms: &HistogramBundle,
+        options: SplitSelectionOptions,
+        feature_weights: &[f32],
+        _categorical_features: &[CategoricalFeatureInfo],
+    ) -> EngineResult<Option<SplitCandidate>> {
+        let mut best_candidate: Option<SplitCandidate> = None;
+        let mut best_weighted_gain = 0.0_f32;
+        for feature in histograms.features() {
+            let total = feature.bins().fold(
+                NodeStats {
+                    grad_sum: 0.0,
+                    hess_sum: 0.0,
+                    grad_sq_sum: 0.0,
+                    row_count: 0,
+                },
+                |mut total, bin| {
+                    total.grad_sum += bin.grad_sum;
+                    total.hess_sum += bin.hess_sum;
+                    total.grad_sq_sum += bin.grad_sq_sum;
+                    total.row_count += bin.count;
+                    total
+                },
+            );
+            let parent_gain = 2.0
+                * leaf_gain_term(
+                    total.grad_sum,
+                    total.hess_sum,
+                    total.grad_sq_sum,
+                    total.row_count,
+                    options.l1_alpha,
+                    options.l2_lambda,
+                    options.dro_config.as_ref(),
+                );
+            let mut left = NodeStats {
+                grad_sum: 0.0,
+                hess_sum: 0.0,
+                grad_sq_sum: 0.0,
+                row_count: 0,
+            };
+            for threshold_bin in 0..feature.len().saturating_sub(1) {
+                let bin = feature
+                    .bin(threshold_bin)
+                    .expect("threshold bin is bounded");
+                left.grad_sum += bin.grad_sum;
+                left.hess_sum += bin.hess_sum;
+                left.grad_sq_sum += bin.grad_sq_sum;
+                left.row_count += bin.count;
+                let right = NodeStats {
+                    grad_sum: total.grad_sum - left.grad_sum,
+                    hess_sum: total.hess_sum - left.hess_sum,
+                    grad_sq_sum: total.grad_sq_sum - left.grad_sq_sum,
+                    row_count: total.row_count - left.row_count,
+                };
+                if left.row_count < options.min_rows_per_leaf as u32
+                    || right.row_count < options.min_rows_per_leaf as u32
+                    || left.hess_sum <= options.min_child_hessian
+                    || right.hess_sum <= options.min_child_hessian
+                {
+                    continue;
+                }
+                let gain =
+                    2.0 * (leaf_gain_term(
+                        left.grad_sum,
+                        left.hess_sum,
+                        left.grad_sq_sum,
+                        left.row_count,
+                        options.l1_alpha,
+                        options.l2_lambda,
+                        options.dro_config.as_ref(),
+                    ) + leaf_gain_term(
+                        right.grad_sum,
+                        right.hess_sum,
+                        right.grad_sq_sum,
+                        right.row_count,
+                        options.l1_alpha,
+                        options.l2_lambda,
+                        options.dro_config.as_ref(),
+                    )) - parent_gain;
+                let weight = feature_weights
+                    .get(feature.feature_index() as usize)
+                    .copied()
+                    .unwrap_or(1.0);
+                let weighted_gain = gain * weight;
+                if gain.is_finite() && weighted_gain > best_weighted_gain {
+                    best_weighted_gain = weighted_gain;
+                    best_candidate = Some(SplitCandidate {
+                        node_id: histograms.node_id,
+                        feature_index: feature.feature_index(),
+                        threshold_bin: threshold_bin as u16,
+                        gain,
+                        default_left: false,
+                        is_categorical: false,
+                        categorical_bitset: None,
+                        left_stats: left.clone(),
+                        right_stats: right,
+                    });
+                }
+            }
+        }
+        Ok(best_candidate)
+    }
+
+    fn apply_split(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        node: &NodeSlice,
+        split: &SplitCandidate,
+    ) -> EngineResult<PartitionResult> {
+        MockBackend.apply_split(binned_matrix, node, split)
+    }
+
+    fn reduce_sums(
+        &self,
+        gradients: &[GradientPair],
+        row_indices: &[u32],
+    ) -> EngineResult<NodeStats> {
+        MockBackend.reduce_sums(gradients, row_indices)
     }
 }
 
@@ -941,6 +1289,48 @@ impl ObjectiveOps for BadObjective {
         sample_weights: Option<&[f32]>,
     ) -> EngineResult<f32> {
         squared_error_loss(predictions, targets, sample_weights)
+    }
+}
+
+#[test]
+fn monotone_bound_propagation_level_wise() {
+    assert_monotone_bound_propagation(TreeGrowth::Level, 1);
+    assert_monotone_bound_propagation(TreeGrowth::Level, -1);
+}
+
+#[test]
+fn monotone_bound_propagation_leaf_wise() {
+    assert_monotone_bound_propagation(TreeGrowth::Leaf, 1);
+    assert_monotone_bound_propagation(TreeGrowth::Leaf, -1);
+}
+
+#[test]
+fn monotone_bound_propagation_unconstrained_parity() {
+    let (dataset, binned_matrix, _) = monotone_bound_propagation_fixture();
+    for tree_growth in [TreeGrowth::Level, TreeGrowth::Leaf] {
+        let fit = |monotone_constraints| {
+            Trainer::new(TrainParams {
+                seed: 0,
+                learning_rate: 0.2,
+                max_depth: 4,
+                monotone_constraints,
+                max_leaves: (tree_growth == TreeGrowth::Leaf).then_some(16),
+                tree_growth,
+                ..TrainParams::default()
+            })
+            .expect("parity parameters are valid")
+            .fit_iterations(
+                &dataset,
+                &binned_matrix,
+                &MonotoneRegressionBackend,
+                &SquaredErrorObjective,
+                12,
+            )
+            .expect("parity training succeeds")
+        };
+        let unconstrained = fit(Vec::new());
+        let all_zero = fit(vec![0, 0, 0]);
+        assert_scalar_stumps_bit_identical(&unconstrained, &all_zero);
     }
 }
 

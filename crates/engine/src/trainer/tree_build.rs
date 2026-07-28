@@ -23,6 +23,10 @@ use crate::split_options::{CategoricalFeatureInfo, SplitSelectionOptions};
 use crate::trainer::interaction::{
     InteractionConstraintIndex, filter_histogram_bundle_by_features,
 };
+use crate::trainer::monotone::{
+    BoundedChildren, MonotoneBounds, has_active_monotone_constraints,
+    monotone_constraint_for_feature,
+};
 use crate::trainer::validate::{factor_split_context_for_node, validate_training_alignment};
 use crate::traits::{BackendOps, HistogramExecution};
 use crate::tree_node::{encode_tree_node_id, left_child_node_id, right_child_node_id};
@@ -33,19 +37,20 @@ use crate::types::{
 /// Small epsilon added to leaf value denominators to prevent division by zero.
 pub(crate) const LEAF_EPSILON: f32 = 1e-6;
 
-/// Type alias for an active node entry in the level-wise tree builder.
-/// Fields:
-/// (local_node_id, row_indices, histograms, parent_leaf_value, parent_linear_leaf, path_features)
-type ActiveNodeEntry = (
-    u32,
-    Vec<u32>,
-    HistogramBundle,
-    f32,
-    Option<LinearLeaf>,
-    Vec<u32>,
-);
+struct ActiveNodeEntry {
+    local_node_id: u32,
+    row_indices: Vec<u32>,
+    histograms: HistogramBundle,
+    parent_leaf_value: f32,
+    parent_linear_leaf: Option<LinearLeaf>,
+    path_features: Vec<u32>,
+    monotone_bounds: MonotoneBounds,
+}
 
 const MIN_NODE_PARALLEL_WORK: usize = 4_096;
+const MIN_FINITE_F32_KEY: u32 = 0x0080_0000;
+const MAX_FINITE_F32_KEY: u32 = 0xff7f_ffff;
+const F32_SIGN_MASK: u32 = 0x8000_0000;
 
 struct LevelNodeProposal {
     local_node_id: u32,
@@ -68,6 +73,102 @@ struct LevelNodeChildren {
     left_parent_linear: Option<LinearLeaf>,
     right_parent_linear: Option<LinearLeaf>,
     path_features: Vec<u32>,
+    left_bounds: MonotoneBounds,
+    right_bounds: MonotoneBounds,
+}
+
+fn reconstruct_bounded_child(
+    parent_absolute: f32,
+    bounded_output: f32,
+    bounds: MonotoneBounds,
+) -> EngineResult<(f32, f32)> {
+    let direct_delta = bounded_output - parent_absolute;
+    let direct_absolute = parent_absolute + direct_delta;
+    if direct_delta.is_finite()
+        && direct_absolute.is_finite()
+        && direct_absolute >= bounds.lower
+        && direct_absolute <= bounds.upper
+    {
+        return Ok((direct_delta, direct_absolute));
+    }
+
+    // Parent-relative f32 storage can round back outside an exact child
+    // boundary. Select the nearest finite delta whose actual sum stays inside.
+    let first_key = first_delta_key_reconstructing_at_least(parent_absolute, bounds.lower);
+    let last_key = last_delta_key_reconstructing_at_most(parent_absolute, bounds.upper);
+    if first_key > last_key {
+        return Err(EngineError::InvalidConfig(format!(
+            "no finite parent-relative leaf delta reconstructs inside [{}, {}]",
+            bounds.lower, bounds.upper
+        )));
+    }
+
+    let ideal_key = if direct_delta == f32::NEG_INFINITY {
+        MIN_FINITE_F32_KEY
+    } else if direct_delta == f32::INFINITY {
+        MAX_FINITE_F32_KEY
+    } else {
+        ordered_f32_key(direct_delta)
+    };
+    let delta = f32_from_ordered_key(ideal_key.clamp(first_key, last_key));
+    let absolute = parent_absolute + delta;
+    if !delta.is_finite()
+        || !absolute.is_finite()
+        || absolute < bounds.lower
+        || absolute > bounds.upper
+    {
+        return Err(EngineError::InvalidConfig(format!(
+            "parent-relative leaf delta reconstructed outside [{}, {}]",
+            bounds.lower, bounds.upper
+        )));
+    }
+    Ok((delta, absolute))
+}
+
+fn first_delta_key_reconstructing_at_least(parent_absolute: f32, lower: f32) -> u32 {
+    let mut low = MIN_FINITE_F32_KEY;
+    let mut high = MAX_FINITE_F32_KEY;
+    while low < high {
+        let midpoint = low + (high - low) / 2;
+        if parent_absolute + f32_from_ordered_key(midpoint) >= lower {
+            high = midpoint;
+        } else {
+            low = midpoint + 1;
+        }
+    }
+    low
+}
+
+fn last_delta_key_reconstructing_at_most(parent_absolute: f32, upper: f32) -> u32 {
+    let mut low = MIN_FINITE_F32_KEY;
+    let mut high = MAX_FINITE_F32_KEY;
+    while low < high {
+        let midpoint = low + (high - low).div_ceil(2);
+        if parent_absolute + f32_from_ordered_key(midpoint) <= upper {
+            low = midpoint;
+        } else {
+            high = midpoint - 1;
+        }
+    }
+    low
+}
+
+fn ordered_f32_key(value: f32) -> u32 {
+    let bits = value.to_bits();
+    if bits & F32_SIGN_MASK == 0 {
+        bits ^ F32_SIGN_MASK
+    } else {
+        !bits
+    }
+}
+
+fn f32_from_ordered_key(key: u32) -> f32 {
+    let bits = if key & F32_SIGN_MASK == 0 {
+        !key
+    } else {
+        key ^ F32_SIGN_MASK
+    };
+    f32::from_bits(bits)
 }
 
 struct LevelNodeOutcome {
@@ -298,7 +399,7 @@ fn should_parallelize_level(
         .max(1);
     let row_count = active_nodes
         .iter()
-        .map(|(_, rows, _, _, _, _)| rows.len())
+        .map(|node| node.row_indices.len())
         .sum::<usize>();
     row_count.saturating_mul(selected_feature_count) >= MIN_NODE_PARALLEL_WORK
 }
@@ -312,16 +413,17 @@ fn propose_level_node<B: BackendOps>(
     active_node: ActiveNodeEntry,
     node_active_groups: Option<u64>,
 ) -> EngineResult<LevelNodeOutcome> {
-    let (
+    let ActiveNodeEntry {
         local_node_id,
-        node_rows,
+        row_indices,
         histograms,
         parent_leaf_value,
         parent_linear_leaf,
         path_features,
-    ) = active_node;
+        monotone_bounds,
+    } = active_node;
     let node_id = encode_tree_node_id(context.round_index, local_node_id)?;
-    let node = NodeSlice::new(node_id, node_rows)?;
+    let node = NodeSlice::new(node_id, row_indices)?;
     let factor_context = factor_split_context_for_node(
         context.params,
         context.binned_matrix,
@@ -416,16 +518,65 @@ fn propose_level_node<B: BackendOps>(
         morph.leaf_scale_for_depth(child_depth).multiplier
     });
 
-    let left_leaf_absolute = raw_left_leaf_value.clamp(
+    let raw_left_leaf_absolute = raw_left_leaf_value.clamp(
         -context.controls.max_abs_leaf_value,
         context.controls.max_abs_leaf_value,
     );
-    let right_leaf_absolute = raw_right_leaf_value.clamp(
+    let raw_right_leaf_absolute = raw_right_leaf_value.clamp(
         -context.controls.max_abs_leaf_value,
         context.controls.max_abs_leaf_value,
     );
-    let left_leaf_value = left_leaf_absolute - parent_leaf_value;
-    let right_leaf_value = right_leaf_absolute - parent_leaf_value;
+    let monotone_constraints_active =
+        has_active_monotone_constraints(&context.params.monotone_constraints);
+    if monotone_constraints_active && context.params.leaf_model == LeafModelKind::Linear {
+        return Err(EngineError::InvalidConfig(
+            "active monotone constraints do not support linear leaves during tree growth"
+                .to_string(),
+        ));
+    }
+    let (
+        left_leaf_value,
+        right_leaf_value,
+        left_leaf_absolute,
+        right_leaf_absolute,
+        left_bounds,
+        right_bounds,
+    ) = if monotone_constraints_active {
+        let BoundedChildren {
+            left_output,
+            right_output,
+            left_bounds,
+            right_bounds,
+        } = monotone_bounds.bound_children(
+            monotone_constraint_for_feature(
+                &context.params.monotone_constraints,
+                split.feature_index,
+            ),
+            raw_left_leaf_absolute,
+            raw_right_leaf_absolute,
+        )?;
+        let (left_leaf_value, left_leaf_absolute) =
+            reconstruct_bounded_child(parent_leaf_value, left_output, left_bounds)?;
+        let (right_leaf_value, right_leaf_absolute) =
+            reconstruct_bounded_child(parent_leaf_value, right_output, right_bounds)?;
+        (
+            left_leaf_value,
+            right_leaf_value,
+            left_leaf_absolute,
+            right_leaf_absolute,
+            left_bounds,
+            right_bounds,
+        )
+    } else {
+        (
+            raw_left_leaf_absolute - parent_leaf_value,
+            raw_right_leaf_absolute - parent_leaf_value,
+            raw_left_leaf_absolute,
+            raw_right_leaf_absolute,
+            monotone_bounds,
+            monotone_bounds,
+        )
+    };
     if left_leaf_value.abs() < context.controls.min_abs_leaf_value
         && right_leaf_value.abs() < context.controls.min_abs_leaf_value
     {
@@ -433,21 +584,6 @@ fn propose_level_node<B: BackendOps>(
             local_node_id,
             IterationStopReason::LeafMagnitudeBelowThreshold,
         ));
-    }
-
-    if !context.params.monotone_constraints.is_empty() {
-        let feature_index = split.feature_index as usize;
-        if feature_index < context.params.monotone_constraints.len() {
-            let constraint = context.params.monotone_constraints[feature_index];
-            if (constraint == 1 && left_leaf_absolute > right_leaf_absolute)
-                || (constraint == -1 && left_leaf_absolute < right_leaf_absolute)
-            {
-                return Ok(LevelNodeOutcome::rejected(
-                    local_node_id,
-                    IterationStopReason::MonotoneConstraintViolation,
-                ));
-            }
-        }
     }
 
     let linear_leaf_computation_result: Option<LinearLeafQuad> = if context.params.leaf_model
@@ -618,6 +754,8 @@ fn propose_level_node<B: BackendOps>(
                 left_parent_linear,
                 right_parent_linear,
                 path_features: child_path_features,
+                left_bounds,
+                right_bounds,
             }),
         )
     } else {
@@ -689,14 +827,15 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
     // can replace parent contribution via deltas (tree semantics).
     // depth is the current tree level (0-indexed); all nodes at this level share the same depth.
     // The Option<LinearLeaf> carries the parent's absolute linear leaf (for weight delta computation).
-    let mut active_nodes: Vec<ActiveNodeEntry> = vec![(
-        0_u32,
-        root_node.row_indices,
-        root_histograms,
-        0.0_f32,
-        None,
-        Vec::new(),
-    )];
+    let mut active_nodes = vec![ActiveNodeEntry {
+        local_node_id: 0,
+        row_indices: root_node.row_indices,
+        histograms: root_histograms,
+        parent_leaf_value: 0.0,
+        parent_linear_leaf: None,
+        path_features: Vec::new(),
+        monotone_bounds: MonotoneBounds::root(controls.max_abs_leaf_value)?,
+    }];
 
     for depth in 0..(params.max_depth as usize) {
         if active_nodes.is_empty() {
@@ -731,7 +870,7 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
         let work_items = active_nodes
             .into_iter()
             .map(|active_node| {
-                let active_groups = node_active_groups.get(&active_node.0).copied();
+                let active_groups = node_active_groups.get(&active_node.local_node_id).copied();
                 (active_node, active_groups)
             })
             .collect::<Vec<_>>();
@@ -805,28 +944,30 @@ pub(crate) fn build_tree_level_wise<B: BackendOps>(
                     left_row_indices,
                     right_row_indices,
                 } = proposal.partition;
-                let left_child = (
-                    children.left_local_node_id,
-                    left_row_indices,
-                    children.left_histograms,
-                    children.left_parent_value,
-                    children.left_parent_linear,
-                    children.path_features.clone(),
-                );
-                let right_child = (
-                    children.right_local_node_id,
-                    right_row_indices,
-                    children.right_histograms,
-                    children.right_parent_value,
-                    children.right_parent_linear,
-                    children.path_features,
-                );
+                let left_child = ActiveNodeEntry {
+                    local_node_id: children.left_local_node_id,
+                    row_indices: left_row_indices,
+                    histograms: children.left_histograms,
+                    parent_leaf_value: children.left_parent_value,
+                    parent_linear_leaf: children.left_parent_linear,
+                    path_features: children.path_features.clone(),
+                    monotone_bounds: children.left_bounds,
+                };
+                let right_child = ActiveNodeEntry {
+                    local_node_id: children.right_local_node_id,
+                    row_indices: right_row_indices,
+                    histograms: children.right_histograms,
+                    parent_leaf_value: children.right_parent_value,
+                    parent_linear_leaf: children.right_parent_linear,
+                    path_features: children.path_features,
+                    monotone_bounds: children.right_bounds,
+                };
                 if let (Some(index), Some(active_groups)) =
                     (constraint_index.as_ref(), proposal.node_active_groups)
                 {
                     let child_groups = index.descend(active_groups, proposal.split.feature_index);
-                    node_active_groups.insert(left_child.0, child_groups);
-                    node_active_groups.insert(right_child.0, child_groups);
+                    node_active_groups.insert(left_child.local_node_id, child_groups);
+                    node_active_groups.insert(right_child.local_node_id, child_groups);
                 }
                 next_nodes.push(left_child);
                 next_nodes.push(right_child);
@@ -874,6 +1015,7 @@ pub(crate) struct PendingSplit {
     /// Absolute linear leaf of the parent (used to compute weight deltas for linear-leaf trees).
     parent_linear_leaf: Option<LinearLeaf>,
     depth: usize,
+    monotone_bounds: MonotoneBounds,
 }
 
 // PartialEq uses exact float comparison for the Eq trait bound required by
@@ -1002,6 +1144,7 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
         parent_leaf_value: 0.0,
         parent_linear_leaf: None,
         depth: 0,
+        monotone_bounds: MonotoneBounds::root(controls.max_abs_leaf_value)?,
     });
 
     // Start with 1 leaf (the root). Each split adds 1 net leaf (splits one into two).
@@ -1086,34 +1229,64 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
             1.0
         };
 
-        let left_leaf_absolute =
+        let raw_left_leaf_absolute =
             raw_left_leaf_value.clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value);
-        let right_leaf_absolute =
+        let raw_right_leaf_absolute =
             raw_right_leaf_value.clamp(-controls.max_abs_leaf_value, controls.max_abs_leaf_value);
-        let left_leaf_value = left_leaf_absolute - pending.parent_leaf_value;
-        let right_leaf_value = right_leaf_absolute - pending.parent_leaf_value;
+        let monotone_constraints_active =
+            has_active_monotone_constraints(&params.monotone_constraints);
+        if monotone_constraints_active && params.leaf_model == LeafModelKind::Linear {
+            return Err(EngineError::InvalidConfig(
+                "active monotone constraints do not support linear leaves during tree growth"
+                    .to_string(),
+            ));
+        }
+        let (
+            left_leaf_value,
+            right_leaf_value,
+            left_leaf_absolute,
+            right_leaf_absolute,
+            left_bounds,
+            right_bounds,
+        ) = if monotone_constraints_active {
+            let BoundedChildren {
+                left_output,
+                right_output,
+                left_bounds,
+                right_bounds,
+            } = pending.monotone_bounds.bound_children(
+                monotone_constraint_for_feature(&params.monotone_constraints, split.feature_index),
+                raw_left_leaf_absolute,
+                raw_right_leaf_absolute,
+            )?;
+            let (left_leaf_value, left_leaf_absolute) =
+                reconstruct_bounded_child(pending.parent_leaf_value, left_output, left_bounds)?;
+            let (right_leaf_value, right_leaf_absolute) =
+                reconstruct_bounded_child(pending.parent_leaf_value, right_output, right_bounds)?;
+            (
+                left_leaf_value,
+                right_leaf_value,
+                left_leaf_absolute,
+                right_leaf_absolute,
+                left_bounds,
+                right_bounds,
+            )
+        } else {
+            (
+                raw_left_leaf_absolute - pending.parent_leaf_value,
+                raw_right_leaf_absolute - pending.parent_leaf_value,
+                raw_left_leaf_absolute,
+                raw_right_leaf_absolute,
+                pending.monotone_bounds,
+                pending.monotone_bounds,
+            )
+        };
 
         if left_leaf_value.abs() < controls.min_abs_leaf_value
             && right_leaf_value.abs() < controls.min_abs_leaf_value
         {
             last_rejection = IterationStopReason::LeafMagnitudeBelowThreshold;
             continue;
-        }
-
-        // Monotone constraint enforcement.
-        if !params.monotone_constraints.is_empty() {
-            let fi = split.feature_index as usize;
-            if fi < params.monotone_constraints.len() {
-                let constraint = params.monotone_constraints[fi];
-                if constraint == 1 && left_leaf_absolute > right_leaf_absolute {
-                    last_rejection = IterationStopReason::MonotoneConstraintViolation;
-                    continue;
-                }
-                if constraint == -1 && left_leaf_absolute < right_leaf_absolute {
-                    last_rejection = IterationStopReason::MonotoneConstraintViolation;
-                    continue;
-                }
-            }
         }
 
         // ── Linear leaf path ───────────────────────────────────────────────────
@@ -1271,6 +1444,8 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                 larger_parent_val,
                 smaller_parent_ll,
                 larger_parent_ll,
+                smaller_bounds,
+                larger_bounds,
             ) = if partition.left_row_indices.len() <= partition.right_row_indices.len() {
                 (
                     partition.left_row_indices,
@@ -1283,6 +1458,8 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                     right_parent_val,
                     left_parent_ll,
                     right_parent_ll,
+                    left_bounds,
+                    right_bounds,
                 )
             } else {
                 (
@@ -1296,6 +1473,8 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                     left_parent_val,
                     right_parent_ll,
                     left_parent_ll,
+                    right_bounds,
+                    left_bounds,
                 )
             };
 
@@ -1380,6 +1559,7 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                     parent_leaf_value: smaller_parent_val,
                     parent_linear_leaf: smaller_parent_ll,
                     depth: child_depth,
+                    monotone_bounds: smaller_bounds,
                 });
             }
 
@@ -1421,6 +1601,7 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                     parent_leaf_value: larger_parent_val,
                     parent_linear_leaf: larger_parent_ll,
                     depth: child_depth,
+                    monotone_bounds: larger_bounds,
                 });
             }
         }
