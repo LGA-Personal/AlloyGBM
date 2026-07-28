@@ -1,8 +1,10 @@
 """Tests for warm-starting / incremental training."""
 
+import tempfile
 import unittest
 
 import numpy as np
+import pytest
 
 from alloygbm import GBMRegressor
 
@@ -15,6 +17,31 @@ def _make_dataset(n=200, seed=42):
     X = [[rng.gauss(0, 1) for _ in range(4)] for _ in range(n)]
     y = [row[0] * 2.0 + row[1] * 0.5 + rng.gauss(0, 0.1) for row in X]
     return X, y
+
+
+def _make_monotone_dataset(n=384, seed=7):
+    rng = np.random.RandomState(seed)
+    X = rng.uniform(-2.0, 2.0, size=(n, 3)).astype(np.float32)
+    y = (
+        1.5 * X[:, 0]
+        + 2.0 * np.sin(X[:, 1] * 2.3)
+        + X[:, 0] * X[:, 2]
+        + 0.2 * rng.standard_normal(n)
+    ).astype(np.float32)
+    grid = np.column_stack(
+        [
+            np.linspace(-2.0, 2.0, 101, dtype=np.float32),
+            np.full(101, -1.5, dtype=np.float32),
+            np.full(101, -1.5, dtype=np.float32),
+        ]
+    )
+    return X, y, grid
+
+
+def _assert_nondecreasing_predictions(model, grid):
+    predictions = np.asarray(model.predict(grid))
+    assert np.all(np.isfinite(predictions))
+    assert np.all(np.diff(predictions) >= -1e-6)
 
 
 class TestWarmStartParams(unittest.TestCase):
@@ -225,6 +252,93 @@ class TestWarmStartTraining(unittest.TestCase):
         m.fit(X[:split], y[:split], eval_set=(X[split:], y[split:]))
         preds2 = m.predict(X[:5])
         self.assertEqual(len(preds2), 5)
+
+    def test_monotone_init_model_continuation(self):
+        X, y, grid = _make_monotone_dataset()
+        prior = GBMRegressor(
+            n_estimators=5,
+            max_depth=4,
+            learning_rate=0.2,
+            monotone_constraints=[1, 0, 0],
+            training_policy="manual",
+            seed=0,
+        ).fit(X, y)
+        continued = GBMRegressor(
+            n_estimators=5,
+            max_depth=4,
+            learning_rate=0.2,
+            monotone_constraints=[1, 0, 0],
+            training_policy="manual",
+            seed=0,
+        ).fit(X, y, init_model=prior)
+
+        _assert_nondecreasing_predictions(continued, grid)
+
+    def test_monotone_estimator_warm_start_continuation(self):
+        X, y, grid = _make_monotone_dataset()
+        model = GBMRegressor(
+            n_estimators=5,
+            max_depth=4,
+            learning_rate=0.2,
+            monotone_constraints=[1, 0, 0],
+            training_policy="manual",
+            seed=0,
+            warm_start=True,
+        ).fit(X, y)
+        model.n_estimators = 5
+        model.fit(X, y)
+
+        _assert_nondecreasing_predictions(model, grid)
+
+    def test_monotone_save_load_is_exact_before_continuation(self):
+        X, y, grid = _make_monotone_dataset()
+        prior = GBMRegressor(
+            n_estimators=5,
+            max_depth=4,
+            learning_rate=0.2,
+            monotone_constraints=[1, 0, 0],
+            training_policy="manual",
+            seed=0,
+        ).fit(X, y)
+        predictions_before = prior.predict(grid)
+
+        with tempfile.NamedTemporaryFile(suffix=".agbm") as model_file:
+            prior.save_model(model_file.name)
+            loaded = GBMRegressor.load_model(model_file.name)
+        np.testing.assert_array_equal(predictions_before, loaded.predict(grid))
+
+        continued = GBMRegressor(
+            n_estimators=3,
+            max_depth=4,
+            learning_rate=0.2,
+            monotone_constraints=[1, 0, 0],
+            training_policy="manual",
+            seed=0,
+        ).fit(X, y, init_model=loaded)
+        _assert_nondecreasing_predictions(continued, grid)
+
+    def test_monotone_rejects_violating_unconstrained_init_model(self):
+        X, _, _ = _make_monotone_dataset()
+        violating_targets = (-3.0 * X[:, 0]).astype(np.float32)
+        prior = GBMRegressor(
+            n_estimators=5,
+            max_depth=3,
+            learning_rate=0.5,
+            training_policy="manual",
+            seed=0,
+        ).fit(X, violating_targets)
+        constrained = GBMRegressor(
+            n_estimators=2,
+            max_depth=3,
+            monotone_constraints=[1, 0, 0],
+            training_policy="manual",
+            seed=0,
+        )
+
+        with pytest.raises(
+            ValueError, match="warm_start.*monotone_constraints"
+        ):
+            constrained.fit(X, violating_targets, init_model=prior)
 
 
 class TestWarmStartEdgeCases(unittest.TestCase):

@@ -8,6 +8,10 @@ mod tree_build;
 mod validate;
 
 pub(crate) use interaction::InteractionConstraintIndex;
+use monotone::{
+    has_active_monotone_constraints, project_monotone_forest, project_monotone_tree,
+    validate_monotone_forest,
+};
 #[cfg(test)]
 pub(crate) use policy::{
     AUTO_SPLIT_L2_NOISY_SMALL_WIDE, should_apply_auto_split_l2,
@@ -928,6 +932,11 @@ impl Trainer {
         // has a variable stump count (capped by max_leaves), but the round
         // boundaries are still captured correctly.
         validate_train_params(&self.params)?;
+        if has_active_monotone_constraints(&self.params.monotone_constraints) {
+            return Err(EngineError::InvalidConfig(
+                "multiclass is not supported with active monotone_constraints".to_string(),
+            ));
+        }
         validate_training_dataset(dataset)?;
         validate_neutralization_fit_contract_for_support(&self.params, dataset, false)?;
         validate_warm_start_neutralization_contract(&self.params, warm_start.is_some(), dataset)?;
@@ -2120,6 +2129,17 @@ impl Trainer {
             }
         }
         validate_train_params(&self.params)?;
+        if let Some(categorical_feature) = self.categorical_features.iter().find(|feature| {
+            self.params
+                .monotone_constraints
+                .get(feature.feature_index)
+                .is_some_and(|&constraint| constraint != 0)
+        }) {
+            return Err(EngineError::InvalidConfig(format!(
+                "categorical_features native categorical splitting at feature {} is not supported with active monotone_constraints on that feature",
+                categorical_feature.feature_index
+            )));
+        }
         if let Some(qa) = objective.quantile_alpha()
             && (!qa.is_finite() || qa <= 0.0 || qa >= 1.0)
         {
@@ -2244,21 +2264,32 @@ impl Trainer {
         // than new ones). Now kept as its own local consumed only by the
         // DART-state seeding + round_start_offsets/dart_round_counts
         // pre-population blocks below.
-        let mut initial_stumps_per_round: Vec<usize> = Vec::new();
-        if !stumps.is_empty() {
-            let mut current_tree_id = decode_tree_node_id(stumps[0].split.node_id).0;
-            let mut current_count = 0usize;
-            for stump in &stumps {
-                let tree_id = decode_tree_node_id(stump.split.node_id).0;
-                if tree_id != current_tree_id {
-                    initial_stumps_per_round.push(current_count);
-                    current_tree_id = tree_id;
-                    current_count = 0;
-                }
-                current_count += 1;
-            }
-            initial_stumps_per_round.push(current_count);
+        let mut initial_stumps_per_round = vec![0_usize; round_index_offset];
+        for stump in &stumps {
+            let tree_id = decode_tree_node_id(stump.split.node_id).0 as usize;
+            let initial_round_count = initial_stumps_per_round.len();
+            let count = initial_stumps_per_round.get_mut(tree_id).ok_or_else(|| {
+                EngineError::ContractViolation(format!(
+                    "warm-start tree_id {tree_id} is outside initial_rounds_completed {initial_round_count}"
+                ))
+            })?;
+            *count = count.checked_add(1).ok_or_else(|| {
+                EngineError::ContractViolation(format!(
+                    "warm-start stump count overflow for tree_id {tree_id}"
+                ))
+            })?;
         }
+        validate_monotone_forest(
+            &stumps,
+            &initial_stumps_per_round,
+            &self.params.monotone_constraints,
+            controls.max_abs_leaf_value,
+        )
+        .map_err(|error| {
+            EngineError::InvalidConfig(format!(
+                "warm_start is not compatible with active monotone_constraints: {error}"
+            ))
+        })?;
         let mut rounds_completed = 0_usize;
         let effective_round_cap = controls.rounds;
         let mut stop_reason = IterationStopReason::CompletedRequestedRounds;
@@ -2648,6 +2679,11 @@ impl Trainer {
                     controls.max_abs_leaf_value,
                     raw_features_opt,
                     morph_scale_context,
+                )?;
+                project_monotone_tree(
+                    &mut candidate_round_stumps,
+                    &self.params.monotone_constraints,
+                    controls.max_abs_leaf_value,
                 )?;
             }
 
@@ -3063,13 +3099,24 @@ impl Trainer {
             // Leaf refinement re-solves leaves against targets, so skip it for
             // per-round factor-neutralized gradients until refinement can apply
             // the same projection contract.
+            let all_stumps_per_round = initial_stumps_per_round
+                .iter()
+                .chain(&stumps_per_completed_round)
+                .copied()
+                .collect::<Vec<_>>();
             refine_regression_leaf_values(
                 baseline_prediction,
                 &active_dataset.targets,
                 active_dataset.sample_weights.as_deref(),
                 binned_matrix,
                 &mut stumps,
-                &stumps_per_completed_round,
+                &all_stumps_per_round,
+                controls.max_abs_leaf_value,
+            )?;
+            project_monotone_forest(
+                &mut stumps,
+                &all_stumps_per_round,
+                &self.params.monotone_constraints,
                 controls.max_abs_leaf_value,
             )?;
 

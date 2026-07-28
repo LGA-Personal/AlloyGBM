@@ -530,6 +530,67 @@ fn assert_models_artifact_bit_identical(left: &TrainedModel, right: &TrainedMode
     );
 }
 
+fn assert_stump_bit_identical(left: &TrainedStump, right: &TrainedStump) {
+    assert_eq!(left.split.node_id, right.split.node_id);
+    assert_eq!(left.split.feature_index, right.split.feature_index);
+    assert_eq!(left.split.threshold_bin, right.split.threshold_bin);
+    assert_eq!(left.split.gain.to_bits(), right.split.gain.to_bits());
+    assert_eq!(left.split.default_left, right.split.default_left);
+    assert_eq!(left.split.is_categorical, right.split.is_categorical);
+    assert_eq!(
+        left.split.categorical_bitset,
+        right.split.categorical_bitset
+    );
+    assert_node_stats_bit_identical(&left.split.left_stats, &right.split.left_stats);
+    assert_node_stats_bit_identical(&left.split.right_stats, &right.split.right_stats);
+    assert_eq!(left.tree_weight.to_bits(), right.tree_weight.to_bits());
+    assert_eq!(
+        left.multi_output_leaf_values,
+        right.multi_output_leaf_values
+    );
+    let (LeafValue::Scalar(left_left), LeafValue::Scalar(right_left)) =
+        (&left.left_leaf_value, &right.left_leaf_value)
+    else {
+        panic!("monotone contract fixture must emit scalar left leaves");
+    };
+    let (LeafValue::Scalar(left_right), LeafValue::Scalar(right_right)) =
+        (&left.right_leaf_value, &right.right_leaf_value)
+    else {
+        panic!("monotone contract fixture must emit scalar right leaves");
+    };
+    assert_eq!(left_left.to_bits(), right_left.to_bits());
+    assert_eq!(left_right.to_bits(), right_right.to_bits());
+}
+
+fn assert_monotone_counterexample_predictions(model: &TrainedModel, direction: i8) {
+    let (_, _, sorted_features) = monotone_bound_propagation_fixture();
+    let fixed_feature_1 = quantile_bin_for_sweep(&sorted_features[1], -2.0);
+    let fixed_feature_2 = quantile_bin_for_sweep(&sorted_features[2], -2.0);
+    let predictions = (0..=128)
+        .map(|step| {
+            let feature_0 = -2.0 + 4.0 * step as f32 / 128.0;
+            model
+                .predict_row(&[
+                    quantile_bin_for_sweep(&sorted_features[0], feature_0),
+                    fixed_feature_1,
+                    fixed_feature_2,
+                ])
+                .expect("counterexample prediction succeeds")
+        })
+        .collect::<Vec<_>>();
+
+    for (index, pair) in predictions.windows(2).enumerate() {
+        let directed_difference = direction as f32 * (pair[1] - pair[0]);
+        assert!(
+            directed_difference >= -1e-6,
+            "direction={direction} prediction step {index} violated monotonicity: {} -> {} \
+             (directed difference {directed_difference})",
+            pair[0],
+            pair[1],
+        );
+    }
+}
+
 fn trainer() -> Trainer {
     Trainer::new(TrainParams::default()).expect("default policy parameters are valid")
 }
@@ -1378,6 +1439,280 @@ fn monotone_bound_propagation_unconstrained_parity() {
         let all_zero = fit(vec![0, 0, 0]);
         assert_models_artifact_bit_identical(&unconstrained, &all_zero);
     }
+}
+
+#[test]
+fn monotone_contract_multiclass_is_rejected() {
+    let mut dataset = sample_dataset();
+    dataset.targets = vec![0.0, 1.0, 2.0, 1.0];
+    let trainer = Trainer::new(TrainParams {
+        monotone_constraints: vec![1, 0],
+        ..TrainParams::default()
+    })
+    .expect("scalar monotone parameters are valid");
+    let objective = MultiClassSoftmaxObjective::new(3).expect("three classes are valid");
+    let controls =
+        IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).expect("valid controls");
+
+    let error = trainer
+        .fit_multiclass_iterations_with_summary(
+            &dataset,
+            &sample_binned_matrix(),
+            &MockBackend,
+            &objective,
+            controls,
+        )
+        .expect_err("multiclass with active monotone constraints must fail");
+    let message = error.to_string();
+    assert!(message.contains("multiclass"), "{message}");
+    assert!(message.contains("monotone_constraints"), "{message}");
+}
+
+#[test]
+fn monotone_contract_native_categorical_overlap_is_rejected() {
+    let trainer = Trainer::new(TrainParams {
+        monotone_constraints: vec![1, 0],
+        ..TrainParams::default()
+    })
+    .expect("monotone parameters are valid")
+    .with_categorical_features(vec![CategoricalFeatureInfo {
+        feature_index: 0,
+        num_categories: 4,
+    }]);
+
+    let error = trainer
+        .fit_iterations(
+            &sample_dataset(),
+            &sample_binned_matrix(),
+            &MockBackend,
+            &SquaredErrorObjective,
+            1,
+        )
+        .expect_err("native categorical overlap with a constrained feature must fail");
+    let message = error.to_string();
+    assert!(message.contains("native categorical"), "{message}");
+    assert!(message.contains("monotone_constraints"), "{message}");
+}
+
+#[test]
+fn monotone_contract_native_categorical_non_overlap_is_accepted() {
+    let trainer = Trainer::new(TrainParams {
+        monotone_constraints: vec![1, 0],
+        ..TrainParams::default()
+    })
+    .expect("monotone parameters are valid")
+    .with_categorical_features(vec![CategoricalFeatureInfo {
+        feature_index: 1,
+        num_categories: 2,
+    }]);
+
+    trainer
+        .fit_iterations(
+            &sample_dataset(),
+            &sample_binned_matrix(),
+            &MockBackend,
+            &SquaredErrorObjective,
+            1,
+        )
+        .expect("native categorical metadata on an unconstrained feature must remain supported");
+}
+
+#[test]
+fn monotone_contract_quantile_refinement_preserves_counterexample() {
+    let (dataset, binned_matrix, _) = monotone_bound_propagation_fixture();
+    let model = Trainer::new(TrainParams {
+        seed: 0,
+        learning_rate: 0.2,
+        max_depth: 4,
+        monotone_constraints: vec![1, 0, 0],
+        ..TrainParams::default()
+    })
+    .expect("quantile monotone parameters are valid")
+    .fit_iterations(
+        &dataset,
+        &binned_matrix,
+        &MonotoneRegressionBackend,
+        &QuantileObjective { alpha: 0.5 },
+        12,
+    )
+    .expect("quantile counterexample training succeeds");
+
+    assert_monotone_counterexample_predictions(&model, 1);
+}
+
+#[test]
+fn monotone_contract_experimental_regression_refinement_preserves_counterexample() {
+    if !experiment_leaf_refinement_enabled() {
+        return;
+    }
+
+    let model = fit_monotone_bound_propagation_fixture(TreeGrowth::Level, 1);
+    assert_monotone_counterexample_predictions(&model, 1);
+}
+
+#[test]
+fn monotone_contract_compliant_warm_start_prefix_is_unchanged() {
+    let (dataset, binned_matrix, _) = monotone_bound_propagation_fixture();
+    let params = TrainParams {
+        seed: 0,
+        learning_rate: 0.2,
+        max_depth: 4,
+        monotone_constraints: vec![1, 0, 0],
+        ..TrainParams::default()
+    };
+    let trainer = Trainer::new(params).expect("monotone parameters are valid");
+    let prior = trainer
+        .fit_iterations(
+            &dataset,
+            &binned_matrix,
+            &MonotoneRegressionBackend,
+            &SquaredErrorObjective,
+            3,
+        )
+        .expect("constrained prior fit succeeds");
+    let prior_stumps = prior.stumps.clone();
+    let prior_rounds_completed = prior.rounds_completed();
+    let warm_start = WarmStartState {
+        baseline_prediction: prior.baseline_prediction,
+        stumps: prior.stumps,
+        initial_rounds_completed: prior_rounds_completed,
+        initial_ema_stats: None,
+        initial_dart_tree_weights: None,
+    };
+    let controls =
+        IterationControls::new(2, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).expect("valid controls");
+
+    let continued = trainer
+        .fit_iterations_warm_start(
+            &dataset,
+            &binned_matrix,
+            &MonotoneRegressionBackend,
+            &SquaredErrorObjective,
+            controls,
+            warm_start,
+        )
+        .expect("compliant constrained warm start succeeds");
+
+    assert!(continued.model.stumps.len() >= prior_stumps.len());
+    for (prior_stump, imported_stump) in prior_stumps
+        .iter()
+        .zip(&continued.model.stumps[..prior_stumps.len()])
+    {
+        assert_stump_bit_identical(prior_stump, imported_stump);
+    }
+}
+
+#[test]
+fn monotone_contract_compliant_warm_start_accepts_phantom_rounds() {
+    let compliant_tree_after_phantom = TrainedStump {
+        split: SplitCandidate {
+            node_id: encode_tree_node_id(1, 0).expect("node id encodes"),
+            feature_index: 0,
+            threshold_bin: 1,
+            gain: 1.0,
+            default_left: false,
+            is_categorical: false,
+            categorical_bitset: None,
+            left_stats: NodeStats {
+                grad_sum: 0.0,
+                hess_sum: 2.0,
+                grad_sq_sum: 0.0,
+                row_count: 2,
+            },
+            right_stats: NodeStats {
+                grad_sum: 0.0,
+                hess_sum: 2.0,
+                grad_sq_sum: 0.0,
+                row_count: 2,
+            },
+        },
+        left_leaf_value: LeafValue::Scalar(-1.0),
+        right_leaf_value: LeafValue::Scalar(1.0),
+        tree_weight: 1.0,
+        multi_output_leaf_values: None,
+    };
+    let trainer = Trainer::new(TrainParams {
+        monotone_constraints: vec![1, 0],
+        ..TrainParams::default()
+    })
+    .expect("monotone parameters are valid");
+    let controls =
+        IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).expect("valid controls");
+
+    trainer
+        .fit_iterations_warm_start(
+            &sample_dataset(),
+            &sample_binned_matrix(),
+            &MockBackend,
+            &SquaredErrorObjective,
+            controls,
+            WarmStartState {
+                baseline_prediction: 0.0,
+                stumps: vec![compliant_tree_after_phantom],
+                initial_rounds_completed: 2,
+                initial_ema_stats: None,
+                initial_dart_tree_weights: None,
+            },
+        )
+        .expect("compliant warm start with a phantom prior round must succeed");
+}
+
+#[test]
+fn monotone_contract_violating_legacy_warm_start_is_rejected() {
+    let violating_stump = TrainedStump {
+        split: SplitCandidate {
+            node_id: encode_tree_node_id(0, 0).expect("node id encodes"),
+            feature_index: 0,
+            threshold_bin: 1,
+            gain: 1.0,
+            default_left: false,
+            is_categorical: false,
+            categorical_bitset: None,
+            left_stats: NodeStats {
+                grad_sum: 0.0,
+                hess_sum: 2.0,
+                grad_sq_sum: 0.0,
+                row_count: 2,
+            },
+            right_stats: NodeStats {
+                grad_sum: 0.0,
+                hess_sum: 2.0,
+                grad_sq_sum: 0.0,
+                row_count: 2,
+            },
+        },
+        left_leaf_value: LeafValue::Scalar(1.0),
+        right_leaf_value: LeafValue::Scalar(-1.0),
+        tree_weight: 1.0,
+        multi_output_leaf_values: None,
+    };
+    let trainer = Trainer::new(TrainParams {
+        monotone_constraints: vec![1, 0],
+        ..TrainParams::default()
+    })
+    .expect("monotone parameters are valid");
+    let controls =
+        IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).expect("valid controls");
+
+    let error = trainer
+        .fit_iterations_warm_start(
+            &sample_dataset(),
+            &sample_binned_matrix(),
+            &MockBackend,
+            &SquaredErrorObjective,
+            controls,
+            WarmStartState {
+                baseline_prediction: 0.0,
+                stumps: vec![violating_stump],
+                initial_rounds_completed: 1,
+                initial_ema_stats: None,
+                initial_dart_tree_weights: None,
+            },
+        )
+        .expect_err("violating legacy warm-start tree must fail");
+    let message = error.to_string();
+    assert!(message.contains("warm_start"), "{message}");
+    assert!(message.contains("monotone_constraints"), "{message}");
 }
 
 #[test]

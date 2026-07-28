@@ -5,8 +5,9 @@ import pickle
 import unittest
 
 import numpy as np
+import pytest
 
-from alloygbm import GBMRegressor
+from alloygbm import GBMClassifier, GBMRegressor
 
 
 def _make_dataset(n=300, seed=42):
@@ -16,6 +17,131 @@ def _make_dataset(n=300, seed=42):
     # y = 2*x0 - x1 + 0.5*x2 + noise
     y = 2 * X[:, 0] - X[:, 1] + 0.5 * X[:, 2] + rng.randn(n) * 0.1
     return X, y
+
+
+def _make_monotone_contract_dataset(seed=0):
+    rng = np.random.RandomState(seed)
+    X = rng.uniform(-2.0, 2.0, size=(512, 3)).astype(np.float32)
+    y = (
+        1.2 * X[:, 0]
+        + 2.5 * np.sin(2.2 * X[:, 1])
+        + 1.5 * X[:, 0] * X[:, 2]
+        + 0.35 * rng.standard_normal(X.shape[0])
+    ).astype(np.float32)
+    grid = np.column_stack(
+        [
+            np.linspace(-2.0, 2.0, 129, dtype=np.float32),
+            np.full(129, -2.0, dtype=np.float32),
+            np.full(129, -2.0, dtype=np.float32),
+        ]
+    )
+    return X, y, grid
+
+
+@pytest.mark.parametrize(
+    "estimator_class,kwargs,target_kind,error_class,match",
+    [
+        (
+            GBMRegressor,
+            {"leaf_model": "linear"},
+            "regression",
+            RuntimeError,
+            "leaf_model.*linear.*monotone_constraints",
+        ),
+        (
+            GBMClassifier,
+            {},
+            "multiclass",
+            ValueError,
+            "multiclass.*monotone_constraints",
+        ),
+    ],
+)
+def test_monotone_rejects_unsupported_model_contracts(
+    estimator_class, kwargs, target_kind, error_class, match
+):
+    X, y, _ = _make_monotone_contract_dataset()
+    if target_kind == "multiclass":
+        y = np.arange(X.shape[0]) % 3
+    estimator = estimator_class(
+        n_estimators=2,
+        max_depth=3,
+        monotone_constraints=[1, 0, 0],
+        training_policy="manual",
+        **kwargs,
+    )
+
+    with pytest.raises(error_class, match=match):
+        estimator.fit(X, y)
+
+
+@pytest.mark.parametrize(
+    "case,estimator_class,kwargs",
+    [
+        ("binary", GBMClassifier, {}),
+        (
+            "quantile",
+            GBMRegressor,
+            {"objective": "quantile", "quantile_alpha": 0.5},
+        ),
+        ("missing", GBMRegressor, {}),
+        (
+            "goss",
+            GBMRegressor,
+            {
+                "boosting_mode": "goss",
+                "goss_top_rate": 0.2,
+                "goss_other_rate": 0.1,
+            },
+        ),
+        (
+            "dart",
+            GBMRegressor,
+            {
+                "boosting_mode": "dart",
+                "dart_drop_rate": 0.2,
+                "dart_max_drop": 4,
+            },
+        ),
+        (
+            "morph",
+            GBMRegressor,
+            {"training_mode": "morph", "morph_warmup_iters": 3},
+        ),
+        (
+            "dro",
+            GBMRegressor,
+            {"leaf_solver": "dro", "dro_radius": 0.05},
+        ),
+    ],
+)
+def test_monotone_supported_scalar_modes_end_to_end(
+    case, estimator_class, kwargs
+):
+    X, y, grid = _make_monotone_contract_dataset()
+    if case == "binary":
+        y = (y >= np.median(y)).astype(np.int64)
+    elif case == "missing":
+        X[::17, 1] = np.nan
+        X[::29, 0] = np.nan
+
+    estimator = estimator_class(
+        n_estimators=12,
+        max_depth=4,
+        learning_rate=0.2,
+        monotone_constraints=[1, 0, 0],
+        training_policy="manual",
+        seed=0,
+        **kwargs,
+    )
+    estimator.fit(X, y)
+    if case == "binary":
+        predictions = np.asarray(estimator.predict_proba(grid))[:, 1]
+    else:
+        predictions = np.asarray(estimator.predict(grid))
+
+    assert np.all(np.isfinite(predictions))
+    assert np.all(np.diff(predictions) >= -1e-6)
 
 
 class MonotoneConstraintTests(unittest.TestCase):

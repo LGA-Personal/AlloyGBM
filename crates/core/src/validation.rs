@@ -87,6 +87,16 @@ pub fn validate_train_params(params: &TrainParams) -> CoreResult<()> {
             ));
         }
     }
+    if params.leaf_model == LeafModelKind::Linear
+        && params
+            .monotone_constraints
+            .iter()
+            .any(|&constraint| constraint != 0)
+    {
+        return Err(CoreError::InvalidConfig(
+            "leaf_model='linear' is not supported with active monotone_constraints".to_string(),
+        ));
+    }
 
     for &w in &params.feature_weights {
         if !w.is_finite() || w < 0.0 {
@@ -601,4 +611,35 @@ pub fn validate_model_contract_v1(contract: &ModelIoContractV1) -> CoreResult<()
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod monotone_linear_tests {
+    use super::*;
+
+    #[test]
+    fn monotone_linear_active_constraints_are_rejected() {
+        let params = TrainParams {
+            leaf_model: LeafModelKind::Linear,
+            monotone_constraints: vec![0, 1, 0],
+            ..TrainParams::default()
+        };
+
+        let error =
+            validate_train_params(&params).expect_err("active monotone linear leaves must fail");
+        let message = error.to_string();
+        assert!(message.contains("leaf_model='linear'"), "{message}");
+        assert!(message.contains("monotone_constraints"), "{message}");
+    }
+
+    #[test]
+    fn monotone_linear_all_zero_constraints_are_a_no_op() {
+        let params = TrainParams {
+            leaf_model: LeafModelKind::Linear,
+            monotone_constraints: vec![0, 0, 0],
+            ..TrainParams::default()
+        };
+
+        validate_train_params(&params).expect("all-zero constraints must not reject linear leaves");
+    }
 }
