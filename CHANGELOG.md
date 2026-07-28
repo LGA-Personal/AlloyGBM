@@ -14,7 +14,9 @@
   categorical splits on the constrained feature are rejected. DART's transient
   dropout ensemble is outside this contract. Refinement and constrained warm
   starts validate or project scalar trees without changing artifact format,
-  schema, or public parameters.
+  schema, or public parameters. Joint multi-output training continues to
+  reject monotone constraints; that existing unsupported combination is
+  unchanged.
 
 - **Preserved multiclass DART weights across artifacts and warm starts.**
   Multiclass artifacts now reuse the optional `DartTreeWeights` section in
