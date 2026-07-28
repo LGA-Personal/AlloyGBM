@@ -299,9 +299,9 @@ fn scalar_leaf_value(leaf: &LeafValue, local_node_id: u32, side: &str) -> Engine
 }
 
 #[derive(Debug, Clone, Copy)]
-struct ReconstructibleChild {
-    delta: f32,
-    absolute: f32,
+pub(crate) struct ReconstructibleChild {
+    pub(crate) delta: f32,
+    pub(crate) absolute: f32,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -331,19 +331,17 @@ fn project_monotone_node(
         left_raw,
         right_raw,
     )?;
-    let left = reconstructible_child(
+    let left = reconstruct_bounded_child(
         parent_absolute,
         left_delta,
-        left_raw,
         bounded.left_output,
         bounded.left_bounds,
         local_node_id,
         "left",
     )?;
-    let right = reconstructible_child(
+    let right = reconstruct_bounded_child(
         parent_absolute,
         right_delta,
-        right_raw,
         bounded.right_output,
         bounded.right_bounds,
         local_node_id,
@@ -389,20 +387,19 @@ fn project_monotone_node(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn reconstructible_child(
+pub(crate) fn reconstruct_bounded_child(
     parent_absolute: f32,
-    original_delta: f32,
-    original_absolute: f32,
+    preferred_delta: f32,
     bounded_output: f32,
     bounds: MonotoneBounds,
     local_node_id: u32,
     side: &str,
 ) -> EngineResult<ReconstructibleChild> {
-    if bounded_output.to_bits() == original_absolute.to_bits() {
+    let preferred_absolute = parent_absolute + preferred_delta;
+    if bounded_output.to_bits() == preferred_absolute.to_bits() {
         return Ok(ReconstructibleChild {
-            delta: original_delta,
-            absolute: original_absolute,
+            delta: preferred_delta,
+            absolute: preferred_absolute,
         });
     }
 

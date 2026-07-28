@@ -25,7 +25,7 @@ use crate::trainer::interaction::{
 };
 use crate::trainer::monotone::{
     BoundedChildren, MonotoneBounds, has_active_monotone_constraints,
-    monotone_constraint_for_feature,
+    monotone_constraint_for_feature, reconstruct_bounded_child,
 };
 use crate::trainer::validate::{factor_split_context_for_node, validate_training_alignment};
 use crate::traits::{BackendOps, HistogramExecution};
@@ -48,9 +48,6 @@ struct ActiveNodeEntry {
 }
 
 const MIN_NODE_PARALLEL_WORK: usize = 4_096;
-const MIN_FINITE_F32_KEY: u32 = 0x0080_0000;
-const MAX_FINITE_F32_KEY: u32 = 0xff7f_ffff;
-const F32_SIGN_MASK: u32 = 0x8000_0000;
 
 struct LevelNodeProposal {
     local_node_id: u32,
@@ -75,100 +72,6 @@ struct LevelNodeChildren {
     path_features: Vec<u32>,
     left_bounds: MonotoneBounds,
     right_bounds: MonotoneBounds,
-}
-
-fn reconstruct_bounded_child(
-    parent_absolute: f32,
-    bounded_output: f32,
-    bounds: MonotoneBounds,
-) -> EngineResult<(f32, f32)> {
-    let direct_delta = bounded_output - parent_absolute;
-    let direct_absolute = parent_absolute + direct_delta;
-    if direct_delta.is_finite()
-        && direct_absolute.is_finite()
-        && direct_absolute >= bounds.lower
-        && direct_absolute <= bounds.upper
-    {
-        return Ok((direct_delta, direct_absolute));
-    }
-
-    // Parent-relative f32 storage can round back outside an exact child
-    // boundary. Select the nearest finite delta whose actual sum stays inside.
-    let first_key = first_delta_key_reconstructing_at_least(parent_absolute, bounds.lower);
-    let last_key = last_delta_key_reconstructing_at_most(parent_absolute, bounds.upper);
-    if first_key > last_key {
-        return Err(EngineError::InvalidConfig(format!(
-            "no finite parent-relative leaf delta reconstructs inside [{}, {}]",
-            bounds.lower, bounds.upper
-        )));
-    }
-
-    let ideal_key = if direct_delta == f32::NEG_INFINITY {
-        MIN_FINITE_F32_KEY
-    } else if direct_delta == f32::INFINITY {
-        MAX_FINITE_F32_KEY
-    } else {
-        ordered_f32_key(direct_delta)
-    };
-    let delta = f32_from_ordered_key(ideal_key.clamp(first_key, last_key));
-    let absolute = parent_absolute + delta;
-    if !delta.is_finite()
-        || !absolute.is_finite()
-        || absolute < bounds.lower
-        || absolute > bounds.upper
-    {
-        return Err(EngineError::InvalidConfig(format!(
-            "parent-relative leaf delta reconstructed outside [{}, {}]",
-            bounds.lower, bounds.upper
-        )));
-    }
-    Ok((delta, absolute))
-}
-
-fn first_delta_key_reconstructing_at_least(parent_absolute: f32, lower: f32) -> u32 {
-    let mut low = MIN_FINITE_F32_KEY;
-    let mut high = MAX_FINITE_F32_KEY;
-    while low < high {
-        let midpoint = low + (high - low) / 2;
-        if parent_absolute + f32_from_ordered_key(midpoint) >= lower {
-            high = midpoint;
-        } else {
-            low = midpoint + 1;
-        }
-    }
-    low
-}
-
-fn last_delta_key_reconstructing_at_most(parent_absolute: f32, upper: f32) -> u32 {
-    let mut low = MIN_FINITE_F32_KEY;
-    let mut high = MAX_FINITE_F32_KEY;
-    while low < high {
-        let midpoint = low + (high - low).div_ceil(2);
-        if parent_absolute + f32_from_ordered_key(midpoint) <= upper {
-            low = midpoint;
-        } else {
-            high = midpoint - 1;
-        }
-    }
-    low
-}
-
-fn ordered_f32_key(value: f32) -> u32 {
-    let bits = value.to_bits();
-    if bits & F32_SIGN_MASK == 0 {
-        bits ^ F32_SIGN_MASK
-    } else {
-        !bits
-    }
-}
-
-fn f32_from_ordered_key(key: u32) -> f32 {
-    let bits = if key & F32_SIGN_MASK == 0 {
-        !key
-    } else {
-        key ^ F32_SIGN_MASK
-    };
-    f32::from_bits(bits)
 }
 
 struct LevelNodeOutcome {
@@ -555,15 +458,27 @@ fn propose_level_node<B: BackendOps>(
             raw_left_leaf_absolute,
             raw_right_leaf_absolute,
         )?;
-        let (left_leaf_value, left_leaf_absolute) =
-            reconstruct_bounded_child(parent_leaf_value, left_output, left_bounds)?;
-        let (right_leaf_value, right_leaf_absolute) =
-            reconstruct_bounded_child(parent_leaf_value, right_output, right_bounds)?;
+        let left = reconstruct_bounded_child(
+            parent_leaf_value,
+            left_output - parent_leaf_value,
+            left_output,
+            left_bounds,
+            local_node_id,
+            "left",
+        )?;
+        let right = reconstruct_bounded_child(
+            parent_leaf_value,
+            right_output - parent_leaf_value,
+            right_output,
+            right_bounds,
+            local_node_id,
+            "right",
+        )?;
         (
-            left_leaf_value,
-            right_leaf_value,
-            left_leaf_absolute,
-            right_leaf_absolute,
+            left.delta,
+            right.delta,
+            left.absolute,
+            right.absolute,
             left_bounds,
             right_bounds,
         )
@@ -1259,15 +1174,27 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                 raw_left_leaf_absolute,
                 raw_right_leaf_absolute,
             )?;
-            let (left_leaf_value, left_leaf_absolute) =
-                reconstruct_bounded_child(pending.parent_leaf_value, left_output, left_bounds)?;
-            let (right_leaf_value, right_leaf_absolute) =
-                reconstruct_bounded_child(pending.parent_leaf_value, right_output, right_bounds)?;
+            let left = reconstruct_bounded_child(
+                pending.parent_leaf_value,
+                left_output - pending.parent_leaf_value,
+                left_output,
+                left_bounds,
+                local_node_id,
+                "left",
+            )?;
+            let right = reconstruct_bounded_child(
+                pending.parent_leaf_value,
+                right_output - pending.parent_leaf_value,
+                right_output,
+                right_bounds,
+                local_node_id,
+                "right",
+            )?;
             (
-                left_leaf_value,
-                right_leaf_value,
-                left_leaf_absolute,
-                right_leaf_absolute,
+                left.delta,
+                right.delta,
+                left.absolute,
+                right.absolute,
                 left_bounds,
                 right_bounds,
             )

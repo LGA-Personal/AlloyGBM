@@ -453,14 +453,53 @@ fn assert_monotone_bound_propagation(tree_growth: TreeGrowth, direction: i8) {
     }
 }
 
-fn assert_scalar_stumps_bit_identical(left: &TrainedModel, right: &TrainedModel) {
+fn assert_node_stats_bit_identical(left: &NodeStats, right: &NodeStats) {
+    assert_eq!(left.grad_sum.to_bits(), right.grad_sum.to_bits());
+    assert_eq!(left.hess_sum.to_bits(), right.hess_sum.to_bits());
+    assert_eq!(left.grad_sq_sum.to_bits(), right.grad_sq_sum.to_bits());
+    assert_eq!(left.row_count, right.row_count);
+}
+
+fn assert_models_artifact_bit_identical(left: &TrainedModel, right: &TrainedModel) {
     assert_eq!(
         left.baseline_prediction.to_bits(),
         right.baseline_prediction.to_bits()
     );
     assert_eq!(left.stumps.len(), right.stumps.len());
     for (left_stump, right_stump) in left.stumps.iter().zip(&right.stumps) {
-        assert_eq!(left_stump.split, right_stump.split);
+        assert_eq!(left_stump.split.node_id, right_stump.split.node_id);
+        assert_eq!(
+            left_stump.split.feature_index,
+            right_stump.split.feature_index
+        );
+        assert_eq!(
+            left_stump.split.threshold_bin,
+            right_stump.split.threshold_bin
+        );
+        assert_eq!(
+            left_stump.split.gain.to_bits(),
+            right_stump.split.gain.to_bits()
+        );
+        assert_eq!(
+            left_stump.split.default_left,
+            right_stump.split.default_left
+        );
+        assert_eq!(
+            left_stump.split.is_categorical,
+            right_stump.split.is_categorical
+        );
+        assert_eq!(
+            left_stump.split.categorical_bitset,
+            right_stump.split.categorical_bitset
+        );
+        assert_node_stats_bit_identical(
+            &left_stump.split.left_stats,
+            &right_stump.split.left_stats,
+        );
+        assert_node_stats_bit_identical(
+            &left_stump.split.right_stats,
+            &right_stump.split.right_stats,
+        );
         assert_eq!(
             left_stump.tree_weight.to_bits(),
             right_stump.tree_weight.to_bits()
@@ -482,6 +521,13 @@ fn assert_scalar_stumps_bit_identical(left: &TrainedModel, right: &TrainedModel)
         assert_eq!(left_left.to_bits(), right_left.to_bits());
         assert_eq!(left_right.to_bits(), right_right.to_bits());
     }
+    assert_eq!(
+        left.to_artifact_bytes()
+            .expect("unconstrained parity model serializes"),
+        right
+            .to_artifact_bytes()
+            .expect("all-zero parity model serializes")
+    );
 }
 
 fn trainer() -> Trainer {
@@ -1330,7 +1376,7 @@ fn monotone_bound_propagation_unconstrained_parity() {
         };
         let unconstrained = fit(Vec::new());
         let all_zero = fit(vec![0, 0, 0]);
-        assert_scalar_stumps_bit_identical(&unconstrained, &all_zero);
+        assert_models_artifact_bit_identical(&unconstrained, &all_zero);
     }
 }
 
