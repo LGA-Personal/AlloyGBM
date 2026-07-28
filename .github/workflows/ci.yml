@@ -119,6 +119,14 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
         run: python benchmarks/auto_policy_benchmark.py --quick --gate
 
+      - name: Test monotone benchmark contract
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python -m pytest benchmarks/tests/test_monotone_constraints_benchmark.py -q
+
+      - name: Run compact monotone acceptance gate
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python benchmarks/monotone_constraints_benchmark.py --quick --gate
+
       - name: Import smoke
         run: python -c "import alloygbm; print(alloygbm.native_runtime_info())"
 
