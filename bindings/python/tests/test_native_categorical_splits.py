@@ -144,6 +144,29 @@ class TestNativeCategoricalSplits(unittest.TestCase):
         predictions = np.asarray(model.predict(X))
         self.assertTrue(np.all(np.isfinite(predictions)))
 
+    def test_monotone_init_model_rejects_retained_native_categorical_split(self) -> None:
+        X, y, cats = _make_cat_regression_data()
+        prior = GBMRegressor(
+            n_estimators=5,
+            max_depth=3,
+            max_cat_threshold=64,
+            categorical_feature_indices=[0],
+            training_policy="manual",
+            seed=42,
+        ).fit(X, y, categorical_feature_values_list=[cats])
+        constrained = GBMRegressor(
+            n_estimators=2,
+            max_depth=3,
+            monotone_constraints=[1, 0],
+            training_policy="manual",
+            seed=42,
+        )
+
+        with pytest.raises(
+            ValueError, match="native categorical.*monotone_constraints"
+        ):
+            constrained.fit(X, y, init_model=prior)
+
     # 2. Native vs target encoding comparison
     def test_native_cat_regression_vs_target_encoding(self) -> None:
         """Native splits should be at least as good as target encoding."""

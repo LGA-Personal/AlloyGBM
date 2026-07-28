@@ -1,5 +1,6 @@
 """Tests for warm-starting / incremental training."""
 
+import struct
 import tempfile
 import unittest
 
@@ -7,6 +8,29 @@ import numpy as np
 import pytest
 
 from alloygbm import GBMRegressor
+
+
+def _tree_records(artifact_bytes: bytes) -> list[bytes]:
+    section_count = struct.unpack_from("<I", artifact_bytes, 8)[0]
+    for section_index in range(section_count):
+        descriptor_offset = 16 + section_index * 20
+        kind, payload_offset, payload_length = struct.unpack_from(
+            "<IQQ", artifact_bytes, descriptor_offset
+        )
+        if kind != 1:
+            continue
+        payload = artifact_bytes[payload_offset : payload_offset + payload_length]
+        stump_count = struct.unpack_from("<I", payload, 8)[0]
+        return [
+            payload[16 + stump_index * 32 : 16 + (stump_index + 1) * 32]
+            for stump_index in range(stump_count)
+        ]
+    raise AssertionError("artifact is missing its Trees section")
+
+
+def _logical_tree_count(records: list[bytes]) -> int:
+    tree_ids = {struct.unpack_from("<I", record)[0] // (1 << 20) for record in records}
+    return len(tree_ids)
 
 
 def _make_dataset(n=200, seed=42):
@@ -285,9 +309,21 @@ class TestWarmStartTraining(unittest.TestCase):
             seed=0,
             warm_start=True,
         ).fit(X, y)
+        prior_rounds = model.rounds_completed_
+        prior_records = _tree_records(model.artifact_bytes)
         model.n_estimators = 5
         model.fit(X, y)
+        continued_records = _tree_records(model.artifact_bytes)
 
+        self.assertEqual(prior_rounds, 5)
+        self.assertEqual(model.rounds_completed_, 5)
+        self.assertEqual(_logical_tree_count(prior_records), prior_rounds)
+        self.assertEqual(
+            _logical_tree_count(continued_records),
+            prior_rounds + model.rounds_completed_,
+        )
+        self.assertGreater(len(continued_records), len(prior_records))
+        self.assertEqual(continued_records[: len(prior_records)], prior_records)
         _assert_nondecreasing_predictions(model, grid)
 
     def test_monotone_save_load_is_exact_before_continuation(self):
