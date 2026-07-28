@@ -2161,6 +2161,86 @@ mod tests {
         Predictor::from_artifact_bytes(&artifact).expect("predictor loads")
     }
 
+    #[allow(clippy::excessive_precision)]
+    fn monotone_rounding_boundary_model() -> TrainedModel {
+        TrainedModel {
+            baseline_prediction: 298353.90625,
+            feature_count: 1,
+            stumps: vec![
+                TrainedStump {
+                    split: scalar_split(0, 0, 0),
+                    left_leaf_value: LeafValue::Scalar(-833156.0625),
+                    right_leaf_value: LeafValue::Scalar(59336.9765625),
+                    tree_weight: 1.0,
+                    multi_output_leaf_values: None,
+                },
+                TrainedStump {
+                    split: scalar_split(1, 0, 0),
+                    left_leaf_value: LeafValue::Scalar(446246.53125),
+                    right_leaf_value: LeafValue::Scalar(446246.53125),
+                    tree_weight: 1.0,
+                    multi_output_leaf_values: None,
+                },
+                TrainedStump {
+                    split: scalar_split(2, 0, 0),
+                    left_leaf_value: LeafValue::Scalar(-446246.5),
+                    right_leaf_value: LeafValue::Scalar(-446246.5),
+                    tree_weight: 1.0,
+                    multi_output_leaf_values: None,
+                },
+            ],
+            categorical_state: None,
+            node_debug_stats: None,
+            objective: "squared_error".to_string(),
+            native_categorical_feature_indices: Vec::new(),
+            morph_metadata: None,
+            dro_metadata: None,
+            feature_baseline: None,
+            neutralization_metadata: None,
+        }
+    }
+
+    #[test]
+    #[allow(clippy::excessive_precision)]
+    fn monotone_engine_prediction_matches_compact_tree_local_f32_arithmetic() {
+        let model = monotone_rounding_boundary_model();
+        let low_tree_contribution = -833156.0625_f32 + 446246.53125_f32;
+        let high_tree_contribution = 59336.9765625_f32 + -446246.5_f32;
+        assert_eq!(
+            low_tree_contribution.to_bits(),
+            (-386909.53125_f32).to_bits()
+        );
+        assert_eq!(
+            high_tree_contribution.to_bits(),
+            (-386909.53125_f32).to_bits()
+        );
+
+        let low_row = [0.0_f32];
+        let high_row = [1.0_f32];
+        let engine_low = model
+            .predict_row(&low_row)
+            .expect("engine predicts low row");
+        let engine_high = model
+            .predict_row(&high_row)
+            .expect("engine predicts high row");
+        let artifact = model.to_artifact_bytes().expect("artifact serializes");
+        let predictor = Predictor::from_artifact_bytes(&artifact).expect("predictor loads");
+        let artifact_low = predictor
+            .predict_row(&low_row)
+            .expect("artifact predicts low row");
+        let artifact_high = predictor
+            .predict_row(&high_row)
+            .expect("artifact predicts high row");
+
+        assert!(
+            engine_low <= engine_high,
+            "increasing boundary inverted: {engine_low} > {engine_high}"
+        );
+        assert_eq!(engine_low.to_bits(), artifact_low.to_bits());
+        assert_eq!(engine_high.to_bits(), artifact_high.to_bits());
+        assert_eq!(artifact_low.to_bits(), artifact_high.to_bits());
+    }
+
     #[test]
     fn predictor_collapses_same_tree_scalar_deltas() {
         let predictor = loaded_same_tree_depth_predictor(1.0);

@@ -18,10 +18,11 @@ subtrees.
 This change must:
 
 - support level-wise and leaf-wise growth;
-- compose with standard, GOSS, DART, MorphBoost, DRO, missing-value routing,
+- compose with standard and GOSS boosting, MorphBoost, DRO, missing-value routing,
   interaction constraints, row sampling, and column sampling;
 - preserve the exact no-constraint path;
-- leave model artifacts and prediction traversal unchanged; and
+- leave model artifacts unchanged; align public Rust prediction arithmetic
+  with compact artifact prediction; and
 - reject combinations for which AlloyGBM cannot make the same global
   guarantee.
 
@@ -158,6 +159,11 @@ tradeoff and will be included in quality evidence.
 The strict contract applies to scalar tree outputs. The following
 combinations are rejected with explicit configuration errors:
 
+- `boosting_mode="dart"` with any nonzero monotone constraint. DART predictor
+  weights can change exact f32 ordering after tree projection, so neither
+  transient dropout predictions nor final weighted predictions carry the
+  monotonicity guarantee. Empty or all-zero constraints remain valid and keep
+  ordinary DART behavior unchanged.
 - `leaf_model="linear"` with any nonzero monotone constraint. A bounded
   intercept does not constrain the leaf's linear terms or cross-leaf output
   ranges.
@@ -168,9 +174,9 @@ combinations are rejected with explicit configuration errors:
   categorical splitting. An arbitrary category subset has no lower/upper
   order compatible with numeric monotonicity.
 
-Binary classification remains supported because sigmoid preserves logit
-ordering. Regression, ranking, quantile, GLM, and scalar custom-objective
-outputs remain supported.
+Standard and GOSS scalar ensembles are covered. Binary classification remains
+supported because sigmoid preserves logit ordering. Regression, ranking,
+quantile, GLM, and scalar custom-objective outputs remain supported.
 
 Target- or frequency-encoded categorical columns remain eligible when they
 are trained as ordered numeric features rather than active native
@@ -182,8 +188,10 @@ unchanged.
 ## Warm Start and Persistence
 
 No artifact section or metadata field is added. Final bounded scalar deltas
-are stored in the existing tree representation, and engine and artifact
-predictors evaluate them normally.
+are stored in the existing tree representation. Both public Rust and compact
+artifact prediction first evaluate a selected path into one zero-based local
+f32 contribution per tree, then add that completed contribution once to the
+model baseline. Artifact bytes and compact encoding remain unchanged.
 
 Warm-starting validates every retained scalar tree against the requested
 constraint intervals before adding rounds. A model produced by this
@@ -220,7 +228,9 @@ training adds this validation.
   correlation is not an adequate assertion.
 - Binary probabilities preserve the requested direction.
 - Missing training values do not weaken finite-grid monotonicity.
-- Representative GOSS, DART, MorphBoost, and DRO fits remain monotone.
+- Representative GOSS, MorphBoost, and DRO fits remain monotone.
+- Active DART constraints fail with an actionable configuration error, while
+  all-zero constraints retain ordinary DART behavior.
 - PL and multiclass combinations fail with stable actionable messages.
 - Native-categorical overlap fails while an unconstrained categorical feature
   remains supported.

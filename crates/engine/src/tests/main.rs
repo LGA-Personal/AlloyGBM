@@ -1612,16 +1612,6 @@ fn monotone_contract_experimental_refinement_handles_morph_phantom_round() {
 }
 
 #[test]
-fn monotone_contract_experimental_refinement_handles_dart_morph_phantom_round() {
-    assert_monotone_experimental_refinement_handles_morph_phantom(BoostingMode::Dart {
-        drop_rate: 0.99,
-        max_drop: 2,
-        normalize_type: alloygbm_core::DartNormalize::Tree,
-        sample_type: alloygbm_core::DartSampleType::Uniform,
-    });
-}
-
-#[test]
 fn monotone_contract_projection_counts_are_dense_without_training_state() {
     let stumps = vec![
         multiclass_dart_bookkeeping_stump(1),
@@ -1712,38 +1702,6 @@ fn fit_morph_projection_bookkeeping_control(
                 controls,
             )
             .expect("MorphBoost fit")
-    }
-}
-
-#[test]
-fn monotone_contract_dart_projection_keeps_phantom_normalization_unchanged() {
-    if !experiment_leaf_refinement_enabled() {
-        return;
-    }
-
-    let boosting_mode = BoostingMode::Dart {
-        drop_rate: 0.99,
-        max_drop: 2,
-        normalize_type: alloygbm_core::DartNormalize::Tree,
-        sample_type: alloygbm_core::DartSampleType::Uniform,
-    };
-    let inactive = fit_morph_projection_bookkeeping_control(boosting_mode, vec![0, 0], false);
-    let active = fit_morph_projection_bookkeeping_control(boosting_mode, vec![0, 1], false);
-    let tree_ids = active
-        .model
-        .stumps
-        .iter()
-        .map(|stump| stump.split.node_id / TREE_NODE_STRIDE)
-        .collect::<Vec<_>>();
-
-    assert!(
-        tree_ids.iter().all(|&tree_id| tree_id >= 1),
-        "round 0 should remain a phantom: {tree_ids:?}"
-    );
-    assert!(tree_ids.contains(&1), "round 1 should be material");
-    assert_eq!(active.model.stumps.len(), inactive.model.stumps.len());
-    for (active_stump, inactive_stump) in active.model.stumps.iter().zip(&inactive.model.stumps) {
-        assert_stump_bit_identical(inactive_stump, active_stump);
     }
 }
 

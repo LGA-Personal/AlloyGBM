@@ -55,6 +55,17 @@ def _make_monotone_contract_dataset(seed=0):
             ValueError,
             "multiclass.*monotone_constraints",
         ),
+        (
+            GBMRegressor,
+            {
+                "boosting_mode": "dart",
+                "dart_drop_rate": 0.2,
+                "dart_max_drop": 4,
+            },
+            "regression",
+            RuntimeError,
+            "boosting_mode.*dart.*monotone_constraints",
+        ),
     ],
 )
 def test_monotone_rejects_unsupported_model_contracts(
@@ -92,15 +103,6 @@ def test_monotone_rejects_unsupported_model_contracts(
                 "boosting_mode": "goss",
                 "goss_top_rate": 0.2,
                 "goss_other_rate": 0.1,
-            },
-        ),
-        (
-            "dart",
-            GBMRegressor,
-            {
-                "boosting_mode": "dart",
-                "dart_drop_rate": 0.2,
-                "dart_max_drop": 4,
             },
         ),
         (
@@ -142,6 +144,24 @@ def test_monotone_supported_scalar_modes_end_to_end(
 
     assert np.all(np.isfinite(predictions))
     assert np.all(np.diff(predictions) >= -1e-6)
+
+
+def test_monotone_all_zero_constraints_remain_supported_with_dart() -> None:
+    X, y, grid = _make_monotone_contract_dataset()
+    estimator = GBMRegressor(
+        n_estimators=4,
+        max_depth=3,
+        monotone_constraints=[0, 0, 0],
+        boosting_mode="dart",
+        dart_drop_rate=0.2,
+        dart_max_drop=4,
+        training_policy="manual",
+        seed=0,
+    )
+
+    estimator.fit(X, y)
+
+    assert np.all(np.isfinite(estimator.predict(grid)))
 
 
 class MonotoneConstraintTests(unittest.TestCase):

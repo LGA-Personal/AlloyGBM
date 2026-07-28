@@ -103,10 +103,12 @@ The current codebase includes several design decisions:
 For a constrained numeric feature, the final scalar prediction is ordered only
 over finite numeric values. Missing values follow learned branches and are not
 ranked against numeric values. Binary positive-class probabilities inherit the
-order through sigmoid. Linear leaves, multiclass softmax, and native
-categorical splits on the constrained feature are rejected because they cannot
-provide that scalar numeric-order contract. DART's transient dropout ensemble
-is outside this contract.
+order through sigmoid. Standard and GOSS scalar ensembles are covered. Active
+constraints reject DART, linear leaves, multiclass softmax, and native
+categorical splits on the constrained feature. DART predictor weights can
+change exact f32 ordering after tree projection, so neither transient nor
+final weighted DART predictions are covered. Empty or all-zero constraints
+retain ordinary DART behavior.
 
 .. figure:: _static/tree_node_structure.png
    :alt: AlloyGBM split node structure showing threshold bin, gain, child nodes, and optional node statistics.

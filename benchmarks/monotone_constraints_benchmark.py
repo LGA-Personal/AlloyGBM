@@ -7,6 +7,9 @@ import argparse
 from dataclasses import asdict, dataclass
 from itertools import product
 import platform
+from pathlib import Path
+import re
+import subprocess
 import sys
 import time
 from typing import Callable, Literal, Sequence
@@ -352,8 +355,54 @@ def _failed_record(scenario: Scenario, *, rounds: int, error: Exception) -> dict
     }
 
 
-def run_benchmark(*, quick: bool) -> dict[str, object]:
+def _valid_source_commit(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value) is not None
+
+
+def _resolve_source_commit(
+    *,
+    command_runner: Callable[..., object] = subprocess.run,
+) -> str:
+    try:
+        result = command_runner(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as error:
+        raise RuntimeError(
+            f"failed to resolve benchmark source commit: {error}"
+        ) from error
+
+    if result.returncode != 0:
+        detail = str(result.stderr).strip() or f"git exited with {result.returncode}"
+        raise RuntimeError(
+            f"failed to resolve benchmark source commit with git rev-parse HEAD: {detail}"
+        )
+    commit = str(result.stdout).strip()
+    if not _valid_source_commit(commit):
+        raise RuntimeError(
+            "failed to resolve benchmark source commit: "
+            f"git rev-parse HEAD returned {commit!r}"
+        )
+    return commit
+
+
+def run_benchmark(
+    *,
+    quick: bool,
+    source_commit: str | None = None,
+) -> dict[str, object]:
     """Fit deterministic constrained/unconstrained pairs and collect evidence."""
+    resolved_source_commit = (
+        _resolve_source_commit() if source_commit is None else source_commit
+    )
+    if not _valid_source_commit(resolved_source_commit):
+        raise RuntimeError(
+            "benchmark source commit must be a full 40-character lowercase hexadecimal commit"
+        )
     scenarios = quick_scenarios() if quick else full_scenarios()
     rounds = QUICK_ROUNDS if quick else FULL_ROUNDS
     contexts = QUICK_CONTEXTS if quick else FULL_CONTEXTS
@@ -374,6 +423,7 @@ def run_benchmark(*, quick: bool) -> dict[str, object]:
             "python": platform.python_version(),
             "platform": platform.platform(),
             "numpy": np.__version__,
+            "source_commit": resolved_source_commit,
         },
     }
 
@@ -382,13 +432,32 @@ def _finite_number(value: object) -> bool:
     return isinstance(value, (int, float, np.number)) and not isinstance(value, bool) and bool(np.isfinite(value))
 
 
-def _canonical_contract(report: dict[str, object]) -> tuple[tuple[str, ...], int] | None:
+def _canonical_contract(
+    report: dict[str, object],
+) -> tuple[tuple[Scenario, ...], int, int] | None:
     quick = report.get("quick")
     if not isinstance(quick, bool):
         return None
     scenarios = quick_scenarios() if quick else full_scenarios()
     rounds = QUICK_ROUNDS if quick else FULL_ROUNDS
-    return tuple(scenario.name for scenario in scenarios), rounds
+    contexts = QUICK_CONTEXTS if quick else FULL_CONTEXTS
+    return scenarios, rounds, contexts
+
+
+def _exact_contract_value(actual: object, expected: object) -> bool:
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        return actual.keys() == expected.keys() and all(
+            _exact_contract_value(actual[key], value)
+            for key, value in expected.items()
+        )
+    if isinstance(expected, list):
+        return len(actual) == len(expected) and all(
+            _exact_contract_value(actual_value, expected_value)
+            for actual_value, expected_value in zip(actual, expected, strict=True)
+        )
+    return bool(actual == expected)
 
 
 def _identity_failures(
@@ -416,9 +485,7 @@ def _identity_failures(
             identity = value
         values.append(identity)
 
-    value_set = set(values)
-    expected_set = set(expected)
-    if len(value_set) != len(values) or value_set != expected_set:
+    if values != list(expected):
         return [f"{label} do not exactly match canonical identities"], records_by_identity
     return [], records_by_identity
 
@@ -428,12 +495,16 @@ def evaluate_gate(report: dict[str, object]) -> list[str]:
     canonical = _canonical_contract(report)
     if canonical is None:
         return ["report quick must be a boolean"]
-    expected, expected_rounds = canonical
+    expected_scenarios, expected_rounds, expected_contexts = canonical
+    expected = tuple(scenario.name for scenario in expected_scenarios)
     failures, _ = _identity_failures(
         label="scenario declarations",
         declared=report.get("scenarios"),
         expected=expected,
     )
+    expected_specs = [asdict(scenario) for scenario in expected_scenarios]
+    if not _exact_contract_value(report.get("scenario_specs"), expected_specs):
+        failures.append("scenario_specs do not exactly match canonical declarations")
     record_failures, by_scenario = _identity_failures(
         label="record identities",
         declared=report.get("records"),
@@ -447,8 +518,24 @@ def evaluate_gate(report: dict[str, object]) -> list[str]:
         or report_rounds != expected_rounds
     ):
         failures.append(f"report rounds must equal canonical value {expected_rounds}")
+    report_contexts = report.get("contexts")
+    if (
+        not isinstance(report_contexts, int)
+        or isinstance(report_contexts, bool)
+        or report_contexts != expected_contexts
+    ):
+        failures.append(f"report contexts must equal canonical value {expected_contexts}")
+    environment = report.get("environment")
+    source_commit = (
+        environment.get("source_commit") if isinstance(environment, dict) else None
+    )
+    if not _valid_source_commit(source_commit):
+        failures.append(
+            "environment source commit must be a full 40-character lowercase hexadecimal commit"
+        )
 
-    for scenario in expected:
+    for scenario_spec in expected_scenarios:
+        scenario = scenario_spec.name
         if scenario not in by_scenario:
             failures.append(f"missing record for scenario {scenario}")
             continue
@@ -457,6 +544,12 @@ def evaluate_gate(report: dict[str, object]) -> list[str]:
             continue
         record = by_scenario[scenario][0]
         context = f"scenario {scenario}"
+        for field in ("objective", "direction", "tree_growth", "seed"):
+            expected_value = getattr(scenario_spec, field)
+            if not _exact_contract_value(record.get(field), expected_value):
+                failures.append(
+                    f"{context}: {field} must equal canonical value {expected_value!r}"
+                )
         if record.get("error"):
             failures.append(f"{context}: fit error: {record['error']}")
         for field in (
@@ -490,8 +583,15 @@ def evaluate_gate(report: dict[str, object]) -> list[str]:
         if record.get("violation_count") != 0:
             failures.append(f"{context}: monotone violations detected")
         checked_pairs = record.get("checked_grid_pairs")
-        if not isinstance(checked_pairs, int) or checked_pairs < GRID_VALUES - 1:
-            failures.append(f"{context}: insufficient checked grid pairs")
+        expected_checked_pairs = expected_contexts * (GRID_VALUES - 1)
+        if (
+            not isinstance(checked_pairs, int)
+            or isinstance(checked_pairs, bool)
+            or checked_pairs != expected_checked_pairs
+        ):
+            failures.append(
+                f"{context}: checked grid pairs must equal {expected_checked_pairs}"
+            )
         worst_margin = record.get("worst_signed_monotone_margin")
         if _finite_number(worst_margin) and float(worst_margin) < -MONOTONE_TOLERANCE:
             failures.append(f"{context}: worst margin exceeds tolerance")
@@ -500,11 +600,11 @@ def evaluate_gate(report: dict[str, object]) -> list[str]:
         constant_loss = record.get("constant_loss")
         if not all(_finite_number(value) for value in (constrained_loss, unconstrained_loss, constant_loss)):
             continue
-        if record.get("objective") == "regression":
+        if scenario_spec.objective == "regression":
             ratio = float(constrained_loss) / max(float(unconstrained_loss), np.finfo(float).tiny)
             if ratio > 1.25:
                 failures.append(f"{context}: regression loss ratio {ratio:.6f} exceeds 1.25")
-        elif record.get("objective") == "binary":
+        elif scenario_spec.objective == "binary":
             degradation = float(constrained_loss) - float(unconstrained_loss)
             if degradation > 0.08:
                 failures.append(f"{context}: binary error degradation {degradation:.6f} exceeds 0.08")
@@ -524,8 +624,10 @@ def render_markdown(report: dict[str, object]) -> str:
         "## Environment",
         "",
     ]
-    for key, value in report.get("environment", {}).items():
-        lines.append(f"- {key}: {value}")
+    environment = report.get("environment", {})
+    if isinstance(environment, dict):
+        for key, value in environment.items():
+            lines.append(f"- {key.replace('_', ' ')}: {value}")
     lines.extend(
         [
             "",
@@ -575,8 +677,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     report = run_benchmark(quick=args.quick)
     rendered = render_markdown(report)
     if args.output:
-        from pathlib import Path
-
         Path(args.output).write_text(rendered, encoding="utf-8")
     else:
         print(rendered, end="")

@@ -161,11 +161,13 @@ call `fit(..., eval_set=(X_valid, y_valid))`.
   The tree builders propagate finite lower/upper output bounds from the root.
   Basic split scoring still uses the unbounded gain; after a split is accepted,
   its scalar child outputs are projected into the inherited intervals. Both
-  level-wise and leaf-wise growth use this rule. Active constraints reject
+  level-wise and leaf-wise growth use this rule. Standard and GOSS scalar
+  ensembles are covered. Active constraints reject `boosting_mode="dart"`,
   `leaf_model="linear"`, multiclass softmax, and native categorical splits on
-  the same constrained feature, because none can provide the same numeric
-  scalar-order guarantee. DART's transient dropout ensemble is outside this
-  contract; this statement does not claim it is monotone.
+  the same constrained feature. DART predictor weights can change exact f32
+  ordering after tree projection, so neither transient dropout predictions nor
+  final weighted DART predictions are covered or claimed monotone. Empty or
+  all-zero constraints keep ordinary DART behavior unchanged.
 - `feature_weights: list[float] | dict[int, float] | None = None`
   - Per-feature importance weights that influence split selection. Higher
   weights make a feature more likely to be chosen as a split candidate.
