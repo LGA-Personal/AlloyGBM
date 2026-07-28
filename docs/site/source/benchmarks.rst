@@ -43,6 +43,10 @@ harnesses are also provided:
   descriptive; the 1.50x RMSE gate applies only to explicit default-like
   profiles with ``drop_rate <= 0.10``, while the stress profile remains
   reported and contract-checked.
+- ``benchmarks/monotone_constraints_benchmark.py`` -- deterministic scalar
+  monotone-constraint acceptance evidence for regression and binary models.
+  The report is ``docs/benchmarks/monotone_constraints_v1.md``; finite numeric
+  sweeps and held-out quality are gated, while timing is descriptive.
 
 The suite spans three task types with the following scenarios:
 
@@ -129,6 +133,15 @@ Review-evidence capture:
 
    python3 benchmarks/review_guardrails.py --gate \
      --output docs/benchmarks/review_guardrails_v1.md
+
+Scalar monotone-constraint acceptance:
+
+.. code-block:: console
+
+   python3 benchmarks/monotone_constraints_benchmark.py --quick --gate
+   python3 benchmarks/monotone_constraints_benchmark.py \
+     --gate \
+     --output docs/benchmarks/monotone_constraints_v1.md
 
 Classification only:
 

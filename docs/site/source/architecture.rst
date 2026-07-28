@@ -94,9 +94,19 @@ The current codebase includes several design decisions:
 - dataset-aware training policy in ``auto`` mode
 - NaN-aware histogram building and split finding
 - adaptive u8/u16 bin storage (u8 for <=256 bins, u16 for larger)
-- monotone constraint enforcement during split finding
+- finite lower/upper bound propagation for scalar monotone constraints during
+  level-wise and leaf-wise tree growth; basic split gain remains unbounded and
+  accepted scalar outputs are projected into inherited intervals
 - feature weight integration into split candidate selection
 - optional node statistics for later introspection
+
+For a constrained numeric feature, the final scalar prediction is ordered only
+over finite numeric values. Missing values follow learned branches and are not
+ranked against numeric values. Binary positive-class probabilities inherit the
+order through sigmoid. Linear leaves, multiclass softmax, and native
+categorical splits on the constrained feature are rejected because they cannot
+provide that scalar numeric-order contract. DART's transient dropout ensemble
+is outside this contract.
 
 .. figure:: _static/tree_node_structure.png
    :alt: AlloyGBM split node structure showing threshold bin, gain, child nodes, and optional node statistics.

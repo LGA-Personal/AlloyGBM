@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **Made active scalar monotone constraints globally enforceable.** Constrained
+  level-wise and leaf-wise trees now propagate finite output bounds and project
+  accepted scalar child outputs into inherited intervals, while preserving the
+  existing unbounded split-gain scoring. `+1` and `-1` order final scalar
+  predictions only over finite numeric values; missing values continue through
+  learned, unordered branches, and binary positive-class probabilities inherit
+  the order through sigmoid. Linear leaves, multiclass softmax, and native
+  categorical splits on the constrained feature are rejected. DART's transient
+  dropout ensemble is outside this contract. Refinement and constrained warm
+  starts validate or project scalar trees without changing artifact format,
+  schema, or public parameters.
+
 - **Preserved multiclass DART weights across artifacts and warm starts.**
   Multiclass artifacts now reuse the optional `DartTreeWeights` section in
   class-major stump order, artifact-backed prediction applies those weights,
