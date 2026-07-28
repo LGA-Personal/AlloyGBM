@@ -2200,6 +2200,33 @@ mod tests {
         }
     }
 
+    fn arbitrary_local_order_model() -> TrainedModel {
+        let stump = |local_node_id, left_leaf_value| TrainedStump {
+            split: scalar_split(local_node_id, 0, 0),
+            left_leaf_value: LeafValue::Scalar(left_leaf_value),
+            right_leaf_value: LeafValue::Scalar(0.0),
+            tree_weight: 1.0,
+            multi_output_leaf_values: None,
+        };
+        TrainedModel {
+            baseline_prediction: 0.0,
+            feature_count: 1,
+            stumps: vec![
+                stump(3, 0.01),
+                stump(1, -1_000_000.0),
+                stump(0, 1_000_000.0),
+            ],
+            categorical_state: None,
+            node_debug_stats: None,
+            objective: "squared_error".to_string(),
+            native_categorical_feature_indices: Vec::new(),
+            morph_metadata: None,
+            dro_metadata: None,
+            feature_baseline: None,
+            neutralization_metadata: None,
+        }
+    }
+
     #[test]
     #[allow(clippy::excessive_precision)]
     fn monotone_engine_prediction_matches_compact_tree_local_f32_arithmetic() {
@@ -2249,6 +2276,21 @@ mod tests {
         assert_eq!(engine_low.to_bits(), artifact_low.to_bits());
         assert_eq!(engine_high.to_bits(), artifact_high.to_bits());
         assert_eq!(artifact_low.to_bits(), artifact_high.to_bits());
+
+        let unordered_model = arbitrary_local_order_model();
+        let unordered_engine = unordered_model
+            .predict_row(&low_row)
+            .expect("engine predicts arbitrary local order");
+        let unordered_artifact = unordered_model
+            .to_artifact_bytes()
+            .expect("arbitrary local order artifact serializes");
+        let unordered_predictor =
+            Predictor::from_artifact_bytes(&unordered_artifact).expect("predictor loads");
+        let unordered_compact = unordered_predictor
+            .predict_row(&low_row)
+            .expect("compact predictor predicts arbitrary local order");
+        assert_eq!(unordered_engine.to_bits(), unordered_compact.to_bits());
+        assert_eq!(unordered_engine.to_bits(), 0.01_f32.to_bits());
     }
 
     #[test]

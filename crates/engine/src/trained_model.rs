@@ -132,28 +132,41 @@ impl TrainedModel {
             .iter()
             .map(|stump| (stump.split.node_id, stump))
             .collect::<HashMap<_, _>>();
-        let mut contributions_by_tree = BTreeMap::<u32, f32>::new();
+        let mut stumps_by_tree = BTreeMap::<u32, BTreeMap<u32, &TrainedStump>>::new();
         for stump in &self.stumps {
-            let tree_id = decode_tree_node_id(stump.split.node_id).0;
-            if !row_satisfies_stump_path_features(features, stump, &stumps_by_node)? {
-                continue;
+            let (tree_id, local_node_id) = decode_tree_node_id(stump.split.node_id);
+            if stumps_by_tree
+                .entry(tree_id)
+                .or_default()
+                .insert(local_node_id, stump)
+                .is_some()
+            {
+                return Err(EngineError::ContractViolation(format!(
+                    "tree {tree_id} contains duplicate local node_id {local_node_id}"
+                )));
             }
-            let feature_index = stump.split.feature_index as usize;
-            let feature_value = features[feature_index];
-            let leaf = if split_went_left(&stump.split, feature_value) {
-                stump.left_leaf_value.eval_row(features)
-            } else {
-                stump.right_leaf_value.eval_row(features)
-            };
-            // v0.9.0: DART artifacts carry a per-stump `tree_weight` that
-            // scales the leaf contribution at predict time. Non-DART
-            // models have `tree_weight = 1.0` and this multiplication is
-            // a no-op (bit-identical to v0.8.0).
-            *contributions_by_tree.entry(tree_id).or_default() += stump.tree_weight * leaf;
         }
 
         let mut prediction = self.baseline_prediction;
-        for contribution in contributions_by_tree.into_values() {
+        for tree_stumps in stumps_by_tree.into_values() {
+            let mut contribution = 0.0_f32;
+            for stump in tree_stumps.into_values() {
+                if !row_satisfies_stump_path_features(features, stump, &stumps_by_node)? {
+                    continue;
+                }
+                let feature_index = stump.split.feature_index as usize;
+                let feature_value = features[feature_index];
+                let leaf = if split_went_left(&stump.split, feature_value) {
+                    stump.left_leaf_value.eval_row(features)
+                } else {
+                    stump.right_leaf_value.eval_row(features)
+                };
+                // v0.9.0: DART artifacts carry a per-stump `tree_weight` that
+                // scales the leaf contribution at predict time. Non-DART
+                // models have `tree_weight = 1.0` and this multiplication is
+                // a no-op (bit-identical to v0.8.0).
+                contribution += stump.tree_weight * leaf;
+            }
             prediction += contribution;
         }
 

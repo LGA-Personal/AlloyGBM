@@ -18,9 +18,9 @@
   while empty/all-zero constraints preserve ordinary DART behavior. Constrained
   warm starts also reject retained non-unit DART weights even when the resumed
   fit selects standard boosting. Public Rust prediction now matches compact
-  artifact arithmetic by grouping arbitrary stump order by tree ID,
-  accumulating each selected path locally, and adding one completed tree
-  contribution to the baseline. Refinement and constrained warm starts validate
+  artifact arithmetic by grouping arbitrary stump order by tree ID and local
+  node ID, accumulating each selected path root-to-leaf, and adding one
+  completed tree contribution to the baseline. Refinement and constrained warm starts validate
   or project scalar trees without changing artifact format, schema, or public
   parameters. The
   acceptance gate now requires exact canonical declarations, evidence counts,
