@@ -1625,27 +1625,30 @@ fn monotone_contract_experimental_refinement_handles_dart_morph_phantom_round() 
 fn monotone_contract_projection_counts_are_dense_without_training_state() {
     let stumps = vec![
         multiclass_dart_bookkeeping_stump(1),
+        multiclass_dart_bookkeeping_stump(1),
         multiclass_dart_bookkeeping_stump(3),
     ];
 
-    let counts =
-        dense_projection_stump_counts(&stumps, 4).expect("projection counts should be dense");
+    let counts = dense_projection_stump_counts(&stumps).expect("projection counts should be dense");
 
-    assert_eq!(counts, vec![0, 1, 0, 1]);
+    assert_eq!(counts, vec![0, 2, 0, 1]);
 }
 
 #[test]
-fn monotone_contract_projection_counts_reject_invalid_final_tree_ids() {
-    let out_of_range = vec![multiclass_dart_bookkeeping_stump(2)];
-    let error = dense_projection_stump_counts(&out_of_range, 2)
-        .expect_err("tree id beyond final logical rounds must fail");
-    assert!(error.to_string().contains("tree id 2"), "{error}");
+fn monotone_contract_projection_counts_are_empty_for_an_empty_forest() {
+    assert_eq!(
+        dense_projection_stump_counts(&[]).expect("empty projection counts"),
+        Vec::<usize>::new()
+    );
+}
 
+#[test]
+fn monotone_contract_projection_counts_reject_backward_tree_ids() {
     let out_of_order = vec![
         multiclass_dart_bookkeeping_stump(1),
         multiclass_dart_bookkeeping_stump(0),
     ];
-    let error = dense_projection_stump_counts(&out_of_order, 2)
+    let error = dense_projection_stump_counts(&out_of_order)
         .expect_err("non-contiguous tree slices must fail");
     assert!(error.to_string().contains("stump order"), "{error}");
 }
@@ -1798,6 +1801,84 @@ fn monotone_contract_projection_does_not_change_morph_early_stop_bookkeeping() {
     assert!((active.final_loss - replayed_loss).abs() <= 1.0e-6);
     if let Some(&last_loss) = active.loss_per_completed_round.last() {
         assert!((last_loss - active.final_loss).abs() <= 1.0e-6);
+    }
+}
+
+#[test]
+fn monotone_contract_refinement_accepts_retained_tree_id_after_phantom_plateau() {
+    if !experiment_leaf_refinement_enabled() {
+        return;
+    }
+
+    let training = sample_dataset();
+    let binned_matrix = sample_binned_matrix();
+    let mut validation = sample_dataset();
+    validation.targets = vec![0.15, 0.15, -0.15, -0.15];
+    let params = TrainParams {
+        learning_rate: 0.1,
+        seed: 17,
+        deterministic: true,
+        min_data_in_leaf: 1,
+        lambda_l2: 0.0,
+        monotone_constraints: vec![-1, 0],
+        morph_config: Some(MorphConfig {
+            morph_rate: 0.0,
+            evolution_pressure: 0.0,
+            morph_warmup_iters: u32::MAX,
+            info_score_weight: 0.0,
+            depth_penalty_base: 1.0,
+            balance_penalty: false,
+            lr_schedule: alloygbm_core::LrSchedule::WarmupCosine { warmup_frac: 0.5 },
+        }),
+        ..TrainParams::default()
+    };
+    let controls = IterationControls::new(4, 0.0, 1, 0.1, 1_000_000.0, 0.0, 0)
+        .expect("controls")
+        .with_validation_early_stopping(1, 0.0)
+        .expect("validation controls");
+
+    let summary = Trainer::new(params)
+        .expect("trainer")
+        .fit_iterations_with_validation_summary(
+            &training,
+            &binned_matrix,
+            ValidationDatasetRef {
+                dataset: &validation,
+                binned_matrix: &binned_matrix,
+            },
+            &MockBackend,
+            &SquaredErrorObjective,
+            controls,
+        )
+        .expect("retained tree IDs must determine refinement projection counts");
+
+    assert_eq!(
+        summary.stop_reason,
+        IterationStopReason::ValidationLossPlateau
+    );
+    assert_eq!(summary.best_validation_round, Some(2));
+    assert_eq!(summary.rounds_completed, 2);
+    let tree_ids = summary
+        .model
+        .stumps
+        .iter()
+        .map(|stump| stump.split.node_id / TREE_NODE_STRIDE)
+        .collect::<Vec<_>>();
+    assert_eq!(tree_ids, vec![1, 2]);
+
+    let predictions = (0..=3)
+        .map(|feature| {
+            summary
+                .model
+                .predict_row(&[feature as f32, 0.0])
+                .expect("prediction")
+        })
+        .collect::<Vec<_>>();
+    for pair in predictions.windows(2) {
+        assert!(
+            pair[1] <= pair[0] + 1.0e-6,
+            "decreasing monotone constraint violated: {predictions:?}"
+        );
     }
 }
 

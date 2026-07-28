@@ -54,15 +54,17 @@ pub(crate) fn allocate_dart_contribution_buffer(
     dart_enabled.then(|| vec![0.0; row_count])
 }
 
-pub(crate) fn dense_projection_stump_counts(
-    stumps: &[TrainedStump],
-    logical_round_count: usize,
-) -> EngineResult<Vec<usize>> {
-    let mut counts = vec![0_usize; logical_round_count];
+pub(crate) fn dense_projection_stump_counts(stumps: &[TrainedStump]) -> EngineResult<Vec<usize>> {
+    let mut tree_ids = Vec::with_capacity(stumps.len());
     let mut previous_tree_id = None;
 
     for stump in stumps {
-        let tree_id = decode_tree_node_id(stump.split.node_id).0 as usize;
+        let encoded_tree_id = decode_tree_node_id(stump.split.node_id).0;
+        let tree_id = usize::try_from(encoded_tree_id).map_err(|_| {
+            EngineError::ContractViolation(format!(
+                "projection tree id {encoded_tree_id} does not fit usize"
+            ))
+        })?;
         if let Some(previous_tree_id) = previous_tree_id
             && tree_id < previous_tree_id
         {
@@ -70,17 +72,26 @@ pub(crate) fn dense_projection_stump_counts(
                 "projection stump order moved backward from tree id {previous_tree_id} to tree id {tree_id}"
             )));
         }
-        let count = counts.get_mut(tree_id).ok_or_else(|| {
-            EngineError::ContractViolation(format!(
-                "projection tree id {tree_id} is outside final logical round count {logical_round_count}"
-            ))
-        })?;
+        tree_ids.push(tree_id);
+        previous_tree_id = Some(tree_id);
+    }
+
+    let Some(max_tree_id) = tree_ids.iter().copied().max() else {
+        return Ok(Vec::new());
+    };
+    let round_count = max_tree_id.checked_add(1).ok_or_else(|| {
+        EngineError::ContractViolation(format!(
+            "projection round count overflow after tree id {max_tree_id}"
+        ))
+    })?;
+    let mut counts = vec![0_usize; round_count];
+    for tree_id in tree_ids {
+        let count = &mut counts[tree_id];
         *count = count.checked_add(1).ok_or_else(|| {
             EngineError::ContractViolation(format!(
                 "projection stump count overflow for tree id {tree_id}"
             ))
         })?;
-        previous_tree_id = Some(tree_id);
     }
 
     let covered_stumps = counts.iter().try_fold(0_usize, |total, &count| {
@@ -3137,15 +3148,7 @@ impl Trainer {
             // Leaf refinement re-solves leaves against targets, so skip it for
             // per-round factor-neutralized gradients until refinement can apply
             // the same projection contract.
-            let final_logical_round_count = round_index_offset
-                .checked_add(rounds_completed)
-                .ok_or_else(|| {
-                    EngineError::ContractViolation(
-                        "final logical round count overflow during leaf refinement".to_string(),
-                    )
-                })?;
-            let projection_stumps_per_round =
-                dense_projection_stump_counts(&stumps, final_logical_round_count)?;
+            let projection_stumps_per_round = dense_projection_stump_counts(&stumps)?;
             refine_regression_leaf_values(
                 baseline_prediction,
                 &active_dataset.targets,
