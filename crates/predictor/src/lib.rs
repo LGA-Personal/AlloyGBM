@@ -2203,7 +2203,17 @@ mod tests {
     #[test]
     #[allow(clippy::excessive_precision)]
     fn monotone_engine_prediction_matches_compact_tree_local_f32_arithmetic() {
-        let model = monotone_rounding_boundary_model();
+        let mut model = monotone_rounding_boundary_model();
+        model.stumps.insert(
+            1,
+            TrainedStump {
+                split: scalar_split(TREE_NODE_STRIDE, 0, 0),
+                left_leaf_value: LeafValue::Scalar(0.0),
+                right_leaf_value: LeafValue::Scalar(0.0),
+                tree_weight: 1.0,
+                multi_output_leaf_values: None,
+            },
+        );
         let low_tree_contribution = -833156.0625_f32 + 446246.53125_f32;
         let high_tree_contribution = 59336.9765625_f32 + -446246.5_f32;
         assert_eq!(

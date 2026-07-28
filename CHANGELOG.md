@@ -15,11 +15,14 @@
   GOSS scalar ensembles are covered. Active constraints are rejected with
   `boosting_mode="dart"` because predictor weights can change exact f32 order;
   neither transient nor final weighted DART predictions are claimed monotone,
-  while empty/all-zero constraints preserve ordinary DART behavior. Public Rust
-  prediction now matches compact artifact arithmetic by accumulating each
-  selected path locally before adding one completed tree contribution to the
-  baseline. Refinement and constrained warm starts validate or project scalar
-  trees without changing artifact format, schema, or public parameters. The
+  while empty/all-zero constraints preserve ordinary DART behavior. Constrained
+  warm starts also reject retained non-unit DART weights even when the resumed
+  fit selects standard boosting. Public Rust prediction now matches compact
+  artifact arithmetic by grouping arbitrary stump order by tree ID,
+  accumulating each selected path locally, and adding one completed tree
+  contribution to the baseline. Refinement and constrained warm starts validate
+  or project scalar trees without changing artifact format, schema, or public
+  parameters. The
   acceptance gate now requires exact canonical declarations, evidence counts,
   record metadata, and a full source commit. Joint multi-output training
   continues to reject monotone constraints; that existing unsupported

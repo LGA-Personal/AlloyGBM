@@ -2267,7 +2267,19 @@ impl Trainer {
         } else {
             (fit_contract.baseline_prediction, Vec::new(), 0, None, None)
         };
-        if has_active_monotone_constraints(&self.params.monotone_constraints)
+        let monotone_constraints_active =
+            has_active_monotone_constraints(&self.params.monotone_constraints);
+        if monotone_constraints_active
+            && initial_stumps
+                .iter()
+                .any(|stump| stump.tree_weight.to_bits() != 1.0_f32.to_bits())
+        {
+            return Err(EngineError::InvalidConfig(
+                "warm_start retained DART tree weights are not compatible with active monotone_constraints"
+                    .to_string(),
+            ));
+        }
+        if monotone_constraints_active
             && let Some(stump) = initial_stumps.iter().find(|stump| {
                 stump.split.is_categorical
                     && self

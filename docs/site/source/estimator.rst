@@ -160,7 +160,9 @@ Constraints
   on the same constrained feature. DART predictor weights can change exact f32
   ordering after tree projection, so neither transient dropout predictions nor
   final weighted DART predictions are covered or claimed monotone. Empty or
-  all-zero constraints keep ordinary DART behavior unchanged.
+  all-zero constraints keep ordinary DART behavior unchanged. A constrained
+  warm start also rejects a retained model with non-unit DART weights, even
+  when the resumed fit selects standard boosting.
 - ``feature_weights: list[float] | dict[int, float] | None = None`` --
   per-feature importance weights influencing split selection
 - ``interaction_constraints: list[list[int]] | None = None`` --

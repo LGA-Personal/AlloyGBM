@@ -191,7 +191,9 @@ No artifact section or metadata field is added. Final bounded scalar deltas
 are stored in the existing tree representation. Both public Rust and compact
 artifact prediction first evaluate a selected path into one zero-based local
 f32 contribution per tree, then add that completed contribution once to the
-model baseline. Artifact bytes and compact encoding remain unchanged.
+model baseline. Public Rust prediction groups stumps by decoded tree ID first,
+so manually interleaved public stump vectors retain the same arithmetic as the
+compact predictor. Artifact bytes and compact encoding remain unchanged.
 
 Warm-starting validates every retained scalar tree against the requested
 constraint intervals before adding rounds. A model produced by this
@@ -199,7 +201,9 @@ implementation passes unchanged. A legacy initial model whose trees violate
 the contract is rejected with an actionable error rather than being silently
 presented as a monotone result. Existing legacy artifacts remain loadable and
 predict identically when used for inference; only constrained warm-start
-training adds this validation.
+training adds this validation. A retained prefix with any non-unit DART tree
+weight is also rejected under active constraints, regardless of the resumed
+fit's current boosting mode.
 
 ## Testing
 

@@ -298,6 +298,56 @@ class TestWarmStartTraining(unittest.TestCase):
 
         _assert_nondecreasing_predictions(continued, grid)
 
+    def test_monotone_rejects_dart_weighted_init_model_under_standard_mode(self):
+        X, y, _ = _make_monotone_dataset()
+        prior = GBMRegressor(
+            n_estimators=20,
+            max_depth=3,
+            boosting_mode="dart",
+            dart_drop_rate=0.3,
+            dart_max_drop=5,
+            training_policy="manual",
+            seed=11,
+        ).fit(X, y)
+        continued = GBMRegressor(
+            n_estimators=2,
+            max_depth=3,
+            boosting_mode="standard",
+            monotone_constraints=[1, 0, 0],
+            training_policy="manual",
+            seed=11,
+        )
+
+        with pytest.raises(
+            ValueError,
+            match="warm_start.*DART tree weights.*monotone_constraints",
+        ):
+            continued.fit(X, y, init_model=prior)
+
+    def test_monotone_rejects_dart_weighted_estimator_warm_start(self):
+        X, y, _ = _make_monotone_dataset()
+        model = GBMRegressor(
+            n_estimators=20,
+            max_depth=3,
+            boosting_mode="dart",
+            dart_drop_rate=0.3,
+            dart_max_drop=5,
+            training_policy="manual",
+            seed=11,
+            warm_start=True,
+        ).fit(X, y)
+        model.set_params(
+            n_estimators=2,
+            boosting_mode="standard",
+            monotone_constraints=[1, 0, 0],
+        )
+
+        with pytest.raises(
+            ValueError,
+            match="warm_start.*DART tree weights.*monotone_constraints",
+        ):
+            model.fit(X, y)
+
     def test_monotone_estimator_warm_start_continuation(self):
         X, y, grid = _make_monotone_dataset()
         model = GBMRegressor(

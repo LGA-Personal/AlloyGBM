@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use alloygbm_core::{
     CategoricalStatePayloadV1, DartTreeWeightsPayload, Device, DroMetadataPayload,
@@ -132,17 +132,9 @@ impl TrainedModel {
             .iter()
             .map(|stump| (stump.split.node_id, stump))
             .collect::<HashMap<_, _>>();
-        let mut prediction = self.baseline_prediction;
-        let mut current_tree_id = None;
-        let mut tree_contribution = 0.0_f32;
+        let mut contributions_by_tree = BTreeMap::<u32, f32>::new();
         for stump in &self.stumps {
             let tree_id = decode_tree_node_id(stump.split.node_id).0;
-            if current_tree_id.is_some_and(|current| current != tree_id) {
-                prediction += tree_contribution;
-                tree_contribution = 0.0;
-            }
-            current_tree_id = Some(tree_id);
-
             if !row_satisfies_stump_path_features(features, stump, &stumps_by_node)? {
                 continue;
             }
@@ -157,10 +149,12 @@ impl TrainedModel {
             // scales the leaf contribution at predict time. Non-DART
             // models have `tree_weight = 1.0` and this multiplication is
             // a no-op (bit-identical to v0.8.0).
-            tree_contribution += stump.tree_weight * leaf;
+            *contributions_by_tree.entry(tree_id).or_default() += stump.tree_weight * leaf;
         }
-        if current_tree_id.is_some() {
-            prediction += tree_contribution;
+
+        let mut prediction = self.baseline_prediction;
+        for contribution in contributions_by_tree.into_values() {
+            prediction += contribution;
         }
 
         Ok(prediction)

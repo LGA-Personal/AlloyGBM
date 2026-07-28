@@ -2006,6 +2006,65 @@ fn monotone_contract_rejects_retained_native_categorical_split_without_current_m
 }
 
 #[test]
+fn monotone_contract_rejects_retained_non_unit_dart_weights() {
+    let weighted_stump = TrainedStump {
+        split: SplitCandidate {
+            node_id: encode_tree_node_id(0, 0).expect("node id encodes"),
+            feature_index: 0,
+            threshold_bin: 1,
+            gain: 1.0,
+            default_left: false,
+            is_categorical: false,
+            categorical_bitset: None,
+            left_stats: NodeStats {
+                grad_sum: 0.0,
+                hess_sum: 2.0,
+                grad_sq_sum: 0.0,
+                row_count: 2,
+            },
+            right_stats: NodeStats {
+                grad_sum: 0.0,
+                hess_sum: 2.0,
+                grad_sq_sum: 0.0,
+                row_count: 2,
+            },
+        },
+        left_leaf_value: LeafValue::Scalar(-1.0),
+        right_leaf_value: LeafValue::Scalar(1.0),
+        tree_weight: 0.5,
+        multi_output_leaf_values: None,
+    };
+    let trainer = Trainer::new(TrainParams {
+        monotone_constraints: vec![1, 0],
+        ..TrainParams::default()
+    })
+    .expect("current standard parameters are valid");
+    let controls =
+        IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).expect("valid controls");
+
+    let error = trainer
+        .fit_iterations_warm_start(
+            &sample_dataset(),
+            &sample_binned_matrix(),
+            &MockBackend,
+            &SquaredErrorObjective,
+            controls,
+            WarmStartState {
+                baseline_prediction: 0.0,
+                stumps: vec![weighted_stump],
+                initial_rounds_completed: 1,
+                initial_ema_stats: None,
+                initial_dart_tree_weights: Some(vec![0.5]),
+            },
+        )
+        .expect_err("weighted DART prefix must not bypass the monotone contract");
+    let message = error.to_string();
+    assert!(message.contains("warm_start"), "{message}");
+    assert!(message.contains("DART tree weights"), "{message}");
+    assert!(message.contains("monotone_constraints"), "{message}");
+}
+
+#[test]
 fn monotone_contract_violating_legacy_warm_start_is_rejected() {
     let violating_stump = TrainedStump {
         split: SplitCandidate {
