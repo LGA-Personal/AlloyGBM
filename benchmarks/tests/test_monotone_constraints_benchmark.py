@@ -47,6 +47,7 @@ def _record(scenario, **overrides):
         "checked_grid_pairs": 8 * 256,
         "worst_signed_monotone_margin": 0.0,
         "violation_count": 0,
+        "grid_predictions_finite": True,
         "constrained_finite": True,
         "unconstrained_finite": True,
         "constrained_completed": True,
@@ -59,10 +60,15 @@ def _record(scenario, **overrides):
     return record
 
 
-def _report(records, scenarios=None):
-    scenarios = BENCHMARK.quick_scenarios() if scenarios is None else scenarios
+def _report(*, records=None, scenarios=None, rounds=None):
+    canonical = BENCHMARK.quick_scenarios()
+    scenarios = canonical if scenarios is None else scenarios
+    records = (
+        [_record(scenario) for scenario in canonical] if records is None else records
+    )
     return {
         "quick": True,
+        "rounds": BENCHMARK.QUICK_ROUNDS if rounds is None else rounds,
         "scenarios": [scenario.name for scenario in scenarios],
         "records": records,
     }
@@ -138,6 +144,25 @@ def test_grid_validation_changes_only_feature_zero_for_each_context() -> None:
         np.testing.assert_array_equal(grid[:, 1:], np.tile(context[1:], (257, 1)))
 
 
+def test_grid_validation_marks_mixed_finite_and_nan_predictions_non_finite() -> None:
+    class MixedEstimator:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def predict(self, X):
+            self.calls += 1
+            prediction = X[:, 0].astype(np.float64)
+            if self.calls == 2:
+                prediction[3] = np.nan
+            return prediction
+
+    holdout = np.asarray([[0.0, 0.5], [0.0, -0.5]], dtype=np.float32)
+    check = BENCHMARK.validate_monotonicity(MixedEstimator(), holdout, direction=1)
+
+    assert not check.grid_predictions_finite
+    assert check.checked_grid_pairs == 2 * 256
+
+
 @pytest.mark.parametrize(
     ("overrides", "expected_fragment"),
     [
@@ -145,6 +170,7 @@ def test_grid_validation_changes_only_feature_zero_for_each_context() -> None:
         ({"constrained_completed": False}, "incomplete"),
         ({"constrained_completed_rounds": 15}, "incomplete"),
         ({"checked_grid_pairs": 0}, "grid pairs"),
+        ({"grid_predictions_finite": False}, "grid predictions"),
         ({"violation_count": 1}, "monotone violations"),
         ({"constrained_loss": 1.251, "unconstrained_loss": 1.0}, "ratio"),
         (
@@ -155,21 +181,69 @@ def test_grid_validation_changes_only_feature_zero_for_each_context() -> None:
     ],
 )
 def test_gate_rejects_invalid_record_conditions(overrides, expected_fragment) -> None:
-    scenario = BENCHMARK.quick_scenarios()[0]
-    record = _record(scenario, **overrides)
+    report = _report()
+    report["records"][0].update(overrides)
 
-    failures = BENCHMARK.evaluate_gate(_report([record], [scenario]))
+    failures = BENCHMARK.evaluate_gate(report)
 
     assert any(expected_fragment in failure for failure in failures)
 
 
 def test_gate_rejects_missing_records_and_ignores_timing_ratio() -> None:
-    scenarios = BENCHMARK.quick_scenarios()[:2]
-    failures = BENCHMARK.evaluate_gate(_report([_record(scenarios[0])], scenarios))
+    report = _report()
+    report["records"].pop()
+    failures = BENCHMARK.evaluate_gate(report)
     assert any("missing record" in failure for failure in failures)
 
-    slow_record = _record(scenarios[0], fit_time_ratio=10_000.0)
-    assert BENCHMARK.evaluate_gate(_report([slow_record], [scenarios[0]])) == []
+    report = _report()
+    report["records"][0]["fit_time_ratio"] = 10_000.0
+    assert BENCHMARK.evaluate_gate(report) == []
+
+
+@pytest.mark.parametrize("mutation", ["missing", "unexpected", "duplicate"])
+def test_gate_rejects_noncanonical_scenario_declarations(mutation) -> None:
+    report = _report()
+    if mutation == "missing":
+        report["scenarios"].pop()
+    elif mutation == "unexpected":
+        report["scenarios"].append("unexpected-scenario")
+    else:
+        report["scenarios"].append(report["scenarios"][0])
+
+    failures = BENCHMARK.evaluate_gate(report)
+
+    assert any("scenario declarations" in failure for failure in failures)
+
+
+@pytest.mark.parametrize("mutation", ["missing", "unexpected", "duplicate"])
+def test_gate_rejects_noncanonical_record_identities(mutation) -> None:
+    report = _report()
+    if mutation == "missing":
+        report["records"].pop()
+    elif mutation == "unexpected":
+        extra = dict(report["records"][0])
+        extra["scenario"] = "unexpected-scenario"
+        report["records"].append(extra)
+    else:
+        report["records"].append(dict(report["records"][0]))
+
+    failures = BENCHMARK.evaluate_gate(report)
+
+    assert any("record identities" in failure for failure in failures)
+
+
+def test_gate_rejects_empty_report_and_quick_round_mismatch() -> None:
+    empty = {"quick": True, "rounds": BENCHMARK.QUICK_ROUNDS, "scenarios": [], "records": []}
+    assert any("empty" in failure for failure in BENCHMARK.evaluate_gate(empty))
+
+    report = _report(rounds=1)
+    for record in report["records"]:
+        record["requested_rounds"] = 1
+        record["constrained_completed_rounds"] = 1
+        record["unconstrained_completed_rounds"] = 1
+    failures = BENCHMARK.evaluate_gate(report)
+    assert any("requested rounds" in failure for failure in failures)
+    assert any("incomplete rounds" in failure for failure in failures)
 
 
 def test_quick_gate_passes_on_installed_implementation() -> None:
