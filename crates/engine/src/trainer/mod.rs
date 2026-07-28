@@ -54,19 +54,48 @@ pub(crate) fn allocate_dart_contribution_buffer(
     dart_enabled.then(|| vec![0.0; row_count])
 }
 
-fn append_dense_logical_round_count(
-    stumps_per_logical_round: &mut Vec<usize>,
-    logical_round: usize,
-    stump_count: usize,
-) -> EngineResult<()> {
-    if stumps_per_logical_round.len() != logical_round {
+pub(crate) fn dense_projection_stump_counts(
+    stumps: &[TrainedStump],
+    logical_round_count: usize,
+) -> EngineResult<Vec<usize>> {
+    let mut counts = vec![0_usize; logical_round_count];
+    let mut previous_tree_id = None;
+
+    for stump in stumps {
+        let tree_id = decode_tree_node_id(stump.split.node_id).0 as usize;
+        if let Some(previous_tree_id) = previous_tree_id
+            && tree_id < previous_tree_id
+        {
+            return Err(EngineError::ContractViolation(format!(
+                "projection stump order moved backward from tree id {previous_tree_id} to tree id {tree_id}"
+            )));
+        }
+        let count = counts.get_mut(tree_id).ok_or_else(|| {
+            EngineError::ContractViolation(format!(
+                "projection tree id {tree_id} is outside final logical round count {logical_round_count}"
+            ))
+        })?;
+        *count = count.checked_add(1).ok_or_else(|| {
+            EngineError::ContractViolation(format!(
+                "projection stump count overflow for tree id {tree_id}"
+            ))
+        })?;
+        previous_tree_id = Some(tree_id);
+    }
+
+    let covered_stumps = counts.iter().try_fold(0_usize, |total, &count| {
+        total.checked_add(count).ok_or_else(|| {
+            EngineError::ContractViolation("projection stump count overflow".to_string())
+        })
+    })?;
+    if covered_stumps != stumps.len() {
         return Err(EngineError::ContractViolation(format!(
-            "logical-round stump counts are not dense before round {logical_round}: found {} entries",
-            stumps_per_logical_round.len()
+            "projection round counts cover {covered_stumps} stumps, expected {}",
+            stumps.len()
         )));
     }
-    stumps_per_logical_round.push(stump_count);
-    Ok(())
+
+    Ok(counts)
 }
 
 /// Rebuilds the per-class DART slice map from persisted multiclass stumps.
@@ -2242,13 +2271,13 @@ impl Trainer {
                 stump.split.feature_index
             )));
         }
-        let mut stumps_per_logical_round = vec![0_usize; round_index_offset];
+        let mut initial_stumps_per_round = vec![0_usize; round_index_offset];
         for stump in &initial_stumps {
             let tree_id = decode_tree_node_id(stump.split.node_id).0 as usize;
-            let logical_round_count = stumps_per_logical_round.len();
-            let count = stumps_per_logical_round.get_mut(tree_id).ok_or_else(|| {
+            let initial_round_count = initial_stumps_per_round.len();
+            let count = initial_stumps_per_round.get_mut(tree_id).ok_or_else(|| {
                 EngineError::ContractViolation(format!(
-                    "warm-start tree_id {tree_id} is outside initial_rounds_completed {logical_round_count}"
+                    "warm-start tree_id {tree_id} is outside initial_rounds_completed {initial_round_count}"
                 ))
             })?;
             *count = count.checked_add(1).ok_or_else(|| {
@@ -2259,7 +2288,7 @@ impl Trainer {
         }
         validate_monotone_forest(
             &initial_stumps,
-            &stumps_per_logical_round,
+            &initial_stumps_per_round,
             &self.params.monotone_constraints,
             controls.max_abs_leaf_value,
         )
@@ -2305,6 +2334,10 @@ impl Trainer {
             allocate_dart_contribution_buffer(dart_params.is_some(), values.len())
         });
         let mut stumps = initial_stumps;
+        let initial_stump_count = stumps.len();
+        // New material-round counts retain their historical coordinate system.
+        // MorphBoost phantom rounds are deliberately absent from this vector.
+        let mut stumps_per_completed_round: Vec<usize> = Vec::new();
         let mut rounds_completed = 0_usize;
         let effective_round_cap = controls.rounds;
         let mut stop_reason = IterationStopReason::CompletedRequestedRounds;
@@ -2368,9 +2401,8 @@ impl Trainer {
             // warm-start snapshot captured above (BEFORE the take()). Length
             // must equal `stumps.len()` (one weight per warm-start stump).
             // Falls back to all-1.0s when the prior fit did not use DART
-            // or no snapshot was provided. The dense logical-round counts
-            // include zero-stump phantom rounds, which still need a DART slot.
-            let initial_tree_count = stumps_per_logical_round.len();
+            // or no snapshot was provided.
+            let initial_tree_count = initial_stumps_per_round.len();
             if let Some(saved_weights) = initial_dart_tree_weights.as_ref() {
                 // Caller supplies one weight per stump; we need one weight
                 // per tree. Take the first weight of each tree (all stumps
@@ -2378,12 +2410,8 @@ impl Trainer {
                 // normalization, so this is well-defined).
                 let mut per_tree = Vec::with_capacity(initial_tree_count);
                 let mut stump_offset = 0usize;
-                for &count in &stumps_per_logical_round {
-                    let weight = if count == 0 {
-                        1.0
-                    } else {
-                        saved_weights.get(stump_offset).copied().unwrap_or(1.0)
-                    };
+                for &count in &initial_stumps_per_round {
+                    let weight = saved_weights.get(stump_offset).copied().unwrap_or(1.0);
                     per_tree.push(weight);
                     stump_offset += count;
                 }
@@ -2404,18 +2432,20 @@ impl Trainer {
         // dense even when MorphBoost skips rounds.
         //
         // `round_start_offsets[t]` is the start index in `stumps` where
-        // tree `t`'s stumps begin. `stumps_per_logical_round[t]` is the
-        // corresponding stump count for every boosting mode, including
-        // zero-stump MorphBoost rounds.
+        // tree `t`'s stumps begin; `dart_round_counts[t]` is its stump
+        // count. Together they slice into `stumps` for the DART dropout
+        // subtract/replay step.
         let mut round_start_offsets: Vec<usize> = Vec::new();
+        let mut dart_round_counts: Vec<usize> = Vec::new();
 
-        // v0.10.0: DART + warm_start — pre-populate round_start_offsets
-        // from the warm-start tree shapes so the dropout step can correctly
-        // slice into `stumps` for each prior logical tree.
+        // v0.10.0: DART + warm_start — pre-populate round_start_offsets +
+        // dart_round_counts from the warm-start tree shapes so the dropout
+        // step can correctly slice into `stumps` for each prior tree.
         if dart_params.is_some() {
             let mut offset = 0usize;
-            for &count in &stumps_per_logical_round {
+            for &count in &initial_stumps_per_round {
                 round_start_offsets.push(offset);
+                dart_round_counts.push(count);
                 offset += count;
             }
         }
@@ -2481,7 +2511,7 @@ impl Trainer {
                     for &tree_id in &drops {
                         let w_old = dart_state.tree_weights[tree_id];
                         let start = round_start_offsets[tree_id];
-                        let count = stumps_per_logical_round[tree_id];
+                        let count = dart_round_counts[tree_id];
                         let stump_slice = &stumps[start..start + count];
                         apply_weighted_round_to_predictions_and_accumulator(
                             &mut predictions,
@@ -2665,11 +2695,6 @@ impl Trainer {
                     // leaves below `min_abs_leaf_value`, so all splits get
                     // rejected. This is benign — LR will ramp up. Skip this
                     // round and continue.
-                    append_dense_logical_round_count(
-                        &mut stumps_per_logical_round,
-                        effective_round_index,
-                        0,
-                    )?;
                     rounds_completed += 1;
                     continue;
                 }
@@ -2795,11 +2820,6 @@ impl Trainer {
                     // During warmup, slightly-negative loss improvements arise from
                     // numerical noise at tiny LR. Skip this round and continue;
                     // candidate predictions reset from current at the top of each round.
-                    append_dense_logical_round_count(
-                        &mut stumps_per_logical_round,
-                        effective_round_index,
-                        0,
-                    )?;
                     rounds_completed += 1;
                     continue;
                 }
@@ -2978,16 +2998,9 @@ impl Trainer {
             // are loop-scoped, so they get dropped at end-of-iteration
             // automatically — no explicit reset needed.
             //
-            let candidate_round_stump_count = candidate_round_stumps.len();
-            append_dense_logical_round_count(
-                &mut stumps_per_logical_round,
-                effective_round_index,
-                candidate_round_stump_count,
-            )?;
-
-            // Pad the DART-indexed arrays
+            // Pad all four DART-indexed parallel arrays
             // (`dart_state.tree_weights`, `dart_state.dropped_per_round`,
-            // `round_start_offsets`) up to
+            // `round_start_offsets`, `dart_round_counts`) up to
             // `effective_round_index` with phantom entries for any
             // skipped warmup rounds.  Phantoms have weight=1.0 and
             // count=0, so a later `select_dropouts` could pick one but
@@ -2999,6 +3012,7 @@ impl Trainer {
             if dart_params.is_some() {
                 while round_start_offsets.len() < effective_round_index {
                     round_start_offsets.push(stumps.len());
+                    dart_round_counts.push(0);
                     dart_state.tree_weights.push(1.0);
                     dart_state.dropped_per_round.push(Vec::new());
                 }
@@ -3013,8 +3027,10 @@ impl Trainer {
                     dart_state.dropped_per_round.push(Vec::new());
                 }
                 round_start_offsets.push(stumps.len());
+                dart_round_counts.push(candidate_round_stumps.len());
             }
 
+            stumps_per_completed_round.push(candidate_round_stumps.len());
             stumps.extend(candidate_round_stumps);
             rounds_completed += 1;
 
@@ -3040,16 +3056,10 @@ impl Trainer {
         if let Some(best_round) = truncation_round
             && best_round < rounds_completed
         {
-            let retained_logical_rounds =
-                round_index_offset.checked_add(best_round).ok_or_else(|| {
-                    EngineError::ContractViolation(
-                        "warm-start round offset overflow during truncation".to_string(),
-                    )
-                })?;
             let kept_stumps =
-                retained_stump_count_for_rounds(&stumps_per_logical_round, retained_logical_rounds);
-            stumps.truncate(kept_stumps);
-            stumps_per_logical_round.truncate(retained_logical_rounds);
+                retained_stump_count_for_rounds(&stumps_per_completed_round, best_round);
+            stumps.truncate(initial_stump_count + kept_stumps);
+            stumps_per_completed_round.truncate(best_round);
             loss_per_completed_round.truncate(best_round);
             validation_loss_per_completed_round.truncate(best_round);
             custom_metric_per_round.truncate(best_round);
@@ -3068,8 +3078,24 @@ impl Trainer {
             // through `apply_normalization` produces the exact weights
             // for the kept ensemble.
             if dart_params.is_some() {
-                let truncate_at = retained_logical_rounds;
+                // `best_round` is in committed-round space, but the DART
+                // arrays are indexed by effective_round_index which
+                // includes phantom slots for skipped warmup rounds.
+                // Map best_round → corresponding effective_round_index
+                // by counting committed rounds in dart_round_counts.
+                let mut committed_seen = 0usize;
+                let mut truncate_at = dart_round_counts.len();
+                for (idx, &count) in dart_round_counts.iter().enumerate() {
+                    if count > 0 {
+                        committed_seen += 1;
+                        if committed_seen == best_round {
+                            truncate_at = idx + 1;
+                            break;
+                        }
+                    }
+                }
                 round_start_offsets.truncate(truncate_at);
+                dart_round_counts.truncate(truncate_at);
                 let kept_dropped = dart_state
                     .dropped_per_round
                     .iter()
@@ -3092,14 +3118,16 @@ impl Trainer {
             rounds_completed = best_round;
             weak_improvement_rounds_committed =
                 weak_improvement_rounds_committed.min(rounds_completed);
-            current_loss = loss_per_completed_round
-                .last()
-                .copied()
-                .unwrap_or(initial_loss);
-            current_validation_loss = validation_loss_per_completed_round
-                .last()
-                .copied()
-                .or(initial_validation_loss);
+            current_loss = if rounds_completed == 0 {
+                initial_loss
+            } else {
+                loss_per_completed_round[rounds_completed - 1]
+            };
+            current_validation_loss = if rounds_completed == 0 {
+                initial_validation_loss
+            } else {
+                Some(validation_loss_per_completed_round[rounds_completed - 1])
+            };
         }
 
         if experiment_leaf_refinement_enabled()
@@ -3109,18 +3137,27 @@ impl Trainer {
             // Leaf refinement re-solves leaves against targets, so skip it for
             // per-round factor-neutralized gradients until refinement can apply
             // the same projection contract.
+            let final_logical_round_count = round_index_offset
+                .checked_add(rounds_completed)
+                .ok_or_else(|| {
+                    EngineError::ContractViolation(
+                        "final logical round count overflow during leaf refinement".to_string(),
+                    )
+                })?;
+            let projection_stumps_per_round =
+                dense_projection_stump_counts(&stumps, final_logical_round_count)?;
             refine_regression_leaf_values(
                 baseline_prediction,
                 &active_dataset.targets,
                 active_dataset.sample_weights.as_deref(),
                 binned_matrix,
                 &mut stumps,
-                &stumps_per_logical_round,
+                &projection_stumps_per_round,
                 controls.max_abs_leaf_value,
             )?;
             project_monotone_forest(
                 &mut stumps,
-                &stumps_per_logical_round,
+                &projection_stumps_per_round,
                 &self.params.monotone_constraints,
                 controls.max_abs_leaf_value,
             )?;

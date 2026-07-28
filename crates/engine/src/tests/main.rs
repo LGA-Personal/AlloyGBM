@@ -1622,6 +1622,186 @@ fn monotone_contract_experimental_refinement_handles_dart_morph_phantom_round() 
 }
 
 #[test]
+fn monotone_contract_projection_counts_are_dense_without_training_state() {
+    let stumps = vec![
+        multiclass_dart_bookkeeping_stump(1),
+        multiclass_dart_bookkeeping_stump(3),
+    ];
+
+    let counts =
+        dense_projection_stump_counts(&stumps, 4).expect("projection counts should be dense");
+
+    assert_eq!(counts, vec![0, 1, 0, 1]);
+}
+
+#[test]
+fn monotone_contract_projection_counts_reject_invalid_final_tree_ids() {
+    let out_of_range = vec![multiclass_dart_bookkeeping_stump(2)];
+    let error = dense_projection_stump_counts(&out_of_range, 2)
+        .expect_err("tree id beyond final logical rounds must fail");
+    assert!(error.to_string().contains("tree id 2"), "{error}");
+
+    let out_of_order = vec![
+        multiclass_dart_bookkeeping_stump(1),
+        multiclass_dart_bookkeeping_stump(0),
+    ];
+    let error = dense_projection_stump_counts(&out_of_order, 2)
+        .expect_err("non-contiguous tree slices must fail");
+    assert!(error.to_string().contains("stump order"), "{error}");
+}
+
+fn fit_morph_projection_bookkeeping_control(
+    boosting_mode: BoostingMode,
+    monotone_constraints: Vec<i8>,
+    validation_early_stopping: bool,
+) -> IterationRunSummary {
+    let dataset = sample_dataset();
+    let binned_matrix = sample_binned_matrix();
+    let params = TrainParams {
+        learning_rate: 0.1,
+        seed: 17,
+        deterministic: true,
+        min_data_in_leaf: 1,
+        lambda_l2: 0.0,
+        monotone_constraints,
+        morph_config: Some(MorphConfig {
+            morph_rate: 0.0,
+            evolution_pressure: 0.0,
+            morph_warmup_iters: u32::MAX,
+            info_score_weight: 0.0,
+            depth_penalty_base: 1.0,
+            balance_penalty: false,
+            lr_schedule: alloygbm_core::LrSchedule::WarmupCosine { warmup_frac: 0.5 },
+        }),
+        boosting_mode,
+        ..TrainParams::default()
+    };
+    let mut controls =
+        IterationControls::new(4, 0.0, 1, 0.1, 1_000_000.0, 0.0, 0).expect("controls");
+    if validation_early_stopping {
+        controls = controls
+            .with_validation_early_stopping(1, 100.0)
+            .expect("validation controls");
+    }
+    let trainer = Trainer::new(params).expect("trainer");
+
+    if validation_early_stopping {
+        trainer
+            .fit_iterations_with_validation_summary(
+                &dataset,
+                &binned_matrix,
+                ValidationDatasetRef {
+                    dataset: &dataset,
+                    binned_matrix: &binned_matrix,
+                },
+                &MockBackend,
+                &SquaredErrorObjective,
+                controls,
+            )
+            .expect("MorphBoost validation fit")
+    } else {
+        trainer
+            .fit_iterations_with_summary(
+                &dataset,
+                &binned_matrix,
+                &MockBackend,
+                &SquaredErrorObjective,
+                controls,
+            )
+            .expect("MorphBoost fit")
+    }
+}
+
+#[test]
+fn monotone_contract_dart_projection_keeps_phantom_normalization_unchanged() {
+    if !experiment_leaf_refinement_enabled() {
+        return;
+    }
+
+    let boosting_mode = BoostingMode::Dart {
+        drop_rate: 0.99,
+        max_drop: 2,
+        normalize_type: alloygbm_core::DartNormalize::Tree,
+        sample_type: alloygbm_core::DartSampleType::Uniform,
+    };
+    let inactive = fit_morph_projection_bookkeeping_control(boosting_mode, vec![0, 0], false);
+    let active = fit_morph_projection_bookkeeping_control(boosting_mode, vec![0, 1], false);
+    let tree_ids = active
+        .model
+        .stumps
+        .iter()
+        .map(|stump| stump.split.node_id / TREE_NODE_STRIDE)
+        .collect::<Vec<_>>();
+
+    assert!(
+        tree_ids.iter().all(|&tree_id| tree_id >= 1),
+        "round 0 should remain a phantom: {tree_ids:?}"
+    );
+    assert!(tree_ids.contains(&1), "round 1 should be material");
+    assert_eq!(active.model.stumps.len(), inactive.model.stumps.len());
+    for (active_stump, inactive_stump) in active.model.stumps.iter().zip(&inactive.model.stumps) {
+        assert_stump_bit_identical(inactive_stump, active_stump);
+    }
+}
+
+#[test]
+fn monotone_contract_projection_does_not_change_morph_early_stop_bookkeeping() {
+    if !experiment_leaf_refinement_enabled() {
+        return;
+    }
+
+    let inactive =
+        fit_morph_projection_bookkeeping_control(BoostingMode::Standard, vec![0, 0], true);
+    let active = fit_morph_projection_bookkeeping_control(BoostingMode::Standard, vec![0, 1], true);
+
+    assert_eq!(active.stop_reason, inactive.stop_reason);
+    assert_eq!(active.rounds_completed, inactive.rounds_completed);
+    assert_eq!(
+        active.loss_per_completed_round,
+        inactive.loss_per_completed_round
+    );
+    assert_eq!(
+        active.validation_loss_per_completed_round,
+        inactive.validation_loss_per_completed_round
+    );
+    assert_eq!(
+        active.sampled_rows_per_completed_round,
+        inactive.sampled_rows_per_completed_round
+    );
+    assert_eq!(
+        active.sampled_features_per_completed_round,
+        inactive.sampled_features_per_completed_round
+    );
+    assert_eq!(active.diagnostics_per_round, inactive.diagnostics_per_round);
+    assert_eq!(active.final_loss.to_bits(), inactive.final_loss.to_bits());
+    assert_eq!(
+        active.final_validation_loss.map(f32::to_bits),
+        inactive.final_validation_loss.map(f32::to_bits)
+    );
+    assert_eq!(active.model.stumps.len(), inactive.model.stumps.len());
+    for (active_stump, inactive_stump) in active.model.stumps.iter().zip(&inactive.model.stumps) {
+        assert_stump_bit_identical(inactive_stump, active_stump);
+    }
+
+    let dataset = sample_dataset();
+    let binned_matrix = sample_binned_matrix();
+    let mut replayed_predictions = vec![active.model.baseline_prediction; dataset.row_count()];
+    apply_tree_to_binned_predictions(
+        &mut replayed_predictions,
+        &binned_matrix,
+        &active.model.stumps,
+        Some((&dataset.matrix.values, dataset.matrix.feature_count)),
+    )
+    .expect("retained forest should replay");
+    let replayed_loss =
+        squared_error_loss(&replayed_predictions, &dataset.targets, None).expect("loss");
+    assert!((active.final_loss - replayed_loss).abs() <= 1.0e-6);
+    if let Some(&last_loss) = active.loss_per_completed_round.last() {
+        assert!((last_loss - active.final_loss).abs() <= 1.0e-6);
+    }
+}
+
+#[test]
 fn monotone_contract_compliant_warm_start_prefix_is_unchanged() {
     let (dataset, binned_matrix, _) = monotone_bound_propagation_fixture();
     let params = TrainParams {
