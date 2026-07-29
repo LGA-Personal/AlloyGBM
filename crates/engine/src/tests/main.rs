@@ -2,13 +2,14 @@ use super::*;
 use crate::factor::apply_pre_target_neutralization;
 use alloygbm_categorical::TargetEncoderConfig;
 use alloygbm_core::{
-    CoreError, Device, DroConfig, LeafSolverKind, MISSING_BIN_U8, MorphConfig, NeutralizationKind,
-    discover_exact_feature_bundles,
+    CoreError, Device, DroConfig, FeatureHistogram, HistogramBin, LeafSolverKind, MISSING_BIN_U8,
+    MorphConfig, NeutralizationKind, discover_exact_feature_bundles, leaf_gain_term,
 };
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 use std::time::Duration;
 
 struct MockBackend;
+struct MonotoneRegressionBackend;
 struct GradientNeutralizationCheckingBackend {
     exposures: FactorExposureMatrix,
     weights: Option<Vec<f32>>,
@@ -314,6 +315,282 @@ fn policy_fixture(
     (dataset, matrix)
 }
 
+struct CounterexampleRng {
+    state: u64,
+}
+
+impl CounterexampleRng {
+    fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    fn uniform_unit(&mut self) -> f32 {
+        self.state = self.state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut value = self.state;
+        value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        value ^= value >> 31;
+        ((value >> 40) as f32 + 0.5) / (1_u32 << 24) as f32
+    }
+
+    fn standard_normal(&mut self) -> f32 {
+        let radius = (-2.0 * self.uniform_unit().ln()).sqrt();
+        let angle = std::f32::consts::TAU * self.uniform_unit();
+        radius * angle.cos()
+    }
+}
+
+fn monotone_bound_propagation_fixture() -> (TrainingDataset, BinnedMatrix, Vec<Vec<f32>>) {
+    const ROW_COUNT: usize = 512;
+    const FEATURE_COUNT: usize = 3;
+    const DATA_BIN_COUNT: usize = 254;
+
+    let mut rng = CounterexampleRng::new(0);
+    let mut values = Vec::with_capacity(ROW_COUNT * FEATURE_COUNT);
+    for _ in 0..ROW_COUNT * FEATURE_COUNT {
+        values.push(-2.0 + 4.0 * rng.uniform_unit());
+    }
+    let targets = values
+        .chunks_exact(FEATURE_COUNT)
+        .map(|row| {
+            1.2 * row[0]
+                + 2.5 * (2.2 * row[1]).sin()
+                + 1.5 * row[0] * row[2]
+                + 0.35 * rng.standard_normal()
+        })
+        .collect::<Vec<_>>();
+
+    let mut bins = vec![0_u8; values.len()];
+    let mut sorted_features = Vec::with_capacity(FEATURE_COUNT);
+    for feature in 0..FEATURE_COUNT {
+        let mut sorted = (0..ROW_COUNT)
+            .map(|row| (values[row * FEATURE_COUNT + feature], row))
+            .collect::<Vec<_>>();
+        sorted.sort_unstable_by(|left, right| left.0.total_cmp(&right.0));
+        for (rank, &(_, row)) in sorted.iter().enumerate() {
+            bins[row * FEATURE_COUNT + feature] =
+                ((rank * DATA_BIN_COUNT) / ROW_COUNT).min(DATA_BIN_COUNT - 1) as u8;
+        }
+        sorted_features.push(sorted.into_iter().map(|(value, _)| value).collect());
+    }
+
+    let dataset = TrainingDataset {
+        matrix: alloygbm_core::DatasetMatrix::new(ROW_COUNT, FEATURE_COUNT, values)
+            .expect("counterexample matrix is valid"),
+        targets,
+        sample_weights: None,
+        time_index: None,
+        group_id: None,
+        factor_exposures: None,
+    };
+    let binned_matrix =
+        BinnedMatrix::new(ROW_COUNT, FEATURE_COUNT, (DATA_BIN_COUNT - 1) as u16, bins)
+            .expect("counterexample quantile bins are valid");
+    (dataset, binned_matrix, sorted_features)
+}
+
+fn quantile_bin_for_sweep(sorted_values: &[f32], value: f32) -> f32 {
+    const DATA_BIN_COUNT: usize = 254;
+    let rank = sorted_values.partition_point(|candidate| *candidate <= value);
+    ((rank * DATA_BIN_COUNT) / sorted_values.len()).min(DATA_BIN_COUNT - 1) as f32
+}
+
+fn fit_monotone_bound_propagation_fixture(tree_growth: TreeGrowth, direction: i8) -> TrainedModel {
+    let (mut dataset, binned_matrix, _) = monotone_bound_propagation_fixture();
+    if direction == -1 {
+        for target in &mut dataset.targets {
+            *target = -*target;
+        }
+    }
+    let params = TrainParams {
+        seed: 0,
+        learning_rate: 0.2,
+        max_depth: 4,
+        monotone_constraints: vec![direction, 0, 0],
+        max_leaves: (tree_growth == TreeGrowth::Leaf).then_some(16),
+        tree_growth,
+        ..TrainParams::default()
+    };
+    Trainer::new(params)
+        .expect("counterexample parameters are valid")
+        .fit_iterations(
+            &dataset,
+            &binned_matrix,
+            &MonotoneRegressionBackend,
+            &SquaredErrorObjective,
+            12,
+        )
+        .expect("counterexample training succeeds")
+}
+
+fn assert_monotone_bound_propagation(tree_growth: TreeGrowth, direction: i8) {
+    let (_, _, sorted_features) = monotone_bound_propagation_fixture();
+    let model = fit_monotone_bound_propagation_fixture(tree_growth, direction);
+    let fixed_feature_1 = quantile_bin_for_sweep(&sorted_features[1], -2.0);
+    let fixed_feature_2 = quantile_bin_for_sweep(&sorted_features[2], -2.0);
+    let predictions = (0..=128)
+        .map(|step| {
+            let feature_0 = -2.0 + 4.0 * step as f32 / 128.0;
+            model
+                .predict_row(&[
+                    quantile_bin_for_sweep(&sorted_features[0], feature_0),
+                    fixed_feature_1,
+                    fixed_feature_2,
+                ])
+                .expect("counterexample prediction succeeds")
+        })
+        .collect::<Vec<_>>();
+
+    for (index, pair) in predictions.windows(2).enumerate() {
+        let directed_difference = direction as f32 * (pair[1] - pair[0]);
+        assert!(
+            directed_difference >= -1e-6,
+            "growth={tree_growth:?} direction={direction} prediction step {index} violated \
+             monotonicity: {} -> {} (directed difference {directed_difference})",
+            pair[0],
+            pair[1],
+        );
+    }
+}
+
+fn assert_node_stats_bit_identical(left: &NodeStats, right: &NodeStats) {
+    assert_eq!(left.grad_sum.to_bits(), right.grad_sum.to_bits());
+    assert_eq!(left.hess_sum.to_bits(), right.hess_sum.to_bits());
+    assert_eq!(left.grad_sq_sum.to_bits(), right.grad_sq_sum.to_bits());
+    assert_eq!(left.row_count, right.row_count);
+}
+
+fn assert_models_artifact_bit_identical(left: &TrainedModel, right: &TrainedModel) {
+    assert_eq!(
+        left.baseline_prediction.to_bits(),
+        right.baseline_prediction.to_bits()
+    );
+    assert_eq!(left.stumps.len(), right.stumps.len());
+    for (left_stump, right_stump) in left.stumps.iter().zip(&right.stumps) {
+        assert_eq!(left_stump.split.node_id, right_stump.split.node_id);
+        assert_eq!(
+            left_stump.split.feature_index,
+            right_stump.split.feature_index
+        );
+        assert_eq!(
+            left_stump.split.threshold_bin,
+            right_stump.split.threshold_bin
+        );
+        assert_eq!(
+            left_stump.split.gain.to_bits(),
+            right_stump.split.gain.to_bits()
+        );
+        assert_eq!(
+            left_stump.split.default_left,
+            right_stump.split.default_left
+        );
+        assert_eq!(
+            left_stump.split.is_categorical,
+            right_stump.split.is_categorical
+        );
+        assert_eq!(
+            left_stump.split.categorical_bitset,
+            right_stump.split.categorical_bitset
+        );
+        assert_node_stats_bit_identical(
+            &left_stump.split.left_stats,
+            &right_stump.split.left_stats,
+        );
+        assert_node_stats_bit_identical(
+            &left_stump.split.right_stats,
+            &right_stump.split.right_stats,
+        );
+        assert_eq!(
+            left_stump.tree_weight.to_bits(),
+            right_stump.tree_weight.to_bits()
+        );
+        assert_eq!(
+            left_stump.multi_output_leaf_values,
+            right_stump.multi_output_leaf_values
+        );
+        let (LeafValue::Scalar(left_left), LeafValue::Scalar(right_left)) =
+            (&left_stump.left_leaf_value, &right_stump.left_leaf_value)
+        else {
+            panic!("parity fixture must emit scalar left leaves");
+        };
+        let (LeafValue::Scalar(left_right), LeafValue::Scalar(right_right)) =
+            (&left_stump.right_leaf_value, &right_stump.right_leaf_value)
+        else {
+            panic!("parity fixture must emit scalar right leaves");
+        };
+        assert_eq!(left_left.to_bits(), right_left.to_bits());
+        assert_eq!(left_right.to_bits(), right_right.to_bits());
+    }
+    assert_eq!(
+        left.to_artifact_bytes()
+            .expect("unconstrained parity model serializes"),
+        right
+            .to_artifact_bytes()
+            .expect("all-zero parity model serializes")
+    );
+}
+
+fn assert_stump_bit_identical(left: &TrainedStump, right: &TrainedStump) {
+    assert_eq!(left.split.node_id, right.split.node_id);
+    assert_eq!(left.split.feature_index, right.split.feature_index);
+    assert_eq!(left.split.threshold_bin, right.split.threshold_bin);
+    assert_eq!(left.split.gain.to_bits(), right.split.gain.to_bits());
+    assert_eq!(left.split.default_left, right.split.default_left);
+    assert_eq!(left.split.is_categorical, right.split.is_categorical);
+    assert_eq!(
+        left.split.categorical_bitset,
+        right.split.categorical_bitset
+    );
+    assert_node_stats_bit_identical(&left.split.left_stats, &right.split.left_stats);
+    assert_node_stats_bit_identical(&left.split.right_stats, &right.split.right_stats);
+    assert_eq!(left.tree_weight.to_bits(), right.tree_weight.to_bits());
+    assert_eq!(
+        left.multi_output_leaf_values,
+        right.multi_output_leaf_values
+    );
+    let (LeafValue::Scalar(left_left), LeafValue::Scalar(right_left)) =
+        (&left.left_leaf_value, &right.left_leaf_value)
+    else {
+        panic!("monotone contract fixture must emit scalar left leaves");
+    };
+    let (LeafValue::Scalar(left_right), LeafValue::Scalar(right_right)) =
+        (&left.right_leaf_value, &right.right_leaf_value)
+    else {
+        panic!("monotone contract fixture must emit scalar right leaves");
+    };
+    assert_eq!(left_left.to_bits(), right_left.to_bits());
+    assert_eq!(left_right.to_bits(), right_right.to_bits());
+}
+
+fn assert_monotone_counterexample_predictions(model: &TrainedModel, direction: i8) {
+    let (_, _, sorted_features) = monotone_bound_propagation_fixture();
+    let fixed_feature_1 = quantile_bin_for_sweep(&sorted_features[1], -2.0);
+    let fixed_feature_2 = quantile_bin_for_sweep(&sorted_features[2], -2.0);
+    let predictions = (0..=128)
+        .map(|step| {
+            let feature_0 = -2.0 + 4.0 * step as f32 / 128.0;
+            model
+                .predict_row(&[
+                    quantile_bin_for_sweep(&sorted_features[0], feature_0),
+                    fixed_feature_1,
+                    fixed_feature_2,
+                ])
+                .expect("counterexample prediction succeeds")
+        })
+        .collect::<Vec<_>>();
+
+    for (index, pair) in predictions.windows(2).enumerate() {
+        let directed_difference = direction as f32 * (pair[1] - pair[0]);
+        assert!(
+            directed_difference >= -1e-6,
+            "direction={direction} prediction step {index} violated monotonicity: {} -> {} \
+             (directed difference {directed_difference})",
+            pair[0],
+            pair[1],
+        );
+    }
+}
+
 fn trainer() -> Trainer {
     Trainer::new(TrainParams::default()).expect("default policy parameters are valid")
 }
@@ -506,6 +783,184 @@ impl BackendOps for MockBackend {
             grad_sq_sum,
             row_count: row_indices.len() as u32,
         })
+    }
+}
+
+impl BackendOps for MonotoneRegressionBackend {
+    fn build_histograms(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: &NodeSlice,
+        feature_tiles: &[FeatureTile],
+    ) -> EngineResult<HistogramBundle> {
+        let bin_count = usize::from(binned_matrix.max_bin) + 1;
+        let mut feature_histograms = Vec::new();
+        for feature_index in feature_tiles
+            .iter()
+            .flat_map(|tile| tile.start_feature..tile.end_feature)
+        {
+            let mut bins = vec![
+                HistogramBin {
+                    grad_sum: 0.0,
+                    hess_sum: 0.0,
+                    grad_sq_sum: 0.0,
+                    count: 0,
+                };
+                bin_count
+            ];
+            for &row_index in &node.row_indices {
+                let row = row_index as usize;
+                let gradient = gradients.get(row).ok_or_else(|| {
+                    EngineError::ContractViolation(
+                        "monotone regression row index is out of bounds".to_string(),
+                    )
+                })?;
+                let bin = binned_matrix
+                    .row_bin(row * binned_matrix.feature_count + feature_index as usize)
+                    as usize;
+                let stats = bins.get_mut(bin).ok_or_else(|| {
+                    EngineError::ContractViolation(
+                        "monotone regression bin index is out of bounds".to_string(),
+                    )
+                })?;
+                stats.grad_sum += gradient.grad;
+                stats.hess_sum += gradient.hess;
+                stats.grad_sq_sum += gradient.grad * gradient.grad;
+                stats.count += 1;
+            }
+            feature_histograms.push(FeatureHistogram {
+                feature_index,
+                bins,
+            });
+        }
+        HistogramBundle::from_feature_histograms(node.node_id, feature_histograms, true)
+            .map_err(EngineError::from)
+    }
+
+    fn best_split(&self, histograms: &HistogramBundle) -> EngineResult<Option<SplitCandidate>> {
+        self.best_split_with_options(histograms, SplitSelectionOptions::default(), &[], &[])
+    }
+
+    fn best_split_with_options(
+        &self,
+        histograms: &HistogramBundle,
+        options: SplitSelectionOptions,
+        feature_weights: &[f32],
+        _categorical_features: &[CategoricalFeatureInfo],
+    ) -> EngineResult<Option<SplitCandidate>> {
+        let mut best_candidate: Option<SplitCandidate> = None;
+        let mut best_weighted_gain = 0.0_f32;
+        for feature in histograms.features() {
+            let total = feature.bins().fold(
+                NodeStats {
+                    grad_sum: 0.0,
+                    hess_sum: 0.0,
+                    grad_sq_sum: 0.0,
+                    row_count: 0,
+                },
+                |mut total, bin| {
+                    total.grad_sum += bin.grad_sum;
+                    total.hess_sum += bin.hess_sum;
+                    total.grad_sq_sum += bin.grad_sq_sum;
+                    total.row_count += bin.count;
+                    total
+                },
+            );
+            let parent_gain = 2.0
+                * leaf_gain_term(
+                    total.grad_sum,
+                    total.hess_sum,
+                    total.grad_sq_sum,
+                    total.row_count,
+                    options.l1_alpha,
+                    options.l2_lambda,
+                    options.dro_config.as_ref(),
+                );
+            let mut left = NodeStats {
+                grad_sum: 0.0,
+                hess_sum: 0.0,
+                grad_sq_sum: 0.0,
+                row_count: 0,
+            };
+            for threshold_bin in 0..feature.len().saturating_sub(1) {
+                let bin = feature
+                    .bin(threshold_bin)
+                    .expect("threshold bin is bounded");
+                left.grad_sum += bin.grad_sum;
+                left.hess_sum += bin.hess_sum;
+                left.grad_sq_sum += bin.grad_sq_sum;
+                left.row_count += bin.count;
+                let right = NodeStats {
+                    grad_sum: total.grad_sum - left.grad_sum,
+                    hess_sum: total.hess_sum - left.hess_sum,
+                    grad_sq_sum: total.grad_sq_sum - left.grad_sq_sum,
+                    row_count: total.row_count - left.row_count,
+                };
+                if left.row_count < options.min_rows_per_leaf as u32
+                    || right.row_count < options.min_rows_per_leaf as u32
+                    || left.hess_sum <= options.min_child_hessian
+                    || right.hess_sum <= options.min_child_hessian
+                {
+                    continue;
+                }
+                let gain =
+                    2.0 * (leaf_gain_term(
+                        left.grad_sum,
+                        left.hess_sum,
+                        left.grad_sq_sum,
+                        left.row_count,
+                        options.l1_alpha,
+                        options.l2_lambda,
+                        options.dro_config.as_ref(),
+                    ) + leaf_gain_term(
+                        right.grad_sum,
+                        right.hess_sum,
+                        right.grad_sq_sum,
+                        right.row_count,
+                        options.l1_alpha,
+                        options.l2_lambda,
+                        options.dro_config.as_ref(),
+                    )) - parent_gain;
+                let weight = feature_weights
+                    .get(feature.feature_index() as usize)
+                    .copied()
+                    .unwrap_or(1.0);
+                let weighted_gain = gain * weight;
+                if gain.is_finite() && weighted_gain > best_weighted_gain {
+                    best_weighted_gain = weighted_gain;
+                    best_candidate = Some(SplitCandidate {
+                        node_id: histograms.node_id,
+                        feature_index: feature.feature_index(),
+                        threshold_bin: threshold_bin as u16,
+                        gain,
+                        default_left: false,
+                        is_categorical: false,
+                        categorical_bitset: None,
+                        left_stats: left.clone(),
+                        right_stats: right,
+                    });
+                }
+            }
+        }
+        Ok(best_candidate)
+    }
+
+    fn apply_split(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        node: &NodeSlice,
+        split: &SplitCandidate,
+    ) -> EngineResult<PartitionResult> {
+        MockBackend.apply_split(binned_matrix, node, split)
+    }
+
+    fn reduce_sums(
+        &self,
+        gradients: &[GradientPair],
+        row_indices: &[u32],
+    ) -> EngineResult<NodeStats> {
+        MockBackend.reduce_sums(gradients, row_indices)
     }
 }
 
@@ -942,6 +1397,729 @@ impl ObjectiveOps for BadObjective {
     ) -> EngineResult<f32> {
         squared_error_loss(predictions, targets, sample_weights)
     }
+}
+
+#[test]
+fn monotone_bound_propagation_level_wise() {
+    assert_monotone_bound_propagation(TreeGrowth::Level, 1);
+    assert_monotone_bound_propagation(TreeGrowth::Level, -1);
+}
+
+#[test]
+fn monotone_bound_propagation_leaf_wise() {
+    assert_monotone_bound_propagation(TreeGrowth::Leaf, 1);
+    assert_monotone_bound_propagation(TreeGrowth::Leaf, -1);
+}
+
+#[test]
+fn monotone_bound_propagation_unconstrained_parity() {
+    let (dataset, binned_matrix, _) = monotone_bound_propagation_fixture();
+    for tree_growth in [TreeGrowth::Level, TreeGrowth::Leaf] {
+        let fit = |monotone_constraints| {
+            Trainer::new(TrainParams {
+                seed: 0,
+                learning_rate: 0.2,
+                max_depth: 4,
+                monotone_constraints,
+                max_leaves: (tree_growth == TreeGrowth::Leaf).then_some(16),
+                tree_growth,
+                ..TrainParams::default()
+            })
+            .expect("parity parameters are valid")
+            .fit_iterations(
+                &dataset,
+                &binned_matrix,
+                &MonotoneRegressionBackend,
+                &SquaredErrorObjective,
+                12,
+            )
+            .expect("parity training succeeds")
+        };
+        let unconstrained = fit(Vec::new());
+        let all_zero = fit(vec![0, 0, 0]);
+        assert_models_artifact_bit_identical(&unconstrained, &all_zero);
+    }
+}
+
+#[test]
+fn monotone_contract_multiclass_is_rejected() {
+    let mut dataset = sample_dataset();
+    dataset.targets = vec![0.0, 1.0, 2.0, 1.0];
+    let trainer = Trainer::new(TrainParams {
+        monotone_constraints: vec![1, 0],
+        ..TrainParams::default()
+    })
+    .expect("scalar monotone parameters are valid");
+    let objective = MultiClassSoftmaxObjective::new(3).expect("three classes are valid");
+    let controls =
+        IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).expect("valid controls");
+
+    let error = trainer
+        .fit_multiclass_iterations_with_summary(
+            &dataset,
+            &sample_binned_matrix(),
+            &MockBackend,
+            &objective,
+            controls,
+        )
+        .expect_err("multiclass with active monotone constraints must fail");
+    let message = error.to_string();
+    assert!(message.contains("multiclass"), "{message}");
+    assert!(message.contains("monotone_constraints"), "{message}");
+}
+
+#[test]
+fn monotone_contract_native_categorical_overlap_is_rejected() {
+    let trainer = Trainer::new(TrainParams {
+        monotone_constraints: vec![1, 0],
+        ..TrainParams::default()
+    })
+    .expect("monotone parameters are valid")
+    .with_categorical_features(vec![CategoricalFeatureInfo {
+        feature_index: 0,
+        num_categories: 4,
+    }]);
+
+    let error = trainer
+        .fit_iterations(
+            &sample_dataset(),
+            &sample_binned_matrix(),
+            &MockBackend,
+            &SquaredErrorObjective,
+            1,
+        )
+        .expect_err("native categorical overlap with a constrained feature must fail");
+    let message = error.to_string();
+    assert!(message.contains("native categorical"), "{message}");
+    assert!(message.contains("monotone_constraints"), "{message}");
+}
+
+#[test]
+fn monotone_contract_native_categorical_non_overlap_is_accepted() {
+    let trainer = Trainer::new(TrainParams {
+        monotone_constraints: vec![1, 0],
+        ..TrainParams::default()
+    })
+    .expect("monotone parameters are valid")
+    .with_categorical_features(vec![CategoricalFeatureInfo {
+        feature_index: 1,
+        num_categories: 2,
+    }]);
+
+    trainer
+        .fit_iterations(
+            &sample_dataset(),
+            &sample_binned_matrix(),
+            &MockBackend,
+            &SquaredErrorObjective,
+            1,
+        )
+        .expect("native categorical metadata on an unconstrained feature must remain supported");
+}
+
+#[test]
+fn monotone_contract_quantile_refinement_preserves_counterexample() {
+    let (dataset, binned_matrix, _) = monotone_bound_propagation_fixture();
+    let model = Trainer::new(TrainParams {
+        seed: 0,
+        learning_rate: 0.2,
+        max_depth: 4,
+        monotone_constraints: vec![1, 0, 0],
+        ..TrainParams::default()
+    })
+    .expect("quantile monotone parameters are valid")
+    .fit_iterations(
+        &dataset,
+        &binned_matrix,
+        &MonotoneRegressionBackend,
+        &QuantileObjective { alpha: 0.5 },
+        12,
+    )
+    .expect("quantile counterexample training succeeds");
+
+    assert_monotone_counterexample_predictions(&model, 1);
+}
+
+#[test]
+fn monotone_contract_experimental_regression_refinement_preserves_counterexample() {
+    if !experiment_leaf_refinement_enabled() {
+        return;
+    }
+
+    let model = fit_monotone_bound_propagation_fixture(TreeGrowth::Level, 1);
+    assert_monotone_counterexample_predictions(&model, 1);
+}
+
+fn assert_monotone_experimental_refinement_handles_morph_phantom(boosting_mode: BoostingMode) {
+    if !experiment_leaf_refinement_enabled() {
+        return;
+    }
+
+    let (dataset, binned_matrix, _) = monotone_bound_propagation_fixture();
+    let params = TrainParams {
+        learning_rate: 0.1,
+        seed: 17,
+        deterministic: true,
+        min_data_in_leaf: 1,
+        lambda_l2: 0.0,
+        monotone_constraints: vec![1, 0, 0],
+        morph_config: Some(MorphConfig {
+            morph_rate: 0.0,
+            evolution_pressure: 0.0,
+            morph_warmup_iters: u32::MAX,
+            info_score_weight: 0.0,
+            depth_penalty_base: 1.0,
+            balance_penalty: false,
+            lr_schedule: alloygbm_core::LrSchedule::WarmupCosine { warmup_frac: 0.5 },
+        }),
+        boosting_mode,
+        ..TrainParams::default()
+    };
+    let controls = IterationControls::new(4, 0.0, 1, 0.1, 1_000_000.0, 0.0, 0).expect("controls");
+
+    let summary = Trainer::new(params)
+        .expect("trainer")
+        .fit_iterations_with_summary(
+            &dataset,
+            &binned_matrix,
+            &MonotoneRegressionBackend,
+            &SquaredErrorObjective,
+            controls,
+        )
+        .expect("active-monotone MorphBoost refinement fit");
+    let tree_ids = summary
+        .model
+        .stumps
+        .iter()
+        .map(|stump| stump.split.node_id / TREE_NODE_STRIDE)
+        .collect::<Vec<_>>();
+
+    assert!(summary.rounds_completed >= 2);
+    assert!(
+        tree_ids.iter().all(|&tree_id| tree_id >= 1),
+        "round 0 should be a skipped warmup phantom: {tree_ids:?}"
+    );
+    assert!(
+        tree_ids.contains(&1),
+        "the first material tree must retain logical tree id 1: {tree_ids:?}"
+    );
+    assert_monotone_counterexample_predictions(&summary.model, 1);
+}
+
+#[test]
+fn monotone_contract_experimental_refinement_handles_morph_phantom_round() {
+    assert_monotone_experimental_refinement_handles_morph_phantom(BoostingMode::Standard);
+}
+
+#[test]
+fn monotone_contract_projection_counts_are_dense_without_training_state() {
+    let stumps = vec![
+        multiclass_dart_bookkeeping_stump(1),
+        multiclass_dart_bookkeeping_stump(1),
+        multiclass_dart_bookkeeping_stump(3),
+    ];
+
+    let counts = dense_projection_stump_counts(&stumps).expect("projection counts should be dense");
+
+    assert_eq!(counts, vec![0, 2, 0, 1]);
+}
+
+#[test]
+fn monotone_contract_projection_counts_are_empty_for_an_empty_forest() {
+    assert_eq!(
+        dense_projection_stump_counts(&[]).expect("empty projection counts"),
+        Vec::<usize>::new()
+    );
+}
+
+#[test]
+fn monotone_contract_projection_counts_reject_backward_tree_ids() {
+    let out_of_order = vec![
+        multiclass_dart_bookkeeping_stump(1),
+        multiclass_dart_bookkeeping_stump(0),
+    ];
+    let error = dense_projection_stump_counts(&out_of_order)
+        .expect_err("non-contiguous tree slices must fail");
+    assert!(error.to_string().contains("stump order"), "{error}");
+}
+
+fn fit_morph_projection_bookkeeping_control(
+    boosting_mode: BoostingMode,
+    monotone_constraints: Vec<i8>,
+    validation_early_stopping: bool,
+) -> IterationRunSummary {
+    let dataset = sample_dataset();
+    let binned_matrix = sample_binned_matrix();
+    let params = TrainParams {
+        learning_rate: 0.1,
+        seed: 17,
+        deterministic: true,
+        min_data_in_leaf: 1,
+        lambda_l2: 0.0,
+        monotone_constraints,
+        morph_config: Some(MorphConfig {
+            morph_rate: 0.0,
+            evolution_pressure: 0.0,
+            morph_warmup_iters: u32::MAX,
+            info_score_weight: 0.0,
+            depth_penalty_base: 1.0,
+            balance_penalty: false,
+            lr_schedule: alloygbm_core::LrSchedule::WarmupCosine { warmup_frac: 0.5 },
+        }),
+        boosting_mode,
+        ..TrainParams::default()
+    };
+    let mut controls =
+        IterationControls::new(4, 0.0, 1, 0.1, 1_000_000.0, 0.0, 0).expect("controls");
+    if validation_early_stopping {
+        controls = controls
+            .with_validation_early_stopping(1, 100.0)
+            .expect("validation controls");
+    }
+    let trainer = Trainer::new(params).expect("trainer");
+
+    if validation_early_stopping {
+        trainer
+            .fit_iterations_with_validation_summary(
+                &dataset,
+                &binned_matrix,
+                ValidationDatasetRef {
+                    dataset: &dataset,
+                    binned_matrix: &binned_matrix,
+                },
+                &MockBackend,
+                &SquaredErrorObjective,
+                controls,
+            )
+            .expect("MorphBoost validation fit")
+    } else {
+        trainer
+            .fit_iterations_with_summary(
+                &dataset,
+                &binned_matrix,
+                &MockBackend,
+                &SquaredErrorObjective,
+                controls,
+            )
+            .expect("MorphBoost fit")
+    }
+}
+
+#[test]
+fn monotone_contract_projection_does_not_change_morph_early_stop_bookkeeping() {
+    if !experiment_leaf_refinement_enabled() {
+        return;
+    }
+
+    let inactive =
+        fit_morph_projection_bookkeeping_control(BoostingMode::Standard, vec![0, 0], true);
+    let active = fit_morph_projection_bookkeeping_control(BoostingMode::Standard, vec![0, 1], true);
+
+    assert_eq!(active.stop_reason, inactive.stop_reason);
+    assert_eq!(active.rounds_completed, inactive.rounds_completed);
+    assert_eq!(
+        active.loss_per_completed_round,
+        inactive.loss_per_completed_round
+    );
+    assert_eq!(
+        active.validation_loss_per_completed_round,
+        inactive.validation_loss_per_completed_round
+    );
+    assert_eq!(
+        active.sampled_rows_per_completed_round,
+        inactive.sampled_rows_per_completed_round
+    );
+    assert_eq!(
+        active.sampled_features_per_completed_round,
+        inactive.sampled_features_per_completed_round
+    );
+    assert_eq!(active.diagnostics_per_round, inactive.diagnostics_per_round);
+    assert_eq!(active.final_loss.to_bits(), inactive.final_loss.to_bits());
+    assert_eq!(
+        active.final_validation_loss.map(f32::to_bits),
+        inactive.final_validation_loss.map(f32::to_bits)
+    );
+    assert_eq!(active.model.stumps.len(), inactive.model.stumps.len());
+    for (active_stump, inactive_stump) in active.model.stumps.iter().zip(&inactive.model.stumps) {
+        assert_stump_bit_identical(inactive_stump, active_stump);
+    }
+
+    let dataset = sample_dataset();
+    let binned_matrix = sample_binned_matrix();
+    let mut replayed_predictions = vec![active.model.baseline_prediction; dataset.row_count()];
+    apply_tree_to_binned_predictions(
+        &mut replayed_predictions,
+        &binned_matrix,
+        &active.model.stumps,
+        Some((&dataset.matrix.values, dataset.matrix.feature_count)),
+    )
+    .expect("retained forest should replay");
+    let replayed_loss =
+        squared_error_loss(&replayed_predictions, &dataset.targets, None).expect("loss");
+    assert!((active.final_loss - replayed_loss).abs() <= 1.0e-6);
+    if let Some(&last_loss) = active.loss_per_completed_round.last() {
+        assert!((last_loss - active.final_loss).abs() <= 1.0e-6);
+    }
+}
+
+#[test]
+fn monotone_contract_refinement_accepts_retained_tree_id_after_phantom_plateau() {
+    if !experiment_leaf_refinement_enabled() {
+        return;
+    }
+
+    let training = sample_dataset();
+    let binned_matrix = sample_binned_matrix();
+    let mut validation = sample_dataset();
+    validation.targets = vec![0.15, 0.15, -0.15, -0.15];
+    let params = TrainParams {
+        learning_rate: 0.1,
+        seed: 17,
+        deterministic: true,
+        min_data_in_leaf: 1,
+        lambda_l2: 0.0,
+        monotone_constraints: vec![-1, 0],
+        morph_config: Some(MorphConfig {
+            morph_rate: 0.0,
+            evolution_pressure: 0.0,
+            morph_warmup_iters: u32::MAX,
+            info_score_weight: 0.0,
+            depth_penalty_base: 1.0,
+            balance_penalty: false,
+            lr_schedule: alloygbm_core::LrSchedule::WarmupCosine { warmup_frac: 0.5 },
+        }),
+        ..TrainParams::default()
+    };
+    let controls = IterationControls::new(4, 0.0, 1, 0.1, 1_000_000.0, 0.0, 0)
+        .expect("controls")
+        .with_validation_early_stopping(1, 0.0)
+        .expect("validation controls");
+
+    let summary = Trainer::new(params)
+        .expect("trainer")
+        .fit_iterations_with_validation_summary(
+            &training,
+            &binned_matrix,
+            ValidationDatasetRef {
+                dataset: &validation,
+                binned_matrix: &binned_matrix,
+            },
+            &MockBackend,
+            &SquaredErrorObjective,
+            controls,
+        )
+        .expect("retained tree IDs must determine refinement projection counts");
+
+    assert_eq!(
+        summary.stop_reason,
+        IterationStopReason::ValidationLossPlateau
+    );
+    assert_eq!(summary.best_validation_round, Some(2));
+    assert_eq!(summary.rounds_completed, 2);
+    let tree_ids = summary
+        .model
+        .stumps
+        .iter()
+        .map(|stump| stump.split.node_id / TREE_NODE_STRIDE)
+        .collect::<Vec<_>>();
+    assert_eq!(tree_ids, vec![1, 2]);
+
+    let predictions = (0..=3)
+        .map(|feature| {
+            summary
+                .model
+                .predict_row(&[feature as f32, 0.0])
+                .expect("prediction")
+        })
+        .collect::<Vec<_>>();
+    for pair in predictions.windows(2) {
+        assert!(
+            pair[1] <= pair[0] + 1.0e-6,
+            "decreasing monotone constraint violated: {predictions:?}"
+        );
+    }
+}
+
+#[test]
+fn monotone_contract_compliant_warm_start_prefix_is_unchanged() {
+    let (dataset, binned_matrix, _) = monotone_bound_propagation_fixture();
+    let params = TrainParams {
+        seed: 0,
+        learning_rate: 0.2,
+        max_depth: 4,
+        monotone_constraints: vec![1, 0, 0],
+        ..TrainParams::default()
+    };
+    let trainer = Trainer::new(params).expect("monotone parameters are valid");
+    let prior = trainer
+        .fit_iterations(
+            &dataset,
+            &binned_matrix,
+            &MonotoneRegressionBackend,
+            &SquaredErrorObjective,
+            3,
+        )
+        .expect("constrained prior fit succeeds");
+    let prior_stumps = prior.stumps.clone();
+    let prior_rounds_completed = prior.rounds_completed();
+    let warm_start = WarmStartState {
+        baseline_prediction: prior.baseline_prediction,
+        stumps: prior.stumps,
+        initial_rounds_completed: prior_rounds_completed,
+        initial_ema_stats: None,
+        initial_dart_tree_weights: None,
+    };
+    let controls =
+        IterationControls::new(2, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).expect("valid controls");
+
+    let continued = trainer
+        .fit_iterations_warm_start(
+            &dataset,
+            &binned_matrix,
+            &MonotoneRegressionBackend,
+            &SquaredErrorObjective,
+            controls,
+            warm_start,
+        )
+        .expect("compliant constrained warm start succeeds");
+
+    assert!(continued.model.stumps.len() >= prior_stumps.len());
+    for (prior_stump, imported_stump) in prior_stumps
+        .iter()
+        .zip(&continued.model.stumps[..prior_stumps.len()])
+    {
+        assert_stump_bit_identical(prior_stump, imported_stump);
+    }
+}
+
+#[test]
+fn monotone_contract_compliant_warm_start_accepts_phantom_rounds() {
+    let compliant_tree_after_phantom = TrainedStump {
+        split: SplitCandidate {
+            node_id: encode_tree_node_id(1, 0).expect("node id encodes"),
+            feature_index: 0,
+            threshold_bin: 1,
+            gain: 1.0,
+            default_left: false,
+            is_categorical: false,
+            categorical_bitset: None,
+            left_stats: NodeStats {
+                grad_sum: 0.0,
+                hess_sum: 2.0,
+                grad_sq_sum: 0.0,
+                row_count: 2,
+            },
+            right_stats: NodeStats {
+                grad_sum: 0.0,
+                hess_sum: 2.0,
+                grad_sq_sum: 0.0,
+                row_count: 2,
+            },
+        },
+        left_leaf_value: LeafValue::Scalar(-1.0),
+        right_leaf_value: LeafValue::Scalar(1.0),
+        tree_weight: 1.0,
+        multi_output_leaf_values: None,
+    };
+    let trainer = Trainer::new(TrainParams {
+        monotone_constraints: vec![1, 0],
+        ..TrainParams::default()
+    })
+    .expect("monotone parameters are valid");
+    let controls =
+        IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).expect("valid controls");
+
+    trainer
+        .fit_iterations_warm_start(
+            &sample_dataset(),
+            &sample_binned_matrix(),
+            &MockBackend,
+            &SquaredErrorObjective,
+            controls,
+            WarmStartState {
+                baseline_prediction: 0.0,
+                stumps: vec![compliant_tree_after_phantom],
+                initial_rounds_completed: 2,
+                initial_ema_stats: None,
+                initial_dart_tree_weights: None,
+            },
+        )
+        .expect("compliant warm start with a phantom prior round must succeed");
+}
+
+#[test]
+fn monotone_contract_rejects_retained_native_categorical_split_without_current_metadata() {
+    let categorical_stump = TrainedStump {
+        split: SplitCandidate {
+            node_id: encode_tree_node_id(0, 0).expect("node id encodes"),
+            feature_index: 0,
+            threshold_bin: 0,
+            gain: 1.0,
+            default_left: false,
+            is_categorical: true,
+            categorical_bitset: Some(vec![0b0000_0101]),
+            left_stats: NodeStats {
+                grad_sum: 0.0,
+                hess_sum: 2.0,
+                grad_sq_sum: 0.0,
+                row_count: 2,
+            },
+            right_stats: NodeStats {
+                grad_sum: 0.0,
+                hess_sum: 2.0,
+                grad_sq_sum: 0.0,
+                row_count: 2,
+            },
+        },
+        left_leaf_value: LeafValue::Scalar(-1.0),
+        right_leaf_value: LeafValue::Scalar(1.0),
+        tree_weight: 1.0,
+        multi_output_leaf_values: None,
+    };
+    let trainer = Trainer::new(TrainParams {
+        monotone_constraints: vec![1, 0],
+        ..TrainParams::default()
+    })
+    .expect("monotone parameters are valid");
+    let controls =
+        IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).expect("valid controls");
+
+    let error = trainer
+        .fit_iterations_warm_start(
+            &sample_dataset(),
+            &sample_binned_matrix(),
+            &MockBackend,
+            &SquaredErrorObjective,
+            controls,
+            WarmStartState {
+                baseline_prediction: 0.0,
+                stumps: vec![categorical_stump],
+                initial_rounds_completed: 1,
+                initial_ema_stats: None,
+                initial_dart_tree_weights: None,
+            },
+        )
+        .expect_err("retained native categorical split on a constrained feature must fail");
+    let message = error.to_string();
+    assert!(message.contains("native categorical"), "{message}");
+    assert!(message.contains("monotone_constraints"), "{message}");
+}
+
+#[test]
+fn monotone_contract_rejects_retained_non_unit_dart_weights() {
+    let weighted_stump = TrainedStump {
+        split: SplitCandidate {
+            node_id: encode_tree_node_id(0, 0).expect("node id encodes"),
+            feature_index: 0,
+            threshold_bin: 1,
+            gain: 1.0,
+            default_left: false,
+            is_categorical: false,
+            categorical_bitset: None,
+            left_stats: NodeStats {
+                grad_sum: 0.0,
+                hess_sum: 2.0,
+                grad_sq_sum: 0.0,
+                row_count: 2,
+            },
+            right_stats: NodeStats {
+                grad_sum: 0.0,
+                hess_sum: 2.0,
+                grad_sq_sum: 0.0,
+                row_count: 2,
+            },
+        },
+        left_leaf_value: LeafValue::Scalar(-1.0),
+        right_leaf_value: LeafValue::Scalar(1.0),
+        tree_weight: 0.5,
+        multi_output_leaf_values: None,
+    };
+    let trainer = Trainer::new(TrainParams {
+        monotone_constraints: vec![1, 0],
+        ..TrainParams::default()
+    })
+    .expect("current standard parameters are valid");
+    let controls =
+        IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).expect("valid controls");
+
+    let error = trainer
+        .fit_iterations_warm_start(
+            &sample_dataset(),
+            &sample_binned_matrix(),
+            &MockBackend,
+            &SquaredErrorObjective,
+            controls,
+            WarmStartState {
+                baseline_prediction: 0.0,
+                stumps: vec![weighted_stump],
+                initial_rounds_completed: 1,
+                initial_ema_stats: None,
+                initial_dart_tree_weights: Some(vec![0.5]),
+            },
+        )
+        .expect_err("weighted DART prefix must not bypass the monotone contract");
+    let message = error.to_string();
+    assert!(message.contains("warm_start"), "{message}");
+    assert!(message.contains("DART tree weights"), "{message}");
+    assert!(message.contains("monotone_constraints"), "{message}");
+}
+
+#[test]
+fn monotone_contract_violating_legacy_warm_start_is_rejected() {
+    let violating_stump = TrainedStump {
+        split: SplitCandidate {
+            node_id: encode_tree_node_id(0, 0).expect("node id encodes"),
+            feature_index: 0,
+            threshold_bin: 1,
+            gain: 1.0,
+            default_left: false,
+            is_categorical: false,
+            categorical_bitset: None,
+            left_stats: NodeStats {
+                grad_sum: 0.0,
+                hess_sum: 2.0,
+                grad_sq_sum: 0.0,
+                row_count: 2,
+            },
+            right_stats: NodeStats {
+                grad_sum: 0.0,
+                hess_sum: 2.0,
+                grad_sq_sum: 0.0,
+                row_count: 2,
+            },
+        },
+        left_leaf_value: LeafValue::Scalar(1.0),
+        right_leaf_value: LeafValue::Scalar(-1.0),
+        tree_weight: 1.0,
+        multi_output_leaf_values: None,
+    };
+    let trainer = Trainer::new(TrainParams {
+        monotone_constraints: vec![1, 0],
+        ..TrainParams::default()
+    })
+    .expect("monotone parameters are valid");
+    let controls =
+        IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).expect("valid controls");
+
+    let error = trainer
+        .fit_iterations_warm_start(
+            &sample_dataset(),
+            &sample_binned_matrix(),
+            &MockBackend,
+            &SquaredErrorObjective,
+            controls,
+            WarmStartState {
+                baseline_prediction: 0.0,
+                stumps: vec![violating_stump],
+                initial_rounds_completed: 1,
+                initial_ema_stats: None,
+                initial_dart_tree_weights: None,
+            },
+        )
+        .expect_err("violating legacy warm-start tree must fail");
+    let message = error.to_string();
+    assert!(message.contains("warm_start"), "{message}");
+    assert!(message.contains("monotone_constraints"), "{message}");
 }
 
 #[test]

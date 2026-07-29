@@ -31,6 +31,10 @@ Current benchmark entry points:
   the 200-round `0.20 / 50` stress arm visible; only explicit default-like
   profiles (`drop_rate <= 0.10`) use the 1.50x RMSE quality gate, and timing
   remains descriptive.
+- deterministic scalar monotone-constraint acceptance harness:
+  `benchmarks/monotone_constraints_benchmark.py` with report at
+  [monotone_constraints_v1.md](monotone_constraints_v1.md). It checks finite
+  numeric sweeps for zero scalar-prediction violations; timing is descriptive.
 - descriptive high-class-count, low-drop-cap multiclass DART scratch harness:
   `benchmarks/multiclass_dart_scratch_benchmark.py` with report at
   [multiclass_dart_scratch_v1.md](multiclass_dart_scratch_v1.md). It has no
@@ -60,3 +64,21 @@ python benchmarks/auto_policy_benchmark.py --quick --gate
 
 The full three-seed evidence and selection decision are recorded in
 [auto_policy_calibration_v1.md](auto_policy_calibration_v1.md).
+
+## Monotone-constraint acceptance
+
+The compact CI sentinel and full committed-evidence capture are:
+
+```bash
+python3 benchmarks/monotone_constraints_benchmark.py --quick --gate
+python3 benchmarks/monotone_constraints_benchmark.py \
+  --gate \
+  --output docs/benchmarks/monotone_constraints_v1.md
+```
+
+The full report covers regression and binary scalar models across training-row
+counts, feature widths, both constraint directions, both tree-growth
+strategies, and three seeds. It requires finite sweep values, zero violations,
+completed rounds, bounded quality degradation, and improvement over a constant
+predictor. Missing values are not ordered by this numeric sweep; they follow
+the model's learned missing branch.

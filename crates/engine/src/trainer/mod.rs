@@ -1,11 +1,17 @@
 //! Trainer module — gradient-boosting iteration controller.
 
 mod interaction;
+#[allow(dead_code)]
+mod monotone;
 mod policy;
 mod tree_build;
 mod validate;
 
 pub(crate) use interaction::InteractionConstraintIndex;
+use monotone::{
+    has_active_monotone_constraints, project_monotone_forest, project_monotone_tree,
+    validate_monotone_forest,
+};
 #[cfg(test)]
 pub(crate) use policy::{
     AUTO_SPLIT_L2_NOISY_SMALL_WIDE, should_apply_auto_split_l2,
@@ -46,6 +52,61 @@ pub(crate) fn allocate_dart_contribution_buffer(
     row_count: usize,
 ) -> Option<Vec<f32>> {
     dart_enabled.then(|| vec![0.0; row_count])
+}
+
+pub(crate) fn dense_projection_stump_counts(stumps: &[TrainedStump]) -> EngineResult<Vec<usize>> {
+    let mut tree_ids = Vec::with_capacity(stumps.len());
+    let mut previous_tree_id = None;
+
+    for stump in stumps {
+        let encoded_tree_id = decode_tree_node_id(stump.split.node_id).0;
+        let tree_id = usize::try_from(encoded_tree_id).map_err(|_| {
+            EngineError::ContractViolation(format!(
+                "projection tree id {encoded_tree_id} does not fit usize"
+            ))
+        })?;
+        if let Some(previous_tree_id) = previous_tree_id
+            && tree_id < previous_tree_id
+        {
+            return Err(EngineError::ContractViolation(format!(
+                "projection stump order moved backward from tree id {previous_tree_id} to tree id {tree_id}"
+            )));
+        }
+        tree_ids.push(tree_id);
+        previous_tree_id = Some(tree_id);
+    }
+
+    let Some(max_tree_id) = tree_ids.iter().copied().max() else {
+        return Ok(Vec::new());
+    };
+    let round_count = max_tree_id.checked_add(1).ok_or_else(|| {
+        EngineError::ContractViolation(format!(
+            "projection round count overflow after tree id {max_tree_id}"
+        ))
+    })?;
+    let mut counts = vec![0_usize; round_count];
+    for tree_id in tree_ids {
+        let count = &mut counts[tree_id];
+        *count = count.checked_add(1).ok_or_else(|| {
+            EngineError::ContractViolation(format!(
+                "projection stump count overflow for tree id {tree_id}"
+            ))
+        })?;
+    }
+
+    let covered_stumps = counts.iter().try_fold(0_usize, |total, &count| {
+        total.checked_add(count).ok_or_else(|| {
+            EngineError::ContractViolation("projection stump count overflow".to_string())
+        })
+    })?;
+    if covered_stumps != stumps.len() {
+        return Err(EngineError::ContractViolation(format!(
+            "projection round counts cover {covered_stumps} stumps, expected {}",
+            stumps.len()
+        )));
+    }
+
+    Ok(counts)
 }
 
 /// Rebuilds the per-class DART slice map from persisted multiclass stumps.
@@ -926,6 +987,11 @@ impl Trainer {
         // has a variable stump count (capped by max_leaves), but the round
         // boundaries are still captured correctly.
         validate_train_params(&self.params)?;
+        if has_active_monotone_constraints(&self.params.monotone_constraints) {
+            return Err(EngineError::InvalidConfig(
+                "multiclass is not supported with active monotone_constraints".to_string(),
+            ));
+        }
         validate_training_dataset(dataset)?;
         validate_neutralization_fit_contract_for_support(&self.params, dataset, false)?;
         validate_warm_start_neutralization_contract(&self.params, warm_start.is_some(), dataset)?;
@@ -2118,6 +2184,17 @@ impl Trainer {
             }
         }
         validate_train_params(&self.params)?;
+        if let Some(categorical_feature) = self.categorical_features.iter().find(|feature| {
+            self.params
+                .monotone_constraints
+                .get(feature.feature_index)
+                .is_some_and(|&constraint| constraint != 0)
+        }) {
+            return Err(EngineError::InvalidConfig(format!(
+                "categorical_features native categorical splitting at feature {} is not supported with active monotone_constraints on that feature",
+                categorical_feature.feature_index
+            )));
+        }
         if let Some(qa) = objective.quantile_alpha()
             && (!qa.is_finite() || qa <= 0.0 || qa >= 1.0)
         {
@@ -2190,6 +2267,59 @@ impl Trainer {
         } else {
             (fit_contract.baseline_prediction, Vec::new(), 0, None, None)
         };
+        let monotone_constraints_active =
+            has_active_monotone_constraints(&self.params.monotone_constraints);
+        if monotone_constraints_active
+            && initial_stumps
+                .iter()
+                .any(|stump| stump.tree_weight.to_bits() != 1.0_f32.to_bits())
+        {
+            return Err(EngineError::InvalidConfig(
+                "warm_start retained DART tree weights are not compatible with active monotone_constraints"
+                    .to_string(),
+            ));
+        }
+        if monotone_constraints_active
+            && let Some(stump) = initial_stumps.iter().find(|stump| {
+                stump.split.is_categorical
+                    && self
+                        .params
+                        .monotone_constraints
+                        .get(stump.split.feature_index as usize)
+                        .is_some_and(|&direction| direction != 0)
+            })
+        {
+            return Err(EngineError::InvalidConfig(format!(
+                "warm_start native categorical split on feature {} is not compatible with active monotone_constraints",
+                stump.split.feature_index
+            )));
+        }
+        let mut initial_stumps_per_round = vec![0_usize; round_index_offset];
+        for stump in &initial_stumps {
+            let tree_id = decode_tree_node_id(stump.split.node_id).0 as usize;
+            let initial_round_count = initial_stumps_per_round.len();
+            let count = initial_stumps_per_round.get_mut(tree_id).ok_or_else(|| {
+                EngineError::ContractViolation(format!(
+                    "warm-start tree_id {tree_id} is outside initial_rounds_completed {initial_round_count}"
+                ))
+            })?;
+            *count = count.checked_add(1).ok_or_else(|| {
+                EngineError::ContractViolation(format!(
+                    "warm-start stump count overflow for tree_id {tree_id}"
+                ))
+            })?;
+        }
+        validate_monotone_forest(
+            &initial_stumps,
+            &initial_stumps_per_round,
+            &self.params.monotone_constraints,
+            controls.max_abs_leaf_value,
+        )
+        .map_err(|error| {
+            EngineError::InvalidConfig(format!(
+                "warm_start is not compatible with active monotone_constraints: {error}"
+            ))
+        })?;
         let raw_features_opt = Some((
             &active_dataset.matrix.values as &[f32],
             active_dataset.matrix.feature_count,
@@ -2228,35 +2358,9 @@ impl Trainer {
         });
         let mut stumps = initial_stumps;
         let initial_stump_count = stumps.len();
-        // `stumps_per_completed_round` stays NEW-ROUND-ONLY (its original
-        // semantics): downstream consumers (validation early-stopping
-        // truncation via `retained_stump_count_for_rounds`, leaf refinement,
-        // DART replay truncation) index into it with a `best_round` value
-        // relative to the new fit and assume entry `i` holds the i-th
-        // newly-committed round's stump count.
+        // New material-round counts retain their historical coordinate system.
+        // MorphBoost phantom rounds are deliberately absent from this vector.
         let mut stumps_per_completed_round: Vec<usize> = Vec::new();
-        // Separate vector for warm-start prior-round counts. v0.10.0 review
-        // follow-up: this used to live in `stumps_per_completed_round`, but
-        // that broke `best_round`-indexed truncation when warm_start combined
-        // with eval_set early stopping (kept counts from old rounds rather
-        // than new ones). Now kept as its own local consumed only by the
-        // DART-state seeding + round_start_offsets/dart_round_counts
-        // pre-population blocks below.
-        let mut initial_stumps_per_round: Vec<usize> = Vec::new();
-        if !stumps.is_empty() {
-            let mut current_tree_id = decode_tree_node_id(stumps[0].split.node_id).0;
-            let mut current_count = 0usize;
-            for stump in &stumps {
-                let tree_id = decode_tree_node_id(stump.split.node_id).0;
-                if tree_id != current_tree_id {
-                    initial_stumps_per_round.push(current_count);
-                    current_tree_id = tree_id;
-                    current_count = 0;
-                }
-                current_count += 1;
-            }
-            initial_stumps_per_round.push(current_count);
-        }
         let mut rounds_completed = 0_usize;
         let effective_round_cap = controls.rounds;
         let mut stop_reason = IterationStopReason::CompletedRequestedRounds;
@@ -2320,10 +2424,7 @@ impl Trainer {
             // warm-start snapshot captured above (BEFORE the take()). Length
             // must equal `stumps.len()` (one weight per warm-start stump).
             // Falls back to all-1.0s when the prior fit did not use DART
-            // or no snapshot was provided. Uses `initial_stumps_per_round`
-            // (warm-start prior-round counts) — distinct from
-            // `stumps_per_completed_round` (new-round counts) so downstream
-            // best_round-indexed truncation continues to work correctly.
+            // or no snapshot was provided.
             let initial_tree_count = initial_stumps_per_round.len();
             if let Some(saved_weights) = initial_dart_tree_weights.as_ref() {
                 // Caller supplies one weight per stump; we need one weight
@@ -2355,21 +2456,14 @@ impl Trainer {
         //
         // `round_start_offsets[t]` is the start index in `stumps` where
         // tree `t`'s stumps begin; `dart_round_counts[t]` is its stump
-        // count.  Together they slice into `stumps` for the DART
-        // dropout subtract/replay step.  Stays empty for non-DART
-        // fits.  Keep separate from the pre-existing
-        // `stumps_per_completed_round` (committed-only) so we don't
-        // perturb downstream consumers like
-        // `retained_stump_count_for_rounds`.
+        // count. Together they slice into `stumps` for the DART dropout
+        // subtract/replay step.
         let mut round_start_offsets: Vec<usize> = Vec::new();
         let mut dart_round_counts: Vec<usize> = Vec::new();
 
         // v0.10.0: DART + warm_start — pre-populate round_start_offsets +
         // dart_round_counts from the warm-start tree shapes so the dropout
-        // step can correctly slice into `stumps` for each prior tree. Stays
-        // a no-op for non-DART or cold fits. Uses `initial_stumps_per_round`
-        // (warm-start prior-round counts) so `stumps_per_completed_round`
-        // can stay new-round-only for downstream best_round indexing.
+        // step can correctly slice into `stumps` for each prior tree.
         if dart_params.is_some() {
             let mut offset = 0usize;
             for &count in &initial_stumps_per_round {
@@ -2646,6 +2740,11 @@ impl Trainer {
                     controls.max_abs_leaf_value,
                     raw_features_opt,
                     morph_scale_context,
+                )?;
+                project_monotone_tree(
+                    &mut candidate_round_stumps,
+                    &self.params.monotone_constraints,
+                    controls.max_abs_leaf_value,
                 )?;
             }
 
@@ -3061,13 +3160,20 @@ impl Trainer {
             // Leaf refinement re-solves leaves against targets, so skip it for
             // per-round factor-neutralized gradients until refinement can apply
             // the same projection contract.
+            let projection_stumps_per_round = dense_projection_stump_counts(&stumps)?;
             refine_regression_leaf_values(
                 baseline_prediction,
                 &active_dataset.targets,
                 active_dataset.sample_weights.as_deref(),
                 binned_matrix,
                 &mut stumps,
-                &stumps_per_completed_round,
+                &projection_stumps_per_round,
+                controls.max_abs_leaf_value,
+            )?;
+            project_monotone_forest(
+                &mut stumps,
+                &projection_stumps_per_round,
+                &self.params.monotone_constraints,
                 controls.max_abs_leaf_value,
             )?;
 

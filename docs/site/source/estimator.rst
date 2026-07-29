@@ -142,6 +142,27 @@ Constraints
 - ``monotone_constraints: list[int] | dict[int, int] | None = None`` --
   constrain features to monotone increasing (+1), decreasing (-1), or
   unconstrained (0)
+
+  With an active constraint, scalar-tree predictions are non-decreasing
+  (``+1``) or non-increasing (``-1``) when only that constrained feature
+  changes between finite numeric values. The bound applies to the final scalar
+  prediction, not to an ordering involving a missing value: missing values
+  follow a learned branch and are not part of numeric ordering. For binary
+  classification, ``predict_proba(...)[:, 1]`` has the same order because
+  sigmoid is order-preserving.
+
+  The tree builders propagate finite lower/upper output bounds from the root.
+  Basic split scoring still uses the unbounded gain; after a split is accepted,
+  its scalar child outputs are projected into inherited intervals. Both
+  level-wise and leaf-wise growth use this rule. Standard and GOSS scalar
+  ensembles are covered. Active constraints reject ``boosting_mode="dart"``,
+  ``leaf_model="linear"``, multiclass softmax, and native categorical splits
+  on the same constrained feature. DART predictor weights can change exact f32
+  ordering after tree projection, so neither transient dropout predictions nor
+  final weighted DART predictions are covered or claimed monotone. Empty or
+  all-zero constraints keep ordinary DART behavior unchanged. A constrained
+  warm start also rejects a retained model with non-unit DART weights, even
+  when the resumed fit selects standard boosting.
 - ``feature_weights: list[float] | dict[int, float] | None = None`` --
   per-feature importance weights influencing split selection
 - ``interaction_constraints: list[list[int]] | None = None`` --

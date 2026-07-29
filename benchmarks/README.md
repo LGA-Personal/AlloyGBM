@@ -201,6 +201,11 @@ Additional lighter-weight scripts target specific features:
   report is `docs/benchmarks/review_guardrails_v1.md`; `--quick --gate` is the
   CI-sized contract run. DART timings are descriptive, and its 1.50x quality
   gate applies only to explicit default-like profiles (`drop_rate <= 0.10`).
+- `benchmarks/monotone_constraints_benchmark.py` — deterministic scalar
+  monotone-constraint acceptance evidence across regression and binary
+  objectives. The full report is `docs/benchmarks/monotone_constraints_v1.md`;
+  finite numeric sweeps and quality gates are required, while timing is
+  descriptive.
 - `benchmarks/architectural_backlog/` — isolated baseline/candidate harness for
   SoA histograms, node-level parallelism, duplicate bin storage, compact
   predictor nodes, EFB, and approximate quantile sketches. Methodology and
@@ -226,6 +231,12 @@ python3 benchmarks/objective_benchmark.py --gate
 python3 benchmarks/review_guardrails.py --gate \
   --output docs/benchmarks/review_guardrails_v1.md
 python3 benchmarks/review_guardrails.py --quick --gate
+
+# Scalar monotone-constraint evidence capture (full) and CI-sized contract run
+python3 benchmarks/monotone_constraints_benchmark.py --quick --gate
+python3 benchmarks/monotone_constraints_benchmark.py \
+  --gate \
+  --output docs/benchmarks/monotone_constraints_v1.md
 
 # Fast smoke run for all six deferred architecture projects
 python3 -m benchmarks.architectural_backlog.run \

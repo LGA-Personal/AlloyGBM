@@ -36,6 +36,12 @@ profile evidence. DART timing is descriptive; the 1.50x RMSE gate applies only
 to explicit default-like profiles with `drop_rate <= 0.10`, while the aggressive
 stress profile remains reported and contract-checked.
 
+A deterministic scalar monotone-constraint harness lives at
+`benchmarks/monotone_constraints_benchmark.py`; its committed evidence is
+[monotone_constraints_v1.md](../benchmarks/monotone_constraints_v1.md). It
+checks finite numeric sweeps and held-out quality for regression and binary
+models; fit timing is descriptive only.
+
 The comparative runner also emits a temporal/panel stability table for scenarios
 whose names include `time`, `temporal`, or `panel`. It reports mean score,
 worst score, and score standard deviation across repeated runs; this is the
@@ -176,6 +182,15 @@ Review-evidence capture:
 ```bash
 python3 benchmarks/review_guardrails.py --gate \
   --output docs/benchmarks/review_guardrails_v1.md
+```
+
+Scalar monotone-constraint acceptance:
+
+```bash
+python3 benchmarks/monotone_constraints_benchmark.py --quick --gate
+python3 benchmarks/monotone_constraints_benchmark.py \
+  --gate \
+  --output docs/benchmarks/monotone_constraints_v1.md
 ```
 
 See the full runner guide in [benchmarks/README.md](../../benchmarks/README.md).

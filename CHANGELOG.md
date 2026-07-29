@@ -4,6 +4,30 @@
 
 ### Fixed
 
+- **Made active scalar monotone constraints globally enforceable.** Constrained
+  level-wise and leaf-wise trees now propagate finite output bounds and project
+  accepted scalar child outputs into inherited intervals, while preserving the
+  existing unbounded split-gain scoring. `+1` and `-1` order final scalar
+  predictions only over finite numeric values; missing values continue through
+  learned, unordered branches, and binary positive-class probabilities inherit
+  the order through sigmoid. Linear leaves, multiclass softmax, and native
+  categorical splits on the constrained feature are rejected. Standard and
+  GOSS scalar ensembles are covered. Active constraints are rejected with
+  `boosting_mode="dart"` because predictor weights can change exact f32 order;
+  neither transient nor final weighted DART predictions are claimed monotone,
+  while empty/all-zero constraints preserve ordinary DART behavior. Constrained
+  warm starts also reject retained non-unit DART weights even when the resumed
+  fit selects standard boosting. Public Rust prediction now matches compact
+  artifact arithmetic by grouping arbitrary stump order by tree ID and local
+  node ID, accumulating each selected path root-to-leaf, and adding one
+  completed tree contribution to the baseline. Refinement and constrained warm starts validate
+  or project scalar trees without changing artifact format, schema, or public
+  parameters. The
+  acceptance gate now requires exact canonical declarations, evidence counts,
+  record metadata, and a full source commit. Joint multi-output training
+  continues to reject monotone constraints; that existing unsupported
+  combination is unchanged.
+
 - **Preserved multiclass DART weights across artifacts and warm starts.**
   Multiclass artifacts now reuse the optional `DartTreeWeights` section in
   class-major stump order, artifact-backed prediction applies those weights,
