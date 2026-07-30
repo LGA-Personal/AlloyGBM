@@ -35,6 +35,12 @@ Current benchmark entry points:
   `benchmarks/monotone_constraints_benchmark.py` with report at
   [monotone_constraints_v1.md](monotone_constraints_v1.md). It checks finite
   numeric sweeps for zero scalar-prediction violations; timing is descriptive.
+- deterministic fit-thread and multiclass class-tree scaling harness:
+  `benchmarks/multiclass_parallelism_benchmark.py` with report at
+  [multiclass_parallelism_v1.md](multiclass_parallelism_v1.md). It requires
+  exact serial/parallel artifact and prediction hashes, finite probabilities,
+  completed rounds, and prior-beating log loss across row/feature shapes,
+  class counts, and both growth strategies.
 - descriptive high-class-count, low-drop-cap multiclass DART scratch harness:
   `benchmarks/multiclass_dart_scratch_benchmark.py` with report at
   [multiclass_dart_scratch_v1.md](multiclass_dart_scratch_v1.md). It has no

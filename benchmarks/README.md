@@ -206,6 +206,11 @@ Additional lighter-weight scripts target specific features:
   objectives. The full report is `docs/benchmarks/monotone_constraints_v1.md`;
   finite numeric sweeps and quality gates are required, while timing is
   descriptive.
+- `benchmarks/multiclass_parallelism_benchmark.py` — deterministic `n_jobs`
+  and multiclass class-tree scaling evidence across tall/narrow, medium/wide,
+  and small matrices, 3 and 12 classes, and both growth strategies. The full
+  report is `docs/benchmarks/multiclass_parallelism_v1.md`; exact serial versus
+  parallel artifact and prediction hashes are required.
 - `benchmarks/architectural_backlog/` — isolated baseline/candidate harness for
   SoA histograms, node-level parallelism, duplicate bin storage, compact
   predictor nodes, EFB, and approximate quantile sketches. Methodology and

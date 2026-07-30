@@ -47,6 +47,11 @@ harnesses are also provided:
   monotone-constraint acceptance evidence for regression and binary models.
   The report is ``docs/benchmarks/monotone_constraints_v1.md``; finite numeric
   sweeps and held-out quality are gated, while timing is descriptive.
+- ``benchmarks/multiclass_parallelism_benchmark.py`` -- deterministic
+  ``n_jobs`` and multiclass class-tree scaling evidence across matrix shapes,
+  class counts, and both growth strategies. The report is
+  ``docs/benchmarks/multiclass_parallelism_v1.md``; serial and parallel
+  artifacts and predictions must match exactly.
 
 The suite spans three task types with the following scenarios:
 
