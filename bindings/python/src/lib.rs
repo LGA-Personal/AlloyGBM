@@ -9,7 +9,6 @@ mod predict;
 mod pyclasses;
 mod quantization;
 mod shap_bridge;
-#[allow(dead_code)] // Removed when fit entry points consume the pool helper.
 mod threading;
 mod train;
 use crate::joint::{JointPredictorHandle, train_joint_multi_label_ranker};

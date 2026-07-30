@@ -1,0 +1,219 @@
+from __future__ import annotations
+
+import inspect
+import pickle
+
+import numpy as np
+import pytest
+from sklearn.base import clone
+
+from alloygbm import GBMClassifier, GBMRanker, GBMRegressor, MultiLabelGBMRanker
+from alloygbm import _alloygbm as _native
+from alloygbm._regressor import _base as _regressor_base
+
+
+@pytest.mark.parametrize(
+    "estimator_factory",
+    [
+        GBMRegressor,
+        GBMClassifier,
+        GBMRanker,
+        MultiLabelGBMRanker,
+    ],
+)
+@pytest.mark.parametrize("n_jobs", [None, -1, 1, 3])
+def test_estimators_retain_supported_n_jobs(estimator_factory, n_jobs):
+    estimator = estimator_factory(n_jobs=n_jobs)
+
+    assert estimator.get_params()["n_jobs"] == n_jobs
+    assert clone(estimator).get_params()["n_jobs"] == n_jobs
+    assert pickle.loads(pickle.dumps(estimator)).get_params()["n_jobs"] == n_jobs
+    assert "n_jobs=" in repr(estimator)
+
+
+@pytest.mark.parametrize(
+    "estimator_factory",
+    [
+        GBMRegressor,
+        GBMClassifier,
+        GBMRanker,
+        MultiLabelGBMRanker,
+    ],
+)
+@pytest.mark.parametrize(
+    "n_jobs",
+    [True, False, 0, -2, 1.5, "2", object()],
+    ids=["true", "false", "zero", "below-minus-one", "float", "string", "object"],
+)
+def test_estimators_reject_invalid_n_jobs(estimator_factory, n_jobs):
+    with pytest.raises(ValueError, match="n_jobs"):
+        estimator_factory(n_jobs=n_jobs)
+
+
+@pytest.mark.parametrize(
+    "estimator_factory",
+    [
+        GBMRegressor,
+        GBMClassifier,
+        GBMRanker,
+        MultiLabelGBMRanker,
+    ],
+)
+def test_set_params_validates_and_retains_n_jobs(estimator_factory):
+    estimator = estimator_factory()
+
+    assert estimator.set_params(n_jobs=2) is estimator
+    assert estimator.get_params()["n_jobs"] == 2
+    with pytest.raises(ValueError, match="n_jobs"):
+        estimator.set_params(n_jobs=0)
+    assert estimator.get_params()["n_jobs"] == 2
+
+
+def test_regressor_classifier_and_ranker_signatures_expose_n_jobs():
+    for estimator_type in (GBMRegressor, GBMClassifier, GBMRanker):
+        parameter = inspect.signature(estimator_type).parameters["n_jobs"]
+        assert parameter.default is None
+        assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_native_training_signatures_expose_n_jobs():
+    functions = (
+        _native.train_regression_artifact,
+        _native.train_regression_artifact_dense,
+        _native.train_regression_artifact_with_summary,
+        _native.train_regression_artifact_dense_with_summary,
+        _native.train_regression_artifact_dense_with_summary_bytes,
+        _native.train_joint_multi_label_ranker,
+    )
+    for function in functions:
+        parameter = inspect.signature(function).parameters["n_jobs"]
+        assert parameter.default in (None, Ellipsis)
+
+
+@pytest.mark.parametrize("n_jobs", [0, -2])
+def test_native_training_bridge_rejects_invalid_n_jobs(n_jobs):
+    with pytest.raises(ValueError, match="n_jobs"):
+        _native.train_regression_artifact(
+            rows=[[0.0], [1.0], [2.0], [3.0]],
+            targets=[0.0, 1.0, 2.0, 3.0],
+            learning_rate=0.1,
+            max_depth=2,
+            row_subsample=1.0,
+            col_subsample=1.0,
+            min_validation_improvement=0.0,
+            seed=3,
+            deterministic=True,
+            rounds=1,
+            n_jobs=n_jobs,
+        )
+
+
+def test_regressor_forwards_n_jobs_to_native_summary_bridge(monkeypatch):
+    seen: list[int | None] = []
+    original_loader = (
+        _regressor_base._load_native_train_regression_artifact_with_summary
+    )
+
+    def recording_loader():
+        native_function = original_loader()
+
+        def recording_bridge(*args, **kwargs):
+            seen.append(kwargs.get("n_jobs"))
+            return native_function(*args, **kwargs)
+
+        return recording_bridge
+
+    monkeypatch.setattr(
+        _regressor_base,
+        "_load_native_train_regression_artifact_with_summary",
+        recording_loader,
+    )
+    model = GBMRegressor(n_estimators=3, max_depth=2, n_jobs=2)
+    model.fit([[0.0], [1.0], [2.0], [3.0]], [0.0, 1.0, 2.0, 3.0])
+
+    assert seen == [2]
+
+
+def _assert_fit_equivalent(single, parallel, X, y, **fit_kwargs):
+    single.fit(X, y, **fit_kwargs)
+    parallel.fit(X, y, **fit_kwargs)
+
+    if isinstance(single, MultiLabelGBMRanker):
+        if single.multi_label_mode == "joint":
+            assert single._joint_artifact_bytes == parallel._joint_artifact_bytes
+        else:
+            assert [
+                bytes(ranker.artifact_bytes) for ranker in single.sub_rankers_
+            ] == [
+                bytes(ranker.artifact_bytes) for ranker in parallel.sub_rankers_
+            ]
+    else:
+        assert bytes(single.artifact_bytes) == bytes(parallel.artifact_bytes)
+    np.testing.assert_array_equal(single.predict(X), parallel.predict(X))
+
+
+def test_standard_fit_paths_are_exact_across_thread_counts():
+    X = np.arange(96, dtype=np.float32).reshape(32, 3)
+    regression_y = (0.25 * X[:, 0] - 0.1 * X[:, 2]).astype(np.float32)
+    binary_y = (np.arange(32) % 2).astype(np.int32)
+    multiclass_y = (np.arange(32) % 4).astype(np.int32)
+    group = np.repeat(np.arange(8), 4)
+    ranking_y = (np.arange(32) % 4).astype(np.float32)
+
+    _assert_fit_equivalent(
+        GBMRegressor(n_estimators=4, max_depth=2, seed=9, n_jobs=1),
+        GBMRegressor(n_estimators=4, max_depth=2, seed=9, n_jobs=2),
+        X,
+        regression_y,
+    )
+    _assert_fit_equivalent(
+        GBMClassifier(n_estimators=4, max_depth=2, seed=9, n_jobs=1),
+        GBMClassifier(n_estimators=4, max_depth=2, seed=9, n_jobs=2),
+        X,
+        binary_y,
+    )
+    _assert_fit_equivalent(
+        GBMClassifier(n_estimators=4, max_depth=2, seed=9, n_jobs=1),
+        GBMClassifier(n_estimators=4, max_depth=2, seed=9, n_jobs=2),
+        X,
+        multiclass_y,
+    )
+    _assert_fit_equivalent(
+        GBMRanker(n_estimators=4, max_depth=2, seed=9, n_jobs=1),
+        GBMRanker(n_estimators=4, max_depth=2, seed=9, n_jobs=2),
+        X,
+        ranking_y,
+        group=group,
+    )
+
+
+@pytest.mark.parametrize("mode", ["independent", "joint"])
+def test_multi_label_fit_is_exact_across_thread_counts(mode):
+    X = np.arange(96, dtype=np.float32).reshape(32, 3)
+    group = np.repeat(np.arange(8), 4)
+    targets = np.column_stack(
+        [
+            np.arange(32) % 4,
+            (np.arange(32) * 3) % 5,
+        ]
+    ).astype(np.float32)
+
+    _assert_fit_equivalent(
+        MultiLabelGBMRanker(
+            n_estimators=3,
+            max_depth=2,
+            seed=5,
+            n_jobs=1,
+            multi_label_mode=mode,
+        ),
+        MultiLabelGBMRanker(
+            n_estimators=3,
+            max_depth=2,
+            seed=5,
+            n_jobs=2,
+            multi_label_mode=mode,
+        ),
+        X,
+        targets,
+        group=group,
+    )

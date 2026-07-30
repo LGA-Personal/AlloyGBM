@@ -26,6 +26,7 @@ from typing import Any
 import numpy as np
 
 from .ranker import GBMRanker
+from ._regressor._core import _validate_n_jobs
 from ._regressor._quantization import _QuantizationMixin
 from ._regressor._shap import _ShapMixin
 
@@ -122,6 +123,9 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
         # Stash kwargs so we can clone the same configuration into every
         # per-label `GBMRanker`.  `_per_label_kwargs` is the canonical store.
         self._per_label_kwargs: dict[str, Any] = dict(kwargs)
+        self._per_label_kwargs["n_jobs"] = _validate_n_jobs(
+            self._per_label_kwargs.get("n_jobs")
+        )
         if "quantile_sketch_max_rows" in self._per_label_kwargs:
             value = self._per_label_kwargs["quantile_sketch_max_rows"]
             normalized = int(value) if value is not None else None
@@ -258,6 +262,8 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
                     "quantile_sketch_max_rows must be greater than 0 when set"
                 )
             params["quantile_sketch_max_rows"] = normalized
+        if "n_jobs" in params:
+            params["n_jobs"] = _validate_n_jobs(params["n_jobs"])
         if "feature_bundling" in params:
             feature_bundling = str(params["feature_bundling"])
             if feature_bundling not in {"off", "exact"}:
@@ -405,6 +411,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
     # in docs/limitations.md.
     _JOINT_SUPPORTED_KWARGS = frozenset({
         "n_estimators",
+        "n_jobs",
         "learning_rate",
         "seed",
         "max_depth",
@@ -943,6 +950,7 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
             ranking_sigma=float(kw.get("ranking_sigma", 1.0)),
             lambdarank_truncation_level=joint_lambdarank_truncation_level,
             lambdarank_normalize=joint_lambdarank_normalize,
+            n_jobs=kw.get("n_jobs"),
         )
 
         self._joint_artifact_bytes = bytes(artifact)
@@ -1357,5 +1365,6 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
             f"multi_label_mode={self.multi_label_mode!r}, "
             f"ranking_labels={self.ranking_labels_}, "
             f"ranking_objective={self.ranking_objective!r}, "
+            f"n_jobs={self._per_label_kwargs.get('n_jobs')}, "
             f"fitted={self._is_fitted})"
         )

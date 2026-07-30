@@ -384,7 +384,8 @@ class GBMClassifier(GBMRegressor, _SKLEARN_CLASSIFIER_MIXIN):
             f"dart_drop_rate={self.dart_drop_rate}, "
             f"dart_max_drop={self.dart_max_drop}, "
             f"dart_normalize_type='{self.dart_normalize_type}', "
-            f"dart_sample_type='{self.dart_sample_type}'"
+            f"dart_sample_type='{self.dart_sample_type}', "
+            f"n_jobs={self.n_jobs}"
             ")"
         )
 
