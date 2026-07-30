@@ -20,7 +20,7 @@ use crate::quantization::{
     ContinuousBinningStrategy, parse_continuous_binning_strategy,
     prepare_training_matrices_from_dense_values, prepare_validation_matrices_from_dense_values,
 };
-use crate::threading::install_in_fit_pool;
+use crate::threading::{FitThreadCount, install_in_fit_pool};
 use crate::{DEFAULT_TRAIN_ROUNDS, MAX_SUPPORTED_TRAIN_ROUNDS};
 
 use alloygbm_backend_cpu::CpuBackend;
@@ -928,7 +928,7 @@ pub(crate) fn train_regression_artifact_with_summary_dense_impl(
     ranking_sigma=1.0,
     lambdarank_truncation_level=None::<usize>,
     lambdarank_normalize=false,
-    n_jobs=None::<isize>
+    n_jobs=None::<FitThreadCount>
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact(
@@ -980,8 +980,9 @@ pub(crate) fn train_regression_artifact(
     ranking_sigma: f32,
     lambdarank_truncation_level: Option<usize>,
     lambdarank_normalize: bool,
-    n_jobs: Option<isize>,
+    n_jobs: Option<FitThreadCount>,
 ) -> PyResult<Vec<u8>> {
+    let n_jobs = n_jobs.map(FitThreadCount::into_inner);
     let parsed_morph_config = morph_config
         .map(|d| parse_morph_config_from_pydict(&d))
         .transpose()?;
@@ -1150,7 +1151,7 @@ pub(crate) fn train_regression_artifact(
     ranking_sigma=1.0,
     lambdarank_truncation_level=None::<usize>,
     lambdarank_normalize=false,
-    n_jobs=None::<isize>
+    n_jobs=None::<FitThreadCount>
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_dense(
@@ -1204,8 +1205,9 @@ pub(crate) fn train_regression_artifact_dense(
     ranking_sigma: f32,
     lambdarank_truncation_level: Option<usize>,
     lambdarank_normalize: bool,
-    n_jobs: Option<isize>,
+    n_jobs: Option<FitThreadCount>,
 ) -> PyResult<Vec<u8>> {
+    let n_jobs = n_jobs.map(FitThreadCount::into_inner);
     let parsed_morph_config = morph_config
         .map(|d| parse_morph_config_from_pydict(&d))
         .transpose()?;
@@ -1396,7 +1398,7 @@ pub(crate) fn train_regression_artifact_dense(
     ranking_sigma=1.0,
     lambdarank_truncation_level=None::<usize>,
     lambdarank_normalize=false,
-    n_jobs=None::<isize>
+    n_jobs=None::<FitThreadCount>
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_with_summary(
@@ -1476,8 +1478,9 @@ pub(crate) fn train_regression_artifact_with_summary(
     ranking_sigma: f32,
     lambdarank_truncation_level: Option<usize>,
     lambdarank_normalize: bool,
-    n_jobs: Option<isize>,
+    n_jobs: Option<FitThreadCount>,
 ) -> PyResult<NativeTrainingResult> {
+    let n_jobs = n_jobs.map(FitThreadCount::into_inner);
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
     }
@@ -1763,7 +1766,7 @@ mod tests {
     ranking_sigma=1.0,
     lambdarank_truncation_level=None::<usize>,
     lambdarank_normalize=false,
-    n_jobs=None::<isize>
+    n_jobs=None::<FitThreadCount>
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_dense_with_summary(
@@ -1846,8 +1849,9 @@ pub(crate) fn train_regression_artifact_dense_with_summary(
     ranking_sigma: f32,
     lambdarank_truncation_level: Option<usize>,
     lambdarank_normalize: bool,
-    n_jobs: Option<isize>,
+    n_jobs: Option<FitThreadCount>,
 ) -> PyResult<NativeTrainingResult> {
+    let n_jobs = n_jobs.map(FitThreadCount::into_inner);
     if rounds == 0 {
         return Err(PyValueError::new_err("rounds must be greater than 0"));
     }
@@ -2075,7 +2079,7 @@ fn dense_input_to_f32_vec(input: &Bound<'_, PyAny>) -> PyResult<Vec<f32>> {
     ranking_sigma=1.0,
     lambdarank_truncation_level=None::<usize>,
     lambdarank_normalize=false,
-    n_jobs=None::<isize>
+    n_jobs=None::<FitThreadCount>
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
@@ -2158,8 +2162,9 @@ pub(crate) fn train_regression_artifact_dense_with_summary_bytes(
     ranking_sigma: f32,
     lambdarank_truncation_level: Option<usize>,
     lambdarank_normalize: bool,
-    n_jobs: Option<isize>,
+    n_jobs: Option<FitThreadCount>,
 ) -> PyResult<NativeTrainingResult> {
+    let n_jobs = n_jobs.map(FitThreadCount::into_inner);
     let values = dense_input_to_f32_vec(values_bytes)?;
     let targets = bytes_to_f32_vec(targets_bytes)?;
     let validation_values = validation_values_bytes

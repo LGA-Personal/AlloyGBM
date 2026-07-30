@@ -1,6 +1,31 @@
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyBool;
 use rayon::ThreadPoolBuilder;
+
+#[derive(Clone, Copy)]
+pub(crate) struct FitThreadCount(isize);
+
+impl FitThreadCount {
+    pub(crate) fn into_inner(self) -> isize {
+        self.0
+    }
+}
+
+impl<'a, 'py> FromPyObject<'a, 'py> for FitThreadCount {
+    type Error = PyErr;
+
+    fn extract(obj: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        if obj.is_instance_of::<PyBool>() {
+            return Err(PyValueError::new_err(
+                "n_jobs must be None, -1, or a positive integer",
+            ));
+        }
+        obj.extract::<isize>()
+            .map(Self)
+            .map_err(|_| PyValueError::new_err("n_jobs must be None, -1, or a positive integer"))
+    }
+}
 
 fn available_fit_threads() -> usize {
     std::thread::available_parallelism()

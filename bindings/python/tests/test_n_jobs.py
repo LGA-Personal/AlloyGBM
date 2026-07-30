@@ -90,7 +90,7 @@ def test_native_training_signatures_expose_n_jobs():
         assert parameter.default in (None, Ellipsis)
 
 
-@pytest.mark.parametrize("n_jobs", [0, -2])
+@pytest.mark.parametrize("n_jobs", [True, False, 0, -2])
 def test_native_training_bridge_rejects_invalid_n_jobs(n_jobs):
     with pytest.raises(ValueError, match="n_jobs"):
         _native.train_regression_artifact(
@@ -106,6 +106,63 @@ def test_native_training_bridge_rejects_invalid_n_jobs(n_jobs):
             rounds=1,
             n_jobs=n_jobs,
         )
+
+
+@pytest.mark.parametrize(
+    "estimator_type",
+    [GBMRegressor, GBMClassifier, GBMRanker],
+)
+def test_legacy_estimator_pickle_state_defaults_n_jobs(estimator_type):
+    estimator = estimator_type(n_jobs=2)
+    state = estimator.__getstate__()
+    state.pop("n_jobs")
+
+    restored = estimator_type.__new__(estimator_type)
+    restored.__setstate__(state)
+
+    assert restored.n_jobs is None
+    assert restored.get_params()["n_jobs"] is None
+    assert "n_jobs=None" in repr(restored)
+
+
+def test_legacy_multilabel_pickle_state_defaults_n_jobs():
+    estimator = MultiLabelGBMRanker(n_jobs=2)
+    state = estimator.__getstate__()
+    state["_per_label_kwargs"].pop("n_jobs")
+
+    restored = MultiLabelGBMRanker.__new__(MultiLabelGBMRanker)
+    restored.__setstate__(state)
+
+    assert restored.get_params()["n_jobs"] is None
+    assert "n_jobs=None" in repr(restored)
+
+
+def test_legacy_independent_multilabel_bundle_defaults_n_jobs(tmp_path):
+    X = np.arange(16, dtype=np.float32).reshape(8, 2)
+    y = np.column_stack(
+        [
+            np.linspace(0.0, 1.0, 8, dtype=np.float32),
+            np.linspace(1.0, 0.0, 8, dtype=np.float32),
+        ]
+    )
+    group = np.repeat(np.arange(4, dtype=np.int64), 2)
+    estimator = MultiLabelGBMRanker(
+        ranking_labels=["forward", "reverse"],
+        n_estimators=2,
+        max_depth=1,
+        n_jobs=2,
+    ).fit(X, y, group=group)
+    estimator._per_label_kwargs.pop("n_jobs")
+    for ranker in estimator._sub_rankers:
+        del ranker.n_jobs
+    path = tmp_path / "legacy-independent.mlranker"
+    estimator.save_model(str(path))
+
+    restored = MultiLabelGBMRanker.load_model(str(path))
+
+    assert restored.get_params()["n_jobs"] is None
+    assert all(ranker.n_jobs is None for ranker in restored.sub_rankers_)
+    np.testing.assert_array_equal(restored.predict(X), estimator.predict(X))
 
 
 def test_regressor_forwards_n_jobs_to_native_summary_bridge(monkeypatch):

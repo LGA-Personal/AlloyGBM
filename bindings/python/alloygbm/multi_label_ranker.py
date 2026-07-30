@@ -1133,6 +1133,9 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
 
     def __setstate__(self, state: dict) -> None:
         self.__dict__.update(state)
+        if not hasattr(self, "_per_label_kwargs"):
+            self._per_label_kwargs = {}
+        self._per_label_kwargs.setdefault("n_jobs", None)
         if (
             getattr(self, "multi_label_mode", "independent") == "joint"
             and self._joint_artifact_bytes is not None
@@ -1345,10 +1348,11 @@ class MultiLabelGBMRanker(_QuantizationMixin, _ShapMixin):
                 inst.feature_quantile_cut_methods_ = metadata.get("feature_quantile_cut_methods")
                 inst._continuous_feature_linear_rank_flags = metadata.get("continuous_feature_linear_rank_flags")
                 inst._per_label_kwargs = metadata.get("per_label_kwargs", {})
+                inst._per_label_kwargs.setdefault("n_jobs", None)
                 inst.ranking_objective = metadata.get("ranking_objective", "rank:ndcg")
             else:
                 inst._uses_continuous_binning = False
-                inst._per_label_kwargs = {}
+                inst._per_label_kwargs = {"n_jobs": None}
 
             return inst
 

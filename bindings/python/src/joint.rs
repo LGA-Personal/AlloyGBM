@@ -12,7 +12,7 @@ use crate::pyclasses::NativeContinuousBinningMetadata;
 use crate::quantization::{
     parse_continuous_binning_strategy, prepare_training_matrices_from_dense_values,
 };
-use crate::threading::install_in_fit_pool;
+use crate::threading::{FitThreadCount, install_in_fit_pool};
 
 type JointTrainingBridgeResult = (
     Vec<u8>,
@@ -134,7 +134,7 @@ impl JointPredictorHandle {
     ranking_sigma=1.0_f32,
     lambdarank_truncation_level=None::<usize>,
     lambdarank_normalize=false,
-    n_jobs=None::<isize>,
+    n_jobs=None::<FitThreadCount>,
 ))]
 pub(crate) fn train_joint_multi_label_ranker(
     py: Python<'_>,
@@ -188,8 +188,9 @@ pub(crate) fn train_joint_multi_label_ranker(
     ranking_sigma: f32,
     lambdarank_truncation_level: Option<usize>,
     lambdarank_normalize: bool,
-    n_jobs: Option<isize>,
+    n_jobs: Option<FitThreadCount>,
 ) -> PyResult<JointTrainingBridgeResult> {
+    let n_jobs = n_jobs.map(FitThreadCount::into_inner);
     let parsed_morph_config = match morph_config.as_ref() {
         Some(dict) => Some(parse_morph_config_from_pydict(dict)?),
         None => None,

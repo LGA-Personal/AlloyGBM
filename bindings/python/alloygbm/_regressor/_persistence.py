@@ -75,6 +75,8 @@ class _PersistenceMixin:
 
     def __setstate__(self, state: dict) -> None:
         self.__dict__.update(state)
+        if not hasattr(self, "n_jobs"):
+            self.n_jobs = None
         if not hasattr(self, "feature_bundling"):
             self.feature_bundling = "off"
         if not hasattr(self, "feature_bundling_diagnostics_"):
