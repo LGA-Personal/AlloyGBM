@@ -393,6 +393,34 @@ def evaluate_gate(report: dict[str, object]) -> list[str]:
     return failures
 
 
+def timing_summary(report: dict[str, object]) -> list[dict[str, object]]:
+    pairs: dict[str, dict[str, dict[str, object]]] = {}
+    for record in report.get("records", []):
+        if isinstance(record, dict):
+            pairs.setdefault(str(record["scenario"]), {})[str(record["arm"])] = record
+    grouped: dict[tuple[str, int], list[float]] = {}
+    for pair in pairs.values():
+        serial = pair.get("serial")
+        parallel = pair.get("parallel")
+        if serial is None or parallel is None:
+            continue
+        key = (str(serial["shape"]), int(serial["n_classes"]))
+        grouped.setdefault(key, []).append(
+            float(serial["fit_seconds"]) / float(parallel["fit_seconds"])
+        )
+    return [
+        {
+            "shape": shape,
+            "n_classes": n_classes,
+            "scenario_count": len(speedups),
+            "median_speedup": median(speedups),
+            "minimum_speedup": min(speedups),
+            "maximum_speedup": max(speedups),
+        }
+        for (shape, n_classes), speedups in sorted(grouped.items())
+    ]
+
+
 def render_markdown(report: dict[str, object]) -> str:
     records = report.get("records", [])
     lines = [
@@ -415,6 +443,20 @@ def render_markdown(report: dict[str, object]) -> str:
             "- Multiclass log loss must beat the class-prior baseline.",
             "- Explicit worker requests are upper bounds; quick-run timing is descriptive.",
             "- Full-run high-class median speedup must exceed 1.0x and low-class median regression must stay within 10%.",
+            "",
+            "## Timing Summary",
+            "",
+            "| Shape | Classes | Scenarios | Median speedup | Minimum | Maximum |",
+            "| --- | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in timing_summary(report):
+        lines.append(
+            "| {shape} | {n_classes} | {scenario_count} | {median_speedup:.3f}x | "
+            "{minimum_speedup:.3f}x | {maximum_speedup:.3f}x |".format(**row)
+        )
+    lines.extend(
+        [
             "",
             "## Records",
             "",

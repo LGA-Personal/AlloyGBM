@@ -177,6 +177,8 @@ def test_render_and_cli_write_json_and_markdown(monkeypatch, tmp_path):
     assert json.loads(json_path.read_text(encoding="utf-8")) == report
     markdown = markdown_path.read_text(encoding="utf-8")
     assert "# Multiclass Parallelism Benchmark" in markdown
+    assert "## Timing Summary" in markdown
+    assert "Median speedup" in markdown
     assert "Artifact SHA-256" in markdown
 
 
