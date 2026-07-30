@@ -187,6 +187,119 @@ def test_standard_fit_paths_are_exact_across_thread_counts():
     )
 
 
+def _eligible_multiclass_fixture():
+    rng = np.random.default_rng(41)
+    X = rng.normal(size=(1_024, 4)).astype(np.float32)
+    scores = np.column_stack(
+        [
+            1.2 * X[:, 0] - 0.4 * X[:, 1],
+            -0.7 * X[:, 0] + X[:, 2],
+            0.5 * X[:, 1] - X[:, 3],
+            -0.4 * X[:, 2] + 0.8 * X[:, 3],
+        ]
+    )
+    return X, np.argmax(scores, axis=1).astype(np.int32)
+
+
+@pytest.mark.parametrize(
+    "mode_kwargs",
+    [
+        {},
+        {"tree_growth": "leaf", "max_leaves": 4},
+        {
+            "boosting_mode": "goss",
+            "goss_top_rate": 0.2,
+            "goss_other_rate": 0.2,
+        },
+        {
+            "boosting_mode": "dart",
+            "dart_drop_rate": 0.25,
+            "dart_max_drop": 3,
+        },
+        {
+            "training_mode": "morph",
+            "morph_warmup_iters": 1,
+        },
+    ],
+    ids=["level", "leaf", "goss", "dart", "morph"],
+)
+def test_eligible_multiclass_modes_are_exact_across_thread_counts(mode_kwargs):
+    X, y = _eligible_multiclass_fixture()
+    shared = {
+        "n_estimators": 4,
+        "max_depth": 2,
+        "seed": 13,
+        **mode_kwargs,
+    }
+
+    _assert_fit_equivalent(
+        GBMClassifier(n_jobs=1, **shared),
+        GBMClassifier(n_jobs=2, **shared),
+        X,
+        y,
+    )
+
+
+def test_eligible_multiclass_validation_is_exact_across_thread_counts():
+    X, y = _eligible_multiclass_fixture()
+    validation_X = X[768:]
+    validation_y = y[768:]
+    shared = {
+        "n_estimators": 8,
+        "max_depth": 2,
+        "seed": 17,
+        "early_stopping_rounds": 2,
+    }
+
+    _assert_fit_equivalent(
+        GBMClassifier(n_jobs=1, **shared),
+        GBMClassifier(n_jobs=2, **shared),
+        X,
+        y,
+        eval_set=(validation_X, validation_y),
+    )
+
+
+def test_eligible_multiclass_warm_start_is_exact_across_thread_counts():
+    X, y = _eligible_multiclass_fixture()
+    prior_single = GBMClassifier(
+        n_estimators=2,
+        max_depth=2,
+        seed=23,
+        n_jobs=1,
+    ).fit(X, y)
+    prior_parallel = GBMClassifier(
+        n_estimators=2,
+        max_depth=2,
+        seed=23,
+        n_jobs=2,
+    ).fit(X, y)
+    np.testing.assert_array_equal(
+        prior_single.artifact_bytes,
+        prior_parallel.artifact_bytes,
+    )
+
+    _assert_fit_equivalent(
+        GBMClassifier(
+            n_estimators=4,
+            max_depth=2,
+            seed=23,
+            warm_start=True,
+            n_jobs=1,
+        ),
+        GBMClassifier(
+            n_estimators=4,
+            max_depth=2,
+            seed=23,
+            warm_start=True,
+            n_jobs=2,
+        ),
+        X,
+        y,
+        init_model=prior_single,
+    )
+
+
 @pytest.mark.parametrize("mode", ["independent", "joint"])
 def test_multi_label_fit_is_exact_across_thread_counts(mode):
     X = np.arange(96, dtype=np.float32).reshape(32, 3)
