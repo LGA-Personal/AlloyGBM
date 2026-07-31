@@ -211,6 +211,11 @@ Additional lighter-weight scripts target specific features:
   and small matrices, 3 and 12 classes, and both growth strategies. The full
   report is `docs/benchmarks/multiclass_parallelism_v1.md`; exact serial versus
   parallel artifact and prediction hashes are required.
+- `benchmarks/allocation_reuse_benchmark.py` — isolated paired subprocess
+  evidence for allocation reuse across tall/deep, wide/deep, short/wide, and
+  shallow/tall regression matrices with missing values. Quick mode compares
+  the installed candidate runtime with itself. Full mode accepts separate
+  Python executables and worktrees for a same-host baseline/candidate run.
 - `benchmarks/architectural_backlog/` — isolated baseline/candidate harness for
   SoA histograms, node-level parallelism, duplicate bin storage, compact
   predictor nodes, EFB, and approximate quantile sketches. Methodology and
@@ -243,6 +248,21 @@ python3 benchmarks/monotone_constraints_benchmark.py \
   --gate \
   --output docs/benchmarks/monotone_constraints_v1.md
 
+# Allocation-reuse contract and compact candidate self-consistency gate
+python3 -m pytest benchmarks/tests/test_allocation_reuse_benchmark.py -q
+python3 benchmarks/allocation_reuse_benchmark.py --quick --gate
+
+# Full same-host A/B after running maturin develop --release in each environment
+/path/to/candidate/.venv/bin/python \
+  /path/to/candidate/benchmarks/allocation_reuse_benchmark.py \
+  --full --gate \
+  --baseline-python /path/to/baseline/.venv/bin/python \
+  --baseline-workdir /path/to/baseline \
+  --candidate-python /path/to/candidate/.venv/bin/python \
+  --candidate-workdir /path/to/candidate \
+  --output-json benchmarks/results/allocation_reuse.json \
+  --output-markdown benchmarks/results/allocation_reuse.md
+
 # Fast smoke run for all six deferred architecture projects
 python3 -m benchmarks.architectural_backlog.run \
   --profile quick --mode baseline --gate
@@ -262,6 +282,17 @@ python3 -m benchmarks.architectural_backlog.run \
 python3 benchmarks/numerai_benchmark.py --feature-set small \
   --rounds 1200 --learning-rate 0.05 --max-depth 6 --col-subsample 0.3
 ```
+
+The allocation-reuse workers run with isolated import paths and record the
+source commit from each declared worktree together with the loaded package and
+native-extension paths and extension digest. Warmups run in separate
+subprocesses and are excluded from the recorded repetitions. Artifact,
+prediction, and RMSE equivalence is exact. Full-mode performance gates compare
+per-case medians and then aggregate geometric timing and RSS ratios: aggregate
+native slowdown must stay within 3%, aggregate incremental RSS growth within
+5%, and at least one deep-pressure case must improve in median time or RSS.
+Quick mode intentionally gates equivalence only because its single repetition
+is too small for defensible performance claims.
 
 ## Outputs
 

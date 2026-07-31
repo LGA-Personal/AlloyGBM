@@ -135,6 +135,14 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
         run: python benchmarks/multiclass_parallelism_benchmark.py --quick --gate
 
+      - name: Test allocation reuse benchmark contract
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python -m pytest benchmarks/tests/test_allocation_reuse_benchmark.py -q
+
+      - name: Run compact allocation reuse gate
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python benchmarks/allocation_reuse_benchmark.py --quick --gate
+
       - name: Import smoke
         run: python -c "import alloygbm; print(alloygbm.native_runtime_info())"
 
