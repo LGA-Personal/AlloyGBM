@@ -1641,22 +1641,6 @@ impl CpuBackend {
         )
     }
 
-    pub(crate) fn apply_split_with_stats_parallel(
-        binned_matrix: &BinnedMatrix,
-        gradients: &[GradientPair],
-        node: &NodeSlice,
-        split: &SplitCandidate,
-    ) -> EngineResult<(PartitionResult, NodeStats, NodeStats)> {
-        let lookup = Self::split_row_lookup(binned_matrix, Some(gradients), node, split)?;
-        Self::apply_split_with_stats_parallel_with_lookup(
-            binned_matrix,
-            gradients,
-            node,
-            split,
-            lookup,
-        )
-    }
-
     fn apply_split_with_stats_parallel_with_lookup(
         binned_matrix: &BinnedMatrix,
         gradients: &[GradientPair],

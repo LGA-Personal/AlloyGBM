@@ -1,4 +1,5 @@
 use crate::factor_split::factor_split_penalty;
+use crate::split_helpers::goes_left_for_split;
 use crate::*;
 use alloygbm_core::{
     DatasetMatrix, FactorExposureMatrix, FeatureHistogram, FeatureTile, HistogramBin,
@@ -220,6 +221,108 @@ fn split_candidate(
             row_count: 0,
         },
     }
+}
+
+fn legacy_parallel_partition_with_stats(
+    binned_matrix: &BinnedMatrix,
+    gradients: &[GradientPair],
+    node: &NodeSlice,
+    split: &SplitCandidate,
+) -> (PartitionResult, NodeStats, NodeStats) {
+    type ChunkResult = (Vec<u32>, Vec<u32>, f32, f32, f32, f32, f32, f32);
+
+    let chunk_size = (node.row_indices.len() / rayon::current_num_threads().max(1)).max(4096);
+    let chunk_results: Vec<ChunkResult> = node
+        .row_indices
+        .par_chunks(chunk_size)
+        .map(|chunk| {
+            let mut left = Vec::new();
+            let mut right = Vec::new();
+            let mut left_grad = 0.0_f32;
+            let mut left_hess = 0.0_f32;
+            let mut left_grad_sq = 0.0_f32;
+            let mut right_grad = 0.0_f32;
+            let mut right_hess = 0.0_f32;
+            let mut right_grad_sq = 0.0_f32;
+            let feature_index = split.feature_index as usize;
+            let use_col_major = binned_matrix.has_col_major();
+            let column_base = feature_index * binned_matrix.row_count;
+            let missing_bin = binned_matrix.missing_bin();
+
+            for &row in chunk {
+                let row_index = row as usize;
+                let bin = if use_col_major {
+                    binned_matrix.col_bin(column_base + row_index)
+                } else {
+                    binned_matrix.row_bin(row_index * binned_matrix.feature_count + feature_index)
+                };
+                let gradient = gradients[row_index];
+                if goes_left_for_split(bin, missing_bin, split) {
+                    left.push(row);
+                    left_grad += gradient.grad;
+                    left_hess += gradient.hess;
+                    left_grad_sq += gradient.grad * gradient.grad;
+                } else {
+                    right.push(row);
+                    right_grad += gradient.grad;
+                    right_hess += gradient.hess;
+                    right_grad_sq += gradient.grad * gradient.grad;
+                }
+            }
+
+            (
+                left,
+                right,
+                left_grad,
+                left_hess,
+                left_grad_sq,
+                right_grad,
+                right_hess,
+                right_grad_sq,
+            )
+        })
+        .collect();
+
+    let mut left_row_indices = Vec::with_capacity(node.row_indices.len() / 2);
+    let mut right_row_indices = Vec::with_capacity(node.row_indices.len() / 2);
+    let mut left_grad = 0.0_f32;
+    let mut left_hess = 0.0_f32;
+    let mut left_grad_sq = 0.0_f32;
+    let mut right_grad = 0.0_f32;
+    let mut right_hess = 0.0_f32;
+    let mut right_grad_sq = 0.0_f32;
+
+    for (left, right, chunk_lg, chunk_lh, chunk_lq, chunk_rg, chunk_rh, chunk_rq) in chunk_results {
+        left_row_indices.extend(left);
+        right_row_indices.extend(right);
+        left_grad += chunk_lg;
+        left_hess += chunk_lh;
+        left_grad_sq += chunk_lq;
+        right_grad += chunk_rg;
+        right_hess += chunk_rh;
+        right_grad_sq += chunk_rq;
+    }
+
+    let left_count = left_row_indices.len() as u32;
+    let right_count = right_row_indices.len() as u32;
+    (
+        PartitionResult {
+            left_row_indices,
+            right_row_indices,
+        },
+        NodeStats {
+            grad_sum: left_grad,
+            hess_sum: left_hess,
+            grad_sq_sum: left_grad_sq,
+            row_count: left_count,
+        },
+        NodeStats {
+            grad_sum: right_grad,
+            hess_sum: right_hess,
+            grad_sq_sum: right_grad_sq,
+            row_count: right_count,
+        },
+    )
 }
 
 fn with_histogram_feature<R>(
@@ -1177,13 +1280,19 @@ fn owned_partition_matches_parallel_chunk_statistic_order() {
     let node = NodeSlice::new(0, (0..ROWS as u32).collect()).expect("node");
     let split = split_candidate(0, 0, false, false, None);
 
-    let expected = CpuBackend::apply_split_with_stats_parallel(&matrix, &gradients, &node, &split)
-        .expect("parallel partition");
-    let actual = backend
-        .apply_split_owned_with_stats(&matrix, &gradients, node, &split)
-        .expect("owned partition");
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .expect("test pool")
+        .install(|| {
+            assert_eq!(rayon::current_num_threads(), 4);
+            let expected = legacy_parallel_partition_with_stats(&matrix, &gradients, &node, &split);
+            let actual = backend
+                .apply_split_owned_with_stats(&matrix, &gradients, node, &split)
+                .expect("owned partition");
 
-    assert_eq!(actual, expected);
+            assert_eq!(actual, expected);
+        });
 }
 
 #[test]
