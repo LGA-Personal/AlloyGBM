@@ -29,7 +29,80 @@ struct ConcurrentHistogramBackend {
     active_builds: AtomicUsize,
     max_active_builds: AtomicUsize,
 }
+struct OwnershipRecordingBackend {
+    owned_delegates_to_borrowed: bool,
+    borrowed_split_calls: AtomicUsize,
+    owned_split_calls: AtomicUsize,
+}
 struct BadObjective;
+
+impl OwnershipRecordingBackend {
+    fn new(owned_delegates_to_borrowed: bool) -> Self {
+        Self {
+            owned_delegates_to_borrowed,
+            borrowed_split_calls: AtomicUsize::new(0),
+            owned_split_calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn partition_with_stats(
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: &NodeSlice,
+        split: &SplitCandidate,
+    ) -> EngineResult<(PartitionResult, NodeStats, NodeStats)> {
+        node.validate_bounds(binned_matrix.row_count)?;
+        let mut left_row_indices = Vec::new();
+        let mut right_row_indices = Vec::new();
+        for &row_index in &node.row_indices {
+            let cell_index =
+                row_index as usize * binned_matrix.feature_count + split.feature_index as usize;
+            let bin = binned_matrix.row_bin(cell_index);
+            let went_left = if bin == binned_matrix.missing_bin() {
+                split.default_left
+            } else {
+                bin <= split.threshold_bin
+            };
+            if went_left {
+                left_row_indices.push(row_index);
+            } else {
+                right_row_indices.push(row_index);
+            }
+        }
+        let left_stats = Self::stats(gradients, &left_row_indices)?;
+        let right_stats = Self::stats(gradients, &right_row_indices)?;
+        Ok((
+            PartitionResult {
+                left_row_indices,
+                right_row_indices,
+            },
+            left_stats,
+            right_stats,
+        ))
+    }
+
+    fn stats(gradients: &[GradientPair], row_indices: &[u32]) -> EngineResult<NodeStats> {
+        let mut grad_sum = 0.0;
+        let mut hess_sum = 0.0;
+        let mut grad_sq_sum = 0.0;
+        for &row_index in row_indices {
+            let gradient = gradients.get(row_index as usize).ok_or_else(|| {
+                EngineError::ContractViolation(
+                    "ownership fixture row index is out of bounds".to_string(),
+                )
+            })?;
+            grad_sum += gradient.grad;
+            hess_sum += gradient.hess;
+            grad_sq_sum += gradient.grad * gradient.grad;
+        }
+        Ok(NodeStats {
+            grad_sum,
+            hess_sum,
+            grad_sq_sum,
+            row_count: row_indices.len() as u32,
+        })
+    }
+}
 
 fn sample_dataset() -> TrainingDataset {
     TrainingDataset {
@@ -84,6 +157,42 @@ fn node_parallelism_fixture() -> (TrainingDataset, BinnedMatrix) {
         factor_exposures: None,
     };
     let binned = BinnedMatrix::new(ROWS, 1, 7, bins).expect("parallel fixture bins are valid");
+    (dataset, binned)
+}
+
+fn allocation_reuse_fixture(row_count: usize) -> (TrainingDataset, BinnedMatrix) {
+    const FEATURE_COUNT: usize = 5;
+    let mut values = Vec::with_capacity(row_count * FEATURE_COUNT);
+    let mut bins = Vec::with_capacity(row_count * FEATURE_COUNT);
+    for row in 0..row_count {
+        for feature in 0..FEATURE_COUNT {
+            let bin = if row == 0 && feature == 0 {
+                MISSING_BIN_U8
+            } else {
+                ((row >> feature.min(3)) & 1) as u8
+            };
+            bins.push(bin);
+            values.push(if bin == MISSING_BIN_U8 {
+                f32::NAN
+            } else {
+                f32::from(bin)
+            });
+        }
+    }
+    let targets = (0..row_count)
+        .map(|row| ((row.wrapping_mul(37).wrapping_add(11)) % 101) as f32 / 10.0 - 5.0)
+        .collect();
+    let dataset = TrainingDataset {
+        matrix: alloygbm_core::DatasetMatrix::new(row_count, FEATURE_COUNT, values)
+            .expect("allocation reuse fixture matrix is valid"),
+        targets,
+        sample_weights: None,
+        time_index: None,
+        group_id: None,
+        factor_exposures: None,
+    };
+    let binned = BinnedMatrix::new(row_count, FEATURE_COUNT, 1, bins)
+        .expect("allocation reuse fixture bins are valid");
     (dataset, binned)
 }
 
@@ -807,6 +916,147 @@ impl BackendOps for MockBackend {
             grad_sq_sum,
             row_count: row_indices.len() as u32,
         })
+    }
+}
+
+impl BackendOps for OwnershipRecordingBackend {
+    fn build_histograms(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: &NodeSlice,
+        feature_tiles: &[FeatureTile],
+    ) -> EngineResult<HistogramBundle> {
+        self.build_histograms_with_grad_sq(binned_matrix, gradients, node, feature_tiles, false)
+    }
+
+    fn build_histograms_with_grad_sq(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: &NodeSlice,
+        feature_tiles: &[FeatureTile],
+        include_grad_sq: bool,
+    ) -> EngineResult<HistogramBundle> {
+        const BIN_COUNT: usize = 256;
+        let mut feature_histograms = Vec::new();
+        for feature_index in feature_tiles
+            .iter()
+            .flat_map(|tile| tile.start_feature..tile.end_feature)
+        {
+            let mut bins = vec![
+                HistogramBin {
+                    grad_sum: 0.0,
+                    hess_sum: 0.0,
+                    grad_sq_sum: 0.0,
+                    count: 0,
+                };
+                BIN_COUNT
+            ];
+            for &row_index in &node.row_indices {
+                let row = row_index as usize;
+                let gradient = gradients.get(row).ok_or_else(|| {
+                    EngineError::ContractViolation(
+                        "ownership fixture gradient row is out of bounds".to_string(),
+                    )
+                })?;
+                let cell_index = row * binned_matrix.feature_count + feature_index as usize;
+                let bin = binned_matrix.row_bin(cell_index) as usize;
+                let histogram_bin = bins.get_mut(bin).ok_or_else(|| {
+                    EngineError::ContractViolation(
+                        "ownership fixture bin is out of bounds".to_string(),
+                    )
+                })?;
+                histogram_bin.grad_sum += gradient.grad;
+                histogram_bin.hess_sum += gradient.hess;
+                histogram_bin.grad_sq_sum += gradient.grad * gradient.grad;
+                histogram_bin.count += 1;
+            }
+            feature_histograms.push(FeatureHistogram {
+                feature_index,
+                bins,
+            });
+        }
+        HistogramBundle::from_feature_histograms(node.node_id, feature_histograms, include_grad_sq)
+            .map_err(EngineError::from)
+    }
+
+    fn best_split(&self, histograms: &HistogramBundle) -> EngineResult<Option<SplitCandidate>> {
+        let (_, local_node_id) = decode_tree_node_id(histograms.node_id);
+        let depth = (u32::BITS - (local_node_id + 1).leading_zeros() - 1) as usize;
+        Ok(Some(SplitCandidate {
+            node_id: histograms.node_id,
+            feature_index: depth.min(3) as u32,
+            threshold_bin: 0,
+            gain: 100.0 - depth as f32,
+            default_left: false,
+            is_categorical: false,
+            categorical_bitset: None,
+            left_stats: NodeStats {
+                grad_sum: 0.0,
+                hess_sum: 0.0,
+                grad_sq_sum: 0.0,
+                row_count: 0,
+            },
+            right_stats: NodeStats {
+                grad_sum: 0.0,
+                hess_sum: 0.0,
+                grad_sq_sum: 0.0,
+                row_count: 0,
+            },
+        }))
+    }
+
+    fn apply_split(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        node: &NodeSlice,
+        split: &SplitCandidate,
+    ) -> EngineResult<PartitionResult> {
+        let gradients = vec![
+            GradientPair {
+                grad: 0.0,
+                hess: 1.0,
+            };
+            binned_matrix.row_count
+        ];
+        let (partition, _, _) = Self::partition_with_stats(binned_matrix, &gradients, node, split)?;
+        Ok(partition)
+    }
+
+    fn apply_split_with_stats(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: &NodeSlice,
+        split: &SplitCandidate,
+    ) -> EngineResult<(PartitionResult, NodeStats, NodeStats)> {
+        self.borrowed_split_calls
+            .fetch_add(1, AtomicOrdering::SeqCst);
+        Self::partition_with_stats(binned_matrix, gradients, node, split)
+    }
+
+    fn apply_split_owned_with_stats(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: NodeSlice,
+        split: &SplitCandidate,
+    ) -> EngineResult<(PartitionResult, NodeStats, NodeStats)> {
+        self.owned_split_calls.fetch_add(1, AtomicOrdering::SeqCst);
+        if self.owned_delegates_to_borrowed {
+            self.apply_split_with_stats(binned_matrix, gradients, &node, split)
+        } else {
+            Self::partition_with_stats(binned_matrix, gradients, &node, split)
+        }
+    }
+
+    fn reduce_sums(
+        &self,
+        gradients: &[GradientPair],
+        row_indices: &[u32],
+    ) -> EngineResult<NodeStats> {
+        Self::stats(gradients, row_indices)
     }
 }
 
@@ -2153,6 +2403,147 @@ fn squared_error_objective_produces_expected_baseline() {
         .initial_prediction(&[2.0, 0.0, -2.0], None)
         .expect("baseline should compute");
     assert!(baseline.abs() < 1e-6);
+}
+
+fn fit_allocation_reuse_fixture(
+    tree_growth: TreeGrowth,
+    use_dro: bool,
+    row_count: usize,
+    workers: usize,
+    backend: &OwnershipRecordingBackend,
+) -> IterationRunSummary {
+    let (dataset, binned) = allocation_reuse_fixture(row_count);
+    let params = TrainParams {
+        seed: 73,
+        max_depth: 4,
+        max_leaves: (tree_growth == TreeGrowth::Leaf).then_some(16),
+        tree_growth,
+        leaf_solver: if use_dro {
+            LeafSolverKind::Dro
+        } else {
+            LeafSolverKind::Standard
+        },
+        dro_config: use_dro.then_some(DroConfig {
+            radius: 0.2,
+            metric: alloygbm_core::DroMetric::Wasserstein,
+        }),
+        ..TrainParams::default()
+    };
+    let controls = IterationControls::new(2, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
+        .expect("allocation reuse controls are valid")
+        .with_max_leaves((tree_growth == TreeGrowth::Leaf).then_some(16))
+        .expect("allocation reuse leaf limit is valid");
+    let trainer = Trainer::new(params).expect("allocation reuse params are valid");
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .build()
+        .expect("allocation reuse thread pool should build")
+        .install(|| {
+            trainer
+                .fit_iterations_with_summary(
+                    &dataset,
+                    &binned,
+                    backend,
+                    &SquaredErrorObjective,
+                    controls,
+                )
+                .expect("allocation reuse fixture should train")
+        })
+}
+
+fn assert_allocation_reuse_matches_borrowed_reference(tree_growth: TreeGrowth, use_dro: bool) {
+    let reference_backend = OwnershipRecordingBackend::new(true);
+    let reference = fit_allocation_reuse_fixture(tree_growth, use_dro, 32, 1, &reference_backend);
+    let owned_backend = OwnershipRecordingBackend::new(false);
+    let owned = fit_allocation_reuse_fixture(tree_growth, use_dro, 32, 1, &owned_backend);
+
+    assert_eq!(owned.model, reference.model);
+    assert_eq!(owned.diagnostics_per_round, reference.diagnostics_per_round);
+    assert_eq!(owned.stop_reason, reference.stop_reason);
+    assert_eq!(
+        owned.stop_reason,
+        IterationStopReason::CompletedRequestedRounds
+    );
+    assert!(owned.model.stumps.iter().any(|stump| {
+        let (_, local_node_id) = decode_tree_node_id(stump.split.node_id);
+        (7..=14).contains(&local_node_id)
+    }));
+    let (dataset, _) = allocation_reuse_fixture(32);
+    for row in dataset
+        .matrix
+        .values
+        .chunks_exact(dataset.matrix.feature_count)
+    {
+        let reference_prediction = reference
+            .model
+            .predict_row(row)
+            .expect("reference predicts");
+        let owned_prediction = owned.model.predict_row(row).expect("owned path predicts");
+        assert_eq!(owned_prediction.to_bits(), reference_prediction.to_bits());
+    }
+
+    assert!(
+        reference_backend
+            .borrowed_split_calls
+            .load(AtomicOrdering::SeqCst)
+            > 0,
+        "reference owned entry point should delegate to borrowed partitioning"
+    );
+    assert_eq!(
+        owned_backend.owned_split_calls.load(AtomicOrdering::SeqCst),
+        owned.model.stumps.len(),
+        "every committed split should consume node ownership"
+    );
+    assert_eq!(
+        owned_backend
+            .borrowed_split_calls
+            .load(AtomicOrdering::SeqCst),
+        0,
+        "owned tree-builder flow should not borrow node rows for partitioning"
+    );
+}
+
+#[test]
+fn allocation_reuse_level_wise_preserves_standard_and_dro_behavior() {
+    for use_dro in [false, true] {
+        assert_allocation_reuse_matches_borrowed_reference(TreeGrowth::Level, use_dro);
+    }
+}
+
+#[test]
+fn allocation_reuse_leaf_wise_preserves_standard_and_dro_behavior() {
+    for use_dro in [false, true] {
+        assert_allocation_reuse_matches_borrowed_reference(TreeGrowth::Leaf, use_dro);
+    }
+}
+
+#[test]
+fn allocation_reuse_level_wise_preserves_node_parallel_ordering() {
+    let one_worker_backend = OwnershipRecordingBackend::new(false);
+    let one_worker =
+        fit_allocation_reuse_fixture(TreeGrowth::Level, true, 8_192, 1, &one_worker_backend);
+    let four_worker_backend = OwnershipRecordingBackend::new(false);
+    let four_worker =
+        fit_allocation_reuse_fixture(TreeGrowth::Level, true, 8_192, 4, &four_worker_backend);
+
+    assert_eq!(four_worker.model, one_worker.model);
+    assert_eq!(
+        four_worker.diagnostics_per_round,
+        one_worker.diagnostics_per_round
+    );
+    assert_eq!(four_worker.stop_reason, one_worker.stop_reason);
+    assert_eq!(
+        one_worker_backend
+            .owned_split_calls
+            .load(AtomicOrdering::SeqCst),
+        one_worker.model.stumps.len()
+    );
+    assert_eq!(
+        four_worker_backend
+            .owned_split_calls
+            .load(AtomicOrdering::SeqCst),
+        four_worker.model.stumps.len()
+    );
 }
 
 #[test]

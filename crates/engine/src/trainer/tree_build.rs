@@ -319,7 +319,7 @@ fn propose_level_node<B: BackendOps>(
     let ActiveNodeEntry {
         local_node_id,
         row_indices,
-        histograms,
+        mut histograms,
         parent_leaf_value,
         parent_linear_leaf,
         path_features,
@@ -333,6 +333,7 @@ fn propose_level_node<B: BackendOps>(
         context.factor_exposures,
         &node.row_indices,
     );
+    let parent_row_count = node.row_indices.len();
     let filtered_histograms_storage;
     let histograms_for_split = match (context.constraint_index, node_active_groups) {
         (Some(index), Some(active_groups)) => {
@@ -363,15 +364,13 @@ fn propose_level_node<B: BackendOps>(
         ));
     }
 
-    let (partition, left_stats, right_stats) = context.backend.apply_split_with_stats(
+    let (partition, left_stats, right_stats) = context.backend.apply_split_owned_with_stats(
         context.binned_matrix,
         context.gradients,
-        &node,
+        node,
         &split,
     )?;
-    if partition.left_row_indices.len() + partition.right_row_indices.len()
-        != node.row_indices.len()
-    {
+    if partition.left_row_indices.len() + partition.right_row_indices.len() != parent_row_count {
         return Err(EngineError::ContractViolation(
             "split partition does not cover all node rows".to_string(),
         ));
@@ -626,8 +625,8 @@ fn propose_level_node<B: BackendOps>(
                     context.split_options.requires_grad_sq(),
                     context.histogram_execution,
                 )?;
-                let right_histograms =
-                    subtract_histogram_bundle(&histograms, &left_histograms, right_node_id)?;
+                histograms.subtract_child_in_place(&left_histograms, right_node_id)?;
+                let right_histograms = histograms;
                 (
                     PartitionResult {
                         left_row_indices: left_node.row_indices,
@@ -646,8 +645,8 @@ fn propose_level_node<B: BackendOps>(
                     context.split_options.requires_grad_sq(),
                     context.histogram_execution,
                 )?;
-                let left_histograms =
-                    subtract_histogram_bundle(&histograms, &right_histograms, left_node_id)?;
+                histograms.subtract_child_in_place(&right_histograms, left_node_id)?;
+                let left_histograms = histograms;
                 (
                     PartitionResult {
                         left_row_indices,
@@ -1068,6 +1067,18 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
     let mut last_rejection = IterationStopReason::NoSplitCandidate;
 
     while let Some(pending) = queue.pop() {
+        let PendingSplit {
+            local_node_id,
+            row_indices,
+            path_features,
+            split_candidate: split,
+            mut histograms,
+            parent_leaf_value,
+            parent_linear_leaf,
+            depth,
+            monotone_bounds,
+        } = pending;
+
         // Check max_leaves: splitting adds 1 net leaf.
         if leaves_used + 1 > max_leaves {
             last_rejection = IterationStopReason::MaxLeavesReached;
@@ -1075,22 +1086,20 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
         }
 
         // Check max_depth constraint.
-        if pending.depth >= max_depth {
+        if depth >= max_depth {
             last_rejection = IterationStopReason::DepthBudgetReached;
             continue;
         }
 
-        let local_node_id = pending.local_node_id;
         let node_id = encode_tree_node_id(round_index, local_node_id)?;
-        let node = NodeSlice::new(node_id, pending.row_indices)?;
-        let split = pending.split_candidate;
+        let node = NodeSlice::new(node_id, row_indices)?;
+        let parent_row_count = node.row_indices.len();
 
         // Apply the split: partition rows and get stats.
         let (partition, left_stats, right_stats) =
-            backend.apply_split_with_stats(binned_matrix, gradients, &node, &split)?;
+            backend.apply_split_owned_with_stats(binned_matrix, gradients, node, &split)?;
 
-        if partition.left_row_indices.len() + partition.right_row_indices.len()
-            != node.row_indices.len()
+        if partition.left_row_indices.len() + partition.right_row_indices.len() != parent_row_count
         {
             return Err(EngineError::ContractViolation(
                 "split partition does not cover all node rows".to_string(),
@@ -1126,7 +1135,7 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
             split_options.l1_alpha,
             split_options.dro_config.as_ref(),
         );
-        let child_depth = (pending.depth + 1) as u32;
+        let child_depth = (depth + 1) as u32;
         let scheduled_lr = morph.map_or(params.learning_rate, |m| m.scheduled_lr());
         let leaf_scale = morph.map_or(params.learning_rate, |m| {
             m.leaf_scale_for_depth(child_depth).total
@@ -1137,7 +1146,7 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
             / (right_stats.hess_sum + split_options.l2_lambda + LEAF_EPSILON);
 
         // Morph leaf modifications: depth penalty + per-round shrinkage.
-        // Children of `pending` land at `pending.depth + 1` in the tree.
+        // Children land at `depth + 1` in the tree.
         let morph_scale = if let Some(m) = morph.as_ref() {
             m.leaf_scale_for_depth(child_depth).multiplier
         } else {
@@ -1169,22 +1178,22 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                 right_output,
                 left_bounds,
                 right_bounds,
-            } = pending.monotone_bounds.bound_children(
+            } = monotone_bounds.bound_children(
                 monotone_constraint_for_feature(&params.monotone_constraints, split.feature_index),
                 raw_left_leaf_absolute,
                 raw_right_leaf_absolute,
             )?;
             let left = reconstruct_bounded_child(
-                pending.parent_leaf_value,
-                left_output - pending.parent_leaf_value,
+                parent_leaf_value,
+                left_output - parent_leaf_value,
                 left_output,
                 left_bounds,
                 local_node_id,
                 "left",
             )?;
             let right = reconstruct_bounded_child(
-                pending.parent_leaf_value,
-                right_output - pending.parent_leaf_value,
+                parent_leaf_value,
+                right_output - parent_leaf_value,
                 right_output,
                 right_bounds,
                 local_node_id,
@@ -1200,12 +1209,12 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
             )
         } else {
             (
-                raw_left_leaf_absolute - pending.parent_leaf_value,
-                raw_right_leaf_absolute - pending.parent_leaf_value,
+                raw_left_leaf_absolute - parent_leaf_value,
+                raw_right_leaf_absolute - parent_leaf_value,
                 raw_left_leaf_absolute,
                 raw_right_leaf_absolute,
-                pending.monotone_bounds,
-                pending.monotone_bounds,
+                monotone_bounds,
+                monotone_bounds,
             )
         };
 
@@ -1223,7 +1232,7 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
             && !split.is_categorical
         {
             let regressor_features = linear_regressor_path_features(
-                &pending.path_features,
+                &path_features,
                 split.feature_index,
                 split.is_categorical,
                 binned_matrix.feature_count,
@@ -1262,9 +1271,9 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                     // Compute delta versions (parent-relative).
                     let mut ll_delta = ll_abs.clone();
                     let mut rl_delta = rl_abs.clone();
-                    ll_delta.intercept -= pending.parent_leaf_value;
-                    rl_delta.intercept -= pending.parent_leaf_value;
-                    if let Some(ref p) = pending.parent_linear_leaf {
+                    ll_delta.intercept -= parent_leaf_value;
+                    rl_delta.intercept -= parent_leaf_value;
+                    if let Some(ref p) = parent_linear_leaf {
                         for (slot, &feature) in ll_delta.regressor_features.iter().enumerate() {
                             if let Some(parent_slot) =
                                 p.regressor_features.iter().position(|&f| f == feature)
@@ -1342,7 +1351,7 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
         leaves_used += 1;
 
         // Enqueue children if within depth budget.
-        let child_depth = pending.depth + 1;
+        let child_depth = depth + 1;
         if child_depth < max_depth {
             let left_local = left_child_node_id(local_node_id)?;
             let right_local = right_child_node_id(local_node_id)?;
@@ -1413,11 +1422,8 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                 feature_tiles,
                 split_options.requires_grad_sq(),
             )?;
-            let larger_histograms = subtract_histogram_bundle(
-                &pending.histograms,
-                &smaller_histograms,
-                larger_node_id,
-            )?;
+            histograms.subtract_child_in_place(&smaller_histograms, larger_node_id)?;
+            let larger_histograms = histograms;
 
             // Propagate interaction-constraint active groups to both
             // children of the just-applied split.  Both children inherit the
@@ -1429,7 +1435,7 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
                 .map(|s| (s.split.feature_index, s.split.is_categorical))
                 .unwrap_or((0, false));
             let child_path_features = linear_regressor_path_features(
-                &pending.path_features,
+                &path_features,
                 split_feature_for_descend,
                 split_is_categorical_for_descend,
                 binned_matrix.feature_count,
@@ -1545,6 +1551,7 @@ pub(crate) fn build_tree_leaf_wise<B: BackendOps>(
 ///
 /// This avoids allocating a new `HistogramBundle` by reusing `dest`.
 /// `dest` must have the same feature count and bin counts as `parent`.
+#[cfg(test)]
 pub(crate) fn subtract_histogram_bundle_into(
     parent: &HistogramBundle,
     child: &HistogramBundle,
@@ -1562,6 +1569,7 @@ pub(crate) fn subtract_histogram_bundle_into(
         .map_err(EngineError::from)
 }
 
+#[cfg(test)]
 pub(crate) fn subtract_histogram_bundle(
     parent: &HistogramBundle,
     child: &HistogramBundle,
