@@ -64,6 +64,15 @@
 
 ### Performance
 
+- **Reused histogram, partition, and split-scan allocations during tree
+  construction.** Consumed parent histogram storage now becomes the larger
+  child's subtraction result, owned row partitioning retains one parent vector
+  for a child, and standard numeric SIMD scans use worker-local prefix scratch.
+  A manifest-attested eight-case benchmark preserved exact artifact and
+  prediction digests across all 24 recorded pairs. Aggregate native fit time
+  changed by +0.8% and incremental RSS by -3.7%; the wide/deep level-wise
+  pressure case improved time by 15.2% and RSS by 13.2%. No public API or
+  artifact format changed.
 - **Parallelized eligible multiclass class-tree builds.** Multiclass rounds
   now prepare independent class candidates in parallel inside the fit-scoped
   pool, then commit them in class order. Small workloads remain serial, and

@@ -41,6 +41,12 @@ Current benchmark entry points:
   exact serial/parallel artifact and prediction hashes, finite probabilities,
   completed rounds, and prior-beating log loss across row/feature shapes,
   class counts, and both growth strategies.
+- isolated histogram and partition allocation-reuse harness:
+  `benchmarks/allocation_reuse_benchmark.py` with report at
+  [allocation_reuse_v1.md](allocation_reuse_v1.md). It compares manifest-attested
+  baseline and candidate native extensions across four matrix shapes and both
+  growth strategies, requiring exact artifact and prediction digests before
+  applying aggregate native-time and RSS gates.
 - descriptive high-class-count, low-drop-cap multiclass DART scratch harness:
   `benchmarks/multiclass_dart_scratch_benchmark.py` with report at
   [multiclass_dart_scratch_v1.md](multiclass_dart_scratch_v1.md). It has no
