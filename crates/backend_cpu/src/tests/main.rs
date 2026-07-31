@@ -2022,16 +2022,10 @@ fn make_options(
     }
 }
 
-fn assert_standard_simd_matches_scalar(feature: &FeatureHistogram, options: SplitSelectionOptions) {
-    let scalar = with_histogram_feature(feature, |view| {
-        CpuBackend::best_split_for_feature_inner(view, 0, options, GainStrategy::Standard, None)
-    });
-    let simd = with_histogram_feature(feature, |view| {
-        CpuBackend::best_split_for_feature_standard_simd(view, 0, options)
-    });
-
+fn assert_split_candidates_match(scalar: Option<&SplitCandidate>, simd: Option<&SplitCandidate>) {
     match (scalar, simd) {
         (Some(scalar), Some(simd)) => {
+            assert_eq!(scalar.feature_index, simd.feature_index);
             assert_eq!(scalar.threshold_bin, simd.threshold_bin);
             assert_eq!(scalar.default_left, simd.default_left);
             assert!((scalar.gain - simd.gain).abs() < 1e-4);
@@ -2047,8 +2041,25 @@ fn assert_standard_simd_matches_scalar(feature: &FeatureHistogram, options: Spli
     }
 }
 
+fn standard_simd_and_scalar_candidates(
+    feature: &FeatureHistogram,
+    options: SplitSelectionOptions,
+) -> (Option<SplitCandidate>, Option<SplitCandidate>) {
+    let scalar = with_histogram_feature(feature, |view| {
+        CpuBackend::best_split_for_feature_inner(view, 0, options, GainStrategy::Standard, None)
+    });
+    let simd = with_histogram_feature(feature, |view| {
+        CpuBackend::best_split_for_feature_standard_simd(view, 0, options)
+    });
+
+    assert_split_candidates_match(scalar.as_ref(), simd.as_ref());
+    (scalar, simd)
+}
+
 #[test]
 fn split_scan_simd_matches_scalar_across_bin_counts_missing_directions_and_ties() {
+    let mut missing_left_fixture = None;
+    let mut missing_right_fixture = None;
     for &bin_count in &[2_usize, 7, 8, 9, 63, 255, 65_535] {
         let mut state = 0x9E37_79B9_u32 ^ bin_count as u32;
         let mut bins = Vec::with_capacity(bin_count);
@@ -2070,12 +2081,27 @@ fn split_scan_simd_matches_scalar_across_bin_counts_missing_directions_and_ties(
         };
 
         for missing_bin_index in [bin_count, bin_count - 1] {
-            assert_standard_simd_matches_scalar(
+            let (scalar, _) = standard_simd_and_scalar_candidates(
                 &feature,
                 make_options(0.05, 0.1, 0.0, 0.0, missing_bin_index),
             );
+            match (bin_count, missing_bin_index) {
+                (8, 7) => missing_left_fixture = scalar,
+                (7, 6) => missing_right_fixture = scalar,
+                _ => {}
+            }
         }
     }
+
+    let missing_left_fixture =
+        missing_left_fixture.expect("seeded missing-left fixture should produce a split");
+    assert_eq!(missing_left_fixture.threshold_bin, 3);
+    assert!(missing_left_fixture.default_left);
+
+    let missing_right_fixture =
+        missing_right_fixture.expect("seeded missing-right fixture should produce a split");
+    assert_eq!(missing_right_fixture.threshold_bin, 0);
+    assert!(!missing_right_fixture.default_left);
 
     let tied = FeatureHistogram {
         feature_index: 0,
@@ -2106,7 +2132,88 @@ fn split_scan_simd_matches_scalar_across_bin_counts_missing_directions_and_ties(
             },
         ],
     };
-    assert_standard_simd_matches_scalar(&tied, make_options(0.0, 0.1, 0.0, 0.0, 4));
+    let (scalar_tie, simd_tie) =
+        standard_simd_and_scalar_candidates(&tied, make_options(0.0, 0.1, 0.0, 0.0, 4));
+    let scalar_tie = scalar_tie.expect("symmetric fixture should produce a split");
+    let simd_tie = simd_tie.expect("symmetric fixture should produce a split");
+    assert_eq!(scalar_tie.threshold_bin, 0);
+    assert!(scalar_tie.default_left);
+    assert_eq!(simd_tie.threshold_bin, 0);
+    assert!(simd_tie.default_left);
+}
+
+#[test]
+fn split_scan_nested_rayon_multi_worker_selection_matches_sequential_scalar_oracle() {
+    const FEATURE_COUNT: usize = 16;
+    let gradients = [3.0_f32, 2.0, 1.0, -1.0, -2.0, -3.0, 1.0, -1.0, 0.5];
+    let features = (0..FEATURE_COUNT)
+        .map(|feature_index| {
+            let scale = feature_index as f32 + 1.0;
+            FeatureHistogram {
+                feature_index: feature_index as u32,
+                bins: gradients
+                    .iter()
+                    .enumerate()
+                    .map(|(bin_index, &gradient)| HistogramBin {
+                        grad_sum: gradient * scale,
+                        hess_sum: 1.0 + bin_index as f32 * 0.125,
+                        grad_sq_sum: 0.0,
+                        count: 3 + bin_index as u32,
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
+    let histograms = HistogramBundle::from_feature_histograms(7, features, true)
+        .expect("parallel split fixture");
+    assert!(histograms.feature_count() >= CpuBackend::PARALLEL_SPLIT_FEATURE_THRESHOLD);
+    let options = make_options(0.05, 0.1, 0.0, 0.0, 8);
+    let expected = histograms
+        .features()
+        .filter_map(|feature| {
+            CpuBackend::best_split_for_feature_inner(
+                feature,
+                histograms.node_id,
+                options,
+                GainStrategy::Standard,
+                None,
+            )
+        })
+        .reduce(|left, right| {
+            if apply_feature_weight(&right, &[]) > apply_feature_weight(&left, &[]) {
+                right
+            } else {
+                left
+            }
+        });
+
+    let nested_histograms = histograms.clone();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .expect("nested split test pool");
+    pool.spawn(move || {
+        let actual = CpuBackend::best_split_with_options_internal(
+            &nested_histograms,
+            options,
+            &[],
+            &[],
+            None,
+        );
+        sender
+            .send((
+                rayon::current_num_threads(),
+                rayon::current_thread_index(),
+                actual,
+            ))
+            .expect("test receiver remains live");
+    });
+    let (thread_count, worker_index, actual) = receiver.recv().expect("nested split result");
+
+    assert_eq!(thread_count, 4);
+    assert!(worker_index.is_some());
+    assert_split_candidates_match(expected.as_ref(), actual.as_ref());
 }
 
 #[test]
