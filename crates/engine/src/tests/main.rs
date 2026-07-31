@@ -5,6 +5,7 @@ use alloygbm_core::{
     CoreError, Device, DroConfig, FeatureHistogram, HistogramBin, LeafSolverKind, MISSING_BIN_U8,
     MorphConfig, NeutralizationKind, discover_exact_feature_bundles, leaf_gain_term,
 };
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 use std::time::Duration;
 
@@ -33,6 +34,20 @@ struct OwnershipRecordingBackend {
     owned_delegates_to_borrowed: bool,
     borrowed_split_calls: AtomicUsize,
     owned_split_calls: AtomicUsize,
+    histogram_specs: Mutex<std::collections::HashMap<u32, OwnershipHistogramSpec>>,
+    expected_complement_histograms:
+        Mutex<std::collections::HashMap<u32, ExpectedComplementHistogram>>,
+    validated_complement_histograms: AtomicUsize,
+    validated_grad_sq_complement_histograms: AtomicUsize,
+}
+#[derive(Clone)]
+struct OwnershipHistogramSpec {
+    feature_indices: Vec<u32>,
+    include_grad_sq: bool,
+}
+struct ExpectedComplementHistogram {
+    histogram: HistogramBundle,
+    error_scale: HistogramBundle,
 }
 struct BadObjective;
 
@@ -42,7 +57,231 @@ impl OwnershipRecordingBackend {
             owned_delegates_to_borrowed,
             borrowed_split_calls: AtomicUsize::new(0),
             owned_split_calls: AtomicUsize::new(0),
+            histogram_specs: Mutex::new(std::collections::HashMap::new()),
+            expected_complement_histograms: Mutex::new(std::collections::HashMap::new()),
+            validated_complement_histograms: AtomicUsize::new(0),
+            validated_grad_sq_complement_histograms: AtomicUsize::new(0),
         }
+    }
+
+    fn build_histogram_for_rows(
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node_id: u32,
+        row_indices: &[u32],
+        feature_indices: &[u32],
+        include_grad_sq: bool,
+        sum_absolute_gradients: bool,
+    ) -> EngineResult<HistogramBundle> {
+        const BIN_COUNT: usize = 256;
+        let mut feature_histograms = Vec::with_capacity(feature_indices.len());
+        for &feature_index in feature_indices {
+            let mut bins = vec![
+                HistogramBin {
+                    grad_sum: 0.0,
+                    hess_sum: 0.0,
+                    grad_sq_sum: 0.0,
+                    count: 0,
+                };
+                BIN_COUNT
+            ];
+            for &row_index in row_indices {
+                let row = row_index as usize;
+                let gradient = gradients.get(row).ok_or_else(|| {
+                    EngineError::ContractViolation(
+                        "ownership fixture gradient row is out of bounds".to_string(),
+                    )
+                })?;
+                let cell_index = row * binned_matrix.feature_count + feature_index as usize;
+                let bin = binned_matrix.row_bin(cell_index) as usize;
+                let histogram_bin = bins.get_mut(bin).ok_or_else(|| {
+                    EngineError::ContractViolation(
+                        "ownership fixture bin is out of bounds".to_string(),
+                    )
+                })?;
+                histogram_bin.grad_sum += if sum_absolute_gradients {
+                    gradient.grad.abs()
+                } else {
+                    gradient.grad
+                };
+                histogram_bin.hess_sum += gradient.hess;
+                histogram_bin.grad_sq_sum += gradient.grad * gradient.grad;
+                histogram_bin.count += 1;
+            }
+            feature_histograms.push(FeatureHistogram {
+                feature_index,
+                bins,
+            });
+        }
+        HistogramBundle::from_feature_histograms(node_id, feature_histograms, include_grad_sq)
+            .map_err(EngineError::from)
+    }
+
+    fn record_complement_histogram(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: &NodeSlice,
+        partition: &PartitionResult,
+    ) -> EngineResult<()> {
+        let spec = self
+            .histogram_specs
+            .lock()
+            .expect("ownership histogram specs lock should not be poisoned")
+            .get(&node.node_id)
+            .cloned()
+            .ok_or_else(|| {
+                EngineError::ContractViolation(format!(
+                    "missing ownership histogram spec for node {}",
+                    node.node_id
+                ))
+            })?;
+        let (tree_id, local_node_id) = decode_tree_node_id(node.node_id);
+        let left_node_id =
+            encode_tree_node_id(tree_id as usize, left_child_node_id(local_node_id)?)?;
+        let right_node_id =
+            encode_tree_node_id(tree_id as usize, right_child_node_id(local_node_id)?)?;
+        {
+            let mut specs = self
+                .histogram_specs
+                .lock()
+                .expect("ownership histogram specs lock should not be poisoned");
+            specs.insert(left_node_id, spec.clone());
+            specs.insert(right_node_id, spec.clone());
+        }
+        let (complement_node_id, complement_rows) =
+            if partition.left_row_indices.len() <= partition.right_row_indices.len() {
+                (right_node_id, partition.right_row_indices.as_slice())
+            } else {
+                (left_node_id, partition.left_row_indices.as_slice())
+            };
+        let expected = Self::build_histogram_for_rows(
+            binned_matrix,
+            gradients,
+            complement_node_id,
+            complement_rows,
+            &spec.feature_indices,
+            spec.include_grad_sq,
+            false,
+        )?;
+        let error_scale = Self::build_histogram_for_rows(
+            binned_matrix,
+            gradients,
+            node.node_id,
+            &node.row_indices,
+            &spec.feature_indices,
+            spec.include_grad_sq,
+            true,
+        )?;
+        self.expected_complement_histograms
+            .lock()
+            .expect("ownership complement histogram lock should not be poisoned")
+            .insert(
+                complement_node_id,
+                ExpectedComplementHistogram {
+                    histogram: expected,
+                    error_scale,
+                },
+            );
+        Ok(())
+    }
+
+    fn validate_complement_histogram(
+        actual: &HistogramBundle,
+        expected: &ExpectedComplementHistogram,
+    ) -> EngineResult<()> {
+        let expected_histogram = &expected.histogram;
+        if actual.node_id != expected_histogram.node_id
+            || actual.feature_indices() != expected_histogram.feature_indices()
+            || actual.bin_count() != expected_histogram.bin_count()
+            || actual.has_grad_sq_sums() != expected_histogram.has_grad_sq_sums()
+        {
+            return Err(EngineError::ContractViolation(format!(
+                "complement histogram layout mismatch for node {}",
+                actual.node_id
+            )));
+        }
+        let values_match = |actual: f32, expected: f32, error_scale: f32| {
+            (actual - expected).abs()
+                <= 256.0 * f32::EPSILON * error_scale.abs().max(expected.abs()).max(1.0)
+        };
+        for feature_position in 0..actual.feature_count() {
+            let actual_feature = actual.feature(feature_position).ok_or_else(|| {
+                EngineError::ContractViolation(
+                    "missing actual complement histogram feature".to_string(),
+                )
+            })?;
+            let expected_feature =
+                expected_histogram
+                    .feature(feature_position)
+                    .ok_or_else(|| {
+                        EngineError::ContractViolation(
+                            "missing expected complement histogram feature".to_string(),
+                        )
+                    })?;
+            let error_scale_feature =
+                expected
+                    .error_scale
+                    .feature(feature_position)
+                    .ok_or_else(|| {
+                        EngineError::ContractViolation(
+                            "missing complement histogram error scale feature".to_string(),
+                        )
+                    })?;
+            let gradient_error_scale = error_scale_feature.grad_sums().iter().sum::<f32>();
+            let hessian_error_scale = error_scale_feature.hess_sums().iter().sum::<f32>();
+            let feature_index = actual.feature_indices()[feature_position];
+            if actual_feature.counts() != expected_feature.counts() {
+                return Err(EngineError::ContractViolation(format!(
+                    "complement histogram count mismatch for node {} feature {}",
+                    actual.node_id, feature_index
+                )));
+            }
+            for (label, actual_values, expected_values, error_scale) in [
+                (
+                    "gradient",
+                    actual_feature.grad_sums(),
+                    expected_feature.grad_sums(),
+                    gradient_error_scale,
+                ),
+                (
+                    "hessian",
+                    actual_feature.hess_sums(),
+                    expected_feature.hess_sums(),
+                    hessian_error_scale,
+                ),
+            ] {
+                if let Some((bin, (&actual_value, &expected_value))) =
+                    actual_values.iter().zip(expected_values).enumerate().find(
+                        |&(_, (&actual, &expected))| !values_match(actual, expected, error_scale),
+                    )
+                {
+                    return Err(EngineError::ContractViolation(format!(
+                        "complement histogram {label} mismatch for node {} feature {} bin {bin}: actual={actual_value} expected={expected_value} scale={error_scale}",
+                        actual.node_id, feature_index,
+                    )));
+                }
+            }
+            let grad_sq_error_scale = error_scale_feature
+                .grad_sq_sums()
+                .map(|values| values.iter().sum::<f32>());
+            if let (Some(actual_values), Some(expected_values), Some(error_scale)) = (
+                actual_feature.grad_sq_sums(),
+                expected_feature.grad_sq_sums(),
+                grad_sq_error_scale,
+            ) && let Some((bin, (&actual_value, &expected_value))) = actual_values
+                .iter()
+                .zip(expected_values)
+                .enumerate()
+                .find(|&(_, (&actual, &expected))| !values_match(actual, expected, error_scale))
+            {
+                return Err(EngineError::ContractViolation(format!(
+                    "complement histogram gradient-squared mismatch for node {} feature {} bin {bin}: actual={actual_value} expected={expected_value} scale={error_scale}",
+                    actual.node_id, feature_index,
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn partition_with_stats(
@@ -938,50 +1177,46 @@ impl BackendOps for OwnershipRecordingBackend {
         feature_tiles: &[FeatureTile],
         include_grad_sq: bool,
     ) -> EngineResult<HistogramBundle> {
-        const BIN_COUNT: usize = 256;
-        let mut feature_histograms = Vec::new();
-        for feature_index in feature_tiles
+        let feature_indices = feature_tiles
             .iter()
             .flat_map(|tile| tile.start_feature..tile.end_feature)
-        {
-            let mut bins = vec![
-                HistogramBin {
-                    grad_sum: 0.0,
-                    hess_sum: 0.0,
-                    grad_sq_sum: 0.0,
-                    count: 0,
-                };
-                BIN_COUNT
-            ];
-            for &row_index in &node.row_indices {
-                let row = row_index as usize;
-                let gradient = gradients.get(row).ok_or_else(|| {
-                    EngineError::ContractViolation(
-                        "ownership fixture gradient row is out of bounds".to_string(),
-                    )
-                })?;
-                let cell_index = row * binned_matrix.feature_count + feature_index as usize;
-                let bin = binned_matrix.row_bin(cell_index) as usize;
-                let histogram_bin = bins.get_mut(bin).ok_or_else(|| {
-                    EngineError::ContractViolation(
-                        "ownership fixture bin is out of bounds".to_string(),
-                    )
-                })?;
-                histogram_bin.grad_sum += gradient.grad;
-                histogram_bin.hess_sum += gradient.hess;
-                histogram_bin.grad_sq_sum += gradient.grad * gradient.grad;
-                histogram_bin.count += 1;
-            }
-            feature_histograms.push(FeatureHistogram {
-                feature_index,
-                bins,
-            });
-        }
-        HistogramBundle::from_feature_histograms(node.node_id, feature_histograms, include_grad_sq)
-            .map_err(EngineError::from)
+            .collect::<Vec<_>>();
+        self.histogram_specs
+            .lock()
+            .expect("ownership histogram specs lock should not be poisoned")
+            .insert(
+                node.node_id,
+                OwnershipHistogramSpec {
+                    feature_indices: feature_indices.clone(),
+                    include_grad_sq,
+                },
+            );
+        Self::build_histogram_for_rows(
+            binned_matrix,
+            gradients,
+            node.node_id,
+            &node.row_indices,
+            &feature_indices,
+            include_grad_sq,
+            false,
+        )
     }
 
     fn best_split(&self, histograms: &HistogramBundle) -> EngineResult<Option<SplitCandidate>> {
+        let expected = self
+            .expected_complement_histograms
+            .lock()
+            .expect("ownership complement histogram lock should not be poisoned")
+            .remove(&histograms.node_id);
+        if let Some(expected) = expected {
+            Self::validate_complement_histogram(histograms, &expected)?;
+            self.validated_complement_histograms
+                .fetch_add(1, AtomicOrdering::SeqCst);
+            if expected.histogram.has_grad_sq_sums() {
+                self.validated_grad_sq_complement_histograms
+                    .fetch_add(1, AtomicOrdering::SeqCst);
+            }
+        }
         let (_, local_node_id) = decode_tree_node_id(histograms.node_id);
         let depth = (u32::BITS - (local_node_id + 1).leading_zeros() - 1) as usize;
         Ok(Some(SplitCandidate {
@@ -1033,7 +1268,9 @@ impl BackendOps for OwnershipRecordingBackend {
     ) -> EngineResult<(PartitionResult, NodeStats, NodeStats)> {
         self.borrowed_split_calls
             .fetch_add(1, AtomicOrdering::SeqCst);
-        Self::partition_with_stats(binned_matrix, gradients, node, split)
+        let result = Self::partition_with_stats(binned_matrix, gradients, node, split)?;
+        self.record_complement_histogram(binned_matrix, gradients, node, &result.0)?;
+        Ok(result)
     }
 
     fn apply_split_owned_with_stats(
@@ -1047,7 +1284,9 @@ impl BackendOps for OwnershipRecordingBackend {
         if self.owned_delegates_to_borrowed {
             self.apply_split_with_stats(binned_matrix, gradients, &node, split)
         } else {
-            Self::partition_with_stats(binned_matrix, gradients, &node, split)
+            let result = Self::partition_with_stats(binned_matrix, gradients, &node, split)?;
+            self.record_complement_histogram(binned_matrix, gradients, &node, &result.0)?;
+            Ok(result)
         }
     }
 
@@ -2451,6 +2690,17 @@ fn fit_allocation_reuse_fixture(
         })
 }
 
+fn expected_complement_histogram_validations(model: &TrainedModel) -> usize {
+    model
+        .stumps
+        .iter()
+        .filter(|stump| {
+            let (_, local_node_id) = decode_tree_node_id(stump.split.node_id);
+            local_node_id < 7
+        })
+        .count()
+}
+
 fn assert_allocation_reuse_matches_borrowed_reference(tree_growth: TreeGrowth, use_dro: bool) {
     let reference_backend = OwnershipRecordingBackend::new(true);
     let reference = fit_allocation_reuse_fixture(tree_growth, use_dro, 32, 1, &reference_backend);
@@ -2501,6 +2751,21 @@ fn assert_allocation_reuse_matches_borrowed_reference(tree_growth: TreeGrowth, u
         0,
         "owned tree-builder flow should not borrow node rows for partitioning"
     );
+    let expected_validations = expected_complement_histogram_validations(&owned.model);
+    assert_eq!(
+        owned_backend
+            .validated_complement_histograms
+            .load(AtomicOrdering::SeqCst),
+        expected_validations,
+        "every reused complementary child histogram should match a direct rebuild"
+    );
+    assert_eq!(
+        owned_backend
+            .validated_grad_sq_complement_histograms
+            .load(AtomicOrdering::SeqCst),
+        if use_dro { expected_validations } else { 0 },
+        "DRO complementary histograms should validate squared-gradient contents"
+    );
 }
 
 #[test]
@@ -2543,6 +2808,24 @@ fn allocation_reuse_level_wise_preserves_node_parallel_ordering() {
             .owned_split_calls
             .load(AtomicOrdering::SeqCst),
         four_worker.model.stumps.len()
+    );
+    assert_eq!(
+        one_worker_backend
+            .validated_complement_histograms
+            .load(AtomicOrdering::SeqCst),
+        expected_complement_histogram_validations(&one_worker.model)
+    );
+    assert_eq!(
+        four_worker_backend
+            .validated_complement_histograms
+            .load(AtomicOrdering::SeqCst),
+        expected_complement_histogram_validations(&four_worker.model)
+    );
+    assert_eq!(
+        four_worker_backend
+            .validated_grad_sq_complement_histograms
+            .load(AtomicOrdering::SeqCst),
+        expected_complement_histogram_validations(&four_worker.model)
     );
 }
 
