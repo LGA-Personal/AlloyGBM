@@ -44,6 +44,65 @@ thread_local! {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CpuBackend;
 
+#[derive(Clone, Copy, Default)]
+struct NodeStatsAccumulator {
+    grad_sum: f32,
+    hess_sum: f32,
+    grad_sq_sum: f32,
+    row_count: usize,
+}
+
+impl NodeStatsAccumulator {
+    fn add(&mut self, gradient: GradientPair) {
+        self.grad_sum += gradient.grad;
+        self.hess_sum += gradient.hess;
+        self.grad_sq_sum += gradient.grad * gradient.grad;
+        self.row_count += 1;
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.grad_sum += other.grad_sum;
+        self.hess_sum += other.hess_sum;
+        self.grad_sq_sum += other.grad_sq_sum;
+        self.row_count += other.row_count;
+    }
+
+    fn into_node_stats(self, row_count: usize) -> NodeStats {
+        NodeStats {
+            grad_sum: self.grad_sum,
+            hess_sum: self.hess_sum,
+            grad_sq_sum: self.grad_sq_sum,
+            row_count: row_count as u32,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct ChunkStats {
+    left: NodeStatsAccumulator,
+    right: NodeStatsAccumulator,
+}
+
+#[derive(Clone, Copy)]
+struct SplitRowLookup {
+    feature_index: usize,
+    column_base: usize,
+    missing_bin: u16,
+    use_col_major: bool,
+}
+
+impl SplitRowLookup {
+    fn goes_left(self, matrix: &BinnedMatrix, row: u32, split: &SplitCandidate) -> bool {
+        let row = row as usize;
+        let bin = if self.use_col_major {
+            matrix.col_bin(self.column_base + row)
+        } else {
+            matrix.row_bin(row * matrix.feature_count + self.feature_index)
+        };
+        goes_left_for_split(bin, self.missing_bin, split)
+    }
+}
+
 impl CpuBackend {
     pub fn device(&self) -> Device {
         Device::Cpu
@@ -146,6 +205,38 @@ impl CpuBackend {
         feature_tile_count > 1
             && row_count.saturating_mul(selected_feature_count) >= PARALLEL_TILE_WORKLOAD_THRESHOLD
             && rayon::current_num_threads() > 1
+    }
+
+    fn split_row_lookup(
+        binned_matrix: &BinnedMatrix,
+        gradients: Option<&[GradientPair]>,
+        node: &NodeSlice,
+        split: &SplitCandidate,
+    ) -> EngineResult<SplitRowLookup> {
+        node.validate_bounds(binned_matrix.row_count)?;
+        if let Some(gradients) = gradients
+            && gradients.len() != binned_matrix.row_count
+        {
+            return Err(EngineError::ContractViolation(format!(
+                "gradients length {} does not match row_count {}",
+                gradients.len(),
+                binned_matrix.row_count
+            )));
+        }
+        if split.feature_index as usize >= binned_matrix.feature_count {
+            return Err(EngineError::ContractViolation(format!(
+                "split feature_index {} exceeds feature_count {}",
+                split.feature_index, binned_matrix.feature_count
+            )));
+        }
+
+        let feature_index = split.feature_index as usize;
+        Ok(SplitRowLookup {
+            feature_index,
+            column_base: feature_index * binned_matrix.row_count,
+            missing_bin: binned_matrix.missing_bin(),
+            use_col_major: binned_matrix.has_col_major(),
+        })
     }
 
     fn build_feature_histograms_for_tile(
@@ -1556,90 +1647,115 @@ impl CpuBackend {
         node: &NodeSlice,
         split: &SplitCandidate,
     ) -> EngineResult<(PartitionResult, NodeStats, NodeStats)> {
-        type ChunkResult = (Vec<u32>, Vec<u32>, f32, f32, f32, f32, f32, f32);
-        let chunk_size = (node.row_indices.len() / rayon::current_num_threads().max(1)).max(4096);
-        let chunk_results: Vec<ChunkResult> = node
-            .row_indices
-            .par_chunks(chunk_size)
-            .map(|chunk| {
-                let mut left = Vec::new();
-                let mut right = Vec::new();
-                let mut lg = 0.0_f32;
-                let mut lh = 0.0_f32;
-                let mut lq = 0.0_f32;
-                let mut rg = 0.0_f32;
-                let mut rh = 0.0_f32;
-                let mut rq = 0.0_f32;
-                let feature_index = split.feature_index as usize;
-                let use_col_major = binned_matrix.has_col_major();
-                let col_base = feature_index * binned_matrix.row_count;
-                let missing = binned_matrix.missing_bin();
-                for &row_index_u32 in chunk {
-                    let row_index = row_index_u32 as usize;
-                    let bin_val = if use_col_major {
-                        binned_matrix.col_bin(col_base + row_index)
-                    } else {
-                        let cell_index = row_index * binned_matrix.feature_count + feature_index;
-                        binned_matrix.row_bin(cell_index)
-                    };
-                    let gradient = gradients[row_index];
-                    if goes_left_for_split(bin_val, missing, split) {
-                        left.push(row_index_u32);
-                        lg += gradient.grad;
-                        lh += gradient.hess;
-                        lq += gradient.grad * gradient.grad;
-                    } else {
-                        right.push(row_index_u32);
-                        rg += gradient.grad;
-                        rh += gradient.hess;
-                        rq += gradient.grad * gradient.grad;
-                    }
-                }
-                (left, right, lg, lh, lq, rg, rh, rq)
-            })
-            .collect();
+        let lookup = Self::split_row_lookup(binned_matrix, Some(gradients), node, split)?;
+        Self::apply_split_with_stats_parallel_with_lookup(
+            binned_matrix,
+            gradients,
+            node,
+            split,
+            lookup,
+        )
+    }
 
-        let total_rows = node.row_indices.len();
-        let mut left_row_indices = Vec::with_capacity(total_rows / 2);
-        let mut right_row_indices = Vec::with_capacity(total_rows / 2);
-        let mut left_grad_sum = 0.0_f32;
-        let mut left_hess_sum = 0.0_f32;
-        let mut left_grad_sq_sum = 0.0_f32;
-        let mut right_grad_sum = 0.0_f32;
-        let mut right_hess_sum = 0.0_f32;
-        let mut right_grad_sq_sum = 0.0_f32;
+    fn apply_split_with_stats_parallel_with_lookup(
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: &NodeSlice,
+        split: &SplitCandidate,
+        lookup: SplitRowLookup,
+    ) -> EngineResult<(PartitionResult, NodeStats, NodeStats)> {
+        let (left_stats, right_stats) =
+            Self::parallel_split_stats(binned_matrix, gradients, &node.row_indices, split, lookup);
+        let left_count = left_stats.row_count as usize;
+        let right_count = right_stats.row_count as usize;
+        let mut left_row_indices = Vec::with_capacity(left_count);
+        let mut right_row_indices = Vec::with_capacity(right_count);
 
-        for (left, right, lg, lh, lq, rg, rh, rq) in chunk_results {
-            left_row_indices.extend(left);
-            right_row_indices.extend(right);
-            left_grad_sum += lg;
-            left_hess_sum += lh;
-            left_grad_sq_sum += lq;
-            right_grad_sum += rg;
-            right_hess_sum += rh;
-            right_grad_sq_sum += rq;
+        for &row in &node.row_indices {
+            if lookup.goes_left(binned_matrix, row, split) {
+                left_row_indices.push(row);
+            } else {
+                right_row_indices.push(row);
+            }
         }
 
-        let left_count = left_row_indices.len() as u32;
-        let right_count = right_row_indices.len() as u32;
         Ok((
             PartitionResult {
                 left_row_indices,
                 right_row_indices,
             },
-            NodeStats {
-                grad_sum: left_grad_sum,
-                hess_sum: left_hess_sum,
-                grad_sq_sum: left_grad_sq_sum,
-                row_count: left_count,
-            },
-            NodeStats {
-                grad_sum: right_grad_sum,
-                hess_sum: right_hess_sum,
-                grad_sq_sum: right_grad_sq_sum,
-                row_count: right_count,
-            },
+            left_stats,
+            right_stats,
         ))
+    }
+
+    fn apply_split_owned_with_stats_parallel(
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: NodeSlice,
+        split: &SplitCandidate,
+        lookup: SplitRowLookup,
+    ) -> EngineResult<(PartitionResult, NodeStats, NodeStats)> {
+        let (left_stats, right_stats) =
+            Self::parallel_split_stats(binned_matrix, gradients, &node.row_indices, split, lookup);
+        let mut left_row_indices = Vec::with_capacity(left_stats.row_count as usize);
+        let mut right_row_indices = node.row_indices;
+        right_row_indices.retain(|&row| {
+            if lookup.goes_left(binned_matrix, row, split) {
+                left_row_indices.push(row);
+                false
+            } else {
+                true
+            }
+        });
+
+        Ok((
+            PartitionResult {
+                left_row_indices,
+                right_row_indices,
+            },
+            left_stats,
+            right_stats,
+        ))
+    }
+
+    fn parallel_split_stats(
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        rows: &[u32],
+        split: &SplitCandidate,
+        lookup: SplitRowLookup,
+    ) -> (NodeStats, NodeStats) {
+        let chunk_size = (rows.len() / rayon::current_num_threads().max(1)).max(4096);
+        let chunk_stats: Vec<ChunkStats> = rows
+            .par_chunks(chunk_size)
+            .map(|chunk| {
+                let mut stats = ChunkStats::default();
+                for &row in chunk {
+                    let gradient = gradients[row as usize];
+                    if lookup.goes_left(binned_matrix, row, split) {
+                        stats.left.add(gradient);
+                    } else {
+                        stats.right.add(gradient);
+                    }
+                }
+                stats
+            })
+            .collect();
+
+        let mut left = NodeStatsAccumulator::default();
+        let mut right = NodeStatsAccumulator::default();
+        for chunk in chunk_stats {
+            left.merge(chunk.left);
+            right.merge(chunk.right);
+        }
+
+        let left_count = left.row_count;
+        let right_count = right.row_count;
+        (
+            left.into_node_stats(left_count),
+            right.into_node_stats(right_count),
+        )
     }
 }
 

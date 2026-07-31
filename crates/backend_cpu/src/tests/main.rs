@@ -192,6 +192,36 @@ fn sample_node() -> NodeSlice {
     NodeSlice::new(0, vec![0, 1, 2, 3]).expect("node is valid")
 }
 
+fn split_candidate(
+    feature_index: u32,
+    threshold_bin: u16,
+    default_left: bool,
+    is_categorical: bool,
+    categorical_bitset: Option<Vec<u8>>,
+) -> SplitCandidate {
+    SplitCandidate {
+        node_id: 0,
+        feature_index,
+        threshold_bin,
+        gain: 0.0,
+        default_left,
+        is_categorical,
+        categorical_bitset,
+        left_stats: NodeStats {
+            grad_sum: 0.0,
+            hess_sum: 0.0,
+            grad_sq_sum: 0.0,
+            row_count: 0,
+        },
+        right_stats: NodeStats {
+            grad_sum: 0.0,
+            hess_sum: 0.0,
+            grad_sq_sum: 0.0,
+            row_count: 0,
+        },
+    }
+}
+
 fn with_histogram_feature<R>(
     feature: &FeatureHistogram,
     f: impl FnOnce(HistogramFeatureView<'_>) -> R,
@@ -1054,6 +1084,106 @@ fn apply_split_with_stats_matches_partition_and_reduction_reference() {
     assert_eq!(partition, reference_partition);
     assert_eq!(left_stats, reference_left);
     assert_eq!(right_stats, reference_right);
+}
+
+#[test]
+fn owned_partition_reuses_parent_storage_for_numeric_thresholds() {
+    let backend = CpuBackend;
+    let matrix = BinnedMatrix::new(5, 1, 4, vec![0, 1, 2, 3, 4]).expect("valid matrix");
+    let gradients = vec![GradientPair::new(1.0, 1.0).expect("gradient"); 5];
+    let mut rows = Vec::with_capacity(8);
+    rows.extend(0..5);
+    let node = NodeSlice::new(0, rows).expect("node");
+    let split = split_candidate(0, 2, false, false, None);
+
+    let expected = backend
+        .apply_split_with_stats(&matrix, &gradients, &node, &split)
+        .expect("borrowed partition");
+    let parent_ptr = node.row_indices.as_ptr();
+    let actual = backend
+        .apply_split_owned_with_stats(&matrix, &gradients, node, &split)
+        .expect("owned partition");
+
+    assert_eq!(actual, expected);
+    assert_eq!(actual.0.right_row_indices.as_ptr(), parent_ptr);
+}
+
+#[test]
+fn owned_partition_reuses_parent_storage_for_missing_values_in_both_directions() {
+    let backend = CpuBackend;
+    let missing = u16::from(MISSING_BIN_U8);
+    let matrix =
+        BinnedMatrix::new(4, 1, missing, vec![0, MISSING_BIN_U8, 2, 3]).expect("valid matrix");
+    let gradients = vec![GradientPair::new(1.0, 1.0).expect("gradient"); 4];
+
+    for default_left in [false, true] {
+        let mut rows = Vec::with_capacity(8);
+        rows.extend(0..4);
+        let node = NodeSlice::new(0, rows).expect("node");
+        let split = split_candidate(0, 1, default_left, false, None);
+
+        let expected = backend
+            .apply_split_with_stats(&matrix, &gradients, &node, &split)
+            .expect("borrowed partition");
+        let parent_ptr = node.row_indices.as_ptr();
+        let actual = backend
+            .apply_split_owned_with_stats(&matrix, &gradients, node, &split)
+            .expect("owned partition");
+
+        assert_eq!(actual, expected);
+        assert_eq!(actual.0.right_row_indices.as_ptr(), parent_ptr);
+    }
+}
+
+#[test]
+fn owned_partition_reuses_parent_storage_for_categorical_bitsets() {
+    let backend = CpuBackend;
+    let matrix = BinnedMatrix::new(6, 1, 2, vec![0, 1, 2, 0, 1, 2]).expect("valid matrix");
+    let gradients = vec![GradientPair::new(1.0, 1.0).expect("gradient"); 6];
+    let mut rows = Vec::with_capacity(8);
+    rows.extend(0..6);
+    let node = NodeSlice::new(0, rows).expect("node");
+    let split = split_candidate(0, 0, true, true, Some(vec![0b0000_0011]));
+
+    let expected = backend
+        .apply_split_with_stats(&matrix, &gradients, &node, &split)
+        .expect("borrowed partition");
+    let parent_ptr = node.row_indices.as_ptr();
+    let actual = backend
+        .apply_split_owned_with_stats(&matrix, &gradients, node, &split)
+        .expect("owned partition");
+
+    assert_eq!(actual, expected);
+    assert_eq!(actual.0.right_row_indices.as_ptr(), parent_ptr);
+}
+
+#[test]
+fn owned_partition_matches_parallel_chunk_statistic_order() {
+    const ROWS: usize = 50_000;
+
+    let backend = CpuBackend;
+    let bins = (0..ROWS).map(|row| (row % 2) as u8).collect();
+    let matrix = BinnedMatrix::new(ROWS, 1, 1, bins).expect("valid matrix");
+    let gradients = (0..ROWS)
+        .map(|row| {
+            let magnitude = if row % 2 == 0 { 1.0e20 } else { 1.0 };
+            let sign = match (row / 2) % 3 {
+                1 => -1.0,
+                _ => 1.0,
+            };
+            GradientPair::new(sign * magnitude, 1.0 + (row % 2) as f32).expect("gradient")
+        })
+        .collect::<Vec<_>>();
+    let node = NodeSlice::new(0, (0..ROWS as u32).collect()).expect("node");
+    let split = split_candidate(0, 0, false, false, None);
+
+    let expected = CpuBackend::apply_split_with_stats_parallel(&matrix, &gradients, &node, &split)
+        .expect("parallel partition");
+    let actual = backend
+        .apply_split_owned_with_stats(&matrix, &gradients, node, &split)
+        .expect("owned partition");
+
+    assert_eq!(actual, expected);
 }
 
 #[test]
