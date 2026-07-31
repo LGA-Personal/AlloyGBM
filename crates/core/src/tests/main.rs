@@ -1765,10 +1765,22 @@ fn histogram_subtraction_pair(include_grad_sq: bool) -> (HistogramBundle, Histog
     (parent, child)
 }
 
+fn histogram_soa_pointers(
+    bundle: &HistogramBundle,
+) -> (*const f32, *const f32, Option<*const f32>, *const u32) {
+    let feature = bundle.feature(0).expect("first histogram feature");
+    (
+        feature.grad_sums().as_ptr(),
+        feature.hess_sums().as_ptr(),
+        feature.grad_sq_sums().map(<[f32]>::as_ptr),
+        feature.counts().as_ptr(),
+    )
+}
+
 #[test]
 fn subtract_child_in_place_matches_allocating_subtraction_without_grad_sq() {
     let (mut parent, child) = histogram_subtraction_pair(false);
-    let grad_ptr = parent.feature(0).unwrap().grad_sums().as_ptr();
+    let soa_pointers = histogram_soa_pointers(&parent);
     let expected = {
         let mut dest = HistogramBundle::new_zeroed_with_grad_sq(
             parent.feature_indices(),
@@ -1780,13 +1792,13 @@ fn subtract_child_in_place_matches_allocating_subtraction_without_grad_sq() {
     };
     parent.subtract_child_in_place(&child, 9).unwrap();
     assert_eq!(parent, expected);
-    assert_eq!(parent.feature(0).unwrap().grad_sums().as_ptr(), grad_ptr);
+    assert_eq!(histogram_soa_pointers(&parent), soa_pointers);
 }
 
 #[test]
 fn subtract_child_in_place_matches_allocating_subtraction_with_grad_sq() {
     let (mut parent, child) = histogram_subtraction_pair(true);
-    let grad_ptr = parent.feature(0).unwrap().grad_sums().as_ptr();
+    let soa_pointers = histogram_soa_pointers(&parent);
     let expected = {
         let mut dest = HistogramBundle::new_zeroed_with_grad_sq(
             parent.feature_indices(),
@@ -1798,7 +1810,7 @@ fn subtract_child_in_place_matches_allocating_subtraction_with_grad_sq() {
     };
     parent.subtract_child_in_place(&child, 9).unwrap();
     assert_eq!(parent, expected);
-    assert_eq!(parent.feature(0).unwrap().grad_sums().as_ptr(), grad_ptr);
+    assert_eq!(histogram_soa_pointers(&parent), soa_pointers);
 }
 
 #[test]
@@ -1824,4 +1836,30 @@ fn subtract_child_in_place_rejects_excess_counts_atomically() {
         matches!(error, CoreError::Validation(message) if message == "child histogram count exceeds parent")
     );
     assert_eq!(parent, original);
+}
+
+#[test]
+fn subtract_child_in_place_rejects_layout_mismatch_atomically() {
+    let (mut parent, _) = histogram_subtraction_pair(true);
+    let child = HistogramBundle::from_soa(
+        8,
+        vec![3, 8],
+        2,
+        vec![1.0, 2.0, 3.0, 4.0],
+        vec![0.1, 0.2, 0.3, 0.4],
+        Some(vec![10.0, 20.0, 30.0, 40.0]),
+        vec![1, 2, 3, 4],
+    )
+    .expect("valid child histogram");
+    let original = parent.clone();
+
+    let error = parent
+        .subtract_child_in_place(&child, 9)
+        .expect_err("histogram layouts must match");
+
+    assert!(
+        matches!(error, CoreError::Validation(message) if message == "histogram subtraction requires identical layouts")
+    );
+    assert_eq!(parent, original);
+    assert_eq!(parent.node_id, 4);
 }
