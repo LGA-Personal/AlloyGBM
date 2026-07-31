@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -114,6 +115,33 @@ def _bound_result(runtime, case, repetition, **changes):
     return replace(result, **changes)
 
 
+def _attest_runtime(runtime, *, package_root=None):
+    package = package_root or (
+        runtime.workdir / "bindings" / "python" / "alloygbm"
+    )
+    package.mkdir(parents=True, exist_ok=True)
+    package_path = package / "__init__.py"
+    extension_path = package / "_alloygbm.abi3.so"
+    package_path.touch()
+    extension_path.write_bytes(runtime.source_commit.encode("ascii"))
+    manifest = BENCHMARK.RuntimeManifest(
+        schema_version=BENCHMARK.RUNTIME_MANIFEST_SCHEMA_VERSION,
+        runtime_name=runtime.name,
+        source_commit=runtime.source_commit,
+        python_executable=str(runtime.python.absolute()),
+        package_path=str(package_path.resolve()),
+        extension_path=str(extension_path.resolve()),
+        extension_sha256=hashlib.sha256(extension_path.read_bytes()).hexdigest(),
+    )
+    manifest_path = runtime.workdir / f"{runtime.name}-runtime.json"
+    BENCHMARK.write_runtime_manifest(manifest_path, manifest)
+    return replace(
+        runtime,
+        manifest_path=manifest_path,
+        attestation=manifest,
+    )
+
+
 def test_fixture_generation_is_deterministic_and_contains_missing_values():
     case = BENCHMARK.quick_cases()[0]
 
@@ -181,6 +209,22 @@ def test_worker_command_is_isolated_and_bound_to_runtime_worktree(tmp_path):
     assert invocation.value_after("--expected-source-commit") == "1" * 40
     assert "PYTHONPATH" not in invocation.env
     assert "PYTHONHOME" not in invocation.env
+
+
+def test_worker_command_passes_runtime_manifest_when_present(tmp_path):
+    runtime = _attest_runtime(_runtime(tmp_path, "candidate", "2" * 40))
+
+    invocation = BENCHMARK.build_worker_invocation(
+        runtime,
+        BENCHMARK.quick_cases()[0],
+        profile="quick",
+        repetition=0,
+        n_jobs=2,
+    )
+
+    assert invocation.value_after("--runtime-manifest") == str(
+        runtime.manifest_path
+    )
 
 
 def test_worker_output_parser_accepts_one_complete_bound_json_record(tmp_path):
@@ -291,8 +335,8 @@ def test_runtime_validation_rejects_shared_native_binary_for_distinct_commits():
 
 
 def test_full_configuration_requires_distinct_runtime_identity(tmp_path):
-    baseline = _runtime(tmp_path, "baseline", "1" * 40)
-    candidate = _runtime(tmp_path, "candidate", "2" * 40)
+    baseline = _attest_runtime(_runtime(tmp_path, "baseline", "1" * 40))
+    candidate = _attest_runtime(_runtime(tmp_path, "candidate", "2" * 40))
     BENCHMARK.validate_run_configuration(
         profile="full", baseline=baseline, candidate=candidate, repetitions=3
     )
@@ -309,6 +353,44 @@ def test_full_configuration_requires_distinct_runtime_identity(tmp_path):
             )
 
 
+def test_full_configuration_rejects_missing_or_same_manifest(tmp_path):
+    baseline = _attest_runtime(_runtime(tmp_path, "baseline", "1" * 40))
+    candidate = _attest_runtime(_runtime(tmp_path, "candidate", "2" * 40))
+
+    with pytest.raises(ValueError, match="manifest"):
+        BENCHMARK.validate_run_configuration(
+            profile="full",
+            baseline=replace(baseline, manifest_path=None, attestation=None),
+            candidate=candidate,
+            repetitions=3,
+        )
+
+    shared_runtime = replace(
+        candidate.attestation,
+        package_path=baseline.attestation.package_path,
+        extension_path=baseline.attestation.extension_path,
+        extension_sha256=baseline.attestation.extension_sha256,
+    )
+    with pytest.raises(ValueError, match="same runtime"):
+        BENCHMARK.validate_run_configuration(
+            profile="full",
+            baseline=baseline,
+            candidate=replace(candidate, attestation=shared_runtime),
+            repetitions=3,
+        )
+    with pytest.raises(ValueError, match="distinct.*manifest"):
+        BENCHMARK.validate_run_configuration(
+            profile="full",
+            baseline=baseline,
+            candidate=replace(
+                candidate,
+                manifest_path=baseline.manifest_path,
+                attestation=baseline.attestation,
+            ),
+            repetitions=3,
+        )
+
+
 def test_quick_configuration_is_the_only_self_comparison_mode(tmp_path):
     candidate = _runtime(tmp_path, "candidate", "2" * 40)
     baseline = replace(candidate, name="baseline")
@@ -320,6 +402,16 @@ def test_quick_configuration_is_the_only_self_comparison_mode(tmp_path):
         BENCHMARK.validate_run_configuration(
             profile="full", baseline=baseline, candidate=candidate, repetitions=3
         )
+
+
+def test_quick_baseline_alias_preserves_candidate_manifest(tmp_path):
+    candidate = _attest_runtime(_runtime(tmp_path, "candidate", "2" * 40))
+
+    baseline = BENCHMARK.quick_baseline_runtime(candidate)
+
+    assert baseline.name == "baseline"
+    assert baseline.manifest_path == candidate.manifest_path
+    assert baseline.attestation == candidate.attestation
 
 
 def test_worker_result_must_bind_to_declared_interpreter_and_worktree(tmp_path):
@@ -342,6 +434,113 @@ def test_worker_result_must_bind_to_declared_interpreter_and_worktree(tmp_path):
     for record in invalid:
         with pytest.raises(ValueError, match="runtime binding"):
             BENCHMARK.validate_result_binding(runtime, record)
+
+
+def test_verified_manifest_allows_wheel_site_packages(tmp_path):
+    runtime = _runtime(tmp_path, "candidate", "2" * 40)
+    wheel_package = tmp_path / "venv" / "site-packages" / "alloygbm"
+    runtime = _attest_runtime(runtime, package_root=wheel_package)
+    case = BENCHMARK.quick_cases()[0]
+    result = replace(
+        _bound_result(runtime, case, 0),
+        package_path=runtime.attestation.package_path,
+        extension_path=runtime.attestation.extension_path,
+        extension_sha256=runtime.attestation.extension_sha256,
+    )
+
+    BENCHMARK.validate_result_binding(runtime, result)
+
+    mismatches = (
+        replace(result, source_commit="3" * 40),
+        replace(result, python_executable="/wrong/python"),
+        replace(result, package_path="/wrong/alloygbm/__init__.py"),
+        replace(result, extension_path="/wrong/_alloygbm.so"),
+        replace(result, extension_sha256="0" * 64),
+    )
+    for mismatch in mismatches:
+        with pytest.raises(ValueError, match="manifest"):
+            BENCHMARK.validate_result_binding(runtime, mismatch)
+
+
+def test_runtime_manifest_round_trips_as_strict_json(tmp_path):
+    runtime = _attest_runtime(_runtime(tmp_path, "candidate", "2" * 40))
+
+    loaded = BENCHMARK.load_runtime_manifest(
+        runtime.manifest_path,
+        runtime=replace(runtime, manifest_path=None, attestation=None),
+        expected_name="candidate",
+    )
+
+    assert loaded == runtime.attestation
+    payload = json.loads(runtime.manifest_path.read_text(encoding="utf-8"))
+    assert set(payload) == {
+        "schema_version",
+        "runtime_name",
+        "source_commit",
+        "python_executable",
+        "package_path",
+        "extension_path",
+        "extension_sha256",
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("source_commit", "3" * 40, "commit"),
+        ("python_executable", "/wrong/python", "executable"),
+        ("package_path", "/missing/alloygbm/__init__.py", "package path"),
+        ("extension_path", "/missing/alloygbm.so", "extension path"),
+        ("extension_sha256", "0" * 64, "digest"),
+    ],
+)
+def test_runtime_manifest_rejects_stale_identity_fields(
+    tmp_path, field, value, message
+):
+    runtime = _attest_runtime(_runtime(tmp_path, "candidate", "2" * 40))
+    payload = runtime.attestation.to_dict()
+    payload[field] = value
+    runtime.manifest_path.write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match=message):
+        BENCHMARK.load_runtime_manifest(
+            runtime.manifest_path,
+            runtime=replace(runtime, manifest_path=None, attestation=None),
+            expected_name="candidate",
+        )
+
+
+def test_runtime_manifest_rejects_unknown_fields_and_nonfinite_json(tmp_path):
+    runtime = _attest_runtime(_runtime(tmp_path, "candidate", "2" * 40))
+    payload = runtime.attestation.to_dict()
+    payload["unexpected"] = True
+    runtime.manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="fields"):
+        BENCHMARK.load_runtime_manifest(
+            runtime.manifest_path,
+            runtime=replace(runtime, manifest_path=None, attestation=None),
+            expected_name="candidate",
+        )
+
+    runtime.manifest_path.write_text('{"schema_version": NaN}', encoding="utf-8")
+    with pytest.raises(ValueError, match="strict JSON"):
+        BENCHMARK.load_runtime_manifest(
+            runtime.manifest_path,
+            runtime=replace(runtime, manifest_path=None, attestation=None),
+            expected_name="candidate",
+        )
+
+    payload = runtime.attestation.to_dict()
+    payload["schema_version"] = "1"
+    runtime.manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="types"):
+        BENCHMARK.load_runtime_manifest(
+            runtime.manifest_path,
+            runtime=replace(runtime, manifest_path=None, attestation=None),
+            expected_name="candidate",
+        )
 
 
 @pytest.mark.parametrize(
@@ -483,10 +682,14 @@ def test_full_cli_supports_repetitions_and_exact_output_flags():
             "/baseline/python",
             "--baseline-workdir",
             "/baseline",
+            "--baseline-manifest",
+            "/baseline/runtime.json",
             "--candidate-python",
             "/candidate/python",
             "--candidate-workdir",
             "/candidate",
+            "--candidate-manifest",
+            "/candidate/runtime.json",
             "--repetitions",
             "3",
             "--output-json",
@@ -501,6 +704,35 @@ def test_full_cli_supports_repetitions_and_exact_output_flags():
     assert args.repetitions == 3
     assert args.output_json == Path("/tmp/report.json")
     assert args.output_markdown == Path("/tmp/report.md")
+
+
+def test_cli_rejects_abbreviated_output_flags():
+    parser = BENCHMARK._parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--full", "--output-j", "/tmp/report.json"])
+
+
+def test_manifest_writer_cli_is_an_explicit_mode():
+    args = BENCHMARK._parser().parse_args(
+        [
+            "--write-runtime-manifest",
+            "/tmp/candidate-runtime.json",
+            "--runtime-name",
+            "candidate",
+            "--runtime-python",
+            "/candidate/python",
+            "--runtime-workdir",
+            "/candidate",
+        ]
+    )
+
+    BENCHMARK.validate_cli_args(args)
+    assert args.write_runtime_manifest == Path("/tmp/candidate-runtime.json")
+
+    args.gate = True
+    with pytest.raises(ValueError, match="manifest mode does not accept"):
+        BENCHMARK.validate_cli_args(args)
 
 
 def test_markdown_renders_runtime_identity_aggregate_gates_and_digests():
@@ -553,6 +785,11 @@ def test_ci_runs_allocation_contract_and_quick_self_consistency_gate():
         in workflow
     )
     assert (
-        "python benchmarks/allocation_reuse_benchmark.py --quick --gate"
+        "--write-runtime-manifest /tmp/alloygbm-candidate-runtime.json"
+        in workflow
+    )
+    assert (
+        "python benchmarks/allocation_reuse_benchmark.py --quick "
+        "--candidate-manifest /tmp/alloygbm-candidate-runtime.json --gate"
         in workflow
     )

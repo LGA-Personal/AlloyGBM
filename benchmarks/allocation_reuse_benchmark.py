@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 import hashlib
 import json
 import math
@@ -20,7 +20,8 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+RUNTIME_MANIFEST_SCHEMA_VERSION = 1
 QUICK_REPETITIONS = 1
 FULL_REPETITIONS = 5
 QUICK_ESTIMATORS = 3
@@ -56,19 +57,78 @@ class Fixture:
 
 
 @dataclass(frozen=True)
+class RuntimeManifest:
+    schema_version: int
+    runtime_name: str
+    source_commit: str
+    python_executable: str
+    package_path: str
+    extension_path: str
+    extension_sha256: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> RuntimeManifest:
+        expected = {
+            "schema_version",
+            "runtime_name",
+            "source_commit",
+            "python_executable",
+            "package_path",
+            "extension_path",
+            "extension_sha256",
+        }
+        if set(payload) != expected:
+            raise ValueError(
+                "runtime manifest fields must exactly match the schema: "
+                f"expected={sorted(expected)}, actual={sorted(payload)}"
+            )
+        string_fields = expected - {"schema_version"}
+        if type(payload["schema_version"]) is not int or any(
+            not isinstance(payload[field_name], str)
+            for field_name in string_fields
+        ):
+            raise ValueError("runtime manifest field types do not match the schema")
+        manifest = cls(
+            schema_version=payload["schema_version"],
+            runtime_name=payload["runtime_name"],
+            source_commit=payload["source_commit"],
+            python_executable=payload["python_executable"],
+            package_path=payload["package_path"],
+            extension_path=payload["extension_path"],
+            extension_sha256=payload["extension_sha256"],
+        )
+        if manifest.schema_version != RUNTIME_MANIFEST_SCHEMA_VERSION:
+            raise ValueError(
+                f"unsupported runtime manifest schema {manifest.schema_version}"
+            )
+        return manifest
+
+
+@dataclass(frozen=True)
 class RuntimeSpec:
     name: str
     python: Path
     workdir: Path
     source_commit: str
+    manifest_path: Path | None = None
+    attestation: RuntimeManifest | None = None
 
-    def to_dict(self) -> dict[str, str]:
-        return {
+    def to_dict(self) -> dict[str, Any]:
+        payload = {
             "name": self.name,
             "python": str(self.python),
             "workdir": str(self.workdir),
             "source_commit": self.source_commit,
+            "manifest_path": (
+                None if self.manifest_path is None else str(self.manifest_path)
+            ),
         }
+        if self.attestation is not None:
+            payload["attestation"] = self.attestation.to_dict()
+        return payload
 
 
 @dataclass(frozen=True)
@@ -292,14 +352,30 @@ def _git_commit(workdir: Path) -> str:
     return commit
 
 
-def resolve_runtime(name: str, python: Path, workdir: Path) -> RuntimeSpec:
+def resolve_runtime(
+    name: str,
+    python: Path,
+    workdir: Path,
+    manifest_path: Path | None = None,
+) -> RuntimeSpec:
     python = Path(os.path.abspath(python.expanduser()))
     workdir = workdir.expanduser().resolve()
     if not python.is_file():
         raise ValueError(f"{name} Python executable does not exist: {python}")
     if not workdir.is_dir():
         raise ValueError(f"{name} workdir does not exist: {workdir}")
-    return RuntimeSpec(name, python, workdir, _git_commit(workdir))
+    runtime = RuntimeSpec(name, python, workdir, _git_commit(workdir))
+    if manifest_path is None:
+        return runtime
+    manifest_path = manifest_path.expanduser().resolve()
+    manifest = load_runtime_manifest(
+        manifest_path, runtime=runtime, expected_name=name
+    )
+    return replace(
+        runtime,
+        manifest_path=manifest_path,
+        attestation=manifest,
+    )
 
 
 def build_worker_invocation(
@@ -313,7 +389,7 @@ def build_worker_invocation(
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
     env.pop("PYTHONHOME", None)
-    command = (
+    command_prefix = (
         str(runtime.python),
         "-I",
         str(SCRIPT_PATH),
@@ -327,6 +403,13 @@ def build_worker_invocation(
         str(runtime.python),
         "--expected-source-commit",
         runtime.source_commit,
+    )
+    manifest_args = (
+        ("--runtime-manifest", str(runtime.manifest_path))
+        if runtime.manifest_path is not None
+        else ()
+    )
+    command = command_prefix + manifest_args + (
         "--case",
         case.name,
         "--repetition",
@@ -349,8 +432,106 @@ def _reject_json_constant(value: str) -> None:
     raise ValueError(f"non-finite JSON number {value}")
 
 
+def _reject_duplicate_keys(
+    pairs: Sequence[tuple[str, Any]],
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise ValueError(f"duplicate JSON key {key!r}")
+        payload[key] = value
+    return payload
+
+
+def strict_json_loads(payload: str) -> Any:
+    return json.loads(
+        payload,
+        parse_constant=_reject_json_constant,
+        object_pairs_hook=_reject_duplicate_keys,
+    )
+
+
 def _normalized_path(path: str | Path) -> Path:
     return Path(os.path.abspath(Path(path).expanduser()))
+
+
+def _valid_hex(value: str, length: int) -> bool:
+    return len(value) == length and all(
+        character in "0123456789abcdef" for character in value
+    )
+
+
+def _validate_manifest_against_runtime(
+    manifest: RuntimeManifest,
+    runtime: RuntimeSpec,
+    *,
+    expected_name: str | None,
+) -> None:
+    if expected_name is not None and manifest.runtime_name != expected_name:
+        raise ValueError(
+            "runtime manifest name mismatch: "
+            f"expected {expected_name}, got {manifest.runtime_name}"
+        )
+    if manifest.source_commit != runtime.source_commit:
+        raise ValueError(
+            "runtime manifest commit mismatch: "
+            f"expected {runtime.source_commit}, got {manifest.source_commit}"
+        )
+    if not _valid_hex(manifest.source_commit, 40):
+        raise ValueError("runtime manifest commit must be a lowercase Git SHA")
+    if _normalized_path(manifest.python_executable) != _normalized_path(
+        runtime.python
+    ):
+        raise ValueError("runtime manifest executable does not match declared Python")
+    if not runtime.python.is_file():
+        raise ValueError("runtime manifest executable is missing")
+    try:
+        package_path = Path(manifest.package_path).resolve(strict=True)
+    except OSError as error:
+        raise ValueError("runtime manifest package path is missing") from error
+    if not package_path.is_file():
+        raise ValueError("runtime manifest package path is not a file")
+    try:
+        extension_path = Path(manifest.extension_path).resolve(strict=True)
+    except OSError as error:
+        raise ValueError("runtime manifest extension path is missing") from error
+    if not extension_path.is_file():
+        raise ValueError("runtime manifest extension path is not a file")
+    if not _valid_hex(manifest.extension_sha256, 64):
+        raise ValueError("runtime manifest extension digest must be lowercase SHA-256")
+    actual_digest = _sha256_file(extension_path)
+    if actual_digest != manifest.extension_sha256:
+        raise ValueError(
+            "runtime manifest extension digest is stale: "
+            f"expected {manifest.extension_sha256}, got {actual_digest}"
+        )
+
+
+def write_runtime_manifest(path: Path, manifest: RuntimeManifest) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        strict_json_dumps(manifest.to_dict(), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def load_runtime_manifest(
+    path: Path,
+    *,
+    runtime: RuntimeSpec,
+    expected_name: str | None,
+) -> RuntimeManifest:
+    try:
+        payload = strict_json_loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError) as error:
+        raise ValueError(f"runtime manifest is not strict JSON: {path}") from error
+    if not isinstance(payload, dict):
+        raise ValueError("runtime manifest must contain a JSON object")
+    manifest = RuntimeManifest.from_dict(payload)
+    _validate_manifest_against_runtime(
+        manifest, runtime, expected_name=expected_name
+    )
+    return manifest
 
 
 def _resolved_file_within(path_text: str, root: Path) -> bool:
@@ -394,6 +575,31 @@ def _validate_runtime_paths(
 
 
 def validate_result_binding(runtime: RuntimeSpec, result: CaseResult) -> None:
+    if runtime.attestation is not None:
+        manifest = runtime.attestation
+        try:
+            package_matches = Path(result.package_path).resolve(
+                strict=True
+            ) == Path(manifest.package_path).resolve(strict=True)
+            extension_matches = Path(result.extension_path).resolve(
+                strict=True
+            ) == Path(manifest.extension_path).resolve(strict=True)
+        except OSError:
+            package_matches = False
+            extension_matches = False
+        manifest_matches = (
+            result.source_commit == manifest.source_commit
+            and _normalized_path(result.python_executable)
+            == _normalized_path(manifest.python_executable)
+            and package_matches
+            and extension_matches
+            and result.extension_sha256 == manifest.extension_sha256
+        )
+        if not manifest_matches:
+            raise ValueError(
+                f"{runtime.name} live worker record does not match runtime manifest"
+            )
+        return
     _validate_runtime_paths(
         runtime,
         python_executable=result.python_executable,
@@ -515,12 +721,31 @@ def _worker_result(args: argparse.Namespace) -> CaseResult:
         args.runtime_workdir.resolve(),
         source_commit,
     )
-    _validate_runtime_paths(
-        worker_runtime,
+    if args.runtime_manifest is not None:
+        manifest_path = args.runtime_manifest.resolve()
+        worker_runtime = replace(
+            worker_runtime,
+            manifest_path=manifest_path,
+            attestation=load_runtime_manifest(
+                manifest_path,
+                runtime=worker_runtime,
+                expected_name=None,
+            ),
+        )
+    extension_sha256 = _sha256_file(extension_path)
+    binding_record = CaseResult(
+        artifact_sha256="binding-only",
+        prediction_sha256="binding-only",
+        native_seconds=1.0,
+        rss_mib=None,
+        source_commit=source_commit,
+        extension_sha256=extension_sha256,
+        runtime_name=args.runtime_name,
         python_executable=str(_normalized_path(sys.executable)),
         package_path=str(package_path),
         extension_path=str(extension_path),
     )
+    validate_result_binding(worker_runtime, binding_record)
     fixture = make_fixture(case)
     n_estimators = QUICK_ESTIMATORS if profile == "quick" else FULL_ESTIMATORS
     parameters: dict[str, Any] = {
@@ -563,7 +788,7 @@ def _worker_result(args: argparse.Namespace) -> CaseResult:
         tree_growth=case.tree_growth,
         repetition=args.repetition,
         source_commit=source_commit,
-        extension_sha256=_sha256_file(extension_path),
+        extension_sha256=extension_sha256,
         runtime_name=args.runtime_name,
         fit_seconds=fit_seconds,
         dimensions={
@@ -813,6 +1038,37 @@ def validate_run_configuration(
         raise ValueError(
             "full mode requires distinct Python executables, workdirs, and commits"
         )
+    if (
+        baseline.manifest_path is None
+        or baseline.attestation is None
+        or candidate.manifest_path is None
+        or candidate.attestation is None
+    ):
+        raise ValueError("full mode requires verified baseline and candidate manifests")
+    if baseline.manifest_path.resolve() == candidate.manifest_path.resolve():
+        raise ValueError("full mode requires distinct runtime manifest files")
+    _validate_manifest_against_runtime(
+        baseline.attestation, baseline, expected_name="baseline"
+    )
+    _validate_manifest_against_runtime(
+        candidate.attestation, candidate, expected_name="candidate"
+    )
+    same_package = Path(baseline.attestation.package_path).resolve() == Path(
+        candidate.attestation.package_path
+    ).resolve()
+    same_extension = Path(baseline.attestation.extension_path).resolve() == Path(
+        candidate.attestation.extension_path
+    ).resolve()
+    same_digest = (
+        baseline.attestation.extension_sha256
+        == candidate.attestation.extension_sha256
+    )
+    if same_package or same_extension or same_digest:
+        raise ValueError("full mode manifests attest the same runtime")
+
+
+def quick_baseline_runtime(candidate: RuntimeSpec) -> RuntimeSpec:
+    return replace(candidate, name="baseline")
 
 
 def validate_runtime_pair(
@@ -1027,24 +1283,51 @@ def render_markdown(report: Mapping[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def create_runtime_manifest(runtime: RuntimeSpec) -> RuntimeManifest:
+    if _normalized_path(sys.executable) != _normalized_path(runtime.python):
+        raise ValueError(
+            "runtime manifest must be written by the declared Python executable"
+        )
+
+    import alloygbm
+    from alloygbm import _alloygbm
+
+    package_path = Path(alloygbm.__file__).resolve(strict=True)
+    extension_path = Path(_alloygbm.__file__).resolve(strict=True)
+    return RuntimeManifest(
+        schema_version=RUNTIME_MANIFEST_SCHEMA_VERSION,
+        runtime_name=runtime.name,
+        source_commit=runtime.source_commit,
+        python_executable=str(_normalized_path(sys.executable)),
+        package_path=str(package_path),
+        extension_path=str(extension_path),
+        extension_sha256=_sha256_file(extension_path),
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
-    profile = parser.add_mutually_exclusive_group(required=True)
-    profile.add_argument("--quick", action="store_true")
-    profile.add_argument("--full", action="store_true")
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--quick", action="store_true")
+    mode.add_argument("--full", action="store_true")
+    mode.add_argument("--write-runtime-manifest", type=Path)
     parser.add_argument("--gate", action="store_true")
     parser.add_argument("--baseline-python", type=Path)
     parser.add_argument("--baseline-workdir", type=Path)
+    parser.add_argument("--baseline-manifest", type=Path)
     parser.add_argument("--candidate-python", type=Path)
     parser.add_argument("--candidate-workdir", type=Path)
+    parser.add_argument("--candidate-manifest", type=Path)
     parser.add_argument("--repetitions", type=int)
     parser.add_argument("--n-jobs", type=int, default=min(4, os.cpu_count() or 1))
     parser.add_argument("--worker-timeout", type=float, default=900.0)
     parser.add_argument("--output-json", type=Path)
     parser.add_argument("--output-markdown", type=Path)
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--runtime-name", help=argparse.SUPPRESS)
-    parser.add_argument("--runtime-workdir", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--runtime-name")
+    parser.add_argument("--runtime-python", type=Path)
+    parser.add_argument("--runtime-workdir", type=Path)
+    parser.add_argument("--runtime-manifest", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--expected-python", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--expected-source-commit", help=argparse.SUPPRESS)
     parser.add_argument("--case", help=argparse.SUPPRESS)
@@ -1083,6 +1366,37 @@ def repetitions_from_args(args: argparse.Namespace) -> int:
 
 
 def validate_cli_args(args: argparse.Namespace) -> None:
+    if args.write_runtime_manifest is not None:
+        if (
+            args.runtime_name is None
+            or args.runtime_python is None
+            or args.runtime_workdir is None
+        ):
+            raise ValueError(
+                "manifest mode requires --runtime-name, --runtime-python, "
+                "and --runtime-workdir"
+            )
+        benchmark_only_values = (
+            args.gate,
+            args.baseline_python,
+            args.baseline_workdir,
+            args.baseline_manifest,
+            args.candidate_python,
+            args.candidate_workdir,
+            args.candidate_manifest,
+            args.repetitions,
+            args.output_json,
+            args.output_markdown,
+        )
+        if any(
+            value is not None and value is not False
+            for value in benchmark_only_values
+        ):
+            raise ValueError(
+                "manifest mode does not accept benchmark runtime, gate, repetition, "
+                "or output arguments"
+            )
+        return
     profile = profile_from_args(args)
     repetitions = repetitions_from_args(args)
     if repetitions < 1:
@@ -1090,20 +1404,28 @@ def validate_cli_args(args: argparse.Namespace) -> None:
     runtime_values = (
         args.baseline_python,
         args.baseline_workdir,
+        args.baseline_manifest,
         args.candidate_python,
         args.candidate_workdir,
+        args.candidate_manifest,
     )
     if profile == "full":
         if any(value is None for value in runtime_values):
             raise ValueError(
                 "full mode requires explicit baseline/candidate Python executables "
-                "and workdirs"
+                "workdirs, and manifests"
             )
         if repetitions < 3:
             raise ValueError("full mode requires at least 3 repetitions")
     else:
-        if args.baseline_python is not None or args.baseline_workdir is not None:
+        if (
+            args.baseline_python is not None
+            or args.baseline_workdir is not None
+            or args.baseline_manifest is not None
+        ):
             raise ValueError("quick mode does not accept baseline runtime arguments")
+        if args.candidate_manifest is None:
+            raise ValueError("quick mode requires --candidate-manifest")
         if (args.candidate_python is None) != (args.candidate_workdir is None):
             raise ValueError(
                 "quick mode candidate Python and workdir must be supplied together"
@@ -1120,21 +1442,34 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     validate_cli_args(args)
+    if args.write_runtime_manifest is not None:
+        runtime = resolve_runtime(
+            args.runtime_name,
+            args.runtime_python,
+            args.runtime_workdir,
+        )
+        manifest = create_runtime_manifest(runtime)
+        write_runtime_manifest(args.write_runtime_manifest, manifest)
+        print(args.write_runtime_manifest)
+        return 0
     profile = profile_from_args(args)
     repetitions = repetitions_from_args(args)
     candidate_python = args.candidate_python or Path(sys.executable)
     candidate_workdir = args.candidate_workdir or REPO_ROOT
-    candidate = resolve_runtime("candidate", candidate_python, candidate_workdir)
+    candidate = resolve_runtime(
+        "candidate",
+        candidate_python,
+        candidate_workdir,
+        args.candidate_manifest,
+    )
     if profile == "quick":
-        baseline = RuntimeSpec(
-            "baseline",
-            candidate.python,
-            candidate.workdir,
-            candidate.source_commit,
-        )
+        baseline = quick_baseline_runtime(candidate)
     else:
         baseline = resolve_runtime(
-            "baseline", args.baseline_python, args.baseline_workdir
+            "baseline",
+            args.baseline_python,
+            args.baseline_workdir,
+            args.baseline_manifest,
         )
     report = run_benchmark(
         profile=profile,
