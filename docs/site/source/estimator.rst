@@ -178,6 +178,15 @@ Reproducibility
 
 - ``seed: int = 0``
 - ``deterministic: bool = True``
+- ``n_jobs: int | None = None`` -- fit-time native worker count. ``None`` and
+  ``-1`` use the available logical CPUs; a positive integer uses exactly that
+  many workers. ``0`` and values below ``-1`` are invalid.
+
+Each fit creates a private Rayon thread pool. The setting covers native input
+quantization and training, including eligible parallel multiclass class-tree
+builds, without mutating Rayon's process-global pool. Prediction and SHAP are
+not controlled by ``n_jobs``. When fitting multiple estimators concurrently,
+budget each estimator's ``n_jobs`` separately to avoid oversubscription.
 
 Continuous-feature controls
 ---------------------------

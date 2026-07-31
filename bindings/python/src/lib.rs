@@ -9,6 +9,7 @@ mod predict;
 mod pyclasses;
 mod quantization;
 mod shap_bridge;
+mod threading;
 mod train;
 use crate::joint::{JointPredictorHandle, train_joint_multi_label_ranker};
 use crate::predict::{

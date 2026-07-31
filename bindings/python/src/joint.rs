@@ -12,6 +12,7 @@ use crate::pyclasses::NativeContinuousBinningMetadata;
 use crate::quantization::{
     parse_continuous_binning_strategy, prepare_training_matrices_from_dense_values,
 };
+use crate::threading::{FitThreadCount, install_in_fit_pool};
 
 type JointTrainingBridgeResult = (
     Vec<u8>,
@@ -133,8 +134,10 @@ impl JointPredictorHandle {
     ranking_sigma=1.0_f32,
     lambdarank_truncation_level=None::<usize>,
     lambdarank_normalize=false,
+    n_jobs=None::<FitThreadCount>,
 ))]
 pub(crate) fn train_joint_multi_label_ranker(
+    py: Python<'_>,
     x_values: Vec<f32>,
     row_count: usize,
     feature_count: usize,
@@ -170,6 +173,124 @@ pub(crate) fn train_joint_multi_label_ranker(
     init_baselines: Option<Vec<f32>>,
     init_rounds_completed: Option<usize>,
     morph_config: Option<pyo3::Bound<'_, pyo3::types::PyDict>>,
+    leaf_solver: String,
+    dro_radius: f32,
+    dro_metric: String,
+    factor_exposure_values: Option<Vec<f32>>,
+    factor_exposure_row_count: Option<usize>,
+    factor_exposure_factor_count: Option<usize>,
+    neutralization: String,
+    factor_neutralization_lambda: f32,
+    factor_penalty: f32,
+    tweedie_variance_power: Option<f32>,
+    poisson_max_delta_step: Option<f32>,
+    quantile_alpha: Option<f32>,
+    ranking_sigma: f32,
+    lambdarank_truncation_level: Option<usize>,
+    lambdarank_normalize: bool,
+    n_jobs: Option<FitThreadCount>,
+) -> PyResult<JointTrainingBridgeResult> {
+    let n_jobs = n_jobs.map(FitThreadCount::into_inner);
+    let parsed_morph_config = match morph_config.as_ref() {
+        Some(dict) => Some(parse_morph_config_from_pydict(dict)?),
+        None => None,
+    };
+
+    py.detach(move || {
+        install_in_fit_pool(n_jobs, move || {
+            train_joint_multi_label_ranker_in_fit_pool(
+                x_values,
+                row_count,
+                feature_count,
+                targets_per_output,
+                n_outputs,
+                per_output_objective_names,
+                group_id,
+                n_estimators,
+                learning_rate,
+                seed,
+                max_depth,
+                min_data_in_leaf,
+                lambda_l2,
+                min_split_gain,
+                row_subsample,
+                col_subsample,
+                interaction_constraints,
+                tree_growth,
+                max_leaves,
+                categorical_feature_indices,
+                max_cat_threshold,
+                continuous_binning_strategy,
+                continuous_binning_max_bins,
+                quantile_sketch_max_rows,
+                boosting_mode,
+                goss_top_rate,
+                goss_other_rate,
+                dart_drop_rate,
+                dart_max_drop,
+                dart_normalize_type,
+                dart_sample_type,
+                init_artifact_bytes,
+                init_baselines,
+                init_rounds_completed,
+                parsed_morph_config,
+                leaf_solver,
+                dro_radius,
+                dro_metric,
+                factor_exposure_values,
+                factor_exposure_row_count,
+                factor_exposure_factor_count,
+                neutralization,
+                factor_neutralization_lambda,
+                factor_penalty,
+                tweedie_variance_power,
+                poisson_max_delta_step,
+                quantile_alpha,
+                ranking_sigma,
+                lambdarank_truncation_level,
+                lambdarank_normalize,
+            )
+        })
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn train_joint_multi_label_ranker_in_fit_pool(
+    x_values: Vec<f32>,
+    row_count: usize,
+    feature_count: usize,
+    targets_per_output: Vec<Vec<f32>>,
+    n_outputs: usize,
+    per_output_objective_names: Vec<String>,
+    group_id: Option<Vec<u32>>,
+    n_estimators: usize,
+    learning_rate: f32,
+    seed: u64,
+    max_depth: u16,
+    min_data_in_leaf: u32,
+    lambda_l2: f32,
+    min_split_gain: f32,
+    row_subsample: f32,
+    col_subsample: f32,
+    interaction_constraints: Vec<Vec<u32>>,
+    tree_growth: String,
+    max_leaves: Option<usize>,
+    categorical_feature_indices: Vec<usize>,
+    max_cat_threshold: usize,
+    continuous_binning_strategy: String,
+    continuous_binning_max_bins: usize,
+    quantile_sketch_max_rows: Option<usize>,
+    boosting_mode: String,
+    goss_top_rate: Option<f32>,
+    goss_other_rate: Option<f32>,
+    dart_drop_rate: Option<f32>,
+    dart_max_drop: Option<usize>,
+    dart_normalize_type: Option<String>,
+    dart_sample_type: Option<String>,
+    init_artifact_bytes: Option<Vec<u8>>,
+    init_baselines: Option<Vec<f32>>,
+    init_rounds_completed: Option<usize>,
+    parsed_morph_config: Option<alloygbm_core::MorphConfig>,
     leaf_solver: String,
     dro_radius: f32,
     dro_metric: String,
@@ -288,14 +409,6 @@ pub(crate) fn train_joint_multi_label_ranker(
         dart_normalize_type.as_deref(),
         dart_sample_type.as_deref(),
     )?;
-    // v0.10.4: MorphBoost — parse the per-label `morph_config` dict
-    // (built by `alloygbm._morph.build_morph_config_dict`) into a
-    // `MorphConfig`. `None` means non-morph training. Validation runs in
-    // `parse_morph_config_from_pydict` (mirrors single-output path).
-    let parsed_morph_config = match morph_config.as_ref() {
-        Some(dict) => Some(parse_morph_config_from_pydict(dict)?),
-        None => None,
-    };
     // v0.10.5: DRO leaf solver — mirrors the single-output path.
     let parsed_leaf_solver = parse_leaf_solver(&leaf_solver)?;
     let parsed_dro_config = parse_dro_config(parsed_leaf_solver, dro_radius, &dro_metric)?;

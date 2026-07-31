@@ -186,6 +186,17 @@ call `fit(..., eval_set=(X_valid, y_valid))`.
   - Random seed for training-time sampling.
 - `deterministic: bool = True`
   - Keeps training deterministic when possible.
+- `n_jobs: int | None = None`
+  - Controls native fit-time parallelism. `None` and `-1` use the available
+    logical CPUs; a positive integer uses exactly that many workers. `0` and
+    values below `-1` are invalid.
+
+Each fit creates a private Rayon thread pool. The setting covers native input
+quantization and training, including eligible parallel multiclass class-tree
+builds, without changing Rayon's process-global pool. Prediction and SHAP are
+not controlled by `n_jobs`. When fitting multiple estimators concurrently,
+budget each estimator's `n_jobs` separately to avoid oversubscribing the
+machine.
 
 ## Continuous Feature Handling
 

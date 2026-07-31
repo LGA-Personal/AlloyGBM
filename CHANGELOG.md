@@ -38,6 +38,13 @@
 
 ### Features
 
+- **Added explicit fit-time thread control.** `GBMRegressor`,
+  `GBMClassifier`, `GBMRanker`, and both `MultiLabelGBMRanker` modes now
+  accept `n_jobs`. `None` and `-1` use the available logical CPUs, while a
+  positive value creates a fit-scoped Rayon pool with exactly that many
+  workers. Training no longer depends on or mutates Rayon's global pool, so
+  callers can budget concurrent estimator fits independently.
+
 - **Added fitted auto-policy diagnostics and calibration evidence.**
   `resolved_training_policy_` reports the requested policy mode, requested and
   effective round counts, effective leaf/split thresholds, effective
@@ -57,6 +64,13 @@
 
 ### Performance
 
+- **Parallelized eligible multiclass class-tree builds.** Multiclass rounds
+  now prepare independent class candidates in parallel inside the fit-scoped
+  pool, then commit them in class order. Small workloads remain serial, and
+  nested tree-building parallelism reuses the same pool rather than creating
+  child pools. A 72-record, three-shape benchmark preserved artifact and
+  prediction hashes exactly; median four-worker speedups ranged from 1.26x to
+  2.13x for 12-class fits and from 1.01x to 2.31x for 3-class fits.
 - **Avoided a repeated DART dropped-tree walk during normalization.** Training
   now aggregates selected dropped-tree contributions while forming the
   dropout prediction state, then reuses that aggregate for normalization.

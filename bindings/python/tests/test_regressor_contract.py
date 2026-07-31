@@ -420,6 +420,7 @@ class GBMRegressorContractTests(unittest.TestCase):
                         "tweedie_variance_power": None,
                         "poisson_max_delta_step": None,
                         "quantile_alpha": None,
+                        "n_jobs": None,
                     }
                 ],
             )

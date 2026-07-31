@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import time
+from numbers import Integral
 
 import numpy as np
 
@@ -24,6 +25,17 @@ from ._base import (
     _diagnostics_to_dicts,
     _validate_quantile_alpha,
 )
+
+
+def _validate_n_jobs(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise ValueError("n_jobs must be None, -1, or a positive integer")
+    normalized = int(value)
+    if normalized == -1 or normalized > 0:
+        return normalized
+    raise ValueError("n_jobs must be None, -1, or a positive integer")
 
 
 class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _PersistenceMixin, _GBMRegressorBase):
@@ -92,6 +104,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         tweedie_variance_power: float = 1.5,
         poisson_max_delta_step: float = 0.7,
         quantile_alpha: float = 0.5,
+        n_jobs: int | None = None,
     ) -> None:
         if not (0.0 < learning_rate <= 1.0):
             raise ValueError("learning_rate must be in (0.0, 1.0]")
@@ -464,6 +477,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
         self.tweedie_variance_power = float(tweedie_variance_power)
         self.poisson_max_delta_step = float(poisson_max_delta_step)
         self.quantile_alpha = float(quantile_alpha)
+        self.n_jobs = _validate_n_jobs(n_jobs)
         self._fit_neutralization: str | None = None
         self._fit_factor_neutralization_lambda: float | None = None
         self._fit_factor_penalty: float | None = None
@@ -559,7 +573,8 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             f"dart_normalize_type='{self.dart_normalize_type}', "
             f"dart_sample_type='{self.dart_sample_type}', "
             f"poisson_max_delta_step={self.poisson_max_delta_step}, "
-            f"quantile_alpha={self.quantile_alpha}"
+            f"quantile_alpha={self.quantile_alpha}, "
+            f"n_jobs={self.n_jobs}"
             ")"
         )
 
@@ -627,6 +642,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             "tweedie_variance_power": self.tweedie_variance_power,
             "poisson_max_delta_step": self.poisson_max_delta_step,
             "quantile_alpha": self.quantile_alpha,
+            "n_jobs": self.n_jobs,
         }
 
     def set_params(self, **params: object) -> "GBMRegressor":
@@ -692,6 +708,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             "tweedie_variance_power",
             "poisson_max_delta_step",
             "quantile_alpha",
+            "n_jobs",
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
@@ -780,6 +797,9 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
             if n_estimators <= 0:
                 raise ValueError("n_estimators must be greater than 0")
             self.n_estimators = n_estimators
+
+        if "n_jobs" in params:
+            self.n_jobs = _validate_n_jobs(params["n_jobs"])
 
         if "row_subsample" in params:
             row_subsample = float(params["row_subsample"])
@@ -1802,6 +1822,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                         if self._objective_name() == "quantile"
                         else None
                     ),
+                    n_jobs=self.n_jobs,
                     **ranking_sigma_kwargs,
                 )
                 return self._finalize_training_result(
@@ -1958,6 +1979,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                     if self._objective_name() == "quantile"
                     else None
                 ),
+                n_jobs=self.n_jobs,
                 **ranking_sigma_kwargs,
             )
         else:
@@ -2065,6 +2087,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                     if self._objective_name() == "quantile"
                     else None
                 ),
+                n_jobs=self.n_jobs,
                 **ranking_sigma_kwargs,
             )
 
@@ -2504,6 +2527,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                     if self._objective_name() == "quantile"
                     else None
                 ),
+                n_jobs=self.n_jobs,
                 **ranking_sigma_kwargs,
             )
         else:
@@ -2582,6 +2606,7 @@ class GBMRegressor(_ValidationMixin, _QuantizationMixin, _ShapMixin, _Persistenc
                     if self._objective_name() == "quantile"
                     else None
                 ),
+                n_jobs=self.n_jobs,
                 **ranking_sigma_kwargs,
             )
 

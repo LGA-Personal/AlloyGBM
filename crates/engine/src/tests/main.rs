@@ -87,6 +87,30 @@ fn node_parallelism_fixture() -> (TrainingDataset, BinnedMatrix) {
     (dataset, binned)
 }
 
+fn multiclass_parallelism_fixture(row_count: usize) -> (TrainingDataset, BinnedMatrix) {
+    let values = (0..row_count)
+        .map(|row| (row % 16) as f32)
+        .collect::<Vec<_>>();
+    let targets = (0..row_count)
+        .map(|row| (row % 4) as f32)
+        .collect::<Vec<_>>();
+    let bins = (0..row_count)
+        .map(|row| (row % 16) as u8)
+        .collect::<Vec<_>>();
+    let dataset = TrainingDataset {
+        matrix: alloygbm_core::DatasetMatrix::new(row_count, 1, values)
+            .expect("multiclass fixture matrix is valid"),
+        targets,
+        sample_weights: None,
+        time_index: None,
+        group_id: None,
+        factor_exposures: None,
+    };
+    let binned =
+        BinnedMatrix::new(row_count, 1, 15, bins).expect("multiclass fixture bins are valid");
+    (dataset, binned)
+}
+
 fn factor_dominated_dataset() -> TrainingDataset {
     TrainingDataset {
         matrix: alloygbm_core::DatasetMatrix::new(
@@ -2165,6 +2189,116 @@ fn level_wise_training_overlaps_independent_node_histogram_builds() {
     assert!(
         backend.max_active_builds.load(AtomicOrdering::SeqCst) > 1,
         "independent active nodes should build histograms concurrently"
+    );
+}
+
+#[test]
+fn multiclass_training_overlaps_eligible_class_histogram_builds() {
+    let (dataset, binned) = multiclass_parallelism_fixture(8_192);
+    let backend = ConcurrentHistogramBackend {
+        active_builds: AtomicUsize::new(0),
+        max_active_builds: AtomicUsize::new(0),
+    };
+    let trainer = Trainer::new(TrainParams {
+        max_depth: 1,
+        ..TrainParams::default()
+    })
+    .expect("parallel fixture params are valid");
+    let controls =
+        IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).expect("valid controls");
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .expect("test pool should build")
+        .install(|| {
+            trainer
+                .fit_multiclass_iterations_with_summary(
+                    &dataset,
+                    &binned,
+                    &backend,
+                    &MultiClassSoftmaxObjective::new(4).expect("objective"),
+                    controls,
+                )
+                .expect("parallel fixture should train")
+        });
+
+    assert!(
+        backend.max_active_builds.load(AtomicOrdering::SeqCst) > 1,
+        "eligible class roots should build histograms concurrently"
+    );
+}
+
+#[test]
+fn multiclass_training_keeps_small_class_builds_sequential() {
+    let (dataset, binned) = multiclass_parallelism_fixture(512);
+    let backend = ConcurrentHistogramBackend {
+        active_builds: AtomicUsize::new(0),
+        max_active_builds: AtomicUsize::new(0),
+    };
+    let trainer = Trainer::new(TrainParams {
+        max_depth: 1,
+        ..TrainParams::default()
+    })
+    .expect("small fixture params are valid");
+    let controls =
+        IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).expect("valid controls");
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .expect("test pool should build")
+        .install(|| {
+            trainer
+                .fit_multiclass_iterations_with_summary(
+                    &dataset,
+                    &binned,
+                    &backend,
+                    &MultiClassSoftmaxObjective::new(4).expect("objective"),
+                    controls,
+                )
+                .expect("small fixture should train")
+        });
+
+    assert_eq!(
+        backend.max_active_builds.load(AtomicOrdering::SeqCst),
+        1,
+        "small class builds should remain sequential"
+    );
+}
+
+#[test]
+fn multiclass_training_keeps_eligible_class_builds_sequential_with_one_worker() {
+    let (dataset, binned) = multiclass_parallelism_fixture(8_192);
+    let backend = ConcurrentHistogramBackend {
+        active_builds: AtomicUsize::new(0),
+        max_active_builds: AtomicUsize::new(0),
+    };
+    let trainer = Trainer::new(TrainParams {
+        max_depth: 1,
+        ..TrainParams::default()
+    })
+    .expect("one-worker fixture params are valid");
+    let controls =
+        IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0).expect("valid controls");
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .expect("test pool should build")
+        .install(|| {
+            trainer
+                .fit_multiclass_iterations_with_summary(
+                    &dataset,
+                    &binned,
+                    &backend,
+                    &MultiClassSoftmaxObjective::new(4).expect("objective"),
+                    controls,
+                )
+                .expect("one-worker fixture should train")
+        });
+
+    assert_eq!(
+        backend.max_active_builds.load(AtomicOrdering::SeqCst),
+        1,
+        "one-worker fits cannot overlap class builds"
     );
 }
 

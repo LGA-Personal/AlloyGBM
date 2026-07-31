@@ -42,6 +42,13 @@ A deterministic scalar monotone-constraint harness lives at
 checks finite numeric sweeps and held-out quality for regression and binary
 models; fit timing is descriptive only.
 
+A deterministic fit-thread and multiclass class-tree scaling harness lives at
+`benchmarks/multiclass_parallelism_benchmark.py`; its committed evidence is
+[multiclass_parallelism_v1.md](../benchmarks/multiclass_parallelism_v1.md).
+Serial and parallel arms must produce exact artifact and prediction hashes,
+complete the same rounds, emit finite probabilities, and beat the class-prior
+log-loss baseline across tall/narrow, medium/wide, and small workloads.
+
 The comparative runner also emits a temporal/panel stability table for scenarios
 whose names include `time`, `temporal`, or `panel`. It reports mean score,
 worst score, and score standard deviation across repeated runs; this is the

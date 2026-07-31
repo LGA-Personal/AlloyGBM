@@ -3,6 +3,7 @@
 mod interaction;
 #[allow(dead_code)]
 mod monotone;
+mod multiclass_build;
 mod policy;
 mod tree_build;
 mod validate;
@@ -38,6 +39,10 @@ pub(crate) use validate::{
 // enumerate ~50 imports here, we use a glob import. Tightening this is left to a
 // future task.
 use crate::*;
+use multiclass_build::{
+    MulticlassTreeBuildOutcome, collect_ordered_class_results, should_parallelize_multiclass_trees,
+};
+use rayon::prelude::*;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Trainer {
@@ -1191,8 +1196,6 @@ impl Trainer {
         let mut weak_improvement_streak = 0_usize;
         let mut weak_improvement_rounds_committed = 0_usize;
         let mut current_validation_loss = initial_validation_loss;
-        let mut gradient_buffer: Vec<GradientPair> = Vec::with_capacity(n);
-
         let effective_round_cap = controls.rounds;
 
         // Build MorphState (K classes) for the duration of training when
@@ -1406,28 +1409,27 @@ impl Trainer {
             // Record stump counts before this round
             let pre_round_counts: Vec<usize> = class_stumps.iter().map(|s| s.len()).collect();
 
-            // Build K trees
-            let mut any_tree_produced = false;
-            // Per-class diagnostics for this round; aggregated to a single
-            // `IterationDiagnostics` after the class loop completes.
-            let mut per_class_diagnostics: Vec<IterationDiagnostics> = Vec::with_capacity(k);
-            for class_k in 0..k {
-                // Use the pre-computed (and possibly GOSS-amplified) buffer.
-                gradient_buffer.clear();
-                gradient_buffer.extend_from_slice(&class_gradient_buffers[class_k]);
-                let original_gradient_norm = class_original_gradient_norms[class_k];
-                per_class_diagnostics.push(IterationDiagnostics::from_gradient_snapshot(
-                    &gradient_buffer,
-                    original_gradient_norm,
-                    sampled_row_count,
-                    feature_tiles.len(),
-                ));
-
-                // Update per-class EMA stats from this class's gradients.
+            // Morph EMA mutation remains class-ordered so serial and parallel
+            // fits capture the same contexts.
+            for (class_k, gradients) in class_gradient_buffers.iter().enumerate() {
                 if let Some(ms) = morph_state.as_mut() {
-                    ms.update_ema_from_gradient_pairs(&gradient_buffer, class_k);
+                    ms.update_ema_from_gradient_pairs(gradients, class_k);
                 }
+            }
 
+            let mut round_split_options = split_options;
+            round_split_options.min_rows_per_leaf = controls.min_rows_per_leaf;
+            let raw_feature_values = &dataset.matrix.values;
+            let build_class_tree =
+                |(class_k, candidate_predictions): (usize, &mut Vec<f32>)|
+                 -> EngineResult<MulticlassTreeBuildOutcome> {
+                    let gradients = &class_gradient_buffers[class_k];
+                    let diagnostics = IterationDiagnostics::from_gradient_snapshot(
+                        gradients,
+                        class_original_gradient_norms[class_k],
+                        sampled_row_count,
+                        feature_tiles.len(),
+                    );
                 let morph_tree_ctx: Option<MorphTreeContext<'_>> =
                     morph_state.as_ref().map(|ms| MorphTreeContext {
                         state: ms,
@@ -1436,51 +1438,75 @@ impl Trainer {
                         class_idx: class_k,
                     });
 
-                let mut round_split_options = split_options;
-                round_split_options.min_rows_per_leaf = controls.min_rows_per_leaf;
-                let raw_fv = &dataset.matrix.values;
-                let (round_stumps, _round_stop) = if self.params.tree_growth == TreeGrowth::Leaf {
-                    build_tree_leaf_wise(
+                    let (round_stumps, _round_stop) =
+                        if self.params.tree_growth == TreeGrowth::Leaf {
+                            build_tree_leaf_wise(
                         backend,
                         binned_matrix,
-                        &gradient_buffer,
+                                gradients,
                         root_row_indices.clone(),
                         effective_round,
                         &feature_tiles,
                         round_split_options,
                         &self.params,
                         &controls,
-                        &mut class_candidate_predictions[class_k],
+                                candidate_predictions,
                         &self.params.feature_weights,
                         &self.categorical_features,
                         morph_tree_ctx,
-                        raw_fv,
+                                raw_feature_values,
                         dataset.factor_exposures.as_ref(),
-                    )?
-                } else {
-                    build_tree_level_wise(
+                            )?
+                        } else {
+                            build_tree_level_wise(
                         backend,
                         binned_matrix,
-                        &gradient_buffer,
+                                gradients,
                         root_row_indices.clone(),
                         effective_round,
                         &feature_tiles,
                         round_split_options,
                         &self.params,
                         &controls,
-                        &mut class_candidate_predictions[class_k],
+                                candidate_predictions,
                         &self.params.feature_weights,
                         &self.categorical_features,
                         morph_tree_ctx,
-                        raw_fv,
+                                raw_feature_values,
                         dataset.factor_exposures.as_ref(),
-                    )?
+                            )?
+                        };
+
+                    Ok(MulticlassTreeBuildOutcome {
+                        class_index: class_k,
+                        diagnostics,
+                        round_stumps,
+                    })
                 };
 
-                if !round_stumps.is_empty() {
-                    any_tree_produced = true;
-                }
-                class_stumps[class_k].extend(round_stumps);
+            let build_results =
+                if should_parallelize_multiclass_trees(k, sampled_row_count, sampled_feature_count)
+                {
+                    class_candidate_predictions
+                        .par_iter_mut()
+                        .enumerate()
+                        .map(&build_class_tree)
+                        .collect::<Vec<_>>()
+                } else {
+                    class_candidate_predictions
+                        .iter_mut()
+                        .enumerate()
+                        .map(build_class_tree)
+                        .collect::<Vec<_>>()
+                };
+            let outcomes = collect_ordered_class_results(build_results)?;
+            let mut any_tree_produced = false;
+            let mut per_class_diagnostics: Vec<IterationDiagnostics> = Vec::with_capacity(k);
+            for outcome in outcomes {
+                debug_assert_eq!(outcome.class_index, per_class_diagnostics.len());
+                any_tree_produced |= !outcome.round_stumps.is_empty();
+                per_class_diagnostics.push(outcome.diagnostics);
+                class_stumps[outcome.class_index].extend(outcome.round_stumps);
             }
 
             for class_k in 0..k {
