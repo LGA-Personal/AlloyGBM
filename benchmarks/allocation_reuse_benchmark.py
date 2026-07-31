@@ -21,7 +21,7 @@ import numpy as np
 
 
 SCHEMA_VERSION = 3
-RUNTIME_MANIFEST_SCHEMA_VERSION = 1
+RUNTIME_MANIFEST_SCHEMA_VERSION = 2
 QUICK_REPETITIONS = 1
 FULL_REPETITIONS = 5
 QUICK_ESTIMATORS = 3
@@ -65,6 +65,7 @@ class RuntimeManifest:
     package_path: str
     extension_path: str
     extension_sha256: str
+    extension_source_commit: str
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -79,6 +80,7 @@ class RuntimeManifest:
             "package_path",
             "extension_path",
             "extension_sha256",
+            "extension_source_commit",
         }
         if set(payload) != expected:
             raise ValueError(
@@ -99,6 +101,7 @@ class RuntimeManifest:
             package_path=payload["package_path"],
             extension_path=payload["extension_path"],
             extension_sha256=payload["extension_sha256"],
+            extension_source_commit=payload["extension_source_commit"],
         )
         if manifest.schema_version != RUNTIME_MANIFEST_SCHEMA_VERSION:
             raise ValueError(
@@ -352,6 +355,27 @@ def _git_commit(workdir: Path) -> str:
     return commit
 
 
+def _require_clean_worktree(workdir: Path) -> None:
+    try:
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(workdir),
+                "status",
+                "--porcelain",
+                "--untracked-files=no",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise ValueError(f"cannot inspect source state for {workdir}") from error
+    if completed.stdout.strip():
+        raise ValueError(f"runtime worktree must be clean: {workdir}")
+
+
 def resolve_runtime(
     name: str,
     python: Path,
@@ -367,6 +391,7 @@ def resolve_runtime(
     runtime = RuntimeSpec(name, python, workdir, _git_commit(workdir))
     if manifest_path is None:
         return runtime
+    _require_clean_worktree(workdir)
     manifest_path = manifest_path.expanduser().resolve()
     manifest = load_runtime_manifest(
         manifest_path, runtime=runtime, expected_name=name
@@ -475,6 +500,13 @@ def _validate_manifest_against_runtime(
             "runtime manifest commit mismatch: "
             f"expected {runtime.source_commit}, got {manifest.source_commit}"
         )
+    if manifest.extension_source_commit != manifest.source_commit:
+        raise ValueError(
+            "runtime manifest native build commit mismatch: "
+            f"source={manifest.source_commit}, native={manifest.extension_source_commit}"
+        )
+    if not _valid_hex(manifest.extension_source_commit, 40):
+        raise ValueError("runtime manifest native build commit must be a lowercase Git SHA")
     if not _valid_hex(manifest.source_commit, 40):
         raise ValueError("runtime manifest commit must be a lowercase Git SHA")
     if _normalized_path(manifest.python_executable) != _normalized_path(
@@ -664,6 +696,7 @@ def _sha256_file(path: Path) -> str:
 
 def _worker_result(args: argparse.Namespace) -> CaseResult:
     profile = profile_from_args(args)
+    _require_clean_worktree(args.runtime_workdir)
     source_commit = _git_commit(args.runtime_workdir)
     if source_commit != args.expected_source_commit:
         raise ValueError(
@@ -949,6 +982,13 @@ def evaluate_gates(
                 "aggregate timing slowdown exceeds 3% "
                 f"(ratio={aggregate_timing:.4f})"
             )
+        unavailable_rss = [
+            summary.case for summary in summaries if summary.rss_ratio is None
+        ]
+        failures.extend(
+            f"{case}: RSS unavailable for full performance gate"
+            for case in unavailable_rss
+        )
         if aggregate_rss is None:
             failures.append("aggregate RSS unavailable: no case has positive deltas")
         elif aggregate_rss > RSS_INCREASE_LIMIT:
@@ -1188,6 +1228,7 @@ def render_markdown(report: Mapping[str, Any]) -> str:
     lines.append("")
     for arm in ("baseline", "candidate"):
         result = first_pair[arm]
+        attestation = runtimes[arm].get("attestation")
         title = arm.capitalize()
         lines.extend(
             [
@@ -1196,6 +1237,11 @@ def render_markdown(report: Mapping[str, Any]) -> str:
                 f"- {title} extension SHA-256: `{result['extension_sha256']}`",
             ]
         )
+        if attestation is not None:
+            lines.append(
+                f"- {title} native build commit: "
+                f"`{attestation['extension_source_commit']}`"
+            )
     aggregate_rss = _format_optional(gate["aggregate_rss_ratio"], 4)
     lines.extend(
         [
@@ -1258,6 +1304,20 @@ def render_markdown(report: Mapping[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def validate_native_build_provenance(
+    runtime: RuntimeSpec,
+    extension_source_commit: str,
+    extension_source_dirty: bool,
+) -> None:
+    if extension_source_dirty:
+        raise ValueError("native extension was built from a dirty or unknown source state")
+    if extension_source_commit != runtime.source_commit:
+        raise ValueError(
+            "native build commit does not match runtime worktree: "
+            f"source={runtime.source_commit}, native={extension_source_commit}"
+        )
+
+
 def create_runtime_manifest(runtime: RuntimeSpec) -> RuntimeManifest:
     if _normalized_path(sys.executable) != _normalized_path(runtime.python):
         raise ValueError(
@@ -1267,6 +1327,16 @@ def create_runtime_manifest(runtime: RuntimeSpec) -> RuntimeManifest:
     import alloygbm
     from alloygbm import _alloygbm
 
+    _require_clean_worktree(runtime.workdir)
+    extension_source_commit, extension_source_dirty = _alloygbm._build_provenance()
+    if (
+        not isinstance(extension_source_commit, str)
+        or type(extension_source_dirty) is not bool
+    ):
+        raise ValueError("native build provenance has invalid field types")
+    validate_native_build_provenance(
+        runtime, extension_source_commit, extension_source_dirty
+    )
     package_path = Path(alloygbm.__file__).resolve(strict=True)
     extension_path = Path(_alloygbm.__file__).resolve(strict=True)
     return RuntimeManifest(
@@ -1277,6 +1347,7 @@ def create_runtime_manifest(runtime: RuntimeSpec) -> RuntimeManifest:
         package_path=str(package_path),
         extension_path=str(extension_path),
         extension_sha256=_sha256_file(extension_path),
+        extension_source_commit=extension_source_commit,
     )
 
 

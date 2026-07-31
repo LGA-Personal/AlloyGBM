@@ -138,6 +138,7 @@ def _attest_runtime(runtime, *, package_root=None):
         package_path=str(package_path.resolve()),
         extension_path=str(extension_path.resolve()),
         extension_sha256=hashlib.sha256(extension_path.read_bytes()).hexdigest(),
+        extension_source_commit=runtime.source_commit,
     )
     manifest_path = runtime.workdir / f"{runtime.name}-runtime.json"
     BENCHMARK.write_runtime_manifest(manifest_path, manifest)
@@ -505,6 +506,7 @@ def test_runtime_manifest_round_trips_as_strict_json(tmp_path):
         "package_path",
         "extension_path",
         "extension_sha256",
+        "extension_source_commit",
     }
 
 
@@ -534,6 +536,30 @@ def test_runtime_manifest_rejects_stale_identity_fields(
             runtime=replace(runtime, manifest_path=None, attestation=None),
             expected_name="candidate",
         )
+
+
+def test_runtime_manifest_rejects_extension_built_from_another_commit(tmp_path):
+    runtime = _attest_runtime(_runtime(tmp_path, "candidate", "2" * 40))
+    payload = runtime.attestation.to_dict()
+    payload["extension_source_commit"] = "1" * 40
+    runtime.manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="native build commit"):
+        BENCHMARK.load_runtime_manifest(
+            runtime.manifest_path,
+            runtime=replace(runtime, manifest_path=None, attestation=None),
+            expected_name="candidate",
+        )
+
+
+def test_native_build_provenance_requires_matching_clean_commit(tmp_path):
+    runtime = _runtime(tmp_path, "candidate", "2" * 40)
+
+    BENCHMARK.validate_native_build_provenance(runtime, "2" * 40, False)
+    with pytest.raises(ValueError, match="dirty"):
+        BENCHMARK.validate_native_build_provenance(runtime, "2" * 40, True)
+    with pytest.raises(ValueError, match="does not match"):
+        BENCHMARK.validate_native_build_provenance(runtime, "1" * 40, False)
 
 
 def test_runtime_manifest_rejects_unknown_fields_and_nonfinite_json(tmp_path):
@@ -624,6 +650,26 @@ def test_all_zero_rss_is_reported_unavailable_and_fails_full_gate():
     assert evaluation.aggregate_rss_ratio is None
     assert evaluation.rss_cases_available == 0
     assert any("RSS unavailable" in failure for failure in evaluation.failures)
+
+
+def test_full_gate_fails_when_one_case_has_unmeasurable_baseline_rss():
+    pairs = _pairs()
+    pairs = [
+        BENCHMARK.PairedResult(
+            replace(pair.baseline, rss_mib=0.0),
+            replace(pair.candidate, rss_mib=1000.0),
+        )
+        if pair.baseline.case == "tall_deep-level"
+        else pair
+        for pair in pairs
+    ]
+
+    evaluation = BENCHMARK.evaluate_gates(pairs, profile="full")
+
+    assert any(
+        "tall_deep-level" in failure and "RSS unavailable" in failure
+        for failure in evaluation.failures
+    )
 
 
 def test_rss_ratio_overflow_is_unavailable():
@@ -783,7 +829,7 @@ def test_manifest_writer_cli_is_an_explicit_mode():
         BENCHMARK.validate_cli_args(args)
 
 
-def test_markdown_renders_runtime_identity_aggregate_gates_and_digests():
+def test_markdown_renders_runtime_identity_aggregate_gates_and_digests(tmp_path):
     pairs = _pairs()
     pairs[0] = BENCHMARK.PairedResult(
         pairs[0].baseline,
@@ -793,14 +839,16 @@ def test_markdown_renders_runtime_identity_aggregate_gates_and_digests():
             prediction_sha256="candidate-prediction",
         ),
     )
+    baseline_runtime = _attest_runtime(
+        _runtime(tmp_path, "baseline", "1" * 40)
+    )
+    candidate_runtime = _attest_runtime(
+        _runtime(tmp_path, "candidate", "2" * 40)
+    )
     report = BENCHMARK.build_report(
         profile="full",
-        baseline=BENCHMARK.RuntimeSpec(
-            "baseline", Path("/baseline/python"), Path("/baseline"), "1" * 40
-        ),
-        candidate=BENCHMARK.RuntimeSpec(
-            "candidate", Path("/candidate/python"), Path("/candidate"), "2" * 40
-        ),
+        baseline=baseline_runtime,
+        candidate=candidate_runtime,
         pairs=pairs,
         repetitions=3,
         n_jobs=4,
@@ -816,6 +864,8 @@ def test_markdown_renders_runtime_identity_aggregate_gates_and_digests():
     assert "Prediction SHA-256" in markdown
     assert "Baseline extension SHA-256" in markdown
     assert "Candidate extension SHA-256" in markdown
+    assert "Baseline native build commit" in markdown
+    assert "Candidate native build commit" in markdown
     assert "`a`" in markdown
     assert "`candidate-artifact`" in markdown
     assert "`b`" in markdown
