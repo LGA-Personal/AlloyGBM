@@ -386,6 +386,7 @@ def build_worker_invocation(
     repetition: int,
     n_jobs: int,
 ) -> WorkerInvocation:
+    require_runtime_attestation(runtime)
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
     env.pop("PYTHONHOME", None)
@@ -404,12 +405,9 @@ def build_worker_invocation(
         "--expected-source-commit",
         runtime.source_commit,
     )
-    manifest_args = (
-        ("--runtime-manifest", str(runtime.manifest_path))
-        if runtime.manifest_path is not None
-        else ()
-    )
-    command = command_prefix + manifest_args + (
+    command = command_prefix + (
+        "--runtime-manifest",
+        str(runtime.manifest_path),
         "--case",
         case.name,
         "--repetition",
@@ -534,78 +532,48 @@ def load_runtime_manifest(
     return manifest
 
 
-def _resolved_file_within(path_text: str, root: Path) -> bool:
-    if not path_text:
-        return False
-    try:
-        path = Path(path_text).resolve(strict=True)
-        root = root.resolve(strict=True)
-        path.relative_to(root)
-    except (OSError, ValueError):
-        return False
-    return path.is_file()
-
-
-def _validate_runtime_paths(
-    runtime: RuntimeSpec,
-    *,
-    python_executable: str,
-    package_path: str,
-    extension_path: str,
-) -> None:
-    expected_package_root = runtime.workdir / "bindings" / "python" / "alloygbm"
-    interpreter_matches = (
-        bool(python_executable)
-        and _normalized_path(python_executable)
-        == _normalized_path(runtime.python)
-        and runtime.python.is_file()
-    )
-    package_matches = _resolved_file_within(
-        package_path, expected_package_root
-    )
-    extension_matches = _resolved_file_within(
-        extension_path, expected_package_root
-    )
-    if not interpreter_matches or not package_matches or not extension_matches:
+def loaded_runtime_attestation(runtime: RuntimeSpec) -> RuntimeManifest:
+    if runtime.manifest_path is None or runtime.attestation is None:
         raise ValueError(
-            f"{runtime.name} runtime binding is unverifiable: "
-            f"python={python_executable!r}, "
-            f"package={package_path!r}, extension={extension_path!r}"
+            f"{runtime.name} requires a loaded, verified runtime manifest"
         )
+    return runtime.attestation
+
+
+def require_runtime_attestation(runtime: RuntimeSpec) -> RuntimeManifest:
+    attestation = loaded_runtime_attestation(runtime)
+    _validate_manifest_against_runtime(
+        attestation,
+        runtime,
+        expected_name=None,
+    )
+    return attestation
 
 
 def validate_result_binding(runtime: RuntimeSpec, result: CaseResult) -> None:
-    if runtime.attestation is not None:
-        manifest = runtime.attestation
-        try:
-            package_matches = Path(result.package_path).resolve(
-                strict=True
-            ) == Path(manifest.package_path).resolve(strict=True)
-            extension_matches = Path(result.extension_path).resolve(
-                strict=True
-            ) == Path(manifest.extension_path).resolve(strict=True)
-        except OSError:
-            package_matches = False
-            extension_matches = False
-        manifest_matches = (
-            result.source_commit == manifest.source_commit
-            and _normalized_path(result.python_executable)
-            == _normalized_path(manifest.python_executable)
-            and package_matches
-            and extension_matches
-            and result.extension_sha256 == manifest.extension_sha256
-        )
-        if not manifest_matches:
-            raise ValueError(
-                f"{runtime.name} live worker record does not match runtime manifest"
-            )
-        return
-    _validate_runtime_paths(
-        runtime,
-        python_executable=result.python_executable,
-        package_path=result.package_path,
-        extension_path=result.extension_path,
+    manifest = require_runtime_attestation(runtime)
+    try:
+        package_matches = Path(result.package_path).resolve(
+            strict=True
+        ) == Path(manifest.package_path).resolve(strict=True)
+        extension_matches = Path(result.extension_path).resolve(
+            strict=True
+        ) == Path(manifest.extension_path).resolve(strict=True)
+    except OSError:
+        package_matches = False
+        extension_matches = False
+    manifest_matches = (
+        result.source_commit == manifest.source_commit
+        and _normalized_path(result.python_executable)
+        == _normalized_path(manifest.python_executable)
+        and package_matches
+        and extension_matches
+        and result.extension_sha256 == manifest.extension_sha256
     )
+    if not manifest_matches:
+        raise ValueError(
+            f"{runtime.name} live worker record does not match runtime manifest"
+        )
 
 
 def require_native_train_seconds(timing: Mapping[str, Any]) -> float:
@@ -721,17 +689,16 @@ def _worker_result(args: argparse.Namespace) -> CaseResult:
         args.runtime_workdir.resolve(),
         source_commit,
     )
-    if args.runtime_manifest is not None:
-        manifest_path = args.runtime_manifest.resolve()
-        worker_runtime = replace(
-            worker_runtime,
-            manifest_path=manifest_path,
-            attestation=load_runtime_manifest(
-                manifest_path,
-                runtime=worker_runtime,
-                expected_name=None,
-            ),
-        )
+    manifest_path = args.runtime_manifest.resolve()
+    worker_runtime = replace(
+        worker_runtime,
+        manifest_path=manifest_path,
+        attestation=load_runtime_manifest(
+            manifest_path,
+            runtime=worker_runtime,
+            expected_name=None,
+        ),
+    )
     extension_sha256 = _sha256_file(extension_path)
     binding_record = CaseResult(
         artifact_sha256="binding-only",
@@ -1019,6 +986,10 @@ def validate_run_configuration(
 ) -> None:
     if repetitions < 1:
         raise ValueError("repetitions must be at least 1")
+    if profile not in {"quick", "full"}:
+        raise ValueError(f"unknown profile {profile!r}")
+    baseline_attestation = loaded_runtime_attestation(baseline)
+    candidate_attestation = loaded_runtime_attestation(candidate)
     python_same = _normalized_path(baseline.python) == _normalized_path(
         candidate.python
     )
@@ -1027,9 +998,20 @@ def validate_run_configuration(
     if profile == "quick":
         if not (python_same and workdir_same and commit_same):
             raise ValueError("quick mode requires candidate self-comparison")
+        if (
+            baseline.manifest_path.resolve()
+            != candidate.manifest_path.resolve()
+            or baseline_attestation != candidate_attestation
+        ):
+            raise ValueError(
+                "quick mode requires one shared candidate runtime manifest"
+            )
+        _validate_manifest_against_runtime(
+            candidate_attestation,
+            candidate,
+            expected_name="candidate",
+        )
         return
-    if profile != "full":
-        raise ValueError(f"unknown profile {profile!r}")
     if repetitions < 3:
         raise ValueError("full mode requires at least 3 repetitions")
     if python_same and workdir_same and commit_same:
@@ -1038,30 +1020,23 @@ def validate_run_configuration(
         raise ValueError(
             "full mode requires distinct Python executables, workdirs, and commits"
         )
-    if (
-        baseline.manifest_path is None
-        or baseline.attestation is None
-        or candidate.manifest_path is None
-        or candidate.attestation is None
-    ):
-        raise ValueError("full mode requires verified baseline and candidate manifests")
     if baseline.manifest_path.resolve() == candidate.manifest_path.resolve():
         raise ValueError("full mode requires distinct runtime manifest files")
     _validate_manifest_against_runtime(
-        baseline.attestation, baseline, expected_name="baseline"
+        baseline_attestation, baseline, expected_name="baseline"
     )
     _validate_manifest_against_runtime(
-        candidate.attestation, candidate, expected_name="candidate"
+        candidate_attestation, candidate, expected_name="candidate"
     )
-    same_package = Path(baseline.attestation.package_path).resolve() == Path(
-        candidate.attestation.package_path
+    same_package = Path(baseline_attestation.package_path).resolve() == Path(
+        candidate_attestation.package_path
     ).resolve()
-    same_extension = Path(baseline.attestation.extension_path).resolve() == Path(
-        candidate.attestation.extension_path
+    same_extension = Path(baseline_attestation.extension_path).resolve() == Path(
+        candidate_attestation.extension_path
     ).resolve()
     same_digest = (
-        baseline.attestation.extension_sha256
-        == candidate.attestation.extension_sha256
+        baseline_attestation.extension_sha256
+        == candidate_attestation.extension_sha256
     )
     if same_package or same_extension or same_digest:
         raise ValueError("full mode manifests attest the same runtime")
@@ -1339,6 +1314,7 @@ def _require_worker_args(args: argparse.Namespace) -> None:
     required = (
         "runtime_name",
         "runtime_workdir",
+        "runtime_manifest",
         "expected_python",
         "expected_source_commit",
         "case",

@@ -99,18 +99,24 @@ def _runtime(tmp_path: Path, name: str, commit: str):
 
 def _bound_result(runtime, case, repetition, **changes):
     package = runtime.workdir / "bindings" / "python" / "alloygbm"
+    package_path = str(package / "__init__.py")
+    extension_path = str(package / "_alloygbm.abi3.so")
+    extension_sha256 = (
+        "e" if runtime.source_commit == "1" * 40 else "f"
+    ) * 64
+    if runtime.attestation is not None:
+        package_path = runtime.attestation.package_path
+        extension_path = runtime.attestation.extension_path
+        extension_sha256 = runtime.attestation.extension_sha256
     result = _result(
         case=case.name,
         repetition=repetition,
         source_commit=runtime.source_commit,
-        extension_sha256=(
-            "e" if runtime.source_commit == "1" * 40 else "f"
-        )
-        * 64,
+        extension_sha256=extension_sha256,
         runtime_name=runtime.name,
         python_executable=str(runtime.python.absolute()),
-        package_path=str(package / "__init__.py"),
-        extension_path=str(package / "_alloygbm.abi3.so"),
+        package_path=package_path,
+        extension_path=extension_path,
     )
     return replace(result, **changes)
 
@@ -185,12 +191,14 @@ def test_profiles_cover_required_shapes_and_growth_modes():
 def test_worker_command_is_isolated_and_bound_to_runtime_worktree(tmp_path):
     python = tmp_path / "venv" / "bin" / "python"
     workdir = tmp_path / "source"
-    runtime = BENCHMARK.RuntimeSpec(
+    python.parent.mkdir(parents=True)
+    python.touch()
+    runtime = _attest_runtime(BENCHMARK.RuntimeSpec(
         name="baseline",
         python=python,
         workdir=workdir,
         source_commit="1" * 40,
-    )
+    ))
     case = BENCHMARK.quick_cases()[0]
 
     invocation = BENCHMARK.build_worker_invocation(
@@ -207,6 +215,9 @@ def test_worker_command_is_isolated_and_bound_to_runtime_worktree(tmp_path):
     assert invocation.value_after("--runtime-workdir") == str(workdir)
     assert invocation.value_after("--expected-python") == str(python)
     assert invocation.value_after("--expected-source-commit") == "1" * 40
+    assert invocation.value_after("--runtime-manifest") == str(
+        runtime.manifest_path
+    )
     assert "PYTHONPATH" not in invocation.env
     assert "PYTHONHOME" not in invocation.env
 
@@ -227,8 +238,21 @@ def test_worker_command_passes_runtime_manifest_when_present(tmp_path):
     )
 
 
+def test_worker_invocation_rejects_missing_runtime_attestation(tmp_path):
+    runtime = _runtime(tmp_path, "candidate", "2" * 40)
+
+    with pytest.raises(ValueError, match="verified runtime manifest"):
+        BENCHMARK.build_worker_invocation(
+            runtime,
+            BENCHMARK.quick_cases()[0],
+            profile="quick",
+            repetition=0,
+            n_jobs=2,
+        )
+
+
 def test_worker_output_parser_accepts_one_complete_bound_json_record(tmp_path):
-    runtime = _runtime(tmp_path, "baseline", "1" * 40)
+    runtime = _attest_runtime(_runtime(tmp_path, "baseline", "1" * 40))
     case = BENCHMARK.quick_cases()[0]
     expected = _bound_result(runtime, case, 0)
 
@@ -392,8 +416,8 @@ def test_full_configuration_rejects_missing_or_same_manifest(tmp_path):
 
 
 def test_quick_configuration_is_the_only_self_comparison_mode(tmp_path):
-    candidate = _runtime(tmp_path, "candidate", "2" * 40)
-    baseline = replace(candidate, name="baseline")
+    candidate = _attest_runtime(_runtime(tmp_path, "candidate", "2" * 40))
+    baseline = BENCHMARK.quick_baseline_runtime(candidate)
 
     BENCHMARK.validate_run_configuration(
         profile="quick", baseline=baseline, candidate=candidate, repetitions=1
@@ -401,6 +425,19 @@ def test_quick_configuration_is_the_only_self_comparison_mode(tmp_path):
     with pytest.raises(ValueError, match="self-comparison"):
         BENCHMARK.validate_run_configuration(
             profile="full", baseline=baseline, candidate=candidate, repetitions=3
+        )
+
+
+def test_quick_configuration_rejects_missing_runtime_attestation(tmp_path):
+    candidate = _runtime(tmp_path, "candidate", "2" * 40)
+    baseline = replace(candidate, name="baseline")
+
+    with pytest.raises(ValueError, match="verified runtime manifest"):
+        BENCHMARK.validate_run_configuration(
+            profile="quick",
+            baseline=baseline,
+            candidate=candidate,
+            repetitions=1,
         )
 
 
@@ -414,26 +451,13 @@ def test_quick_baseline_alias_preserves_candidate_manifest(tmp_path):
     assert baseline.attestation == candidate.attestation
 
 
-def test_worker_result_must_bind_to_declared_interpreter_and_worktree(tmp_path):
+def test_worker_result_binding_rejects_missing_runtime_attestation(tmp_path):
     runtime = _runtime(tmp_path, "baseline", "1" * 40)
     case = BENCHMARK.quick_cases()[0]
     result = _bound_result(runtime, case, 0)
 
-    BENCHMARK.validate_result_binding(runtime, result)
-
-    foreign = tmp_path / "foreign" / "alloygbm"
-    foreign.mkdir(parents=True)
-    (foreign / "__init__.py").touch()
-    (foreign / "_alloygbm.so").touch()
-    invalid = (
-        replace(result, python_executable=str(tmp_path / "other-python")),
-        replace(result, package_path=str(foreign / "__init__.py")),
-        replace(result, extension_path=str(foreign / "_alloygbm.so")),
-        replace(result, package_path=""),
-    )
-    for record in invalid:
-        with pytest.raises(ValueError, match="runtime binding"):
-            BENCHMARK.validate_result_binding(runtime, record)
+    with pytest.raises(ValueError, match="verified runtime manifest"):
+        BENCHMARK.validate_result_binding(runtime, result)
 
 
 def test_verified_manifest_allows_wheel_site_packages(tmp_path):
@@ -613,8 +637,8 @@ def test_strict_json_rejects_nonfinite_numbers(value):
 
 
 def test_orchestrator_excludes_warmups_and_alternates_arm_order(monkeypatch, tmp_path):
-    candidate = _runtime(tmp_path, "candidate", "1" * 40)
-    baseline = replace(candidate, name="baseline")
+    candidate = _attest_runtime(_runtime(tmp_path, "candidate", "1" * 40))
+    baseline = BENCHMARK.quick_baseline_runtime(candidate)
     calls = []
 
     def fake_run_worker(runtime, case, **kwargs):
@@ -645,8 +669,32 @@ def test_orchestrator_excludes_warmups_and_alternates_arm_order(monkeypatch, tmp
     ]
 
 
+def test_worker_cli_rejects_missing_runtime_manifest():
+    args = BENCHMARK._parser().parse_args(
+        [
+            "--quick",
+            "--worker",
+            "--runtime-name",
+            "candidate",
+            "--runtime-workdir",
+            "/candidate",
+            "--expected-python",
+            "/candidate/python",
+            "--expected-source-commit",
+            "2" * 40,
+            "--case",
+            BENCHMARK.quick_cases()[0].name,
+            "--repetition",
+            "0",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="runtime_manifest"):
+        BENCHMARK._require_worker_args(args)
+
+
 def test_worker_parse_errors_include_runtime_and_case_context(monkeypatch, tmp_path):
-    runtime = _runtime(tmp_path, "baseline", "1" * 40)
+    runtime = _attest_runtime(_runtime(tmp_path, "baseline", "1" * 40))
     case = BENCHMARK.quick_cases()[0]
     completed = subprocess.CompletedProcess([], 0, stdout="not-json", stderr="")
     monkeypatch.setattr(BENCHMARK.subprocess, "run", lambda *args, **kwargs: completed)
@@ -793,3 +841,38 @@ def test_ci_runs_allocation_contract_and_quick_self_consistency_gate():
         "--candidate-manifest /tmp/alloygbm-candidate-runtime.json --gate"
         in workflow
     )
+
+
+def test_readme_locks_canonical_task6_manifest_flow():
+    readme = (REPO_ROOT / "benchmarks" / "README.md").read_text(
+        encoding="utf-8"
+    )
+    task6 = readme.split(
+        "# Canonical Task 6 full flow after release-building both worktree environments",
+        1,
+    )[1].split("# Fast smoke run", 1)[0]
+    expected = r'''/tmp/alloygbm-pr128-baseline/.venv/bin/python \
+  "$(pwd)/benchmarks/allocation_reuse_benchmark.py" \
+  --write-runtime-manifest /tmp/alloygbm-pr128-baseline/runtime.json \
+  --runtime-name baseline \
+  --runtime-python /tmp/alloygbm-pr128-baseline/.venv/bin/python \
+  --runtime-workdir /tmp/alloygbm-pr128-baseline
+.venv/bin/python benchmarks/allocation_reuse_benchmark.py \
+  --write-runtime-manifest /tmp/alloygbm-pr128-candidate-runtime.json \
+  --runtime-name candidate \
+  --runtime-python .venv/bin/python \
+  --runtime-workdir "$(pwd)"
+.venv/bin/python benchmarks/allocation_reuse_benchmark.py \
+  --full \
+  --baseline-python /tmp/alloygbm-pr128-baseline/.venv/bin/python \
+  --baseline-workdir /tmp/alloygbm-pr128-baseline \
+  --baseline-manifest /tmp/alloygbm-pr128-baseline/runtime.json \
+  --candidate-python .venv/bin/python \
+  --candidate-workdir "$(pwd)" \
+  --candidate-manifest /tmp/alloygbm-pr128-candidate-runtime.json \
+  --repetitions 3 \
+  --gate \
+  --output-json docs/benchmarks/allocation_reuse_v1.json \
+  --output-markdown docs/benchmarks/allocation_reuse_v1.md'''
+
+    assert task6.strip() == expected
