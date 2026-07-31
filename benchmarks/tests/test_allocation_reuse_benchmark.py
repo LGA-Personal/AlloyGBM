@@ -920,7 +920,7 @@ def test_readme_locks_canonical_task6_manifest_flow():
   --candidate-python .venv/bin/python \
   --candidate-workdir "$(pwd)" \
   --candidate-manifest /tmp/alloygbm-pr128-candidate-runtime.json \
-  --repetitions 3 \
+  --repetitions 5 \
   --gate \
   --output-json docs/benchmarks/allocation_reuse_v1.json \
   --output-markdown docs/benchmarks/allocation_reuse_v1.md'''
