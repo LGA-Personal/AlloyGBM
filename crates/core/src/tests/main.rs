@@ -1740,3 +1740,88 @@ fn exact_feature_bundles_decline_exhausted_u16_storage() {
 
     assert_eq!(map.bundle_count(), 0);
 }
+
+fn histogram_subtraction_pair(include_grad_sq: bool) -> (HistogramBundle, HistogramBundle) {
+    let parent = HistogramBundle::from_soa(
+        4,
+        vec![3, 7],
+        2,
+        vec![10.0, 20.0, 30.0, 40.0],
+        vec![1.0, 2.0, 3.0, 4.0],
+        include_grad_sq.then_some(vec![100.0, 200.0, 300.0, 400.0]),
+        vec![5, 6, 7, 8],
+    )
+    .expect("valid parent histogram");
+    let child = HistogramBundle::from_soa(
+        8,
+        vec![3, 7],
+        2,
+        vec![1.0, 2.0, 3.0, 4.0],
+        vec![0.1, 0.2, 0.3, 0.4],
+        include_grad_sq.then_some(vec![10.0, 20.0, 30.0, 40.0]),
+        vec![1, 2, 3, 4],
+    )
+    .expect("valid child histogram");
+    (parent, child)
+}
+
+#[test]
+fn subtract_child_in_place_matches_allocating_subtraction_without_grad_sq() {
+    let (mut parent, child) = histogram_subtraction_pair(false);
+    let grad_ptr = parent.feature(0).unwrap().grad_sums().as_ptr();
+    let expected = {
+        let mut dest = HistogramBundle::new_zeroed_with_grad_sq(
+            parent.feature_indices(),
+            parent.bin_count(),
+            parent.has_grad_sq_sums(),
+        );
+        dest.subtract_into(&parent, &child, 9).unwrap();
+        dest
+    };
+    parent.subtract_child_in_place(&child, 9).unwrap();
+    assert_eq!(parent, expected);
+    assert_eq!(parent.feature(0).unwrap().grad_sums().as_ptr(), grad_ptr);
+}
+
+#[test]
+fn subtract_child_in_place_matches_allocating_subtraction_with_grad_sq() {
+    let (mut parent, child) = histogram_subtraction_pair(true);
+    let grad_ptr = parent.feature(0).unwrap().grad_sums().as_ptr();
+    let expected = {
+        let mut dest = HistogramBundle::new_zeroed_with_grad_sq(
+            parent.feature_indices(),
+            parent.bin_count(),
+            parent.has_grad_sq_sums(),
+        );
+        dest.subtract_into(&parent, &child, 9).unwrap();
+        dest
+    };
+    parent.subtract_child_in_place(&child, 9).unwrap();
+    assert_eq!(parent, expected);
+    assert_eq!(parent.feature(0).unwrap().grad_sums().as_ptr(), grad_ptr);
+}
+
+#[test]
+fn subtract_child_in_place_rejects_excess_counts_atomically() {
+    let (mut parent, _) = histogram_subtraction_pair(true);
+    let child = HistogramBundle::from_soa(
+        8,
+        vec![3, 7],
+        2,
+        vec![1.0, 2.0, 3.0, 4.0],
+        vec![0.1, 0.2, 0.3, 0.4],
+        Some(vec![10.0, 20.0, 30.0, 40.0]),
+        vec![1, 2, 8, 4],
+    )
+    .expect("valid child histogram");
+    let original = parent.clone();
+
+    let error = parent
+        .subtract_child_in_place(&child, 9)
+        .expect_err("child count must not exceed parent count");
+
+    assert!(
+        matches!(error, CoreError::Validation(message) if message == "child histogram count exceeds parent")
+    );
+    assert_eq!(parent, original);
+}

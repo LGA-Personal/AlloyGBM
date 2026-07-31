@@ -399,16 +399,35 @@ impl HistogramBundle {
         result
     }
 
-    pub fn subtract_into(&mut self, parent: &Self, child: &Self, node_id: u32) -> CoreResult<()> {
+    fn validate_subtraction_layout(
+        parent: &Self,
+        child: &Self,
+        destination: &Self,
+    ) -> CoreResult<()> {
         if parent.feature_indices != child.feature_indices
-            || self.feature_indices != parent.feature_indices
+            || destination.feature_indices != parent.feature_indices
             || parent.bin_count != child.bin_count
-            || self.bin_count != parent.bin_count
+            || destination.bin_count != parent.bin_count
             || parent.has_grad_sq_sums() != child.has_grad_sq_sums()
-            || self.has_grad_sq_sums() != parent.has_grad_sq_sums()
+            || destination.has_grad_sq_sums() != parent.has_grad_sq_sums()
         {
             return Err(CoreError::Validation(
                 "histogram subtraction requires identical layouts".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn subtract_into(&mut self, parent: &Self, child: &Self, node_id: u32) -> CoreResult<()> {
+        Self::validate_subtraction_layout(parent, child, self)?;
+        if parent
+            .counts
+            .iter()
+            .zip(&child.counts)
+            .any(|(&parent, &child)| child > parent)
+        {
+            return Err(CoreError::Validation(
+                "child histogram count exceeds parent".to_string(),
             ));
         }
         self.node_id = node_id;
@@ -443,9 +462,37 @@ impl HistogramBundle {
             .zip(&parent.counts)
             .zip(&child.counts)
         {
-            *dest = parent.checked_sub(child).ok_or_else(|| {
-                CoreError::Validation("child histogram count exceeds parent".to_string())
-            })?;
+            *dest = parent - child;
+        }
+        Ok(())
+    }
+
+    pub fn subtract_child_in_place(&mut self, child: &Self, node_id: u32) -> CoreResult<()> {
+        Self::validate_subtraction_layout(self, child, self)?;
+        if self
+            .counts
+            .iter()
+            .zip(&child.counts)
+            .any(|(&parent, &child)| child > parent)
+        {
+            return Err(CoreError::Validation(
+                "child histogram count exceeds parent".to_string(),
+            ));
+        }
+        self.node_id = node_id;
+        for (parent, &child) in self.grad_sums.iter_mut().zip(&child.grad_sums) {
+            *parent -= child;
+        }
+        for (parent, &child) in self.hess_sums.iter_mut().zip(&child.hess_sums) {
+            *parent -= child;
+        }
+        if let (Some(parent), Some(child)) = (&mut self.grad_sq_sums, &child.grad_sq_sums) {
+            for (parent, &child) in parent.iter_mut().zip(child) {
+                *parent -= child;
+            }
+        }
+        for (parent, &child) in self.counts.iter_mut().zip(&child.counts) {
+            *parent -= child;
         }
         Ok(())
     }
