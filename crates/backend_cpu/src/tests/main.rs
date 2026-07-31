@@ -2022,6 +2022,93 @@ fn make_options(
     }
 }
 
+fn assert_standard_simd_matches_scalar(feature: &FeatureHistogram, options: SplitSelectionOptions) {
+    let scalar = with_histogram_feature(feature, |view| {
+        CpuBackend::best_split_for_feature_inner(view, 0, options, GainStrategy::Standard, None)
+    });
+    let simd = with_histogram_feature(feature, |view| {
+        CpuBackend::best_split_for_feature_standard_simd(view, 0, options)
+    });
+
+    match (scalar, simd) {
+        (Some(scalar), Some(simd)) => {
+            assert_eq!(scalar.threshold_bin, simd.threshold_bin);
+            assert_eq!(scalar.default_left, simd.default_left);
+            assert!((scalar.gain - simd.gain).abs() < 1e-4);
+            assert_eq!(scalar.left_stats, simd.left_stats);
+            assert_eq!(scalar.right_stats, simd.right_stats);
+        }
+        (None, None) => {}
+        (scalar, simd) => panic!(
+            "scalar/simd disagree on Some-ness: scalar={}, simd={}",
+            scalar.is_some(),
+            simd.is_some()
+        ),
+    }
+}
+
+#[test]
+fn split_scan_simd_matches_scalar_across_bin_counts_missing_directions_and_ties() {
+    for &bin_count in &[2_usize, 7, 8, 9, 63, 255, 65_535] {
+        let mut state = 0x9E37_79B9_u32 ^ bin_count as u32;
+        let mut bins = Vec::with_capacity(bin_count);
+        for _ in 0..bin_count {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let grad_sum = ((state >> 8) as i16 as f32) / 4096.0;
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let hess_sum = 0.5 + (state % 10_000) as f32 / 10_000.0;
+            bins.push(HistogramBin {
+                grad_sum,
+                hess_sum,
+                grad_sq_sum: 0.0,
+                count: 1 + state % 11,
+            });
+        }
+        let feature = FeatureHistogram {
+            feature_index: 0,
+            bins,
+        };
+
+        for missing_bin_index in [bin_count, bin_count - 1] {
+            assert_standard_simd_matches_scalar(
+                &feature,
+                make_options(0.05, 0.1, 0.0, 0.0, missing_bin_index),
+            );
+        }
+    }
+
+    let tied = FeatureHistogram {
+        feature_index: 0,
+        bins: vec![
+            HistogramBin {
+                grad_sum: 1.0,
+                hess_sum: 1.0,
+                grad_sq_sum: 0.0,
+                count: 1,
+            },
+            HistogramBin {
+                grad_sum: -1.0,
+                hess_sum: 1.0,
+                grad_sq_sum: 0.0,
+                count: 1,
+            },
+            HistogramBin {
+                grad_sum: -1.0,
+                hess_sum: 1.0,
+                grad_sq_sum: 0.0,
+                count: 1,
+            },
+            HistogramBin {
+                grad_sum: 1.0,
+                hess_sum: 1.0,
+                grad_sq_sum: 0.0,
+                count: 1,
+            },
+        ],
+    };
+    assert_standard_simd_matches_scalar(&tied, make_options(0.0, 0.1, 0.0, 0.0, 4));
+}
+
 #[test]
 fn simd_standard_bin_scan_matches_scalar() {
     let bins: Vec<HistogramBin> = (0..32)
