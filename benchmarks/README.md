@@ -255,7 +255,7 @@ python3 benchmarks/allocation_reuse_benchmark.py --quick --gate
 # Full same-host A/B after running maturin develop --release in each environment
 /path/to/candidate/.venv/bin/python \
   /path/to/candidate/benchmarks/allocation_reuse_benchmark.py \
-  --full --gate \
+  --full --repetitions 3 --gate \
   --baseline-python /path/to/baseline/.venv/bin/python \
   --baseline-workdir /path/to/baseline \
   --candidate-python /path/to/candidate/.venv/bin/python \
@@ -291,8 +291,13 @@ prediction, and RMSE equivalence is exact. Full-mode performance gates compare
 per-case medians and then aggregate geometric timing and RSS ratios: aggregate
 native slowdown must stay within 3%, aggregate incremental RSS growth within
 5%, and at least one deep-pressure case must improve in median time or RSS.
-Quick mode intentionally gates equivalence only because its single repetition
-is too small for defensible performance claims.
+Full mode requires explicit, distinct baseline and candidate Python
+executables and workdirs whose Git commits also differ. Quick mode is the only
+self-comparison mode and intentionally gates equivalence only because its
+single default repetition is too small for defensible performance claims.
+Zero or unsupported RSS deltas are reported as unavailable and excluded from
+the RSS geometric mean; a full run fails if no case has measurable positive
+deltas.
 
 ## Outputs
 

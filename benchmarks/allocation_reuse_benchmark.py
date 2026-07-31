@@ -20,7 +20,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 QUICK_REPETITIONS = 1
 FULL_REPETITIONS = 5
 QUICK_ESTIMATORS = 3
@@ -87,7 +87,7 @@ class CaseResult:
     artifact_sha256: str
     prediction_sha256: str
     native_seconds: float
-    rss_mib: float
+    rss_mib: float | None
     rmse: float = 0.0
     case: str = ""
     shape: str = ""
@@ -121,7 +121,11 @@ class CaseResult:
             artifact_sha256=str(payload["artifact_sha256"]),
             prediction_sha256=str(payload["prediction_sha256"]),
             native_seconds=float(payload["native_seconds"]),
-            rss_mib=float(payload["rss_mib"]),
+            rss_mib=(
+                None
+                if payload["rss_mib"] is None
+                else float(payload["rss_mib"])
+            ),
             rmse=float(payload.get("rmse", 0.0)),
             case=str(payload.get("case", "")),
             shape=str(payload.get("shape", "")),
@@ -159,7 +163,7 @@ class PairEvaluation:
     equivalent: bool
     failures: tuple[str, ...]
     timing_ratio: float
-    rss_ratio: float
+    rss_ratio: float | None
 
 
 @dataclass(frozen=True)
@@ -171,16 +175,17 @@ class CaseSummary:
     baseline_native_seconds: float
     candidate_native_seconds: float
     timing_ratio: float
-    baseline_rss_mib: float
-    candidate_rss_mib: float
-    rss_ratio: float
+    baseline_rss_mib: float | None
+    candidate_rss_mib: float | None
+    rss_ratio: float | None
 
 
 @dataclass(frozen=True)
 class GateEvaluation:
     failures: tuple[str, ...]
     aggregate_timing_ratio: float
-    aggregate_rss_ratio: float
+    aggregate_rss_ratio: float | None
+    rss_cases_available: int
     performance_gated: bool
     case_summaries: tuple[CaseSummary, ...]
 
@@ -288,7 +293,7 @@ def _git_commit(workdir: Path) -> str:
 
 
 def resolve_runtime(name: str, python: Path, workdir: Path) -> RuntimeSpec:
-    python = python.expanduser().absolute()
+    python = Path(os.path.abspath(python.expanduser()))
     workdir = workdir.expanduser().resolve()
     if not python.is_file():
         raise ValueError(f"{name} Python executable does not exist: {python}")
@@ -312,15 +317,16 @@ def build_worker_invocation(
         str(runtime.python),
         "-I",
         str(SCRIPT_PATH),
+        f"--{profile}",
         "--worker",
         "--runtime-name",
         runtime.name,
         "--runtime-workdir",
         str(runtime.workdir),
+        "--expected-python",
+        str(runtime.python),
         "--expected-source-commit",
         runtime.source_commit,
-        "--profile",
-        profile,
         "--case",
         case.name,
         "--repetition",
@@ -335,17 +341,89 @@ def _finite_nonnegative(value: float) -> bool:
     return math.isfinite(value) and value >= 0.0
 
 
+def strict_json_dumps(payload: Any, **kwargs: Any) -> str:
+    return json.dumps(payload, allow_nan=False, **kwargs)
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON number {value}")
+
+
+def _normalized_path(path: str | Path) -> Path:
+    return Path(os.path.abspath(Path(path).expanduser()))
+
+
+def _resolved_file_within(path_text: str, root: Path) -> bool:
+    if not path_text:
+        return False
+    try:
+        path = Path(path_text).resolve(strict=True)
+        root = root.resolve(strict=True)
+        path.relative_to(root)
+    except (OSError, ValueError):
+        return False
+    return path.is_file()
+
+
+def _validate_runtime_paths(
+    runtime: RuntimeSpec,
+    *,
+    python_executable: str,
+    package_path: str,
+    extension_path: str,
+) -> None:
+    expected_package_root = runtime.workdir / "bindings" / "python" / "alloygbm"
+    interpreter_matches = (
+        bool(python_executable)
+        and _normalized_path(python_executable)
+        == _normalized_path(runtime.python)
+        and runtime.python.is_file()
+    )
+    package_matches = _resolved_file_within(
+        package_path, expected_package_root
+    )
+    extension_matches = _resolved_file_within(
+        extension_path, expected_package_root
+    )
+    if not interpreter_matches or not package_matches or not extension_matches:
+        raise ValueError(
+            f"{runtime.name} runtime binding is unverifiable: "
+            f"python={python_executable!r}, "
+            f"package={package_path!r}, extension={extension_path!r}"
+        )
+
+
+def validate_result_binding(runtime: RuntimeSpec, result: CaseResult) -> None:
+    _validate_runtime_paths(
+        runtime,
+        python_executable=result.python_executable,
+        package_path=result.package_path,
+        extension_path=result.extension_path,
+    )
+
+
+def require_native_train_seconds(timing: Mapping[str, Any]) -> float:
+    value = timing.get("native_train_seconds")
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(float(value))
+        or float(value) <= 0.0
+    ):
+        raise ValueError("fit_timing_ must contain finite positive native_train_seconds")
+    return float(value)
+
+
 def parse_worker_output(
     stdout: str,
     *,
-    runtime_name: str,
+    runtime: RuntimeSpec,
     expected_case: str,
     expected_repetition: int,
-    expected_source_commit: str,
 ) -> CaseResult:
     try:
-        payload = json.loads(stdout)
-    except json.JSONDecodeError as error:
+        payload = json.loads(stdout, parse_constant=_reject_json_constant)
+    except (json.JSONDecodeError, ValueError) as error:
         raise ValueError("worker must emit a single JSON object") from error
     if not isinstance(payload, dict):
         raise ValueError("worker must emit a single JSON object")
@@ -353,39 +431,53 @@ def parse_worker_output(
         result = CaseResult.from_dict(payload)
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError(f"invalid worker record: {error}") from error
-    if result.runtime_name != runtime_name:
+    if result.runtime_name != runtime.name:
         raise ValueError(
-            f"worker runtime name mismatch: expected {runtime_name}, got {result.runtime_name}"
+            f"worker runtime name mismatch: expected {runtime.name}, got {result.runtime_name}"
         )
     if result.case != expected_case or result.repetition != expected_repetition:
         raise ValueError("worker case or repetition does not match invocation")
-    if result.source_commit != expected_source_commit:
+    if result.source_commit != runtime.source_commit:
         raise ValueError(
             "worker source commit mismatch: "
-            f"expected {expected_source_commit}, got {result.source_commit}"
+            f"expected {runtime.source_commit}, got {result.source_commit}"
         )
     for name, value in (
         ("native_seconds", result.native_seconds),
         ("fit_seconds", result.fit_seconds),
-        ("rss_mib", result.rss_mib),
         ("rmse", result.rmse),
     ):
         if not _finite_nonnegative(value):
             raise ValueError(f"worker {name} must be finite and non-negative")
+    if result.native_seconds <= 0.0:
+        raise ValueError("worker native_seconds must be positive")
+    if result.rss_mib is not None and not _finite_nonnegative(result.rss_mib):
+        raise ValueError("worker rss_mib must be null or finite and non-negative")
     if not result.artifact_sha256 or not result.prediction_sha256:
         raise ValueError("worker digests must be non-empty")
+    if len(result.extension_sha256) != 64:
+        raise ValueError("worker extension SHA-256 must contain 64 hex characters")
+    validate_result_binding(runtime, result)
     return result
 
 
-def _peak_rss_mib() -> float:
+def _peak_rss_mib() -> float | None:
     try:
         import resource
 
         raw = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
     except (ImportError, AttributeError):
-        return 0.0
+        return None
     divisor = 1024.0 * 1024.0 if sys.platform == "darwin" else 1024.0
     return raw / divisor
+
+
+def _rss_delta_mib(before: float | None, after: float | None) -> float | None:
+    if before is None or after is None:
+        return None
+    if not math.isfinite(before) or not math.isfinite(after):
+        return None
+    return max(0.0, after - before)
 
 
 def _sha256_file(path: Path) -> str:
@@ -397,25 +489,40 @@ def _sha256_file(path: Path) -> str:
 
 
 def _worker_result(args: argparse.Namespace) -> CaseResult:
+    profile = profile_from_args(args)
     source_commit = _git_commit(args.runtime_workdir)
     if source_commit != args.expected_source_commit:
         raise ValueError(
             "runtime worktree moved after orchestration: "
             f"expected {args.expected_source_commit}, got {source_commit}"
         )
-    cases = {case.name: case for case in profile_cases(args.profile)}
+    cases = {case.name: case for case in profile_cases(profile)}
     try:
         case = cases[args.case]
     except KeyError as error:
-        raise ValueError(f"unknown {args.profile} case {args.case!r}") from error
+        raise ValueError(f"unknown {profile} case {args.case!r}") from error
 
     # Runtime imports are deliberately worker-only. The orchestrator must not
     # resolve AlloyGBM from its own interpreter or checkout.
     import alloygbm
     from alloygbm import GBMRegressor, _alloygbm
 
+    package_path = Path(alloygbm.__file__).resolve()
+    extension_path = Path(_alloygbm.__file__).resolve()
+    worker_runtime = RuntimeSpec(
+        args.runtime_name,
+        _normalized_path(args.expected_python),
+        args.runtime_workdir.resolve(),
+        source_commit,
+    )
+    _validate_runtime_paths(
+        worker_runtime,
+        python_executable=str(_normalized_path(sys.executable)),
+        package_path=str(package_path),
+        extension_path=str(extension_path),
+    )
     fixture = make_fixture(case)
-    n_estimators = QUICK_ESTIMATORS if args.profile == "quick" else FULL_ESTIMATORS
+    n_estimators = QUICK_ESTIMATORS if profile == "quick" else FULL_ESTIMATORS
     parameters: dict[str, Any] = {
         "n_estimators": n_estimators,
         "learning_rate": 0.08,
@@ -444,14 +551,12 @@ def _worker_result(args: argparse.Namespace) -> CaseResult:
     residuals = predictions - fixture.y_eval.astype(np.float64)
     rmse = float(np.sqrt(np.mean(np.square(residuals))))
     timing = dict(getattr(estimator, "fit_timing_", None) or {})
-    native_seconds = float(timing.get("native_train_seconds", fit_seconds))
-    package_path = Path(alloygbm.__file__).resolve()
-    extension_path = Path(_alloygbm.__file__).resolve()
+    native_seconds = require_native_train_seconds(timing)
     return CaseResult(
         artifact_sha256=hashlib.sha256(bytes(estimator.artifact_bytes)).hexdigest(),
         prediction_sha256=hashlib.sha256(predictions.tobytes()).hexdigest(),
         native_seconds=native_seconds,
-        rss_mib=max(0.0, rss_after - rss_before),
+        rss_mib=_rss_delta_mib(rss_before, rss_after),
         rmse=rmse,
         case=case.name,
         shape=case.shape,
@@ -467,7 +572,7 @@ def _worker_result(args: argparse.Namespace) -> CaseResult:
             "n_eval_rows": case.n_eval_rows,
         },
         parameters=parameters,
-        python_executable=str(Path(sys.executable).absolute()),
+        python_executable=str(_normalized_path(sys.executable)),
         package_path=str(package_path),
         extension_path=str(extension_path),
     )
@@ -508,19 +613,45 @@ def run_worker(
         raise RuntimeError(
             f"{runtime.name} worker timed out for {case.name}"
         ) from error
-    return parse_worker_output(
-        completed.stdout,
-        runtime_name=runtime.name,
-        expected_case=case.name,
-        expected_repetition=repetition,
-        expected_source_commit=runtime.source_commit,
-    )
+    try:
+        return parse_worker_output(
+            completed.stdout,
+            runtime=runtime,
+            expected_case=case.name,
+            expected_repetition=repetition,
+        )
+    except ValueError as error:
+        raise RuntimeError(
+            f"{runtime.name} worker produced invalid output for {case.name}: {error}"
+        ) from error
 
 
-def _ratio(candidate: float, baseline: float) -> float:
-    if baseline == 0.0:
-        return 1.0 if candidate == 0.0 else math.inf
-    return candidate / baseline
+def _required_ratio(candidate: float, baseline: float) -> float:
+    if (
+        not math.isfinite(candidate)
+        or not math.isfinite(baseline)
+        or candidate <= 0.0
+        or baseline <= 0.0
+    ):
+        raise ValueError("timing ratios require finite positive values")
+    ratio = candidate / baseline
+    if not math.isfinite(ratio):
+        raise ValueError("timing ratio must be finite")
+    return ratio
+
+
+def _rss_ratio(candidate: float | None, baseline: float | None) -> float | None:
+    if candidate is None or baseline is None:
+        return None
+    if (
+        not math.isfinite(candidate)
+        or not math.isfinite(baseline)
+        or candidate <= 0.0
+        or baseline <= 0.0
+    ):
+        return None
+    ratio = candidate / baseline
+    return ratio if math.isfinite(ratio) else None
 
 
 def evaluate_pair(baseline: CaseResult, candidate: CaseResult) -> PairEvaluation:
@@ -540,20 +671,18 @@ def evaluate_pair(baseline: CaseResult, candidate: CaseResult) -> PairEvaluation
     return PairEvaluation(
         equivalent=not failures,
         failures=tuple(failures),
-        timing_ratio=_ratio(candidate.native_seconds, baseline.native_seconds),
-        rss_ratio=_ratio(candidate.rss_mib, baseline.rss_mib),
+        timing_ratio=_required_ratio(
+            candidate.native_seconds, baseline.native_seconds
+        ),
+        rss_ratio=_rss_ratio(candidate.rss_mib, baseline.rss_mib),
     )
 
 
 def _geometric_mean(values: Sequence[float]) -> float:
     if not values:
-        return math.nan
-    if any(value < 0.0 for value in values):
-        return math.nan
-    if any(math.isinf(value) for value in values):
-        return math.inf
-    if any(value == 0.0 for value in values):
-        return 0.0
+        raise ValueError("geometric mean requires at least one value")
+    if any(not math.isfinite(value) or value <= 0.0 for value in values):
+        raise ValueError("geometric mean requires finite positive values")
     return math.exp(sum(math.log(value) for value in values) / len(values))
 
 
@@ -565,8 +694,22 @@ def _case_summaries(pairs: Sequence[PairedResult]) -> tuple[CaseSummary, ...]:
     for case, group in sorted(grouped.items()):
         baseline_native = median(pair.baseline.native_seconds for pair in group)
         candidate_native = median(pair.candidate.native_seconds for pair in group)
-        baseline_rss = median(pair.baseline.rss_mib for pair in group)
-        candidate_rss = median(pair.candidate.rss_mib for pair in group)
+        baseline_rss_values = [pair.baseline.rss_mib for pair in group]
+        candidate_rss_values = [pair.candidate.rss_mib for pair in group]
+        rss_available = all(
+            value is not None
+            for value in (*baseline_rss_values, *candidate_rss_values)
+        )
+        baseline_rss = (
+            median(float(value) for value in baseline_rss_values)
+            if rss_available
+            else None
+        )
+        candidate_rss = (
+            median(float(value) for value in candidate_rss_values)
+            if rss_available
+            else None
+        )
         first = group[0].baseline
         summaries.append(
             CaseSummary(
@@ -576,10 +719,10 @@ def _case_summaries(pairs: Sequence[PairedResult]) -> tuple[CaseSummary, ...]:
                 repetitions=len(group),
                 baseline_native_seconds=baseline_native,
                 candidate_native_seconds=candidate_native,
-                timing_ratio=_ratio(candidate_native, baseline_native),
+                timing_ratio=_required_ratio(candidate_native, baseline_native),
                 baseline_rss_mib=baseline_rss,
                 candidate_rss_mib=candidate_rss,
-                rss_ratio=_ratio(candidate_rss, baseline_rss),
+                rss_ratio=_rss_ratio(candidate_rss, baseline_rss),
             )
         )
     return tuple(summaries)
@@ -601,7 +744,12 @@ def evaluate_gates(
     aggregate_timing = _geometric_mean(
         [summary.timing_ratio for summary in summaries]
     )
-    aggregate_rss = _geometric_mean([summary.rss_ratio for summary in summaries])
+    rss_ratios = [
+        summary.rss_ratio
+        for summary in summaries
+        if summary.rss_ratio is not None
+    ]
+    aggregate_rss = _geometric_mean(rss_ratios) if rss_ratios else None
     performance_gated = profile == "full"
     if performance_gated:
         if not math.isfinite(aggregate_timing) or aggregate_timing > TIMING_SLOWDOWN_LIMIT:
@@ -609,7 +757,9 @@ def evaluate_gates(
                 "aggregate timing slowdown exceeds 3% "
                 f"(ratio={aggregate_timing:.4f})"
             )
-        if not math.isfinite(aggregate_rss) or aggregate_rss > RSS_INCREASE_LIMIT:
+        if aggregate_rss is None:
+            failures.append("aggregate RSS unavailable: no case has positive deltas")
+        elif aggregate_rss > RSS_INCREASE_LIMIT:
             failures.append(
                 "aggregate RSS increase exceeds 5% "
                 f"(ratio={aggregate_rss:.4f})"
@@ -620,7 +770,8 @@ def evaluate_gates(
             if summary.shape in {"tall_deep", "wide_deep"}
         ]
         if not any(
-            summary.timing_ratio < 1.0 or summary.rss_ratio < 1.0
+            summary.timing_ratio < 1.0
+            or (summary.rss_ratio is not None and summary.rss_ratio < 1.0)
             for summary in deep
         ):
             failures.append("no median timing or RSS improvement in any deep pressure case")
@@ -628,19 +779,40 @@ def evaluate_gates(
         tuple(failures),
         aggregate_timing,
         aggregate_rss,
+        len(rss_ratios),
         performance_gated,
         summaries,
     )
 
 
-def _is_within(path_text: str, root: Path) -> bool:
-    if not path_text:
-        return False
-    try:
-        Path(path_text).resolve().relative_to(root.resolve())
-    except ValueError:
-        return False
-    return True
+def validate_run_configuration(
+    *,
+    profile: str,
+    baseline: RuntimeSpec,
+    candidate: RuntimeSpec,
+    repetitions: int,
+) -> None:
+    if repetitions < 1:
+        raise ValueError("repetitions must be at least 1")
+    python_same = _normalized_path(baseline.python) == _normalized_path(
+        candidate.python
+    )
+    workdir_same = baseline.workdir.resolve() == candidate.workdir.resolve()
+    commit_same = baseline.source_commit == candidate.source_commit
+    if profile == "quick":
+        if not (python_same and workdir_same and commit_same):
+            raise ValueError("quick mode requires candidate self-comparison")
+        return
+    if profile != "full":
+        raise ValueError(f"unknown profile {profile!r}")
+    if repetitions < 3:
+        raise ValueError("full mode requires at least 3 repetitions")
+    if python_same and workdir_same and commit_same:
+        raise ValueError("full mode rejects self-comparison")
+    if python_same or workdir_same or commit_same:
+        raise ValueError(
+            "full mode requires distinct Python executables, workdirs, and commits"
+        )
 
 
 def validate_runtime_pair(
@@ -659,16 +831,9 @@ def validate_runtime_pair(
         and baseline_hashes == candidate_hashes
     ):
         raise ValueError("distinct source commits loaded the same native extension")
-    if baseline.workdir != candidate.workdir:
-        for pair in pairs:
-            if _is_within(pair.baseline.package_path, candidate.workdir) or _is_within(
-                pair.baseline.extension_path, candidate.workdir
-            ):
-                raise ValueError("baseline worker imported the candidate worktree runtime")
-            if _is_within(pair.candidate.package_path, baseline.workdir) or _is_within(
-                pair.candidate.extension_path, baseline.workdir
-            ):
-                raise ValueError("candidate worker imported the baseline worktree runtime")
+    for pair in pairs:
+        validate_result_binding(baseline, pair.baseline)
+        validate_result_binding(candidate, pair.candidate)
 
 
 def build_report(
@@ -677,13 +842,14 @@ def build_report(
     baseline: RuntimeSpec,
     candidate: RuntimeSpec,
     pairs: Sequence[PairedResult],
+    repetitions: int,
     n_jobs: int,
 ) -> dict[str, Any]:
     gates = evaluate_gates(pairs, profile=profile)
     return {
         "schema_version": SCHEMA_VERSION,
         "profile": profile,
-        "repetitions": profile_repetitions(profile),
+        "repetitions": repetitions,
         "warmup_runs_per_case": 1,
         "n_jobs": n_jobs,
         "host": {
@@ -701,6 +867,7 @@ def build_report(
             "performance_gated": gates.performance_gated,
             "aggregate_timing_ratio": gates.aggregate_timing_ratio,
             "aggregate_rss_ratio": gates.aggregate_rss_ratio,
+            "rss_cases_available": gates.rss_cases_available,
             "case_summaries": [asdict(summary) for summary in gates.case_summaries],
         },
     }
@@ -711,9 +878,16 @@ def run_benchmark(
     profile: str,
     baseline: RuntimeSpec,
     candidate: RuntimeSpec,
+    repetitions: int,
     n_jobs: int,
     timeout_seconds: float,
 ) -> dict[str, Any]:
+    validate_run_configuration(
+        profile=profile,
+        baseline=baseline,
+        candidate=candidate,
+        repetitions=repetitions,
+    )
     cases = profile_cases(profile)
     pairs: list[PairedResult] = []
     for case_index, case in enumerate(cases):
@@ -729,7 +903,7 @@ def run_benchmark(
                 n_jobs=n_jobs,
                 timeout_seconds=timeout_seconds,
             )
-        for repetition in range(profile_repetitions(profile)):
+        for repetition in range(repetitions):
             order = (
                 (baseline, candidate)
                 if (case_index + repetition) % 2 == 0
@@ -753,8 +927,13 @@ def run_benchmark(
         baseline=baseline,
         candidate=candidate,
         pairs=pairs,
+        repetitions=repetitions,
         n_jobs=n_jobs,
     )
+
+
+def _format_optional(value: float | None, digits: int) -> str:
+    return "n/a" if value is None else f"{value:.{digits}f}"
 
 
 def render_markdown(report: Mapping[str, Any]) -> str:
@@ -774,13 +953,27 @@ def render_markdown(report: Mapping[str, Any]) -> str:
             f"| {arm} | `{runtime['source_commit']}` | `{runtime['python']}` | "
             f"`{runtime['workdir']}` |"
         )
+    first_pair = report["pairs"][0]
+    lines.append("")
+    for arm in ("baseline", "candidate"):
+        result = first_pair[arm]
+        title = arm.capitalize()
+        lines.extend(
+            [
+                f"- {title} package path: `{result['package_path']}`",
+                f"- {title} extension path: `{result['extension_path']}`",
+                f"- {title} extension SHA-256: `{result['extension_sha256']}`",
+            ]
+        )
+    aggregate_rss = _format_optional(gate["aggregate_rss_ratio"], 4)
     lines.extend(
         [
             "",
             "## Aggregate Gate",
             "",
             f"- Aggregate timing ratio: {gate['aggregate_timing_ratio']:.4f}",
-            f"- Aggregate RSS ratio: {gate['aggregate_rss_ratio']:.4f}",
+            f"- Aggregate RSS ratio: {aggregate_rss}",
+            f"- RSS cases available: {gate['rss_cases_available']}",
             f"- Performance gated: {gate['performance_gated']}",
             f"- Failures: {len(gate['failures'])}",
         ]
@@ -800,37 +993,43 @@ def render_markdown(report: Mapping[str, Any]) -> str:
         ]
     )
     for summary in gate["case_summaries"]:
+        baseline_rss = _format_optional(summary["baseline_rss_mib"], 2)
+        candidate_rss = _format_optional(summary["candidate_rss_mib"], 2)
+        rss_ratio = _format_optional(summary["rss_ratio"], 4)
         lines.append(
             f"| `{summary['case']}` | {summary['repetitions']} | "
             f"{summary['baseline_native_seconds']:.6f} | "
             f"{summary['candidate_native_seconds']:.6f} | "
             f"{summary['timing_ratio']:.4f} | "
-            f"{summary['baseline_rss_mib']:.2f} | "
-            f"{summary['candidate_rss_mib']:.2f} | {summary['rss_ratio']:.4f} |"
+            f"{baseline_rss} | {candidate_rss} | {rss_ratio} |"
         )
     lines.extend(
         [
             "",
             "## Exact Equivalence",
             "",
-            "| Case | Rep | RMSE | Artifact SHA-256 | Prediction SHA-256 |",
-            "| --- | ---: | ---: | --- | --- |",
+            "| Case | Rep | Baseline RMSE | Candidate RMSE | Baseline Artifact SHA-256 | Candidate Artifact SHA-256 | Baseline Prediction SHA-256 | Candidate Prediction SHA-256 |",
+            "| --- | ---: | ---: | ---: | --- | --- | --- | --- |",
         ]
     )
     for pair in report["pairs"]:
         baseline_result = pair["baseline"]
+        candidate_result = pair["candidate"]
         lines.append(
             f"| `{baseline_result['case']}` | {baseline_result['repetition']} | "
             f"{baseline_result['rmse']:.12g} | "
+            f"{candidate_result['rmse']:.12g} | "
             f"`{baseline_result['artifact_sha256']}` | "
-            f"`{baseline_result['prediction_sha256']}` |"
+            f"`{candidate_result['artifact_sha256']}` | "
+            f"`{baseline_result['prediction_sha256']}` | "
+            f"`{candidate_result['prediction_sha256']}` |"
         )
     return "\n".join(lines) + "\n"
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    profile = parser.add_mutually_exclusive_group()
+    profile = parser.add_mutually_exclusive_group(required=True)
     profile.add_argument("--quick", action="store_true")
     profile.add_argument("--full", action="store_true")
     parser.add_argument("--gate", action="store_true")
@@ -838,6 +1037,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--baseline-workdir", type=Path)
     parser.add_argument("--candidate-python", type=Path)
     parser.add_argument("--candidate-workdir", type=Path)
+    parser.add_argument("--repetitions", type=int)
     parser.add_argument("--n-jobs", type=int, default=min(4, os.cpu_count() or 1))
     parser.add_argument("--worker-timeout", type=float, default=900.0)
     parser.add_argument("--output-json", type=Path)
@@ -845,8 +1045,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--runtime-name", help=argparse.SUPPRESS)
     parser.add_argument("--runtime-workdir", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--expected-python", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--expected-source-commit", help=argparse.SUPPRESS)
-    parser.add_argument("--profile", choices=("quick", "full"), help=argparse.SUPPRESS)
     parser.add_argument("--case", help=argparse.SUPPRESS)
     parser.add_argument("--repetition", type=int, help=argparse.SUPPRESS)
     return parser
@@ -856,8 +1056,8 @@ def _require_worker_args(args: argparse.Namespace) -> None:
     required = (
         "runtime_name",
         "runtime_workdir",
+        "expected_python",
         "expected_source_commit",
-        "profile",
         "case",
         "repetition",
     )
@@ -866,26 +1066,81 @@ def _require_worker_args(args: argparse.Namespace) -> None:
         raise ValueError(f"worker missing arguments: {', '.join(missing)}")
 
 
+def profile_from_args(args: argparse.Namespace) -> str:
+    if args.quick:
+        return "quick"
+    if args.full:
+        return "full"
+    raise ValueError("an explicit --quick or --full profile is required")
+
+
+def repetitions_from_args(args: argparse.Namespace) -> int:
+    return (
+        args.repetitions
+        if args.repetitions is not None
+        else profile_repetitions(profile_from_args(args))
+    )
+
+
+def validate_cli_args(args: argparse.Namespace) -> None:
+    profile = profile_from_args(args)
+    repetitions = repetitions_from_args(args)
+    if repetitions < 1:
+        raise ValueError("--repetitions must be at least 1")
+    runtime_values = (
+        args.baseline_python,
+        args.baseline_workdir,
+        args.candidate_python,
+        args.candidate_workdir,
+    )
+    if profile == "full":
+        if any(value is None for value in runtime_values):
+            raise ValueError(
+                "full mode requires explicit baseline/candidate Python executables "
+                "and workdirs"
+            )
+        if repetitions < 3:
+            raise ValueError("full mode requires at least 3 repetitions")
+    else:
+        if args.baseline_python is not None or args.baseline_workdir is not None:
+            raise ValueError("quick mode does not accept baseline runtime arguments")
+        if (args.candidate_python is None) != (args.candidate_workdir is None):
+            raise ValueError(
+                "quick mode candidate Python and workdir must be supplied together"
+            )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.n_jobs < 1:
         raise ValueError("--n-jobs must be at least 1")
     if args.worker:
         _require_worker_args(args)
-        print(json.dumps(_worker_result(args).to_dict(), sort_keys=True))
+        print(strict_json_dumps(_worker_result(args).to_dict(), sort_keys=True))
         return 0
 
-    profile = "full" if args.full else "quick"
+    validate_cli_args(args)
+    profile = profile_from_args(args)
+    repetitions = repetitions_from_args(args)
     candidate_python = args.candidate_python or Path(sys.executable)
     candidate_workdir = args.candidate_workdir or REPO_ROOT
-    baseline_python = args.baseline_python or candidate_python
-    baseline_workdir = args.baseline_workdir or candidate_workdir
-    baseline = resolve_runtime("baseline", baseline_python, baseline_workdir)
     candidate = resolve_runtime("candidate", candidate_python, candidate_workdir)
+    if profile == "quick":
+        baseline = RuntimeSpec(
+            "baseline",
+            candidate.python,
+            candidate.workdir,
+            candidate.source_commit,
+        )
+    else:
+        baseline = resolve_runtime(
+            "baseline", args.baseline_python, args.baseline_workdir
+        )
     report = run_benchmark(
         profile=profile,
         baseline=baseline,
         candidate=candidate,
+        repetitions=repetitions,
         n_jobs=args.n_jobs,
         timeout_seconds=args.worker_timeout,
     )
@@ -893,7 +1148,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.output_json:
         args.output_json.parent.mkdir(parents=True, exist_ok=True)
         args.output_json.write_text(
-            json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            strict_json_dumps(report, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
         )
     if args.output_markdown:
         args.output_markdown.parent.mkdir(parents=True, exist_ok=True)
