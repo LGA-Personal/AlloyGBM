@@ -26,6 +26,7 @@ struct EncodedFeatureCheckingBackend {
     expected_bins: Vec<u16>,
 }
 struct CategoricalAncestorLinearPathBackend;
+struct WarmupRollbackBackend;
 struct ConcurrentHistogramBackend {
     active_builds: AtomicUsize,
     max_active_builds: AtomicUsize,
@@ -1155,6 +1156,45 @@ impl BackendOps for MockBackend {
             grad_sq_sum,
             row_count: row_indices.len() as u32,
         })
+    }
+}
+
+impl BackendOps for WarmupRollbackBackend {
+    fn build_histograms(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: &NodeSlice,
+        feature_tiles: &[FeatureTile],
+    ) -> EngineResult<HistogramBundle> {
+        MockBackend.build_histograms(binned_matrix, gradients, node, feature_tiles)
+    }
+
+    fn best_split(&self, histograms: &HistogramBundle) -> EngineResult<Option<SplitCandidate>> {
+        let (tree_id, _) = decode_tree_node_id(histograms.node_id);
+        let mut split = MockBackend
+            .best_split(histograms)?
+            .expect("mock backend always returns a split");
+        split.feature_index = u32::from(tree_id > 0);
+        split.threshold_bin = 0;
+        Ok(Some(split))
+    }
+
+    fn apply_split(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        node: &NodeSlice,
+        split: &SplitCandidate,
+    ) -> EngineResult<PartitionResult> {
+        MockBackend.apply_split(binned_matrix, node, split)
+    }
+
+    fn reduce_sums(
+        &self,
+        gradients: &[GradientPair],
+        row_indices: &[u32],
+    ) -> EngineResult<NodeStats> {
+        MockBackend.reduce_sums(gradients, row_indices)
     }
 }
 
@@ -4894,6 +4934,571 @@ fn assert_sampled_scalar_runs_repeat<O: ObjectiveOps>(
     );
     assert_eq!(first.rounds_completed, second.rounds_completed);
     assert_eq!(first.stop_reason, second.stop_reason);
+}
+
+fn scalar_predictions_from_model(
+    model: &TrainedModel,
+    dataset: &TrainingDataset,
+    binned_matrix: &BinnedMatrix,
+) -> Vec<f32> {
+    let mut predictions = vec![model.baseline_prediction; dataset.row_count()];
+    apply_tree_to_binned_predictions(
+        &mut predictions,
+        binned_matrix,
+        &model.stumps,
+        Some((&dataset.matrix.values, dataset.matrix.feature_count)),
+    )
+    .expect("retained model replays");
+    predictions
+}
+
+#[track_caller]
+fn assert_scalar_summary_matches_retained_model<O: ObjectiveOps>(
+    summary: &IterationRunSummary,
+    dataset: &TrainingDataset,
+    binned_matrix: &BinnedMatrix,
+    objective: &O,
+) {
+    let predictions = scalar_predictions_from_model(&summary.model, dataset, binned_matrix);
+    let replayed_loss = objective
+        .loss(
+            &predictions,
+            &dataset.targets,
+            dataset.sample_weights.as_deref(),
+        )
+        .expect("retained-model loss computes");
+    assert_eq!(
+        summary.final_loss.to_bits(),
+        replayed_loss.to_bits(),
+        "recorded final loss must describe the retained forest"
+    );
+    assert_eq!(
+        summary.sampled_rows_per_completed_round.len(),
+        summary.loss_per_completed_round.len()
+    );
+    assert_eq!(
+        summary.diagnostics_per_round.len(),
+        summary.loss_per_completed_round.len()
+    );
+    assert!(summary.loss_per_completed_round.len() <= summary.rounds_completed);
+
+    let artifact = summary
+        .model
+        .to_artifact_bytes()
+        .expect("retained model serializes");
+    let restored =
+        TrainedModel::from_artifact_bytes(&artifact).expect("retained model deserializes");
+    let restored_bits = scalar_predictions_from_model(&restored, dataset, binned_matrix)
+        .into_iter()
+        .map(f32::to_bits)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        restored_bits,
+        predictions
+            .into_iter()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>()
+    );
+}
+
+fn warmup_rollback_fixture() -> (TrainingDataset, BinnedMatrix) {
+    const ROWS: usize = 32;
+    const FEATURES: usize = 2;
+    const SEED: u64 = 17;
+    let mut dummy_gradients = vec![
+        GradientPair {
+            grad: 1.0,
+            hess: 1.0
+        };
+        ROWS
+    ];
+    let first_selection = select_row_indices_for_round(
+        BoostingMode::Standard,
+        ROWS,
+        0.5,
+        SEED,
+        0,
+        &mut dummy_gradients,
+    );
+    let first_selected = first_selection
+        .selected
+        .iter()
+        .map(|&row| row as usize)
+        .collect::<std::collections::HashSet<_>>();
+    assert!(
+        first_selection.selected.iter().any(|&row| row % 2 == 0)
+            && first_selection.selected.iter().any(|&row| row % 2 == 1),
+        "round-zero sample must populate both rollback-test leaves"
+    );
+
+    let mut second_dummy = vec![
+        GradientPair {
+            grad: 1.0,
+            hess: 1.0
+        };
+        ROWS
+    ];
+    let second_selection = select_row_indices_for_round(
+        BoostingMode::Standard,
+        ROWS,
+        0.5,
+        SEED,
+        1,
+        &mut second_dummy,
+    );
+    assert!(
+        second_selection
+            .selected
+            .iter()
+            .any(|row| first_selected.contains(&(*row as usize)))
+            && second_selection
+                .selected
+                .iter()
+                .any(|row| !first_selected.contains(&(*row as usize))),
+        "round-one sample must populate both material-tree leaves"
+    );
+
+    let mut values = Vec::with_capacity(ROWS * FEATURES);
+    let mut bins = Vec::with_capacity(ROWS * FEATURES);
+    let mut targets = Vec::with_capacity(ROWS);
+    for row in 0..ROWS {
+        let was_selected = first_selected.contains(&row);
+        let alternating = (row % 2) as u8;
+        let membership = u8::from(was_selected);
+        values.extend([f32::from(alternating), f32::from(membership)]);
+        bins.extend([alternating, membership]);
+        targets.push(if was_selected { 1.0 } else { -1.0 });
+    }
+    let dataset = TrainingDataset {
+        matrix: alloygbm_core::DatasetMatrix::new(ROWS, FEATURES, values)
+            .expect("warmup rollback matrix is valid"),
+        targets,
+        sample_weights: None,
+        time_index: None,
+        group_id: None,
+        factor_exposures: None,
+    };
+    let binned =
+        BinnedMatrix::new(ROWS, FEATURES, 1, bins).expect("warmup rollback bins are valid");
+    (dataset, binned)
+}
+
+fn warmup_rollback_params() -> TrainParams {
+    TrainParams {
+        learning_rate: 1.0,
+        seed: 17,
+        deterministic: true,
+        max_depth: 1,
+        min_data_in_leaf: 1,
+        lambda_l2: 0.0,
+        morph_config: Some(MorphConfig {
+            morph_rate: 0.0,
+            evolution_pressure: 0.0,
+            morph_warmup_iters: u32::MAX,
+            info_score_weight: 0.0,
+            depth_penalty_base: 1.0,
+            balance_penalty: false,
+            lr_schedule: alloygbm_core::LrSchedule::WarmupCosine { warmup_frac: 0.5 },
+        }),
+        ..TrainParams::default()
+    }
+}
+
+fn warmup_rollback_controls() -> IterationControls {
+    IterationControls::new(4, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
+        .expect("warmup rollback controls are valid")
+        .with_subsample_rates(0.5, 1.0)
+        .expect("warmup rollback sampling rates are valid")
+}
+
+#[test]
+fn sampled_prediction_delta_scalar_morph_warmup_rollback_matches_retained_model() {
+    let (dataset, binned) = warmup_rollback_fixture();
+    let summary = Trainer::new(warmup_rollback_params())
+        .expect("warmup rollback params are valid")
+        .fit_iterations_with_summary(
+            &dataset,
+            &binned,
+            &WarmupRollbackBackend,
+            &SquaredErrorObjective,
+            warmup_rollback_controls(),
+        )
+        .expect("scalar warmup rollback fit succeeds");
+
+    let tree_ids = summary
+        .model
+        .stumps
+        .iter()
+        .map(|stump| stump.split.node_id / TREE_NODE_STRIDE)
+        .collect::<Vec<_>>();
+    assert!(
+        !tree_ids.is_empty(),
+        "fixture must retain a later material tree"
+    );
+    assert!(
+        tree_ids.iter().all(|&tree_id| tree_id > 0),
+        "round zero must be rejected during warmup: {tree_ids:?}"
+    );
+    assert!(
+        tree_ids.contains(&1),
+        "round one must be material: {tree_ids:?}"
+    );
+    assert_scalar_summary_matches_retained_model(
+        &summary,
+        &dataset,
+        &binned,
+        &SquaredErrorObjective,
+    );
+}
+
+#[test]
+fn sampled_prediction_delta_multiclass_morph_warmup_rollback_matches_retained_model() {
+    let (mut dataset, binned) = warmup_rollback_fixture();
+    dataset.targets = dataset
+        .targets
+        .iter()
+        .map(|&target| f32::from(target > 0.0))
+        .collect();
+    let objective = MultiClassSoftmaxObjective::new(2).expect("two-class objective is valid");
+    let summary = Trainer::new(warmup_rollback_params())
+        .expect("warmup rollback params are valid")
+        .fit_multiclass_iterations_with_summary(
+            &dataset,
+            &binned,
+            &WarmupRollbackBackend,
+            &objective,
+            warmup_rollback_controls(),
+        )
+        .expect("multiclass warmup rollback fit succeeds");
+
+    assert_eq!(summary.loss_per_completed_round[0], summary.initial_loss);
+    let tree_ids = summary
+        .model
+        .class_stumps
+        .iter()
+        .flatten()
+        .map(|stump| stump.split.node_id / TREE_NODE_STRIDE)
+        .collect::<Vec<_>>();
+    assert!(
+        !tree_ids.is_empty(),
+        "fixture must retain later material trees"
+    );
+    assert!(
+        tree_ids.iter().all(|&tree_id| tree_id > 0),
+        "round zero must be rejected during warmup: {tree_ids:?}"
+    );
+    assert!(
+        tree_ids.contains(&1),
+        "round one must be material: {tree_ids:?}"
+    );
+    let raw_predictions = multiclass_dart_repeated_walk_predictions(
+        &summary.model,
+        &binned,
+        &dataset.matrix.values,
+        dataset.matrix.feature_count,
+    );
+    let replayed_loss = objective
+        .loss(
+            &raw_predictions,
+            &dataset.targets,
+            dataset.sample_weights.as_deref(),
+        )
+        .expect("retained multiclass loss computes");
+    assert_eq!(summary.final_loss.to_bits(), replayed_loss.to_bits());
+    assert_eq!(
+        summary.loss_per_completed_round.len(),
+        summary.rounds_completed
+    );
+    assert_eq!(
+        summary.diagnostics_per_round.len(),
+        summary.rounds_completed
+    );
+    let artifact = summary
+        .model
+        .to_artifact_bytes()
+        .expect("retained multiclass model serializes");
+    let restored = MultiClassTrainedModel::from_artifact_bytes(&artifact)
+        .expect("retained multiclass model deserializes");
+    assert_eq!(
+        multiclass_dart_repeated_walk_predictions(
+            &restored,
+            &binned,
+            &dataset.matrix.values,
+            dataset.matrix.feature_count,
+        )
+        .iter()
+        .flatten()
+        .map(|value| value.to_bits())
+        .collect::<Vec<_>>(),
+        raw_predictions
+            .iter()
+            .flatten()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn sampled_prediction_delta_missing_categorical_pl_matches_retained_model() {
+    let mut dataset = categorical_ancestor_linear_path_dataset();
+    let mut selection_gradients = vec![
+        GradientPair {
+            grad: 1.0,
+            hess: 1.0
+        };
+        dataset.row_count()
+    ];
+    let selection = select_row_indices_for_round(
+        BoostingMode::Standard,
+        dataset.row_count(),
+        0.75,
+        23,
+        0,
+        &mut selection_gradients,
+    );
+    let missing_row = selection.excluded[0] as usize;
+    dataset.matrix.values[missing_row * dataset.matrix.feature_count] = f32::NAN;
+    let mut bins = vec![
+        0, 0, //
+        0, 1, //
+        1, 0, //
+        1, 1, //
+        2, 0, //
+        2, 1, //
+        3, 0, //
+        3, 1,
+    ];
+    bins[missing_row * dataset.matrix.feature_count] = MISSING_BIN_U8;
+    let binned = BinnedMatrix::new(dataset.row_count(), dataset.matrix.feature_count, 3, bins)
+        .expect("missing categorical PL bins are valid");
+    let params = TrainParams {
+        seed: 23,
+        deterministic: true,
+        max_depth: 2,
+        min_data_in_leaf: 1,
+        leaf_model: LeafModelKind::Linear,
+        ..TrainParams::default()
+    };
+    let controls = IterationControls::new(2, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
+        .expect("missing categorical PL controls are valid")
+        .with_subsample_rates(0.75, 1.0)
+        .expect("missing categorical PL rates are valid");
+    let summary = Trainer::new(params)
+        .expect("missing categorical PL params are valid")
+        .with_categorical_features(vec![CategoricalFeatureInfo {
+            feature_index: 0,
+            num_categories: 4,
+        }])
+        .fit_iterations_with_summary(
+            &dataset,
+            &binned,
+            &CategoricalAncestorLinearPathBackend,
+            &SquaredErrorObjective,
+            controls,
+        )
+        .expect("sampled missing categorical PL fit succeeds");
+
+    assert!(
+        summary
+            .model
+            .stumps
+            .iter()
+            .any(|stump| stump.split.is_categorical),
+        "fixture must retain a native categorical split"
+    );
+    assert!(
+        summary.model.stumps.iter().any(|stump| {
+            matches!(stump.left_leaf_value, LeafValue::Linear(_))
+                || matches!(stump.right_leaf_value, LeafValue::Linear(_))
+        }),
+        "fixture must retain a piecewise-linear leaf"
+    );
+    assert!(
+        summary.sampled_rows_per_completed_round[0] < dataset.row_count(),
+        "fixture must exercise excluded-row completion"
+    );
+    assert!(
+        summary
+            .model
+            .predict_row(
+                &dataset.matrix.values[missing_row * dataset.matrix.feature_count
+                    ..(missing_row + 1) * dataset.matrix.feature_count]
+            )
+            .expect("missing categorical row predicts")
+            .is_finite()
+    );
+    assert_scalar_summary_matches_retained_model(
+        &summary,
+        &dataset,
+        &binned,
+        &SquaredErrorObjective,
+    );
+}
+
+#[test]
+fn sampled_prediction_delta_dro_and_monotone_match_retained_models() {
+    let (dro_dataset, dro_binned) = allocation_reuse_fixture(64);
+    let dro_controls = IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
+        .expect("sampled DRO controls are valid")
+        .with_subsample_rates(0.5, 1.0)
+        .expect("sampled DRO rates are valid");
+    let dro_summary = Trainer::new(TrainParams {
+        seed: 31,
+        deterministic: true,
+        max_depth: 2,
+        min_data_in_leaf: 1,
+        leaf_solver: LeafSolverKind::Dro,
+        dro_config: Some(DroConfig {
+            radius: 0.05,
+            metric: alloygbm_core::DroMetric::Wasserstein,
+        }),
+        ..TrainParams::default()
+    })
+    .expect("sampled DRO params are valid")
+    .fit_iterations_with_summary(
+        &dro_dataset,
+        &dro_binned,
+        &MockBackend,
+        &SquaredErrorObjective,
+        dro_controls,
+    )
+    .expect("sampled DRO fit succeeds");
+    assert!(dro_summary.model.dro_metadata.is_some());
+    assert!(
+        dro_summary
+            .sampled_rows_per_completed_round
+            .iter()
+            .all(|&rows| rows < dro_dataset.row_count())
+    );
+    assert_scalar_summary_matches_retained_model(
+        &dro_summary,
+        &dro_dataset,
+        &dro_binned,
+        &SquaredErrorObjective,
+    );
+
+    let (monotone_dataset, monotone_binned, _) = monotone_bound_propagation_fixture();
+    let monotone_controls = IterationControls::new(4, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
+        .expect("sampled monotone controls are valid")
+        .with_subsample_rates(0.5, 1.0)
+        .expect("sampled monotone rates are valid");
+    let monotone_summary = Trainer::new(TrainParams {
+        seed: 37,
+        deterministic: true,
+        learning_rate: 0.2,
+        max_depth: 4,
+        min_data_in_leaf: 1,
+        monotone_constraints: vec![1, 0, 0],
+        ..TrainParams::default()
+    })
+    .expect("sampled monotone params are valid")
+    .fit_iterations_with_summary(
+        &monotone_dataset,
+        &monotone_binned,
+        &MonotoneRegressionBackend,
+        &SquaredErrorObjective,
+        monotone_controls,
+    )
+    .expect("sampled monotone fit succeeds");
+    assert!(!monotone_summary.model.stumps.is_empty());
+    assert_scalar_summary_matches_retained_model(
+        &monotone_summary,
+        &monotone_dataset,
+        &monotone_binned,
+        &SquaredErrorObjective,
+    );
+}
+
+#[test]
+fn sampled_prediction_delta_weighted_goss_warm_start_validation_matches_retained_model() {
+    let (mut dataset, binned) = allocation_reuse_fixture(64);
+    dataset.sample_weights = Some(
+        (0..dataset.row_count())
+            .map(|row| 0.5 + (row % 7) as f32 * 0.25)
+            .collect(),
+    );
+    let params = TrainParams {
+        seed: 41,
+        deterministic: true,
+        max_depth: 2,
+        min_data_in_leaf: 1,
+        boosting_mode: BoostingMode::Goss {
+            top_rate: 0.25,
+            other_rate: 0.25,
+        },
+        ..TrainParams::default()
+    };
+    let trainer = Trainer::new(params).expect("weighted GOSS params are valid");
+    let prior_controls = IterationControls::new(2, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
+        .expect("weighted GOSS prior controls are valid");
+    let prior = trainer
+        .fit_iterations_with_summary(
+            &dataset,
+            &binned,
+            &MockBackend,
+            &SquaredErrorObjective,
+            prior_controls,
+        )
+        .expect("weighted GOSS prior fit succeeds");
+    assert_scalar_summary_matches_retained_model(&prior, &dataset, &binned, &SquaredErrorObjective);
+    let prior_stumps = prior.model.stumps.clone();
+    let warm_start = WarmStartState {
+        baseline_prediction: prior.model.baseline_prediction,
+        stumps: prior.model.stumps,
+        initial_rounds_completed: prior.rounds_completed,
+        initial_ema_stats: None,
+        initial_dart_tree_weights: None,
+    };
+    let continuation_controls = IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
+        .expect("weighted GOSS continuation controls are valid")
+        .with_validation_early_stopping(2, 0.0)
+        .expect("weighted GOSS validation controls are valid");
+    let summary = trainer
+        .fit_iterations_warm_start_with_validation(
+            &dataset,
+            &binned,
+            ValidationDatasetRef {
+                dataset: &dataset,
+                binned_matrix: &binned,
+            },
+            &MockBackend,
+            &SquaredErrorObjective,
+            continuation_controls,
+            warm_start,
+        )
+        .expect("weighted GOSS warm-start validation fit succeeds");
+
+    assert!(summary.model.stumps.len() >= prior_stumps.len());
+    for (expected, actual) in prior_stumps.iter().zip(&summary.model.stumps) {
+        assert_stump_bit_identical(expected, actual);
+    }
+    assert!(
+        summary
+            .sampled_rows_per_completed_round
+            .iter()
+            .all(|&rows| rows < dataset.row_count()),
+        "weighted GOSS continuation must exercise excluded-row completion"
+    );
+    assert_scalar_summary_matches_retained_model(
+        &summary,
+        &dataset,
+        &binned,
+        &SquaredErrorObjective,
+    );
+    let validation_predictions = scalar_predictions_from_model(&summary.model, &dataset, &binned);
+    let replayed_validation_loss = squared_error_loss(
+        &validation_predictions,
+        &dataset.targets,
+        dataset.sample_weights.as_deref(),
+    )
+    .expect("retained validation loss computes");
+    assert_eq!(
+        summary
+            .final_validation_loss
+            .expect("validation loss is recorded")
+            .to_bits(),
+        replayed_validation_loss.to_bits()
+    );
 }
 
 #[test]

@@ -1693,8 +1693,8 @@ impl Trainer {
                     || (in_warmup_phase && morph_state.is_some()));
             if loss_gate_active && loss_improvement < 0.0 {
                 // Truncate stumps so the model doesn't include this round's contribution.
-                // (`class_candidate_predictions` is reset from `class_predictions` at the
-                // top of each round, so the candidate state is implicitly rolled back.)
+                // Eligible class candidates persist across rounds, so the warmup continue
+                // path below explicitly rolls them back to committed predictions.
                 for class_k in 0..k {
                     class_stumps[class_k].truncate(pre_round_counts[class_k]);
                 }
@@ -2930,8 +2930,8 @@ impl Trainer {
                         validation_predictions = Some(backup);
                     }
                     // During warmup, slightly-negative loss improvements arise from
-                    // numerical noise at tiny LR. Skip this round and continue;
-                    // candidate predictions reset from current at the top of each round.
+                    // numerical noise at tiny LR. Skip this round and explicitly roll
+                    // the persistent eligible candidate back before the next round.
                     if !requires_full_replay {
                         candidate_predictions.copy_from_slice(&predictions);
                     }
