@@ -49,7 +49,8 @@ Current benchmark entry points:
   applying aggregate native-time and RSS gates.
 - isolated sampled-prediction-delta harness:
   `benchmarks/sampled_prediction_delta_benchmark.py`, with Task 6 evidence
-  pending at [sampled_prediction_delta_v1.md](sampled_prediction_delta_v1.md).
+  at [sampled_prediction_delta_v1.md](sampled_prediction_delta_v1.md) and
+  [sampled_prediction_delta_v1.json](sampled_prediction_delta_v1.json).
   It pairs scalar and multiclass subsample/GOSS cases exactly, keeps DART and
   quantile as explicit full-replay sentinels, and reserves timing/RSS claims
   for five-repetition runs from distinct manifest-attested commits.
