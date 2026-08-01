@@ -117,13 +117,13 @@ coverage check.
 
 ### Stable CPU partition
 
-The CPU path retains right rows in the consumed parent vector and pushes left rows into one new
-vector. Rust's stable `Vec::retain` compaction preserves input order for retained rows; pushes
-preserve input order for extracted rows. Both children therefore match the existing partition
-order exactly.
+The CPU path scans the consumed parent vector in input order, writes right rows into earlier slots
+of that same vector, and pushes left rows into one new vector. This safe forward compaction and the
+left-row pushes both preserve input order, so both children match the existing partition order
+exactly.
 
-For nodes below the parallel threshold, the retain pass also accumulates left and right statistics
-in original row order. This matches the current sequential arithmetic.
+For nodes below the parallel threshold, the compaction pass also accumulates left and right
+statistics in original row order. This matches the current sequential arithmetic.
 
 For nodes at or above the parallel threshold:
 
@@ -131,7 +131,7 @@ For nodes at or above the parallel threshold:
 2. Collect one fixed-size `ChunkStats` value per chunk.
 3. Fold those values in chunk order, exactly as the current implementation does.
 4. Reserve the exact left count derived from chunk statistics.
-5. Perform stable retain/extract into the reused right vector and new left vector.
+5. Perform stable forward compaction into the reused right vector and new left vector.
 
 The second pass trades another feature-bin read for deterministic floating-point behavior and
 removes `2 * worker_count` growable row buffers plus the final right-row allocation. The chunk size,
@@ -179,8 +179,8 @@ rule, missing-value direction order, and final candidate reconstruction remain u
 
 - Layout and count-underflow validation precedes in-place histogram mutation.
 - Backend validation precedes row-vector mutation.
-- `Vec::retain` and `Vec::push` are safe operations; no uninitialized storage or raw pointers are
-  used.
+- Indexed reads/writes, `Vec::truncate`, and `Vec::push` are safe operations; no uninitialized
+  storage or raw pointers are used.
 - If allocation fails, Rust's normal allocation failure behavior is unchanged.
 - If a backend using the default owned method fails, the consumed node drops normally.
 - Thread-local scratch borrows are scoped to one scanner invocation and cannot escape.
