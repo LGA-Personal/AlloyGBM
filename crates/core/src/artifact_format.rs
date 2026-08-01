@@ -490,6 +490,39 @@ pub fn decode_optional_categorical_state_section_v1(
 pub fn encode_native_categorical_splits_payload(
     payload: &NativeCategoricalSplitsPayload,
 ) -> CoreResult<Vec<u8>> {
+    if payload.native_categorical_feature_indices.len() > MAX_MODEL_FEATURES {
+        return Err(CoreError::Serialization(format!(
+            "native categorical feature count {} exceeds maximum {MAX_MODEL_FEATURES}",
+            payload.native_categorical_feature_indices.len()
+        )));
+    }
+    if payload.stump_bitsets.len() > MAX_MODEL_STUMPS {
+        return Err(CoreError::Serialization(format!(
+            "native categorical stump count {} exceeds maximum {MAX_MODEL_STUMPS}",
+            payload.stump_bitsets.len()
+        )));
+    }
+    for pair in payload.native_categorical_feature_indices.windows(2) {
+        if pair[1] <= pair[0] {
+            return Err(CoreError::Validation(format!(
+                "native categorical feature indices must be strictly increasing (found {} after {})",
+                pair[1], pair[0]
+            )));
+        }
+    }
+    let mut seen_stumps = std::collections::HashSet::with_capacity(payload.stump_bitsets.len());
+    for (stump_index, bitset) in &payload.stump_bitsets {
+        if !seen_stumps.insert(*stump_index) {
+            return Err(CoreError::Validation(format!(
+                "native categorical stump index {stump_index} is duplicated"
+            )));
+        }
+        if bitset.is_empty() {
+            return Err(CoreError::Validation(format!(
+                "native categorical stump index {stump_index} has an empty bitset"
+            )));
+        }
+    }
     let feature_count =
         u32::try_from(payload.native_categorical_feature_indices.len()).map_err(|_| {
             CoreError::Serialization("native cat feature count exceeds u32::MAX".to_string())
@@ -528,23 +561,57 @@ pub fn decode_native_categorical_splits_payload(
     let feature_count = read_u32_le(bytes, 0)? as usize;
     let stump_count = read_u32_le(bytes, 4)? as usize;
 
+    if feature_count > MAX_MODEL_FEATURES {
+        return Err(CoreError::Serialization(format!(
+            "native categorical feature count {feature_count} exceeds maximum {MAX_MODEL_FEATURES}"
+        )));
+    }
+    if stump_count > MAX_MODEL_STUMPS {
+        return Err(CoreError::Serialization(format!(
+            "native categorical stump count {stump_count} exceeds maximum {MAX_MODEL_STUMPS}"
+        )));
+    }
+
     let feature_section_len = feature_count.checked_mul(4).ok_or_else(|| {
         CoreError::Serialization("native cat feature section length overflow".to_string())
     })?;
-    if bytes.len() < HEADER_SIZE + feature_section_len {
+    let bitsets_start = HEADER_SIZE
+        .checked_add(feature_section_len)
+        .ok_or_else(|| {
+            CoreError::Serialization("native cat feature section length overflow".to_string())
+        })?;
+    if bytes.len() < bitsets_start {
         return Err(CoreError::Serialization(
             "native categorical splits payload too small for feature indices".to_string(),
         ));
     }
+    const MIN_STUMP_BITSET_BYTES: usize = 6;
+    let remaining = bytes.len() - bitsets_start;
+    if stump_count > remaining / MIN_STUMP_BITSET_BYTES {
+        return Err(CoreError::Serialization(format!(
+            "native categorical stump count {stump_count} does not fit in remaining payload bytes {remaining}"
+        )));
+    }
 
     let mut native_categorical_feature_indices = Vec::with_capacity(feature_count);
     let mut cursor = HEADER_SIZE;
+    let mut previous_feature = None;
     for _ in 0..feature_count {
-        native_categorical_feature_indices.push(read_u32_le(bytes, cursor)?);
+        let feature_index = read_u32_le(bytes, cursor)?;
+        if let Some(previous) = previous_feature
+            && feature_index <= previous
+        {
+            return Err(CoreError::Validation(format!(
+                "native categorical feature indices must be strictly increasing (found {feature_index} after {previous})"
+            )));
+        }
+        previous_feature = Some(feature_index);
+        native_categorical_feature_indices.push(feature_index);
         cursor += 4;
     }
 
     let mut stump_bitsets = Vec::with_capacity(stump_count);
+    let mut seen_stumps = std::collections::HashSet::with_capacity(stump_count);
     for _ in 0..stump_count {
         if cursor + 6 > bytes.len() {
             return Err(CoreError::Serialization(
@@ -552,17 +619,36 @@ pub fn decode_native_categorical_splits_payload(
             ));
         }
         let stump_index = read_u32_le(bytes, cursor)?;
+        if !seen_stumps.insert(stump_index) {
+            return Err(CoreError::Validation(format!(
+                "native categorical stump index {stump_index} is duplicated"
+            )));
+        }
         cursor += 4;
         let bitset_len = u16::from_le_bytes([bytes[cursor], bytes[cursor + 1]]) as usize;
         cursor += 2;
-        if cursor + bitset_len > bytes.len() {
+        if bitset_len == 0 {
+            return Err(CoreError::Validation(format!(
+                "native categorical stump index {stump_index} has an empty bitset"
+            )));
+        }
+        let bitset_end = cursor.checked_add(bitset_len).ok_or_else(|| {
+            CoreError::Serialization("native categorical bitset length overflow".to_string())
+        })?;
+        if bitset_end > bytes.len() {
             return Err(CoreError::Serialization(
                 "native categorical splits payload truncated in bitset data".to_string(),
             ));
         }
-        let bitset = bytes[cursor..cursor + bitset_len].to_vec();
-        cursor += bitset_len;
+        let bitset = bytes[cursor..bitset_end].to_vec();
+        cursor = bitset_end;
         stump_bitsets.push((stump_index, bitset));
+    }
+    if cursor != bytes.len() {
+        return Err(CoreError::Serialization(format!(
+            "native categorical splits payload has {} trailing bytes",
+            bytes.len() - cursor
+        )));
     }
 
     Ok(NativeCategoricalSplitsPayload {
@@ -652,6 +738,18 @@ pub fn decode_optional_morph_metadata_section(bytes: &[u8]) -> CoreResult<MorphM
             "unsupported morph metadata version: {version}"
         )));
     }
+    if version == 1 && bytes.len() != 36 {
+        return Err(CoreError::Validation(format!(
+            "morph metadata v1 length must be 36 bytes, got {}",
+            bytes.len()
+        )));
+    }
+    if version == 2 && bytes.len() < 40 {
+        return Err(CoreError::Validation(format!(
+            "morph metadata v2 length must be at least 40 bytes, got {}",
+            bytes.len()
+        )));
+    }
     let mut o = 2usize;
     macro_rules! read_f32 {
         () => {{
@@ -672,6 +770,12 @@ pub fn decode_optional_morph_metadata_section(bytes: &[u8]) -> CoreResult<MorphM
     let morph_warmup_iters = read_u32!();
     let info_score_weight = read_f32!();
     let depth_penalty_base = read_f32!();
+    if bytes[o] > 1 {
+        return Err(CoreError::Validation(format!(
+            "morph metadata balance_penalty flag must be 0 or 1, got {}",
+            bytes[o]
+        )));
+    }
     let balance_penalty = bytes[o] != 0;
     o += 1;
     let lr_kind = bytes[o];
@@ -691,18 +795,25 @@ pub fn decode_optional_morph_metadata_section(bytes: &[u8]) -> CoreResult<MorphM
     };
     // v2 tail: optional EMA stats.  v1 artifacts have no tail and
     // decode with `ema_stats = Vec::new()`.
-    let ema_stats = if version >= 2 && o + 4 <= bytes.len() {
+    let ema_stats = if version >= 2 {
         let count =
             u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]) as usize;
         o += 4;
+        if count > MAX_MODEL_CLASSES {
+            return Err(CoreError::Validation(format!(
+                "morph metadata ema count {count} exceeds maximum {MAX_MODEL_CLASSES}"
+            )));
+        }
         let expected_tail = count.checked_mul(12).ok_or_else(|| {
             CoreError::Validation("morph metadata ema count overflow".to_string())
         })?;
-        if o + expected_tail > bytes.len() {
+        let expected_end = o.checked_add(expected_tail).ok_or_else(|| {
+            CoreError::Validation("morph metadata ema count overflow".to_string())
+        })?;
+        if expected_end != bytes.len() {
             return Err(CoreError::Validation(format!(
-                "morph metadata ema tail truncated: expected {} bytes after header, got {}",
-                expected_tail,
-                bytes.len() - o
+                "morph metadata v2 length must be {expected_end} bytes for {count} ema records, got {}",
+                bytes.len()
             )));
         }
         let mut stats = Vec::with_capacity(count);
@@ -710,12 +821,39 @@ pub fn decode_optional_morph_metadata_section(bytes: &[u8]) -> CoreResult<MorphM
             let mean = read_f32!();
             let std = read_f32!();
             let alpha = read_f32!();
+            if !mean.is_finite()
+                || !std.is_finite()
+                || std < 0.0
+                || !alpha.is_finite()
+                || !(0.0..=1.0).contains(&alpha)
+            {
+                return Err(CoreError::Validation(
+                    "morph metadata ema statistics must have finite mean, finite non-negative std, and alpha in [0, 1]"
+                        .to_string(),
+                ));
+            }
             stats.push(GradientEmaStats { mean, std, alpha });
         }
         stats
     } else {
         Vec::new()
     };
+    if !morph_rate.is_finite()
+        || !(0.0..=1.0).contains(&morph_rate)
+        || !evolution_pressure.is_finite()
+        || evolution_pressure < 0.0
+        || !info_score_weight.is_finite()
+        || !(0.0..=1.0).contains(&info_score_weight)
+        || !depth_penalty_base.is_finite()
+        || !(0.0..=1.0).contains(&depth_penalty_base)
+        || depth_penalty_base == 0.0
+        || !warmup_frac.is_finite()
+        || (lr_kind == 1 && !(0.0..=1.0).contains(&warmup_frac))
+    {
+        return Err(CoreError::Validation(
+            "morph metadata contains invalid configuration values".to_string(),
+        ));
+    }
     Ok(MorphMetadataPayload {
         config: MorphConfig {
             morph_rate,
@@ -764,10 +902,11 @@ pub fn encode_dro_metadata_payload(payload: &DroMetadataPayload) -> Vec<u8> {
 }
 
 pub fn decode_dro_metadata_payload(bytes: &[u8]) -> CoreResult<DroMetadataPayload> {
-    if bytes.len() < 7 {
-        return Err(CoreError::Validation(
-            "dro metadata section too short".to_string(),
-        ));
+    if bytes.len() != 7 {
+        return Err(CoreError::Validation(format!(
+            "dro metadata section length must be 7 bytes, got {}",
+            bytes.len()
+        )));
     }
     let version = u16::from_le_bytes([bytes[0], bytes[1]]);
     if version != 1 {
@@ -829,10 +968,11 @@ pub fn encode_neutralization_metadata_payload(payload: &NeutralizationMetadataPa
 pub fn decode_neutralization_metadata_payload(
     bytes: &[u8],
 ) -> CoreResult<NeutralizationMetadataPayload> {
-    if bytes.len() < 11 {
-        return Err(CoreError::Validation(
-            "neutralization metadata section too short".to_string(),
-        ));
+    if bytes.len() != 11 {
+        return Err(CoreError::Validation(format!(
+            "neutralization metadata section length must be 11 bytes, got {}",
+            bytes.len()
+        )));
     }
     let version = u16::from_le_bytes([bytes[0], bytes[1]]);
     if version != 1 {
@@ -968,8 +1108,21 @@ pub fn decode_linear_leaf_coefficients_payload(
         )));
     }
     let entry_count = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+    if entry_count > MAX_MODEL_STUMPS {
+        return Err(CoreError::Validation(format!(
+            "linear leaf entry count {entry_count} exceeds maximum {MAX_MODEL_STUMPS}"
+        )));
+    }
+    const MIN_LINEAR_LEAF_ENTRY_BYTES: usize = 5;
+    let remaining = bytes.len() - 8;
+    if entry_count > remaining / MIN_LINEAR_LEAF_ENTRY_BYTES {
+        return Err(CoreError::Validation(format!(
+            "linear leaf entry count {entry_count} does not fit in remaining payload bytes {remaining}"
+        )));
+    }
     let mut o = 8usize;
     let mut entries = Vec::with_capacity(entry_count);
+    let mut seen_stumps = std::collections::HashSet::with_capacity(entry_count);
 
     let read_u32 = |bytes: &[u8], o: &mut usize| -> CoreResult<u32> {
         if *o + 4 > bytes.len() {
@@ -994,6 +1147,11 @@ pub fn decode_linear_leaf_coefficients_payload(
 
     for _ in 0..entry_count {
         let stump_idx = read_u32(bytes, &mut o)?;
+        if !seen_stumps.insert(stump_idx) {
+            return Err(CoreError::Validation(format!(
+                "linear leaf stump index {stump_idx} is duplicated"
+            )));
+        }
         if o >= bytes.len() {
             return Err(CoreError::Validation(
                 "unexpected end of linear leaf coefficients data".to_string(),
@@ -1001,6 +1159,11 @@ pub fn decode_linear_leaf_coefficients_payload(
         }
         let flags = bytes[o];
         o += 1;
+        if flags == 0 || flags & !0b11 != 0 {
+            return Err(CoreError::Validation(format!(
+                "linear leaf entry for stump {stump_idx} has invalid flags {flags:#04b}"
+            )));
+        }
 
         let read_leaf = |bytes: &[u8], o: &mut usize| -> CoreResult<LinearLeaf> {
             if *o >= bytes.len() {
@@ -1010,10 +1173,26 @@ pub fn decode_linear_leaf_coefficients_payload(
             }
             let d = bytes[*o] as usize;
             *o += 1;
+            if d > MAX_PL_REGRESSORS {
+                return Err(CoreError::Validation(format!(
+                    "linear leaf regressor count {d} exceeds maximum {MAX_PL_REGRESSORS}"
+                )));
+            }
             let intercept = read_f32(bytes, o)?;
+            if !intercept.is_finite() {
+                return Err(CoreError::Validation(
+                    "linear leaf intercept must be finite".to_string(),
+                ));
+            }
             let mut weights = Vec::with_capacity(d);
             for _ in 0..d {
-                weights.push(read_f32(bytes, o)?);
+                let weight = read_f32(bytes, o)?;
+                if !weight.is_finite() {
+                    return Err(CoreError::Validation(
+                        "linear leaf weights must be finite".to_string(),
+                    ));
+                }
+                weights.push(weight);
             }
             let mut regressor_features = Vec::with_capacity(d);
             for _ in 0..d {
@@ -1022,11 +1201,24 @@ pub fn decode_linear_leaf_coefficients_payload(
             let (feature_means, feature_inv_stds) = if version >= 2 {
                 let mut means = Vec::with_capacity(d);
                 for _ in 0..d {
-                    means.push(read_f32(bytes, o)?);
+                    let mean = read_f32(bytes, o)?;
+                    if !mean.is_finite() {
+                        return Err(CoreError::Validation(
+                            "linear leaf feature means must be finite".to_string(),
+                        ));
+                    }
+                    means.push(mean);
                 }
                 let mut inv_stds = Vec::with_capacity(d);
                 for _ in 0..d {
-                    inv_stds.push(read_f32(bytes, o)?);
+                    let inv_std = read_f32(bytes, o)?;
+                    if !inv_std.is_finite() || inv_std <= 0.0 {
+                        return Err(CoreError::Validation(
+                            "linear leaf inverse standard deviations must be finite and > 0"
+                                .to_string(),
+                        ));
+                    }
+                    inv_stds.push(inv_std);
                 }
                 (means, inv_stds)
             } else {
@@ -1056,6 +1248,12 @@ pub fn decode_linear_leaf_coefficients_payload(
             left_leaf,
             right_leaf,
         });
+    }
+    if o != bytes.len() {
+        return Err(CoreError::Validation(format!(
+            "linear leaf coefficients payload has {} trailing bytes",
+            bytes.len() - o
+        )));
     }
 
     Ok(LinearLeafCoefficientsPayload { entries })
@@ -1119,7 +1317,17 @@ pub fn decode_dart_tree_weights_payload(bytes: &[u8]) -> CoreResult<DartTreeWeig
         )));
     }
     let count = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
-    let expected = 8 + 4 * count;
+    if count > MAX_MODEL_STUMPS {
+        return Err(CoreError::Validation(format!(
+            "DartTreeWeights count {count} exceeds maximum {MAX_MODEL_STUMPS}"
+        )));
+    }
+    let expected =
+        8_usize
+            .checked_add(count.checked_mul(4).ok_or_else(|| {
+                CoreError::Validation("DartTreeWeights length overflow".to_string())
+            })?)
+            .ok_or_else(|| CoreError::Validation("DartTreeWeights length overflow".to_string()))?;
     if bytes.len() != expected {
         return Err(CoreError::Validation(format!(
             "DartTreeWeights payload length {} != expected {} ({} weights)",
@@ -1131,12 +1339,14 @@ pub fn decode_dart_tree_weights_payload(bytes: &[u8]) -> CoreResult<DartTreeWeig
     let mut weights = Vec::with_capacity(count);
     for i in 0..count {
         let off = 8 + 4 * i;
-        weights.push(f32::from_le_bytes([
-            bytes[off],
-            bytes[off + 1],
-            bytes[off + 2],
-            bytes[off + 3],
-        ]));
+        let weight =
+            f32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]]);
+        if !weight.is_finite() || weight < 0.0 {
+            return Err(CoreError::Validation(format!(
+                "DartTreeWeights weight {i} must be finite and >= 0"
+            )));
+        }
+        weights.push(weight);
     }
     Ok(DartTreeWeightsPayload { weights })
 }
@@ -1213,6 +1423,22 @@ pub fn decode_multi_output_leaf_values_payload(
     }
     let n_outputs = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
     let n_stumps = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
+    if n_outputs == 0 || n_outputs as usize > MAX_MODEL_OUTPUTS {
+        return Err(CoreError::Validation(format!(
+            "MultiOutputLeafValues n_outputs {n_outputs} must be in [1, {MAX_MODEL_OUTPUTS}]"
+        )));
+    }
+    if n_stumps > MAX_MODEL_STUMPS {
+        return Err(CoreError::Validation(format!(
+            "MultiOutputLeafValues stump count {n_stumps} exceeds maximum {MAX_MODEL_STUMPS}"
+        )));
+    }
+    let remaining = bytes.len() - 12;
+    if n_stumps > remaining / 4 {
+        return Err(CoreError::Validation(format!(
+            "MultiOutputLeafValues stump count {n_stumps} does not fit in remaining payload bytes {remaining}"
+        )));
+    }
     let mut cursor = 12usize;
     let mut per_stump_leaf_values = Vec::with_capacity(n_stumps);
     for _ in 0..n_stumps {
@@ -1228,7 +1454,18 @@ pub fn decode_multi_output_leaf_values_payload(
             bytes[cursor + 3],
         ]) as usize;
         cursor += 4;
-        if cursor + len * 4 > bytes.len() {
+        if len % n_outputs as usize != 0 {
+            return Err(CoreError::Validation(format!(
+                "MultiOutputLeafValues stump length {len} is not divisible by n_outputs {n_outputs}"
+            )));
+        }
+        let value_bytes = len.checked_mul(4).ok_or_else(|| {
+            CoreError::Validation("MultiOutputLeafValues length overflow".to_string())
+        })?;
+        let values_end = cursor.checked_add(value_bytes).ok_or_else(|| {
+            CoreError::Validation("MultiOutputLeafValues length overflow".to_string())
+        })?;
+        if values_end > bytes.len() {
             return Err(CoreError::Validation(
                 "MultiOutputLeafValues: truncated leaf values".to_string(),
             ));
@@ -1242,9 +1479,20 @@ pub fn decode_multi_output_leaf_values_payload(
                 bytes[cursor + 3],
             ]);
             cursor += 4;
+            if !v.is_finite() {
+                return Err(CoreError::Validation(
+                    "MultiOutputLeafValues values must be finite".to_string(),
+                ));
+            }
             values.push(v);
         }
         per_stump_leaf_values.push(values);
+    }
+    if cursor != bytes.len() {
+        return Err(CoreError::Validation(format!(
+            "MultiOutputLeafValues payload has {} trailing bytes",
+            bytes.len() - cursor
+        )));
     }
     Ok(MultiOutputLeafValuesPayload {
         n_outputs,
@@ -1310,10 +1558,20 @@ pub fn decode_feature_baseline_payload(bytes: &[u8]) -> CoreResult<FeatureBaseli
         )));
     }
     let feature_count = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
-    let expected = 8 + feature_count * 4;
-    if bytes.len() < expected {
+    if feature_count > MAX_MODEL_FEATURES {
         return Err(CoreError::Validation(format!(
-            "feature baseline section too short: need {expected} bytes, got {}",
+            "feature baseline count {feature_count} exceeds maximum {MAX_MODEL_FEATURES}"
+        )));
+    }
+    let expected =
+        8_usize
+            .checked_add(feature_count.checked_mul(4).ok_or_else(|| {
+                CoreError::Validation("feature baseline length overflow".to_string())
+            })?)
+            .ok_or_else(|| CoreError::Validation("feature baseline length overflow".to_string()))?;
+    if bytes.len() != expected {
+        return Err(CoreError::Validation(format!(
+            "feature baseline section length must be {expected} bytes, got {}",
             bytes.len()
         )));
     }
@@ -1321,6 +1579,12 @@ pub fn decode_feature_baseline_payload(bytes: &[u8]) -> CoreResult<FeatureBaseli
     let mut o = 8usize;
     for _ in 0..feature_count {
         let v = f32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
+        if !v.is_finite() {
+            return Err(CoreError::Validation(format!(
+                "feature baseline value {} must be finite",
+                feature_means.len()
+            )));
+        }
         feature_means.push(v);
         o += 4;
     }
