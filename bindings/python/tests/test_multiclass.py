@@ -35,6 +35,70 @@ def _make_multiclass_dataset(
     return X_train, y_train, X_val, y_val
 
 
+def _make_sampled_multiclass_fixture(
+    n_classes: int, seed: int = 20260801
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build a deterministic fixture large enough to parallelize class trees."""
+    rng = np.random.default_rng(seed + n_classes)
+    rows = 2048
+    X = rng.normal(size=(rows, 6)).astype(np.float32)
+    score = (
+        1.7 * X[:, 0]
+        - 1.1 * X[:, 1]
+        + 0.8 * X[:, 2] * X[:, 3]
+        + 0.4 * X[:, 4]
+    )
+    boundaries = np.quantile(score, np.linspace(0.0, 1.0, n_classes + 1)[1:-1])
+    y = np.digitize(score, boundaries).astype(np.int64)
+    return X, y
+
+
+class TestSampledMulticlassCandidateReuse(unittest.TestCase):
+    """Sampled multiclass fits must remain bit-identical across worker counts."""
+
+    def test_sampled_multiclass_serial_parallel_exactness(self) -> None:
+        rounds = 6
+        for n_classes in (3, 12):
+            X, y = _make_sampled_multiclass_fixture(n_classes)
+            for tree_growth in ("level", "leaf"):
+                for boosting_mode in ("standard", "goss"):
+                    with self.subTest(
+                        n_classes=n_classes,
+                        tree_growth=tree_growth,
+                        boosting_mode=boosting_mode,
+                    ):
+                        kwargs = {
+                            "n_estimators": rounds,
+                            "learning_rate": 0.1,
+                            "max_depth": 2,
+                            "max_leaves": 4 if tree_growth == "leaf" else None,
+                            "tree_growth": tree_growth,
+                            "min_data_in_leaf": 1,
+                            "seed": 17,
+                            "deterministic": True,
+                            "boosting_mode": boosting_mode,
+                        }
+                        if boosting_mode == "standard":
+                            kwargs["row_subsample"] = 0.5
+                        else:
+                            kwargs["goss_top_rate"] = 0.5
+                            kwargs["goss_other_rate"] = 0.25
+
+                        serial = GBMClassifier(n_jobs=1, **kwargs).fit(X, y)
+                        parallel = GBMClassifier(n_jobs=4, **kwargs).fit(X, y)
+                        serial_proba = serial.predict_proba(X)
+                        parallel_proba = parallel.predict_proba(X)
+
+                        self.assertEqual(serial._artifact_bytes, parallel._artifact_bytes)
+                        np.testing.assert_array_equal(serial_proba, parallel_proba)
+                        self.assertTrue(np.isfinite(serial_proba).all())
+                        np.testing.assert_allclose(
+                            serial_proba.sum(axis=1), 1.0, atol=1e-6, rtol=0.0
+                        )
+                        self.assertEqual(serial.n_estimators_, rounds)
+                        self.assertEqual(parallel.n_estimators_, rounds)
+
+
 class TestFitAndPredictThreeClasses(unittest.TestCase):
     """Synthetic data with 3 classes, verify predictions are valid class labels."""
 

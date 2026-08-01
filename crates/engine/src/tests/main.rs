@@ -26,6 +26,7 @@ struct EncodedFeatureCheckingBackend {
     expected_bins: Vec<u16>,
 }
 struct CategoricalAncestorLinearPathBackend;
+struct WarmupRollbackBackend;
 struct ConcurrentHistogramBackend {
     active_builds: AtomicUsize,
     max_active_builds: AtomicUsize,
@@ -1155,6 +1156,45 @@ impl BackendOps for MockBackend {
             grad_sq_sum,
             row_count: row_indices.len() as u32,
         })
+    }
+}
+
+impl BackendOps for WarmupRollbackBackend {
+    fn build_histograms(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: &NodeSlice,
+        feature_tiles: &[FeatureTile],
+    ) -> EngineResult<HistogramBundle> {
+        MockBackend.build_histograms(binned_matrix, gradients, node, feature_tiles)
+    }
+
+    fn best_split(&self, histograms: &HistogramBundle) -> EngineResult<Option<SplitCandidate>> {
+        let (tree_id, _) = decode_tree_node_id(histograms.node_id);
+        let mut split = MockBackend
+            .best_split(histograms)?
+            .expect("mock backend always returns a split");
+        split.feature_index = u32::from(tree_id > 0);
+        split.threshold_bin = 0;
+        Ok(Some(split))
+    }
+
+    fn apply_split(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        node: &NodeSlice,
+        split: &SplitCandidate,
+    ) -> EngineResult<PartitionResult> {
+        MockBackend.apply_split(binned_matrix, node, split)
+    }
+
+    fn reduce_sums(
+        &self,
+        gradients: &[GradientPair],
+        row_indices: &[u32],
+    ) -> EngineResult<NodeStats> {
+        MockBackend.reduce_sums(gradients, row_indices)
     }
 }
 
@@ -4705,6 +4745,1494 @@ fn sampled_row_indices_are_seeded_and_non_prefix() {
     assert_eq!(selected, selected_repeat);
     assert_eq!(selected.len(), 4);
     assert_ne!(selected, vec![0, 1, 2, 3]);
+}
+
+fn sampled_builder_deltas_plus_excluded_replay(
+    tree_growth: TreeGrowth,
+    boosting_mode: BoostingMode,
+    row_subsample: f32,
+) -> EngineResult<()> {
+    let dataset = sample_dataset();
+    let binned = sample_binned_matrix();
+    let params = TrainParams {
+        seed: 17,
+        max_depth: 1,
+        max_leaves: (tree_growth == TreeGrowth::Leaf).then_some(2),
+        tree_growth,
+        boosting_mode,
+        ..TrainParams::default()
+    };
+    let controls = IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)?
+        .with_subsample_rates(row_subsample, 1.0)?
+        .with_max_leaves((tree_growth == TreeGrowth::Leaf).then_some(2))?;
+    let initial_predictions = vec![
+        SquaredErrorObjective
+            .initial_prediction(&dataset.targets, None)?;
+        dataset.row_count()
+    ];
+    let mut gradients =
+        SquaredErrorObjective.compute_gradients(&initial_predictions, &dataset.targets, None)?;
+    let selection = select_row_indices_for_round(
+        params.boosting_mode,
+        dataset.row_count(),
+        controls.row_subsample,
+        sampling_seed_base(params.seed, params.deterministic),
+        0,
+        &mut gradients,
+    );
+    let (feature_tiles, _) = sampled_feature_tiles(
+        binned.feature_count,
+        controls.col_subsample,
+        sampling_seed_base(params.seed, params.deterministic),
+        0,
+    )?;
+    let mut split_options = split_selection_options_for_training(&params, None, &dataset, &binned)?;
+    split_options.min_rows_per_leaf = controls.min_rows_per_leaf;
+    let mut builder_candidate = initial_predictions.clone();
+    let raw_features = &dataset.matrix.values;
+    let (stumps, _) = if tree_growth == TreeGrowth::Leaf {
+        build_tree_leaf_wise(
+            &MockBackend,
+            &binned,
+            &gradients,
+            selection.selected.clone(),
+            0,
+            &feature_tiles,
+            split_options,
+            &params,
+            &controls,
+            &mut builder_candidate,
+            &params.feature_weights,
+            &[],
+            None,
+            raw_features,
+            None,
+        )?
+    } else {
+        build_tree_level_wise(
+            &MockBackend,
+            &binned,
+            &gradients,
+            selection.selected.clone(),
+            0,
+            &feature_tiles,
+            split_options,
+            &params,
+            &controls,
+            &mut builder_candidate,
+            &params.feature_weights,
+            &[],
+            None,
+            raw_features,
+            None,
+        )?
+    };
+    assert!(!stumps.is_empty(), "fixture should build a nonempty tree");
+
+    let mut completed = builder_candidate;
+    apply_weighted_round_to_rows(
+        &mut completed,
+        &binned,
+        &stumps,
+        Some((raw_features, dataset.matrix.feature_count)),
+        &selection.excluded,
+        1.0,
+    )?;
+    let mut oracle = initial_predictions;
+    apply_weighted_round_to_predictions(
+        &mut oracle,
+        &binned,
+        &stumps,
+        Some((raw_features, dataset.matrix.feature_count)),
+        1.0,
+    )?;
+    assert_eq!(
+        completed
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        oracle
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+    );
+    Ok(())
+}
+
+#[test]
+fn sampled_builder_deltas_plus_excluded_replay_match_full_walk() {
+    for tree_growth in [TreeGrowth::Level, TreeGrowth::Leaf] {
+        for row_subsample in [1.0, 0.8, 0.5] {
+            sampled_builder_deltas_plus_excluded_replay(
+                tree_growth,
+                BoostingMode::Standard,
+                row_subsample,
+            )
+            .expect("sampled builder completion should match a full tree walk");
+        }
+        sampled_builder_deltas_plus_excluded_replay(
+            tree_growth,
+            BoostingMode::Goss {
+                top_rate: 0.5,
+                other_rate: 0.25,
+            },
+            1.0,
+        )
+        .expect("GOSS builder completion should match a full tree walk");
+    }
+}
+
+fn assert_sampled_scalar_runs_repeat<O: ObjectiveOps>(
+    params: TrainParams,
+    controls: IterationControls,
+    objective: &O,
+) {
+    let dataset = sample_dataset();
+    let binned = sample_binned_matrix();
+    let trainer = Trainer::new(params).expect("sampled scalar params are valid");
+    let first = trainer
+        .fit_iterations_with_summary(&dataset, &binned, &MockBackend, objective, controls)
+        .expect("first sampled scalar fit succeeds");
+    let second = trainer
+        .fit_iterations_with_summary(&dataset, &binned, &MockBackend, objective, controls)
+        .expect("second sampled scalar fit succeeds");
+
+    assert_eq!(
+        first
+            .model
+            .to_artifact_bytes()
+            .expect("first artifact serializes"),
+        second
+            .model
+            .to_artifact_bytes()
+            .expect("second artifact serializes"),
+    );
+    let prediction_bits = |model: &TrainedModel| {
+        dataset
+            .matrix
+            .values
+            .chunks_exact(dataset.matrix.feature_count)
+            .map(|row| {
+                model
+                    .predict_row(row)
+                    .expect("prediction succeeds")
+                    .to_bits()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        prediction_bits(&first.model),
+        prediction_bits(&second.model)
+    );
+    assert_eq!(
+        first.loss_per_completed_round,
+        second.loss_per_completed_round
+    );
+    assert_eq!(
+        first.sampled_rows_per_completed_round,
+        second.sampled_rows_per_completed_round
+    );
+    assert_eq!(first.rounds_completed, second.rounds_completed);
+    assert_eq!(first.stop_reason, second.stop_reason);
+}
+
+fn scalar_predictions_from_model(
+    model: &TrainedModel,
+    dataset: &TrainingDataset,
+    binned_matrix: &BinnedMatrix,
+) -> Vec<f32> {
+    let mut predictions = vec![model.baseline_prediction; dataset.row_count()];
+    apply_tree_to_binned_predictions(
+        &mut predictions,
+        binned_matrix,
+        &model.stumps,
+        Some((&dataset.matrix.values, dataset.matrix.feature_count)),
+    )
+    .expect("retained model replays");
+    predictions
+}
+
+#[track_caller]
+fn assert_scalar_summary_matches_retained_model<O: ObjectiveOps>(
+    summary: &IterationRunSummary,
+    dataset: &TrainingDataset,
+    binned_matrix: &BinnedMatrix,
+    objective: &O,
+) {
+    let predictions = scalar_predictions_from_model(&summary.model, dataset, binned_matrix);
+    let replayed_loss = objective
+        .loss(
+            &predictions,
+            &dataset.targets,
+            dataset.sample_weights.as_deref(),
+        )
+        .expect("retained-model loss computes");
+    assert_eq!(
+        summary.final_loss.to_bits(),
+        replayed_loss.to_bits(),
+        "recorded final loss must describe the retained forest"
+    );
+    assert_eq!(
+        summary.sampled_rows_per_completed_round.len(),
+        summary.loss_per_completed_round.len()
+    );
+    assert_eq!(
+        summary.diagnostics_per_round.len(),
+        summary.loss_per_completed_round.len()
+    );
+    assert!(summary.loss_per_completed_round.len() <= summary.rounds_completed);
+
+    let artifact = summary
+        .model
+        .to_artifact_bytes()
+        .expect("retained model serializes");
+    let restored =
+        TrainedModel::from_artifact_bytes(&artifact).expect("retained model deserializes");
+    let restored_bits = scalar_predictions_from_model(&restored, dataset, binned_matrix)
+        .into_iter()
+        .map(f32::to_bits)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        restored_bits,
+        predictions
+            .into_iter()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[track_caller]
+fn assert_scalar_summaries_repeat(
+    first: &IterationRunSummary,
+    second: &IterationRunSummary,
+    dataset: &TrainingDataset,
+    binned_matrix: &BinnedMatrix,
+) {
+    assert_eq!(first, second);
+    assert_eq!(
+        first
+            .model
+            .to_artifact_bytes()
+            .expect("first repeated artifact serializes"),
+        second
+            .model
+            .to_artifact_bytes()
+            .expect("second repeated artifact serializes")
+    );
+    assert_eq!(
+        scalar_predictions_from_model(&first.model, dataset, binned_matrix)
+            .into_iter()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>(),
+        scalar_predictions_from_model(&second.model, dataset, binned_matrix)
+            .into_iter()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[track_caller]
+fn assert_multiclass_summaries_repeat(
+    first: &MultiClassIterationRunSummary,
+    second: &MultiClassIterationRunSummary,
+    dataset: &TrainingDataset,
+    binned_matrix: &BinnedMatrix,
+) {
+    assert_eq!(first, second);
+    assert_eq!(
+        first
+            .model
+            .to_artifact_bytes()
+            .expect("first repeated multiclass artifact serializes"),
+        second
+            .model
+            .to_artifact_bytes()
+            .expect("second repeated multiclass artifact serializes")
+    );
+    let prediction_bits = |model: &MultiClassTrainedModel| {
+        multiclass_dart_repeated_walk_predictions(
+            model,
+            binned_matrix,
+            &dataset.matrix.values,
+            dataset.matrix.feature_count,
+        )
+        .iter()
+        .flatten()
+        .map(|value| value.to_bits())
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        prediction_bits(&first.model),
+        prediction_bits(&second.model)
+    );
+}
+
+fn warmup_rollback_fixture() -> (TrainingDataset, BinnedMatrix) {
+    const ROWS: usize = 32;
+    const FEATURES: usize = 2;
+    const SEED: u64 = 17;
+    let mut dummy_gradients = vec![
+        GradientPair {
+            grad: 1.0,
+            hess: 1.0
+        };
+        ROWS
+    ];
+    let first_selection = select_row_indices_for_round(
+        BoostingMode::Standard,
+        ROWS,
+        0.5,
+        SEED,
+        0,
+        &mut dummy_gradients,
+    );
+    let first_selected = first_selection
+        .selected
+        .iter()
+        .map(|&row| row as usize)
+        .collect::<std::collections::HashSet<_>>();
+    assert!(
+        first_selection.selected.iter().any(|&row| row % 2 == 0)
+            && first_selection.selected.iter().any(|&row| row % 2 == 1),
+        "round-zero sample must populate both rollback-test leaves"
+    );
+
+    let mut second_dummy = vec![
+        GradientPair {
+            grad: 1.0,
+            hess: 1.0
+        };
+        ROWS
+    ];
+    let second_selection = select_row_indices_for_round(
+        BoostingMode::Standard,
+        ROWS,
+        0.5,
+        SEED,
+        1,
+        &mut second_dummy,
+    );
+    assert!(
+        second_selection
+            .selected
+            .iter()
+            .any(|row| first_selected.contains(&(*row as usize)))
+            && second_selection
+                .selected
+                .iter()
+                .any(|row| !first_selected.contains(&(*row as usize))),
+        "round-one sample must populate both material-tree leaves"
+    );
+
+    let mut values = Vec::with_capacity(ROWS * FEATURES);
+    let mut bins = Vec::with_capacity(ROWS * FEATURES);
+    let mut targets = Vec::with_capacity(ROWS);
+    for row in 0..ROWS {
+        let was_selected = first_selected.contains(&row);
+        let alternating = (row % 2) as u8;
+        let membership = u8::from(was_selected);
+        values.extend([f32::from(alternating), f32::from(membership)]);
+        bins.extend([alternating, membership]);
+        targets.push(if was_selected { 1.0 } else { -1.0 });
+    }
+    let dataset = TrainingDataset {
+        matrix: alloygbm_core::DatasetMatrix::new(ROWS, FEATURES, values)
+            .expect("warmup rollback matrix is valid"),
+        targets,
+        sample_weights: None,
+        time_index: None,
+        group_id: None,
+        factor_exposures: None,
+    };
+    let binned =
+        BinnedMatrix::new(ROWS, FEATURES, 1, bins).expect("warmup rollback bins are valid");
+    (dataset, binned)
+}
+
+fn warmup_rollback_params() -> TrainParams {
+    TrainParams {
+        learning_rate: 1.0,
+        seed: 17,
+        deterministic: true,
+        max_depth: 1,
+        min_data_in_leaf: 1,
+        lambda_l2: 0.0,
+        morph_config: Some(MorphConfig {
+            morph_rate: 0.0,
+            evolution_pressure: 0.0,
+            morph_warmup_iters: u32::MAX,
+            info_score_weight: 0.0,
+            depth_penalty_base: 1.0,
+            balance_penalty: false,
+            lr_schedule: alloygbm_core::LrSchedule::WarmupCosine { warmup_frac: 0.5 },
+        }),
+        ..TrainParams::default()
+    }
+}
+
+fn warmup_rollback_controls() -> IterationControls {
+    IterationControls::new(4, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
+        .expect("warmup rollback controls are valid")
+        .with_subsample_rates(0.5, 1.0)
+        .expect("warmup rollback sampling rates are valid")
+}
+
+#[test]
+fn sampled_prediction_delta_scalar_morph_warmup_rollback_matches_retained_model() {
+    let (dataset, binned) = warmup_rollback_fixture();
+    let trainer = Trainer::new(warmup_rollback_params()).expect("warmup rollback params are valid");
+    let run = || {
+        trainer
+            .fit_iterations_with_summary(
+                &dataset,
+                &binned,
+                &WarmupRollbackBackend,
+                &SquaredErrorObjective,
+                warmup_rollback_controls(),
+            )
+            .expect("scalar warmup rollback fit succeeds")
+    };
+    let summary = run();
+    let repeated = run();
+
+    let tree_ids = summary
+        .model
+        .stumps
+        .iter()
+        .map(|stump| stump.split.node_id / TREE_NODE_STRIDE)
+        .collect::<Vec<_>>();
+    assert!(
+        !tree_ids.is_empty(),
+        "fixture must retain a later material tree"
+    );
+    assert!(
+        tree_ids.iter().all(|&tree_id| tree_id > 0),
+        "round zero must be rejected during warmup: {tree_ids:?}"
+    );
+    assert!(
+        tree_ids.contains(&1),
+        "round one must be material: {tree_ids:?}"
+    );
+    assert_scalar_summary_matches_retained_model(
+        &summary,
+        &dataset,
+        &binned,
+        &SquaredErrorObjective,
+    );
+    assert_scalar_summaries_repeat(&summary, &repeated, &dataset, &binned);
+}
+
+#[test]
+fn sampled_prediction_delta_multiclass_morph_warmup_rollback_matches_retained_model() {
+    let (mut dataset, binned) = warmup_rollback_fixture();
+    dataset.targets = dataset
+        .targets
+        .iter()
+        .map(|&target| f32::from(target > 0.0))
+        .collect();
+    let objective = MultiClassSoftmaxObjective::new(2).expect("two-class objective is valid");
+    let trainer = Trainer::new(warmup_rollback_params()).expect("warmup rollback params are valid");
+    let run = || {
+        trainer
+            .fit_multiclass_iterations_with_summary(
+                &dataset,
+                &binned,
+                &WarmupRollbackBackend,
+                &objective,
+                warmup_rollback_controls(),
+            )
+            .expect("multiclass warmup rollback fit succeeds")
+    };
+    let summary = run();
+    let repeated = run();
+
+    assert_eq!(summary.loss_per_completed_round[0], summary.initial_loss);
+    let tree_ids = summary
+        .model
+        .class_stumps
+        .iter()
+        .flatten()
+        .map(|stump| stump.split.node_id / TREE_NODE_STRIDE)
+        .collect::<Vec<_>>();
+    assert!(
+        !tree_ids.is_empty(),
+        "fixture must retain later material trees"
+    );
+    assert!(
+        tree_ids.iter().all(|&tree_id| tree_id > 0),
+        "round zero must be rejected during warmup: {tree_ids:?}"
+    );
+    assert!(
+        tree_ids.contains(&1),
+        "round one must be material: {tree_ids:?}"
+    );
+    let raw_predictions = multiclass_dart_repeated_walk_predictions(
+        &summary.model,
+        &binned,
+        &dataset.matrix.values,
+        dataset.matrix.feature_count,
+    );
+    let replayed_loss = objective
+        .loss(
+            &raw_predictions,
+            &dataset.targets,
+            dataset.sample_weights.as_deref(),
+        )
+        .expect("retained multiclass loss computes");
+    assert_eq!(summary.final_loss.to_bits(), replayed_loss.to_bits());
+    assert_eq!(
+        summary.loss_per_completed_round.len(),
+        summary.rounds_completed
+    );
+    assert_eq!(
+        summary.diagnostics_per_round.len(),
+        summary.rounds_completed
+    );
+    let artifact = summary
+        .model
+        .to_artifact_bytes()
+        .expect("retained multiclass model serializes");
+    let restored = MultiClassTrainedModel::from_artifact_bytes(&artifact)
+        .expect("retained multiclass model deserializes");
+    assert_eq!(
+        multiclass_dart_repeated_walk_predictions(
+            &restored,
+            &binned,
+            &dataset.matrix.values,
+            dataset.matrix.feature_count,
+        )
+        .iter()
+        .flatten()
+        .map(|value| value.to_bits())
+        .collect::<Vec<_>>(),
+        raw_predictions
+            .iter()
+            .flatten()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
+    );
+    assert_multiclass_summaries_repeat(&summary, &repeated, &dataset, &binned);
+}
+
+#[test]
+fn sampled_prediction_delta_missing_categorical_pl_matches_retained_model() {
+    let mut dataset = categorical_ancestor_linear_path_dataset();
+    let mut selection_gradients = vec![
+        GradientPair {
+            grad: 1.0,
+            hess: 1.0
+        };
+        dataset.row_count()
+    ];
+    let selection = select_row_indices_for_round(
+        BoostingMode::Standard,
+        dataset.row_count(),
+        0.75,
+        23,
+        0,
+        &mut selection_gradients,
+    );
+    let missing_row = selection.excluded[0] as usize;
+    dataset.matrix.values[missing_row * dataset.matrix.feature_count] = f32::NAN;
+    let mut bins = vec![
+        0, 0, //
+        0, 1, //
+        1, 0, //
+        1, 1, //
+        2, 0, //
+        2, 1, //
+        3, 0, //
+        3, 1,
+    ];
+    bins[missing_row * dataset.matrix.feature_count] = MISSING_BIN_U8;
+    let binned = BinnedMatrix::new(dataset.row_count(), dataset.matrix.feature_count, 3, bins)
+        .expect("missing categorical PL bins are valid");
+    let params = TrainParams {
+        seed: 23,
+        deterministic: true,
+        max_depth: 2,
+        min_data_in_leaf: 1,
+        leaf_model: LeafModelKind::Linear,
+        ..TrainParams::default()
+    };
+    let controls = IterationControls::new(2, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
+        .expect("missing categorical PL controls are valid")
+        .with_subsample_rates(0.75, 1.0)
+        .expect("missing categorical PL rates are valid");
+    let trainer = Trainer::new(params)
+        .expect("missing categorical PL params are valid")
+        .with_categorical_features(vec![CategoricalFeatureInfo {
+            feature_index: 0,
+            num_categories: 4,
+        }]);
+    let run = || {
+        trainer
+            .fit_iterations_with_summary(
+                &dataset,
+                &binned,
+                &CategoricalAncestorLinearPathBackend,
+                &SquaredErrorObjective,
+                controls,
+            )
+            .expect("sampled missing categorical PL fit succeeds")
+    };
+    let summary = run();
+    let repeated = run();
+
+    assert!(
+        summary
+            .model
+            .stumps
+            .iter()
+            .any(|stump| stump.split.is_categorical),
+        "fixture must retain a native categorical split"
+    );
+    assert!(
+        summary.model.stumps.iter().any(|stump| {
+            matches!(stump.left_leaf_value, LeafValue::Linear(_))
+                || matches!(stump.right_leaf_value, LeafValue::Linear(_))
+        }),
+        "fixture must retain a piecewise-linear leaf"
+    );
+    assert!(
+        summary.sampled_rows_per_completed_round[0] < dataset.row_count(),
+        "fixture must exercise excluded-row completion"
+    );
+    assert!(
+        summary
+            .model
+            .predict_row(
+                &dataset.matrix.values[missing_row * dataset.matrix.feature_count
+                    ..(missing_row + 1) * dataset.matrix.feature_count]
+            )
+            .expect("missing categorical row predicts")
+            .is_finite()
+    );
+    assert_scalar_summary_matches_retained_model(
+        &summary,
+        &dataset,
+        &binned,
+        &SquaredErrorObjective,
+    );
+    assert_scalar_summaries_repeat(&summary, &repeated, &dataset, &binned);
+}
+
+#[test]
+fn sampled_prediction_delta_dro_and_monotone_match_retained_models() {
+    let dro_dataset = sample_dataset();
+    let dro_binned = sample_binned_matrix();
+    let dro_controls = IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
+        .expect("sampled DRO controls are valid")
+        .with_subsample_rates(0.75, 1.0)
+        .expect("sampled DRO rates are valid");
+    let dro_trainer = Trainer::new(TrainParams {
+        seed: 31,
+        deterministic: true,
+        max_depth: 2,
+        min_data_in_leaf: 1,
+        leaf_solver: LeafSolverKind::Dro,
+        dro_config: Some(DroConfig {
+            radius: 0.05,
+            metric: alloygbm_core::DroMetric::Wasserstein,
+        }),
+        ..TrainParams::default()
+    })
+    .expect("sampled DRO params are valid");
+    let run_dro = || {
+        dro_trainer
+            .fit_iterations_with_summary(
+                &dro_dataset,
+                &dro_binned,
+                &MockBackend,
+                &SquaredErrorObjective,
+                dro_controls,
+            )
+            .expect("sampled DRO fit succeeds")
+    };
+    let dro_summary = run_dro();
+    let repeated_dro = run_dro();
+    assert!(dro_summary.model.dro_metadata.is_some());
+    assert!(
+        !dro_summary.model.stumps.is_empty(),
+        "DRO fixture must retain a tree: stop={:?}, rounds={}, losses={:?}",
+        dro_summary.stop_reason,
+        dro_summary.rounds_completed,
+        dro_summary.loss_per_completed_round
+    );
+    assert!(!dro_summary.loss_per_completed_round.is_empty());
+    assert!(
+        dro_summary
+            .sampled_rows_per_completed_round
+            .iter()
+            .all(|&rows| rows < dro_dataset.row_count())
+    );
+    assert_scalar_summary_matches_retained_model(
+        &dro_summary,
+        &dro_dataset,
+        &dro_binned,
+        &SquaredErrorObjective,
+    );
+    assert_scalar_summaries_repeat(&dro_summary, &repeated_dro, &dro_dataset, &dro_binned);
+
+    let (monotone_dataset, monotone_binned, _) = monotone_bound_propagation_fixture();
+    let monotone_controls = IterationControls::new(4, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
+        .expect("sampled monotone controls are valid")
+        .with_subsample_rates(0.5, 1.0)
+        .expect("sampled monotone rates are valid");
+    let monotone_trainer = Trainer::new(TrainParams {
+        seed: 37,
+        deterministic: true,
+        learning_rate: 0.2,
+        max_depth: 4,
+        min_data_in_leaf: 1,
+        monotone_constraints: vec![1, 0, 0],
+        ..TrainParams::default()
+    })
+    .expect("sampled monotone params are valid");
+    let run_monotone = || {
+        monotone_trainer
+            .fit_iterations_with_summary(
+                &monotone_dataset,
+                &monotone_binned,
+                &MonotoneRegressionBackend,
+                &SquaredErrorObjective,
+                monotone_controls,
+            )
+            .expect("sampled monotone fit succeeds")
+    };
+    let monotone_summary = run_monotone();
+    let repeated_monotone = run_monotone();
+    assert!(!monotone_summary.model.stumps.is_empty());
+    assert_scalar_summary_matches_retained_model(
+        &monotone_summary,
+        &monotone_dataset,
+        &monotone_binned,
+        &SquaredErrorObjective,
+    );
+    assert_scalar_summaries_repeat(
+        &monotone_summary,
+        &repeated_monotone,
+        &monotone_dataset,
+        &monotone_binned,
+    );
+}
+
+#[test]
+fn sampled_prediction_delta_weighted_goss_warm_start_validation_matches_retained_model() {
+    let (mut dataset, binned) = allocation_reuse_fixture(64);
+    dataset.sample_weights = Some(
+        (0..dataset.row_count())
+            .map(|row| 0.5 + (row % 7) as f32 * 0.25)
+            .collect(),
+    );
+    let (mut validation_dataset, validation_binned) = allocation_reuse_fixture(47);
+    validation_dataset.sample_weights = Some(
+        (0..validation_dataset.row_count())
+            .map(|row| 0.75 + (row % 5) as f32 * 0.2)
+            .collect(),
+    );
+    let params = TrainParams {
+        seed: 41,
+        deterministic: true,
+        max_depth: 2,
+        min_data_in_leaf: 1,
+        boosting_mode: BoostingMode::Goss {
+            top_rate: 0.25,
+            other_rate: 0.25,
+        },
+        ..TrainParams::default()
+    };
+    let trainer = Trainer::new(params).expect("weighted GOSS params are valid");
+    let prior_controls = IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
+        .expect("weighted GOSS prior controls are valid");
+    let continuation_controls = IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
+        .expect("weighted GOSS continuation controls are valid")
+        .with_validation_early_stopping(2, 0.0)
+        .expect("weighted GOSS validation controls are valid");
+    let run = || {
+        let backend = OwnershipRecordingBackend::new(false);
+        let prior = trainer
+            .fit_iterations_with_summary(
+                &dataset,
+                &binned,
+                &backend,
+                &SquaredErrorObjective,
+                prior_controls,
+            )
+            .expect("weighted GOSS prior fit succeeds");
+        let prior_stumps = prior.model.stumps.clone();
+        let warm_start = WarmStartState {
+            baseline_prediction: prior.model.baseline_prediction,
+            stumps: prior.model.stumps.clone(),
+            initial_rounds_completed: prior.rounds_completed,
+            initial_ema_stats: None,
+            initial_dart_tree_weights: None,
+        };
+        let summary = trainer
+            .fit_iterations_warm_start_with_validation(
+                &dataset,
+                &binned,
+                ValidationDatasetRef {
+                    dataset: &validation_dataset,
+                    binned_matrix: &validation_binned,
+                },
+                &backend,
+                &SquaredErrorObjective,
+                continuation_controls,
+                warm_start,
+            )
+            .expect("weighted GOSS warm-start validation fit succeeds");
+        (prior, prior_stumps, summary)
+    };
+    let (prior, prior_stumps, summary) = run();
+    let (repeated_prior, repeated_prior_stumps, repeated_summary) = run();
+
+    assert!(!prior_stumps.is_empty());
+    assert_eq!(prior_stumps.len(), repeated_prior_stumps.len());
+    assert!(
+        summary.rounds_completed > 0,
+        "warm-start continuation must retain a round: stop={:?}, prior_rounds={}, prior_stumps={}, final_stumps={}, losses={:?}, validation_losses={:?}",
+        summary.stop_reason,
+        prior.rounds_completed,
+        prior_stumps.len(),
+        summary.model.stumps.len(),
+        summary.loss_per_completed_round,
+        summary.validation_loss_per_completed_round
+    );
+    assert!(summary.model.stumps.len() > prior_stumps.len());
+    for (expected, actual) in prior_stumps.iter().zip(&summary.model.stumps) {
+        assert_stump_bit_identical(expected, actual);
+    }
+    assert!(!summary.sampled_rows_per_completed_round.is_empty());
+    assert!(
+        summary
+            .sampled_rows_per_completed_round
+            .iter()
+            .all(|&rows| rows < dataset.row_count()),
+        "weighted GOSS continuation must exercise excluded-row completion"
+    );
+    assert_scalar_summary_matches_retained_model(
+        &summary,
+        &dataset,
+        &binned,
+        &SquaredErrorObjective,
+    );
+    assert_scalar_summaries_repeat(&prior, &repeated_prior, &dataset, &binned);
+    assert_scalar_summaries_repeat(&summary, &repeated_summary, &dataset, &binned);
+    let validation_predictions =
+        scalar_predictions_from_model(&summary.model, &validation_dataset, &validation_binned);
+    let replayed_validation_loss = squared_error_loss(
+        &validation_predictions,
+        &validation_dataset.targets,
+        validation_dataset.sample_weights.as_deref(),
+    )
+    .expect("retained validation loss computes");
+    assert_eq!(
+        summary
+            .final_validation_loss
+            .expect("validation loss is recorded")
+            .to_bits(),
+        replayed_validation_loss.to_bits()
+    );
+}
+
+#[test]
+fn sampled_prediction_delta_scalar() {
+    for tree_growth in [TreeGrowth::Level, TreeGrowth::Leaf] {
+        for (boosting_mode, row_subsample) in [
+            (BoostingMode::Standard, 1.0),
+            (BoostingMode::Standard, 0.8),
+            (BoostingMode::Standard, 0.5),
+            (
+                BoostingMode::Goss {
+                    top_rate: 0.5,
+                    other_rate: 0.25,
+                },
+                1.0,
+            ),
+        ] {
+            let params = TrainParams {
+                seed: 17,
+                max_depth: 1,
+                max_leaves: (tree_growth == TreeGrowth::Leaf).then_some(2),
+                tree_growth,
+                boosting_mode,
+                ..TrainParams::default()
+            };
+            let controls = IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
+                .expect("sampled scalar controls are valid")
+                .with_subsample_rates(row_subsample, 1.0)
+                .expect("sampled scalar rates are valid")
+                .with_max_leaves((tree_growth == TreeGrowth::Leaf).then_some(2))
+                .expect("sampled scalar leaf limit is valid");
+            assert_sampled_scalar_runs_repeat(params, controls, &SquaredErrorObjective);
+        }
+    }
+}
+
+fn sampled_multiclass_prediction_delta_fixture() -> (TrainingDataset, BinnedMatrix) {
+    const ROWS: usize = 8_192;
+    const FEATURES: usize = 3;
+    let mut values = Vec::with_capacity(ROWS * FEATURES);
+    let mut bins = Vec::with_capacity(ROWS * FEATURES);
+    let mut targets = Vec::with_capacity(ROWS);
+    for row in 0..ROWS {
+        let first = (row % 16) as u8;
+        let second = ((row / 16) % 16) as u8;
+        let third = ((row / 256) % 16) as u8;
+        bins.extend([first, second, third]);
+        values.extend([f32::from(first), f32::from(second), f32::from(third)]);
+        targets.push(
+            ((usize::from(first / 4) + 2 * usize::from(second / 4) + usize::from(third / 8)) % 3)
+                as f32,
+        );
+    }
+    let dataset = TrainingDataset {
+        matrix: alloygbm_core::DatasetMatrix::new(ROWS, FEATURES, values)
+            .expect("sampled multiclass fixture matrix is valid"),
+        targets,
+        sample_weights: None,
+        time_index: None,
+        group_id: None,
+        factor_exposures: None,
+    };
+    let binned = BinnedMatrix::new(ROWS, FEATURES, 15, bins)
+        .expect("sampled multiclass fixture bins are valid");
+    (dataset, binned)
+}
+
+fn sampled_multiclass_prediction_delta_run(
+    params: TrainParams,
+    controls: IterationControls,
+    worker_count: usize,
+) -> MultiClassIterationRunSummary {
+    let (dataset, binned) = sampled_multiclass_prediction_delta_fixture();
+    let objective = MultiClassSoftmaxObjective::new(3).expect("three-class objective");
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(worker_count)
+        .build()
+        .expect("test pool should build")
+        .install(|| {
+            Trainer::new(params)
+                .expect("sampled multiclass params are valid")
+                .fit_multiclass_iterations_with_summary(
+                    &dataset,
+                    &binned,
+                    &MockBackend,
+                    &objective,
+                    controls,
+                )
+                .expect("sampled multiclass fit succeeds")
+        })
+}
+
+fn multiclass_prediction_bits(
+    model: &MultiClassTrainedModel,
+    dataset: &TrainingDataset,
+    binned: &BinnedMatrix,
+) -> (Vec<u32>, Vec<u32>) {
+    let raw_predictions = multiclass_dart_repeated_walk_predictions(
+        model,
+        binned,
+        &dataset.matrix.values,
+        dataset.matrix.feature_count,
+    );
+    let raw_bits = raw_predictions
+        .iter()
+        .flatten()
+        .map(|value| value.to_bits())
+        .collect();
+    let mut probability_bits = Vec::with_capacity(dataset.row_count() * model.num_classes);
+    for row in 0..dataset.row_count() {
+        let max_logit = raw_predictions
+            .iter()
+            .map(|class_predictions| class_predictions[row])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let sum_exp: f32 = raw_predictions
+            .iter()
+            .map(|class_predictions| (class_predictions[row] - max_logit).exp())
+            .sum();
+        probability_bits.extend(raw_predictions.iter().map(|class_predictions| {
+            ((class_predictions[row] - max_logit).exp() / sum_exp).to_bits()
+        }));
+    }
+    (raw_bits, probability_bits)
+}
+
+fn assert_sampled_multiclass_runs_equal(
+    actual: &MultiClassIterationRunSummary,
+    expected: &MultiClassIterationRunSummary,
+) {
+    let (dataset, binned) = sampled_multiclass_prediction_delta_fixture();
+    assert_eq!(
+        actual
+            .model
+            .to_artifact_bytes()
+            .expect("actual artifact serializes"),
+        expected
+            .model
+            .to_artifact_bytes()
+            .expect("expected artifact serializes"),
+    );
+    assert_eq!(
+        multiclass_prediction_bits(&actual.model, &dataset, &binned),
+        multiclass_prediction_bits(&expected.model, &dataset, &binned),
+    );
+    assert_eq!(
+        actual.loss_per_completed_round,
+        expected.loss_per_completed_round
+    );
+    assert_eq!(
+        actual.sampled_rows_per_completed_round,
+        expected.sampled_rows_per_completed_round
+    );
+    assert_eq!(actual.rounds_completed, expected.rounds_completed);
+    assert_eq!(actual.stop_reason, expected.stop_reason);
+    let tree_order = |model: &MultiClassTrainedModel| {
+        model
+            .class_stumps
+            .iter()
+            .map(|stumps| {
+                stumps
+                    .iter()
+                    .map(|stump| stump.split.node_id)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(tree_order(&actual.model), tree_order(&expected.model));
+}
+
+#[test]
+fn sampled_prediction_delta_multiclass() {
+    for tree_growth in [TreeGrowth::Level, TreeGrowth::Leaf] {
+        for (boosting_mode, row_subsample) in [
+            (BoostingMode::Standard, 0.5),
+            (
+                BoostingMode::Goss {
+                    top_rate: 0.5,
+                    other_rate: 0.25,
+                },
+                1.0,
+            ),
+            (
+                BoostingMode::Dart {
+                    drop_rate: 0.5,
+                    max_drop: 2,
+                    normalize_type: alloygbm_core::DartNormalize::Tree,
+                    sample_type: alloygbm_core::DartSampleType::Uniform,
+                },
+                0.5,
+            ),
+        ] {
+            let params = TrainParams {
+                seed: 17,
+                deterministic: true,
+                max_depth: 2,
+                max_leaves: (tree_growth == TreeGrowth::Leaf).then_some(4),
+                min_data_in_leaf: 1,
+                tree_growth,
+                boosting_mode,
+                ..TrainParams::default()
+            };
+            let controls = IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
+                .expect("sampled multiclass controls are valid")
+                .with_subsample_rates(row_subsample, 1.0)
+                .expect("sampled multiclass rates are valid")
+                .with_max_leaves((tree_growth == TreeGrowth::Leaf).then_some(4))
+                .expect("sampled multiclass leaf limit is valid");
+            let serial_first = sampled_multiclass_prediction_delta_run(params.clone(), controls, 1);
+            let serial_second =
+                sampled_multiclass_prediction_delta_run(params.clone(), controls, 1);
+            let parallel_first =
+                sampled_multiclass_prediction_delta_run(params.clone(), controls, 4);
+            let parallel_second = sampled_multiclass_prediction_delta_run(params, controls, 4);
+
+            assert_sampled_multiclass_runs_equal(&serial_first, &serial_second);
+            assert_sampled_multiclass_runs_equal(&parallel_first, &parallel_second);
+            assert_sampled_multiclass_runs_equal(&serial_first, &parallel_first);
+        }
+    }
+}
+
+#[test]
+fn sampled_prediction_delta_fallback() {
+    let mut gradients = vec![
+        GradientPair {
+            grad: 1.0,
+            hess: 1.0,
+        };
+        4
+    ];
+    let sampled =
+        select_row_indices_for_round(BoostingMode::Standard, 4, 0.5, 17, 0, &mut gradients);
+    assert!(!sampled.excluded.is_empty());
+    assert!(!requires_full_prediction_replay(false, None));
+
+    let full = select_row_indices_for_round(BoostingMode::Standard, 4, 1.0, 17, 0, &mut gradients);
+    assert!(full.excluded.is_empty());
+    assert!(!requires_full_prediction_replay(false, None));
+    assert!(requires_full_prediction_replay(true, None));
+    assert!(requires_full_prediction_replay(false, Some(0.5)));
+
+    let controls = IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
+        .expect("fallback controls are valid")
+        .with_subsample_rates(0.5, 1.0)
+        .expect("fallback rates are valid");
+    assert_sampled_scalar_runs_repeat(
+        TrainParams {
+            seed: 17,
+            max_depth: 1,
+            boosting_mode: BoostingMode::Dart {
+                drop_rate: 0.5,
+                max_drop: 2,
+                normalize_type: alloygbm_core::DartNormalize::Tree,
+                sample_type: alloygbm_core::DartSampleType::Uniform,
+            },
+            ..TrainParams::default()
+        },
+        controls,
+        &SquaredErrorObjective,
+    );
+    assert_sampled_scalar_runs_repeat(
+        TrainParams {
+            seed: 17,
+            max_depth: 1,
+            ..TrainParams::default()
+        },
+        controls,
+        &QuantileObjective { alpha: 0.5 },
+    );
+}
+
+#[test]
+fn round_row_selection_preserves_uniform_rows_and_partitions_domain() {
+    // Frozen from 04d25dc's pre-partition implementation. Keep these vectors
+    // independent of the current sampling wrappers.
+    let assert_complete = |partition: &RoundRowSelection, row_count: u32| {
+        assert!(partition.selected.is_sorted());
+        assert!(partition.excluded.is_sorted());
+        let mut combined = partition.selected.clone();
+        combined.extend_from_slice(&partition.excluded);
+        combined.sort_unstable();
+        assert_eq!(combined, (0..row_count).collect::<Vec<_>>());
+    };
+
+    let mut gradients = vec![
+        GradientPair {
+            grad: 1.0,
+            hess: 1.0
+        };
+        17
+    ];
+    let standard =
+        select_row_indices_for_round(BoostingMode::Standard, 17, 0.8, 91, 3, &mut gradients);
+    assert_eq!(
+        standard.selected,
+        vec![0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 15, 16]
+    );
+    assert_eq!(standard.excluded, vec![8, 9, 14]);
+    assert_complete(&standard, 17);
+
+    let dart = select_row_indices_for_round(
+        BoostingMode::Dart {
+            drop_rate: 0.1,
+            max_drop: 5,
+            normalize_type: alloygbm_core::DartNormalize::Tree,
+            sample_type: alloygbm_core::DartSampleType::Uniform,
+        },
+        17,
+        0.5,
+        91,
+        3,
+        &mut gradients,
+    );
+    assert_eq!(dart.selected, vec![0, 2, 3, 4, 10, 11, 12, 13, 16]);
+    assert_eq!(dart.excluded, vec![1, 5, 6, 7, 8, 9, 14, 15]);
+    assert_complete(&dart, 17);
+
+    let low_rate =
+        select_row_indices_for_round(BoostingMode::Standard, 17, 0.01, 91, 3, &mut gradients);
+    assert_eq!(low_rate.selected, vec![2]);
+    assert_eq!(
+        low_rate.excluded,
+        vec![0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    );
+    assert_complete(&low_rate, 17);
+
+    let mut full_gradients = vec![
+        GradientPair {
+            grad: 1.0,
+            hess: 1.0
+        };
+        5
+    ];
+    let full =
+        select_row_indices_for_round(BoostingMode::Standard, 5, 1.0, 91, 3, &mut full_gradients);
+    assert_eq!(full.selected, vec![0, 1, 2, 3, 4]);
+    assert!(full.excluded.is_empty());
+    assert_complete(&full, 5);
+
+    let mut zero_gradients = Vec::new();
+    let zero =
+        select_row_indices_for_round(BoostingMode::Standard, 0, 0.5, 91, 3, &mut zero_gradients);
+    assert!(zero.selected.is_empty());
+    assert!(zero.excluded.is_empty());
+    assert_complete(&zero, 0);
+
+    let repeat =
+        select_row_indices_for_round(BoostingMode::Standard, 17, 0.8, 91, 3, &mut gradients);
+    assert_eq!(repeat, standard);
+}
+
+#[test]
+fn goss_round_row_selection_preserves_partition_and_amplification() {
+    // Frozen from 04d25dc's pre-partition implementation.
+    let source_gradients = vec![
+        GradientPair {
+            grad: 0.1,
+            hess: 1.0,
+        },
+        GradientPair {
+            grad: 0.2,
+            hess: 1.0,
+        },
+        GradientPair {
+            grad: 0.3,
+            hess: 1.0,
+        },
+        GradientPair {
+            grad: 0.4,
+            hess: 1.0,
+        },
+        GradientPair {
+            grad: 0.5,
+            hess: 1.0,
+        },
+    ];
+    let magnitudes = vec![0.1, 0.2, 0.3, 0.4, 0.5];
+    let (top, other, amplification) = goss_sample_indices(&magnitudes, 0.2, 0.1, 91, 3);
+    assert_eq!(top, vec![4]);
+    assert_eq!(other, vec![0]);
+    assert_eq!(amplification, 4.0);
+
+    let mut gradients = source_gradients.clone();
+    let partition = select_row_indices_for_round(
+        BoostingMode::Goss {
+            top_rate: 0.2,
+            other_rate: 0.1,
+        },
+        5,
+        1.0,
+        91,
+        3,
+        &mut gradients,
+    );
+    assert_eq!(partition.selected, vec![0, 4]);
+    assert_eq!(partition.excluded, vec![1, 2, 3]);
+    assert!(partition.selected.is_sorted());
+    assert!(partition.excluded.is_sorted());
+    let mut combined = partition.selected.clone();
+    combined.extend_from_slice(&partition.excluded);
+    combined.sort_unstable();
+    assert_eq!(combined, vec![0, 1, 2, 3, 4]);
+    assert_eq!(gradients[0].grad, 0.4);
+    assert_eq!(gradients[0].hess, 4.0);
+    assert_eq!(&gradients[1..], &source_gradients[1..]);
+}
+
+#[test]
+fn goss_round_row_selection_pins_tie_boundary_partition() {
+    let magnitudes = vec![10.0, 10.0, 10.0, 10.0, 1.0, 1.0];
+    let (top, other, amplification) = goss_sample_indices(&magnitudes, 0.5, 0.2, 91, 3);
+    assert_eq!(top, vec![0, 1, 2]);
+    assert_eq!(other, vec![3, 4]);
+    assert_eq!(amplification, 1.5);
+
+    let mut gradients = magnitudes
+        .iter()
+        .map(|&grad| GradientPair { grad, hess: 2.0 })
+        .collect::<Vec<_>>();
+    let partition = select_row_indices_for_round(
+        BoostingMode::Goss {
+            top_rate: 0.5,
+            other_rate: 0.2,
+        },
+        6,
+        1.0,
+        91,
+        3,
+        &mut gradients,
+    );
+    assert_eq!(partition.selected, vec![0, 1, 2, 3, 4]);
+    assert_eq!(partition.excluded, vec![5]);
+    assert_eq!(
+        gradients[3],
+        GradientPair {
+            grad: 15.0,
+            hess: 3.0
+        }
+    );
+    assert_eq!(
+        gradients[4],
+        GradientPair {
+            grad: 1.5,
+            hess: 3.0
+        }
+    );
+}
+
+#[test]
+fn goss_round_row_selection_pins_zero_other_and_full_partitions() {
+    let magnitudes = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+    let (top, other, amplification) = goss_sample_indices(&magnitudes, 0.2, 0.0, 1, 0);
+    assert_eq!(top, vec![4]);
+    assert!(other.is_empty());
+    assert_eq!(amplification, 1.0);
+
+    let source_gradients = magnitudes
+        .iter()
+        .map(|&grad| GradientPair { grad, hess: 1.0 })
+        .collect::<Vec<_>>();
+    let mut zero_other_gradients = source_gradients.clone();
+    let zero_other = select_row_indices_for_round(
+        BoostingMode::Goss {
+            top_rate: 0.2,
+            other_rate: 0.0,
+        },
+        5,
+        1.0,
+        1,
+        0,
+        &mut zero_other_gradients,
+    );
+    assert_eq!(zero_other.selected, vec![4]);
+    assert_eq!(zero_other.excluded, vec![0, 1, 2, 3]);
+    assert_eq!(zero_other_gradients, source_gradients);
+
+    let (top, other, amplification) = goss_sample_indices(&magnitudes, 1.0, 0.5, 1, 0);
+    assert_eq!(top, vec![0, 1, 2, 3, 4]);
+    assert!(other.is_empty());
+    assert_eq!(amplification, 1.0);
+
+    let mut full_gradients = source_gradients.clone();
+    let full = select_row_indices_for_round(
+        BoostingMode::Goss {
+            top_rate: 1.0,
+            other_rate: 0.5,
+        },
+        5,
+        1.0,
+        1,
+        0,
+        &mut full_gradients,
+    );
+    assert_eq!(full.selected, vec![0, 1, 2, 3, 4]);
+    assert!(full.excluded.is_empty());
+    assert_eq!(full_gradients, source_gradients);
+}
+
+#[test]
+fn goss_multiclass_round_selection_shares_partition_and_amplification() {
+    let mut class_gradient_buffers = vec![
+        vec![
+            GradientPair {
+                grad: 0.1,
+                hess: 1.0,
+            },
+            GradientPair {
+                grad: 0.2,
+                hess: 1.0,
+            },
+            GradientPair {
+                grad: 0.3,
+                hess: 1.0,
+            },
+            GradientPair {
+                grad: 0.4,
+                hess: 1.0,
+            },
+            GradientPair {
+                grad: 0.5,
+                hess: 1.0,
+            },
+        ],
+        vec![
+            GradientPair {
+                grad: 0.5,
+                hess: 2.0,
+            },
+            GradientPair {
+                grad: 0.4,
+                hess: 2.0,
+            },
+            GradientPair {
+                grad: 0.3,
+                hess: 2.0,
+            },
+            GradientPair {
+                grad: 0.2,
+                hess: 2.0,
+            },
+            GradientPair {
+                grad: 0.1,
+                hess: 2.0,
+            },
+        ],
+        vec![
+            GradientPair {
+                grad: 0.2,
+                hess: 3.0,
+            },
+            GradientPair {
+                grad: 0.3,
+                hess: 3.0,
+            },
+            GradientPair {
+                grad: 0.4,
+                hess: 3.0,
+            },
+            GradientPair {
+                grad: 0.5,
+                hess: 3.0,
+            },
+            GradientPair {
+                grad: 0.6,
+                hess: 3.0,
+            },
+        ],
+    ];
+    let original = class_gradient_buffers.clone();
+    let magnitudes = vec![0.8, 0.9, 1.0, 1.1, 1.2];
+    let (top, other, amplification) = goss_sample_indices(&magnitudes, 0.2, 0.1, 91, 3);
+    assert_eq!(top, vec![4]);
+    assert_eq!(other, vec![0]);
+    assert_eq!(amplification, 4.0);
+
+    let partition = select_row_indices_for_round_multiclass(
+        BoostingMode::Goss {
+            top_rate: 0.2,
+            other_rate: 0.1,
+        },
+        5,
+        1.0,
+        91,
+        3,
+        &mut class_gradient_buffers,
+    );
+    assert_eq!(partition.selected, vec![0, 4]);
+    assert_eq!(partition.excluded, vec![1, 2, 3]);
+    assert!(partition.selected.is_sorted());
+    assert!(partition.excluded.is_sorted());
+    let mut combined = partition.selected.clone();
+    combined.extend_from_slice(&partition.excluded);
+    combined.sort_unstable();
+    assert_eq!(combined, vec![0, 1, 2, 3, 4]);
+    for (class_index, buffer) in class_gradient_buffers.iter().enumerate() {
+        assert_eq!(buffer[0].grad, original[class_index][0].grad * 4.0);
+        assert_eq!(buffer[0].hess, original[class_index][0].hess * 4.0);
+        assert_eq!(&buffer[1..], &original[class_index][1..]);
+    }
 }
 
 #[test]

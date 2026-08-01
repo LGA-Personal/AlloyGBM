@@ -12,9 +12,9 @@
 //! evaluate as scalar intercepts unless PL leaves are active and
 //! raw feature rows are provided.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use alloygbm_core::{BinnedMatrix, MISSING_BIN_U8, PartitionResult};
+use alloygbm_core::{BinnedMatrix, PartitionResult};
 
 use crate::error::{EngineError, EngineResult};
 use crate::tree_node::decode_tree_node_id;
@@ -55,7 +55,7 @@ pub(crate) fn apply_partition_leaf_updates(
 /// rescaled tree post-normalization.
 ///
 /// Routing uses the binned-matrix view but with the same split
-/// semantics as the predictor: missing bin (`MISSING_BIN_U8`) routes
+/// semantics as the predictor: the matrix's missing bin routes
 /// through `default_left`; native categorical splits consult the
 /// stump's `categorical_bitset`; otherwise the standard
 /// `bin <= threshold_bin` comparison applies.  Using only
@@ -116,9 +116,38 @@ pub(crate) fn apply_weighted_round_to_predictions_and_accumulator(
     )
 }
 
+pub(crate) fn apply_weighted_round_to_rows(
+    predictions: &mut [f32],
+    binned_matrix: &BinnedMatrix,
+    stumps: &[TrainedStump],
+    raw_features: Option<(&[f32], usize)>,
+    row_indices: &[u32],
+    factor: f32,
+) -> EngineResult<()> {
+    validate_restricted_replay_inputs(predictions, binned_matrix, raw_features, row_indices)?;
+    let stump_by_local = build_stump_lookup(stumps, binned_matrix.feature_count)?;
+    if stumps.is_empty() || factor == 0.0 {
+        return Ok(());
+    }
+    let missing_bin = binned_matrix.missing_bin();
+    for &row_index in row_indices {
+        let row_index = row_index as usize;
+        let prediction = &mut predictions[row_index];
+        replay_round_row(
+            row_index,
+            binned_matrix,
+            &stump_by_local,
+            missing_bin,
+            raw_features,
+            |_, leaf_value| *prediction += factor * leaf_value,
+        );
+    }
+    Ok(())
+}
+
 #[inline]
-fn binned_split_went_left(stump: &TrainedStump, bin: u16) -> bool {
-    if bin == u16::from(MISSING_BIN_U8) {
+fn binned_split_went_left(stump: &TrainedStump, bin: u16, missing_bin: u16) -> bool {
+    if bin == missing_bin {
         stump.split.default_left
     } else if stump.split.is_categorical {
         stump
@@ -132,6 +161,151 @@ fn binned_split_went_left(stump: &TrainedStump, bin: u16) -> bool {
             })
     } else {
         bin <= stump.split.threshold_bin
+    }
+}
+
+fn build_stump_lookup(
+    stumps: &[TrainedStump],
+    feature_count: usize,
+) -> EngineResult<HashMap<u32, &TrainedStump>> {
+    validate_stump_contracts(stumps, feature_count)?;
+    let mut stump_by_local: HashMap<u32, &TrainedStump> = HashMap::with_capacity(stumps.len());
+    for stump in stumps {
+        let (_, local_id) = decode_tree_node_id(stump.split.node_id);
+        if stump_by_local.insert(local_id, stump).is_some() {
+            return Err(EngineError::ContractViolation(format!(
+                "duplicate local node id {local_id} in replay round"
+            )));
+        }
+    }
+    Ok(stump_by_local)
+}
+
+fn validate_stump_contracts(stumps: &[TrainedStump], feature_count: usize) -> EngineResult<()> {
+    let mut seen_nodes = HashSet::with_capacity(stumps.len());
+    for stump in stumps {
+        let feature_index = stump.split.feature_index as usize;
+        if feature_index >= feature_count {
+            return Err(EngineError::ContractViolation(format!(
+                "stump feature index {feature_index} is out of bounds for binned feature count {feature_count}"
+            )));
+        }
+        let (tree_id, local_id) = decode_tree_node_id(stump.split.node_id);
+        if !seen_nodes.insert((tree_id, local_id)) {
+            return Err(EngineError::ContractViolation(format!(
+                "duplicate local node id {local_id} for tree {tree_id}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_active_raw_features(
+    row_count: usize,
+    binned_feature_count: usize,
+    raw_features: Option<(&[f32], usize)>,
+) -> EngineResult<()> {
+    let Some((raw, feature_count)) = raw_features else {
+        return Ok(());
+    };
+    if raw.is_empty() {
+        return Ok(());
+    }
+    if feature_count == 0 {
+        return Err(EngineError::ContractViolation(
+            "raw feature count must be nonzero for nonempty PL input".to_string(),
+        ));
+    }
+    if feature_count != binned_feature_count {
+        return Err(EngineError::ContractViolation(format!(
+            "raw feature count {feature_count} does not match binned feature count {binned_feature_count}"
+        )));
+    }
+    let required_len = row_count.checked_mul(feature_count).ok_or_else(|| {
+        EngineError::ContractViolation(format!(
+            "raw feature storage size overflows for row count {row_count} and feature count {feature_count}"
+        ))
+    })?;
+    if raw.len() < required_len {
+        return Err(EngineError::ContractViolation(format!(
+            "raw feature storage length {} is shorter than required length {required_len}",
+            raw.len(),
+        )));
+    }
+    Ok(())
+}
+
+fn validate_restricted_replay_inputs(
+    predictions: &[f32],
+    binned_matrix: &BinnedMatrix,
+    raw_features: Option<(&[f32], usize)>,
+    row_indices: &[u32],
+) -> EngineResult<()> {
+    if predictions.len() != binned_matrix.row_count {
+        return Err(EngineError::ContractViolation(format!(
+            "prediction length {} does not match binned row count {}",
+            predictions.len(),
+            binned_matrix.row_count,
+        )));
+    }
+    for &row_index in row_indices {
+        if row_index as usize >= binned_matrix.row_count {
+            return Err(EngineError::ContractViolation(format!(
+                "row index {row_index} is out of bounds for row count {}",
+                binned_matrix.row_count,
+            )));
+        }
+    }
+    validate_active_raw_features(
+        binned_matrix.row_count,
+        binned_matrix.feature_count,
+        raw_features,
+    )
+}
+
+fn replay_round_row(
+    row_index: usize,
+    binned_matrix: &BinnedMatrix,
+    stump_by_local: &HashMap<u32, &TrainedStump>,
+    missing_bin: u16,
+    raw_features: Option<(&[f32], usize)>,
+    mut apply_stump: impl FnMut(&TrainedStump, f32),
+) {
+    let mut local_id = 0_u32;
+    loop {
+        let Some(stump) = stump_by_local.get(&local_id) else {
+            break;
+        };
+        let feature_index = stump.split.feature_index as usize;
+        let bin = binned_matrix.col_bin(feature_index * binned_matrix.row_count + row_index);
+        let went_left = binned_split_went_left(stump, bin, missing_bin);
+        let leaf_value = if went_left {
+            evaluate_leaf_for_row(&stump.left_leaf_value, row_index, raw_features)
+        } else {
+            evaluate_leaf_for_row(&stump.right_leaf_value, row_index, raw_features)
+        };
+        apply_stump(stump, leaf_value);
+        local_id = if went_left {
+            local_id * 2 + 1
+        } else {
+            local_id * 2 + 2
+        };
+    }
+}
+
+#[inline]
+fn evaluate_leaf_for_row(
+    leaf_value: &alloygbm_core::LeafValue,
+    row_index: usize,
+    raw_features: Option<(&[f32], usize)>,
+) -> f32 {
+    if let Some((raw, feature_count)) = raw_features
+        && !raw.is_empty()
+    {
+        let row_offset = row_index * feature_count;
+        leaf_value.eval_row(&raw[row_offset..])
+    } else {
+        leaf_value.as_scalar()
     }
 }
 
@@ -149,47 +323,27 @@ fn apply_weighted_round_to_predictions_internal(
     if stumps.is_empty() || (prediction_factor == 0.0 && accumulator_factor_is_zero) {
         return Ok(());
     }
-    let mut stump_by_local: HashMap<u32, &TrainedStump> = HashMap::with_capacity(stumps.len());
-    for stump in stumps {
-        let (_, local_id) = decode_tree_node_id(stump.split.node_id);
-        stump_by_local.insert(local_id, stump);
-    }
+    validate_active_raw_features(
+        binned_matrix.row_count,
+        binned_matrix.feature_count,
+        raw_features,
+    )?;
+    let stump_by_local = build_stump_lookup(stumps, binned_matrix.feature_count)?;
+    let missing_bin = binned_matrix.missing_bin();
     for (row_index, prediction) in predictions.iter_mut().enumerate() {
-        let mut local_id = 0_u32;
-        loop {
-            let Some(stump) = stump_by_local.get(&local_id) else {
-                break;
-            };
-            let feature_index = stump.split.feature_index as usize;
-            let bin = binned_matrix.col_bin(feature_index * binned_matrix.row_count + row_index);
-            let went_left = binned_split_went_left(stump, bin);
-            let leaf_contribution = if went_left {
-                if let Some((raw, fc)) = raw_features
-                    && !raw.is_empty()
-                {
-                    let row_offset = row_index * fc;
-                    stump.left_leaf_value.eval_row(&raw[row_offset..])
-                } else {
-                    stump.left_leaf_value.as_scalar()
+        replay_round_row(
+            row_index,
+            binned_matrix,
+            &stump_by_local,
+            missing_bin,
+            raw_features,
+            |_, leaf_value| {
+                *prediction += prediction_factor * leaf_value;
+                if let Some((buffer, factor)) = accumulator.as_mut() {
+                    buffer[row_index] += *factor * leaf_value;
                 }
-            } else if let Some((raw, fc)) = raw_features
-                && !raw.is_empty()
-            {
-                let row_offset = row_index * fc;
-                stump.right_leaf_value.eval_row(&raw[row_offset..])
-            } else {
-                stump.right_leaf_value.as_scalar()
-            };
-            *prediction += prediction_factor * leaf_contribution;
-            if let Some((buffer, factor)) = accumulator.as_mut() {
-                buffer[row_index] += *factor * leaf_contribution;
-            }
-            local_id = if went_left {
-                local_id * 2 + 1
-            } else {
-                local_id * 2 + 2
-            };
-        }
+            },
+        );
     }
     Ok(())
 }
@@ -221,52 +375,22 @@ pub(crate) fn apply_round_stumps_tree_walk(
     if stumps.is_empty() {
         return Ok(());
     }
-    // Build a lookup from local_node_id to stump for tree traversal
-    let mut stump_by_local: HashMap<u32, &TrainedStump> = HashMap::with_capacity(stumps.len());
-    for stump in stumps {
-        let (_, local_id) = decode_tree_node_id(stump.split.node_id);
-        stump_by_local.insert(local_id, stump);
-    }
+    validate_active_raw_features(
+        binned_matrix.row_count,
+        binned_matrix.feature_count,
+        raw_features,
+    )?;
+    let stump_by_local = build_stump_lookup(stumps, binned_matrix.feature_count)?;
+    let missing_bin = binned_matrix.missing_bin();
     for (row_index, prediction) in predictions.iter_mut().enumerate() {
-        // Walk the tree starting from the root (local_node_id = 0)
-        let mut local_id = 0_u32;
-        loop {
-            let Some(stump) = stump_by_local.get(&local_id) else {
-                break; // reached a leaf — no stump at this node
-            };
-            let feature_index = stump.split.feature_index as usize;
-            let bin = binned_matrix.col_bin(feature_index * binned_matrix.row_count + row_index);
-            // v0.10.0 review fix (Comment 1): multiply leaf contribution by
-            // `stump.tree_weight` so warm-start prior predictions reflect
-            // saved DART weights. For non-DART stumps tree_weight == 1.0,
-            // so this is a no-op and preserves byte-identical numerics for
-            // every existing caller (Standard/GOSS/Morph/DRO/linear).
-            let tree_weight = stump.tree_weight;
-            let went_left = binned_split_went_left(stump, bin);
-            if went_left {
-                let leaf_value = if let Some((raw, fc)) = raw_features
-                    && !raw.is_empty()
-                {
-                    let row_offset = row_index * fc;
-                    stump.left_leaf_value.eval_row(&raw[row_offset..])
-                } else {
-                    stump.left_leaf_value.as_scalar()
-                };
-                *prediction += tree_weight * leaf_value;
-                local_id = local_id * 2 + 1; // left child
-            } else {
-                let leaf_value = if let Some((raw, fc)) = raw_features
-                    && !raw.is_empty()
-                {
-                    let row_offset = row_index * fc;
-                    stump.right_leaf_value.eval_row(&raw[row_offset..])
-                } else {
-                    stump.right_leaf_value.as_scalar()
-                };
-                *prediction += tree_weight * leaf_value;
-                local_id = local_id * 2 + 2; // right child
-            }
-        }
+        replay_round_row(
+            row_index,
+            binned_matrix,
+            &stump_by_local,
+            missing_bin,
+            raw_features,
+            |stump, leaf_value| *prediction += stump.tree_weight * leaf_value,
+        );
     }
     Ok(())
 }
@@ -280,6 +404,12 @@ pub(crate) fn apply_tree_to_binned_predictions(
     if stumps.is_empty() {
         return Ok(());
     }
+    validate_active_raw_features(
+        binned_matrix.row_count,
+        binned_matrix.feature_count,
+        raw_features,
+    )?;
+    validate_stump_contracts(stumps, binned_matrix.feature_count)?;
     // Split stumps into per-round groups by detecting tree_id changes
     let mut round_start = 0;
     let mut current_tree_id = decode_tree_node_id(stumps[0].split.node_id).0;
@@ -308,7 +438,9 @@ pub(crate) fn apply_tree_to_binned_predictions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloygbm_core::{LeafValue, LinearLeaf, NodeStats, SplitCandidate};
+    use alloygbm_core::{
+        LeafValue, LinearLeaf, MISSING_BIN_U8, MISSING_BIN_U16, NodeStats, SplitCandidate,
+    };
 
     fn assert_close(actual: &[f32], expected: &[f32]) {
         assert_eq!(actual.len(), expected.len());
@@ -387,6 +519,23 @@ mod tests {
         Ok(())
     }
 
+    fn assert_restricted_rows_match_full_replay(
+        binned: BinnedMatrix,
+        stumps: Vec<TrainedStump>,
+        raw_features: Option<(&[f32], usize)>,
+    ) -> EngineResult<()> {
+        let initial = vec![10.0, 20.0, 30.0, 40.0];
+        let mut expected = initial.clone();
+        apply_weighted_round_to_predictions(&mut expected, &binned, &stumps, raw_features, 1.0)?;
+        let mut actual = initial.clone();
+        apply_weighted_round_to_rows(&mut actual, &binned, &stumps, raw_features, &[1, 3], 1.0)?;
+        assert_eq!(actual[0].to_bits(), initial[0].to_bits());
+        assert_eq!(actual[2].to_bits(), initial[2].to_bits());
+        assert_eq!(actual[1].to_bits(), expected[1].to_bits());
+        assert_eq!(actual[3].to_bits(), expected[3].to_bits());
+        Ok(())
+    }
+
     #[test]
     fn aggregate_scalar_leaf_matches_reference_walk() -> EngineResult<()> {
         let binned = BinnedMatrix::new(4, 1, 3, vec![0, 1, 2, 3]).expect("valid binned matrix");
@@ -396,6 +545,17 @@ mod tests {
             LeafValue::Scalar(-0.5),
         )];
         assert_aggregate_matches_reference(vec![10.0, 20.0, 30.0, 40.0], binned, stumps, None)
+    }
+
+    #[test]
+    fn restricted_numeric_rows_match_full_replay() -> EngineResult<()> {
+        let binned = BinnedMatrix::new(4, 1, 3, vec![0, 1, 2, 3]).expect("valid binned matrix");
+        let stumps = vec![TrainedStump::new_unweighted(
+            scalar_split(1, true, false, None),
+            LeafValue::Scalar(1.5),
+            LeafValue::Scalar(-0.5),
+        )];
+        assert_restricted_rows_match_full_replay(binned, stumps, None)
     }
 
     #[test]
@@ -439,6 +599,18 @@ mod tests {
     }
 
     #[test]
+    fn restricted_learned_missing_rows_match_full_replay() -> EngineResult<()> {
+        let binned = BinnedMatrix::new(4, 1, 3, vec![0, MISSING_BIN_U8, 2, MISSING_BIN_U8])
+            .expect("valid binned matrix");
+        let stumps = vec![TrainedStump::new_unweighted(
+            scalar_split(1, false, false, None),
+            LeafValue::Scalar(2.0),
+            LeafValue::Scalar(-3.0),
+        )];
+        assert_restricted_rows_match_full_replay(binned, stumps, None)
+    }
+
+    #[test]
     fn aggregate_native_categorical_routing_matches_reference_walk() -> EngineResult<()> {
         let binned = BinnedMatrix::new(4, 1, 3, vec![0, 1, 2, 3]).expect("valid binned matrix");
         let stumps = vec![TrainedStump::new_unweighted(
@@ -447,6 +619,17 @@ mod tests {
             LeafValue::Scalar(-1.25),
         )];
         assert_aggregate_matches_reference(vec![1.0; 4], binned, stumps, None)
+    }
+
+    #[test]
+    fn restricted_native_categorical_rows_match_full_replay() -> EngineResult<()> {
+        let binned = BinnedMatrix::new(4, 1, 3, vec![0, 1, 2, 3]).expect("valid binned matrix");
+        let stumps = vec![TrainedStump::new_unweighted(
+            scalar_split(0, false, true, Some(vec![0b0000_0101])),
+            LeafValue::Scalar(0.75),
+            LeafValue::Scalar(-1.25),
+        )];
+        assert_restricted_rows_match_full_replay(binned, stumps, None)
     }
 
     #[test]
@@ -493,6 +676,364 @@ mod tests {
         )];
         let raw_features = vec![1.0, 10.0, 2.0, 20.0, 3.0, 30.0, 4.0, 40.0];
         assert_aggregate_matches_reference(vec![0.0; 4], binned, stumps, Some((&raw_features, 2)))
+    }
+
+    #[test]
+    fn restricted_linear_leaf_rows_match_full_replay() -> EngineResult<()> {
+        let binned =
+            BinnedMatrix::new(4, 2, 3, vec![0, 0, 1, 0, 2, 0, 3, 0]).expect("valid binned matrix");
+        let stumps = vec![TrainedStump::new_unweighted(
+            scalar_split(1, true, false, None),
+            LeafValue::Linear(LinearLeaf::identity_scaled(1.0, vec![0.5], vec![0])),
+            LeafValue::Linear(LinearLeaf::identity_scaled(-2.0, vec![0.25], vec![1])),
+        )];
+        let raw_features = vec![1.0, 10.0, 2.0, 20.0, 3.0, 30.0, 4.0, 40.0];
+        assert_restricted_rows_match_full_replay(binned, stumps, Some((&raw_features, 2)))
+    }
+
+    fn assert_wide_bin_missing_direction(
+        default_left: bool,
+        expected_missing_leaf: f32,
+    ) -> EngineResult<()> {
+        let binned = BinnedMatrix::new_u16(
+            4,
+            1,
+            65_534,
+            MISSING_BIN_U16,
+            vec![0, MISSING_BIN_U16, 2, MISSING_BIN_U16],
+        )
+        .expect("valid wide-bin matrix");
+        let stumps = vec![TrainedStump::new_unweighted(
+            scalar_split(1, default_left, false, None),
+            LeafValue::Scalar(2.0),
+            LeafValue::Scalar(-3.0),
+        )];
+
+        let mut full = vec![0.0; 4];
+        apply_weighted_round_to_predictions(&mut full, &binned, &stumps, None, 1.0)?;
+        assert_close(
+            &full,
+            &[2.0, expected_missing_leaf, -3.0, expected_missing_leaf],
+        );
+
+        let initial = vec![10.0, 20.0, 30.0, 40.0];
+        let mut restricted = initial.clone();
+        apply_weighted_round_to_rows(&mut restricted, &binned, &stumps, None, &[1, 3], 1.0)?;
+        assert_eq!(restricted[0].to_bits(), initial[0].to_bits());
+        assert_eq!(restricted[2].to_bits(), initial[2].to_bits());
+        assert_eq!(
+            restricted[1].to_bits(),
+            (20.0 + expected_missing_leaf).to_bits()
+        );
+        assert_eq!(
+            restricted[3].to_bits(),
+            (40.0 + expected_missing_leaf).to_bits()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn wide_bin_missing_default_left_true_matches_predictor_routing() -> EngineResult<()> {
+        assert_wide_bin_missing_direction(true, 2.0)
+    }
+
+    #[test]
+    fn wide_bin_missing_default_left_false_matches_predictor_routing() -> EngineResult<()> {
+        assert_wide_bin_missing_direction(false, -3.0)
+    }
+
+    #[test]
+    fn depth_two_replay_preserves_per_stump_f32_sequence() -> EngineResult<()> {
+        let binned = BinnedMatrix::new(4, 1, 3, vec![0, 0, 2, 2]).expect("valid binned matrix");
+        let mut root_split = scalar_split(1, true, false, None);
+        root_split.node_id = 0;
+        let mut child_split = scalar_split(0, true, false, None);
+        child_split.node_id = 1;
+        let stumps = vec![
+            TrainedStump::new_unweighted(
+                root_split,
+                LeafValue::Scalar(1.0),
+                LeafValue::Scalar(0.0),
+            ),
+            TrainedStump::new_unweighted(
+                child_split,
+                LeafValue::Scalar(1.0),
+                LeafValue::Scalar(0.0),
+            ),
+        ];
+        let initial = vec![10.0, 16_777_216.0, 30.0, 40.0];
+
+        let mut expected = initial.clone();
+        expected[1] += 1.0;
+        expected[1] += 1.0;
+
+        let mut full = initial.clone();
+        apply_weighted_round_to_predictions(&mut full, &binned, &stumps, None, 1.0)?;
+        assert_eq!(full[1].to_bits(), expected[1].to_bits());
+
+        let mut restricted = initial.clone();
+        apply_weighted_round_to_rows(&mut restricted, &binned, &stumps, None, &[1], 1.0)?;
+        assert_eq!(restricted[1].to_bits(), expected[1].to_bits());
+        assert_eq!(restricted[0].to_bits(), initial[0].to_bits());
+        assert_eq!(restricted[2].to_bits(), initial[2].to_bits());
+        assert_eq!(restricted[3].to_bits(), initial[3].to_bits());
+        Ok(())
+    }
+
+    #[test]
+    fn restricted_rows_reject_invalid_descendant_feature_before_mutation() {
+        let binned = BinnedMatrix::new(4, 1, 3, vec![0, 0, 2, 2]).expect("valid binned matrix");
+        let mut root_split = scalar_split(1, true, false, None);
+        root_split.node_id = 0;
+        let mut child_split = scalar_split(0, true, false, None);
+        child_split.node_id = 1;
+        child_split.feature_index = 1;
+        let stumps = vec![
+            TrainedStump::new_unweighted(
+                root_split,
+                LeafValue::Scalar(1.0),
+                LeafValue::Scalar(0.0),
+            ),
+            TrainedStump::new_unweighted(
+                child_split,
+                LeafValue::Scalar(2.0),
+                LeafValue::Scalar(0.0),
+            ),
+        ];
+        let initial = vec![10.0, 20.0, 30.0, 40.0];
+        let mut actual = initial.clone();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            apply_weighted_round_to_rows(&mut actual, &binned, &stumps, None, &[1], 1.0)
+        }));
+
+        assert!(matches!(result, Ok(Err(EngineError::ContractViolation(_)))));
+        assert_eq!(actual, initial);
+    }
+
+    #[test]
+    fn restricted_rows_reject_out_of_bounds_before_mutation() {
+        let binned = BinnedMatrix::new(4, 1, 3, vec![0, 1, 2, 3]).expect("valid binned matrix");
+        let stumps = vec![TrainedStump::new_unweighted(
+            scalar_split(1, true, false, None),
+            LeafValue::Scalar(1.5),
+            LeafValue::Scalar(-0.5),
+        )];
+        let initial = vec![10.0, 20.0, 30.0, 40.0];
+        let mut actual = initial.clone();
+
+        let result =
+            apply_weighted_round_to_rows(&mut actual, &binned, &stumps, None, &[1, 4], 1.0);
+
+        assert!(matches!(result, Err(EngineError::ContractViolation(_))));
+        assert_eq!(actual, initial);
+    }
+
+    #[test]
+    fn restricted_rows_reject_undersized_linear_raw_input_before_mutation() {
+        let binned =
+            BinnedMatrix::new(4, 2, 3, vec![0, 0, 1, 0, 2, 0, 3, 0]).expect("valid binned matrix");
+        let stumps = vec![TrainedStump::new_unweighted(
+            scalar_split(1, true, false, None),
+            LeafValue::Linear(LinearLeaf::identity_scaled(1.0, vec![0.5], vec![0])),
+            LeafValue::Linear(LinearLeaf::identity_scaled(-2.0, vec![0.25], vec![1])),
+        )];
+        let initial = vec![10.0, 20.0, 30.0, 40.0];
+        let raw_features = vec![1.0, 10.0, 2.0];
+        let mut actual = initial.clone();
+
+        let result = apply_weighted_round_to_rows(
+            &mut actual,
+            &binned,
+            &stumps,
+            Some((&raw_features, 2)),
+            &[1, 3],
+            1.0,
+        );
+
+        assert!(matches!(result, Err(EngineError::ContractViolation(_))));
+        assert_eq!(actual, initial);
+    }
+
+    #[test]
+    fn restricted_rows_reject_prediction_length_mismatch_before_mutation() {
+        let binned = BinnedMatrix::new(4, 1, 3, vec![0, 1, 2, 3]).expect("valid binned matrix");
+        let stumps = vec![TrainedStump::new_unweighted(
+            scalar_split(1, true, false, None),
+            LeafValue::Scalar(1.5),
+            LeafValue::Scalar(-0.5),
+        )];
+        let initial = vec![10.0, 20.0, 30.0];
+        let mut actual = initial.clone();
+
+        let result = apply_weighted_round_to_rows(&mut actual, &binned, &stumps, None, &[1], 1.0);
+
+        assert!(matches!(result, Err(EngineError::ContractViolation(_))));
+        assert_eq!(actual, initial);
+    }
+
+    #[test]
+    fn restricted_rows_reject_zero_feature_count_before_mutation() {
+        let binned =
+            BinnedMatrix::new(4, 2, 3, vec![0, 0, 1, 0, 2, 0, 3, 0]).expect("valid binned matrix");
+        let stumps = vec![TrainedStump::new_unweighted(
+            scalar_split(1, true, false, None),
+            LeafValue::Linear(LinearLeaf::identity_scaled(1.0, vec![0.5], vec![0])),
+            LeafValue::Linear(LinearLeaf::identity_scaled(-2.0, vec![0.25], vec![1])),
+        )];
+        let initial = vec![10.0, 20.0, 30.0, 40.0];
+        let raw_features = vec![1.0];
+        let mut actual = initial.clone();
+
+        let result = apply_weighted_round_to_rows(
+            &mut actual,
+            &binned,
+            &stumps,
+            Some((&raw_features, 0)),
+            &[1, 3],
+            1.0,
+        );
+
+        assert!(matches!(result, Err(EngineError::ContractViolation(_))));
+        assert_eq!(actual, initial);
+    }
+
+    #[test]
+    fn restricted_rows_reject_raw_feature_count_mismatch_before_mutation() {
+        let binned =
+            BinnedMatrix::new(4, 2, 3, vec![0, 0, 1, 0, 2, 0, 3, 0]).expect("valid binned matrix");
+        let stumps = vec![TrainedStump::new_unweighted(
+            scalar_split(1, true, false, None),
+            LeafValue::Linear(LinearLeaf::identity_scaled(1.0, vec![0.5], vec![0])),
+            LeafValue::Linear(LinearLeaf::identity_scaled(-2.0, vec![0.25], vec![1])),
+        )];
+        let initial = vec![10.0, 20.0, 30.0, 40.0];
+        let raw_features = vec![1.0, 2.0, 3.0, 4.0];
+        let mut actual = initial.clone();
+
+        let result = apply_weighted_round_to_rows(
+            &mut actual,
+            &binned,
+            &stumps,
+            Some((&raw_features, 1)),
+            &[1, 3],
+            1.0,
+        );
+
+        assert!(matches!(result, Err(EngineError::ContractViolation(_))));
+        assert_eq!(actual, initial);
+    }
+
+    #[test]
+    fn restricted_rows_reject_duplicate_local_ids_before_mutation() {
+        let binned = BinnedMatrix::new(4, 1, 3, vec![0, 1, 2, 3]).expect("valid binned matrix");
+        let mut duplicate_split = scalar_split(0, true, false, None);
+        duplicate_split.node_id = 0;
+        let stumps = vec![
+            TrainedStump::new_unweighted(
+                scalar_split(1, true, false, None),
+                LeafValue::Scalar(1.5),
+                LeafValue::Scalar(-0.5),
+            ),
+            TrainedStump::new_unweighted(
+                duplicate_split,
+                LeafValue::Scalar(9.0),
+                LeafValue::Scalar(-9.0),
+            ),
+        ];
+        let initial = vec![10.0, 20.0, 30.0, 40.0];
+        let mut actual = initial.clone();
+
+        let result =
+            apply_weighted_round_to_rows(&mut actual, &binned, &stumps, None, &[1, 3], 1.0);
+
+        assert!(matches!(result, Err(EngineError::ContractViolation(_))));
+        assert_eq!(actual, initial);
+    }
+
+    #[test]
+    fn weighted_full_no_ops_ignore_malformed_unused_inputs() {
+        let binned = BinnedMatrix::new(2, 1, 1, vec![0, 1]).expect("valid binned matrix");
+        let malformed_raw = vec![1.0];
+        let initial = vec![10.0, 20.0];
+
+        let mut empty_stump_predictions = initial.clone();
+        let empty_result = apply_weighted_round_to_predictions(
+            &mut empty_stump_predictions,
+            &binned,
+            &[],
+            Some((&malformed_raw, 0)),
+            1.0,
+        );
+        assert_eq!(empty_result, Ok(()));
+        assert_eq!(empty_stump_predictions, initial);
+
+        let mut malformed_split = scalar_split(0, true, false, None);
+        malformed_split.feature_index = 1;
+        let malformed_stumps = vec![TrainedStump::new_unweighted(
+            malformed_split,
+            LeafValue::Scalar(1.0),
+            LeafValue::Scalar(-1.0),
+        )];
+        let mut zero_factor_predictions = initial.clone();
+        let mut zero_factor_accumulator = vec![3.0, 4.0];
+        let initial_accumulator = zero_factor_accumulator.clone();
+        let zero_result = apply_weighted_round_to_predictions_and_accumulator(
+            &mut zero_factor_predictions,
+            &mut zero_factor_accumulator,
+            &binned,
+            &malformed_stumps,
+            None,
+            0.0,
+            0.0,
+        );
+        assert_eq!(zero_result, Ok(()));
+        assert_eq!(zero_factor_predictions, initial);
+        assert_eq!(zero_factor_accumulator, initial_accumulator);
+    }
+
+    #[test]
+    fn restricted_no_ops_still_validate_malformed_inputs() {
+        let binned = BinnedMatrix::new(2, 1, 1, vec![0, 1]).expect("valid binned matrix");
+        let malformed_raw = vec![1.0];
+        let initial = vec![10.0, 20.0];
+
+        let mut empty_stump_predictions = initial.clone();
+        let empty_result = apply_weighted_round_to_rows(
+            &mut empty_stump_predictions,
+            &binned,
+            &[],
+            Some((&malformed_raw, 0)),
+            &[],
+            0.0,
+        );
+        assert!(matches!(
+            empty_result,
+            Err(EngineError::ContractViolation(_))
+        ));
+        assert_eq!(empty_stump_predictions, initial);
+
+        let mut malformed_split = scalar_split(0, true, false, None);
+        malformed_split.feature_index = 1;
+        let malformed_stumps = vec![TrainedStump::new_unweighted(
+            malformed_split,
+            LeafValue::Scalar(1.0),
+            LeafValue::Scalar(-1.0),
+        )];
+        let mut zero_factor_predictions = initial.clone();
+        let zero_result = apply_weighted_round_to_rows(
+            &mut zero_factor_predictions,
+            &binned,
+            &malformed_stumps,
+            None,
+            &[0],
+            0.0,
+        );
+        assert!(matches!(
+            zero_result,
+            Err(EngineError::ContractViolation(_))
+        ));
+        assert_eq!(zero_factor_predictions, initial);
     }
 
     #[test]

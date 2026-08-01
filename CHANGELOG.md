@@ -64,6 +64,18 @@
 
 ### Performance
 
+- **Reused selected-row prediction deltas for sampled scalar and multiclass
+  fits.** Eligible standard and GOSS rounds now retain the builder's selected-row
+  prediction updates and replay the accepted tree only for excluded rows, while
+  keeping committed and candidate buffers synchronized. A manifest-attested
+  same-host 10-case x 5-repetition benchmark preserved exact artifact and
+  prediction digests in all 50 pairs. Delta-sensitive native time was 0.7439x,
+  all-eligible native time was 0.7179x, and aggregate incremental RSS was
+  0.9410x versus baseline; the worst eligible median was 1.0376x, below the
+  1.08x limit. DART and quantile retain their full-replay lifecycle, while joint
+  multi-output training retains its independent path. Both shared full-tree
+  replay and restricted replay now use the matrix's logical missing bin for u16
+  routing, a separate correctness correction rather than a performance claim.
 - **Reused histogram, partition, and split-scan allocations during tree
   construction.** Consumed parent histogram storage now becomes the larger
   child's subtraction result, owned row partitioning retains one parent vector

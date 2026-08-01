@@ -59,6 +59,14 @@ pub(crate) fn allocate_dart_contribution_buffer(
     dart_enabled.then(|| vec![0.0; row_count])
 }
 
+#[inline]
+pub(crate) fn requires_full_prediction_replay(
+    dart_enabled: bool,
+    quantile_alpha: Option<f32>,
+) -> bool {
+    dart_enabled || quantile_alpha.is_some()
+}
+
 pub(crate) fn dense_projection_stump_counts(stumps: &[TrainedStump]) -> EngineResult<Vec<usize>> {
     let mut tree_ids = Vec::with_capacity(stumps.len());
     let mut previous_tree_id = None;
@@ -1385,7 +1393,10 @@ impl Trainer {
 
             // Shared row sampling across all K classes. In GOSS mode this
             // amplifies the sampled-low rows in every class buffer.
-            let root_row_indices = select_row_indices_for_round_multiclass(
+            let RoundRowSelection {
+                selected: root_row_indices,
+                excluded: excluded_row_indices,
+            } = select_row_indices_for_round_multiclass(
                 self.params.boosting_mode,
                 n,
                 controls.row_subsample,
@@ -1401,9 +1412,15 @@ impl Trainer {
             )?;
             let sampled_row_count = root_row_indices.len();
 
-            // Copy current predictions to candidates
-            for class_k in 0..k {
-                class_candidate_predictions[class_k].copy_from_slice(&class_predictions[class_k]);
+            // DART rewrites candidate predictions after dropout normalization,
+            // so retain its full-copy lifecycle. Non-DART candidates remain
+            // synchronized after accepted rounds and builders update selected
+            // rows in place.
+            if dart_params.is_some() {
+                for class_k in 0..k {
+                    class_candidate_predictions[class_k]
+                        .copy_from_slice(&class_predictions[class_k]);
+                }
             }
 
             // Record stump counts before this round
@@ -1511,17 +1528,29 @@ impl Trainer {
 
             for class_k in 0..k {
                 let round_stumps = &class_stumps[class_k][pre_round_counts[class_k]..];
-                class_candidate_predictions[class_k].copy_from_slice(&class_predictions[class_k]);
-                // Tree builders update only the sampled partition rows while constructing
-                // split statistics. Rebuild the candidate by walking the accepted tree over
-                // every training row so the training state matches inference semantics.
-                apply_weighted_round_to_predictions(
-                    &mut class_candidate_predictions[class_k],
-                    binned_matrix,
-                    round_stumps,
-                    Some((&dataset.matrix.values, dataset.matrix.feature_count)),
-                    1.0,
-                )?;
+                if dart_params.is_some() {
+                    class_candidate_predictions[class_k]
+                        .copy_from_slice(&class_predictions[class_k]);
+                    apply_weighted_round_to_predictions(
+                        &mut class_candidate_predictions[class_k],
+                        binned_matrix,
+                        round_stumps,
+                        Some((&dataset.matrix.values, dataset.matrix.feature_count)),
+                        1.0,
+                    )?;
+                } else {
+                    // Ordered result collection above makes this class-ordered
+                    // completion deterministic. Builders already applied this
+                    // round to selected rows, so replay only the complement.
+                    apply_weighted_round_to_rows(
+                        &mut class_candidate_predictions[class_k],
+                        binned_matrix,
+                        round_stumps,
+                        Some((&dataset.matrix.values, dataset.matrix.feature_count)),
+                        &excluded_row_indices,
+                        1.0,
+                    )?;
+                }
             }
 
             // v0.10.1 DART post-build: rescale the K new trees to
@@ -1632,6 +1661,12 @@ impl Trainer {
                         sampled_feature_count,
                         &per_class_diagnostics,
                     );
+                    if dart_params.is_none() {
+                        for class_k in 0..k {
+                            class_candidate_predictions[class_k]
+                                .copy_from_slice(&class_predictions[class_k]);
+                        }
+                    }
                     rounds_completed += 1;
                     continue;
                 }
@@ -1658,8 +1693,8 @@ impl Trainer {
                     || (in_warmup_phase && morph_state.is_some()));
             if loss_gate_active && loss_improvement < 0.0 {
                 // Truncate stumps so the model doesn't include this round's contribution.
-                // (`class_candidate_predictions` is reset from `class_predictions` at the
-                // top of each round, so the candidate state is implicitly rolled back.)
+                // Eligible class candidates persist across rounds, so the warmup continue
+                // path below explicitly rolls them back to committed predictions.
                 for class_k in 0..k {
                     class_stumps[class_k].truncate(pre_round_counts[class_k]);
                 }
@@ -1693,6 +1728,12 @@ impl Trainer {
                         sampled_feature_count,
                         &per_class_diagnostics,
                     );
+                    if dart_params.is_none() {
+                        for class_k in 0..k {
+                            class_candidate_predictions[class_k]
+                                .copy_from_slice(&class_predictions[class_k]);
+                        }
+                    }
                     rounds_completed += 1;
                     continue;
                 }
@@ -2180,6 +2221,8 @@ impl Trainer {
             } => Some((drop_rate, max_drop, normalize_type, sample_type)),
             _ => None,
         };
+        let requires_full_replay =
+            requires_full_prediction_replay(dart_params.is_some(), objective.quantile_alpha());
         // v0.10.0: DART + warm_start is now supported. See the dart_state
         // seeding logic below — `dart_state.tree_weights` is initialized from
         // `warm_start.initial_dart_tree_weights` when present, falling back
@@ -2634,7 +2677,10 @@ impl Trainer {
                     &mut projection_scratch,
                 )?;
             }
-            let root_row_indices = select_row_indices_for_round(
+            let RoundRowSelection {
+                selected: root_row_indices,
+                excluded: excluded_row_indices,
+            } = select_row_indices_for_round(
                 self.params.boosting_mode,
                 active_dataset.row_count(),
                 controls.row_subsample,
@@ -2673,7 +2719,9 @@ impl Trainer {
                 ms.update_ema_from_gradient_pairs(gradients, 0);
             }
 
-            candidate_predictions.copy_from_slice(&predictions);
+            if requires_full_replay {
+                candidate_predictions.copy_from_slice(&predictions);
+            }
 
             let morph_tree_ctx: Option<MorphTreeContext<'_>> =
                 morph_state.as_ref().map(|ms| MorphTreeContext {
@@ -2744,6 +2792,9 @@ impl Trainer {
                     // leaves below `min_abs_leaf_value`, so all splits get
                     // rejected. This is benign — LR will ramp up. Skip this
                     // round and continue.
+                    if !requires_full_replay {
+                        candidate_predictions.copy_from_slice(&predictions);
+                    }
                     rounds_completed += 1;
                     continue;
                 }
@@ -2774,17 +2825,29 @@ impl Trainer {
                 )?;
             }
 
-            candidate_predictions.copy_from_slice(&predictions);
-            // Tree builders update only the sampled partition rows while constructing split
-            // statistics. Rebuild the candidate by walking the accepted tree over every
-            // training row so the training state matches inference semantics.
-            apply_weighted_round_to_predictions(
-                &mut candidate_predictions,
-                binned_matrix,
-                &candidate_round_stumps,
-                raw_features_opt,
-                1.0,
-            )?;
+            if requires_full_replay {
+                // DART and quantile leaf refinement replace builder-side
+                // candidate updates, so preserve their full replay lifecycle.
+                candidate_predictions.copy_from_slice(&predictions);
+                apply_weighted_round_to_predictions(
+                    &mut candidate_predictions,
+                    binned_matrix,
+                    &candidate_round_stumps,
+                    raw_features_opt,
+                    1.0,
+                )?;
+            } else {
+                // Tree builders have already applied this round to selected
+                // rows. Replay just the complement to complete the candidate.
+                apply_weighted_round_to_rows(
+                    &mut candidate_predictions,
+                    binned_matrix,
+                    &candidate_round_stumps,
+                    raw_features_opt,
+                    &excluded_row_indices,
+                    1.0,
+                )?;
+            }
 
             // DART: rebuild `candidate_predictions` to reflect the
             // post-normalization weights. After `build_tree_*` returned,
@@ -2867,8 +2930,11 @@ impl Trainer {
                         validation_predictions = Some(backup);
                     }
                     // During warmup, slightly-negative loss improvements arise from
-                    // numerical noise at tiny LR. Skip this round and continue;
-                    // candidate predictions reset from current at the top of each round.
+                    // numerical noise at tiny LR. Skip this round and explicitly roll
+                    // the persistent eligible candidate back before the next round.
+                    if !requires_full_replay {
+                        candidate_predictions.copy_from_slice(&predictions);
+                    }
                     rounds_completed += 1;
                     continue;
                 }
@@ -3028,7 +3094,11 @@ impl Trainer {
                 candidate_validation_loss = Some(next_validation_loss);
             }
 
-            std::mem::swap(&mut predictions, &mut candidate_predictions);
+            if requires_full_replay {
+                std::mem::swap(&mut predictions, &mut candidate_predictions);
+            } else {
+                predictions.copy_from_slice(&candidate_predictions);
+            }
             current_loss = candidate_loss;
             loss_per_completed_round.push(candidate_loss);
             sampled_rows_per_completed_round.push(sampled_row_count);
