@@ -21,7 +21,8 @@ pub(crate) fn compute_feature_means_from_matrix(
     feature_count: usize,
     row_count: usize,
 ) -> Option<Vec<f32>> {
-    if feature_count == 0 || row_count == 0 || values.len() < row_count * feature_count {
+    let required_len = row_count.checked_mul(feature_count)?;
+    if feature_count == 0 || row_count == 0 || values.len() < required_len {
         return None;
     }
     let mut sums = vec![0.0_f64; feature_count];

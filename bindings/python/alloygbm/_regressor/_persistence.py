@@ -250,7 +250,8 @@ class _PersistenceMixin:
         model._float_thresholds_converted = False
         # Eagerly reconstruct the native predictor so predict() uses the fast path.
         model._native_predictor_handle = cls._build_native_predictor_handle(
-            artifact_bytes
+            artifact_bytes,
+            required=True,
         )
         model._convert_predictor_thresholds_to_float()
 
@@ -301,21 +302,30 @@ class _PersistenceMixin:
         return self._artifact_bytes
 
     @staticmethod
-    def _build_native_predictor_handle(artifact_bytes: bytes) -> object | None:
+    def _build_native_predictor_handle(
+        artifact_bytes: bytes,
+        *,
+        required: bool = False,
+    ) -> object | None:
         try:
             native_predictor_handle_class = _base._load_native_predictor_handle_class()
         except RuntimeError:
             return None
         try:
             return native_predictor_handle_class(artifact_bytes, strict=True)
-        except Exception:
-            pass
-        # Fallback: non-strict loading (required for multi-class models which
-        # use MultiClassTrees section instead of the dual Trees+PredictorLayout
-        # format that strict mode requires).
+        except Exception as strict_error:
+            # Compatibility mode accepts legacy Trees-only and multiclass
+            # artifacts that do not satisfy the single-output strict contract.
+            strict_error_message = str(strict_error)
         try:
             return native_predictor_handle_class(artifact_bytes, strict=False)
-        except Exception:
+        except Exception as compatibility_error:
+            if required:
+                raise RuntimeError(
+                    "native predictor rejected the model artifact in both strict "
+                    f"and compatibility modes (strict: {strict_error_message}; "
+                    f"compatibility: {compatibility_error})"
+                ) from compatibility_error
             return None
 
     def _convert_predictor_thresholds_to_float(self) -> None:

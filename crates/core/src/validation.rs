@@ -1,6 +1,9 @@
 use crate::artifact_format::{
-    MAX_MODEL_ARTIFACT_SECTIONS, MAX_MODEL_SECTION_PAYLOAD_BYTES, MODEL_BINARY_HEADER_LEN,
+    MAX_MODEL_ARTIFACT_BYTES, MAX_MODEL_ARTIFACT_SECTIONS, MAX_MODEL_CLASSES,
+    MAX_MODEL_FEATURE_NAME_BYTES, MAX_MODEL_FEATURES, MAX_MODEL_METADATA_BYTES,
+    MAX_MODEL_OBJECTIVE_BYTES, MAX_MODEL_SECTION_PAYLOAD_BYTES, MODEL_BINARY_HEADER_LEN,
     MODEL_BINARY_MAGIC, MODEL_FORMAT_V1, MODEL_SECTION_DESCRIPTOR_LEN, ModelIoContractV1,
+    ModelMetadata,
 };
 use crate::binned::{BinStorage, BinnedMatrix};
 use crate::config::{BoostingMode, LeafModelKind, LeafSolverKind, TrainParams, TreeGrowth};
@@ -317,46 +320,46 @@ pub fn validate_dataset_schema(schema: &DatasetSchema) -> CoreResult<()> {
 }
 
 pub fn validate_dataset_matrix(matrix: &DatasetMatrix) -> CoreResult<()> {
-    if matrix.row_count == 0 {
-        return Err(CoreError::Validation(
-            "row_count must be greater than 0".to_string(),
-        ));
-    }
-    if matrix.feature_count == 0 {
-        return Err(CoreError::Validation(
-            "feature_count must be greater than 0".to_string(),
-        ));
-    }
+    let expected_len = checked_dense_element_count(matrix.row_count, matrix.feature_count)?;
     // Allow empty values for metadata-only matrices (no categorical encoding).
-    if !matrix.values.is_empty() && matrix.values.len() != matrix.row_count * matrix.feature_count {
+    if !matrix.values.is_empty() && matrix.values.len() != expected_len {
         return Err(CoreError::Validation(format!(
             "matrix values length {} does not match row_count * feature_count {}",
             matrix.values.len(),
-            matrix.row_count * matrix.feature_count
+            expected_len
         )));
     }
     Ok(())
 }
 
 pub fn validate_dense_matrix_view(matrix: &DenseMatrixView<'_>) -> CoreResult<()> {
-    if matrix.row_count == 0 {
+    let expected_len = checked_dense_element_count(matrix.row_count, matrix.feature_count)?;
+    if matrix.values.len() != expected_len {
+        return Err(CoreError::Validation(format!(
+            "matrix values length {} does not match row_count * feature_count {}",
+            matrix.values.len(),
+            expected_len
+        )));
+    }
+    Ok(())
+}
+
+pub fn checked_dense_element_count(row_count: usize, feature_count: usize) -> CoreResult<usize> {
+    if row_count == 0 {
         return Err(CoreError::Validation(
             "row_count must be greater than 0".to_string(),
         ));
     }
-    if matrix.feature_count == 0 {
+    if feature_count == 0 {
         return Err(CoreError::Validation(
             "feature_count must be greater than 0".to_string(),
         ));
     }
-    if matrix.values.len() != matrix.row_count * matrix.feature_count {
-        return Err(CoreError::Validation(format!(
-            "matrix values length {} does not match row_count * feature_count {}",
-            matrix.values.len(),
-            matrix.row_count * matrix.feature_count
-        )));
-    }
-    Ok(())
+    row_count.checked_mul(feature_count).ok_or_else(|| {
+        CoreError::Validation(format!(
+            "row_count * feature_count overflows usize ({row_count} * {feature_count})"
+        ))
+    })
 }
 
 pub fn validate_columnar_matrix_view(matrix: &ColumnarMatrixView<'_>) -> CoreResult<()> {
@@ -502,7 +505,7 @@ pub fn validate_binned_matrix(matrix: &BinnedMatrix) -> CoreResult<()> {
             "feature bundle map dimensions do not match binned matrix".to_string(),
         ));
     }
-    let expected_len = matrix.row_count * matrix.storage_feature_count;
+    let expected_len = checked_dense_element_count(matrix.row_count, matrix.storage_feature_count)?;
     if matrix.bins_col_adaptive.len() != expected_len {
         return Err(CoreError::Validation(format!(
             "column-major bins length {} does not match row_count * feature_count {}",
@@ -558,10 +561,11 @@ pub fn validate_model_contract_v1(contract: &ModelIoContractV1) -> CoreResult<()
             contract.header.format_version
         )));
     }
-    if contract.metadata.format_version != MODEL_FORMAT_V1 {
+    validate_model_metadata(&contract.metadata)?;
+    if contract.header.metadata_json_len as usize > MAX_MODEL_METADATA_BYTES {
         return Err(CoreError::Serialization(format!(
-            "metadata format_version {}, expected {MODEL_FORMAT_V1}",
-            contract.metadata.format_version
+            "metadata_json_len {} exceeds maximum {MAX_MODEL_METADATA_BYTES}",
+            contract.header.metadata_json_len
         )));
     }
     if contract.sections.len() != contract.header.section_count as usize {
@@ -619,7 +623,65 @@ pub fn validate_model_contract_v1(contract: &ModelIoContractV1) -> CoreResult<()
             .checked_add(section.length)
             .ok_or_else(|| CoreError::Serialization("section offset overflow".to_string()))?;
     }
+    if expected_offset > MAX_MODEL_ARTIFACT_BYTES {
+        return Err(CoreError::Serialization(format!(
+            "artifact length {expected_offset} exceeds maximum {MAX_MODEL_ARTIFACT_BYTES}"
+        )));
+    }
 
+    Ok(())
+}
+
+pub fn validate_model_metadata(metadata: &ModelMetadata) -> CoreResult<()> {
+    if metadata.format_version != MODEL_FORMAT_V1 {
+        return Err(CoreError::Serialization(format!(
+            "metadata format_version {}, expected {MODEL_FORMAT_V1}",
+            metadata.format_version
+        )));
+    }
+    if metadata.feature_names.is_empty() {
+        return Err(CoreError::Validation(
+            "metadata feature_names must contain at least one feature".to_string(),
+        ));
+    }
+    if metadata.feature_names.len() > MAX_MODEL_FEATURES {
+        return Err(CoreError::Validation(format!(
+            "metadata feature count {} exceeds maximum {MAX_MODEL_FEATURES}",
+            metadata.feature_names.len()
+        )));
+    }
+    for (index, name) in metadata.feature_names.iter().enumerate() {
+        if name.len() > MAX_MODEL_FEATURE_NAME_BYTES {
+            return Err(CoreError::Validation(format!(
+                "metadata feature name {index} length {} exceeds maximum {MAX_MODEL_FEATURE_NAME_BYTES}",
+                name.len()
+            )));
+        }
+    }
+    if metadata.objective.is_empty() {
+        return Err(CoreError::Validation(
+            "metadata objective must not be empty".to_string(),
+        ));
+    }
+    if metadata.objective.len() > MAX_MODEL_OBJECTIVE_BYTES {
+        return Err(CoreError::Validation(format!(
+            "metadata objective length {} exceeds maximum {MAX_MODEL_OBJECTIVE_BYTES}",
+            metadata.objective.len()
+        )));
+    }
+    if let Some(num_classes) = metadata.num_classes {
+        let num_classes = num_classes as usize;
+        if !(2..=MAX_MODEL_CLASSES).contains(&num_classes) {
+            return Err(CoreError::Validation(format!(
+                "metadata num_classes {num_classes} must be in [2, {MAX_MODEL_CLASSES}]"
+            )));
+        }
+    }
+    if metadata.objective == "multiclass_softmax" && metadata.num_classes.is_none() {
+        return Err(CoreError::Validation(
+            "multiclass_softmax metadata requires num_classes".to_string(),
+        ));
+    }
     Ok(())
 }
 

@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **Hardened model artifact and dense-input trust boundaries.** Artifact writers,
+  contract validation, engine/predictor loaders, and optional section decoders
+  now share explicit resource budgets, checked count arithmetic, finite-value
+  checks, and cross-section reference validation before allocation. Scalar and
+  multiclass tree sections must match their objective metadata, corrupt embedded
+  artifacts fail during Python model loading, dense public APIs reject shape
+  overflow, and SHAP binning contexts reject malformed cuts, ranges, and reserved
+  missing-bin values. The v1 artifact format and bytes for valid models are
+  unchanged.
+
 - **Made active scalar monotone constraints globally enforceable.** Constrained
   level-wise and leaf-wise trees now propagate finite output bounds and project
   accepted scalar child outputs into inherited intervals, while preserving the

@@ -770,6 +770,9 @@ pub(crate) fn explain_interactions_from_model(
     binning: Option<&BinningContext>,
 ) -> ShapResult<ShapInteractionBatch> {
     validate_rows(rows, model.feature_count)?;
+    if let Some(context) = binning {
+        context.validate(model.feature_count)?;
+    }
 
     // Linear leaves are fully supported for SHAP interactions: we run standard
     // TreeSHAP interactions on the constant parts of the leaves, then attribute

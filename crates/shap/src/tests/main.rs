@@ -388,6 +388,68 @@ fn binning_context_quantile_matches_predictor_conversion() {
 }
 
 #[test]
+fn binning_context_rejects_invalid_quantile_cuts() {
+    for cuts in [vec![0.1, f32::NAN], vec![0.1, 0.1], vec![0.2, 0.1]] {
+        let context = BinningContext::Quantile {
+            feature_cuts: vec![cuts],
+        };
+        let error = context
+            .validate(1)
+            .expect_err("invalid quantile cuts must fail validation");
+        assert!(error.to_string().contains("feature 0"));
+    }
+
+    let oversized = BinningContext::Quantile {
+        feature_cuts: vec![vec![0.0; alloygbm_core::MAX_MODEL_CUTS_PER_FEATURE + 1]],
+    };
+    let error = oversized
+        .validate(1)
+        .expect_err("oversized quantile cut tables must fail validation");
+    assert!(error.to_string().contains("exceeds maximum"));
+}
+
+#[test]
+fn binning_context_rejects_invalid_linear_ranges() {
+    let context = BinningContext::Linear {
+        feature_mins: vec![2.0],
+        feature_maxs: vec![1.0],
+        max_data_bin: 254,
+    };
+    let error = context
+        .validate(1)
+        .expect_err("reversed feature ranges must fail validation");
+    assert!(error.to_string().contains("min <= max"));
+}
+
+#[test]
+fn interaction_explanation_rejects_malformed_binning_context() {
+    let artifact = fixture_model()
+        .to_artifact_bytes()
+        .expect("artifact serializes");
+    let rows = vec![vec![0.0, 0.0]];
+    let context = BinningContext::Quantile {
+        feature_cuts: vec![vec![0.5]],
+    };
+
+    let error = explain_interactions_from_artifact_bytes_with_binning(&artifact, &rows, &context)
+        .expect_err("mismatched interaction binning must fail without indexing");
+    assert!(error.to_string().contains("feature_cuts length"));
+}
+
+#[test]
+fn binning_context_rejects_missing_bin_as_data_bin() {
+    let context = BinningContext::Linear {
+        feature_mins: vec![0.0],
+        feature_maxs: vec![1.0],
+        max_data_bin: u16::MAX,
+    };
+    let error = context
+        .validate(1)
+        .expect_err("the u16 missing sentinel cannot be a data bin");
+    assert!(error.to_string().contains("max_data_bin"));
+}
+
+#[test]
 fn binning_context_linear_rank_inverts_rank_mapping() {
     // For a rank-flagged feature with 5 unique sorted values and
     // max_data_bin = 4, the rank-to-bin formula is bin = round(rank).

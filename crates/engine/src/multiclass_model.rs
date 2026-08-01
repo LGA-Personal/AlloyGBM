@@ -1,9 +1,9 @@
 use alloygbm_core::{
     CategoricalStatePayloadV1, DartTreeWeightsPayload, Device, DroMetadataPayload, LeafValue,
-    LinearLeafCoefficientsPayload, LinearLeafEntry, MODEL_FORMAT_V1, ModelMetadata,
-    ModelSectionKind, MorphMetadataPayload, NodeStats, SplitCandidate,
-    decode_optional_categorical_state_section_v1, decode_optional_dart_tree_weights_section,
-    decode_optional_dro_metadata_artifact_section,
+    LinearLeafCoefficientsPayload, LinearLeafEntry, MAX_MODEL_CLASSES, MAX_MODEL_FEATURES,
+    MAX_MODEL_STUMPS, MODEL_FORMAT_V1, ModelMetadata, ModelSectionKind, MorphMetadataPayload,
+    NodeStats, SplitCandidate, decode_optional_categorical_state_section_v1,
+    decode_optional_dart_tree_weights_section, decode_optional_dro_metadata_artifact_section,
     decode_optional_linear_leaf_coefficients_section,
     decode_optional_morph_metadata_artifact_section, deserialize_model_artifact_v1,
     encode_categorical_state_payload_v1, encode_dart_tree_weights_payload,
@@ -12,7 +12,9 @@ use alloygbm_core::{
     validate_categorical_state_payload_v1,
 };
 
-use crate::artifact::{read_f32_le, read_u16_le, read_u32_le, required_single_section};
+use crate::artifact::{
+    decode_predictor_layout_payload, read_f32_le, read_u16_le, read_u32_le, required_single_section,
+};
 use crate::error::{EngineError, EngineResult};
 use crate::tree_node::TREE_NODE_STRIDE;
 use crate::{IterationDiagnostics, IterationStopReason, ResolvedTrainingPolicy, TrainedStump};
@@ -55,6 +57,7 @@ impl MultiClassTrainedModel {
     }
 
     pub fn to_artifact_bytes(&self) -> EngineResult<Vec<u8>> {
+        validate_multiclass_model_for_serialization(self)?;
         let feature_count_u32 = u32::try_from(self.feature_count).map_err(|_| {
             EngineError::ContractViolation("feature_count exceeds u32::MAX".to_string())
         })?;
@@ -212,6 +215,13 @@ impl MultiClassTrainedModel {
     pub fn from_artifact_bytes(bytes: &[u8]) -> EngineResult<Self> {
         let parsed = deserialize_model_artifact_v1(bytes).map_err(EngineError::from)?;
 
+        if parsed.contract.metadata.objective != "multiclass_softmax" {
+            return Err(EngineError::ContractViolation(format!(
+                "MultiClassTrees requires objective multiclass_softmax, found {:?}",
+                parsed.contract.metadata.objective
+            )));
+        }
+
         let mc_section =
             required_single_section(&parsed.sections, ModelSectionKind::MultiClassTrees)?;
 
@@ -232,8 +242,45 @@ impl MultiClassTrainedModel {
         let num_classes = read_u32_le(payload, 4)? as usize;
         let feature_count = read_u32_le(payload, 8)? as usize;
 
+        if !(2..=MAX_MODEL_CLASSES).contains(&num_classes) {
+            return Err(EngineError::ContractViolation(format!(
+                "multiclass payload num_classes {num_classes} must be in [2, {MAX_MODEL_CLASSES}]"
+            )));
+        }
+        if feature_count == 0 || feature_count > MAX_MODEL_FEATURES {
+            return Err(EngineError::ContractViolation(format!(
+                "multiclass payload feature_count {feature_count} must be in [1, {MAX_MODEL_FEATURES}]"
+            )));
+        }
+        if parsed.contract.metadata.num_classes != Some(num_classes as u32) {
+            return Err(EngineError::ContractViolation(format!(
+                "metadata num_classes {:?} does not match multiclass payload num_classes {num_classes}",
+                parsed.contract.metadata.num_classes
+            )));
+        }
+        let metadata_feature_count = parsed.contract.metadata.feature_names.len();
+        if feature_count != metadata_feature_count {
+            return Err(EngineError::ContractViolation(format!(
+                "multiclass payload feature_count {feature_count} does not match metadata feature count {metadata_feature_count}"
+            )));
+        }
+        let layout_section =
+            required_single_section(&parsed.sections, ModelSectionKind::PredictorLayout)?;
+        let predictor_layout = decode_predictor_layout_payload(&layout_section.payload)?;
+        if predictor_layout.feature_count != feature_count {
+            return Err(EngineError::ContractViolation(format!(
+                "predictor layout feature_count {} does not match multiclass payload feature_count {feature_count}",
+                predictor_layout.feature_count
+            )));
+        }
+
         let baselines_start = MC_HEADER_SIZE;
-        let baselines_end = baselines_start + num_classes * 4;
+        let class_bytes = num_classes.checked_mul(4).ok_or_else(|| {
+            EngineError::ContractViolation("multiclass class table length overflow".to_string())
+        })?;
+        let baselines_end = baselines_start.checked_add(class_bytes).ok_or_else(|| {
+            EngineError::ContractViolation("multiclass baseline offset overflow".to_string())
+        })?;
         if payload.len() < baselines_end {
             return Err(EngineError::ContractViolation(
                 "multiclass trees payload too small for baselines".to_string(),
@@ -241,11 +288,19 @@ impl MultiClassTrainedModel {
         }
         let mut baseline_predictions = Vec::with_capacity(num_classes);
         for k in 0..num_classes {
-            baseline_predictions.push(read_f32_le(payload, baselines_start + k * 4)?);
+            let baseline = read_f32_le(payload, baselines_start + k * 4)?;
+            if !baseline.is_finite() {
+                return Err(EngineError::ContractViolation(format!(
+                    "multiclass baseline {k} must be finite"
+                )));
+            }
+            baseline_predictions.push(baseline);
         }
 
         let counts_start = baselines_end;
-        let counts_end = counts_start + num_classes * 4;
+        let counts_end = counts_start.checked_add(class_bytes).ok_or_else(|| {
+            EngineError::ContractViolation("multiclass stump count offset overflow".to_string())
+        })?;
         if payload.len() < counts_end {
             return Err(EngineError::ContractViolation(
                 "multiclass trees payload too small for stump counts".to_string(),
@@ -257,9 +312,23 @@ impl MultiClassTrainedModel {
         }
 
         const STUMP_SIZE: usize = 32;
-        let total_stumps: usize = stump_counts.iter().sum();
+        let total_stumps = stump_counts.iter().try_fold(0usize, |total, &count| {
+            total.checked_add(count).ok_or_else(|| {
+                EngineError::ContractViolation("multiclass stump count overflow".to_string())
+            })
+        })?;
+        if total_stumps > MAX_MODEL_STUMPS {
+            return Err(EngineError::ContractViolation(format!(
+                "multiclass stump count {total_stumps} exceeds maximum {MAX_MODEL_STUMPS}"
+            )));
+        }
         let stumps_start = counts_end;
-        let expected_len = stumps_start + total_stumps * STUMP_SIZE;
+        let stump_bytes = total_stumps.checked_mul(STUMP_SIZE).ok_or_else(|| {
+            EngineError::ContractViolation("multiclass stump payload length overflow".to_string())
+        })?;
+        let expected_len = stumps_start.checked_add(stump_bytes).ok_or_else(|| {
+            EngineError::ContractViolation("multiclass payload length overflow".to_string())
+        })?;
         if payload.len() != expected_len {
             return Err(EngineError::ContractViolation(format!(
                 "multiclass trees payload length {} does not match expected {expected_len}",
@@ -276,6 +345,11 @@ impl MultiClassTrainedModel {
                 let feature_index = read_u32_le(payload, offset + 4)?;
                 let threshold_bin = read_u16_le(payload, offset + 8)?;
                 let flags = read_u16_le(payload, offset + 10)?;
+                if flags & !3 != 0 {
+                    return Err(EngineError::ContractViolation(format!(
+                        "multiclass stump contains unsupported flags {flags:#x}"
+                    )));
+                }
                 let default_left = (flags & 1) != 0;
                 let is_categorical = (flags & 2) != 0;
                 let gain = read_f32_le(payload, offset + 12)?;
@@ -283,6 +357,20 @@ impl MultiClassTrainedModel {
                 let right_leaf_value = read_f32_le(payload, offset + 20)?;
                 let left_count = read_u32_le(payload, offset + 24)?;
                 let right_count = read_u32_le(payload, offset + 28)?;
+
+                if feature_index as usize >= feature_count {
+                    return Err(EngineError::ContractViolation(format!(
+                        "multiclass stump split feature_index {feature_index} exceeds model feature_count {feature_count}"
+                    )));
+                }
+                if !gain.is_finite()
+                    || !left_leaf_value.is_finite()
+                    || !right_leaf_value.is_finite()
+                {
+                    return Err(EngineError::ContractViolation(
+                        "multiclass stump contains non-finite gain or leaf value".to_string(),
+                    ));
+                }
 
                 stumps.push(TrainedStump {
                     split: SplitCandidate {
@@ -351,19 +439,29 @@ impl MultiClassTrainedModel {
             }
             for entry in ll_payload.entries {
                 let global_idx = entry.stump_idx as usize;
+                if global_idx >= total_stumps {
+                    return Err(EngineError::ContractViolation(format!(
+                        "linear leaf stump index {} exceeds multiclass stump count {total_stumps}",
+                        entry.stump_idx
+                    )));
+                }
                 let class_idx = prefix[1..].partition_point(|&p| p <= global_idx);
-                if class_idx < class_stumps.len() {
-                    let stump_idx = global_idx - prefix[class_idx];
-                    if stump_idx < class_stumps[class_idx].len() {
-                        if let Some(ll) = entry.left_leaf {
-                            class_stumps[class_idx][stump_idx].left_leaf_value =
-                                LeafValue::Linear(ll);
-                        }
-                        if let Some(rl) = entry.right_leaf {
-                            class_stumps[class_idx][stump_idx].right_leaf_value =
-                                LeafValue::Linear(rl);
-                        }
-                    }
+                let stump_idx = global_idx - prefix[class_idx];
+                if let Some(ll) = entry.left_leaf {
+                    validate_multiclass_linear_leaf_features(
+                        &ll.regressor_features,
+                        feature_count,
+                        entry.stump_idx,
+                    )?;
+                    class_stumps[class_idx][stump_idx].left_leaf_value = LeafValue::Linear(ll);
+                }
+                if let Some(rl) = entry.right_leaf {
+                    validate_multiclass_linear_leaf_features(
+                        &rl.regressor_features,
+                        feature_count,
+                        entry.stump_idx,
+                    )?;
+                    class_stumps[class_idx][stump_idx].right_leaf_value = LeafValue::Linear(rl);
                 }
             }
         }
@@ -379,6 +477,106 @@ impl MultiClassTrainedModel {
             dro_metadata,
         })
     }
+}
+
+fn validate_multiclass_linear_leaf_features(
+    regressor_features: &[u32],
+    feature_count: usize,
+    stump_index: u32,
+) -> EngineResult<()> {
+    for &feature_index in regressor_features {
+        if feature_index as usize >= feature_count {
+            return Err(EngineError::ContractViolation(format!(
+                "linear leaf stump index {stump_index} regressor feature_index {feature_index} exceeds model feature_count {feature_count}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_multiclass_model_for_serialization(model: &MultiClassTrainedModel) -> EngineResult<()> {
+    if model.objective != "multiclass_softmax" {
+        return Err(EngineError::ContractViolation(format!(
+            "MultiClassTrees requires objective multiclass_softmax, found {:?}",
+            model.objective
+        )));
+    }
+    if !(2..=MAX_MODEL_CLASSES).contains(&model.num_classes) {
+        return Err(EngineError::ContractViolation(format!(
+            "num_classes {} must be in [2, {MAX_MODEL_CLASSES}]",
+            model.num_classes
+        )));
+    }
+    if model.feature_count == 0 || model.feature_count > MAX_MODEL_FEATURES {
+        return Err(EngineError::ContractViolation(format!(
+            "feature_count {} must be in [1, {MAX_MODEL_FEATURES}]",
+            model.feature_count
+        )));
+    }
+    if model.baseline_predictions.len() != model.num_classes
+        || model.class_stumps.len() != model.num_classes
+    {
+        return Err(EngineError::ContractViolation(format!(
+            "num_classes {} must match baseline count {} and class stump table count {}",
+            model.num_classes,
+            model.baseline_predictions.len(),
+            model.class_stumps.len()
+        )));
+    }
+    if model
+        .baseline_predictions
+        .iter()
+        .any(|value| !value.is_finite())
+    {
+        return Err(EngineError::ContractViolation(
+            "multiclass baselines must be finite".to_string(),
+        ));
+    }
+    let total_stumps = model
+        .class_stumps
+        .iter()
+        .try_fold(0usize, |total, stumps| total.checked_add(stumps.len()))
+        .ok_or_else(|| {
+            EngineError::ContractViolation("multiclass stump count overflow".to_string())
+        })?;
+    if total_stumps > MAX_MODEL_STUMPS {
+        return Err(EngineError::ContractViolation(format!(
+            "multiclass stump count {total_stumps} exceeds maximum {MAX_MODEL_STUMPS}"
+        )));
+    }
+    for (stump_index, stump) in model.class_stumps.iter().flatten().enumerate() {
+        if stump.split.feature_index as usize >= model.feature_count {
+            return Err(EngineError::ContractViolation(format!(
+                "stump {stump_index} split feature_index {} exceeds model feature_count {}",
+                stump.split.feature_index, model.feature_count
+            )));
+        }
+        if !stump.split.gain.is_finite()
+            || !stump.left_leaf_value.as_scalar().is_finite()
+            || !stump.right_leaf_value.as_scalar().is_finite()
+            || !stump.tree_weight.is_finite()
+            || stump.tree_weight < 0.0
+        {
+            return Err(EngineError::ContractViolation(format!(
+                "stump {stump_index} contains invalid gain, leaf value, or tree weight"
+            )));
+        }
+        if let LeafValue::Linear(leaf) = &stump.left_leaf_value {
+            validate_multiclass_linear_leaf_features(
+                &leaf.regressor_features,
+                model.feature_count,
+                stump_index as u32,
+            )?;
+        }
+        if let LeafValue::Linear(leaf) = &stump.right_leaf_value {
+            validate_multiclass_linear_leaf_features(
+                &leaf.regressor_features,
+                model.feature_count,
+                stump_index as u32,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// Summary from a multi-class training run.

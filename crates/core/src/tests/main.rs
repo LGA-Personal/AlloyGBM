@@ -17,6 +17,15 @@ fn validates_default_train_params() {
 }
 
 #[test]
+fn dense_shape_rejects_element_count_overflow() {
+    let err = checked_dense_element_count(usize::MAX, 2).expect_err("shape must overflow");
+    assert!(err.to_string().contains("row_count * feature_count"));
+
+    let err = checked_dense_element_count(1, 0).expect_err("zero features must fail");
+    assert!(err.to_string().contains("feature_count"));
+}
+
+#[test]
 fn train_params_default_has_no_neutralization_config() {
     let params = TrainParams::default();
     assert!(params.neutralization_config.is_none());
@@ -547,6 +556,33 @@ fn linear_leaf_coefficients_v2_roundtrip_preserves_scaled_metadata() {
 }
 
 #[test]
+fn linear_leaf_decoder_rejects_entry_count_that_cannot_fit_payload() {
+    let mut bytes = 2_u32.to_le_bytes().to_vec();
+    bytes.extend_from_slice(&1_000_u32.to_le_bytes());
+
+    let err = decode_linear_leaf_coefficients_payload(&bytes)
+        .expect_err("entry count must be checked before allocation");
+    assert!(err.to_string().contains("entry count 1000 does not fit"));
+}
+
+#[test]
+fn linear_leaf_decoder_rejects_trailing_bytes() {
+    let payload = LinearLeafCoefficientsPayload {
+        entries: vec![LinearLeafEntry {
+            stump_idx: 0,
+            left_leaf: Some(LinearLeaf::identity_scaled(0.25, vec![0.5], vec![0])),
+            right_leaf: None,
+        }],
+    };
+    let mut bytes = encode_linear_leaf_coefficients_payload(&payload);
+    bytes.push(0);
+
+    let err = decode_linear_leaf_coefficients_payload(&bytes)
+        .expect_err("trailing linear-leaf bytes must be rejected");
+    assert!(err.to_string().contains("trailing"));
+}
+
+#[test]
 fn metadata_json_ignores_unknown_future_fields() {
     let json = concat!(
         "{",
@@ -780,6 +816,103 @@ fn model_artifact_deserialize_rejects_excessive_section_length_before_payload_co
 }
 
 #[test]
+fn model_artifact_deserialize_rejects_excessive_metadata_before_json_decode() {
+    let bytes = ModelBinaryHeader::new(0, (MAX_MODEL_METADATA_BYTES + 1) as u32)
+        .encode()
+        .to_vec();
+
+    let err = deserialize_model_artifact_v1(&bytes)
+        .expect_err("excessive metadata should be rejected before JSON decode");
+    match err {
+        CoreError::Serialization(message) => {
+            assert!(message.contains("metadata json length"));
+            assert!(message.contains("exceeds"));
+        }
+        other => panic!("expected serialization error, got {other:?}"),
+    }
+}
+
+#[test]
+fn model_metadata_rejects_invalid_resource_and_class_contracts() {
+    let cases = [
+        ModelMetadata {
+            feature_names: Vec::new(),
+            ..sample_metadata()
+        },
+        ModelMetadata {
+            feature_names: vec!["x".repeat(MAX_MODEL_FEATURE_NAME_BYTES + 1)],
+            ..sample_metadata()
+        },
+        ModelMetadata {
+            objective: String::new(),
+            ..sample_metadata()
+        },
+        ModelMetadata {
+            objective: "x".repeat(MAX_MODEL_OBJECTIVE_BYTES + 1),
+            ..sample_metadata()
+        },
+        ModelMetadata {
+            num_classes: Some(1),
+            ..sample_metadata()
+        },
+        ModelMetadata {
+            objective: "multiclass_softmax".to_string(),
+            num_classes: None,
+            ..sample_metadata()
+        },
+    ];
+
+    for metadata in cases {
+        assert!(
+            validate_model_metadata(&metadata).is_err(),
+            "metadata should be rejected: {metadata:?}"
+        );
+    }
+}
+
+#[test]
+fn model_contract_rejects_aggregate_artifact_over_budget() {
+    let metadata = sample_metadata();
+    let metadata_json_len = serialize_metadata_json(&metadata).len() as u32;
+    let payload_start = (MODEL_BINARY_HEADER_LEN + 2 * MODEL_SECTION_DESCRIPTOR_LEN) as u64
+        + metadata_json_len as u64;
+    let contract = ModelIoContractV1 {
+        header: ModelBinaryHeader::new(2, metadata_json_len),
+        sections: vec![
+            ModelSectionDescriptor {
+                kind: ModelSectionKind::Trees,
+                offset: payload_start,
+                length: artifact_format::MAX_MODEL_SECTION_PAYLOAD_BYTES,
+            },
+            ModelSectionDescriptor {
+                kind: ModelSectionKind::PredictorLayout,
+                offset: payload_start + artifact_format::MAX_MODEL_SECTION_PAYLOAD_BYTES,
+                length: artifact_format::MAX_MODEL_SECTION_PAYLOAD_BYTES,
+            },
+        ],
+        metadata,
+    };
+
+    let err = validate_model_contract_v1(&contract)
+        .expect_err("aggregate artifact larger than the budget must fail");
+    assert!(err.to_string().contains("artifact length"));
+    assert!(err.to_string().contains("exceeds"));
+}
+
+#[test]
+fn model_contract_rejects_metadata_over_budget() {
+    let contract = ModelIoContractV1 {
+        header: ModelBinaryHeader::new(0, (MAX_MODEL_METADATA_BYTES + 1) as u32),
+        sections: Vec::new(),
+        metadata: sample_metadata(),
+    };
+
+    let err = validate_model_contract_v1(&contract)
+        .expect_err("metadata larger than the budget must fail");
+    assert!(err.to_string().contains("metadata_json_len"));
+}
+
+#[test]
 fn categorical_state_payload_roundtrip() {
     let payload = CategoricalStatePayloadV1 {
         format_version: CATEGORICAL_STATE_FORMAT_V1,
@@ -816,6 +949,45 @@ fn categorical_state_payload_decode_rejects_unknown_flags() {
         decode_categorical_state_payload_v1(&bytes),
         Err(CoreError::Serialization(_))
     ));
+}
+
+#[test]
+fn native_categorical_decoder_rejects_stump_count_that_cannot_fit_payload() {
+    let mut bytes = 0_u32.to_le_bytes().to_vec();
+    bytes.extend_from_slice(&1_000_u32.to_le_bytes());
+
+    let err = decode_native_categorical_splits_payload(&bytes)
+        .expect_err("stump count must be checked before allocation");
+    assert!(err.to_string().contains("stump count 1000 does not fit"));
+}
+
+#[test]
+fn native_categorical_decoder_rejects_trailing_bytes() {
+    let payload = NativeCategoricalSplitsPayload {
+        native_categorical_feature_indices: vec![0],
+        stump_bitsets: vec![(0, vec![1])],
+    };
+    let mut bytes = encode_native_categorical_splits_payload(&payload).expect("payload encodes");
+    bytes.push(0);
+
+    let err = decode_native_categorical_splits_payload(&bytes)
+        .expect_err("trailing native-categorical bytes must be rejected");
+    assert!(err.to_string().contains("trailing"));
+}
+
+#[test]
+fn native_categorical_encoder_rejects_invalid_reference_layout() {
+    let unsorted_features = NativeCategoricalSplitsPayload {
+        native_categorical_feature_indices: vec![2, 1],
+        stump_bitsets: vec![(0, vec![1])],
+    };
+    assert!(encode_native_categorical_splits_payload(&unsorted_features).is_err());
+
+    let duplicate_stumps = NativeCategoricalSplitsPayload {
+        native_categorical_feature_indices: vec![1],
+        stump_bitsets: vec![(0, vec![1]), (0, vec![2])],
+    };
+    assert!(encode_native_categorical_splits_payload(&duplicate_stumps).is_err());
 }
 
 #[test]
@@ -1041,6 +1213,21 @@ fn dro_leaf_gain_uses_same_effective_gradient_as_leaf_solve() {
 }
 
 #[test]
+fn dro_metadata_rejects_trailing_bytes() {
+    let mut bytes = encode_dro_metadata_payload(&DroMetadataPayload {
+        config: DroConfig {
+            radius: 0.25,
+            metric: DroMetric::Wasserstein,
+        },
+    });
+    bytes.push(0);
+
+    let err = decode_dro_metadata_payload(&bytes)
+        .expect_err("fixed-size DRO metadata must reject trailing bytes");
+    assert!(err.to_string().contains("length"));
+}
+
+#[test]
 fn validate_train_params_accepts_morph_config() {
     let p = TrainParams {
         morph_config: Some(MorphConfig::default()),
@@ -1190,6 +1377,22 @@ fn morph_metadata_decode_rejects_unknown_lr_kind() {
 }
 
 #[test]
+fn morph_metadata_decode_rejects_trailing_bytes() {
+    let payload = MorphMetadataPayload {
+        config: MorphConfig::default(),
+        final_iteration: 1,
+        final_total: 2,
+        ema_stats: Vec::new(),
+    };
+    let mut bytes = encode_morph_metadata_payload(&payload);
+    bytes.push(0);
+
+    let err = decode_optional_morph_metadata_section(&bytes)
+        .expect_err("trailing morph metadata bytes must be rejected");
+    assert!(err.to_string().contains("length"));
+}
+
+#[test]
 fn morph_metadata_artifact_round_trip() {
     let metadata = sample_metadata();
     let morph_payload = MorphMetadataPayload {
@@ -1328,6 +1531,20 @@ fn feature_baseline_payload_rejects_short_buffer() {
 }
 
 #[test]
+fn feature_baseline_payload_rejects_trailing_and_non_finite_values() {
+    let mut trailing = encode_feature_baseline_payload(&FeatureBaselinePayload {
+        feature_means: vec![1.0],
+    });
+    trailing.push(0);
+    assert!(decode_feature_baseline_payload(&trailing).is_err());
+
+    let non_finite = encode_feature_baseline_payload(&FeatureBaselinePayload {
+        feature_means: vec![f32::NAN],
+    });
+    assert!(decode_feature_baseline_payload(&non_finite).is_err());
+}
+
+#[test]
 fn feature_baseline_section_kind_round_trips() {
     // Variant-id stability is part of the on-disk contract; if this test
     // fails, an existing artifact's section was renumbered.
@@ -1401,6 +1618,23 @@ fn multi_output_leaf_values_bad_version_errors() {
 }
 
 #[test]
+fn multi_output_leaf_values_reject_impossible_count_and_zero_outputs() {
+    let mut impossible = 1_u32.to_le_bytes().to_vec();
+    impossible.extend_from_slice(&1_u32.to_le_bytes());
+    impossible.extend_from_slice(&1_000_u32.to_le_bytes());
+    let err = decode_multi_output_leaf_values_payload(&impossible)
+        .expect_err("stump count must fit payload before allocation");
+    assert!(err.to_string().contains("stump count 1000 does not fit"));
+
+    let zero_outputs = MultiOutputLeafValuesPayload {
+        n_outputs: 0,
+        per_stump_leaf_values: Vec::new(),
+    };
+    let bytes = encode_multi_output_leaf_values_payload(&zero_outputs);
+    assert!(decode_multi_output_leaf_values_payload(&bytes).is_err());
+}
+
+#[test]
 fn dart_tree_weights_payload_empty_round_trips() {
     let payload = DartTreeWeightsPayload { weights: vec![] };
     let bytes = encode_dart_tree_weights_payload(&payload);
@@ -1432,6 +1666,16 @@ fn dart_tree_weights_payload_length_mismatch_errors() {
     bytes.extend_from_slice(&1.0f32.to_le_bytes());
     let err = decode_dart_tree_weights_payload(&bytes).unwrap_err();
     assert!(matches!(err, CoreError::Validation(_)));
+}
+
+#[test]
+fn dart_tree_weights_payload_rejects_non_finite_weights() {
+    let bytes = encode_dart_tree_weights_payload(&DartTreeWeightsPayload {
+        weights: vec![f32::NAN],
+    });
+    let err = decode_dart_tree_weights_payload(&bytes)
+        .expect_err("non-finite DART weights must be rejected");
+    assert!(err.to_string().contains("finite"));
 }
 
 #[test]
@@ -1489,6 +1733,22 @@ fn neutralization_metadata_rejects_bad_kind() {
     });
     bytes[2] = 99; // bogus kind byte
     assert!(decode_neutralization_metadata_payload(&bytes).is_err());
+}
+
+#[test]
+fn neutralization_metadata_rejects_trailing_bytes() {
+    let mut bytes = encode_neutralization_metadata_payload(&NeutralizationMetadataPayload {
+        config: FactorNeutralizationConfig {
+            kind: NeutralizationKind::SplitPenalty,
+            ridge_lambda: 1e-6,
+            split_penalty: 0.1,
+        },
+    });
+    bytes.push(0);
+
+    let err = decode_neutralization_metadata_payload(&bytes)
+        .expect_err("fixed-size neutralization metadata must reject trailing bytes");
+    assert!(err.to_string().contains("length"));
 }
 
 #[test]

@@ -8,9 +8,9 @@ use alloygbm_core::{
     FactorExposureMatrix, HistogramBundle, LeafValue, PartitionResult, SplitCandidate,
 };
 #[cfg(test)]
-use alloygbm_core::{MODEL_FORMAT_V1, ModelSectionKind, NodeStats};
-#[cfg(test)]
 use alloygbm_core::{ModelMetadata, deserialize_model_artifact_v1, serialize_model_artifact_v1};
+#[cfg(test)]
+use alloygbm_core::{ModelSectionKind, NodeStats};
 
 mod error;
 pub use error::{EngineError, EngineResult};

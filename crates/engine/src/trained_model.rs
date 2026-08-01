@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use alloygbm_core::{
     CategoricalStatePayloadV1, DartTreeWeightsPayload, Device, DroMetadataPayload,
-    FeatureBaselinePayload, LeafValue, LinearLeafCoefficientsPayload, LinearLeafEntry,
+    FeatureBaselinePayload, LeafValue, LinearLeaf, LinearLeafCoefficientsPayload, LinearLeafEntry,
     MODEL_FORMAT_V1, ModelMetadata, ModelSectionKind, MorphMetadataPayload,
     NativeCategoricalSplitsPayload, NeutralizationMetadataPayload,
     decode_optional_categorical_state_section_v1, decode_optional_dart_tree_weights_section,
@@ -391,6 +391,13 @@ impl TrainedModel {
         compatibility_mode: ArtifactCompatibilityMode,
     ) -> EngineResult<Self> {
         let parsed = deserialize_model_artifact_v1(bytes).map_err(EngineError::from)?;
+        if parsed.contract.metadata.objective == "multiclass_softmax"
+            || parsed.contract.metadata.num_classes.is_some()
+        {
+            return Err(EngineError::ContractViolation(
+                "multiclass metadata requires a MultiClassTrees artifact".to_string(),
+            ));
+        }
         let compatibility_report = artifact_compatibility_report_from_sections(&parsed.sections);
 
         match compatibility_mode {
@@ -441,21 +448,61 @@ impl TrainedModel {
             )));
         }
 
+        if !model.baseline_prediction.is_finite() {
+            return Err(EngineError::ContractViolation(
+                "decoded trees baseline_prediction must be finite".to_string(),
+            ));
+        }
+        for (stump_index, stump) in model.stumps.iter().enumerate() {
+            if stump.split.feature_index as usize >= model.feature_count {
+                return Err(EngineError::ContractViolation(format!(
+                    "stump {stump_index} split feature_index {} exceeds model feature_count {}",
+                    stump.split.feature_index, model.feature_count
+                )));
+            }
+            if !stump.split.gain.is_finite()
+                || !stump.left_leaf_value.as_scalar().is_finite()
+                || !stump.right_leaf_value.as_scalar().is_finite()
+            {
+                return Err(EngineError::ContractViolation(format!(
+                    "stump {stump_index} contains non-finite gain or leaf value"
+                )));
+            }
+        }
+
         model.categorical_state =
             decode_optional_categorical_state_section_v1(&parsed.sections, metadata_feature_count)?;
-        model.node_debug_stats = decode_optional_node_debug_stats_section(&parsed.sections)?;
+        let node_debug_stats = decode_optional_node_debug_stats_section(&parsed.sections)?;
+        model = model.with_node_debug_stats(node_debug_stats)?;
 
         // Decode optional native categorical splits section and populate stump bitsets.
         if let Some(cat_payload) =
             decode_optional_native_categorical_splits_section(&parsed.sections)?
         {
+            for &feature_index in &cat_payload.native_categorical_feature_indices {
+                if feature_index as usize >= model.feature_count {
+                    return Err(EngineError::ContractViolation(format!(
+                        "native categorical feature_index {feature_index} exceeds model feature_count {}",
+                        model.feature_count
+                    )));
+                }
+            }
             model.native_categorical_feature_indices =
                 cat_payload.native_categorical_feature_indices;
             for (stump_index, bitset) in cat_payload.stump_bitsets {
                 let idx = stump_index as usize;
-                if idx < model.stumps.len() {
-                    model.stumps[idx].split.categorical_bitset = Some(bitset);
+                let stump_count = model.stumps.len();
+                let stump = model.stumps.get_mut(idx).ok_or_else(|| {
+                    EngineError::ContractViolation(format!(
+                        "native categorical stump index {stump_index} exceeds stump count {stump_count}"
+                    ))
+                })?;
+                if !stump.split.is_categorical {
+                    return Err(EngineError::ContractViolation(format!(
+                        "native categorical stump index {stump_index} targets a non-categorical split"
+                    )));
                 }
+                stump.split.categorical_bitset = Some(bitset);
             }
         }
 
@@ -474,25 +521,36 @@ impl TrainedModel {
         {
             for entry in ll_payload.entries {
                 let idx = entry.stump_idx as usize;
-                if idx < model.stumps.len() {
-                    if let Some(ll) = entry.left_leaf {
-                        model.stumps[idx].left_leaf_value = LeafValue::Linear(ll);
-                    }
-                    if let Some(rl) = entry.right_leaf {
-                        model.stumps[idx].right_leaf_value = LeafValue::Linear(rl);
-                    }
+                if idx >= model.stumps.len() {
+                    return Err(EngineError::ContractViolation(format!(
+                        "linear leaf stump index {} exceeds stump count {}",
+                        entry.stump_idx,
+                        model.stumps.len()
+                    )));
+                }
+                if let Some(ll) = entry.left_leaf {
+                    validate_linear_leaf_features(&ll, model.feature_count, entry.stump_idx)?;
+                    model.stumps[idx].left_leaf_value = LeafValue::Linear(ll);
+                }
+                if let Some(rl) = entry.right_leaf {
+                    validate_linear_leaf_features(&rl, model.feature_count, entry.stump_idx)?;
+                    model.stumps[idx].right_leaf_value = LeafValue::Linear(rl);
                 }
             }
         }
 
-        // Decode optional FeatureBaseline section.  Only retain when the
-        // length matches feature_count to defend against artifact corruption
-        // or schema drift; mismatches silently fall back to `None`, which
-        // SHAP treats as "no linear-leaf support recorded for this artifact".
-        model.feature_baseline = decode_optional_feature_baseline_section(&parsed.sections)
+        model.feature_baseline = match decode_optional_feature_baseline_section(&parsed.sections)
             .map_err(EngineError::from)?
-            .map(|payload| payload.feature_means)
-            .filter(|means| means.len() == metadata_feature_count);
+        {
+            Some(payload) if payload.feature_means.len() != metadata_feature_count => {
+                return Err(EngineError::ContractViolation(format!(
+                    "FeatureBaseline count {} does not match model feature_count {metadata_feature_count}",
+                    payload.feature_means.len()
+                )));
+            }
+            Some(payload) => Some(payload.feature_means),
+            None => None,
+        };
 
         // Decode optional DartTreeWeights section and apply per-stump weights.
         // Pre-v0.9.0 artifacts have no section; stumps keep their default 1.0.
@@ -549,4 +607,19 @@ impl TrainedModel {
         model.objective = parsed.contract.metadata.objective.clone();
         Ok(model)
     }
+}
+
+fn validate_linear_leaf_features(
+    leaf: &LinearLeaf,
+    feature_count: usize,
+    stump_index: u32,
+) -> EngineResult<()> {
+    for &feature_index in &leaf.regressor_features {
+        if feature_index as usize >= feature_count {
+            return Err(EngineError::ContractViolation(format!(
+                "linear leaf stump index {stump_index} regressor feature_index {feature_index} exceeds model feature_count {feature_count}"
+            )));
+        }
+    }
+    Ok(())
 }

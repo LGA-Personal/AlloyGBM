@@ -794,6 +794,21 @@ class NativeRuntimeIntegrationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _ = model.artifact_bytes
 
+    def test_load_model_rejects_corrupt_embedded_artifact(self) -> None:
+        model = self.alloygbm.GBMRegressor(n_estimators=2, deterministic=True, seed=19)
+        model.fit(FIT_ROWS, FIT_TARGETS)
+        path = Path(self._tempdir.name) / "corrupt-embedded-artifact.agbm"
+        model.save_model(str(path))
+
+        payload = bytearray(path.read_bytes())
+        metadata_len = int.from_bytes(payload[4:8], "little")
+        artifact_start = 8 + metadata_len
+        payload[artifact_start : artifact_start + 4] = b"BAD!"
+        path.write_bytes(payload)
+
+        with self.assertRaisesRegex(RuntimeError, "native predictor|artifact|serialization"):
+            self.alloygbm.GBMRegressor.load_model(str(path))
+
     def test_save_load_model_preserves_evals_result(self) -> None:
         model = self.alloygbm.GBMRegressor(
             learning_rate=0.3,

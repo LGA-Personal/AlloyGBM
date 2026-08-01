@@ -16,12 +16,15 @@ pub mod validation;
 pub use artifact_format::{
     CATEGORICAL_STATE_FORMAT_V1, CategoricalStatePayloadV1, DartTreeWeightsPayload,
     DroMetadataPayload, FeatureBaselinePayload, LinearLeafCoefficientsPayload, LinearLeafEntry,
-    MODEL_BINARY_HEADER_LEN, MODEL_BINARY_MAGIC, MODEL_FORMAT_V1, MODEL_SECTION_DESCRIPTOR_LEN,
-    ModelArtifactSection, ModelBinaryHeader, ModelIoContractV1, ModelMetadata,
-    ModelSectionDescriptor, ModelSectionKind, MorphMetadataPayload, MultiOutputLeafValuesPayload,
-    NativeCategoricalSplitsPayload, NeutralizationMetadataPayload, ParsedModelArtifactV1,
-    RequiredSectionCompatibilityReport, decode_categorical_state_payload_v1,
-    decode_dart_tree_weights_payload, decode_dro_metadata_payload, decode_feature_baseline_payload,
+    MAX_MODEL_ARTIFACT_BYTES, MAX_MODEL_CLASSES, MAX_MODEL_CUTS_PER_FEATURE,
+    MAX_MODEL_FEATURE_NAME_BYTES, MAX_MODEL_FEATURES, MAX_MODEL_METADATA_BYTES,
+    MAX_MODEL_OBJECTIVE_BYTES, MAX_MODEL_OUTPUTS, MAX_MODEL_STUMPS, MODEL_BINARY_HEADER_LEN,
+    MODEL_BINARY_MAGIC, MODEL_FORMAT_V1, MODEL_SECTION_DESCRIPTOR_LEN, ModelArtifactSection,
+    ModelBinaryHeader, ModelIoContractV1, ModelMetadata, ModelSectionDescriptor, ModelSectionKind,
+    MorphMetadataPayload, MultiOutputLeafValuesPayload, NativeCategoricalSplitsPayload,
+    NeutralizationMetadataPayload, ParsedModelArtifactV1, RequiredSectionCompatibilityReport,
+    decode_categorical_state_payload_v1, decode_dart_tree_weights_payload,
+    decode_dro_metadata_payload, decode_feature_baseline_payload,
     decode_linear_leaf_coefficients_payload, decode_multi_output_leaf_values_payload,
     decode_native_categorical_splits_payload, decode_neutralization_metadata_payload,
     decode_optional_categorical_state_section_v1, decode_optional_dart_tree_weights_section,
@@ -69,9 +72,10 @@ pub use training_mode::{
     GradientEmaStats, LrSchedule, MorphConfig, MorphPrecomputed, TrainingMode,
 };
 pub use validation::{
-    validate_binned_matrix, validate_columnar_matrix_view, validate_dataset_matrix,
-    validate_dataset_schema, validate_dense_matrix_view, validate_model_contract_v1,
-    validate_train_params, validate_training_dataset,
+    checked_dense_element_count, validate_binned_matrix, validate_columnar_matrix_view,
+    validate_dataset_matrix, validate_dataset_schema, validate_dense_matrix_view,
+    validate_model_contract_v1, validate_model_metadata, validate_train_params,
+    validate_training_dataset,
 };
 
 #[cfg(test)]
