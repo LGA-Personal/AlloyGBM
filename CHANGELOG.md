@@ -64,6 +64,16 @@
 
 ### Performance
 
+- **Reused histogram, partition, and split-scan allocations during tree
+  construction.** Consumed parent histogram storage now becomes the larger
+  child's subtraction result, owned row partitioning retains one parent vector
+  for a child, and standard numeric SIMD scans use worker-local prefix scratch.
+  A native-build-provenance-attested eight-case benchmark preserved exact
+  artifact and prediction digests across all 40 recorded pairs. Aggregate
+  native fit time changed by +1.8% and incremental RSS by -7.4%; every case
+  used less RSS, while shallow/tall native time increased by 7.3%-8.1%. No
+  Python API or artifact format changed; the internal Rust-facing `BackendOps`
+  trait gains one additive method with a default implementation.
 - **Parallelized eligible multiclass class-tree builds.** Multiclass rounds
   now prepare independent class candidates in parallel inside the fit-scoped
   pool, then commit them in class order. Small workloads remain serial, and

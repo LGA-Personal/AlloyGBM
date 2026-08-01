@@ -1,4 +1,5 @@
 use crate::factor_split::factor_split_penalty;
+use crate::split_helpers::goes_left_for_split;
 use crate::*;
 use alloygbm_core::{
     DatasetMatrix, FactorExposureMatrix, FeatureHistogram, FeatureTile, HistogramBin,
@@ -190,6 +191,138 @@ fn sample_gradients() -> Vec<GradientPair> {
 
 fn sample_node() -> NodeSlice {
     NodeSlice::new(0, vec![0, 1, 2, 3]).expect("node is valid")
+}
+
+fn split_candidate(
+    feature_index: u32,
+    threshold_bin: u16,
+    default_left: bool,
+    is_categorical: bool,
+    categorical_bitset: Option<Vec<u8>>,
+) -> SplitCandidate {
+    SplitCandidate {
+        node_id: 0,
+        feature_index,
+        threshold_bin,
+        gain: 0.0,
+        default_left,
+        is_categorical,
+        categorical_bitset,
+        left_stats: NodeStats {
+            grad_sum: 0.0,
+            hess_sum: 0.0,
+            grad_sq_sum: 0.0,
+            row_count: 0,
+        },
+        right_stats: NodeStats {
+            grad_sum: 0.0,
+            hess_sum: 0.0,
+            grad_sq_sum: 0.0,
+            row_count: 0,
+        },
+    }
+}
+
+fn legacy_parallel_partition_with_stats(
+    binned_matrix: &BinnedMatrix,
+    gradients: &[GradientPair],
+    node: &NodeSlice,
+    split: &SplitCandidate,
+) -> (PartitionResult, NodeStats, NodeStats) {
+    type ChunkResult = (Vec<u32>, Vec<u32>, f32, f32, f32, f32, f32, f32);
+
+    let chunk_size = (node.row_indices.len() / rayon::current_num_threads().max(1)).max(4096);
+    let chunk_results: Vec<ChunkResult> = node
+        .row_indices
+        .par_chunks(chunk_size)
+        .map(|chunk| {
+            let mut left = Vec::new();
+            let mut right = Vec::new();
+            let mut left_grad = 0.0_f32;
+            let mut left_hess = 0.0_f32;
+            let mut left_grad_sq = 0.0_f32;
+            let mut right_grad = 0.0_f32;
+            let mut right_hess = 0.0_f32;
+            let mut right_grad_sq = 0.0_f32;
+            let feature_index = split.feature_index as usize;
+            let use_col_major = binned_matrix.has_col_major();
+            let column_base = feature_index * binned_matrix.row_count;
+            let missing_bin = binned_matrix.missing_bin();
+
+            for &row in chunk {
+                let row_index = row as usize;
+                let bin = if use_col_major {
+                    binned_matrix.col_bin(column_base + row_index)
+                } else {
+                    binned_matrix.row_bin(row_index * binned_matrix.feature_count + feature_index)
+                };
+                let gradient = gradients[row_index];
+                if goes_left_for_split(bin, missing_bin, split) {
+                    left.push(row);
+                    left_grad += gradient.grad;
+                    left_hess += gradient.hess;
+                    left_grad_sq += gradient.grad * gradient.grad;
+                } else {
+                    right.push(row);
+                    right_grad += gradient.grad;
+                    right_hess += gradient.hess;
+                    right_grad_sq += gradient.grad * gradient.grad;
+                }
+            }
+
+            (
+                left,
+                right,
+                left_grad,
+                left_hess,
+                left_grad_sq,
+                right_grad,
+                right_hess,
+                right_grad_sq,
+            )
+        })
+        .collect();
+
+    let mut left_row_indices = Vec::with_capacity(node.row_indices.len() / 2);
+    let mut right_row_indices = Vec::with_capacity(node.row_indices.len() / 2);
+    let mut left_grad = 0.0_f32;
+    let mut left_hess = 0.0_f32;
+    let mut left_grad_sq = 0.0_f32;
+    let mut right_grad = 0.0_f32;
+    let mut right_hess = 0.0_f32;
+    let mut right_grad_sq = 0.0_f32;
+
+    for (left, right, chunk_lg, chunk_lh, chunk_lq, chunk_rg, chunk_rh, chunk_rq) in chunk_results {
+        left_row_indices.extend(left);
+        right_row_indices.extend(right);
+        left_grad += chunk_lg;
+        left_hess += chunk_lh;
+        left_grad_sq += chunk_lq;
+        right_grad += chunk_rg;
+        right_hess += chunk_rh;
+        right_grad_sq += chunk_rq;
+    }
+
+    let left_count = left_row_indices.len() as u32;
+    let right_count = right_row_indices.len() as u32;
+    (
+        PartitionResult {
+            left_row_indices,
+            right_row_indices,
+        },
+        NodeStats {
+            grad_sum: left_grad,
+            hess_sum: left_hess,
+            grad_sq_sum: left_grad_sq,
+            row_count: left_count,
+        },
+        NodeStats {
+            grad_sum: right_grad,
+            hess_sum: right_hess,
+            grad_sq_sum: right_grad_sq,
+            row_count: right_count,
+        },
+    )
 }
 
 fn with_histogram_feature<R>(
@@ -1057,6 +1190,135 @@ fn apply_split_with_stats_matches_partition_and_reduction_reference() {
 }
 
 #[test]
+fn owned_partition_reuses_parent_storage_for_numeric_thresholds() {
+    let backend = CpuBackend;
+    let matrix = BinnedMatrix::new(5, 1, 4, vec![0, 1, 2, 3, 4]).expect("valid matrix");
+    let gradients = vec![GradientPair::new(1.0, 1.0).expect("gradient"); 5];
+    let mut rows = Vec::with_capacity(8);
+    rows.extend(0..5);
+    let node = NodeSlice::new(0, rows).expect("node");
+    let split = split_candidate(0, 2, false, false, None);
+
+    let expected = backend
+        .apply_split_with_stats(&matrix, &gradients, &node, &split)
+        .expect("borrowed partition");
+    let parent_ptr = node.row_indices.as_ptr();
+    let actual = backend
+        .apply_split_owned_with_stats(&matrix, &gradients, node, &split)
+        .expect("owned partition");
+
+    assert_eq!(actual, expected);
+    assert_eq!(actual.0.right_row_indices.as_ptr(), parent_ptr);
+}
+
+#[test]
+fn owned_partition_compaction_is_stable_and_preserves_parent_allocation() {
+    let mut rows = Vec::with_capacity(12);
+    rows.extend(0..8);
+    let parent_ptr = rows.as_ptr();
+    let parent_capacity = rows.capacity();
+
+    let (left, right) = CpuBackend::stable_partition_owned_rows(rows, 4, |row| row % 2 == 1);
+
+    assert_eq!(left, vec![1, 3, 5, 7]);
+    assert_eq!(right, vec![0, 2, 4, 6]);
+    assert_eq!(right.as_ptr(), parent_ptr);
+    assert_eq!(right.capacity(), parent_capacity);
+
+    let (left, right) = CpuBackend::stable_partition_owned_rows(vec![2, 1, 0], 3, |_| true);
+    assert_eq!(left, vec![2, 1, 0]);
+    assert!(right.is_empty());
+
+    let (left, right) = CpuBackend::stable_partition_owned_rows(vec![2, 1, 0], 0, |_| false);
+    assert!(left.is_empty());
+    assert_eq!(right, vec![2, 1, 0]);
+}
+
+#[test]
+fn owned_partition_reuses_parent_storage_for_missing_values_in_both_directions() {
+    let backend = CpuBackend;
+    let missing = u16::from(MISSING_BIN_U8);
+    let matrix =
+        BinnedMatrix::new(4, 1, missing, vec![0, MISSING_BIN_U8, 2, 3]).expect("valid matrix");
+    let gradients = vec![GradientPair::new(1.0, 1.0).expect("gradient"); 4];
+
+    for default_left in [false, true] {
+        let mut rows = Vec::with_capacity(8);
+        rows.extend(0..4);
+        let node = NodeSlice::new(0, rows).expect("node");
+        let split = split_candidate(0, 1, default_left, false, None);
+
+        let expected = backend
+            .apply_split_with_stats(&matrix, &gradients, &node, &split)
+            .expect("borrowed partition");
+        let parent_ptr = node.row_indices.as_ptr();
+        let actual = backend
+            .apply_split_owned_with_stats(&matrix, &gradients, node, &split)
+            .expect("owned partition");
+
+        assert_eq!(actual, expected);
+        assert_eq!(actual.0.right_row_indices.as_ptr(), parent_ptr);
+    }
+}
+
+#[test]
+fn owned_partition_reuses_parent_storage_for_categorical_bitsets() {
+    let backend = CpuBackend;
+    let matrix = BinnedMatrix::new(6, 1, 2, vec![0, 1, 2, 0, 1, 2]).expect("valid matrix");
+    let gradients = vec![GradientPair::new(1.0, 1.0).expect("gradient"); 6];
+    let mut rows = Vec::with_capacity(8);
+    rows.extend(0..6);
+    let node = NodeSlice::new(0, rows).expect("node");
+    let split = split_candidate(0, 0, true, true, Some(vec![0b0000_0011]));
+
+    let expected = backend
+        .apply_split_with_stats(&matrix, &gradients, &node, &split)
+        .expect("borrowed partition");
+    let parent_ptr = node.row_indices.as_ptr();
+    let actual = backend
+        .apply_split_owned_with_stats(&matrix, &gradients, node, &split)
+        .expect("owned partition");
+
+    assert_eq!(actual, expected);
+    assert_eq!(actual.0.right_row_indices.as_ptr(), parent_ptr);
+}
+
+#[test]
+fn owned_partition_matches_parallel_chunk_statistic_order() {
+    const ROWS: usize = 50_000;
+
+    let backend = CpuBackend;
+    let bins = (0..ROWS).map(|row| (row % 2) as u8).collect();
+    let matrix = BinnedMatrix::new(ROWS, 1, 1, bins).expect("valid matrix");
+    let gradients = (0..ROWS)
+        .map(|row| {
+            let magnitude = if row % 2 == 0 { 1.0e20 } else { 1.0 };
+            let sign = match (row / 2) % 3 {
+                1 => -1.0,
+                _ => 1.0,
+            };
+            GradientPair::new(sign * magnitude, 1.0 + (row % 2) as f32).expect("gradient")
+        })
+        .collect::<Vec<_>>();
+    let node = NodeSlice::new(0, (0..ROWS as u32).collect()).expect("node");
+    let split = split_candidate(0, 0, false, false, None);
+
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .expect("test pool")
+        .install(|| {
+            assert_eq!(rayon::current_num_threads(), 4);
+            let expected = legacy_parallel_partition_with_stats(&matrix, &gradients, &node, &split);
+            let actual = backend
+                .apply_split_owned_with_stats(&matrix, &gradients, node, &split)
+                .expect("owned partition");
+
+            assert_eq!(actual, expected);
+        });
+}
+
+#[test]
 fn reduce_sums_aggregates_requested_rows() {
     let backend = CpuBackend;
     let stats = backend
@@ -1781,6 +2043,200 @@ fn make_options(
         dro_config: None,
         missing_bin_index,
     }
+}
+
+fn assert_split_candidates_match(scalar: Option<&SplitCandidate>, simd: Option<&SplitCandidate>) {
+    match (scalar, simd) {
+        (Some(scalar), Some(simd)) => {
+            assert_eq!(scalar.feature_index, simd.feature_index);
+            assert_eq!(scalar.threshold_bin, simd.threshold_bin);
+            assert_eq!(scalar.default_left, simd.default_left);
+            assert!((scalar.gain - simd.gain).abs() < 1e-4);
+            assert_eq!(scalar.left_stats, simd.left_stats);
+            assert_eq!(scalar.right_stats, simd.right_stats);
+        }
+        (None, None) => {}
+        (scalar, simd) => panic!(
+            "scalar/simd disagree on Some-ness: scalar={}, simd={}",
+            scalar.is_some(),
+            simd.is_some()
+        ),
+    }
+}
+
+fn standard_simd_and_scalar_candidates(
+    feature: &FeatureHistogram,
+    options: SplitSelectionOptions,
+) -> (Option<SplitCandidate>, Option<SplitCandidate>) {
+    let scalar = with_histogram_feature(feature, |view| {
+        CpuBackend::best_split_for_feature_inner(view, 0, options, GainStrategy::Standard, None)
+    });
+    let simd = with_histogram_feature(feature, |view| {
+        CpuBackend::best_split_for_feature_standard_simd(view, 0, options)
+    });
+
+    assert_split_candidates_match(scalar.as_ref(), simd.as_ref());
+    (scalar, simd)
+}
+
+#[test]
+fn split_scan_simd_matches_scalar_across_bin_counts_missing_directions_and_ties() {
+    let mut missing_left_fixture = None;
+    let mut missing_right_fixture = None;
+    for &bin_count in &[2_usize, 7, 8, 9, 63, 255, 65_535] {
+        let mut state = 0x9E37_79B9_u32 ^ bin_count as u32;
+        let mut bins = Vec::with_capacity(bin_count);
+        for _ in 0..bin_count {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let grad_sum = ((state >> 8) as i16 as f32) / 4096.0;
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let hess_sum = 0.5 + (state % 10_000) as f32 / 10_000.0;
+            bins.push(HistogramBin {
+                grad_sum,
+                hess_sum,
+                grad_sq_sum: 0.0,
+                count: 1 + state % 11,
+            });
+        }
+        let feature = FeatureHistogram {
+            feature_index: 0,
+            bins,
+        };
+
+        for missing_bin_index in [bin_count, bin_count - 1] {
+            let (scalar, _) = standard_simd_and_scalar_candidates(
+                &feature,
+                make_options(0.05, 0.1, 0.0, 0.0, missing_bin_index),
+            );
+            match (bin_count, missing_bin_index) {
+                (8, 7) => missing_left_fixture = scalar,
+                (7, 6) => missing_right_fixture = scalar,
+                _ => {}
+            }
+        }
+    }
+
+    let missing_left_fixture =
+        missing_left_fixture.expect("seeded missing-left fixture should produce a split");
+    assert_eq!(missing_left_fixture.threshold_bin, 3);
+    assert!(missing_left_fixture.default_left);
+
+    let missing_right_fixture =
+        missing_right_fixture.expect("seeded missing-right fixture should produce a split");
+    assert_eq!(missing_right_fixture.threshold_bin, 0);
+    assert!(!missing_right_fixture.default_left);
+
+    let tied = FeatureHistogram {
+        feature_index: 0,
+        bins: vec![
+            HistogramBin {
+                grad_sum: 1.0,
+                hess_sum: 1.0,
+                grad_sq_sum: 0.0,
+                count: 1,
+            },
+            HistogramBin {
+                grad_sum: -1.0,
+                hess_sum: 1.0,
+                grad_sq_sum: 0.0,
+                count: 1,
+            },
+            HistogramBin {
+                grad_sum: -1.0,
+                hess_sum: 1.0,
+                grad_sq_sum: 0.0,
+                count: 1,
+            },
+            HistogramBin {
+                grad_sum: 1.0,
+                hess_sum: 1.0,
+                grad_sq_sum: 0.0,
+                count: 1,
+            },
+        ],
+    };
+    let (scalar_tie, simd_tie) =
+        standard_simd_and_scalar_candidates(&tied, make_options(0.0, 0.1, 0.0, 0.0, 4));
+    let scalar_tie = scalar_tie.expect("symmetric fixture should produce a split");
+    let simd_tie = simd_tie.expect("symmetric fixture should produce a split");
+    assert_eq!(scalar_tie.threshold_bin, 0);
+    assert!(scalar_tie.default_left);
+    assert_eq!(simd_tie.threshold_bin, 0);
+    assert!(simd_tie.default_left);
+}
+
+#[test]
+fn split_scan_nested_rayon_multi_worker_selection_matches_sequential_scalar_oracle() {
+    const FEATURE_COUNT: usize = 16;
+    let gradients = [3.0_f32, 2.0, 1.0, -1.0, -2.0, -3.0, 1.0, -1.0, 0.5];
+    let features = (0..FEATURE_COUNT)
+        .map(|feature_index| {
+            let scale = feature_index as f32 + 1.0;
+            FeatureHistogram {
+                feature_index: feature_index as u32,
+                bins: gradients
+                    .iter()
+                    .enumerate()
+                    .map(|(bin_index, &gradient)| HistogramBin {
+                        grad_sum: gradient * scale,
+                        hess_sum: 1.0 + bin_index as f32 * 0.125,
+                        grad_sq_sum: 0.0,
+                        count: 3 + bin_index as u32,
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
+    let histograms = HistogramBundle::from_feature_histograms(7, features, true)
+        .expect("parallel split fixture");
+    assert!(histograms.feature_count() >= CpuBackend::PARALLEL_SPLIT_FEATURE_THRESHOLD);
+    let options = make_options(0.05, 0.1, 0.0, 0.0, 8);
+    let expected = histograms
+        .features()
+        .filter_map(|feature| {
+            CpuBackend::best_split_for_feature_inner(
+                feature,
+                histograms.node_id,
+                options,
+                GainStrategy::Standard,
+                None,
+            )
+        })
+        .reduce(|left, right| {
+            if apply_feature_weight(&right, &[]) > apply_feature_weight(&left, &[]) {
+                right
+            } else {
+                left
+            }
+        });
+
+    let nested_histograms = histograms.clone();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .expect("nested split test pool");
+    pool.spawn(move || {
+        let actual = CpuBackend::best_split_with_options_internal(
+            &nested_histograms,
+            options,
+            &[],
+            &[],
+            None,
+        );
+        sender
+            .send((
+                rayon::current_num_threads(),
+                rayon::current_thread_index(),
+                actual,
+            ))
+            .expect("test receiver remains live");
+    });
+    let (thread_count, worker_index, actual) = receiver.recv().expect("nested split result");
+
+    assert_eq!(thread_count, 4);
+    assert!(worker_index.is_some());
+    assert_split_candidates_match(expected.as_ref(), actual.as_ref());
 }
 
 #[test]

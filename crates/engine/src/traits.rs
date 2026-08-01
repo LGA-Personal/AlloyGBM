@@ -127,6 +127,15 @@ pub trait BackendOps: Sync {
         let right_stats = self.reduce_sums(gradients, &partition.right_row_indices)?;
         Ok((partition, left_stats, right_stats))
     }
+    fn apply_split_owned_with_stats(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: NodeSlice,
+        split: &SplitCandidate,
+    ) -> EngineResult<(PartitionResult, NodeStats, NodeStats)> {
+        self.apply_split_with_stats(binned_matrix, gradients, &node, split)
+    }
     fn reduce_sums(
         &self,
         gradients: &[GradientPair],

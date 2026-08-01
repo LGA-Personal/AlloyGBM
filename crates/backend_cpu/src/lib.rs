@@ -22,6 +22,7 @@ pub use pl_histogram::build_linear_histograms_cpu;
 mod pl;
 
 mod split_helpers;
+mod split_scan;
 
 use arena::{
     BIN_HEAVY_THRESHOLD, HistogramArena, HistogramKernelPath, PARALLEL_TILE_WORKLOAD_THRESHOLD,
@@ -33,6 +34,7 @@ use split_helpers::{
     categorical_bitset_for_prefix, categorical_bitset_for_prefix_into, goes_left_for_split,
     l1_threshold_gradient, split_gain_term,
 };
+use split_scan::with_split_scan_scratch;
 
 pub use alloygbm_core::simd;
 
@@ -43,6 +45,65 @@ thread_local! {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CpuBackend;
+
+#[derive(Clone, Copy, Default)]
+struct NodeStatsAccumulator {
+    grad_sum: f32,
+    hess_sum: f32,
+    grad_sq_sum: f32,
+    row_count: usize,
+}
+
+impl NodeStatsAccumulator {
+    fn add(&mut self, gradient: GradientPair) {
+        self.grad_sum += gradient.grad;
+        self.hess_sum += gradient.hess;
+        self.grad_sq_sum += gradient.grad * gradient.grad;
+        self.row_count += 1;
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.grad_sum += other.grad_sum;
+        self.hess_sum += other.hess_sum;
+        self.grad_sq_sum += other.grad_sq_sum;
+        self.row_count += other.row_count;
+    }
+
+    fn into_node_stats(self, row_count: usize) -> NodeStats {
+        NodeStats {
+            grad_sum: self.grad_sum,
+            hess_sum: self.hess_sum,
+            grad_sq_sum: self.grad_sq_sum,
+            row_count: row_count as u32,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct ChunkStats {
+    left: NodeStatsAccumulator,
+    right: NodeStatsAccumulator,
+}
+
+#[derive(Clone, Copy)]
+struct SplitRowLookup {
+    feature_index: usize,
+    column_base: usize,
+    missing_bin: u16,
+    use_col_major: bool,
+}
+
+impl SplitRowLookup {
+    fn goes_left(self, matrix: &BinnedMatrix, row: u32, split: &SplitCandidate) -> bool {
+        let row = row as usize;
+        let bin = if self.use_col_major {
+            matrix.col_bin(self.column_base + row)
+        } else {
+            matrix.row_bin(row * matrix.feature_count + self.feature_index)
+        };
+        goes_left_for_split(bin, self.missing_bin, split)
+    }
+}
 
 impl CpuBackend {
     pub fn device(&self) -> Device {
@@ -146,6 +207,38 @@ impl CpuBackend {
         feature_tile_count > 1
             && row_count.saturating_mul(selected_feature_count) >= PARALLEL_TILE_WORKLOAD_THRESHOLD
             && rayon::current_num_threads() > 1
+    }
+
+    fn split_row_lookup(
+        binned_matrix: &BinnedMatrix,
+        gradients: Option<&[GradientPair]>,
+        node: &NodeSlice,
+        split: &SplitCandidate,
+    ) -> EngineResult<SplitRowLookup> {
+        node.validate_bounds(binned_matrix.row_count)?;
+        if let Some(gradients) = gradients
+            && gradients.len() != binned_matrix.row_count
+        {
+            return Err(EngineError::ContractViolation(format!(
+                "gradients length {} does not match row_count {}",
+                gradients.len(),
+                binned_matrix.row_count
+            )));
+        }
+        if split.feature_index as usize >= binned_matrix.feature_count {
+            return Err(EngineError::ContractViolation(format!(
+                "split feature_index {} exceeds feature_count {}",
+                split.feature_index, binned_matrix.feature_count
+            )));
+        }
+
+        let feature_index = split.feature_index as usize;
+        Ok(SplitRowLookup {
+            feature_index,
+            column_base: feature_index * binned_matrix.row_count,
+            missing_bin: binned_matrix.missing_bin(),
+            use_col_major: binned_matrix.has_col_major(),
+        })
     }
 
     fn build_feature_histograms_for_tile(
@@ -584,232 +677,232 @@ impl CpuBackend {
             return None;
         }
 
-        // Pre-compute scalar cumulative left-side stats. The prefix scan is
-        // inherently sequential, so we keep it in scalar code.
-        let mut cum_left_grad = vec![0.0_f32; scan_limit];
-        let mut cum_left_hess = vec![0.0_f32; scan_limit];
-        let mut cum_left_count = vec![0_u32; scan_limit];
-        {
-            let mut g = 0.0_f32;
-            let mut h = 0.0_f32;
-            let mut c = 0_u32;
-            for i in 0..scan_limit {
-                g += grad_sums[i];
-                h += hess_sums[i];
-                c += counts[i];
-                cum_left_grad[i] = g;
-                cum_left_hess[i] = h;
-                cum_left_count[i] = c;
-            }
-        }
-
-        // Per-NaN-direction broadcast values.
-        let l1_alpha = options.l1_alpha;
-        let l2_lambda = options.l2_lambda;
-        let min_child_hessian = options.min_child_hessian;
-        let min_rows = options.min_rows_per_leaf as f32;
-        let min_leaf_mag = options.min_leaf_magnitude;
-        let nm_total_grad_v = f32x8::splat(nm_total_grad);
-        let nm_total_hess_v = f32x8::splat(nm_total_hess);
-        let nm_total_count_f = nm_total_count as f32;
-        let nm_total_count_v = f32x8::splat(nm_total_count_f);
-        let missing_grad_v = f32x8::splat(missing_grad);
-        let missing_hess_v = f32x8::splat(missing_hess);
-        let missing_count_f = missing_count as f32;
-        let missing_count_v = f32x8::splat(missing_count_f);
-        let l2_lambda_v = f32x8::splat(l2_lambda);
-        let eps_v = f32x8::splat(EPSILON);
-        let min_child_hess_v = f32x8::splat(min_child_hessian);
-        let min_rows_v = f32x8::splat(min_rows);
-        let min_leaf_mag_v = f32x8::splat(min_leaf_mag);
-        let parent_gain_term_v = f32x8::splat(parent_gain_term);
-        let neg_inf_v = f32x8::splat(f32::NEG_INFINITY);
-
-        // Best result tracking — store as (gain, threshold_bin, default_left).
-        // Final SplitCandidate is built once at the end from the cumulative arrays.
-        let mut best_gain = 0.0_f32;
-        let mut best_threshold: usize = usize::MAX;
-        let mut best_default_left = false;
-
-        // For each NaN direction, evaluate gain across all bins in 8-wide chunks.
-        for &default_left in &[true, false] {
-            let nan_left_mask = default_left;
-            // For each chunk-of-8 starting at `chunk_start`:
-            let mut chunk_start = 0usize;
-            while chunk_start < scan_limit {
-                let chunk_end = (chunk_start + 8).min(scan_limit);
-                let chunk_len = chunk_end - chunk_start;
-
-                // Load 8 lanes of cumulative left stats (zero-pad the tail).
-                let mut lg_arr = [0.0_f32; 8];
-                let mut lh_arr = [0.0_f32; 8];
-                let mut lc_arr = [0.0_f32; 8];
-                for j in 0..chunk_len {
-                    lg_arr[j] = cum_left_grad[chunk_start + j];
-                    lh_arr[j] = cum_left_hess[chunk_start + j];
-                    lc_arr[j] = cum_left_count[chunk_start + j] as f32;
+        with_split_scan_scratch(
+            scan_limit,
+            |cum_left_grad, cum_left_hess, cum_left_count| {
+                // Pre-compute scalar cumulative left-side stats. The prefix scan is
+                // inherently sequential, so we keep it in scalar code.
+                let mut g = 0.0_f32;
+                let mut h = 0.0_f32;
+                let mut c = 0_u32;
+                for i in 0..scan_limit {
+                    g += grad_sums[i];
+                    h += hess_sums[i];
+                    c += counts[i];
+                    cum_left_grad[i] = g;
+                    cum_left_hess[i] = h;
+                    cum_left_count[i] = c;
                 }
-                let lg_v = f32x8::from(lg_arr);
-                let lh_v = f32x8::from(lh_arr);
-                let lc_v = f32x8::from(lc_arr);
 
-                // Right-side stats (before NaN routing).
-                let rg_v = nm_total_grad_v - lg_v;
-                let rh_v = nm_total_hess_v - lh_v;
-                let rc_v = nm_total_count_v - lc_v;
+                // Per-NaN-direction broadcast values.
+                let l1_alpha = options.l1_alpha;
+                let l2_lambda = options.l2_lambda;
+                let min_child_hessian = options.min_child_hessian;
+                let min_rows = options.min_rows_per_leaf as f32;
+                let min_leaf_mag = options.min_leaf_magnitude;
+                let nm_total_grad_v = f32x8::splat(nm_total_grad);
+                let nm_total_hess_v = f32x8::splat(nm_total_hess);
+                let nm_total_count_f = nm_total_count as f32;
+                let nm_total_count_v = f32x8::splat(nm_total_count_f);
+                let missing_grad_v = f32x8::splat(missing_grad);
+                let missing_hess_v = f32x8::splat(missing_hess);
+                let missing_count_f = missing_count as f32;
+                let missing_count_v = f32x8::splat(missing_count_f);
+                let l2_lambda_v = f32x8::splat(l2_lambda);
+                let eps_v = f32x8::splat(EPSILON);
+                let min_child_hess_v = f32x8::splat(min_child_hessian);
+                let min_rows_v = f32x8::splat(min_rows);
+                let min_leaf_mag_v = f32x8::splat(min_leaf_mag);
+                let parent_gain_term_v = f32x8::splat(parent_gain_term);
+                let neg_inf_v = f32x8::splat(f32::NEG_INFINITY);
 
-                // Apply NaN-direction routing.
-                let (eff_lg, eff_lh, eff_lc, eff_rg, eff_rh, eff_rc) = if nan_left_mask {
-                    (
-                        lg_v + missing_grad_v,
-                        lh_v + missing_hess_v,
-                        lc_v + missing_count_v,
-                        rg_v,
-                        rh_v,
-                        rc_v,
-                    )
-                } else {
-                    (
-                        lg_v,
-                        lh_v,
-                        lc_v,
-                        rg_v + missing_grad_v,
-                        rh_v + missing_hess_v,
-                        rc_v + missing_count_v,
-                    )
-                };
+                // Best result tracking — store as (gain, threshold_bin, default_left).
+                // Final SplitCandidate is built once at the end from the cumulative arrays.
+                let mut best_gain = 0.0_f32;
+                let mut best_threshold: usize = usize::MAX;
+                let mut best_default_left = false;
 
-                // L1-thresholded gradient sums.
-                let lg_l1 = l1_threshold_f32x8(eff_lg, l1_alpha);
-                let rg_l1 = l1_threshold_f32x8(eff_rg, l1_alpha);
+                // For each NaN direction, evaluate gain across all bins in 8-wide chunks.
+                for &default_left in &[true, false] {
+                    let nan_left_mask = default_left;
+                    // For each chunk-of-8 starting at `chunk_start`:
+                    let mut chunk_start = 0usize;
+                    while chunk_start < scan_limit {
+                        let chunk_end = (chunk_start + 8).min(scan_limit);
+                        let chunk_len = chunk_end - chunk_start;
 
-                // Denominators.
-                let l_denom = eff_lh + l2_lambda_v + eps_v;
-                let r_denom = eff_rh + l2_lambda_v + eps_v;
+                        // Load 8 lanes of cumulative left stats (zero-pad the tail).
+                        let mut lg_arr = [0.0_f32; 8];
+                        let mut lh_arr = [0.0_f32; 8];
+                        let mut lc_arr = [0.0_f32; 8];
+                        for j in 0..chunk_len {
+                            lg_arr[j] = cum_left_grad[chunk_start + j];
+                            lh_arr[j] = cum_left_hess[chunk_start + j];
+                            lc_arr[j] = cum_left_count[chunk_start + j] as f32;
+                        }
+                        let lg_v = f32x8::from(lg_arr);
+                        let lh_v = f32x8::from(lh_arr);
+                        let lc_v = f32x8::from(lc_arr);
 
-                // Gain.
-                let gain_v =
-                    (lg_l1 * lg_l1) / l_denom + (rg_l1 * rg_l1) / r_denom - parent_gain_term_v;
+                        // Right-side stats (before NaN routing).
+                        let rg_v = nm_total_grad_v - lg_v;
+                        let rh_v = nm_total_hess_v - lh_v;
+                        let rc_v = nm_total_count_v - lc_v;
 
-                // Validity mask:
-                //   eff_lc >= min_rows_per_leaf
-                //   eff_rc >= min_rows_per_leaf
-                //   eff_lh > min_child_hessian
-                //   eff_rh > min_child_hessian
-                let lc_ok = eff_lc.cmp_ge(min_rows_v);
-                let rc_ok = eff_rc.cmp_ge(min_rows_v);
-                let lh_ok = eff_lh.cmp_gt(min_child_hess_v);
-                let rh_ok = eff_rh.cmp_gt(min_child_hess_v);
-                // Combine via bitwise AND on the float-mask representation.
-                let valid_mask = lc_ok & rc_ok & lh_ok & rh_ok;
+                        // Apply NaN-direction routing.
+                        let (eff_lg, eff_lh, eff_lc, eff_rg, eff_rh, eff_rc) = if nan_left_mask {
+                            (
+                                lg_v + missing_grad_v,
+                                lh_v + missing_hess_v,
+                                lc_v + missing_count_v,
+                                rg_v,
+                                rh_v,
+                                rc_v,
+                            )
+                        } else {
+                            (
+                                lg_v,
+                                lh_v,
+                                lc_v,
+                                rg_v + missing_grad_v,
+                                rh_v + missing_hess_v,
+                                rc_v + missing_count_v,
+                            )
+                        };
 
-                // min_leaf_magnitude filter: candidate is rejected when BOTH
-                // sides' leaf magnitudes are below the threshold.
-                let final_gain = if min_leaf_mag > 0.0 {
-                    let l_leaf_mag = lg_l1.abs() / l_denom;
-                    let r_leaf_mag = rg_l1.abs() / r_denom;
-                    // pass if either side >= min_leaf_mag (i.e. NOT both below).
-                    let l_passes = l_leaf_mag.cmp_ge(min_leaf_mag_v);
-                    let r_passes = r_leaf_mag.cmp_ge(min_leaf_mag_v);
-                    let leaf_mag_ok = l_passes | r_passes;
-                    let combined = valid_mask & leaf_mag_ok;
-                    // If combined-mask is all-ones (lane valid), keep gain;
-                    // else replace with -inf.
-                    combined.blend(gain_v, neg_inf_v)
-                } else {
-                    valid_mask.blend(gain_v, neg_inf_v)
-                };
+                        // L1-thresholded gradient sums.
+                        let lg_l1 = l1_threshold_f32x8(eff_lg, l1_alpha);
+                        let rg_l1 = l1_threshold_f32x8(eff_rg, l1_alpha);
 
-                // Extract gain to scalar for tail-masking, edge-threshold
-                // rejection, and horizontal argmax. The lane-extract overhead
-                // is small (8 floats) compared to the vectorized gain math.
-                let mut g_arr = final_gain.to_array();
-                // Mask out tail-padded lanes.
-                for slot in g_arr.iter_mut().skip(chunk_len) {
-                    *slot = f32::NEG_INFINITY;
-                }
-                // Skip "edge" thresholds where left covers all non-missing bins.
-                // Replicates the scalar check:
-                //   if threshold_bin + 1 >= scan_limit && nm_total_count == left_count { skip }
-                for (j, slot) in g_arr.iter_mut().take(chunk_len).enumerate() {
-                    let threshold_bin = chunk_start + j;
-                    let left_count = cum_left_count[threshold_bin];
-                    if threshold_bin + 1 >= scan_limit && nm_total_count == left_count {
-                        *slot = f32::NEG_INFINITY;
+                        // Denominators.
+                        let l_denom = eff_lh + l2_lambda_v + eps_v;
+                        let r_denom = eff_rh + l2_lambda_v + eps_v;
+
+                        // Gain.
+                        let gain_v = (lg_l1 * lg_l1) / l_denom + (rg_l1 * rg_l1) / r_denom
+                            - parent_gain_term_v;
+
+                        // Validity mask:
+                        //   eff_lc >= min_rows_per_leaf
+                        //   eff_rc >= min_rows_per_leaf
+                        //   eff_lh > min_child_hessian
+                        //   eff_rh > min_child_hessian
+                        let lc_ok = eff_lc.cmp_ge(min_rows_v);
+                        let rc_ok = eff_rc.cmp_ge(min_rows_v);
+                        let lh_ok = eff_lh.cmp_gt(min_child_hess_v);
+                        let rh_ok = eff_rh.cmp_gt(min_child_hess_v);
+                        // Combine via bitwise AND on the float-mask representation.
+                        let valid_mask = lc_ok & rc_ok & lh_ok & rh_ok;
+
+                        // min_leaf_magnitude filter: candidate is rejected when BOTH
+                        // sides' leaf magnitudes are below the threshold.
+                        let final_gain = if min_leaf_mag > 0.0 {
+                            let l_leaf_mag = lg_l1.abs() / l_denom;
+                            let r_leaf_mag = rg_l1.abs() / r_denom;
+                            // pass if either side >= min_leaf_mag (i.e. NOT both below).
+                            let l_passes = l_leaf_mag.cmp_ge(min_leaf_mag_v);
+                            let r_passes = r_leaf_mag.cmp_ge(min_leaf_mag_v);
+                            let leaf_mag_ok = l_passes | r_passes;
+                            let combined = valid_mask & leaf_mag_ok;
+                            // If combined-mask is all-ones (lane valid), keep gain;
+                            // else replace with -inf.
+                            combined.blend(gain_v, neg_inf_v)
+                        } else {
+                            valid_mask.blend(gain_v, neg_inf_v)
+                        };
+
+                        // Extract gain to scalar for tail-masking, edge-threshold
+                        // rejection, and horizontal argmax. The lane-extract overhead
+                        // is small (8 floats) compared to the vectorized gain math.
+                        let mut g_arr = final_gain.to_array();
+                        // Mask out tail-padded lanes.
+                        for slot in g_arr.iter_mut().skip(chunk_len) {
+                            *slot = f32::NEG_INFINITY;
+                        }
+                        // Skip "edge" thresholds where left covers all non-missing bins.
+                        // Replicates the scalar check:
+                        //   if threshold_bin + 1 >= scan_limit && nm_total_count == left_count { skip }
+                        for (j, slot) in g_arr.iter_mut().take(chunk_len).enumerate() {
+                            let threshold_bin = chunk_start + j;
+                            let left_count = cum_left_count[threshold_bin];
+                            if threshold_bin + 1 >= scan_limit && nm_total_count == left_count {
+                                *slot = f32::NEG_INFINITY;
+                            }
+                        }
+                        // Horizontal argmax for this chunk against the running best.
+                        for (j, &g) in g_arr.iter().take(chunk_len).enumerate() {
+                            if g > best_gain {
+                                best_gain = g;
+                                best_threshold = chunk_start + j;
+                                best_default_left = default_left;
+                            }
+                        }
+
+                        chunk_start = chunk_end;
                     }
                 }
-                // Horizontal argmax for this chunk against the running best.
-                for (j, &g) in g_arr.iter().take(chunk_len).enumerate() {
-                    if g > best_gain {
-                        best_gain = g;
-                        best_threshold = chunk_start + j;
-                        best_default_left = default_left;
-                    }
+
+                if best_threshold == usize::MAX {
+                    return None;
                 }
 
-                chunk_start = chunk_end;
-            }
-        }
+                // Reconstruct the chosen candidate's stats from the cumulative arrays.
+                let threshold_bin = best_threshold;
+                let left_grad = cum_left_grad[threshold_bin];
+                let left_hess = cum_left_hess[threshold_bin];
+                let left_count = cum_left_count[threshold_bin];
+                let right_grad = nm_total_grad - left_grad;
+                let right_hess = nm_total_hess - left_hess;
+                let right_count = nm_total_count.saturating_sub(left_count);
 
-        if best_threshold == usize::MAX {
-            return None;
-        }
+                let (eff_lg, eff_lh, eff_lq, eff_lc, eff_rg, eff_rh, eff_rq, eff_rc) =
+                    if best_default_left {
+                        (
+                            left_grad + missing_grad,
+                            left_hess + missing_hess,
+                            0.0,
+                            left_count + missing_count,
+                            right_grad,
+                            right_hess,
+                            0.0,
+                            right_count,
+                        )
+                    } else {
+                        (
+                            left_grad,
+                            left_hess,
+                            0.0,
+                            left_count,
+                            right_grad + missing_grad,
+                            right_hess + missing_hess,
+                            0.0,
+                            right_count + missing_count,
+                        )
+                    };
 
-        // Reconstruct the chosen candidate's stats from the cumulative arrays.
-        let threshold_bin = best_threshold;
-        let left_grad = cum_left_grad[threshold_bin];
-        let left_hess = cum_left_hess[threshold_bin];
-        let left_count = cum_left_count[threshold_bin];
-        let right_grad = nm_total_grad - left_grad;
-        let right_hess = nm_total_hess - left_hess;
-        let right_count = nm_total_count.saturating_sub(left_count);
-
-        let (eff_lg, eff_lh, eff_lq, eff_lc, eff_rg, eff_rh, eff_rq, eff_rc) = if best_default_left
-        {
-            (
-                left_grad + missing_grad,
-                left_hess + missing_hess,
-                0.0,
-                left_count + missing_count,
-                right_grad,
-                right_hess,
-                0.0,
-                right_count,
-            )
-        } else {
-            (
-                left_grad,
-                left_hess,
-                0.0,
-                left_count,
-                right_grad + missing_grad,
-                right_hess + missing_hess,
-                0.0,
-                right_count + missing_count,
-            )
-        };
-
-        Some(SplitCandidate {
-            node_id,
-            feature_index: feature_histogram.feature_index(),
-            threshold_bin: threshold_bin as u16,
-            gain: best_gain,
-            default_left: best_default_left,
-            is_categorical: false,
-            categorical_bitset: None,
-            left_stats: NodeStats {
-                grad_sum: eff_lg,
-                hess_sum: eff_lh,
-                grad_sq_sum: eff_lq,
-                row_count: eff_lc,
+                Some(SplitCandidate {
+                    node_id,
+                    feature_index: feature_histogram.feature_index(),
+                    threshold_bin: threshold_bin as u16,
+                    gain: best_gain,
+                    default_left: best_default_left,
+                    is_categorical: false,
+                    categorical_bitset: None,
+                    left_stats: NodeStats {
+                        grad_sum: eff_lg,
+                        hess_sum: eff_lh,
+                        grad_sq_sum: eff_lq,
+                        row_count: eff_lc,
+                    },
+                    right_stats: NodeStats {
+                        grad_sum: eff_rg,
+                        hess_sum: eff_rh,
+                        grad_sq_sum: eff_rq,
+                        row_count: eff_rc,
+                    },
+                })
             },
-            right_stats: NodeStats {
-                grad_sum: eff_rg,
-                hess_sum: eff_rh,
-                grad_sq_sum: eff_rq,
-                row_count: eff_rc,
-            },
-        })
+        )
     }
 
     /// Shared scaffold for numeric split finding, parameterised by gain strategy.
@@ -1550,96 +1643,122 @@ impl CpuBackend {
         )
     }
 
-    pub(crate) fn apply_split_with_stats_parallel(
+    fn apply_split_with_stats_parallel_with_lookup(
         binned_matrix: &BinnedMatrix,
         gradients: &[GradientPair],
         node: &NodeSlice,
         split: &SplitCandidate,
+        lookup: SplitRowLookup,
     ) -> EngineResult<(PartitionResult, NodeStats, NodeStats)> {
-        type ChunkResult = (Vec<u32>, Vec<u32>, f32, f32, f32, f32, f32, f32);
-        let chunk_size = (node.row_indices.len() / rayon::current_num_threads().max(1)).max(4096);
-        let chunk_results: Vec<ChunkResult> = node
-            .row_indices
-            .par_chunks(chunk_size)
-            .map(|chunk| {
-                let mut left = Vec::new();
-                let mut right = Vec::new();
-                let mut lg = 0.0_f32;
-                let mut lh = 0.0_f32;
-                let mut lq = 0.0_f32;
-                let mut rg = 0.0_f32;
-                let mut rh = 0.0_f32;
-                let mut rq = 0.0_f32;
-                let feature_index = split.feature_index as usize;
-                let use_col_major = binned_matrix.has_col_major();
-                let col_base = feature_index * binned_matrix.row_count;
-                let missing = binned_matrix.missing_bin();
-                for &row_index_u32 in chunk {
-                    let row_index = row_index_u32 as usize;
-                    let bin_val = if use_col_major {
-                        binned_matrix.col_bin(col_base + row_index)
-                    } else {
-                        let cell_index = row_index * binned_matrix.feature_count + feature_index;
-                        binned_matrix.row_bin(cell_index)
-                    };
-                    let gradient = gradients[row_index];
-                    if goes_left_for_split(bin_val, missing, split) {
-                        left.push(row_index_u32);
-                        lg += gradient.grad;
-                        lh += gradient.hess;
-                        lq += gradient.grad * gradient.grad;
-                    } else {
-                        right.push(row_index_u32);
-                        rg += gradient.grad;
-                        rh += gradient.hess;
-                        rq += gradient.grad * gradient.grad;
-                    }
-                }
-                (left, right, lg, lh, lq, rg, rh, rq)
-            })
-            .collect();
+        let (left_stats, right_stats) =
+            Self::parallel_split_stats(binned_matrix, gradients, &node.row_indices, split, lookup);
+        let left_count = left_stats.row_count as usize;
+        let right_count = right_stats.row_count as usize;
+        let mut left_row_indices = Vec::with_capacity(left_count);
+        let mut right_row_indices = Vec::with_capacity(right_count);
 
-        let total_rows = node.row_indices.len();
-        let mut left_row_indices = Vec::with_capacity(total_rows / 2);
-        let mut right_row_indices = Vec::with_capacity(total_rows / 2);
-        let mut left_grad_sum = 0.0_f32;
-        let mut left_hess_sum = 0.0_f32;
-        let mut left_grad_sq_sum = 0.0_f32;
-        let mut right_grad_sum = 0.0_f32;
-        let mut right_hess_sum = 0.0_f32;
-        let mut right_grad_sq_sum = 0.0_f32;
-
-        for (left, right, lg, lh, lq, rg, rh, rq) in chunk_results {
-            left_row_indices.extend(left);
-            right_row_indices.extend(right);
-            left_grad_sum += lg;
-            left_hess_sum += lh;
-            left_grad_sq_sum += lq;
-            right_grad_sum += rg;
-            right_hess_sum += rh;
-            right_grad_sq_sum += rq;
+        for &row in &node.row_indices {
+            if lookup.goes_left(binned_matrix, row, split) {
+                left_row_indices.push(row);
+            } else {
+                right_row_indices.push(row);
+            }
         }
 
-        let left_count = left_row_indices.len() as u32;
-        let right_count = right_row_indices.len() as u32;
         Ok((
             PartitionResult {
                 left_row_indices,
                 right_row_indices,
             },
-            NodeStats {
-                grad_sum: left_grad_sum,
-                hess_sum: left_hess_sum,
-                grad_sq_sum: left_grad_sq_sum,
-                row_count: left_count,
-            },
-            NodeStats {
-                grad_sum: right_grad_sum,
-                hess_sum: right_hess_sum,
-                grad_sq_sum: right_grad_sq_sum,
-                row_count: right_count,
-            },
+            left_stats,
+            right_stats,
         ))
+    }
+
+    fn stable_partition_owned_rows(
+        mut rows: Vec<u32>,
+        left_capacity: usize,
+        mut goes_left: impl FnMut(u32) -> bool,
+    ) -> (Vec<u32>, Vec<u32>) {
+        let mut left_rows = Vec::with_capacity(left_capacity);
+        let mut right_len = 0;
+
+        for read_index in 0..rows.len() {
+            let row = rows[read_index];
+            if goes_left(row) {
+                left_rows.push(row);
+            } else {
+                rows[right_len] = row;
+                right_len += 1;
+            }
+        }
+        rows.truncate(right_len);
+
+        (left_rows, rows)
+    }
+
+    fn apply_split_owned_with_stats_parallel(
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: NodeSlice,
+        split: &SplitCandidate,
+        lookup: SplitRowLookup,
+    ) -> EngineResult<(PartitionResult, NodeStats, NodeStats)> {
+        let (left_stats, right_stats) =
+            Self::parallel_split_stats(binned_matrix, gradients, &node.row_indices, split, lookup);
+        let (left_row_indices, right_row_indices) = Self::stable_partition_owned_rows(
+            node.row_indices,
+            left_stats.row_count as usize,
+            |row| lookup.goes_left(binned_matrix, row, split),
+        );
+
+        Ok((
+            PartitionResult {
+                left_row_indices,
+                right_row_indices,
+            },
+            left_stats,
+            right_stats,
+        ))
+    }
+
+    fn parallel_split_stats(
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        rows: &[u32],
+        split: &SplitCandidate,
+        lookup: SplitRowLookup,
+    ) -> (NodeStats, NodeStats) {
+        let chunk_size = (rows.len() / rayon::current_num_threads().max(1)).max(4096);
+        let chunk_stats: Vec<ChunkStats> = rows
+            .par_chunks(chunk_size)
+            .map(|chunk| {
+                let mut stats = ChunkStats::default();
+                for &row in chunk {
+                    let gradient = gradients[row as usize];
+                    if lookup.goes_left(binned_matrix, row, split) {
+                        stats.left.add(gradient);
+                    } else {
+                        stats.right.add(gradient);
+                    }
+                }
+                stats
+            })
+            .collect();
+
+        let mut left = NodeStatsAccumulator::default();
+        let mut right = NodeStatsAccumulator::default();
+        for chunk in chunk_stats {
+            left.merge(chunk.left);
+            right.merge(chunk.right);
+        }
+
+        let left_count = left.row_count;
+        let right_count = right.row_count;
+        (
+            left.into_node_stats(left_count),
+            right.into_node_stats(right_count),
+        )
     }
 }
 

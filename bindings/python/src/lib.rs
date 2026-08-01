@@ -52,6 +52,14 @@ pub(crate) const LINEAR_TAIL_CORE_SPAN_RATIO_ENV_VAR: &str =
     "ALLOYGBM_EXPERIMENT_LINEAR_TAIL_CORE_SPAN_RATIO";
 pub(crate) const DEFAULT_LINEAR_TAIL_CORE_SPAN_RATIO_THRESHOLD: f32 = 0.10;
 
+#[pyfunction]
+fn _build_provenance() -> (&'static str, bool) {
+    (
+        env!("ALLOYGBM_BUILD_SOURCE_COMMIT"),
+        env!("ALLOYGBM_BUILD_SOURCE_DIRTY") != "false",
+    )
+}
+
 pub(crate) fn dense_rows_from_flat_values(
     values: &[f32],
     row_count: usize,
@@ -66,6 +74,7 @@ pub(crate) fn dense_rows_from_flat_values(
 
 #[pymodule]
 fn _alloygbm(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(_build_provenance, m)?)?;
     m.add_class::<NativeRuntimeInfo>()?;
     m.add_class::<NativePredictorHandle>()?;
     m.add_class::<JointPredictorHandle>()?;

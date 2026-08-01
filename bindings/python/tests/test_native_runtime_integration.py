@@ -159,6 +159,12 @@ class NativeRuntimeIntegrationTests(unittest.TestCase):
         self.assertEqual(info.name, "alloygbm")
         self.assertRegex(info.version, re.compile(r"^\d+\.\d+\.\d+"))
 
+    def test_native_extension_exposes_build_provenance(self) -> None:
+        commit, dirty = self.alloygbm._alloygbm._build_provenance()
+
+        self.assertRegex(commit, r"^[0-9a-f]{40}$")
+        self.assertIs(type(dirty), bool)
+
     def test_runtime_import_exposes_metric_helpers(self) -> None:
         self.assertTrue(callable(self.alloygbm.rmse))
         self.assertTrue(callable(self.alloygbm.mae))

@@ -11,8 +11,8 @@ use rayon::prelude::*;
 
 use crate::CpuBackend;
 use crate::factor_split::validate_factor_split_context;
-use crate::split_helpers::{apply_feature_weight, goes_left_for_split};
-use crate::{pl, pl_histogram};
+use crate::split_helpers::apply_feature_weight;
+use crate::{NodeStatsAccumulator, pl, pl_histogram};
 
 impl BackendOps for CpuBackend {
     fn build_histograms(
@@ -211,32 +211,15 @@ impl BackendOps for CpuBackend {
         node: &NodeSlice,
         split: &SplitCandidate,
     ) -> EngineResult<PartitionResult> {
-        node.validate_bounds(binned_matrix.row_count)?;
-        if split.feature_index as usize >= binned_matrix.feature_count {
-            return Err(EngineError::ContractViolation(format!(
-                "split feature_index {} exceeds feature_count {}",
-                split.feature_index, binned_matrix.feature_count
-            )));
-        }
+        let lookup = Self::split_row_lookup(binned_matrix, None, node, split)?;
 
         let mut left_row_indices = Vec::new();
         let mut right_row_indices = Vec::new();
-        let feature_index = split.feature_index as usize;
-        let use_col_major = binned_matrix.has_col_major();
-        let col_base = feature_index * binned_matrix.row_count;
-        let missing = binned_matrix.missing_bin();
         for &row_index in &node.row_indices {
-            let row_index = row_index as usize;
-            let bin_val = if use_col_major {
-                binned_matrix.col_bin(col_base + row_index)
+            if lookup.goes_left(binned_matrix, row_index, split) {
+                left_row_indices.push(row_index);
             } else {
-                let cell_index = row_index * binned_matrix.feature_count + feature_index;
-                binned_matrix.row_bin(cell_index)
-            };
-            if goes_left_for_split(bin_val, missing, split) {
-                left_row_indices.push(row_index as u32);
-            } else {
-                right_row_indices.push(row_index as u32);
+                right_row_indices.push(row_index);
             }
         }
 
@@ -253,59 +236,33 @@ impl BackendOps for CpuBackend {
         node: &NodeSlice,
         split: &SplitCandidate,
     ) -> EngineResult<(PartitionResult, NodeStats, NodeStats)> {
-        node.validate_bounds(binned_matrix.row_count)?;
-        if gradients.len() != binned_matrix.row_count {
-            return Err(EngineError::ContractViolation(format!(
-                "gradients length {} does not match row_count {}",
-                gradients.len(),
-                binned_matrix.row_count
-            )));
-        }
-        if split.feature_index as usize >= binned_matrix.feature_count {
-            return Err(EngineError::ContractViolation(format!(
-                "split feature_index {} exceeds feature_count {}",
-                split.feature_index, binned_matrix.feature_count
-            )));
-        }
+        let lookup = Self::split_row_lookup(binned_matrix, Some(gradients), node, split)?;
 
         const PARALLEL_PARTITION_THRESHOLD: usize = 50_000;
 
         if node.row_indices.len() >= PARALLEL_PARTITION_THRESHOLD {
-            return Self::apply_split_with_stats_parallel(binned_matrix, gradients, node, split);
+            return Self::apply_split_with_stats_parallel_with_lookup(
+                binned_matrix,
+                gradients,
+                node,
+                split,
+                lookup,
+            );
         }
 
         let mut left_row_indices = Vec::with_capacity(node.row_indices.len() / 2);
         let mut right_row_indices = Vec::with_capacity(node.row_indices.len() / 2);
-        let mut left_grad_sum = 0.0_f32;
-        let mut left_hess_sum = 0.0_f32;
-        let mut left_grad_sq_sum = 0.0_f32;
-        let mut right_grad_sum = 0.0_f32;
-        let mut right_hess_sum = 0.0_f32;
-        let mut right_grad_sq_sum = 0.0_f32;
+        let mut left_stats = NodeStatsAccumulator::default();
+        let mut right_stats = NodeStatsAccumulator::default();
 
-        let feature_index = split.feature_index as usize;
-        let use_col_major = binned_matrix.has_col_major();
-        let col_base = feature_index * binned_matrix.row_count;
-        let missing = binned_matrix.missing_bin();
         for &row_index_u32 in &node.row_indices {
-            let row_index = row_index_u32 as usize;
-            let bin_val = if use_col_major {
-                binned_matrix.col_bin(col_base + row_index)
-            } else {
-                let cell_index = row_index * binned_matrix.feature_count + feature_index;
-                binned_matrix.row_bin(cell_index)
-            };
-            let gradient = gradients[row_index];
-            if goes_left_for_split(bin_val, missing, split) {
+            let gradient = gradients[row_index_u32 as usize];
+            if lookup.goes_left(binned_matrix, row_index_u32, split) {
                 left_row_indices.push(row_index_u32);
-                left_grad_sum += gradient.grad;
-                left_hess_sum += gradient.hess;
-                left_grad_sq_sum += gradient.grad * gradient.grad;
+                left_stats.add(gradient);
             } else {
                 right_row_indices.push(row_index_u32);
-                right_grad_sum += gradient.grad;
-                right_hess_sum += gradient.hess;
-                right_grad_sq_sum += gradient.grad * gradient.grad;
+                right_stats.add(gradient);
             }
         }
 
@@ -313,20 +270,62 @@ impl BackendOps for CpuBackend {
             left_row_indices,
             right_row_indices,
         };
-        let left_stats = NodeStats {
-            grad_sum: left_grad_sum,
-            hess_sum: left_hess_sum,
-            grad_sq_sum: left_grad_sq_sum,
-            row_count: partition.left_row_indices.len() as u32,
-        };
-        let right_stats = NodeStats {
-            grad_sum: right_grad_sum,
-            hess_sum: right_hess_sum,
-            grad_sq_sum: right_grad_sq_sum,
-            row_count: partition.right_row_indices.len() as u32,
-        };
+        let left_count = partition.left_row_indices.len();
+        let right_count = partition.right_row_indices.len();
+        Ok((
+            partition,
+            left_stats.into_node_stats(left_count),
+            right_stats.into_node_stats(right_count),
+        ))
+    }
 
-        Ok((partition, left_stats, right_stats))
+    fn apply_split_owned_with_stats(
+        &self,
+        binned_matrix: &BinnedMatrix,
+        gradients: &[GradientPair],
+        node: NodeSlice,
+        split: &SplitCandidate,
+    ) -> EngineResult<(PartitionResult, NodeStats, NodeStats)> {
+        let lookup = Self::split_row_lookup(binned_matrix, Some(gradients), &node, split)?;
+
+        const PARALLEL_PARTITION_THRESHOLD: usize = 50_000;
+
+        if node.row_indices.len() >= PARALLEL_PARTITION_THRESHOLD {
+            return Self::apply_split_owned_with_stats_parallel(
+                binned_matrix,
+                gradients,
+                node,
+                split,
+                lookup,
+            );
+        }
+
+        let mut left_stats = NodeStatsAccumulator::default();
+        let mut right_stats = NodeStatsAccumulator::default();
+        let left_capacity = node.row_indices.len() / 2;
+        let (left_row_indices, right_row_indices) =
+            Self::stable_partition_owned_rows(node.row_indices, left_capacity, |row| {
+                let gradient = gradients[row as usize];
+                if lookup.goes_left(binned_matrix, row, split) {
+                    left_stats.add(gradient);
+                    true
+                } else {
+                    right_stats.add(gradient);
+                    false
+                }
+            });
+
+        let partition = PartitionResult {
+            left_row_indices,
+            right_row_indices,
+        };
+        let left_count = partition.left_row_indices.len();
+        let right_count = partition.right_row_indices.len();
+        Ok((
+            partition,
+            left_stats.into_node_stats(left_count),
+            right_stats.into_node_stats(right_count),
+        ))
     }
 
     fn reduce_sums(

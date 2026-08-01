@@ -49,6 +49,13 @@ Serial and parallel arms must produce exact artifact and prediction hashes,
 complete the same rounds, emit finite probabilities, and beat the class-prior
 log-loss baseline across tall/narrow, medium/wide, and small workloads.
 
+The allocation-reuse harness at `benchmarks/allocation_reuse_benchmark.py`
+compares separately built, manifest-attested native runtimes across tall/deep,
+wide/deep, short/wide, and shallow/tall matrices under both growth strategies.
+Its [committed evidence](../benchmarks/allocation_reuse_v1.md) requires exact
+artifact and prediction digests and gates aggregate native fit time and
+incremental RSS.
+
 The comparative runner also emits a temporal/panel stability table for scenarios
 whose names include `time`, `temporal`, or `panel`. It reports mean score,
 worst score, and score standard deviation across repeated runs; this is the

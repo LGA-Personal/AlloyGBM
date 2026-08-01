@@ -97,6 +97,15 @@ jobs:
       - name: Install wheel
         run: python -m pip install --force-reinstall dist/*.whl
 
+      - name: Attest installed AlloyGBM runtime
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: |
+          python benchmarks/allocation_reuse_benchmark.py \
+            --write-runtime-manifest /tmp/alloygbm-candidate-runtime.json \
+            --runtime-name candidate \
+            --runtime-python "$(python -c 'import sys; print(sys.executable)')" \
+            --runtime-workdir "$GITHUB_WORKSPACE"
+
       - name: Install test dependencies
         run: python -m pip install pytest pytest-subtests numpy scikit-learn pandas
 
@@ -134,6 +143,14 @@ jobs:
       - name: Run compact multiclass parallelism gate
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
         run: python benchmarks/multiclass_parallelism_benchmark.py --quick --gate
+
+      - name: Test allocation reuse benchmark contract
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python -m pytest benchmarks/tests/test_allocation_reuse_benchmark.py -q
+
+      - name: Run compact allocation reuse gate
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: python benchmarks/allocation_reuse_benchmark.py --quick --candidate-manifest /tmp/alloygbm-candidate-runtime.json --gate
 
       - name: Import smoke
         run: python -c "import alloygbm; print(alloygbm.native_runtime_info())"

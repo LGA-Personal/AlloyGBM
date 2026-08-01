@@ -52,6 +52,11 @@ harnesses are also provided:
   class counts, and both growth strategies. The report is
   ``docs/benchmarks/multiclass_parallelism_v1.md``; serial and parallel
   artifacts and predictions must match exactly.
+- ``benchmarks/allocation_reuse_benchmark.py`` -- isolated, manifest-attested
+  baseline/candidate evidence for histogram and row-partition allocation reuse
+  across four matrix shapes and both growth strategies. The report is
+  ``docs/benchmarks/allocation_reuse_v1.md``; artifacts and predictions must
+  match exactly before aggregate native-time and RSS gates are applied.
 
 The suite spans three task types with the following scenarios:
 

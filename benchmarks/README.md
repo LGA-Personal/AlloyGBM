@@ -211,6 +211,12 @@ Additional lighter-weight scripts target specific features:
   and small matrices, 3 and 12 classes, and both growth strategies. The full
   report is `docs/benchmarks/multiclass_parallelism_v1.md`; exact serial versus
   parallel artifact and prediction hashes are required.
+- `benchmarks/allocation_reuse_benchmark.py` — isolated paired subprocess
+  evidence for allocation reuse across tall/deep, wide/deep, short/wide, and
+  shallow/tall regression matrices with missing values. Quick mode compares
+  one manifest-attested candidate runtime with itself. Full mode requires
+  separate Python executables, worktrees, and strict runtime manifests for a
+  same-host baseline/candidate run.
 - `benchmarks/architectural_backlog/` — isolated baseline/candidate harness for
   SoA histograms, node-level parallelism, duplicate bin storage, compact
   predictor nodes, EFB, and approximate quantile sketches. Methodology and
@@ -243,6 +249,43 @@ python3 benchmarks/monotone_constraints_benchmark.py \
   --gate \
   --output docs/benchmarks/monotone_constraints_v1.md
 
+# Allocation-reuse contract and compact candidate self-consistency gate
+python3 -m pytest benchmarks/tests/test_allocation_reuse_benchmark.py -q
+.venv/bin/python benchmarks/allocation_reuse_benchmark.py \
+  --write-runtime-manifest /tmp/alloygbm-candidate-runtime.json \
+  --runtime-name candidate \
+  --runtime-python .venv/bin/python \
+  --runtime-workdir "$(pwd)"
+.venv/bin/python benchmarks/allocation_reuse_benchmark.py \
+  --quick \
+  --candidate-manifest /tmp/alloygbm-candidate-runtime.json \
+  --gate
+
+# Canonical Task 6 full flow after release-building both worktree environments
+/tmp/alloygbm-pr128-baseline/.venv/bin/python \
+  "$(pwd)/benchmarks/allocation_reuse_benchmark.py" \
+  --write-runtime-manifest /tmp/alloygbm-pr128-baseline/runtime.json \
+  --runtime-name baseline \
+  --runtime-python /tmp/alloygbm-pr128-baseline/.venv/bin/python \
+  --runtime-workdir /tmp/alloygbm-pr128-baseline
+.venv/bin/python benchmarks/allocation_reuse_benchmark.py \
+  --write-runtime-manifest /tmp/alloygbm-pr128-candidate-runtime.json \
+  --runtime-name candidate \
+  --runtime-python .venv/bin/python \
+  --runtime-workdir "$(pwd)"
+.venv/bin/python benchmarks/allocation_reuse_benchmark.py \
+  --full \
+  --baseline-python /tmp/alloygbm-pr128-baseline/.venv/bin/python \
+  --baseline-workdir /tmp/alloygbm-pr128-baseline \
+  --baseline-manifest /tmp/alloygbm-pr128-baseline/runtime.json \
+  --candidate-python .venv/bin/python \
+  --candidate-workdir "$(pwd)" \
+  --candidate-manifest /tmp/alloygbm-pr128-candidate-runtime.json \
+  --repetitions 5 \
+  --gate \
+  --output-json docs/benchmarks/allocation_reuse_v1.json \
+  --output-markdown docs/benchmarks/allocation_reuse_v1.md
+
 # Fast smoke run for all six deferred architecture projects
 python3 -m benchmarks.architectural_backlog.run \
   --profile quick --mode baseline --gate
@@ -262,6 +305,28 @@ python3 -m benchmarks.architectural_backlog.run \
 python3 benchmarks/numerai_benchmark.py --feature-set small \
   --rounds 1200 --learning-rate 0.05 --max-depth 6 --col-subsample 0.3
 ```
+
+The allocation-reuse manifest is strict JSON written by the declared runtime
+immediately after build/install. The native extension embeds its build commit
+and dirty-source state; manifest creation requires a clean worktree and an
+embedded commit equal to that worktree's `HEAD`. The manifest also binds the
+normalized Python executable, loaded package and extension paths, and extension
+SHA-256. This supports both editable worktree builds and wheel installations
+while rejecting stale, dirty, or substituted binaries. Workers run with
+isolated import paths and must match the manifest exactly. Warmups run in separate
+subprocesses and are excluded from the recorded repetitions. Artifact,
+prediction, and RMSE equivalence is exact. Full-mode performance gates compare
+per-case medians and then aggregate geometric timing and RSS ratios: aggregate
+native slowdown must stay within 3%, aggregate incremental RSS growth within
+5%, and at least one deep-pressure case must improve in median time or RSS.
+Full mode requires explicit, distinct baseline and candidate Python
+executables, workdirs, manifests, and source commits. Quick mode is the only
+self-comparison mode and requires one candidate manifest; it intentionally
+gates equivalence only because its single default repetition is too small for
+defensible performance claims.
+Zero or unsupported RSS deltas are reported as unavailable and excluded from
+the RSS geometric mean. A full run fails if any case lacks a measurable
+positive ratio, preventing an unavailable baseline from hiding candidate RSS.
 
 ## Outputs
 
