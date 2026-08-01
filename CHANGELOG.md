@@ -70,8 +70,8 @@
   for a child, and standard numeric SIMD scans use worker-local prefix scratch.
   A native-build-provenance-attested eight-case benchmark preserved exact
   artifact and prediction digests across all 40 recorded pairs. Aggregate
-  native fit time changed by +2.6% and incremental RSS by -7.3%; every case
-  used less RSS, while shallow/tall native time increased by 7.8%-9.4%. No
+  native fit time changed by +1.8% and incremental RSS by -7.4%; every case
+  used less RSS, while shallow/tall native time increased by 7.3%-8.1%. No
   public API or artifact format changed.
 - **Parallelized eligible multiclass class-tree builds.** Multiclass rounds
   now prepare independent class candidates in parallel inside the fit-scoped

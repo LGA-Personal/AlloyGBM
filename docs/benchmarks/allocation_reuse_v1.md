@@ -4,22 +4,22 @@
 
 | Arm | Source commit | Python | Workdir |
 | --- | --- | --- | --- |
-| baseline | `f7cb6d40992a1497ce72a958d861a127b0cc6e41` | `/tmp/alloygbm-pr128-baseline/.venv/bin/python` | `/private/tmp/alloygbm-pr128-baseline` |
-| candidate | `d04ea48f7d46db374ea7308da52adaacafd9172f` | `/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python` | `/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools` |
+| baseline | `05630870a9e8a0b32cb46b59bf97441911b7de45` | `/tmp/alloygbm-pr128-baseline/.venv/bin/python` | `/private/tmp/alloygbm-pr128-baseline` |
+| candidate | `4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc` | `/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python` | `/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools` |
 
 - Baseline package path: `/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py`
 - Baseline extension path: `/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so`
-- Baseline extension SHA-256: `e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96`
-- Baseline native build commit: `f7cb6d40992a1497ce72a958d861a127b0cc6e41`
+- Baseline extension SHA-256: `b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c`
+- Baseline native build commit: `05630870a9e8a0b32cb46b59bf97441911b7de45`
 - Candidate package path: `/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py`
 - Candidate extension path: `/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so`
-- Candidate extension SHA-256: `c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76`
-- Candidate native build commit: `d04ea48f7d46db374ea7308da52adaacafd9172f`
+- Candidate extension SHA-256: `c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7`
+- Candidate native build commit: `4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc`
 
 ## Aggregate Gate
 
-- Aggregate timing ratio: 1.0261
-- Aggregate RSS ratio: 0.9273
+- Aggregate timing ratio: 1.0183
+- Aggregate RSS ratio: 0.9262
 - RSS cases available: 8
 - Performance gated: True
 - Failures: 0
@@ -31,14 +31,14 @@ Warmup subprocesses are excluded from every recorded repetition.
 
 | Case | Reps | Baseline native s | Candidate native s | Ratio | Baseline RSS MiB | Candidate RSS MiB | Ratio |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `shallow_tall-leaf` | 5 | 0.099073 | 0.108333 | 1.0935 | 9.14 | 8.31 | 0.9094 |
-| `shallow_tall-level` | 5 | 0.093627 | 0.100923 | 1.0779 | 9.28 | 8.45 | 0.9108 |
-| `short_wide-leaf` | 5 | 0.359307 | 0.352773 | 0.9818 | 35.88 | 34.36 | 0.9578 |
-| `short_wide-level` | 5 | 0.277270 | 0.284183 | 1.0249 | 63.86 | 61.28 | 0.9596 |
-| `tall_deep-leaf` | 5 | 0.162985 | 0.163912 | 1.0057 | 11.16 | 9.55 | 0.8557 |
-| `tall_deep-level` | 5 | 0.165133 | 0.163641 | 0.9910 | 15.66 | 14.73 | 0.9411 |
-| `wide_deep-leaf` | 5 | 0.337670 | 0.340243 | 1.0076 | 38.81 | 36.34 | 0.9364 |
-| `wide_deep-level` | 5 | 0.434755 | 0.448719 | 1.0321 | 80.08 | 76.25 | 0.9522 |
+| `shallow_tall-leaf` | 5 | 0.099446 | 0.107489 | 1.0809 | 9.28 | 8.50 | 0.9158 |
+| `shallow_tall-level` | 5 | 0.093936 | 0.100801 | 1.0731 | 9.34 | 8.44 | 0.9030 |
+| `short_wide-leaf` | 5 | 0.353511 | 0.356417 | 1.0082 | 35.48 | 34.41 | 0.9696 |
+| `short_wide-level` | 5 | 0.286607 | 0.287546 | 1.0033 | 64.44 | 60.12 | 0.9331 |
+| `tall_deep-leaf` | 5 | 0.164860 | 0.163782 | 0.9935 | 11.09 | 9.58 | 0.8634 |
+| `tall_deep-level` | 5 | 0.167394 | 0.164189 | 0.9808 | 15.75 | 14.52 | 0.9216 |
+| `wide_deep-leaf` | 5 | 0.338198 | 0.341783 | 1.0106 | 38.86 | 36.83 | 0.9477 |
+| `wide_deep-level` | 5 | 0.453334 | 0.453482 | 1.0003 | 81.25 | 77.95 | 0.9594 |
 
 ## Exact Equivalence
 

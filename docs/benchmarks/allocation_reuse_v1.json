@@ -82,103 +82,103 @@
     }
   ],
   "gate": {
-    "aggregate_rss_ratio": 0.9272818100292147,
-    "aggregate_timing_ratio": 1.02614226165376,
+    "aggregate_rss_ratio": 0.9261559270017512,
+    "aggregate_timing_ratio": 1.0182572108971903,
     "case_summaries": [
       {
-        "baseline_native_seconds": 0.099073334,
-        "baseline_rss_mib": 9.140625,
-        "candidate_native_seconds": 0.108332625,
-        "candidate_rss_mib": 8.3125,
+        "baseline_native_seconds": 0.099446166,
+        "baseline_rss_mib": 9.28125,
+        "candidate_native_seconds": 0.107489291,
+        "candidate_rss_mib": 8.5,
         "case": "shallow_tall-leaf",
         "repetitions": 5,
-        "rss_ratio": 0.9094017094017094,
+        "rss_ratio": 0.9158249158249159,
         "shape": "shallow_tall",
-        "timing_ratio": 1.0934589624287803,
+        "timing_ratio": 1.0808791864333915,
         "tree_growth": "leaf"
       },
       {
-        "baseline_native_seconds": 0.093627375,
-        "baseline_rss_mib": 9.28125,
-        "candidate_native_seconds": 0.100923167,
-        "candidate_rss_mib": 8.453125,
+        "baseline_native_seconds": 0.093935917,
+        "baseline_rss_mib": 9.34375,
+        "candidate_native_seconds": 0.100801458,
+        "candidate_rss_mib": 8.4375,
         "case": "shallow_tall-level",
         "repetitions": 5,
-        "rss_ratio": 0.9107744107744108,
+        "rss_ratio": 0.903010033444816,
         "shape": "shallow_tall",
-        "timing_ratio": 1.0779237055401798,
+        "timing_ratio": 1.073087496447179,
         "tree_growth": "level"
       },
       {
-        "baseline_native_seconds": 0.359307333,
-        "baseline_rss_mib": 35.875,
-        "candidate_native_seconds": 0.352773,
-        "candidate_rss_mib": 34.359375,
+        "baseline_native_seconds": 0.353511458,
+        "baseline_rss_mib": 35.484375,
+        "candidate_native_seconds": 0.356416625,
+        "candidate_rss_mib": 34.40625,
         "case": "short_wide-leaf",
         "repetitions": 5,
-        "rss_ratio": 0.9577526132404182,
+        "rss_ratio": 0.9696169088507266,
         "shape": "short_wide",
-        "timing_ratio": 0.9818140839335444,
+        "timing_ratio": 1.0082180278298079,
         "tree_growth": "leaf"
       },
       {
-        "baseline_native_seconds": 0.277269917,
-        "baseline_rss_mib": 63.859375,
-        "candidate_native_seconds": 0.284183,
-        "candidate_rss_mib": 61.28125,
+        "baseline_native_seconds": 0.286606834,
+        "baseline_rss_mib": 64.4375,
+        "candidate_native_seconds": 0.28754625,
+        "candidate_rss_mib": 60.125,
         "case": "short_wide-level",
         "repetitions": 5,
-        "rss_ratio": 0.9596280890628823,
+        "rss_ratio": 0.933074684772066,
         "shape": "short_wide",
-        "timing_ratio": 1.0249326831947658,
+        "timing_ratio": 1.0032777166785911,
         "tree_growth": "level"
       },
       {
-        "baseline_native_seconds": 0.162985208,
-        "baseline_rss_mib": 11.15625,
-        "candidate_native_seconds": 0.163912292,
-        "candidate_rss_mib": 9.546875,
+        "baseline_native_seconds": 0.164859958,
+        "baseline_rss_mib": 11.09375,
+        "candidate_native_seconds": 0.163781583,
+        "candidate_rss_mib": 9.578125,
         "case": "tall_deep-leaf",
         "repetitions": 5,
-        "rss_ratio": 0.8557422969187675,
+        "rss_ratio": 0.8633802816901408,
         "shape": "tall_deep",
-        "timing_ratio": 1.0056881480925557,
+        "timing_ratio": 0.993458842201088,
         "tree_growth": "leaf"
       },
       {
-        "baseline_native_seconds": 0.16513325,
-        "baseline_rss_mib": 15.65625,
-        "candidate_native_seconds": 0.163640542,
-        "candidate_rss_mib": 14.734375,
+        "baseline_native_seconds": 0.167394375,
+        "baseline_rss_mib": 15.75,
+        "candidate_native_seconds": 0.164188583,
+        "candidate_rss_mib": 14.515625,
         "case": "tall_deep-level",
         "repetitions": 5,
-        "rss_ratio": 0.9411177644710579,
+        "rss_ratio": 0.9216269841269841,
         "shape": "tall_deep",
-        "timing_ratio": 0.9909605848610137,
+        "timing_ratio": 0.9808488666360503,
         "tree_growth": "level"
       },
       {
-        "baseline_native_seconds": 0.337670042,
-        "baseline_rss_mib": 38.8125,
-        "candidate_native_seconds": 0.34024275,
-        "candidate_rss_mib": 36.34375,
+        "baseline_native_seconds": 0.338198125,
+        "baseline_rss_mib": 38.859375,
+        "candidate_native_seconds": 0.341782875,
+        "candidate_rss_mib": 36.828125,
         "case": "wide_deep-leaf",
         "repetitions": 5,
-        "rss_ratio": 0.9363929146537843,
+        "rss_ratio": 0.9477281865701649,
         "shape": "wide_deep",
-        "timing_ratio": 1.0076189998519323,
+        "timing_ratio": 1.0105995561033934,
         "tree_growth": "leaf"
       },
       {
-        "baseline_native_seconds": 0.43475525,
-        "baseline_rss_mib": 80.078125,
-        "candidate_native_seconds": 0.448718792,
-        "candidate_rss_mib": 76.25,
+        "baseline_native_seconds": 0.4533345,
+        "baseline_rss_mib": 81.25,
+        "candidate_native_seconds": 0.453481667,
+        "candidate_rss_mib": 77.953125,
         "case": "wide_deep-level",
         "repetitions": 5,
-        "rss_ratio": 0.9521951219512195,
+        "rss_ratio": 0.9594230769230769,
         "shape": "wide_deep",
-        "timing_ratio": 1.0321181676356985,
+        "timing_ratio": 1.0003246322527846,
         "tree_growth": "level"
       }
     ],
@@ -202,9 +202,9 @@
           "n_rows": 32768
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.16852212499361485,
-        "native_seconds": 0.163843209,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.17120354098733515,
+        "native_seconds": 0.166592916,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -224,10 +224,10 @@
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "repetition": 0,
         "rmse": 0.5873298636294246,
-        "rss_mib": 15.734375,
+        "rss_mib": 15.75,
         "runtime_name": "baseline",
         "shape": "tall_deep",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "level"
       },
       "candidate": {
@@ -239,9 +239,9 @@
           "n_rows": 32768
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.16905441600829363,
-        "native_seconds": 0.164367583,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.1689277500845492,
+        "native_seconds": 0.164188583,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -261,10 +261,10 @@
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 0,
         "rmse": 0.5873298636294246,
-        "rss_mib": 14.734375,
+        "rss_mib": 14.234375,
         "runtime_name": "candidate",
         "shape": "tall_deep",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "level"
       }
     },
@@ -278,9 +278,9 @@
           "n_rows": 32768
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.16976258298382163,
-        "native_seconds": 0.164909375,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.17730162490624934,
+        "native_seconds": 0.172548125,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -300,10 +300,10 @@
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "repetition": 1,
         "rmse": 0.5873298636294246,
-        "rss_mib": 15.65625,
+        "rss_mib": 15.921875,
         "runtime_name": "baseline",
         "shape": "tall_deep",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "level"
       },
       "candidate": {
@@ -315,9 +315,9 @@
           "n_rows": 32768
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.16858870803844184,
-        "native_seconds": 0.1638245,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.16974212497007102,
+        "native_seconds": 0.165137292,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -336,11 +336,87 @@
         "prediction_sha256": "313af77cf0b8dfcada0f30eda1de815434ceef944f50298b879e1e5e5f2ea902",
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 1,
+        "rmse": 0.5873298636294246,
+        "rss_mib": 14.515625,
+        "runtime_name": "candidate",
+        "shape": "tall_deep",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
+        "tree_growth": "level"
+      }
+    },
+    {
+      "baseline": {
+        "artifact_sha256": "5e64dbc9840a7ca06b4057ee666c6541b42abc9ed3fb9eb0a2ce3d3ea950ac13",
+        "case": "tall_deep-level",
+        "dimensions": {
+          "n_eval_rows": 4096,
+          "n_features": 16,
+          "n_rows": 32768
+        },
+        "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.1722590000135824,
+        "native_seconds": 0.167394375,
+        "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
+        "parameters": {
+          "continuous_binning_max_bins": 64,
+          "deterministic": true,
+          "lambda_l2": 1.0,
+          "learning_rate": 0.08,
+          "max_depth": 8,
+          "min_data_in_leaf": 8,
+          "min_split_gain": 0.0,
+          "n_estimators": 24,
+          "n_jobs": 4,
+          "seed": 2101,
+          "training_policy": "manual",
+          "tree_growth": "level"
+        },
+        "prediction_sha256": "313af77cf0b8dfcada0f30eda1de815434ceef944f50298b879e1e5e5f2ea902",
+        "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
+        "repetition": 2,
+        "rmse": 0.5873298636294246,
+        "rss_mib": 15.75,
+        "runtime_name": "baseline",
+        "shape": "tall_deep",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
+        "tree_growth": "level"
+      },
+      "candidate": {
+        "artifact_sha256": "5e64dbc9840a7ca06b4057ee666c6541b42abc9ed3fb9eb0a2ce3d3ea950ac13",
+        "case": "tall_deep-level",
+        "dimensions": {
+          "n_eval_rows": 4096,
+          "n_features": 16,
+          "n_rows": 32768
+        },
+        "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.17066766694188118,
+        "native_seconds": 0.165967583,
+        "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
+        "parameters": {
+          "continuous_binning_max_bins": 64,
+          "deterministic": true,
+          "lambda_l2": 1.0,
+          "learning_rate": 0.08,
+          "max_depth": 8,
+          "min_data_in_leaf": 8,
+          "min_split_gain": 0.0,
+          "n_estimators": 24,
+          "n_jobs": 4,
+          "seed": 2101,
+          "training_policy": "manual",
+          "tree_growth": "level"
+        },
+        "prediction_sha256": "313af77cf0b8dfcada0f30eda1de815434ceef944f50298b879e1e5e5f2ea902",
+        "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
+        "repetition": 2,
         "rmse": 0.5873298636294246,
         "rss_mib": 14.859375,
         "runtime_name": "candidate",
         "shape": "tall_deep",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "level"
       }
     },
@@ -354,85 +430,9 @@
           "n_rows": 32768
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.16978808399289846,
-        "native_seconds": 0.16513325,
-        "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
-        "parameters": {
-          "continuous_binning_max_bins": 64,
-          "deterministic": true,
-          "lambda_l2": 1.0,
-          "learning_rate": 0.08,
-          "max_depth": 8,
-          "min_data_in_leaf": 8,
-          "min_split_gain": 0.0,
-          "n_estimators": 24,
-          "n_jobs": 4,
-          "seed": 2101,
-          "training_policy": "manual",
-          "tree_growth": "level"
-        },
-        "prediction_sha256": "313af77cf0b8dfcada0f30eda1de815434ceef944f50298b879e1e5e5f2ea902",
-        "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
-        "repetition": 2,
-        "rmse": 0.5873298636294246,
-        "rss_mib": 15.5625,
-        "runtime_name": "baseline",
-        "shape": "tall_deep",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
-        "tree_growth": "level"
-      },
-      "candidate": {
-        "artifact_sha256": "5e64dbc9840a7ca06b4057ee666c6541b42abc9ed3fb9eb0a2ce3d3ea950ac13",
-        "case": "tall_deep-level",
-        "dimensions": {
-          "n_eval_rows": 4096,
-          "n_features": 16,
-          "n_rows": 32768
-        },
-        "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.16798658296465874,
-        "native_seconds": 0.163088833,
-        "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
-        "parameters": {
-          "continuous_binning_max_bins": 64,
-          "deterministic": true,
-          "lambda_l2": 1.0,
-          "learning_rate": 0.08,
-          "max_depth": 8,
-          "min_data_in_leaf": 8,
-          "min_split_gain": 0.0,
-          "n_estimators": 24,
-          "n_jobs": 4,
-          "seed": 2101,
-          "training_policy": "manual",
-          "tree_growth": "level"
-        },
-        "prediction_sha256": "313af77cf0b8dfcada0f30eda1de815434ceef944f50298b879e1e5e5f2ea902",
-        "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
-        "repetition": 2,
-        "rmse": 0.5873298636294246,
-        "rss_mib": 14.671875,
-        "runtime_name": "candidate",
-        "shape": "tall_deep",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
-        "tree_growth": "level"
-      }
-    },
-    {
-      "baseline": {
-        "artifact_sha256": "5e64dbc9840a7ca06b4057ee666c6541b42abc9ed3fb9eb0a2ce3d3ea950ac13",
-        "case": "tall_deep-level",
-        "dimensions": {
-          "n_eval_rows": 4096,
-          "n_features": 16,
-          "n_rows": 32768
-        },
-        "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.1705275831045583,
-        "native_seconds": 0.165672709,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.17055220901966095,
+        "native_seconds": 0.165770541,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -452,10 +452,10 @@
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "repetition": 3,
         "rmse": 0.5873298636294246,
-        "rss_mib": 15.609375,
+        "rss_mib": 15.578125,
         "runtime_name": "baseline",
         "shape": "tall_deep",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "level"
       },
       "candidate": {
@@ -467,9 +467,9 @@
           "n_rows": 32768
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.1676268329611048,
-        "native_seconds": 0.16298725,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.16857604100368917,
+        "native_seconds": 0.163644333,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -489,10 +489,10 @@
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 3,
         "rmse": 0.5873298636294246,
-        "rss_mib": 14.546875,
+        "rss_mib": 14.8125,
         "runtime_name": "candidate",
         "shape": "tall_deep",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "level"
       }
     },
@@ -506,9 +506,9 @@
           "n_rows": 32768
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.20478849997743964,
-        "native_seconds": 0.199970917,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.1754127920139581,
+        "native_seconds": 0.170514125,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -528,10 +528,10 @@
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "repetition": 4,
         "rmse": 0.5873298636294246,
-        "rss_mib": 15.71875,
+        "rss_mib": 15.640625,
         "runtime_name": "baseline",
         "shape": "tall_deep",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "level"
       },
       "candidate": {
@@ -543,9 +543,9 @@
           "n_rows": 32768
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.16830312507227063,
-        "native_seconds": 0.163640542,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.16888408397790045,
+        "native_seconds": 0.164145,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -565,10 +565,10 @@
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 4,
         "rmse": 0.5873298636294246,
-        "rss_mib": 14.90625,
+        "rss_mib": 14.421875,
         "runtime_name": "candidate",
         "shape": "tall_deep",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "level"
       }
     },
@@ -582,9 +582,9 @@
           "n_rows": 32768
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.16737149993423373,
-        "native_seconds": 0.162945833,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.1697489160578698,
+        "native_seconds": 0.1654935,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -605,10 +605,10 @@
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "repetition": 0,
         "rmse": 0.6311037169272574,
-        "rss_mib": 11.0625,
+        "rss_mib": 10.90625,
         "runtime_name": "baseline",
         "shape": "tall_deep",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "leaf"
       },
       "candidate": {
@@ -620,9 +620,9 @@
           "n_rows": 32768
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.16807754104956985,
-        "native_seconds": 0.163912292,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.16718766698613763,
+        "native_seconds": 0.162888,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -643,10 +643,10 @@
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 0,
         "rmse": 0.6311037169272574,
-        "rss_mib": 9.46875,
+        "rss_mib": 9.578125,
         "runtime_name": "candidate",
         "shape": "tall_deep",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "leaf"
       }
     },
@@ -660,9 +660,9 @@
           "n_rows": 32768
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.16741945897229016,
-        "native_seconds": 0.163143459,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.1676333340583369,
+        "native_seconds": 0.163399791,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -683,10 +683,10 @@
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "repetition": 1,
         "rmse": 0.6311037169272574,
-        "rss_mib": 11.15625,
+        "rss_mib": 10.90625,
         "runtime_name": "baseline",
         "shape": "tall_deep",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "leaf"
       },
       "candidate": {
@@ -698,9 +698,9 @@
           "n_rows": 32768
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.1679211660521105,
-        "native_seconds": 0.163748542,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.168342666933313,
+        "native_seconds": 0.164177334,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -720,245 +720,245 @@
         "prediction_sha256": "f19e9adbd9da24d32b6e35a526d331cd1db04624085ab7217a97f76a579d5c08",
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 1,
-        "rmse": 0.6311037169272574,
-        "rss_mib": 9.515625,
-        "runtime_name": "candidate",
-        "shape": "tall_deep",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
-        "tree_growth": "leaf"
-      }
-    },
-    {
-      "baseline": {
-        "artifact_sha256": "d94ba2ae11419f3ed0ae8ce8800ef265c908192bcbda904cc4fc69268cc364df",
-        "case": "tall_deep-leaf",
-        "dimensions": {
-          "n_eval_rows": 4096,
-          "n_features": 16,
-          "n_rows": 32768
-        },
-        "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.16693570895586163,
-        "native_seconds": 0.162706042,
-        "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
-        "parameters": {
-          "continuous_binning_max_bins": 64,
-          "deterministic": true,
-          "lambda_l2": 1.0,
-          "learning_rate": 0.08,
-          "max_depth": 8,
-          "max_leaves": 64,
-          "min_data_in_leaf": 8,
-          "min_split_gain": 0.0,
-          "n_estimators": 24,
-          "n_jobs": 4,
-          "seed": 2101,
-          "training_policy": "manual",
-          "tree_growth": "leaf"
-        },
-        "prediction_sha256": "f19e9adbd9da24d32b6e35a526d331cd1db04624085ab7217a97f76a579d5c08",
-        "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
-        "repetition": 2,
-        "rmse": 0.6311037169272574,
-        "rss_mib": 11.203125,
-        "runtime_name": "baseline",
-        "shape": "tall_deep",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
-        "tree_growth": "leaf"
-      },
-      "candidate": {
-        "artifact_sha256": "d94ba2ae11419f3ed0ae8ce8800ef265c908192bcbda904cc4fc69268cc364df",
-        "case": "tall_deep-leaf",
-        "dimensions": {
-          "n_eval_rows": 4096,
-          "n_features": 16,
-          "n_rows": 32768
-        },
-        "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.1678526250179857,
-        "native_seconds": 0.163652375,
-        "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
-        "parameters": {
-          "continuous_binning_max_bins": 64,
-          "deterministic": true,
-          "lambda_l2": 1.0,
-          "learning_rate": 0.08,
-          "max_depth": 8,
-          "max_leaves": 64,
-          "min_data_in_leaf": 8,
-          "min_split_gain": 0.0,
-          "n_estimators": 24,
-          "n_jobs": 4,
-          "seed": 2101,
-          "training_policy": "manual",
-          "tree_growth": "leaf"
-        },
-        "prediction_sha256": "f19e9adbd9da24d32b6e35a526d331cd1db04624085ab7217a97f76a579d5c08",
-        "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
-        "repetition": 2,
-        "rmse": 0.6311037169272574,
-        "rss_mib": 9.6875,
-        "runtime_name": "candidate",
-        "shape": "tall_deep",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
-        "tree_growth": "leaf"
-      }
-    },
-    {
-      "baseline": {
-        "artifact_sha256": "d94ba2ae11419f3ed0ae8ce8800ef265c908192bcbda904cc4fc69268cc364df",
-        "case": "tall_deep-leaf",
-        "dimensions": {
-          "n_eval_rows": 4096,
-          "n_features": 16,
-          "n_rows": 32768
-        },
-        "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.1671934580663219,
-        "native_seconds": 0.162985208,
-        "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
-        "parameters": {
-          "continuous_binning_max_bins": 64,
-          "deterministic": true,
-          "lambda_l2": 1.0,
-          "learning_rate": 0.08,
-          "max_depth": 8,
-          "max_leaves": 64,
-          "min_data_in_leaf": 8,
-          "min_split_gain": 0.0,
-          "n_estimators": 24,
-          "n_jobs": 4,
-          "seed": 2101,
-          "training_policy": "manual",
-          "tree_growth": "leaf"
-        },
-        "prediction_sha256": "f19e9adbd9da24d32b6e35a526d331cd1db04624085ab7217a97f76a579d5c08",
-        "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
-        "repetition": 3,
-        "rmse": 0.6311037169272574,
-        "rss_mib": 11.328125,
-        "runtime_name": "baseline",
-        "shape": "tall_deep",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
-        "tree_growth": "leaf"
-      },
-      "candidate": {
-        "artifact_sha256": "d94ba2ae11419f3ed0ae8ce8800ef265c908192bcbda904cc4fc69268cc364df",
-        "case": "tall_deep-leaf",
-        "dimensions": {
-          "n_eval_rows": 4096,
-          "n_features": 16,
-          "n_rows": 32768
-        },
-        "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.16821529204025865,
-        "native_seconds": 0.164033458,
-        "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
-        "parameters": {
-          "continuous_binning_max_bins": 64,
-          "deterministic": true,
-          "lambda_l2": 1.0,
-          "learning_rate": 0.08,
-          "max_depth": 8,
-          "max_leaves": 64,
-          "min_data_in_leaf": 8,
-          "min_split_gain": 0.0,
-          "n_estimators": 24,
-          "n_jobs": 4,
-          "seed": 2101,
-          "training_policy": "manual",
-          "tree_growth": "leaf"
-        },
-        "prediction_sha256": "f19e9adbd9da24d32b6e35a526d331cd1db04624085ab7217a97f76a579d5c08",
-        "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
-        "repetition": 3,
-        "rmse": 0.6311037169272574,
-        "rss_mib": 9.640625,
-        "runtime_name": "candidate",
-        "shape": "tall_deep",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
-        "tree_growth": "leaf"
-      }
-    },
-    {
-      "baseline": {
-        "artifact_sha256": "d94ba2ae11419f3ed0ae8ce8800ef265c908192bcbda904cc4fc69268cc364df",
-        "case": "tall_deep-leaf",
-        "dimensions": {
-          "n_eval_rows": 4096,
-          "n_features": 16,
-          "n_rows": 32768
-        },
-        "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.16766541602555662,
-        "native_seconds": 0.163278167,
-        "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
-        "parameters": {
-          "continuous_binning_max_bins": 64,
-          "deterministic": true,
-          "lambda_l2": 1.0,
-          "learning_rate": 0.08,
-          "max_depth": 8,
-          "max_leaves": 64,
-          "min_data_in_leaf": 8,
-          "min_split_gain": 0.0,
-          "n_estimators": 24,
-          "n_jobs": 4,
-          "seed": 2101,
-          "training_policy": "manual",
-          "tree_growth": "leaf"
-        },
-        "prediction_sha256": "f19e9adbd9da24d32b6e35a526d331cd1db04624085ab7217a97f76a579d5c08",
-        "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
-        "repetition": 4,
-        "rmse": 0.6311037169272574,
-        "rss_mib": 10.8125,
-        "runtime_name": "baseline",
-        "shape": "tall_deep",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
-        "tree_growth": "leaf"
-      },
-      "candidate": {
-        "artifact_sha256": "d94ba2ae11419f3ed0ae8ce8800ef265c908192bcbda904cc4fc69268cc364df",
-        "case": "tall_deep-leaf",
-        "dimensions": {
-          "n_eval_rows": 4096,
-          "n_features": 16,
-          "n_rows": 32768
-        },
-        "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.16915262502152473,
-        "native_seconds": 0.165044209,
-        "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
-        "parameters": {
-          "continuous_binning_max_bins": 64,
-          "deterministic": true,
-          "lambda_l2": 1.0,
-          "learning_rate": 0.08,
-          "max_depth": 8,
-          "max_leaves": 64,
-          "min_data_in_leaf": 8,
-          "min_split_gain": 0.0,
-          "n_estimators": 24,
-          "n_jobs": 4,
-          "seed": 2101,
-          "training_policy": "manual",
-          "tree_growth": "leaf"
-        },
-        "prediction_sha256": "f19e9adbd9da24d32b6e35a526d331cd1db04624085ab7217a97f76a579d5c08",
-        "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
-        "repetition": 4,
         "rmse": 0.6311037169272574,
         "rss_mib": 9.546875,
         "runtime_name": "candidate",
         "shape": "tall_deep",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
+        "tree_growth": "leaf"
+      }
+    },
+    {
+      "baseline": {
+        "artifact_sha256": "d94ba2ae11419f3ed0ae8ce8800ef265c908192bcbda904cc4fc69268cc364df",
+        "case": "tall_deep-leaf",
+        "dimensions": {
+          "n_eval_rows": 4096,
+          "n_features": 16,
+          "n_rows": 32768
+        },
+        "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.16937524999957532,
+        "native_seconds": 0.164859958,
+        "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
+        "parameters": {
+          "continuous_binning_max_bins": 64,
+          "deterministic": true,
+          "lambda_l2": 1.0,
+          "learning_rate": 0.08,
+          "max_depth": 8,
+          "max_leaves": 64,
+          "min_data_in_leaf": 8,
+          "min_split_gain": 0.0,
+          "n_estimators": 24,
+          "n_jobs": 4,
+          "seed": 2101,
+          "training_policy": "manual",
+          "tree_growth": "leaf"
+        },
+        "prediction_sha256": "f19e9adbd9da24d32b6e35a526d331cd1db04624085ab7217a97f76a579d5c08",
+        "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
+        "repetition": 2,
+        "rmse": 0.6311037169272574,
+        "rss_mib": 11.09375,
+        "runtime_name": "baseline",
+        "shape": "tall_deep",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
+        "tree_growth": "leaf"
+      },
+      "candidate": {
+        "artifact_sha256": "d94ba2ae11419f3ed0ae8ce8800ef265c908192bcbda904cc4fc69268cc364df",
+        "case": "tall_deep-leaf",
+        "dimensions": {
+          "n_eval_rows": 4096,
+          "n_features": 16,
+          "n_rows": 32768
+        },
+        "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.1679130420088768,
+        "native_seconds": 0.163781583,
+        "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
+        "parameters": {
+          "continuous_binning_max_bins": 64,
+          "deterministic": true,
+          "lambda_l2": 1.0,
+          "learning_rate": 0.08,
+          "max_depth": 8,
+          "max_leaves": 64,
+          "min_data_in_leaf": 8,
+          "min_split_gain": 0.0,
+          "n_estimators": 24,
+          "n_jobs": 4,
+          "seed": 2101,
+          "training_policy": "manual",
+          "tree_growth": "leaf"
+        },
+        "prediction_sha256": "f19e9adbd9da24d32b6e35a526d331cd1db04624085ab7217a97f76a579d5c08",
+        "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
+        "repetition": 2,
+        "rmse": 0.6311037169272574,
+        "rss_mib": 9.5625,
+        "runtime_name": "candidate",
+        "shape": "tall_deep",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
+        "tree_growth": "leaf"
+      }
+    },
+    {
+      "baseline": {
+        "artifact_sha256": "d94ba2ae11419f3ed0ae8ce8800ef265c908192bcbda904cc4fc69268cc364df",
+        "case": "tall_deep-leaf",
+        "dimensions": {
+          "n_eval_rows": 4096,
+          "n_features": 16,
+          "n_rows": 32768
+        },
+        "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.16915395797695965,
+        "native_seconds": 0.164974958,
+        "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
+        "parameters": {
+          "continuous_binning_max_bins": 64,
+          "deterministic": true,
+          "lambda_l2": 1.0,
+          "learning_rate": 0.08,
+          "max_depth": 8,
+          "max_leaves": 64,
+          "min_data_in_leaf": 8,
+          "min_split_gain": 0.0,
+          "n_estimators": 24,
+          "n_jobs": 4,
+          "seed": 2101,
+          "training_policy": "manual",
+          "tree_growth": "leaf"
+        },
+        "prediction_sha256": "f19e9adbd9da24d32b6e35a526d331cd1db04624085ab7217a97f76a579d5c08",
+        "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
+        "repetition": 3,
+        "rmse": 0.6311037169272574,
+        "rss_mib": 11.171875,
+        "runtime_name": "baseline",
+        "shape": "tall_deep",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
+        "tree_growth": "leaf"
+      },
+      "candidate": {
+        "artifact_sha256": "d94ba2ae11419f3ed0ae8ce8800ef265c908192bcbda904cc4fc69268cc364df",
+        "case": "tall_deep-leaf",
+        "dimensions": {
+          "n_eval_rows": 4096,
+          "n_features": 16,
+          "n_rows": 32768
+        },
+        "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.1682907909853384,
+        "native_seconds": 0.163848333,
+        "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
+        "parameters": {
+          "continuous_binning_max_bins": 64,
+          "deterministic": true,
+          "lambda_l2": 1.0,
+          "learning_rate": 0.08,
+          "max_depth": 8,
+          "max_leaves": 64,
+          "min_data_in_leaf": 8,
+          "min_split_gain": 0.0,
+          "n_estimators": 24,
+          "n_jobs": 4,
+          "seed": 2101,
+          "training_policy": "manual",
+          "tree_growth": "leaf"
+        },
+        "prediction_sha256": "f19e9adbd9da24d32b6e35a526d331cd1db04624085ab7217a97f76a579d5c08",
+        "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
+        "repetition": 3,
+        "rmse": 0.6311037169272574,
+        "rss_mib": 9.875,
+        "runtime_name": "candidate",
+        "shape": "tall_deep",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
+        "tree_growth": "leaf"
+      }
+    },
+    {
+      "baseline": {
+        "artifact_sha256": "d94ba2ae11419f3ed0ae8ce8800ef265c908192bcbda904cc4fc69268cc364df",
+        "case": "tall_deep-leaf",
+        "dimensions": {
+          "n_eval_rows": 4096,
+          "n_features": 16,
+          "n_rows": 32768
+        },
+        "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.16860966698732227,
+        "native_seconds": 0.164466583,
+        "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
+        "parameters": {
+          "continuous_binning_max_bins": 64,
+          "deterministic": true,
+          "lambda_l2": 1.0,
+          "learning_rate": 0.08,
+          "max_depth": 8,
+          "max_leaves": 64,
+          "min_data_in_leaf": 8,
+          "min_split_gain": 0.0,
+          "n_estimators": 24,
+          "n_jobs": 4,
+          "seed": 2101,
+          "training_policy": "manual",
+          "tree_growth": "leaf"
+        },
+        "prediction_sha256": "f19e9adbd9da24d32b6e35a526d331cd1db04624085ab7217a97f76a579d5c08",
+        "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
+        "repetition": 4,
+        "rmse": 0.6311037169272574,
+        "rss_mib": 11.140625,
+        "runtime_name": "baseline",
+        "shape": "tall_deep",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
+        "tree_growth": "leaf"
+      },
+      "candidate": {
+        "artifact_sha256": "d94ba2ae11419f3ed0ae8ce8800ef265c908192bcbda904cc4fc69268cc364df",
+        "case": "tall_deep-leaf",
+        "dimensions": {
+          "n_eval_rows": 4096,
+          "n_features": 16,
+          "n_rows": 32768
+        },
+        "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.16776841704268008,
+        "native_seconds": 0.163121166,
+        "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
+        "parameters": {
+          "continuous_binning_max_bins": 64,
+          "deterministic": true,
+          "lambda_l2": 1.0,
+          "learning_rate": 0.08,
+          "max_depth": 8,
+          "max_leaves": 64,
+          "min_data_in_leaf": 8,
+          "min_split_gain": 0.0,
+          "n_estimators": 24,
+          "n_jobs": 4,
+          "seed": 2101,
+          "training_policy": "manual",
+          "tree_growth": "leaf"
+        },
+        "prediction_sha256": "f19e9adbd9da24d32b6e35a526d331cd1db04624085ab7217a97f76a579d5c08",
+        "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
+        "repetition": 4,
+        "rmse": 0.6311037169272574,
+        "rss_mib": 10.015625,
+        "runtime_name": "candidate",
+        "shape": "tall_deep",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "leaf"
       }
     },
@@ -972,9 +972,9 @@
           "n_rows": 8192
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.4435826250119135,
-        "native_seconds": 0.43475525,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.4759274579118937,
+        "native_seconds": 0.466746084,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -994,10 +994,10 @@
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "repetition": 0,
         "rmse": 1.0004270058610452,
-        "rss_mib": 76.03125,
+        "rss_mib": 81.25,
         "runtime_name": "baseline",
         "shape": "wide_deep",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "level"
       },
       "candidate": {
@@ -1009,9 +1009,9 @@
           "n_rows": 8192
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.4591030420269817,
-        "native_seconds": 0.450235708,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.48230487504042685,
+        "native_seconds": 0.473405625,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -1031,10 +1031,10 @@
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 0,
         "rmse": 1.0004270058610452,
-        "rss_mib": 79.21875,
+        "rss_mib": 77.90625,
         "runtime_name": "candidate",
         "shape": "wide_deep",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "level"
       }
     },
@@ -1048,9 +1048,9 @@
           "n_rows": 8192
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.4429253750713542,
-        "native_seconds": 0.434071667,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.4984066670294851,
+        "native_seconds": 0.487937416,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -1070,10 +1070,10 @@
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "repetition": 1,
         "rmse": 1.0004270058610452,
-        "rss_mib": 80.078125,
+        "rss_mib": 86.609375,
         "runtime_name": "baseline",
         "shape": "wide_deep",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "level"
       },
       "candidate": {
@@ -1085,9 +1085,9 @@
           "n_rows": 8192
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.45806924998760223,
-        "native_seconds": 0.448718792,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.504825665964745,
+        "native_seconds": 0.495558791,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -1107,10 +1107,10 @@
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 1,
         "rmse": 1.0004270058610452,
-        "rss_mib": 74.21875,
+        "rss_mib": 87.359375,
         "runtime_name": "candidate",
         "shape": "wide_deep",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "level"
       }
     },
@@ -1124,9 +1124,9 @@
           "n_rows": 8192
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.4406136249890551,
-        "native_seconds": 0.431749917,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.44746862503234297,
+        "native_seconds": 0.438405,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -1146,10 +1146,10 @@
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "repetition": 2,
         "rmse": 1.0004270058610452,
-        "rss_mib": 80.765625,
+        "rss_mib": 79.296875,
         "runtime_name": "baseline",
         "shape": "wide_deep",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "level"
       },
       "candidate": {
@@ -1161,9 +1161,9 @@
           "n_rows": 8192
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.45300049998331815,
-        "native_seconds": 0.443990292,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.4572464170632884,
+        "native_seconds": 0.448372209,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -1183,10 +1183,10 @@
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 2,
         "rmse": 1.0004270058610452,
-        "rss_mib": 71.75,
+        "rss_mib": 72.234375,
         "runtime_name": "candidate",
         "shape": "wide_deep",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "level"
       }
     },
@@ -1200,9 +1200,9 @@
           "n_rows": 8192
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.44517995801288635,
-        "native_seconds": 0.436022542,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.4625656669959426,
+        "native_seconds": 0.4533345,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -1222,10 +1222,10 @@
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "repetition": 3,
         "rmse": 1.0004270058610452,
-        "rss_mib": 80.265625,
+        "rss_mib": 79.390625,
         "runtime_name": "baseline",
         "shape": "wide_deep",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "level"
       },
       "candidate": {
@@ -1237,9 +1237,9 @@
           "n_rows": 8192
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.4547652080655098,
-        "native_seconds": 0.445951709,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.4626727079739794,
+        "native_seconds": 0.453481667,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -1259,10 +1259,10 @@
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 3,
         "rmse": 1.0004270058610452,
-        "rss_mib": 76.25,
+        "rss_mib": 77.953125,
         "runtime_name": "candidate",
         "shape": "wide_deep",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "level"
       }
     },
@@ -1276,9 +1276,9 @@
           "n_rows": 8192
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.45276149990968406,
-        "native_seconds": 0.443642125,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.45558700000401586,
+        "native_seconds": 0.446409583,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -1298,10 +1298,10 @@
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "repetition": 4,
         "rmse": 1.0004270058610452,
-        "rss_mib": 79.1875,
+        "rss_mib": 84.390625,
         "runtime_name": "baseline",
         "shape": "wide_deep",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "level"
       },
       "candidate": {
@@ -1313,9 +1313,9 @@
           "n_rows": 8192
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.45802983292378485,
-        "native_seconds": 0.449088958,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.4605219999793917,
+        "native_seconds": 0.451177875,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -1335,10 +1335,10 @@
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 4,
         "rmse": 1.0004270058610452,
-        "rss_mib": 77.5,
+        "rss_mib": 78.109375,
         "runtime_name": "candidate",
         "shape": "wide_deep",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "level"
       }
     },
@@ -1352,9 +1352,9 @@
           "n_rows": 8192
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.3450441249879077,
-        "native_seconds": 0.336297875,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.34597033297177404,
+        "native_seconds": 0.337002208,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -1375,10 +1375,10 @@
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "repetition": 0,
         "rmse": 1.0096257076906594,
-        "rss_mib": 38.5625,
+        "rss_mib": 38.21875,
         "runtime_name": "baseline",
         "shape": "wide_deep",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "leaf"
       },
       "candidate": {
@@ -1390,9 +1390,9 @@
           "n_rows": 8192
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.3480564580531791,
-        "native_seconds": 0.339302083,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.34914945892523974,
+        "native_seconds": 0.340649125,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -1413,10 +1413,10 @@
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 0,
         "rmse": 1.0096257076906594,
-        "rss_mib": 36.34375,
+        "rss_mib": 36.734375,
         "runtime_name": "candidate",
         "shape": "wide_deep",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "leaf"
       }
     },
@@ -1430,9 +1430,9 @@
           "n_rows": 8192
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.34551291598472744,
-        "native_seconds": 0.336913292,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.3471022079465911,
+        "native_seconds": 0.338198125,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -1453,10 +1453,10 @@
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "repetition": 1,
         "rmse": 1.0096257076906594,
-        "rss_mib": 38.6875,
+        "rss_mib": 38.859375,
         "runtime_name": "baseline",
         "shape": "wide_deep",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "leaf"
       },
       "candidate": {
@@ -1468,9 +1468,9 @@
           "n_rows": 8192
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.3473000410012901,
-        "native_seconds": 0.338642334,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.35736899997573346,
+        "native_seconds": 0.348777417,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -1491,10 +1491,10 @@
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 1,
         "rmse": 1.0096257076906594,
-        "rss_mib": 36.078125,
+        "rss_mib": 37.6875,
         "runtime_name": "candidate",
         "shape": "wide_deep",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "leaf"
       }
     },
@@ -1508,9 +1508,9 @@
           "n_rows": 8192
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.34762975003104657,
-        "native_seconds": 0.33818575,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.34476395801175386,
+        "native_seconds": 0.335840458,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -1531,10 +1531,10 @@
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "repetition": 2,
         "rmse": 1.0096257076906594,
-        "rss_mib": 38.8125,
+        "rss_mib": 38.59375,
         "runtime_name": "baseline",
         "shape": "wide_deep",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "leaf"
       },
       "candidate": {
@@ -1546,9 +1546,9 @@
           "n_rows": 8192
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.3496034999843687,
-        "native_seconds": 0.340866458,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.35090645798482,
+        "native_seconds": 0.342478584,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -1569,10 +1569,10 @@
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 2,
         "rmse": 1.0096257076906594,
-        "rss_mib": 36.140625,
+        "rss_mib": 36.375,
         "runtime_name": "candidate",
         "shape": "wide_deep",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "leaf"
       }
     },
@@ -1586,9 +1586,9 @@
           "n_rows": 8192
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.35133879201021045,
-        "native_seconds": 0.342397542,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.3550012500490993,
+        "native_seconds": 0.34628675,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -1609,10 +1609,10 @@
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "repetition": 3,
         "rmse": 1.0096257076906594,
-        "rss_mib": 39.15625,
+        "rss_mib": 39.515625,
         "runtime_name": "baseline",
         "shape": "wide_deep",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "leaf"
       },
       "candidate": {
@@ -1624,9 +1624,9 @@
           "n_rows": 8192
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.34871666703838855,
-        "native_seconds": 0.34024275,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.3505269589368254,
+        "native_seconds": 0.341782875,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -1647,10 +1647,10 @@
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 3,
         "rmse": 1.0096257076906594,
-        "rss_mib": 36.5625,
+        "rss_mib": 36.875,
         "runtime_name": "candidate",
         "shape": "wide_deep",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "leaf"
       }
     },
@@ -1664,9 +1664,9 @@
           "n_rows": 8192
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.34678716701455414,
-        "native_seconds": 0.337670042,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.3485069159651175,
+        "native_seconds": 0.339652,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -1687,10 +1687,10 @@
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "repetition": 4,
         "rmse": 1.0096257076906594,
-        "rss_mib": 38.828125,
+        "rss_mib": 39.03125,
         "runtime_name": "baseline",
         "shape": "wide_deep",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "leaf"
       },
       "candidate": {
@@ -1702,9 +1702,9 @@
           "n_rows": 8192
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.3499415830010548,
-        "native_seconds": 0.341237125,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.3494530830066651,
+        "native_seconds": 0.340928875,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -1725,10 +1725,10 @@
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 4,
         "rmse": 1.0096257076906594,
-        "rss_mib": 36.796875,
+        "rss_mib": 36.828125,
         "runtime_name": "candidate",
         "shape": "wide_deep",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "leaf"
       }
     },
@@ -1742,9 +1742,9 @@
           "n_rows": 1024
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.28140033304225653,
-        "native_seconds": 0.277269917,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.2792543329996988,
+        "native_seconds": 0.275185584,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -1764,10 +1764,10 @@
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "repetition": 0,
         "rmse": 1.1407160544596453,
-        "rss_mib": 59.796875,
+        "rss_mib": 62.578125,
         "runtime_name": "baseline",
         "shape": "short_wide",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "level"
       },
       "candidate": {
@@ -1779,9 +1779,9 @@
           "n_rows": 1024
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.29844241600949317,
-        "native_seconds": 0.294480667,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.2908608749276027,
+        "native_seconds": 0.286967416,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -1801,10 +1801,10 @@
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 0,
         "rmse": 1.1407160544596453,
-        "rss_mib": 73.1875,
+        "rss_mib": 60.125,
         "runtime_name": "candidate",
         "shape": "short_wide",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "level"
       }
     },
@@ -1818,9 +1818,9 @@
           "n_rows": 1024
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.2802040829556063,
-        "native_seconds": 0.276113292,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.29337699990719557,
+        "native_seconds": 0.289366917,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -1839,11 +1839,239 @@
         "prediction_sha256": "e997bc302f2bb1b5c70193f3c2e8ec456b125575f6389a9592994356d34a82f3",
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "repetition": 1,
+        "rmse": 1.1407160544596453,
+        "rss_mib": 64.4375,
+        "runtime_name": "baseline",
+        "shape": "short_wide",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
+        "tree_growth": "level"
+      },
+      "candidate": {
+        "artifact_sha256": "8e60f0e3c2eaccb5448572225c1bb95ee99abb8086fcf3b23f02e56723dd7806",
+        "case": "short_wide-level",
+        "dimensions": {
+          "n_eval_rows": 512,
+          "n_features": 512,
+          "n_rows": 1024
+        },
+        "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.2916060830466449,
+        "native_seconds": 0.287660917,
+        "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
+        "parameters": {
+          "continuous_binning_max_bins": 64,
+          "deterministic": true,
+          "lambda_l2": 1.0,
+          "learning_rate": 0.08,
+          "max_depth": 6,
+          "min_data_in_leaf": 8,
+          "min_split_gain": 0.0,
+          "n_estimators": 24,
+          "n_jobs": 4,
+          "seed": 2301,
+          "training_policy": "manual",
+          "tree_growth": "level"
+        },
+        "prediction_sha256": "e997bc302f2bb1b5c70193f3c2e8ec456b125575f6389a9592994356d34a82f3",
+        "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
+        "repetition": 1,
+        "rmse": 1.1407160544596453,
+        "rss_mib": 58.421875,
+        "runtime_name": "candidate",
+        "shape": "short_wide",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
+        "tree_growth": "level"
+      }
+    },
+    {
+      "baseline": {
+        "artifact_sha256": "8e60f0e3c2eaccb5448572225c1bb95ee99abb8086fcf3b23f02e56723dd7806",
+        "case": "short_wide-level",
+        "dimensions": {
+          "n_eval_rows": 512,
+          "n_features": 512,
+          "n_rows": 1024
+        },
+        "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.28455045900773257,
+        "native_seconds": 0.280688958,
+        "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
+        "parameters": {
+          "continuous_binning_max_bins": 64,
+          "deterministic": true,
+          "lambda_l2": 1.0,
+          "learning_rate": 0.08,
+          "max_depth": 6,
+          "min_data_in_leaf": 8,
+          "min_split_gain": 0.0,
+          "n_estimators": 24,
+          "n_jobs": 4,
+          "seed": 2301,
+          "training_policy": "manual",
+          "tree_growth": "level"
+        },
+        "prediction_sha256": "e997bc302f2bb1b5c70193f3c2e8ec456b125575f6389a9592994356d34a82f3",
+        "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
+        "repetition": 2,
+        "rmse": 1.1407160544596453,
+        "rss_mib": 59.90625,
+        "runtime_name": "baseline",
+        "shape": "short_wide",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
+        "tree_growth": "level"
+      },
+      "candidate": {
+        "artifact_sha256": "8e60f0e3c2eaccb5448572225c1bb95ee99abb8086fcf3b23f02e56723dd7806",
+        "case": "short_wide-level",
+        "dimensions": {
+          "n_eval_rows": 512,
+          "n_features": 512,
+          "n_rows": 1024
+        },
+        "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.29104524990543723,
+        "native_seconds": 0.287047167,
+        "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
+        "parameters": {
+          "continuous_binning_max_bins": 64,
+          "deterministic": true,
+          "lambda_l2": 1.0,
+          "learning_rate": 0.08,
+          "max_depth": 6,
+          "min_data_in_leaf": 8,
+          "min_split_gain": 0.0,
+          "n_estimators": 24,
+          "n_jobs": 4,
+          "seed": 2301,
+          "training_policy": "manual",
+          "tree_growth": "level"
+        },
+        "prediction_sha256": "e997bc302f2bb1b5c70193f3c2e8ec456b125575f6389a9592994356d34a82f3",
+        "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
+        "repetition": 2,
+        "rmse": 1.1407160544596453,
+        "rss_mib": 60.71875,
+        "runtime_name": "candidate",
+        "shape": "short_wide",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
+        "tree_growth": "level"
+      }
+    },
+    {
+      "baseline": {
+        "artifact_sha256": "8e60f0e3c2eaccb5448572225c1bb95ee99abb8086fcf3b23f02e56723dd7806",
+        "case": "short_wide-level",
+        "dimensions": {
+          "n_eval_rows": 512,
+          "n_features": 512,
+          "n_rows": 1024
+        },
+        "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.29295904200989753,
+        "native_seconds": 0.287827084,
+        "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
+        "parameters": {
+          "continuous_binning_max_bins": 64,
+          "deterministic": true,
+          "lambda_l2": 1.0,
+          "learning_rate": 0.08,
+          "max_depth": 6,
+          "min_data_in_leaf": 8,
+          "min_split_gain": 0.0,
+          "n_estimators": 24,
+          "n_jobs": 4,
+          "seed": 2301,
+          "training_policy": "manual",
+          "tree_growth": "level"
+        },
+        "prediction_sha256": "e997bc302f2bb1b5c70193f3c2e8ec456b125575f6389a9592994356d34a82f3",
+        "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
+        "repetition": 3,
+        "rmse": 1.1407160544596453,
+        "rss_mib": 71.140625,
+        "runtime_name": "baseline",
+        "shape": "short_wide",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
+        "tree_growth": "level"
+      },
+      "candidate": {
+        "artifact_sha256": "8e60f0e3c2eaccb5448572225c1bb95ee99abb8086fcf3b23f02e56723dd7806",
+        "case": "short_wide-level",
+        "dimensions": {
+          "n_eval_rows": 512,
+          "n_features": 512,
+          "n_rows": 1024
+        },
+        "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.2916887500323355,
+        "native_seconds": 0.28754625,
+        "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
+        "parameters": {
+          "continuous_binning_max_bins": 64,
+          "deterministic": true,
+          "lambda_l2": 1.0,
+          "learning_rate": 0.08,
+          "max_depth": 6,
+          "min_data_in_leaf": 8,
+          "min_split_gain": 0.0,
+          "n_estimators": 24,
+          "n_jobs": 4,
+          "seed": 2301,
+          "training_policy": "manual",
+          "tree_growth": "level"
+        },
+        "prediction_sha256": "e997bc302f2bb1b5c70193f3c2e8ec456b125575f6389a9592994356d34a82f3",
+        "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
+        "repetition": 3,
+        "rmse": 1.1407160544596453,
+        "rss_mib": 58.5,
+        "runtime_name": "candidate",
+        "shape": "short_wide",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
+        "tree_growth": "level"
+      }
+    },
+    {
+      "baseline": {
+        "artifact_sha256": "8e60f0e3c2eaccb5448572225c1bb95ee99abb8086fcf3b23f02e56723dd7806",
+        "case": "short_wide-level",
+        "dimensions": {
+          "n_eval_rows": 512,
+          "n_features": 512,
+          "n_rows": 1024
+        },
+        "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.29047841706778854,
+        "native_seconds": 0.286606834,
+        "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
+        "parameters": {
+          "continuous_binning_max_bins": 64,
+          "deterministic": true,
+          "lambda_l2": 1.0,
+          "learning_rate": 0.08,
+          "max_depth": 6,
+          "min_data_in_leaf": 8,
+          "min_split_gain": 0.0,
+          "n_estimators": 24,
+          "n_jobs": 4,
+          "seed": 2301,
+          "training_policy": "manual",
+          "tree_growth": "level"
+        },
+        "prediction_sha256": "e997bc302f2bb1b5c70193f3c2e8ec456b125575f6389a9592994356d34a82f3",
+        "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
+        "repetition": 4,
         "rmse": 1.1407160544596453,
         "rss_mib": 64.890625,
         "runtime_name": "baseline",
         "shape": "short_wide",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "level"
       },
       "candidate": {
@@ -1855,237 +2083,9 @@
           "n_rows": 1024
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.28843312500976026,
-        "native_seconds": 0.284183,
-        "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
-        "parameters": {
-          "continuous_binning_max_bins": 64,
-          "deterministic": true,
-          "lambda_l2": 1.0,
-          "learning_rate": 0.08,
-          "max_depth": 6,
-          "min_data_in_leaf": 8,
-          "min_split_gain": 0.0,
-          "n_estimators": 24,
-          "n_jobs": 4,
-          "seed": 2301,
-          "training_policy": "manual",
-          "tree_growth": "level"
-        },
-        "prediction_sha256": "e997bc302f2bb1b5c70193f3c2e8ec456b125575f6389a9592994356d34a82f3",
-        "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
-        "repetition": 1,
-        "rmse": 1.1407160544596453,
-        "rss_mib": 61.828125,
-        "runtime_name": "candidate",
-        "shape": "short_wide",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
-        "tree_growth": "level"
-      }
-    },
-    {
-      "baseline": {
-        "artifact_sha256": "8e60f0e3c2eaccb5448572225c1bb95ee99abb8086fcf3b23f02e56723dd7806",
-        "case": "short_wide-level",
-        "dimensions": {
-          "n_eval_rows": 512,
-          "n_features": 512,
-          "n_rows": 1024
-        },
-        "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.28702562500257045,
-        "native_seconds": 0.283114375,
-        "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
-        "parameters": {
-          "continuous_binning_max_bins": 64,
-          "deterministic": true,
-          "lambda_l2": 1.0,
-          "learning_rate": 0.08,
-          "max_depth": 6,
-          "min_data_in_leaf": 8,
-          "min_split_gain": 0.0,
-          "n_estimators": 24,
-          "n_jobs": 4,
-          "seed": 2301,
-          "training_policy": "manual",
-          "tree_growth": "level"
-        },
-        "prediction_sha256": "e997bc302f2bb1b5c70193f3c2e8ec456b125575f6389a9592994356d34a82f3",
-        "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
-        "repetition": 2,
-        "rmse": 1.1407160544596453,
-        "rss_mib": 61.921875,
-        "runtime_name": "baseline",
-        "shape": "short_wide",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
-        "tree_growth": "level"
-      },
-      "candidate": {
-        "artifact_sha256": "8e60f0e3c2eaccb5448572225c1bb95ee99abb8086fcf3b23f02e56723dd7806",
-        "case": "short_wide-level",
-        "dimensions": {
-          "n_eval_rows": 512,
-          "n_features": 512,
-          "n_rows": 1024
-        },
-        "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.2858268329873681,
-        "native_seconds": 0.281850708,
-        "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
-        "parameters": {
-          "continuous_binning_max_bins": 64,
-          "deterministic": true,
-          "lambda_l2": 1.0,
-          "learning_rate": 0.08,
-          "max_depth": 6,
-          "min_data_in_leaf": 8,
-          "min_split_gain": 0.0,
-          "n_estimators": 24,
-          "n_jobs": 4,
-          "seed": 2301,
-          "training_policy": "manual",
-          "tree_growth": "level"
-        },
-        "prediction_sha256": "e997bc302f2bb1b5c70193f3c2e8ec456b125575f6389a9592994356d34a82f3",
-        "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
-        "repetition": 2,
-        "rmse": 1.1407160544596453,
-        "rss_mib": 58.109375,
-        "runtime_name": "candidate",
-        "shape": "short_wide",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
-        "tree_growth": "level"
-      }
-    },
-    {
-      "baseline": {
-        "artifact_sha256": "8e60f0e3c2eaccb5448572225c1bb95ee99abb8086fcf3b23f02e56723dd7806",
-        "case": "short_wide-level",
-        "dimensions": {
-          "n_eval_rows": 512,
-          "n_features": 512,
-          "n_rows": 1024
-        },
-        "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.2780068329302594,
-        "native_seconds": 0.27403275,
-        "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
-        "parameters": {
-          "continuous_binning_max_bins": 64,
-          "deterministic": true,
-          "lambda_l2": 1.0,
-          "learning_rate": 0.08,
-          "max_depth": 6,
-          "min_data_in_leaf": 8,
-          "min_split_gain": 0.0,
-          "n_estimators": 24,
-          "n_jobs": 4,
-          "seed": 2301,
-          "training_policy": "manual",
-          "tree_growth": "level"
-        },
-        "prediction_sha256": "e997bc302f2bb1b5c70193f3c2e8ec456b125575f6389a9592994356d34a82f3",
-        "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
-        "repetition": 3,
-        "rmse": 1.1407160544596453,
-        "rss_mib": 63.859375,
-        "runtime_name": "baseline",
-        "shape": "short_wide",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
-        "tree_growth": "level"
-      },
-      "candidate": {
-        "artifact_sha256": "8e60f0e3c2eaccb5448572225c1bb95ee99abb8086fcf3b23f02e56723dd7806",
-        "case": "short_wide-level",
-        "dimensions": {
-          "n_eval_rows": 512,
-          "n_features": 512,
-          "n_rows": 1024
-        },
-        "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.28887941606808454,
-        "native_seconds": 0.285025375,
-        "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
-        "parameters": {
-          "continuous_binning_max_bins": 64,
-          "deterministic": true,
-          "lambda_l2": 1.0,
-          "learning_rate": 0.08,
-          "max_depth": 6,
-          "min_data_in_leaf": 8,
-          "min_split_gain": 0.0,
-          "n_estimators": 24,
-          "n_jobs": 4,
-          "seed": 2301,
-          "training_policy": "manual",
-          "tree_growth": "level"
-        },
-        "prediction_sha256": "e997bc302f2bb1b5c70193f3c2e8ec456b125575f6389a9592994356d34a82f3",
-        "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
-        "repetition": 3,
-        "rmse": 1.1407160544596453,
-        "rss_mib": 61.28125,
-        "runtime_name": "candidate",
-        "shape": "short_wide",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
-        "tree_growth": "level"
-      }
-    },
-    {
-      "baseline": {
-        "artifact_sha256": "8e60f0e3c2eaccb5448572225c1bb95ee99abb8086fcf3b23f02e56723dd7806",
-        "case": "short_wide-level",
-        "dimensions": {
-          "n_eval_rows": 512,
-          "n_features": 512,
-          "n_rows": 1024
-        },
-        "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.2856752920197323,
-        "native_seconds": 0.281738458,
-        "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
-        "parameters": {
-          "continuous_binning_max_bins": 64,
-          "deterministic": true,
-          "lambda_l2": 1.0,
-          "learning_rate": 0.08,
-          "max_depth": 6,
-          "min_data_in_leaf": 8,
-          "min_split_gain": 0.0,
-          "n_estimators": 24,
-          "n_jobs": 4,
-          "seed": 2301,
-          "training_policy": "manual",
-          "tree_growth": "level"
-        },
-        "prediction_sha256": "e997bc302f2bb1b5c70193f3c2e8ec456b125575f6389a9592994356d34a82f3",
-        "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
-        "repetition": 4,
-        "rmse": 1.1407160544596453,
-        "rss_mib": 66.984375,
-        "runtime_name": "baseline",
-        "shape": "short_wide",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
-        "tree_growth": "level"
-      },
-      "candidate": {
-        "artifact_sha256": "8e60f0e3c2eaccb5448572225c1bb95ee99abb8086fcf3b23f02e56723dd7806",
-        "case": "short_wide-level",
-        "dimensions": {
-          "n_eval_rows": 512,
-          "n_features": 512,
-          "n_rows": 1024
-        },
-        "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.28673375002108514,
-        "native_seconds": 0.282824459,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.2925829580053687,
+        "native_seconds": 0.288601667,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -2105,10 +2105,10 @@
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 4,
         "rmse": 1.1407160544596453,
-        "rss_mib": 58.734375,
+        "rss_mib": 61.03125,
         "runtime_name": "candidate",
         "shape": "short_wide",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "level"
       }
     },
@@ -2122,9 +2122,9 @@
           "n_rows": 1024
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.3674537920160219,
-        "native_seconds": 0.363493375,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.3575077500427142,
+        "native_seconds": 0.353511458,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -2145,10 +2145,10 @@
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "repetition": 0,
         "rmse": 1.1407160544596453,
-        "rss_mib": 35.3125,
+        "rss_mib": 35.53125,
         "runtime_name": "baseline",
         "shape": "short_wide",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "leaf"
       },
       "candidate": {
@@ -2160,9 +2160,9 @@
           "n_rows": 1024
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.35670533298980445,
-        "native_seconds": 0.3527385,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.3595985419815406,
+        "native_seconds": 0.3553945,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -2183,10 +2183,10 @@
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 0,
         "rmse": 1.1407160544596453,
-        "rss_mib": 34.703125,
+        "rss_mib": 34.828125,
         "runtime_name": "candidate",
         "shape": "short_wide",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "leaf"
       }
     },
@@ -2200,9 +2200,9 @@
           "n_rows": 1024
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.3605137919075787,
-        "native_seconds": 0.356627291,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.3595895000034943,
+        "native_seconds": 0.355704208,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -2223,10 +2223,10 @@
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "repetition": 1,
         "rmse": 1.1407160544596453,
-        "rss_mib": 35.96875,
+        "rss_mib": 35.671875,
         "runtime_name": "baseline",
         "shape": "short_wide",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "leaf"
       },
       "candidate": {
@@ -2238,9 +2238,9 @@
           "n_rows": 1024
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.3572411249624565,
-        "native_seconds": 0.353335625,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.36034074996132404,
+        "native_seconds": 0.356416625,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -2261,10 +2261,10 @@
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 1,
         "rmse": 1.1407160544596453,
-        "rss_mib": 34.359375,
+        "rss_mib": 35.09375,
         "runtime_name": "candidate",
         "shape": "short_wide",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "leaf"
       }
     },
@@ -2278,9 +2278,9 @@
           "n_rows": 1024
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.358064208063297,
-        "native_seconds": 0.354124791,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.35631854203529656,
+        "native_seconds": 0.352409,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -2301,10 +2301,10 @@
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "repetition": 2,
         "rmse": 1.1407160544596453,
-        "rss_mib": 35.875,
+        "rss_mib": 35.1875,
         "runtime_name": "baseline",
         "shape": "short_wide",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "leaf"
       },
       "candidate": {
@@ -2316,9 +2316,9 @@
           "n_rows": 1024
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.3569028750061989,
-        "native_seconds": 0.352773,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.36115979205351323,
+        "native_seconds": 0.357212792,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -2339,10 +2339,10 @@
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 2,
         "rmse": 1.1407160544596453,
-        "rss_mib": 34.171875,
+        "rss_mib": 34.3125,
         "runtime_name": "candidate",
         "shape": "short_wide",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "leaf"
       }
     },
@@ -2356,9 +2356,9 @@
           "n_rows": 1024
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.36359000008087605,
-        "native_seconds": 0.359307333,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.3652032910613343,
+        "native_seconds": 0.361082333,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -2379,10 +2379,10 @@
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "repetition": 3,
         "rmse": 1.1407160544596453,
-        "rss_mib": 35.71875,
+        "rss_mib": 35.484375,
         "runtime_name": "baseline",
         "shape": "short_wide",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "leaf"
       },
       "candidate": {
@@ -2394,9 +2394,9 @@
           "n_rows": 1024
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.3569181669736281,
-        "native_seconds": 0.35287675,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.36076412501279265,
+        "native_seconds": 0.3567235,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -2417,10 +2417,10 @@
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 3,
         "rmse": 1.1407160544596453,
-        "rss_mib": 34.203125,
+        "rss_mib": 34.234375,
         "runtime_name": "candidate",
         "shape": "short_wide",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "leaf"
       }
     },
@@ -2434,9 +2434,9 @@
           "n_rows": 1024
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.3782610410125926,
-        "native_seconds": 0.374369458,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.35685887502040714,
+        "native_seconds": 0.352930791,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -2457,10 +2457,10 @@
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "repetition": 4,
         "rmse": 1.1407160544596453,
-        "rss_mib": 38.78125,
+        "rss_mib": 35.484375,
         "runtime_name": "baseline",
         "shape": "short_wide",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "leaf"
       },
       "candidate": {
@@ -2472,9 +2472,9 @@
           "n_rows": 1024
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.3558781660394743,
-        "native_seconds": 0.351948209,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.35831770801451057,
+        "native_seconds": 0.354124084,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -2495,10 +2495,10 @@
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 4,
         "rmse": 1.1407160544596453,
-        "rss_mib": 34.640625,
+        "rss_mib": 34.40625,
         "runtime_name": "candidate",
         "shape": "short_wide",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "leaf"
       }
     },
@@ -2512,9 +2512,9 @@
           "n_rows": 65536
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.09786220802925527,
-        "native_seconds": 0.092925209,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.09885587508324534,
+        "native_seconds": 0.093709667,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -2534,10 +2534,10 @@
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "repetition": 0,
         "rmse": 0.643290350576337,
-        "rss_mib": 9.28125,
+        "rss_mib": 9.328125,
         "runtime_name": "baseline",
         "shape": "shallow_tall",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "level"
       },
       "candidate": {
@@ -2549,9 +2549,9 @@
           "n_rows": 65536
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.10581233398988843,
-        "native_seconds": 0.100867792,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.10578854102641344,
+        "native_seconds": 0.100801458,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -2571,10 +2571,10 @@
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 0,
         "rmse": 0.643290350576337,
-        "rss_mib": 8.421875,
+        "rss_mib": 8.359375,
         "runtime_name": "candidate",
         "shape": "shallow_tall",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "level"
       }
     },
@@ -2588,9 +2588,9 @@
           "n_rows": 65536
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.1014463750179857,
-        "native_seconds": 0.096327917,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.10220466600731015,
+        "native_seconds": 0.097003625,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -2610,10 +2610,10 @@
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "repetition": 1,
         "rmse": 0.643290350576337,
-        "rss_mib": 9.578125,
+        "rss_mib": 9.5,
         "runtime_name": "baseline",
         "shape": "shallow_tall",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "level"
       },
       "candidate": {
@@ -2625,9 +2625,9 @@
           "n_rows": 65536
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.1060570830013603,
-        "native_seconds": 0.101054708,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.10591024998575449,
+        "native_seconds": 0.100580209,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -2647,10 +2647,10 @@
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 1,
         "rmse": 0.643290350576337,
-        "rss_mib": 8.390625,
+        "rss_mib": 8.4375,
         "runtime_name": "candidate",
         "shape": "shallow_tall",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "level"
       }
     },
@@ -2664,9 +2664,9 @@
           "n_rows": 65536
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.0988268330693245,
-        "native_seconds": 0.093802416,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.09885379101615399,
+        "native_seconds": 0.093935917,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -2686,10 +2686,10 @@
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "repetition": 2,
         "rmse": 0.643290350576337,
-        "rss_mib": 9.21875,
+        "rss_mib": 9.84375,
         "runtime_name": "baseline",
         "shape": "shallow_tall",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "level"
       },
       "candidate": {
@@ -2701,9 +2701,9 @@
           "n_rows": 65536
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.10618474998045713,
-        "native_seconds": 0.101212416,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.10565799998585135,
+        "native_seconds": 0.10067975,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -2723,10 +2723,10 @@
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 2,
         "rmse": 0.643290350576337,
-        "rss_mib": 8.453125,
+        "rss_mib": 8.484375,
         "runtime_name": "candidate",
         "shape": "shallow_tall",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "level"
       }
     },
@@ -2740,9 +2740,9 @@
           "n_rows": 65536
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.09860149992164224,
-        "native_seconds": 0.093627375,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.0986399999819696,
+        "native_seconds": 0.093615458,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -2762,10 +2762,10 @@
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "repetition": 3,
         "rmse": 0.643290350576337,
-        "rss_mib": 9.203125,
+        "rss_mib": 9.34375,
         "runtime_name": "baseline",
         "shape": "shallow_tall",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "level"
       },
       "candidate": {
@@ -2777,9 +2777,9 @@
           "n_rows": 65536
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.10600754199549556,
-        "native_seconds": 0.100718958,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.10590704204514623,
+        "native_seconds": 0.100974334,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -2799,10 +2799,10 @@
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 3,
         "rmse": 0.643290350576337,
-        "rss_mib": 8.5,
+        "rss_mib": 8.3125,
         "runtime_name": "candidate",
         "shape": "shallow_tall",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "level"
       }
     },
@@ -2816,9 +2816,9 @@
           "n_rows": 65536
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.09809508395846933,
-        "native_seconds": 0.093058791,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.09926879103295505,
+        "native_seconds": 0.094054167,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -2838,10 +2838,10 @@
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "repetition": 4,
         "rmse": 0.643290350576337,
-        "rss_mib": 9.546875,
+        "rss_mib": 9.34375,
         "runtime_name": "baseline",
         "shape": "shallow_tall",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "level"
       },
       "candidate": {
@@ -2853,9 +2853,9 @@
           "n_rows": 65536
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.10625420801807195,
-        "native_seconds": 0.100923167,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.10594404092989862,
+        "native_seconds": 0.100998792,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -2878,7 +2878,7 @@
         "rss_mib": 8.5,
         "runtime_name": "candidate",
         "shape": "shallow_tall",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "level"
       }
     },
@@ -2892,9 +2892,9 @@
           "n_rows": 65536
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.1041359999217093,
-        "native_seconds": 0.099073334,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.10416341701056808,
+        "native_seconds": 0.099193667,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -2915,10 +2915,10 @@
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "repetition": 0,
         "rmse": 0.643290350576337,
-        "rss_mib": 9.171875,
+        "rss_mib": 9.34375,
         "runtime_name": "baseline",
         "shape": "shallow_tall",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "leaf"
       },
       "candidate": {
@@ -2930,9 +2930,9 @@
           "n_rows": 65536
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.11347216693684459,
-        "native_seconds": 0.108445042,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.11200045805890113,
+        "native_seconds": 0.1069125,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -2953,10 +2953,10 @@
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 0,
         "rmse": 0.643290350576337,
-        "rss_mib": 8.171875,
+        "rss_mib": 8.546875,
         "runtime_name": "candidate",
         "shape": "shallow_tall",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "leaf"
       }
     },
@@ -2970,9 +2970,9 @@
           "n_rows": 65536
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.10405308392364532,
-        "native_seconds": 0.099096875,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.10537770891096443,
+        "native_seconds": 0.100242,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -2996,7 +2996,7 @@
         "rss_mib": 9.140625,
         "runtime_name": "baseline",
         "shape": "shallow_tall",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "leaf"
       },
       "candidate": {
@@ -3008,9 +3008,9 @@
           "n_rows": 65536
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.11339770909398794,
-        "native_seconds": 0.108047208,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.11258933297358453,
+        "native_seconds": 0.107489291,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -3031,10 +3031,10 @@
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 1,
         "rmse": 0.643290350576337,
-        "rss_mib": 8.53125,
+        "rss_mib": 8.5,
         "runtime_name": "candidate",
         "shape": "shallow_tall",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "leaf"
       }
     },
@@ -3048,9 +3048,9 @@
           "n_rows": 65536
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.10400112497154623,
-        "native_seconds": 0.098873708,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.10430541704408824,
+        "native_seconds": 0.099279875,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -3074,7 +3074,7 @@
         "rss_mib": 9.078125,
         "runtime_name": "baseline",
         "shape": "shallow_tall",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "leaf"
       },
       "candidate": {
@@ -3086,9 +3086,9 @@
           "n_rows": 65536
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.11318716604728252,
-        "native_seconds": 0.108200833,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.11205316707491875,
+        "native_seconds": 0.10710625,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -3109,10 +3109,10 @@
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 2,
         "rmse": 0.643290350576337,
-        "rss_mib": 8.3125,
+        "rss_mib": 8.484375,
         "runtime_name": "candidate",
         "shape": "shallow_tall",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "leaf"
       }
     },
@@ -3126,9 +3126,9 @@
           "n_rows": 65536
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.10386029107030481,
-        "native_seconds": 0.098790417,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.10438533395063132,
+        "native_seconds": 0.099446166,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -3149,10 +3149,10 @@
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "repetition": 3,
         "rmse": 0.643290350576337,
-        "rss_mib": 9.015625,
+        "rss_mib": 9.28125,
         "runtime_name": "baseline",
         "shape": "shallow_tall",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "leaf"
       },
       "candidate": {
@@ -3164,9 +3164,9 @@
           "n_rows": 65536
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.11367670795880258,
-        "native_seconds": 0.10862575,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.11271483299788088,
+        "native_seconds": 0.10781525,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -3187,10 +3187,10 @@
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 3,
         "rmse": 0.643290350576337,
-        "rss_mib": 8.453125,
+        "rss_mib": 8.265625,
         "runtime_name": "candidate",
         "shape": "shallow_tall",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "leaf"
       }
     },
@@ -3204,9 +3204,9 @@
           "n_rows": 65536
         },
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "fit_seconds": 0.10432233393657953,
-        "native_seconds": 0.09932875,
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "fit_seconds": 0.1051050410605967,
+        "native_seconds": 0.099703416,
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -3227,10 +3227,10 @@
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "repetition": 4,
         "rmse": 0.643290350576337,
-        "rss_mib": 9.390625,
+        "rss_mib": 9.640625,
         "runtime_name": "baseline",
         "shape": "shallow_tall",
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "tree_growth": "leaf"
       },
       "candidate": {
@@ -3242,9 +3242,9 @@
           "n_rows": 65536
         },
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "fit_seconds": 0.11332920799031854,
-        "native_seconds": 0.108332625,
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "fit_seconds": 0.11304616602137685,
+        "native_seconds": 0.107865166,
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "parameters": {
           "continuous_binning_max_bins": 64,
@@ -3265,10 +3265,10 @@
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "repetition": 4,
         "rmse": 0.643290350576337,
-        "rss_mib": 8.1875,
+        "rss_mib": 8.90625,
         "runtime_name": "candidate",
         "shape": "shallow_tall",
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "tree_growth": "leaf"
       }
     }
@@ -3279,35 +3279,35 @@
     "baseline": {
       "attestation": {
         "extension_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "e25d6542069d7d3a50401ff8c9c1f9db12e89f7b89ebf1fae846ad78672ada96",
-        "extension_source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+        "extension_sha256": "b52a52b2e812063ff72661f64ec50f42c8fe05ecff6e8103159e2ec65ad3b10c",
+        "extension_source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
         "package_path": "/private/tmp/alloygbm-pr128-baseline/bindings/python/alloygbm/__init__.py",
         "python_executable": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
         "runtime_name": "baseline",
         "schema_version": 2,
-        "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41"
+        "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45"
       },
-      "manifest_path": "/private/tmp/alloygbm-pr128-baseline/runtime-v2.json",
+      "manifest_path": "/private/tmp/alloygbm-pr128-baseline/runtime-final.json",
       "name": "baseline",
       "python": "/tmp/alloygbm-pr128-baseline/.venv/bin/python",
-      "source_commit": "f7cb6d40992a1497ce72a958d861a127b0cc6e41",
+      "source_commit": "05630870a9e8a0b32cb46b59bf97441911b7de45",
       "workdir": "/private/tmp/alloygbm-pr128-baseline"
     },
     "candidate": {
       "attestation": {
         "extension_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/_alloygbm.abi3.so",
-        "extension_sha256": "c14a519c1eaa1bf41078fea38c884cc9c849d35c7a5f871186df1f9414c00d76",
-        "extension_source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+        "extension_sha256": "c37deefb2f27f734350d7df8734310d19ffe5b59e9ac1cb4accbf03ca784dab7",
+        "extension_source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
         "package_path": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/bindings/python/alloygbm/__init__.py",
         "python_executable": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
         "runtime_name": "candidate",
         "schema_version": 2,
-        "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f"
+        "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc"
       },
-      "manifest_path": "/private/tmp/alloygbm-pr128-candidate-runtime-v2.json",
+      "manifest_path": "/private/tmp/alloygbm-pr128-candidate-runtime-final.json",
       "name": "candidate",
       "python": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools/.venv/bin/python",
-      "source_commit": "d04ea48f7d46db374ea7308da52adaacafd9172f",
+      "source_commit": "4972cd62b95b7f432e02e891e9ee9e3ad1c77cdc",
       "workdir": "/Users/lashby/Projects/AlloyGBM/.worktrees/pr-128-allocation-pools"
     }
   },
