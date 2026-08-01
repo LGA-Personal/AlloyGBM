@@ -780,6 +780,90 @@ fn model_artifact_deserialize_rejects_excessive_section_length_before_payload_co
 }
 
 #[test]
+fn model_artifact_deserialize_rejects_excessive_metadata_before_json_decode() {
+    let bytes = ModelBinaryHeader::new(0, (MAX_MODEL_METADATA_BYTES + 1) as u32)
+        .encode()
+        .to_vec();
+
+    let err = deserialize_model_artifact_v1(&bytes)
+        .expect_err("excessive metadata should be rejected before JSON decode");
+    match err {
+        CoreError::Serialization(message) => {
+            assert!(message.contains("metadata json length"));
+            assert!(message.contains("exceeds"));
+        }
+        other => panic!("expected serialization error, got {other:?}"),
+    }
+}
+
+#[test]
+fn model_metadata_rejects_invalid_resource_and_class_contracts() {
+    let cases = [
+        ModelMetadata {
+            feature_names: Vec::new(),
+            ..sample_metadata()
+        },
+        ModelMetadata {
+            feature_names: vec!["x".repeat(MAX_MODEL_FEATURE_NAME_BYTES + 1)],
+            ..sample_metadata()
+        },
+        ModelMetadata {
+            objective: String::new(),
+            ..sample_metadata()
+        },
+        ModelMetadata {
+            objective: "x".repeat(MAX_MODEL_OBJECTIVE_BYTES + 1),
+            ..sample_metadata()
+        },
+        ModelMetadata {
+            num_classes: Some(1),
+            ..sample_metadata()
+        },
+        ModelMetadata {
+            objective: "multiclass_softmax".to_string(),
+            num_classes: None,
+            ..sample_metadata()
+        },
+    ];
+
+    for metadata in cases {
+        assert!(
+            validate_model_metadata(&metadata).is_err(),
+            "metadata should be rejected: {metadata:?}"
+        );
+    }
+}
+
+#[test]
+fn model_contract_rejects_aggregate_artifact_over_budget() {
+    let metadata = sample_metadata();
+    let metadata_json_len = serialize_metadata_json(&metadata).len() as u32;
+    let payload_start = (MODEL_BINARY_HEADER_LEN + 2 * MODEL_SECTION_DESCRIPTOR_LEN) as u64
+        + metadata_json_len as u64;
+    let contract = ModelIoContractV1 {
+        header: ModelBinaryHeader::new(2, metadata_json_len),
+        sections: vec![
+            ModelSectionDescriptor {
+                kind: ModelSectionKind::Trees,
+                offset: payload_start,
+                length: artifact_format::MAX_MODEL_SECTION_PAYLOAD_BYTES,
+            },
+            ModelSectionDescriptor {
+                kind: ModelSectionKind::PredictorLayout,
+                offset: payload_start + artifact_format::MAX_MODEL_SECTION_PAYLOAD_BYTES,
+                length: artifact_format::MAX_MODEL_SECTION_PAYLOAD_BYTES,
+            },
+        ],
+        metadata,
+    };
+
+    let err = validate_model_contract_v1(&contract)
+        .expect_err("aggregate artifact larger than the budget must fail");
+    assert!(err.to_string().contains("artifact length"));
+    assert!(err.to_string().contains("exceeds"));
+}
+
+#[test]
 fn categorical_state_payload_roundtrip() {
     let payload = CategoricalStatePayloadV1 {
         format_version: CATEGORICAL_STATE_FORMAT_V1,

@@ -22,6 +22,15 @@ pub const MODEL_BINARY_HEADER_LEN: usize = 16;
 pub const MODEL_SECTION_DESCRIPTOR_LEN: usize = 20;
 pub const MAX_MODEL_ARTIFACT_SECTIONS: usize = 64;
 pub const MAX_MODEL_SECTION_PAYLOAD_BYTES: u64 = 512 * 1024 * 1024;
+pub const MAX_MODEL_ARTIFACT_BYTES: u64 = 1024 * 1024 * 1024;
+pub const MAX_MODEL_METADATA_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_MODEL_FEATURES: usize = 1_000_000;
+pub const MAX_MODEL_STUMPS: usize = 16_000_000;
+pub const MAX_MODEL_CLASSES: usize = 65_536;
+pub const MAX_MODEL_OUTPUTS: usize = 65_536;
+pub const MAX_MODEL_FEATURE_NAME_BYTES: usize = 4_096;
+pub const MAX_MODEL_OBJECTIVE_BYTES: usize = 4_096;
+pub const MAX_MODEL_CUTS_PER_FEATURE: usize = u16::MAX as usize - 1;
 pub const CATEGORICAL_STATE_FORMAT_V1: u32 = 1;
 const CATEGORICAL_STATE_HEADER_LEN: usize = 16;
 const CATEGORICAL_STATE_FLAG_LEAKAGE_SAFE_TARGET_ENCODING: u32 = 1;
@@ -1361,13 +1370,15 @@ pub fn deserialize_metadata_json(input: &str) -> CoreResult<ModelMetadata> {
     let json: ModelMetadataJson = serde_json::from_str(input)
         .map_err(|err| CoreError::Serialization(format!("invalid metadata json: {err}")))?;
 
-    Ok(ModelMetadata {
+    let metadata = ModelMetadata {
         format_version: json.format_version,
         feature_names: json.feature_names,
         trained_device: Device::parse_metadata_label(&json.trained_device)?,
         objective: json.objective,
         num_classes: json.num_classes,
-    })
+    };
+    crate::validation::validate_model_metadata(&metadata)?;
+    Ok(metadata)
 }
 
 pub fn serialize_model_artifact_v1(
@@ -1382,6 +1393,12 @@ pub fn serialize_model_artifact_v1(
 
     let metadata_json = serialize_metadata_json(metadata);
     let metadata_json_bytes = metadata_json.as_bytes();
+    if metadata_json_bytes.len() > MAX_MODEL_METADATA_BYTES {
+        return Err(CoreError::Serialization(format!(
+            "metadata json length {} exceeds maximum {MAX_MODEL_METADATA_BYTES}",
+            metadata_json_bytes.len()
+        )));
+    }
     let metadata_json_len = u32::try_from(metadata_json_bytes.len()).map_err(|_| {
         CoreError::Serialization("metadata json length exceeds u32::MAX".to_string())
     })?;
@@ -1428,6 +1445,11 @@ pub fn serialize_model_artifact_v1(
             .checked_add(length)
             .ok_or_else(|| CoreError::Serialization("section offset overflow".to_string()))?;
     }
+    if offset > MAX_MODEL_ARTIFACT_BYTES {
+        return Err(CoreError::Serialization(format!(
+            "artifact length {offset} exceeds maximum {MAX_MODEL_ARTIFACT_BYTES}"
+        )));
+    }
 
     let contract = ModelIoContractV1 {
         header: ModelBinaryHeader::new(section_count, metadata_json_len),
@@ -1452,6 +1474,12 @@ pub fn serialize_model_artifact_v1(
 }
 
 pub fn deserialize_model_artifact_v1(bytes: &[u8]) -> CoreResult<ParsedModelArtifactV1> {
+    if bytes.len() as u64 > MAX_MODEL_ARTIFACT_BYTES {
+        return Err(CoreError::Serialization(format!(
+            "artifact length {} exceeds maximum {MAX_MODEL_ARTIFACT_BYTES}",
+            bytes.len()
+        )));
+    }
     if bytes.len() < MODEL_BINARY_HEADER_LEN {
         return Err(CoreError::Serialization(
             "artifact too small to contain model header".to_string(),
@@ -1473,6 +1501,11 @@ pub fn deserialize_model_artifact_v1(bytes: &[u8]) -> CoreResult<ParsedModelArti
         )));
     }
     let metadata_json_len = header.metadata_json_len as usize;
+    if metadata_json_len > MAX_MODEL_METADATA_BYTES {
+        return Err(CoreError::Serialization(format!(
+            "metadata json length {metadata_json_len} exceeds maximum {MAX_MODEL_METADATA_BYTES}"
+        )));
+    }
     let descriptor_table_len = section_count
         .checked_mul(MODEL_SECTION_DESCRIPTOR_LEN)
         .ok_or_else(|| CoreError::Serialization("section table length overflow".to_string()))?;

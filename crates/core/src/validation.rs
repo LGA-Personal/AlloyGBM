@@ -1,6 +1,8 @@
 use crate::artifact_format::{
-    MAX_MODEL_ARTIFACT_SECTIONS, MAX_MODEL_SECTION_PAYLOAD_BYTES, MODEL_BINARY_HEADER_LEN,
-    MODEL_BINARY_MAGIC, MODEL_FORMAT_V1, MODEL_SECTION_DESCRIPTOR_LEN, ModelIoContractV1,
+    MAX_MODEL_ARTIFACT_BYTES, MAX_MODEL_ARTIFACT_SECTIONS, MAX_MODEL_CLASSES,
+    MAX_MODEL_FEATURE_NAME_BYTES, MAX_MODEL_FEATURES, MAX_MODEL_OBJECTIVE_BYTES,
+    MAX_MODEL_SECTION_PAYLOAD_BYTES, MODEL_BINARY_HEADER_LEN, MODEL_BINARY_MAGIC, MODEL_FORMAT_V1,
+    MODEL_SECTION_DESCRIPTOR_LEN, ModelIoContractV1, ModelMetadata,
 };
 use crate::binned::{BinStorage, BinnedMatrix};
 use crate::config::{BoostingMode, LeafModelKind, LeafSolverKind, TrainParams, TreeGrowth};
@@ -558,12 +560,7 @@ pub fn validate_model_contract_v1(contract: &ModelIoContractV1) -> CoreResult<()
             contract.header.format_version
         )));
     }
-    if contract.metadata.format_version != MODEL_FORMAT_V1 {
-        return Err(CoreError::Serialization(format!(
-            "metadata format_version {}, expected {MODEL_FORMAT_V1}",
-            contract.metadata.format_version
-        )));
-    }
+    validate_model_metadata(&contract.metadata)?;
     if contract.sections.len() != contract.header.section_count as usize {
         return Err(CoreError::Serialization(format!(
             "section table length {} does not match header section_count {}",
@@ -619,7 +616,65 @@ pub fn validate_model_contract_v1(contract: &ModelIoContractV1) -> CoreResult<()
             .checked_add(section.length)
             .ok_or_else(|| CoreError::Serialization("section offset overflow".to_string()))?;
     }
+    if expected_offset > MAX_MODEL_ARTIFACT_BYTES {
+        return Err(CoreError::Serialization(format!(
+            "artifact length {expected_offset} exceeds maximum {MAX_MODEL_ARTIFACT_BYTES}"
+        )));
+    }
 
+    Ok(())
+}
+
+pub fn validate_model_metadata(metadata: &ModelMetadata) -> CoreResult<()> {
+    if metadata.format_version != MODEL_FORMAT_V1 {
+        return Err(CoreError::Serialization(format!(
+            "metadata format_version {}, expected {MODEL_FORMAT_V1}",
+            metadata.format_version
+        )));
+    }
+    if metadata.feature_names.is_empty() {
+        return Err(CoreError::Validation(
+            "metadata feature_names must contain at least one feature".to_string(),
+        ));
+    }
+    if metadata.feature_names.len() > MAX_MODEL_FEATURES {
+        return Err(CoreError::Validation(format!(
+            "metadata feature count {} exceeds maximum {MAX_MODEL_FEATURES}",
+            metadata.feature_names.len()
+        )));
+    }
+    for (index, name) in metadata.feature_names.iter().enumerate() {
+        if name.len() > MAX_MODEL_FEATURE_NAME_BYTES {
+            return Err(CoreError::Validation(format!(
+                "metadata feature name {index} length {} exceeds maximum {MAX_MODEL_FEATURE_NAME_BYTES}",
+                name.len()
+            )));
+        }
+    }
+    if metadata.objective.is_empty() {
+        return Err(CoreError::Validation(
+            "metadata objective must not be empty".to_string(),
+        ));
+    }
+    if metadata.objective.len() > MAX_MODEL_OBJECTIVE_BYTES {
+        return Err(CoreError::Validation(format!(
+            "metadata objective length {} exceeds maximum {MAX_MODEL_OBJECTIVE_BYTES}",
+            metadata.objective.len()
+        )));
+    }
+    if let Some(num_classes) = metadata.num_classes {
+        let num_classes = num_classes as usize;
+        if !(2..=MAX_MODEL_CLASSES).contains(&num_classes) {
+            return Err(CoreError::Validation(format!(
+                "metadata num_classes {num_classes} must be in [2, {MAX_MODEL_CLASSES}]"
+            )));
+        }
+    }
+    if metadata.objective == "multiclass_softmax" && metadata.num_classes.is_none() {
+        return Err(CoreError::Validation(
+            "multiclass_softmax metadata requires num_classes".to_string(),
+        ));
+    }
     Ok(())
 }
 
