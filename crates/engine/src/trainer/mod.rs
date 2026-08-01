@@ -1395,7 +1395,7 @@ impl Trainer {
             // amplifies the sampled-low rows in every class buffer.
             let RoundRowSelection {
                 selected: root_row_indices,
-                excluded: _excluded_row_indices,
+                excluded: excluded_row_indices,
             } = select_row_indices_for_round_multiclass(
                 self.params.boosting_mode,
                 n,
@@ -1412,9 +1412,15 @@ impl Trainer {
             )?;
             let sampled_row_count = root_row_indices.len();
 
-            // Copy current predictions to candidates
-            for class_k in 0..k {
-                class_candidate_predictions[class_k].copy_from_slice(&class_predictions[class_k]);
+            // DART rewrites candidate predictions after dropout normalization,
+            // so retain its full-copy lifecycle. Non-DART candidates remain
+            // synchronized after accepted rounds and builders update selected
+            // rows in place.
+            if dart_params.is_some() {
+                for class_k in 0..k {
+                    class_candidate_predictions[class_k]
+                        .copy_from_slice(&class_predictions[class_k]);
+                }
             }
 
             // Record stump counts before this round
@@ -1522,17 +1528,29 @@ impl Trainer {
 
             for class_k in 0..k {
                 let round_stumps = &class_stumps[class_k][pre_round_counts[class_k]..];
-                class_candidate_predictions[class_k].copy_from_slice(&class_predictions[class_k]);
-                // Tree builders update only the sampled partition rows while constructing
-                // split statistics. Rebuild the candidate by walking the accepted tree over
-                // every training row so the training state matches inference semantics.
-                apply_weighted_round_to_predictions(
-                    &mut class_candidate_predictions[class_k],
-                    binned_matrix,
-                    round_stumps,
-                    Some((&dataset.matrix.values, dataset.matrix.feature_count)),
-                    1.0,
-                )?;
+                if dart_params.is_some() {
+                    class_candidate_predictions[class_k]
+                        .copy_from_slice(&class_predictions[class_k]);
+                    apply_weighted_round_to_predictions(
+                        &mut class_candidate_predictions[class_k],
+                        binned_matrix,
+                        round_stumps,
+                        Some((&dataset.matrix.values, dataset.matrix.feature_count)),
+                        1.0,
+                    )?;
+                } else {
+                    // Ordered result collection above makes this class-ordered
+                    // completion deterministic. Builders already applied this
+                    // round to selected rows, so replay only the complement.
+                    apply_weighted_round_to_rows(
+                        &mut class_candidate_predictions[class_k],
+                        binned_matrix,
+                        round_stumps,
+                        Some((&dataset.matrix.values, dataset.matrix.feature_count)),
+                        &excluded_row_indices,
+                        1.0,
+                    )?;
+                }
             }
 
             // v0.10.1 DART post-build: rescale the K new trees to
@@ -1643,6 +1661,12 @@ impl Trainer {
                         sampled_feature_count,
                         &per_class_diagnostics,
                     );
+                    if dart_params.is_none() {
+                        for class_k in 0..k {
+                            class_candidate_predictions[class_k]
+                                .copy_from_slice(&class_predictions[class_k]);
+                        }
+                    }
                     rounds_completed += 1;
                     continue;
                 }
@@ -1704,6 +1728,12 @@ impl Trainer {
                         sampled_feature_count,
                         &per_class_diagnostics,
                     );
+                    if dart_params.is_none() {
+                        for class_k in 0..k {
+                            class_candidate_predictions[class_k]
+                                .copy_from_slice(&class_predictions[class_k]);
+                        }
+                    }
                     rounds_completed += 1;
                     continue;
                 }

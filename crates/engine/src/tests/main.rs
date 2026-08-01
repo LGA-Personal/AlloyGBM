@@ -4930,6 +4930,191 @@ fn sampled_prediction_delta_scalar() {
     }
 }
 
+fn sampled_multiclass_prediction_delta_fixture() -> (TrainingDataset, BinnedMatrix) {
+    const ROWS: usize = 8_192;
+    const FEATURES: usize = 3;
+    let mut values = Vec::with_capacity(ROWS * FEATURES);
+    let mut bins = Vec::with_capacity(ROWS * FEATURES);
+    let mut targets = Vec::with_capacity(ROWS);
+    for row in 0..ROWS {
+        let first = (row % 16) as u8;
+        let second = ((row / 16) % 16) as u8;
+        let third = ((row / 256) % 16) as u8;
+        bins.extend([first, second, third]);
+        values.extend([f32::from(first), f32::from(second), f32::from(third)]);
+        targets.push(
+            ((usize::from(first / 4) + 2 * usize::from(second / 4) + usize::from(third / 8)) % 3)
+                as f32,
+        );
+    }
+    let dataset = TrainingDataset {
+        matrix: alloygbm_core::DatasetMatrix::new(ROWS, FEATURES, values)
+            .expect("sampled multiclass fixture matrix is valid"),
+        targets,
+        sample_weights: None,
+        time_index: None,
+        group_id: None,
+        factor_exposures: None,
+    };
+    let binned = BinnedMatrix::new(ROWS, FEATURES, 15, bins)
+        .expect("sampled multiclass fixture bins are valid");
+    (dataset, binned)
+}
+
+fn sampled_multiclass_prediction_delta_run(
+    params: TrainParams,
+    controls: IterationControls,
+    worker_count: usize,
+) -> MultiClassIterationRunSummary {
+    let (dataset, binned) = sampled_multiclass_prediction_delta_fixture();
+    let objective = MultiClassSoftmaxObjective::new(3).expect("three-class objective");
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(worker_count)
+        .build()
+        .expect("test pool should build")
+        .install(|| {
+            Trainer::new(params)
+                .expect("sampled multiclass params are valid")
+                .fit_multiclass_iterations_with_summary(
+                    &dataset,
+                    &binned,
+                    &MockBackend,
+                    &objective,
+                    controls,
+                )
+                .expect("sampled multiclass fit succeeds")
+        })
+}
+
+fn multiclass_prediction_bits(
+    model: &MultiClassTrainedModel,
+    dataset: &TrainingDataset,
+    binned: &BinnedMatrix,
+) -> (Vec<u32>, Vec<u32>) {
+    let raw_predictions = multiclass_dart_repeated_walk_predictions(
+        model,
+        binned,
+        &dataset.matrix.values,
+        dataset.matrix.feature_count,
+    );
+    let raw_bits = raw_predictions
+        .iter()
+        .flatten()
+        .map(|value| value.to_bits())
+        .collect();
+    let mut probability_bits = Vec::with_capacity(dataset.row_count() * model.num_classes);
+    for row in 0..dataset.row_count() {
+        let max_logit = raw_predictions
+            .iter()
+            .map(|class_predictions| class_predictions[row])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let sum_exp: f32 = raw_predictions
+            .iter()
+            .map(|class_predictions| (class_predictions[row] - max_logit).exp())
+            .sum();
+        probability_bits.extend(raw_predictions.iter().map(|class_predictions| {
+            ((class_predictions[row] - max_logit).exp() / sum_exp).to_bits()
+        }));
+    }
+    (raw_bits, probability_bits)
+}
+
+fn assert_sampled_multiclass_runs_equal(
+    actual: &MultiClassIterationRunSummary,
+    expected: &MultiClassIterationRunSummary,
+) {
+    let (dataset, binned) = sampled_multiclass_prediction_delta_fixture();
+    assert_eq!(
+        actual
+            .model
+            .to_artifact_bytes()
+            .expect("actual artifact serializes"),
+        expected
+            .model
+            .to_artifact_bytes()
+            .expect("expected artifact serializes"),
+    );
+    assert_eq!(
+        multiclass_prediction_bits(&actual.model, &dataset, &binned),
+        multiclass_prediction_bits(&expected.model, &dataset, &binned),
+    );
+    assert_eq!(
+        actual.loss_per_completed_round,
+        expected.loss_per_completed_round
+    );
+    assert_eq!(
+        actual.sampled_rows_per_completed_round,
+        expected.sampled_rows_per_completed_round
+    );
+    assert_eq!(actual.rounds_completed, expected.rounds_completed);
+    assert_eq!(actual.stop_reason, expected.stop_reason);
+    let tree_order = |model: &MultiClassTrainedModel| {
+        model
+            .class_stumps
+            .iter()
+            .map(|stumps| {
+                stumps
+                    .iter()
+                    .map(|stump| stump.split.node_id)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(tree_order(&actual.model), tree_order(&expected.model));
+}
+
+#[test]
+fn sampled_prediction_delta_multiclass() {
+    for tree_growth in [TreeGrowth::Level, TreeGrowth::Leaf] {
+        for (boosting_mode, row_subsample) in [
+            (BoostingMode::Standard, 0.5),
+            (
+                BoostingMode::Goss {
+                    top_rate: 0.5,
+                    other_rate: 0.25,
+                },
+                1.0,
+            ),
+            (
+                BoostingMode::Dart {
+                    drop_rate: 0.5,
+                    max_drop: 2,
+                    normalize_type: alloygbm_core::DartNormalize::Tree,
+                    sample_type: alloygbm_core::DartSampleType::Uniform,
+                },
+                0.5,
+            ),
+        ] {
+            let params = TrainParams {
+                seed: 17,
+                deterministic: true,
+                max_depth: 2,
+                max_leaves: (tree_growth == TreeGrowth::Leaf).then_some(4),
+                min_data_in_leaf: 1,
+                tree_growth,
+                boosting_mode,
+                ..TrainParams::default()
+            };
+            let controls = IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
+                .expect("sampled multiclass controls are valid")
+                .with_subsample_rates(row_subsample, 1.0)
+                .expect("sampled multiclass rates are valid")
+                .with_max_leaves((tree_growth == TreeGrowth::Leaf).then_some(4))
+                .expect("sampled multiclass leaf limit is valid");
+            let serial_first = sampled_multiclass_prediction_delta_run(params.clone(), controls, 1);
+            let serial_second =
+                sampled_multiclass_prediction_delta_run(params.clone(), controls, 1);
+            let parallel_first =
+                sampled_multiclass_prediction_delta_run(params.clone(), controls, 4);
+            let parallel_second = sampled_multiclass_prediction_delta_run(params, controls, 4);
+
+            assert_sampled_multiclass_runs_equal(&serial_first, &serial_second);
+            assert_sampled_multiclass_runs_equal(&parallel_first, &parallel_second);
+            assert_sampled_multiclass_runs_equal(&serial_first, &parallel_first);
+        }
+    }
+}
+
 #[test]
 fn sampled_prediction_delta_fallback() {
     let mut gradients = vec![
