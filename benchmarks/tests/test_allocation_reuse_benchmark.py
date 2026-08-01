@@ -6,7 +6,9 @@ from dataclasses import replace
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -31,6 +33,65 @@ def _load_benchmark():
 
 
 BENCHMARK = _load_benchmark()
+
+
+def _build_provenance_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
+    root = tmp_path / "repo"
+    binding = root / "bindings" / "python"
+    source = binding / "src" / "lib.rs"
+    source.parent.mkdir(parents=True)
+    shutil.copy2(REPO_ROOT / "bindings" / "python" / "build.rs", binding)
+    (binding / "Cargo.toml").write_text(
+        """[package]
+name = "provenance-fixture"
+version = "0.0.0"
+edition = "2024"
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+""",
+        encoding="utf-8",
+    )
+    source.write_text(
+        'pub const COMMIT: &str = env!("ALLOYGBM_BUILD_SOURCE_COMMIT");\n'
+        'pub const DIRTY: &str = env!("ALLOYGBM_BUILD_SOURCE_DIRTY");\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(root), "config", "user.name", "Benchmark Test"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "commit", "-q", "-m", "fixture"],
+        check=True,
+    )
+    return root, binding, tmp_path / "target"
+
+
+def _run_provenance_fixture(
+    binding: Path,
+    target: Path,
+    *,
+    extra_env: dict[str, str] | None = None,
+) -> str:
+    env = os.environ.copy()
+    env["CARGO_TARGET_DIR"] = str(target)
+    env.update(extra_env or {})
+    subprocess.run(
+        ["cargo", "check", "--quiet", "--manifest-path", str(binding / "Cargo.toml")],
+        check=True,
+        env=env,
+    )
+    outputs = list(target.glob("debug/build/provenance-fixture-*/output"))
+    assert len(outputs) == 1
+    return outputs[0].read_text(encoding="utf-8")
 
 
 def _result(
@@ -560,6 +621,61 @@ def test_native_build_provenance_requires_matching_clean_commit(tmp_path):
         BENCHMARK.validate_native_build_provenance(runtime, "2" * 40, True)
     with pytest.raises(ValueError, match="does not match"):
         BENCHMARK.validate_native_build_provenance(runtime, "1" * 40, False)
+
+
+def test_build_provenance_reruns_for_tracked_source_changes(tmp_path):
+    root, binding, target = _build_provenance_fixture(tmp_path)
+    source = binding / "src" / "lib.rs"
+    original = source.read_bytes()
+
+    clean_output = _run_provenance_fixture(binding, target)
+    assert "cargo:rustc-env=ALLOYGBM_BUILD_SOURCE_DIRTY=false" in clean_output
+
+    source.write_bytes(original + b"// dirty build input\n")
+    dirty_output = _run_provenance_fixture(binding, target)
+    assert "cargo:rustc-env=ALLOYGBM_BUILD_SOURCE_DIRTY=true" in dirty_output
+
+    source.write_bytes(original)
+    assert subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout == ""
+    assert "cargo:rustc-env=ALLOYGBM_BUILD_SOURCE_DIRTY=true" in (
+        next(target.glob("debug/build/provenance-fixture-*/output")).read_text(
+            encoding="utf-8"
+        )
+    )
+
+
+def test_build_provenance_ignores_environment_spoofing(tmp_path):
+    root, binding, target = _build_provenance_fixture(tmp_path)
+    commit = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    output = _run_provenance_fixture(
+        binding,
+        target,
+        extra_env={
+            "ALLOYGBM_BUILD_SOURCE_COMMIT": "1" * 40,
+            "ALLOYGBM_BUILD_SOURCE_DIRTY": "false",
+        },
+    )
+
+    assert f"cargo:rustc-env=ALLOYGBM_BUILD_SOURCE_COMMIT={commit}" in output
+    assert "cargo:rustc-env=ALLOYGBM_BUILD_SOURCE_COMMIT=" + "1" * 40 not in output
 
 
 def test_runtime_manifest_rejects_unknown_fields_and_nonfinite_json(tmp_path):
