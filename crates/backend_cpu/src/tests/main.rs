@@ -1212,6 +1212,29 @@ fn owned_partition_reuses_parent_storage_for_numeric_thresholds() {
 }
 
 #[test]
+fn owned_partition_compaction_is_stable_and_preserves_parent_allocation() {
+    let mut rows = Vec::with_capacity(12);
+    rows.extend(0..8);
+    let parent_ptr = rows.as_ptr();
+    let parent_capacity = rows.capacity();
+
+    let (left, right) = CpuBackend::stable_partition_owned_rows(rows, 4, |row| row % 2 == 1);
+
+    assert_eq!(left, vec![1, 3, 5, 7]);
+    assert_eq!(right, vec![0, 2, 4, 6]);
+    assert_eq!(right.as_ptr(), parent_ptr);
+    assert_eq!(right.capacity(), parent_capacity);
+
+    let (left, right) = CpuBackend::stable_partition_owned_rows(vec![2, 1, 0], 3, |_| true);
+    assert_eq!(left, vec![2, 1, 0]);
+    assert!(right.is_empty());
+
+    let (left, right) = CpuBackend::stable_partition_owned_rows(vec![2, 1, 0], 0, |_| false);
+    assert!(left.is_empty());
+    assert_eq!(right, vec![2, 1, 0]);
+}
+
+#[test]
 fn owned_partition_reuses_parent_storage_for_missing_values_in_both_directions() {
     let backend = CpuBackend;
     let missing = u16::from(MISSING_BIN_U8);

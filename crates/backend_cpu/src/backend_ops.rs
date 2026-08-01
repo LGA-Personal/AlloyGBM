@@ -300,21 +300,20 @@ impl BackendOps for CpuBackend {
             );
         }
 
-        let mut left_row_indices = Vec::with_capacity(node.row_indices.len() / 2);
-        let mut right_row_indices = node.row_indices;
         let mut left_stats = NodeStatsAccumulator::default();
         let mut right_stats = NodeStatsAccumulator::default();
-        right_row_indices.retain(|&row| {
-            let gradient = gradients[row as usize];
-            if lookup.goes_left(binned_matrix, row, split) {
-                left_row_indices.push(row);
-                left_stats.add(gradient);
-                false
-            } else {
-                right_stats.add(gradient);
-                true
-            }
-        });
+        let left_capacity = node.row_indices.len() / 2;
+        let (left_row_indices, right_row_indices) =
+            Self::stable_partition_owned_rows(node.row_indices, left_capacity, |row| {
+                let gradient = gradients[row as usize];
+                if lookup.goes_left(binned_matrix, row, split) {
+                    left_stats.add(gradient);
+                    true
+                } else {
+                    right_stats.add(gradient);
+                    false
+                }
+            });
 
         let partition = PartitionResult {
             left_row_indices,

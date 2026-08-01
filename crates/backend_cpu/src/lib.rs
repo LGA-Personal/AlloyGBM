@@ -1675,6 +1675,28 @@ impl CpuBackend {
         ))
     }
 
+    fn stable_partition_owned_rows(
+        mut rows: Vec<u32>,
+        left_capacity: usize,
+        mut goes_left: impl FnMut(u32) -> bool,
+    ) -> (Vec<u32>, Vec<u32>) {
+        let mut left_rows = Vec::with_capacity(left_capacity);
+        let mut right_len = 0;
+
+        for read_index in 0..rows.len() {
+            let row = rows[read_index];
+            if goes_left(row) {
+                left_rows.push(row);
+            } else {
+                rows[right_len] = row;
+                right_len += 1;
+            }
+        }
+        rows.truncate(right_len);
+
+        (left_rows, rows)
+    }
+
     fn apply_split_owned_with_stats_parallel(
         binned_matrix: &BinnedMatrix,
         gradients: &[GradientPair],
@@ -1684,16 +1706,11 @@ impl CpuBackend {
     ) -> EngineResult<(PartitionResult, NodeStats, NodeStats)> {
         let (left_stats, right_stats) =
             Self::parallel_split_stats(binned_matrix, gradients, &node.row_indices, split, lookup);
-        let mut left_row_indices = Vec::with_capacity(left_stats.row_count as usize);
-        let mut right_row_indices = node.row_indices;
-        right_row_indices.retain(|&row| {
-            if lookup.goes_left(binned_matrix, row, split) {
-                left_row_indices.push(row);
-                false
-            } else {
-                true
-            }
-        });
+        let (left_row_indices, right_row_indices) = Self::stable_partition_owned_rows(
+            node.row_indices,
+            left_stats.row_count as usize,
+            |row| lookup.goes_left(binned_matrix, row, split),
+        );
 
         Ok((
             PartitionResult {
