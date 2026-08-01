@@ -184,9 +184,9 @@ impl BinningContext {
                         feature_maxs.len(),
                     )));
                 }
-                if *max_data_bin == 0 {
+                if *max_data_bin == 0 || *max_data_bin == u16::MAX {
                     return Err(ShapError::InvalidInput(
-                        "BinningContext::Linear: max_data_bin must be greater than 0".to_string(),
+                        "BinningContext::Linear: max_data_bin must be in [1, 65534]".to_string(),
                     ));
                 }
                 validate_feature_ranges("BinningContext::Linear", feature_mins, feature_maxs)?;
@@ -224,9 +224,9 @@ impl BinningContext {
                         feature_maxs.len(),
                     )));
                 }
-                if *max_data_bin == 0 {
+                if *max_data_bin == 0 || *max_data_bin == u16::MAX {
                     return Err(ShapError::InvalidInput(
-                        "BinningContext::LinearRank: max_data_bin must be greater than 0"
+                        "BinningContext::LinearRank: max_data_bin must be in [1, 65534]"
                             .to_string(),
                     ));
                 }

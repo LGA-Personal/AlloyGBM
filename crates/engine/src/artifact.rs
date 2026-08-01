@@ -142,6 +142,7 @@ pub(crate) fn decode_predictor_layout_payload(
 pub(crate) fn encode_node_debug_stats_payload(
     node_debug_stats: &[NodeDebugStats],
 ) -> EngineResult<Vec<u8>> {
+    validate_node_debug_stats(node_debug_stats, None)?;
     let record_count = u32::try_from(node_debug_stats.len()).map_err(|_| {
         EngineError::ContractViolation("node debug stats count exceeds u32::MAX".to_string())
     })?;
@@ -182,6 +183,11 @@ pub(crate) fn decode_node_debug_stats_payload(bytes: &[u8]) -> EngineResult<Vec<
         )));
     }
     let record_count = read_u32_le(bytes, 4)? as usize;
+    if record_count > MAX_MODEL_STUMPS {
+        return Err(EngineError::ContractViolation(format!(
+            "node debug stats record count {record_count} exceeds maximum {MAX_MODEL_STUMPS}"
+        )));
+    }
     let expected_len = HEADER_SIZE
         .checked_add(record_count.checked_mul(RECORD_SIZE).ok_or_else(|| {
             EngineError::ContractViolation("node debug stats payload length overflow".to_string())
@@ -201,7 +207,12 @@ pub(crate) fn decode_node_debug_stats_payload(bytes: &[u8]) -> EngineResult<Vec<
     for record_index in 0..record_count {
         let base = HEADER_SIZE + record_index * RECORD_SIZE;
         let nds_flags = read_u16_le(bytes, base + 10)?;
-        records.push(NodeDebugStats {
+        if nds_flags & !1 != 0 {
+            return Err(EngineError::ContractViolation(format!(
+                "node debug stats record {record_index} contains unsupported flags {nds_flags:#x}"
+            )));
+        }
+        let record = NodeDebugStats {
             node_id: read_u32_le(bytes, base)?,
             feature_index: read_u32_le(bytes, base + 4)?,
             threshold_bin: read_u16_le(bytes, base + 8)?,
@@ -219,7 +230,9 @@ pub(crate) fn decode_node_debug_stats_payload(bytes: &[u8]) -> EngineResult<Vec<
                 grad_sq_sum: 0.0,
                 row_count: read_u32_le(bytes, base + 36)?,
             },
-        });
+        };
+        validate_node_debug_stats(std::slice::from_ref(&record), None)?;
+        records.push(record);
     }
     Ok(records)
 }
@@ -234,6 +247,7 @@ pub(crate) fn decode_optional_node_debug_stats_section(
 }
 
 pub(crate) fn encode_trained_model_payload(model: &TrainedModel) -> EngineResult<Vec<u8>> {
+    validate_trained_model_payload(model)?;
     let feature_count = u32::try_from(model.feature_count).map_err(|_| {
         EngineError::ContractViolation("feature_count exceeds u32::MAX".to_string())
     })?;
@@ -263,6 +277,79 @@ pub(crate) fn encode_trained_model_payload(model: &TrainedModel) -> EngineResult
     }
 
     Ok(bytes)
+}
+
+fn validate_trained_model_payload(model: &TrainedModel) -> EngineResult<()> {
+    if model.feature_count == 0 || model.feature_count > MAX_MODEL_FEATURES {
+        return Err(EngineError::ContractViolation(format!(
+            "feature_count {} must be in [1, {MAX_MODEL_FEATURES}]",
+            model.feature_count
+        )));
+    }
+    if model.stumps.len() > MAX_MODEL_STUMPS {
+        return Err(EngineError::ContractViolation(format!(
+            "stump count {} exceeds maximum {MAX_MODEL_STUMPS}",
+            model.stumps.len()
+        )));
+    }
+    if !model.baseline_prediction.is_finite() {
+        return Err(EngineError::ContractViolation(
+            "baseline_prediction must be finite".to_string(),
+        ));
+    }
+    for (stump_index, stump) in model.stumps.iter().enumerate() {
+        if stump.split.feature_index as usize >= model.feature_count {
+            return Err(EngineError::ContractViolation(format!(
+                "stump {stump_index} split feature_index {} exceeds model feature_count {}",
+                stump.split.feature_index, model.feature_count
+            )));
+        }
+        if !stump.split.gain.is_finite()
+            || !stump.left_leaf_value.as_scalar().is_finite()
+            || !stump.right_leaf_value.as_scalar().is_finite()
+        {
+            return Err(EngineError::ContractViolation(format!(
+                "stump {stump_index} contains non-finite gain or leaf value"
+            )));
+        }
+    }
+    if let Some(records) = model.node_debug_stats.as_deref() {
+        validate_node_debug_stats(records, Some(model.feature_count))?;
+    }
+    Ok(())
+}
+
+fn validate_node_debug_stats(
+    records: &[NodeDebugStats],
+    feature_count: Option<usize>,
+) -> EngineResult<()> {
+    if records.len() > MAX_MODEL_STUMPS {
+        return Err(EngineError::ContractViolation(format!(
+            "node debug stats record count {} exceeds maximum {MAX_MODEL_STUMPS}",
+            records.len()
+        )));
+    }
+    for (record_index, record) in records.iter().enumerate() {
+        if let Some(count) = feature_count
+            && record.feature_index as usize >= count
+        {
+            return Err(EngineError::ContractViolation(format!(
+                "node debug stats record {record_index} feature_index {} exceeds model feature_count {count}",
+                record.feature_index
+            )));
+        }
+        if !record.gain.is_finite()
+            || !record.left_stats.grad_sum.is_finite()
+            || !record.left_stats.hess_sum.is_finite()
+            || !record.right_stats.grad_sum.is_finite()
+            || !record.right_stats.hess_sum.is_finite()
+        {
+            return Err(EngineError::ContractViolation(format!(
+                "node debug stats record {record_index} contains non-finite values"
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn decode_trained_model_payload(bytes: &[u8]) -> EngineResult<TrainedModel> {

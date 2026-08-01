@@ -1,8 +1,9 @@
 use crate::artifact_format::{
     MAX_MODEL_ARTIFACT_BYTES, MAX_MODEL_ARTIFACT_SECTIONS, MAX_MODEL_CLASSES,
-    MAX_MODEL_FEATURE_NAME_BYTES, MAX_MODEL_FEATURES, MAX_MODEL_OBJECTIVE_BYTES,
-    MAX_MODEL_SECTION_PAYLOAD_BYTES, MODEL_BINARY_HEADER_LEN, MODEL_BINARY_MAGIC, MODEL_FORMAT_V1,
-    MODEL_SECTION_DESCRIPTOR_LEN, ModelIoContractV1, ModelMetadata,
+    MAX_MODEL_FEATURE_NAME_BYTES, MAX_MODEL_FEATURES, MAX_MODEL_METADATA_BYTES,
+    MAX_MODEL_OBJECTIVE_BYTES, MAX_MODEL_SECTION_PAYLOAD_BYTES, MODEL_BINARY_HEADER_LEN,
+    MODEL_BINARY_MAGIC, MODEL_FORMAT_V1, MODEL_SECTION_DESCRIPTOR_LEN, ModelIoContractV1,
+    ModelMetadata,
 };
 use crate::binned::{BinStorage, BinnedMatrix};
 use crate::config::{BoostingMode, LeafModelKind, LeafSolverKind, TrainParams, TreeGrowth};
@@ -561,6 +562,12 @@ pub fn validate_model_contract_v1(contract: &ModelIoContractV1) -> CoreResult<()
         )));
     }
     validate_model_metadata(&contract.metadata)?;
+    if contract.header.metadata_json_len as usize > MAX_MODEL_METADATA_BYTES {
+        return Err(CoreError::Serialization(format!(
+            "metadata_json_len {} exceeds maximum {MAX_MODEL_METADATA_BYTES}",
+            contract.header.metadata_json_len
+        )));
+    }
     if contract.sections.len() != contract.header.section_count as usize {
         return Err(CoreError::Serialization(format!(
             "section table length {} does not match header section_count {}",

@@ -456,6 +456,12 @@ impl Predictor {
         if let Some(mc_section) =
             optional_single_section(&parsed.sections, ModelSectionKind::MultiClassTrees)?
         {
+            if metadata.objective != "multiclass_softmax" {
+                return Err(PredictorError::ContractViolation(format!(
+                    "MultiClassTrees requires objective multiclass_softmax, found {:?}",
+                    metadata.objective
+                )));
+            }
             let predictor_layout =
                 resolve_predictor_layout(&parsed.sections, metadata_feature_count)?;
             let (num_classes, feature_count, baselines, mut per_class_stumps) =
@@ -608,6 +614,11 @@ impl Predictor {
         }
 
         // Single-output path (existing behavior)
+        if metadata.objective == "multiclass_softmax" || metadata.num_classes.is_some() {
+            return Err(PredictorError::ContractViolation(
+                "multiclass metadata requires a MultiClassTrees artifact".to_string(),
+            ));
+        }
         let compatibility_report = required_section_compatibility_report(&parsed.sections);
         if !compatibility_report.legacy_compatible {
             return Err(PredictorError::ContractViolation(
@@ -2546,7 +2557,7 @@ mod tests {
             baseline_prediction: 0.0,
             feature_count: 1,
             stumps: vec![TrainedStump::new_unweighted(
-                scalar_split(0, 1, 0),
+                scalar_split(0, 0, 0),
                 LeafValue::Scalar(-0.1),
                 LeafValue::Scalar(0.1),
             )],
@@ -2559,7 +2570,22 @@ mod tests {
             feature_baseline: None,
             neutralization_metadata: None,
         };
-        let artifact = model.to_artifact_bytes().expect("artifact serializes");
+        let valid_artifact = model.to_artifact_bytes().expect("artifact serializes");
+        let parsed = deserialize_model_artifact_v1(&valid_artifact).expect("artifact decodes");
+        let metadata = parsed.contract.metadata;
+        let sections = parsed
+            .sections
+            .into_iter()
+            .map(|section| {
+                let mut payload = section.payload;
+                if section.descriptor.kind == ModelSectionKind::Trees {
+                    payload[20..24].copy_from_slice(&1_u32.to_le_bytes());
+                }
+                (section.descriptor.kind, payload)
+            })
+            .collect::<Vec<_>>();
+        let artifact = alloygbm_core::serialize_model_artifact_v1(&metadata, &sections)
+            .expect("corrupt artifact reserializes");
 
         let result = Predictor::from_artifact_bytes(&artifact);
 
@@ -2719,6 +2745,39 @@ mod tests {
         let err = Predictor::from_artifact_bytes(&malformed)
             .expect_err("metadata/payload class mismatch must fail");
         assert!(err.to_string().contains("num_classes"));
+    }
+
+    #[test]
+    fn predictor_rejects_objective_section_mismatches() {
+        let artifact = train_multiclass_artifact();
+        let parsed = deserialize_model_artifact_v1(&artifact).expect("artifact decodes");
+        let mut metadata = parsed.contract.metadata;
+        metadata.objective = "squared_error".to_string();
+        let sections = parsed
+            .sections
+            .into_iter()
+            .map(|section| (section.descriptor.kind, section.payload))
+            .collect::<Vec<_>>();
+        let malformed = alloygbm_core::serialize_model_artifact_v1(&metadata, &sections)
+            .expect("artifact reserializes");
+        let error = Predictor::from_artifact_bytes(&malformed)
+            .expect_err("MultiClassTrees requires the multiclass objective");
+        assert!(error.to_string().contains("multiclass_softmax"));
+
+        let model = same_tree_depth_model(1.0);
+        let parsed = deserialize_model_artifact_v1(&model.to_artifact_bytes().unwrap()).unwrap();
+        let mut metadata = parsed.contract.metadata;
+        metadata.objective = "multiclass_softmax".to_string();
+        metadata.num_classes = Some(2);
+        let sections = parsed
+            .sections
+            .into_iter()
+            .map(|section| (section.descriptor.kind, section.payload))
+            .collect::<Vec<_>>();
+        let malformed = alloygbm_core::serialize_model_artifact_v1(&metadata, &sections).unwrap();
+        let error = Predictor::from_artifact_bytes(&malformed)
+            .expect_err("Trees cannot carry multiclass metadata");
+        assert!(error.to_string().contains("multiclass"));
     }
 
     #[test]

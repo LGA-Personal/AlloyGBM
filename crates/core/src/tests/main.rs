@@ -900,6 +900,19 @@ fn model_contract_rejects_aggregate_artifact_over_budget() {
 }
 
 #[test]
+fn model_contract_rejects_metadata_over_budget() {
+    let contract = ModelIoContractV1 {
+        header: ModelBinaryHeader::new(0, (MAX_MODEL_METADATA_BYTES + 1) as u32),
+        sections: Vec::new(),
+        metadata: sample_metadata(),
+    };
+
+    let err = validate_model_contract_v1(&contract)
+        .expect_err("metadata larger than the budget must fail");
+    assert!(err.to_string().contains("metadata_json_len"));
+}
+
+#[test]
 fn categorical_state_payload_roundtrip() {
     let payload = CategoricalStatePayloadV1 {
         format_version: CATEGORICAL_STATE_FORMAT_V1,

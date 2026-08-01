@@ -391,6 +391,13 @@ impl TrainedModel {
         compatibility_mode: ArtifactCompatibilityMode,
     ) -> EngineResult<Self> {
         let parsed = deserialize_model_artifact_v1(bytes).map_err(EngineError::from)?;
+        if parsed.contract.metadata.objective == "multiclass_softmax"
+            || parsed.contract.metadata.num_classes.is_some()
+        {
+            return Err(EngineError::ContractViolation(
+                "multiclass metadata requires a MultiClassTrees artifact".to_string(),
+            ));
+        }
         let compatibility_report = artifact_compatibility_report_from_sections(&parsed.sections);
 
         match compatibility_mode {
@@ -465,7 +472,8 @@ impl TrainedModel {
 
         model.categorical_state =
             decode_optional_categorical_state_section_v1(&parsed.sections, metadata_feature_count)?;
-        model.node_debug_stats = decode_optional_node_debug_stats_section(&parsed.sections)?;
+        let node_debug_stats = decode_optional_node_debug_stats_section(&parsed.sections)?;
+        model = model.with_node_debug_stats(node_debug_stats)?;
 
         // Decode optional native categorical splits section and populate stump bitsets.
         if let Some(cat_payload) =

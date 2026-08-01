@@ -215,6 +215,13 @@ impl MultiClassTrainedModel {
     pub fn from_artifact_bytes(bytes: &[u8]) -> EngineResult<Self> {
         let parsed = deserialize_model_artifact_v1(bytes).map_err(EngineError::from)?;
 
+        if parsed.contract.metadata.objective != "multiclass_softmax" {
+            return Err(EngineError::ContractViolation(format!(
+                "MultiClassTrees requires objective multiclass_softmax, found {:?}",
+                parsed.contract.metadata.objective
+            )));
+        }
+
         let mc_section =
             required_single_section(&parsed.sections, ModelSectionKind::MultiClassTrees)?;
 
@@ -488,6 +495,12 @@ fn validate_multiclass_linear_leaf_features(
 }
 
 fn validate_multiclass_model_for_serialization(model: &MultiClassTrainedModel) -> EngineResult<()> {
+    if model.objective != "multiclass_softmax" {
+        return Err(EngineError::ContractViolation(format!(
+            "MultiClassTrees requires objective multiclass_softmax, found {:?}",
+            model.objective
+        )));
+    }
     if !(2..=MAX_MODEL_CLASSES).contains(&model.num_classes) {
         return Err(EngineError::ContractViolation(format!(
             "num_classes {} must be in [2, {MAX_MODEL_CLASSES}]",
