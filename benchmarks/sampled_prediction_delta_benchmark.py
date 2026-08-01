@@ -228,13 +228,12 @@ class CaseResult:
             not isinstance(rss, (int, float)) or isinstance(rss, bool)
         ):
             raise ValueError("worker rss_mib must be numeric or null")
-        try:
-            dimensions = {
-                str(key): int(value)
-                for key, value in payload["dimensions"].items()
-            }
-        except (TypeError, ValueError) as error:
-            raise ValueError("worker dimensions must contain integer values") from error
+        if any(
+            type(key) is not str or type(value) is not int or value < 0
+            for key, value in payload["dimensions"].items()
+        ):
+            raise ValueError("worker dimensions must contain non-negative integers")
+        dimensions = dict(payload["dimensions"])
         return cls(
             case=payload["case"],
             shape=payload["shape"],
@@ -554,16 +553,25 @@ def _valid_hex(value: str, length: int) -> bool:
     return len(value) == length and all(character in "0123456789abcdef" for character in value)
 
 
-def _validate_case_metadata(result: CaseResult) -> None:
-    matching_specs = [
-        case
-        for case in (*quick_cases(), *full_cases())
-        if case.name == result.case
-    ]
-    if not matching_specs:
+def _same_typed_mapping(
+    actual: Mapping[str, Any], expected: Mapping[str, Any]
+) -> bool:
+    return set(actual) == set(expected) and all(
+        type(actual[key]) is type(expected[key]) and actual[key] == expected[key]
+        for key in expected
+    )
+
+
+def _validate_case_metadata(
+    result: CaseResult, *, profile: str, n_jobs: int
+) -> None:
+    cases = {case.name: case for case in profile_cases(profile)}
+    try:
+        case = cases[result.case]
+    except KeyError as error:
         raise ValueError(f"worker case metadata names unknown case {result.case!r}")
-    expected_metric = "rmse" if matching_specs[0].task == "scalar" else "log_loss"
-    metadata_matches = any(
+    expected_metric = "rmse" if case.task == "scalar" else "log_loss"
+    metadata_matches = (
         (
             result.shape,
             result.task,
@@ -586,7 +594,10 @@ def _validate_case_metadata(result: CaseResult) -> None:
                 "n_eval_rows": case.n_eval_rows,
             },
         )
-        for case in matching_specs
+        and _same_typed_mapping(
+            result.parameters,
+            _estimator_parameters(case, profile=profile, n_jobs=n_jobs),
+        )
     )
     if not metadata_matches:
         raise ValueError(f"worker case metadata does not match catalog for {result.case}")
@@ -598,6 +609,8 @@ def parse_worker_output(
     runtime: RuntimeSpec,
     expected_case: str,
     expected_repetition: int,
+    expected_profile: str,
+    expected_n_jobs: int,
 ) -> CaseResult:
     try:
         payload = strict_json_loads(stdout)
@@ -615,7 +628,9 @@ def parse_worker_output(
         )
     if result.case != expected_case or result.repetition != expected_repetition:
         raise ValueError("worker case or repetition does not match invocation")
-    _validate_case_metadata(result)
+    _validate_case_metadata(
+        result, profile=expected_profile, n_jobs=expected_n_jobs
+    )
     if result.source_commit != runtime.source_commit:
         raise ValueError(
             "worker source commit mismatch: "
@@ -700,9 +715,16 @@ def _worker_result(args: argparse.Namespace) -> CaseResult:
     except KeyError as error:
         raise ValueError(f"unknown {profile} case {args.case!r}") from error
 
+    live_python = _normalized_path(sys.executable)
+    declared_python = _normalized_path(args.expected_python)
+    if live_python != declared_python:
+        raise ValueError(
+            "live Python interpreter does not match declared runtime: "
+            f"live={live_python}, declared={declared_python}"
+        )
     worker_runtime = RuntimeSpec(
         args.runtime_name,
-        _normalized_path(args.expected_python),
+        live_python,
         args.runtime_workdir.resolve(),
         source_commit,
     )
@@ -713,7 +735,7 @@ def _worker_result(args: argparse.Namespace) -> CaseResult:
         attestation=load_runtime_manifest(
             manifest_path,
             runtime=worker_runtime,
-            expected_name=None,
+            expected_name=("candidate" if profile == "quick" else args.runtime_name),
         ),
     )
 
@@ -724,7 +746,19 @@ def _worker_result(args: argparse.Namespace) -> CaseResult:
     package_path = Path(alloygbm.__file__).resolve()
     extension_path = Path(_alloygbm.__file__).resolve()
     extension_sha256 = _sha256_file(extension_path)
-    rss_before = _peak_rss_mib()
+    binding_record = _SUPPORT.CaseResult(
+        artifact_sha256="binding-only",
+        prediction_sha256="binding-only",
+        native_seconds=1.0,
+        rss_mib=None,
+        source_commit=source_commit,
+        extension_sha256=extension_sha256,
+        runtime_name=args.runtime_name,
+        python_executable=str(live_python),
+        package_path=str(package_path),
+        extension_path=str(extension_path),
+    )
+    validate_result_binding(worker_runtime, binding_record)
     fixture = make_fixture(case)
     parameters = _estimator_parameters(case, profile=profile, n_jobs=args.n_jobs)
     estimator = (
@@ -732,7 +766,9 @@ def _worker_result(args: argparse.Namespace) -> CaseResult:
         if case.task == "scalar"
         else GBMClassifier(**parameters)
     )
+    rss_before = _peak_rss_mib()
     estimator.fit(fixture.X_train, fixture.y_train)
+    rss_after = _peak_rss_mib()
     if case.task == "scalar":
         predictions = np.ascontiguousarray(
             estimator.predict(fixture.X_eval), dtype="<f4"
@@ -748,7 +784,6 @@ def _worker_result(args: argparse.Namespace) -> CaseResult:
         true_probabilities = predictions[np.arange(len(labels)), labels].astype(np.float64)
         quality_metric = "log_loss"
         quality_value = float(-np.mean(np.log(np.clip(true_probabilities, 1e-15, 1.0))))
-    rss_after = _peak_rss_mib()
     timing = dict(getattr(estimator, "fit_timing_", None) or {})
     native_seconds = require_native_train_seconds(timing)
     completed_rounds, stop_reason = require_completion_diagnostics(estimator)
@@ -824,6 +859,8 @@ def run_worker(
             runtime=runtime,
             expected_case=case.name,
             expected_repetition=repetition,
+            expected_profile=profile,
+            expected_n_jobs=n_jobs,
         )
     except ValueError as error:
         raise RuntimeError(
@@ -900,18 +937,17 @@ def _geometric_mean(values: Sequence[float]) -> float:
     return math.exp(sum(math.log(value) for value in values) / len(values))
 
 
-def _case_summaries(pairs: Sequence[PairedResult]) -> tuple[CaseSummary, ...]:
-    catalog = {case.name: case for case in full_cases()}
+def _case_summaries(
+    pairs: Sequence[PairedResult], *, profile: str
+) -> tuple[CaseSummary, ...]:
+    catalog = {case.name: case for case in profile_cases(profile)}
     grouped: dict[str, list[PairedResult]] = {}
     for pair in pairs:
-        grouped.setdefault(pair.baseline.case, []).append(pair)
+        if pair.baseline.case in catalog:
+            grouped.setdefault(pair.baseline.case, []).append(pair)
     summaries: list[CaseSummary] = []
     for case_name, group in sorted(grouped.items()):
-        case = catalog.get(case_name)
-        if case is None:
-            case = next(
-                spec for spec in quick_cases() if spec.name == case_name
-            )
+        case = catalog[case_name]
         baseline_native = median(pair.baseline.native_seconds for pair in group)
         candidate_native = median(pair.candidate.native_seconds for pair in group)
         baseline_rss_values = [pair.baseline.rss_mib for pair in group]
@@ -956,19 +992,46 @@ def _case_summaries(pairs: Sequence[PairedResult]) -> tuple[CaseSummary, ...]:
     return tuple(summaries)
 
 
+def _full_matrix_failures(pairs: Sequence[PairedResult]) -> tuple[str, ...]:
+    expected = {
+        (case.name, repetition)
+        for case in full_cases()
+        for repetition in range(FULL_REPETITIONS)
+    }
+    observed = [(pair.baseline.case, pair.baseline.repetition) for pair in pairs]
+    counts: dict[tuple[str, int], int] = {}
+    for identity in observed:
+        counts[identity] = counts.get(identity, 0) + 1
+    observed_set = set(counts)
+    duplicates = sorted(
+        identity for identity, count in counts.items() if count != 1
+    )
+    missing = sorted(expected - observed_set)
+    unexpected = sorted(observed_set - expected)
+    if len(observed) == len(expected) and not duplicates and not missing and not unexpected:
+        return ()
+    return (
+        "full mode requires the exact 10-case x 5-repetition matrix "
+        f"(records={len(observed)}, missing={missing}, unexpected={unexpected}, "
+        f"duplicates={duplicates})",
+    )
+
+
 def evaluate_gates(pairs: Sequence[PairedResult], *, profile: str) -> GateEvaluation:
     if profile not in {"quick", "full"}:
         raise ValueError(f"unknown profile {profile!r}")
     if not pairs:
         raise ValueError("benchmark produced no paired results")
     failures: list[str] = []
+    if profile == "full":
+        failures.extend(_full_matrix_failures(pairs))
     for pair in pairs:
         evaluation = evaluate_pair(pair.baseline, pair.candidate)
         failures.extend(
             f"{pair.baseline.case}/rep-{pair.baseline.repetition}: {failure}"
             for failure in evaluation.failures
         )
-    summaries = _case_summaries(pairs)
+    summaries = _case_summaries(pairs, profile=profile)
     delta_ratios = [
         summary.time_ratio
         for summary in summaries
@@ -977,8 +1040,8 @@ def evaluate_gates(pairs: Sequence[PairedResult], *, profile: str) -> GateEvalua
     eligible_ratios = [
         summary.time_ratio for summary in summaries if summary.performance_eligible
     ]
-    delta_aggregate = _geometric_mean(delta_ratios)
-    eligible_aggregate = _geometric_mean(eligible_ratios)
+    delta_aggregate = _geometric_mean(delta_ratios) if delta_ratios else 1.0
+    eligible_aggregate = _geometric_mean(eligible_ratios) if eligible_ratios else 1.0
     rss_ratios = [
         summary.rss_ratio for summary in summaries if summary.rss_ratio is not None
     ]
@@ -1040,8 +1103,8 @@ def validate_run_configuration(
     candidate: RuntimeSpec,
     repetitions: int,
 ) -> None:
-    if profile == "full" and repetitions < FULL_REPETITIONS:
-        raise ValueError("full mode requires at least 5 repetitions")
+    if profile == "full" and repetitions != FULL_REPETITIONS:
+        raise ValueError("full mode requires exactly 5 repetitions")
     _SUPPORT.validate_run_configuration(
         profile=profile,
         baseline=baseline,
@@ -1067,6 +1130,8 @@ def build_report(
     repetitions: int,
     n_jobs: int,
 ) -> dict[str, Any]:
+    if profile == "full" and repetitions != FULL_REPETITIONS:
+        raise ValueError("full mode requires exactly 5 repetitions")
     gates = evaluate_gates(pairs, profile=profile)
     return {
         "schema_version": SCHEMA_VERSION,
@@ -1334,8 +1399,8 @@ def validate_cli_args(args: argparse.Namespace) -> None:
     else:
         if args.baseline_manifest is None or args.candidate_manifest is None:
             raise ValueError("full mode requires baseline and candidate manifests")
-        if repetitions < FULL_REPETITIONS:
-            raise ValueError("full mode requires at least 5 repetitions")
+        if repetitions != FULL_REPETITIONS:
+            raise ValueError("full mode requires exactly 5 repetitions")
 
 
 def main(argv: Sequence[str] | None = None) -> int:

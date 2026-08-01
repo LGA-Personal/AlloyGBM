@@ -369,11 +369,13 @@ Each worker validates that manifest before importing AlloyGBM, hashes
 contiguous `float32` predictions, and requires exact artifact, prediction,
 round-count, stop-reason, and finite-quality pairing. One warmup subprocess per
 arm and case is excluded, then measured arm order alternates. Full evidence
-requires at least five repetitions, distinct clean manifests and commits, and
-positive incremental RSS for every pair. DART and quantile remain exactness
-gates but are excluded from timing aggregates. The serialized native-time
-noise floor can waive only the per-case slowdown gate; it does not weaken
-either aggregate timing gate.
+requires exactly five repetitions, the complete unique 10-case matrix,
+distinct clean manifests and commits, and positive incremental fit RSS for
+every pair. RSS is sampled immediately before and after `fit`, excluding
+fixture construction, prediction, and quality calculation. DART and quantile
+remain exactness gates but are excluded from timing aggregates. The serialized
+native-time noise floor can waive only the per-case slowdown gate; it does not
+weaken either aggregate timing gate.
 
 ## Outputs
 

@@ -8,6 +8,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+import types
 
 import numpy as np
 import pytest
@@ -51,6 +52,34 @@ def _load_benchmark():
 BENCHMARK = _load_benchmark()
 
 
+def _expected_parameters(case, *, profile: str, n_jobs: int):
+    parameters = {
+        "n_estimators": 3 if profile == "quick" else 24,
+        "learning_rate": 0.08,
+        "max_depth": case.max_depth,
+        "min_data_in_leaf": 8,
+        "min_split_gain": 0.0,
+        "lambda_l2": 1.0,
+        "training_policy": "manual",
+        "continuous_binning_max_bins": 64,
+        "tree_growth": case.growth,
+        "row_subsample": case.row_subsample,
+        "boosting_mode": case.boosting_mode,
+        "seed": case.seed,
+        "deterministic": True,
+        "n_jobs": n_jobs,
+    }
+    if case.growth == "leaf":
+        parameters["max_leaves"] = min(64, 2**case.max_depth)
+    if case.boosting_mode == "goss":
+        parameters.update(goss_top_rate=0.2, goss_other_rate=0.1)
+    if case.boosting_mode == "dart":
+        parameters.update(dart_drop_rate=0.1, dart_max_drop=5)
+    if case.objective == "quantile":
+        parameters.update(objective="quantile", quantile_alpha=0.5)
+    return parameters
+
+
 def _runtime(tmp_path: Path, name: str, commit: str):
     workdir = tmp_path / name
     python = workdir / ".venv" / "bin" / "python"
@@ -84,6 +113,36 @@ def _runtime(tmp_path: Path, name: str, commit: str):
     )
 
 
+def _live_runtime(tmp_path: Path, name: str, commit: str):
+    workdir = tmp_path / name
+    package = workdir / "alloygbm"
+    package.mkdir(parents=True)
+    package_path = package / "__init__.py"
+    extension_path = package / "_alloygbm.abi3.so"
+    package_path.touch()
+    extension_path.write_bytes(commit.encode("ascii"))
+    manifest = BENCHMARK.RuntimeManifest(
+        schema_version=BENCHMARK.RUNTIME_MANIFEST_SCHEMA_VERSION,
+        runtime_name=name,
+        source_commit=commit,
+        python_executable=str(BENCHMARK._normalized_path(sys.executable)),
+        package_path=str(package_path.resolve()),
+        extension_path=str(extension_path.resolve()),
+        extension_sha256=hashlib.sha256(extension_path.read_bytes()).hexdigest(),
+        extension_source_commit=commit,
+    )
+    manifest_path = workdir / f"{name}-runtime.json"
+    BENCHMARK.write_runtime_manifest(manifest_path, manifest)
+    return BENCHMARK.RuntimeSpec(
+        name=name,
+        python=Path(sys.executable),
+        workdir=workdir,
+        source_commit=commit,
+        manifest_path=manifest_path,
+        attestation=manifest,
+    )
+
+
 def _result(
     case=None,
     *,
@@ -93,8 +152,11 @@ def _result(
     native_seconds: float = 1.0,
     rss_mib: float | None = 10.0,
     quality_value: float = 0.25,
+    profile: str = "full",
+    n_jobs: int = 2,
 ):
     case = case or BENCHMARK.full_cases()[1]
+    parameters = _expected_parameters(case, profile=profile, n_jobs=n_jobs)
     return BENCHMARK.CaseResult(
         case=case.name,
         shape=case.shape,
@@ -112,7 +174,7 @@ def _result(
         prediction_sha256="b" * 64,
         native_seconds=native_seconds,
         rss_mib=rss_mib,
-        completed_rounds=24,
+        completed_rounds=parameters["n_estimators"],
         stop_reason="CompletedRequestedRounds",
         quality_metric="rmse" if case.task == "scalar" else "log_loss",
         quality_value=quality_value,
@@ -122,16 +184,20 @@ def _result(
             "n_features": case.n_features,
             "n_eval_rows": case.n_eval_rows,
         },
-        parameters={"seed": case.seed},
+        parameters=parameters,
     )
 
 
-def _bound_result(runtime, case, repetition, **changes):
+def _bound_result(
+    runtime, case, repetition, *, profile="quick", n_jobs=2, **changes
+):
     result = _result(
         case,
         repetition=repetition,
         runtime_name=runtime.name,
         source_commit=runtime.source_commit,
+        profile=profile,
+        n_jobs=n_jobs,
     )
     result = replace(
         result,
@@ -275,6 +341,128 @@ def test_worker_validates_manifest_before_importing_alloygbm(monkeypatch, tmp_pa
     assert imported is False
 
 
+def test_worker_rejects_wrong_live_interpreter_before_alloygbm_import(
+    monkeypatch, tmp_path
+):
+    runtime = _runtime(tmp_path, "candidate", "2" * 40)
+    case = BENCHMARK.quick_cases()[0]
+    imported = False
+    real_import = __import__
+
+    def tracking_import(name, *import_args, **import_kwargs):
+        nonlocal imported
+        if name == "alloygbm" or name.startswith("alloygbm."):
+            imported = True
+            raise AssertionError("AlloyGBM imported before live Python validation")
+        return real_import(name, *import_args, **import_kwargs)
+
+    monkeypatch.setattr(BENCHMARK, "_require_clean_worktree", lambda _: None)
+    monkeypatch.setattr(BENCHMARK, "_git_commit", lambda _: runtime.source_commit)
+    monkeypatch.setattr("builtins.__import__", tracking_import)
+    args = BENCHMARK._parser().parse_args(
+        [
+            "--quick",
+            "--worker",
+            "--runtime-name",
+            "candidate",
+            "--runtime-workdir",
+            str(runtime.workdir),
+            "--runtime-manifest",
+            str(runtime.manifest_path),
+            "--expected-python",
+            str(runtime.python),
+            "--expected-source-commit",
+            runtime.source_commit,
+            "--case",
+            case.name,
+            "--repetition",
+            "0",
+            "--n-jobs",
+            "2",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="live Python interpreter"):
+        BENCHMARK._worker_result(args)
+    assert imported is False
+
+
+def test_worker_rejects_live_package_mismatch_before_fixture_or_fit(
+    monkeypatch, tmp_path
+):
+    runtime = _live_runtime(tmp_path, "candidate", "2" * 40)
+    case = BENCHMARK.quick_cases()[0]
+    wrong_package = tmp_path / "wrong" / "alloygbm" / "__init__.py"
+    wrong_package.parent.mkdir(parents=True)
+    wrong_package.touch()
+    events = []
+
+    class FakeEstimator:
+        artifact_bytes = b"artifact"
+        fit_timing_ = {"native_train_seconds": 0.01}
+        rounds_completed_ = 3
+        stop_reason_ = "CompletedRequestedRounds"
+
+        def __init__(self, **parameters):
+            events.append("estimator")
+
+        def fit(self, X, y):
+            events.append("fit")
+
+        def predict(self, X):
+            events.append("predict")
+            return np.zeros(len(X), dtype=np.float32)
+
+    fake_alloygbm = types.ModuleType("alloygbm")
+    fake_alloygbm.__file__ = str(wrong_package)
+    fake_alloygbm.GBMRegressor = FakeEstimator
+    fake_alloygbm.GBMClassifier = FakeEstimator
+    fake_extension = types.ModuleType("alloygbm._alloygbm")
+    fake_extension.__file__ = runtime.attestation.extension_path
+    fake_alloygbm._alloygbm = fake_extension
+
+    def fake_fixture(_case):
+        events.append("fixture")
+        return BENCHMARK.Fixture(
+            np.zeros((4, case.n_features), dtype=np.float32),
+            np.zeros(4, dtype=np.float32),
+            np.zeros((2, case.n_features), dtype=np.float32),
+            np.zeros(2, dtype=np.float32),
+        )
+
+    monkeypatch.setitem(sys.modules, "alloygbm", fake_alloygbm)
+    monkeypatch.setitem(sys.modules, "alloygbm._alloygbm", fake_extension)
+    monkeypatch.setattr(BENCHMARK, "_require_clean_worktree", lambda _: None)
+    monkeypatch.setattr(BENCHMARK, "_git_commit", lambda _: runtime.source_commit)
+    monkeypatch.setattr(BENCHMARK, "make_fixture", fake_fixture)
+    args = BENCHMARK._parser().parse_args(
+        [
+            "--quick",
+            "--worker",
+            "--runtime-name",
+            "candidate",
+            "--runtime-workdir",
+            str(runtime.workdir),
+            "--runtime-manifest",
+            str(runtime.manifest_path),
+            "--expected-python",
+            str(runtime.python),
+            "--expected-source-commit",
+            runtime.source_commit,
+            "--case",
+            case.name,
+            "--repetition",
+            "0",
+            "--n-jobs",
+            "2",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="manifest"):
+        BENCHMARK._worker_result(args)
+    assert events == []
+
+
 def test_worker_parser_accepts_one_strict_complete_identity_bound_record(tmp_path):
     runtime = _runtime(tmp_path, "candidate", "2" * 40)
     case = BENCHMARK.quick_cases()[0]
@@ -285,6 +473,8 @@ def test_worker_parser_accepts_one_strict_complete_identity_bound_record(tmp_pat
         runtime=runtime,
         expected_case=case.name,
         expected_repetition=0,
+        expected_profile="quick",
+        expected_n_jobs=2,
     )
 
     assert parsed == expected
@@ -308,6 +498,8 @@ def test_worker_parser_rejects_noise_nonfinite_json_and_duplicate_keys(
             runtime=runtime,
             expected_case=BENCHMARK.quick_cases()[0].name,
             expected_repetition=0,
+            expected_profile="quick",
+            expected_n_jobs=2,
         )
 
 
@@ -328,6 +520,8 @@ def test_worker_parser_rejects_nonfinite_metrics_and_wrong_identity(tmp_path):
                 runtime=runtime,
                 expected_case=case.name,
                 expected_repetition=0,
+                expected_profile="quick",
+                expected_n_jobs=2,
             )
 
 
@@ -352,7 +546,83 @@ def test_worker_parser_binds_named_case_to_catalog_metadata(tmp_path):
                 runtime=runtime,
                 expected_case=case.name,
                 expected_repetition=0,
+                expected_profile="quick",
+                expected_n_jobs=2,
             )
+
+
+def test_worker_parser_rejects_quick_workload_as_full_evidence(tmp_path):
+    runtime = _runtime(tmp_path, "candidate", "2" * 40)
+    case_name = "scalar_tall_narrow_level_subsample_050"
+    quick_case = next(case for case in BENCHMARK.quick_cases() if case.name == case_name)
+    result = _bound_result(runtime, quick_case, 0, profile="quick", n_jobs=2)
+
+    with pytest.raises(ValueError, match="case metadata"):
+        BENCHMARK.parse_worker_output(
+            json.dumps(result.to_dict()),
+            runtime=runtime,
+            expected_case=case_name,
+            expected_repetition=0,
+            expected_profile="full",
+            expected_n_jobs=2,
+        )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda result: replace(
+            result, parameters={**result.parameters, "row_subsample": 1.0}
+        ),
+        lambda result: replace(
+            result, parameters={**result.parameters, "boosting_mode": "goss"}
+        ),
+        lambda result: replace(
+            result, parameters={**result.parameters, "n_estimators": 0}
+        ),
+        lambda result: replace(
+            result, parameters={**result.parameters, "n_jobs": 7}
+        ),
+        lambda result: replace(
+            result, parameters={**result.parameters, "n_jobs": 2.0}
+        ),
+    ],
+    ids=["subsample", "boosting", "rounds", "n-jobs", "n-jobs-type"],
+)
+def test_worker_parser_rejects_off_catalog_parameters(tmp_path, change):
+    runtime = _runtime(tmp_path, "candidate", "2" * 40)
+    case = BENCHMARK.quick_cases()[0]
+    result = change(_bound_result(runtime, case, 0, profile="quick", n_jobs=2))
+
+    with pytest.raises(ValueError, match="case metadata"):
+        BENCHMARK.parse_worker_output(
+            json.dumps(result.to_dict()),
+            runtime=runtime,
+            expected_case=case.name,
+            expected_repetition=0,
+            expected_profile="quick",
+            expected_n_jobs=2,
+        )
+
+
+def test_worker_parser_rejects_non_integer_dimensions(tmp_path):
+    runtime = _runtime(tmp_path, "candidate", "2" * 40)
+    case = BENCHMARK.quick_cases()[0]
+    result = _bound_result(runtime, case, 0, profile="quick", n_jobs=2)
+    result = replace(
+        result,
+        dimensions={**result.dimensions, "n_rows": str(case.n_rows)},
+    )
+
+    with pytest.raises(ValueError, match="dimensions"):
+        BENCHMARK.parse_worker_output(
+            json.dumps(result.to_dict()),
+            runtime=runtime,
+            expected_case=case.name,
+            expected_repetition=0,
+            expected_profile="quick",
+            expected_n_jobs=2,
+        )
 
 
 def test_pairing_requires_exact_digests_rounds_stop_reason_and_quality():
@@ -398,6 +668,83 @@ def test_worker_requires_native_completion_diagnostics():
     for incomplete in (object(), type("NoStop", (), {"rounds_completed_": 24})()):
         with pytest.raises(ValueError, match="completion diagnostics"):
             BENCHMARK.require_completion_diagnostics(incomplete)
+
+
+def test_worker_rss_brackets_fit_only(monkeypatch, tmp_path):
+    runtime = _live_runtime(tmp_path, "candidate", "2" * 40)
+    case = BENCHMARK.quick_cases()[0]
+    events = []
+
+    class FakeEstimator:
+        artifact_bytes = b"artifact"
+        fit_timing_ = {"native_train_seconds": 0.01}
+        rounds_completed_ = 3
+        stop_reason_ = "CompletedRequestedRounds"
+
+        def __init__(self, **parameters):
+            events.append("estimator")
+
+        def fit(self, X, y):
+            events.append("fit")
+
+        def predict(self, X):
+            events.append("predict")
+            return np.zeros(len(X), dtype=np.float32)
+
+    fake_alloygbm = types.ModuleType("alloygbm")
+    fake_alloygbm.__file__ = runtime.attestation.package_path
+    fake_alloygbm.GBMRegressor = FakeEstimator
+    fake_alloygbm.GBMClassifier = FakeEstimator
+    fake_extension = types.ModuleType("alloygbm._alloygbm")
+    fake_extension.__file__ = runtime.attestation.extension_path
+    fake_alloygbm._alloygbm = fake_extension
+
+    def fake_fixture(_case):
+        events.append("fixture")
+        return BENCHMARK.Fixture(
+            np.zeros((4, case.n_features), dtype=np.float32),
+            np.zeros(4, dtype=np.float32),
+            np.zeros((2, case.n_features), dtype=np.float32),
+            np.zeros(2, dtype=np.float32),
+        )
+
+    def fake_rss():
+        events.append("rss")
+        return float(events.count("rss"))
+
+    monkeypatch.setitem(sys.modules, "alloygbm", fake_alloygbm)
+    monkeypatch.setitem(sys.modules, "alloygbm._alloygbm", fake_extension)
+    monkeypatch.setattr(BENCHMARK, "_require_clean_worktree", lambda _: None)
+    monkeypatch.setattr(BENCHMARK, "_git_commit", lambda _: runtime.source_commit)
+    monkeypatch.setattr(BENCHMARK, "make_fixture", fake_fixture)
+    monkeypatch.setattr(BENCHMARK, "_peak_rss_mib", fake_rss)
+    args = BENCHMARK._parser().parse_args(
+        [
+            "--quick",
+            "--worker",
+            "--runtime-name",
+            "baseline",
+            "--runtime-workdir",
+            str(runtime.workdir),
+            "--runtime-manifest",
+            str(runtime.manifest_path),
+            "--expected-python",
+            str(runtime.python),
+            "--expected-source-commit",
+            runtime.source_commit,
+            "--case",
+            case.name,
+            "--repetition",
+            "0",
+            "--n-jobs",
+            "2",
+        ]
+    )
+
+    result = BENCHMARK._worker_result(args)
+
+    assert result.runtime_name == "baseline"
+    assert events == ["fixture", "estimator", "rss", "fit", "rss", "predict"]
 
 
 def test_fallback_timing_is_excluded_but_equivalence_is_not():
@@ -513,11 +860,60 @@ def test_rss_gate_boundary_and_every_full_pair_must_be_measurable():
     assert any("measurable positive RSS" in failure for failure in unavailable.failures)
 
 
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda pairs: [
+            pair
+            for pair in pairs
+            if pair.baseline.case != "fallback_scalar_dart_subsample_050"
+        ],
+        lambda pairs: pairs[:-1],
+        lambda pairs: [*pairs, pairs[0]],
+        lambda pairs: [
+            *pairs[:-1],
+            BENCHMARK.PairedResult(
+                replace(pairs[-1].baseline, repetition=5),
+                replace(pairs[-1].candidate, repetition=5),
+            ),
+        ],
+        lambda pairs: [
+            *pairs[:-1],
+            BENCHMARK.PairedResult(
+                replace(pairs[-1].baseline, repetition=-1),
+                replace(pairs[-1].candidate, repetition=-1),
+            ),
+        ],
+        lambda pairs: [
+            *pairs,
+            BENCHMARK.PairedResult(
+                replace(pairs[0].baseline, case="off_catalog_case"),
+                replace(pairs[0].candidate, case="off_catalog_case"),
+            ),
+        ],
+    ],
+    ids=[
+        "missing-fallback",
+        "missing-pair",
+        "duplicate",
+        "extra-repetition",
+        "warmup",
+        "extra-case",
+    ],
+)
+def test_full_gate_requires_exact_unique_ten_by_five_matrix(mutate):
+    evaluation = BENCHMARK.evaluate_gates(
+        mutate(_full_pairs(delta_ratio=0.98)), profile="full"
+    )
+
+    assert any("exact 10-case x 5-repetition matrix" in failure for failure in evaluation.failures)
+
+
 def test_quick_gate_checks_consistency_without_performance_claims():
     cases = {case.name: case for case in BENCHMARK.quick_cases()}
     pairs = []
     for case_name in sorted(QUICK_CASE_NAMES):
-        baseline = _result(cases[case_name])
+        baseline = _result(cases[case_name], profile="quick")
         candidate = replace(
             baseline,
             runtime_name="candidate",
@@ -558,9 +954,22 @@ def test_configuration_requires_one_quick_manifest_and_distinct_full_manifests(
             ),
             repetitions=5,
         )
-    with pytest.raises(ValueError, match="at least 5"):
+    with pytest.raises(ValueError, match="exactly 5"):
         BENCHMARK.validate_run_configuration(
             profile="full", baseline=baseline, candidate=candidate, repetitions=4
+        )
+    with pytest.raises(ValueError, match="exactly 5"):
+        BENCHMARK.validate_run_configuration(
+            profile="full", baseline=baseline, candidate=candidate, repetitions=6
+        )
+    with pytest.raises(ValueError, match="exactly 5"):
+        BENCHMARK.build_report(
+            profile="full",
+            baseline=baseline,
+            candidate=candidate,
+            pairs=_full_pairs(delta_ratio=0.98),
+            repetitions=6,
+            n_jobs=2,
         )
 
 
@@ -636,6 +1045,19 @@ def test_cli_has_manifest_quick_and_five_repetition_full_modes():
         ]
     )
     BENCHMARK.validate_cli_args(manifest)
+
+    six_repetitions = parser.parse_args(
+        [
+            "--baseline-manifest",
+            "/tmp/baseline.json",
+            "--candidate-manifest",
+            "/tmp/candidate.json",
+            "--repetitions",
+            "6",
+        ]
+    )
+    with pytest.raises(ValueError, match="exactly 5"):
+        BENCHMARK.validate_cli_args(six_repetitions)
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
