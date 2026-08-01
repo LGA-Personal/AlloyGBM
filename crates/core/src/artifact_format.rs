@@ -1454,7 +1454,7 @@ pub fn decode_multi_output_leaf_values_payload(
             bytes[cursor + 3],
         ]) as usize;
         cursor += 4;
-        if len % n_outputs as usize != 0 {
+        if !len.is_multiple_of(n_outputs as usize) {
             return Err(CoreError::Validation(format!(
                 "MultiOutputLeafValues stump length {len} is not divisible by n_outputs {n_outputs}"
             )));
