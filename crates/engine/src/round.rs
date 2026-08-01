@@ -317,18 +317,18 @@ fn apply_weighted_round_to_predictions_internal(
     raw_features: Option<(&[f32], usize)>,
     prediction_factor: f32,
 ) -> EngineResult<()> {
-    validate_active_raw_features(
-        binned_matrix.row_count,
-        binned_matrix.feature_count,
-        raw_features,
-    )?;
-    let stump_by_local = build_stump_lookup(stumps, binned_matrix.feature_count)?;
     let accumulator_factor_is_zero = accumulator
         .as_ref()
         .is_none_or(|(_, factor)| *factor == 0.0);
     if stumps.is_empty() || (prediction_factor == 0.0 && accumulator_factor_is_zero) {
         return Ok(());
     }
+    validate_active_raw_features(
+        binned_matrix.row_count,
+        binned_matrix.feature_count,
+        raw_features,
+    )?;
+    let stump_by_local = build_stump_lookup(stumps, binned_matrix.feature_count)?;
     let missing_bin = binned_matrix.missing_bin();
     for (row_index, prediction) in predictions.iter_mut().enumerate() {
         replay_round_row(
@@ -949,6 +949,91 @@ mod tests {
 
         assert!(matches!(result, Err(EngineError::ContractViolation(_))));
         assert_eq!(actual, initial);
+    }
+
+    #[test]
+    fn weighted_full_no_ops_ignore_malformed_unused_inputs() {
+        let binned = BinnedMatrix::new(2, 1, 1, vec![0, 1]).expect("valid binned matrix");
+        let malformed_raw = vec![1.0];
+        let initial = vec![10.0, 20.0];
+
+        let mut empty_stump_predictions = initial.clone();
+        let empty_result = apply_weighted_round_to_predictions(
+            &mut empty_stump_predictions,
+            &binned,
+            &[],
+            Some((&malformed_raw, 0)),
+            1.0,
+        );
+        assert_eq!(empty_result, Ok(()));
+        assert_eq!(empty_stump_predictions, initial);
+
+        let mut malformed_split = scalar_split(0, true, false, None);
+        malformed_split.feature_index = 1;
+        let malformed_stumps = vec![TrainedStump::new_unweighted(
+            malformed_split,
+            LeafValue::Scalar(1.0),
+            LeafValue::Scalar(-1.0),
+        )];
+        let mut zero_factor_predictions = initial.clone();
+        let mut zero_factor_accumulator = vec![3.0, 4.0];
+        let initial_accumulator = zero_factor_accumulator.clone();
+        let zero_result = apply_weighted_round_to_predictions_and_accumulator(
+            &mut zero_factor_predictions,
+            &mut zero_factor_accumulator,
+            &binned,
+            &malformed_stumps,
+            None,
+            0.0,
+            0.0,
+        );
+        assert_eq!(zero_result, Ok(()));
+        assert_eq!(zero_factor_predictions, initial);
+        assert_eq!(zero_factor_accumulator, initial_accumulator);
+    }
+
+    #[test]
+    fn restricted_no_ops_still_validate_malformed_inputs() {
+        let binned = BinnedMatrix::new(2, 1, 1, vec![0, 1]).expect("valid binned matrix");
+        let malformed_raw = vec![1.0];
+        let initial = vec![10.0, 20.0];
+
+        let mut empty_stump_predictions = initial.clone();
+        let empty_result = apply_weighted_round_to_rows(
+            &mut empty_stump_predictions,
+            &binned,
+            &[],
+            Some((&malformed_raw, 0)),
+            &[],
+            0.0,
+        );
+        assert!(matches!(
+            empty_result,
+            Err(EngineError::ContractViolation(_))
+        ));
+        assert_eq!(empty_stump_predictions, initial);
+
+        let mut malformed_split = scalar_split(0, true, false, None);
+        malformed_split.feature_index = 1;
+        let malformed_stumps = vec![TrainedStump::new_unweighted(
+            malformed_split,
+            LeafValue::Scalar(1.0),
+            LeafValue::Scalar(-1.0),
+        )];
+        let mut zero_factor_predictions = initial.clone();
+        let zero_result = apply_weighted_round_to_rows(
+            &mut zero_factor_predictions,
+            &binned,
+            &malformed_stumps,
+            None,
+            &[0],
+            0.0,
+        );
+        assert!(matches!(
+            zero_result,
+            Err(EngineError::ContractViolation(_))
+        ));
+        assert_eq!(zero_factor_predictions, initial);
     }
 
     #[test]
