@@ -6836,6 +6836,34 @@ fn trained_model_serialization_rejects_invalid_primary_values() {
 }
 
 #[test]
+fn trained_model_serialization_rejects_invalid_linear_leaf_metadata() {
+    let mut model = sample_trained_model();
+    model.stumps[0].left_leaf_value = LeafValue::Linear(alloygbm_core::LinearLeaf::scaled(
+        0.0,
+        vec![0.5],
+        vec![model.feature_count as u32],
+        vec![0.0],
+        vec![1.0],
+    ));
+    let error = model
+        .to_artifact_bytes()
+        .expect_err("out-of-range PL regressor references must not serialize");
+    assert!(error.to_string().contains("regressor feature_index"));
+
+    model.stumps[0].left_leaf_value = LeafValue::Linear(alloygbm_core::LinearLeaf::scaled(
+        0.0,
+        vec![f32::NAN],
+        vec![0],
+        vec![0.0],
+        vec![1.0],
+    ));
+    let error = model
+        .to_artifact_bytes()
+        .expect_err("non-finite PL coefficients must not serialize");
+    assert!(error.to_string().contains("invalid coefficients"));
+}
+
+#[test]
 fn node_debug_stats_decoder_rejects_excessive_counts_and_unknown_flags() {
     let mut excessive = Vec::new();
     excessive.extend_from_slice(&MODEL_FORMAT_V1.to_le_bytes());
@@ -6851,6 +6879,14 @@ fn node_debug_stats_decoder_rejects_excessive_counts_and_unknown_flags() {
     let error = crate::artifact::decode_node_debug_stats_payload(&invalid_flags)
         .expect_err("unknown debug flags must fail");
     assert!(error.to_string().contains("flags"));
+
+    let mut non_finite = vec![0_u8; 48];
+    non_finite[0..4].copy_from_slice(&MODEL_FORMAT_V1.to_le_bytes());
+    non_finite[4..8].copy_from_slice(&1_u32.to_le_bytes());
+    non_finite[20..24].copy_from_slice(&f32::NAN.to_le_bytes());
+    let error = crate::artifact::decode_node_debug_stats_payload(&non_finite)
+        .expect_err("non-finite debug values must fail");
+    assert!(error.to_string().contains("non-finite"));
 }
 
 #[test]

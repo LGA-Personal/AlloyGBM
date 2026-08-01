@@ -3,8 +3,9 @@
 //! Extracted from `lib.rs` in refactor Task 1.16.
 
 use alloygbm_core::{
-    LeafValue, MAX_MODEL_FEATURES, MAX_MODEL_STUMPS, MODEL_FORMAT_V1, ModelArtifactSection,
-    ModelSectionKind, NodeStats, SplitCandidate, required_section_compatibility_report,
+    LeafValue, LinearLeaf, MAX_MODEL_FEATURES, MAX_MODEL_STUMPS, MAX_PL_REGRESSORS,
+    MODEL_FORMAT_V1, ModelArtifactSection, ModelSectionKind, NodeStats, SplitCandidate,
+    required_section_compatibility_report,
 };
 
 use crate::error::{EngineError, EngineResult};
@@ -312,9 +313,57 @@ fn validate_trained_model_payload(model: &TrainedModel) -> EngineResult<()> {
                 "stump {stump_index} contains non-finite gain or leaf value"
             )));
         }
+        if let LeafValue::Linear(leaf) = &stump.left_leaf_value {
+            validate_linear_leaf(leaf, model.feature_count, stump_index, "left")?;
+        }
+        if let LeafValue::Linear(leaf) = &stump.right_leaf_value {
+            validate_linear_leaf(leaf, model.feature_count, stump_index, "right")?;
+        }
     }
     if let Some(records) = model.node_debug_stats.as_deref() {
         validate_node_debug_stats(records, Some(model.feature_count))?;
+    }
+    Ok(())
+}
+
+fn validate_linear_leaf(
+    leaf: &LinearLeaf,
+    feature_count: usize,
+    stump_index: usize,
+    side: &str,
+) -> EngineResult<()> {
+    let regressor_count = leaf.weights.len();
+    if regressor_count > MAX_PL_REGRESSORS {
+        return Err(EngineError::ContractViolation(format!(
+            "stump {stump_index} {side} linear leaf regressor count {regressor_count} exceeds maximum {MAX_PL_REGRESSORS}"
+        )));
+    }
+    if leaf.regressor_features.len() != regressor_count
+        || leaf.feature_means.len() != regressor_count
+        || leaf.feature_inv_stds.len() != regressor_count
+    {
+        return Err(EngineError::ContractViolation(format!(
+            "stump {stump_index} {side} linear leaf coefficient dimensions do not match regressor count {regressor_count}"
+        )));
+    }
+    if !leaf.intercept.is_finite()
+        || leaf.weights.iter().any(|value| !value.is_finite())
+        || leaf.feature_means.iter().any(|value| !value.is_finite())
+        || leaf
+            .feature_inv_stds
+            .iter()
+            .any(|value| !value.is_finite() || *value <= 0.0)
+    {
+        return Err(EngineError::ContractViolation(format!(
+            "stump {stump_index} {side} linear leaf contains invalid coefficients or scaling values"
+        )));
+    }
+    for &feature_index in &leaf.regressor_features {
+        if feature_index as usize >= feature_count {
+            return Err(EngineError::ContractViolation(format!(
+                "stump {stump_index} {side} linear leaf regressor feature_index {feature_index} exceeds model feature_count {feature_count}"
+            )));
+        }
     }
     Ok(())
 }
