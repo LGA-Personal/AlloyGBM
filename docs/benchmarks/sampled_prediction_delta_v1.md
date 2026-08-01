@@ -14,6 +14,8 @@
 - All-eligible native-time ratio: 0.7179
 - Aggregate RSS ratio: 0.9410
 - Failures: 0
+- Worst eligible case: `scalar_small_wide_leaf_subsample_050` slowed by 3.76%
+  (1.0376x), within the 1.08x per-case limit.
 - DART and quantile timing are descriptive fallback sentinels.
 
 This full profile compares separate, manifest-attested baseline and candidate runtimes.
