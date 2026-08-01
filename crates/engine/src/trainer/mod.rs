@@ -1385,7 +1385,10 @@ impl Trainer {
 
             // Shared row sampling across all K classes. In GOSS mode this
             // amplifies the sampled-low rows in every class buffer.
-            let root_row_indices = select_row_indices_for_round_multiclass(
+            let RoundRowSelection {
+                selected: root_row_indices,
+                excluded: _excluded_row_indices,
+            } = select_row_indices_for_round_multiclass(
                 self.params.boosting_mode,
                 n,
                 controls.row_subsample,
@@ -2634,7 +2637,10 @@ impl Trainer {
                     &mut projection_scratch,
                 )?;
             }
-            let root_row_indices = select_row_indices_for_round(
+            let RoundRowSelection {
+                selected: root_row_indices,
+                excluded: _excluded_row_indices,
+            } = select_row_indices_for_round(
                 self.params.boosting_mode,
                 active_dataset.row_count(),
                 controls.row_subsample,

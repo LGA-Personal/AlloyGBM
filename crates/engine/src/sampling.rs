@@ -48,40 +48,58 @@ fn sampled_count(total_count: usize, subsample: f32) -> usize {
         .min(total_count as f32) as usize
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RoundRowSelection {
+    pub(crate) selected: Vec<u32>,
+    pub(crate) excluded: Vec<u32>,
+}
+
+fn sampled_index_partition(
+    total_count: usize,
+    subsample: f32,
+    seed_base: u64,
+    round_index: u64,
+) -> (Vec<usize>, Vec<usize>) {
+    if total_count == 0 {
+        return (Vec::new(), Vec::new());
+    }
+    let keep_count = sampled_count(total_count, subsample);
+    if keep_count >= total_count {
+        return ((0..total_count).collect(), Vec::new());
+    }
+    let round_seed = mixed_hash(seed_base ^ round_index.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    let mut scored = (0..total_count)
+        .map(|index| {
+            let index_seed = (index as u64).wrapping_mul(0xD6E8_FD50_89A4_7A4D);
+            (index, mixed_hash(round_seed ^ index_seed))
+        })
+        .collect::<Vec<_>>();
+    scored.select_nth_unstable_by(keep_count, |lhs, rhs| {
+        lhs.1.cmp(&rhs.1).then_with(|| lhs.0.cmp(&rhs.0))
+    });
+    let mut selected = scored[..keep_count]
+        .iter()
+        .map(|(index, _)| *index)
+        .collect::<Vec<_>>();
+    let mut excluded = scored[keep_count..]
+        .iter()
+        .map(|(index, _)| *index)
+        .collect::<Vec<_>>();
+    selected.sort_unstable();
+    excluded.sort_unstable();
+    (selected, excluded)
+}
+
 pub(crate) fn sampled_indices(
     total_count: usize,
     subsample: f32,
     seed_base: u64,
     round_index: u64,
 ) -> Vec<usize> {
-    if total_count == 0 {
-        return Vec::new();
-    }
-    let keep_count = sampled_count(total_count, subsample);
-    if keep_count >= total_count {
-        return (0..total_count).collect();
-    }
-
-    let round_seed = mixed_hash(seed_base ^ round_index.wrapping_mul(0x9E37_79B9_7F4A_7C15));
-    let mut scored = (0..total_count)
-        .map(|index| {
-            let index_seed = (index as u64).wrapping_mul(0xD6E8_FD50_89A4_7A4D);
-            let hash = mixed_hash(round_seed ^ index_seed);
-            (index, hash)
-        })
-        .collect::<Vec<_>>();
-    scored.select_nth_unstable_by(keep_count, |lhs, rhs| {
-        lhs.1.cmp(&rhs.1).then_with(|| lhs.0.cmp(&rhs.0))
-    });
-
-    let mut selected = scored[..keep_count]
-        .iter()
-        .map(|(index, _)| *index)
-        .collect::<Vec<_>>();
-    selected.sort_unstable();
-    selected
+    sampled_index_partition(total_count, subsample, seed_base, round_index).0
 }
 
+#[allow(dead_code)]
 pub(crate) fn sampled_row_indices(
     row_count: usize,
     row_subsample: f32,
@@ -116,8 +134,7 @@ pub(crate) fn sampled_row_indices(
 ///   (`fit_iterations_with_optional_validation_summary`) before
 ///   gradient computation.  See `crates/engine/src/dart.rs`.
 ///
-/// Returns the sorted set of row indices used as `root_row_indices`
-/// for tree construction this round.
+/// Returns the sorted selected and excluded row partitions for this round.
 pub(crate) fn select_row_indices_for_round(
     boosting_mode: BoostingMode,
     row_count: usize,
@@ -125,7 +142,7 @@ pub(crate) fn select_row_indices_for_round(
     seed_base: u64,
     round_index: u64,
     gradients: &mut [GradientPair],
-) -> Vec<u32> {
+) -> RoundRowSelection {
     match boosting_mode {
         BoostingMode::Goss {
             top_rate,
@@ -135,23 +152,38 @@ pub(crate) fn select_row_indices_for_round(
             // in (e.g. `|grad| / sqrt(hess)`) but the LightGBM
             // reference uses |grad| only.
             let magnitudes: Vec<f32> = gradients.iter().map(|g| g.grad.abs()).collect();
-            let (top, other, amplification) =
-                goss_sample_indices(&magnitudes, top_rate, other_rate, seed_base, round_index);
+            let selection =
+                goss_index_partition(&magnitudes, top_rate, other_rate, seed_base, round_index);
+            let amplification = selection.amplification;
             if (amplification - 1.0).abs() > f32::EPSILON {
-                for &row in &other {
+                for &row in &selection.other {
                     let idx = row as usize;
                     gradients[idx].grad *= amplification;
                     gradients[idx].hess *= amplification;
                 }
             }
-            let mut merged: Vec<u32> = Vec::with_capacity(top.len() + other.len());
-            merged.extend(top);
-            merged.extend(other);
-            merged.sort_unstable();
-            merged
+            let mut selected = Vec::with_capacity(selection.top.len() + selection.other.len());
+            selected.extend_from_slice(&selection.top);
+            selected.extend_from_slice(&selection.other);
+            selected.sort_unstable();
+            RoundRowSelection {
+                selected,
+                excluded: selection.excluded,
+            }
         }
         BoostingMode::Standard | BoostingMode::Dart { .. } => {
-            sampled_row_indices(row_count, row_subsample, seed_base, round_index)
+            let (selected, excluded) =
+                sampled_index_partition(row_count, row_subsample, seed_base, round_index);
+            RoundRowSelection {
+                selected: selected
+                    .into_iter()
+                    .map(|row_index| row_index as u32)
+                    .collect(),
+                excluded: excluded
+                    .into_iter()
+                    .map(|row_index| row_index as u32)
+                    .collect(),
+            }
         }
     }
 }
@@ -174,7 +206,7 @@ pub(crate) fn select_row_indices_for_round_multiclass(
     seed_base: u64,
     round_index: u64,
     class_gradient_buffers: &mut [Vec<GradientPair>],
-) -> Vec<u32> {
+) -> RoundRowSelection {
     match boosting_mode {
         BoostingMode::Goss {
             top_rate,
@@ -200,10 +232,11 @@ pub(crate) fn select_row_indices_for_round_multiclass(
                         .sum::<f32>()
                 })
                 .collect();
-            let (top, other, amplification) =
-                goss_sample_indices(&magnitudes, top_rate, other_rate, seed_base, round_index);
+            let selection =
+                goss_index_partition(&magnitudes, top_rate, other_rate, seed_base, round_index);
+            let amplification = selection.amplification;
             if (amplification - 1.0).abs() > f32::EPSILON {
-                for &row in &other {
+                for &row in &selection.other {
                     let idx = row as usize;
                     for class_buf in class_gradient_buffers.iter_mut().take(k) {
                         let pair = &mut class_buf[idx];
@@ -212,14 +245,28 @@ pub(crate) fn select_row_indices_for_round_multiclass(
                     }
                 }
             }
-            let mut merged: Vec<u32> = Vec::with_capacity(top.len() + other.len());
-            merged.extend(top);
-            merged.extend(other);
-            merged.sort_unstable();
-            merged
+            let mut selected = Vec::with_capacity(selection.top.len() + selection.other.len());
+            selected.extend_from_slice(&selection.top);
+            selected.extend_from_slice(&selection.other);
+            selected.sort_unstable();
+            RoundRowSelection {
+                selected,
+                excluded: selection.excluded,
+            }
         }
         BoostingMode::Standard | BoostingMode::Dart { .. } => {
-            sampled_row_indices(row_count, row_subsample, seed_base, round_index)
+            let (selected, excluded) =
+                sampled_index_partition(row_count, row_subsample, seed_base, round_index);
+            RoundRowSelection {
+                selected: selected
+                    .into_iter()
+                    .map(|row_index| row_index as u32)
+                    .collect(),
+                excluded: excluded
+                    .into_iter()
+                    .map(|row_index| row_index as u32)
+                    .collect(),
+            }
         }
     }
 }
@@ -239,30 +286,41 @@ pub(crate) fn select_row_indices_for_round_multiclass(
 /// cases.  For large `n` the two forms agree (since `top_n ≈ top_rate
 /// · n` and `other_n ≈ other_rate · n`).
 ///
-/// Returns `(sampled_row_indices, amplification, top_kept_count)`:
+/// Returns `(top_indices, other_indices, amplification)`:
 ///
-/// * `sampled_row_indices` — sorted ascending, includes both kept-top
+/// * `top_indices` and `other_indices` — sorted ascending, include both kept-top
 ///   and sampled-low rows.  Suitable to feed
 ///   `NodeSlice::row_indices`.
 /// * `amplification` — multiplier the caller applies to gradients and
 ///   hessians on the sampled-low rows (not on the kept-top rows!) to
 ///   preserve unbiasedness.  Always `>= 1.0`; equals `1.0` when
 ///   `other_rate == 0`.
-/// * `top_kept_count` — number of leading elements in
-///   `sampled_row_indices` (after sorting) that are kept-top rows.
-///   *Not* used directly — instead, the caller marks each row by
-///   checking membership in a separate hash set.  Returned for
-///   convenience and unit-test sanity checks.
-pub(crate) fn goss_sample_indices(
+///
+/// The excluded side is retained internally by the round-selection
+/// dispatchers; this compatibility wrapper returns only the historical
+/// sampled tuple used by feature sampling, tests, and joint training.
+struct GossRowSelection {
+    top: Vec<u32>,
+    other: Vec<u32>,
+    excluded: Vec<u32>,
+    amplification: f32,
+}
+
+fn goss_index_partition(
     gradient_magnitudes: &[f32],
     top_rate: f32,
     other_rate: f32,
     seed_base: u64,
     round_index: u64,
-) -> (Vec<u32>, Vec<u32>, f32) {
+) -> GossRowSelection {
     let n = gradient_magnitudes.len();
     if n == 0 {
-        return (Vec::new(), Vec::new(), 1.0);
+        return GossRowSelection {
+            top: Vec::new(),
+            other: Vec::new(),
+            excluded: Vec::new(),
+            amplification: 1.0,
+        };
     }
     let top_n = ((top_rate * n as f32).ceil() as usize).max(1).min(n);
     let other_n = ((other_rate * n as f32).ceil() as usize).min(n - top_n);
@@ -285,7 +343,7 @@ pub(crate) fn goss_sample_indices(
     }
     let mut top_indices: Vec<u32> = indexed[..top_n].iter().map(|(i, _)| *i).collect();
 
-    let mut other_indices: Vec<u32> = if other_n > 0 && top_n < n {
+    let (mut other_indices, mut excluded_indices): (Vec<u32>, Vec<u32>) = if top_n < n {
         let mut rest_scored: Vec<(u32, u64)> = indexed[top_n..]
             .iter()
             .map(|(i, _)| {
@@ -297,12 +355,17 @@ pub(crate) fn goss_sample_indices(
                 (*i, seed)
             })
             .collect();
-        rest_scored.select_nth_unstable_by(other_n - 1, |a, b| {
-            a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0))
-        });
-        rest_scored[..other_n].iter().map(|(i, _)| *i).collect()
+        if other_n > 0 {
+            rest_scored.select_nth_unstable_by(other_n - 1, |a, b| {
+                a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0))
+            });
+        }
+        (
+            rest_scored[..other_n].iter().map(|(i, _)| *i).collect(),
+            rest_scored[other_n..].iter().map(|(i, _)| *i).collect(),
+        )
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
 
     // Amplification uses **realized** counts (`(n - top_n) / other_n`)
@@ -323,5 +386,28 @@ pub(crate) fn goss_sample_indices(
 
     top_indices.sort_unstable();
     other_indices.sort_unstable();
-    (top_indices, other_indices, amplification)
+    excluded_indices.sort_unstable();
+    GossRowSelection {
+        top: top_indices,
+        other: other_indices,
+        excluded: excluded_indices,
+        amplification,
+    }
+}
+
+pub(crate) fn goss_sample_indices(
+    gradient_magnitudes: &[f32],
+    top_rate: f32,
+    other_rate: f32,
+    seed_base: u64,
+    round_index: u64,
+) -> (Vec<u32>, Vec<u32>, f32) {
+    let selection = goss_index_partition(
+        gradient_magnitudes,
+        top_rate,
+        other_rate,
+        seed_base,
+        round_index,
+    );
+    (selection.top, selection.other, selection.amplification)
 }
