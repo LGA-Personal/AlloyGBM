@@ -4709,6 +4709,17 @@ fn sampled_row_indices_are_seeded_and_non_prefix() {
 
 #[test]
 fn round_row_selection_preserves_uniform_rows_and_partitions_domain() {
+    // Frozen from 04d25dc's pre-partition implementation. Keep these vectors
+    // independent of the current sampling wrappers.
+    let assert_complete = |partition: &RoundRowSelection, row_count: u32| {
+        assert!(partition.selected.is_sorted());
+        assert!(partition.excluded.is_sorted());
+        let mut combined = partition.selected.clone();
+        combined.extend_from_slice(&partition.excluded);
+        combined.sort_unstable();
+        assert_eq!(combined, (0..row_count).collect::<Vec<_>>());
+    };
+
     let mut gradients = vec![
         GradientPair {
             grad: 1.0,
@@ -4716,55 +4727,69 @@ fn round_row_selection_preserves_uniform_rows_and_partitions_domain() {
         };
         17
     ];
-    for rate in [1.0, 0.8, 0.5, 0.01] {
-        let expected = sampled_row_indices(17, rate, 91, 3);
-        let partition =
-            select_row_indices_for_round(BoostingMode::Standard, 17, rate, 91, 3, &mut gradients);
-        assert_eq!(partition.selected, expected);
-        assert!(partition.selected.is_sorted());
-        assert!(partition.excluded.is_sorted());
-        let mut combined = partition.selected.clone();
-        combined.extend_from_slice(&partition.excluded);
-        combined.sort_unstable();
-        assert_eq!(combined, (0..17_u32).collect::<Vec<_>>());
-    }
+    let standard =
+        select_row_indices_for_round(BoostingMode::Standard, 17, 0.8, 91, 3, &mut gradients);
+    assert_eq!(
+        standard.selected,
+        vec![0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 15, 16]
+    );
+    assert_eq!(standard.excluded, vec![8, 9, 14]);
+    assert_complete(&standard, 17);
+
+    let dart = select_row_indices_for_round(
+        BoostingMode::Dart {
+            drop_rate: 0.1,
+            max_drop: 5,
+            normalize_type: alloygbm_core::DartNormalize::Tree,
+            sample_type: alloygbm_core::DartSampleType::Uniform,
+        },
+        17,
+        0.5,
+        91,
+        3,
+        &mut gradients,
+    );
+    assert_eq!(dart.selected, vec![0, 2, 3, 4, 10, 11, 12, 13, 16]);
+    assert_eq!(dart.excluded, vec![1, 5, 6, 7, 8, 9, 14, 15]);
+    assert_complete(&dart, 17);
+
+    let low_rate =
+        select_row_indices_for_round(BoostingMode::Standard, 17, 0.01, 91, 3, &mut gradients);
+    assert_eq!(low_rate.selected, vec![2]);
+    assert_eq!(
+        low_rate.excluded,
+        vec![0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    );
+    assert_complete(&low_rate, 17);
+
+    let mut full_gradients = vec![
+        GradientPair {
+            grad: 1.0,
+            hess: 1.0
+        };
+        5
+    ];
+    let full =
+        select_row_indices_for_round(BoostingMode::Standard, 5, 1.0, 91, 3, &mut full_gradients);
+    assert_eq!(full.selected, vec![0, 1, 2, 3, 4]);
+    assert!(full.excluded.is_empty());
+    assert_complete(&full, 5);
 
     let mut zero_gradients = Vec::new();
     let zero =
         select_row_indices_for_round(BoostingMode::Standard, 0, 0.5, 91, 3, &mut zero_gradients);
     assert!(zero.selected.is_empty());
     assert!(zero.excluded.is_empty());
+    assert_complete(&zero, 0);
 
-    let mut repeat_gradients = vec![
-        GradientPair {
-            grad: 1.0,
-            hess: 1.0
-        };
-        17
-    ];
-    let repeat = select_row_indices_for_round(
-        BoostingMode::Standard,
-        17,
-        0.5,
-        91,
-        3,
-        &mut repeat_gradients,
-    );
-    let repeat_again = {
-        let mut gradients = vec![
-            GradientPair {
-                grad: 1.0,
-                hess: 1.0
-            };
-            17
-        ];
-        select_row_indices_for_round(BoostingMode::Standard, 17, 0.5, 91, 3, &mut gradients)
-    };
-    assert_eq!(repeat, repeat_again);
+    let repeat =
+        select_row_indices_for_round(BoostingMode::Standard, 17, 0.8, 91, 3, &mut gradients);
+    assert_eq!(repeat, standard);
 }
 
 #[test]
 fn goss_round_row_selection_preserves_partition_and_amplification() {
+    // Frozen from 04d25dc's pre-partition implementation.
     let source_gradients = vec![
         GradientPair {
             grad: 0.1,
@@ -4787,18 +4812,11 @@ fn goss_round_row_selection_preserves_partition_and_amplification() {
             hess: 1.0,
         },
     ];
-    let magnitudes = source_gradients
-        .iter()
-        .map(|pair| pair.grad)
-        .collect::<Vec<_>>();
-    let (expected_top, expected_other, expected_amplification) =
-        goss_sample_indices(&magnitudes, 0.2, 0.1, 91, 3);
-    let mut expected_selected = expected_top.clone();
-    expected_selected.extend_from_slice(&expected_other);
-    expected_selected.sort_unstable();
-    let expected_excluded = (0..5_u32)
-        .filter(|row| !expected_selected.contains(row))
-        .collect::<Vec<_>>();
+    let magnitudes = vec![0.1, 0.2, 0.3, 0.4, 0.5];
+    let (top, other, amplification) = goss_sample_indices(&magnitudes, 0.2, 0.1, 91, 3);
+    assert_eq!(top, vec![4]);
+    assert_eq!(other, vec![0]);
+    assert_eq!(amplification, 4.0);
 
     let mut gradients = source_gradients.clone();
     let partition = select_row_indices_for_round(
@@ -4812,16 +4830,108 @@ fn goss_round_row_selection_preserves_partition_and_amplification() {
         3,
         &mut gradients,
     );
-    assert_eq!(partition.selected, expected_selected);
-    assert_eq!(partition.excluded, expected_excluded);
+    assert_eq!(partition.selected, vec![0, 4]);
+    assert_eq!(partition.excluded, vec![1, 2, 3]);
     assert!(partition.selected.is_sorted());
     assert!(partition.excluded.is_sorted());
-    assert_eq!(expected_amplification, 4.0);
-    assert_eq!(
-        gradients[expected_other[0] as usize].grad,
-        source_gradients[expected_other[0] as usize].grad * 4.0
+    let mut combined = partition.selected.clone();
+    combined.extend_from_slice(&partition.excluded);
+    combined.sort_unstable();
+    assert_eq!(combined, vec![0, 1, 2, 3, 4]);
+    assert_eq!(gradients[0].grad, 0.4);
+    assert_eq!(gradients[0].hess, 4.0);
+    assert_eq!(&gradients[1..], &source_gradients[1..]);
+}
+
+#[test]
+fn goss_round_row_selection_pins_tie_boundary_partition() {
+    let magnitudes = vec![10.0, 10.0, 10.0, 10.0, 1.0, 1.0];
+    let (top, other, amplification) = goss_sample_indices(&magnitudes, 0.5, 0.2, 91, 3);
+    assert_eq!(top, vec![0, 1, 2]);
+    assert_eq!(other, vec![3, 4]);
+    assert_eq!(amplification, 1.5);
+
+    let mut gradients = magnitudes
+        .iter()
+        .map(|&grad| GradientPair { grad, hess: 2.0 })
+        .collect::<Vec<_>>();
+    let partition = select_row_indices_for_round(
+        BoostingMode::Goss {
+            top_rate: 0.5,
+            other_rate: 0.2,
+        },
+        6,
+        1.0,
+        91,
+        3,
+        &mut gradients,
     );
-    assert_eq!(gradients[expected_other[0] as usize].hess, 4.0);
+    assert_eq!(partition.selected, vec![0, 1, 2, 3, 4]);
+    assert_eq!(partition.excluded, vec![5]);
+    assert_eq!(
+        gradients[3],
+        GradientPair {
+            grad: 15.0,
+            hess: 3.0
+        }
+    );
+    assert_eq!(
+        gradients[4],
+        GradientPair {
+            grad: 1.5,
+            hess: 3.0
+        }
+    );
+}
+
+#[test]
+fn goss_round_row_selection_pins_zero_other_and_full_partitions() {
+    let magnitudes = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+    let (top, other, amplification) = goss_sample_indices(&magnitudes, 0.2, 0.0, 1, 0);
+    assert_eq!(top, vec![4]);
+    assert!(other.is_empty());
+    assert_eq!(amplification, 1.0);
+
+    let source_gradients = magnitudes
+        .iter()
+        .map(|&grad| GradientPair { grad, hess: 1.0 })
+        .collect::<Vec<_>>();
+    let mut zero_other_gradients = source_gradients.clone();
+    let zero_other = select_row_indices_for_round(
+        BoostingMode::Goss {
+            top_rate: 0.2,
+            other_rate: 0.0,
+        },
+        5,
+        1.0,
+        1,
+        0,
+        &mut zero_other_gradients,
+    );
+    assert_eq!(zero_other.selected, vec![4]);
+    assert_eq!(zero_other.excluded, vec![0, 1, 2, 3]);
+    assert_eq!(zero_other_gradients, source_gradients);
+
+    let (top, other, amplification) = goss_sample_indices(&magnitudes, 1.0, 0.5, 1, 0);
+    assert_eq!(top, vec![0, 1, 2, 3, 4]);
+    assert!(other.is_empty());
+    assert_eq!(amplification, 1.0);
+
+    let mut full_gradients = source_gradients.clone();
+    let full = select_row_indices_for_round(
+        BoostingMode::Goss {
+            top_rate: 1.0,
+            other_rate: 0.5,
+        },
+        5,
+        1.0,
+        1,
+        0,
+        &mut full_gradients,
+    );
+    assert_eq!(full.selected, vec![0, 1, 2, 3, 4]);
+    assert!(full.excluded.is_empty());
+    assert_eq!(full_gradients, source_gradients);
 }
 
 #[test]
@@ -4895,22 +5005,11 @@ fn goss_multiclass_round_selection_shares_partition_and_amplification() {
         ],
     ];
     let original = class_gradient_buffers.clone();
-    let magnitudes = (0..5)
-        .map(|row| {
-            original
-                .iter()
-                .map(|buffer| buffer[row].grad.abs())
-                .sum::<f32>()
-        })
-        .collect::<Vec<_>>();
-    let (expected_top, expected_other, expected_amplification) =
-        goss_sample_indices(&magnitudes, 0.2, 0.1, 91, 3);
-    let mut expected_selected = expected_top.clone();
-    expected_selected.extend_from_slice(&expected_other);
-    expected_selected.sort_unstable();
-    let expected_excluded = (0..5_u32)
-        .filter(|row| !expected_selected.contains(row))
-        .collect::<Vec<_>>();
+    let magnitudes = vec![0.8, 0.9, 1.0, 1.1, 1.2];
+    let (top, other, amplification) = goss_sample_indices(&magnitudes, 0.2, 0.1, 91, 3);
+    assert_eq!(top, vec![4]);
+    assert_eq!(other, vec![0]);
+    assert_eq!(amplification, 4.0);
 
     let partition = select_row_indices_for_round_multiclass(
         BoostingMode::Goss {
@@ -4923,17 +5022,18 @@ fn goss_multiclass_round_selection_shares_partition_and_amplification() {
         3,
         &mut class_gradient_buffers,
     );
-    assert_eq!(partition.selected, expected_selected);
-    assert_eq!(partition.excluded, expected_excluded);
+    assert_eq!(partition.selected, vec![0, 4]);
+    assert_eq!(partition.excluded, vec![1, 2, 3]);
     assert!(partition.selected.is_sorted());
     assert!(partition.excluded.is_sorted());
-    assert_eq!(expected_amplification, 4.0);
+    let mut combined = partition.selected.clone();
+    combined.extend_from_slice(&partition.excluded);
+    combined.sort_unstable();
+    assert_eq!(combined, vec![0, 1, 2, 3, 4]);
     for (class_index, buffer) in class_gradient_buffers.iter().enumerate() {
-        for &row in &expected_other {
-            let row = row as usize;
-            assert_eq!(buffer[row].grad, original[class_index][row].grad * 4.0);
-            assert_eq!(buffer[row].hess, original[class_index][row].hess * 4.0);
-        }
+        assert_eq!(buffer[0].grad, original[class_index][0].grad * 4.0);
+        assert_eq!(buffer[0].hess, original[class_index][0].hess * 4.0);
+        assert_eq!(&buffer[1..], &original[class_index][1..]);
     }
 }
 
