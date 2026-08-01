@@ -217,6 +217,11 @@ Additional lighter-weight scripts target specific features:
   one manifest-attested candidate runtime with itself. Full mode requires
   separate Python executables, worktrees, and strict runtime manifests for a
   same-host baseline/candidate run.
+- `benchmarks/sampled_prediction_delta_benchmark.py` — manifest-attested,
+  isolated scalar/multiclass evidence for reusing sampled-row prediction
+  deltas. It covers uniform subsampling, GOSS, both growth modes, and explicit
+  DART/quantile full-replay sentinels. Quick mode proves candidate harness
+  consistency only; full mode applies the predeclared timing and RSS gates.
 - `benchmarks/architectural_backlog/` — isolated baseline/candidate harness for
   SoA histograms, node-level parallelism, duplicate bin storage, compact
   predictor nodes, EFB, and approximate quantile sketches. Methodology and
@@ -260,6 +265,36 @@ python3 -m pytest benchmarks/tests/test_allocation_reuse_benchmark.py -q
   --quick \
   --candidate-manifest /tmp/alloygbm-candidate-runtime.json \
   --gate
+
+# Sampled-prediction-delta contracts and fresh candidate manifest
+.venv/bin/python -m pytest \
+  benchmarks/tests/test_sampled_prediction_delta_benchmark.py -q
+.venv/bin/python benchmarks/sampled_prediction_delta_benchmark.py \
+  --write-runtime-manifest /private/tmp/alloygbm-pr129-candidate-runtime.json \
+  --runtime-name candidate \
+  --runtime-python .venv/bin/python \
+  --runtime-workdir "$(pwd)"
+
+# Candidate self-consistency gate; this does not claim a speedup
+.venv/bin/python benchmarks/sampled_prediction_delta_benchmark.py \
+  --quick \
+  --candidate-manifest /private/tmp/alloygbm-pr129-candidate-runtime.json \
+  --gate
+
+# Full Task 6 flow after release-building distinct clean worktrees
+/private/tmp/alloygbm-pr129-baseline/.venv/bin/python \
+  "$(pwd)/benchmarks/sampled_prediction_delta_benchmark.py" \
+  --write-runtime-manifest /private/tmp/alloygbm-pr129-baseline-runtime.json \
+  --runtime-name baseline \
+  --runtime-python /private/tmp/alloygbm-pr129-baseline/.venv/bin/python \
+  --runtime-workdir /private/tmp/alloygbm-pr129-baseline
+.venv/bin/python benchmarks/sampled_prediction_delta_benchmark.py \
+  --baseline-manifest /private/tmp/alloygbm-pr129-baseline-runtime.json \
+  --candidate-manifest /private/tmp/alloygbm-pr129-candidate-runtime.json \
+  --repetitions 5 \
+  --gate \
+  --output-json docs/benchmarks/sampled_prediction_delta_v1.json \
+  --output-markdown docs/benchmarks/sampled_prediction_delta_v1.md
 
 # Canonical Task 6 full flow after release-building both worktree environments
 /tmp/alloygbm-pr128-baseline/.venv/bin/python \
@@ -327,6 +362,18 @@ defensible performance claims.
 Zero or unsupported RSS deltas are reported as unavailable and excluded from
 the RSS geometric mean. A full run fails if any case lacks a measurable
 positive ratio, preventing an unavailable baseline from hiding candidate RSS.
+
+The sampled-prediction-delta harness imports the allocation-reuse runtime
+attestation implementation rather than maintaining a second manifest parser.
+Each worker validates that manifest before importing AlloyGBM, hashes
+contiguous `float32` predictions, and requires exact artifact, prediction,
+round-count, stop-reason, and finite-quality pairing. One warmup subprocess per
+arm and case is excluded, then measured arm order alternates. Full evidence
+requires at least five repetitions, distinct clean manifests and commits, and
+positive incremental RSS for every pair. DART and quantile remain exactness
+gates but are excluded from timing aggregates. The serialized native-time
+noise floor can waive only the per-case slowdown gate; it does not weaken
+either aggregate timing gate.
 
 ## Outputs
 

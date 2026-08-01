@@ -47,6 +47,12 @@ Current benchmark entry points:
   baseline and candidate native extensions across four matrix shapes and both
   growth strategies, requiring exact artifact and prediction digests before
   applying aggregate native-time and RSS gates.
+- isolated sampled-prediction-delta harness:
+  `benchmarks/sampled_prediction_delta_benchmark.py`, with Task 6 evidence
+  pending at [sampled_prediction_delta_v1.md](sampled_prediction_delta_v1.md).
+  It pairs scalar and multiclass subsample/GOSS cases exactly, keeps DART and
+  quantile as explicit full-replay sentinels, and reserves timing/RSS claims
+  for five-repetition runs from distinct manifest-attested commits.
 - descriptive high-class-count, low-drop-cap multiclass DART scratch harness:
   `benchmarks/multiclass_dart_scratch_benchmark.py` with report at
   [multiclass_dart_scratch_v1.md](multiclass_dart_scratch_v1.md). It has no
