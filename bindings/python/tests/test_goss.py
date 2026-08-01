@@ -129,6 +129,50 @@ def test_goss_regressor_predictions_do_not_overshoot_simple_target_range():
     assert float(np.max(preds)) <= allowed_high
 
 
+@pytest.mark.parametrize(
+    ("boosting_mode", "row_subsample", "goss_top_rate", "goss_other_rate"),
+    [
+        ("standard", 0.5, None, None),
+        ("goss", 1.0, 0.2, 0.2),
+    ],
+)
+def test_sampled_scalar_fits_are_bitwise_repeatable_and_complete(
+    boosting_mode, row_subsample, goss_top_rate, goss_other_rate
+):
+    rng = np.random.default_rng(20260801)
+    X = rng.normal(size=(640, 5)).astype("float32")
+    y = (
+        1.4 * X[:, 0]
+        - 0.7 * X[:, 1]
+        + 0.2 * np.sin(X[:, 2])
+        + 0.03 * rng.normal(size=X.shape[0])
+    ).astype("float32")
+    kwargs = dict(
+        n_estimators=40,
+        max_depth=3,
+        learning_rate=0.08,
+        boosting_mode=boosting_mode,
+        row_subsample=row_subsample,
+        continuous_binning_strategy="quantile",
+        training_policy="manual",
+        seed=29,
+    )
+    if goss_top_rate is not None:
+        kwargs.update(goss_top_rate=goss_top_rate, goss_other_rate=goss_other_rate)
+
+    first = GBMRegressor(**kwargs).fit(X, y)
+    second = GBMRegressor(**kwargs).fit(X, y)
+    first_predictions = np.asarray(first.predict(X), dtype=np.float32)
+    second_predictions = np.asarray(second.predict(X), dtype=np.float32)
+
+    assert first.n_estimators_ == kwargs["n_estimators"]
+    assert second.n_estimators_ == kwargs["n_estimators"]
+    assert first.artifact_bytes == second.artifact_bytes
+    np.testing.assert_array_equal(first_predictions, second_predictions)
+    assert np.all(np.isfinite(first_predictions))
+    assert float(rmse(y, first_predictions)) < float(rmse(y, np.full_like(y, np.mean(y)))) * 0.6
+
+
 def test_goss_classifier_binary_trains_and_predicts():
     rng = np.random.default_rng(20260518)
     X = rng.normal(size=(1_000, 6)).astype("float32")

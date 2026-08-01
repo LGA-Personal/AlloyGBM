@@ -4707,6 +4707,279 @@ fn sampled_row_indices_are_seeded_and_non_prefix() {
     assert_ne!(selected, vec![0, 1, 2, 3]);
 }
 
+fn sampled_builder_deltas_plus_excluded_replay(
+    tree_growth: TreeGrowth,
+    boosting_mode: BoostingMode,
+    row_subsample: f32,
+) -> EngineResult<()> {
+    let dataset = sample_dataset();
+    let binned = sample_binned_matrix();
+    let params = TrainParams {
+        seed: 17,
+        max_depth: 1,
+        max_leaves: (tree_growth == TreeGrowth::Leaf).then_some(2),
+        tree_growth,
+        boosting_mode,
+        ..TrainParams::default()
+    };
+    let controls = IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)?
+        .with_subsample_rates(row_subsample, 1.0)?
+        .with_max_leaves((tree_growth == TreeGrowth::Leaf).then_some(2))?;
+    let initial_predictions = vec![
+        SquaredErrorObjective
+            .initial_prediction(&dataset.targets, None)?;
+        dataset.row_count()
+    ];
+    let mut gradients =
+        SquaredErrorObjective.compute_gradients(&initial_predictions, &dataset.targets, None)?;
+    let selection = select_row_indices_for_round(
+        params.boosting_mode,
+        dataset.row_count(),
+        controls.row_subsample,
+        sampling_seed_base(params.seed, params.deterministic),
+        0,
+        &mut gradients,
+    );
+    let (feature_tiles, _) = sampled_feature_tiles(
+        binned.feature_count,
+        controls.col_subsample,
+        sampling_seed_base(params.seed, params.deterministic),
+        0,
+    )?;
+    let mut split_options = split_selection_options_for_training(&params, None, &dataset, &binned)?;
+    split_options.min_rows_per_leaf = controls.min_rows_per_leaf;
+    let mut builder_candidate = initial_predictions.clone();
+    let raw_features = &dataset.matrix.values;
+    let (stumps, _) = if tree_growth == TreeGrowth::Leaf {
+        build_tree_leaf_wise(
+            &MockBackend,
+            &binned,
+            &gradients,
+            selection.selected.clone(),
+            0,
+            &feature_tiles,
+            split_options,
+            &params,
+            &controls,
+            &mut builder_candidate,
+            &params.feature_weights,
+            &[],
+            None,
+            raw_features,
+            None,
+        )?
+    } else {
+        build_tree_level_wise(
+            &MockBackend,
+            &binned,
+            &gradients,
+            selection.selected.clone(),
+            0,
+            &feature_tiles,
+            split_options,
+            &params,
+            &controls,
+            &mut builder_candidate,
+            &params.feature_weights,
+            &[],
+            None,
+            raw_features,
+            None,
+        )?
+    };
+    assert!(!stumps.is_empty(), "fixture should build a nonempty tree");
+
+    let mut completed = builder_candidate;
+    apply_weighted_round_to_rows(
+        &mut completed,
+        &binned,
+        &stumps,
+        Some((raw_features, dataset.matrix.feature_count)),
+        &selection.excluded,
+        1.0,
+    )?;
+    let mut oracle = initial_predictions;
+    apply_weighted_round_to_predictions(
+        &mut oracle,
+        &binned,
+        &stumps,
+        Some((raw_features, dataset.matrix.feature_count)),
+        1.0,
+    )?;
+    assert_eq!(
+        completed
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        oracle
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+    );
+    Ok(())
+}
+
+#[test]
+fn sampled_builder_deltas_plus_excluded_replay_match_full_walk() {
+    for tree_growth in [TreeGrowth::Level, TreeGrowth::Leaf] {
+        for row_subsample in [1.0, 0.8, 0.5] {
+            sampled_builder_deltas_plus_excluded_replay(
+                tree_growth,
+                BoostingMode::Standard,
+                row_subsample,
+            )
+            .expect("sampled builder completion should match a full tree walk");
+        }
+        sampled_builder_deltas_plus_excluded_replay(
+            tree_growth,
+            BoostingMode::Goss {
+                top_rate: 0.5,
+                other_rate: 0.25,
+            },
+            1.0,
+        )
+        .expect("GOSS builder completion should match a full tree walk");
+    }
+}
+
+fn assert_sampled_scalar_runs_repeat<O: ObjectiveOps>(
+    params: TrainParams,
+    controls: IterationControls,
+    objective: &O,
+) {
+    let dataset = sample_dataset();
+    let binned = sample_binned_matrix();
+    let trainer = Trainer::new(params).expect("sampled scalar params are valid");
+    let first = trainer
+        .fit_iterations_with_summary(&dataset, &binned, &MockBackend, objective, controls)
+        .expect("first sampled scalar fit succeeds");
+    let second = trainer
+        .fit_iterations_with_summary(&dataset, &binned, &MockBackend, objective, controls)
+        .expect("second sampled scalar fit succeeds");
+
+    assert_eq!(
+        first
+            .model
+            .to_artifact_bytes()
+            .expect("first artifact serializes"),
+        second
+            .model
+            .to_artifact_bytes()
+            .expect("second artifact serializes"),
+    );
+    let prediction_bits = |model: &TrainedModel| {
+        dataset
+            .matrix
+            .values
+            .chunks_exact(dataset.matrix.feature_count)
+            .map(|row| {
+                model
+                    .predict_row(row)
+                    .expect("prediction succeeds")
+                    .to_bits()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        prediction_bits(&first.model),
+        prediction_bits(&second.model)
+    );
+    assert_eq!(
+        first.loss_per_completed_round,
+        second.loss_per_completed_round
+    );
+    assert_eq!(
+        first.sampled_rows_per_completed_round,
+        second.sampled_rows_per_completed_round
+    );
+    assert_eq!(first.rounds_completed, second.rounds_completed);
+    assert_eq!(first.stop_reason, second.stop_reason);
+}
+
+#[test]
+fn sampled_prediction_delta_scalar() {
+    for tree_growth in [TreeGrowth::Level, TreeGrowth::Leaf] {
+        for (boosting_mode, row_subsample) in [
+            (BoostingMode::Standard, 1.0),
+            (BoostingMode::Standard, 0.8),
+            (BoostingMode::Standard, 0.5),
+            (
+                BoostingMode::Goss {
+                    top_rate: 0.5,
+                    other_rate: 0.25,
+                },
+                1.0,
+            ),
+        ] {
+            let params = TrainParams {
+                seed: 17,
+                max_depth: 1,
+                max_leaves: (tree_growth == TreeGrowth::Leaf).then_some(2),
+                tree_growth,
+                boosting_mode,
+                ..TrainParams::default()
+            };
+            let controls = IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
+                .expect("sampled scalar controls are valid")
+                .with_subsample_rates(row_subsample, 1.0)
+                .expect("sampled scalar rates are valid")
+                .with_max_leaves((tree_growth == TreeGrowth::Leaf).then_some(2))
+                .expect("sampled scalar leaf limit is valid");
+            assert_sampled_scalar_runs_repeat(params, controls, &SquaredErrorObjective);
+        }
+    }
+}
+
+#[test]
+fn sampled_prediction_delta_fallback() {
+    let mut gradients = vec![
+        GradientPair {
+            grad: 1.0,
+            hess: 1.0,
+        };
+        4
+    ];
+    let sampled =
+        select_row_indices_for_round(BoostingMode::Standard, 4, 0.5, 17, 0, &mut gradients);
+    assert!(!sampled.excluded.is_empty());
+    assert!(!requires_full_prediction_replay(false, None));
+
+    let full = select_row_indices_for_round(BoostingMode::Standard, 4, 1.0, 17, 0, &mut gradients);
+    assert!(full.excluded.is_empty());
+    assert!(!requires_full_prediction_replay(false, None));
+    assert!(requires_full_prediction_replay(true, None));
+    assert!(requires_full_prediction_replay(false, Some(0.5)));
+
+    let controls = IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
+        .expect("fallback controls are valid")
+        .with_subsample_rates(0.5, 1.0)
+        .expect("fallback rates are valid");
+    assert_sampled_scalar_runs_repeat(
+        TrainParams {
+            seed: 17,
+            max_depth: 1,
+            boosting_mode: BoostingMode::Dart {
+                drop_rate: 0.5,
+                max_drop: 2,
+                normalize_type: alloygbm_core::DartNormalize::Tree,
+                sample_type: alloygbm_core::DartSampleType::Uniform,
+            },
+            ..TrainParams::default()
+        },
+        controls,
+        &SquaredErrorObjective,
+    );
+    assert_sampled_scalar_runs_repeat(
+        TrainParams {
+            seed: 17,
+            max_depth: 1,
+            ..TrainParams::default()
+        },
+        controls,
+        &QuantileObjective { alpha: 0.5 },
+    );
+}
+
 #[test]
 fn round_row_selection_preserves_uniform_rows_and_partitions_domain() {
     // Frozen from 04d25dc's pre-partition implementation. Keep these vectors
