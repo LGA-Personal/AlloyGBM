@@ -3,8 +3,8 @@
 //! Extracted from `lib.rs` in refactor Task 1.16.
 
 use alloygbm_core::{
-    LeafValue, MODEL_FORMAT_V1, ModelArtifactSection, ModelSectionKind, NodeStats, SplitCandidate,
-    required_section_compatibility_report,
+    LeafValue, MAX_MODEL_FEATURES, MAX_MODEL_STUMPS, MODEL_FORMAT_V1, ModelArtifactSection,
+    ModelSectionKind, NodeStats, SplitCandidate, required_section_compatibility_report,
 };
 
 use crate::error::{EngineError, EngineResult};
@@ -284,6 +284,22 @@ pub(crate) fn decode_trained_model_payload(bytes: &[u8]) -> EngineResult<Trained
     let stump_count = read_u32_le(bytes, 8)? as usize;
     let baseline_prediction = read_f32_le(bytes, 12)?;
 
+    if feature_count == 0 || feature_count > MAX_MODEL_FEATURES {
+        return Err(EngineError::ContractViolation(format!(
+            "model payload feature_count {feature_count} must be in [1, {MAX_MODEL_FEATURES}]"
+        )));
+    }
+    if stump_count > MAX_MODEL_STUMPS {
+        return Err(EngineError::ContractViolation(format!(
+            "model payload stump count {stump_count} exceeds maximum {MAX_MODEL_STUMPS}"
+        )));
+    }
+    if !baseline_prediction.is_finite() {
+        return Err(EngineError::ContractViolation(
+            "model payload baseline_prediction must be finite".to_string(),
+        ));
+    }
+
     let expected_len = HEADER_SIZE
         .checked_add(stump_count.checked_mul(STUMP_SIZE).ok_or_else(|| {
             EngineError::ContractViolation("stump payload length overflow".to_string())
@@ -304,6 +320,11 @@ pub(crate) fn decode_trained_model_payload(bytes: &[u8]) -> EngineResult<Trained
         let feature_index = read_u32_le(bytes, base + 4)?;
         let threshold_bin = read_u16_le(bytes, base + 8)?;
         let flags = read_u16_le(bytes, base + 10)?;
+        if flags & !3 != 0 {
+            return Err(EngineError::ContractViolation(format!(
+                "stump {stump_index} contains unsupported flags {flags:#x}"
+            )));
+        }
         let default_left = (flags & 1) != 0;
         let is_categorical = (flags & 2) != 0;
         let gain = read_f32_le(bytes, base + 12)?;
@@ -311,6 +332,17 @@ pub(crate) fn decode_trained_model_payload(bytes: &[u8]) -> EngineResult<Trained
         let right_leaf_value = read_f32_le(bytes, base + 20)?;
         let left_count = read_u32_le(bytes, base + 24)?;
         let right_count = read_u32_le(bytes, base + 28)?;
+
+        if feature_index as usize >= feature_count {
+            return Err(EngineError::ContractViolation(format!(
+                "stump {stump_index} split feature_index {feature_index} exceeds model feature_count {feature_count}"
+            )));
+        }
+        if !gain.is_finite() || !left_leaf_value.is_finite() || !right_leaf_value.is_finite() {
+            return Err(EngineError::ContractViolation(format!(
+                "stump {stump_index} contains non-finite gain or leaf value"
+            )));
+        }
 
         stumps.push(TrainedStump {
             split: SplitCandidate {

@@ -1,7 +1,8 @@
 use alloygbm_core::{
-    CategoricalStatePayloadV1, CoreError, MODEL_FORMAT_V1, ModelArtifactSection, ModelMetadata,
-    ModelSectionKind, decode_optional_categorical_state_section_v1,
-    decode_optional_dart_tree_weights_section, decode_optional_linear_leaf_coefficients_section,
+    CategoricalStatePayloadV1, CoreError, MAX_MODEL_CLASSES, MAX_MODEL_FEATURES, MAX_MODEL_STUMPS,
+    MODEL_FORMAT_V1, ModelArtifactSection, ModelMetadata, ModelSectionKind,
+    decode_optional_categorical_state_section_v1, decode_optional_dart_tree_weights_section,
+    decode_optional_linear_leaf_coefficients_section,
     decode_optional_native_categorical_splits_section, deserialize_model_artifact_v1,
     format_required_section_mode_error, required_section_compatibility_report,
 };
@@ -452,25 +453,12 @@ impl Predictor {
             let (num_classes, feature_count, baselines, mut per_class_stumps) =
                 decode_multiclass_trees_payload(&mc_section.payload)?;
 
-            // Decode optional NativeCategoricalSplits section for multiclass.
-            if let Some(cat_payload) =
-                decode_optional_native_categorical_splits_section(&parsed.sections)
-                    .map_err(PredictorError::from)?
-            {
-                // Stump indices in the bitset section are global (flat) across all classes.
-                let mut global_idx = 0usize;
-                let stump_bitsets: std::collections::HashMap<u32, Vec<u8>> =
-                    cat_payload.stump_bitsets.into_iter().collect();
-                for class_stumps in &mut per_class_stumps {
-                    for stump in class_stumps.iter_mut() {
-                        if let Some(bitset) = stump_bitsets.get(&(global_idx as u32)) {
-                            stump.categorical_bitset = Some(bitset.clone());
-                        }
-                        global_idx += 1;
-                    }
-                }
+            if metadata.num_classes != Some(num_classes as u32) {
+                return Err(PredictorError::ContractViolation(format!(
+                    "metadata num_classes {:?} does not match multiclass payload num_classes {num_classes}",
+                    metadata.num_classes
+                )));
             }
-
             if predictor_layout.feature_count != metadata_feature_count {
                 return Err(PredictorError::ContractViolation(format!(
                     "predictor layout feature_count {} does not match metadata feature count {}",
@@ -482,6 +470,52 @@ impl Predictor {
                     "multiclass trees feature_count {} does not match metadata feature count {}",
                     feature_count, metadata_feature_count
                 )));
+            }
+            let total_stumps = per_class_stumps.iter().try_fold(0usize, |total, stumps| {
+                total.checked_add(stumps.len()).ok_or_else(|| {
+                    PredictorError::ContractViolation(
+                        "multiclass flattened stump count overflow".to_string(),
+                    )
+                })
+            })?;
+
+            // Decode optional NativeCategoricalSplits section for multiclass.
+            if let Some(cat_payload) =
+                decode_optional_native_categorical_splits_section(&parsed.sections)
+                    .map_err(PredictorError::from)?
+            {
+                for &feature_index in &cat_payload.native_categorical_feature_indices {
+                    if feature_index as usize >= feature_count {
+                        return Err(PredictorError::ContractViolation(format!(
+                            "native categorical feature_index {feature_index} exceeds model feature_count {feature_count}"
+                        )));
+                    }
+                }
+                // Stump indices in the bitset section are global (flat) across all classes.
+                let mut global_idx = 0usize;
+                let stump_bitsets: std::collections::HashMap<u32, Vec<u8>> =
+                    cat_payload.stump_bitsets.into_iter().collect();
+                if let Some((&stump_index, _)) = stump_bitsets
+                    .iter()
+                    .find(|(stump_index, _)| **stump_index as usize >= total_stumps)
+                {
+                    return Err(PredictorError::ContractViolation(format!(
+                        "native categorical stump index {stump_index} exceeds multiclass stump count {total_stumps}"
+                    )));
+                }
+                for class_stumps in &mut per_class_stumps {
+                    for stump in class_stumps.iter_mut() {
+                        if let Some(bitset) = stump_bitsets.get(&(global_idx as u32)) {
+                            if !stump.is_categorical {
+                                return Err(PredictorError::ContractViolation(format!(
+                                    "native categorical stump index {global_idx} targets a non-categorical split"
+                                )));
+                            }
+                            stump.categorical_bitset = Some(bitset.clone());
+                        }
+                        global_idx += 1;
+                    }
+                }
             }
 
             // Decode optional linear leaf coefficients for multiclass.
@@ -499,21 +533,25 @@ impl Predictor {
                 }
                 for entry in ll_payload.entries {
                     let global_idx = entry.stump_idx as usize;
+                    if global_idx >= total_stumps {
+                        return Err(PredictorError::ContractViolation(format!(
+                            "linear leaf stump index {} exceeds multiclass stump count {total_stumps}",
+                            entry.stump_idx
+                        )));
+                    }
                     // Binary search to find which class this index belongs to.
                     // partition_point on prefix[1..] finds first k where prefix[k+1] > global_idx.
                     let class_idx = prefix[1..].partition_point(|&p| p <= global_idx);
-                    if class_idx < per_class_stumps.len() {
-                        let stump_idx = global_idx - prefix[class_idx];
-                        if stump_idx < per_class_stumps[class_idx].len() {
-                            if let Some(ll) = entry.left_leaf {
-                                per_class_stumps[class_idx][stump_idx].left_linear =
-                                    Some(linear_leaf_to_compact(&ll));
-                            }
-                            if let Some(rl) = entry.right_leaf {
-                                per_class_stumps[class_idx][stump_idx].right_linear =
-                                    Some(linear_leaf_to_compact(&rl));
-                            }
-                        }
+                    let stump_idx = global_idx - prefix[class_idx];
+                    if let Some(ll) = entry.left_leaf {
+                        validate_linear_leaf_features(&ll, feature_count, entry.stump_idx)?;
+                        per_class_stumps[class_idx][stump_idx].left_linear =
+                            Some(linear_leaf_to_compact(&ll));
+                    }
+                    if let Some(rl) = entry.right_leaf {
+                        validate_linear_leaf_features(&rl, feature_count, entry.stump_idx)?;
+                        per_class_stumps[class_idx][stump_idx].right_linear =
+                            Some(linear_leaf_to_compact(&rl));
                     }
                 }
             }
@@ -521,7 +559,6 @@ impl Predictor {
             let dart_weights = decode_optional_dart_tree_weights_section(&parsed.sections)
                 .map_err(PredictorError::from)?
                 .map(|payload| payload.weights);
-            let total_stumps = per_class_stumps.iter().map(Vec::len).sum::<usize>();
             if let Some(weights) = dart_weights.as_ref()
                 && weights.len() != total_stumps
             {
@@ -579,11 +616,27 @@ impl Predictor {
             decode_optional_native_categorical_splits_section(&parsed.sections)
                 .map_err(PredictorError::from)?
         {
+            for &feature_index in &cat_payload.native_categorical_feature_indices {
+                if feature_index as usize >= payload_feature_count {
+                    return Err(PredictorError::ContractViolation(format!(
+                        "native categorical feature_index {feature_index} exceeds model feature_count {payload_feature_count}"
+                    )));
+                }
+            }
             for (stump_index, bitset) in cat_payload.stump_bitsets {
                 let idx = stump_index as usize;
-                if idx < stumps.len() {
-                    stumps[idx].categorical_bitset = Some(bitset);
+                let stump_count = stumps.len();
+                let stump = stumps.get_mut(idx).ok_or_else(|| {
+                    PredictorError::ContractViolation(format!(
+                        "native categorical stump index {stump_index} exceeds stump count {stump_count}"
+                    ))
+                })?;
+                if !stump.is_categorical {
+                    return Err(PredictorError::ContractViolation(format!(
+                        "native categorical stump index {stump_index} targets a non-categorical split"
+                    )));
                 }
+                stump.categorical_bitset = Some(bitset);
             }
         }
 
@@ -593,13 +646,20 @@ impl Predictor {
         {
             for entry in ll_payload.entries {
                 let idx = entry.stump_idx as usize;
-                if idx < stumps.len() {
-                    if let Some(ll) = entry.left_leaf {
-                        stumps[idx].left_linear = Some(linear_leaf_to_compact(&ll));
-                    }
-                    if let Some(rl) = entry.right_leaf {
-                        stumps[idx].right_linear = Some(linear_leaf_to_compact(&rl));
-                    }
+                if idx >= stumps.len() {
+                    return Err(PredictorError::ContractViolation(format!(
+                        "linear leaf stump index {} exceeds stump count {}",
+                        entry.stump_idx,
+                        stumps.len()
+                    )));
+                }
+                if let Some(ll) = entry.left_leaf {
+                    validate_linear_leaf_features(&ll, payload_feature_count, entry.stump_idx)?;
+                    stumps[idx].left_linear = Some(linear_leaf_to_compact(&ll));
+                }
+                if let Some(rl) = entry.right_leaf {
+                    validate_linear_leaf_features(&rl, payload_feature_count, entry.stump_idx)?;
+                    stumps[idx].right_linear = Some(linear_leaf_to_compact(&rl));
                 }
             }
         }
@@ -1286,6 +1346,22 @@ fn decode_trained_model_payload(
     let stump_count = read_u32_le(bytes, 8)? as usize;
     let baseline_prediction = read_f32_le(bytes, 12)?;
 
+    if feature_count == 0 || feature_count > MAX_MODEL_FEATURES {
+        return Err(PredictorError::ContractViolation(format!(
+            "trees payload feature_count {feature_count} must be in [1, {MAX_MODEL_FEATURES}]"
+        )));
+    }
+    if stump_count > MAX_MODEL_STUMPS {
+        return Err(PredictorError::ContractViolation(format!(
+            "trees payload stump count {stump_count} exceeds maximum {MAX_MODEL_STUMPS}"
+        )));
+    }
+    if !baseline_prediction.is_finite() {
+        return Err(PredictorError::ContractViolation(
+            "trees payload baseline_prediction must be finite".to_string(),
+        ));
+    }
+
     let expected_len = HEADER_SIZE
         .checked_add(stump_count.checked_mul(STUMP_SIZE).ok_or_else(|| {
             PredictorError::ContractViolation("stump payload length overflow".to_string())
@@ -1306,11 +1382,26 @@ fn decode_trained_model_payload(
         let feature_index = read_u32_le(bytes, base + 4)?;
         let threshold_bin = read_u16_le(bytes, base + 8)?;
         let stump_flags = read_u16_le(bytes, base + 10)?;
+        if stump_flags & !3 != 0 {
+            return Err(PredictorError::ContractViolation(format!(
+                "stump {stump_index} contains unsupported flags {stump_flags:#x}"
+            )));
+        }
         let default_left = (stump_flags & 1) != 0;
         let is_categorical = (stump_flags & 2) != 0;
-        let _gain = read_f32_le(bytes, base + 12)?;
+        let gain = read_f32_le(bytes, base + 12)?;
         let left_leaf_value = read_f32_le(bytes, base + 16)?;
         let right_leaf_value = read_f32_le(bytes, base + 20)?;
+        if feature_index as usize >= feature_count {
+            return Err(PredictorError::ContractViolation(format!(
+                "stump {stump_index} split feature_index {feature_index} exceeds model feature_count {feature_count}"
+            )));
+        }
+        if !gain.is_finite() || !left_leaf_value.is_finite() || !right_leaf_value.is_finite() {
+            return Err(PredictorError::ContractViolation(format!(
+                "stump {stump_index} contains non-finite gain or leaf value"
+            )));
+        }
         stumps.push(PredictorStump {
             node_id,
             feature_index,
@@ -1342,6 +1433,21 @@ fn linear_leaf_to_compact(ll: &alloygbm_core::LinearLeaf) -> LinearLeafCompact {
         feature_means: ll.feature_means.to_vec(),
         feature_inv_stds: ll.feature_inv_stds.to_vec(),
     }
+}
+
+fn validate_linear_leaf_features(
+    leaf: &alloygbm_core::LinearLeaf,
+    feature_count: usize,
+    stump_index: u32,
+) -> PredictorResult<()> {
+    for &feature_index in &leaf.regressor_features {
+        if feature_index as usize >= feature_count {
+            return Err(PredictorError::ContractViolation(format!(
+                "linear leaf stump index {stump_index} regressor feature_index {feature_index} exceeds model feature_count {feature_count}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Build predictor trees and a parallel `Vec<u32>` of source tree_ids
@@ -1568,8 +1674,24 @@ fn decode_multiclass_trees_payload(bytes: &[u8]) -> PredictorResult<MultiClassTr
     let num_classes = read_u32_le(bytes, 4)? as usize;
     let feature_count = read_u32_le(bytes, 8)? as usize;
 
+    if !(2..=MAX_MODEL_CLASSES).contains(&num_classes) {
+        return Err(PredictorError::ContractViolation(format!(
+            "multiclass payload num_classes {num_classes} must be in [2, {MAX_MODEL_CLASSES}]"
+        )));
+    }
+    if feature_count == 0 || feature_count > MAX_MODEL_FEATURES {
+        return Err(PredictorError::ContractViolation(format!(
+            "multiclass payload feature_count {feature_count} must be in [1, {MAX_MODEL_FEATURES}]"
+        )));
+    }
+
     let baselines_start = MC_HEADER_SIZE;
-    let baselines_end = baselines_start + num_classes * 4;
+    let class_bytes = num_classes.checked_mul(4).ok_or_else(|| {
+        PredictorError::ContractViolation("multiclass class table length overflow".to_string())
+    })?;
+    let baselines_end = baselines_start.checked_add(class_bytes).ok_or_else(|| {
+        PredictorError::ContractViolation("multiclass baseline offset overflow".to_string())
+    })?;
     if bytes.len() < baselines_end {
         return Err(PredictorError::ContractViolation(
             "multiclass trees payload too small for baselines".to_string(),
@@ -1577,11 +1699,19 @@ fn decode_multiclass_trees_payload(bytes: &[u8]) -> PredictorResult<MultiClassTr
     }
     let mut baselines = Vec::with_capacity(num_classes);
     for k in 0..num_classes {
-        baselines.push(read_f32_le(bytes, baselines_start + k * 4)?);
+        let baseline = read_f32_le(bytes, baselines_start + k * 4)?;
+        if !baseline.is_finite() {
+            return Err(PredictorError::ContractViolation(format!(
+                "multiclass baseline {k} must be finite"
+            )));
+        }
+        baselines.push(baseline);
     }
 
     let counts_start = baselines_end;
-    let counts_end = counts_start + num_classes * 4;
+    let counts_end = counts_start.checked_add(class_bytes).ok_or_else(|| {
+        PredictorError::ContractViolation("multiclass stump count offset overflow".to_string())
+    })?;
     if bytes.len() < counts_end {
         return Err(PredictorError::ContractViolation(
             "multiclass trees payload too small for stump counts".to_string(),
@@ -1592,9 +1722,23 @@ fn decode_multiclass_trees_payload(bytes: &[u8]) -> PredictorResult<MultiClassTr
         stump_counts.push(read_u32_le(bytes, counts_start + k * 4)? as usize);
     }
 
-    let total_stumps: usize = stump_counts.iter().sum();
+    let total_stumps = stump_counts.iter().try_fold(0usize, |total, &count| {
+        total.checked_add(count).ok_or_else(|| {
+            PredictorError::ContractViolation("multiclass stump count overflow".to_string())
+        })
+    })?;
+    if total_stumps > MAX_MODEL_STUMPS {
+        return Err(PredictorError::ContractViolation(format!(
+            "multiclass stump count {total_stumps} exceeds maximum {MAX_MODEL_STUMPS}"
+        )));
+    }
     let stumps_start = counts_end;
-    let expected_len = stumps_start + total_stumps * STUMP_SIZE;
+    let stump_bytes = total_stumps.checked_mul(STUMP_SIZE).ok_or_else(|| {
+        PredictorError::ContractViolation("multiclass stump payload length overflow".to_string())
+    })?;
+    let expected_len = stumps_start.checked_add(stump_bytes).ok_or_else(|| {
+        PredictorError::ContractViolation("multiclass payload length overflow".to_string())
+    })?;
     if bytes.len() != expected_len {
         return Err(PredictorError::ContractViolation(format!(
             "multiclass trees payload length {} does not match expected {expected_len}",
@@ -1611,11 +1755,27 @@ fn decode_multiclass_trees_payload(bytes: &[u8]) -> PredictorResult<MultiClassTr
             let feature_index = read_u32_le(bytes, offset + 4)?;
             let threshold_bin = read_u16_le(bytes, offset + 8)?;
             let flags = read_u16_le(bytes, offset + 10)?;
+            if flags & !3 != 0 {
+                return Err(PredictorError::ContractViolation(format!(
+                    "multiclass stump contains unsupported flags {flags:#x}"
+                )));
+            }
             let default_left = (flags & 1) != 0;
             let is_categorical = (flags & 2) != 0;
-            let _gain = read_f32_le(bytes, offset + 12)?;
+            let gain = read_f32_le(bytes, offset + 12)?;
             let left_leaf_value = read_f32_le(bytes, offset + 16)?;
             let right_leaf_value = read_f32_le(bytes, offset + 20)?;
+
+            if feature_index as usize >= feature_count {
+                return Err(PredictorError::ContractViolation(format!(
+                    "multiclass stump split feature_index {feature_index} exceeds model feature_count {feature_count}"
+                )));
+            }
+            if !gain.is_finite() || !left_leaf_value.is_finite() || !right_leaf_value.is_finite() {
+                return Err(PredictorError::ContractViolation(
+                    "multiclass stump contains non-finite gain or leaf value".to_string(),
+                ));
+            }
 
             stumps.push(PredictorStump {
                 node_id,
@@ -2499,6 +2659,25 @@ mod tests {
         let predictor = Predictor::from_artifact_bytes(&artifact).unwrap();
         assert!(predictor.is_multiclass());
         assert_eq!(predictor.num_classes(), Some(3));
+    }
+
+    #[test]
+    fn multiclass_predictor_rejects_metadata_class_count_mismatch() {
+        let artifact = train_multiclass_artifact();
+        let parsed = deserialize_model_artifact_v1(&artifact).expect("artifact decodes");
+        let mut metadata = parsed.contract.metadata;
+        metadata.num_classes = Some(4);
+        let sections = parsed
+            .sections
+            .into_iter()
+            .map(|section| (section.descriptor.kind, section.payload))
+            .collect::<Vec<_>>();
+        let malformed = alloygbm_core::serialize_model_artifact_v1(&metadata, &sections)
+            .expect("artifact reserializes");
+
+        let err = Predictor::from_artifact_bytes(&malformed)
+            .expect_err("metadata/payload class mismatch must fail");
+        assert!(err.to_string().contains("num_classes"));
     }
 
     #[test]

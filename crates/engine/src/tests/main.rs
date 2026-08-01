@@ -2,8 +2,10 @@ use super::*;
 use crate::factor::apply_pre_target_neutralization;
 use alloygbm_categorical::TargetEncoderConfig;
 use alloygbm_core::{
-    CoreError, Device, DroConfig, FeatureHistogram, HistogramBin, LeafSolverKind, MISSING_BIN_U8,
-    MorphConfig, NeutralizationKind, discover_exact_feature_bundles, leaf_gain_term,
+    CoreError, Device, DroConfig, FeatureBaselinePayload, FeatureHistogram, HistogramBin,
+    LeafSolverKind, MISSING_BIN_U8, MorphConfig, NativeCategoricalSplitsPayload,
+    NeutralizationKind, discover_exact_feature_bundles, encode_feature_baseline_payload,
+    encode_native_categorical_splits_payload, leaf_gain_term,
 };
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
@@ -6731,6 +6733,80 @@ fn trained_model_artifact_roundtrip_preserves_predictions() {
 }
 
 #[test]
+fn trained_model_artifact_rejects_out_of_range_split_feature_at_load() {
+    let model = sample_trained_model();
+    let bytes = model.to_artifact_bytes().expect("artifact serializes");
+    let parsed = deserialize_model_artifact_v1(&bytes).expect("artifact decodes");
+    let mut sections = parsed
+        .sections
+        .into_iter()
+        .map(|section| (section.descriptor.kind, section.payload))
+        .collect::<Vec<_>>();
+    let trees = sections
+        .iter_mut()
+        .find(|(kind, _)| *kind == ModelSectionKind::Trees)
+        .map(|(_, payload)| payload)
+        .expect("trees section");
+    trees[20..24].copy_from_slice(&(model.feature_count as u32).to_le_bytes());
+    let malformed = serialize_model_artifact_v1(&parsed.contract.metadata, &sections)
+        .expect("malformed structural artifact serializes");
+
+    let err = TrainedModel::from_artifact_bytes(&malformed)
+        .expect_err("out-of-range split feature must fail during load");
+    assert!(err.to_string().contains("feature_index"));
+}
+
+#[test]
+fn trained_model_artifact_rejects_feature_baseline_count_mismatch() {
+    let model = sample_trained_model();
+    let bytes = model.to_artifact_bytes().expect("artifact serializes");
+    let parsed = deserialize_model_artifact_v1(&bytes).expect("artifact decodes");
+    let mut sections = parsed
+        .sections
+        .into_iter()
+        .map(|section| (section.descriptor.kind, section.payload))
+        .collect::<Vec<_>>();
+    sections.push((
+        ModelSectionKind::FeatureBaseline,
+        encode_feature_baseline_payload(&FeatureBaselinePayload {
+            feature_means: vec![0.0],
+        }),
+    ));
+    let malformed = serialize_model_artifact_v1(&parsed.contract.metadata, &sections)
+        .expect("malformed structural artifact serializes");
+
+    let err = TrainedModel::from_artifact_bytes(&malformed)
+        .expect_err("feature baseline mismatch must fail during load");
+    assert!(err.to_string().contains("FeatureBaseline"));
+}
+
+#[test]
+fn trained_model_artifact_rejects_out_of_range_native_categorical_overlay() {
+    let model = sample_trained_model();
+    let bytes = model.to_artifact_bytes().expect("artifact serializes");
+    let parsed = deserialize_model_artifact_v1(&bytes).expect("artifact decodes");
+    let mut sections = parsed
+        .sections
+        .into_iter()
+        .map(|section| (section.descriptor.kind, section.payload))
+        .collect::<Vec<_>>();
+    sections.push((
+        ModelSectionKind::NativeCategoricalSplits,
+        encode_native_categorical_splits_payload(&NativeCategoricalSplitsPayload {
+            native_categorical_feature_indices: vec![0],
+            stump_bitsets: vec![(model.stumps.len() as u32, vec![1])],
+        })
+        .expect("payload encodes"),
+    ));
+    let malformed = serialize_model_artifact_v1(&parsed.contract.metadata, &sections)
+        .expect("malformed structural artifact serializes");
+
+    let err = TrainedModel::from_artifact_bytes(&malformed)
+        .expect_err("out-of-range categorical overlay must fail during load");
+    assert!(err.to_string().contains("stump index"));
+}
+
+#[test]
 fn trained_model_artifact_roundtrip_preserves_optional_categorical_state() {
     let model = sample_trained_model()
         .with_categorical_state(Some(CategoricalStatePayloadV1 {
@@ -8809,6 +8885,35 @@ fn test_multiclass_trained_model_artifact_roundtrip() {
             .all(|section| section.descriptor.kind != ModelSectionKind::DartTreeWeights),
         "unit-weight multiclass artifacts must remain compatible without a DART section"
     );
+}
+
+#[test]
+fn multiclass_artifact_rejects_metadata_class_count_mismatch() {
+    let model = MultiClassTrainedModel {
+        num_classes: 2,
+        baseline_predictions: vec![0.0, 0.0],
+        feature_count: 1,
+        class_stumps: vec![Vec::new(), Vec::new()],
+        categorical_state: None,
+        objective: "multiclass_softmax".to_string(),
+        morph_metadata: None,
+        dro_metadata: None,
+    };
+    let bytes = model.to_artifact_bytes().expect("artifact serializes");
+    let parsed = deserialize_model_artifact_v1(&bytes).expect("artifact decodes");
+    let mut metadata = parsed.contract.metadata;
+    metadata.num_classes = Some(3);
+    let sections = parsed
+        .sections
+        .into_iter()
+        .map(|section| (section.descriptor.kind, section.payload))
+        .collect::<Vec<_>>();
+    let malformed =
+        serialize_model_artifact_v1(&metadata, &sections).expect("artifact reserializes");
+
+    let err = MultiClassTrainedModel::from_artifact_bytes(&malformed)
+        .expect_err("metadata/payload class mismatch must fail");
+    assert!(err.to_string().contains("num_classes"));
 }
 
 #[test]
