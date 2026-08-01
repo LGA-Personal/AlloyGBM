@@ -1,3 +1,5 @@
+use alloygbm_core::MAX_MODEL_CUTS_PER_FEATURE;
+
 use crate::error::{ShapError, ShapResult};
 
 pub(crate) const TREE_NODE_STRIDE: u32 = 1 << 20;
@@ -173,7 +175,7 @@ impl BinningContext {
             BinningContext::Linear {
                 feature_mins,
                 feature_maxs,
-                ..
+                max_data_bin,
             } => {
                 if feature_mins.len() != feature_count || feature_maxs.len() != feature_count {
                     return Err(ShapError::InvalidInput(format!(
@@ -182,6 +184,12 @@ impl BinningContext {
                         feature_maxs.len(),
                     )));
                 }
+                if *max_data_bin == 0 {
+                    return Err(ShapError::InvalidInput(
+                        "BinningContext::Linear: max_data_bin must be greater than 0".to_string(),
+                    ));
+                }
+                validate_feature_ranges("BinningContext::Linear", feature_mins, feature_maxs)?;
             }
             BinningContext::Quantile { feature_cuts } => {
                 if feature_cuts.len() != feature_count {
@@ -190,13 +198,20 @@ impl BinningContext {
                         feature_cuts.len(),
                     )));
                 }
+                for (feature_index, cuts) in feature_cuts.iter().enumerate() {
+                    validate_ordered_feature_values(
+                        "BinningContext::Quantile",
+                        feature_index,
+                        cuts,
+                    )?;
+                }
             }
             BinningContext::PreBinned => {}
             BinningContext::LinearRank {
                 per_feature,
                 feature_mins,
                 feature_maxs,
-                ..
+                max_data_bin,
             } => {
                 if per_feature.len() != feature_count
                     || feature_mins.len() != feature_count
@@ -208,6 +223,22 @@ impl BinningContext {
                         feature_mins.len(),
                         feature_maxs.len(),
                     )));
+                }
+                if *max_data_bin == 0 {
+                    return Err(ShapError::InvalidInput(
+                        "BinningContext::LinearRank: max_data_bin must be greater than 0"
+                            .to_string(),
+                    ));
+                }
+                validate_feature_ranges("BinningContext::LinearRank", feature_mins, feature_maxs)?;
+                for (feature_index, sorted_values) in per_feature.iter().enumerate() {
+                    if let Some(values) = sorted_values {
+                        validate_ordered_feature_values(
+                            "BinningContext::LinearRank",
+                            feature_index,
+                            values,
+                        )?;
+                    }
                 }
             }
         }
@@ -244,6 +275,49 @@ impl BinningContext {
             _ => None,
         }
     }
+}
+
+fn validate_feature_ranges(
+    context: &str,
+    feature_mins: &[f32],
+    feature_maxs: &[f32],
+) -> ShapResult<()> {
+    for (feature_index, (&min_value, &max_value)) in
+        feature_mins.iter().zip(feature_maxs).enumerate()
+    {
+        if !min_value.is_finite() || !max_value.is_finite() || min_value > max_value {
+            return Err(ShapError::InvalidInput(format!(
+                "{context}: feature {feature_index} requires finite min/max with min <= max"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_ordered_feature_values(
+    context: &str,
+    feature_index: usize,
+    values: &[f32],
+) -> ShapResult<()> {
+    if values.len() > MAX_MODEL_CUTS_PER_FEATURE {
+        return Err(ShapError::InvalidInput(format!(
+            "{context}: feature {feature_index} has {} values, exceeds maximum {MAX_MODEL_CUTS_PER_FEATURE}",
+            values.len()
+        )));
+    }
+    for (index, &value) in values.iter().enumerate() {
+        if !value.is_finite() {
+            return Err(ShapError::InvalidInput(format!(
+                "{context}: feature {feature_index} value {index} must be finite"
+            )));
+        }
+        if index > 0 && value <= values[index - 1] {
+            return Err(ShapError::InvalidInput(format!(
+                "{context}: feature {feature_index} values must be strictly increasing"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[inline]
