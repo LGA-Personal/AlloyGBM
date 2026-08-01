@@ -28,8 +28,14 @@ fn main() {
     let workspace = manifest_dir.join("../..");
 
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-env-changed=ALLOYGBM_BUILD_SOURCE_COMMIT");
-    println!("cargo:rerun-if-env-changed=ALLOYGBM_BUILD_SOURCE_DIRTY");
+    if let Some(files) = git_output(&workspace, &["ls-files", "-z"]) {
+        for relative_path in files.split('\0').filter(|path| !path.is_empty()) {
+            println!(
+                "cargo:rerun-if-changed={}",
+                workspace.join(relative_path).display()
+            );
+        }
+    }
     if let Some(head) = git_path(&workspace, "HEAD") {
         println!("cargo:rerun-if-changed={}", head.display());
     }
@@ -39,24 +45,18 @@ fn main() {
         println!("cargo:rerun-if-changed={}", reference_path.display());
     }
 
-    let commit = env::var("ALLOYGBM_BUILD_SOURCE_COMMIT")
-        .ok()
-        .or_else(|| git_output(&workspace, &["rev-parse", "HEAD"]))
+    let commit = git_output(&workspace, &["rev-parse", "HEAD"])
         .filter(|value| value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .unwrap_or_else(|| "unknown".to_owned())
         .to_ascii_lowercase();
-    let dirty = env::var("ALLOYGBM_BUILD_SOURCE_DIRTY")
-        .ok()
-        .unwrap_or_else(|| {
-            git_output(
-                &workspace,
-                &["status", "--porcelain", "--untracked-files=no"],
-            )
-            .map_or_else(
-                || "unknown".to_owned(),
-                |status| (!status.is_empty()).to_string(),
-            )
-        });
+    let dirty = git_output(
+        &workspace,
+        &["status", "--porcelain", "--untracked-files=no"],
+    )
+    .map_or_else(
+        || "unknown".to_owned(),
+        |status| (!status.is_empty()).to_string(),
+    );
 
     println!("cargo:rustc-env=ALLOYGBM_BUILD_SOURCE_COMMIT={commit}");
     println!("cargo:rustc-env=ALLOYGBM_BUILD_SOURCE_DIRTY={dirty}");
