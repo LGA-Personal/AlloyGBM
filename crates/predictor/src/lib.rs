@@ -1,8 +1,8 @@
 use alloygbm_core::{
     CategoricalStatePayloadV1, CoreError, MAX_MODEL_CLASSES, MAX_MODEL_FEATURES, MAX_MODEL_STUMPS,
     MODEL_FORMAT_V1, ModelArtifactSection, ModelMetadata, ModelSectionKind,
-    decode_optional_categorical_state_section_v1, decode_optional_dart_tree_weights_section,
-    decode_optional_linear_leaf_coefficients_section,
+    checked_dense_element_count, decode_optional_categorical_state_section_v1,
+    decode_optional_dart_tree_weights_section, decode_optional_linear_leaf_coefficients_section,
     decode_optional_native_categorical_splits_section, deserialize_model_artifact_v1,
     format_required_section_mode_error, required_section_compatibility_report,
 };
@@ -19,6 +19,14 @@ const PARALLEL_PREDICT_MIN_WORK_ITEMS: usize = 16_384;
 // the trainer emits loads and every artifact accepted here could have been
 // trained.
 use alloygbm_core::MAX_TREE_NODE_SLOTS;
+
+fn checked_predictor_dense_element_count(
+    row_count: usize,
+    feature_count: usize,
+) -> PredictorResult<usize> {
+    checked_dense_element_count(row_count, feature_count)
+        .map_err(|error| PredictorError::InvalidInput(error.to_string()))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PredictorError {
@@ -834,6 +842,10 @@ impl Predictor {
         self.num_classes
     }
 
+    pub fn feature_count(&self) -> usize {
+        self.metadata.feature_names.len()
+    }
+
     pub fn predict_row(&self, features: &[f32]) -> PredictorResult<f32> {
         if self.is_multiclass() {
             return Err(PredictorError::ContractViolation(
@@ -924,17 +936,13 @@ impl Predictor {
                 feature_count, model_feature_count
             )));
         }
-        if values.len() != row_count * feature_count {
+        let expected_elements = checked_predictor_dense_element_count(row_count, feature_count)?;
+        if values.len() != expected_elements {
             return Err(PredictorError::InvalidInput(format!(
                 "values length {} does not match row_count * feature_count {}",
                 values.len(),
-                row_count * feature_count
+                expected_elements
             )));
-        }
-        if row_count == 0 {
-            return Err(PredictorError::InvalidInput(
-                "row_count must be greater than 0".to_string(),
-            ));
         }
 
         if should_parallel_predict_batch(row_count, self.trees.len()) {
@@ -992,7 +1000,14 @@ impl Predictor {
                 feature_count, model_feature_count
             )));
         }
-        let expected_bytes = row_count * feature_count * 4;
+        let expected_elements = checked_predictor_dense_element_count(row_count, feature_count)?;
+        let expected_bytes = expected_elements.checked_mul(std::mem::size_of::<f32>()).ok_or_else(
+            || {
+                PredictorError::InvalidInput(format!(
+                    "row_count * feature_count * 4 overflows usize ({row_count} * {feature_count} * 4)"
+                ))
+            },
+        )?;
         if bytes.len() != expected_bytes {
             return Err(PredictorError::InvalidInput(format!(
                 "bytes length {} does not match expected {} (row_count={} * feature_count={} * 4)",
@@ -1002,13 +1017,11 @@ impl Predictor {
                 feature_count
             )));
         }
-        if row_count == 0 {
-            return Err(PredictorError::InvalidInput(
-                "row_count must be greater than 0".to_string(),
-            ));
-        }
-
-        let row_bytes = feature_count * 4;
+        let row_bytes = feature_count
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| {
+                PredictorError::InvalidInput("feature_count * 4 overflows usize".to_string())
+            })?;
         let chunk_size = 4096.max(row_count / (rayon::current_num_threads().max(1) * 4));
         let mut predictions = vec![0.0_f32; row_count];
 
@@ -1113,7 +1126,13 @@ impl Predictor {
             Ok(logits)
         };
 
-        let mut output = Vec::with_capacity(rows.len() * k);
+        let output_count = rows.len().checked_mul(k).ok_or_else(|| {
+            PredictorError::InvalidInput(format!(
+                "row_count * num_classes overflows usize ({} * {k})",
+                rows.len()
+            ))
+        })?;
+        let mut output = Vec::with_capacity(output_count);
         if should_parallel_predict_batch(rows.len(), class_trees.iter().map(|t| t.len()).sum()) {
             let results: PredictorResult<Vec<Vec<f32>>> =
                 rows.par_iter().map(|row| predict_row(row)).collect();
@@ -1149,17 +1168,13 @@ impl Predictor {
                 feature_count, model_feature_count
             )));
         }
-        if values.len() != row_count * feature_count {
+        let expected_elements = checked_predictor_dense_element_count(row_count, feature_count)?;
+        if values.len() != expected_elements {
             return Err(PredictorError::InvalidInput(format!(
                 "values length {} does not match row_count * feature_count {}",
                 values.len(),
-                row_count * feature_count
+                expected_elements
             )));
-        }
-        if row_count == 0 {
-            return Err(PredictorError::InvalidInput(
-                "row_count must be greater than 0".to_string(),
-            ));
         }
 
         let k = self.num_classes.unwrap(); // already validated is_multiclass above
@@ -1179,7 +1194,12 @@ impl Predictor {
         };
 
         let total_trees: usize = class_trees.iter().map(|t| t.len()).sum();
-        let mut output = Vec::with_capacity(row_count * k);
+        let output_count = row_count.checked_mul(k).ok_or_else(|| {
+            PredictorError::InvalidInput(format!(
+                "row_count * num_classes overflows usize ({row_count} * {k})"
+            ))
+        })?;
+        let mut output = Vec::with_capacity(output_count);
         if should_parallel_predict_batch(row_count, total_trees) {
             let results: PredictorResult<Vec<Vec<f32>>> = (0..row_count)
                 .into_par_iter()
@@ -1812,6 +1832,27 @@ mod tests {
     #[test]
     fn compact_predictor_node_stays_within_inline_size_budget() {
         assert_eq!(std::mem::size_of::<CompactPredictorNode>(), 40);
+    }
+
+    #[test]
+    fn dense_prediction_rejects_element_count_overflow() {
+        let predictor = Predictor::new(ModelMetadata {
+            format_version: MODEL_FORMAT_V1,
+            feature_names: vec!["f0".to_string(), "f1".to_string()],
+            trained_device: Device::Cpu,
+            objective: "squared_error".to_string(),
+            num_classes: None,
+        });
+
+        let err = predictor
+            .predict_batch_dense(&[], usize::MAX, 2)
+            .expect_err("overflowing dense dimensions must fail");
+        assert!(err.to_string().contains("row_count * feature_count"));
+
+        let err = predictor
+            .predict_batch_dense_bytes(&[], usize::MAX, 2)
+            .expect_err("overflowing dense byte dimensions must fail");
+        assert!(err.to_string().contains("row_count * feature_count"));
     }
 
     #[test]

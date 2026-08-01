@@ -4,11 +4,59 @@ use crate::quantization::{
     quantize_dense_values_linear_inplace_wide, quantize_dense_values_linear_rank_inplace_wide,
     quantize_linear_value,
 };
+use alloygbm_core::checked_dense_element_count;
 use alloygbm_engine::{ArtifactCompatibilityMode, TrainedModel};
 use alloygbm_predictor::{Predictor, PredictorError};
 use numpy::{PyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::prelude::*;
 use rayon::prelude::*;
+
+pub(crate) fn checked_dense_prediction_elements(
+    values_len: usize,
+    row_count: usize,
+    feature_count: usize,
+) -> Result<usize, String> {
+    let expected =
+        checked_dense_element_count(row_count, feature_count).map_err(|error| error.to_string())?;
+    if values_len != expected {
+        return Err(format!(
+            "values length {values_len} does not match row_count * feature_count {expected}"
+        ));
+    }
+    Ok(expected)
+}
+
+pub(crate) fn checked_dense_prediction_bytes(
+    bytes_len: usize,
+    row_count: usize,
+    feature_count: usize,
+) -> Result<usize, String> {
+    let expected_elements =
+        checked_dense_element_count(row_count, feature_count).map_err(|error| error.to_string())?;
+    let expected_bytes = expected_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| {
+            format!(
+                "row_count * feature_count * 4 overflows usize ({row_count} * {feature_count} * 4)"
+            )
+        })?;
+    if bytes_len != expected_bytes {
+        return Err(format!(
+            "values_bytes length {bytes_len} does not match row_count * feature_count * 4 ({expected_bytes})"
+        ));
+    }
+    Ok(expected_elements)
+}
+
+fn validate_predictor_feature_count(predictor: &Predictor, feature_count: usize) -> PyResult<()> {
+    let model_feature_count = predictor.feature_count();
+    if feature_count != model_feature_count {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "feature_count {feature_count} does not match model feature_count {model_feature_count}"
+        )));
+    }
+    Ok(())
+}
 
 // -- Piece A: NativePredictorHandle ------------------------------------------
 
@@ -119,11 +167,9 @@ impl NativePredictorHandle {
         feature_mins: Vec<f32>,
         feature_maxs: Vec<f32>,
     ) -> PyResult<Vec<f32>> {
-        if !values_bytes.len().is_multiple_of(4) {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "values_bytes length must be a multiple of 4 (f32)",
-            ));
-        }
+        validate_predictor_feature_count(&self.predictor, feature_count)?;
+        let total = checked_dense_prediction_bytes(values_bytes.len(), row_count, feature_count)
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
         if feature_mins.len() != feature_count || feature_maxs.len() != feature_count {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "feature_mins/feature_maxs length must match feature_count",
@@ -131,7 +177,6 @@ impl NativePredictorHandle {
         }
         py.detach(|| {
             // Fused bytes→f32+quantize (single allocation, parallel), then predict.
-            let total = row_count * feature_count;
             let mut quantized = vec![0.0_f32; total];
             let chunk_size = 4096.max(row_count / rayon::current_num_threads().max(1));
             quantized
@@ -187,6 +232,9 @@ impl NativePredictorHandle {
         feature_maxs: Vec<f32>,
         max_data_bin: Option<u16>,
     ) -> PyResult<Vec<f32>> {
+        validate_predictor_feature_count(&self.predictor, feature_count)?;
+        checked_dense_prediction_elements(values.len(), row_count, feature_count)
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
         if feature_mins.len() != feature_count || feature_maxs.len() != feature_count {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "feature_mins/feature_maxs length must match feature_count",
@@ -257,6 +305,9 @@ impl NativePredictorHandle {
         feature_sorted_values: Vec<Vec<f32>>,
         max_data_bin: Option<u16>,
     ) -> PyResult<Vec<f32>> {
+        validate_predictor_feature_count(&self.predictor, feature_count)?;
+        checked_dense_prediction_elements(values.len(), row_count, feature_count)
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
         if feature_mins.len() != feature_count || feature_maxs.len() != feature_count {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "feature_mins/feature_maxs length must match feature_count",

@@ -17,6 +17,15 @@ fn validates_default_train_params() {
 }
 
 #[test]
+fn dense_shape_rejects_element_count_overflow() {
+    let err = checked_dense_element_count(usize::MAX, 2).expect_err("shape must overflow");
+    assert!(err.to_string().contains("row_count * feature_count"));
+
+    let err = checked_dense_element_count(1, 0).expect_err("zero features must fail");
+    assert!(err.to_string().contains("feature_count"));
+}
+
+#[test]
 fn train_params_default_has_no_neutralization_config() {
     let params = TrainParams::default();
     assert!(params.neutralization_config.is_none());

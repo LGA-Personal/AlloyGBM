@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use alloygbm_core::checked_dense_element_count;
 use alloygbm_engine::{TrainedModel, TrainedStump};
 
 use crate::binning::{
@@ -485,6 +486,8 @@ pub(crate) fn validate_rows(rows: &[Vec<f32>], feature_count: usize) -> ShapResu
     if rows.is_empty() {
         return Err(ShapError::InvalidInput("rows cannot be empty".to_string()));
     }
+    checked_dense_element_count(rows.len(), feature_count)
+        .map_err(|error| ShapError::InvalidInput(error.to_string()))?;
 
     for (row_index, row) in rows.iter().enumerate() {
         if row.len() != feature_count {

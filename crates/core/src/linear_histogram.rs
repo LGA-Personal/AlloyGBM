@@ -210,7 +210,10 @@ impl LinearFeatureScaler {
     }
 
     pub fn from_raw_matrix(raw: &[f32], row_count: usize, feature_count: usize) -> Self {
-        if row_count == 0 || feature_count == 0 || raw.len() < row_count * feature_count {
+        let Some(required_len) = row_count.checked_mul(feature_count) else {
+            return Self::identity(feature_count);
+        };
+        if row_count == 0 || feature_count == 0 || raw.len() < required_len {
             return Self::identity(feature_count);
         }
 

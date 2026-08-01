@@ -319,46 +319,46 @@ pub fn validate_dataset_schema(schema: &DatasetSchema) -> CoreResult<()> {
 }
 
 pub fn validate_dataset_matrix(matrix: &DatasetMatrix) -> CoreResult<()> {
-    if matrix.row_count == 0 {
-        return Err(CoreError::Validation(
-            "row_count must be greater than 0".to_string(),
-        ));
-    }
-    if matrix.feature_count == 0 {
-        return Err(CoreError::Validation(
-            "feature_count must be greater than 0".to_string(),
-        ));
-    }
+    let expected_len = checked_dense_element_count(matrix.row_count, matrix.feature_count)?;
     // Allow empty values for metadata-only matrices (no categorical encoding).
-    if !matrix.values.is_empty() && matrix.values.len() != matrix.row_count * matrix.feature_count {
+    if !matrix.values.is_empty() && matrix.values.len() != expected_len {
         return Err(CoreError::Validation(format!(
             "matrix values length {} does not match row_count * feature_count {}",
             matrix.values.len(),
-            matrix.row_count * matrix.feature_count
+            expected_len
         )));
     }
     Ok(())
 }
 
 pub fn validate_dense_matrix_view(matrix: &DenseMatrixView<'_>) -> CoreResult<()> {
-    if matrix.row_count == 0 {
+    let expected_len = checked_dense_element_count(matrix.row_count, matrix.feature_count)?;
+    if matrix.values.len() != expected_len {
+        return Err(CoreError::Validation(format!(
+            "matrix values length {} does not match row_count * feature_count {}",
+            matrix.values.len(),
+            expected_len
+        )));
+    }
+    Ok(())
+}
+
+pub fn checked_dense_element_count(row_count: usize, feature_count: usize) -> CoreResult<usize> {
+    if row_count == 0 {
         return Err(CoreError::Validation(
             "row_count must be greater than 0".to_string(),
         ));
     }
-    if matrix.feature_count == 0 {
+    if feature_count == 0 {
         return Err(CoreError::Validation(
             "feature_count must be greater than 0".to_string(),
         ));
     }
-    if matrix.values.len() != matrix.row_count * matrix.feature_count {
-        return Err(CoreError::Validation(format!(
-            "matrix values length {} does not match row_count * feature_count {}",
-            matrix.values.len(),
-            matrix.row_count * matrix.feature_count
-        )));
-    }
-    Ok(())
+    row_count.checked_mul(feature_count).ok_or_else(|| {
+        CoreError::Validation(format!(
+            "row_count * feature_count overflows usize ({row_count} * {feature_count})"
+        ))
+    })
 }
 
 pub fn validate_columnar_matrix_view(matrix: &ColumnarMatrixView<'_>) -> CoreResult<()> {
@@ -504,7 +504,7 @@ pub fn validate_binned_matrix(matrix: &BinnedMatrix) -> CoreResult<()> {
             "feature bundle map dimensions do not match binned matrix".to_string(),
         ));
     }
-    let expected_len = matrix.row_count * matrix.storage_feature_count;
+    let expected_len = checked_dense_element_count(matrix.row_count, matrix.storage_feature_count)?;
     if matrix.bins_col_adaptive.len() != expected_len {
         return Err(CoreError::Validation(format!(
             "column-major bins length {} does not match row_count * feature_count {}",

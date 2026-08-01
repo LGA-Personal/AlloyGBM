@@ -1,5 +1,8 @@
 use crate::categorical_bridge::{flatten_rows, resolve_categorical_spec};
-use crate::predict::{predictor_predict_batch_canonical_impl, predictor_predict_batch_impl};
+use crate::predict::{
+    checked_dense_prediction_bytes, checked_dense_prediction_elements,
+    predictor_predict_batch_canonical_impl, predictor_predict_batch_impl,
+};
 use crate::quantization::{ContinuousBinningStrategy, prepare_training_matrices_from_dense_values};
 use crate::shap_bridge::{shap_explain_rows_impl, shap_global_importance_impl};
 use crate::train::train_regression_artifact_with_summary_dense_impl;
@@ -63,6 +66,21 @@ fn train_regression_artifact_impl(
         0,     // max_cat_threshold
     )
     .map(|result| result.artifact_bytes)
+}
+
+#[test]
+fn quantized_prediction_shape_rejects_overflow_and_length_mismatch() {
+    let overflow = checked_dense_prediction_elements(0, usize::MAX, 2)
+        .expect_err("overflowing dimensions must fail");
+    assert!(overflow.to_string().contains("row_count * feature_count"));
+
+    let mismatch =
+        checked_dense_prediction_elements(3, 2, 2).expect_err("mismatched input length must fail");
+    assert!(mismatch.to_string().contains("values length 3"));
+
+    let byte_mismatch = checked_dense_prediction_bytes(4, 1, 2)
+        .expect_err("dimensionally inconsistent f32 bytes must fail");
+    assert!(byte_mismatch.contains("values_bytes length 4"));
 }
 
 fn quality_fixture_dataset() -> TrainingDataset {

@@ -425,7 +425,9 @@ fn transpose_bins_to_column_major_u8(
     row_count: usize,
     feature_count: usize,
 ) -> Vec<u8> {
-    let total = row_count * feature_count;
+    let Some(total) = row_count.checked_mul(feature_count) else {
+        return Vec::new();
+    };
     if total == 0 || bins.len() != total {
         return Vec::new();
     }
@@ -444,7 +446,9 @@ fn transpose_bins_to_column_major_u16(
     row_count: usize,
     feature_count: usize,
 ) -> Vec<u16> {
-    let total = row_count * feature_count;
+    let Some(total) = row_count.checked_mul(feature_count) else {
+        return Vec::new();
+    };
     if total == 0 || bins.len() != total {
         return Vec::new();
     }

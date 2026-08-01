@@ -1,6 +1,9 @@
 use crate::error::{CoreError, CoreResult};
 use crate::neutralization::FactorExposureMatrix;
-use crate::{validate_columnar_matrix_view, validate_dataset_matrix, validate_dense_matrix_view};
+use crate::{
+    checked_dense_element_count, validate_columnar_matrix_view, validate_dataset_matrix,
+    validate_dense_matrix_view,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatasetSchema {
@@ -32,16 +35,7 @@ impl DatasetMatrix {
     /// Values are not populated — only use when the training path does not
     /// need dense float values (i.e. no categorical target encoding).
     pub fn new_metadata_only(row_count: usize, feature_count: usize) -> CoreResult<Self> {
-        if row_count == 0 {
-            return Err(CoreError::Validation(
-                "row_count must be greater than 0".to_string(),
-            ));
-        }
-        if feature_count == 0 {
-            return Err(CoreError::Validation(
-                "feature_count must be greater than 0".to_string(),
-            ));
-        }
+        checked_dense_element_count(row_count, feature_count)?;
         Ok(Self {
             row_count,
             feature_count,

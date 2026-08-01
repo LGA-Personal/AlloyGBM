@@ -72,9 +72,10 @@ pub use training_mode::{
     GradientEmaStats, LrSchedule, MorphConfig, MorphPrecomputed, TrainingMode,
 };
 pub use validation::{
-    validate_binned_matrix, validate_columnar_matrix_view, validate_dataset_matrix,
-    validate_dataset_schema, validate_dense_matrix_view, validate_model_contract_v1,
-    validate_model_metadata, validate_train_params, validate_training_dataset,
+    checked_dense_element_count, validate_binned_matrix, validate_columnar_matrix_view,
+    validate_dataset_matrix, validate_dataset_schema, validate_dense_matrix_view,
+    validate_model_contract_v1, validate_model_metadata, validate_train_params,
+    validate_training_dataset,
 };
 
 #[cfg(test)]
