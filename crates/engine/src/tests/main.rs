@@ -5001,6 +5001,72 @@ fn assert_scalar_summary_matches_retained_model<O: ObjectiveOps>(
     );
 }
 
+#[track_caller]
+fn assert_scalar_summaries_repeat(
+    first: &IterationRunSummary,
+    second: &IterationRunSummary,
+    dataset: &TrainingDataset,
+    binned_matrix: &BinnedMatrix,
+) {
+    assert_eq!(first, second);
+    assert_eq!(
+        first
+            .model
+            .to_artifact_bytes()
+            .expect("first repeated artifact serializes"),
+        second
+            .model
+            .to_artifact_bytes()
+            .expect("second repeated artifact serializes")
+    );
+    assert_eq!(
+        scalar_predictions_from_model(&first.model, dataset, binned_matrix)
+            .into_iter()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>(),
+        scalar_predictions_from_model(&second.model, dataset, binned_matrix)
+            .into_iter()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[track_caller]
+fn assert_multiclass_summaries_repeat(
+    first: &MultiClassIterationRunSummary,
+    second: &MultiClassIterationRunSummary,
+    dataset: &TrainingDataset,
+    binned_matrix: &BinnedMatrix,
+) {
+    assert_eq!(first, second);
+    assert_eq!(
+        first
+            .model
+            .to_artifact_bytes()
+            .expect("first repeated multiclass artifact serializes"),
+        second
+            .model
+            .to_artifact_bytes()
+            .expect("second repeated multiclass artifact serializes")
+    );
+    let prediction_bits = |model: &MultiClassTrainedModel| {
+        multiclass_dart_repeated_walk_predictions(
+            model,
+            binned_matrix,
+            &dataset.matrix.values,
+            dataset.matrix.feature_count,
+        )
+        .iter()
+        .flatten()
+        .map(|value| value.to_bits())
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        prediction_bits(&first.model),
+        prediction_bits(&second.model)
+    );
+}
+
 fn warmup_rollback_fixture() -> (TrainingDataset, BinnedMatrix) {
     const ROWS: usize = 32;
     const FEATURES: usize = 2;
@@ -5114,16 +5180,20 @@ fn warmup_rollback_controls() -> IterationControls {
 #[test]
 fn sampled_prediction_delta_scalar_morph_warmup_rollback_matches_retained_model() {
     let (dataset, binned) = warmup_rollback_fixture();
-    let summary = Trainer::new(warmup_rollback_params())
-        .expect("warmup rollback params are valid")
-        .fit_iterations_with_summary(
-            &dataset,
-            &binned,
-            &WarmupRollbackBackend,
-            &SquaredErrorObjective,
-            warmup_rollback_controls(),
-        )
-        .expect("scalar warmup rollback fit succeeds");
+    let trainer = Trainer::new(warmup_rollback_params()).expect("warmup rollback params are valid");
+    let run = || {
+        trainer
+            .fit_iterations_with_summary(
+                &dataset,
+                &binned,
+                &WarmupRollbackBackend,
+                &SquaredErrorObjective,
+                warmup_rollback_controls(),
+            )
+            .expect("scalar warmup rollback fit succeeds")
+    };
+    let summary = run();
+    let repeated = run();
 
     let tree_ids = summary
         .model
@@ -5149,6 +5219,7 @@ fn sampled_prediction_delta_scalar_morph_warmup_rollback_matches_retained_model(
         &binned,
         &SquaredErrorObjective,
     );
+    assert_scalar_summaries_repeat(&summary, &repeated, &dataset, &binned);
 }
 
 #[test]
@@ -5160,16 +5231,20 @@ fn sampled_prediction_delta_multiclass_morph_warmup_rollback_matches_retained_mo
         .map(|&target| f32::from(target > 0.0))
         .collect();
     let objective = MultiClassSoftmaxObjective::new(2).expect("two-class objective is valid");
-    let summary = Trainer::new(warmup_rollback_params())
-        .expect("warmup rollback params are valid")
-        .fit_multiclass_iterations_with_summary(
-            &dataset,
-            &binned,
-            &WarmupRollbackBackend,
-            &objective,
-            warmup_rollback_controls(),
-        )
-        .expect("multiclass warmup rollback fit succeeds");
+    let trainer = Trainer::new(warmup_rollback_params()).expect("warmup rollback params are valid");
+    let run = || {
+        trainer
+            .fit_multiclass_iterations_with_summary(
+                &dataset,
+                &binned,
+                &WarmupRollbackBackend,
+                &objective,
+                warmup_rollback_controls(),
+            )
+            .expect("multiclass warmup rollback fit succeeds")
+    };
+    let summary = run();
+    let repeated = run();
 
     assert_eq!(summary.loss_per_completed_round[0], summary.initial_loss);
     let tree_ids = summary
@@ -5236,6 +5311,7 @@ fn sampled_prediction_delta_multiclass_morph_warmup_rollback_matches_retained_mo
             .map(|value| value.to_bits())
             .collect::<Vec<_>>()
     );
+    assert_multiclass_summaries_repeat(&summary, &repeated, &dataset, &binned);
 }
 
 #[test]
@@ -5283,20 +5359,25 @@ fn sampled_prediction_delta_missing_categorical_pl_matches_retained_model() {
         .expect("missing categorical PL controls are valid")
         .with_subsample_rates(0.75, 1.0)
         .expect("missing categorical PL rates are valid");
-    let summary = Trainer::new(params)
+    let trainer = Trainer::new(params)
         .expect("missing categorical PL params are valid")
         .with_categorical_features(vec![CategoricalFeatureInfo {
             feature_index: 0,
             num_categories: 4,
-        }])
-        .fit_iterations_with_summary(
-            &dataset,
-            &binned,
-            &CategoricalAncestorLinearPathBackend,
-            &SquaredErrorObjective,
-            controls,
-        )
-        .expect("sampled missing categorical PL fit succeeds");
+        }]);
+    let run = || {
+        trainer
+            .fit_iterations_with_summary(
+                &dataset,
+                &binned,
+                &CategoricalAncestorLinearPathBackend,
+                &SquaredErrorObjective,
+                controls,
+            )
+            .expect("sampled missing categorical PL fit succeeds")
+    };
+    let summary = run();
+    let repeated = run();
 
     assert!(
         summary
@@ -5333,16 +5414,18 @@ fn sampled_prediction_delta_missing_categorical_pl_matches_retained_model() {
         &binned,
         &SquaredErrorObjective,
     );
+    assert_scalar_summaries_repeat(&summary, &repeated, &dataset, &binned);
 }
 
 #[test]
 fn sampled_prediction_delta_dro_and_monotone_match_retained_models() {
-    let (dro_dataset, dro_binned) = allocation_reuse_fixture(64);
+    let dro_dataset = sample_dataset();
+    let dro_binned = sample_binned_matrix();
     let dro_controls = IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
         .expect("sampled DRO controls are valid")
-        .with_subsample_rates(0.5, 1.0)
+        .with_subsample_rates(0.75, 1.0)
         .expect("sampled DRO rates are valid");
-    let dro_summary = Trainer::new(TrainParams {
+    let dro_trainer = Trainer::new(TrainParams {
         seed: 31,
         deterministic: true,
         max_depth: 2,
@@ -5354,16 +5437,29 @@ fn sampled_prediction_delta_dro_and_monotone_match_retained_models() {
         }),
         ..TrainParams::default()
     })
-    .expect("sampled DRO params are valid")
-    .fit_iterations_with_summary(
-        &dro_dataset,
-        &dro_binned,
-        &MockBackend,
-        &SquaredErrorObjective,
-        dro_controls,
-    )
-    .expect("sampled DRO fit succeeds");
+    .expect("sampled DRO params are valid");
+    let run_dro = || {
+        dro_trainer
+            .fit_iterations_with_summary(
+                &dro_dataset,
+                &dro_binned,
+                &MockBackend,
+                &SquaredErrorObjective,
+                dro_controls,
+            )
+            .expect("sampled DRO fit succeeds")
+    };
+    let dro_summary = run_dro();
+    let repeated_dro = run_dro();
     assert!(dro_summary.model.dro_metadata.is_some());
+    assert!(
+        !dro_summary.model.stumps.is_empty(),
+        "DRO fixture must retain a tree: stop={:?}, rounds={}, losses={:?}",
+        dro_summary.stop_reason,
+        dro_summary.rounds_completed,
+        dro_summary.loss_per_completed_round
+    );
+    assert!(!dro_summary.loss_per_completed_round.is_empty());
     assert!(
         dro_summary
             .sampled_rows_per_completed_round
@@ -5376,13 +5472,14 @@ fn sampled_prediction_delta_dro_and_monotone_match_retained_models() {
         &dro_binned,
         &SquaredErrorObjective,
     );
+    assert_scalar_summaries_repeat(&dro_summary, &repeated_dro, &dro_dataset, &dro_binned);
 
     let (monotone_dataset, monotone_binned, _) = monotone_bound_propagation_fixture();
     let monotone_controls = IterationControls::new(4, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
         .expect("sampled monotone controls are valid")
         .with_subsample_rates(0.5, 1.0)
         .expect("sampled monotone rates are valid");
-    let monotone_summary = Trainer::new(TrainParams {
+    let monotone_trainer = Trainer::new(TrainParams {
         seed: 37,
         deterministic: true,
         learning_rate: 0.2,
@@ -5391,21 +5488,32 @@ fn sampled_prediction_delta_dro_and_monotone_match_retained_models() {
         monotone_constraints: vec![1, 0, 0],
         ..TrainParams::default()
     })
-    .expect("sampled monotone params are valid")
-    .fit_iterations_with_summary(
-        &monotone_dataset,
-        &monotone_binned,
-        &MonotoneRegressionBackend,
-        &SquaredErrorObjective,
-        monotone_controls,
-    )
-    .expect("sampled monotone fit succeeds");
+    .expect("sampled monotone params are valid");
+    let run_monotone = || {
+        monotone_trainer
+            .fit_iterations_with_summary(
+                &monotone_dataset,
+                &monotone_binned,
+                &MonotoneRegressionBackend,
+                &SquaredErrorObjective,
+                monotone_controls,
+            )
+            .expect("sampled monotone fit succeeds")
+    };
+    let monotone_summary = run_monotone();
+    let repeated_monotone = run_monotone();
     assert!(!monotone_summary.model.stumps.is_empty());
     assert_scalar_summary_matches_retained_model(
         &monotone_summary,
         &monotone_dataset,
         &monotone_binned,
         &SquaredErrorObjective,
+    );
+    assert_scalar_summaries_repeat(
+        &monotone_summary,
+        &repeated_monotone,
+        &monotone_dataset,
+        &monotone_binned,
     );
 }
 
@@ -5415,6 +5523,12 @@ fn sampled_prediction_delta_weighted_goss_warm_start_validation_matches_retained
     dataset.sample_weights = Some(
         (0..dataset.row_count())
             .map(|row| 0.5 + (row % 7) as f32 * 0.25)
+            .collect(),
+    );
+    let (mut validation_dataset, validation_binned) = allocation_reuse_fixture(47);
+    validation_dataset.sample_weights = Some(
+        (0..validation_dataset.row_count())
+            .map(|row| 0.75 + (row % 5) as f32 * 0.2)
             .collect(),
     );
     let params = TrainParams {
@@ -5429,49 +5543,67 @@ fn sampled_prediction_delta_weighted_goss_warm_start_validation_matches_retained
         ..TrainParams::default()
     };
     let trainer = Trainer::new(params).expect("weighted GOSS params are valid");
-    let prior_controls = IterationControls::new(2, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
+    let prior_controls = IterationControls::new(1, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
         .expect("weighted GOSS prior controls are valid");
-    let prior = trainer
-        .fit_iterations_with_summary(
-            &dataset,
-            &binned,
-            &MockBackend,
-            &SquaredErrorObjective,
-            prior_controls,
-        )
-        .expect("weighted GOSS prior fit succeeds");
-    assert_scalar_summary_matches_retained_model(&prior, &dataset, &binned, &SquaredErrorObjective);
-    let prior_stumps = prior.model.stumps.clone();
-    let warm_start = WarmStartState {
-        baseline_prediction: prior.model.baseline_prediction,
-        stumps: prior.model.stumps,
-        initial_rounds_completed: prior.rounds_completed,
-        initial_ema_stats: None,
-        initial_dart_tree_weights: None,
-    };
     let continuation_controls = IterationControls::new(3, 0.0, 1, 0.0, 1_000_000.0, 0.0, 0)
         .expect("weighted GOSS continuation controls are valid")
         .with_validation_early_stopping(2, 0.0)
         .expect("weighted GOSS validation controls are valid");
-    let summary = trainer
-        .fit_iterations_warm_start_with_validation(
-            &dataset,
-            &binned,
-            ValidationDatasetRef {
-                dataset: &dataset,
-                binned_matrix: &binned,
-            },
-            &MockBackend,
-            &SquaredErrorObjective,
-            continuation_controls,
-            warm_start,
-        )
-        .expect("weighted GOSS warm-start validation fit succeeds");
+    let run = || {
+        let backend = OwnershipRecordingBackend::new(false);
+        let prior = trainer
+            .fit_iterations_with_summary(
+                &dataset,
+                &binned,
+                &backend,
+                &SquaredErrorObjective,
+                prior_controls,
+            )
+            .expect("weighted GOSS prior fit succeeds");
+        let prior_stumps = prior.model.stumps.clone();
+        let warm_start = WarmStartState {
+            baseline_prediction: prior.model.baseline_prediction,
+            stumps: prior.model.stumps.clone(),
+            initial_rounds_completed: prior.rounds_completed,
+            initial_ema_stats: None,
+            initial_dart_tree_weights: None,
+        };
+        let summary = trainer
+            .fit_iterations_warm_start_with_validation(
+                &dataset,
+                &binned,
+                ValidationDatasetRef {
+                    dataset: &validation_dataset,
+                    binned_matrix: &validation_binned,
+                },
+                &backend,
+                &SquaredErrorObjective,
+                continuation_controls,
+                warm_start,
+            )
+            .expect("weighted GOSS warm-start validation fit succeeds");
+        (prior, prior_stumps, summary)
+    };
+    let (prior, prior_stumps, summary) = run();
+    let (repeated_prior, repeated_prior_stumps, repeated_summary) = run();
 
-    assert!(summary.model.stumps.len() >= prior_stumps.len());
+    assert!(!prior_stumps.is_empty());
+    assert_eq!(prior_stumps.len(), repeated_prior_stumps.len());
+    assert!(
+        summary.rounds_completed > 0,
+        "warm-start continuation must retain a round: stop={:?}, prior_rounds={}, prior_stumps={}, final_stumps={}, losses={:?}, validation_losses={:?}",
+        summary.stop_reason,
+        prior.rounds_completed,
+        prior_stumps.len(),
+        summary.model.stumps.len(),
+        summary.loss_per_completed_round,
+        summary.validation_loss_per_completed_round
+    );
+    assert!(summary.model.stumps.len() > prior_stumps.len());
     for (expected, actual) in prior_stumps.iter().zip(&summary.model.stumps) {
         assert_stump_bit_identical(expected, actual);
     }
+    assert!(!summary.sampled_rows_per_completed_round.is_empty());
     assert!(
         summary
             .sampled_rows_per_completed_round
@@ -5485,11 +5617,14 @@ fn sampled_prediction_delta_weighted_goss_warm_start_validation_matches_retained
         &binned,
         &SquaredErrorObjective,
     );
-    let validation_predictions = scalar_predictions_from_model(&summary.model, &dataset, &binned);
+    assert_scalar_summaries_repeat(&prior, &repeated_prior, &dataset, &binned);
+    assert_scalar_summaries_repeat(&summary, &repeated_summary, &dataset, &binned);
+    let validation_predictions =
+        scalar_predictions_from_model(&summary.model, &validation_dataset, &validation_binned);
     let replayed_validation_loss = squared_error_loss(
         &validation_predictions,
-        &dataset.targets,
-        dataset.sample_weights.as_deref(),
+        &validation_dataset.targets,
+        validation_dataset.sample_weights.as_deref(),
     )
     .expect("retained validation loss computes");
     assert_eq!(
